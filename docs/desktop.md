@@ -80,8 +80,7 @@ npm run dist
 you run it on — NSIS `.exe` on Windows, `.dmg` on macOS, `.AppImage` on Linux.
 **Cross-building is not supported here** (e.g. you can't build the Windows `.exe`
 on Linux without Wine), so run `npm run dist` / `Build-Installer.cmd` on the
-target OS. Drop a `build/icon.png` and `assets/tray.png` in first for branded
-icons.
+target OS. The branded icons are already committed (see [Icons](#icons) below).
 
 The app ships **unpacked** (`asar: false`) because it runs a local Next.js
 server (`next start`) as a child process, which must be a real file on disk

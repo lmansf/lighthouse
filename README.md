@@ -88,5 +88,5 @@ Copy `.env.local.example` → `.env.local` (gitignored). All vars are optional:
 
 Working local-first vertical slice: real file tree, real retrieval, real streamed
 chat, plus a persistent **desktop app** (Electron) with a double-click launcher
-and a packaged installer. Next: app/tray icons, optional vector embeddings behind
-`RagService.search`, and binary formats (PDF/DOCX) extraction.
+a packaged installer, and branded app/tray/installer icons. Next: optional vector
+embeddings behind `RagService.search`, and binary formats (PDF/DOCX) extraction.
