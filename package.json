@@ -2,11 +2,30 @@
   "name": "rag-vault",
   "version": "0.1.0",
   "private": true,
+  "main": "electron/main.js",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "electron": "electron .",
+    "dist": "electron-builder"
+  },
+  "build": {
+    "appId": "com.lighthouse.app",
+    "productName": "Lighthouse",
+    "files": [
+      "electron/**/*",
+      ".next/**/*",
+      "public/**/*",
+      "package.json",
+      "next.config.*"
+    ],
+    "extraMetadata": { "main": "electron/main.js" },
+    "directories": { "output": "release" },
+    "win": { "target": "nsis" },
+    "mac": { "target": "dmg" },
+    "linux": { "target": "AppImage" }
   },
   "dependencies": {
     "@fluentui/react-components": "^9.54.0",
@@ -20,6 +39,8 @@
     "@types/node": "22.10.7",
     "@types/react": "19.0.7",
     "@types/react-dom": "19.0.3",
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8",
     "typescript": "5.7.3"
   }
 }
