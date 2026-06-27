@@ -8,8 +8,10 @@
  * Keep using `useRagStore` (do not import other features directly).
  */
 
+import { useRef, useState } from "react";
 import {
   Badge,
+  Button,
   Switch,
   Text,
   Title3,
@@ -18,6 +20,7 @@ import {
   tokens,
 } from "@fluentui/react-components";
 import {
+  ArrowUploadRegular,
   DatabaseRegular,
   DocumentRegular,
   DocumentPdfRegular,
@@ -32,6 +35,14 @@ const useStyles = makeStyles({
     flexDirection: "column",
     minHeight: 0,
     height: "100%",
+    ...shorthands.borderRadius(tokens.borderRadiusLarge),
+    ...shorthands.border("2px", "dashed", "transparent"),
+    transitionProperty: "border-color, background-color",
+    transitionDuration: tokens.durationFaster,
+  },
+  panelDragging: {
+    ...shorthands.borderColor(tokens.colorBrandStroke1),
+    backgroundColor: tokens.colorBrandBackground2,
   },
   header: {
     display: "flex",
@@ -113,17 +124,57 @@ export function FileExplorer() {
   const selectionMode = useRagStore((s) => s.selectionMode);
   const setSelectionMode = useRagStore((s) => s.setSelectionMode);
   const toggleIncluded = useRagStore((s) => s.toggleIncluded);
+  const upload = useRagStore((s) => s.upload);
+
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [dragging, setDragging] = useState(false);
 
   const includedCount = nodes.filter((n) => n.kind === "file" && n.ragIncluded).length;
 
+  const sendFiles = (list: FileList | null) => {
+    if (list && list.length) void upload(Array.from(list));
+  };
+
   return (
-    <section className={styles.panel}>
+    <section
+      className={`${styles.panel}${dragging ? ` ${styles.panelDragging}` : ""}`}
+      onDragOver={(e) => {
+        e.preventDefault();
+        if (!dragging) setDragging(true);
+      }}
+      onDragLeave={(e) => {
+        if (e.currentTarget === e.target) setDragging(false);
+      }}
+      onDrop={(e) => {
+        e.preventDefault();
+        setDragging(false);
+        sendFiles(e.dataTransfer.files);
+      }}
+    >
       <div className={styles.header}>
         <Title3>Files</Title3>
         <div className={styles.toolbar}>
           <Badge appearance="tint" color="brand">
             {includedCount} in RAG
           </Badge>
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            hidden
+            onChange={(e) => {
+              sendFiles(e.target.files);
+              e.target.value = "";
+            }}
+          />
+          <Button
+            icon={<ArrowUploadRegular />}
+            appearance="primary"
+            size="small"
+            onClick={() => fileInputRef.current?.click()}
+          >
+            Add files
+          </Button>
           <Switch
             checked={selectionMode}
             onChange={(_, d) => setSelectionMode(d.checked)}

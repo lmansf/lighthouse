@@ -200,6 +200,30 @@ export function moveNode(fromId: string, toParentId: string | null): { newId: st
 }
 
 /**
+ * Write an uploaded file into the vault (optionally under a folder). The name is
+ * reduced to a basename and collisions get a " (n)" suffix, so a client can
+ * never write outside the vault or clobber an existing file. No state entry is
+ * created, so an uploaded file is EXCLUDED by default like any external add.
+ */
+export function addFile(name: string, bytes: Buffer, destParentId: string | null = null): { newId: string } {
+  const safeName = path.basename(name).trim();
+  if (!safeName || safeName.startsWith(".")) throw new Error("invalid filename");
+  const ext = path.extname(safeName);
+  const base = safeName.slice(0, safeName.length - ext.length);
+
+  let finalId = destParentId ? `${destParentId}/${safeName}` : safeName;
+  let abs = safeAbs(finalId);
+  for (let i = 1; fs.existsSync(abs); i++) {
+    const alt = `${base} (${i})${ext}`;
+    finalId = destParentId ? `${destParentId}/${alt}` : alt;
+    abs = safeAbs(finalId);
+  }
+  fs.mkdirSync(path.dirname(abs), { recursive: true });
+  fs.writeFileSync(abs, bytes);
+  return { newId: finalId };
+}
+
+/**
  * File ids currently included on disk — the single source of truth for what
  * chat may see. Returns empty if the vault source is toggled unavailable.
  * This is what makes inclusion changes hot: the next answer reads this fresh,
