@@ -22,15 +22,22 @@ export async function POST(req: Request) {
 
   // For folder uploads the client sends a `paths` entry per file (the file's
   // path relative to the dropped folder, e.g. "notes/2024/q1.md") so the folder
-  // structure is recreated in the vault. Aligned by index with `files`.
-  const files = form.getAll("files").filter((e): e is File => typeof e !== "string");
-  const paths = form.getAll("paths").map((p) => (typeof p === "string" ? p : ""));
+  // structure is recreated in the vault. Pair each file with its path *before*
+  // dropping non-file entries, so a stray non-file `files` value can't shift the
+  // index alignment of every file that follows it.
+  const rawPaths = form.getAll("paths");
+  const items = form
+    .getAll("files")
+    .map((entry, i) => ({
+      file: entry,
+      path: typeof rawPaths[i] === "string" ? (rawPaths[i] as string) : "",
+    }))
+    .filter((p): p is { file: File; path: string } => typeof p.file !== "string");
 
   const added: { newId: string }[] = [];
   const skipped: { name: string; reason: string }[] = [];
   let accepted = 0;
-  for (let i = 0; i < files.length; i++) {
-    const file = files[i];
+  for (const { file, path: rel } of items) {
     if (accepted >= MAX_FILES) {
       skipped.push({ name: file.name, reason: `exceeds max of ${MAX_FILES} files` });
       continue;
@@ -41,7 +48,6 @@ export async function POST(req: Request) {
     }
     // Derive a sub-directory from the relative path (everything but the file
     // name); fall back to the single `dir` field. addFile guards against escapes.
-    const rel = paths[i] ?? "";
     const subDir = rel.includes("/") ? rel.slice(0, rel.lastIndexOf("/")) : null;
     const target = subDir || dest;
     try {

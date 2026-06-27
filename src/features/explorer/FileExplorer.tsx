@@ -11,7 +11,7 @@
  * Keep using `useRagStore` (do not import other features directly).
  */
 
-import { useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import {
   Badge,
   Button,
@@ -109,6 +109,7 @@ const useStyles = makeStyles({
   icon: { fontSize: "20px", flexShrink: 0 },
   name: { flex: 1, minWidth: 0, wordBreak: "break-word" },
   spacer: { flex: 1 },
+  dimmed: { opacity: 0.45 },
 });
 
 function fileIcon(node: FileNode, className: string) {
@@ -218,7 +219,17 @@ export function FileExplorer() {
   const [dragging, setDragging] = useState(false);
 
   const includedCount = nodes.filter((n) => n.kind === "file" && n.ragIncluded).length;
-  const childrenOf = (id: string | null) => nodes.filter((n) => n.parentId === id);
+  // Index children by parent once so recursive tree rendering is O(n), not O(n^2).
+  const childrenByParent = useMemo(() => {
+    const map = new Map<string | null, FileNode[]>();
+    for (const n of nodes) {
+      const arr = map.get(n.parentId);
+      if (arr) arr.push(n);
+      else map.set(n.parentId, [n]);
+    }
+    return map;
+  }, [nodes]);
+  const childrenOf = (id: string | null) => childrenByParent.get(id) ?? [];
 
   const sendFiles = (list: FileList | null) => {
     if (!list || !list.length) return;
@@ -333,16 +344,18 @@ export function FileExplorer() {
                   </Text>
                 </div>
               ) : (
-                roots.map((node) => (
-                  <TreeRow
-                    key={node.id}
-                    node={node}
-                    depth={0}
-                    childrenOf={(id) => childrenOf(id)}
-                    onToggle={(id) => void toggleIncluded(id)}
-                    onUnlink={(id) => void removeReference(id)}
-                  />
-                ))
+                <div className={source.available ? undefined : styles.dimmed}>
+                  {roots.map((node) => (
+                    <TreeRow
+                      key={node.id}
+                      node={node}
+                      depth={0}
+                      childrenOf={childrenOf}
+                      onToggle={(id) => void toggleIncluded(id)}
+                      onUnlink={(id) => void removeReference(id)}
+                    />
+                  ))}
+                </div>
               )}
             </div>
           );

@@ -11,6 +11,7 @@ import {
   removeReference,
 } from "@/server/vault";
 import { isSameOrigin } from "@/server/http";
+import { isDesktopApp } from "@/server/config";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -61,6 +62,12 @@ export async function POST(req: Request) {
     }
 
     case "addReference": {
+      if (!isDesktopApp()) {
+        return NextResponse.json(
+          { error: "linking files is available only in the desktop app" },
+          { status: 403 },
+        );
+      }
       if (typeof body.path !== "string" || !body.path.trim()) {
         return NextResponse.json({ error: "path required" }, { status: 400 });
       }

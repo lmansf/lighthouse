@@ -47,6 +47,7 @@ function startServer() {
     env: {
       ...process.env,
       ELECTRON_RUN_AS_NODE: "1", // run the Next CLI on Electron's bundled Node
+      LIGHTHOUSE_DESKTOP: "1", // gates desktop-only endpoints (e.g. link in place)
       VAULT_DIR: vaultDir(),
       PORT: String(PORT),
     },

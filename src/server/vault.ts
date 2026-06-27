@@ -46,6 +46,16 @@ function loadState(): VaultState {
   };
 }
 
+/** True when `child` is `parent` or lives beneath it on disk. */
+function isWithin(parent: string, child: string): boolean {
+  return child === parent || child.startsWith(parent + path.sep);
+}
+
+/** True when either path contains the other (overlapping subtrees). */
+function pathsOverlap(a: string, b: string): boolean {
+  return isWithin(a, b) || isWithin(b, a);
+}
+
 /** Which reference, if any, owns a node id (`extN` itself or `extN/...`). */
 function refIdOf(id: string, refs: Record<string, Reference>): string | null {
   for (const refId of Object.keys(refs)) {
@@ -342,14 +352,21 @@ export function addReference(inputPath: string): { id: string; kind: "file" | "f
   const kind: "file" | "folder" = st.isDirectory() ? "folder" : "file";
   const state = loadState();
 
-  // Don't link the same path twice, and never link inside the vault itself
-  // (those are already first-class vault items).
-  const base = vaultDir();
-  if (abs === base || abs.startsWith(base + path.sep)) {
-    throw new Error("already inside the vault");
+  // Never link a path that overlaps the vault (inside it, or an ancestor that
+  // contains it) — those files are already first-class vault items and linking
+  // them would re-enumerate the same content under a second `extN` id.
+  if (pathsOverlap(abs, vaultDir())) {
+    throw new Error("overlaps the vault");
   }
+  // Re-linking the exact same path is idempotent; reject anything that overlaps
+  // an existing reference so the same file can't be indexed twice (which would
+  // duplicate retrieval hits and skew the TF-IDF scoring).
   for (const [id, r] of Object.entries(state.references)) {
-    if (path.resolve(r.path) === abs) return { id, kind: r.kind };
+    const rp = path.resolve(r.path);
+    if (rp === abs) return { id, kind: r.kind };
+    if (pathsOverlap(abs, rp)) {
+      throw new Error("overlaps an existing reference");
+    }
   }
 
   let i = 0;
