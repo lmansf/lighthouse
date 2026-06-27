@@ -1,17 +1,6 @@
 "use client";
 
-import {
-  Button,
-  Text,
-  Tooltip,
-  makeStyles,
-  shorthands,
-  tokens,
-} from "@fluentui/react-components";
-import {
-  PanelLeftContract24Regular,
-  PanelLeftExpand24Regular,
-} from "@fluentui/react-icons";
+import { Text, makeStyles, shorthands, tokens } from "@fluentui/react-components";
 import { LAYOUT } from "./theme";
 
 const useStyles = makeStyles({
@@ -19,19 +8,17 @@ const useStyles = makeStyles({
     display: "flex",
     flexDirection: "column",
     height: "100%",
+    width: `${LAYOUT.railWidth}px`,
+    flexShrink: 0,
     backgroundColor: tokens.colorNeutralBackground2,
     ...shorthands.borderRight("1px", "solid", tokens.colorNeutralStroke2),
-    transitionProperty: "width",
-    transitionDuration: tokens.durationNormal,
     overflow: "hidden",
   },
   header: {
     display: "flex",
     alignItems: "center",
-    justifyContent: "space-between",
     height: `${LAYOUT.headerHeight}px`,
-    paddingLeft: tokens.spacingHorizontalM,
-    paddingRight: tokens.spacingHorizontalS,
+    ...shorthands.padding(0, tokens.spacingHorizontalM),
     ...shorthands.borderBottom("1px", "solid", tokens.colorNeutralStroke2),
   },
   brand: {
@@ -40,11 +27,13 @@ const useStyles = makeStyles({
     gap: tokens.spacingHorizontalS,
     fontWeight: tokens.fontWeightSemibold,
   },
-  dot: {
+  // The beacon: the one place red shows by default.
+  beacon: {
     width: "10px",
     height: "10px",
     borderRadius: "50%",
     backgroundColor: tokens.colorBrandBackground,
+    boxShadow: `0 0 8px 1px ${tokens.colorBrandBackground}`,
   },
   body: {
     flex: 1,
@@ -54,40 +43,24 @@ const useStyles = makeStyles({
 });
 
 interface LeftRailProps {
-  collapsed: boolean;
-  onToggle: () => void;
   children: React.ReactNode;
 }
 
 /**
- * Collapsible left rail. Hosts the onboarding flow first, then app navigation.
- * Owned by the shell team; features render inside `children`.
+ * Fixed (non-collapsible) left rail. Hosts the onboarding flow first, then the
+ * Ask panel. Owned by the shell team; features render inside `children`.
  */
-export function LeftRail({ collapsed, onToggle, children }: LeftRailProps) {
+export function LeftRail({ children }: LeftRailProps) {
   const styles = useStyles();
   return (
-    <div
-      className={styles.rail}
-      style={{ width: collapsed ? LAYOUT.railCollapsedWidth : LAYOUT.railWidth }}
-    >
+    <div className={styles.rail}>
       <div className={styles.header}>
-        {!collapsed && (
-          <span className={styles.brand}>
-            <span className={styles.dot} />
-            <Text weight="semibold">RAG Vault</Text>
-          </span>
-        )}
-        <Tooltip content={collapsed ? "Expand" : "Collapse"} relationship="label">
-          <Button
-            appearance="subtle"
-            icon={
-              collapsed ? <PanelLeftExpand24Regular /> : <PanelLeftContract24Regular />
-            }
-            onClick={onToggle}
-          />
-        </Tooltip>
+        <span className={styles.brand}>
+          <span className={styles.beacon} />
+          <Text weight="semibold">Lighthouse</Text>
+        </span>
       </div>
-      {!collapsed && <div className={styles.body}>{children}</div>}
+      <div className={styles.body}>{children}</div>
     </div>
   );
 }

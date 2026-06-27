@@ -3,7 +3,7 @@ import "./globals.css";
 import { Providers } from "./providers";
 
 export const metadata: Metadata = {
-  title: "RAG Vault",
+  title: "Lighthouse",
   description: "Curate which files and data sources your AI can see.",
 };
 
@@ -13,7 +13,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en" data-theme="dark">
+    <html lang="en" data-theme="light">
       <body>
         <Providers>{children}</Providers>
       </body>

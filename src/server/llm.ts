@@ -80,7 +80,7 @@ async function* streamClaude(
       max_tokens: 1024,
       stream: true,
       system:
-        "You are RAG Vault's assistant. Answer only from the provided context and cite sources as [n]. Be concise.",
+        "You are Lighthouse's assistant. Answer only from the provided context and cite sources as [n]. Be concise.",
       messages: [{ role: "user", content: buildPrompt(question, contexts) }],
     }),
   });

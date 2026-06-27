@@ -60,7 +60,7 @@ export function OnboardingPanel() {
     return (
       <div className={styles.panel}>
         <Title3>Welcome</Title3>
-        <Text className={styles.hint}>Sign in to set up your RAG Vault.</Text>
+        <Text className={styles.hint}>Sign in to set up your Lighthouse.</Text>
         <Field label="Email">
           <Input value={email} onChange={(_, d) => setEmail(d.value)} type="email" />
         </Field>
