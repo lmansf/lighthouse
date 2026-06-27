@@ -27,6 +27,14 @@ export interface RagService {
   setSourceAvailable(sourceId: string, available: boolean): Promise<void>;
   /** Retrieve references relevant to a query from the currently-included set. */
   search(query: string, includedFileIds: string[]): Promise<RagReference[]>;
+  /**
+   * Link a file or folder by its real absolute path instead of copying it into
+   * the vault (reduces duplication). Returns the new node id. Desktop-only —
+   * the browser has no access to real filesystem paths.
+   */
+  addReference(path: string): Promise<{ id: string; kind: "file" | "folder" }>;
+  /** Remove a reference (unlink); the real files on disk are left untouched. */
+  removeReference(refId: string): Promise<void>;
 }
 
 /** Registration / sign-in. Mocked now; swap for a real identity provider later. */

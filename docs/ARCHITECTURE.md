@@ -1,7 +1,7 @@
 # RAG Vault - Architecture
 
 RAG Vault lets a user curate which of their files and data sources are exposed to a RAG (retrieval-augmented generation) system.
-Browse files in an organic, oversized, dark-themed File-Explorer-like UI, then toggle items as **included** or **excluded** from retrieval.
+Browse files in an organic, dark-themed File-Explorer-like tree, then toggle items as **included** or **excluded** from retrieval.
 Anything included is searchable by the AI; anything excluded is invisible to it.
 A Google-style chat surface (answer on top, related files below, streamed in realtime) queries only the included material.
 
@@ -41,7 +41,7 @@ Two Zustand stores carry shared state between features:
 |---|---|---|---|
 | shell | `src/shell/` | `FluentProvider`/dark theme (`theme.ts`), app frame, collapsible left rail | contracts |
 | onboarding | `src/features/onboarding/` | sign-in slides → model-select (provider/model/key + key links) | contracts, `AuthService`, `useAuthStore` |
-| explorer | `src/features/explorer/` | oversized organic file tiles, hierarchical RAG toggle / selection mode | contracts, `RagService`, `useRagStore` |
+| explorer | `src/features/explorer/` | file tree, hierarchical RAG toggle / selection mode, add files/folders, link files in place | contracts, `RagService`, `useRagStore` |
 | chat | `src/features/chat/` | answer-on-top + reference files below, realtime streaming | contracts, `ChatService`, `useRagStore` |
 
 `app/page.tsx` composes the three feature components into the shell. Each team replaces **only its own** placeholder.

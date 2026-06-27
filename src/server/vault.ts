@@ -17,10 +17,22 @@ import {
   writeJson,
 } from "./config";
 
+/** An item referenced in place (not copied) — its real absolute path on disk. */
+interface Reference {
+  path: string;
+  name: string;
+  kind: "file" | "folder";
+}
+
 interface VaultState {
   sourceAvailable: boolean;
   /** Explicit inclusion overrides keyed by node id; absent ⇒ excluded. */
   included: Record<string, boolean>;
+  /**
+   * External references keyed by a synthetic node-id prefix (e.g. "ext0"). Their
+   * content lives at `path` on disk and is read in place — no copy is made.
+   */
+  references: Record<string, Reference>;
 }
 
 function loadState(): VaultState {
@@ -30,7 +42,43 @@ function loadState(): VaultState {
   return {
     sourceAvailable: raw.sourceAvailable ?? true,
     included: { ...(raw.included ?? {}) },
+    references: { ...(raw.references ?? {}) },
   };
+}
+
+/** True when `child` is `parent` or lives beneath it on disk. */
+function isWithin(parent: string, child: string): boolean {
+  return child === parent || child.startsWith(parent + path.sep);
+}
+
+/** True when either path contains the other (overlapping subtrees). */
+function pathsOverlap(a: string, b: string): boolean {
+  return isWithin(a, b) || isWithin(b, a);
+}
+
+/** Which reference, if any, owns a node id (`extN` itself or `extN/...`). */
+function refIdOf(id: string, refs: Record<string, Reference>): string | null {
+  for (const refId of Object.keys(refs)) {
+    if (id === refId || id.startsWith(`${refId}/`)) return refId;
+  }
+  return null;
+}
+
+/**
+ * Resolve a node id to an absolute path on disk. Vault-relative ids map under
+ * the vault directory; referenced ids (`extN/...`) map under their registered
+ * real path. Both reject paths that escape their base.
+ */
+function resolveAbs(id: string, state: VaultState): string {
+  const refId = refIdOf(id, state.references);
+  if (!refId) return safeAbs(id);
+  const base = path.resolve(state.references[refId].path);
+  const sub = id.slice(refId.length).replace(/^\//, "");
+  const abs = path.resolve(base, sub);
+  if (abs !== base && !abs.startsWith(base + path.sep)) {
+    throw new Error("path escapes the reference");
+  }
+  return abs;
 }
 function saveState(s: VaultState): void {
   writeJson(statePath(), s);
@@ -112,6 +160,70 @@ function walk(root: string): FileNode[] {
     }
   };
   recurse(root, null);
+
+  // Referenced items (added via "Link…"): read in place under an `extN` prefix.
+  for (const [refId, ref] of Object.entries(state.references)) {
+    let exists = true;
+    try {
+      fs.statSync(ref.path);
+    } catch {
+      exists = false;
+    }
+    if (ref.kind === "file") {
+      let size: number | undefined;
+      try {
+        size = fs.statSync(ref.path).size;
+      } catch {
+        size = undefined;
+      }
+      out.push({
+        id: refId, parentId: null, sourceId: VAULT_SOURCE_ID, name: ref.name,
+        kind: "file", mimeType: mimeOf(ref.name), size,
+        ragIncluded: included(refId), external: true,
+      });
+      continue;
+    }
+    out.push({
+      id: refId, parentId: null, sourceId: VAULT_SOURCE_ID, name: ref.name,
+      kind: "folder", ragIncluded: included(refId), external: true,
+    });
+    if (!exists) continue;
+
+    const recurseExt = (absDir: string, parentId: string) => {
+      let entries: fs.Dirent[];
+      try {
+        entries = fs.readdirSync(absDir, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const e of entries) {
+        if (e.name.startsWith(".")) continue;
+        const abs = path.join(absDir, e.name);
+        const rel = path.relative(ref.path, abs).split(path.sep).join("/");
+        const id = `${refId}/${rel}`;
+        if (e.isDirectory()) {
+          out.push({
+            id, parentId, sourceId: VAULT_SOURCE_ID, name: e.name,
+            kind: "folder", ragIncluded: included(id), external: true,
+          });
+          recurseExt(abs, id);
+        } else if (e.isFile()) {
+          let size: number | undefined;
+          try {
+            size = fs.statSync(abs).size;
+          } catch {
+            size = undefined;
+          }
+          out.push({
+            id, parentId, sourceId: VAULT_SOURCE_ID, name: e.name,
+            kind: "file", mimeType: mimeOf(e.name), size,
+            ragIncluded: included(id), external: true,
+          });
+        }
+      }
+    };
+    recurseExt(ref.path, refId);
+  }
   return out;
 }
 
@@ -224,6 +336,59 @@ export function addFile(name: string, bytes: Buffer, destParentId: string | null
 }
 
 /**
+ * Register a file or folder *in place* (a reference / link) instead of copying
+ * it into the vault — this is how the app adds existing files without making a
+ * second copy. The path must be an existing absolute path. Re-linking the same
+ * path returns the existing reference. Excluded by default, like any new add.
+ */
+export function addReference(inputPath: string): { id: string; kind: "file" | "folder" } {
+  const abs = path.resolve(inputPath);
+  let st: fs.Stats;
+  try {
+    st = fs.statSync(abs);
+  } catch {
+    throw new Error("path not found");
+  }
+  const kind: "file" | "folder" = st.isDirectory() ? "folder" : "file";
+  const state = loadState();
+
+  // Never link a path that overlaps the vault (inside it, or an ancestor that
+  // contains it) — those files are already first-class vault items and linking
+  // them would re-enumerate the same content under a second `extN` id.
+  if (pathsOverlap(abs, vaultDir())) {
+    throw new Error("overlaps the vault");
+  }
+  // Re-linking the exact same path is idempotent; reject anything that overlaps
+  // an existing reference so the same file can't be indexed twice (which would
+  // duplicate retrieval hits and skew the TF-IDF scoring).
+  for (const [id, r] of Object.entries(state.references)) {
+    const rp = path.resolve(r.path);
+    if (rp === abs) return { id, kind: r.kind };
+    if (pathsOverlap(abs, rp)) {
+      throw new Error("overlaps an existing reference");
+    }
+  }
+
+  let i = 0;
+  let id = `ext${i}`;
+  while (state.references[id]) id = `ext${++i}`;
+  state.references[id] = { path: abs, name: path.basename(abs) || abs, kind };
+  saveState(state);
+  return { id, kind };
+}
+
+/** Drop a reference (unlink). Leaves the real files on disk untouched. */
+export function removeReference(refId: string): void {
+  const state = loadState();
+  if (!state.references[refId]) return;
+  delete state.references[refId];
+  for (const k of Object.keys(state.included)) {
+    if (k === refId || k.startsWith(`${refId}/`)) delete state.included[k];
+  }
+  saveState(state);
+}
+
+/**
  * File ids currently included on disk — the single source of truth for what
  * chat may see. Returns empty if the vault source is toggled unavailable.
  * This is what makes inclusion changes hot: the next answer reads this fresh,
@@ -237,11 +402,21 @@ export function activeIncludedFileIds(): string[] {
     .map((n) => n.id);
 }
 
-/** Read a file's text, or "" for unsupported/binary types. */
-function readText(nodeId: string): string {
-  if (!isTextFile(nodeId)) return "";
+/**
+ * Read a file's text, or "" for unsupported/binary types. Resolves the node id
+ * to its real path first, so referenced files (whose id is a synthetic `extN`
+ * with no extension) are read — and type-checked — by their true path.
+ */
+function readText(nodeId: string, state: VaultState): string {
+  let abs: string;
   try {
-    return fs.readFileSync(path.join(vaultDir(), nodeId), "utf8");
+    abs = resolveAbs(nodeId, state);
+  } catch {
+    return "";
+  }
+  if (!isTextFile(abs)) return "";
+  try {
+    return fs.readFileSync(abs, "utf8");
   } catch {
     return "";
   }
@@ -284,9 +459,10 @@ export function retrieve(query: string, includedFileIds: string[], k = 5): Retri
   const idset = new Set(includedFileIds.filter((id) => authoritative.has(id)));
   const nodes = walk(vaultDir()).filter((n) => n.kind === "file" && idset.has(n.id));
 
+  const state = loadState();
   const chunks: Chunk[] = [];
   for (const n of nodes) {
-    const text = readText(n.id);
+    const text = readText(n.id, state);
     if (text.trim()) chunks.push(...chunksOf(text, n.id, n.name));
   }
   if (chunks.length === 0) return { references: [], contexts: [] };

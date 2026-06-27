@@ -59,6 +59,22 @@ class MockRagService implements RagService {
       .slice(0, 4);
   }
 
+  async addReference(path: string): Promise<{ id: string; kind: "file" | "folder" }> {
+    // The mock has no filesystem; surface a referenced node so the surface is
+    // exercised. A real implementation links the true path on disk.
+    const id = `ext-${this.nodes.length}`;
+    const name = path.split(/[/\\]/).pop() || path;
+    this.nodes.push({
+      id, parentId: null, sourceId: this.sources[0]?.id ?? "vault",
+      name, kind: "file", ragIncluded: false, external: true,
+    });
+    return { id, kind: "file" };
+  }
+
+  async removeReference(refId: string): Promise<void> {
+    this.nodes = this.nodes.filter((n) => n.id !== refId && !n.id.startsWith(`${refId}/`));
+  }
+
   /** A node plus all of its descendants (so toggling a folder cascades). */
   private descendantIds(rootId: string): Set<string> {
     const out = new Set<string>([rootId]);

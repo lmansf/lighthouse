@@ -1,8 +1,10 @@
 # Storage model
 
 RAG Vault is **local-first and standalone**. Your documents stay in a directory
-on your own computer; derived state (which files are included, your profile and
-API key, future indexes) lives in a hidden `.rag-vault/` folder beside them.
+on your own computer; derived state (which files are included, files you've
+**linked** in place from elsewhere on disk, your profile and API key, future
+indexes) lives in a hidden `.rag-vault/` folder beside them. Linked items are
+read from their real location and are never copied into the vault.
 
 There is no required cloud database. If you later want to host the app, the
 `RagService` / `ChatService` / `AuthService` contracts are the seam: a cloud

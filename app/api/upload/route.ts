@@ -20,12 +20,24 @@ export async function POST(req: Request) {
   const destRaw = form.get("dir");
   const dest = typeof destRaw === "string" && destRaw ? destRaw : null;
 
+  // For folder uploads the client sends a `paths` entry per file (the file's
+  // path relative to the dropped folder, e.g. "notes/2024/q1.md") so the folder
+  // structure is recreated in the vault. Pair each file with its path *before*
+  // dropping non-file entries, so a stray non-file `files` value can't shift the
+  // index alignment of every file that follows it.
+  const rawPaths = form.getAll("paths");
+  const items = form
+    .getAll("files")
+    .map((entry, i) => ({
+      file: entry,
+      path: typeof rawPaths[i] === "string" ? (rawPaths[i] as string) : "",
+    }))
+    .filter((p): p is { file: File; path: string } => typeof p.file !== "string");
+
   const added: { newId: string }[] = [];
   const skipped: { name: string; reason: string }[] = [];
   let accepted = 0;
-  for (const entry of form.getAll("files")) {
-    if (typeof entry === "string") continue;
-    const file = entry as File;
+  for (const { file, path: rel } of items) {
     if (accepted >= MAX_FILES) {
       skipped.push({ name: file.name, reason: `exceeds max of ${MAX_FILES} files` });
       continue;
@@ -34,9 +46,13 @@ export async function POST(req: Request) {
       skipped.push({ name: file.name, reason: `exceeds ${MAX_FILE_BYTES / (1024 * 1024)}MB limit` });
       continue;
     }
+    // Derive a sub-directory from the relative path (everything but the file
+    // name); fall back to the single `dir` field. addFile guards against escapes.
+    const subDir = rel.includes("/") ? rel.slice(0, rel.lastIndexOf("/")) : null;
+    const target = subDir || dest;
     try {
       const bytes = Buffer.from(await file.arrayBuffer());
-      added.push(addFile(file.name, bytes, dest));
+      added.push(addFile(file.name, bytes, target));
       accepted++;
     } catch (err) {
       skipped.push({ name: file.name, reason: err instanceof Error ? err.message : "upload failed" });

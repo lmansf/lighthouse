@@ -52,7 +52,10 @@ contracts — no cloud database required:
   is explicitly on *and* no ancestor folder is excluded, so anything newly added
   from disk stays out until you opt it in and an excluded folder forces every
   descendant out. Files can also be moved within the vault (`op:move`), which
-  carries their inclusion flags to the new location.
+  carries their inclusion flags to the new location. Whole folders upload with
+  their structure, and the desktop app can **link** files/folders in place
+  (`op:addReference` / `op:removeReference`) — indexing them from their real
+  location on disk instead of copying a second time.
 - **Retrieval** is real TF-IDF cosine over the text of the *included* files
   (`src/server/vault.ts`) — local, no embeddings download.
 - **Chat** streams a grounded answer (`/api/chat`): Anthropic Claude when an API

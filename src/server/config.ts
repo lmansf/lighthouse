@@ -41,6 +41,15 @@ export function profilePath(): string {
 /** The single logical source id for the local vault folder. */
 export const VAULT_SOURCE_ID = "vault";
 
+/**
+ * True only when running inside the packaged desktop app (Electron sets this).
+ * Linking files in place reads arbitrary absolute paths, so it is gated to the
+ * desktop build and never exposed by a plain web deployment.
+ */
+export function isDesktopApp(): boolean {
+  return process.env.LIGHTHOUSE_DESKTOP === "1";
+}
+
 /** Read a JSON file, returning `fallback` if it is missing or unparseable. */
 export function readJson<T>(file: string, fallback: T): T {
   try {

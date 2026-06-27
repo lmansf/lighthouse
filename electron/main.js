@@ -47,6 +47,7 @@ function startServer() {
     env: {
       ...process.env,
       ELECTRON_RUN_AS_NODE: "1", // run the Next CLI on Electron's bundled Node
+      LIGHTHOUSE_DESKTOP: "1", // gates desktop-only endpoints (e.g. link in place)
       VAULT_DIR: vaultDir(),
       PORT: String(PORT),
     },
@@ -87,6 +88,53 @@ function createWindow() {
   });
 }
 
+/** POST to the running local server's /api/rag (no Origin ⇒ same-origin OK). */
+function postRag(body) {
+  return new Promise((resolve, reject) => {
+    const data = Buffer.from(JSON.stringify(body));
+    const req = http.request(
+      {
+        host: "localhost", port: PORT, path: "/api/rag", method: "POST",
+        headers: { "content-type": "application/json", "content-length": data.length },
+      },
+      (res) => {
+        let buf = "";
+        res.on("data", (d) => (buf += d));
+        res.on("end", () => {
+          if (res.statusCode >= 200 && res.statusCode < 300) {
+            try { resolve(JSON.parse(buf || "{}")); } catch { resolve({}); }
+          } else {
+            reject(new Error(`rag ${res.statusCode}: ${buf}`));
+          }
+        });
+      },
+    );
+    req.on("error", reject);
+    req.write(data);
+    req.end();
+  });
+}
+
+/** Unique destination under the vault, suffixing " (n)" on collisions. */
+function uniqueDest(dir, name) {
+  const ext = path.extname(name);
+  const base = path.basename(name, ext);
+  let dest = path.join(dir, name);
+  for (let i = 1; fs.existsSync(dest); i++) dest = path.join(dir, `${base} (${i})${ext}`);
+  return dest;
+}
+
+function copyDirInto(srcDir, destDir) {
+  fs.mkdirSync(destDir, { recursive: true });
+  for (const e of fs.readdirSync(srcDir, { withFileTypes: true })) {
+    if (e.name.startsWith(".")) continue; // skip dotfiles / .rag-vault
+    const s = path.join(srcDir, e.name);
+    const d = path.join(destDir, e.name);
+    if (e.isDirectory()) copyDirInto(s, d);
+    else if (e.isFile()) fs.copyFileSync(s, d);
+  }
+}
+
 async function addFilesDialog() {
   if (!win) return;
   const r = await dialog.showOpenDialog(win, {
@@ -96,11 +144,43 @@ async function addFilesDialog() {
   if (r.canceled) return;
   const dir = vaultDir();
   for (const src of r.filePaths) {
-    const ext = path.extname(src);
-    const base = path.basename(src, ext);
-    let dest = path.join(dir, path.basename(src));
-    for (let i = 1; fs.existsSync(dest); i++) dest = path.join(dir, `${base} (${i})${ext}`);
-    fs.copyFileSync(src, dest); // lands EXCLUDED by default (no state entry)
+    fs.copyFileSync(src, uniqueDest(dir, path.basename(src))); // EXCLUDED by default
+  }
+  win.webContents.reload();
+}
+
+async function addFolderDialog() {
+  if (!win) return;
+  const r = await dialog.showOpenDialog(win, {
+    title: "Add a folder to your vault (copies it in)",
+    properties: ["openDirectory"],
+  });
+  if (r.canceled) return;
+  const src = r.filePaths[0];
+  const name = path.basename(src);
+  const dir = vaultDir();
+  let dest = path.join(dir, name);
+  for (let i = 1; fs.existsSync(dest); i++) dest = path.join(dir, `${name} (${i})`);
+  copyDirInto(src, dest);
+  win.webContents.reload();
+}
+
+/** Link files or a folder in place (added by reference — no copy is made). */
+async function linkDialog(directory) {
+  if (!win) return;
+  const r = await dialog.showOpenDialog(win, {
+    title: directory
+      ? "Link a folder in place (not copied)"
+      : "Link files in place (not copied)",
+    properties: directory ? ["openDirectory"] : ["openFile", "multiSelections"],
+  });
+  if (r.canceled) return;
+  for (const p of r.filePaths) {
+    try {
+      await postRag({ op: "addReference", path: p });
+    } catch (err) {
+      dialog.showErrorBox("Lighthouse", `Could not link:\n${p}\n\n${err.message}`);
+    }
   }
   win.webContents.reload();
 }
@@ -127,6 +207,11 @@ function buildMenu() {
         label: "File",
         submenu: [
           { label: "Add files…", accelerator: "CmdOrCtrl+O", click: addFilesDialog },
+          { label: "Add folder…", click: addFolderDialog },
+          { type: "separator" },
+          { label: "Link files… (no copy)", click: () => linkDialog(false) },
+          { label: "Link folder… (no copy)", click: () => linkDialog(true) },
+          { type: "separator" },
           { label: "Choose vault folder…", click: chooseVaultDialog },
           { label: "Open vault folder", click: () => shell.openPath(vaultDir()) },
           { type: "separator" },

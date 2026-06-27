@@ -7,8 +7,11 @@ import {
   setSourceAvailable,
   retrieve,
   moveNode,
+  addReference,
+  removeReference,
 } from "@/server/vault";
 import { isSameOrigin } from "@/server/http";
+import { isDesktopApp } from "@/server/config";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -57,6 +60,33 @@ export async function POST(req: Request) {
         );
       }
     }
+
+    case "addReference": {
+      if (!isDesktopApp()) {
+        return NextResponse.json(
+          { error: "linking files is available only in the desktop app" },
+          { status: 403 },
+        );
+      }
+      if (typeof body.path !== "string" || !body.path.trim()) {
+        return NextResponse.json({ error: "path required" }, { status: 400 });
+      }
+      try {
+        return NextResponse.json(addReference(body.path));
+      } catch (err) {
+        return NextResponse.json(
+          { error: err instanceof Error ? err.message : "link failed" },
+          { status: 400 },
+        );
+      }
+    }
+
+    case "removeReference":
+      if (typeof body.refId !== "string") {
+        return NextResponse.json({ error: "refId required" }, { status: 400 });
+      }
+      removeReference(body.refId);
+      return NextResponse.json({ ok: true });
 
     default:
       return NextResponse.json({ error: "unknown op" }, { status: 400 });
