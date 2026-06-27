@@ -9,7 +9,7 @@
  * expands this into the full multi-slide registration. Drive `useAuthStore`.
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Button,
   Checkbox,
@@ -69,20 +69,26 @@ export function OnboardingPanel() {
   const [stateField, setStateField] = useState("");
   const [doNotContact, setDoNotContact] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const emailPrefilled = useRef(false);
 
-  // Prefill the registration email from the signed-in user.
+  // Prefill the registration email from the signed-in user, once.
   useEffect(() => {
-    if (onboarding.step === "register" && onboarding.user?.email && !regEmail) {
+    if (
+      onboarding.step === "register" &&
+      onboarding.user?.email &&
+      !emailPrefilled.current
+    ) {
+      emailPrefilled.current = true;
       setRegEmail(onboarding.user.email);
     }
-  }, [onboarding.step, onboarding.user, regEmail]);
+  }, [onboarding.step, onboarding.user]);
 
   const provider = MODEL_PROVIDERS.find((p) => p.id === providerId)!;
 
   async function submitRegistration() {
     setSubmitting(true);
     try {
-      await fetch("/api/register", {
+      const res = await fetch("/api/register", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -94,6 +100,10 @@ export function OnboardingPanel() {
           state: stateField,
         }),
       });
+      const result = await res.json().catch(() => null);
+      if (result?.ok === false && result.reason === "rejected") {
+        console.warn("Registration was rejected and not saved", result.detail);
+      }
     } catch {
       /* network error — proceed regardless; the user can't be blocked here */
     }
