@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import type { OnboardingState } from "@/contracts";
-import { authService } from "@/contracts";
+import { authService, subscribeAuth } from "@/contracts";
 
 /**
  * Auth + onboarding progress. The onboarding feature drives this; the shell
@@ -16,7 +16,12 @@ interface AuthStore {
   signOut: () => Promise<void>;
 }
 
-export const useAuthStore = create<AuthStore>((set) => ({
+export const useAuthStore = create<AuthStore>((set) => {
+  // When the real auth service finishes hydrating a returning user's persisted
+  // profile in the background, push it into the store so onboarding is skipped.
+  subscribeAuth(() => set({ onboarding: authService.getState() }));
+
+  return {
   onboarding: authService.getState(),
 
   refresh: () => set({ onboarding: authService.getState() }),
@@ -45,4 +50,5 @@ export const useAuthStore = create<AuthStore>((set) => ({
     await authService.signOut();
     set({ onboarding: authService.getState() });
   },
-}));
+  };
+});

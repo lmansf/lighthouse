@@ -57,3 +57,9 @@ class MockAuthService implements AuthService {
 }
 
 export const authService: AuthService = new MockAuthService();
+
+/** No-op: the in-memory mock never changes state out-of-band. Mirrors the
+ *  real implementation's hook so the contracts barrel can export either. */
+export function subscribeAuth(_cb: () => void): () => void {
+  return () => {};
+}

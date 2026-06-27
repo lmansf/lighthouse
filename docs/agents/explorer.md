@@ -7,7 +7,7 @@ This is the centerpiece: an organic, oversized, File-Explorer-like grid where th
 
 ## Contract you implement against
 - Read/write `src/stores/useRagStore.ts`: `sources`, `nodes`, `selectionMode`, `setSelectionMode`, `toggleIncluded`, `toggleSourceAvailable`, `includedFileIds()`.
-- The store wraps `RagService` (`src/contracts/services.ts`). `setIncluded` already cascades to descendants (folder/source toggles its whole subtree). Seed data is in `src/contracts/mocks/files.ts`.
+- The store wraps `RagService` (`src/contracts/services.ts`). `setIncluded` already cascades to descendants (folder/source toggles its whole subtree). Inclusion defaults to **excluded**, and a node's rendered `ragIncluded` is the *effective* value: on only if its own flag is set and no ancestor folder is excluded — so a file discovered later (or moved in) under an excluded folder still reads as out. The real backend builds the tree from the on-disk `./vault` directory (`src/server/vault.ts`); the mock's seed tree is in `src/contracts/mocks/files.ts`.
 
 ## What to build
 1. **Oversized organic tiles** - deliberately larger than real File Explorer, rounded (use `theme.ts` radii), with hover lift and per-type icons (database / folder / pdf / doc).
