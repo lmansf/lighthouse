@@ -4,11 +4,18 @@ import type { ChatChunk } from "@/contracts";
 import { retrieve } from "@/server/vault";
 import { streamAnswer } from "@/server/llm";
 import { modelConfig } from "@/server/profile";
+import { isSameOrigin } from "@/server/http";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function POST(req: Request) {
+  if (!isSameOrigin(req)) {
+    return new Response(JSON.stringify({ error: "cross-origin request rejected" }), {
+      status: 403,
+      headers: { "content-type": "application/json" },
+    });
+  }
   const body = await req.json().catch(() => ({}));
   const question = typeof body.question === "string" ? body.question : "";
   const includedFileIds = Array.isArray(body.includedFileIds) ? body.includedFileIds : [];
