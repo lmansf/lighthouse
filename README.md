@@ -1,13 +1,34 @@
-# RAG Vault
+# Lighthouse
 
 Curate which of your files and data sources your AI can see.
-Browse files in an organic, dark, oversized File-Explorer-style UI, toggle items **in** or **out** of the RAG index, and ask a Google-style chat that answers only from what you've included.
+Browse files in a calm, sandy-beach File-Explorer-style UI (red used sparingly as the beacon accent), toggle items **in** or **out** of the RAG index, and ask a Google-style chat that answers only from what you've included. Local-first: your documents stay in a folder on your own machine.
 
-## Quick start
+> The npm package and repo are still named `rag-vault`; the product is **Lighthouse**.
+
+## Run it
+
+### Desktop app (recommended)
+
+Lighthouse runs as a persistent desktop app (system tray, launch-at-login,
+native file/vault dialogs). You don't need a terminal:
+
+- **Just run it** — extract the repo and double-click **`Lighthouse.cmd`**
+  (Windows) or **`Lighthouse.command`** (macOS/Linux). The first launch installs
+  and builds; every launch after that opens the app. Needs [Node.js](https://nodejs.org).
+- **Make a shareable installer** — double-click **`Build-Installer.cmd`** on
+  Windows to produce a standalone `.exe` in `release/` that end users install
+  with no Node.js, build, or terminal.
+
+See **[docs/desktop.md](docs/desktop.md)** for details, the one-line terminal
+installer, and packaging notes.
+
+### Web / development
 
 ```bash
 npm install
 npm run dev      # http://localhost:3000
+npm run build && npm run start   # production server
+npm run electron                 # desktop app (after build)
 ```
 
 ## Architecture
@@ -45,8 +66,27 @@ adapter behind the same `RagService`/`ChatService`/`AuthService` interfaces
 (serverless hosts can't persist to a local directory — local storage means
 running on your own machine).
 
+## Welcome form (optional)
+
+After sign-in, a one-time welcome form in the left rail collects basic contact
+info and submits it to a Supabase table — or **Skip** it entirely. If Supabase
+isn't configured the app stays fully usable; Submit just reports "not
+configured". Setup (table SQL + env) is in **[docs/registration.md](docs/registration.md)**.
+
+## Configuration
+
+Copy `.env.local.example` → `.env.local` (gitignored). All vars are optional:
+
+- `VAULT_DIR` — where your documents live (default `./vault`; the desktop app
+  manages this for you).
+- `ANTHROPIC_API_KEY` — live Claude chat; without it, a local extractive
+  fallback answers with no network.
+- `SUPABASE_URL` / `SUPABASE_ANON_KEY` / `SUPABASE_REGISTRATIONS_TABLE` — the
+  welcome form.
+
 ## Status
 
 Working local-first vertical slice: real file tree, real retrieval, real streamed
-chat. Next: optional vector embeddings behind `RagService.search`, binary
-formats (PDF/DOCX) extraction, and richer explorer/onboarding polish.
+chat, plus a persistent **desktop app** (Electron) with a double-click launcher
+and a packaged installer. Next: app/tray icons, optional vector embeddings behind
+`RagService.search`, and binary formats (PDF/DOCX) extraction.
