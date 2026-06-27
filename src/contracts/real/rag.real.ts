@@ -41,6 +41,15 @@ class RealRagService implements RagService {
     const res = await post({ op: "search", query, includedFileIds });
     return (res.references as RagReference[]) ?? [];
   }
+
+  async addReference(path: string): Promise<{ id: string; kind: "file" | "folder" }> {
+    const res = await post({ op: "addReference", path });
+    return res as { id: string; kind: "file" | "folder" };
+  }
+
+  async removeReference(refId: string): Promise<void> {
+    await post({ op: "removeReference", refId });
+  }
 }
 
 export const ragService: RagService = new RealRagService();

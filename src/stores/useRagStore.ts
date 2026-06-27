@@ -19,6 +19,10 @@ interface RagStore {
   toggleSourceAvailable: (sourceId: string) => Promise<void>;
   /** Upload files into the vault; they land excluded by default. Returns any skipped files. */
   upload: (files: File[], dir?: string | null) => Promise<{ name: string; reason: string }[]>;
+  /** Link a file/folder by its real path instead of copying (desktop-only). */
+  addReference: (path: string) => Promise<void>;
+  /** Remove a reference (unlink); real files are left in place. */
+  removeReference: (refId: string) => Promise<void>;
 
   /** Ids of every included file (leaf) node - what chat retrieves against. */
   includedFileIds: () => string[];
@@ -61,13 +65,28 @@ export const useRagStore = create<RagStore>((set, get) => ({
     if (files.length === 0) return [];
     const fd = new FormData();
     if (dir) fd.append("dir", dir);
-    for (const f of files) fd.append("files", f);
+    for (const f of files) {
+      fd.append("files", f);
+      // For a folder drop/pick the browser sets webkitRelativePath (e.g.
+      // "docs/2024/q1.md"); send it so the server recreates the structure.
+      fd.append("paths", f.webkitRelativePath || "");
+    }
     const res = await fetch("/api/upload", { method: "POST", body: fd });
     const skipped: { name: string; reason: string }[] = res.ok
       ? ((await res.json().catch(() => ({}))).skipped ?? [])
       : files.map((f) => ({ name: f.name, reason: "upload request failed" }));
     await get().load();
     return skipped;
+  },
+
+  addReference: async (path) => {
+    await ragService.addReference(path);
+    await get().load();
+  },
+
+  removeReference: async (refId) => {
+    await ragService.removeReference(refId);
+    await get().load();
   },
 
   includedFileIds: () =>

@@ -48,10 +48,20 @@ npm run electron
 
 - **Persistent** — launches at login and stays in the system tray. Closing the
   window hides it to the tray; quit from the tray menu to fully exit.
-- **Native file dialogs** — `File ▸ Add files…` copies files into your vault
-  (they arrive **excluded by default**, matching the app's exclusion rules).
-  `File ▸ Choose vault folder…` points Lighthouse at any directory.
-- **Open vault folder** — reveals the vault in your OS file manager.
+- **Add files / folders (copy)** — `File ▸ Add files…` and `File ▸ Add folder…`
+  copy items into your vault. A folder keeps its structure.
+- **Link files / folders (no copy)** — `File ▸ Link files…` and
+  `File ▸ Link folder…` add items **by reference**, reading them from their real
+  location on disk so no second copy is made. Unlink any time from the tree
+  (the real files are left in place).
+- Everything added — copied or linked — arrives **excluded by default**, matching
+  the app's exclusion rules; you opt items into the RAG index in the tree.
+- **Choose vault folder…** points Lighthouse at any directory; **Open vault
+  folder** reveals it in your OS file manager.
+
+In the browser, use **Add files** or **Add folder** (or drag items in) — folders
+upload with their structure. Linking in place is desktop-only, since browsers
+can't access real filesystem paths.
 
 ## Vault location
 

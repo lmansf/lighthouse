@@ -30,6 +30,12 @@ export interface FileNode {
   size?: number;
   /** Whether this node is currently included in the RAG index. */
   ragIncluded: boolean;
+  /**
+   * True for items *referenced* in their real location on disk rather than
+   * copied into the vault (added via "Link…"). The subtree root carries it; the
+   * whole referenced tree is read in place, so no copies are made.
+   */
+  external?: boolean;
 }
 
 /** A model provider the user can pick during onboarding. */

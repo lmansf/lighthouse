@@ -20,12 +20,17 @@ export async function POST(req: Request) {
   const destRaw = form.get("dir");
   const dest = typeof destRaw === "string" && destRaw ? destRaw : null;
 
+  // For folder uploads the client sends a `paths` entry per file (the file's
+  // path relative to the dropped folder, e.g. "notes/2024/q1.md") so the folder
+  // structure is recreated in the vault. Aligned by index with `files`.
+  const files = form.getAll("files").filter((e): e is File => typeof e !== "string");
+  const paths = form.getAll("paths").map((p) => (typeof p === "string" ? p : ""));
+
   const added: { newId: string }[] = [];
   const skipped: { name: string; reason: string }[] = [];
   let accepted = 0;
-  for (const entry of form.getAll("files")) {
-    if (typeof entry === "string") continue;
-    const file = entry as File;
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i];
     if (accepted >= MAX_FILES) {
       skipped.push({ name: file.name, reason: `exceeds max of ${MAX_FILES} files` });
       continue;
@@ -34,9 +39,14 @@ export async function POST(req: Request) {
       skipped.push({ name: file.name, reason: `exceeds ${MAX_FILE_BYTES / (1024 * 1024)}MB limit` });
       continue;
     }
+    // Derive a sub-directory from the relative path (everything but the file
+    // name); fall back to the single `dir` field. addFile guards against escapes.
+    const rel = paths[i] ?? "";
+    const subDir = rel.includes("/") ? rel.slice(0, rel.lastIndexOf("/")) : null;
+    const target = subDir || dest;
     try {
       const bytes = Buffer.from(await file.arrayBuffer());
-      added.push(addFile(file.name, bytes, dest));
+      added.push(addFile(file.name, bytes, target));
       accepted++;
     } catch (err) {
       skipped.push({ name: file.name, reason: err instanceof Error ? err.message : "upload failed" });
