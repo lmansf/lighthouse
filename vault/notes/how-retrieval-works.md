@@ -3,7 +3,8 @@
 RAG Vault retrieves passages with a local TF-IDF cosine ranker — no cloud, no
 database server, no embeddings download required.
 
-1. **Scan** — included files are read from the vault directory.
+1. **Scan** — included files are read from the vault directory (or, for files
+   linked in place, from their real location on disk).
 2. **Chunk** — each file's text is split into overlapping ~120-word windows.
 3. **Score** — the query and every chunk become TF-IDF vectors; chunks are
    ranked by cosine similarity.
