@@ -17,32 +17,29 @@ const useStyles = makeStyles({
     flex: 1,
     minWidth: 0,
     minHeight: 0,
-    display: "grid",
-    // Explorer on the left of the workspace, chat on the right.
-    gridTemplateColumns: "minmax(0, 1.4fr) minmax(360px, 1fr)",
-    // Single full-height row so the panes fill the viewport, no dead space.
-    gridTemplateRows: "minmax(0, 1fr)",
-    gap: tokens.spacingHorizontalL,
+    display: "flex",
+    flexDirection: "column",
     padding: tokens.spacingHorizontalL,
     overflow: "hidden",
   },
 });
 
 interface AppShellProps {
-  /** Rendered inside the collapsible left rail (onboarding / nav). */
+  /**
+   * Rendered inside the collapsible left rail. Hosts onboarding before the
+   * user is set up, then the Ask/chat panel afterwards.
+   */
   rail: React.ReactNode;
-  /** Primary workspace - the file explorer. */
-  explorer: React.ReactNode;
-  /** Secondary workspace - the chat panel. */
-  chat: React.ReactNode;
+  /** The primary workspace, filling the rest of the screen - the file explorer. */
+  content: React.ReactNode;
 }
 
 /**
- * The application frame: collapsible rail + two-pane workspace. Owned by the
- * shell team. It also kicks the one-time RAG data load so every feature sees
- * populated stores on first paint.
+ * The application frame: a collapsible left rail + a full-bleed workspace.
+ * Owned by the shell team. It also kicks the one-time RAG data load so every
+ * feature sees populated stores on first paint.
  */
-export function AppShell({ rail, explorer, chat }: AppShellProps) {
+export function AppShell({ rail, content }: AppShellProps) {
   const styles = useStyles();
   const [collapsed, setCollapsed] = useState(false);
   const load = useRagStore((s) => s.load);
@@ -56,10 +53,7 @@ export function AppShell({ rail, explorer, chat }: AppShellProps) {
       <LeftRail collapsed={collapsed} onToggle={() => setCollapsed((c) => !c)}>
         {rail}
       </LeftRail>
-      <div className={styles.main}>
-        {explorer}
-        {chat}
-      </div>
+      <div className={styles.main}>{content}</div>
     </main>
   );
 }

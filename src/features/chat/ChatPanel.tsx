@@ -33,8 +33,7 @@ const useStyles = makeStyles({
     flexDirection: "column",
     minHeight: 0,
     height: "100%",
-    backgroundColor: tokens.colorNeutralBackground2,
-    borderRadius: tokens.borderRadiusXLarge,
+    // Transparent so the panel blends into its host surface (the left rail).
     ...shorthands.padding(tokens.spacingVerticalL),
   },
   header: {

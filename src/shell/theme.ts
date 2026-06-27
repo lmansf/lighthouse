@@ -18,7 +18,7 @@ export const ragVaultDarkTheme: Theme = {
 
 /** Layout constants shared across the shell. */
 export const LAYOUT = {
-  railWidth: 320,
+  railWidth: 380,
   railCollapsedWidth: 64,
   headerHeight: 56,
 } as const;
