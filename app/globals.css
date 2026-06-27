@@ -1,0 +1,22 @@
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+}
+
+body {
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  /* Dark base so there is no white flash before Fluent paints. */
+  background-color: #1f1f1f;
+  color: #ffffff;
+}
+
+#__next,
+main {
+  height: 100%;
+}
