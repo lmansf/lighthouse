@@ -57,13 +57,39 @@ Changing it restarts the local server against the new directory.
 
 ## Building a distributable installer
 
+This produces a **standalone installer** end users double-click — no Node.js,
+no build, no terminal on their side.
+
+### Double-click (no terminal)
+
+On the build machine, double-click **`Build-Installer.cmd`** (Windows). It
+installs build tools if needed, builds the app, and packages the installer,
+then opens the `release/` folder. Share the resulting `.exe`.
+
+### Terminal
+
 ```bash
 npm run dist
 ```
 
-`electron-builder` produces a platform installer in `release/` (NSIS `.exe` on
-Windows, `.dmg` on macOS, `.AppImage` on Linux). Drop a `build/icon.png` and
-`assets/tray.png` in first for branded icons.
+`electron-builder` produces a platform installer in `release/` for the platform
+you run it on — NSIS `.exe` on Windows, `.dmg` on macOS, `.AppImage` on Linux.
+**Cross-building is not supported here** (e.g. you can't build the Windows `.exe`
+on Linux without Wine), so run `npm run dist` / `Build-Installer.cmd` on the
+target OS. Drop a `build/icon.png` and `assets/tray.png` in first for branded
+icons.
+
+The app ships **unpacked** (`asar: false`) because it runs a local Next.js
+server (`next start`) as a child process, which must be a real file on disk
+rather than packed into an asar archive. Only production dependencies are
+bundled; `.next/cache` and the dev toolchain are excluded.
+
+### What the end user gets
+
+The Windows installer (NSIS) installs Lighthouse with a Start-Menu and desktop
+shortcut and lets the user pick the install directory. Launching it starts the
+bundled server and opens the app — and Lighthouse adds itself to login items so
+it stays running in the tray.
 
 ## Configuration
 
