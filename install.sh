@@ -2,14 +2,14 @@
 #
 # Lighthouse one-line installer.
 #
-#   curl -fsSL https://raw.githubusercontent.com/lmansf/rag-vault/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/lmansf/lighthouse/main/install.sh | bash
 #
 # Clones (or updates) the repo into ~/.lighthouse, installs dependencies,
 # builds the Next.js app, and launches the Electron desktop app. Re-running
 # updates an existing install in place.
 set -euo pipefail
 
-REPO_SLUG="${LIGHTHOUSE_REPO_SLUG:-lmansf/rag-vault}"
+REPO_SLUG="${LIGHTHOUSE_REPO_SLUG:-lmansf/lighthouse}"
 REPO="${LIGHTHOUSE_REPO:-https://github.com/$REPO_SLUG.git}"
 DEST="${LIGHTHOUSE_HOME:-$HOME/.lighthouse}"
 
