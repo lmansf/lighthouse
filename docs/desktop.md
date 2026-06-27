@@ -14,10 +14,14 @@ Extract the repo, then double-click the launcher for your OS:
 - **macOS / Linux** — `Lighthouse.command` (macOS: the first time, right-click ▸
   Open to clear Gatekeeper)
 
-The **first** double-click installs dependencies and builds the app (a few
-minutes, shown in a console window). **Every double-click after that** launches
-Lighthouse straight away. The only prerequisite is [Node.js](https://nodejs.org)
-— if it's missing, the launcher opens the download page for you.
+On **Windows**, the launcher opens a small branded **setup window** (lighthouse
+icon, progress bar, status) while it installs and builds on first run, then opens
+the app — no console. The **first** run installs dependencies and builds (a few
+minutes); **every run after** launches straight away. The only prerequisite is
+[Node.js](https://nodejs.org) — if it's missing, the window offers the download.
+
+(macOS/Linux show the same steps in a terminal window. If PowerShell is somehow
+unavailable on Windows, `Lighthouse.cmd` falls back to a plain console too.)
 
 ### One line in a terminal
 
@@ -83,6 +87,13 @@ The app ships **unpacked** (`asar: false`) because it runs a local Next.js
 server (`next start`) as a child process, which must be a real file on disk
 rather than packed into an asar archive. Only production dependencies are
 bundled; `.next/cache` and the dev toolchain are excluded.
+
+### Icons
+
+The branded lighthouse icon is committed (`build/icon.png` / `build/icon.ico`
+for the app + installer, `assets/icon.png` for the window, `assets/tray.png` for
+the tray). To re-generate them after editing the SVG sources in `build/`, run
+`npm run icons` (uses `sharp` + `png-to-ico`).
 
 ### What the end user gets
 

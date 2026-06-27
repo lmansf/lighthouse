@@ -9,6 +9,14 @@ setlocal
 cd /d "%~dp0"
 title Lighthouse
 
+rem --- Prefer the graphical setup window when PowerShell is available -----------
+where powershell >nul 2>nul
+if not errorlevel 1 if exist "%~dp0scripts\setup-gui.ps1" (
+  start "" powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "%~dp0scripts\setup-gui.ps1"
+  exit /b 0
+)
+rem --- Otherwise fall back to the console setup below ---------------------------
+
 rem --- Node.js required ---------------------------------------------------------
 where node >nul 2>nul
 if errorlevel 1 (
