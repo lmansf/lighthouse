@@ -2,6 +2,8 @@
   "name": "rag-vault",
   "version": "0.1.0",
   "private": true,
+  "description": "Lighthouse — a local-first RAG vault for your documents.",
+  "author": "Lighthouse",
   "main": "electron/main.js",
   "scripts": {
     "dev": "next dev",
@@ -14,18 +16,30 @@
   "build": {
     "appId": "com.lighthouse.app",
     "productName": "Lighthouse",
+    "executableName": "Lighthouse",
+    "asar": false,
     "files": [
-      "electron/**/*",
-      ".next/**/*",
-      "public/**/*",
-      "package.json",
-      "next.config.*"
+      "**/*",
+      "!**/.next/cache/**/*",
+      "!**/release/**/*",
+      "!**/*.map",
+      "!**/Lighthouse.cmd",
+      "!**/Lighthouse.command",
+      "!**/install.sh"
     ],
     "extraMetadata": { "main": "electron/main.js" },
     "directories": { "output": "release" },
     "win": { "target": "nsis" },
-    "mac": { "target": "dmg" },
-    "linux": { "target": "AppImage" }
+    "mac": { "target": "dmg", "category": "public.app-category.productivity" },
+    "linux": { "target": "AppImage", "category": "Utility" },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Lighthouse"
+    }
   },
   "dependencies": {
     "@fluentui/react-components": "^9.54.0",
