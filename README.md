@@ -20,6 +20,28 @@ Everything decouples through `src/contracts/` (typed interfaces + mock implement
 
 The feature components in `app/page.tsx` are working placeholders today - each team replaces its own.
 
+## Backend (local-first, standalone)
+
+The mocks are now backed by a real **local-first** implementation behind the same
+contracts — no cloud database required:
+
+- **Files** live in a real directory (`./vault`, or set `VAULT_DIR` to any path).
+  The explorer lists them; inclusion flags persist to `vault/.rag-vault/state.json`.
+- **Retrieval** is real TF-IDF cosine over the text of the *included* files
+  (`src/server/vault.ts`) — local, no embeddings download.
+- **Chat** streams a grounded answer (`/api/chat`): Anthropic Claude when an API
+  key is configured (set in onboarding or `ANTHROPIC_API_KEY`), otherwise a local
+  extractive fallback that needs no network.
+- **Profile/key** are stored locally in `vault/.rag-vault/profile.json` (gitignored).
+
+Swap back to the in-memory mocks by pointing the three exports in
+`src/contracts/index.ts` at `./mocks/*`. A cloud/Vercel deployment would add an
+adapter behind the same `RagService`/`ChatService`/`AuthService` interfaces
+(serverless hosts can't persist to a local directory — local storage means
+running on your own machine).
+
 ## Status
 
-Scaffold. Backend is mocked behind real interfaces (`RagService`, `AuthService`, `ChatService`); auth and onboarding are local-state mocks.
+Working local-first vertical slice: real file tree, real retrieval, real streamed
+chat. Next: optional vector embeddings behind `RagService.search`, binary
+formats (PDF/DOCX) extraction, and richer explorer/onboarding polish.

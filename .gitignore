@@ -23,6 +23,12 @@ yarn-error.log*
 .env*.local
 .env
 
+# vault local state: inclusion flags, profile + API key, indexes (never commit)
+vault/.rag-vault/
+# user-added documents (sample docs under vault/ are tracked; uncomment to keep
+# your own vault private if you store documents inside the repo)
+# /vault/
+
 # typescript
 *.tsbuildinfo
 next-env.d.ts
