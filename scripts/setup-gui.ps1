@@ -117,9 +117,14 @@ $work = {
   param($sync, $root, $logFile)
   function Step($name) { $sync.Status = $name; [void]$sync.Lines.Add($name) }
   function RunCmd($cmd) {
+    $errFile = "$logFile.err"
     $p = Start-Process -FilePath "cmd.exe" -ArgumentList "/c", $cmd `
          -WorkingDirectory $root -NoNewWindow -PassThru -Wait `
-         -RedirectStandardOutput $logFile -RedirectStandardError "$logFile.err"
+         -RedirectStandardOutput $logFile -RedirectStandardError $errFile
+    if ((Test-Path $errFile) -and (Get-Item $errFile).Length -gt 0) {
+      Add-Content -Path $logFile -Value (Get-Content -Path $errFile -Raw)
+    }
+    Remove-Item $errFile -ErrorAction SilentlyContinue
     return $p.ExitCode
   }
   try {

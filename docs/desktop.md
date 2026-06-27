@@ -93,7 +93,8 @@ bundled; `.next/cache` and the dev toolchain are excluded.
 The branded lighthouse icon is committed (`build/icon.png` / `build/icon.ico`
 for the app + installer, `assets/icon.png` for the window, `assets/tray.png` for
 the tray). To re-generate them after editing the SVG sources in `build/`, run
-`npm run icons` (uses `sharp` + `png-to-ico`).
+`npm run icons` (installs `sharp` + `png-to-ico` on demand, so end users never
+pull these heavy native deps).
 
 ### What the end user gets
 

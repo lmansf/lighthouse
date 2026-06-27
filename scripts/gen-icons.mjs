@@ -5,7 +5,7 @@
  *                                         Windows .ico / macOS .icns from it)
  *   build/tray.svg  -> assets/tray.png  (transparent tray/menubar icon)
  *
- * Run: `npm run icons` (after `npm install`, which provides sharp).
+ * Run: `npm run icons` (installs sharp / png-to-ico on demand via --no-save).
  * The generated PNGs are committed so end users never need sharp.
  */
 import sharp from "sharp";

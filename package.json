@@ -10,7 +10,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "icons": "node scripts/gen-icons.mjs",
+    "icons": "npm install --no-save sharp@^0.33.5 png-to-ico@^2.1.8 && node scripts/gen-icons.mjs",
     "electron": "electron .",
     "dist": "electron-builder"
   },
@@ -62,8 +62,6 @@
     "@types/react-dom": "19.0.3",
     "electron": "^33.2.0",
     "electron-builder": "^25.1.8",
-    "png-to-ico": "^2.1.8",
-    "sharp": "^0.33.5",
     "typescript": "5.7.3"
   }
 }
