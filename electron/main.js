@@ -12,6 +12,8 @@ const http = require("node:http");
 
 const PORT = Number(process.env.LIGHTHOUSE_PORT || 3777);
 const APP_ROOT = path.join(__dirname, "..");
+const WINDOW_ICON = path.join(APP_ROOT, "assets", "icon.png");
+const TRAY_ICON = path.join(APP_ROOT, "assets", "tray.png");
 
 let serverProc = null;
 let win = null;
@@ -71,6 +73,7 @@ function createWindow() {
     show: false,
     backgroundColor: "#FBF5E9", // sandy cream — matches the theme, no flash
     title: "Lighthouse",
+    icon: WINDOW_ICON,
     webPreferences: { contextIsolation: true },
   });
   win.loadURL(`http://localhost:${PORT}`);
@@ -138,7 +141,10 @@ function buildMenu() {
 }
 
 function createTray() {
-  tray = new Tray(nativeImage.createEmpty()); // replace with assets/tray.png for a real icon
+  // A real branded tray icon, falling back to empty if the asset is missing.
+  let trayImg = nativeImage.createFromPath(TRAY_ICON);
+  trayImg = trayImg.isEmpty() ? nativeImage.createEmpty() : trayImg.resize({ width: 16, height: 16 });
+  tray = new Tray(trayImg);
   tray.setToolTip("Lighthouse");
   tray.setContextMenu(
     Menu.buildFromTemplate([
