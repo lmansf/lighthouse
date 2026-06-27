@@ -14,7 +14,7 @@ You own the application frame, the collapsible left rail, and the **design token
 ## Acceptance criteria
 - Dark Fluent theme applied with **no flash of unstyled content** (SSR Griffel via `app/providers.tsx`).
 - Left rail collapses/expands smoothly; collapsed width hides the rail body, keeps the toggle.
-- Two-pane workspace (explorer | chat) is responsive and never overflows the viewport.
+- Left rail hosts onboarding until `onboarding.step === "done"`, then the chat/Ask panel; the file explorer fills the rest of the screen. Responsive, never overflows the viewport.
 - The organic look: larger corner radii than stock Fluent, soft shadows. Tune via `theme.ts`, not per-component hardcoding.
 - `npm run build` passes.
 
