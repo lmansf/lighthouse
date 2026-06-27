@@ -14,7 +14,7 @@ A Google-style answer surface: the AI answer on top, related/reference files ben
 1. **Composer** + transcript of turns.
 2. Each assistant turn: **answer streamed token-by-token at the top**, then a **"Related files"** list of reference cards below (name, snippet, score), appearing as the stream resolves.
 3. Realtime feel - show streaming state; let the user ask follow-ups.
-4. Empty/grounding states: if `includedFileIds()` is empty, prompt the user to include files first (the mock already returns a no-grounding answer in that case).
+4. Empty/grounding states: if `includedFileIds()` is empty, prompt the user to include files first (the backend returns a no-grounding answer in that case).
 
 ## Acceptance criteria
 - Streaming renders incrementally (not all-at-once).

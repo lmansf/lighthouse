@@ -13,7 +13,7 @@ npm run dev      # http://localhost:3000
 ## Architecture
 
 This repo is structured so independent agent teams can each own one feature in its own git worktree and converge cleanly.
-Everything decouples through `src/contracts/` (typed interfaces + mock implementations) and two Zustand stores.
+Everything decouples through `src/contracts/` (typed interfaces + swappable implementations, real or mock) and two Zustand stores.
 
 - **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** - the design, the contract seam, and the rules of the road.
 - **docs/agents/** - one brief per feature team: [shell](docs/agents/shell.md), [onboarding](docs/agents/onboarding.md), [explorer](docs/agents/explorer.md), [chat](docs/agents/chat.md).
