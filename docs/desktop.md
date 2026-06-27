@@ -22,7 +22,7 @@ Lighthouse straight away. The only prerequisite is [Node.js](https://nodejs.org)
 ### One line in a terminal
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/lmansf/rag-vault/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/lmansf/lighthouse/main/install.sh | bash
 ```
 
 This clones the repo to `~/.lighthouse`, installs dependencies, builds the app,
@@ -33,8 +33,8 @@ installer uses `gh` to clone.
 ### Manual
 
 ```bash
-git clone https://github.com/lmansf/rag-vault.git
-cd rag-vault
+git clone https://github.com/lmansf/lighthouse.git
+cd lighthouse
 npm install
 npm run build
 npm run electron
