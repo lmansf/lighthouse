@@ -113,7 +113,9 @@ async function* extractive(question: string, contexts: Ctx[], noKey: boolean): A
       .slice(0, 3)
       .map((c, i) => `[${i + 1}] **${c.name}** — ${c.text.slice(0, 300).trim()}…`)
       .join("\n\n") +
-    `\n\n_Configure an Anthropic key in onboarding for synthesized answers._`;
+    // Only nudge about a key when there genuinely isn't one — not when we fell
+    // back after a transient model error despite a configured key.
+    (noKey ? `\n\n_Configure an Anthropic key in onboarding for synthesized answers._` : "");
 
   for (const word of (head + body).split(/(\s+)/)) {
     yield word;

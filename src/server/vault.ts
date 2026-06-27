@@ -23,10 +23,14 @@ interface VaultState {
   included: Record<string, boolean>;
 }
 
-const DEFAULT_STATE: VaultState = { sourceAvailable: true, included: {} };
-
 function loadState(): VaultState {
-  return { ...DEFAULT_STATE, ...readJson(statePath(), DEFAULT_STATE) };
+  // Construct fresh objects each call so a missing state file never aliases a
+  // shared default that setIncluded() would then mutate for the process life.
+  const raw = readJson<Partial<VaultState>>(statePath(), {});
+  return {
+    sourceAvailable: raw.sourceAvailable ?? true,
+    included: { ...(raw.included ?? {}) },
+  };
 }
 function saveState(s: VaultState): void {
   writeJson(statePath(), s);

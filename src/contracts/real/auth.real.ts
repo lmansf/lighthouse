@@ -14,6 +14,16 @@ let cached: OnboardingState = {
   hasApiKey: false,
 };
 
+/** Subscribers notified when `cached` changes out-of-band (background hydrate). */
+const listeners = new Set<() => void>();
+export function subscribeAuth(cb: () => void): () => void {
+  listeners.add(cb);
+  return () => listeners.delete(cb);
+}
+function notify(): void {
+  for (const cb of listeners) cb();
+}
+
 async function post(op: string, extra: Record<string, unknown> = {}): Promise<OnboardingState> {
   const r = await fetch("/api/profile", {
     method: "POST",
@@ -29,7 +39,10 @@ if (typeof window !== "undefined") {
   fetch("/api/profile", { cache: "no-store" })
     .then((r) => (r.ok ? r.json() : null))
     .then((s) => {
-      if (s) cached = s as OnboardingState;
+      if (s) {
+        cached = s as OnboardingState;
+        notify(); // a returning user's persisted profile now reaches the store
+      }
     })
     .catch(() => {});
 }

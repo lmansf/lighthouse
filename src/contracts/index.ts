@@ -8,5 +8,5 @@ export { SEED_NODES, SEED_SOURCES } from "./mocks/files";
 // Real, local-first implementations (filesystem vault + local retrieval +
 // Claude/extractive chat). Swap back to ./mocks/* to run fully offline mocks.
 export { ragService } from "./real/rag.real";
-export { authService } from "./real/auth.real";
+export { authService, subscribeAuth } from "./real/auth.real";
 export { chatService } from "./real/chat.real";
