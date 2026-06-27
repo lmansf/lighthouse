@@ -9,7 +9,8 @@
 # updates an existing install in place.
 set -euo pipefail
 
-REPO="${LIGHTHOUSE_REPO:-https://github.com/lmansf/rag-vault.git}"
+REPO_SLUG="${LIGHTHOUSE_REPO_SLUG:-lmansf/rag-vault}"
+REPO="${LIGHTHOUSE_REPO:-https://github.com/$REPO_SLUG.git}"
 DEST="${LIGHTHOUSE_HOME:-$HOME/.lighthouse}"
 
 info() { printf '\033[1;31m▸\033[0m %s\n' "$1"; } # red beacon prompt
@@ -21,8 +22,13 @@ command -v npm >/dev/null   || { echo "npm is required"; exit 1; }
 if [ -d "$DEST/.git" ]; then
   info "Updating Lighthouse in $DEST"
   git -C "$DEST" pull --ff-only
+elif command -v gh >/dev/null && gh auth status >/dev/null 2>&1; then
+  # Private repo: use the user's authenticated GitHub CLI.
+  info "Installing Lighthouse to $DEST (via gh)"
+  gh repo clone "$REPO_SLUG" "$DEST" -- --depth 1
 else
   info "Installing Lighthouse to $DEST"
+  echo "  (private repo? install the GitHub CLI and run 'gh auth login' first)"
   git clone --depth 1 "$REPO" "$DEST"
 fi
 

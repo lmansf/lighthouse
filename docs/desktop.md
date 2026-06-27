@@ -6,14 +6,29 @@ a real folder on your computer — nothing is uploaded to a cloud database.
 
 ## Install
 
-One line in a terminal:
+### Double-click (no terminal)
+
+Extract the repo, then double-click the launcher for your OS:
+
+- **Windows** — `Lighthouse.cmd`
+- **macOS / Linux** — `Lighthouse.command` (macOS: the first time, right-click ▸
+  Open to clear Gatekeeper)
+
+The **first** double-click installs dependencies and builds the app (a few
+minutes, shown in a console window). **Every double-click after that** launches
+Lighthouse straight away. The only prerequisite is [Node.js](https://nodejs.org)
+— if it's missing, the launcher opens the download page for you.
+
+### One line in a terminal
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/lmansf/rag-vault/main/install.sh | bash
 ```
 
 This clones the repo to `~/.lighthouse`, installs dependencies, builds the app,
-and launches it. Re-running the same command updates an existing install.
+and launches it. Re-running the same command updates an existing install. For a
+**private** repo, install the GitHub CLI and run `gh auth login` first — the
+installer uses `gh` to clone.
 
 ### Manual
 
