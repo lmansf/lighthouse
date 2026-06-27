@@ -57,6 +57,9 @@ class RealAuthService implements AuthService {
   async register(name: string, email: string): Promise<User> {
     return (await post("register", { name, email })).user!;
   }
+  async finishRegistration(): Promise<void> {
+    await post("finishRegistration");
+  }
   async selectModel(providerId: string, modelId: string, apiKey: string): Promise<void> {
     await post("selectModel", { providerId, modelId, apiKey });
   }

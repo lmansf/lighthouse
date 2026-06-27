@@ -11,9 +11,9 @@ body {
 
 body {
   font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
-  /* Dark base so there is no white flash before Fluent paints. */
-  background-color: #1f1f1f;
-  color: #ffffff;
+  /* Cream base matching the light theme so there is no flash before Fluent paints. */
+  background-color: #FBF5E9;
+  color: #1f1f1f;
 }
 
 #__next,

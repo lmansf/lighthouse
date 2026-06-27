@@ -9,9 +9,10 @@
  * expands this into the full multi-slide registration. Drive `useAuthStore`.
  */
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Button,
+  Checkbox,
   Dropdown,
   Field,
   Input,
@@ -39,12 +40,18 @@ const useStyles = makeStyles({
     gap: tokens.spacingVerticalS,
     padding: tokens.spacingHorizontalL,
   },
+  row: {
+    display: "flex",
+    gap: tokens.spacingHorizontalS,
+    marginTop: tokens.spacingVerticalS,
+  },
 });
 
 export function OnboardingPanel() {
   const styles = useStyles();
   const onboarding = useAuthStore((s) => s.onboarding);
   const signIn = useAuthStore((s) => s.signIn);
+  const finishRegistration = useAuthStore((s) => s.finishRegistration);
   const selectModel = useAuthStore((s) => s.selectModel);
   const signOut = useAuthStore((s) => s.signOut);
 
@@ -54,13 +61,61 @@ export function OnboardingPanel() {
   const [modelId, setModelId] = useState(MODEL_PROVIDERS[0].models[0]);
   const [apiKey, setApiKey] = useState("");
 
+  // Welcome-registration form fields.
+  const [firstName, setFirstName] = useState("");
+  const [lastName, setLastName] = useState("");
+  const [regEmail, setRegEmail] = useState("");
+  const [city, setCity] = useState("");
+  const [stateField, setStateField] = useState("");
+  const [doNotContact, setDoNotContact] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const emailPrefilled = useRef(false);
+
+  // Prefill the registration email from the signed-in user, once.
+  useEffect(() => {
+    if (
+      onboarding.step === "register" &&
+      onboarding.user?.email &&
+      !emailPrefilled.current
+    ) {
+      emailPrefilled.current = true;
+      setRegEmail(onboarding.user.email);
+    }
+  }, [onboarding.step, onboarding.user]);
+
   const provider = MODEL_PROVIDERS.find((p) => p.id === providerId)!;
+
+  async function submitRegistration() {
+    setSubmitting(true);
+    try {
+      const res = await fetch("/api/register", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          firstName,
+          lastName,
+          email: regEmail,
+          doNotContact,
+          city,
+          state: stateField,
+        }),
+      });
+      const result = await res.json().catch(() => null);
+      if (result?.ok === false && result.reason === "rejected") {
+        console.warn("Registration was rejected and not saved", result.detail);
+      }
+    } catch {
+      /* network error — proceed regardless; the user can't be blocked here */
+    }
+    await finishRegistration();
+    setSubmitting(false);
+  }
 
   if (onboarding.step === "sign-in") {
     return (
       <div className={styles.panel}>
         <Title3>Welcome</Title3>
-        <Text className={styles.hint}>Sign in to set up your RAG Vault.</Text>
+        <Text className={styles.hint}>Sign in to set up your Lighthouse.</Text>
         <Field label="Email">
           <Input value={email} onChange={(_, d) => setEmail(d.value)} type="email" />
         </Field>
@@ -78,6 +133,53 @@ export function OnboardingPanel() {
         >
           Continue
         </Button>
+      </div>
+    );
+  }
+
+  if (onboarding.step === "register") {
+    return (
+      <div className={styles.panel}>
+        <Title3>Welcome aboard</Title3>
+        <Text className={styles.hint}>
+          Tell us a little about you, or skip — it&apos;s optional.
+        </Text>
+        <Field label="First name">
+          <Input value={firstName} onChange={(_, d) => setFirstName(d.value)} />
+        </Field>
+        <Field label="Last name">
+          <Input value={lastName} onChange={(_, d) => setLastName(d.value)} />
+        </Field>
+        <Field label="Email">
+          <Input type="email" value={regEmail} onChange={(_, d) => setRegEmail(d.value)} />
+        </Field>
+        <Field label="City">
+          <Input value={city} onChange={(_, d) => setCity(d.value)} />
+        </Field>
+        <Field label="State">
+          <Input value={stateField} onChange={(_, d) => setStateField(d.value)} />
+        </Field>
+        <Checkbox
+          checked={doNotContact}
+          onChange={(_, d) => setDoNotContact(Boolean(d.checked))}
+          label="Do not contact me"
+        />
+        <div className={styles.row}>
+          <Button
+            appearance="primary"
+            disabled={submitting || !regEmail}
+            onClick={() => void submitRegistration()}
+          >
+            Submit
+          </Button>
+          <Button
+            appearance="subtle"
+            disabled={submitting}
+            onClick={() => void finishRegistration()}
+          >
+            Skip
+          </Button>
+        </div>
       </div>
     );
   }

@@ -38,15 +38,19 @@ export function getState(): OnboardingState {
 export function signIn(email: string): User {
   const p = load();
   const user: User = { id: "local", name: email.split("@")[0] || "User", email };
-  save({ ...p, user, step: "select-model" });
+  save({ ...p, user, step: "register" });
   return user;
 }
 
 export function register(name: string, email: string): User {
   const p = load();
   const user: User = { id: "local", name, email };
-  save({ ...p, user, step: "select-model" });
+  save({ ...p, user, step: "register" });
   return user;
+}
+
+export function finishRegistration(): void {
+  save({ ...load(), step: "select-model" });
 }
 
 export function selectModel(providerId: string, modelId: string, apiKey: string): void {

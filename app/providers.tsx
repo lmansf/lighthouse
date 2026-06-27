@@ -9,12 +9,12 @@ import {
   createDOMRenderer,
   renderToStyleElements,
 } from "@fluentui/react-components";
-import { ragVaultDarkTheme } from "@/shell/theme";
+import { lighthouseTheme } from "@/shell/theme";
 
 /**
  * Fluent UI v9 (Griffel) SSR wiring for the Next.js App Router.
  * Streams Griffel's collected styles into the document head so there is no
- * flash of unstyled content, and applies the dark theme by default.
+ * flash of unstyled content, and applies the Lighthouse (sandy-beach) theme.
  */
 export function Providers({ children }: { children: React.ReactNode }) {
   const [renderer] = useState(() => createDOMRenderer());
@@ -27,7 +27,7 @@ export function Providers({ children }: { children: React.ReactNode }) {
   return (
     <RendererProvider renderer={renderer}>
       <SSRProvider>
-        <FluentProvider theme={ragVaultDarkTheme}>{children}</FluentProvider>
+        <FluentProvider theme={lighthouseTheme}>{children}</FluentProvider>
       </SSRProvider>
     </RendererProvider>
   );

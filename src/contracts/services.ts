@@ -34,6 +34,8 @@ export interface AuthService {
   getState(): OnboardingState;
   signIn(email: string, password: string): Promise<User>;
   register(name: string, email: string, password: string): Promise<User>;
+  /** Advance past the welcome/registration step (whether submitted or skipped). */
+  finishRegistration(): Promise<void>;
   selectModel(providerId: string, modelId: string, apiKey: string): Promise<void>;
   completeOnboarding(): Promise<void>;
   signOut(): Promise<void>;

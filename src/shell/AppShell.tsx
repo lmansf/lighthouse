@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import { makeStyles, tokens } from "@fluentui/react-components";
 import { useRagStore } from "@/stores/useRagStore";
 import { LeftRail } from "./LeftRail";
@@ -26,8 +26,8 @@ const useStyles = makeStyles({
 
 interface AppShellProps {
   /**
-   * Rendered inside the collapsible left rail. Hosts onboarding before the
-   * user is set up, then the Ask/chat panel afterwards.
+   * Rendered inside the fixed left rail. Hosts onboarding before the user is
+   * set up, then the Ask/chat panel afterwards.
    */
   rail: React.ReactNode;
   /** The primary workspace, filling the rest of the screen - the file explorer. */
@@ -35,13 +35,12 @@ interface AppShellProps {
 }
 
 /**
- * The application frame: a collapsible left rail + a full-bleed workspace.
- * Owned by the shell team. It also kicks the one-time RAG data load so every
- * feature sees populated stores on first paint.
+ * The application frame: a fixed left rail + a full-bleed workspace. Owned by
+ * the shell team. It also kicks the one-time RAG data load so every feature
+ * sees populated stores on first paint.
  */
 export function AppShell({ rail, content }: AppShellProps) {
   const styles = useStyles();
-  const [collapsed, setCollapsed] = useState(false);
   const load = useRagStore((s) => s.load);
 
   useEffect(() => {
@@ -50,9 +49,7 @@ export function AppShell({ rail, content }: AppShellProps) {
 
   return (
     <main className={styles.root}>
-      <LeftRail collapsed={collapsed} onToggle={() => setCollapsed((c) => !c)}>
-        {rail}
-      </LeftRail>
+      <LeftRail>{rail}</LeftRail>
       <div className={styles.main}>{content}</div>
     </main>
   );
