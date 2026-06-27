@@ -50,9 +50,11 @@ export function readJson<T>(file: string, fallback: T): T {
   }
 }
 
+let writeCounter = 0;
+
 /** Write a JSON file atomically (write-temp-then-rename) to avoid torn reads. */
 export function writeJson(file: string, value: unknown): void {
-  const tmp = `${file}.tmp`;
+  const tmp = `${file}.${process.pid}.${writeCounter++}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(value, null, 2), "utf8");
   fs.renameSync(tmp, file);
 }

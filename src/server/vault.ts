@@ -19,7 +19,7 @@ import {
 
 interface VaultState {
   sourceAvailable: boolean;
-  /** Explicit inclusion overrides keyed by node id; absent ⇒ default true. */
+  /** Explicit inclusion overrides keyed by node id; absent ⇒ excluded. */
   included: Record<string, boolean>;
 }
 

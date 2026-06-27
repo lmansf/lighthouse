@@ -39,13 +39,24 @@ export async function* streamAnswer(
 
   const canClaude = cfg.providerId === "anthropic" && cfg.apiKey;
   if (canClaude) {
+    let emitted = false;
     try {
-      yield* streamClaude(question, contexts, cfg.apiKey!, cfg.modelId ?? "claude-haiku-4-5");
+      for await (const delta of streamClaude(
+        question,
+        contexts,
+        cfg.apiKey!,
+        cfg.modelId ?? "claude-haiku-4-5",
+      )) {
+        emitted = true;
+        yield delta;
+      }
       return;
     } catch (err) {
-      yield `\n\n_(Live model unavailable — ${
+      const note = `\n\n_(Live model unavailable — ${
         err instanceof Error ? err.message : "error"
-      }; falling back to local passages.)_\n\n`;
+      }${emitted ? "." : "; falling back to local passages."})_\n\n`;
+      yield note;
+      if (emitted) return;
     }
   }
   yield* extractive(question, contexts, !canClaude);
