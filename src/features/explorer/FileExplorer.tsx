@@ -127,26 +127,40 @@ export function FileExplorer() {
   const upload = useRagStore((s) => s.upload);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const dragDepth = useRef(0);
   const [dragging, setDragging] = useState(false);
 
   const includedCount = nodes.filter((n) => n.kind === "file" && n.ragIncluded).length;
 
   const sendFiles = (list: FileList | null) => {
-    if (list && list.length) void upload(Array.from(list));
+    if (!list || !list.length) return;
+    void upload(Array.from(list)).then((skipped) => {
+      if (skipped.length) {
+        console.warn(
+          `Skipped ${skipped.length} file(s): ` +
+            skipped.map((s) => `${s.name} (${s.reason})`).join(", "),
+        );
+      }
+    });
   };
 
   return (
     <section
       className={`${styles.panel}${dragging ? ` ${styles.panelDragging}` : ""}`}
+      onDragEnter={() => {
+        dragDepth.current += 1;
+        setDragging(true);
+      }}
       onDragOver={(e) => {
         e.preventDefault();
-        if (!dragging) setDragging(true);
       }}
-      onDragLeave={(e) => {
-        if (e.currentTarget === e.target) setDragging(false);
+      onDragLeave={() => {
+        dragDepth.current = Math.max(0, dragDepth.current - 1);
+        if (dragDepth.current === 0) setDragging(false);
       }}
       onDrop={(e) => {
         e.preventDefault();
+        dragDepth.current = 0;
         setDragging(false);
         sendFiles(e.dataTransfer.files);
       }}

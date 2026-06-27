@@ -17,8 +17,8 @@ interface RagStore {
   setSelectionMode: (on: boolean) => void;
   toggleIncluded: (nodeId: string) => Promise<void>;
   toggleSourceAvailable: (sourceId: string) => Promise<void>;
-  /** Upload files into the vault; they land excluded by default. */
-  upload: (files: File[], dir?: string | null) => Promise<void>;
+  /** Upload files into the vault; they land excluded by default. Returns any skipped files. */
+  upload: (files: File[], dir?: string | null) => Promise<{ name: string; reason: string }[]>;
 
   /** Ids of every included file (leaf) node - what chat retrieves against. */
   includedFileIds: () => string[];
@@ -58,12 +58,16 @@ export const useRagStore = create<RagStore>((set, get) => ({
   },
 
   upload: async (files, dir = null) => {
-    if (files.length === 0) return;
+    if (files.length === 0) return [];
     const fd = new FormData();
     if (dir) fd.append("dir", dir);
     for (const f of files) fd.append("files", f);
-    await fetch("/api/upload", { method: "POST", body: fd });
+    const res = await fetch("/api/upload", { method: "POST", body: fd });
+    const skipped: { name: string; reason: string }[] = res.ok
+      ? ((await res.json().catch(() => ({}))).skipped ?? [])
+      : files.map((f) => ({ name: f.name, reason: "upload request failed" }));
     await get().load();
+    return skipped;
   },
 
   includedFileIds: () =>

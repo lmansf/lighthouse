@@ -26,5 +26,5 @@ export async function POST(req: Request) {
     city: String(b.city ?? "").trim(),
     state: String(b.state ?? "").trim(),
   });
-  return NextResponse.json(result, { status: result.ok ? 200 : 200 });
+  return NextResponse.json(result, { status: 200 });
 }
