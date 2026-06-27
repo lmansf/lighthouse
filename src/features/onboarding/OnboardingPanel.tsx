@@ -9,9 +9,10 @@
  * expands this into the full multi-slide registration. Drive `useAuthStore`.
  */
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Button,
+  Checkbox,
   Dropdown,
   Field,
   Input,
@@ -39,12 +40,18 @@ const useStyles = makeStyles({
     gap: tokens.spacingVerticalS,
     padding: tokens.spacingHorizontalL,
   },
+  row: {
+    display: "flex",
+    gap: tokens.spacingHorizontalS,
+    marginTop: tokens.spacingVerticalS,
+  },
 });
 
 export function OnboardingPanel() {
   const styles = useStyles();
   const onboarding = useAuthStore((s) => s.onboarding);
   const signIn = useAuthStore((s) => s.signIn);
+  const finishRegistration = useAuthStore((s) => s.finishRegistration);
   const selectModel = useAuthStore((s) => s.selectModel);
   const signOut = useAuthStore((s) => s.signOut);
 
@@ -54,7 +61,45 @@ export function OnboardingPanel() {
   const [modelId, setModelId] = useState(MODEL_PROVIDERS[0].models[0]);
   const [apiKey, setApiKey] = useState("");
 
+  // Welcome-registration form fields.
+  const [firstName, setFirstName] = useState("");
+  const [lastName, setLastName] = useState("");
+  const [regEmail, setRegEmail] = useState("");
+  const [city, setCity] = useState("");
+  const [stateField, setStateField] = useState("");
+  const [doNotContact, setDoNotContact] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+
+  // Prefill the registration email from the signed-in user.
+  useEffect(() => {
+    if (onboarding.step === "register" && onboarding.user?.email && !regEmail) {
+      setRegEmail(onboarding.user.email);
+    }
+  }, [onboarding.step, onboarding.user, regEmail]);
+
   const provider = MODEL_PROVIDERS.find((p) => p.id === providerId)!;
+
+  async function submitRegistration() {
+    setSubmitting(true);
+    try {
+      await fetch("/api/register", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          firstName,
+          lastName,
+          email: regEmail,
+          doNotContact,
+          city,
+          state: stateField,
+        }),
+      });
+    } catch {
+      /* network error — proceed regardless; the user can't be blocked here */
+    }
+    await finishRegistration();
+    setSubmitting(false);
+  }
 
   if (onboarding.step === "sign-in") {
     return (
@@ -78,6 +123,53 @@ export function OnboardingPanel() {
         >
           Continue
         </Button>
+      </div>
+    );
+  }
+
+  if (onboarding.step === "register") {
+    return (
+      <div className={styles.panel}>
+        <Title3>Welcome aboard</Title3>
+        <Text className={styles.hint}>
+          Tell us a little about you, or skip — it&apos;s optional.
+        </Text>
+        <Field label="First name">
+          <Input value={firstName} onChange={(_, d) => setFirstName(d.value)} />
+        </Field>
+        <Field label="Last name">
+          <Input value={lastName} onChange={(_, d) => setLastName(d.value)} />
+        </Field>
+        <Field label="Email">
+          <Input type="email" value={regEmail} onChange={(_, d) => setRegEmail(d.value)} />
+        </Field>
+        <Field label="City">
+          <Input value={city} onChange={(_, d) => setCity(d.value)} />
+        </Field>
+        <Field label="State">
+          <Input value={stateField} onChange={(_, d) => setStateField(d.value)} />
+        </Field>
+        <Checkbox
+          checked={doNotContact}
+          onChange={(_, d) => setDoNotContact(Boolean(d.checked))}
+          label="Do not contact me"
+        />
+        <div className={styles.row}>
+          <Button
+            appearance="primary"
+            disabled={submitting || !regEmail}
+            onClick={() => void submitRegistration()}
+          >
+            Submit
+          </Button>
+          <Button
+            appearance="subtle"
+            disabled={submitting}
+            onClick={() => void finishRegistration()}
+          >
+            Skip
+          </Button>
+        </div>
       </div>
     );
   }

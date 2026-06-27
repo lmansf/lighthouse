@@ -21,14 +21,18 @@ class MockAuthService implements AuthService {
 
   async signIn(email: string): Promise<User> {
     const user: User = { id: "u-1", name: email.split("@")[0] || "User", email };
-    this.state = { ...this.state, user, step: "select-model" };
+    this.state = { ...this.state, user, step: "register" };
     return user;
   }
 
   async register(name: string, email: string): Promise<User> {
     const user: User = { id: "u-1", name, email };
-    this.state = { ...this.state, user, step: "select-model" };
+    this.state = { ...this.state, user, step: "register" };
     return user;
+  }
+
+  async finishRegistration(): Promise<void> {
+    this.state = { ...this.state, step: "select-model" };
   }
 
   async selectModel(providerId: string, modelId: string, apiKey: string): Promise<void> {

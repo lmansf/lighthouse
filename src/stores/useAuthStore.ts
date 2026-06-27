@@ -11,6 +11,7 @@ interface AuthStore {
   refresh: () => void;
   signIn: (email: string, password: string) => Promise<void>;
   register: (name: string, email: string, password: string) => Promise<void>;
+  finishRegistration: () => Promise<void>;
   selectModel: (providerId: string, modelId: string, apiKey: string) => Promise<void>;
   completeOnboarding: () => Promise<void>;
   signOut: () => Promise<void>;
@@ -33,6 +34,11 @@ export const useAuthStore = create<AuthStore>((set) => {
 
   register: async (name, email, password) => {
     await authService.register(name, email, password);
+    set({ onboarding: authService.getState() });
+  },
+
+  finishRegistration: async () => {
+    await authService.finishRegistration();
     set({ onboarding: authService.getState() });
   },
 

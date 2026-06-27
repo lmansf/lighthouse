@@ -4,6 +4,7 @@ import {
   getState,
   signIn,
   register,
+  finishRegistration,
   selectModel,
   completeOnboarding,
   signOut,
@@ -28,6 +29,9 @@ export async function POST(req: Request) {
       break;
     case "register":
       register(String(body.name ?? ""), String(body.email ?? ""));
+      break;
+    case "finishRegistration":
+      finishRegistration();
       break;
     case "selectModel":
       selectModel(String(body.providerId ?? ""), String(body.modelId ?? ""), String(body.apiKey ?? ""));
