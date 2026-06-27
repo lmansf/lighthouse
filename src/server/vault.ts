@@ -36,6 +36,26 @@ function saveState(s: VaultState): void {
   writeJson(statePath(), s);
 }
 
+/**
+ * Effective inclusion — default is EXCLUDED. A node counts as included only
+ * when its own flag is explicitly `true` AND no ancestor folder is explicitly
+ * excluded. Consequences, by design:
+ *  - anything new (added from the computer, anywhere) defaults out;
+ *  - an excluded folder forces every descendant out, even a file moved in
+ *    later that carried an included flag (ancestor exclusion wins);
+ *  - an internal move preserves the node's own flag (see moveNode), but the
+ *    ancestor rule above still applies at its new location.
+ */
+function isEffectivelyIncluded(id: string, state: VaultState): boolean {
+  const parts = id.split("/");
+  let prefix = "";
+  for (let i = 0; i < parts.length - 1; i++) {
+    prefix = prefix ? `${prefix}/${parts[i]}` : parts[i];
+    if (state.included[prefix] === false) return false; // an ancestor folder is excluded
+  }
+  return state.included[id] === true; // absent ⇒ excluded
+}
+
 /** Text-extractable extensions. Binary formats (pdf/docx) await the parser upgrade. */
 const TEXT_EXT = new Set([
   ".md", ".markdown", ".txt", ".text", ".rst", ".csv", ".tsv", ".json",
@@ -57,7 +77,7 @@ const mimeOf = (name: string) => MIME[path.extname(name).toLowerCase()];
 function walk(root: string): FileNode[] {
   const out: FileNode[] = [];
   const state = loadState();
-  const included = (id: string) => state.included[id] ?? true;
+  const included = (id: string) => isEffectivelyIncluded(id, state);
 
   const recurse = (absDir: string, parentId: string | null) => {
     let entries: fs.Dirent[];
@@ -136,6 +156,49 @@ export function setSourceAvailable(available: boolean): void {
   saveState(state);
 }
 
+/** Resolve a vault-relative id to an absolute path, refusing to escape the vault. */
+function safeAbs(relId: string): string {
+  const base = vaultDir();
+  const abs = path.resolve(base, relId);
+  if (abs !== base && !abs.startsWith(base + path.sep)) {
+    throw new Error("path escapes the vault");
+  }
+  return abs;
+}
+
+/**
+ * Move a file/folder within the vault (an *internal* move), preserving its
+ * inclusion setting and that of its subtree. This is what distinguishes an
+ * internal move from an external add: an external add is only ever discovered
+ * by a fresh scan and so defaults to excluded, whereas an internal move carries
+ * its flags across. The ancestor-exclusion rule in isEffectivelyIncluded still
+ * governs the effective result at the destination.
+ */
+export function moveNode(fromId: string, toParentId: string | null): { newId: string } {
+  if (!fromId) throw new Error("fromId required");
+  const fromAbs = safeAbs(fromId);
+  const name = path.basename(fromId);
+  const newId = toParentId ? `${toParentId}/${name}` : name;
+  const toAbs = safeAbs(newId);
+  if (!fs.existsSync(fromAbs)) throw new Error("source not found");
+  if (fs.existsSync(toAbs)) throw new Error("destination already exists");
+
+  fs.mkdirSync(path.dirname(toAbs), { recursive: true });
+  fs.renameSync(fromAbs, toAbs);
+
+  // Remap the node and every descendant's inclusion flag onto the new prefix.
+  const state = loadState();
+  const next: Record<string, boolean> = {};
+  for (const [k, v] of Object.entries(state.included)) {
+    if (k === fromId) next[newId] = v;
+    else if (k.startsWith(`${fromId}/`)) next[newId + k.slice(fromId.length)] = v;
+    else next[k] = v;
+  }
+  state.included = next;
+  saveState(state);
+  return { newId };
+}
+
 /**
  * File ids currently included on disk — the single source of truth for what
  * chat may see. Returns empty if the vault source is toggled unavailable.
@@ -146,7 +209,7 @@ export function activeIncludedFileIds(): string[] {
   const state = loadState();
   if (!state.sourceAvailable) return [];
   return walk(vaultDir())
-    .filter((n) => n.kind === "file" && (state.included[n.id] ?? true))
+    .filter((n) => n.kind === "file" && isEffectivelyIncluded(n.id, state))
     .map((n) => n.id);
 }
 

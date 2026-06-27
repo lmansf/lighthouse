@@ -6,6 +6,7 @@ import {
   setIncluded,
   setSourceAvailable,
   retrieve,
+  moveNode,
 } from "@/server/vault";
 
 export const runtime = "nodejs";
@@ -36,6 +37,21 @@ export async function POST(req: Request) {
       const query = typeof body.query === "string" ? body.query : "";
       const ids = Array.isArray(body.includedFileIds) ? body.includedFileIds : [];
       return NextResponse.json({ references: retrieve(query, ids).references });
+    }
+
+    case "move": {
+      if (typeof body.from !== "string") {
+        return NextResponse.json({ error: "from required" }, { status: 400 });
+      }
+      const toParentId = typeof body.toParentId === "string" ? body.toParentId : null;
+      try {
+        return NextResponse.json(moveNode(body.from, toParentId));
+      } catch (err) {
+        return NextResponse.json(
+          { error: err instanceof Error ? err.message : "move failed" },
+          { status: 400 },
+        );
+      }
     }
 
     default:
