@@ -132,6 +132,20 @@ export function setSourceAvailable(available: boolean): void {
   saveState(state);
 }
 
+/**
+ * File ids currently included on disk — the single source of truth for what
+ * chat may see. Returns empty if the vault source is toggled unavailable.
+ * This is what makes inclusion changes hot: the next answer reads this fresh,
+ * so unselecting a file (or hiding the source) drops it immediately.
+ */
+export function activeIncludedFileIds(): string[] {
+  const state = loadState();
+  if (!state.sourceAvailable) return [];
+  return walk(vaultDir())
+    .filter((n) => n.kind === "file" && (state.included[n.id] ?? true))
+    .map((n) => n.id);
+}
+
 /** Read a file's text, or "" for unsupported/binary types. */
 function readText(nodeId: string): string {
   if (!isTextFile(nodeId)) return "";
@@ -171,7 +185,12 @@ export interface Retrieved {
 
 /** TF-IDF cosine retrieval over the included files' text. */
 export function retrieve(query: string, includedFileIds: string[], k = 5): Retrieved {
-  const idset = new Set(includedFileIds);
+  // Server-authoritative inclusion: intersect the caller's set with what is
+  // actually included on disk right now, so unselecting a file (or hiding the
+  // source) removes it from the very next answer — a stale client cannot leak
+  // an excluded file into retrieval.
+  const authoritative = new Set(activeIncludedFileIds());
+  const idset = new Set(includedFileIds.filter((id) => authoritative.has(id)));
   const nodes = walk(vaultDir()).filter((n) => n.kind === "file" && idset.has(n.id));
 
   const chunks: Chunk[] = [];
