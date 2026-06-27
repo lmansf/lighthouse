@@ -1,4 +1,4 @@
-/** RAG read/curate endpoint: list the tree, toggle inclusion, run retrieval. */
+/** RAG read/curate endpoint: list the tree, toggle inclusion, move nodes, run retrieval. */
 import { NextResponse } from "next/server";
 import {
   listSources,

@@ -27,6 +27,11 @@ contracts — no cloud database required:
 
 - **Files** live in a real directory (`./vault`, or set `VAULT_DIR` to any path).
   The explorer lists them; inclusion flags persist to `vault/.rag-vault/state.json`.
+  Inclusion defaults to **excluded**: a node is retrievable only if its own flag
+  is explicitly on *and* no ancestor folder is excluded, so anything newly added
+  from disk stays out until you opt it in and an excluded folder forces every
+  descendant out. Files can also be moved within the vault (`op:move`), which
+  carries their inclusion flags to the new location.
 - **Retrieval** is real TF-IDF cosine over the text of the *included* files
   (`src/server/vault.ts`) — local, no embeddings download.
 - **Chat** streams a grounded answer (`/api/chat`): Anthropic Claude when an API
