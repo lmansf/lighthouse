@@ -75,14 +75,20 @@ running on your own machine).
 
 After sign-in, a one-time welcome form in the left rail collects basic contact
 info — or **Skip** it entirely. Either way it mints a **14-day trial** (unique
-GUID + encrypted license key, kept locally and, when Supabase is configured, on
-the trial row). The license is checked once per launch; when the trial ends the
-vault is reset and the user is prompted to start a fresh trial (re-registration
-is unlimited, and trials can be extended by editing `trial_end` in Supabase).
+GUID + encrypted license key). The trial secrets — the Supabase service-role key
+and the `LICENSE_SECRET` that encrypts keys — live **only** in a hosted Supabase
+**Edge Function**, never in the shipped app; the desktop holds only public config
+(the function URL + anon key, committed in `.env.production`) and calls the
+function to mint and verify trials. The license is checked once per launch; only
+a verified time-expiry resets the vault and prompts a fresh trial (a forged key
+or an offline check never wipes anything). Re-registration is unlimited, and
+trials can be extended by editing `trial_end` in Supabase.
 
-Trial enforcement is active only when Supabase is configured (or
-`LICENSE_ENFORCE=1`); otherwise the app runs unlicensed and fully usable. Setup
-(table SQL + env) is in **[docs/registration.md](docs/registration.md)**.
+Trial enforcement is active when the hosted function is configured
+(`LICENSE_API_URL`, the shipping default) or `LICENSE_ENFORCE=1` (a self-contained
+local-dev trial); otherwise the app runs unlicensed and fully usable. Setup
+(table SQL + Edge Function deploy) is in
+**[docs/registration.md](docs/registration.md)**.
 
 ## Configuration
 
@@ -92,12 +98,14 @@ Copy `.env.local.example` → `.env.local` (gitignored). All vars are optional:
   manages this for you).
 - `ANTHROPIC_API_KEY` — live Claude chat; without it, a local extractive
   fallback answers with no network.
-- `SUPABASE_URL` / `SUPABASE_ANON_KEY` / `SUPABASE_REGISTRATIONS_TABLE` — the
-  welcome form.
-- `SUPABASE_SERVICE_ROLE_KEY` / `LICENSE_SECRET` / `LICENSE_ENFORCE` — trial
-  licensing (server-side trial reads/extends + license-key encryption; set
-  `LICENSE_ENFORCE=1` to enforce trials without Supabase). See
-  **[docs/registration.md](docs/registration.md)**.
+- `LICENSE_API_URL` / `SUPABASE_ANON_KEY` — public hosted-license config (the
+  Edge Function URL + anon key). Shipped in the committed `.env.production`;
+  override in `.env.local` to point a dev build at the same function.
+- `LICENSE_ENFORCE` / `LICENSE_SECRET` — local-dev trial only: set
+  `LICENSE_ENFORCE=1` (with no `LICENSE_API_URL`) for a self-contained trial
+  using local crypto, with `LICENSE_SECRET` encrypting the local key. The
+  service-role key and the production `LICENSE_SECRET` live in the Edge Function,
+  never here. See **[docs/registration.md](docs/registration.md)**.
 
 ## Status
 

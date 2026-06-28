@@ -95,7 +95,10 @@ target OS. The branded icons are already committed (see [Icons](#icons) below).
 The app ships **unpacked** (`asar: false`) because it runs a local Next.js
 server (`next start`) as a child process, which must be a real file on disk
 rather than packed into an asar archive. Only production dependencies are
-bundled; `.next/cache` and the dev toolchain are excluded.
+bundled; `.next/cache`, the dev toolchain, and the `supabase/` Edge Function
+sources are excluded. So are `.env` / `.env.local` (dev files that may hold
+secrets) — only the public `.env.production` (license function URL + anon key)
+ships.
 
 ### Icons
 
@@ -115,6 +118,7 @@ it stays running in the tray.
 ## Configuration
 
 Environment variables (set in `.env.local` or the shell that launches the app)
-still apply — `ANTHROPIC_API_KEY` for live chat, and the `SUPABASE_*` vars from
+still apply — `ANTHROPIC_API_KEY` for live chat, and the trial-licensing config
+(`LICENSE_API_URL` + `SUPABASE_ANON_KEY`, shipped in `.env.production`) from
 [registration.md](./registration.md) for the welcome form. `VAULT_DIR` is set
 automatically by the desktop app from your chosen folder.
