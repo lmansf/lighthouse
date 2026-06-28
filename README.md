@@ -64,7 +64,12 @@ contracts — no cloud database required:
 - **Retrieval** is real TF-IDF cosine over the text of the *included* files,
   combined with a file name/path match so a file is findable by what it's *called*
   as well as what it contains (a file named `creditcard.csv` answers "any credit
-  cards?" even when its rows are anonymized numbers). Catalog-style queries
+  cards?" even when its rows are anonymized numbers). Plain-text files are read
+  directly; **PDF, Word (`.docx`), and Excel (`.xlsx`/`.xls`)** documents have
+  their text extracted by parsers loaded lazily on first use and cached on disk
+  (keyed by the file's mtime+size, so each document is parsed once), and an
+  unreadable or corrupt document degrades gracefully to empty text yet stays
+  findable by name (`src/server/extract.ts`). Catalog-style queries
   ("show me all files", "list my datasets", "how many PDFs") skip ranking and
   instead **enumerate** the included set, narrowing to a file kind (datasets,
   documents, PDFs, spreadsheets) or a named file type (`csv`, `pdf`, `md`, …) when
@@ -132,7 +137,8 @@ Copy `.env.local.example` → `.env.local` (gitignored). All vars are optional:
 
 ## Status
 
-Working local-first vertical slice: real file tree, real retrieval, real streamed
-chat, plus a persistent **desktop app** (Electron) with a double-click launcher
-a packaged installer, and branded app/tray/installer icons. Next: optional vector
-embeddings behind `RagService.search`, and binary formats (PDF/DOCX) extraction.
+Working local-first vertical slice: real file tree, real retrieval (including
+text extraction from PDF, Word, and Excel documents), real streamed chat, plus a
+persistent **desktop app** (Electron) with a double-click launcher, a packaged
+installer, and branded app/tray/installer icons. Next: optional vector
+embeddings behind `RagService.search`.

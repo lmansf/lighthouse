@@ -26,8 +26,9 @@ src/contracts/
 ```
 
 The barrel exports the **real** implementations by default; the server-side
-logic they call lives in `src/server/` (`vault.ts`, `llm.ts`, `profile.ts`,
-`config.ts`, plus the `sources/` registry) and is exposed through the Node routes
+logic they call lives in `src/server/` (`vault.ts`, `extract.ts` — text
+extraction for PDF/Word/Excel documents, `llm.ts`, `profile.ts`, `config.ts`,
+plus the `sources/` registry) and is exposed through the Node routes
 in `app/api/{rag,chat,open,profile}`.
 See [README.md](../README.md#backend-local-first-standalone) for what runs where.
 

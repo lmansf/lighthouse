@@ -20,7 +20,7 @@ export async function POST(req: Request) {
   const question = typeof body.question === "string" ? body.question : "";
   const includedFileIds = Array.isArray(body.includedFileIds) ? body.includedFileIds : [];
 
-  const { references, contexts } = retrieve(question, includedFileIds);
+  const { references, contexts } = await retrieve(question, includedFileIds);
   const cfg = modelConfig();
 
   const encoder = new TextEncoder();

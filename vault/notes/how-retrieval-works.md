@@ -4,7 +4,11 @@ RAG Vault retrieves passages with a local TF-IDF cosine ranker — no cloud, no
 database server, no embeddings download required.
 
 1. **Scan** — included files are read from the vault directory (or, for files
-   linked in place, from their real location on disk).
+   linked in place, from their real location on disk). Plain-text files are read
+   directly; PDF, Word (`.docx`), and Excel (`.xlsx`/`.xls`) documents have their
+   text extracted by parsers loaded lazily on first use and cached on disk, so
+   each document is parsed once and an unreadable file falls back to empty text
+   while staying findable by name.
 2. **Chunk** — each file's text is split into overlapping ~120-word windows.
 3. **Score** — the query and every chunk become TF-IDF vectors; chunks are
    ranked by cosine similarity.
