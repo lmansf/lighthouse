@@ -576,11 +576,16 @@ const LISTING_NOUN = new Set([
   "pdf", "pdfs", "spreadsheet", "spreadsheets", "csv", "csvs", "table", "tables",
   "source", "sources",
 ]);
-// File-type qualifiers ("csv files", "pdf documents") — extension-like adjectives.
-const LISTING_QUALIFIER = new Set([
-  "csv", "tsv", "xlsx", "xls", "parquet", "json", "arrow", "feather", "md",
-  "markdown", "txt", "text", "rst", "rtf", "odt", "docx", "xml", "html",
-]);
+// File-type qualifiers ("csv files", "pdf documents") — extension-like adjectives
+// mapped to the concrete extensions they name. A named type narrows the listing
+// to exactly those extensions, overriding the broad noun-based kind.
+const LISTING_QUALIFIER: Record<string, string[]> = {
+  csv: [".csv"], tsv: [".tsv"], xlsx: [".xlsx"], xls: [".xls"],
+  parquet: [".parquet"], json: [".json"], arrow: [".arrow"], feather: [".feather"],
+  md: [".md", ".markdown"], markdown: [".md", ".markdown"],
+  txt: [".txt", ".text"], text: [".txt", ".text"], rst: [".rst"], rtf: [".rtf"],
+  odt: [".odt"], docx: [".docx"], xml: [".xml"], html: [".html"],
+};
 
 /**
  * Detect a catalog-style query ("show me all files", "list my datasets", "how
@@ -604,10 +609,33 @@ function listingIntent(query: string): Listing | null {
   // (verbs, determiners, the catalog noun, and any file-type qualifier); if any
   // meaningful content token survives, this is a content question — e.g. "which
   // documents mention the lawsuit" — so fall through to relevance ranking.
-  const residual = (q.match(/[a-z0-9]+/g) ?? []).filter(
-    (t) => !LISTING_FILLER.has(t) && !LISTING_NOUN.has(t) && !LISTING_QUALIFIER.has(t),
+  const tokens = q.match(/[a-z0-9]+/g) ?? [];
+  const residual = tokens.filter(
+    (t) => !LISTING_FILLER.has(t) && !LISTING_NOUN.has(t) && !LISTING_QUALIFIER[t],
   );
   if (residual.length > 0) return null;
+
+  // A named file-type qualifier (including a catalog noun that is itself a
+  // concrete type, e.g. "csvs") narrows the listing to exactly its extensions,
+  // overriding the broad noun-based kind below.
+  const qualWords: string[] = [];
+  const qualExts = new Set<string>();
+  for (const t of tokens) {
+    const base = LISTING_QUALIFIER[t]
+      ? t
+      : t.endsWith("s") && LISTING_QUALIFIER[t.slice(0, -1)]
+        ? t.slice(0, -1)
+        : null;
+    if (base && !qualWords.includes(base)) {
+      qualWords.push(base);
+      for (const e of LISTING_QUALIFIER[base]) qualExts.add(e);
+    }
+  }
+  if (qualExts.size > 0)
+    return {
+      label: `${qualWords.map((w) => w.toUpperCase()).join("/")} files`,
+      match: (name) => qualExts.has(path.extname(name).toLowerCase()),
+    };
 
   const noun = m[1];
   const kind =
