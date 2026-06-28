@@ -196,6 +196,10 @@ export const useLicenseStore = create<LicenseStore>((set, get) => ({
   // ties the license to a user (so a business can buy many under one card).
   subscribe: async (email: string) => {
     if (get().purchasing) return;
+    // Capture the pre-checkout paid-through. Renewing from grace already has
+    // licenseType='paid', so a real purchase is the moment paid_through ADVANCES
+    // past this — not merely "paid & grace", which is already true on entry.
+    const entryThrough = Date.parse(get().trialEnd ?? "");
     set({ purchasing: true });
     try {
       const r = await fetch("/api/license", {
@@ -209,11 +213,15 @@ export const useLicenseStore = create<LicenseStore>((set, get) => ({
         return;
       }
       window.open(url, "_blank", "noopener,noreferrer");
-      // Poll check() for up to ~10 minutes; stop as soon as we're paid & valid.
+      // Poll check() for up to ~10 minutes; stop once the webhook extends our
+      // paid_through (covers both a first purchase and a renewal from grace).
       for (let i = 0; i < 200; i++) {
         await new Promise((res) => setTimeout(res, 3000));
         const status = await get().check();
-        if (get().licenseType === "paid" && (status === "valid" || status === "grace")) {
+        const through = Date.parse(get().trialEnd ?? "");
+        const advanced =
+          Number.isFinite(through) && (!Number.isFinite(entryThrough) || through > entryThrough);
+        if (get().licenseType === "paid" && (status === "valid" || status === "grace") && advanced) {
           // Purchase confirmed — queue the post-purchase feedback survey, shown
           // after Stripe's receipt and before the app reopens to chat.
           set({ pendingFeedback: true });

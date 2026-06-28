@@ -418,7 +418,14 @@ export function LicenseGate({ status }: { status: LicenseStatus }) {
 
   return (
     <div className={styles.rail}>
-      {resolvedStep === "feedback" && <FeedbackForm mode="trial-end" onDone={() => setStep("thanks")} />}
+      {resolvedStep === "feedback" && (
+        <>
+          <FeedbackForm mode="trial-end" onDone={() => setStep("thanks")} />
+          <Button appearance="subtle" onClick={() => setStep("choose")}>
+            Skip — I have a key or want to start a trial
+          </Button>
+        </>
+      )}
       {resolvedStep === "thanks" && (
         <>
           <div className={styles.beaconRow}>
