@@ -41,6 +41,28 @@ export function profilePath(): string {
 /** The single logical source id for the local vault folder. */
 export const VAULT_SOURCE_ID = "vault";
 
+/** The logical source id for the Microsoft SharePoint / OneDrive connector. */
+export const SHAREPOINT_SOURCE_ID = "sharepoint";
+
+/**
+ * Public Microsoft Entra (Azure AD) application client id for the SharePoint
+ * connector. This is a *public* PKCE/device-code client — it carries no secret,
+ * so shipping it in the app is expected and safe. Overridable via env for
+ * self-hosters who register their own app.
+ */
+export const SHAREPOINT_CLIENT_ID =
+  process.env.SHAREPOINT_CLIENT_ID?.trim() || "d25817ff-a0ed-4458-9282-41a18ce6d48a";
+
+/**
+ * Per-connector state directory (OAuth tokens, mirrored content, inclusion).
+ * Lives beside the vault state, never inside the repo or the app bundle.
+ */
+export function connectorsDir(): string {
+  const dir = path.join(stateDir(), "connectors");
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
 /**
  * True only when running inside the packaged desktop app (Electron sets this).
  * Linking files in place reads arbitrary absolute paths, so it is gated to the

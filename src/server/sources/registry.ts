@@ -9,11 +9,12 @@
 import type { DataSource, FileNode } from "@/contracts";
 import { retrieve as vaultRetrieve, type Retrieved } from "../vault";
 import { localVault } from "./local";
+import { sharepoint } from "./sharepoint";
 import type { SourceConnector } from "./types";
 
 // Local vault is kept LAST so it acts as the fallback owner (cloud connectors,
 // which match by id prefix, are consulted first).
-const connectors: SourceConnector[] = [localVault];
+const connectors: SourceConnector[] = [sharepoint, localVault];
 
 /** The connector that owns a node id — a cloud connector by id prefix, else local. */
 function connectorFor(id: string): SourceConnector {
@@ -23,12 +24,22 @@ function connectorFor(id: string): SourceConnector {
   return localVault;
 }
 
+/** Connectors that should currently surface (a cloud source hides until connected). */
+async function presentConnectors(): Promise<SourceConnector[]> {
+  const flags = await Promise.all(
+    connectors.map((c) => (c.isPresent ? c.isPresent() : Promise.resolve(true))),
+  );
+  return connectors.filter((_, i) => flags[i]);
+}
+
 export async function listSources(): Promise<DataSource[]> {
-  return Promise.all(connectors.map((c) => c.source()));
+  const present = await presentConnectors();
+  return Promise.all(present.map((c) => c.source()));
 }
 
 export async function listNodes(): Promise<FileNode[]> {
-  const trees = await Promise.all(connectors.map((c) => c.listNodes()));
+  const present = await presentConnectors();
+  const trees = await Promise.all(present.map((c) => c.listNodes()));
   return trees.flat();
 }
 
@@ -76,6 +87,17 @@ export async function removeFromVault(nodeId: string): Promise<void> {
  * text is gathered and ranked together (the ranking math is already source-
  * agnostic — it operates on { id, name, text }).
  */
-export function retrieve(query: string, includedFileIds: string[], k = 5): Promise<Retrieved> {
-  return vaultRetrieve(query, includedFileIds, k);
+export async function retrieve(
+  query: string,
+  includedFileIds: string[],
+  k = 5,
+): Promise<Retrieved> {
+  // Gather mirrored content from any cloud connector for its enabled files, then
+  // rank it together with vault files in the (source-agnostic) vault engine.
+  const external = (
+    await Promise.all(
+      connectors.filter((c) => c.retrievalItems).map((c) => c.retrievalItems!(includedFileIds)),
+    )
+  ).flat();
+  return vaultRetrieve(query, includedFileIds, k, external);
 }

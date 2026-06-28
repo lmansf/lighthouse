@@ -10,6 +10,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
+    "test": "tsc --noEmit",
     "icons": "npm install --no-save sharp@^0.33.5 png-to-ico@^2.1.8 && node scripts/gen-icons.mjs",
     "electron": "electron .",
     "dist": "electron-builder"
