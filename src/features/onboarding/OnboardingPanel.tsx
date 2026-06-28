@@ -25,6 +25,7 @@ import {
 } from "@fluentui/react-components";
 import { MODEL_PROVIDERS } from "@/contracts";
 import { useAuthStore } from "@/stores/useAuthStore";
+import { useLicenseStore } from "@/stores/useLicenseStore";
 
 const useStyles = makeStyles({
   panel: {
@@ -54,6 +55,7 @@ export function OnboardingPanel() {
   const finishRegistration = useAuthStore((s) => s.finishRegistration);
   const selectModel = useAuthStore((s) => s.selectModel);
   const signOut = useAuthStore((s) => s.signOut);
+  const startTrial = useLicenseStore((s) => s.startTrial);
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -175,7 +177,14 @@ export function OnboardingPanel() {
           <Button
             appearance="subtle"
             disabled={submitting}
-            onClick={() => void finishRegistration()}
+            onClick={() =>
+              void (async () => {
+                // Skipping still starts a trial (no contact info) so the user
+                // isn't dropped straight onto the "trial ended" screen.
+                await startTrial();
+                await finishRegistration();
+              })()
+            }
           >
             Skip
           </Button>

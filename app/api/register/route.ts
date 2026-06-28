@@ -1,6 +1,7 @@
-/** Welcome-registration endpoint: forward the form to Supabase (if configured). */
+/** Welcome-registration endpoint: mint a trial with the contact info (if any). */
 import { NextResponse } from "next/server";
-import { submitRegistration, isSupabaseConfigured } from "@/server/registration";
+import { isSupabaseConfigured } from "@/server/registration";
+import { startTrial } from "@/server/license";
 import { isSameOrigin } from "@/server/http";
 
 export const runtime = "nodejs";
@@ -18,13 +19,21 @@ export async function POST(req: Request) {
   if (!b || typeof b.email !== "string" || !b.email.trim()) {
     return NextResponse.json({ ok: false, reason: "rejected", detail: "email required" }, { status: 400 });
   }
-  const result = await submitRegistration({
-    firstName: String(b.firstName ?? "").trim(),
-    lastName: String(b.lastName ?? "").trim(),
-    email: String(b.email).trim(),
-    doNotContact: Boolean(b.doNotContact),
-    city: String(b.city ?? "").trim(),
-    state: String(b.state ?? "").trim(),
-  });
-  return NextResponse.json(result, { status: 200 });
+  try {
+    const { trialEnd } = await startTrial({
+      firstName: String(b.firstName ?? "").trim(),
+      lastName: String(b.lastName ?? "").trim(),
+      email: String(b.email).trim(),
+      doNotContact: Boolean(b.doNotContact),
+      city: String(b.city ?? "").trim(),
+      state: String(b.state ?? "").trim(),
+    });
+    return NextResponse.json({ ok: true, trialEnd }, { status: 200 });
+  } catch (err) {
+    // Supabase rejected the insert — surface it, but the local trial still mints.
+    return NextResponse.json(
+      { ok: false, reason: "rejected", detail: err instanceof Error ? err.message : "registration failed" },
+      { status: 200 },
+    );
+  }
 }
