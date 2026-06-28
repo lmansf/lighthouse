@@ -15,6 +15,12 @@ import { useMemo, useRef, useState } from "react";
 import {
   Badge,
   Button,
+  Checkbox,
+  Menu,
+  MenuItem,
+  MenuList,
+  MenuPopover,
+  MenuTrigger,
   Switch,
   Text,
   Title3,
@@ -25,15 +31,17 @@ import {
 } from "@fluentui/react-components";
 import {
   ArrowSyncRegular,
-  ArrowUploadRegular,
   ChevronDownRegular,
   ChevronRightRegular,
   DatabaseRegular,
   DismissRegular,
   DocumentRegular,
   DocumentPdfRegular,
+  EyeRegular,
+  EyeOffRegular,
   FolderRegular,
   FolderAddRegular,
+  FolderOpenRegular,
   LinkRegular,
 } from "@fluentui/react-icons";
 import type { FileNode } from "@/contracts";
@@ -99,6 +107,21 @@ const useStyles = makeStyles({
   rowIncluded: {
     backgroundColor: tokens.colorBrandBackground2,
   },
+  rowSelected: {
+    backgroundColor: tokens.colorNeutralBackground1Selected,
+    ...shorthands.outline("1px", "solid", tokens.colorBrandStroke1),
+  },
+  actionBar: {
+    display: "flex",
+    alignItems: "center",
+    gap: tokens.spacingHorizontalS,
+    flexWrap: "wrap",
+    ...shorthands.padding(tokens.spacingVerticalS, tokens.spacingHorizontalS),
+    marginBottom: tokens.spacingVerticalS,
+    borderRadius: tokens.borderRadiusMedium,
+    backgroundColor: tokens.colorNeutralBackground2,
+  },
+  check: { flexShrink: 0 },
   chevron: {
     display: "flex",
     alignItems: "center",
@@ -125,23 +148,40 @@ interface TreeRowProps {
   node: FileNode;
   depth: number;
   childrenOf: (id: string) => FileNode[];
+  selectionMode: boolean;
+  isSelected: (id: string) => boolean;
   onToggle: (id: string) => void;
+  onSelect: (id: string) => void;
   onUnlink: (id: string) => void;
 }
 
-function TreeRow({ node, depth, childrenOf, onToggle, onUnlink }: TreeRowProps) {
+function TreeRow({
+  node,
+  depth,
+  childrenOf,
+  selectionMode,
+  isSelected,
+  onToggle,
+  onSelect,
+  onUnlink,
+}: TreeRowProps) {
   const styles = useStyles();
   const [open, setOpen] = useState(depth < 1); // top-level folders open by default
   const kids = node.kind === "folder" ? childrenOf(node.id) : [];
+  const selected = selectionMode && isSelected(node.id);
+  // In selection mode a click picks the row; otherwise it toggles RAG inclusion.
+  const activate = () => (selectionMode ? onSelect(node.id) : onToggle(node.id));
 
   return (
     <div>
       <div
-        className={`${styles.row}${node.ragIncluded ? ` ${styles.rowIncluded}` : ""}`}
+        className={`${styles.row}${node.ragIncluded ? ` ${styles.rowIncluded}` : ""}${
+          selected ? ` ${styles.rowSelected}` : ""
+        }`}
         style={{ paddingLeft: `${depth * 18 + 4}px` }}
         role="button"
         tabIndex={0}
-        onClick={() => onToggle(node.id)}
+        onClick={activate}
       >
         <span
           className={styles.chevron}
@@ -155,6 +195,17 @@ function TreeRow({ node, depth, childrenOf, onToggle, onUnlink }: TreeRowProps) 
             open ? <ChevronDownRegular /> : <ChevronRightRegular />
           ) : null}
         </span>
+        {selectionMode && (
+          <Checkbox
+            className={styles.check}
+            checked={selected}
+            onClick={(e) => {
+              e.stopPropagation();
+              onSelect(node.id);
+            }}
+            aria-label={`Select ${node.name}`}
+          />
+        )}
         {fileIcon(node, styles.icon)}
         <Text className={styles.name} size={300}>
           {node.name}
@@ -194,7 +245,10 @@ function TreeRow({ node, depth, childrenOf, onToggle, onUnlink }: TreeRowProps) 
               node={k}
               depth={depth + 1}
               childrenOf={childrenOf}
+              selectionMode={selectionMode}
+              isSelected={isSelected}
               onToggle={onToggle}
+              onSelect={onSelect}
               onUnlink={onUnlink}
             />
           ))}
@@ -210,10 +264,17 @@ export function FileExplorer() {
   const nodes = useRagStore((s) => s.nodes);
   const selectionMode = useRagStore((s) => s.selectionMode);
   const setSelectionMode = useRagStore((s) => s.setSelectionMode);
+  const selectedIds = useRagStore((s) => s.selectedIds);
+  const toggleSelected = useRagStore((s) => s.toggleSelected);
+  const clearSelection = useRagStore((s) => s.clearSelection);
+  const applySelection = useRagStore((s) => s.applySelection);
   const toggleIncluded = useRagStore((s) => s.toggleIncluded);
   const removeReference = useRagStore((s) => s.removeReference);
   const refresh = useRagStore((s) => s.load);
   const upload = useRagStore((s) => s.upload);
+
+  const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
+  const isSelected = (id: string) => selectedSet.has(id);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
@@ -300,21 +361,29 @@ export function FileExplorer() {
               e.target.value = "";
             }}
           />
-          <Button
-            icon={<ArrowUploadRegular />}
-            appearance="primary"
-            size="small"
-            onClick={() => fileInputRef.current?.click()}
-          >
-            Add files
-          </Button>
-          <Button
-            icon={<FolderAddRegular />}
-            size="small"
-            onClick={() => folderInputRef.current?.click()}
-          >
-            Add folder
-          </Button>
+          <Menu>
+            <MenuTrigger disableButtonEnhancement>
+              <Button icon={<FolderOpenRegular />} appearance="primary" size="small">
+                Browse…
+              </Button>
+            </MenuTrigger>
+            <MenuPopover>
+              <MenuList>
+                <MenuItem
+                  icon={<DocumentRegular />}
+                  onClick={() => fileInputRef.current?.click()}
+                >
+                  Files…
+                </MenuItem>
+                <MenuItem
+                  icon={<FolderAddRegular />}
+                  onClick={() => folderInputRef.current?.click()}
+                >
+                  Folder…
+                </MenuItem>
+              </MenuList>
+            </MenuPopover>
+          </Menu>
           <Tooltip content="Re-scan the vault for new files" relationship="label">
             <Button
               icon={<ArrowSyncRegular />}
@@ -331,6 +400,40 @@ export function FileExplorer() {
           />
         </div>
       </div>
+
+      {selectionMode && (
+        <div className={styles.actionBar}>
+          <Text size={300} weight="semibold">
+            {selectedIds.length} selected
+          </Text>
+          <span className={styles.spacer} />
+          <Button
+            icon={<EyeRegular />}
+            appearance="primary"
+            size="small"
+            disabled={selectedIds.length === 0}
+            onClick={() => void applySelection(true)}
+          >
+            Make visible
+          </Button>
+          <Button
+            icon={<EyeOffRegular />}
+            size="small"
+            disabled={selectedIds.length === 0}
+            onClick={() => void applySelection(false)}
+          >
+            Remove
+          </Button>
+          <Button
+            appearance="subtle"
+            size="small"
+            disabled={selectedIds.length === 0}
+            onClick={() => clearSelection()}
+          >
+            Clear
+          </Button>
+        </div>
+      )}
 
       <div className={styles.scroll}>
         {sources.map((source) => {
@@ -351,7 +454,7 @@ export function FileExplorer() {
               {roots.length === 0 ? (
                 <div className={styles.empty}>
                   <Text size={300}>
-                    No files yet. Use <b>Add files</b> or <b>Add folder</b>, or drag items here.
+                    No files yet. Use <b>Browse…</b>, or drag items here.
                   </Text>
                 </div>
               ) : (
@@ -362,7 +465,10 @@ export function FileExplorer() {
                       node={node}
                       depth={0}
                       childrenOf={childrenOf}
+                      selectionMode={selectionMode}
+                      isSelected={isSelected}
                       onToggle={(id) => void toggleIncluded(id)}
+                      onSelect={(id) => toggleSelected(id)}
                       onUnlink={(id) => void removeReference(id)}
                     />
                   ))}

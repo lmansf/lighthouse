@@ -403,9 +403,17 @@ export function activeIncludedFileIds(): string[] {
 }
 
 /**
+ * Per-file read cap. A vault can hold very large text files (e.g. a 150 MB CSV
+ * dataset); reading and chunking one whole would stall — or OOM — a query. The
+ * first slice is more than enough for relevance matching, so we cap the read.
+ */
+const MAX_TEXT_BYTES = 1_000_000;
+
+/**
  * Read a file's text, or "" for unsupported/binary types. Resolves the node id
  * to its real path first, so referenced files (whose id is a synthetic `extN`
- * with no extension) are read — and type-checked — by their true path.
+ * with no extension) are read — and type-checked — by their true path. Files
+ * larger than MAX_TEXT_BYTES are read up to that prefix only.
  */
 function readText(nodeId: string, state: VaultState): string {
   let abs: string;
@@ -416,15 +424,70 @@ function readText(nodeId: string, state: VaultState): string {
   }
   if (!isTextFile(abs)) return "";
   try {
-    return fs.readFileSync(abs, "utf8");
+    let size = 0;
+    try {
+      size = fs.statSync(abs).size;
+    } catch {
+      size = 0;
+    }
+    if (size <= MAX_TEXT_BYTES) return fs.readFileSync(abs, "utf8");
+    // Large file: read only the first MAX_TEXT_BYTES so it can't blow up memory
+    // or stall the query. Enough text to match on.
+    const fd = fs.openSync(abs, "r");
+    try {
+      const buf = Buffer.allocUnsafe(MAX_TEXT_BYTES);
+      const read = fs.readSync(fd, buf, 0, MAX_TEXT_BYTES, 0);
+      return buf.subarray(0, read).toString("utf8");
+    } finally {
+      fs.closeSync(fd);
+    }
   } catch {
     return "";
   }
 }
 
-const STOP = new Set("the a an and or of to in is are for on with as at by from this that it be".split(" "));
+const STOP = new Set(
+  "the a an and or of to in is are for on with as at by from this that it be do does have any there my our your you me i".split(
+    " ",
+  ),
+);
 function tokenize(s: string): string[] {
   return s.toLowerCase().match(/[a-z0-9]{2,}/g)?.filter((t) => !STOP.has(t)) ?? [];
+}
+
+/** Crude singularizer so "cards" matches "card". */
+function singular(t: string): string {
+  return t.length > 3 && t.endsWith("s") ? t.slice(0, -1) : t;
+}
+
+/** Searchable tokens from a file's name and path (so it's findable by what it's
+ *  called, not only by its contents). */
+function nameTokensOf(id: string, name: string): string[] {
+  return tokenize(`${id.replace(/\//g, " ")} ${name}`);
+}
+
+/**
+ * How strongly the query matches a file's name/path tokens. Substring matching
+ * lets "credit"/"card" hit a file literally named "creditcard.csv", and the
+ * singularizer bridges "cards"→"card". `strong` requires a real (≥4-char) word
+ * to match, so noise like "csv" alone doesn't qualify a file.
+ */
+function nameMatch(qTokens: string[], nameToks: string[]): { hits: number; strong: boolean } {
+  let hits = 0;
+  let strong = false;
+  for (const raw of qTokens) {
+    const q = singular(raw);
+    if (q.length < 3) continue;
+    const hit = nameToks.some((nt0) => {
+      const nt = singular(nt0);
+      return nt === q || nt.includes(q) || (nt.length >= 3 && q.includes(nt));
+    });
+    if (hit) {
+      hits++;
+      if (raw.length >= 4) strong = true;
+    }
+  }
+  return { hits, strong };
 }
 
 interface Chunk { fileId: string; name: string; text: string; tf: Map<string, number>; }
@@ -449,7 +512,15 @@ export interface Retrieved {
   contexts: { name: string; text: string; score: number }[];
 }
 
-/** TF-IDF cosine retrieval over the included files' text. */
+/** Bound total chunks scored per query so many/large files can't stall it. */
+const MAX_TOTAL_CHUNKS = 4000;
+
+/**
+ * Retrieval over the included files. Combines TF-IDF cosine over file *content*
+ * with a *filename/path* match — so a file is findable both by what it contains
+ * and by what it's called. (A file literally named "creditcard.csv" answers
+ * "do I have any credit cards?" even when its rows are anonymized numbers.)
+ */
 export function retrieve(query: string, includedFileIds: string[], k = 5): Retrieved {
   // Server-authoritative inclusion: intersect the caller's set with what is
   // actually included on disk right now, so unselecting a file (or hiding the
@@ -458,68 +529,102 @@ export function retrieve(query: string, includedFileIds: string[], k = 5): Retri
   const authoritative = new Set(activeIncludedFileIds());
   const idset = new Set(includedFileIds.filter((id) => authoritative.has(id)));
   const nodes = walk(vaultDir()).filter((n) => n.kind === "file" && idset.has(n.id));
+  if (nodes.length === 0) return { references: [], contexts: [] };
+
+  const qtokens = tokenize(query);
+  if (qtokens.length === 0) return { references: [], contexts: [] };
 
   const state = loadState();
+  const nameToks = new Map<string, string[]>();
+  for (const n of nodes) nameToks.set(n.id, nameTokensOf(n.id, n.name));
+  const preview = new Map<string, string>(); // first content slice, for name-only hits
   const chunks: Chunk[] = [];
   for (const n of nodes) {
     const text = readText(n.id, state);
-    if (text.trim()) chunks.push(...chunksOf(text, n.id, n.name));
-  }
-  if (chunks.length === 0) return { references: [], contexts: [] };
-
-  // idf over chunks
-  const df = new Map<string, number>();
-  for (const c of chunks) for (const t of c.tf.keys()) df.set(t, (df.get(t) ?? 0) + 1);
-  const N = chunks.length;
-  const idf = (t: string) => Math.log((N + 1) / ((df.get(t) ?? 0) + 1)) + 1;
-
-  const qtf = new Map<string, number>();
-  for (const t of tokenize(query)) qtf.set(t, (qtf.get(t) ?? 0) + 1);
-  if (qtf.size === 0) return { references: [], contexts: [] };
-
-  const vec = (tf: Map<string, number>) => {
-    const v = new Map<string, number>();
-    let norm = 0;
-    for (const [t, f] of tf) {
-      const w = f * idf(t);
-      v.set(t, w);
-      norm += w * w;
+    if (text.trim()) {
+      const cs = chunksOf(text, n.id, n.name);
+      preview.set(n.id, cs[0]?.text.slice(0, 240) ?? "");
+      for (const c of cs) {
+        chunks.push(c);
+        if (chunks.length >= MAX_TOTAL_CHUNKS) break;
+      }
     }
-    return { v, norm: Math.sqrt(norm) || 1 };
-  };
-  const q = vec(qtf);
+    if (chunks.length >= MAX_TOTAL_CHUNKS) break;
+  }
 
-  const scored = chunks.map((c) => {
-    const d = vec(c.tf);
-    let dot = 0;
-    for (const [t, w] of q.v) dot += w * (d.v.get(t) ?? 0);
-    return { c, score: dot / (q.norm * d.norm) };
-  });
+  // --- content scoring (TF-IDF cosine over chunks) ---
+  let scored: { c: Chunk; score: number }[] = [];
+  if (chunks.length > 0) {
+    const df = new Map<string, number>();
+    for (const c of chunks) for (const t of c.tf.keys()) df.set(t, (df.get(t) ?? 0) + 1);
+    const N = chunks.length;
+    const idf = (t: string) => Math.log((N + 1) / ((df.get(t) ?? 0) + 1)) + 1;
+    const qtf = new Map<string, number>();
+    for (const t of qtokens) qtf.set(t, (qtf.get(t) ?? 0) + 1);
+    const vec = (tf: Map<string, number>) => {
+      const v = new Map<string, number>();
+      let norm = 0;
+      for (const [t, f] of tf) {
+        const w = f * idf(t);
+        v.set(t, w);
+        norm += w * w;
+      }
+      return { v, norm: Math.sqrt(norm) || 1 };
+    };
+    const q = vec(qtf);
+    scored = chunks.map((c) => {
+      const d = vec(c.tf);
+      let dot = 0;
+      for (const [t, w] of q.v) dot += w * (d.v.get(t) ?? 0);
+      let score = dot / (q.norm * d.norm);
+      // Nudge a chunk up when its file also matches by name (name + content).
+      const nm = nameMatch(qtokens, nameToks.get(c.fileId) ?? []);
+      if (nm.strong) score += 0.2 * (nm.hits / qtokens.length);
+      return { c, score };
+    });
+  }
 
-  const top = scored
+  // Build merged candidates: scored content chunks, plus a synthetic entry for
+  // any file that matches by name but isn't already represented by its content.
+  interface Cand { fileId: string; name: string; text: string; score: number }
+  const cands: Cand[] = scored
     .filter((s) => s.score > 0)
-    .sort((a, b) => b.score - a.score)
-    .slice(0, k);
+    .map((s) => ({ fileId: s.c.fileId, name: s.c.name, text: s.c.text, score: s.score }));
+  const present = new Set(cands.map((c) => c.fileId));
+  for (const n of nodes) {
+    if (present.has(n.id)) continue;
+    const nm = nameMatch(qtokens, nameToks.get(n.id) ?? []);
+    if (nm.hits === 0 || !nm.strong) continue;
+    const pv = preview.get(n.id) ?? "";
+    cands.push({
+      fileId: n.id,
+      name: n.name,
+      text: pv || "(matched by file name; no readable text could be extracted)",
+      score: 0.5 + 0.4 * (nm.hits / qtokens.length), // 0.5..0.9
+    });
+  }
+
+  const top = cands.sort((a, b) => b.score - a.score).slice(0, k);
   if (top.length === 0) return { references: [], contexts: [] };
 
   const max = top[0].score || 1;
   // one reference per file (best chunk), but keep all top chunks as context
   const seen = new Set<string>();
   const references: RagReference[] = [];
-  for (const { c, score } of top) {
+  for (const c of top) {
     if (seen.has(c.fileId)) continue;
     seen.add(c.fileId);
     references.push({
       fileId: c.fileId,
       name: c.name,
       snippet: c.text.slice(0, 240).trim() + (c.text.length > 240 ? "…" : ""),
-      score: Math.min(1, score / max),
+      score: Math.min(1, c.score / max),
     });
   }
-  const contexts = top.map(({ c, score }) => ({
+  const contexts = top.map((c) => ({
     name: c.name,
     text: c.text,
-    score: Math.min(1, score / max),
+    score: Math.min(1, c.score / max),
   }));
   return { references, contexts };
 }
