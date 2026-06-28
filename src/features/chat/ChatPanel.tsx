@@ -1,15 +1,17 @@
 "use client";
 
 /**
- * [TEAM: chat] PLACEHOLDER.
+ * [TEAM: chat] Conversational chat.
  *
- * Working stub: streams a mock answer and renders references below it, the
- * Google-style "answer on top, related files underneath" layout. The chat team
- * builds out the full transcript/composer here. Scope retrieval via
- * `useRagStore().includedFileIds()` - never read other features' internals.
+ * A running dialogue: each question and grounded answer is kept in a transcript
+ * so users can ask follow-up questions about the documents that came back. A
+ * "New chat" button in the corner starts a fresh conversation. Retrieval is
+ * scoped to `useRagStore().includedFileIds()` — never read other features'
+ * internals. The Google-style "answer + related files underneath" layout is
+ * preserved per assistant turn.
  */
 
-import { useMemo, useState, type KeyboardEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import {
   Badge,
   Button,
@@ -22,8 +24,13 @@ import {
   shorthands,
   tokens,
 } from "@fluentui/react-components";
-import { DocumentRegular, OpenRegular, SendRegular } from "@fluentui/react-icons";
-import type { RagReference } from "@/contracts";
+import {
+  AddRegular,
+  DocumentRegular,
+  OpenRegular,
+  SendRegular,
+} from "@fluentui/react-icons";
+import type { ChatMessage, ChatTurn, RagReference } from "@/contracts";
 import { chatService } from "@/contracts";
 import { useRagStore } from "@/stores/useRagStore";
 import { ACCENTS } from "@/shell/theme";
@@ -52,12 +59,17 @@ const useStyles = makeStyles({
     display: "flex",
     alignItems: "center",
     justifyContent: "space-between",
+    gap: tokens.spacingHorizontalM,
     marginBottom: tokens.spacingVerticalM,
   },
+  headerMeta: { display: "flex", alignItems: "center", gap: tokens.spacingHorizontalS },
   body: {
     flex: 1,
     minHeight: 0,
     overflowY: "auto",
+    display: "flex",
+    flexDirection: "column",
+    gap: tokens.spacingVerticalL,
   },
   // Pre-conversation: the prompt sits centered in the rail (Google-style),
   // rather than pinned to the bottom.
@@ -74,6 +86,18 @@ const useStyles = makeStyles({
   },
   heroComposer: { width: "100%", maxWidth: "640px", marginTop: tokens.spacingVerticalS },
   heroHint: { color: tokens.colorNeutralForeground2, maxWidth: "420px" },
+
+  turn: { display: "flex", flexDirection: "column", gap: tokens.spacingVerticalXS },
+  // The user's question — a compact tinted bubble aligned to the right.
+  question: {
+    alignSelf: "flex-end",
+    maxWidth: "80%",
+    ...shorthands.padding(tokens.spacingVerticalS, tokens.spacingHorizontalM),
+    backgroundColor: tokens.colorBrandBackground2,
+    color: tokens.colorNeutralForeground1,
+    borderRadius: tokens.borderRadiusLarge,
+    whiteSpace: "pre-wrap",
+  },
   answer: {
     fontSize: tokens.fontSizeBase400,
     lineHeight: tokens.lineHeightBase400,
@@ -83,7 +107,7 @@ const useStyles = makeStyles({
     display: "flex",
     flexDirection: "column",
     gap: tokens.spacingVerticalS,
-    marginTop: tokens.spacingVerticalL,
+    marginTop: tokens.spacingVerticalM,
   },
   refCard: {
     display: "flex",
@@ -111,7 +135,7 @@ const useStyles = makeStyles({
     display: "flex",
     alignItems: "center",
     gap: tokens.spacingHorizontalS,
-    ...shorthands.padding(tokens.spacingVerticalL, "0"),
+    ...shorthands.padding(tokens.spacingVerticalS, "0"),
     color: tokens.colorNeutralForeground3,
   },
   // Static glowing beacon for the centered pre-ask prompt — the lighthouse light.
@@ -179,21 +203,49 @@ export function ChatPanel() {
   );
 
   const [question, setQuestion] = useState("");
-  const [answer, setAnswer] = useState("");
-  const [references, setReferences] = useState<RagReference[]>([]);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [streaming, setStreaming] = useState(false);
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const idSeq = useRef(0);
+
+  // Keep the newest turn in view as the transcript grows and tokens stream in.
+  useEffect(() => {
+    const el = bodyRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [messages]);
 
   async function ask() {
     const q = question.trim();
     if (!q || streaming) return;
+    // The conversation so far (completed turns only) becomes the model's history.
+    const history: ChatTurn[] = messages.map((m) => ({ role: m.role, content: m.content }));
+    const userMsg: ChatMessage = { id: `u${++idSeq.current}`, role: "user", content: q };
+    const asstId = `a${++idSeq.current}`;
+    const asstMsg: ChatMessage = { id: asstId, role: "assistant", content: "", references: [] };
+    setMessages((m) => [...m, userMsg, asstMsg]);
+    setQuestion("");
     setStreaming(true);
-    setAnswer("");
-    setReferences([]);
-    for await (const chunk of chatService.ask(q, includedFileIds)) {
-      if (chunk.delta) setAnswer((a) => a + chunk.delta);
-      if (chunk.references) setReferences(chunk.references);
+    try {
+      for await (const chunk of chatService.ask(q, includedFileIds, history)) {
+        if (chunk.delta) {
+          setMessages((m) =>
+            m.map((x) => (x.id === asstId ? { ...x, content: x.content + chunk.delta } : x)),
+          );
+        }
+        if (chunk.references) {
+          const refs = chunk.references;
+          setMessages((m) => m.map((x) => (x.id === asstId ? { ...x, references: refs } : x)));
+        }
+      }
+    } finally {
+      setStreaming(false);
     }
-    setStreaming(false);
+  }
+
+  function newChat() {
+    if (streaming) return;
+    setMessages([]);
+    setQuestion("");
   }
 
   // Open a cited file in its native app (desktop only; the route no-ops on web).
@@ -205,12 +257,12 @@ export function ChatPanel() {
     }).catch(() => {});
   }
 
-  const composer = (
+  const composer = (placeholder: string) => (
     <div className={styles.composer}>
       <Input
         style={{ flex: 1 }}
         value={question}
-        placeholder="Ask about your included files…"
+        placeholder={placeholder}
         onChange={(_, d) => setQuestion(d.value)}
         onKeyDown={(e) => e.key === "Enter" && void ask()}
       />
@@ -220,87 +272,113 @@ export function ChatPanel() {
     </div>
   );
 
+  function References({ references }: { references: RagReference[] }) {
+    return (
+      <div className={styles.refs}>
+        <Text weight="semibold" size={200}>
+          Related files
+        </Text>
+        {references.map((r) => (
+          <Card
+            key={r.fileId}
+            className={
+              desktop ? mergeClasses(styles.refCard, styles.refCardInteractive) : styles.refCard
+            }
+            appearance="filled-alternative"
+            {...(desktop
+              ? {
+                  role: "button",
+                  tabIndex: 0,
+                  title: `Open ${r.name}`,
+                  onClick: () => void openFile(r.fileId),
+                  onKeyDown: (e: KeyboardEvent) =>
+                    (e.key === "Enter" || e.key === " ") && void openFile(r.fileId),
+                }
+              : {})}
+          >
+            <DocumentRegular fontSize={24} />
+            <div className={styles.refMeta}>
+              <Text weight="semibold" truncate>
+                {r.name}
+              </Text>
+              <Text size={200} className={styles.empty}>
+                {r.snippet}
+              </Text>
+            </div>
+            {desktop && <OpenRegular className={`${styles.openIcon} open-affordance`} fontSize={18} />}
+            <Badge appearance="outline">{Math.round(r.score * 100)}%</Badge>
+          </Card>
+        ))}
+      </div>
+    );
+  }
+
   // Before the first question, center the prompt in the rail (Google-style).
-  if (!answer && !streaming) {
+  if (messages.length === 0 && !streaming) {
     return (
       <section className={styles.panel}>
         <div className={styles.hero}>
           <span className={styles.beacon} />
           <Title3>Ask Lighthouse</Title3>
           <Text className={styles.heroHint}>
-            I&apos;ll answer using only the files you&apos;ve included.
+            I&apos;ll answer using only the files you&apos;ve included. Ask follow-up questions to
+            dig into what comes back.
           </Text>
           <Badge appearance="tint">{includedFileIds.length} sources available</Badge>
-          <div className={styles.heroComposer}>{composer}</div>
+          <div className={styles.heroComposer}>{composer("Ask about your included files…")}</div>
         </div>
       </section>
     );
   }
 
+  const lastId = messages[messages.length - 1]?.id;
+
   return (
     <section className={styles.panel}>
       <div className={styles.conversation}>
-      <div className={styles.header}>
-        <Title3>Ask</Title3>
-        <Badge appearance="tint">{includedFileIds.length} sources available</Badge>
-      </div>
+        <div className={styles.header}>
+          <Title3>Ask</Title3>
+          <div className={styles.headerMeta}>
+            <Badge appearance="tint">{includedFileIds.length} sources available</Badge>
+            <Button
+              appearance="subtle"
+              icon={<AddRegular />}
+              disabled={streaming}
+              onClick={newChat}
+              title="Start a fresh conversation"
+            >
+              New chat
+            </Button>
+          </div>
+        </div>
 
-      <div className={styles.body}>
-        {streaming && !answer ? (
-          <LighthouseLoader className={styles.loader} dotClass={styles.loaderDot} />
-        ) : (
-          <>
-            <Text className={styles.answer}>
-              {answer}
-              {streaming && <span className={styles.beaconInline} />}
-            </Text>
-            {references.length > 0 && (
-              <div className={styles.refs}>
-                <Text weight="semibold" size={200}>
-                  Related files
-                </Text>
-                {references.map((r) => (
-                  <Card
-                    key={r.fileId}
-                    className={
-                      desktop
-                        ? mergeClasses(styles.refCard, styles.refCardInteractive)
-                        : styles.refCard
-                    }
-                    appearance="filled-alternative"
-                    {...(desktop
-                      ? {
-                          role: "button",
-                          tabIndex: 0,
-                          title: `Open ${r.name}`,
-                          onClick: () => void openFile(r.fileId),
-                          onKeyDown: (e: KeyboardEvent) =>
-                            (e.key === "Enter" || e.key === " ") && void openFile(r.fileId),
-                        }
-                      : {})}
-                  >
-                    <DocumentRegular fontSize={24} />
-                    <div className={styles.refMeta}>
-                      <Text weight="semibold" truncate>
-                        {r.name}
-                      </Text>
-                      <Text size={200} className={styles.empty}>
-                        {r.snippet}
-                      </Text>
-                    </div>
-                    {desktop && (
-                      <OpenRegular className={`${styles.openIcon} open-affordance`} fontSize={18} />
-                    )}
-                    <Badge appearance="outline">{Math.round(r.score * 100)}%</Badge>
-                  </Card>
-                ))}
+        <div className={styles.body} ref={bodyRef}>
+          {messages.map((m) =>
+            m.role === "user" ? (
+              <div key={m.id} className={styles.turn}>
+                <div className={styles.question}>{m.content}</div>
               </div>
-            )}
-          </>
-        )}
-      </div>
+            ) : (
+              <div key={m.id} className={styles.turn}>
+                {streaming && !m.content && m.id === lastId ? (
+                  <LighthouseLoader className={styles.loader} dotClass={styles.loaderDot} />
+                ) : (
+                  <>
+                    <Text className={styles.answer}>
+                      {m.content}
+                      {streaming && m.id === lastId && <span className={styles.beaconInline} />}
+                    </Text>
+                    {m.references && m.references.length > 0 && (
+                      <References references={m.references} />
+                    )}
+                  </>
+                )}
+              </div>
+            ),
+          )}
+        </div>
 
-      {composer}
+        {composer("Ask a follow-up…")}
       </div>
     </section>
   );

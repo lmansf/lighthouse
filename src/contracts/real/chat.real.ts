@@ -1,14 +1,18 @@
 /** Real ChatService — streams grounded answers from the local `/api/chat` route
  *  (newline-delimited ChatChunk JSON). */
 import type { ChatService } from "../services";
-import type { ChatChunk } from "../types";
+import type { ChatChunk, ChatTurn } from "../types";
 
 class RealChatService implements ChatService {
-  async *ask(question: string, includedFileIds: string[]): AsyncIterable<ChatChunk> {
+  async *ask(
+    question: string,
+    includedFileIds: string[],
+    history: ChatTurn[] = [],
+  ): AsyncIterable<ChatChunk> {
     const res = await fetch("/api/chat", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ question, includedFileIds }),
+      body: JSON.stringify({ question, includedFileIds, history }),
     });
     if (!res.ok || !res.body) {
       yield { delta: `Chat failed (${res.status}).`, done: true };

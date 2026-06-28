@@ -1,5 +1,5 @@
 import type { ChatService } from "../services";
-import type { ChatChunk } from "../types";
+import type { ChatChunk, ChatTurn } from "../types";
 import { ragService } from "./rag.mock";
 
 /**
@@ -8,10 +8,15 @@ import { ragService } from "./rag.mock";
  * via the RagService. Swap for a real model call behind this surface.
  */
 class MockChatService implements ChatService {
-  async *ask(question: string, includedFileIds: string[]): AsyncIterable<ChatChunk> {
+  async *ask(
+    question: string,
+    includedFileIds: string[],
+    history: ChatTurn[] = [],
+  ): AsyncIterable<ChatChunk> {
     const references = await ragService.search(question, includedFileIds);
+    const followUp = history.some((t) => t.role === "user");
     const answer = includedFileIds.length
-      ? `Based on the ${includedFileIds.length} included source(s), here is what I found regarding "${question}". This is a mock answer streamed in realtime to demonstrate the chat seam.`
+      ? `${followUp ? "Following up: " : ""}Based on the ${includedFileIds.length} included source(s), here is what I found regarding "${question}". This is a mock answer streamed in realtime to demonstrate the chat seam.`
       : `Nothing is currently included in the RAG index, so I can't ground an answer. Highlight some files in the explorer and ask again.`;
 
     const words = answer.split(" ");

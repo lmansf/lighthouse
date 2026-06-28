@@ -8,6 +8,7 @@
 
 import type {
   ChatChunk,
+  ChatTurn,
   DataSource,
   FileNode,
   OnboardingState,
@@ -65,7 +66,9 @@ export interface AuthService {
 export interface ChatService {
   /**
    * Ask a question against the included file set. Yields incremental chunks;
-   * the final chunk carries `done: true` and the resolved references.
+   * the final chunk carries `done: true` and the resolved references. `history`
+   * carries prior turns so follow-up questions ("tell me more about the second
+   * one") resolve against the ongoing conversation.
    */
-  ask(question: string, includedFileIds: string[]): AsyncIterable<ChatChunk>;
+  ask(question: string, includedFileIds: string[], history?: ChatTurn[]): AsyncIterable<ChatChunk>;
 }

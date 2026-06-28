@@ -79,6 +79,12 @@ export interface RagReference {
 
 export type ChatRole = "user" | "assistant";
 
+/** A prior turn sent back to the model so follow-up questions have context. */
+export interface ChatTurn {
+  role: ChatRole;
+  content: string;
+}
+
 /** A single message in the chat transcript. */
 export interface ChatMessage {
   id: string;

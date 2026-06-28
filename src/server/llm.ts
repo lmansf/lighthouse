@@ -6,6 +6,8 @@
  * - Otherwise: a fully-local extractive fallback that streams the most relevant
  *   passages, so the app is useful with zero configuration and zero network.
  */
+import type { ChatTurn } from "@/contracts";
+
 const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION = "2023-06-01";
 
@@ -31,6 +33,7 @@ export async function* streamAnswer(
   question: string,
   contexts: Ctx[],
   cfg: { providerId: string | null; modelId: string | null; apiKey: string | null },
+  history: ChatTurn[] = [],
 ): AsyncGenerator<string> {
   if (contexts.length === 0) {
     yield "Nothing relevant is included in the RAG index yet. Add or include files in the explorer, then ask again.";
@@ -46,6 +49,7 @@ export async function* streamAnswer(
         contexts,
         cfg.apiKey!,
         cfg.modelId ?? "claude-haiku-4-5",
+        history,
       )) {
         emitted = true;
         yield delta;
@@ -67,7 +71,14 @@ async function* streamClaude(
   contexts: Ctx[],
   apiKey: string,
   model: string,
+  history: ChatTurn[] = [],
 ): AsyncGenerator<string> {
+  // Prior turns first (so the model has the thread), then the current question
+  // with its freshly-retrieved context grounded in.
+  const messages = [
+    ...history.map((t) => ({ role: t.role, content: t.content })),
+    { role: "user" as const, content: buildPrompt(question, contexts) },
+  ];
   const res = await fetch(ANTHROPIC_URL, {
     method: "POST",
     headers: {
@@ -80,8 +91,9 @@ async function* streamClaude(
       max_tokens: 1024,
       stream: true,
       system:
-        "You are Lighthouse's assistant. Answer only from the provided context and cite sources as [n]. Be concise.",
-      messages: [{ role: "user", content: buildPrompt(question, contexts) }],
+        "You are Lighthouse's assistant. Answer only from the provided context and cite sources as [n]. Be concise. " +
+        "Earlier turns in the conversation may reference the same documents; use them to interpret follow-up questions.",
+      messages,
     }),
   });
   if (!res.ok || !res.body) {
