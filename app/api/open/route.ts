@@ -9,6 +9,7 @@
  */
 import { NextResponse } from "next/server";
 import { spawn } from "node:child_process";
+import fs from "node:fs";
 import { resolveNodePath } from "@/server/vault";
 import { isSameOrigin } from "@/server/http";
 import { isDesktopApp } from "@/server/config";
@@ -21,7 +22,7 @@ function openWithOS(absPath: string): void {
   const platform = process.platform;
   const [cmd, args] =
     platform === "win32"
-      ? ["cmd", ["/c", "start", "", absPath]]
+      ? ["explorer.exe", [absPath]]
       : platform === "darwin"
         ? ["open", [absPath]]
         : ["xdg-open", [absPath]]; // linux / wsl
@@ -45,7 +46,15 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "nodeId required" }, { status: 400 });
   }
   try {
-    openWithOS(resolveNodePath(body.nodeId));
+    const absPath = resolveNodePath(body.nodeId);
+    const stat = fs.statSync(absPath, { throwIfNoEntry: false });
+    if (!stat) {
+      return NextResponse.json({ error: "file no longer exists" }, { status: 404 });
+    }
+    if (!stat.isFile()) {
+      return NextResponse.json({ error: "not a file" }, { status: 400 });
+    }
+    openWithOS(absPath);
     return NextResponse.json({ ok: true });
   } catch (err) {
     return NextResponse.json(

@@ -2,7 +2,7 @@
 import type { RagService } from "../services";
 import type { DataSource, FileNode, RagReference } from "../types";
 
-async function getTree(): Promise<{ sources: DataSource[]; nodes: FileNode[] }> {
+async function getTree(): Promise<{ sources: DataSource[]; nodes: FileNode[]; desktop: boolean }> {
   const r = await fetch("/api/rag", { cache: "no-store" });
   if (!r.ok) throw new Error(`GET /api/rag ${r.status}`);
   return r.json();
@@ -49,6 +49,10 @@ class RealRagService implements RagService {
 
   async removeReference(refId: string): Promise<void> {
     await post({ op: "removeReference", refId });
+  }
+
+  async capabilities(): Promise<{ desktop: boolean }> {
+    return { desktop: (await getTree()).desktop };
   }
 }
 

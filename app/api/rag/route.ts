@@ -18,7 +18,7 @@ export const dynamic = "force-dynamic";
 
 export async function GET() {
   const [sources, nodes] = await Promise.all([listSources(), listNodes()]);
-  return NextResponse.json({ sources, nodes });
+  return NextResponse.json({ sources, nodes, desktop: isDesktopApp() });
 }
 
 export async function POST(req: Request) {

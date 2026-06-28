@@ -75,6 +75,10 @@ class MockRagService implements RagService {
     this.nodes = this.nodes.filter((n) => n.id !== refId && !n.id.startsWith(`${refId}/`));
   }
 
+  async capabilities(): Promise<{ desktop: boolean }> {
+    return { desktop: false };
+  }
+
   /** A node plus all of its descendants (so toggling a folder cascades). */
   private descendantIds(rootId: string): Set<string> {
     const out = new Set<string>([rootId]);

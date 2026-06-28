@@ -35,6 +35,13 @@ export interface RagService {
   addReference(path: string): Promise<{ id: string; kind: "file" | "folder" }>;
   /** Remove a reference (unlink); the real files on disk are left untouched. */
   removeReference(refId: string): Promise<void>;
+  /**
+   * Capabilities of the running deployment. `desktop` is true only in the
+   * packaged desktop app, where filesystem-backed actions (opening a cited file
+   * natively, linking by path) work; a plain web deployment reports false so the
+   * UI can hide affordances the server would refuse.
+   */
+  capabilities(): Promise<{ desktop: boolean }>;
 }
 
 /** Registration / sign-in. Mocked now; swap for a real identity provider later. */

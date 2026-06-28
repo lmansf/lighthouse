@@ -9,7 +9,7 @@
  * `useRagStore().includedFileIds()` - never read other features' internals.
  */
 
-import { useMemo, useState } from "react";
+import { useMemo, useState, type KeyboardEvent } from "react";
 import {
   Badge,
   Button,
@@ -18,6 +18,7 @@ import {
   Text,
   Title3,
   makeStyles,
+  mergeClasses,
   shorthands,
   tokens,
 } from "@fluentui/react-components";
@@ -77,6 +78,8 @@ const useStyles = makeStyles({
     alignItems: "center",
     gap: tokens.spacingHorizontalM,
     ...shorthands.padding(tokens.spacingVerticalS, tokens.spacingHorizontalM),
+  },
+  refCardInteractive: {
     cursor: "pointer",
     ":hover": { backgroundColor: tokens.colorNeutralBackground2Hover },
     ":hover .open-affordance": { opacity: 1 },
@@ -157,6 +160,7 @@ export function ChatPanel() {
   // Subscribe to `nodes` (not the stable `includedFileIds` fn) so the panel
   // re-renders when the explorer toggles inclusion - this is the live seam.
   const nodes = useRagStore((s) => s.nodes);
+  const desktop = useRagStore((s) => s.desktop);
   const includedFileIds = useMemo(
     () => nodes.filter((n) => n.kind === "file" && n.ragIncluded).map((n) => n.id),
     [nodes],
@@ -245,13 +249,22 @@ export function ChatPanel() {
                 {references.map((r) => (
                   <Card
                     key={r.fileId}
-                    className={styles.refCard}
+                    className={
+                      desktop
+                        ? mergeClasses(styles.refCard, styles.refCardInteractive)
+                        : styles.refCard
+                    }
                     appearance="filled-alternative"
-                    role="button"
-                    tabIndex={0}
-                    title={`Open ${r.name}`}
-                    onClick={() => void openFile(r.fileId)}
-                    onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && void openFile(r.fileId)}
+                    {...(desktop
+                      ? {
+                          role: "button",
+                          tabIndex: 0,
+                          title: `Open ${r.name}`,
+                          onClick: () => void openFile(r.fileId),
+                          onKeyDown: (e: KeyboardEvent) =>
+                            (e.key === "Enter" || e.key === " ") && void openFile(r.fileId),
+                        }
+                      : {})}
                   >
                     <DocumentRegular fontSize={24} />
                     <div className={styles.refMeta}>
@@ -262,7 +275,9 @@ export function ChatPanel() {
                         {r.snippet}
                       </Text>
                     </div>
-                    <OpenRegular className={`${styles.openIcon} open-affordance`} fontSize={18} />
+                    {desktop && (
+                      <OpenRegular className={`${styles.openIcon} open-affordance`} fontSize={18} />
+                    )}
                     <Badge appearance="outline">{Math.round(r.score * 100)}%</Badge>
                   </Card>
                 ))}
