@@ -1,9 +1,9 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { makeStyles, tokens } from "@fluentui/react-components";
 import { useRagStore } from "@/stores/useRagStore";
-import { LeftRail } from "./LeftRail";
+import { Sidebar } from "./Sidebar";
 
 const useStyles = makeStyles({
   root: {
@@ -19,28 +19,25 @@ const useStyles = makeStyles({
     minHeight: 0,
     display: "flex",
     flexDirection: "column",
-    padding: tokens.spacingHorizontalL,
     overflow: "hidden",
   },
 });
 
 interface AppShellProps {
-  /**
-   * Rendered inside the fixed left rail. Hosts onboarding before the user is
-   * set up, then the Ask/chat panel afterwards.
-   */
-  rail: React.ReactNode;
-  /** The primary workspace, filling the rest of the screen - the file explorer. */
-  content: React.ReactNode;
+  /** The collapsible left sidebar — the file explorer. */
+  sidebar: React.ReactNode;
+  /** The primary workspace, front and center — the chat panel. */
+  main: React.ReactNode;
 }
 
 /**
- * The application frame: a fixed left rail + a full-bleed workspace. Owned by
- * the shell team. It also kicks the one-time RAG data load so every feature
- * sees populated stores on first paint.
+ * The application frame: a collapsible file sidebar + a front-and-center
+ * workspace (chat). Owned by the shell team. It also kicks the one-time RAG
+ * data load so every feature sees populated stores on first paint.
  */
-export function AppShell({ rail, content }: AppShellProps) {
+export function AppShell({ sidebar, main }: AppShellProps) {
   const styles = useStyles();
+  const [collapsed, setCollapsed] = useState(false);
   const load = useRagStore((s) => s.load);
 
   useEffect(() => {
@@ -73,8 +70,10 @@ export function AppShell({ rail, content }: AppShellProps) {
 
   return (
     <main className={styles.root}>
-      <LeftRail>{rail}</LeftRail>
-      <div className={styles.main}>{content}</div>
+      <Sidebar collapsed={collapsed} onToggleCollapsed={() => setCollapsed((c) => !c)}>
+        {sidebar}
+      </Sidebar>
+      <div className={styles.main}>{main}</div>
     </main>
   );
 }

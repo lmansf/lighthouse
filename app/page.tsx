@@ -52,39 +52,50 @@ export default function Home() {
     height: "100%",
   };
 
+  const centered: React.CSSProperties = {
+    display: "flex",
+    height: "100vh",
+    alignItems: "center",
+    justifyContent: "center",
+    overflowY: "auto",
+  };
+
   let shell: React.ReactNode;
-  if (onboarded && isLocked(status)) {
-    // Vault stays visible but greyed/inert; the rail hosts the lock gate.
+  if (!onboarded) {
+    // Onboarding takes the whole screen, centered — no sidebar/chat yet.
+    shell = (
+      <div style={centered}>
+        <OnboardingPanel />
+      </div>
+    );
+  } else if (isLocked(status)) {
+    // Chat is replaced by the lock gate; the file sidebar stays visible but
+    // greyed/inert so the workspace is recognizable behind the gate.
     shell = (
       <AppShell
-        rail={<LicenseGate status={status} />}
-        content={
+        sidebar={
           <div aria-hidden inert style={greyed}>
             <FileExplorer />
           </div>
         }
+        main={<LicenseGate status={status} />}
       />
     );
-  } else if (onboarded && pendingFeedback) {
-    // Just subscribed: show the post-purchase survey in the rail (after Stripe's
-    // receipt, before chat reopens). The vault is unlocked behind it.
-    shell = <AppShell rail={<PostPurchaseFeedback />} content={<FileExplorer />} />;
-  } else if (onboarded && status === "grace") {
+  } else if (pendingFeedback) {
+    // Just subscribed: the post-purchase survey takes the main area before chat
+    // reopens. The vault is unlocked in the sidebar.
+    shell = <AppShell sidebar={<FileExplorer />} main={<PostPurchaseFeedback />} />;
+  } else if (status === "grace") {
     shell = (
       <div style={{ display: "flex", flexDirection: "column", height: "100vh" }}>
         <GraceBanner graceUntil={graceUntil} />
         <div style={{ flex: 1, minHeight: 0 }}>
-          <AppShell rail={<ChatPanel />} content={<FileExplorer />} />
+          <AppShell sidebar={<FileExplorer />} main={<ChatPanel />} />
         </div>
       </div>
     );
   } else {
-    shell = (
-      <AppShell
-        rail={onboarded ? <ChatPanel /> : <OnboardingPanel />}
-        content={<FileExplorer />}
-      />
-    );
+    shell = <AppShell sidebar={<FileExplorer />} main={<ChatPanel />} />;
   }
 
   return (
