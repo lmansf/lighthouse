@@ -85,6 +85,15 @@ function saveState(s: VaultState): void {
 }
 
 /**
+ * Resolve a node id to its real absolute path on disk (vault file or referenced
+ * item), refusing any path that escapes the vault / its reference. Used to open
+ * a file in its native application from a chat citation.
+ */
+export function resolveNodePath(nodeId: string): string {
+  return resolveAbs(nodeId, loadState());
+}
+
+/**
  * Effective inclusion — default is EXCLUDED. A node counts as included only
  * when its own flag is explicitly `true` AND no ancestor folder is explicitly
  * excluded. Consequences, by design:

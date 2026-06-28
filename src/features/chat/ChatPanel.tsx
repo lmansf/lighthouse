@@ -21,7 +21,7 @@ import {
   shorthands,
   tokens,
 } from "@fluentui/react-components";
-import { DocumentRegular, SendRegular } from "@fluentui/react-icons";
+import { DocumentRegular, OpenRegular, SendRegular } from "@fluentui/react-icons";
 import type { RagReference } from "@/contracts";
 import { chatService } from "@/contracts";
 import { useRagStore } from "@/stores/useRagStore";
@@ -77,7 +77,11 @@ const useStyles = makeStyles({
     alignItems: "center",
     gap: tokens.spacingHorizontalM,
     ...shorthands.padding(tokens.spacingVerticalS, tokens.spacingHorizontalM),
+    cursor: "pointer",
+    ":hover": { backgroundColor: tokens.colorNeutralBackground2Hover },
+    ":hover .open-affordance": { opacity: 1 },
   },
+  openIcon: { opacity: 0, transition: "opacity 120ms ease", color: tokens.colorNeutralForeground3 },
   refMeta: { display: "flex", flexDirection: "column", flex: 1, minWidth: 0 },
   composer: {
     display: "flex",
@@ -176,6 +180,15 @@ export function ChatPanel() {
     setStreaming(false);
   }
 
+  // Open a cited file in its native app (desktop only; the route no-ops on web).
+  async function openFile(fileId: string) {
+    await fetch("/api/open", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ nodeId: fileId }),
+    }).catch(() => {});
+  }
+
   const composer = (
     <div className={styles.composer}>
       <Input
@@ -230,7 +243,16 @@ export function ChatPanel() {
                   Related files
                 </Text>
                 {references.map((r) => (
-                  <Card key={r.fileId} className={styles.refCard} appearance="filled-alternative">
+                  <Card
+                    key={r.fileId}
+                    className={styles.refCard}
+                    appearance="filled-alternative"
+                    role="button"
+                    tabIndex={0}
+                    title={`Open ${r.name}`}
+                    onClick={() => void openFile(r.fileId)}
+                    onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && void openFile(r.fileId)}
+                  >
                     <DocumentRegular fontSize={24} />
                     <div className={styles.refMeta}>
                       <Text weight="semibold" truncate>
@@ -240,6 +262,7 @@ export function ChatPanel() {
                         {r.snippet}
                       </Text>
                     </div>
+                    <OpenRegular className={`${styles.openIcon} open-affordance`} fontSize={18} />
                     <Badge appearance="outline">{Math.round(r.score * 100)}%</Badge>
                   </Card>
                 ))}

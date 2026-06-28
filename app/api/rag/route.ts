@@ -9,7 +9,7 @@ import {
   moveNode,
   addReference,
   removeReference,
-} from "@/server/vault";
+} from "@/server/sources/registry";
 import { isSameOrigin } from "@/server/http";
 import { isDesktopApp } from "@/server/config";
 
@@ -17,7 +17,8 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  return NextResponse.json({ sources: listSources(), nodes: listNodes() });
+  const [sources, nodes] = await Promise.all([listSources(), listNodes()]);
+  return NextResponse.json({ sources, nodes });
 }
 
 export async function POST(req: Request) {
@@ -30,14 +31,17 @@ export async function POST(req: Request) {
       if (typeof body.nodeId !== "string" || typeof body.included !== "boolean") {
         return NextResponse.json({ error: "nodeId and included required" }, { status: 400 });
       }
-      setIncluded(body.nodeId, body.included);
+      await setIncluded(body.nodeId, body.included);
       return NextResponse.json({ ok: true });
 
     case "source":
       if (typeof body.available !== "boolean") {
         return NextResponse.json({ error: "available required" }, { status: 400 });
       }
-      setSourceAvailable(body.available);
+      await setSourceAvailable(
+        body.available,
+        typeof body.sourceId === "string" ? body.sourceId : undefined,
+      );
       return NextResponse.json({ ok: true });
 
     case "search": {
@@ -52,7 +56,7 @@ export async function POST(req: Request) {
       }
       const toParentId = typeof body.toParentId === "string" ? body.toParentId : null;
       try {
-        return NextResponse.json(moveNode(body.from, toParentId));
+        return NextResponse.json(await moveNode(body.from, toParentId));
       } catch (err) {
         return NextResponse.json(
           { error: err instanceof Error ? err.message : "move failed" },
@@ -72,7 +76,7 @@ export async function POST(req: Request) {
         return NextResponse.json({ error: "path required" }, { status: 400 });
       }
       try {
-        return NextResponse.json(addReference(body.path));
+        return NextResponse.json(await addReference(body.path));
       } catch (err) {
         return NextResponse.json(
           { error: err instanceof Error ? err.message : "link failed" },
@@ -85,7 +89,7 @@ export async function POST(req: Request) {
       if (typeof body.refId !== "string") {
         return NextResponse.json({ error: "refId required" }, { status: 400 });
       }
-      removeReference(body.refId);
+      await removeReference(body.refId);
       return NextResponse.json({ ok: true });
 
     default:
