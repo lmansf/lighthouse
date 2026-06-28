@@ -44,7 +44,14 @@ export function AppShell({ rail, content }: AppShellProps) {
   const load = useRagStore((s) => s.load);
 
   useEffect(() => {
-    void load();
+    // A transient backend/IPC failure must not crash the poll loop or surface
+    // an unhandled rejection; log and let the next tick recover.
+    const refresh = () => {
+      void load().catch((err) => {
+        console.error("Failed to refresh the vault tree", err);
+      });
+    };
+    refresh();
     // Keep the tree live: re-read the vault on an interval and whenever the
     // window regains focus, so files added *outside* an in-app upload — copied
     // into the vault folder directly, or via a native dialog — appear without a
@@ -52,7 +59,7 @@ export function AppShell({ rail, content }: AppShellProps) {
     // is unreliable on Windows/WSL-mounted and network paths.
     const POLL_MS = 4000;
     const tick = () => {
-      if (!document.hidden) void load();
+      if (!document.hidden) refresh();
     };
     const timer = setInterval(tick, POLL_MS);
     window.addEventListener("focus", tick);
