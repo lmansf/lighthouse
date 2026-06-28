@@ -30,7 +30,7 @@ export default function Home() {
   }, [onboarded, checkLicense]);
 
   if (onboarded && (licenseStatus === "expired" || licenseStatus === "none")) {
-    return <TrialExpired />;
+    return <TrialExpired status={licenseStatus} />;
   }
 
   return (

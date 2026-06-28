@@ -126,6 +126,8 @@ export async function startTrial(contact?: Registration): Promise<{ guid: string
   const licenseKey = encrypt({ guid, iat: now.toISOString(), trialEnd });
 
   const useContact = contact ?? loadIdentity() ?? null;
+  if (useContact) writeJson(identityPath(), useContact);
+  writeJson(licensePath(), { guid, licenseKey, trialEnd } satisfies LocalLicense);
   if (sb()) {
     await sbInsert({
       ...(useContact
@@ -144,15 +146,15 @@ export async function startTrial(contact?: Registration): Promise<{ guid: string
       license_key: licenseKey,
     });
   }
-  if (useContact) writeJson(identityPath(), useContact);
-  writeJson(licensePath(), { guid, licenseKey, trialEnd } satisfies LocalLicense);
   return { guid, trialEnd };
 }
 
 /**
  * Check the stored license once per launch. Reads the authoritative `trial_end`
- * from Supabase when configured (so manual extensions apply). On expiry or a
- * tampered key, RESETS the vault and reports "expired".
+ * from Supabase when configured (so manual extensions apply). Only a verified,
+ * time-based expiry RESETS the vault. An unreadable key (corrupt file, a rotated
+ * or changed LICENSE_SECRET, or tampering) reports "none" so the user is
+ * prompted to start a fresh trial — without destroying any vault files.
  */
 export async function checkLicense(): Promise<{ status: LicenseStatus; trialEnd?: string }> {
   if (!licensingEnabled()) return { status: "disabled" };
@@ -161,10 +163,7 @@ export async function checkLicense(): Promise<{ status: LicenseStatus; trialEnd?
   if (!lic?.guid || !lic.licenseKey) return { status: "none" };
 
   const decoded = decrypt<{ guid: string; trialEnd: string }>(lic.licenseKey);
-  if (!decoded || decoded.guid !== lic.guid) {
-    resetVault(); // forged/corrupt key
-    return { status: "expired" };
-  }
+  if (!decoded || decoded.guid !== lic.guid) return { status: "none" };
 
   let trialEnd = lic.trialEnd || decoded.trialEnd;
   const remote = await sbTrialEnd(lic.guid);

@@ -44,23 +44,35 @@ const useStyles = makeStyles({
 });
 
 /**
- * Shown when the trial has ended. The vault has already been reset server-side;
- * starting a new trial mints a fresh 14-day key and returns to an empty vault.
+ * Trial gate. For an expired trial the vault has already been reset server-side;
+ * for "none" (no readable license yet) nothing has been touched. Either way,
+ * starting a trial mints a fresh 14-day key.
  */
-export function TrialExpired() {
+export function TrialExpired({ status = "expired" }: { status?: "expired" | "none" }) {
   const styles = useStyles();
   const startTrial = useLicenseStore((s) => s.startTrial);
   const starting = useLicenseStore((s) => s.starting);
+
+  const expired = status === "expired";
 
   return (
     <main className={styles.root}>
       <div className={styles.card}>
         <span className={styles.beacon} />
-        <Title2>Your trial has ended</Title2>
+        <Title2>{expired ? "Your trial has ended" : "Start your trial"}</Title2>
         <Text className={styles.body}>
-          Your 14-day trial is over, so your vault has been reset. Start a new
-          trial to keep using Lighthouse — you&apos;ll begin with a fresh, empty
-          vault. Files you linked in place are left on your disk untouched.
+          {expired ? (
+            <>
+              Your 14-day trial is over, so your vault has been reset. Start a new
+              trial to keep using Lighthouse — you&apos;ll begin with a fresh, empty
+              vault. Files you linked in place are left on your disk untouched.
+            </>
+          ) : (
+            <>
+              Start a free 14-day trial to use Lighthouse. Your vault is untouched —
+              nothing has been reset.
+            </>
+          )}
         </Text>
         <Button
           appearance="primary"
@@ -69,7 +81,7 @@ export function TrialExpired() {
           disabled={starting}
           onClick={() => void startTrial()}
         >
-          {starting ? "Starting…" : "Start new trial"}
+          {starting ? "Starting…" : expired ? "Start new trial" : "Start trial"}
         </Button>
       </div>
     </main>
