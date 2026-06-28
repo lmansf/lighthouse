@@ -7,25 +7,33 @@
 //   REGISTRATIONS_TABLE                       optional (default "registrations")
 //
 // Operations (POST { op }):
-//   start      → mint a 14-day TRIAL: new GUID, trial_start/end, AES-256-GCM
-//                license_key; insert the row (with optional contact); return key.
+//   start      → mint a 14-day TRIAL. New GUID + AES-256-GCM key; insert the row
+//                (with optional contact + contact_id); return the key.
 //   check      → given a license_key, report its status. Trials are
 //                valid | expired | none. PAID licenses are valid | grace |
 //                locked | none — they NEVER report a destructive expiry; once
 //                past `paid_through` they enter a grace window, then lock.
+//   feedback   → record a feedback-form submission (post-purchase survey).
+//   bug        → record an in-app bug report.
+//   ping       → log an app launch to the userlogs table.
+//   All form rows carry a stable contact_id so paid vs unpaid can be compared.
 //   issuePaid  → (admin-only; needs x-admin-token == ADMIN_TOKEN) mint/activate
 //                a PAID license for a guid/email with a paid_through date. This
-//                is the seam a future purchase webhook (e.g. Stripe) calls.
+//                is the seam the Stripe webhook calls.
 //
 // Deploy:  supabase functions deploy license
 //          supabase secrets set LICENSE_SECRET="<long random string>"
 //          supabase secrets set ADMIN_TOKEN="<long random string>"   # for paid
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
-const TRIAL_DAYS = 14;
+const TRIAL_DAYS = 14; // every trial is 14 sign-in days
 const GRACE_DAYS = 14; // paid: grace window after paid_through before locking
 const DAY_MS = 86_400_000;
 const TABLE = Deno.env.get("REGISTRATIONS_TABLE") ?? "registrations";
+const FEEDBACK_TABLE = Deno.env.get("FEEDBACK_TABLE") ?? "feedback";
+const USERLOGS_TABLE = Deno.env.get("USERLOGS_TABLE") ?? "userlogs";
+const BUGS_TABLE = Deno.env.get("BUGS_TABLE") ?? "bug_reports";
+const NOTIFY_TABLE = Deno.env.get("NOTIFY_TABLE") ?? "purchase_interest";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -82,6 +90,7 @@ function json(body: unknown, status = 200): Response {
 }
 
 interface Contact {
+  contactId?: string;
   firstName?: string;
   lastName?: string;
   email?: string;
@@ -93,14 +102,15 @@ interface Contact {
 async function start(contact: Contact): Promise<Response> {
   const guid = crypto.randomUUID();
   const now = new Date();
-  // trial_end is a nominal far date for display only — the trial is gated by
-  // sign-in DAYS (active_days vs trial_days), not by the calendar.
+  // trial_end is a nominal date for display only — the trial is gated by sign-in
+  // DAYS (active_days vs trial_days), not by the calendar.
   const trialEnd = new Date(now.getTime() + TRIAL_DAYS * DAY_MS).toISOString();
   const licenseKey = await encrypt({ guid, iat: now.toISOString(), type: "trial" });
 
   const { error } = await admin()
     .from(TABLE)
     .insert({
+      contact_id: contact.contactId ?? null,
       first_name: contact.firstName ?? null,
       last_name: contact.lastName ?? null,
       email: contact.email ?? null,
@@ -118,6 +128,83 @@ async function start(contact: Contact): Promise<Response> {
     });
   if (error) return json({ ok: false, reason: "rejected", detail: error.message });
   return json({ ok: true, guid, trialEnd, licenseKey, trialDays: TRIAL_DAYS, remainingDays: TRIAL_DAYS });
+}
+
+interface Feedback {
+  contactId?: string;
+  firstName?: string;
+  lastName?: string;
+  email?: string;
+  easeOfUse?: number;
+  overallValue?: number;
+  liked?: string;
+  changeOrAdd?: string;
+  doNotContact?: boolean;
+  notifyWhenAvailable?: boolean;
+}
+const score = (n: unknown): number | null => {
+  const v = Math.round(Number(n));
+  return Number.isFinite(v) && v >= 0 && v <= 5 ? v : null;
+};
+
+/** Record a feedback submission. Submitting once unlocks 14-day trials. */
+async function feedback(f: Feedback): Promise<Response> {
+  if (!f.email) return json({ ok: false, reason: "rejected", detail: "email required" }, 400);
+  const { error } = await admin().from(FEEDBACK_TABLE).insert({
+    contact_id: f.contactId ?? null,
+    first_name: f.firstName ?? null,
+    last_name: f.lastName ?? null,
+    email: f.email,
+    ease_of_use: score(f.easeOfUse),
+    overall_value: score(f.overallValue),
+    liked: f.liked ?? null,
+    change_or_add: f.changeOrAdd ?? null,
+    do_not_contact: Boolean(f.doNotContact),
+    notify_when_available: Boolean(f.notifyWhenAvailable),
+  });
+  if (error) return json({ ok: false, reason: "rejected", detail: error.message });
+  return json({ ok: true });
+}
+
+/** "Notify me when purchasing opens" — pre-launch interest capture. */
+async function notify(body: Record<string, unknown>): Promise<Response> {
+  const email = body.email ? String(body.email) : "";
+  if (!email) return json({ ok: false, reason: "rejected", detail: "email required" }, 400);
+  const { error } = await admin().from(NOTIFY_TABLE).insert({
+    contact_id: body.contactId ? String(body.contactId) : null,
+    email,
+  });
+  if (error) return json({ ok: false, reason: "rejected", detail: error.message });
+  return json({ ok: true });
+}
+
+/** Record a bug report from the in-app form. */
+async function bug(body: Record<string, unknown>): Promise<Response> {
+  const where = body.where ? String(body.where) : null;
+  const what = body.what ? String(body.what) : null;
+  if (!where && !what) return json({ ok: false, reason: "rejected", detail: "empty report" }, 400);
+  const { error } = await admin().from(BUGS_TABLE).insert({
+    contact_id: body.contactId ? String(body.contactId) : null,
+    where_at: where,
+    description: what,
+    guid: body.guid ? String(body.guid) : null,
+    email: body.email ? String(body.email) : null,
+    app_version: body.version ? String(body.version) : null,
+  });
+  if (error) return json({ ok: false, reason: "rejected", detail: error.message });
+  return json({ ok: true });
+}
+
+/** Log an app launch to userlogs. Best-effort — never blocks a launch. */
+async function ping(body: Record<string, unknown>): Promise<Response> {
+  const { error } = await admin().from(USERLOGS_TABLE).insert({
+    contact_id: body.contactId ? String(body.contactId) : null,
+    guid: body.guid ? String(body.guid) : null,
+    email: body.email ? String(body.email) : null,
+    event: "launch",
+    app_version: body.version ? String(body.version) : null,
+  });
+  return json({ ok: !error });
 }
 
 interface Decoded {
@@ -241,6 +328,14 @@ Deno.serve(async (req: Request) => {
       return await start((body.contact ?? {}) as Contact);
     case "check":
       return await check(String(body.licenseKey ?? ""));
+    case "feedback":
+      return await feedback((body.feedback ?? {}) as Feedback);
+    case "notify":
+      return await notify(body);
+    case "bug":
+      return await bug(body);
+    case "ping":
+      return await ping(body);
     case "issuePaid": {
       const admin = Deno.env.get("ADMIN_TOKEN");
       if (!admin || req.headers.get("x-admin-token") !== admin)

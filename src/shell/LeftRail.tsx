@@ -2,6 +2,7 @@
 
 import { Text, makeStyles, shorthands, tokens } from "@fluentui/react-components";
 import { LAYOUT } from "./theme";
+import { SettingsMenu } from "@/features/license/LicenseGate";
 
 const useStyles = makeStyles({
   rail: {
@@ -17,6 +18,7 @@ const useStyles = makeStyles({
   header: {
     display: "flex",
     alignItems: "center",
+    justifyContent: "space-between",
     height: `${LAYOUT.headerHeight}px`,
     ...shorthands.padding(0, tokens.spacingHorizontalM),
     ...shorthands.borderBottom("1px", "solid", tokens.colorNeutralStroke2),
@@ -59,6 +61,7 @@ export function LeftRail({ children }: LeftRailProps) {
           <span className={styles.beacon} />
           <Text weight="semibold">Lighthouse</Text>
         </span>
+        <SettingsMenu />
       </div>
       <div className={styles.body}>{children}</div>
     </div>

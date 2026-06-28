@@ -52,6 +52,23 @@ const server = http.createServer((req, res) => {
       return send({ ok: true, guid, trialEnd, licenseKey, trialDays: TRIAL_DAYS, remainingDays: TRIAL_DAYS });
     }
 
+    if (body.op === "feedback") {
+      if (!body?.feedback?.email) return send({ ok: false, reason: "rejected", detail: "email required" }, 400);
+      return send({ ok: true });
+    }
+
+    if (body.op === "notify") {
+      if (!body.email) return send({ ok: false, reason: "rejected", detail: "email required" }, 400);
+      return send({ ok: true });
+    }
+
+    if (body.op === "bug") {
+      if (!body.where && !body.what) return send({ ok: false, reason: "rejected" }, 400);
+      return send({ ok: true });
+    }
+
+    if (body.op === "ping") return send({ ok: true });
+
     if (body.op === "check") {
       const decoded = decrypt(String(body.licenseKey || ""));
       if (!decoded?.guid) return send({ status: "none" });
@@ -98,6 +115,15 @@ const server = http.createServer((req, res) => {
     if (body.op === "__setLicense") {
       rows.set(body.guid, { ...(rows.get(body.guid) || {}), ...body.fields });
       return send({ ok: true, row: rows.get(body.guid) });
+    }
+
+    // create-checkout shim: the desktop posts {guid,email} (no op) to
+    // CHECKOUT_API_URL; return a fake Stripe session URL echoing them.
+    if (!body.op && (body.guid || body.email)) {
+      const u = new URL("https://checkout.stripe.com/c/pay/test_session");
+      if (body.guid) u.searchParams.set("cri", body.guid);
+      if (body.email) u.searchParams.set("email", body.email);
+      return send({ url: u.toString() });
     }
 
     send({ error: "unknown op" }, 400);

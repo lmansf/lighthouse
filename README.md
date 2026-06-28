@@ -71,32 +71,25 @@ adapter behind the same `RagService`/`ChatService`/`AuthService` interfaces
 (serverless hosts can't persist to a local directory — local storage means
 running on your own machine).
 
-## Welcome form & licensing (optional)
+## Pricing & trial
 
-After sign-in, a one-time welcome form in the left rail collects basic contact
-info — or **Skip** it entirely. Either way it mints a **14-day trial** (unique
-GUID + encrypted license key). The licensing secrets — the Supabase service-role
-key and the `LICENSE_SECRET` that encrypts keys — live **only** in a hosted
-Supabase **Edge Function**, never in the shipped app; the desktop holds only
-public config (the function URL + anon key, committed in `.env.production`) and
-calls the function to mint and verify licenses. The license is checked once per
-launch.
+Start a **free 14-day trial** — no payment, no key to copy, and repeatable. When
+a trial ends you can start another, or skip it and **subscribe for $14.99 a
+month** for unlimited use.
 
-**Nothing is ever deleted.** A trial lasts 14 **sign-in days** (counted only on
-distinct days the app reaches the server, not calendar time); when it runs out
-the app *locks* — the vault files stay on disk but are greyed out behind a
-sign-in / start-a-new-trial gate. From there the user can start a fresh trial
-(unlimited, non-destructive) or paste a **paid** license key to activate it. A
-paid license stays usable through its `paid_through` date, then enters a
-renewal-banner **grace** window, and only **locks** (never deletes) once grace
-elapses. Trials extend by raising `trial_days` in Supabase; paid keys by setting
-`paid_through`. Full model, paid-key issuing, and SQL are in
-**[docs/registration.md](docs/registration.md)**.
+Your files are always yours. A lapsed trial or subscription only **locks** the
+app — your vault is greyed out, never deleted — until you start a new trial or
+subscribe. Subscribing is one click: checkout opens in your browser and the app
+unlocks itself the moment payment goes through, with no license key to paste.
+Each subscription is tied to an email, so a team can buy several under one card.
 
-License enforcement is active when the hosted function is configured
-(`LICENSE_API_URL`, the shipping default) or `LICENSE_ENFORCE=1` (a self-contained
-local-dev trial); otherwise the app runs unlicensed and fully usable. Setup
-(table SQL + Edge Function deploy) is in
+> **Paid subscriptions aren't open yet.** The shipped build defaults to
+> `PAID_ENABLED=0`, so the Subscribe affordances stay hidden and the app shows
+> **"Get notified when purchasing opens"** instead — only the free trial is
+> live. Flip `PAID_ENABLED=1` (see [Configuration](#configuration)) to surface
+> the $14.99/mo checkout described above.
+
+Self-hosting setup (Supabase tables + Edge Functions + Stripe) is in
 **[docs/registration.md](docs/registration.md)**.
 
 ## Configuration
@@ -110,6 +103,14 @@ Copy `.env.local.example` → `.env.local` (gitignored). All vars are optional:
 - `LICENSE_API_URL` / `SUPABASE_ANON_KEY` — public hosted-license config (the
   Edge Function URL + anon key). Shipped in the committed `.env.production`;
   override in `.env.local` to point a dev build at the same function.
+- `CHECKOUT_API_URL` — public `create-checkout` Edge Function URL for the
+  $14.99/mo plan. Shipped in `.env.production`; the Stripe secret, price ID, and
+  webhook secret live only in the Edge Functions, never here. See
+  **[docs/registration.md](docs/registration.md)**.
+- `PAID_ENABLED` — set to `1` (then restart) to surface the Subscribe
+  affordances (left-nav button, registration screen, lock gate); default `0`
+  shows "Get notified when purchasing opens" instead. Public; shipped in
+  `.env.production`.
 - `LICENSE_ENFORCE` / `LICENSE_SECRET` — local-dev trial only: set
   `LICENSE_ENFORCE=1` (with no `LICENSE_API_URL`) for a self-contained trial
   using local crypto, with `LICENSE_SECRET` encrypting the local key. The
