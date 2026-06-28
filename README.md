@@ -58,7 +58,11 @@ contracts — no cloud database required:
   their structure, and the desktop app can **link** files/folders in place
   (`op:addReference` / `op:removeReference`) — indexing them from their real
   location on disk instead of copying a second time.
-- **Retrieval** is real TF-IDF cosine over the text of the *included* files
+- **Retrieval** is real TF-IDF cosine over the text of the *included* files,
+  combined with a file name/path match so a file is findable by what it's *called*
+  as well as what it contains (a file named `creditcard.csv` answers "any credit
+  cards?" even when its rows are anonymized numbers). Large files are read up to a
+  1 MB prefix and total chunks are capped, so a huge dataset can't stall a query
   (`src/server/vault.ts`) — local, no embeddings download.
 - **Chat** streams a grounded answer (`/api/chat`): Anthropic Claude when an API
   key is configured (set in onboarding or `ANTHROPIC_API_KEY`), otherwise a local

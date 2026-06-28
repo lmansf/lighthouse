@@ -59,9 +59,9 @@ npm run electron
 - **Choose vault folder…** points Lighthouse at any directory; **Open vault
   folder** reveals it in your OS file manager.
 
-In the browser, use **Add files** or **Add folder** (or drag items in) — folders
-upload with their structure. Linking in place is desktop-only, since browsers
-can't access real filesystem paths.
+In the browser, use the toolbar's **Browse…** menu (**Files…** / **Folder…**)
+or drag items in — folders upload with their structure. Linking in place is
+desktop-only, since browsers can't access real filesystem paths.
 
 ## Vault location
 
