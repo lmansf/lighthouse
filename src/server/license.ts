@@ -1,23 +1,29 @@
 /**
- * Trial licensing (server-side, single-user).
+ * Trial licensing (desktop side).
  *
- * On registration the app mints a trial: a unique GUID, a start/end window
- * (14 days), and an AES-256-GCM-encrypted `license_key` binding the GUID. The
- * row is written to Supabase (so a trial can be extended by editing `trial_end`
- * there) and a copy is stored locally in `.rag-vault/license.json`.
+ * The trial SECRETS — the Supabase service-role key and the `LICENSE_SECRET`
+ * that encrypts license keys — live ONLY in the hosted Supabase Edge Function
+ * (`supabase/functions/license`), never in the shipped app. The desktop holds
+ * just the function's public URL and the public anon key, and calls it to mint
+ * ("start") and verify ("check") trials. The filesystem RESET on expiry happens
+ * locally (it can't be done server-side).
  *
- * Once per launch the app checks the license. When the trial has ended the
- * vault is RESET — copied files deleted, index/state cleared, references
- * unlinked (their real files left untouched), and the local license removed —
- * and the user is prompted to start a new trial. Re-registration is unlimited.
+ * Modes:
+ *   Hosted   (LICENSE_API_URL set) — the shipping config. Mint/check go through
+ *            the Edge Function. No secret is present on the client.
+ *   Local    (LICENSE_ENFORCE=1, no URL) — a self-contained trial using local
+ *            Node crypto + a local LICENSE_SECRET. For development only.
+ *   Disabled (neither) — app runs unlicensed; checkLicense() reports "disabled".
  *
- * Enforcement is active only when Supabase is configured (or LICENSE_ENFORCE=1);
- * otherwise the app runs unlicensed and `checkLicense()` reports "disabled".
+ * Only a verified, time-based expiry RESETS the vault — copied files deleted,
+ * index/state cleared, references unlinked (their real files left untouched),
+ * local license removed. An unreadable/forged key, or an offline check, reports
+ * "none"/grace and never destroys vault files. Re-registration is unlimited.
  *
- *   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY  server-side Supabase access
- *   SUPABASE_REGISTRATIONS_TABLE             table name (default "registrations")
- *   LICENSE_SECRET                           key-encryption secret (set in prod!)
- *   LICENSE_ENFORCE=1                        force enforcement without Supabase
+ *   LICENSE_API_URL    https://<project>.supabase.co/functions/v1/license
+ *   SUPABASE_ANON_KEY  public key used to authorize the function call
+ *   LICENSE_ENFORCE=1  enable the local-dev trial (no hosted function)
+ *   LICENSE_SECRET     local-dev-only key-encryption secret
  */
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -36,25 +42,43 @@ export type LicenseStatus = "valid" | "expired" | "none" | "disabled";
 interface LocalLicense {
   guid: string;
   licenseKey: string;
-  trialEnd: string; // ISO; local copy / fallback when Supabase is absent
+  trialEnd: string; // ISO; authoritative copy refreshed on each successful check
 }
 
-/** Supabase access for license rows — prefers the service-role key. */
-function sb(): { base: string; key: string; table: string } | null {
-  const url = process.env.SUPABASE_URL?.trim();
-  const key =
-    process.env.SUPABASE_SERVICE_ROLE_KEY?.trim() || process.env.SUPABASE_ANON_KEY?.trim();
-  const table = process.env.SUPABASE_REGISTRATIONS_TABLE?.trim() || "registrations";
-  if (!url || !key) return null;
-  return { base: url.replace(/\/$/, ""), key, table };
+/** The hosted Edge Function URL, or null when not configured. */
+function licenseApi(): string | null {
+  return process.env.LICENSE_API_URL?.trim() || null;
 }
 
-/** Trial enforcement is on only with Supabase configured, or when forced. */
+/** Local-dev trial: enforced, self-contained, no hosted function. */
+function localMode(): boolean {
+  return !licenseApi() && process.env.LICENSE_ENFORCE === "1";
+}
+
+/** Trial enforcement is on with a hosted function, or in forced local-dev. */
 export function licensingEnabled(): boolean {
-  return Boolean(sb()) || process.env.LICENSE_ENFORCE === "1";
+  return Boolean(licenseApi()) || localMode();
 }
 
-// --- crypto (AES-256-GCM) ----------------------------------------------------
+// --- hosted Edge Function ----------------------------------------------------
+/** Call the license Edge Function. Throws on a non-2xx / network error. */
+async function callFn(op: string, extra: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const url = licenseApi();
+  if (!url) throw new Error("LICENSE_API_URL not configured");
+  const anon = process.env.SUPABASE_ANON_KEY?.trim();
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      ...(anon ? { apikey: anon, authorization: `Bearer ${anon}` } : {}),
+    },
+    body: JSON.stringify({ op, ...extra }),
+  });
+  if (!res.ok) throw new Error(`license fn ${res.status}: ${(await res.text()).slice(0, 200)}`);
+  return (await res.json()) as Record<string, unknown>;
+}
+
+// --- local-dev crypto (AES-256-GCM) ------------------------------------------
 function secretKey(): Buffer {
   const secret = process.env.LICENSE_SECRET?.trim() || "lighthouse-insecure-default-secret";
   return crypto.scryptSync(secret, "lighthouse-license-v1", 32);
@@ -77,84 +101,59 @@ function decrypt<T>(token: string): T | null {
   }
 }
 
-// --- Supabase REST -----------------------------------------------------------
-async function sbInsert(row: Record<string, unknown>): Promise<void> {
-  const c = sb();
-  if (!c) return;
-  const res = await fetch(`${c.base}/rest/v1/${encodeURIComponent(c.table)}`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      apikey: c.key,
-      authorization: `Bearer ${c.key}`,
-      Prefer: "return=minimal",
-    },
-    body: JSON.stringify(row),
-  });
-  if (!res.ok) {
-    throw new Error(`supabase insert ${res.status}: ${(await res.text()).slice(0, 200)}`);
-  }
-}
-/** The authoritative (extendable) trial end for a GUID, or null. */
-async function sbTrialEnd(guid: string): Promise<string | null> {
-  const c = sb();
-  if (!c) return null;
-  const q = `guid=eq.${encodeURIComponent(guid)}&select=trial_end&order=trial_end.desc&limit=1`;
-  const res = await fetch(`${c.base}/rest/v1/${encodeURIComponent(c.table)}?${q}`, {
-    headers: { apikey: c.key, authorization: `Bearer ${c.key}` },
-  });
-  if (!res.ok) return null;
-  const rows = await res.json().catch(() => []);
-  return Array.isArray(rows) && rows[0]?.trial_end ? String(rows[0].trial_end) : null;
-}
-
 // --- contact identity persists across resets (for one-click re-trial) --------
 function loadIdentity(): Registration | null {
   return readJson<Registration | null>(identityPath(), null);
 }
+function contactRow(c: Registration) {
+  return {
+    firstName: c.firstName,
+    lastName: c.lastName,
+    email: c.email,
+    doNotContact: c.doNotContact,
+    city: c.city,
+    state: c.state,
+  };
+}
 
 /**
- * Mint a fresh trial: new GUID + 14-day window + encrypted key. Persists to
- * Supabase (if configured) and locally. `contact` (from the welcome form) is
- * remembered and reused for later one-click re-trials.
+ * Mint a fresh trial: new GUID + 14-day window + encrypted key. In hosted mode
+ * the Edge Function mints (and writes the Supabase row); locally we mint with
+ * Node crypto. `contact` (from the welcome form) is remembered and reused for
+ * later one-click re-trials. The local license is written from the result.
  */
 export async function startTrial(contact?: Registration): Promise<{ guid: string; trialEnd: string }> {
-  const guid = crypto.randomUUID();
-  const now = new Date();
-  const end = new Date(now.getTime() + TRIAL_DAYS * DAY_MS);
-  const trialEnd = end.toISOString();
-  const licenseKey = encrypt({ guid, iat: now.toISOString(), trialEnd });
-
   const useContact = contact ?? loadIdentity() ?? null;
   if (useContact) writeJson(identityPath(), useContact);
-  writeJson(licensePath(), { guid, licenseKey, trialEnd } satisfies LocalLicense);
-  if (sb()) {
-    await sbInsert({
-      ...(useContact
-        ? {
-            first_name: useContact.firstName,
-            last_name: useContact.lastName,
-            email: useContact.email,
-            do_not_contact: useContact.doNotContact,
-            city: useContact.city,
-            state: useContact.state,
-          }
-        : {}),
-      guid,
-      trial_start: now.toISOString(),
-      trial_end: trialEnd,
-      license_key: licenseKey,
-    });
+
+  if (licenseApi()) {
+    const r = await callFn("start", { contact: useContact ? contactRow(useContact) : undefined });
+    if (r.ok === false) throw new Error(String(r.detail ?? "trial start rejected"));
+    const lic: LocalLicense = {
+      guid: String(r.guid),
+      licenseKey: String(r.licenseKey),
+      trialEnd: String(r.trialEnd),
+    };
+    writeJson(licensePath(), lic);
+    return { guid: lic.guid, trialEnd: lic.trialEnd };
   }
+
+  // local-dev (or disabled) — self-contained trial, no Supabase
+  const guid = crypto.randomUUID();
+  const now = new Date();
+  const trialEnd = new Date(now.getTime() + TRIAL_DAYS * DAY_MS).toISOString();
+  const licenseKey = encrypt({ guid, iat: now.toISOString(), trialEnd });
+  writeJson(licensePath(), { guid, licenseKey, trialEnd } satisfies LocalLicense);
   return { guid, trialEnd };
 }
 
 /**
- * Check the stored license once per launch. Reads the authoritative `trial_end`
- * from Supabase when configured (so manual extensions apply). Only a verified,
- * time-based expiry RESETS the vault. An unreadable key (corrupt file, a rotated
- * or changed LICENSE_SECRET, or tampering) reports "none" so the user is
- * prompted to start a fresh trial — without destroying any vault files.
+ * Check the stored license once per launch. In hosted mode the Edge Function is
+ * authoritative (so manual `trial_end` extensions apply); we cache its latest
+ * `trial_end` locally for offline grace. Only a verified, time-based "expired"
+ * RESETS the vault. An unreadable/forged key, or an offline check past the
+ * cached end, reports "none" so the user is prompted for a fresh trial —
+ * without destroying any vault files.
  */
 export async function checkLicense(): Promise<{ status: LicenseStatus; trialEnd?: string }> {
   if (!licensingEnabled()) return { status: "disabled" };
@@ -162,13 +161,37 @@ export async function checkLicense(): Promise<{ status: LicenseStatus; trialEnd?
   const lic = readJson<LocalLicense | null>(licensePath(), null);
   if (!lic?.guid || !lic.licenseKey) return { status: "none" };
 
+  if (licenseApi()) {
+    try {
+      const r = await callFn("check", { licenseKey: lic.licenseKey });
+      const status = r.status as LicenseStatus;
+      if (status === "valid") {
+        const trialEnd = r.trialEnd ? String(r.trialEnd) : lic.trialEnd;
+        if (trialEnd !== lic.trialEnd) writeJson(licensePath(), { ...lic, trialEnd });
+        return { status: "valid", trialEnd };
+      }
+      if (status === "expired") {
+        resetVault();
+        return { status: "expired" };
+      }
+      // "none" — forged/corrupt key. Prompt for a new trial; do NOT reset.
+      return { status: "none" };
+    } catch {
+      // Offline / function unreachable: never reset on an unverifiable check.
+      // Grant grace while the last-known trial_end is still in the future;
+      // otherwise prompt for a fresh trial (still no wipe).
+      const endMs = Date.parse(lic.trialEnd);
+      if (!Number.isNaN(endMs) && Date.now() <= endMs) {
+        return { status: "valid", trialEnd: lic.trialEnd };
+      }
+      return { status: "none" };
+    }
+  }
+
+  // local-dev verification
   const decoded = decrypt<{ guid: string; trialEnd: string }>(lic.licenseKey);
   if (!decoded || decoded.guid !== lic.guid) return { status: "none" };
-
-  let trialEnd = lic.trialEnd || decoded.trialEnd;
-  const remote = await sbTrialEnd(lic.guid);
-  if (remote) trialEnd = remote;
-
+  const trialEnd = lic.trialEnd || decoded.trialEnd;
   const endMs = Date.parse(trialEnd);
   if (Number.isNaN(endMs) || Date.now() > endMs) {
     resetVault();
