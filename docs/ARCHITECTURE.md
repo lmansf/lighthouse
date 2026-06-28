@@ -56,7 +56,7 @@ Two Zustand stores carry shared state between features:
 
 | Feature | Folder | Owns | Depends on |
 |---|---|---|---|
-| shell | `src/shell/` | `FluentProvider`/sandy-beach light theme (`theme.ts`), app frame, collapsible left rail | contracts |
+| shell | `src/shell/` | `FluentProvider`/sandy-beach light theme (`theme.ts`), app frame, collapsible left file sidebar (front-and-center chat in the main area) | contracts |
 | onboarding | `src/features/onboarding/` | sign-in slides → model-select (provider/model/key + key links) | contracts, `AuthService`, `useAuthStore` |
 | explorer | `src/features/explorer/` | file tree, hierarchical RAG toggle / selection mode, add files/folders, link files in place, remove from vault (recoverable trash) | contracts, `RagService`, `useRagStore` |
 | chat | `src/features/chat/` | answer-on-top + reference files below (clickable to open the cited file natively on desktop), realtime streaming | contracts, `ChatService`, `useRagStore` |

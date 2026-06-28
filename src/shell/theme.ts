@@ -91,6 +91,9 @@ export const ACCENTS = {
 
 /** Layout constants shared across the shell. */
 export const LAYOUT = {
-  railWidth: 380,
+  /** Width of the expanded file sidebar. */
+  sidebarWidth: 320,
+  /** Width of the collapsed sidebar (thin icon rail). */
+  sidebarCollapsedWidth: 48,
   headerHeight: 56,
 } as const;

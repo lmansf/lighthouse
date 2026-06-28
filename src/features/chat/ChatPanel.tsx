@@ -26,6 +26,7 @@ import { DocumentRegular, OpenRegular, SendRegular } from "@fluentui/react-icons
 import type { RagReference } from "@/contracts";
 import { chatService } from "@/contracts";
 import { useRagStore } from "@/stores/useRagStore";
+import { ACCENTS } from "@/shell/theme";
 
 const useStyles = makeStyles({
   panel: {
@@ -33,8 +34,19 @@ const useStyles = makeStyles({
     flexDirection: "column",
     minHeight: 0,
     height: "100%",
-    // Transparent so the panel blends into its host surface (the left rail).
     ...shorthands.padding(tokens.spacingVerticalL),
+  },
+  // Front-and-center conversation: a readable column centered in the wide main
+  // area rather than a full-bleed stretch.
+  conversation: {
+    width: "100%",
+    maxWidth: "820px",
+    marginLeft: "auto",
+    marginRight: "auto",
+    display: "flex",
+    flexDirection: "column",
+    flex: 1,
+    minHeight: 0,
   },
   header: {
     display: "flex",
@@ -60,7 +72,7 @@ const useStyles = makeStyles({
     gap: tokens.spacingVerticalM,
     ...shorthands.padding(tokens.spacingVerticalXL, tokens.spacingHorizontalL),
   },
-  heroComposer: { width: "100%", maxWidth: "520px", marginTop: tokens.spacingVerticalS },
+  heroComposer: { width: "100%", maxWidth: "640px", marginTop: tokens.spacingVerticalS },
   heroHint: { color: tokens.colorNeutralForeground2, maxWidth: "420px" },
   answer: {
     fontSize: tokens.fontSizeBase400,
@@ -102,13 +114,13 @@ const useStyles = makeStyles({
     ...shorthands.padding(tokens.spacingVerticalL, "0"),
     color: tokens.colorNeutralForeground3,
   },
-  // Static glowing beacon for the centered pre-ask prompt (decorative).
+  // Static glowing beacon for the centered pre-ask prompt — the lighthouse light.
   beacon: {
     width: "14px",
     height: "14px",
     borderRadius: "50%",
     backgroundColor: tokens.colorBrandBackground,
-    boxShadow: `0 0 10px 2px ${tokens.colorBrandBackground}`,
+    boxShadow: `0 0 12px 3px ${ACCENTS.beam}`,
   },
   // Small gently-pulsing dot used by the loader.
   loaderDot: {
@@ -227,6 +239,7 @@ export function ChatPanel() {
 
   return (
     <section className={styles.panel}>
+      <div className={styles.conversation}>
       <div className={styles.header}>
         <Title3>Ask</Title3>
         <Badge appearance="tint">{includedFileIds.length} sources available</Badge>
@@ -288,6 +301,7 @@ export function ChatPanel() {
       </div>
 
       {composer}
+      </div>
     </section>
   );
 }

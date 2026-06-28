@@ -1,6 +1,6 @@
 # Welcome registration + trial licensing (Supabase)
 
-After sign-in, Lighthouse shows a one-time welcome form in the left rail
+After sign-in, Lighthouse shows a one-time welcome form full-screen (centered)
 (first name, last name, email, "do not contact me", city, state). Submitting —
 or **Skip**, which is always available — mints a [14-day trial](#licensing-model)
 and the rest of onboarding proceeds either way.
@@ -218,9 +218,9 @@ unlimited and non-destructive.
 
 **Feedback timing** depends on whether paid mode is on:
 
-- **paid on** — feedback is a **post-purchase** survey, shown in the left rail
+- **paid on** — feedback is a **post-purchase** survey, shown in the main area
   after Stripe's receipt and before chat reopens.
-- **paid off** — when a trial ends the rail shows the feedback form, which
+- **paid off** — when a trial ends the main area shows the feedback form, which
   includes an **"email me when purchasing opens"** checkbox; the registration
   choice and the settings-gear item show **"Get notified when purchasing opens"**
   (the same slot that becomes **Subscribe** when `PAID_ENABLED=1`). Interest

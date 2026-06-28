@@ -3,7 +3,7 @@
 ## Scope (yours)
 - `src/features/onboarding/` only. Replace the `OnboardingPanel.tsx` placeholder with the full flow.
 
-This renders inside the shell's left rail.
+This renders full-screen (centered) before the sidebar + chat workspace appears.
 
 ## Contract you implement against
 - Drive `src/stores/useAuthStore.ts` (`signIn`, `register`, `selectModel`, `completeOnboarding`, `signOut`).
