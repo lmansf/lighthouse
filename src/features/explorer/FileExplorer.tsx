@@ -23,11 +23,14 @@ import {
   DialogSurface,
   DialogTitle,
   DialogTrigger,
+  Link,
   Menu,
+  MenuDivider,
   MenuItem,
   MenuList,
   MenuPopover,
   MenuTrigger,
+  Spinner,
   Switch,
   Text,
   Title3,
@@ -40,6 +43,7 @@ import {
   ArrowSyncRegular,
   ChevronDownRegular,
   ChevronRightRegular,
+  CloudArrowUpRegular,
   DatabaseRegular,
   DeleteRegular,
   DismissRegular,
@@ -49,6 +53,7 @@ import {
   FolderAddRegular,
   FolderOpenRegular,
   LinkRegular,
+  PlugDisconnectedRegular,
 } from "@fluentui/react-icons";
 import type { FileNode } from "@/contracts";
 import { useRagStore } from "@/stores/useRagStore";
@@ -94,6 +99,27 @@ const useStyles = makeStyles({
     gap: tokens.spacingHorizontalS,
     marginTop: tokens.spacingVerticalL,
     marginBottom: tokens.spacingVerticalS,
+  },
+  connectBody: {
+    display: "flex",
+    flexDirection: "column",
+    gap: tokens.spacingVerticalM,
+    alignItems: "flex-start",
+  },
+  deviceCode: {
+    fontFamily: tokens.fontFamilyMonospace,
+    fontSize: tokens.fontSizeHero800,
+    fontWeight: tokens.fontWeightSemibold,
+    letterSpacing: "0.15em",
+    ...shorthands.padding(tokens.spacingVerticalS, tokens.spacingHorizontalM),
+    backgroundColor: tokens.colorNeutralBackground3,
+    ...shorthands.borderRadius(tokens.borderRadiusMedium),
+    userSelect: "all",
+  },
+  waitingRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: tokens.spacingHorizontalS,
   },
   empty: {
     ...shorthands.padding(tokens.spacingVerticalXL, tokens.spacingHorizontalL),
@@ -297,6 +323,10 @@ export function FileExplorer() {
   const removeFromVault = useRagStore((s) => s.removeFromVault);
   const refresh = useRagStore((s) => s.load);
   const upload = useRagStore((s) => s.upload);
+  const sharepoint = useRagStore((s) => s.sharepoint);
+  const connectSharePoint = useRagStore((s) => s.connectSharePoint);
+  const closeSharePointDialog = useRagStore((s) => s.closeSharePointDialog);
+  const disconnectSharePoint = useRagStore((s) => s.disconnectSharePoint);
 
   const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
   const isSelected = (id: string) => selectedSet.has(id);
@@ -415,6 +445,13 @@ export function FileExplorer() {
                 >
                   Folder…
                 </MenuItem>
+                <MenuDivider />
+                <MenuItem
+                  icon={<CloudArrowUpRegular />}
+                  onClick={() => void connectSharePoint()}
+                >
+                  Connect SharePoint…
+                </MenuItem>
               </MenuList>
             </MenuPopover>
           </Menu>
@@ -474,12 +511,33 @@ export function FileExplorer() {
           return (
             <div key={source.id}>
               <div className={styles.sourceLabel}>
-                {source.kind === "database" ? <DatabaseRegular /> : <FolderRegular />}
+                {/* "sharepoint" is the cloud connector's source id (see config). */}
+                {source.id === "sharepoint" ? (
+                  <CloudArrowUpRegular />
+                ) : source.kind === "database" ? (
+                  <DatabaseRegular />
+                ) : (
+                  <FolderRegular />
+                )}
                 <Text weight="semibold">{source.name}</Text>
                 {!source.available && (
                   <Badge appearance="outline" color="danger">
                     unavailable
                   </Badge>
+                )}
+                {source.id === "sharepoint" && (
+                  <>
+                    <span className={styles.spacer} />
+                    <Tooltip content="Disconnect SharePoint" relationship="label">
+                      <Button
+                        icon={<PlugDisconnectedRegular />}
+                        size="small"
+                        appearance="subtle"
+                        aria-label="Disconnect SharePoint"
+                        onClick={() => void disconnectSharePoint()}
+                      />
+                    </Tooltip>
+                  </>
                 )}
               </div>
               {roots.length === 0 ? (
@@ -553,6 +611,70 @@ export function FileExplorer() {
                 }}
               >
                 Remove
+              </Button>
+            </DialogActions>
+          </DialogBody>
+        </DialogSurface>
+      </Dialog>
+
+      {/* SharePoint device-code sign-in. */}
+      <Dialog
+        open={sharepoint.open}
+        onOpenChange={(_, d) => {
+          if (!d.open) closeSharePointDialog();
+        }}
+      >
+        <DialogSurface>
+          <DialogBody>
+            <DialogTitle>Connect SharePoint</DialogTitle>
+            <DialogContent className={styles.connectBody}>
+              {sharepoint.phase === "starting" && (
+                <div className={styles.waitingRow}>
+                  <Spinner size="tiny" />
+                  <Text>Starting sign-in…</Text>
+                </div>
+              )}
+
+              {sharepoint.phase === "waiting" && (
+                <>
+                  <Text>
+                    1. Open{" "}
+                    <Link href={sharepoint.verificationUri} target="_blank" rel="noreferrer">
+                      {sharepoint.verificationUri?.replace(/^https?:\/\//, "")}
+                    </Link>{" "}
+                    and enter this code:
+                  </Text>
+                  <span className={styles.deviceCode}>{sharepoint.userCode}</span>
+                  <Text size={300}>
+                    2. Sign in with your work or school account and approve access.
+                  </Text>
+                  <div className={styles.waitingRow}>
+                    <Spinner size="tiny" />
+                    <Text size={300}>Waiting for you to finish in the browser…</Text>
+                  </div>
+                </>
+              )}
+
+              {sharepoint.phase === "connected" && (
+                <Text>✅ Connected. Your SharePoint files now appear in the list.</Text>
+              )}
+
+              {sharepoint.phase === "expired" && (
+                <Text>The code expired before sign-in completed. Please try again.</Text>
+              )}
+
+              {sharepoint.phase === "error" && (
+                <Text>Could not connect: {sharepoint.error}</Text>
+              )}
+            </DialogContent>
+            <DialogActions>
+              {(sharepoint.phase === "expired" || sharepoint.phase === "error") && (
+                <Button appearance="primary" onClick={() => void connectSharePoint()}>
+                  Try again
+                </Button>
+              )}
+              <Button appearance="secondary" onClick={() => closeSharePointDialog()}>
+                {sharepoint.phase === "connected" ? "Done" : "Cancel"}
               </Button>
             </DialogActions>
           </DialogBody>

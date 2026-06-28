@@ -27,6 +27,20 @@ export interface SourceConnector {
   /** Toggle whether the whole source is available to retrieval. */
   setAvailable(available: boolean): Promise<void>;
 
+  // --- optional capabilities ---
+  /**
+   * Whether this source should currently appear at all. A cloud connector
+   * returns false until the user has connected it, so it stays hidden (and out
+   * of listings) rather than showing an empty placeholder. Absent ⇒ always present.
+   */
+  isPresent?(): Promise<boolean>;
+  /**
+   * For a cloud connector: the locally-mirrored content for whichever of
+   * `includedIds` this source owns and has enabled, as `{ id, name, abs }` so
+   * the registry can rank it alongside vault files. Absent ⇒ contributes none.
+   */
+  retrievalItems?(includedIds: string[]): Promise<{ id: string; name: string; abs: string }[]>;
+
   // --- optional, local-only capabilities ---
   /** Link a real path in place (desktop local vault only). */
   addReference?(path: string): Promise<{ id: string; kind: "file" | "folder" }>;

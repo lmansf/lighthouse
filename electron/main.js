@@ -78,6 +78,15 @@ function createWindow() {
     webPreferences: { contextIsolation: true },
   });
   win.loadURL(`http://localhost:${PORT}`);
+  // Open external links (e.g. the Microsoft device-login page) in the system
+  // browser rather than a new Electron window.
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:\/\//i.test(url) && !url.startsWith(`http://localhost:${PORT}`)) {
+      shell.openExternal(url);
+      return { action: "deny" };
+    }
+    return { action: "allow" };
+  });
   win.once("ready-to-show", () => win.show());
   // Closing hides to tray instead of quitting (persistent app).
   win.on("close", (e) => {

@@ -486,8 +486,16 @@ async function readText(nodeId: string, state: VaultState): Promise<string> {
   } catch {
     return "";
   }
-  // Rich formats (pdf/docx/xlsx) go through a parser with its own size handling
-  // and on-disk cache; plain text is read directly below.
+  return readTextAbs(abs);
+}
+
+/**
+ * Read text from an absolute path — used for vault files and for the local
+ * mirror of a cloud (SharePoint) file. Rich formats (pdf/docx/xlsx) go through
+ * the parser with its own size handling and cache; plain text is read directly,
+ * capped at MAX_TEXT_BYTES.
+ */
+export async function readTextAbs(abs: string): Promise<string> {
   if (isRichFile(abs)) return extractRichText(abs, path.extname(abs).toLowerCase());
   if (!isTextFile(abs)) return "";
   try {
@@ -722,34 +730,50 @@ const MAX_TOTAL_CHUNKS = 4000;
  * and by what it's called. (A file literally named "creditcard.csv" answers
  * "do I have any credit cards?" even when its rows are anonymized numbers.)
  */
-export async function retrieve(query: string, includedFileIds: string[], k = 5): Promise<Retrieved> {
+export async function retrieve(
+  query: string,
+  includedFileIds: string[],
+  k = 5,
+  external: { id: string; name: string; abs: string }[] = [],
+): Promise<Retrieved> {
   // Server-authoritative inclusion: intersect the caller's set with what is
   // actually included on disk right now, so unselecting a file (or hiding the
   // source) removes it from the very next answer — a stale client cannot leak
-  // an excluded file into retrieval.
+  // an excluded file into retrieval. (Cloud items arrive pre-filtered in
+  // `external`, already scoped to enabled, mirrored files by the registry.)
   const authoritative = new Set(activeIncludedFileIds());
   const idset = new Set(includedFileIds.filter((id) => authoritative.has(id)));
   const nodes = walk(vaultDir()).filter((n) => n.kind === "file" && idset.has(n.id));
-  if (nodes.length === 0) return { references: [], contexts: [] };
+  if (nodes.length === 0 && external.length === 0) return { references: [], contexts: [] };
 
   // Catalog/listing intent ("show me all files", "list my datasets") enumerates
-  // the included set rather than ranking it by relevance.
-  const listing = listingIntent(query);
-  if (listing) return buildListing(nodes, listing);
+  // vault files (cloud placeholders aren't part of the vault tree); content
+  // retrieval below spans both the vault and mirrored cloud files.
+  if (nodes.length > 0) {
+    const listing = listingIntent(query);
+    if (listing) return buildListing(nodes, listing);
+  }
 
   const qtokens = tokenize(query);
   if (qtokens.length === 0) return { references: [], contexts: [] };
 
   const state = loadState();
+  // Unified retrieval items: vault files (read by node id) and mirrored cloud
+  // files (read by absolute mirror path). `pathFor` seeds name-token matching —
+  // vault ids are real paths; cloud ids are opaque, so match on the name only.
+  const items: { id: string; name: string; pathFor: string; read: () => Promise<string> }[] = [
+    ...nodes.map((n) => ({ id: n.id, name: n.name, pathFor: n.id, read: () => readText(n.id, state) })),
+    ...external.map((e) => ({ id: e.id, name: e.name, pathFor: "", read: () => readTextAbs(e.abs) })),
+  ];
   const nameToks = new Map<string, string[]>();
-  for (const n of nodes) nameToks.set(n.id, nameTokensOf(n.id, n.name));
+  for (const it of items) nameToks.set(it.id, nameTokensOf(it.pathFor, it.name));
   const preview = new Map<string, string>(); // first content slice, for name-only hits
   const chunks: Chunk[] = [];
-  for (const n of nodes) {
-    const text = await readText(n.id, state);
+  for (const it of items) {
+    const text = await it.read();
     if (text.trim()) {
-      const cs = chunksOf(text, n.id, n.name);
-      preview.set(n.id, cs[0]?.text.slice(0, 240) ?? "");
+      const cs = chunksOf(text, it.id, it.name);
+      preview.set(it.id, cs[0]?.text.slice(0, 240) ?? "");
       for (const c of cs) {
         chunks.push(c);
         if (chunks.length >= MAX_TOTAL_CHUNKS) break;
@@ -797,14 +821,14 @@ export async function retrieve(query: string, includedFileIds: string[], k = 5):
     .filter((s) => s.score > 0)
     .map((s) => ({ fileId: s.c.fileId, name: s.c.name, text: s.c.text, score: s.score }));
   const present = new Set(cands.map((c) => c.fileId));
-  for (const n of nodes) {
-    if (present.has(n.id)) continue;
-    const nm = nameMatch(qtokens, nameToks.get(n.id) ?? []);
+  for (const it of items) {
+    if (present.has(it.id)) continue;
+    const nm = nameMatch(qtokens, nameToks.get(it.id) ?? []);
     if (nm.hits === 0 || !nm.strong) continue;
-    const pv = preview.get(n.id) ?? "";
+    const pv = preview.get(it.id) ?? "";
     cands.push({
-      fileId: n.id,
-      name: n.name,
+      fileId: it.id,
+      name: it.name,
       text: pv || "(matched by file name; no readable text could be extracted)",
       score: 0.5 + 0.4 * (nm.hits / qtokens.length), // 0.5..0.9
     });
