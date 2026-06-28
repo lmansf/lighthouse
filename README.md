@@ -156,7 +156,9 @@ ways to provide one:
 - **Bring your own:** run [Ollama](https://ollama.com) or
   [LM Studio](https://lmstudio.ai) yourself and point Lighthouse at it with
   `LIGHTHOUSE_LOCAL_LLM_URL` (default `http://127.0.0.1:8080/v1/chat/completions`;
-  for Ollama use `http://127.0.0.1:11434/v1/chat/completions`).
+  for Ollama use `http://127.0.0.1:11434/v1/chat/completions`). Servers that
+  require a named model (Ollama, LM Studio) need `LIGHTHOUSE_LOCAL_LLM_MODEL` set
+  to the model you pulled (e.g. `llama3.2`); `llama-server` ignores it.
 
 If the local server isn't reachable, Lighthouse falls back to streaming the most
 relevant passages so you still get a grounded, cited answer.

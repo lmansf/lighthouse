@@ -66,6 +66,10 @@ function startLocalLlm() {
     stdio: "inherit",
   });
   llmProc.on("error", (e) => console.error("local model failed to start", e));
+  llmProc.on("exit", (code, signal) => {
+    llmProc = null;
+    if (code) console.error(`local model exited with code ${code}${signal ? ` (${signal})` : ""}`);
+  });
 }
 
 function startServer() {
