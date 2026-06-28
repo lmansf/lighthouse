@@ -536,10 +536,10 @@ export function retrieve(query: string, includedFileIds: string[], k = 5): Retri
 
   const state = loadState();
   const nameToks = new Map<string, string[]>();
+  for (const n of nodes) nameToks.set(n.id, nameTokensOf(n.id, n.name));
   const preview = new Map<string, string>(); // first content slice, for name-only hits
   const chunks: Chunk[] = [];
   for (const n of nodes) {
-    nameToks.set(n.id, nameTokensOf(n.id, n.name));
     const text = readText(n.id, state);
     if (text.trim()) {
       const cs = chunksOf(text, n.id, n.name);
