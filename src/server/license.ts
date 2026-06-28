@@ -32,6 +32,7 @@
 import crypto from "node:crypto";
 import path from "node:path";
 import { stateDir, readJson, writeJson } from "./config";
+import { getState as profileState } from "./profile";
 import type { Registration } from "./registration";
 
 const TRIAL_DAYS = 14; // sign-in days a trial lasts
@@ -164,6 +165,18 @@ function contactRow(c: Registration) {
     city: c.city,
     state: c.state,
   };
+}
+
+/**
+ * Email to stamp on logs/bug reports. Prefers the signed-in account (the auth
+ * profile), since a user can be signed in without ever having started a trial /
+ * left feedback / checked out — in which case the license identity has no email.
+ * Falls back to that license identity.
+ */
+function accountEmail(): string | undefined {
+  const fromProfile = profileState().user?.email?.trim();
+  if (fromProfile) return fromProfile;
+  return loadIdentity()?.email || undefined;
 }
 
 /**
@@ -369,14 +382,13 @@ export async function checkoutUrl(email?: string): Promise<string | null> {
 export async function submitBug(where: string, what: string): Promise<{ ok: boolean }> {
   if (!licenseApi()) return { ok: true };
   const lic = readJson<LocalLicense | null>(licensePath(), null);
-  const id = loadIdentity();
   try {
     const r = await callFn("bug", {
       where,
       what,
       contactId: getContactId(),
       guid: lic?.guid,
-      email: id?.email,
+      email: accountEmail(),
       version: process.env.npm_package_version,
     });
     return { ok: r.ok !== false };
@@ -389,12 +401,11 @@ export async function submitBug(where: string, what: string): Promise<{ ok: bool
 export async function pingLaunch(): Promise<void> {
   if (!licenseApi()) return;
   const lic = readJson<LocalLicense | null>(licensePath(), null);
-  const id = loadIdentity();
   try {
     await callFn("ping", {
       contactId: getContactId(),
       guid: lic?.guid,
-      email: id?.email,
+      email: accountEmail(),
       version: process.env.npm_package_version,
     });
   } catch {

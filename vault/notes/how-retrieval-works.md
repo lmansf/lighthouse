@@ -12,6 +12,11 @@ database server, no embeddings download required.
    is configured, otherwise a local extractive summary) and surfaced as the
    reference passages beneath the answer.
 
+Catalog-style questions ("show me all files", "list my datasets", "how many
+PDFs") bypass the ranker entirely and instead **enumerate** the included files —
+narrowing to a file kind (datasets, documents, PDFs, spreadsheets) or a named
+type (`csv`, `pdf`, `md`, …) when the question names one.
+
 Because retrieval lives behind the `RagService.search` contract, this ranker can
 later be swapped for vector embeddings (e.g. a local transformers.js model)
 without changing the API routes or any UI code.

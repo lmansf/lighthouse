@@ -547,6 +547,140 @@ function nameMatch(qTokens: string[], nameToks: string[]): { hits: number; stron
   return { hits, strong };
 }
 
+// --- catalog / listing queries -----------------------------------------------
+interface Listing {
+  label: string;
+  match: (name: string) => boolean;
+}
+
+const LISTING_EXT: Record<string, string[]> = {
+  dataset: [".csv", ".tsv", ".xlsx", ".xls", ".parquet", ".json", ".arrow", ".feather"],
+  spreadsheet: [".csv", ".tsv", ".xlsx", ".xls"],
+  document: [".md", ".markdown", ".txt", ".text", ".rst", ".doc", ".docx", ".pdf", ".rtf", ".odt"],
+  pdf: [".pdf"],
+};
+
+// Catalog scaffolding tokens — verbs, determiners, and quantifiers that frame a
+// "list my files" request but carry no content of their own.
+const LISTING_FILLER = new Set([
+  "show", "me", "list", "give", "please", "can", "could", "would", "you", "display",
+  "name", "names", "enumerate", "tell", "what", "which", "how", "many", "much",
+  "are", "there", "is", "do", "does", "did", "i", "we", "my", "our", "the", "a",
+  "an", "all", "every", "each", "of", "in", "on", "to", "get", "see", "view",
+  "find", "catalog", "catalogue", "count", "number", "total", "available",
+  "included", "uploaded", "stored", "have", "has", "any",
+]);
+// Catalog nouns (singular/plural) that name the kind being enumerated.
+const LISTING_NOUN = new Set([
+  "file", "files", "dataset", "datasets", "document", "documents", "doc", "docs",
+  "pdf", "pdfs", "spreadsheet", "spreadsheets", "csv", "csvs", "table", "tables",
+  "source", "sources",
+]);
+// File-type qualifiers ("csv files", "pdf documents") — extension-like adjectives
+// mapped to the concrete extensions they name. A named type narrows the listing
+// to exactly those extensions, overriding the broad noun-based kind.
+const LISTING_QUALIFIER: Record<string, string[]> = {
+  csv: [".csv"], tsv: [".tsv"], xlsx: [".xlsx"], xls: [".xls"],
+  parquet: [".parquet"], json: [".json"], arrow: [".arrow"], feather: [".feather"],
+  md: [".md", ".markdown"], markdown: [".md", ".markdown"],
+  txt: [".txt", ".text"], text: [".txt", ".text"], rst: [".rst"], rtf: [".rtf"],
+  odt: [".odt"], docx: [".docx"], xml: [".xml"], html: [".html"],
+};
+
+/**
+ * Detect a catalog-style query ("show me all files", "list my datasets", "how
+ * many documents") — which should ENUMERATE the included set rather than rank by
+ * relevance — and which file kind it refers to. Returns null for an ordinary
+ * content question (e.g. "what's in the budget file": singular, no list cue).
+ */
+function listingIntent(query: string): Listing | null {
+  const q = query.toLowerCase();
+  const m = q.match(/\b(file|dataset|document|doc|pdf|spreadsheet|csv|table|source)(s)?\b/);
+  if (!m) return null;
+  const plural = Boolean(m[2]);
+  const verb = /\b(show|list|give|display|name|what|which|how many|enumerate|tell)\b/.test(q);
+  if (!verb) return null;
+  // A singular noun needs an explicit "all/every/list/how many" cue so a content
+  // question about one file ("summarize the report file") doesn't trip this.
+  const strong = /\b(all|every|each|list|how many|enumerate|catalog|catalogue)\b/.test(q);
+  if (!plural && !strong) return null;
+
+  // Only a pure catalog request should enumerate. Strip the catalog scaffolding
+  // (verbs, determiners, the catalog noun, and any file-type qualifier); if any
+  // meaningful content token survives, this is a content question — e.g. "which
+  // documents mention the lawsuit" — so fall through to relevance ranking.
+  const tokens = q.match(/[a-z0-9]+/g) ?? [];
+  const residual = tokens.filter(
+    (t) => !LISTING_FILLER.has(t) && !LISTING_NOUN.has(t) && !LISTING_QUALIFIER[t],
+  );
+  if (residual.length > 0) return null;
+
+  // A named file-type qualifier (including a catalog noun that is itself a
+  // concrete type, e.g. "csvs") narrows the listing to exactly its extensions,
+  // overriding the broad noun-based kind below.
+  const qualWords: string[] = [];
+  const qualExts = new Set<string>();
+  for (const t of tokens) {
+    const base = LISTING_QUALIFIER[t]
+      ? t
+      : t.endsWith("s") && LISTING_QUALIFIER[t.slice(0, -1)]
+        ? t.slice(0, -1)
+        : null;
+    if (base && !qualWords.includes(base)) {
+      qualWords.push(base);
+      for (const e of LISTING_QUALIFIER[base]) qualExts.add(e);
+    }
+  }
+  if (qualExts.size > 0)
+    return {
+      label: `${qualWords.map((w) => w.toUpperCase()).join("/")} files`,
+      match: (name) => qualExts.has(path.extname(name).toLowerCase()),
+    };
+
+  const noun = m[1];
+  const kind =
+    noun === "dataset" || noun === "csv" || noun === "table"
+      ? "dataset"
+      : noun === "spreadsheet"
+        ? "spreadsheet"
+        : noun === "document" || noun === "doc"
+          ? "document"
+          : noun === "pdf"
+            ? "pdf"
+            : "all";
+  if (kind === "all") return { label: "files", match: () => true };
+  const exts = new Set(LISTING_EXT[kind]);
+  return {
+    label: kind === "pdf" ? "PDFs" : `${kind}s`,
+    match: (name) => exts.has(path.extname(name).toLowerCase()),
+  };
+}
+
+/** Enumerate the included files matching a listing intent (capped for huge vaults). */
+function buildListing(nodes: FileNode[], intent: Listing): Retrieved {
+  const files = nodes.filter((n) => intent.match(n.name));
+  if (files.length === 0)
+    return {
+      references: [],
+      contexts: [{ name: `Included ${intent.label}`, text: `No included ${intent.label} found.`, score: 1 }],
+    };
+  const names = files.map((f) => f.name);
+  // Cap the prose list at the same count as the citeable references below so
+  // every named file has a corresponding clickable citation.
+  const CAP = 50;
+  const list =
+    `${files.length} included ${intent.label}:\n` +
+    names.slice(0, CAP).map((n) => `- ${n}`).join("\n") +
+    (names.length > CAP ? `\n…and ${names.length - CAP} more` : "");
+  const references: RagReference[] = files.slice(0, CAP).map((f) => ({
+    fileId: f.id,
+    name: f.name,
+    snippet: "",
+    score: 1,
+  }));
+  return { references, contexts: [{ name: `Included ${intent.label}`, text: list, score: 1 }] };
+}
+
 interface Chunk { fileId: string; name: string; text: string; tf: Map<string, number>; }
 
 function chunksOf(text: string, fileId: string, name: string): Chunk[] {
@@ -587,6 +721,11 @@ export function retrieve(query: string, includedFileIds: string[], k = 5): Retri
   const idset = new Set(includedFileIds.filter((id) => authoritative.has(id)));
   const nodes = walk(vaultDir()).filter((n) => n.kind === "file" && idset.has(n.id));
   if (nodes.length === 0) return { references: [], contexts: [] };
+
+  // Catalog/listing intent ("show me all files", "list my datasets") enumerates
+  // the included set rather than ranking it by relevance.
+  const listing = listingIntent(query);
+  if (listing) return buildListing(nodes, listing);
 
   const qtokens = tokenize(query);
   if (qtokens.length === 0) return { references: [], contexts: [] };

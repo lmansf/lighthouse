@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import {
+  Avatar,
   Button,
   Checkbox,
   Dialog,
@@ -29,8 +30,16 @@ import {
   shorthands,
   tokens,
 } from "@fluentui/react-components";
-import { KeyRegular, MailRegular, OpenRegular, SettingsRegular, StarRegular } from "@fluentui/react-icons";
+import {
+  KeyRegular,
+  MailRegular,
+  OpenRegular,
+  SettingsRegular,
+  SignOutRegular,
+  StarRegular,
+} from "@fluentui/react-icons";
 import { useLicenseStore, type FeedbackInput, type LicenseStatus } from "@/stores/useLicenseStore";
+import { useAuthStore } from "@/stores/useAuthStore";
 
 const LH_REPO = "https://github.com/lmansf/lighthouse";
 
@@ -76,6 +85,14 @@ const useStyles = makeStyles({
     fontWeight: tokens.fontWeightSemibold,
     backgroundColor: tokens.colorBrandBackground2,
   },
+  profileHeader: {
+    display: "flex",
+    alignItems: "center",
+    gap: tokens.spacingHorizontalS,
+    ...shorthands.padding(tokens.spacingVerticalS, tokens.spacingHorizontalM),
+    maxWidth: "280px",
+  },
+  profileText: { display: "flex", flexDirection: "column", minWidth: 0 },
 });
 
 /** 0–5 rating as a compact segmented row. */
@@ -454,6 +471,8 @@ export function LicenseGate({ status }: { status: LicenseStatus }) {
 export function SettingsMenu() {
   const styles = useStyles();
   const paidEnabled = useLicenseStore((s) => s.paidEnabled);
+  const user = useAuthStore((s) => s.onboarding.user);
+  const signOut = useAuthStore((s) => s.signOut);
   const [dlg, setDlg] = useState(false);
 
   return (
@@ -464,6 +483,25 @@ export function SettingsMenu() {
         </MenuTrigger>
         <MenuPopover>
           <MenuList>
+            {user && (
+              <>
+                <div className={styles.profileHeader}>
+                  <Avatar name={user.name} color="brand" size={32} />
+                  <div className={styles.profileText}>
+                    <Text weight="semibold" truncate>
+                      {user.name}
+                    </Text>
+                    <Text size={200} className={styles.muted} truncate>
+                      {user.email}
+                    </Text>
+                  </div>
+                </div>
+                <MenuItem icon={<SignOutRegular />} onClick={() => void signOut()}>
+                  Sign out
+                </MenuItem>
+                <MenuDivider />
+              </>
+            )}
             <MenuItem
               className={styles.highlightItem}
               icon={paidEnabled ? <StarRegular /> : <MailRegular />}
