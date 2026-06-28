@@ -174,14 +174,16 @@ async function check(licenseKey: string): Promise<Response> {
   // Trial: 14 days of USE, counted once per distinct UTC day the user signs in.
   // Nothing is ever deleted — once the allowance is spent the status is
   // "expired" and the app locks (greyed vault + sign-in gate).
-  const trialDays = row?.trial_days ?? TRIAL_DAYS;
-  let activeDays = row?.active_days ?? 0;
-  if (row) {
-    const today = new Date().toISOString().slice(0, 10); // UTC YYYY-MM-DD
-    if (row.last_active_day !== today) {
-      activeDays += 1;
-      await admin().from(TABLE).update({ active_days: activeDays, last_active_day: today }).eq("guid", guid);
-    }
+  // A trial carries no expiry in its token — the sign-in-day count lives only in
+  // the row. Without one (never registered, or deleted) it can't be counted, so
+  // report "none" (prompt to start a trial) rather than an unbounded "valid".
+  if (!row) return json({ status: "none", licenseType: "trial", guid });
+  const trialDays = row.trial_days ?? TRIAL_DAYS;
+  let activeDays = row.active_days ?? 0;
+  const today = new Date().toISOString().slice(0, 10); // UTC YYYY-MM-DD
+  if (row.last_active_day !== today) {
+    activeDays += 1;
+    await admin().from(TABLE).update({ active_days: activeDays, last_active_day: today }).eq("guid", guid);
   }
   const remainingDays = Math.max(0, trialDays - activeDays);
   const status = activeDays > trialDays ? "expired" : "valid";

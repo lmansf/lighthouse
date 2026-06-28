@@ -208,18 +208,26 @@ export async function activateLicense(licenseKey: string): Promise<LicenseResult
     return { status };
   }
 
-  // local-dev: decode and validate the pasted key
+  // local-dev: decode and validate the pasted key BEFORE persisting, so pasting
+  // an already-locked/expired key never clobbers a currently-valid license
+  // (mirrors the hosted path, which only stores a usable valid/grace status).
   const decoded = decrypt<{ guid: string; type?: LicenseType; paidThrough?: string }>(key);
   if (!decoded?.guid) return { status: "none" };
   const type = decoded.type ?? "trial";
-  writeJson(licensePath(), {
-    guid: decoded.guid,
-    licenseKey: key,
-    licenseType: type,
-    trialEnd: decoded.paidThrough,
-    activeDays: type === "trial" ? 0 : undefined,
-  } satisfies LocalLicense);
-  return await checkLicense();
+  const result: LicenseResult =
+    type === "paid"
+      ? paidStatusFrom(decoded.paidThrough, undefined)
+      : { status: "valid", licenseType: "trial", remainingDays: TRIAL_DAYS };
+  if (result.status === "valid" || result.status === "grace") {
+    writeJson(licensePath(), {
+      guid: decoded.guid,
+      licenseKey: key,
+      licenseType: type,
+      trialEnd: decoded.paidThrough,
+      activeDays: type === "trial" ? 0 : undefined,
+    } satisfies LocalLicense);
+  }
+  return result;
 }
 
 // --- paid status from an end date (shared by offline + local-dev paths) -------

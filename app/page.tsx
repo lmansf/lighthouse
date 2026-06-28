@@ -36,6 +36,7 @@ export default function Home() {
       <>
         <div
           aria-hidden
+          inert
           style={{
             position: "fixed",
             inset: 0,
