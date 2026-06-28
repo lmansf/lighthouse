@@ -44,6 +44,7 @@ interface LicenseStore {
   graceUntil: string | null;
   remainingDays: number | null;
   starting: boolean;
+  startError: string | null;
   activating: boolean;
   activateError: string | null;
   purchasing: boolean;
@@ -51,6 +52,7 @@ interface LicenseStore {
   pendingFeedback: boolean; // show the post-purchase feedback form once
   check: () => Promise<LicenseStatus>;
   loadConfig: () => Promise<void>;
+  /** Mint a fresh trial. On failure sets startError (never loops silently). */
   startTrial: () => Promise<void>;
   activate: (licenseKey: string) => Promise<boolean>;
   submitFeedback: (f: FeedbackInput) => Promise<boolean>;
@@ -86,6 +88,7 @@ export const useLicenseStore = create<LicenseStore>((set, get) => ({
   graceUntil: null,
   remainingDays: null,
   starting: false,
+  startError: null,
   activating: false,
   activateError: null,
   purchasing: false,
@@ -121,10 +124,26 @@ export const useLicenseStore = create<LicenseStore>((set, get) => ({
   },
 
   startTrial: async () => {
-    set({ starting: true });
+    set({ starting: true, startError: null });
     try {
-      await postLicense("start");
-      await get().check();
+      const data = await postLicense("start");
+      if (data.ok === false) {
+        // The trial mint failed server-side (e.g. the license service is
+        // unreachable or not deployed). Surface it instead of silently looping.
+        set({
+          startError:
+            "Couldn't start your trial — the license service is unreachable. Please check your connection and try again.",
+        });
+        return;
+      }
+      const status = await get().check();
+      if (isLocked(status)) {
+        // start reported success but the license still isn't valid — don't leave
+        // the user clicking a button that appears to do nothing.
+        set({ startError: "Your trial couldn't be started. Please try again." });
+      }
+    } catch {
+      set({ startError: "Couldn't reach the license service. Please try again." });
     } finally {
       set({ starting: false });
     }

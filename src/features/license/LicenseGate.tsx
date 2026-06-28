@@ -231,6 +231,7 @@ function RegistrationChoice() {
   const paidEnabled = useLicenseStore((s) => s.paidEnabled);
   const startTrial = useLicenseStore((s) => s.startTrial);
   const starting = useLicenseStore((s) => s.starting);
+  const startError = useLicenseStore((s) => s.startError);
   const purchasing = useLicenseStore((s) => s.purchasing);
   const cancelSubscribe = useLicenseStore((s) => s.cancelSubscribe);
   const [dlg, setDlg] = useState(false);
@@ -283,6 +284,7 @@ function RegistrationChoice() {
       >
         {starting ? "Starting…" : "Start a 14-day trial"}
       </Button>
+      {startError && <Text className={styles.error}>{startError}</Text>}
 
       <Divider />
       <ActivateKey />
