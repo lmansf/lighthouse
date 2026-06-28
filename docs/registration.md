@@ -99,7 +99,8 @@ and purchase), so you can compare, say, comments from **paid vs unpaid** contact
 by joining `contact_id` to `registrations`.
 
 ```sql
--- Feedback form (post-purchase survey when paid is on; end-of-trial when off)
+-- Feedback form (post-purchase survey when paid is on; end-of-trial when off;
+-- plus the optional one-time mid-session nudge after a while of active use)
 create table if not exists public.feedback (
   id            bigint generated always as identity primary key,
   created_at    timestamptz not null default now(),
@@ -225,6 +226,15 @@ unlimited and non-destructive.
   choice and the settings-gear item show **"Get notified when purchasing opens"**
   (the same slot that becomes **Subscribe** when `PAID_ENABLED=1`). Interest
   lands in `purchase_interest`.
+
+Independently of the trial state, a gentle **mid-session nudge** can also surface
+the same feedback form. After ~5 minutes of *active* use (only time the window is
+visible counts), a small "What do you think so far?" bubble slides up in the
+bottom-left corner; expanding it opens the form in `mid-session` mode (same
+fields, gentler copy, no notify checkbox). It appears **at most once per install**
+— dismissing or submitting sets a `localStorage` flag so it never returns — and
+its submissions land in the same `feedback` table. The component is
+`src/features/feedback/FeedbackNudge.tsx`, mounted once the user is onboarded.
 
 ### Paid licenses
 
