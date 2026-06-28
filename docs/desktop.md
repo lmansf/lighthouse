@@ -97,8 +97,8 @@ server (`next start`) as a child process, which must be a real file on disk
 rather than packed into an asar archive. Only production dependencies are
 bundled; `.next/cache`, the dev toolchain, and the `supabase/` Edge Function
 sources are excluded. So are `.env` / `.env.local` (dev files that may hold
-secrets) — only the public `.env.production` (license function URL + anon key)
-ships.
+secrets) — only the public `.env.production` (license + checkout function URLs,
+anon key, and the `PAID_ENABLED` flag) ships.
 
 ### Icons
 
@@ -118,7 +118,8 @@ it stays running in the tray.
 ## Configuration
 
 Environment variables (set in `.env.local` or the shell that launches the app)
-still apply — `ANTHROPIC_API_KEY` for live chat, and the licensing config
-(`LICENSE_API_URL` + `SUPABASE_ANON_KEY`, shipped in `.env.production`) from
-[registration.md](./registration.md) for the welcome form. `VAULT_DIR` is set
-automatically by the desktop app from your chosen folder.
+still apply — `ANTHROPIC_API_KEY` for live chat, and the licensing/checkout
+config (`LICENSE_API_URL` + `SUPABASE_ANON_KEY` + `CHECKOUT_API_URL`, plus the
+`PAID_ENABLED` flag, shipped in `.env.production`) from
+[registration.md](./registration.md) for the welcome form and subscriptions.
+`VAULT_DIR` is set automatically by the desktop app from your chosen folder.

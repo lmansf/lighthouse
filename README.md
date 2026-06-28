@@ -97,6 +97,14 @@ Copy `.env.local.example` → `.env.local` (gitignored). All vars are optional:
 - `LICENSE_API_URL` / `SUPABASE_ANON_KEY` — public hosted-license config (the
   Edge Function URL + anon key). Shipped in the committed `.env.production`;
   override in `.env.local` to point a dev build at the same function.
+- `CHECKOUT_API_URL` — public `create-checkout` Edge Function URL for the
+  $14.99/mo plan. Shipped in `.env.production`; the Stripe secret, price ID, and
+  webhook secret live only in the Edge Functions, never here. See
+  **[docs/registration.md](docs/registration.md)**.
+- `PAID_ENABLED` — set to `1` (then restart) to surface the Subscribe
+  affordances (left-nav button, registration screen, lock gate); default `0`
+  shows "Get notified when purchasing opens" instead. Public; shipped in
+  `.env.production`.
 - `LICENSE_ENFORCE` / `LICENSE_SECRET` — local-dev trial only: set
   `LICENSE_ENFORCE=1` (with no `LICENSE_API_URL`) for a self-contained trial
   using local crypto, with `LICENSE_SECRET` encrypting the local key. The

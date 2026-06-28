@@ -276,6 +276,9 @@ transactions.
    `STRIPE_WEBHOOK_SECRET` above.
 4. Set `CHECKOUT_API_URL` in `.env.production` to the deployed `create-checkout`
    URL (already pre-filled for this project; public/safe to ship).
+5. Set `PAID_ENABLED=1` in `.env.production` and restart to surface the Subscribe
+   affordances (left-nav button, registration screen, lock gate). While it stays
+   `0`, those slots show "Get notified when purchasing opens" instead.
 
 > Both functions must be public (no JWT) so the app and Stripe can reach them.
 > The webhook authenticates by verifying the Stripe **signature**; `create-checkout`
