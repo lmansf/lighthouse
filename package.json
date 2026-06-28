@@ -2,7 +2,7 @@
   "name": "rag-vault",
   "version": "0.1.0",
   "private": true,
-  "description": "Lighthouse — a local-first RAG vault for your documents.",
+  "description": "Lighthouse \u2014 a local-first RAG vault for your documents.",
   "author": "Lighthouse",
   "main": "electron/main.js",
   "scripts": {
@@ -13,7 +13,8 @@
     "test": "tsc --noEmit",
     "icons": "npm install --no-save sharp@^0.33.5 png-to-ico@^2.1.8 && node scripts/gen-icons.mjs",
     "electron": "electron .",
-    "dist": "electron-builder"
+    "dist": "electron-builder",
+    "test:extract": "node --test \"test/**/*.test.mjs\""
   },
   "build": {
     "appId": "com.lighthouse.app",

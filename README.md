@@ -67,9 +67,11 @@ contracts — no cloud database required:
   cards?" even when its rows are anonymized numbers). Plain-text files are read
   directly; **PDF, Word (`.docx`), and Excel (`.xlsx`/`.xls`)** documents have
   their text extracted by parsers loaded lazily on first use and cached on disk
-  (keyed by the file's mtime+size, so each document is parsed once), and an
-  unreadable or corrupt document degrades gracefully to empty text yet stays
-  findable by name (`src/server/extract.ts`). Catalog-style queries
+  (keyed by the file's mtime+size, so each document is parsed once — a failed
+  parse is logged and *not* cached, so a transient error is retried on the next
+  scan rather than pinned to empty), and an unreadable or corrupt document
+  degrades gracefully to empty text yet stays findable by name
+  (`src/server/extract.ts`). Catalog-style queries
   ("show me all files", "list my datasets", "how many PDFs") skip ranking and
   instead **enumerate** the included set, narrowing to a file kind (datasets,
   documents, PDFs, spreadsheets) or a named file type (`csv`, `pdf`, `md`, …) when

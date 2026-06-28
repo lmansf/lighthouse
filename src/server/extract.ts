@@ -79,6 +79,21 @@ async function extractByExt(abs: string, ext: string): Promise<string> {
 
 // --- on-disk cache (parse once per file version) ---
 
+/**
+ * Cache schema version. Bump this whenever the extraction logic changes in a
+ * way that could alter output (or to discard entries written by a buggy older
+ * build). Entries tagged with a different version are ignored, forcing a
+ * one-time re-extraction — this is how a user recovers from PDFs that an
+ * earlier version cached as empty.
+ */
+const CACHE_VERSION = 2;
+
+interface CacheRecord {
+  v: number;
+  key: string;
+  text: string;
+}
+
 function cacheDir(): string {
   const dir = path.join(stateDir(), "cache", "extract");
   fs.mkdirSync(dir, { recursive: true });
@@ -108,20 +123,34 @@ export async function extractRichText(abs: string, ext: string): Promise<string>
   const key = `${stat.mtimeMs}:${stat.size}`;
   const cp = cachePath(abs);
   try {
-    const hit = JSON.parse(fs.readFileSync(cp, "utf8"));
-    if (hit && hit.key === key && typeof hit.text === "string") return hit.text;
+    const hit = JSON.parse(fs.readFileSync(cp, "utf8")) as Partial<CacheRecord>;
+    if (hit && hit.v === CACHE_VERSION && hit.key === key && typeof hit.text === "string") {
+      return hit.text;
+    }
+    // A miss here (no file, stale key, or older schema version) falls through
+    // to a fresh parse below — older entries that may have cached an empty
+    // result are intentionally re-extracted.
   } catch {
-    // no cache yet, or it's stale/corrupt — parse fresh below.
+    // no cache yet, or it's corrupt — parse fresh below.
   }
 
-  let text = "";
+  let text: string;
   try {
     text = clamp((await extractByExt(abs, ext)).trim());
-  } catch {
-    text = "";
+  } catch (err) {
+    // Degrade gracefully — one unreadable file must never break a vault scan —
+    // but do NOT swallow the cause silently and do NOT cache the failure: log
+    // it so empty results are diagnosable, and leave the cache empty so the
+    // next scan retries (a transient parse error shouldn't pin "" forever).
+    const reason = err instanceof Error ? err.message : String(err);
+    console.error(`extract: failed to read ${path.basename(abs)} (${ext}): ${reason}`);
+    return "";
   }
+  // Only successful extractions are cached. An empty string here is a genuine
+  // result (e.g. a scanned/image-only PDF with no text layer), safe to cache.
   try {
-    fs.writeFileSync(cp, JSON.stringify({ key, text }));
+    const record: CacheRecord = { v: CACHE_VERSION, key, text };
+    fs.writeFileSync(cp, JSON.stringify(record));
   } catch {
     // Cache write is best-effort; a read-only state dir just means re-parsing.
   }
