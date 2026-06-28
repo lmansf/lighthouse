@@ -13,9 +13,17 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import { connectorsDir, SHAREPOINT_CLIENT_ID, readJson, writeJson } from "../../config";
+import {
+  connectorsDir,
+  SHAREPOINT_CLIENT_ID,
+  SHAREPOINT_AUTHORITY,
+  readJson,
+  writeJson,
+} from "../../config";
 
-const AUTHORITY = "https://login.microsoftonline.com/common/oauth2/v2.0";
+// Device-code endpoints hang off the v2.0 path under the configured authority
+// base (e.g. https://login.microsoftonline.com/common + /oauth2/v2.0).
+const AUTHORITY = `${SHAREPOINT_AUTHORITY.replace(/\/$/, "")}/oauth2/v2.0`;
 /** Delegated Graph scopes. offline_access yields a refresh token. */
 const SCOPES = ["offline_access", "openid", "profile", "User.Read", "Files.Read.All", "Sites.Read.All"];
 /** Refresh a little early so a token never expires mid-request. */
