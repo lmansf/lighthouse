@@ -59,6 +59,7 @@ const useStyles = makeStyles({
     alignItems: "center",
     gap: tokens.spacingHorizontalS,
     flexShrink: 0,
+    marginTop: "auto",
     ...shorthands.padding(tokens.spacingVerticalS, tokens.spacingHorizontalM),
     ...shorthands.borderTop("1px", "solid", tokens.colorNeutralStroke2),
   },
