@@ -64,7 +64,11 @@ contracts — no cloud database required:
 - **Retrieval** is real TF-IDF cosine over the text of the *included* files,
   combined with a file name/path match so a file is findable by what it's *called*
   as well as what it contains (a file named `creditcard.csv` answers "any credit
-  cards?" even when its rows are anonymized numbers). Large files are read up to a
+  cards?" even when its rows are anonymized numbers). Catalog-style queries
+  ("show me all files", "list my datasets", "how many PDFs") skip ranking and
+  instead **enumerate** the included set, narrowing to a file kind (datasets,
+  documents, PDFs, spreadsheets) or a named file type (`csv`, `pdf`, `md`, …) when
+  the query names one. Large files are read up to a
   1 MB prefix and total chunks are capped, so a huge dataset can't stall a query
   (`src/server/vault.ts`) — local, no embeddings download.
 - **Chat** streams a grounded answer (`/api/chat`): Anthropic Claude when an API
