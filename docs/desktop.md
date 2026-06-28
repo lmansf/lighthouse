@@ -58,6 +58,11 @@ npm run electron
   the app's exclusion rules; you opt items into the RAG index in the tree.
 - **Choose vault folder…** points Lighthouse at any directory; **Open vault
   folder** reveals it in your OS file manager.
+- **Open cited files** — in chat, the **Related files** cards are clickable and
+  open the cited file in its native application. This is desktop-only (the
+  `/api/open` route refuses on a web deployment, where the server has no access
+  to your local files); the client sends only the node id and the server resolves
+  it to a path, rejecting anything that escapes the vault.
 
 In the browser, use the toolbar's **Browse…** menu (**Files…** / **Folder…**)
 or drag items in — folders upload with their structure. Linking in place is
