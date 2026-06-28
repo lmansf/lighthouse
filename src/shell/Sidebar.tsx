@@ -53,6 +53,7 @@ const useStyles = makeStyles({
     boxShadow: `0 0 10px 2px ${ACCENTS.beam}`,
   },
   body: { flex: 1, minHeight: 0, overflowY: "auto" },
+  bodyHidden: { display: "none" },
   footer: {
     display: "flex",
     alignItems: "center",
@@ -80,10 +81,10 @@ interface SidebarProps {
 export function Sidebar({ collapsed, onToggleCollapsed, children }: SidebarProps) {
   const styles = useStyles();
 
-  if (collapsed) {
-    return (
-      <div className={mergeClasses(styles.sidebar, styles.collapsed)}>
-        <div className={mergeClasses(styles.header, styles.headerCollapsed)}>
+  return (
+    <div className={mergeClasses(styles.sidebar, collapsed && styles.collapsed)}>
+      <div className={mergeClasses(styles.header, collapsed && styles.headerCollapsed)}>
+        {collapsed ? (
           <Tooltip content="Expand files" relationship="label">
             <Button
               appearance="subtle"
@@ -93,38 +94,32 @@ export function Sidebar({ collapsed, onToggleCollapsed, children }: SidebarProps
               onClick={onToggleCollapsed}
             />
           </Tooltip>
-        </div>
-        <div className={styles.body} />
-        <div className={mergeClasses(styles.footer, styles.footerCollapsed)}>
-          <SettingsMenu />
-        </div>
+        ) : (
+          <>
+            <span className={styles.brand}>
+              <span className={styles.beacon} />
+              <Text weight="semibold">Lighthouse</Text>
+            </span>
+            <Tooltip content="Collapse files" relationship="label">
+              <Button
+                appearance="subtle"
+                size="small"
+                icon={<PanelLeftContractRegular />}
+                aria-label="Collapse sidebar"
+                onClick={onToggleCollapsed}
+              />
+            </Tooltip>
+          </>
+        )}
       </div>
-    );
-  }
-
-  return (
-    <div className={styles.sidebar}>
-      <div className={styles.header}>
-        <span className={styles.brand}>
-          <span className={styles.beacon} />
-          <Text weight="semibold">Lighthouse</Text>
-        </span>
-        <Tooltip content="Collapse files" relationship="label">
-          <Button
-            appearance="subtle"
-            size="small"
-            icon={<PanelLeftContractRegular />}
-            aria-label="Collapse sidebar"
-            onClick={onToggleCollapsed}
-          />
-        </Tooltip>
-      </div>
-      <div className={styles.body}>{children}</div>
-      <div className={styles.footer}>
+      <div className={mergeClasses(styles.body, collapsed && styles.bodyHidden)}>{children}</div>
+      <div className={mergeClasses(styles.footer, collapsed && styles.footerCollapsed)}>
         <SettingsMenu />
-        <Text size={200} className={styles.footerLabel}>
-          Settings
-        </Text>
+        {!collapsed && (
+          <Text size={200} className={styles.footerLabel}>
+            Settings
+          </Text>
+        )}
       </div>
     </div>
   );
