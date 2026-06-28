@@ -34,4 +34,7 @@ export interface SourceConnector {
   removeReference?(refId: string): Promise<void>;
   /** Move a node within the source, preserving inclusion. */
   moveNode?(fromId: string, toParentId: string | null): Promise<{ newId: string }>;
+  /** Remove a node from the source (non-destructive: linked items unlink, vault
+   *  items move to a recoverable trash). */
+  remove?(nodeId: string): Promise<void>;
 }

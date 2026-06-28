@@ -12,6 +12,7 @@ import {
   setSourceAvailable as vaultSetSourceAvailable,
   addReference as vaultAddReference,
   removeReference as vaultRemoveReference,
+  removeFromVault as vaultRemoveFromVault,
   moveNode as vaultMoveNode,
 } from "../vault";
 import type { DataSource, FileNode } from "@/contracts";
@@ -42,5 +43,8 @@ export const localVault: SourceConnector = {
   },
   async moveNode(fromId, toParentId) {
     return vaultMoveNode(fromId, toParentId);
+  },
+  async remove(nodeId) {
+    vaultRemoveFromVault(nodeId);
   },
 };

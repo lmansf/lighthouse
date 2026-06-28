@@ -39,6 +39,11 @@ interface RagStore {
   addReference: (path: string) => Promise<void>;
   /** Remove a reference (unlink); real files are left in place. */
   removeReference: (refId: string) => Promise<void>;
+  /**
+   * Remove nodes from the vault (non-destructive: linked items unlink, vault
+   * items move to a recoverable trash). Clears any selection afterwards.
+   */
+  removeFromVault: (nodeIds: string[]) => Promise<void>;
 
   /** Ids of every included file (leaf) node - what chat retrieves against. */
   includedFileIds: () => string[];
@@ -122,6 +127,18 @@ export const useRagStore = create<RagStore>((set, get) => ({
 
   removeReference: async (refId) => {
     await ragService.removeReference(refId);
+    await get().load();
+  },
+
+  removeFromVault: async (nodeIds) => {
+    for (const nodeId of nodeIds) {
+      await fetch("/api/rag", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ op: "remove", nodeId }),
+      }).catch(() => {});
+    }
+    set({ selectedIds: [] });
     await get().load();
   },
 
