@@ -237,6 +237,14 @@ export function ChatPanel() {
           setMessages((m) => m.map((x) => (x.id === asstId ? { ...x, references: refs } : x)));
         }
       }
+    } catch {
+      setMessages((m) =>
+        m.map((x) =>
+          x.id === asstId && !x.content
+            ? { ...x, content: "Something went wrong reaching the model. Please try again." }
+            : x,
+        ),
+      );
     } finally {
       setStreaming(false);
     }

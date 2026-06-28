@@ -74,9 +74,14 @@ async function* streamClaude(
   history: ChatTurn[] = [],
 ): AsyncGenerator<string> {
   // Prior turns first (so the model has the thread), then the current question
-  // with its freshly-retrieved context grounded in.
+  // with its freshly-retrieved context grounded in. Anthropic rejects
+  // empty-content turns and requires the sequence to begin with a user turn.
+  const priorTurns = history.filter(
+    (t) => typeof t.content === "string" && t.content.trim() !== "",
+  );
+  while (priorTurns.length > 0 && priorTurns[0].role !== "user") priorTurns.shift();
   const messages = [
-    ...history.map((t) => ({ role: t.role, content: t.content })),
+    ...priorTurns.map((t) => ({ role: t.role, content: t.content })),
     { role: "user" as const, content: buildPrompt(question, contexts) },
   ];
   const res = await fetch(ANTHROPIC_URL, {
