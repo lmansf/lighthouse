@@ -49,6 +49,9 @@ function startServer() {
       ELECTRON_RUN_AS_NODE: "1", // run the Next CLI on Electron's bundled Node
       LIGHTHOUSE_DESKTOP: "1", // gates desktop-only endpoints (e.g. link in place)
       VAULT_DIR: vaultDir(),
+      // Let the in-app UI read/change desktop settings (e.g. launch-at-login);
+      // the main process re-reads this file on its next launch.
+      LIGHTHOUSE_SETTINGS_FILE: settingsFile(),
       PORT: String(PORT),
     },
     stdio: "inherit",
@@ -269,7 +272,9 @@ if (!app.requestSingleInstanceLock()) {
   });
 
   app.whenReady().then(() => {
-    app.setLoginItemSettings({ openAtLogin: true }); // persistent: launch at login
+    // Launch at login unless the user turned it off (default on). The in-app
+    // prompt writes runOnStartup to the settings file; we honor it each launch.
+    app.setLoginItemSettings({ openAtLogin: loadSettings().runOnStartup !== false });
     startServer();
     buildMenu();
     createTray();

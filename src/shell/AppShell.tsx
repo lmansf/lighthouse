@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { makeStyles, tokens } from "@fluentui/react-components";
 import { useRagStore } from "@/stores/useRagStore";
 import { Sidebar } from "./Sidebar";
+import { StartupPrompt } from "@/features/startup/StartupPrompt";
 
 const useStyles = makeStyles({
   root: {
@@ -74,6 +75,7 @@ export function AppShell({ sidebar, main }: AppShellProps) {
         {sidebar}
       </Sidebar>
       <div className={styles.main}>{main}</div>
+      <StartupPrompt />
     </main>
   );
 }
