@@ -71,12 +71,18 @@ adapter behind the same `RagService`/`ChatService`/`AuthService` interfaces
 (serverless hosts can't persist to a local directory — local storage means
 running on your own machine).
 
-## Welcome form (optional)
+## Welcome form & trial licensing (optional)
 
 After sign-in, a one-time welcome form in the left rail collects basic contact
-info and submits it to a Supabase table — or **Skip** it entirely. If Supabase
-isn't configured the app stays fully usable; Submit just reports "not
-configured". Setup (table SQL + env) is in **[docs/registration.md](docs/registration.md)**.
+info — or **Skip** it entirely. Either way it mints a **14-day trial** (unique
+GUID + encrypted license key, kept locally and, when Supabase is configured, on
+the trial row). The license is checked once per launch; when the trial ends the
+vault is reset and the user is prompted to start a fresh trial (re-registration
+is unlimited, and trials can be extended by editing `trial_end` in Supabase).
+
+Trial enforcement is active only when Supabase is configured (or
+`LICENSE_ENFORCE=1`); otherwise the app runs unlicensed and fully usable. Setup
+(table SQL + env) is in **[docs/registration.md](docs/registration.md)**.
 
 ## Configuration
 
@@ -88,6 +94,10 @@ Copy `.env.local.example` → `.env.local` (gitignored). All vars are optional:
   fallback answers with no network.
 - `SUPABASE_URL` / `SUPABASE_ANON_KEY` / `SUPABASE_REGISTRATIONS_TABLE` — the
   welcome form.
+- `SUPABASE_SERVICE_ROLE_KEY` / `LICENSE_SECRET` / `LICENSE_ENFORCE` — trial
+  licensing (server-side trial reads/extends + license-key encryption; set
+  `LICENSE_ENFORCE=1` to enforce trials without Supabase). See
+  **[docs/registration.md](docs/registration.md)**.
 
 ## Status
 

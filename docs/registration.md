@@ -1,10 +1,12 @@
 # Welcome registration (Supabase)
 
 After sign-in, Lighthouse shows a one-time welcome form in the left rail
-(first name, last name, email, "do not contact me", city, state). Submitting
-inserts a row into a Supabase table; **Skip** is always available and the rest
-of onboarding proceeds either way. If Supabase isn't configured, Submit simply
-reports "not configured" — the app stays fully usable.
+(first name, last name, email, "do not contact me", city, state). Submitting —
+or **Skip**, which is always available — mints a [14-day trial](#trial-licensing)
+and the rest of onboarding proceeds either way. When Supabase is configured the
+contact info and trial are written to the registrations table; otherwise the
+trial is kept locally and the app stays fully usable (trial enforcement is off
+unless `LICENSE_ENFORCE=1`).
 
 ## 1. Create the table
 
