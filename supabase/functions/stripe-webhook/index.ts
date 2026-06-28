@@ -52,14 +52,19 @@ async function grantPaid(opts: {
     if (data && data.length) return;
   }
   if (opts.email) {
-    const { data } = await db
+    // Target the most recent row by id (PostgREST ignores order/limit on UPDATE,
+    // and re-trials produce several rows under one email).
+    const { data: rows } = await db
       .from(TABLE)
-      .update(patch)
+      .select("id")
       .eq("email", opts.email)
       .order("created_at", { ascending: false })
-      .select("guid")
       .limit(1);
-    if (data && data.length) return;
+    const id = rows?.[0]?.id;
+    if (id !== undefined && id !== null) {
+      const { data } = await db.from(TABLE).update(patch).eq("id", id).select("guid");
+      if (data && data.length) return;
+    }
   }
   // No prior row (e.g. bought before ever trialing): create one.
   await db.from(TABLE).insert({ email: opts.email ?? null, guid: opts.guid ?? undefined, ...patch });
@@ -103,6 +108,7 @@ Deno.serve(async (req) => {
         if (inv.subscription) {
           const sub = await stripe.subscriptions.retrieve(String(inv.subscription));
           await grantPaid({
+            guid: sub.metadata?.guid, // stamped onto the subscription at checkout
             email: inv.customer_email,
             customerId: String(inv.customer),
             subscriptionId: sub.id,

@@ -49,7 +49,6 @@ interface LicenseStore {
   purchasing: boolean;
   paidEnabled: boolean;
   pendingFeedback: boolean; // show the post-purchase feedback form once
-  notified: boolean; // "notify me when purchasing opens" was submitted
   check: () => Promise<LicenseStatus>;
   loadConfig: () => Promise<void>;
   startTrial: () => Promise<void>;
@@ -92,7 +91,6 @@ export const useLicenseStore = create<LicenseStore>((set, get) => ({
   purchasing: false,
   paidEnabled: false,
   pendingFeedback: false,
-  notified: false,
 
   loadConfig: async () => {
     try {
@@ -162,7 +160,6 @@ export const useLicenseStore = create<LicenseStore>((set, get) => ({
   submitNotify: async (email: string) => {
     try {
       const data = await postLicense("notify", { email });
-      if (data.ok) set({ notified: true });
       return Boolean(data.ok);
     } catch {
       return false;

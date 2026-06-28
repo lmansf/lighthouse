@@ -409,14 +409,15 @@ export function PostPurchaseFeedback() {
 export function LicenseGate({ status }: { status: LicenseStatus }) {
   const styles = useStyles();
   const paidEnabled = useLicenseStore((s) => s.paidEnabled);
-  const [step, setStep] = useState<"feedback" | "thanks" | "choose">(
-    status === "expired" && !paidEnabled ? "feedback" : "choose",
-  );
+  // null until the user advances; the entry step is derived each render so the
+  // async paidEnabled config can't strand an expired trial on the feedback form.
+  const [step, setStep] = useState<"feedback" | "thanks" | "choose" | null>(null);
+  const resolvedStep = step ?? (status === "expired" && !paidEnabled ? "feedback" : "choose");
 
   return (
     <div className={styles.rail}>
-      {step === "feedback" && <FeedbackForm mode="trial-end" onDone={() => setStep("thanks")} />}
-      {step === "thanks" && (
+      {resolvedStep === "feedback" && <FeedbackForm mode="trial-end" onDone={() => setStep("thanks")} />}
+      {resolvedStep === "thanks" && (
         <>
           <div className={styles.beaconRow}>
             <span className={styles.beacon} />
@@ -431,7 +432,7 @@ export function LicenseGate({ status }: { status: LicenseStatus }) {
           </Button>
         </>
       )}
-      {step === "choose" && <RegistrationChoice />}
+      {resolvedStep === "choose" && <RegistrationChoice />}
     </div>
   );
 }
