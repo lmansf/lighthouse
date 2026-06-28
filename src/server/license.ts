@@ -67,7 +67,7 @@ export interface LicenseResult {
   licenseType?: LicenseType;
   trialEnd?: string;
   graceUntil?: string;
-  remainingDays?: number; // trial: sign-in days left of the 30
+  remainingDays?: number; // trial: sign-in days left of the 14
 }
 
 /** The hosted Edge Function URL, or null when not configured. */
