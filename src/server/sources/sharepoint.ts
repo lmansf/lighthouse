@@ -79,6 +79,17 @@ async function mirror(node: SpNode): Promise<void> {
   }
 }
 
+/** Mirror many files with bounded concurrency so a large folder can't fan out
+ *  into 1500 simultaneous (or serialized) downloads. */
+async function mirrorAll(files: SpNode[]): Promise<void> {
+  const CONCURRENCY = 4;
+  let i = 0;
+  const worker = async () => {
+    while (i < files.length) await mirror(files[i++]);
+  };
+  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, files.length) }, worker));
+}
+
 function unmirror(node: SpNode): void {
   try {
     fs.rmSync(mirrorPathFor(node), { force: true });
@@ -145,7 +156,12 @@ export const sharepoint: SourceConnector = {
     // Mirror (or drop) the affected files so retrieval has their content.
     const files = descendantFiles(nodeId, s.nodes ?? []);
     if (included) {
-      for (const f of files) await mirror(f);
+      // Mirror in the background with bounded concurrency: enabling a large
+      // folder shouldn't block the request, and retrievalItems surfaces each
+      // file lazily as its mirror lands.
+      void mirrorAll(files).catch((err) =>
+        console.warn(`[sharepoint] mirror batch failed: ${(err as Error).message}`),
+      );
     } else {
       const byId = nodeMap(s.nodes ?? []);
       for (const f of files) {
@@ -170,6 +186,7 @@ export const sharepoint: SourceConnector = {
       if (!ownsId(id)) continue;
       const node = byId.get(id);
       if (!node || node.kind !== "file") continue;
+      if (!effectivelyIncluded(id, s, byId)) continue;
       const abs = mirrorPathFor(node);
       if (fs.existsSync(abs)) out.push({ id, name: node.name, abs });
     }

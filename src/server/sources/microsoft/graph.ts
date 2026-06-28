@@ -15,6 +15,8 @@ const GRAPH = "https://graph.microsoft.com/v1.0";
 const MAX_NODES = 1500;
 const MAX_DEPTH = 6;
 const MAX_DRIVES = 12;
+/** Largest single file we'll mirror; bigger files are skipped, not OOM'd. */
+const MAX_MIRROR_BYTES = 50_000_000;
 
 const nodeId = (driveId: string, itemId: string) => `${SHAREPOINT_SOURCE_ID}::${driveId}::${itemId}`;
 
@@ -154,8 +156,18 @@ export async function listTree(): Promise<SpNode[]> {
   return out;
 }
 
-/** Download an item's bytes to `destPath`. Returns false if the item has no content. */
-export async function downloadItem(driveId: string, itemId: string, destPath: string): Promise<boolean> {
+/**
+ * Download an item's bytes to `destPath`. Returns false if the item has no
+ * content or exceeds `maxBytes`. Streams to disk with a hard byte ceiling so a
+ * missing or untruthful Content-Length can't buffer an unbounded file into
+ * memory.
+ */
+export async function downloadItem(
+  driveId: string,
+  itemId: string,
+  destPath: string,
+  maxBytes = MAX_MIRROR_BYTES,
+): Promise<boolean> {
   const token = await getAccessToken();
   const res = await fetch(`${GRAPH}/drives/${driveId}/items/${itemId}/content`, {
     headers: { authorization: `Bearer ${token}` },
@@ -165,7 +177,35 @@ export async function downloadItem(driveId: string, itemId: string, destPath: st
     if (res.status === 404) return false;
     throw new Error(`download ${res.status}`);
   }
-  const buf = Buffer.from(await res.arrayBuffer());
-  fs.writeFileSync(destPath, buf);
+  const declared = Number(res.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    await res.body.cancel().catch(() => {});
+    console.warn(`[sharepoint] skipping ${itemId}: ${declared} bytes exceeds ${maxBytes}-byte mirror cap.`);
+    return false;
+  }
+  const reader = res.body.getReader();
+  const fh = await fs.promises.open(destPath, "w");
+  let over = false;
+  try {
+    let written = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      written += value.byteLength;
+      if (written > maxBytes) {
+        over = true;
+        break;
+      }
+      await fh.write(value);
+    }
+  } finally {
+    await fh.close().catch(() => {});
+  }
+  if (over) {
+    await reader.cancel().catch(() => {});
+    await fs.promises.rm(destPath, { force: true });
+    console.warn(`[sharepoint] skipping ${itemId}: exceeds ${maxBytes}-byte mirror cap.`);
+    return false;
+  }
   return true;
 }
