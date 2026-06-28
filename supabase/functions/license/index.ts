@@ -183,6 +183,9 @@ async function bug(body: Record<string, unknown>): Promise<Response> {
   const where = body.where ? String(body.where) : null;
   const what = body.what ? String(body.what) : null;
   if (!where && !what) return json({ ok: false, reason: "rejected", detail: "empty report" }, 400);
+  // A contact may file many reports — see migration
+  // 20260628162019_bug_reports_allow_multiple.sql, which removed the UNIQUE
+  // constraint on contact_id (issue #26). Each report is its own row.
   const { error } = await admin().from(BUGS_TABLE).insert({
     contact_id: body.contactId ? String(body.contactId) : null,
     where_at: where,
