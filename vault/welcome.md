@@ -18,4 +18,5 @@ contents out (including files added to it later).
 
 To get synthesized (rather than extractive) answers, add an Anthropic API key in
 onboarding — it is stored locally in `vault/.rag-vault/profile.json` and never
-leaves your machine.
+leaves your machine. Or pick the **Local model (private)** provider to synthesize
+answers entirely on-device, with no key and no network at all.

@@ -13,8 +13,9 @@ database server, no embeddings download required.
 3. **Score** — the query and every chunk become TF-IDF vectors; chunks are
    ranked by cosine similarity.
 4. **Ground** — the top chunks are passed to the answer step (Claude when a key
-   is configured, otherwise a local extractive summary) and surfaced as the
-   reference passages beneath the answer.
+   is configured, an on-device local model when the "Local model (private)"
+   provider is selected, otherwise a local extractive summary) and surfaced as
+   the reference passages beneath the answer.
 
 Catalog-style questions ("show me all files", "list my datasets", "how many
 PDFs") bypass the ranker entirely and instead **enumerate** the included files —

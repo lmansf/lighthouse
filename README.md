@@ -149,8 +149,8 @@ Copy `.env.local.example` → `.env.local` (gitignored). All vars are optional:
 
 ## Local model
 
-Pick **"Local model (private)"** in onboarding (or under the gear → AI models) to
-answer entirely on-device — no API key, no network, nothing leaves your machine.
+Pick **"Local model (private)"** as your provider in onboarding to answer
+entirely on-device — no API key, no network, nothing leaves your machine.
 This is the privacy-first option for governance-conscious teams.
 
 Lighthouse talks to a local **OpenAI chat-completions compatible** server. Two
