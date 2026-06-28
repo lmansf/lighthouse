@@ -318,13 +318,15 @@ function RegistrationChoice() {
 /**
  * Feedback form. "post-purchase" runs after a subscription (no notify line);
  * "trial-end" runs when a trial ends while paid is off, and includes the
- * "email me when purchasing opens" checkbox.
+ * "email me when purchasing opens" checkbox; "mid-session" is the optional
+ * nudge that surfaces after a while of use (issue: feedback nudge) — same form,
+ * gentler copy. The `mode` only changes copy, so adding modes is safe.
  */
 export function FeedbackForm({
   mode,
   onDone,
 }: {
-  mode: "trial-end" | "post-purchase";
+  mode: "trial-end" | "post-purchase" | "mid-session";
   onDone: () => void;
 }) {
   const styles = useStyles();
@@ -359,12 +361,20 @@ export function FeedbackForm({
     <>
       <div className={styles.beaconRow}>
         <span className={styles.beacon} />
-        <Title3>{mode === "post-purchase" ? "Thanks for subscribing!" : "Your trial has ended"}</Title3>
+        <Title3>
+          {mode === "post-purchase"
+            ? "Thanks for subscribing!"
+            : mode === "mid-session"
+              ? "What do you think so far?"
+              : "Your trial has ended"}
+        </Title3>
       </div>
       <Text className={styles.body}>
         {mode === "post-purchase"
           ? "A couple of quick questions before you dive back in — your files are right where you left them."
-          : "Share a little feedback. Your files are safe and untouched."}
+          : mode === "mid-session"
+            ? "You've been at it a little while — mind sharing a quick first impression? It really helps."
+            : "Share a little feedback. Your files are safe and untouched."}
       </Text>
 
       <Field label="First name">

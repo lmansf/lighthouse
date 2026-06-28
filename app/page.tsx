@@ -9,6 +9,7 @@ import { FileExplorer } from "@/features/explorer/FileExplorer";
 import { ChatPanel } from "@/features/chat/ChatPanel";
 import { LicenseGate, GraceBanner, PostPurchaseFeedback } from "@/features/license/LicenseGate";
 import { BugReport } from "@/features/feedback/BugReport";
+import { FeedbackNudge } from "@/features/feedback/FeedbackNudge";
 
 /**
  * Composition root. The shell owns layout; each feature team replaces its own
@@ -102,6 +103,7 @@ export default function Home() {
     <>
       {shell}
       <BugReport />
+      {onboarded && <FeedbackNudge />}
     </>
   );
 }
