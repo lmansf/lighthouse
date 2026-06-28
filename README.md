@@ -76,9 +76,13 @@ contracts — no cloud database required:
   the query names one. Large files are read up to a
   1 MB prefix and total chunks are capped, so a huge dataset can't stall a query
   (`src/server/vault.ts`) — local, no embeddings download.
-- **Chat** streams a grounded answer (`/api/chat`): Anthropic Claude when an API
-  key is configured (set in onboarding or `ANTHROPIC_API_KEY`), otherwise a local
-  extractive fallback that needs no network. The answer's **Related files** cards
+- **Chat** is a running conversation that streams a grounded answer (`/api/chat`):
+  Anthropic Claude when an API key is configured (set in onboarding or
+  `ANTHROPIC_API_KEY`), otherwise a local extractive fallback that needs no network.
+  Each question and answer is kept in a transcript so you can ask follow-ups about
+  the documents that came back (prior turns — capped to the last few — are threaded
+  to the model, and a bare follow-up blends in the previous question to anchor
+  retrieval); **New chat** starts fresh. The answer's **Related files** cards
   are clickable on the desktop build — `/api/open` opens the cited file in its
   native app (web deployments report no such capability and the cards stay inert).
 - **Profile/key** are stored locally in `vault/.rag-vault/profile.json` (gitignored).

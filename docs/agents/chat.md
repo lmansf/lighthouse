@@ -7,13 +7,13 @@ A Google-style answer surface: the AI answer on top, related/reference files ben
 
 ## Contract you implement against
 - Scope retrieval via `useRagStore().includedFileIds()` - only included files are queryable.
-- Call `ChatService.ask(question, includedFileIds)` from `@/contracts`. It returns an `AsyncIterable<ChatChunk>`; append each `chunk.delta`, and the terminating chunk (`done: true`) carries `references: RagReference[]`.
+- Call `ChatService.ask(question, includedFileIds, history?)` from `@/contracts`. It returns an `AsyncIterable<ChatChunk>`; append each `chunk.delta`, and the terminating chunk (`done: true`) carries `references: RagReference[]`. Pass prior turns as `history: ChatTurn[]` (`{ role, content }`) so follow-up questions resolve against the ongoing conversation (the backend caps history to the last few turns).
 - Render `RagReference` (`fileId`, `name`, `snippet`, `score`) as the "related files" list.
 
 ## What to build
-1. **Composer** + transcript of turns.
+1. **Composer** + a running transcript of turns: each question and its grounded answer is kept so the dialogue accumulates. A **"New chat"** button starts a fresh conversation.
 2. Each assistant turn: **answer streamed token-by-token at the top**, then a **"Related files"** list of reference cards below (name, snippet, score), appearing as the stream resolves.
-3. Realtime feel - show streaming state; let the user ask follow-ups.
+3. Realtime feel - show streaming state; let the user ask follow-ups (prior turns are threaded back via `history`).
 4. Empty/grounding states: if `includedFileIds()` is empty, prompt the user to include files first (the backend returns a no-grounding answer in that case).
 
 ## Acceptance criteria

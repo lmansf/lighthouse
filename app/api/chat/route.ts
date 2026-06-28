@@ -1,6 +1,6 @@
 /** Chat endpoint: retrieve from the included set, then stream a grounded answer
  *  as newline-delimited ChatChunk JSON (the final line carries references). */
-import type { ChatChunk } from "@/contracts";
+import type { ChatChunk, ChatTurn } from "@/contracts";
 import { retrieve } from "@/server/sources/registry";
 import { streamAnswer } from "@/server/llm";
 import { modelConfig } from "@/server/profile";
@@ -19,8 +19,24 @@ export async function POST(req: Request) {
   const body = await req.json().catch(() => ({}));
   const question = typeof body.question === "string" ? body.question : "";
   const includedFileIds = Array.isArray(body.includedFileIds) ? body.includedFileIds : [];
+  // Prior turns (sanitized) so follow-ups have conversational context.
+  const history: ChatTurn[] = Array.isArray(body.history)
+    ? body.history
+        .filter(
+          (t: unknown): t is ChatTurn =>
+            !!t &&
+            typeof (t as ChatTurn).content === "string" &&
+            ((t as ChatTurn).role === "user" || (t as ChatTurn).role === "assistant"),
+        )
+        .slice(-8) // cap context: last few turns are enough and bound token cost
+    : [];
 
-  const { references, contexts } = await retrieve(question, includedFileIds);
+  // A bare follow-up ("what about the second one?") retrieves poorly on its own,
+  // so blend in the previous user turn to anchor retrieval to the topic.
+  const lastUserTurn = [...history].reverse().find((t) => t.role === "user");
+  const retrievalQuery = lastUserTurn ? `${lastUserTurn.content}\n${question}` : question;
+
+  const { references, contexts } = await retrieve(retrievalQuery, includedFileIds);
   const cfg = modelConfig();
 
   const encoder = new TextEncoder();
@@ -29,7 +45,7 @@ export async function POST(req: Request) {
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
       try {
-        for await (const delta of streamAnswer(question, contexts, cfg)) {
+        for await (const delta of streamAnswer(question, contexts, cfg, history)) {
           controller.enqueue(line({ delta, done: false }));
         }
       } catch (err) {
