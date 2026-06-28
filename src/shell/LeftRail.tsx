@@ -1,7 +1,7 @@
 "use client";
 
 import { Text, makeStyles, shorthands, tokens } from "@fluentui/react-components";
-import { LAYOUT } from "./theme";
+import { LAYOUT, ACCENTS } from "./theme";
 import { SettingsMenu } from "@/features/license/LicenseGate";
 
 const useStyles = makeStyles({
@@ -29,13 +29,13 @@ const useStyles = makeStyles({
     gap: tokens.spacingHorizontalS,
     fontWeight: tokens.fontWeightSemibold,
   },
-  // The beacon: the one place red shows by default.
+  // The beacon: a red lamp throwing a warm amber glow — the lighthouse light.
   beacon: {
     width: "10px",
     height: "10px",
     borderRadius: "50%",
     backgroundColor: tokens.colorBrandBackground,
-    boxShadow: `0 0 8px 1px ${tokens.colorBrandBackground}`,
+    boxShadow: `0 0 10px 2px ${ACCENTS.beam}`,
   },
   body: {
     flex: 1,
