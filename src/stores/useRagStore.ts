@@ -11,6 +11,12 @@ interface RagStore {
   sources: DataSource[];
   nodes: FileNode[];
   /**
+   * True only on the desktop build, where filesystem-backed actions (opening a
+   * cited file natively) work. The web deployment reports false so the UI can
+   * hide affordances the server would refuse.
+   */
+  desktop: boolean;
+  /**
    * Selection mode: clicking a row picks it (multi-select) instead of toggling
    * its RAG inclusion, so the user can select several files and then apply one
    * action — "make visible" (include) or "remove" (exclude) — to all of them.
@@ -41,15 +47,17 @@ interface RagStore {
 export const useRagStore = create<RagStore>((set, get) => ({
   sources: [],
   nodes: [],
+  desktop: false,
   selectionMode: false,
   selectedIds: [],
 
   load: async () => {
-    const [sources, nodes] = await Promise.all([
+    const [sources, nodes, caps] = await Promise.all([
       ragService.listSources(),
       ragService.listNodes(),
+      ragService.capabilities(),
     ]);
-    set({ sources, nodes });
+    set({ sources, nodes, desktop: caps.desktop });
   },
 
   // Leaving selection mode clears the pending picks so they don't linger.

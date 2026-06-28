@@ -66,7 +66,9 @@ contracts — no cloud database required:
   (`src/server/vault.ts`) — local, no embeddings download.
 - **Chat** streams a grounded answer (`/api/chat`): Anthropic Claude when an API
   key is configured (set in onboarding or `ANTHROPIC_API_KEY`), otherwise a local
-  extractive fallback that needs no network.
+  extractive fallback that needs no network. The answer's **Related files** cards
+  are clickable on the desktop build — `/api/open` opens the cited file in its
+  native app (web deployments report no such capability and the cards stay inert).
 - **Profile/key** are stored locally in `vault/.rag-vault/profile.json` (gitignored).
 
 Swap back to the in-memory mocks by pointing the three exports in

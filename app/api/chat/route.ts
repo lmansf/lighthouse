@@ -1,7 +1,7 @@
 /** Chat endpoint: retrieve from the included set, then stream a grounded answer
  *  as newline-delimited ChatChunk JSON (the final line carries references). */
 import type { ChatChunk } from "@/contracts";
-import { retrieve } from "@/server/vault";
+import { retrieve } from "@/server/sources/registry";
 import { streamAnswer } from "@/server/llm";
 import { modelConfig } from "@/server/profile";
 import { isSameOrigin } from "@/server/http";

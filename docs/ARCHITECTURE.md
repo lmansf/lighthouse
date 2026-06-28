@@ -27,8 +27,22 @@ src/contracts/
 
 The barrel exports the **real** implementations by default; the server-side
 logic they call lives in `src/server/` (`vault.ts`, `llm.ts`, `profile.ts`,
-`config.ts`) and is exposed through the Node routes in `app/api/{rag,chat,profile}`.
+`config.ts`, plus the `sources/` registry) and is exposed through the Node routes
+in `app/api/{rag,chat,open,profile}`.
 See [README.md](../README.md#backend-local-first-standalone) for what runs where.
+
+### The source-connector seam
+
+`src/server/sources/` keeps the explorer and the API source-agnostic. A
+`SourceConnector` (`types.ts`) is one top-level origin of documents; the local
+filesystem vault (`local.ts`, a thin adapter over `vault.ts`) is the first one
+and the **fallback owner** for any bare node id. The `registry.ts` aggregates
+listings across all connectors and routes each curation op (`setIncluded`,
+`moveNode`, `addReference`, …) and retrieval to the owning source. Cloud
+connectors (SharePoint, S3, …) register here later, owning ids namespaced
+`${sourceId}::<path>`; the registry consults them by id prefix first, then falls
+back to local. `/api/rag` and chat retrieval go through the registry, not
+`vault.ts` directly. This is groundwork — today only the local vault is wired in.
 
 Two Zustand stores carry shared state between features:
 
@@ -42,7 +56,7 @@ Two Zustand stores carry shared state between features:
 | shell | `src/shell/` | `FluentProvider`/dark theme (`theme.ts`), app frame, collapsible left rail | contracts |
 | onboarding | `src/features/onboarding/` | sign-in slides → model-select (provider/model/key + key links) | contracts, `AuthService`, `useAuthStore` |
 | explorer | `src/features/explorer/` | file tree, hierarchical RAG toggle / selection mode, add files/folders, link files in place | contracts, `RagService`, `useRagStore` |
-| chat | `src/features/chat/` | answer-on-top + reference files below, realtime streaming | contracts, `ChatService`, `useRagStore` |
+| chat | `src/features/chat/` | answer-on-top + reference files below (clickable to open the cited file natively on desktop), realtime streaming | contracts, `ChatService`, `useRagStore` |
 
 `app/page.tsx` composes the three feature components into the shell. Each team replaces **only its own** placeholder.
 

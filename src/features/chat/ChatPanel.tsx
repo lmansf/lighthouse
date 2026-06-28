@@ -9,7 +9,7 @@
  * `useRagStore().includedFileIds()` - never read other features' internals.
  */
 
-import { useMemo, useState } from "react";
+import { useMemo, useState, type KeyboardEvent } from "react";
 import {
   Badge,
   Button,
@@ -18,10 +18,11 @@ import {
   Text,
   Title3,
   makeStyles,
+  mergeClasses,
   shorthands,
   tokens,
 } from "@fluentui/react-components";
-import { DocumentRegular, SendRegular } from "@fluentui/react-icons";
+import { DocumentRegular, OpenRegular, SendRegular } from "@fluentui/react-icons";
 import type { RagReference } from "@/contracts";
 import { chatService } from "@/contracts";
 import { useRagStore } from "@/stores/useRagStore";
@@ -78,6 +79,12 @@ const useStyles = makeStyles({
     gap: tokens.spacingHorizontalM,
     ...shorthands.padding(tokens.spacingVerticalS, tokens.spacingHorizontalM),
   },
+  refCardInteractive: {
+    cursor: "pointer",
+    ":hover": { backgroundColor: tokens.colorNeutralBackground2Hover },
+    ":hover .open-affordance": { opacity: 1 },
+  },
+  openIcon: { opacity: 0, transition: "opacity 120ms ease", color: tokens.colorNeutralForeground3 },
   refMeta: { display: "flex", flexDirection: "column", flex: 1, minWidth: 0 },
   composer: {
     display: "flex",
@@ -153,6 +160,7 @@ export function ChatPanel() {
   // Subscribe to `nodes` (not the stable `includedFileIds` fn) so the panel
   // re-renders when the explorer toggles inclusion - this is the live seam.
   const nodes = useRagStore((s) => s.nodes);
+  const desktop = useRagStore((s) => s.desktop);
   const includedFileIds = useMemo(
     () => nodes.filter((n) => n.kind === "file" && n.ragIncluded).map((n) => n.id),
     [nodes],
@@ -174,6 +182,15 @@ export function ChatPanel() {
       if (chunk.references) setReferences(chunk.references);
     }
     setStreaming(false);
+  }
+
+  // Open a cited file in its native app (desktop only; the route no-ops on web).
+  async function openFile(fileId: string) {
+    await fetch("/api/open", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ nodeId: fileId }),
+    }).catch(() => {});
   }
 
   const composer = (
@@ -230,7 +247,25 @@ export function ChatPanel() {
                   Related files
                 </Text>
                 {references.map((r) => (
-                  <Card key={r.fileId} className={styles.refCard} appearance="filled-alternative">
+                  <Card
+                    key={r.fileId}
+                    className={
+                      desktop
+                        ? mergeClasses(styles.refCard, styles.refCardInteractive)
+                        : styles.refCard
+                    }
+                    appearance="filled-alternative"
+                    {...(desktop
+                      ? {
+                          role: "button",
+                          tabIndex: 0,
+                          title: `Open ${r.name}`,
+                          onClick: () => void openFile(r.fileId),
+                          onKeyDown: (e: KeyboardEvent) =>
+                            (e.key === "Enter" || e.key === " ") && void openFile(r.fileId),
+                        }
+                      : {})}
+                  >
                     <DocumentRegular fontSize={24} />
                     <div className={styles.refMeta}>
                       <Text weight="semibold" truncate>
@@ -240,6 +275,9 @@ export function ChatPanel() {
                         {r.snippet}
                       </Text>
                     </div>
+                    {desktop && (
+                      <OpenRegular className={`${styles.openIcon} open-affordance`} fontSize={18} />
+                    )}
                     <Badge appearance="outline">{Math.round(r.score * 100)}%</Badge>
                   </Card>
                 ))}

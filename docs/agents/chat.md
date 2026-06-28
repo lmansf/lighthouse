@@ -18,7 +18,7 @@ A Google-style answer surface: the AI answer on top, related/reference files ben
 
 ## Acceptance criteria
 - Streaming renders incrementally (not all-at-once).
-- References are clickable affordances that reference real `fileId`s from the store (wiring to "reveal in explorer" can be a store flag later - do not import the explorer).
+- References are clickable affordances that reference real `fileId`s from the store. On the desktop build (`useRagStore().desktop`), clicking a card POSTs the `fileId` to `/api/open` to open the cited file in its native app; on web the cards stay non-interactive (the route refuses). Do not import the explorer.
 - The "N sources available" indicator tracks `includedFileIds()` live.
 - `npm run build` passes.
 
