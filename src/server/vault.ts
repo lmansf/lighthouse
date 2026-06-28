@@ -560,6 +560,28 @@ const LISTING_EXT: Record<string, string[]> = {
   pdf: [".pdf"],
 };
 
+// Catalog scaffolding tokens — verbs, determiners, and quantifiers that frame a
+// "list my files" request but carry no content of their own.
+const LISTING_FILLER = new Set([
+  "show", "me", "list", "give", "please", "can", "could", "would", "you", "display",
+  "name", "names", "enumerate", "tell", "what", "which", "how", "many", "much",
+  "are", "there", "is", "do", "does", "did", "i", "we", "my", "our", "the", "a",
+  "an", "all", "every", "each", "of", "in", "on", "to", "get", "see", "view",
+  "find", "catalog", "catalogue", "count", "number", "total", "available",
+  "included", "uploaded", "stored", "have", "has", "any",
+]);
+// Catalog nouns (singular/plural) that name the kind being enumerated.
+const LISTING_NOUN = new Set([
+  "file", "files", "dataset", "datasets", "document", "documents", "doc", "docs",
+  "pdf", "pdfs", "spreadsheet", "spreadsheets", "csv", "csvs", "table", "tables",
+  "source", "sources",
+]);
+// File-type qualifiers ("csv files", "pdf documents") — extension-like adjectives.
+const LISTING_QUALIFIER = new Set([
+  "csv", "tsv", "xlsx", "xls", "parquet", "json", "arrow", "feather", "md",
+  "markdown", "txt", "text", "rst", "rtf", "odt", "docx", "xml", "html",
+]);
+
 /**
  * Detect a catalog-style query ("show me all files", "list my datasets", "how
  * many documents") — which should ENUMERATE the included set rather than rank by
@@ -577,6 +599,15 @@ function listingIntent(query: string): Listing | null {
   // question about one file ("summarize the report file") doesn't trip this.
   const strong = /\b(all|every|each|list|how many|enumerate|catalog|catalogue)\b/.test(q);
   if (!plural && !strong) return null;
+
+  // Only a pure catalog request should enumerate. Strip the catalog scaffolding
+  // (verbs, determiners, the catalog noun, and any file-type qualifier); if any
+  // meaningful content token survives, this is a content question — e.g. "which
+  // documents mention the lawsuit" — so fall through to relevance ranking.
+  const residual = (q.match(/[a-z0-9]+/g) ?? []).filter(
+    (t) => !LISTING_FILLER.has(t) && !LISTING_NOUN.has(t) && !LISTING_QUALIFIER.has(t),
+  );
+  if (residual.length > 0) return null;
 
   const noun = m[1];
   const kind =
@@ -600,14 +631,20 @@ function listingIntent(query: string): Listing | null {
 /** Enumerate the included files matching a listing intent (capped for huge vaults). */
 function buildListing(nodes: FileNode[], intent: Listing): Retrieved {
   const files = nodes.filter((n) => intent.match(n.name));
-  if (files.length === 0) return { references: [], contexts: [] };
+  if (files.length === 0)
+    return {
+      references: [],
+      contexts: [{ name: `Included ${intent.label}`, text: `No included ${intent.label} found.`, score: 1 }],
+    };
   const names = files.map((f) => f.name);
-  const CAP = 200;
+  // Cap the prose list at the same count as the citeable references below so
+  // every named file has a corresponding clickable citation.
+  const CAP = 50;
   const list =
     `${files.length} included ${intent.label}:\n` +
     names.slice(0, CAP).map((n) => `- ${n}`).join("\n") +
     (names.length > CAP ? `\n…and ${names.length - CAP} more` : "");
-  const references: RagReference[] = files.slice(0, 50).map((f) => ({
+  const references: RagReference[] = files.slice(0, CAP).map((f) => ({
     fileId: f.id,
     name: f.name,
     snippet: "",
