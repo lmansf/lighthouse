@@ -16,6 +16,7 @@ const WINDOW_ICON = path.join(APP_ROOT, "assets", "icon.png");
 const TRAY_ICON = path.join(APP_ROOT, "assets", "tray.png");
 
 let serverProc = null;
+let llmProc = null;
 let win = null;
 let tray = null;
 
@@ -38,6 +39,33 @@ function vaultDir() {
   const dir = loadSettings().vaultDir || path.join(app.getPath("documents"), "Lighthouse Vault");
   fs.mkdirSync(dir, { recursive: true });
   return dir;
+}
+
+/**
+ * Optionally launch a bundled local inference server (issue #24, "Local model").
+ * If a `llama-server`-style binary and a `.gguf` model are packaged under
+ * resources/llm, spawn it on :8080 — the default the app's "Local model"
+ * provider talks to. When nothing is bundled this is a no-op, and that provider
+ * instead targets any OpenAI-compatible server the user runs themselves (Ollama,
+ * LM Studio) via the LIGHTHOUSE_LOCAL_LLM_URL the Next server reads.
+ */
+function startLocalLlm() {
+  const root = process.resourcesPath
+    ? path.join(process.resourcesPath, "llm")
+    : path.join(APP_ROOT, "resources", "llm");
+  const bin = path.join(root, process.platform === "win32" ? "llama-server.exe" : "llama-server");
+  let model = null;
+  try {
+    model = fs.readdirSync(root).find((f) => f.toLowerCase().endsWith(".gguf"));
+  } catch {
+    /* no bundled model directory */
+  }
+  if (!model || !fs.existsSync(bin)) return; // nothing bundled — rely on an external server
+  llmProc = spawn(bin, ["-m", path.join(root, model), "--host", "127.0.0.1", "--port", "8080"], {
+    cwd: root,
+    stdio: "inherit",
+  });
+  llmProc.on("error", (e) => console.error("local model failed to start", e));
 }
 
 function startServer() {
@@ -275,6 +303,7 @@ if (!app.requestSingleInstanceLock()) {
     // Launch at login unless the user turned it off (default on). The in-app
     // prompt writes runOnStartup to the settings file; we honor it each launch.
     app.setLoginItemSettings({ openAtLogin: loadSettings().runOnStartup !== false });
+    startLocalLlm(); // bring up the bundled local model first, if present
     startServer();
     buildMenu();
     createTray();
@@ -299,5 +328,6 @@ if (!app.requestSingleInstanceLock()) {
   app.on("before-quit", () => {
     app.isQuitting = true;
     if (serverProc) serverProc.kill();
+    if (llmProc) llmProc.kill();
   });
 }

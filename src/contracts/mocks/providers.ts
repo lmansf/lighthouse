@@ -2,7 +2,8 @@ import type { ModelProvider } from "../types";
 
 /**
  * Model providers offered during onboarding. `apiKeyUrl` deep-links the user
- * to the exact page where they generate a key for that provider.
+ * to the exact page where they generate a key for that provider (or, for the
+ * local model, to setup docs — it needs no key).
  */
 export const MODEL_PROVIDERS: ModelProvider[] = [
   {
@@ -10,6 +11,15 @@ export const MODEL_PROVIDERS: ModelProvider[] = [
     label: "Anthropic Claude",
     models: ["claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5"],
     apiKeyUrl: "https://console.anthropic.com/settings/keys",
+  },
+  {
+    // A private model that runs entirely on this machine — no key, no network,
+    // nothing leaves your environment. Talks to a local OpenAI-compatible
+    // inference server (llama.cpp's `llama-server`, Ollama, LM Studio, etc.).
+    id: "local",
+    label: "Local model (private)",
+    models: ["lighthouse-local"],
+    apiKeyUrl: "https://github.com/lmansf/lighthouse#local-model",
   },
   {
     id: "openai",

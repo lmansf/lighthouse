@@ -139,6 +139,28 @@ Copy `.env.local.example` → `.env.local` (gitignored). All vars are optional:
   service-role key and the production `LICENSE_SECRET` live in the Edge Function,
   never here. See **[docs/registration.md](docs/registration.md)**.
 
+## Local model
+
+Pick **"Local model (private)"** in onboarding (or under the gear → AI models) to
+answer entirely on-device — no API key, no network, nothing leaves your machine.
+This is the privacy-first option for governance-conscious teams.
+
+Lighthouse talks to a local **OpenAI chat-completions compatible** server. Two
+ways to provide one:
+
+- **Bundled (zero setup):** when a `llama-server` binary and a `.gguf` model are
+  packaged under `resources/llm/`, the desktop app launches it automatically on
+  `127.0.0.1:8080` at startup and shuts it down on quit. (Packaging the binary +
+  weights into the installer via electron-builder `extraResources` is the
+  remaining release step.)
+- **Bring your own:** run [Ollama](https://ollama.com) or
+  [LM Studio](https://lmstudio.ai) yourself and point Lighthouse at it with
+  `LIGHTHOUSE_LOCAL_LLM_URL` (default `http://127.0.0.1:8080/v1/chat/completions`;
+  for Ollama use `http://127.0.0.1:11434/v1/chat/completions`).
+
+If the local server isn't reachable, Lighthouse falls back to streaming the most
+relevant passages so you still get a grounded, cited answer.
+
 ## Status
 
 Working local-first vertical slice: real file tree, real retrieval (including
