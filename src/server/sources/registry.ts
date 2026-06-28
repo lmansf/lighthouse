@@ -76,6 +76,6 @@ export async function removeFromVault(nodeId: string): Promise<void> {
  * text is gathered and ranked together (the ranking math is already source-
  * agnostic — it operates on { id, name, text }).
  */
-export function retrieve(query: string, includedFileIds: string[], k = 5): Retrieved {
+export function retrieve(query: string, includedFileIds: string[], k = 5): Promise<Retrieved> {
   return vaultRetrieve(query, includedFileIds, k);
 }

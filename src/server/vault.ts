@@ -17,6 +17,7 @@ import {
   readJson,
   writeJson,
 } from "./config";
+import { isRichFile, extractRichText } from "./extract";
 
 /** An item referenced in place (not copied) — its real absolute path on disk. */
 interface Reference {
@@ -114,7 +115,10 @@ function isEffectivelyIncluded(id: string, state: VaultState): boolean {
   return state.included[id] === true; // absent ⇒ excluded
 }
 
-/** Text-extractable extensions. Binary formats (pdf/docx) await the parser upgrade. */
+/**
+ * Extensions read directly as UTF-8 text. Rich binary formats (pdf/docx/xlsx)
+ * are decoded via parsers in ./extract and are *not* listed here.
+ */
 const TEXT_EXT = new Set([
   ".md", ".markdown", ".txt", ".text", ".rst", ".csv", ".tsv", ".json",
   ".yaml", ".yml", ".log", ".html", ".htm", ".xml", ".js", ".ts", ".tsx",
@@ -126,6 +130,9 @@ const MIME: Record<string, string> = {
   ".md": "text/markdown", ".markdown": "text/markdown", ".txt": "text/plain",
   ".csv": "text/csv", ".json": "application/json", ".pdf": "application/pdf",
   ".html": "text/html", ".htm": "text/html",
+  ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  ".xls": "application/vnd.ms-excel",
 };
 
 const isTextFile = (name: string) => TEXT_EXT.has(path.extname(name).toLowerCase());
@@ -472,13 +479,16 @@ const MAX_TEXT_BYTES = 1_000_000;
  * with no extension) are read — and type-checked — by their true path. Files
  * larger than MAX_TEXT_BYTES are read up to that prefix only.
  */
-function readText(nodeId: string, state: VaultState): string {
+async function readText(nodeId: string, state: VaultState): Promise<string> {
   let abs: string;
   try {
     abs = resolveAbs(nodeId, state);
   } catch {
     return "";
   }
+  // Rich formats (pdf/docx/xlsx) go through a parser with its own size handling
+  // and on-disk cache; plain text is read directly below.
+  if (isRichFile(abs)) return extractRichText(abs, path.extname(abs).toLowerCase());
   if (!isTextFile(abs)) return "";
   try {
     let size = 0;
@@ -712,7 +722,7 @@ const MAX_TOTAL_CHUNKS = 4000;
  * and by what it's called. (A file literally named "creditcard.csv" answers
  * "do I have any credit cards?" even when its rows are anonymized numbers.)
  */
-export function retrieve(query: string, includedFileIds: string[], k = 5): Retrieved {
+export async function retrieve(query: string, includedFileIds: string[], k = 5): Promise<Retrieved> {
   // Server-authoritative inclusion: intersect the caller's set with what is
   // actually included on disk right now, so unselecting a file (or hiding the
   // source) removes it from the very next answer — a stale client cannot leak
@@ -736,7 +746,7 @@ export function retrieve(query: string, includedFileIds: string[], k = 5): Retri
   const preview = new Map<string, string>(); // first content slice, for name-only hits
   const chunks: Chunk[] = [];
   for (const n of nodes) {
-    const text = readText(n.id, state);
+    const text = await readText(n.id, state);
     if (text.trim()) {
       const cs = chunksOf(text, n.id, n.name);
       preview.set(n.id, cs[0]?.text.slice(0, 240) ?? "");

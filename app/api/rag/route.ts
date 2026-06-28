@@ -48,7 +48,7 @@ export async function POST(req: Request) {
     case "search": {
       const query = typeof body.query === "string" ? body.query : "";
       const ids = Array.isArray(body.includedFileIds) ? body.includedFileIds : [];
-      return NextResponse.json({ references: retrieve(query, ids).references });
+      return NextResponse.json({ references: (await retrieve(query, ids)).references });
     }
 
     case "move": {
