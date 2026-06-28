@@ -21,7 +21,7 @@ const ratio = (a, b) => {
 const P = {
   bg1: "#FBF5E9", bg2: "#F4E9D2", bg3: "#EADFC5",
   fg1: "#2A2018", fg2: "#6E5C44", fg3: "#87745A",
-  red: "#BE2A1E", redText: "#9A2017",
+  red: "#C02A20", redText: "#9A2017",
   sky: "#2C6BA6", skyFill: "#CFE2F2",
   beam: "#E0A019", beamFill: "#FBE7AC",
   white: "#FFFFFF",
