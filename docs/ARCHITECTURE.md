@@ -18,7 +18,7 @@ Everything hangs off `src/contracts/`. Features depend on the contract **interfa
 
 ```
 src/contracts/
-  types.ts        # FileNode, DataSource, ModelProvider, RagReference, ChatMessage, ChatChunk, User, OnboardingState
+  types.ts        # FileNode, DataSource, ModelProvider, RagReference, ChatTurn, ChatMessage, ChatChunk, User, OnboardingState
   services.ts     # RagService, AuthService, ChatService  (interfaces)
   mocks/          # in-memory implementations + seed data
   real/           # local-first implementations (call the app/api/* routes)
@@ -59,7 +59,7 @@ Two Zustand stores carry shared state between features:
 | shell | `src/shell/` | `FluentProvider`/sandy-beach light theme (`theme.ts`), app frame, collapsible left file sidebar (front-and-center chat in the main area) | contracts |
 | onboarding | `src/features/onboarding/` | sign-in slides → model-select (provider/model/key + key links) | contracts, `AuthService`, `useAuthStore` |
 | explorer | `src/features/explorer/` | file tree, hierarchical RAG toggle / selection mode, add files/folders, link files in place, remove from vault (recoverable trash) | contracts, `RagService`, `useRagStore` |
-| chat | `src/features/chat/` | answer-on-top + reference files below (clickable to open the cited file natively on desktop), realtime streaming | contracts, `ChatService`, `useRagStore` |
+| chat | `src/features/chat/` | running conversation (transcript of turns + follow-ups, "New chat" to reset) of answer-on-top + reference files below (clickable to open the cited file natively on desktop), realtime streaming | contracts, `ChatService`, `useRagStore` |
 
 `app/page.tsx` composes the three feature components into the shell. Each team replaces **only its own** placeholder.
 
