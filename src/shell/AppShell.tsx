@@ -45,6 +45,23 @@ export function AppShell({ rail, content }: AppShellProps) {
 
   useEffect(() => {
     void load();
+    // Keep the tree live: re-read the vault on an interval and whenever the
+    // window regains focus, so files added *outside* an in-app upload — copied
+    // into the vault folder directly, or via a native dialog — appear without a
+    // manual reload. Polling (a fresh scan) is used rather than fs.watch, which
+    // is unreliable on Windows/WSL-mounted and network paths.
+    const POLL_MS = 4000;
+    const tick = () => {
+      if (!document.hidden) void load();
+    };
+    const timer = setInterval(tick, POLL_MS);
+    window.addEventListener("focus", tick);
+    document.addEventListener("visibilitychange", tick);
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener("focus", tick);
+      document.removeEventListener("visibilitychange", tick);
+    };
   }, [load]);
 
   return (
