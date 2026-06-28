@@ -1,6 +1,9 @@
 /**
  * Answer generation. Grounds every answer in the retrieved vault context.
  *
+ * - Local model (when the "local" provider is selected): real streamed tokens
+ *   from an on-machine OpenAI-compatible inference server (llama.cpp's
+ *   `llama-server`, Ollama, LM Studio, …). Nothing leaves the machine.
  * - Anthropic Claude (when a key + the Anthropic provider are configured):
  *   real streamed tokens via the Messages API over `fetch` (no SDK dependency).
  * - Otherwise: a fully-local extractive fallback that streams the most relevant
@@ -10,6 +13,14 @@ import type { ChatTurn } from "@/contracts";
 
 const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION = "2023-06-01";
+
+// Where the bundled/local inference server listens. Override with
+// LIGHTHOUSE_LOCAL_LLM_URL to point at an existing Ollama/LM Studio instance.
+// The endpoint must be OpenAI chat-completions compatible.
+const LOCAL_LLM_URL =
+  process.env.LIGHTHOUSE_LOCAL_LLM_URL?.trim() || "http://127.0.0.1:8080/v1/chat/completions";
+const LOCAL_SYSTEM_PROMPT =
+  "You are Lighthouse's assistant. Answer only from the provided context and cite sources as [n]. Be concise.";
 
 export interface Ctx {
   name: string;
@@ -38,6 +49,26 @@ export async function* streamAnswer(
   if (contexts.length === 0) {
     yield "Nothing relevant is included in the RAG index yet. Add or include files in the explorer, then ask again.";
     return;
+  }
+
+  // A private, on-machine model — no key required.
+  if (cfg.providerId === "local") {
+    let emitted = false;
+    try {
+      for await (const delta of streamLocal(question, contexts, cfg.modelId ?? "lighthouse-local")) {
+        emitted = true;
+        yield delta;
+      }
+      return;
+    } catch (err) {
+      const note = `\n\n_(Local model unavailable — ${
+        err instanceof Error ? err.message : "error"
+      }${emitted ? "." : "; is the local model running? Falling back to passages."})_\n\n`;
+      yield note;
+      if (emitted) return;
+      yield* extractive(question, contexts, false);
+      return;
+    }
   }
 
   const canClaude = cfg.providerId === "anthropic" && cfg.apiKey;
@@ -124,6 +155,58 @@ async function* streamClaude(
         if (evt.type === "content_block_delta" && evt.delta?.type === "text_delta") {
           yield evt.delta.text as string;
         }
+      } catch {
+        /* ignore keep-alive / non-JSON frames */
+      }
+    }
+  }
+}
+
+/**
+ * Stream from a local OpenAI-compatible chat-completions endpoint (llama.cpp's
+ * `llama-server`, Ollama at /v1, LM Studio, …). Same SSE shape as OpenAI:
+ * `data: {choices:[{delta:{content}}]}` lines terminated by `data: [DONE]`.
+ */
+async function* streamLocal(
+  question: string,
+  contexts: Ctx[],
+  model: string,
+): AsyncGenerator<string> {
+  const res = await fetch(LOCAL_LLM_URL, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model,
+      max_tokens: 1024,
+      stream: true,
+      messages: [
+        { role: "system", content: LOCAL_SYSTEM_PROMPT },
+        { role: "user", content: buildPrompt(question, contexts) },
+      ],
+    }),
+  });
+  if (!res.ok || !res.body) {
+    throw new Error(`local model ${res.status}: ${(await res.text()).slice(0, 200)}`);
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    const lines = buf.split("\n");
+    buf = lines.pop() ?? "";
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith("data:")) continue;
+      const payload = trimmed.slice(5).trim();
+      if (!payload || payload === "[DONE]") continue;
+      try {
+        const evt = JSON.parse(payload);
+        const delta = evt.choices?.[0]?.delta?.content;
+        if (typeof delta === "string" && delta) yield delta;
       } catch {
         /* ignore keep-alive / non-JSON frames */
       }
