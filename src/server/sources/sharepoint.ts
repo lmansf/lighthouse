@@ -31,9 +31,8 @@ function nodeMap(nodes: SpNode[]): Map<string, SpNode> {
 }
 
 /** Effective inclusion: the node's own flag, or any ancestor folder's flag. */
-function effectivelyIncluded(id: string, state: MsState): boolean {
+function effectivelyIncluded(id: string, state: MsState, byId: Map<string, SpNode>): boolean {
   const inc = state.included ?? {};
-  const byId = nodeMap(state.nodes ?? []);
   let cur: string | null = id;
   while (cur) {
     if (inc[cur]) return true;
@@ -120,6 +119,7 @@ export const sharepoint: SourceConnector = {
   async listNodes(): Promise<FileNode[]> {
     const s = loadState();
     if (!isConnected()) return [];
+    const byId = nodeMap(s.nodes ?? []);
     return (s.nodes ?? []).map((n) => ({
       id: n.id,
       parentId: n.parentId,
@@ -128,7 +128,7 @@ export const sharepoint: SourceConnector = {
       kind: n.kind,
       mimeType: n.mimeType,
       size: n.size,
-      ragIncluded: effectivelyIncluded(n.id, s),
+      ragIncluded: effectivelyIncluded(n.id, s, byId),
       external: true, // content lives remotely until mirrored — reuse external styling
     }));
   },
@@ -147,7 +147,10 @@ export const sharepoint: SourceConnector = {
     if (included) {
       for (const f of files) await mirror(f);
     } else {
-      for (const f of files) unmirror(f);
+      const byId = nodeMap(s.nodes ?? []);
+      for (const f of files) {
+        if (!effectivelyIncluded(f.id, s, byId)) unmirror(f);
+      }
     }
   },
 
