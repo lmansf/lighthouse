@@ -1,24 +1,28 @@
 /**
- * Trial licensing (desktop side).
+ * Licensing (desktop side).
  *
- * The trial SECRETS — the Supabase service-role key and the `LICENSE_SECRET`
- * that encrypts license keys — live ONLY in the hosted Supabase Edge Function
+ * The secrets — the Supabase service-role key and the `LICENSE_SECRET` that
+ * encrypts license keys — live ONLY in the hosted Supabase Edge Function
  * (`supabase/functions/license`), never in the shipped app. The desktop holds
  * just the function's public URL and the public anon key, and calls it to mint
- * ("start") and verify ("check") trials. The filesystem RESET on expiry happens
- * locally (it can't be done server-side).
+ * ("start"), verify ("check"), and activate paid keys.
+ *
+ * Nothing is ever DELETED. When a license isn't valid the app locks: the vault
+ * files stay on disk (greyed out in the UI) and the user is shown a sign-in /
+ * start-a-new-trial gate. Files are never reset.
+ *
+ * Trial: 14 days of use, counted only on distinct days the user signs in (a
+ * launch that reaches `check`). The count is authoritative in Supabase
+ * (`active_days`/`last_active_day`); local-dev keeps its own counter.
+ *
+ * Paid: never expires destructively. Past `paid_through` the license enters a
+ * 14-day GRACE window (still usable, with a banner), then LOCKS (files greyed,
+ * sign-in gate) until renewed. A paid key is pasted into the activate field.
  *
  * Modes:
- *   Hosted   (LICENSE_API_URL set) — the shipping config. Mint/check go through
- *            the Edge Function. No secret is present on the client.
- *   Local    (LICENSE_ENFORCE=1, no URL) — a self-contained trial using local
- *            Node crypto + a local LICENSE_SECRET. For development only.
- *   Disabled (neither) — app runs unlicensed; checkLicense() reports "disabled".
- *
- * Only a verified, time-based expiry RESETS the vault — copied files deleted,
- * index/state cleared, references unlinked (their real files left untouched),
- * local license removed. An unreadable/forged key, or an offline check, reports
- * "none"/grace and never destroys vault files. Re-registration is unlimited.
+ *   Hosted   (LICENSE_API_URL set) — the shipping config. No secret on client.
+ *   Local    (LICENSE_ENFORCE=1, no URL) — self-contained, local crypto. Dev.
+ *   Disabled (neither) — app runs unlicensed; checkLicense() == "disabled".
  *
  *   LICENSE_API_URL    https://<project>.supabase.co/functions/v1/license
  *   SUPABASE_ANON_KEY  public key used to authorize the function call
@@ -26,23 +30,44 @@
  *   LICENSE_SECRET     local-dev-only key-encryption secret
  */
 import crypto from "node:crypto";
-import fs from "node:fs";
 import path from "node:path";
-import { vaultDir, stateDir, statePath, readJson, writeJson } from "./config";
+import { stateDir, readJson, writeJson } from "./config";
 import type { Registration } from "./registration";
 
-const TRIAL_DAYS = 14;
+const TRIAL_DAYS = 14; // sign-in days a trial lasts
+const GRACE_DAYS = 14; // paid: grace window after paid_through before locking
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 const licensePath = () => path.join(stateDir(), "license.json");
 const identityPath = () => path.join(stateDir(), "identity.json");
 
-export type LicenseStatus = "valid" | "expired" | "none" | "disabled";
+/** UTC calendar day (YYYY-MM-DD) — the unit a trial's sign-in days are counted in. */
+function utcDay(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+export type LicenseType = "trial" | "paid";
+
+// trial: valid | expired (locked, NOT deleted) | none
+// paid:  valid | grace (lapsed, still usable) | locked (NOT deleted) | none
+export type LicenseStatus = "valid" | "expired" | "grace" | "locked" | "none" | "disabled";
 
 interface LocalLicense {
   guid: string;
   licenseKey: string;
-  trialEnd: string; // ISO; authoritative copy refreshed on each successful check
+  licenseType?: LicenseType; // absent ⇒ "trial" (back-compat)
+  trialEnd?: string; // paid: paid_through; trial: nominal (display only)
+  graceUntil?: string; // paid: when grace ends and it locks
+  activeDays?: number; // local-dev trial: distinct sign-in days counted
+  lastActiveDay?: string; // local-dev trial: UTC day of the last count
+}
+
+export interface LicenseResult {
+  status: LicenseStatus;
+  licenseType?: LicenseType;
+  trialEnd?: string;
+  graceUntil?: string;
+  remainingDays?: number; // trial: sign-in days left of the 30
 }
 
 /** The hosted Edge Function URL, or null when not configured. */
@@ -55,7 +80,7 @@ function localMode(): boolean {
   return !licenseApi() && process.env.LICENSE_ENFORCE === "1";
 }
 
-/** Trial enforcement is on with a hosted function, or in forced local-dev. */
+/** Licensing is enforced with a hosted function, or in forced local-dev. */
 export function licensingEnabled(): boolean {
   return Boolean(licenseApi()) || localMode();
 }
@@ -101,7 +126,7 @@ function decrypt<T>(token: string): T | null {
   }
 }
 
-// --- contact identity persists across resets (for one-click re-trial) --------
+// --- contact identity persists across locks (for one-click re-trial) ---------
 function loadIdentity(): Registration | null {
   return readJson<Registration | null>(identityPath(), null);
 }
@@ -117,45 +142,107 @@ function contactRow(c: Registration) {
 }
 
 /**
- * Mint a fresh trial: new GUID + 14-day window + encrypted key. In hosted mode
- * the Edge Function mints (and writes the Supabase row); locally we mint with
- * Node crypto. `contact` (from the welcome form) is remembered and reused for
- * later one-click re-trials. The local license is written from the result.
+ * Mint a fresh trial: new GUID + encrypted key + a 14 sign-in-day allowance. In
+ * hosted mode the Edge Function mints (and writes the Supabase row); locally we
+ * mint with Node crypto. `contact` is remembered for later one-click re-trials.
  */
-export async function startTrial(contact?: Registration): Promise<{ guid: string; trialEnd: string }> {
+export async function startTrial(contact?: Registration): Promise<{ guid: string }> {
   const useContact = contact ?? loadIdentity() ?? null;
   if (useContact) writeJson(identityPath(), useContact);
 
   if (licenseApi()) {
     const r = await callFn("start", { contact: useContact ? contactRow(useContact) : undefined });
     if (r.ok === false) throw new Error(String(r.detail ?? "trial start rejected"));
-    const lic: LocalLicense = {
+    writeJson(licensePath(), {
       guid: String(r.guid),
       licenseKey: String(r.licenseKey),
-      trialEnd: String(r.trialEnd),
-    };
-    writeJson(licensePath(), lic);
-    return { guid: lic.guid, trialEnd: lic.trialEnd };
+      licenseType: "trial",
+      trialEnd: r.trialEnd ? String(r.trialEnd) : undefined,
+    } satisfies LocalLicense);
+    return { guid: String(r.guid) };
   }
 
   // local-dev (or disabled) — self-contained trial, no Supabase
   const guid = crypto.randomUUID();
   const now = new Date();
-  const trialEnd = new Date(now.getTime() + TRIAL_DAYS * DAY_MS).toISOString();
-  const licenseKey = encrypt({ guid, iat: now.toISOString(), trialEnd });
-  writeJson(licensePath(), { guid, licenseKey, trialEnd } satisfies LocalLicense);
-  return { guid, trialEnd };
+  const licenseKey = encrypt({ guid, iat: now.toISOString(), type: "trial" });
+  writeJson(licensePath(), {
+    guid,
+    licenseKey,
+    licenseType: "trial",
+    activeDays: 0,
+    lastActiveDay: undefined,
+  } satisfies LocalLicense);
+  return { guid };
 }
 
 /**
- * Check the stored license once per launch. In hosted mode the Edge Function is
- * authoritative (so manual `trial_end` extensions apply); we cache its latest
- * `trial_end` locally for offline grace. Only a verified, time-based "expired"
- * RESETS the vault. An unreadable/forged key, or an offline check past the
- * cached end, reports "none" so the user is prompted for a fresh trial —
- * without destroying any vault files.
+ * Activate a license key the user pasted (e.g. a purchased PAID key). Validates
+ * it via the function (hosted) or by decoding it (local-dev); on a usable status
+ * (valid/grace) it's stored locally so the next check picks it up. Never deletes
+ * or resets anything. Returns the resolved status.
  */
-export async function checkLicense(): Promise<{ status: LicenseStatus; trialEnd?: string }> {
+export async function activateLicense(licenseKey: string): Promise<LicenseResult> {
+  const key = licenseKey.trim();
+  if (!key) return { status: "none" };
+
+  if (licenseApi()) {
+    let r: Record<string, unknown>;
+    try {
+      r = await callFn("check", { licenseKey: key });
+    } catch {
+      return { status: "none" }; // unreachable — can't validate an unknown key
+    }
+    const status = r.status as LicenseStatus;
+    if (status === "valid" || status === "grace") {
+      const lic: LocalLicense = {
+        guid: String(r.guid ?? crypto.randomUUID()),
+        licenseKey: key,
+        licenseType: (r.licenseType as LicenseType) ?? "paid",
+        trialEnd: String(r.paidThrough ?? r.trialEnd ?? "") || undefined,
+        graceUntil: r.graceUntil ? String(r.graceUntil) : undefined,
+      };
+      writeJson(licensePath(), lic);
+      return { status, licenseType: lic.licenseType, trialEnd: lic.trialEnd, graceUntil: lic.graceUntil };
+    }
+    return { status };
+  }
+
+  // local-dev: decode and validate the pasted key
+  const decoded = decrypt<{ guid: string; type?: LicenseType; paidThrough?: string }>(key);
+  if (!decoded?.guid) return { status: "none" };
+  const type = decoded.type ?? "trial";
+  writeJson(licensePath(), {
+    guid: decoded.guid,
+    licenseKey: key,
+    licenseType: type,
+    trialEnd: decoded.paidThrough,
+    activeDays: type === "trial" ? 0 : undefined,
+  } satisfies LocalLicense);
+  return await checkLicense();
+}
+
+// --- paid status from an end date (shared by offline + local-dev paths) -------
+function paidStatusFrom(end: string | undefined, graceUntil: string | undefined): LicenseResult {
+  const endMs = Date.parse(end ?? "");
+  if (Number.isNaN(endMs)) return { status: "valid", licenseType: "paid" }; // open-ended
+  const graceMs = graceUntil ? Date.parse(graceUntil) : endMs + GRACE_DAYS * DAY_MS;
+  const now = Date.now();
+  const gu = new Date(graceMs).toISOString();
+  if (now <= endMs) return { status: "valid", licenseType: "paid", trialEnd: end };
+  if (now <= graceMs) return { status: "grace", licenseType: "paid", trialEnd: end, graceUntil: gu };
+  return { status: "locked", licenseType: "paid", trialEnd: end, graceUntil: gu };
+}
+
+/**
+ * Check the stored license once per launch. Authoritative in hosted mode (the
+ * Edge Function counts trial sign-in days and applies paid grace/lock). NOTHING
+ * is ever deleted: an expired trial or a locked paid license just reports its
+ * status so the UI can grey the vault and show the sign-in gate. An unreachable
+ * function is treated leniently (never locks a trial offline; paid falls back to
+ * its cached dates).
+ */
+export async function checkLicense(): Promise<LicenseResult> {
   if (!licensingEnabled()) return { status: "disabled" };
 
   const lic = readJson<LocalLicense | null>(licensePath(), null);
@@ -165,68 +252,43 @@ export async function checkLicense(): Promise<{ status: LicenseStatus; trialEnd?
     try {
       const r = await callFn("check", { licenseKey: lic.licenseKey });
       const status = r.status as LicenseStatus;
-      if (status === "valid") {
-        const trialEnd = r.trialEnd ? String(r.trialEnd) : lic.trialEnd;
-        if (trialEnd !== lic.trialEnd) writeJson(licensePath(), { ...lic, trialEnd });
-        return { status: "valid", trialEnd };
+      const licenseType = (r.licenseType as LicenseType) ?? lic.licenseType ?? "trial";
+      const trialEnd = r.paidThrough ? String(r.paidThrough) : r.trialEnd ? String(r.trialEnd) : lic.trialEnd;
+      const graceUntil = r.graceUntil ? String(r.graceUntil) : undefined;
+      const remainingDays = typeof r.remainingDays === "number" ? r.remainingDays : undefined;
+
+      // Cache the latest authoritative values for offline fallback (no reset).
+      if (status === "valid" || status === "grace" || status === "locked") {
+        writeJson(licensePath(), { ...lic, licenseType, trialEnd, graceUntil });
       }
-      if (status === "expired") {
-        resetVault();
-        return { status: "expired" };
-      }
-      // "none" — forged/corrupt key. Prompt for a new trial; do NOT reset.
-      return { status: "none" };
+      return { status, licenseType, trialEnd, graceUntil, remainingDays };
     } catch {
-      // Offline / function unreachable: never reset on an unverifiable check.
-      // Grant grace while the last-known trial_end is still in the future;
-      // otherwise prompt for a fresh trial (still no wipe).
-      const endMs = Date.parse(lic.trialEnd);
-      if (!Number.isNaN(endMs) && Date.now() <= endMs) {
-        return { status: "valid", trialEnd: lic.trialEnd };
+      // Offline / unreachable: never lock a trial (sign-in days only count when
+      // the user actually reaches the server). Paid falls back to cached dates.
+      if ((lic.licenseType ?? "trial") === "paid") {
+        return paidStatusFrom(lic.trialEnd, lic.graceUntil);
       }
-      return { status: "none" };
+      return { status: "valid", licenseType: "trial" };
     }
   }
 
-  // local-dev verification
-  const decoded = decrypt<{ guid: string; trialEnd: string }>(lic.licenseKey);
+  // --- local-dev verification ---
+  const decoded = decrypt<{ guid: string; type?: LicenseType; paidThrough?: string }>(lic.licenseKey);
   if (!decoded || decoded.guid !== lic.guid) return { status: "none" };
-  const trialEnd = lic.trialEnd || decoded.trialEnd;
-  const endMs = Date.parse(trialEnd);
-  if (Number.isNaN(endMs) || Date.now() > endMs) {
-    resetVault();
-    return { status: "expired" };
-  }
-  return { status: "valid", trialEnd };
-}
+  const type = lic.licenseType ?? decoded.type ?? "trial";
 
-/**
- * Reset the vault on trial expiry. Deletes everything copied into the vault and
- * clears the index/inclusion state and references (an UNLINK — the real files a
- * reference points to are left in place). Removes the local license so the next
- * launch prompts for a new trial. The contact identity and profile are kept.
- */
-export function resetVault(): void {
-  const dir = vaultDir();
-  let entries: string[] = [];
-  try {
-    entries = fs.readdirSync(dir);
-  } catch {
-    /* nothing to clear */
+  if (type === "paid") {
+    return paidStatusFrom(lic.trialEnd ?? decoded.paidThrough, lic.graceUntil);
   }
-  for (const e of entries) {
-    if (e === ".rag-vault") continue; // keep state dir; we rewrite/prune below
-    try {
-      fs.rmSync(path.join(dir, e), { recursive: true, force: true });
-    } catch {
-      /* best-effort */
-    }
+
+  // trial: count one sign-in day per new UTC day, lock past the allowance
+  const today = utcDay();
+  let activeDays = lic.activeDays ?? 0;
+  if (lic.lastActiveDay !== today) {
+    activeDays += 1;
+    writeJson(licensePath(), { ...lic, activeDays, lastActiveDay: today });
   }
-  // Clear inclusion + references (unlink in place; external real files untouched).
-  writeJson(statePath(), { sourceAvailable: true, included: {}, references: {} });
-  try {
-    fs.rmSync(licensePath(), { force: true });
-  } catch {
-    /* already gone */
-  }
+  const remainingDays = Math.max(0, TRIAL_DAYS - activeDays);
+  if (activeDays > TRIAL_DAYS) return { status: "expired", licenseType: "trial", remainingDays: 0 };
+  return { status: "valid", licenseType: "trial", remainingDays };
 }

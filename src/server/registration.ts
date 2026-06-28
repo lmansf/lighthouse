@@ -10,8 +10,9 @@
  *   LICENSE_API_URL    https://<project>.supabase.co/functions/v1/license
  *   SUPABASE_ANON_KEY  public key (authorizes the function call)
  *
- * Trial row columns: first_name, last_name, email, do_not_contact (bool), city,
- * state, plus guid, trial_start, trial_end, license_key (see docs).
+ * Row columns: first_name, last_name, email, do_not_contact (bool), city, state,
+ * plus the license columns guid, license_key, license_type, trial_days,
+ * active_days, last_active_day, paid_through, grace_days (see docs).
  */
 export interface Registration {
   firstName: string;
