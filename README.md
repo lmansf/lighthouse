@@ -71,20 +71,29 @@ adapter behind the same `RagService`/`ChatService`/`AuthService` interfaces
 (serverless hosts can't persist to a local directory — local storage means
 running on your own machine).
 
-## Welcome form & trial licensing (optional)
+## Welcome form & licensing (optional)
 
 After sign-in, a one-time welcome form in the left rail collects basic contact
 info — or **Skip** it entirely. Either way it mints a **14-day trial** (unique
-GUID + encrypted license key). The trial secrets — the Supabase service-role key
-and the `LICENSE_SECRET` that encrypts keys — live **only** in a hosted Supabase
-**Edge Function**, never in the shipped app; the desktop holds only public config
-(the function URL + anon key, committed in `.env.production`) and calls the
-function to mint and verify trials. The license is checked once per launch; only
-a verified time-expiry resets the vault and prompts a fresh trial (a forged key
-or an offline check never wipes anything). Re-registration is unlimited, and
-trials can be extended by editing `trial_end` in Supabase.
+GUID + encrypted license key). The licensing secrets — the Supabase service-role
+key and the `LICENSE_SECRET` that encrypts keys — live **only** in a hosted
+Supabase **Edge Function**, never in the shipped app; the desktop holds only
+public config (the function URL + anon key, committed in `.env.production`) and
+calls the function to mint and verify licenses. The license is checked once per
+launch.
 
-Trial enforcement is active when the hosted function is configured
+**Nothing is ever deleted.** A trial lasts 14 **sign-in days** (counted only on
+distinct days the app reaches the server, not calendar time); when it runs out
+the app *locks* — the vault files stay on disk but are greyed out behind a
+sign-in / start-a-new-trial gate. From there the user can start a fresh trial
+(unlimited, non-destructive) or paste a **paid** license key to activate it. A
+paid license stays usable through its `paid_through` date, then enters a
+renewal-banner **grace** window, and only **locks** (never deletes) once grace
+elapses. Trials extend by raising `trial_days` in Supabase; paid keys by setting
+`paid_through`. Full model, paid-key issuing, and SQL are in
+**[docs/registration.md](docs/registration.md)**.
+
+License enforcement is active when the hosted function is configured
 (`LICENSE_API_URL`, the shipping default) or `LICENSE_ENFORCE=1` (a self-contained
 local-dev trial); otherwise the app runs unlicensed and fully usable. Setup
 (table SQL + Edge Function deploy) is in

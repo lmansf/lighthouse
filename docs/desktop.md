@@ -118,7 +118,7 @@ it stays running in the tray.
 ## Configuration
 
 Environment variables (set in `.env.local` or the shell that launches the app)
-still apply — `ANTHROPIC_API_KEY` for live chat, and the trial-licensing config
+still apply — `ANTHROPIC_API_KEY` for live chat, and the licensing config
 (`LICENSE_API_URL` + `SUPABASE_ANON_KEY`, shipped in `.env.production`) from
 [registration.md](./registration.md) for the welcome form. `VAULT_DIR` is set
 automatically by the desktop app from your chosen folder.
