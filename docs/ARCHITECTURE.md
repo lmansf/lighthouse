@@ -1,14 +1,14 @@
 # RAG Vault - Architecture
 
 RAG Vault lets a user curate which of their files and data sources are exposed to a RAG (retrieval-augmented generation) system.
-Browse files in an organic, dark-themed File-Explorer-like tree, then toggle items as **included** or **excluded** from retrieval.
+Browse files in an organic, sandy-beach light-themed File-Explorer-like tree, then toggle items as **included** or **excluded** from retrieval.
 Anything included is searchable by the AI; anything excluded is invisible to it.
 A Google-style chat surface (answer on top, related files below, streamed in realtime) queries only the included material.
 
 ## Stack
 
 - **Next.js 15** (App Router) + **React 19** + **TypeScript**, **npm**.
-- **Fluent UI 2** (`@fluentui/react-components`, Griffel `makeStyles` + design tokens) - the only styling system. Dark theme (`webDarkTheme`, lightly customized) by default.
+- **Fluent UI 2** (`@fluentui/react-components`, Griffel `makeStyles` + design tokens) - the only styling system. Light theme (`createLightTheme`, a sandy-beach palette with sparing lighthouse-red and sky/amber accents) by default.
 - **Zustand** for small, domain-scoped shared stores.
 - Backend is a **local-first** implementation behind the real interfaces: a filesystem vault, local TF-IDF retrieval, and streamed Claude-or-extractive chat, served by Node routes under `app/api/` (logic in `src/server/`). No cloud database. The in-memory mocks stay swappable behind the same interfaces.
 
@@ -56,7 +56,7 @@ Two Zustand stores carry shared state between features:
 
 | Feature | Folder | Owns | Depends on |
 |---|---|---|---|
-| shell | `src/shell/` | `FluentProvider`/dark theme (`theme.ts`), app frame, collapsible left rail | contracts |
+| shell | `src/shell/` | `FluentProvider`/sandy-beach light theme (`theme.ts`), app frame, collapsible left rail | contracts |
 | onboarding | `src/features/onboarding/` | sign-in slides → model-select (provider/model/key + key links) | contracts, `AuthService`, `useAuthStore` |
 | explorer | `src/features/explorer/` | file tree, hierarchical RAG toggle / selection mode, add files/folders, link files in place, remove from vault (recoverable trash) | contracts, `RagService`, `useRagStore` |
 | chat | `src/features/chat/` | answer-on-top + reference files below (clickable to open the cited file natively on desktop), realtime streaming | contracts, `ChatService`, `useRagStore` |
