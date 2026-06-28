@@ -20,6 +20,18 @@ export type LicenseStatus =
 
 export type LicenseType = "trial" | "paid";
 
+export interface FeedbackInput {
+  firstName: string;
+  lastName: string;
+  email: string;
+  easeOfUse: number;
+  overallValue: number;
+  liked: string;
+  changeOrAdd: string;
+  doNotContact: boolean;
+  notifyWhenAvailable?: boolean;
+}
+
 /** Statuses where the vault is greyed and the sign-in / start-trial gate shows. */
 export function isLocked(s: LicenseStatus): boolean {
   return s === "expired" || s === "locked" || s === "none";
@@ -34,9 +46,19 @@ interface LicenseStore {
   starting: boolean;
   activating: boolean;
   activateError: string | null;
+  purchasing: boolean;
+  paidEnabled: boolean;
+  pendingFeedback: boolean; // show the post-purchase feedback form once
+  notified: boolean; // "notify me when purchasing opens" was submitted
   check: () => Promise<LicenseStatus>;
+  loadConfig: () => Promise<void>;
   startTrial: () => Promise<void>;
   activate: (licenseKey: string) => Promise<boolean>;
+  submitFeedback: (f: FeedbackInput) => Promise<boolean>;
+  submitNotify: (email: string) => Promise<boolean>;
+  subscribe: (email: string) => Promise<void>;
+  cancelSubscribe: () => void;
+  dismissFeedback: () => void;
 }
 
 interface LicensePayload {
@@ -45,6 +67,7 @@ interface LicensePayload {
   trialEnd?: string | null;
   graceUntil?: string | null;
   remainingDays?: number | null;
+  paidEnabled?: boolean;
   ok?: boolean;
 }
 
@@ -66,6 +89,19 @@ export const useLicenseStore = create<LicenseStore>((set, get) => ({
   starting: false,
   activating: false,
   activateError: null,
+  purchasing: false,
+  paidEnabled: false,
+  pendingFeedback: false,
+  notified: false,
+
+  loadConfig: async () => {
+    try {
+      const data = await postLicense("config");
+      set({ paidEnabled: Boolean(data.paidEnabled) });
+    } catch {
+      set({ paidEnabled: false }); // fail closed: no paid UI if we can't tell
+    }
+  },
 
   check: async () => {
     try {
@@ -111,6 +147,66 @@ export const useLicenseStore = create<LicenseStore>((set, get) => ({
       return false;
     } finally {
       set({ activating: false });
+    }
+  },
+
+  submitFeedback: async (f: FeedbackInput) => {
+    try {
+      const data = await postLicense("feedback", { feedback: f });
+      return Boolean(data.ok);
+    } catch {
+      return false;
+    }
+  },
+
+  submitNotify: async (email: string) => {
+    try {
+      const data = await postLicense("notify", { email });
+      if (data.ok) set({ notified: true });
+      return Boolean(data.ok);
+    } catch {
+      return false;
+    }
+  },
+
+  dismissFeedback: () => set({ pendingFeedback: false }),
+
+  // Stop waiting on a checkout the user abandoned in the browser; the poll loop
+  // sees purchasing=false and breaks, freeing the Subscribe/Renew controls.
+  cancelSubscribe: () => set({ purchasing: false }),
+
+  // Open Stripe checkout in the browser, then poll until the webhook upgrades
+  // this install to paid — the vault unlocks itself, no key entry. The email
+  // ties the license to a user (so a business can buy many under one card).
+  subscribe: async (email: string) => {
+    if (get().purchasing) return;
+    set({ purchasing: true });
+    try {
+      const r = await fetch("/api/license", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ op: "checkout", email }),
+      });
+      const { url } = (await r.json().catch(() => ({}))) as { url?: string };
+      if (!url) {
+        set({ purchasing: false });
+        return;
+      }
+      window.open(url, "_blank", "noopener,noreferrer");
+      // Poll check() for up to ~10 minutes; stop as soon as we're paid & valid.
+      for (let i = 0; i < 200; i++) {
+        await new Promise((res) => setTimeout(res, 3000));
+        const status = await get().check();
+        if (get().licenseType === "paid" && (status === "valid" || status === "grace")) {
+          // Purchase confirmed — queue the post-purchase feedback survey, shown
+          // after Stripe's receipt and before the app reopens to chat.
+          set({ pendingFeedback: true });
+          break;
+        }
+        if (!get().purchasing) break; // cancelled elsewhere
+      }
+    } finally {
+      set({ purchasing: false });
     }
   },
 }));

@@ -1,6 +1,17 @@
-/** License endpoint: check once per launch, start a new trial, or activate a key. */
+/** License endpoint: check, start a trial, activate a key, submit feedback, ping. */
 import { NextResponse } from "next/server";
-import { checkLicense, startTrial, activateLicense } from "@/server/license";
+import {
+  checkLicense,
+  startTrial,
+  activateLicense,
+  submitFeedback,
+  submitNotify,
+  submitBug,
+  pingLaunch,
+  checkoutUrl,
+  paidEnabled,
+  type FeedbackInput,
+} from "@/server/license";
 import { isSameOrigin } from "@/server/http";
 
 export const runtime = "nodejs";
@@ -12,6 +23,9 @@ export async function POST(req: Request) {
   }
   const body = await req.json().catch(() => ({}));
   switch (body.op) {
+    case "config":
+      return NextResponse.json({ paidEnabled: paidEnabled() });
+
     case "check":
       return NextResponse.json(await checkLicense());
 
@@ -34,6 +48,57 @@ export async function POST(req: Request) {
       const result = await activateLicense(key);
       const ok = result.status === "valid" || result.status === "grace";
       return NextResponse.json({ ok, ...result });
+    }
+
+    case "feedback": {
+      // Submit the feedback form (unlocks 14-day re-trials for the email).
+      const f = body.feedback as Partial<FeedbackInput> | undefined;
+      if (!f || typeof f.email !== "string" || !f.email.trim()) {
+        return NextResponse.json({ ok: false, reason: "rejected", detail: "email required" }, { status: 400 });
+      }
+      const result = await submitFeedback({
+        firstName: String(f.firstName ?? "").trim(),
+        lastName: String(f.lastName ?? "").trim(),
+        email: f.email.trim(),
+        easeOfUse: Number(f.easeOfUse ?? 0),
+        overallValue: Number(f.overallValue ?? 0),
+        liked: String(f.liked ?? "").trim(),
+        changeOrAdd: String(f.changeOrAdd ?? "").trim(),
+        doNotContact: Boolean(f.doNotContact),
+        notifyWhenAvailable: Boolean(f.notifyWhenAvailable),
+      });
+      return NextResponse.json(result);
+    }
+
+    case "notify": {
+      // "Notify me when purchasing opens" (pre-launch interest capture).
+      const email = typeof body.email === "string" ? body.email : "";
+      if (!email.trim()) {
+        return NextResponse.json({ ok: false, reason: "rejected", detail: "email required" }, { status: 400 });
+      }
+      return NextResponse.json(await submitNotify(email));
+    }
+
+    case "bug": {
+      const b = (body.bug ?? {}) as { where?: string; what?: string };
+      const where = String(b.where ?? "").trim();
+      const what = String(b.what ?? "").trim();
+      if (!where && !what) {
+        return NextResponse.json({ ok: false, reason: "rejected", detail: "empty report" }, { status: 400 });
+      }
+      return NextResponse.json(await submitBug(where, what));
+    }
+
+    case "ping": {
+      await pingLaunch();
+      return NextResponse.json({ ok: true });
+    }
+
+    case "checkout": {
+      // Build the Stripe Payment Link URL (carries guid + email). Null if unset.
+      const email = typeof body.email === "string" ? body.email : undefined;
+      const url = await checkoutUrl(email);
+      return NextResponse.json({ url });
     }
 
     default:

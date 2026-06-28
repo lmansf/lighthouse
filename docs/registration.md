@@ -50,6 +50,7 @@ makes it idempotent):
 alter table public.registrations
   -- identity + key
   add column if not exists guid         uuid        not null default gen_random_uuid(),
+  add column if not exists contact_id   uuid,        -- stable per-user id (persists across re-trials)
   add column if not exists license_key  text,
   -- trial vs paid
   add column if not exists license_type text        not null default 'trial'
@@ -62,7 +63,10 @@ alter table public.registrations
   add column if not exists last_active_day date,
   -- PAID: subscription end + grace window before locking
   add column if not exists paid_through timestamptz,
-  add column if not exists grace_days   int         not null default 14;
+  add column if not exists grace_days   int         not null default 14,
+  -- PAID via Stripe (set by the stripe-webhook function)
+  add column if not exists stripe_customer_id     text,
+  add column if not exists stripe_subscription_id text;
 
 -- The function looks up the license by its guid.
 create unique index if not exists registrations_guid_idx on public.registrations (guid);
@@ -70,8 +74,64 @@ create unique index if not exists registrations_guid_idx on public.registrations
 
 > **Upgrading from the earlier (single-column) schema?** Run exactly the block above. The new
 > columns (`license_type`, `trial_days`, `active_days`, `last_active_day`,
-> `paid_through`, `grace_days`) are additive; `trial_end` is now only a nominal
-> display date — trials are gated by `active_days` vs `trial_days`.
+> `paid_through`, `grace_days`, `stripe_*`) are additive; `trial_end` is now only
+> a nominal display date — trials are gated by `active_days` vs `trial_days`.
+
+### Feedback, launch logs, bug reports, purchase interest
+
+Every row carries a stable `contact_id` (the same id across a user's re-trials
+and purchase), so you can compare, say, comments from **paid vs unpaid** contacts
+by joining `contact_id` to `registrations`.
+
+```sql
+-- Feedback form (post-purchase survey when paid is on; end-of-trial when off)
+create table if not exists public.feedback (
+  id            bigint generated always as identity primary key,
+  created_at    timestamptz not null default now(),
+  contact_id    uuid,
+  first_name    text,
+  last_name     text,
+  email         text not null,
+  ease_of_use   int,        -- 0..5
+  overall_value int,        -- 0..5
+  liked         text,
+  change_or_add text,
+  do_not_contact        boolean not null default false,
+  notify_when_available boolean not null default false  -- "email me when purchasing opens"
+);
+create index if not exists feedback_contact_idx on public.feedback (contact_id);
+
+-- One row per app launch (the "ping")
+create table if not exists public.userlogs (
+  id          bigint generated always as identity primary key,
+  created_at  timestamptz not null default now(),
+  contact_id  uuid,
+  guid        uuid,
+  email       text,
+  event       text,
+  app_version text
+);
+
+-- In-app bug reports
+create table if not exists public.bug_reports (
+  id          bigint generated always as identity primary key,
+  created_at  timestamptz not null default now(),
+  contact_id  uuid,
+  where_at    text,        -- "Describe where the bug is happening"
+  description text,        -- "Describe the bug"
+  guid        uuid,
+  email       text,
+  app_version text
+);
+
+-- "Notify me when purchasing opens" (pre-launch interest, captured while paid is off)
+create table if not exists public.purchase_interest (
+  id         bigint generated always as identity primary key,
+  created_at timestamptz not null default now(),
+  contact_id uuid,
+  email      text not null
+);
+```
 
 The Edge Function uses the **service-role** key, which bypasses RLS — so no
 `anon` insert/select policy is needed, and emails stay private (never expose
@@ -134,15 +194,22 @@ authoritative status. The desktop maps it to UI:
 
 ### Trials — 14 **sign-in days**
 
-A trial lasts **14 days of use, counted only on distinct days the user signs in**
-(launches the app and reaches `check`), not 14 calendar days. The function bumps
-`active_days` the first time it's checked each UTC day (`last_active_day`); the
-trial is `expired` once `active_days > trial_days`. The token holds only the
-`guid` — the count lives in Supabase, so it can't be reset by editing the clock.
+Every trial is **14 days of use** — distinct days the user signs in (launches
+the app and reaches `check`), not calendar days. The function bumps `active_days`
+the first time it's checked each UTC day (`last_active_day`); the trial is
+`expired` once `active_days > trial_days`. The token holds only the `guid` — the
+count lives in Supabase, so it can't be reset by editing the clock. Re-trials are
+unlimited and non-destructive.
 
-From the lock screen the user can **start a new trial** (a fresh 14-day
-allowance, files kept) or **activate a license key**. Re-trials are unlimited and
-non-destructive.
+**Feedback timing** depends on whether paid mode is on:
+
+- **paid on** — feedback is a **post-purchase** survey, shown in the left rail
+  after Stripe's receipt and before chat reopens.
+- **paid off** — when a trial ends the rail shows the feedback form, which
+  includes an **"email me when purchasing opens"** checkbox; the registration
+  choice and the settings-gear item show **"Get notified when purchasing opens"**
+  (the same slot that becomes **Subscribe** when `PAID_ENABLED=1`). Interest
+  lands in `purchase_interest`.
 
 ### Paid licenses
 
@@ -166,11 +233,53 @@ curl -X POST "$LICENSE_API_URL" \
 
 Hand the returned `licenseKey` to the buyer; they paste it into the app's
 **activate** field. To renew, re-issue with a later `paidThrough` for the same
-`guid` (or just edit `paid_through` in the table).
+`guid` (or just edit `paid_through` in the table). For the normal self-serve
+purchase, **Stripe does this automatically** (below) — no key changes hands.
 
 **Offline:** if the function is unreachable the app never locks a trial (sign-in
 days only count when the user reaches the server) and falls back to a paid
 license's last cached dates — always non-destructive.
+
+## Payments (Stripe) — $14.99/mo, no key entry
+
+Two Edge Functions:
+
+- **`create-checkout`** — the app's **Subscribe** button calls it with the
+  install's `guid` + buyer email; it creates a Stripe **Checkout Session** for
+  the subscription price and returns the URL the app opens in the browser.
+- **`stripe-webhook`** — on payment, flips that guid's row to
+  `license_type='paid'` with `paid_through` = the subscription's period end (and
+  stores `stripe_customer_id` / `stripe_subscription_id` + the email).
+
+The app **polls `check`** after opening checkout and unlocks itself
+automatically — the buyer never types a key. `invoice.paid` extends
+`paid_through` each cycle; cancellation just lets the normal grace→lock take
+over. Each subscription is tied to its **email**, so a business can buy several
+licenses (one per user/device, each its own `guid`) under one card via separate
+transactions.
+
+### Set it up
+
+1. **Stripe dashboard** → create a Product with a recurring **$14.99/month**
+   price. Copy the **price ID** (`price_…`).
+2. **Deploy both functions** and set secrets:
+   ```sh
+   supabase functions deploy create-checkout
+   supabase functions deploy stripe-webhook
+   supabase secrets set STRIPE_SECRET_KEY="sk_live_…"
+   supabase secrets set STRIPE_PRICE_ID="price_…"        # your $14.99/mo price
+   supabase secrets set STRIPE_WEBHOOK_SECRET="whsec_…"  # from step 3
+   ```
+3. **Stripe dashboard** → Developers → Webhooks → add an endpoint at the deployed
+   `stripe-webhook` URL; subscribe to `checkout.session.completed`,
+   `invoice.paid`, `customer.subscription.deleted`. Copy its signing secret into
+   `STRIPE_WEBHOOK_SECRET` above.
+4. Set `CHECKOUT_API_URL` in `.env.production` to the deployed `create-checkout`
+   URL (already pre-filled for this project; public/safe to ship).
+
+> Both functions must be public (no JWT) so the app and Stripe can reach them.
+> The webhook authenticates by verifying the Stripe **signature**; `create-checkout`
+> only ever returns a hosted Stripe URL and exposes no secret.
 
 ### Extending / adjusting in Supabase
 

@@ -40,6 +40,21 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 
 const licensePath = () => path.join(stateDir(), "license.json");
 const identityPath = () => path.join(stateDir(), "identity.json");
+const contactIdPath = () => path.join(stateDir(), "contact.json");
+
+/**
+ * A stable per-user contact id, generated once and kept across trials, locks,
+ * and purchases (each trial mints a fresh guid, so the guid can't play this
+ * role). Stamped on every form/log row so paid vs unpaid contacts can be told
+ * apart in Supabase.
+ */
+function getContactId(): string {
+  const existing = readJson<{ id?: string } | null>(contactIdPath(), null);
+  if (existing?.id) return existing.id;
+  const id = crypto.randomUUID();
+  writeJson(contactIdPath(), { id });
+  return id;
+}
 
 /** UTC calendar day (YYYY-MM-DD) — the unit a trial's sign-in days are counted in. */
 function utcDay(): string {
@@ -83,6 +98,15 @@ function localMode(): boolean {
 /** Licensing is enforced with a hosted function, or in forced local-dev. */
 export function licensingEnabled(): boolean {
   return Boolean(licenseApi()) || localMode();
+}
+
+/**
+ * Whether paid subscriptions are offered. Off by default — flip PAID_ENABLED=1
+ * (in .env.production, then restart) to surface the Subscribe affordances. When
+ * off, the app is trial-only and the subscribe UI stays hidden.
+ */
+export function paidEnabled(): boolean {
+  return process.env.PAID_ENABLED === "1";
 }
 
 // --- hosted Edge Function ----------------------------------------------------
@@ -132,6 +156,7 @@ function loadIdentity(): Registration | null {
 }
 function contactRow(c: Registration) {
   return {
+    contactId: getContactId(),
     firstName: c.firstName,
     lastName: c.lastName,
     email: c.email,
@@ -228,6 +253,153 @@ export async function activateLicense(licenseKey: string): Promise<LicenseResult
     } satisfies LocalLicense);
   }
   return result;
+}
+
+export interface FeedbackInput {
+  firstName: string;
+  lastName: string;
+  email: string;
+  easeOfUse: number;
+  overallValue: number;
+  liked: string;
+  changeOrAdd: string;
+  doNotContact: boolean;
+  notifyWhenAvailable?: boolean; // "email me when purchasing opens" (pre-launch)
+}
+
+/**
+ * Record a feedback-form submission (a post-purchase survey when paid is on, or
+ * an end-of-trial survey while paid is off). Stamped with the stable contact id
+ * so paid vs unpaid responses can be told apart. The contact fields are
+ * remembered. In local-dev (no hosted function) feedback is accepted but not
+ * stored.
+ */
+export async function submitFeedback(f: FeedbackInput): Promise<{ ok: boolean }> {
+  const existing = loadIdentity();
+  writeJson(identityPath(), {
+    firstName: f.firstName,
+    lastName: f.lastName,
+    email: f.email,
+    doNotContact: f.doNotContact,
+    city: existing?.city ?? "",
+    state: existing?.state ?? "",
+  });
+  if (!licenseApi()) return { ok: true };
+  try {
+    const r = await callFn("feedback", { feedback: { ...f, contactId: getContactId() } });
+    return { ok: r.ok !== false };
+  } catch {
+    return { ok: false };
+  }
+}
+
+/**
+ * Register interest in purchasing while paid mode is off ("notify me when
+ * purchasing opens"). Lands in the same Supabase pipeline, tagged by contact id.
+ */
+export async function submitNotify(email: string): Promise<{ ok: boolean }> {
+  const trimmed = email.trim();
+  if (!trimmed) return { ok: false };
+  const id = loadIdentity();
+  writeJson(identityPath(), {
+    firstName: id?.firstName ?? "",
+    lastName: id?.lastName ?? "",
+    email: trimmed,
+    doNotContact: id?.doNotContact ?? false,
+    city: id?.city ?? "",
+    state: id?.state ?? "",
+  });
+  if (!licenseApi()) return { ok: true };
+  try {
+    const r = await callFn("notify", { email: trimmed, contactId: getContactId() });
+    return { ok: r.ok !== false };
+  } catch {
+    return { ok: false };
+  }
+}
+
+/**
+ * Get a Stripe Checkout URL for this install. Calls the `create-checkout` Edge
+ * Function (which holds the Stripe secret + price) with the install's guid — so
+ * the webhook can upgrade exactly this row — and the buyer's email, so the paid
+ * license is tied to a user (a business can buy many under one card). Ensures a
+ * guid exists first. Returns null when checkout isn't configured/reachable.
+ */
+export async function checkoutUrl(email?: string): Promise<string | null> {
+  const api = process.env.CHECKOUT_API_URL?.trim();
+  if (!api) return null;
+  let lic = readJson<LocalLicense | null>(licensePath(), null);
+  if (!lic?.guid) {
+    await startTrial();
+    lic = readJson<LocalLicense | null>(licensePath(), null);
+  }
+  // The paid license is tied to an email. Prefer the one entered at checkout
+  // (lets a business buy a license for a specific user); fall back to identity.
+  const id = loadIdentity();
+  const buyerEmail = email?.trim() || id?.email || "";
+  if (buyerEmail) {
+    writeJson(identityPath(), {
+      firstName: id?.firstName ?? "",
+      lastName: id?.lastName ?? "",
+      email: buyerEmail,
+      doNotContact: id?.doNotContact ?? false,
+      city: id?.city ?? "",
+      state: id?.state ?? "",
+    });
+  }
+  const anon = process.env.SUPABASE_ANON_KEY?.trim();
+  try {
+    const res = await fetch(api, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...(anon ? { apikey: anon, authorization: `Bearer ${anon}` } : {}),
+      },
+      body: JSON.stringify({ guid: lic?.guid, email: buyerEmail || undefined }),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { url?: string };
+    return data.url ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Send an in-app bug report (with the install's guid/email) to Supabase. */
+export async function submitBug(where: string, what: string): Promise<{ ok: boolean }> {
+  if (!licenseApi()) return { ok: true };
+  const lic = readJson<LocalLicense | null>(licensePath(), null);
+  const id = loadIdentity();
+  try {
+    const r = await callFn("bug", {
+      where,
+      what,
+      contactId: getContactId(),
+      guid: lic?.guid,
+      email: id?.email,
+      version: process.env.npm_package_version,
+    });
+    return { ok: r.ok !== false };
+  } catch {
+    return { ok: false };
+  }
+}
+
+/** Log an app launch to the userlogs table (best-effort; hosted mode only). */
+export async function pingLaunch(): Promise<void> {
+  if (!licenseApi()) return;
+  const lic = readJson<LocalLicense | null>(licensePath(), null);
+  const id = loadIdentity();
+  try {
+    await callFn("ping", {
+      contactId: getContactId(),
+      guid: lic?.guid,
+      email: id?.email,
+      version: process.env.npm_package_version,
+    });
+  } catch {
+    /* logging must never break a launch */
+  }
 }
 
 // --- paid status from an end date (shared by offline + local-dev paths) -------

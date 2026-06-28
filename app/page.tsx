@@ -7,16 +7,18 @@ import { AppShell } from "@/shell/AppShell";
 import { OnboardingPanel } from "@/features/onboarding/OnboardingPanel";
 import { FileExplorer } from "@/features/explorer/FileExplorer";
 import { ChatPanel } from "@/features/chat/ChatPanel";
-import { LicenseGate, GraceBanner } from "@/features/license/LicenseGate";
+import { LicenseGate, GraceBanner, PostPurchaseFeedback } from "@/features/license/LicenseGate";
+import { BugReport } from "@/features/feedback/BugReport";
 
 /**
  * Composition root. The shell owns layout; each feature team replaces its own
  * placeholder component below without touching the others.
  *
- * Once onboarded, the license is checked once per launch. Nothing is ever
- * deleted: when the license isn't valid (trial used up, or a paid subscription
- * locked) the vault is greyed out and a sign-in / start-a-new-trial gate is
- * shown over it. A lapsed-but-in-grace paid license shows a renewal banner.
+ * Once onboarded, the license is checked once per launch (and the launch is
+ * logged). Nothing is ever deleted: when the license isn't valid the vault is
+ * greyed out in the main pane and the left rail shows the lock gate — a feedback
+ * form (after a trial) then a subscribe / start-a-trial choice. A lapsed paid
+ * subscription still in grace shows a renewal banner.
  */
 export default function Home() {
   const step = useAuthStore((s) => s.onboarding.step);
@@ -24,37 +26,51 @@ export default function Home() {
 
   const status = useLicenseStore((s) => s.status);
   const graceUntil = useLicenseStore((s) => s.graceUntil);
+  const pendingFeedback = useLicenseStore((s) => s.pendingFeedback);
   const checkLicense = useLicenseStore((s) => s.check);
+  const loadConfig = useLicenseStore((s) => s.loadConfig);
+
+  // Log the launch once on mount (best-effort) and load config (paid toggle),
+  // independent of license/onboarding state so the nav reflects it at all times.
+  useEffect(() => {
+    void loadConfig();
+    void fetch("/api/license", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ op: "ping" }),
+    }).catch(() => {});
+  }, [loadConfig]);
 
   useEffect(() => {
     if (onboarded) void checkLicense();
   }, [onboarded, checkLicense]);
 
-  if (onboarded && isLocked(status)) {
-    // Vault stays visible but greyed and non-interactive behind the gate.
-    return (
-      <>
-        <div
-          aria-hidden
-          inert
-          style={{
-            position: "fixed",
-            inset: 0,
-            filter: "grayscale(1)",
-            opacity: 0.4,
-            pointerEvents: "none",
-            overflow: "hidden",
-          }}
-        >
-          <AppShell rail={<ChatPanel />} content={<FileExplorer />} />
-        </div>
-        <LicenseGate status={status} />
-      </>
-    );
-  }
+  const greyed: React.CSSProperties = {
+    filter: "grayscale(1)",
+    opacity: 0.45,
+    pointerEvents: "none",
+    height: "100%",
+  };
 
-  if (onboarded && status === "grace") {
-    return (
+  let shell: React.ReactNode;
+  if (onboarded && isLocked(status)) {
+    // Vault stays visible but greyed/inert; the rail hosts the lock gate.
+    shell = (
+      <AppShell
+        rail={<LicenseGate status={status} />}
+        content={
+          <div aria-hidden inert style={greyed}>
+            <FileExplorer />
+          </div>
+        }
+      />
+    );
+  } else if (onboarded && pendingFeedback) {
+    // Just subscribed: show the post-purchase survey in the rail (after Stripe's
+    // receipt, before chat reopens). The vault is unlocked behind it.
+    shell = <AppShell rail={<PostPurchaseFeedback />} content={<FileExplorer />} />;
+  } else if (onboarded && status === "grace") {
+    shell = (
       <div style={{ display: "flex", flexDirection: "column", height: "100vh" }}>
         <GraceBanner graceUntil={graceUntil} />
         <div style={{ flex: 1, minHeight: 0 }}>
@@ -62,12 +78,19 @@ export default function Home() {
         </div>
       </div>
     );
+  } else {
+    shell = (
+      <AppShell
+        rail={onboarded ? <ChatPanel /> : <OnboardingPanel />}
+        content={<FileExplorer />}
+      />
+    );
   }
 
   return (
-    <AppShell
-      rail={onboarded ? <ChatPanel /> : <OnboardingPanel />}
-      content={<FileExplorer />}
-    />
+    <>
+      {shell}
+      <BugReport />
+    </>
   );
 }
