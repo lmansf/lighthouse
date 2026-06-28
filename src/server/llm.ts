@@ -27,7 +27,8 @@ const LOCAL_LLM_MODEL = process.env.LIGHTHOUSE_LOCAL_LLM_MODEL?.trim() || "";
 // giving up and falling back to extractive passages.
 const LOCAL_CONNECT_TIMEOUT_MS = 45_000;
 const LOCAL_SYSTEM_PROMPT =
-  "You are Lighthouse's assistant. Answer only from the provided context and cite sources as [n]. Be concise.";
+  "You are Lighthouse's assistant. Answer only from the provided context and cite sources as [n]. Be concise. " +
+  "Earlier turns in the conversation may reference the same documents; use them to interpret follow-up questions.";
 
 export interface Ctx {
   name: string;
@@ -63,7 +64,7 @@ export async function* streamAnswer(
     let emitted = false;
     try {
       const localModel = LOCAL_LLM_MODEL || cfg.modelId || "lighthouse-local";
-      for await (const delta of streamLocal(question, contexts, localModel)) {
+      for await (const delta of streamLocal(question, contexts, localModel, history)) {
         emitted = true;
         yield delta;
       }
@@ -179,7 +180,12 @@ async function* streamLocal(
   question: string,
   contexts: Ctx[],
   model: string,
+  history: ChatTurn[] = [],
 ): AsyncGenerator<string> {
+  const priorTurns = history.filter(
+    (t) => typeof t.content === "string" && t.content.trim() !== "",
+  );
+  while (priorTurns.length > 0 && priorTurns[0].role !== "user") priorTurns.shift();
   // Bound only the connect/headers phase: a freshly auto-spawned llama-server can
   // accept the TCP connection while still loading the GGUF (tens of seconds), so
   // without this the request hangs instead of failing fast into the fallback. The
@@ -198,6 +204,7 @@ async function* streamLocal(
         stream: true,
         messages: [
           { role: "system", content: LOCAL_SYSTEM_PROMPT },
+          ...priorTurns.map((t) => ({ role: t.role, content: t.content })),
           { role: "user", content: buildPrompt(question, contexts) },
         ],
       }),
