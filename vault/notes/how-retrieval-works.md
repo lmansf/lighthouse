@@ -7,8 +7,9 @@ database server, no embeddings download required.
    linked in place, from their real location on disk). Plain-text files are read
    directly; PDF, Word (`.docx`), and Excel (`.xlsx`/`.xls`) documents have their
    text extracted by parsers loaded lazily on first use and cached on disk, so
-   each document is parsed once and an unreadable file falls back to empty text
-   while staying findable by name.
+   each document is parsed once; a failed parse isn't cached, so an unreadable
+   file falls back to empty text (retried on the next scan, never pinned) while
+   staying findable by name.
 2. **Chunk** — each file's text is split into overlapping ~120-word windows.
 3. **Score** — the query and every chunk become TF-IDF vectors; chunks are
    ranked by cosine similarity.
