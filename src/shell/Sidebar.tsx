@@ -52,7 +52,15 @@ const useStyles = makeStyles({
     backgroundColor: tokens.colorBrandBackground,
     boxShadow: `0 0 10px 2px ${ACCENTS.beam}`,
   },
-  body: { flex: 1, minHeight: 0, overflowY: "auto" },
+  // Inset the explorer from the sidebar edges so its rows and controls aren't
+  // cramped against the left border / right scrollbar. Aligns with the header
+  // and footer's horizontal padding.
+  body: {
+    flex: 1,
+    minHeight: 0,
+    overflowY: "auto",
+    ...shorthands.padding(0, tokens.spacingHorizontalM),
+  },
   bodyHidden: { display: "none" },
   footer: {
     display: "flex",
