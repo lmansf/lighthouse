@@ -78,11 +78,13 @@ contracts — no cloud database required:
   (`src/server/vault.ts`) — local, no embeddings download.
 - **Chat** is a running conversation that streams a grounded answer (`/api/chat`):
   Anthropic Claude when an API key is configured (set in onboarding or
-  `ANTHROPIC_API_KEY`), otherwise a local extractive fallback that needs no network.
-  Each question and answer is kept in a transcript so you can ask follow-ups about
-  the documents that came back (prior turns — capped to the last few — are threaded
-  to the model, and a bare follow-up blends in the previous question to anchor
-  retrieval); **New chat** starts fresh. The answer's **Related files** cards
+  `ANTHROPIC_API_KEY`), an on-device **local model** when the "Local model
+  (private)" provider is selected (see **[Local model](#local-model)**), otherwise
+  a local extractive fallback that needs no network. Each question and answer is
+  kept in a transcript so you can ask follow-ups about the documents that came back
+  (prior turns — capped to the last few — are threaded to the model, and a bare
+  follow-up blends in the previous question to anchor retrieval); **New chat**
+  starts fresh. The answer's **Related files** cards
   are clickable on the desktop build — `/api/open` opens the cited file in its
   native app (web deployments report no such capability and the cards stay inert).
 - **Profile/key** are stored locally in `vault/.rag-vault/profile.json` (gitignored).
@@ -122,6 +124,12 @@ Copy `.env.local.example` → `.env.local` (gitignored). All vars are optional:
   manages this for you).
 - `ANTHROPIC_API_KEY` — live Claude chat; without it, a local extractive
   fallback answers with no network.
+- `LIGHTHOUSE_LOCAL_LLM_URL` — OpenAI chat-completions endpoint for the "Local
+  model (private)" provider (default `http://127.0.0.1:8080/v1/chat/completions`;
+  for Ollama use `http://127.0.0.1:11434/v1/chat/completions`). See
+  **[Local model](#local-model)**.
+- `LIGHTHOUSE_LOCAL_LLM_MODEL` — model name sent to that server; required for
+  Ollama / LM Studio (e.g. `llama3.2`), ignored by `llama-server`.
 - `LICENSE_API_URL` / `SUPABASE_ANON_KEY` — public hosted-license config (the
   Edge Function URL + anon key). Shipped in the committed `.env.production`;
   override in `.env.local` to point a dev build at the same function.
