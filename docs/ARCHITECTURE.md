@@ -29,7 +29,9 @@ The barrel exports the **real** implementations by default; the server-side
 logic they call lives in `src/server/` (`vault.ts`, `extract.ts` — text
 extraction for PDF/Word/Excel documents, `llm.ts`, `profile.ts`, `config.ts`,
 plus the `sources/` registry) and is exposed through the Node routes
-in `app/api/{rag,chat,open,profile}`.
+in `app/api/{rag,chat,open,profile,settings}` (`settings` reads/writes the
+desktop-only launch-at-login preference; `settings.ts` shares it with the
+Electron main process and no-ops on the web build).
 See [README.md](../README.md#backend-local-first-standalone) for what runs where.
 
 ### The source-connector seam

@@ -9,8 +9,8 @@ Browse files in a calm, sandy-beach File-Explorer-style UI (red used sparingly a
 
 ### Desktop app (recommended)
 
-Lighthouse runs as a persistent desktop app (system tray, launch-at-login,
-native file/vault dialogs). You don't need a terminal:
+Lighthouse runs as a persistent desktop app (system tray, opt-out
+launch-at-login, native file/vault dialogs). You don't need a terminal:
 
 - **Just run it** — extract the repo and double-click **`Lighthouse.cmd`**
   (Windows) or **`Lighthouse.command`** (macOS/Linux). The first launch installs
