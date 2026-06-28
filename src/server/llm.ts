@@ -19,6 +19,13 @@ const ANTHROPIC_VERSION = "2023-06-01";
 // The endpoint must be OpenAI chat-completions compatible.
 const LOCAL_LLM_URL =
   process.env.LIGHTHOUSE_LOCAL_LLM_URL?.trim() || "http://127.0.0.1:8080/v1/chat/completions";
+// Model name sent to the local server. llama.cpp's `llama-server` ignores it, but
+// Ollama (and other BYO servers) require a real pulled model name or return 404 —
+// set LIGHTHOUSE_LOCAL_LLM_MODEL to the pulled model (e.g. "llama3.2") in that case.
+const LOCAL_LLM_MODEL = process.env.LIGHTHOUSE_LOCAL_LLM_MODEL?.trim() || "";
+// How long to wait for the local server to start responding (headers) before
+// giving up and falling back to extractive passages.
+const LOCAL_CONNECT_TIMEOUT_MS = 45_000;
 const LOCAL_SYSTEM_PROMPT =
   "You are Lighthouse's assistant. Answer only from the provided context and cite sources as [n]. Be concise.";
 
@@ -55,7 +62,8 @@ export async function* streamAnswer(
   if (cfg.providerId === "local") {
     let emitted = false;
     try {
-      for await (const delta of streamLocal(question, contexts, cfg.modelId ?? "lighthouse-local")) {
+      const localModel = LOCAL_LLM_MODEL || cfg.modelId || "lighthouse-local";
+      for await (const delta of streamLocal(question, contexts, localModel)) {
         emitted = true;
         yield delta;
       }
@@ -172,19 +180,36 @@ async function* streamLocal(
   contexts: Ctx[],
   model: string,
 ): AsyncGenerator<string> {
-  const res = await fetch(LOCAL_LLM_URL, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      model,
-      max_tokens: 1024,
-      stream: true,
-      messages: [
-        { role: "system", content: LOCAL_SYSTEM_PROMPT },
-        { role: "user", content: buildPrompt(question, contexts) },
-      ],
-    }),
-  });
+  // Bound only the connect/headers phase: a freshly auto-spawned llama-server can
+  // accept the TCP connection while still loading the GGUF (tens of seconds), so
+  // without this the request hangs instead of failing fast into the fallback. The
+  // timer is cleared once headers arrive, so a long generation stream is never cut.
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), LOCAL_CONNECT_TIMEOUT_MS);
+  let res: Response;
+  try {
+    res = await fetch(LOCAL_LLM_URL, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      signal: controller.signal,
+      body: JSON.stringify({
+        model,
+        max_tokens: 1024,
+        stream: true,
+        messages: [
+          { role: "system", content: LOCAL_SYSTEM_PROMPT },
+          { role: "user", content: buildPrompt(question, contexts) },
+        ],
+      }),
+    });
+  } catch (err) {
+    if (controller.signal.aborted) {
+      throw new Error(`local model did not respond within ${LOCAL_CONNECT_TIMEOUT_MS}ms`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeout);
+  }
   if (!res.ok || !res.body) {
     throw new Error(`local model ${res.status}: ${(await res.text()).slice(0, 200)}`);
   }
