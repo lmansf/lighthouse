@@ -53,8 +53,7 @@ alter table public.registrations
   add column if not exists contact_id   uuid,        -- stable per-user id (persists across re-trials)
   add column if not exists license_key  text,
   -- trial vs paid
-  add column if not exists license_type text        not null default 'trial'
-    check (license_type in ('trial','paid')),
+  add column if not exists license_type text        not null default 'trial',
   -- TRIAL: counted in sign-in DAYS, not calendar time
   add column if not exists trial_start  timestamptz not null default now(),
   add column if not exists trial_end    timestamptz not null default (now() + interval '14 days'),
@@ -70,7 +69,23 @@ alter table public.registrations
 
 -- The function looks up the license by its guid.
 create unique index if not exists registrations_guid_idx on public.registrations (guid);
+
+-- Constrain license_type as a separate statement (an inline CHECK inside a
+-- multi-column ADD COLUMN trips some clients, e.g. the Supabase SQL editor).
+do $$ begin
+  if not exists (select 1 from pg_constraint where conname = 'registrations_license_type_chk') then
+    alter table public.registrations
+      add constraint registrations_license_type_chk check (license_type in ('trial','paid'));
+  end if;
+end $$;
+
+-- A trial can be minted before an email is known (it's tied to email later).
+alter table public.registrations alter column email drop not null;
 ```
+
+> Apply schema changes via the Supabase **SQL Editor** or the **Management API**
+> (`POST /v1/projects/<ref>/database/query`). The SQL editor can mangle pasted
+> SQL with nested parentheses or inline constraints — the Management API does not.
 
 > **Upgrading from the earlier (single-column) schema?** Run exactly the block above. The new
 > columns (`license_type`, `trial_days`, `active_days`, `last_active_day`,

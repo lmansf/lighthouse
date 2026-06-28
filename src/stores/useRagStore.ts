@@ -10,11 +10,21 @@ import { ragService } from "@/contracts";
 interface RagStore {
   sources: DataSource[];
   nodes: FileNode[];
-  /** True while the explorer is in rapid highlight/unhighlight mode. */
+  /**
+   * Selection mode: clicking a row picks it (multi-select) instead of toggling
+   * its RAG inclusion, so the user can select several files and then apply one
+   * action — "make visible" (include) or "remove" (exclude) — to all of them.
+   */
   selectionMode: boolean;
+  /** Ids picked while in selection mode. */
+  selectedIds: string[];
 
   load: () => Promise<void>;
   setSelectionMode: (on: boolean) => void;
+  toggleSelected: (nodeId: string) => void;
+  clearSelection: () => void;
+  /** Apply include (true) / exclude (false) to every selected node, then clear. */
+  applySelection: (include: boolean) => Promise<void>;
   toggleIncluded: (nodeId: string) => Promise<void>;
   toggleSourceAvailable: (sourceId: string) => Promise<void>;
   /** Upload files into the vault; they land excluded by default. Returns any skipped files. */
@@ -32,6 +42,7 @@ export const useRagStore = create<RagStore>((set, get) => ({
   sources: [],
   nodes: [],
   selectionMode: false,
+  selectedIds: [],
 
   load: async () => {
     const [sources, nodes] = await Promise.all([
@@ -41,7 +52,24 @@ export const useRagStore = create<RagStore>((set, get) => ({
     set({ sources, nodes });
   },
 
-  setSelectionMode: (on) => set({ selectionMode: on }),
+  // Leaving selection mode clears the pending picks so they don't linger.
+  setSelectionMode: (on) => set({ selectionMode: on, selectedIds: on ? get().selectedIds : [] }),
+
+  toggleSelected: (nodeId) =>
+    set((s) => ({
+      selectedIds: s.selectedIds.includes(nodeId)
+        ? s.selectedIds.filter((id) => id !== nodeId)
+        : [...s.selectedIds, nodeId],
+    })),
+
+  clearSelection: () => set({ selectedIds: [] }),
+
+  applySelection: async (include) => {
+    const ids = get().selectedIds;
+    // setIncluded cascades to a folder's descendants, so picking a folder works.
+    for (const id of ids) await ragService.setIncluded(id, include);
+    set({ selectedIds: [], nodes: await ragService.listNodes() });
+  },
 
   toggleIncluded: async (nodeId) => {
     const node = get().nodes.find((n) => n.id === nodeId);
