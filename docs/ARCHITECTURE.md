@@ -10,7 +10,7 @@ A Google-style chat surface (answer on top, related files below, streamed in rea
 - **Next.js 15** (App Router) + **React 19** + **TypeScript**, **npm**.
 - **Fluent UI 2** (`@fluentui/react-components`, Griffel `makeStyles` + design tokens) - the only styling system. Light theme (`createLightTheme`, a sandy-beach palette with sparing lighthouse-red and sky/amber accents) by default.
 - **Zustand** for small, domain-scoped shared stores.
-- Backend is a **local-first** implementation behind the real interfaces: a filesystem vault, local TF-IDF retrieval, and streamed Claude-or-extractive chat, served by Node routes under `app/api/` (logic in `src/server/`). No cloud database. The in-memory mocks stay swappable behind the same interfaces.
+- Backend is a **local-first** implementation behind the real interfaces: a filesystem vault, local TF-IDF retrieval, and streamed chat (Claude, an on-device local model, or an extractive fallback), served by Node routes under `app/api/` (logic in `src/server/`). No cloud database. The in-memory mocks stay swappable behind the same interfaces.
 
 ## The decoupling seam
 
@@ -59,7 +59,7 @@ Two Zustand stores carry shared state between features:
 | Feature | Folder | Owns | Depends on |
 |---|---|---|---|
 | shell | `src/shell/` | `FluentProvider`/sandy-beach light theme (`theme.ts`), app frame, collapsible left file sidebar (front-and-center chat in the main area) | contracts |
-| onboarding | `src/features/onboarding/` | sign-in slides → model-select (provider/model/key + key links) | contracts, `AuthService`, `useAuthStore` |
+| onboarding | `src/features/onboarding/` | sign-in slides → model-select (provider/model/key + key links; the local provider needs no key) | contracts, `AuthService`, `useAuthStore` |
 | explorer | `src/features/explorer/` | file tree, hierarchical RAG toggle / selection mode, add files/folders, link files in place, remove from vault (recoverable trash) | contracts, `RagService`, `useRagStore` |
 | chat | `src/features/chat/` | running conversation (transcript of turns + follow-ups, "New chat" to reset) of answer-on-top + reference files below (clickable to open the cited file natively on desktop), realtime streaming | contracts, `ChatService`, `useRagStore` |
 
@@ -80,8 +80,9 @@ no feature imports one directly. Today the barrel exports `./real/*`: a local-fi
 backend (`src/server/` + `app/api/`) that reads a real `./vault` directory
 (override with `VAULT_DIR`), persists inclusion to `vault/.rag-vault/state.json`,
 runs TF-IDF retrieval over the included files, and streams Anthropic Claude answers
-when an API key is set (in onboarding or `ANTHROPIC_API_KEY`) or a local extractive
-fallback otherwise. Point the three exports at `./mocks/*` for the fully in-memory
+when an API key is set (in onboarding or `ANTHROPIC_API_KEY`), an on-device local
+model when the "local" provider is selected (via an OpenAI-compatible server, see
+[README.md](../README.md#local-model)), or a local extractive fallback otherwise. Point the three exports at `./mocks/*` for the fully in-memory
 mocks. A future cloud/Vercel deployment is another adapter behind the same
 `RagService` / `AuthService` / `ChatService` interfaces - serverless hosts can't
 persist to a local directory, so local storage means running on your own machine.

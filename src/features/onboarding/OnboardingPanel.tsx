@@ -198,7 +198,9 @@ export function OnboardingPanel() {
       <div className={styles.panel}>
         <Title3>Choose your model</Title3>
         <Text className={styles.hint}>
-          Pick your primary model and add its API key.
+          {providerId === "local"
+            ? "The local model runs entirely on your machine — no API key, nothing leaves your computer."
+            : "Pick your primary model and add its API key."}
         </Text>
         <Field label="Provider">
           <Dropdown
@@ -230,24 +232,26 @@ export function OnboardingPanel() {
             ))}
           </Dropdown>
         </Field>
-        <Field
-          label="API key"
-          hint={
-            <Link href={provider.apiKeyUrl} target="_blank" rel="noreferrer">
-              Get your {provider.label} key →
-            </Link>
-          }
-        >
-          <Input
-            value={apiKey}
-            onChange={(_, d) => setApiKey(d.value)}
-            type="password"
-            placeholder="sk-…"
-          />
-        </Field>
+        {providerId !== "local" && (
+          <Field
+            label="API key"
+            hint={
+              <Link href={provider.apiKeyUrl} target="_blank" rel="noreferrer">
+                Get your {provider.label} key →
+              </Link>
+            }
+          >
+            <Input
+              value={apiKey}
+              onChange={(_, d) => setApiKey(d.value)}
+              type="password"
+              placeholder="sk-…"
+            />
+          </Field>
+        )}
         <Button
           appearance="primary"
-          disabled={!apiKey}
+          disabled={providerId !== "local" && !apiKey}
           onClick={() => void selectModel(providerId, modelId, apiKey)}
         >
           Finish setup

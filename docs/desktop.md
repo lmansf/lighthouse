@@ -136,8 +136,17 @@ so it stays running in the tray.
 ## Configuration
 
 Environment variables (set in `.env.local` or the shell that launches the app)
-still apply — `ANTHROPIC_API_KEY` for live chat, and the licensing/checkout
+still apply — `ANTHROPIC_API_KEY` for live chat, `LIGHTHOUSE_LOCAL_LLM_URL` /
+`LIGHTHOUSE_LOCAL_LLM_MODEL` to point the "Local model (private)" provider at an
+external OpenAI-compatible server (see the README's
+[Local model](../README.md#local-model) section), and the licensing/checkout
 config (`LICENSE_API_URL` + `SUPABASE_ANON_KEY` + `CHECKOUT_API_URL`, plus the
 `PAID_ENABLED` flag, shipped in `.env.production`) from
 [registration.md](./registration.md) for the welcome form and subscriptions.
 `VAULT_DIR` is set automatically by the desktop app from your chosen folder.
+
+When a `llama-server` binary and a `.gguf` model are packaged under
+`resources/llm/`, the desktop app auto-launches that local inference server on
+`127.0.0.1:8080` at startup and stops it on quit, so the "Local model (private)"
+provider works with no setup; when nothing is bundled the provider targets an
+external server via `LIGHTHOUSE_LOCAL_LLM_URL` instead.
