@@ -114,13 +114,16 @@ async function check(licenseKey: string): Promise<Response> {
   if (!decoded?.guid) return json({ status: "none" });
 
   // Authoritative (and extendable) trial_end from the row; fall back to the
-  // value baked into the token if the row can't be read (e.g. deleted).
-  const { data } = await admin()
+  // value baked into the token only when the row is genuinely absent (e.g.
+  // deleted). A read error is unverifiable, not an expiry: surface it as a
+  // non-2xx so the client applies offline grace instead of wiping the vault.
+  const { data, error } = await admin()
     .from(TABLE)
     .select("trial_end")
     .eq("guid", decoded.guid)
     .order("trial_end", { ascending: false })
     .limit(1);
+  if (error) return json({ status: "error", detail: error.message }, 503);
   const trialEnd = data?.[0]?.trial_end ?? decoded.trialEnd;
 
   const status = Date.now() > Date.parse(trialEnd) ? "expired" : "valid";
