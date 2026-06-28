@@ -2,8 +2,9 @@
 
 RAG Vault is **local-first and standalone**. Your documents stay in a directory
 on your own computer; derived state (which files are included, files you've
-**linked** in place from elsewhere on disk, your profile and API key, future
-indexes) lives in a hidden `.rag-vault/` folder beside them. Linked items are
+**linked** in place from elsewhere on disk, your profile and API key, the cached
+text extracted from PDF/Word/Excel documents under `.rag-vault/cache/extract/`,
+future indexes) lives in a hidden `.rag-vault/` folder beside them. Linked items are
 read from their real location and are never copied into the vault. Removing an
 item from the vault is non-destructive: vault files move to a recoverable trash
 (`.rag-vault/trash/<date>/`) you can restore by hand, and linked items only
