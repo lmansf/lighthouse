@@ -27,7 +27,11 @@
       "!**/*.map",
       "!**/Lighthouse.cmd",
       "!**/Lighthouse.command",
-      "!**/install.sh"
+      "!**/install.sh",
+      "!**/.env",
+      "!**/.env.local",
+      "!**/.env.*.local",
+      "!supabase/**/*"
     ],
     "extraMetadata": { "main": "electron/main.js" },
     "directories": { "output": "release" },
