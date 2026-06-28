@@ -397,13 +397,26 @@ export function addReference(inputPath: string): { id: string; kind: "file" | "f
  */
 export function removeFromVault(nodeId: string): void {
   const state = loadState();
-  // Linked-in-place item (or anything under one): unlink the reference; never
-  // move or delete the real external files.
-  if (refIdOf(nodeId, state.references)) {
-    removeReference(refIdOf(nodeId, state.references)!);
+  const refId = refIdOf(nodeId, state.references);
+  // The reference root itself: unlink the whole link; never move or delete the
+  // real external files.
+  if (refId === nodeId) {
+    removeReference(refId);
+    return;
+  }
+  // A node *inside* a linked folder: unlinking the whole reference here would
+  // drop every sibling too, and we must never touch the user's real external
+  // files. Scope the removal to just this node's subtree by dropping its
+  // inclusion flags; the link itself stays intact.
+  if (refId) {
+    for (const k of Object.keys(state.included)) {
+      if (k === nodeId || k.startsWith(`${nodeId}/`)) delete state.included[k];
+    }
+    saveState(state);
     return;
   }
   const abs = safeAbs(nodeId); // refuses to escape the vault
+  if (abs === vaultDir()) throw new Error("cannot remove the vault root");
   // Drop inclusion flags for the node and its descendants regardless of move.
   for (const k of Object.keys(state.included)) {
     if (k === nodeId || k.startsWith(`${nodeId}/`)) delete state.included[k];

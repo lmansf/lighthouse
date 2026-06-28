@@ -51,6 +51,10 @@ class RealRagService implements RagService {
     await post({ op: "removeReference", refId });
   }
 
+  async removeFromVault(nodeId: string): Promise<void> {
+    await post({ op: "remove", nodeId });
+  }
+
   async capabilities(): Promise<{ desktop: boolean }> {
     return { desktop: (await getTree()).desktop };
   }

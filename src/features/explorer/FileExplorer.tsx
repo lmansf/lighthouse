@@ -100,6 +100,10 @@ const useStyles = makeStyles({
     textAlign: "center",
     color: tokens.colorNeutralForeground3,
   },
+  removeError: {
+    marginTop: tokens.spacingVerticalS,
+    color: tokens.colorPaletteRedForeground1,
+  },
   row: {
     display: "flex",
     alignItems: "center",
@@ -304,6 +308,7 @@ export function FileExplorer() {
   // Ids queued for a "Remove from vault" confirmation (single via right-click, or
   // the whole selection via the bulk action).
   const [pendingRemove, setPendingRemove] = useState<string[] | null>(null);
+  const [removeError, setRemoveError] = useState<string | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
@@ -508,7 +513,12 @@ export function FileExplorer() {
 
       <Dialog
         open={pendingRemove !== null}
-        onOpenChange={(_, d) => !d.open && setPendingRemove(null)}
+        onOpenChange={(_, d) => {
+          if (!d.open) {
+            setPendingRemove(null);
+            setRemoveError(null);
+          }
+        }}
       >
         <DialogSurface>
           <DialogBody>
@@ -517,6 +527,11 @@ export function FileExplorer() {
               {pendingRemove?.length === 1
                 ? "This item will be moved to the vault's trash and dropped from the index. Linked items are only unlinked — your real files stay where they are. You can restore from .rag-vault/trash."
                 : `These ${pendingRemove?.length ?? 0} items will be moved to the vault's trash and dropped from the index. Linked items are only unlinked. You can restore from .rag-vault/trash.`}
+              {removeError && (
+                <Text as="p" className={styles.removeError}>
+                  {removeError}
+                </Text>
+              )}
             </DialogContent>
             <DialogActions>
               <DialogTrigger disableButtonEnhancement>
@@ -525,8 +540,16 @@ export function FileExplorer() {
               <Button
                 appearance="primary"
                 onClick={() => {
-                  if (pendingRemove) void removeFromVault(pendingRemove);
-                  setPendingRemove(null);
+                  const ids = pendingRemove;
+                  if (!ids) return;
+                  setRemoveError(null);
+                  void removeFromVault(ids).then(
+                    () => setPendingRemove(null),
+                    (err) =>
+                      setRemoveError(
+                        err instanceof Error ? err.message : "Removal failed",
+                      ),
+                  );
                 }}
               >
                 Remove
