@@ -51,7 +51,9 @@ contracts — no cloud database required:
   Inclusion defaults to **excluded**: a node is retrievable only if its own flag
   is explicitly on *and* no ancestor folder is excluded, so anything newly added
   from disk stays out until you opt it in and an excluded folder forces every
-  descendant out. Files can also be moved within the vault (`op:move`), which
+  descendant out. The explorer keeps the tree live — it re-scans the vault in the
+  background (and on a toolbar **Refresh**), so files copied into the vault folder
+  outside an in-app upload appear on their own. Files can also be moved within the vault (`op:move`), which
   carries their inclusion flags to the new location. Whole folders upload with
   their structure, and the desktop app can **link** files/folders in place
   (`op:addReference` / `op:removeReference`) — indexing them from their real

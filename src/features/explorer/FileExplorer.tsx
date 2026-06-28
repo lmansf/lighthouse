@@ -24,6 +24,7 @@ import {
   tokens,
 } from "@fluentui/react-components";
 import {
+  ArrowSyncRegular,
   ArrowUploadRegular,
   ChevronDownRegular,
   ChevronRightRegular,
@@ -211,6 +212,7 @@ export function FileExplorer() {
   const setSelectionMode = useRagStore((s) => s.setSelectionMode);
   const toggleIncluded = useRagStore((s) => s.toggleIncluded);
   const removeReference = useRagStore((s) => s.removeReference);
+  const refresh = useRagStore((s) => s.load);
   const upload = useRagStore((s) => s.upload);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -313,6 +315,15 @@ export function FileExplorer() {
           >
             Add folder
           </Button>
+          <Tooltip content="Re-scan the vault for new files" relationship="label">
+            <Button
+              icon={<ArrowSyncRegular />}
+              size="small"
+              appearance="subtle"
+              aria-label="Refresh"
+              onClick={() => void refresh()}
+            />
+          </Tooltip>
           <Switch
             checked={selectionMode}
             onChange={(_, d) => setSelectionMode(d.checked)}
