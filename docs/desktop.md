@@ -46,8 +46,9 @@ npm run electron
 
 ## What the desktop app adds
 
-- **Persistent** — launches at login and stays in the system tray. Closing the
-  window hides it to the tray; quit from the tray menu to fully exit.
+- **Persistent** — launches at login (see [Launch at login](#launch-at-login))
+  and stays in the system tray. Closing the window hides it to the tray; quit
+  from the tray menu to fully exit.
 - **Add files / folders (copy)** — `File ▸ Add files…` and `File ▸ Add folder…`
   copy items into your vault. A folder keeps its structure.
 - **Link files / folders (no copy)** — `File ▸ Link files…` and
@@ -72,7 +73,18 @@ desktop-only, since browsers can't access real filesystem paths.
 
 By default the vault is `~/Documents/Lighthouse Vault`. The chosen folder is
 remembered in Electron's `userData` directory (`lighthouse-settings.json`).
-Changing it restarts the local server against the new directory.
+Changing it restarts the local server against the new directory. The same
+settings file also holds the launch-at-login preference described below.
+
+## Launch at login
+
+The desktop app opens automatically when you sign in to your computer, so your
+vault is always ready in the background. The **first** time you reach the app it
+asks once — *"Open Lighthouse at startup?"* — with the option on by default; your
+answer is saved (as `runOnStartup` in `lighthouse-settings.json`) and it never
+asks again. The Electron main process reads that preference on each launch and
+adds or removes itself from the OS login items accordingly. This is desktop-only
+— on the web build the prompt never appears and the setting is a no-op.
 
 ## Building a distributable installer
 
@@ -117,8 +129,9 @@ pull these heavy native deps).
 
 The Windows installer (NSIS) installs Lighthouse with a Start-Menu and desktop
 shortcut and lets the user pick the install directory. Launching it starts the
-bundled server and opens the app — and Lighthouse adds itself to login items so
-it stays running in the tray.
+bundled server and opens the app — and, unless the user opts out at the one-time
+[launch-at-login](#launch-at-login) prompt, Lighthouse adds itself to login items
+so it stays running in the tray.
 
 ## Configuration
 
