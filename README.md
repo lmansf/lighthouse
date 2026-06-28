@@ -83,6 +83,12 @@ subscribe. Subscribing is one click: checkout opens in your browser and the app
 unlocks itself the moment payment goes through, with no license key to paste.
 Each subscription is tied to an email, so a team can buy several under one card.
 
+> **Paid subscriptions aren't open yet.** The shipped build defaults to
+> `PAID_ENABLED=0`, so the Subscribe affordances stay hidden and the app shows
+> **"Get notified when purchasing opens"** instead — only the free trial is
+> live. Flip `PAID_ENABLED=1` (see [Configuration](#configuration)) to surface
+> the $14.99/mo checkout described above.
+
 Self-hosting setup (Supabase tables + Edge Functions + Stripe) is in
 **[docs/registration.md](docs/registration.md)**.
 
