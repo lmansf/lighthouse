@@ -7,7 +7,7 @@
 You own the application frame, the collapsible left rail, and the **design tokens** every other feature consumes.
 
 ## Contract you implement against
-- Consume `useRagStore` only to trigger the one-time data load and to read counts if needed. Do not implement feature logic.
+- Consume `useRagStore` only to drive the vault load (`load`) and to read counts if needed. Do not implement feature logic. The shell keeps the tree live: it re-runs `load()` on an interval and whenever the window regains focus/visibility, so files added outside an in-app upload appear without a manual reload. Each refresh swallows backend/IPC errors (logs them) so a transient failure can't crash the poll loop.
 - Read `useAuthStore().onboarding.step` if you gate the workspace behind onboarding.
 - `theme.ts` exports `ragVaultDarkTheme` (Fluent `Theme`) and `LAYOUT`. This is the single source of truth for colors/radii/spacing constants.
 
