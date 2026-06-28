@@ -10,6 +10,7 @@
  * and writes are no-ops.
  */
 import fs from "node:fs";
+import { writeJson } from "./config";
 
 export interface DesktopSettings {
   /** The local vault directory (owned by the Electron main process). */
@@ -40,7 +41,7 @@ export function writeDesktopSettings(patch: Partial<DesktopSettings>): DesktopSe
   if (!f) return {};
   const next = { ...readDesktopSettings(), ...patch };
   try {
-    fs.writeFileSync(f, JSON.stringify(next, null, 2));
+    writeJson(f, next);
   } catch {
     // Best-effort: a read-only location just means the preference isn't saved.
   }
