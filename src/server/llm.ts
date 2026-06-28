@@ -26,9 +26,6 @@ const LOCAL_LLM_MODEL = process.env.LIGHTHOUSE_LOCAL_LLM_MODEL?.trim() || "";
 // How long to wait for the local server to start responding (headers) before
 // giving up and falling back to extractive passages.
 const LOCAL_CONNECT_TIMEOUT_MS = 45_000;
-const LOCAL_SYSTEM_PROMPT =
-  "You are Lighthouse's assistant. Answer only from the provided context and cite sources as [n]. Be concise. " +
-  "Earlier turns in the conversation may reference the same documents; use them to interpret follow-up questions.";
 
 export interface Ctx {
   name: string;
@@ -36,15 +33,37 @@ export interface Ctx {
   score: number;
 }
 
+/**
+ * System prompt for the grounded RAG assistant. Kept as a named constant so the
+ * behaviour is reviewable in one place. It establishes the role, hard grounding
+ * rules, the [n] citation contract, and Markdown formatting (the chat UI renders
+ * Markdown), while leaving the actual context + question to the user message.
+ */
+const SYSTEM_PROMPT = [
+  "You are Lighthouse, a retrieval assistant for a user's private local file vault.",
+  "You answer questions using ONLY the numbered context blocks provided in each message — the user's own included files.",
+  "",
+  "Grounding rules:",
+  "- Base every statement on the provided context. Never use outside knowledge or invent facts, names, numbers, dates, or quotes.",
+  "- If the context does not contain the answer, say so plainly and state what's missing. Do not guess or pad.",
+  "- When sources disagree, surface the conflict and cite each side rather than silently choosing one.",
+  "- Prefer the user's own wording; quote short phrases verbatim when precision matters.",
+  "",
+  "Citations:",
+  "- Cite the sources you used inline as [n], using the bracketed number on each context block.",
+  "- Place a citation right after the fact it supports; combine like [1][3] when several sources back the same point.",
+  "- Only cite blocks you actually used.",
+  "",
+  "Style:",
+  "- Lead with the direct answer, then support it. Be as concise as the question allows.",
+  "- Format for readability with Markdown: headings, **bold**, bullet/numbered lists, tables, and `code`/fenced code where they help. The interface renders Markdown.",
+].join("\n");
+
 function buildPrompt(question: string, contexts: Ctx[]): string {
   const blocks = contexts
     .map((c, i) => `[${i + 1}] ${c.name}\n${c.text}`)
     .join("\n\n");
-  return (
-    `Use ONLY the context below to answer. If it is insufficient, say so plainly ` +
-    `and do not invent facts. Cite sources as [n] inline.\n\n` +
-    `# Context\n${blocks}\n\n# Question\n${question}`
-  );
+  return `# Context\n${blocks}\n\n# Question\n${question}`;
 }
 
 /** Stream an answer as incremental text deltas. */
@@ -135,9 +154,7 @@ async function* streamClaude(
       model,
       max_tokens: 1024,
       stream: true,
-      system:
-        "You are Lighthouse's assistant. Answer only from the provided context and cite sources as [n]. Be concise. " +
-        "Earlier turns in the conversation may reference the same documents; use them to interpret follow-up questions.",
+      system: SYSTEM_PROMPT,
       messages,
     }),
   });
@@ -203,7 +220,7 @@ async function* streamLocal(
         max_tokens: 1024,
         stream: true,
         messages: [
-          { role: "system", content: LOCAL_SYSTEM_PROMPT },
+          { role: "system", content: SYSTEM_PROMPT },
           ...priorTurns.map((t) => ({ role: t.role, content: t.content })),
           { role: "user", content: buildPrompt(question, contexts) },
         ],
