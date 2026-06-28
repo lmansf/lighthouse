@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Avatar,
   Button,
@@ -13,14 +13,17 @@ import {
   DialogTitle,
   DialogTrigger,
   Divider,
+  Dropdown,
   Field,
   Input,
+  Link,
   Menu,
   MenuDivider,
   MenuItem,
   MenuList,
   MenuPopover,
   MenuTrigger,
+  Option,
   Spinner,
   Text,
   Textarea,
@@ -31,6 +34,7 @@ import {
   tokens,
 } from "@fluentui/react-components";
 import {
+  BrainCircuitRegular,
   KeyRegular,
   MailRegular,
   OpenRegular,
@@ -38,6 +42,7 @@ import {
   SignOutRegular,
   StarRegular,
 } from "@fluentui/react-icons";
+import { MODEL_PROVIDERS } from "@/contracts";
 import { useLicenseStore, type FeedbackInput, type LicenseStatus } from "@/stores/useLicenseStore";
 import { useAuthStore } from "@/stores/useAuthStore";
 
@@ -98,6 +103,8 @@ const useStyles = makeStyles({
     maxWidth: "280px",
   },
   profileText: { display: "flex", flexDirection: "column", minWidth: 0 },
+  modelFields: { display: "flex", flexDirection: "column", gap: tokens.spacingVerticalM },
+  savedNote: { color: tokens.colorPaletteGreenForeground1, fontSize: tokens.fontSizeBase200 },
 });
 
 /** 0–5 rating as a compact segmented row. */
@@ -483,12 +490,135 @@ export function LicenseGate({ status }: { status: LicenseStatus }) {
  * item in the buy slot — "Subscribe" when paid is on, "Get notified when
  * purchasing opens" while it's off — plus a couple of basic items.
  */
+/**
+ * Manage the active model provider/model and API key after onboarding. Reuses
+ * the same selectModel seam as the onboarding model step; the server preserves
+ * the stored key when the field is left blank, so the user can switch model
+ * without re-pasting their key.
+ */
+function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean) => void }) {
+  const styles = useStyles();
+  const onboarding = useAuthStore((s) => s.onboarding);
+  const selectModel = useAuthStore((s) => s.selectModel);
+
+  const [providerId, setProviderId] = useState(onboarding.providerId ?? MODEL_PROVIDERS[0].id);
+  const [modelId, setModelId] = useState(
+    onboarding.modelId ?? MODEL_PROVIDERS.find((p) => p.id === providerId)!.models[0],
+  );
+  const [apiKey, setApiKey] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  // Re-sync the fields to the saved settings each time the dialog opens.
+  useEffect(() => {
+    if (!open) return;
+    const pid = onboarding.providerId ?? MODEL_PROVIDERS[0].id;
+    setProviderId(pid);
+    setModelId(onboarding.modelId ?? MODEL_PROVIDERS.find((p) => p.id === pid)!.models[0]);
+    setApiKey("");
+    setSaved(false);
+  }, [open, onboarding.providerId, onboarding.modelId]);
+
+  const provider = MODEL_PROVIDERS.find((p) => p.id === providerId) ?? MODEL_PROVIDERS[0];
+
+  async function save() {
+    setSaving(true);
+    // Empty key ⇒ keep the existing one (selectModel falls back to the stored key).
+    await selectModel(providerId, modelId, apiKey);
+    setSaving(false);
+    setSaved(true);
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={(_, d) => setOpen(d.open)}>
+      <DialogSurface>
+        <DialogBody>
+          <DialogTitle>AI models</DialogTitle>
+          <DialogContent>
+            <div className={styles.modelFields}>
+              <Field label="Provider">
+                <Dropdown
+                  value={provider.label}
+                  selectedOptions={[providerId]}
+                  onOptionSelect={(_, d) => {
+                    const p = MODEL_PROVIDERS.find((x) => x.id === d.optionValue)!;
+                    setProviderId(p.id);
+                    setModelId(p.models[0]);
+                    setSaved(false);
+                  }}
+                >
+                  {MODEL_PROVIDERS.map((p) => (
+                    <Option key={p.id} value={p.id}>
+                      {p.label}
+                    </Option>
+                  ))}
+                </Dropdown>
+              </Field>
+              <Field label="Model">
+                <Dropdown
+                  value={modelId}
+                  selectedOptions={[modelId]}
+                  onOptionSelect={(_, d) => {
+                    setModelId(d.optionValue!);
+                    setSaved(false);
+                  }}
+                >
+                  {provider.models.map((m) => (
+                    <Option key={m} value={m}>
+                      {m}
+                    </Option>
+                  ))}
+                </Dropdown>
+              </Field>
+              <Field
+                label="API key"
+                hint={
+                  <Link href={provider.apiKeyUrl} target="_blank" rel="noreferrer">
+                    Get your {provider.label} key →
+                  </Link>
+                }
+              >
+                <Input
+                  type="password"
+                  value={apiKey}
+                  onChange={(_, d) => {
+                    setApiKey(d.value);
+                    setSaved(false);
+                  }}
+                  placeholder={
+                    onboarding.hasApiKey ? "•••••••• saved — leave blank to keep" : "sk-…"
+                  }
+                />
+              </Field>
+              {saved && <Text className={styles.savedNote}>Saved.</Text>}
+            </div>
+          </DialogContent>
+          <DialogActions>
+            <DialogTrigger disableButtonEnhancement>
+              <Button appearance="secondary">Close</Button>
+            </DialogTrigger>
+            <Button
+              appearance="primary"
+              disabled={saving}
+              icon={saving ? <Spinner size="tiny" /> : undefined}
+              onClick={() => void save()}
+            >
+              {saving ? "Saving…" : "Save"}
+            </Button>
+          </DialogActions>
+        </DialogBody>
+      </DialogSurface>
+    </Dialog>
+  );
+}
+
 export function SettingsMenu() {
   const styles = useStyles();
   const paidEnabled = useLicenseStore((s) => s.paidEnabled);
   const user = useAuthStore((s) => s.onboarding.user);
   const signOut = useAuthStore((s) => s.signOut);
   const [dlg, setDlg] = useState(false);
+  const [aiDlg, setAiDlg] = useState(false);
 
   return (
     <>
@@ -517,6 +647,10 @@ export function SettingsMenu() {
                 <MenuDivider />
               </>
             )}
+            <MenuItem icon={<BrainCircuitRegular />} onClick={() => setAiDlg(true)}>
+              AI models
+            </MenuItem>
+            <MenuDivider />
             <MenuItem
               className={styles.highlightItem}
               icon={paidEnabled ? <StarRegular /> : <MailRegular />}
@@ -535,6 +669,7 @@ export function SettingsMenu() {
         </MenuPopover>
       </Menu>
       <PurchaseDialog open={dlg} setOpen={setDlg} />
+      <AiModelsDialog open={aiDlg} setOpen={setAiDlg} />
     </>
   );
 }
