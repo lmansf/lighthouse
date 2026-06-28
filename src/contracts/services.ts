@@ -36,6 +36,11 @@ export interface RagService {
   /** Remove a reference (unlink); the real files on disk are left untouched. */
   removeReference(refId: string): Promise<void>;
   /**
+   * Remove a node from the vault, non-destructively: a linked item unlinks, a
+   * vault-resident item moves to a recoverable trash. Throws on failure.
+   */
+  removeFromVault(nodeId: string): Promise<void>;
+  /**
    * Capabilities of the running deployment. `desktop` is true only in the
    * packaged desktop app, where filesystem-backed actions (opening a cited file
    * natively, linking by path) work; a plain web deployment reports false so the

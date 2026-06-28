@@ -16,6 +16,13 @@ import {
   Badge,
   Button,
   Checkbox,
+  Dialog,
+  DialogActions,
+  DialogBody,
+  DialogContent,
+  DialogSurface,
+  DialogTitle,
+  DialogTrigger,
   Menu,
   MenuItem,
   MenuList,
@@ -34,11 +41,10 @@ import {
   ChevronDownRegular,
   ChevronRightRegular,
   DatabaseRegular,
+  DeleteRegular,
   DismissRegular,
   DocumentRegular,
   DocumentPdfRegular,
-  EyeRegular,
-  EyeOffRegular,
   FolderRegular,
   FolderAddRegular,
   FolderOpenRegular,
@@ -93,6 +99,10 @@ const useStyles = makeStyles({
     ...shorthands.padding(tokens.spacingVerticalXL, tokens.spacingHorizontalL),
     textAlign: "center",
     color: tokens.colorNeutralForeground3,
+  },
+  removeError: {
+    marginTop: tokens.spacingVerticalS,
+    color: tokens.colorPaletteRedForeground1,
   },
   row: {
     display: "flex",
@@ -153,6 +163,7 @@ interface TreeRowProps {
   onToggle: (id: string) => void;
   onSelect: (id: string) => void;
   onUnlink: (id: string) => void;
+  onRemove: (id: string) => void;
 }
 
 function TreeRow({
@@ -164,6 +175,7 @@ function TreeRow({
   onToggle,
   onSelect,
   onUnlink,
+  onRemove,
 }: TreeRowProps) {
   const styles = useStyles();
   const [open, setOpen] = useState(depth < 1); // top-level folders open by default
@@ -174,6 +186,8 @@ function TreeRow({
 
   return (
     <div>
+      <Menu openOnContext>
+        <MenuTrigger disableButtonEnhancement>
       <div
         className={`${styles.row}${node.ragIncluded ? ` ${styles.rowIncluded}` : ""}${
           selected ? ` ${styles.rowSelected}` : ""
@@ -237,6 +251,15 @@ function TreeRow({
           </Tooltip>
         )}
       </div>
+        </MenuTrigger>
+        <MenuPopover>
+          <MenuList>
+            <MenuItem icon={<DeleteRegular />} onClick={() => onRemove(node.id)}>
+              Remove from vault
+            </MenuItem>
+          </MenuList>
+        </MenuPopover>
+      </Menu>
       {node.kind === "folder" && open && (
         <div>
           {kids.map((k) => (
@@ -250,6 +273,7 @@ function TreeRow({
               onToggle={onToggle}
               onSelect={onSelect}
               onUnlink={onUnlink}
+              onRemove={onRemove}
             />
           ))}
         </div>
@@ -270,11 +294,21 @@ export function FileExplorer() {
   const applySelection = useRagStore((s) => s.applySelection);
   const toggleIncluded = useRagStore((s) => s.toggleIncluded);
   const removeReference = useRagStore((s) => s.removeReference);
+  const removeFromVault = useRagStore((s) => s.removeFromVault);
   const refresh = useRagStore((s) => s.load);
   const upload = useRagStore((s) => s.upload);
 
   const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
   const isSelected = (id: string) => selectedSet.has(id);
+  const nodeById = useMemo(() => new Map(nodes.map((n) => [n.id, n])), [nodes]);
+  // The visibility switch reflects (and sets) the whole selection at once.
+  const allSelectedVisible =
+    selectedIds.length > 0 && selectedIds.every((id) => nodeById.get(id)?.ragIncluded);
+
+  // Ids queued for a "Remove from vault" confirmation (single via right-click, or
+  // the whole selection via the bulk action).
+  const [pendingRemove, setPendingRemove] = useState<string[] | null>(null);
+  const [removeError, setRemoveError] = useState<string | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
@@ -407,22 +441,19 @@ export function FileExplorer() {
             {selectedIds.length} selected
           </Text>
           <span className={styles.spacer} />
+          <Switch
+            checked={Boolean(allSelectedVisible)}
+            disabled={selectedIds.length === 0}
+            onChange={(_, d) => void applySelection(d.checked)}
+            label="Visible to AI"
+          />
           <Button
-            icon={<EyeRegular />}
-            appearance="primary"
+            icon={<DeleteRegular />}
             size="small"
             disabled={selectedIds.length === 0}
-            onClick={() => void applySelection(true)}
+            onClick={() => setPendingRemove(selectedIds)}
           >
-            Make visible
-          </Button>
-          <Button
-            icon={<EyeOffRegular />}
-            size="small"
-            disabled={selectedIds.length === 0}
-            onClick={() => void applySelection(false)}
-          >
-            Remove
+            Remove from vault
           </Button>
           <Button
             appearance="subtle"
@@ -470,6 +501,7 @@ export function FileExplorer() {
                       onToggle={(id) => void toggleIncluded(id)}
                       onSelect={(id) => toggleSelected(id)}
                       onUnlink={(id) => void removeReference(id)}
+                      onRemove={(id) => setPendingRemove([id])}
                     />
                   ))}
                 </div>
@@ -478,6 +510,54 @@ export function FileExplorer() {
           );
         })}
       </div>
+
+      <Dialog
+        open={pendingRemove !== null}
+        onOpenChange={(_, d) => {
+          if (!d.open) {
+            setPendingRemove(null);
+            setRemoveError(null);
+          }
+        }}
+      >
+        <DialogSurface>
+          <DialogBody>
+            <DialogTitle>Remove from vault?</DialogTitle>
+            <DialogContent>
+              {pendingRemove?.length === 1
+                ? "This item will be moved to the vault's trash and dropped from the index. Linked items are only unlinked — your real files stay where they are. You can restore from .rag-vault/trash."
+                : `These ${pendingRemove?.length ?? 0} items will be moved to the vault's trash and dropped from the index. Linked items are only unlinked. You can restore from .rag-vault/trash.`}
+              {removeError && (
+                <Text as="p" className={styles.removeError}>
+                  {removeError}
+                </Text>
+              )}
+            </DialogContent>
+            <DialogActions>
+              <DialogTrigger disableButtonEnhancement>
+                <Button appearance="secondary">Cancel</Button>
+              </DialogTrigger>
+              <Button
+                appearance="primary"
+                onClick={() => {
+                  const ids = pendingRemove;
+                  if (!ids) return;
+                  setRemoveError(null);
+                  void removeFromVault(ids).then(
+                    () => setPendingRemove(null),
+                    (err) =>
+                      setRemoveError(
+                        err instanceof Error ? err.message : "Removal failed",
+                      ),
+                  );
+                }}
+              >
+                Remove
+              </Button>
+            </DialogActions>
+          </DialogBody>
+        </DialogSurface>
+      </Dialog>
     </section>
   );
 }

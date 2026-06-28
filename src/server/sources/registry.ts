@@ -64,6 +64,12 @@ export async function moveNode(
   return c.moveNode(fromId, toParentId);
 }
 
+export async function removeFromVault(nodeId: string): Promise<void> {
+  const c = connectorFor(nodeId);
+  if (!c.remove) throw new Error("remove is unsupported for this source");
+  await c.remove(nodeId);
+}
+
 /**
  * Retrieval across the included set. Today it delegates to the local vault's
  * engine; when a cloud connector lands, this is where each source's mirrored

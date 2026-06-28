@@ -12,6 +12,7 @@ import type { DataSource, FileNode, RagReference } from "@/contracts";
 import {
   VAULT_SOURCE_ID,
   vaultDir,
+  stateDir,
   statePath,
   readJson,
   writeJson,
@@ -384,6 +385,53 @@ export function addReference(inputPath: string): { id: string; kind: "file" | "f
   state.references[id] = { path: abs, name: path.basename(abs) || abs, kind };
   saveState(state);
   return { id, kind };
+}
+
+/**
+ * Remove a node from the vault — non-destructively. A linked (referenced) item
+ * is simply unlinked, leaving the user's real external files untouched. A
+ * vault-resident file or folder is MOVED to a recoverable trash directory
+ * (`.rag-vault/trash/<date>/…`) rather than deleted, and its inclusion flags
+ * (and its subtree's) are dropped. The trash lives under the hidden state dir,
+ * so it never reappears in the tree, and can be restored by hand.
+ */
+export function removeFromVault(nodeId: string): void {
+  const state = loadState();
+  const refId = refIdOf(nodeId, state.references);
+  // The reference root itself: unlink the whole link; never move or delete the
+  // real external files.
+  if (refId === nodeId) {
+    removeReference(refId);
+    return;
+  }
+  // A node *inside* a linked folder: unlinking the whole reference here would
+  // drop every sibling too, and we must never touch the user's real external
+  // files. Scope the removal to just this node's subtree by dropping its
+  // inclusion flags; the link itself stays intact.
+  if (refId) {
+    for (const k of Object.keys(state.included)) {
+      if (k === nodeId || k.startsWith(`${nodeId}/`)) delete state.included[k];
+    }
+    saveState(state);
+    return;
+  }
+  const abs = safeAbs(nodeId); // refuses to escape the vault
+  if (abs === vaultDir()) throw new Error("cannot remove the vault root");
+  // Drop inclusion flags for the node and its descendants regardless of move.
+  for (const k of Object.keys(state.included)) {
+    if (k === nodeId || k.startsWith(`${nodeId}/`)) delete state.included[k];
+  }
+  if (fs.existsSync(abs)) {
+    const day = new Date().toISOString().slice(0, 10);
+    const trashDir = path.join(stateDir(), "trash", day);
+    fs.mkdirSync(trashDir, { recursive: true });
+    let dest = path.join(trashDir, path.basename(nodeId));
+    const ext = path.extname(dest);
+    const base = dest.slice(0, dest.length - ext.length);
+    for (let i = 1; fs.existsSync(dest); i++) dest = `${base} (${i})${ext}`;
+    fs.renameSync(abs, dest);
+  }
+  saveState(state);
 }
 
 /** Drop a reference (unlink). Leaves the real files on disk untouched. */

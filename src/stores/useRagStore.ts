@@ -29,7 +29,10 @@ interface RagStore {
   setSelectionMode: (on: boolean) => void;
   toggleSelected: (nodeId: string) => void;
   clearSelection: () => void;
-  /** Apply include (true) / exclude (false) to every selected node, then clear. */
+  /**
+   * Apply include (true) / exclude (false) to every selected node. The selection
+   * is kept so a stateful "Visible to AI" toggle reflects the result.
+   */
   applySelection: (include: boolean) => Promise<void>;
   toggleIncluded: (nodeId: string) => Promise<void>;
   toggleSourceAvailable: (sourceId: string) => Promise<void>;
@@ -39,6 +42,12 @@ interface RagStore {
   addReference: (path: string) => Promise<void>;
   /** Remove a reference (unlink); real files are left in place. */
   removeReference: (refId: string) => Promise<void>;
+  /**
+   * Remove nodes from the vault (non-destructive: linked items unlink, vault
+   * items move to a recoverable trash). Clears successfully-removed ids from the
+   * selection and rejects if any removal failed.
+   */
+  removeFromVault: (nodeIds: string[]) => Promise<void>;
 
   /** Ids of every included file (leaf) node - what chat retrieves against. */
   includedFileIds: () => string[];
@@ -76,7 +85,8 @@ export const useRagStore = create<RagStore>((set, get) => ({
     const ids = get().selectedIds;
     // setIncluded cascades to a folder's descendants, so picking a folder works.
     for (const id of ids) await ragService.setIncluded(id, include);
-    set({ selectedIds: [], nodes: await ragService.listNodes() });
+    // Keep the selection so the "Visible to AI" toggle reflects the new state.
+    set({ nodes: await ragService.listNodes() });
   },
 
   toggleIncluded: async (nodeId) => {
@@ -123,6 +133,23 @@ export const useRagStore = create<RagStore>((set, get) => ({
   removeReference: async (refId) => {
     await ragService.removeReference(refId);
     await get().load();
+  },
+
+  removeFromVault: async (nodeIds) => {
+    const failed: string[] = [];
+    for (const nodeId of nodeIds) {
+      try {
+        await ragService.removeFromVault(nodeId);
+      } catch {
+        failed.push(nodeId);
+      }
+    }
+    // Keep whatever failed selected so the user can retry; drop the rest.
+    set({ selectedIds: failed });
+    await get().load();
+    if (failed.length) {
+      throw new Error(`Failed to remove ${failed.length} of ${nodeIds.length} item(s)`);
+    }
   },
 
   includedFileIds: () =>

@@ -75,6 +75,11 @@ class MockRagService implements RagService {
     this.nodes = this.nodes.filter((n) => n.id !== refId && !n.id.startsWith(`${refId}/`));
   }
 
+  async removeFromVault(nodeId: string): Promise<void> {
+    const ids = this.descendantIds(nodeId);
+    this.nodes = this.nodes.filter((n) => !ids.has(n.id));
+  }
+
   async capabilities(): Promise<{ desktop: boolean }> {
     return { desktop: false };
   }
