@@ -57,7 +57,10 @@ contracts — no cloud database required:
   carries their inclusion flags to the new location. Whole folders upload with
   their structure, and the desktop app can **link** files/folders in place
   (`op:addReference` / `op:removeReference`) — indexing them from their real
-  location on disk instead of copying a second time.
+  location on disk instead of copying a second time. Items can be **removed from
+  the vault** non-destructively (`op:remove`): a vault file/folder moves to a
+  recoverable trash (`.rag-vault/trash/<date>/`) and a linked item only unlinks,
+  leaving your real files in place.
 - **Retrieval** is real TF-IDF cosine over the text of the *included* files,
   combined with a file name/path match so a file is findable by what it's *called*
   as well as what it contains (a file named `creditcard.csv` answers "any credit
