@@ -2,7 +2,7 @@
   "name": "rag-vault",
   "version": "0.1.0",
   "private": true,
-  "description": "Lighthouse \u2014 a local-first RAG vault for your documents.",
+  "description": "Lighthouse — a local-first RAG vault for your documents.",
   "author": "Lighthouse",
   "main": "electron/main.js",
   "scripts": {
@@ -73,6 +73,8 @@
     "next": "^15.5.19",
     "react": "19.0.0",
     "react-dom": "19.0.0",
+    "react-markdown": "^9.1.0",
+    "remark-gfm": "^4.0.1",
     "unpdf": "^1.6.2",
     "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz",
     "zustand": "^5.0.2"

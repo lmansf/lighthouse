@@ -83,8 +83,10 @@ contracts — no cloud database required:
   the settings gear's **AI models** dialog, or via `ANTHROPIC_API_KEY`), an
   on-device **local model** when the "Local model
   (private)" provider is selected (see **[Local model](#local-model)**), otherwise
-  a local extractive fallback that needs no network. Each question and answer is
-  kept in a transcript so you can ask follow-ups about the documents that came back
+  a local extractive fallback that needs no network. Answers render as Markdown
+  (headings, lists, tables, code, bold, and links that open externally). Each
+  question and answer is kept in a transcript so you can ask follow-ups about the
+  documents that came back
   (prior turns — capped to the last few — are threaded to the model, and a bare
   follow-up blends in the previous question to anchor retrieval); **New chat**
   starts fresh. The answer's **Related files** cards
