@@ -1,0 +1,54 @@
+name: Release
+
+# Build the desktop installers natively (Wine can't be used to cross-build the
+# Windows NSIS .exe) and publish them to a GitHub Release. The lighthouse-web
+# download button auto-detects the .exe asset, so publishing the release makes
+# the download work with no further web change.
+#
+# Trigger: push a tag like `v0.1.0` (must match package.json "version"), or run
+# it manually from the Actions tab ("Run workflow").
+#
+# NOTE: GitHub release assets are capped at 2 GB per file. With the bundled
+# ~1 GB model the Windows installer should land under that; if a build ever
+# exceeds it, drop to a smaller model or switch to first-run model download.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write # create the release and upload installer assets
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest # → Lighthouse-Setup .exe (NSIS), x64
+          - os: macos-latest # → Lighthouse .dmg, arm64 (unsigned)
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # `npm run release` = fetch the llama-server binary + GGUF into
+      # resources/llm, then electron-builder builds and publishes to a draft
+      # release tagged v<version>. Both matrix jobs publish to the same draft,
+      # so the .exe and .dmg attach together.
+      - name: Build and publish installer
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # No signing certificates in CI — build an unsigned macOS app rather
+          # than failing on a missing identity. (Notarize later for no warning.)
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: npm run release
