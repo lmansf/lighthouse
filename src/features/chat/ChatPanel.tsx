@@ -30,7 +30,7 @@ import {
   OpenRegular,
   SendRegular,
 } from "@fluentui/react-icons";
-import ReactMarkdown from "react-markdown";
+import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { ChatMessage, ChatTurn, RagReference } from "@/contracts";
 import { chatService } from "@/contracts";
@@ -224,6 +224,10 @@ const useStyles = makeStyles({
   },
 });
 
+const markdownComponents: Components = {
+  a: ({ node, ...props }) => <a {...props} target="_blank" rel="noopener noreferrer" />,
+};
+
 /** Subtle Lighthouse beacon loader, shown briefly while we wait for the first token. */
 function LighthouseLoader({ className, dotClass }: { className: string; dotClass: string }) {
   return (
@@ -416,7 +420,9 @@ export function ChatPanel() {
                 ) : (
                   <>
                     <div className={styles.answer}>
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.content}</ReactMarkdown>
+                      <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+                        {m.content}
+                      </ReactMarkdown>
                       {streaming && m.id === lastId && <span className={styles.beaconInline} />}
                     </div>
                     {m.references && m.references.length > 0 && (
