@@ -128,7 +128,9 @@ create table if not exists public.userlogs (
   app_version text
 );
 
--- In-app bug reports
+-- In-app bug reports (one row per report — a contact may file many, so no
+-- UNIQUE on contact_id; older deploys that added one are fixed by migration
+-- supabase/migrations/20260628162019_bug_reports_allow_multiple.sql)
 create table if not exists public.bug_reports (
   id          bigint generated always as identity primary key,
   created_at  timestamptz not null default now(),
