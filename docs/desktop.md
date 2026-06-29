@@ -86,6 +86,21 @@ asks again. The Electron main process reads that preference on each launch and
 adds or removes itself from the OS login items accordingly. This is desktop-only
 — on the web build the prompt never appears and the setting is a no-op.
 
+## Renderer security (Content-Security-Policy)
+
+The desktop app sets a **Content-Security-Policy** on every response the renderer
+loads. The Electron main process installs it via
+`session.defaultSession.webRequest.onHeadersReceived` before the window is
+created, so the first document is covered too. The policy keeps the page locked
+to its own local Next server (`http://localhost:PORT`); API routes proxy out to
+Anthropic/Supabase server-side, so the renderer itself only talks to that same
+origin. Notably it **omits `'unsafe-eval'`** — production Next doesn't need it —
+which clears Electron's insecure-CSP warning and removes that attack surface.
+`'unsafe-inline'` stays because Next's bootstrap inline script and Fluent UI's
+(Griffel) runtime `<style>` injection rely on it, and `connect-src` allows
+`localhost`/`127.0.0.1` for the local-model server. This is desktop-only; the
+web build leaves CSP to its own hosting.
+
 ## Building a distributable installer
 
 This produces a **standalone installer** end users double-click — no Node.js,
