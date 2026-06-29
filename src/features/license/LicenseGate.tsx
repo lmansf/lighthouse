@@ -490,6 +490,11 @@ export function LicenseGate({ status }: { status: LicenseStatus }) {
  * item in the buy slot — "Subscribe" when paid is on, "Get notified when
  * purchasing opens" while it's off — plus a couple of basic items.
  */
+/** First model of a provider id, falling back to the first known provider. */
+function firstModelFor(pid: string): string {
+  return (MODEL_PROVIDERS.find((p) => p.id === pid) ?? MODEL_PROVIDERS[0]).models[0];
+}
+
 /**
  * Manage the active model provider/model and API key after onboarding. Reuses
  * the same selectModel seam as the onboarding model step; the server preserves
@@ -502,31 +507,38 @@ function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean
   const selectModel = useAuthStore((s) => s.selectModel);
 
   const [providerId, setProviderId] = useState(onboarding.providerId ?? MODEL_PROVIDERS[0].id);
-  const [modelId, setModelId] = useState(
-    onboarding.modelId ?? MODEL_PROVIDERS.find((p) => p.id === providerId)!.models[0],
-  );
+  const [modelId, setModelId] = useState(onboarding.modelId ?? firstModelFor(providerId));
   const [apiKey, setApiKey] = useState("");
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  // Re-sync the fields to the saved settings each time the dialog opens.
+  // Re-sync the fields to the saved settings on the open transition.
   useEffect(() => {
     if (!open) return;
-    const pid = onboarding.providerId ?? MODEL_PROVIDERS[0].id;
+    const current = useAuthStore.getState().onboarding;
+    const pid = current.providerId ?? MODEL_PROVIDERS[0].id;
     setProviderId(pid);
-    setModelId(onboarding.modelId ?? MODEL_PROVIDERS.find((p) => p.id === pid)!.models[0]);
+    setModelId(current.modelId ?? firstModelFor(pid));
     setApiKey("");
     setSaved(false);
-  }, [open, onboarding.providerId, onboarding.modelId]);
+    setError(null);
+  }, [open]);
 
   const provider = MODEL_PROVIDERS.find((p) => p.id === providerId) ?? MODEL_PROVIDERS[0];
 
   async function save() {
     setSaving(true);
-    // Empty key ⇒ keep the existing one (selectModel falls back to the stored key).
-    await selectModel(providerId, modelId, apiKey);
-    setSaving(false);
-    setSaved(true);
+    setError(null);
+    try {
+      // Empty key ⇒ keep the existing one (selectModel falls back to the stored key).
+      await selectModel(providerId, modelId, apiKey);
+      setSaved(true);
+    } catch {
+      setError("Couldn't save your model settings. Please check your connection and try again.");
+    } finally {
+      setSaving(false);
+    }
   }
 
   return (
@@ -570,26 +582,29 @@ function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean
                   ))}
                 </Dropdown>
               </Field>
-              <Field
-                label="API key"
-                hint={
-                  <Link href={provider.apiKeyUrl} target="_blank" rel="noreferrer">
-                    Get your {provider.label} key →
-                  </Link>
-                }
-              >
-                <Input
-                  type="password"
-                  value={apiKey}
-                  onChange={(_, d) => {
-                    setApiKey(d.value);
-                    setSaved(false);
-                  }}
-                  placeholder={
-                    onboarding.hasApiKey ? "•••••••• saved — leave blank to keep" : "sk-…"
+              {provider.id !== "local" && (
+                <Field
+                  label="API key"
+                  hint={
+                    <Link href={provider.apiKeyUrl} target="_blank" rel="noreferrer">
+                      Get your {provider.label} key →
+                    </Link>
                   }
-                />
-              </Field>
+                >
+                  <Input
+                    type="password"
+                    value={apiKey}
+                    onChange={(_, d) => {
+                      setApiKey(d.value);
+                      setSaved(false);
+                    }}
+                    placeholder={
+                      onboarding.hasApiKey ? "•••••••• saved — leave blank to keep" : "sk-…"
+                    }
+                  />
+                </Field>
+              )}
+              {error && <Text className={styles.error}>{error}</Text>}
               {saved && <Text className={styles.savedNote}>Saved.</Text>}
             </div>
           </DialogContent>
