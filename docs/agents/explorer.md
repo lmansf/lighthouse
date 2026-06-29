@@ -17,6 +17,7 @@ This is the centerpiece: a File-Explorer-like tree where the user curates RAG in
 5. **Linked items** - files/folders added *in place* (desktop-only, via `addReference`) render with a "linked" badge and an **Unlink** action (`removeReference`) on the subtree root; the real files stay on disk.
 6. **Remove from vault** (non-destructive) - a right-click **Remove from vault** context-menu item on any row, plus the selection-mode bulk button, both behind a confirm dialog (`removeFromVault`). A vault-resident file/folder moves to a recoverable trash (`.rag-vault/trash/<date>/`) and its inclusion flags drop; a linked item only unlinks, leaving the user's real files untouched.
 7. **Refresh** - a toolbar button (`load`) that re-scans the vault on demand, so files added outside an in-app upload show up. The shell also polls `load` in the background; this is the manual nudge.
+8. **Drag a file out to chat** - file rows are `draggable`; dragging one onto the chat panel attaches it so the next question is scoped to just that file. Serialize the payload with the shared `@/shell/dnd` helpers (`FILE_DRAG_MIME`, `serializeDraggedFiles`) so the chat panel can tell internal drags from OS file drops. Only local-vault files are draggable — cloud-connector files (namespaced ids) live remotely, outside the vault that attachment retrieval walks.
 
 ## Acceptance criteria
 - Toggling a file updates `useRagStore` immediately, and the chat panel's "sources available" count reflects it (cross-feature seam).

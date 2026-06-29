@@ -57,6 +57,7 @@ import {
 } from "@fluentui/react-icons";
 import type { FileNode } from "@/contracts";
 import { useRagStore } from "@/stores/useRagStore";
+import { FILE_DRAG_MIME, serializeDraggedFiles } from "@/shell/dnd";
 
 const useStyles = makeStyles({
   panel: {
@@ -207,6 +208,9 @@ function TreeRow({
   const [open, setOpen] = useState(depth < 1); // top-level folders open by default
   const kids = node.kind === "folder" ? childrenOf(node.id) : [];
   const selected = selectionMode && isSelected(node.id);
+  // Cloud-connector files (namespaced ids) live remotely, not in the local vault
+  // that attachment retrieval walks, so only local-vault files can be attached.
+  const attachable = node.kind === "file" && !node.id.startsWith(`${node.sourceId}::`);
   // In selection mode a click picks the row; otherwise it toggles RAG inclusion.
   const activate = () => (selectionMode ? onSelect(node.id) : onToggle(node.id));
 
@@ -222,6 +226,16 @@ function TreeRow({
         role="button"
         tabIndex={0}
         onClick={activate}
+        // Drag a file out to the chat panel to ask about just that file.
+        draggable={attachable}
+        onDragStart={(e) => {
+          if (!attachable) return;
+          e.dataTransfer.setData(
+            FILE_DRAG_MIME,
+            serializeDraggedFiles([{ id: node.id, name: node.name }]),
+          );
+          e.dataTransfer.effectAllowed = "copy";
+        }}
       >
         <span
           className={styles.chevron}
@@ -360,7 +374,7 @@ export function FileExplorer() {
 
   const sendFiles = (list: FileList | null) => {
     if (!list || !list.length) return;
-    void upload(Array.from(list)).then((skipped) => {
+    void upload(Array.from(list)).then(({ skipped }) => {
       if (skipped.length) {
         console.warn(
           `Skipped ${skipped.length} file(s): ` +
@@ -373,18 +387,24 @@ export function FileExplorer() {
   return (
     <section
       className={`${styles.panel}${dragging ? ` ${styles.panelDragging}` : ""}`}
-      onDragEnter={() => {
+      onDragEnter={(e) => {
+        // Only react to OS file drops — ignore internal drags (e.g. dragging a
+        // row out to the chat panel), which don't carry "Files".
+        if (!e.dataTransfer.types.includes("Files")) return;
         dragDepth.current += 1;
         setDragging(true);
       }}
       onDragOver={(e) => {
+        if (!e.dataTransfer.types.includes("Files")) return;
         e.preventDefault();
       }}
-      onDragLeave={() => {
+      onDragLeave={(e) => {
+        if (!e.dataTransfer.types.includes("Files")) return;
         dragDepth.current = Math.max(0, dragDepth.current - 1);
         if (dragDepth.current === 0) setDragging(false);
       }}
       onDrop={(e) => {
+        if (!e.dataTransfer.types.includes("Files")) return;
         e.preventDefault();
         dragDepth.current = 0;
         setDragging(false);

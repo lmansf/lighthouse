@@ -90,14 +90,19 @@ export async function removeFromVault(nodeId: string): Promise<void> {
 export async function retrieve(
   query: string,
   includedFileIds: string[],
+  attachmentIds: string[] = [],
   k = 5,
 ): Promise<Retrieved> {
-  // Gather mirrored content from any cloud connector for its enabled files, then
-  // rank it together with vault files in the (source-agnostic) vault engine.
-  const external = (
-    await Promise.all(
-      connectors.filter((c) => c.retrievalItems).map((c) => c.retrievalItems!(includedFileIds)),
-    )
-  ).flat();
-  return vaultRetrieve(query, includedFileIds, k, external);
+  // When the question is scoped to explicit attachments, retrieve only from those
+  // vault files and skip cloud mirroring (attachments are vault files here).
+  // Otherwise gather mirrored content from any cloud connector for its enabled
+  // files and rank it together with vault files in the source-agnostic engine.
+  const external = attachmentIds.length
+    ? []
+    : (
+        await Promise.all(
+          connectors.filter((c) => c.retrievalItems).map((c) => c.retrievalItems!(includedFileIds)),
+        )
+      ).flat();
+  return vaultRetrieve(query, includedFileIds, k, external, attachmentIds);
 }

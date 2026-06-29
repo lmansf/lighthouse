@@ -8,11 +8,12 @@ class RealChatService implements ChatService {
     question: string,
     includedFileIds: string[],
     history: ChatTurn[] = [],
+    attachmentFileIds: string[] = [],
   ): AsyncIterable<ChatChunk> {
     const res = await fetch("/api/chat", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ question, includedFileIds, history }),
+      body: JSON.stringify({ question, includedFileIds, history, attachmentFileIds }),
     });
     if (!res.ok || !res.body) {
       yield { delta: `Chat failed (${res.status}).`, done: true };

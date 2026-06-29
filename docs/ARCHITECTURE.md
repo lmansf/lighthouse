@@ -61,7 +61,7 @@ Two Zustand stores carry shared state between features:
 | shell | `src/shell/` | `FluentProvider`/sandy-beach light theme (`theme.ts`), app frame, collapsible left file sidebar (front-and-center chat in the main area) | contracts |
 | onboarding | `src/features/onboarding/` | sign-in slides → model-select (provider/model/key + key links; the local provider needs no key) | contracts, `AuthService`, `useAuthStore` |
 | explorer | `src/features/explorer/` | file tree, hierarchical RAG toggle / selection mode, add files/folders, link files in place, remove from vault (recoverable trash) | contracts, `RagService`, `useRagStore` |
-| chat | `src/features/chat/` | running conversation (transcript of turns + follow-ups, "New chat" to reset) of answer-on-top (Markdown-rendered via `react-markdown`/`remark-gfm`) + reference files below (clickable to open the cited file natively on desktop), realtime streaming | contracts, `ChatService`, `useRagStore` |
+| chat | `src/features/chat/` | running conversation (transcript of turns + follow-ups, "New chat" to reset) of answer-on-top (Markdown-rendered via `react-markdown`/`remark-gfm`) + reference files below (clickable to open the cited file natively on desktop), realtime streaming, drag/drop a file in to scope a question to just it (`attachmentFileIds`) | contracts, `ChatService`, `useRagStore`, `src/shell/dnd` |
 
 `app/page.tsx` composes the three feature components into the shell. Each team replaces **only its own** placeholder.
 
