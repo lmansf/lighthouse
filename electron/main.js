@@ -20,6 +20,32 @@ let llmProc = null;
 let win = null;
 let tray = null;
 
+/**
+ * Open (append) a log file in the per-user data dir for a child process's
+ * output, returning its fd — or "ignore" if it can't be opened. Used so child
+ * processes write to a log file instead of a console window (paired with
+ * `windowsHide: true`), keeping the desktop app windowless on Windows while
+ * preserving logs for troubleshooting. Call only after `app` is ready.
+ */
+function logFd(name) {
+  try {
+    return fs.openSync(path.join(app.getPath("userData"), name), "a");
+  } catch {
+    return "ignore";
+  }
+}
+
+/** Close a log fd from `logFd` (a numeric fd; "ignore" is a no-op). */
+function closeFd(fd) {
+  if (typeof fd === "number") {
+    try {
+      fs.closeSync(fd);
+    } catch {
+      /* already closed */
+    }
+  }
+}
+
 // Content-Security-Policy for the renderer. The app loads its own local Next
 // server (http://localhost:PORT) and only talks to that same origin from the
 // page (API routes proxy out to Anthropic/Supabase server-side). Notably this
@@ -81,19 +107,24 @@ function startLocalLlm() {
     /* no bundled model directory */
   }
   if (!model || !fs.existsSync(bin)) return; // nothing bundled — rely on an external server
+  const out = logFd("local-model.log");
   llmProc = spawn(bin, ["-m", path.join(root, model), "--host", "127.0.0.1", "--port", "8080"], {
     cwd: root,
-    stdio: "inherit",
+    // Log to a file and hide the console window — no terminal pops up for the user.
+    stdio: ["ignore", out, out],
+    windowsHide: true,
   });
   llmProc.on("error", (e) => console.error("local model failed to start", e));
   llmProc.on("exit", (code, signal) => {
     llmProc = null;
+    closeFd(out);
     if (code) console.error(`local model exited with code ${code}${signal ? ` (${signal})` : ""}`);
   });
 }
 
 function startServer() {
   const nextBin = path.join(APP_ROOT, "node_modules", "next", "dist", "bin", "next");
+  const out = logFd("server.log");
   serverProc = spawn(process.execPath, [nextBin, "start", "-p", String(PORT)], {
     cwd: APP_ROOT,
     env: {
@@ -106,8 +137,13 @@ function startServer() {
       LIGHTHOUSE_SETTINGS_FILE: settingsFile(),
       PORT: String(PORT),
     },
-    stdio: "inherit",
+    // Log to a file and hide the console window — no terminal pops up for the user.
+    stdio: ["ignore", out, out],
+    windowsHide: true,
   });
+  // Close this fd when the process exits so restarting the server (e.g. on a
+  // vault change) doesn't leak a descriptor / duplicate writer on server.log.
+  serverProc.on("exit", () => closeFd(out));
 }
 
 function waitForServer(cb, tries = 0) {
@@ -132,7 +168,10 @@ function createWindow() {
     icon: WINDOW_ICON,
     webPreferences: { contextIsolation: true },
   });
-  win.loadURL(`http://localhost:${PORT}`);
+  // Show a branded splash immediately (a local file, so it paints in well under a
+  // second) while the local engine boots; `showApp()` swaps to the live app once
+  // the server answers. This keeps the user from staring at an empty screen.
+  win.loadFile(path.join(__dirname, "splash.html"));
   // Open external links (e.g. the Microsoft device-login page) in the system
   // browser rather than a new Electron window.
   win.webContents.setWindowOpenHandler(({ url }) => {
@@ -150,6 +189,16 @@ function createWindow() {
       win.hide();
     }
   });
+}
+
+/** Swap the splash for the live app once the local server is answering. */
+function showApp() {
+  if (win && !win.isDestroyed()) win.loadURL(`http://localhost:${PORT}`);
+}
+
+/** Replace the loading splash with a static error state when startup fails. */
+function showError() {
+  if (win && !win.isDestroyed()) win.loadFile(path.join(__dirname, "error.html"));
 }
 
 /** POST to the running local server's /api/rag (no Origin ⇒ same-origin OK). */
@@ -341,6 +390,7 @@ if (!app.requestSingleInstanceLock()) {
     startServer();
     buildMenu();
     createTray();
+    createWindow(); // show the splash right away; swap to the app when ready
     waitForServer((err) => {
       if (err) {
         dialog.showErrorBox(
@@ -349,9 +399,10 @@ if (!app.requestSingleInstanceLock()) {
             ? "Lighthouse couldn't start its local engine. Please try reinstalling; if it keeps happening, contact support."
             : "The local server did not start. Run `npm run build` first, then `npm run electron`.",
         );
+        showError();
         return;
       }
-      createWindow();
+      showApp();
     });
   });
 

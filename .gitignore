@@ -15,6 +15,7 @@
 !/build/icon.png
 !/build/icon.ico
 !/build/tray.svg
+!/build/uninstaller.nsh
 
 # misc
 .DS_Store

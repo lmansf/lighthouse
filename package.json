@@ -82,7 +82,8 @@
       "installerIcon": "build/icon.ico",
       "uninstallerIcon": "build/icon.ico",
       "installerHeaderIcon": "build/icon.ico",
-      "uninstallDisplayName": "Lighthouse"
+      "uninstallDisplayName": "Lighthouse",
+      "include": "build/uninstaller.nsh"
     }
   },
   "dependencies": {
