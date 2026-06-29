@@ -345,7 +345,9 @@ if (!app.requestSingleInstanceLock()) {
       if (err) {
         dialog.showErrorBox(
           "Lighthouse",
-          "The local server did not start. Make sure you ran `npm run build` first.",
+          app.isPackaged
+            ? "Lighthouse couldn't start its local engine. Please try reinstalling; if it keeps happening, contact support."
+            : "The local server did not start. Run `npm run build` first, then `npm run electron`.",
         );
         return;
       }
