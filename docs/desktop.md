@@ -124,13 +124,16 @@ you run it on — NSIS `.exe` on Windows, `.dmg` on macOS, `.AppImage` on Linux.
 on Linux without Wine), so run `npm run dist` / `Build-Installer.cmd` on the
 target OS. The branded icons are already committed (see [Icons](#icons) below).
 
-`npm run dist` first runs `npm run fetch:model` (`scripts/fetch-local-model.mjs`),
-which downloads the `llama-server` binary (llama.cpp, MIT) and a small `.gguf`
-model (Qwen2.5-1.5B-Instruct Q4_K_M, ~1 GB, Apache-2.0) into `resources/llm/`,
-then `electron-builder` copies that folder into the installer via its
-`extraResources` entry. The assets are gitignored and fetched on the build
-machine. Use `npm run dist:nomodel` to skip the fetch and packaging for a lean
-build that relies on a bring-your-own server instead. The fetch script takes
+`npm run dist` first runs `next build` to produce the `.next` production build
+(bundled into the installer so the packaged app's `next start` needs no Node.js
+toolchain on the user's machine), then `npm run fetch:model`
+(`scripts/fetch-local-model.mjs`), which downloads the `llama-server` binary
+(llama.cpp, MIT) and a small `.gguf` model (Qwen2.5-1.5B-Instruct Q4_K_M, ~1 GB,
+Apache-2.0) into `resources/llm/`, and finally `electron-builder` copies that
+folder into the installer via its `extraResources` entry. The model assets are
+gitignored and fetched on the build machine. Use `npm run dist:nomodel` to skip
+the model fetch (it still runs `next build`) for a lean build that relies on a
+bring-your-own server instead. The fetch script takes
 env overrides (pinned `llama.cpp` version, alternate model URL, expected
 checksums) documented in its header comment.
 
