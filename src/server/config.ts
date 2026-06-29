@@ -54,6 +54,25 @@ export const SHAREPOINT_CLIENT_ID =
   process.env.SHAREPOINT_CLIENT_ID?.trim() || "d25817ff-a0ed-4458-9282-41a18ce6d48a";
 
 /**
+ * Entra authority. The base (`/common`) lets any work/school or personal
+ * account sign in; the device-code flow appends `/oauth2/v2.0/devicecode` and
+ * `/token` to it (see sources/microsoft/auth.ts). Overridable for self-hosters
+ * who pin a single tenant.
+ */
+export const SHAREPOINT_AUTHORITY =
+  process.env.SHAREPOINT_AUTHORITY?.trim() || "https://login.microsoftonline.com/common";
+
+/**
+ * Native-client redirect URI registered on the Entra app. The device-code flow
+ * this connector uses does NOT need a redirect (the user approves in a browser
+ * and the app polls for the token), so this is recorded only to mirror the
+ * Azure app registration — and for a future interactive (auth-code + PKCE)
+ * flow. MSAL's convention for a public desktop client is `msal<clientId>://auth`.
+ */
+export const SHAREPOINT_REDIRECT_URI =
+  process.env.SHAREPOINT_REDIRECT_URI?.trim() || `msal${SHAREPOINT_CLIENT_ID}://auth`;
+
+/**
  * Per-connector state directory (OAuth tokens, mirrored content, inclusion).
  * Lives beside the vault state, never inside the repo or the app bundle.
  */
