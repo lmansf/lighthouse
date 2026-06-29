@@ -35,6 +35,17 @@ function logFd(name) {
   }
 }
 
+/** Close a log fd from `logFd` (a numeric fd; "ignore" is a no-op). */
+function closeFd(fd) {
+  if (typeof fd === "number") {
+    try {
+      fs.closeSync(fd);
+    } catch {
+      /* already closed */
+    }
+  }
+}
+
 // Content-Security-Policy for the renderer. The app loads its own local Next
 // server (http://localhost:PORT) and only talks to that same origin from the
 // page (API routes proxy out to Anthropic/Supabase server-side). Notably this
@@ -106,6 +117,7 @@ function startLocalLlm() {
   llmProc.on("error", (e) => console.error("local model failed to start", e));
   llmProc.on("exit", (code, signal) => {
     llmProc = null;
+    closeFd(out);
     if (code) console.error(`local model exited with code ${code}${signal ? ` (${signal})` : ""}`);
   });
 }
@@ -129,6 +141,9 @@ function startServer() {
     stdio: ["ignore", out, out],
     windowsHide: true,
   });
+  // Close this fd when the process exits so restarting the server (e.g. on a
+  // vault change) doesn't leak a descriptor / duplicate writer on server.log.
+  serverProc.on("exit", () => closeFd(out));
 }
 
 function waitForServer(cb, tries = 0) {
@@ -179,6 +194,11 @@ function createWindow() {
 /** Swap the splash for the live app once the local server is answering. */
 function showApp() {
   if (win && !win.isDestroyed()) win.loadURL(`http://localhost:${PORT}`);
+}
+
+/** Replace the loading splash with a static error state when startup fails. */
+function showError() {
+  if (win && !win.isDestroyed()) win.loadFile(path.join(__dirname, "error.html"));
 }
 
 /** POST to the running local server's /api/rag (no Origin ⇒ same-origin OK). */
@@ -379,6 +399,7 @@ if (!app.requestSingleInstanceLock()) {
             ? "Lighthouse couldn't start its local engine. Please try reinstalling; if it keeps happening, contact support."
             : "The local server did not start. Run `npm run build` first, then `npm run electron`.",
         );
+        showError();
         return;
       }
       showApp();

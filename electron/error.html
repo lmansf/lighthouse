@@ -1,0 +1,65 @@
+<!doctype html>
+<!--
+  Startup-failure state shown in the window when the local engine never answers.
+  Replaces the loading splash so the user isn't left with an infinite spinner
+  behind the error dialog. Self-contained and CSP-safe: inline styles only, no
+  scripts, no external resources.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Lighthouse</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #fbf5e9; /* sandy cream — matches the app theme */
+        color: #6b6253;
+        font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+        overflow: hidden;
+        user-select: none;
+      }
+      .wrap {
+        height: 100%;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 16px;
+        padding: 0 40px;
+        box-sizing: border-box;
+        text-align: center;
+      }
+      /* A dimmed, unlit beacon — the engine never came up. */
+      .beacon {
+        width: 18px;
+        height: 18px;
+        border-radius: 50%;
+        background: #c4bcab;
+      }
+      .title {
+        font-size: 26px;
+        font-weight: 600;
+        letter-spacing: 0.2px;
+        color: #463f34;
+      }
+      .sub {
+        font-size: 14px;
+        color: #8a8073;
+        max-width: 420px;
+        line-height: 1.5;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="beacon"></div>
+      <div class="title">Lighthouse couldn't start</div>
+      <div class="sub">
+        The local engine didn't start. Please try reopening Lighthouse; if it
+        keeps happening, reinstall or contact support.
+      </div>
+    </div>
+  </body>
+</html>
