@@ -68,7 +68,14 @@ export interface ChatService {
    * Ask a question against the included file set. Yields incremental chunks;
    * the final chunk carries `done: true` and the resolved references. `history`
    * carries prior turns so follow-up questions ("tell me more about the second
-   * one") resolve against the ongoing conversation.
+   * one") resolve against the ongoing conversation. When `attachmentFileIds` is
+   * non-empty the answer is scoped to just those files (the user attached them to
+   * this question), regardless of the global included set.
    */
-  ask(question: string, includedFileIds: string[], history?: ChatTurn[]): AsyncIterable<ChatChunk>;
+  ask(
+    question: string,
+    includedFileIds: string[],
+    history?: ChatTurn[],
+    attachmentFileIds?: string[],
+  ): AsyncIterable<ChatChunk>;
 }

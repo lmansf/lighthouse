@@ -48,8 +48,15 @@ interface RagStore {
   applySelection: (include: boolean) => Promise<void>;
   toggleIncluded: (nodeId: string) => Promise<void>;
   toggleSourceAvailable: (sourceId: string) => Promise<void>;
-  /** Upload files into the vault; they land excluded by default. Returns any skipped files. */
-  upload: (files: File[], dir?: string | null) => Promise<{ name: string; reason: string }[]>;
+  /**
+   * Upload files into the vault; they land excluded by default. Returns the new
+   * node ids (`addedIds`, in upload order) and any `skipped` files. The ids let
+   * callers act on the fresh uploads — e.g. chat attaches an OS-dropped file.
+   */
+  upload: (
+    files: File[],
+    dir?: string | null,
+  ) => Promise<{ addedIds: string[]; skipped: { name: string; reason: string }[] }>;
   /** Link a file/folder by its real path instead of copying (desktop-only). */
   addReference: (path: string) => Promise<void>;
   /** Remove a reference (unlink); real files are left in place. */
@@ -129,7 +136,7 @@ export const useRagStore = create<RagStore>((set, get) => ({
   },
 
   upload: async (files, dir = null) => {
-    if (files.length === 0) return [];
+    if (files.length === 0) return { addedIds: [], skipped: [] };
     const fd = new FormData();
     if (dir) fd.append("dir", dir);
     for (const f of files) {
@@ -139,11 +146,14 @@ export const useRagStore = create<RagStore>((set, get) => ({
       fd.append("paths", f.webkitRelativePath || "");
     }
     const res = await fetch("/api/upload", { method: "POST", body: fd });
-    const skipped: { name: string; reason: string }[] = res.ok
-      ? ((await res.json().catch(() => ({}))).skipped ?? [])
+    const data: { added?: { newId: string }[]; skipped?: { name: string; reason: string }[] } =
+      res.ok ? await res.json().catch(() => ({})) : {};
+    const addedIds = (data.added ?? []).map((a) => a.newId);
+    const skipped = res.ok
+      ? (data.skipped ?? [])
       : files.map((f) => ({ name: f.name, reason: "upload request failed" }));
     await get().load();
-    return skipped;
+    return { addedIds, skipped };
   },
 
   addReference: async (path) => {

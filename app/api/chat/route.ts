@@ -19,6 +19,12 @@ export async function POST(req: Request) {
   const body = await req.json().catch(() => ({}));
   const question = typeof body.question === "string" ? body.question : "";
   const includedFileIds = Array.isArray(body.includedFileIds) ? body.includedFileIds : [];
+  // Files the user explicitly attached to this question (dragged from the
+  // explorer, or dropped from the OS onto chat). When present, retrieval is
+  // scoped to just these files — see retrieve()/vaultRetrieve.
+  const attachmentFileIds: string[] = Array.isArray(body.attachmentFileIds)
+    ? body.attachmentFileIds.filter((id: unknown): id is string => typeof id === "string")
+    : [];
   // Prior turns (sanitized) so follow-ups have conversational context.
   const history: ChatTurn[] = Array.isArray(body.history)
     ? body.history
@@ -36,7 +42,7 @@ export async function POST(req: Request) {
   const lastUserTurn = [...history].reverse().find((t) => t.role === "user");
   const retrievalQuery = lastUserTurn ? `${lastUserTurn.content}\n${question}` : question;
 
-  const { references, contexts } = await retrieve(retrievalQuery, includedFileIds);
+  const { references, contexts } = await retrieve(retrievalQuery, includedFileIds, attachmentFileIds);
   const cfg = modelConfig();
 
   const encoder = new TextEncoder();

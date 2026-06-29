@@ -735,14 +735,26 @@ export async function retrieve(
   includedFileIds: string[],
   k = 5,
   external: { id: string; name: string; abs: string }[] = [],
+  attachmentIds: string[] = [],
 ): Promise<Retrieved> {
-  // Server-authoritative inclusion: intersect the caller's set with what is
-  // actually included on disk right now, so unselecting a file (or hiding the
-  // source) removes it from the very next answer — a stale client cannot leak
-  // an excluded file into retrieval. (Cloud items arrive pre-filtered in
-  // `external`, already scoped to enabled, mirrored files by the registry.)
-  const authoritative = new Set(activeIncludedFileIds());
-  const idset = new Set(includedFileIds.filter((id) => authoritative.has(id)));
+  // Explicit per-question attachments: the user dragged/attached these specific
+  // files to *this* question, so honor them directly and scope retrieval to only
+  // them — even if they aren't in the global included set (the attach gesture is
+  // the consent). They're still validated to real vault files by the `walk`
+  // filter below, so a client can't name a file outside the vault.
+  //
+  // Otherwise, server-authoritative inclusion: intersect the caller's set with
+  // what is actually included on disk right now, so unselecting a file (or
+  // hiding the source) removes it from the very next answer — a stale client
+  // cannot leak an excluded file into retrieval. (Cloud items arrive pre-filtered
+  // in `external`, already scoped to enabled, mirrored files by the registry.)
+  let idset: Set<string>;
+  if (attachmentIds.length > 0) {
+    idset = new Set(attachmentIds);
+  } else {
+    const authoritative = new Set(activeIncludedFileIds());
+    idset = new Set(includedFileIds.filter((id) => authoritative.has(id)));
+  }
   const nodes = walk(vaultDir()).filter((n) => n.kind === "file" && idset.has(n.id));
   if (nodes.length === 0 && external.length === 0) return { references: [], contexts: [] };
 

@@ -26,16 +26,20 @@ import {
 } from "@fluentui/react-components";
 import {
   AddRegular,
+  AttachRegular,
+  DismissRegular,
   DocumentRegular,
   OpenRegular,
   SendRegular,
 } from "@fluentui/react-icons";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import type { DragEvent } from "react";
 import type { ChatMessage, ChatTurn, RagReference } from "@/contracts";
 import { chatService } from "@/contracts";
 import { useRagStore } from "@/stores/useRagStore";
 import { ACCENTS } from "@/shell/theme";
+import { FILE_DRAG_MIME, parseDraggedFiles, type DraggedFile } from "@/shell/dnd";
 
 const useStyles = makeStyles({
   panel: {
@@ -44,6 +48,50 @@ const useStyles = makeStyles({
     minHeight: 0,
     height: "100%",
     ...shorthands.padding(tokens.spacingVerticalL),
+    ...shorthands.borderRadius(tokens.borderRadiusLarge),
+    ...shorthands.border("2px", "dashed", "transparent"),
+    transitionProperty: "border-color, background-color",
+    transitionDuration: tokens.durationFaster,
+  },
+  // Highlight while a file is being dragged over the chat (from the explorer or
+  // the OS), mirroring the explorer's drop affordance.
+  panelDropping: {
+    ...shorthands.borderColor(tokens.colorBrandStroke1),
+    backgroundColor: tokens.colorBrandBackground2,
+  },
+  // --- Attached files: removable pills above the composer that scope the next
+  //     question to just those files. ---
+  attachBar: {
+    display: "flex",
+    flexWrap: "wrap",
+    alignItems: "center",
+    gap: tokens.spacingHorizontalXS,
+    marginBottom: tokens.spacingVerticalS,
+  },
+  attachHint: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: tokens.spacingHorizontalXXS,
+    color: tokens.colorNeutralForeground3,
+  },
+  attachChip: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: tokens.spacingHorizontalXXS,
+    maxWidth: "220px",
+    ...shorthands.padding("2px", tokens.spacingHorizontalS),
+    backgroundColor: tokens.colorBrandBackground2,
+    color: tokens.colorNeutralForeground1,
+    borderRadius: tokens.borderRadiusCircular,
+    fontSize: tokens.fontSizeBase200,
+  },
+  attachName: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+  attachRemove: {
+    display: "inline-flex",
+    alignItems: "center",
+    cursor: "pointer",
+    color: tokens.colorNeutralForeground3,
+    ":hover": { color: tokens.colorNeutralForeground1 },
   },
   // Front-and-center conversation: a readable column centered in the wide main
   // area rather than a full-bleed stretch.
@@ -244,6 +292,7 @@ export function ChatPanel() {
   // re-renders when the explorer toggles inclusion - this is the live seam.
   const nodes = useRagStore((s) => s.nodes);
   const desktop = useRagStore((s) => s.desktop);
+  const upload = useRagStore((s) => s.upload);
   const includedFileIds = useMemo(
     () => nodes.filter((n) => n.kind === "file" && n.ragIncluded).map((n) => n.id),
     [nodes],
@@ -252,8 +301,75 @@ export function ChatPanel() {
   const [question, setQuestion] = useState("");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [streaming, setStreaming] = useState(false);
+  // Files explicitly attached to the conversation (dragged from the explorer or
+  // dropped from the OS). When present, questions are scoped to just these.
+  const [attachments, setAttachments] = useState<DraggedFile[]>([]);
+  const [dropping, setDropping] = useState(false);
+  const dropDepth = useRef(0);
   const bodyRef = useRef<HTMLDivElement>(null);
   const idSeq = useRef(0);
+
+  function addAttachments(files: DraggedFile[]) {
+    setAttachments((cur) => {
+      const seen = new Set(cur.map((a) => a.id));
+      const next = [...cur];
+      for (const f of files) {
+        if (!seen.has(f.id)) {
+          seen.add(f.id);
+          next.push({ id: f.id, name: f.name });
+        }
+      }
+      return next;
+    });
+  }
+
+  function removeAttachment(id: string) {
+    setAttachments((cur) => cur.filter((a) => a.id !== id));
+  }
+
+  // OS files dropped onto chat: upload into the vault, then attach the new nodes.
+  async function attachOsFiles(list: FileList) {
+    const { addedIds } = await upload(Array.from(list));
+    if (!addedIds.length) return;
+    const byId = new Map(useRagStore.getState().nodes.map((n) => [n.id, n]));
+    addAttachments(
+      addedIds
+        .map((id) => byId.get(id))
+        .filter((n): n is NonNullable<typeof n> => !!n)
+        .map((n) => ({ id: n.id, name: n.name })),
+    );
+  }
+
+  const isFileDrag = (e: DragEvent) =>
+    e.dataTransfer.types.includes(FILE_DRAG_MIME) || e.dataTransfer.types.includes("Files");
+
+  const dropHandlers = {
+    onDragEnter: (e: DragEvent) => {
+      if (!isFileDrag(e)) return;
+      dropDepth.current += 1;
+      setDropping(true);
+    },
+    onDragOver: (e: DragEvent) => {
+      if (isFileDrag(e)) e.preventDefault();
+    },
+    onDragLeave: (e: DragEvent) => {
+      if (!isFileDrag(e)) return;
+      dropDepth.current = Math.max(0, dropDepth.current - 1);
+      if (dropDepth.current === 0) setDropping(false);
+    },
+    onDrop: (e: DragEvent) => {
+      if (!isFileDrag(e)) return;
+      e.preventDefault();
+      dropDepth.current = 0;
+      setDropping(false);
+      const dragged = parseDraggedFiles(e.dataTransfer);
+      if (dragged.length) {
+        addAttachments(dragged);
+        return;
+      }
+      if (e.dataTransfer.files?.length) void attachOsFiles(e.dataTransfer.files);
+    },
+  };
 
   // Keep the newest turn in view as the transcript grows and tokens stream in.
   useEffect(() => {
@@ -272,8 +388,9 @@ export function ChatPanel() {
     setMessages((m) => [...m, userMsg, asstMsg]);
     setQuestion("");
     setStreaming(true);
+    const attachmentIds = attachments.map((a) => a.id);
     try {
-      for await (const chunk of chatService.ask(q, includedFileIds, history)) {
+      for await (const chunk of chatService.ask(q, includedFileIds, history, attachmentIds)) {
         if (chunk.delta) {
           setMessages((m) =>
             m.map((x) => (x.id === asstId ? { ...x, content: x.content + chunk.delta } : x)),
@@ -301,6 +418,7 @@ export function ChatPanel() {
     if (streaming) return;
     setMessages([]);
     setQuestion("");
+    setAttachments([]);
   }
 
   // Open a cited file in its native app (desktop only; the route no-ops on web).
@@ -312,18 +430,51 @@ export function ChatPanel() {
     }).catch(() => {});
   }
 
+  const attachmentBar =
+    attachments.length > 0 ? (
+      <div className={styles.attachBar}>
+        <Text size={200} className={styles.attachHint}>
+          <AttachRegular fontSize={14} />
+          Asking about:
+        </Text>
+        {attachments.map((a) => (
+          <span key={a.id} className={styles.attachChip}>
+            <DocumentRegular fontSize={14} />
+            <span className={styles.attachName} title={a.name}>
+              {a.name}
+            </span>
+            <span
+              role="button"
+              tabIndex={0}
+              aria-label={`Remove ${a.name}`}
+              className={styles.attachRemove}
+              onClick={() => removeAttachment(a.id)}
+              onKeyDown={(e) =>
+                (e.key === "Enter" || e.key === " ") && removeAttachment(a.id)
+              }
+            >
+              <DismissRegular fontSize={12} />
+            </span>
+          </span>
+        ))}
+      </div>
+    ) : null;
+
   const composer = (placeholder: string) => (
-    <div className={styles.composer}>
-      <Input
-        style={{ flex: 1 }}
-        value={question}
-        placeholder={placeholder}
-        onChange={(_, d) => setQuestion(d.value)}
-        onKeyDown={(e) => e.key === "Enter" && void ask()}
-      />
-      <Button appearance="primary" icon={<SendRegular />} disabled={streaming} onClick={() => void ask()}>
-        Ask
-      </Button>
+    <div>
+      {attachmentBar}
+      <div className={styles.composer}>
+        <Input
+          style={{ flex: 1 }}
+          value={question}
+          placeholder={attachments.length > 0 ? "Ask about the attached files…" : placeholder}
+          onChange={(_, d) => setQuestion(d.value)}
+          onKeyDown={(e) => e.key === "Enter" && void ask()}
+        />
+        <Button appearance="primary" icon={<SendRegular />} disabled={streaming} onClick={() => void ask()}>
+          Ask
+        </Button>
+      </div>
     </div>
   );
 
@@ -371,13 +522,16 @@ export function ChatPanel() {
   // Before the first question, center the prompt in the rail (Google-style).
   if (messages.length === 0 && !streaming) {
     return (
-      <section className={styles.panel}>
+      <section
+        className={mergeClasses(styles.panel, dropping ? styles.panelDropping : undefined)}
+        {...dropHandlers}
+      >
         <div className={styles.hero}>
           <span className={styles.beacon} />
           <Title3>Ask Lighthouse</Title3>
           <Text className={styles.heroHint}>
-            I&apos;ll answer using only the files you&apos;ve included. Ask follow-up questions to
-            dig into what comes back.
+            I&apos;ll answer using only the files you&apos;ve included. Drag a file from the
+            explorer (or drop one here) to ask about just that file.
           </Text>
           <Badge appearance="tint">{includedFileIds.length} sources available</Badge>
           <div className={styles.heroComposer}>{composer("Ask about your included files…")}</div>
@@ -389,7 +543,10 @@ export function ChatPanel() {
   const lastId = messages[messages.length - 1]?.id;
 
   return (
-    <section className={styles.panel}>
+    <section
+      className={mergeClasses(styles.panel, dropping ? styles.panelDropping : undefined)}
+      {...dropHandlers}
+    >
       <div className={styles.conversation}>
         <div className={styles.header}>
           <Title3>Ask</Title3>
