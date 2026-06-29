@@ -200,7 +200,10 @@ function flatten(dir) {
   const srcDir = findDirWith(dir, serverName);
   if (!srcDir || srcDir === dir) return; // not found, or already at top level
   for (const f of readdirSync(srcDir, { withFileTypes: true })) {
-    if (!f.isFile()) continue; // binary + co-located shared libs
+    // binary + co-located shared libs, plus the SONAME symlinks (e.g.
+    // libllama-common.so.0 → libllama-common.so.0.0.NNNN) the .tar.gz ships and
+    // the binary resolves at load time via RUNPATH $ORIGIN.
+    if (!f.isFile() && !f.isSymbolicLink()) continue;
     renameSync(join(srcDir, f.name), join(dir, f.name));
   }
   // Drop the now-emptied extraction tree the zip created.
