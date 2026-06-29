@@ -20,7 +20,7 @@
  *
  * Overridable via env (all optional):
  *   LLAMACPP_VERSION   llama.cpp release tag to pin (default: latest)
- *   LLAMACPP_SHA256    expected SHA-256 of the llama.cpp release zip (optional)
+ *   LLAMACPP_SHA256    expected SHA-256 of the llama.cpp release archive (optional)
  *   LOCAL_MODEL_URL    direct URL to a .gguf to use instead of the default
  *   LOCAL_MODEL_FILE   output filename for the .gguf (default: derived from URL)
  *   LOCAL_MODEL_SHA256 expected SHA-256 of the .gguf, verified after download (optional)
@@ -135,7 +135,8 @@ function pickAsset(assets) {
   const os = platform === "win32" ? "win" : platform === "darwin" ? "macos" : "ubuntu";
   const candidates = assets
     .map((a) => a.name)
-    .filter((n) => n.endsWith(".zip") && n.includes(os))
+    // Windows ships .zip; macOS/Linux ship .tar.gz on current llama.cpp releases.
+    .filter((n) => /\.(zip|tar\.gz|tgz)$/i.test(n) && n.includes(os))
     // exclude GPU/driver-specific builds — bundle a portable CPU build
     .filter((n) => !/cuda|hip|vulkan|sycl|kompute/i.test(n));
   // macOS assets are arch-tagged; win/linux x64 CPU builds usually are too.
@@ -155,16 +156,23 @@ function score(name) {
   return s;
 }
 
-/** Extract a .zip cross-platform using the OS's own tooling (no deps). */
-function unzip(zipPath, outDir) {
-  const cmd =
-    platform === "win32"
-      ? ["powershell", ["-NoProfile", "-NonInteractive", "-Command", `Expand-Archive -Path '${zipPath}' -DestinationPath '${outDir}' -Force`]]
-      : ["unzip", ["-o", zipPath, "-d", outDir]];
-  const r = spawnSync(cmd[0], cmd[1], { stdio: "inherit" });
+/**
+ * Extract a release archive using the OS's own tooling (no deps). Current
+ * llama.cpp releases ship Windows as .zip and macOS/Linux as .tar.gz, so handle
+ * both: `tar` (present on Windows 10+, macOS, and Linux) unpacks .tar.gz, while
+ * .zip uses Expand-Archive on Windows and `unzip` elsewhere.
+ */
+function extract(archivePath, outDir) {
+  const isTar = /\.(tar\.gz|tgz)$/i.test(archivePath);
+  const [cmd, cmdArgs] = isTar
+    ? ["tar", ["-xzf", archivePath, "-C", outDir]]
+    : platform === "win32"
+      ? ["powershell", ["-NoProfile", "-NonInteractive", "-Command", `Expand-Archive -Path '${archivePath}' -DestinationPath '${outDir}' -Force`]]
+      : ["unzip", ["-o", archivePath, "-d", outDir]];
+  const r = spawnSync(cmd, cmdArgs, { stdio: "inherit" });
   if (r.status !== 0) {
     throw new Error(
-      `extract failed (${cmd[0]} exited ${r.status}). ${platform === "win32" ? "" : "Install `unzip` and retry."}`,
+      `extract failed (${cmd} exited ${r.status}).${cmd === "unzip" ? " Install `unzip` and retry." : ""}`,
     );
   }
 }
@@ -216,10 +224,10 @@ async function main() {
     const release = await getJson(tag ? `${LLAMACPP_API}/tags/${tag}` : `${LLAMACPP_API}/latest`);
     const asset = pickAsset(release.assets || []);
     console.log(`Downloading ${asset.name} (${release.tag_name})`);
-    const zipPath = join(dest, asset.name);
-    await download(asset.browser_download_url, zipPath, "llama-server", process.env.LLAMACPP_SHA256?.trim());
-    unzip(zipPath, dest);
-    rmSync(zipPath, { force: true });
+    const archivePath = join(dest, asset.name);
+    await download(asset.browser_download_url, archivePath, "llama-server", process.env.LLAMACPP_SHA256?.trim());
+    extract(archivePath, dest);
+    rmSync(archivePath, { force: true });
     flatten(dest);
     if (!existsSync(serverPath)) throw new Error(`extracted, but ${serverName} not found in ${dest}`);
     console.log(`✓ ${serverName}`);
