@@ -162,11 +162,15 @@ This is the privacy-first option for governance-conscious teams.
 Lighthouse talks to a local **OpenAI chat-completions compatible** server. Two
 ways to provide one:
 
-- **Bundled (zero setup):** when a `llama-server` binary and a `.gguf` model are
-  packaged under `resources/llm/`, the desktop app launches it automatically on
-  `127.0.0.1:8080` at startup and shuts it down on quit. (Packaging the binary +
-  weights into the installer via electron-builder `extraResources` is the
-  remaining release step.)
+- **Bundled (zero setup):** the installer ships a `llama-server` binary and a
+  small `.gguf` model under `resources/llm/`, and the desktop app launches it
+  automatically on `127.0.0.1:8080` at startup and shuts it down on quit — no
+  API key, no separate download, nothing to configure. Build it with
+  `npm run dist`, which first runs `npm run fetch:model` to download the
+  binary (llama.cpp, MIT) and weights (Qwen2.5-1.5B-Instruct Q4_K_M, ~1 GB,
+  Apache-2.0) into `resources/llm/`, then packages them into the installer. The
+  assets are gitignored, fetched on the build machine; `npm run dist:nomodel`
+  skips them for a lean build that relies on a bring-your-own server instead.
 - **Bring your own:** run [Ollama](https://ollama.com) or
   [LM Studio](https://lmstudio.ai) yourself and point Lighthouse at it with
   `LIGHTHOUSE_LOCAL_LLM_URL` (default `http://127.0.0.1:8080/v1/chat/completions`;

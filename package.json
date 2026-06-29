@@ -13,7 +13,9 @@
     "test": "tsc --noEmit",
     "icons": "npm install --no-save sharp@^0.33.5 png-to-ico@^2.1.8 && node scripts/gen-icons.mjs",
     "electron": "electron .",
-    "dist": "electron-builder",
+    "fetch:model": "node scripts/fetch-local-model.mjs",
+    "dist": "node scripts/fetch-local-model.mjs && electron-builder",
+    "dist:nomodel": "electron-builder",
     "test:extract": "node --test \"test/**/*.test.mjs\""
   },
   "build": {
@@ -33,7 +35,15 @@
       "!**/.env",
       "!**/.env.local",
       "!**/.env.*.local",
-      "!supabase/**/*"
+      "!supabase/**/*",
+      "!resources/llm/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "resources/llm",
+        "to": "llm",
+        "filter": ["**/*"]
+      }
     ],
     "extraMetadata": {
       "main": "electron/main.js"
