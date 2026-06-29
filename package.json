@@ -16,6 +16,7 @@
     "fetch:model": "node scripts/fetch-local-model.mjs",
     "dist": "node scripts/fetch-local-model.mjs && electron-builder",
     "dist:nomodel": "electron-builder",
+    "release": "node scripts/fetch-local-model.mjs && electron-builder --publish always",
     "test:extract": "node --test \"test/**/*.test.mjs\""
   },
   "build": {
@@ -51,6 +52,14 @@
     "directories": {
       "output": "release"
     },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "lmansf",
+        "repo": "lighthouse",
+        "releaseType": "draft"
+      }
+    ],
     "win": {
       "target": "nsis"
     },
