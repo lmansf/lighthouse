@@ -124,6 +124,16 @@ you run it on — NSIS `.exe` on Windows, `.dmg` on macOS, `.AppImage` on Linux.
 on Linux without Wine), so run `npm run dist` / `Build-Installer.cmd` on the
 target OS. The branded icons are already committed (see [Icons](#icons) below).
 
+`npm run dist` first runs `npm run fetch:model` (`scripts/fetch-local-model.mjs`),
+which downloads the `llama-server` binary (llama.cpp, MIT) and a small `.gguf`
+model (Qwen2.5-1.5B-Instruct Q4_K_M, ~1 GB, Apache-2.0) into `resources/llm/`,
+then `electron-builder` copies that folder into the installer via its
+`extraResources` entry. The assets are gitignored and fetched on the build
+machine. Use `npm run dist:nomodel` to skip the fetch and packaging for a lean
+build that relies on a bring-your-own server instead. The fetch script takes
+env overrides (pinned `llama.cpp` version, alternate model URL, expected
+checksums) documented in its header comment.
+
 The app ships **unpacked** (`asar: false`) because it runs a local Next.js
 server (`next start`) as a child process, which must be a real file on disk
 rather than packed into an asar archive. Only production dependencies are
@@ -160,8 +170,9 @@ config (`LICENSE_API_URL` + `SUPABASE_ANON_KEY` + `CHECKOUT_API_URL`, plus the
 [registration.md](./registration.md) for the welcome form and subscriptions.
 `VAULT_DIR` is set automatically by the desktop app from your chosen folder.
 
-When a `llama-server` binary and a `.gguf` model are packaged under
-`resources/llm/`, the desktop app auto-launches that local inference server on
+A `dist` build bundles a `llama-server` binary and a `.gguf` model under
+`resources/llm/` (see [Building a distributable installer](#building-a-distributable-installer)
+above), and the desktop app auto-launches that local inference server on
 `127.0.0.1:8080` at startup and stops it on quit, so the "Local model (private)"
-provider works with no setup; when nothing is bundled the provider targets an
-external server via `LIGHTHOUSE_LOCAL_LLM_URL` instead.
+provider works with no setup. A `dist:nomodel` build ships nothing there, and
+the provider targets an external server via `LIGHTHOUSE_LOCAL_LLM_URL` instead.
