@@ -30,6 +30,8 @@ import {
   OpenRegular,
   SendRegular,
 } from "@fluentui/react-icons";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import type { ChatMessage, ChatTurn, RagReference } from "@/contracts";
 import { chatService } from "@/contracts";
 import { useRagStore } from "@/stores/useRagStore";
@@ -101,7 +103,48 @@ const useStyles = makeStyles({
   answer: {
     fontSize: tokens.fontSizeBase400,
     lineHeight: tokens.lineHeightBase400,
-    whiteSpace: "pre-wrap",
+    // Tame the Markdown block elements react-markdown emits so answers read as a
+    // tight, well-spaced block rather than with browser-default margins.
+    "& p": { marginTop: 0, marginBottom: tokens.spacingVerticalS },
+    "& p:last-child": { marginBottom: 0 },
+    "& ul, & ol": { marginTop: 0, marginBottom: tokens.spacingVerticalS, paddingLeft: tokens.spacingHorizontalXL },
+    "& li": { marginBottom: tokens.spacingVerticalXXS },
+    "& h1, & h2, & h3, & h4": {
+      marginTop: tokens.spacingVerticalM,
+      marginBottom: tokens.spacingVerticalXS,
+      lineHeight: tokens.lineHeightBase300,
+    },
+    "& h1": { fontSize: tokens.fontSizeBase500 },
+    "& h2, & h3, & h4": { fontSize: tokens.fontSizeBase400 },
+    "& a": { color: tokens.colorBrandForegroundLink },
+    "& code": {
+      fontFamily: tokens.fontFamilyMonospace,
+      fontSize: "0.9em",
+      backgroundColor: tokens.colorNeutralBackground3,
+      ...shorthands.padding("1px", tokens.spacingHorizontalXXS),
+      borderRadius: tokens.borderRadiusSmall,
+    },
+    "& pre": {
+      backgroundColor: tokens.colorNeutralBackground3,
+      ...shorthands.padding(tokens.spacingVerticalS, tokens.spacingHorizontalM),
+      borderRadius: tokens.borderRadiusMedium,
+      overflowX: "auto",
+    },
+    "& pre code": { backgroundColor: "transparent", padding: 0 },
+    "& table": { borderCollapse: "collapse", width: "100%", marginBottom: tokens.spacingVerticalS },
+    "& th, & td": {
+      ...shorthands.border("1px", "solid", tokens.colorNeutralStroke2),
+      ...shorthands.padding(tokens.spacingVerticalXS, tokens.spacingHorizontalS),
+      textAlign: "left",
+    },
+    "& blockquote": {
+      marginLeft: 0,
+      paddingLeft: tokens.spacingHorizontalM,
+      borderLeftWidth: "3px",
+      borderLeftStyle: "solid",
+      borderLeftColor: tokens.colorNeutralStroke2,
+      color: tokens.colorNeutralForeground2,
+    },
   },
   refs: {
     display: "flex",
@@ -372,10 +415,10 @@ export function ChatPanel() {
                   <LighthouseLoader className={styles.loader} dotClass={styles.loaderDot} />
                 ) : (
                   <>
-                    <Text className={styles.answer}>
-                      {m.content}
+                    <div className={styles.answer}>
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.content}</ReactMarkdown>
                       {streaming && m.id === lastId && <span className={styles.beaconInline} />}
-                    </Text>
+                    </div>
                     {m.references && m.references.length > 0 && (
                       <References references={m.references} />
                     )}
