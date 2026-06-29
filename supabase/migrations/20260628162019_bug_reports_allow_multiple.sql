@@ -27,7 +27,7 @@ begin
       and rel.relname = 'bug_reports'
       and con.contype = 'u'
       and (
-        select array_agg(att.attname order by att.attname)
+        select array_agg(att.attname::text order by att.attname)
         from unnest(con.conkey) as k(attnum)
         join pg_attribute att
           on att.attrelid = con.conrelid and att.attnum = k.attnum
@@ -54,7 +54,7 @@ begin
       and idx.indisunique
       and not idx.indisprimary
       and (
-        select array_agg(att.attname order by att.attname)
+        select array_agg(att.attname::text order by att.attname)
         from unnest(idx.indkey) as k(attnum)
         join pg_attribute att
           on att.attrelid = idx.indrelid and att.attnum = k.attnum
