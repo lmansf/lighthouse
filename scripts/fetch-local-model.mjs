@@ -20,14 +20,17 @@
  *
  * Overridable via env (all optional):
  *   LLAMACPP_VERSION   llama.cpp release tag to pin (default: latest)
+ *   LLAMACPP_SHA256    expected SHA-256 of the llama.cpp release zip (optional)
  *   LOCAL_MODEL_URL    direct URL to a .gguf to use instead of the default
  *   LOCAL_MODEL_FILE   output filename for the .gguf (default: derived from URL)
+ *   LOCAL_MODEL_SHA256 expected SHA-256 of the .gguf, verified after download (optional)
  *   GITHUB_TOKEN       lifts the unauthenticated GitHub API rate limit (optional)
  */
-import { createWriteStream, existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
+import { createWriteStream, existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, basename } from "node:path";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import https from "node:https";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -50,8 +53,13 @@ function get(url, headers = {}) {
       const { statusCode, headers: h } = res;
       if (statusCode >= 300 && statusCode < 400 && h.location) {
         res.resume();
-        const next = new URL(h.location, url).toString();
-        resolve(get(next, headers));
+        const next = new URL(h.location, url);
+        // Don't forward credentials (e.g. the GitHub bearer token) across hosts.
+        const sameHost = next.host === new URL(url).host;
+        const fwd = sameHost
+          ? headers
+          : Object.fromEntries(Object.entries(headers).filter(([k]) => !/^authorization$/i.test(k)));
+        resolve(get(next.toString(), fwd));
         return;
       }
       if (statusCode !== 200) {
@@ -72,29 +80,52 @@ async function getJson(url) {
   return JSON.parse(Buffer.concat(chunks).toString("utf8"));
 }
 
-/** Stream a download to disk with a coarse progress line. */
-async function download(url, outPath, label) {
+/**
+ * Stream a download to disk with a coarse progress line. Writes to a `.part`
+ * temp file and renames into place only after the byte count matches
+ * content-length (and the optional SHA-256), so an interrupted run never leaves
+ * a truncated/tampered file that a later run mistakes for a complete one.
+ */
+async function download(url, outPath, label, expectedSha256) {
   const res = await get(url);
   const total = Number(res.headers["content-length"] || 0);
+  const tmpPath = `${outPath}.part`;
+  const hash = expectedSha256 ? createHash("sha256") : null;
   let seen = 0;
   let lastPct = -1;
-  await new Promise((resolve, reject) => {
-    const out = createWriteStream(outPath);
-    res.on("data", (c) => {
-      seen += c.length;
-      if (total) {
-        const pct = Math.floor((seen / total) * 100);
-        if (pct !== lastPct && pct % 5 === 0) {
-          process.stdout.write(`\r  ${label}: ${pct}% (${(seen / 1e6).toFixed(0)}/${(total / 1e6).toFixed(0)} MB)`);
-          lastPct = pct;
+  try {
+    await new Promise((resolve, reject) => {
+      const out = createWriteStream(tmpPath);
+      res.on("data", (c) => {
+        seen += c.length;
+        if (hash) hash.update(c);
+        if (total) {
+          const pct = Math.floor((seen / total) * 100);
+          if (pct !== lastPct && pct % 5 === 0) {
+            process.stdout.write(`\r  ${label}: ${pct}% (${(seen / 1e6).toFixed(0)}/${(total / 1e6).toFixed(0)} MB)`);
+            lastPct = pct;
+          }
         }
-      }
+      });
+      res.pipe(out);
+      out.on("finish", () => out.close(resolve));
+      out.on("error", reject);
+      res.on("error", reject);
     });
-    res.pipe(out);
-    out.on("finish", () => out.close(resolve));
-    out.on("error", reject);
-    res.on("error", reject);
-  });
+    if (total && seen !== total) {
+      throw new Error(`${label}: incomplete download (${seen}/${total} bytes)`);
+    }
+    if (hash) {
+      const got = hash.digest("hex");
+      if (got !== expectedSha256.trim().toLowerCase()) {
+        throw new Error(`${label}: SHA-256 mismatch (expected ${expectedSha256.trim()}, got ${got})`);
+      }
+    }
+  } catch (e) {
+    rmSync(tmpPath, { force: true });
+    throw e;
+  }
+  renameSync(tmpPath, outPath);
   process.stdout.write(`\r  ${label}: done (${(seen / 1e6).toFixed(0)} MB)            \n`);
 }
 
@@ -138,22 +169,35 @@ function unzip(zipPath, outDir) {
   }
 }
 
-/** Flatten any single nested dir the release zip created, so the binary sits in resources/llm/. */
-function flatten(dir) {
+/** Recursively find the directory containing `serverName`, at any depth. */
+function findDirWith(dir, serverName) {
   const entries = readdirSync(dir, { withFileTypes: true });
-  const serverName = platform === "win32" ? "llama-server.exe" : "llama-server";
-  if (entries.some((e) => e.isFile() && e.name === serverName)) return; // already at top level
+  if (entries.some((e) => e.isFile() && e.name === serverName)) return dir;
   for (const e of entries) {
     if (!e.isDirectory()) continue;
-    const sub = join(dir, e.name);
-    const inner = readdirSync(sub, { withFileTypes: true });
-    if (inner.some((f) => f.isFile() && f.name === serverName)) {
-      for (const f of inner) {
-        spawnSync(platform === "win32" ? "cmd" : "mv", platform === "win32" ? ["/c", "move", "/y", join(sub, f.name), join(dir, f.name)] : [join(sub, f.name), join(dir, f.name)], { stdio: "ignore" });
-      }
-      rmSync(sub, { recursive: true, force: true });
-      return;
-    }
+    const found = findDirWith(join(dir, e.name), serverName);
+    if (found) return found;
+  }
+  return null;
+}
+
+/**
+ * Flatten whatever nested layout the release zip created, so the binary and its
+ * sibling shared libraries sit directly in resources/llm/. Release zips vary
+ * (flat, `build/bin/…`, etc.), so search at any depth. Uses renameSync so a
+ * failed move throws rather than silently leaving a missing library behind.
+ */
+function flatten(dir) {
+  const serverName = platform === "win32" ? "llama-server.exe" : "llama-server";
+  const srcDir = findDirWith(dir, serverName);
+  if (!srcDir || srcDir === dir) return; // not found, or already at top level
+  for (const f of readdirSync(srcDir, { withFileTypes: true })) {
+    if (!f.isFile()) continue; // binary + co-located shared libs
+    renameSync(join(srcDir, f.name), join(dir, f.name));
+  }
+  // Drop the now-emptied extraction tree the zip created.
+  for (const e of readdirSync(dir, { withFileTypes: true })) {
+    if (e.isDirectory()) rmSync(join(dir, e.name), { recursive: true, force: true });
   }
 }
 
@@ -173,7 +217,7 @@ async function main() {
     const asset = pickAsset(release.assets || []);
     console.log(`Downloading ${asset.name} (${release.tag_name})`);
     const zipPath = join(dest, asset.name);
-    await download(asset.browser_download_url, zipPath, "llama-server");
+    await download(asset.browser_download_url, zipPath, "llama-server", process.env.LLAMACPP_SHA256?.trim());
     unzip(zipPath, dest);
     rmSync(zipPath, { force: true });
     flatten(dest);
@@ -186,7 +230,7 @@ async function main() {
     console.log(`✓ ${modelFile} already present`);
   } else {
     console.log(`Downloading ${modelFile}`);
-    await download(modelUrl, modelPath, "model");
+    await download(modelUrl, modelPath, "model", process.env.LOCAL_MODEL_SHA256?.trim());
     console.log(`✓ ${modelFile}`);
   }
 
