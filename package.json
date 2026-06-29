@@ -14,9 +14,9 @@
     "icons": "npm install --no-save sharp@^0.33.5 png-to-ico@^2.1.8 && node scripts/gen-icons.mjs",
     "electron": "electron .",
     "fetch:model": "node scripts/fetch-local-model.mjs",
-    "dist": "node scripts/fetch-local-model.mjs && electron-builder",
-    "dist:nomodel": "electron-builder",
-    "release": "node scripts/fetch-local-model.mjs && electron-builder --publish always",
+    "dist": "next build && node scripts/fetch-local-model.mjs && electron-builder",
+    "dist:nomodel": "next build && electron-builder",
+    "release": "next build && node scripts/fetch-local-model.mjs && electron-builder --publish always",
     "test:extract": "node --test \"test/**/*.test.mjs\""
   },
   "build": {
