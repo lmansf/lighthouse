@@ -4,7 +4,7 @@
 // local port, shows it in a window, keeps files in a real local directory,
 // launches at login, lives in the tray, and adds native Add files / Choose
 // vault folder dialogs. Run after `npm run build` via `npm run electron`.
-const { app, BrowserWindow, Menu, Tray, dialog, shell, nativeImage } = require("electron");
+const { app, BrowserWindow, Menu, Tray, dialog, shell, nativeImage, session } = require("electron");
 const { spawn } = require("node:child_process");
 const path = require("node:path");
 const fs = require("node:fs");
@@ -19,6 +19,26 @@ let serverProc = null;
 let llmProc = null;
 let win = null;
 let tray = null;
+
+// Content-Security-Policy for the renderer. The app loads its own local Next
+// server (http://localhost:PORT) and only talks to that same origin from the
+// page (API routes proxy out to Anthropic/Supabase server-side). Notably this
+// omits 'unsafe-eval' — production Next doesn't need it — which clears
+// Electron's insecure-CSP warning and removes that attack surface.
+// 'unsafe-inline' stays because Next's bootstrap inline script and Fluent UI's
+// (Griffel) runtime <style> injection rely on it. localhost/127.0.0.1 are
+// allowed in connect-src for the local-model server.
+const CONTENT_SECURITY_POLICY = [
+  "default-src 'self'",
+  "script-src 'self' 'unsafe-inline'",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data: blob:",
+  "font-src 'self' data:",
+  "connect-src 'self' http://localhost:* http://127.0.0.1:*",
+  "object-src 'none'",
+  "base-uri 'self'",
+  "frame-ancestors 'none'",
+].join("; ");
 
 function settingsFile() {
   return path.join(app.getPath("userData"), "lighthouse-settings.json");
@@ -304,6 +324,16 @@ if (!app.requestSingleInstanceLock()) {
   });
 
   app.whenReady().then(() => {
+    // Apply a Content-Security-Policy to every response the renderer loads. Set
+    // before the window is created so the first document is covered too.
+    session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+      callback({
+        responseHeaders: {
+          ...details.responseHeaders,
+          "Content-Security-Policy": [CONTENT_SECURITY_POLICY],
+        },
+      });
+    });
     // Launch at login unless the user turned it off (default on). The in-app
     // prompt writes runOnStartup to the settings file; we honor it each launch.
     app.setLoginItemSettings({ openAtLogin: loadSettings().runOnStartup !== false });
