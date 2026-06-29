@@ -46,6 +46,10 @@ npm run electron
 
 ## What the desktop app adds
 
+- **Instant splash** — the window opens to a branded loading splash the moment
+  the app launches, then swaps to the live app once the local engine answers, so
+  you never stare at an empty screen while it boots. If the engine never starts,
+  the splash is replaced by a clear error state instead of a hung spinner.
 - **Persistent** — launches at login (see [Launch at login](#launch-at-login))
   and stays in the system tray. Closing the window hides it to the tray; quit
   from the tray menu to fully exit.
@@ -75,6 +79,11 @@ By default the vault is `~/Documents/Lighthouse Vault`. The chosen folder is
 remembered in Electron's `userData` directory (`lighthouse-settings.json`).
 Changing it restarts the local server against the new directory. The same
 settings file also holds the launch-at-login preference described below.
+
+That same `userData` directory also collects the child processes' logs —
+`server.log` (the bundled `next start`) and `local-model.log` (the bundled
+`llama-server`) — written there instead of a console window so no terminal pops
+up on Windows. Check them first if the app won't start.
 
 ## Launch at login
 
@@ -156,10 +165,18 @@ pull these heavy native deps).
 ### What the end user gets
 
 The Windows installer (NSIS) installs Lighthouse with a Start-Menu and desktop
-shortcut and lets the user pick the install directory. Launching it starts the
-bundled server and opens the app — and, unless the user opts out at the one-time
+shortcut and lets the user pick the install directory. Launching it shows the
+loading splash, starts the bundled server, and swaps in the app once it answers
+— and, unless the user opts out at the one-time
 [launch-at-login](#launch-at-login) prompt, Lighthouse adds itself to login items
 so it stays running in the tray.
+
+Uninstalling removes the app and asks once whether to **also delete your
+Lighthouse data** — the app settings/logs (`%APPDATA%\Lighthouse`) and the
+default vault (`Documents\Lighthouse Vault`) along with the files in it. The
+default answer (and a silent `/S` uninstall) is **No**, so your documents and
+settings are never deleted by accident and a reinstall picks up where you left
+off; a vault you pointed elsewhere is always left alone.
 
 ## Configuration
 
