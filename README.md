@@ -89,7 +89,12 @@ contracts — no cloud database required:
   documents that came back
   (prior turns — capped to the last few — are threaded to the model, and a bare
   follow-up blends in the previous question to anchor retrieval); **New chat**
-  starts fresh. The answer's **Related files** cards
+  starts fresh. **Attach files to a question** by dragging one from the explorer
+  onto the chat panel, or dropping files from your OS onto it (those upload into
+  the vault first); attachments show as removable pills and scope the question
+  (and its follow-ups) to just those files — even ones you haven't included
+  globally — until you clear them or start a **New chat**. The answer's
+  **Related files** cards
   are clickable on the desktop build — `/api/open` opens the cited file in its
   native app (web deployments report no such capability and the cards stay inert).
 - **Profile/key** are stored locally in `vault/.rag-vault/profile.json` (gitignored).

@@ -1,10 +1,10 @@
 # Agent brief: shell
 
 ## Scope (yours)
-- `src/shell/` only: `AppShell.tsx`, `Sidebar.tsx`, `theme.ts`.
+- `src/shell/` only: `AppShell.tsx`, `Sidebar.tsx`, `theme.ts`, `dnd.ts`.
 - `app/layout.tsx`, `app/providers.tsx`, `app/globals.css` (the Fluent SSR + light theme wiring).
 
-You own the application frame, the collapsible left file sidebar, and the **design tokens** every other feature consumes.
+You own the application frame, the collapsible left file sidebar, the **design tokens** every other feature consumes, and neutral shared infra like `dnd.ts` (the drag-and-drop payload for moving vault files between features, e.g. explorer → chat) that lets two features share a contract without importing each other.
 
 ## Contract you implement against
 - Consume `useRagStore` only to drive the vault load (`load`) and to read counts if needed. Do not implement feature logic. The shell keeps the tree live: it re-runs `load()` on an interval and whenever the window regains focus/visibility, so files added outside an in-app upload appear without a manual reload. Each refresh swallows backend/IPC errors (logs them) so a transient failure can't crash the poll loop.
