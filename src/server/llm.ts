@@ -48,6 +48,7 @@ const SYSTEM_PROMPT = [
   "- If the context does not contain the answer, say so plainly and state what's missing. Do not guess or pad.",
   "- When sources disagree, surface the conflict and cite each side rather than silently choosing one.",
   "- Prefer the user's own wording; quote short phrases verbatim when precision matters.",
+  "- Earlier turns in the conversation give you the thread; use them to interpret follow-up questions, but draw every factual claim from the numbered context blocks.",
   "",
   "Citations:",
   "- Cite the sources you used inline as [n], using the bracketed number on each context block.",
