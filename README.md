@@ -79,8 +79,9 @@ contracts — no cloud database required:
   1 MB prefix and total chunks are capped, so a huge dataset can't stall a query
   (`src/server/vault.ts`) — local, no embeddings download.
 - **Chat** is a running conversation that streams a grounded answer (`/api/chat`):
-  Anthropic Claude when an API key is configured (set in onboarding or
-  `ANTHROPIC_API_KEY`), an on-device **local model** when the "Local model
+  Anthropic Claude when an API key is configured (set in onboarding or later from
+  the settings gear's **AI models** dialog, or via `ANTHROPIC_API_KEY`), an
+  on-device **local model** when the "Local model
   (private)" provider is selected (see **[Local model](#local-model)**), otherwise
   a local extractive fallback that needs no network. Each question and answer is
   kept in a transcript so you can ask follow-ups about the documents that came back
@@ -151,7 +152,8 @@ Copy `.env.local.example` → `.env.local` (gitignored). All vars are optional:
 
 ## Local model
 
-Pick **"Local model (private)"** as your provider in onboarding to answer
+Pick **"Local model (private)"** as your provider — in onboarding, or later from
+the settings gear's **AI models** dialog — to answer
 entirely on-device — no API key, no network, nothing leaves your machine.
 This is the privacy-first option for governance-conscious teams.
 

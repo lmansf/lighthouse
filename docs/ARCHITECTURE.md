@@ -80,7 +80,8 @@ no feature imports one directly. Today the barrel exports `./real/*`: a local-fi
 backend (`src/server/` + `app/api/`) that reads a real `./vault` directory
 (override with `VAULT_DIR`), persists inclusion to `vault/.rag-vault/state.json`,
 runs TF-IDF retrieval over the included files, and streams Anthropic Claude answers
-when an API key is set (in onboarding or `ANTHROPIC_API_KEY`), an on-device local
+when an API key is set (in onboarding or the settings gear's AI models dialog, or
+`ANTHROPIC_API_KEY`), an on-device local
 model when the "local" provider is selected (via an OpenAI-compatible server, see
 [README.md](../README.md#local-model)), or a local extractive fallback otherwise. Point the three exports at `./mocks/*` for the fully in-memory
 mocks. A future cloud/Vercel deployment is another adapter behind the same
