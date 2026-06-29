@@ -12,7 +12,7 @@ A Google-style answer surface: the AI answer on top, related/reference files ben
 
 ## What to build
 1. **Composer** + a running transcript of turns: each question and its grounded answer is kept so the dialogue accumulates. A **"New chat"** button starts a fresh conversation.
-2. Each assistant turn: **answer streamed token-by-token at the top**, then a **"Related files"** list of reference cards below (name, snippet, score), appearing as the stream resolves.
+2. Each assistant turn: **answer streamed token-by-token at the top** (rendered as Markdown via `react-markdown` + `remark-gfm` — headings, lists, tables, code, bold, and links that open externally), then a **"Related files"** list of reference cards below (name, snippet, score), appearing as the stream resolves.
 3. Realtime feel - show streaming state; let the user ask follow-ups (prior turns are threaded back via `history`).
 4. Empty/grounding states: if `includedFileIds()` is empty, prompt the user to include files first (the backend returns a no-grounding answer in that case).
 
