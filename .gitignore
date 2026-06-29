@@ -39,5 +39,9 @@ vault/.rag-vault/
 *.tsbuildinfo
 next-env.d.ts
 
+# Bundled local model assets (llama-server binary + .gguf weights) — large and
+# licensed separately; fetched at build time by `npm run fetch:model`.
+/resources/llm/
+
 # Lavish review artifacts (local tooling)
 .lavish/
