@@ -367,7 +367,7 @@ export function ChatPanel() {
         addAttachments(dragged);
         return;
       }
-      if (e.dataTransfer.files?.length) void attachOsFiles(e.dataTransfer.files);
+      if (e.dataTransfer.files?.length) void attachOsFiles(e.dataTransfer.files).catch(() => {});
     },
   };
 

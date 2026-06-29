@@ -208,6 +208,9 @@ function TreeRow({
   const [open, setOpen] = useState(depth < 1); // top-level folders open by default
   const kids = node.kind === "folder" ? childrenOf(node.id) : [];
   const selected = selectionMode && isSelected(node.id);
+  // Cloud-connector files (namespaced ids) live remotely, not in the local vault
+  // that attachment retrieval walks, so only local-vault files can be attached.
+  const attachable = node.kind === "file" && !node.id.startsWith(`${node.sourceId}::`);
   // In selection mode a click picks the row; otherwise it toggles RAG inclusion.
   const activate = () => (selectionMode ? onSelect(node.id) : onToggle(node.id));
 
@@ -224,9 +227,9 @@ function TreeRow({
         tabIndex={0}
         onClick={activate}
         // Drag a file out to the chat panel to ask about just that file.
-        draggable={node.kind === "file"}
+        draggable={attachable}
         onDragStart={(e) => {
-          if (node.kind !== "file") return;
+          if (!attachable) return;
           e.dataTransfer.setData(
             FILE_DRAG_MIME,
             serializeDraggedFiles([{ id: node.id, name: node.name }]),
