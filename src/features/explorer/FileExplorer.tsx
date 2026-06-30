@@ -54,9 +54,12 @@ import {
   FolderOpenRegular,
   LinkRegular,
   PlugDisconnectedRegular,
+  ShieldKeyholeRegular,
 } from "@fluentui/react-icons";
 import type { FileNode } from "@/contracts";
 import { useRagStore } from "@/stores/useRagStore";
+import { useAuthStore } from "@/stores/useAuthStore";
+import { logEvent } from "@/lib/logEvent";
 import { FILE_DRAG_MIME, serializeDraggedFiles } from "@/shell/dnd";
 
 const useStyles = makeStyles({
@@ -88,6 +91,17 @@ const useStyles = makeStyles({
     gap: tokens.spacingHorizontalS,
     flexWrap: "wrap",
   },
+  controlNote: {
+    display: "flex",
+    alignItems: "center",
+    gap: tokens.spacingHorizontalS,
+    padding: `${tokens.spacingVerticalS} ${tokens.spacingHorizontalM}`,
+    marginBottom: tokens.spacingVerticalM,
+    borderRadius: tokens.borderRadiusMedium,
+    backgroundColor: tokens.colorNeutralBackground3,
+    color: tokens.colorNeutralForeground2,
+  },
+  controlNoteIcon: { color: tokens.colorBrandForeground1, flexShrink: 0 },
   scroll: {
     flex: 1,
     minHeight: 0,
@@ -212,7 +226,19 @@ function TreeRow({
   // that attachment retrieval walks, so only local-vault files can be attached.
   const attachable = node.kind === "file" && !node.id.startsWith(`${node.sourceId}::`);
   // In selection mode a click picks the row; otherwise it toggles RAG inclusion.
-  const activate = () => (selectionMode ? onSelect(node.id) : onToggle(node.id));
+  const activate = () => {
+    if (selectionMode) {
+      onSelect(node.id);
+      return;
+    }
+    // Privacy-safe availability telemetry: count THIS click (not the folder's
+    // cascade of descendants); the row's current state decides the direction and
+    // `scope` is a coarse kind only - never a name, id, or path.
+    logEvent(node.ragIncluded ? "file_made_unavailable" : "file_made_available", {
+      scope: node.kind === "folder" ? "folder" : "file",
+    });
+    onToggle(node.id);
+  };
 
   return (
     <div>
@@ -341,6 +367,9 @@ export function FileExplorer() {
   const connectSharePoint = useRagStore((s) => s.connectSharePoint);
   const closeSharePointDialog = useRagStore((s) => s.closeSharePointDialog);
   const disconnectSharePoint = useRagStore((s) => s.disconnectSharePoint);
+  // default-inclusion A/B: opt_out includes everything by default, so it carries
+  // a prominent "you control what AI sees" reassurance.
+  const optOut = useAuthStore((s) => s.onboarding.defaultInclusionVariant) === "opt_out";
 
   const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
   const isSelected = (id: string) => selectedSet.has(id);
@@ -491,6 +520,16 @@ export function FileExplorer() {
           />
         </div>
       </div>
+
+      {optOut && (
+        <div className={styles.controlNote}>
+          <ShieldKeyholeRegular fontSize={20} className={styles.controlNoteIcon} />
+          <Text size={200}>
+            Your files are visible to AI by default - <b>you control what it sees</b>.
+            Click any file, folder, or source to take it out.
+          </Text>
+        </div>
+      )}
 
       {selectionMode && (
         <div className={styles.actionBar}>

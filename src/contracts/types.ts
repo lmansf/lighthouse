@@ -66,6 +66,18 @@ export interface OnboardingState {
   modelId: string | null;
   /** Whether the user has supplied an API key (we never persist the key itself in plaintext beyond the mock). */
   hasApiKey: boolean;
+  /**
+   * A/B onboarding variant for this install (`play_first` drops straight into the
+   * workspace on the local model and defers the key prompt; `key_first` is the
+   * classic ask-for-a-key-first flow). Surfaced so the UI can branch copy and
+   * affordances. Optional: absent in the mock / when experiments aren't resolved.
+   */
+  onboardingVariant?: "play_first" | "key_first";
+  /**
+   * A/B default-inclusion variant (`opt_out` includes new files by default with
+   * a prominent control affordance; `opt_in` includes nothing until toggled).
+   */
+  defaultInclusionVariant?: "opt_in" | "opt_out";
 }
 
 /** A reference / related file surfaced beneath a chat answer. */

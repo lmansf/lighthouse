@@ -17,6 +17,8 @@ import {
   readJson,
   writeJson,
 } from "./config";
+import { getVariant } from "./experiment";
+import { recordEvent } from "./license";
 import { isRichFile, extractRichText } from "./extract";
 
 /** An item referenced in place (not copied) — its real absolute path on disk. */
@@ -96,23 +98,37 @@ export function resolveNodePath(nodeId: string): string {
 }
 
 /**
- * Effective inclusion — default is EXCLUDED. A node counts as included only
- * when its own flag is explicitly `true` AND no ancestor folder is explicitly
- * excluded. Consequences, by design:
- *  - anything new (added from the computer, anywhere) defaults out;
+ * Whether absent inclusion flags default to INCLUDED. This is the
+ * `default_inclusion` A/B experiment: `opt_out` includes everything by default
+ * (the user opts pieces out), `opt_in` keeps the original default-excluded
+ * behavior (nothing in until toggled on). Resolved once per walk and threaded
+ * into isEffectivelyIncluded so a big tree isn't re-reading the variant per node.
+ */
+function defaultIncluded(): boolean {
+  return getVariant("default_inclusion") === "opt_out";
+}
+
+/**
+ * Effective inclusion. An ancestor folder explicitly excluded always forces a
+ * node out (ancestor exclusion wins). For an absent own flag the default is the
+ * experiment's: EXCLUDED under `opt_in` (the original behavior), INCLUDED under
+ * `opt_out`. Consequences, by design:
+ *  - opt_in: anything new (added from the computer, anywhere) defaults out;
+ *  - opt_out: anything new defaults in until the user opts it out;
  *  - an excluded folder forces every descendant out, even a file moved in
  *    later that carried an included flag (ancestor exclusion wins);
  *  - an internal move preserves the node's own flag (see moveNode), but the
  *    ancestor rule above still applies at its new location.
  */
-function isEffectivelyIncluded(id: string, state: VaultState): boolean {
+function isEffectivelyIncluded(id: string, state: VaultState, defaultIn = defaultIncluded()): boolean {
   const parts = id.split("/");
   let prefix = "";
   for (let i = 0; i < parts.length - 1; i++) {
     prefix = prefix ? `${prefix}/${parts[i]}` : parts[i];
     if (state.included[prefix] === false) return false; // an ancestor folder is excluded
   }
-  return state.included[id] === true; // absent ⇒ excluded
+  // absent ⇒ included under opt_out, excluded under opt_in
+  return defaultIn ? state.included[id] !== false : state.included[id] === true;
 }
 
 /**
@@ -142,7 +158,8 @@ const mimeOf = (name: string) => MIME[path.extname(name).toLowerCase()];
 function walk(root: string): FileNode[] {
   const out: FileNode[] = [];
   const state = loadState();
-  const included = (id: string) => isEffectivelyIncluded(id, state);
+  const defaultIn = defaultIncluded(); // resolve the variant once for this walk
+  const included = (id: string) => isEffectivelyIncluded(id, state, defaultIn);
 
   const recurse = (absDir: string, parentId: string | null) => {
     let entries: fs.Dirent[];
@@ -256,8 +273,54 @@ export function listSources(): DataSource[] {
 
 export function listNodes(parentId?: string | null): FileNode[] {
   const all = walk(vaultDir());
-  if (parentId === undefined) return all;
+  // A full-tree listing (no parentId) is the app's regular vault scan - the one
+  // hook that also catches files copied in / deleted OUTSIDE the app. Diff it
+  // against the last snapshot to emit privacy-safe presence counts.
+  if (parentId === undefined) {
+    recordPresenceDiff(all);
+    return all;
+  }
   return all.filter((n) => n.parentId === parentId);
+}
+
+const usageSnapshotPath = () => path.join(stateDir(), "usage-snapshot.json");
+
+/**
+ * Emit privacy-safe file-presence telemetry by diffing the current tree against
+ * the last snapshot: one `file_added` per newly-appeared node, one
+ * `file_removed` per disappeared one. The payload is COUNTS ONLY - at most a
+ * coarse `{ kind }` - never a name, path, extension, or size.
+ *
+ * First run seeds the snapshot silently (no events), so a pre-loaded demo vault
+ * never fires a spurious burst. Best-effort: wrapped so a telemetry failure can
+ * never break or slow the scan that produced `nodes`.
+ */
+function recordPresenceDiff(nodes: FileNode[]): void {
+  try {
+    const current: Record<string, "file" | "folder"> = {};
+    for (const n of nodes) {
+      if (n.kind === "file" || n.kind === "folder") current[n.id] = n.kind;
+    }
+    const snap = readJson<{ ids?: Record<string, "file" | "folder"> } | null>(
+      usageSnapshotPath(),
+      null,
+    );
+    if (!snap?.ids) {
+      // First run: seed without emitting (don't count existing files as "added").
+      writeJson(usageSnapshotPath(), { ids: current });
+      return;
+    }
+    const prev = snap.ids;
+    for (const id of Object.keys(current)) {
+      if (!(id in prev)) void recordEvent("file_added", { kind: current[id] });
+    }
+    for (const id of Object.keys(prev)) {
+      if (!(id in current)) void recordEvent("file_removed", { kind: prev[id] });
+    }
+    writeJson(usageSnapshotPath(), { ids: current });
+  } catch {
+    /* presence telemetry is best-effort; never break a scan */
+  }
 }
 
 /** Toggle a node and (for folders) all of its descendants. */
@@ -461,8 +524,9 @@ export function removeReference(refId: string): void {
 export function activeIncludedFileIds(): string[] {
   const state = loadState();
   if (!state.sourceAvailable) return [];
+  const defaultIn = defaultIncluded();
   return walk(vaultDir())
-    .filter((n) => n.kind === "file" && isEffectivelyIncluded(n.id, state))
+    .filter((n) => n.kind === "file" && isEffectivelyIncluded(n.id, state, defaultIn))
     .map((n) => n.id);
 }
 

@@ -7,6 +7,11 @@
  */
 import type { OnboardingState, User } from "@/contracts";
 import { profilePath, readJson, writeJson } from "./config";
+import { getVariant } from "./experiment";
+
+/** Local model provider (key-less, runs on-device) used by the play_first flow. */
+const LOCAL_PROVIDER_ID = "local";
+const LOCAL_MODEL_ID = "lighthouse-local";
 
 interface StoredProfile extends OnboardingState {
   /** Kept server-side only; surfaced to the client solely as `hasApiKey`. */
@@ -32,7 +37,13 @@ function save(p: StoredProfile): void {
 export function getState(): OnboardingState {
   const { apiKey, ...pub } = load();
   void apiKey;
-  return { ...pub, hasApiKey: Boolean(apiKey) || pub.hasApiKey };
+  return {
+    ...pub,
+    hasApiKey: Boolean(apiKey) || pub.hasApiKey,
+    // Surface the A/B variants so the client can branch copy/affordances.
+    onboardingVariant: getVariant("onboarding"),
+    defaultInclusionVariant: getVariant("default_inclusion"),
+  };
 }
 
 export function signIn(email: string): User {
@@ -50,7 +61,22 @@ export function register(name: string, email: string): User {
 }
 
 export function finishRegistration(): void {
-  save({ ...load(), step: "select-model" });
+  const p = load();
+  // Onboarding A/B: play_first defers the API-key prompt - drop straight into the
+  // workspace on the bundled, key-less local model so the user reaches a real
+  // first answer before any friction. They can still connect a cloud model later
+  // (the select-model UI stays reachable). key_first keeps the classic flow:
+  // pick a model and paste a key during onboarding.
+  if (getVariant("onboarding") === "play_first") {
+    save({
+      ...p,
+      providerId: p.providerId ?? LOCAL_PROVIDER_ID,
+      modelId: p.modelId ?? LOCAL_MODEL_ID,
+      step: "done",
+    });
+    return;
+  }
+  save({ ...p, step: "select-model" });
 }
 
 export function selectModel(providerId: string, modelId: string, apiKey: string): void {
