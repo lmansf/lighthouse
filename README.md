@@ -173,7 +173,7 @@ ways to provide one:
   API key, no separate download, nothing to configure. Build it with
   `npm run dist`, which runs `next build` (so the production `.next` is bundled)
   and `npm run fetch:model` to download the binary (llama.cpp, MIT) and weights
-  (Qwen2.5-1.5B-Instruct Q4_K_M, ~1 GB, Apache-2.0) into `resources/llm/`, then
+  (SmolLM2-1.7B-Instruct Q4_K_M, ~1 GB, Apache-2.0) into `resources/llm/`, then
   packages them into the installer. The model assets are gitignored, fetched on
   the build machine; `npm run dist:nomodel` skips them (but still runs
   `next build`) for a lean build that relies on a bring-your-own server instead.
