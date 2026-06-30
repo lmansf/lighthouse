@@ -12,7 +12,7 @@ This renders full-screen (centered) before the sidebar + chat workspace appears.
 
 ## What to build
 1. **Sign-in / registration** as multiple slides (welcome → credentials → confirm). Keep each slide focused; animate between them.
-2. **Model-select onboarding**: pick a primary provider, then a model within it, then paste an API key. Show a contextual "Get your {provider} key →" link (`provider.apiKeyUrl`) that opens in a new tab. The `local` provider hides the key field entirely (no key required) and lets the user finish setup without one.
+2. **Model-select onboarding**: pick a primary provider, then a model within it, then paste an API key. The `local` ("Local model (private)") provider is first in `MODEL_PROVIDERS` and so is the **default selection** on first sign-in (private by default); the user can still switch to a hosted provider before they start. Show a contextual "Get your {provider} key →" link (`provider.apiKeyUrl`) that opens in a new tab. The `local` provider hides the key field entirely (no key required) and lets the user finish setup without one.
 3. On completion, show a compact signed-in summary (name, provider · model, sign out).
 
 ## Acceptance criteria

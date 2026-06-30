@@ -107,8 +107,9 @@ origin. Notably it **omits `'unsafe-eval'`** — production Next doesn't need it
 which clears Electron's insecure-CSP warning and removes that attack surface.
 `'unsafe-inline'` stays because Next's bootstrap inline script and Fluent UI's
 (Griffel) runtime `<style>` injection rely on it, and `connect-src` allows
-`localhost`/`127.0.0.1` for the local-model server. This is desktop-only; the
-web build leaves CSP to its own hosting.
+`localhost`/`127.0.0.1` for the local-model server. `media-src` allows `blob:`
+(and `data:`) so read-aloud can play the synthesized WAV via an object URL. This
+is desktop-only; the web build leaves CSP to its own hosting.
 
 ## Building a distributable installer
 
@@ -129,6 +130,9 @@ npm run dist
 
 `electron-builder` produces a platform installer in `release/` for the platform
 you run it on — NSIS `.exe` on Windows, `.dmg` on macOS, `.AppImage` on Linux.
+The Windows installer has a fixed, version-less name (`Lighthouse-Setup.exe`, set
+via the NSIS `artifactName`) so a GitHub `releases/latest/download/Lighthouse-Setup.exe`
+URL stays permanent across releases (the companion website links straight to it).
 **Cross-building is not supported here** (e.g. you can't build the Windows `.exe`
 on Linux without Wine), so run `npm run dist` / `Build-Installer.cmd` on the
 target OS. The branded icons are already committed (see [Icons](#icons) below).
@@ -138,13 +142,15 @@ target OS. The branded icons are already committed (see [Icons](#icons) below).
 toolchain on the user's machine), then `npm run fetch:model`
 (`scripts/fetch-local-model.mjs`), which downloads the `llama-server` binary
 (llama.cpp, MIT) and a small `.gguf` model (SmolLM2-1.7B-Instruct Q4_K_M, ~1 GB,
-Apache-2.0) into `resources/llm/`, and finally `electron-builder` copies that
-folder into the installer via its `extraResources` entry. The model assets are
-gitignored and fetched on the build machine. Use `npm run dist:nomodel` to skip
-the model fetch (it still runs `next build`) for a lean build that relies on a
-bring-your-own server instead. The fetch script takes
-env overrides (pinned `llama.cpp` version, alternate model URL, expected
-checksums) documented in its header comment.
+Apache-2.0) into `resources/llm/`, **plus** the Piper TTS binary (rhasspy/piper,
+MIT) and a neural voice (`en_US-lessac-medium`, ~63 MB, MIT/CC0) into
+`resources/tts/` for on-device read-aloud, and finally `electron-builder` copies
+both folders into the installer via its `extraResources` entries. The bundled
+assets are gitignored and fetched on the build machine. Use `npm run dist:nomodel`
+to skip the fetch (it still runs `next build`) for a lean build that relies on a
+bring-your-own server instead (and falls back to the OS's Web Speech voices for
+read-aloud). The fetch script takes env overrides (pinned `llama.cpp` version,
+alternate model URL, expected checksums) documented in its header comment.
 
 The app ships **unpacked** (`asar: false`) because it runs a local Next.js
 server (`next start`) as a child process, which must be a real file on disk
@@ -202,8 +208,14 @@ config (`LICENSE_API_URL` + `SUPABASE_ANON_KEY` + `CHECKOUT_API_URL`, plus the
 `VAULT_DIR` is set automatically by the desktop app from your chosen folder.
 
 A `dist` build bundles a `llama-server` binary and a `.gguf` model under
-`resources/llm/` (see [Building a distributable installer](#building-a-distributable-installer)
-above), and the desktop app auto-launches that local inference server on
-`127.0.0.1:8080` at startup and stops it on quit, so the "Local model (private)"
-provider works with no setup. A `dist:nomodel` build ships nothing there, and
-the provider targets an external server via `LIGHTHOUSE_LOCAL_LLM_URL` instead.
+`resources/llm/`, plus the Piper TTS binary and a neural voice under
+`resources/tts/` for on-device read-aloud (see
+[Building a distributable installer](#building-a-distributable-installer) above).
+The desktop app auto-launches the local inference server on `127.0.0.1:8080` at
+startup and stops it on quit, so the "Local model (private)" provider works with
+no setup. It also sets `LIGHTHOUSE_RESOURCES_PATH` so the Next API routes can
+locate the bundled assets - Electron's `resourcesPath` when packaged, the repo's
+`resources/` folder otherwise (`npm run dev` / tests). A `dist:nomodel` build
+ships nothing there, so the provider targets an external server via
+`LIGHTHOUSE_LOCAL_LLM_URL` and read-aloud falls back to the OS's Web Speech
+voices.
