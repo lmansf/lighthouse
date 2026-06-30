@@ -1,6 +1,6 @@
 {
   "name": "rag-vault",
-  "version": "0.1.0",
+  "version": "0.1.3",
   "private": true,
   "description": "Lighthouse — a local-first RAG vault for your documents.",
   "author": "Lighthouse",
@@ -43,7 +43,9 @@
       {
         "from": "resources/llm",
         "to": "llm",
-        "filter": ["**/*"]
+        "filter": [
+          "**/*"
+        ]
       }
     ],
     "extraMetadata": {
