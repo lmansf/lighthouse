@@ -17,8 +17,10 @@ import {
   Button,
   Card,
   Input,
+  Switch,
   Text,
   Title3,
+  Tooltip,
   makeStyles,
   mergeClasses,
   shorthands,
@@ -31,6 +33,8 @@ import {
   DocumentRegular,
   OpenRegular,
   SendRegular,
+  Speaker2Regular,
+  SpeakerOffRegular,
 } from "@fluentui/react-icons";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -39,6 +43,9 @@ import type { ChatMessage, ChatTurn, RagReference } from "@/contracts";
 import { chatService } from "@/contracts";
 import { useRagStore } from "@/stores/useRagStore";
 import { logEvent } from "@/lib/logEvent";
+import { isSpeechSupported, speak, stopSpeaking } from "@/lib/speech";
+
+const READ_ALOUD_KEY = "lighthouse.chat.readAloud";
 import { useChatStore } from "@/stores/useChatStore";
 import { ACCENTS } from "@/shell/theme";
 import { FILE_DRAG_MIME, parseDraggedFiles, type DraggedFile } from "@/shell/dnd";
@@ -202,6 +209,11 @@ const useStyles = makeStyles({
     gap: tokens.spacingVerticalS,
     marginTop: tokens.spacingVerticalM,
   },
+  speakBtn: {
+    marginTop: tokens.spacingVerticalXXS,
+    alignSelf: "flex-start",
+    color: tokens.colorNeutralForeground3,
+  },
   refCard: {
     display: "flex",
     alignItems: "center",
@@ -319,6 +331,50 @@ export function ChatPanel() {
   // Fires the activation event only on the first answered question this session.
   const firstQueryLogged = useRef(false);
 
+  // Read-aloud (on-device TTS): a remembered preference to auto-speak each new
+  // answer, plus which message is speaking right now (for the per-message button).
+  const speechSupported = isSpeechSupported();
+  const [readAloud, setReadAloud] = useState(false);
+  const [speakingId, setSpeakingId] = useState<string | null>(null);
+  // The streaming `ask()` closure captures `readAloud` from its defining render;
+  // a ref lets the post-stream auto-speak read the latest value so toggling the
+  // switch off mid-stream prevents that answer from being spoken.
+  const readAloudRef = useRef(false);
+  readAloudRef.current = readAloud;
+
+  useEffect(() => {
+    if (typeof window !== "undefined" && window.localStorage.getItem(READ_ALOUD_KEY) === "1") {
+      setReadAloud(true);
+    }
+  }, []);
+
+  function setReadAloudPref(on: boolean) {
+    setReadAloud(on);
+    try {
+      window.localStorage.setItem(READ_ALOUD_KEY, on ? "1" : "0");
+    } catch {
+      /* private mode / storage full - the in-session toggle still works */
+    }
+    if (!on) {
+      stopSpeaking();
+      setSpeakingId(null);
+    }
+  }
+
+  /** Speak a message's answer, or stop if it's already the one playing. */
+  function toggleSpeak(id: string, content: string) {
+    if (speakingId === id) {
+      stopSpeaking();
+      setSpeakingId(null);
+      return;
+    }
+    setSpeakingId(id);
+    speak(content, () => setSpeakingId((cur) => (cur === id ? null : cur)));
+  }
+
+  // Stop any speech when the panel unmounts.
+  useEffect(() => () => stopSpeaking(), []);
+
   function addAttachments(files: DraggedFile[]) {
     setAttachments((cur) => {
       const seen = new Set(cur.map((a) => a.id));
@@ -398,11 +454,16 @@ export function ChatPanel() {
     setMessages((m) => [...m, userMsg, asstMsg]);
     setQuestion("");
     setStreaming(true);
+    // A new question interrupts any answer being read aloud.
+    stopSpeaking();
+    setSpeakingId(null);
     const attachmentIds = attachments.map((a) => a.id);
     let sourceCount = 0;
+    let finalContent = "";
     try {
       for await (const chunk of chatService.ask(q, includedFileIds, history, attachmentIds)) {
         if (chunk.delta) {
+          finalContent += chunk.delta;
           setMessages((m) =>
             m.map((x) => (x.id === asstId ? { ...x, content: x.content + chunk.delta } : x)),
           );
@@ -421,6 +482,11 @@ export function ChatPanel() {
         firstQueryLogged.current = true;
         logEvent("first_query", { source_count: sourceCount });
       }
+      // Read the finished answer aloud if the preference is on (on-device TTS).
+      if (readAloudRef.current && finalContent.trim()) {
+        setSpeakingId(asstId);
+        speak(finalContent, () => setSpeakingId((cur) => (cur === asstId ? null : cur)));
+      }
     } catch {
       setMessages((m) =>
         m.map((x) =>
@@ -438,6 +504,8 @@ export function ChatPanel() {
 
   function newChat() {
     if (streaming) return;
+    stopSpeaking();
+    setSpeakingId(null);
     clearMessages();
     setQuestion("");
     setAttachments([]);
@@ -574,6 +642,15 @@ export function ChatPanel() {
           <Title3>Ask</Title3>
           <div className={styles.headerMeta}>
             <Badge appearance="tint">{includedFileIds.length} sources available</Badge>
+            {speechSupported && (
+              <Tooltip content="Read new answers aloud (on-device)" relationship="label">
+                <Switch
+                  checked={readAloud}
+                  onChange={(_, d) => setReadAloudPref(Boolean(d.checked))}
+                  label="Read aloud"
+                />
+              </Tooltip>
+            )}
             <Button
               appearance="subtle"
               icon={<AddRegular />}
@@ -604,6 +681,21 @@ export function ChatPanel() {
                       </ReactMarkdown>
                       {streaming && m.id === lastId && <span className={styles.beaconInline} />}
                     </div>
+                    {speechSupported && m.content && !(streaming && m.id === lastId) && (
+                      <Tooltip
+                        content={speakingId === m.id ? "Stop" : "Read this answer aloud"}
+                        relationship="label"
+                      >
+                        <Button
+                          className={styles.speakBtn}
+                          appearance="subtle"
+                          size="small"
+                          icon={speakingId === m.id ? <SpeakerOffRegular /> : <Speaker2Regular />}
+                          aria-label={speakingId === m.id ? "Stop reading" : "Read this answer aloud"}
+                          onClick={() => toggleSpeak(m.id, m.content)}
+                        />
+                      </Tooltip>
+                    )}
                     {m.references && m.references.length > 0 && (
                       <References references={m.references} />
                     )}

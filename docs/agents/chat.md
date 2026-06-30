@@ -16,6 +16,7 @@ A Google-style answer surface: the AI answer on top, related/reference files ben
 3. Realtime feel - show streaming state; let the user ask follow-ups (prior turns are threaded back via `history`).
 4. Empty/grounding states: if `includedFileIds()` is empty, prompt the user to include files first (the backend returns a no-grounding answer in that case).
 5. **Attach files to a question** - drag a file from the explorer onto the panel, or drop OS files onto it (which `upload`s them into the vault, then attaches the new node ids), to scope the next question and its follow-ups to just those files. Attachments render as removable pills above the composer and clear on **New chat**. Use the shared `@/shell/dnd` helpers (`FILE_DRAG_MIME`, `parseDraggedFiles`) so internal drags stay distinguishable from OS file drops, and pass the attached ids as `attachmentFileIds` to `ask`.
+6. **Read answers aloud (on-device TTS)** - a **Read aloud** switch in the header (persisted to `localStorage`) auto-speaks each finished answer, and each answer carries a play/stop button. Use the `@/lib/speech` helpers (`isSpeechSupported`, `speak`, `stopSpeaking`), which wrap the Web Speech API (`speechSynthesis`) over the OS's installed voices so nothing leaves the machine. Hide both affordances when `isSpeechSupported()` is false. A new question or **New chat** stops any playback.
 
 ## Acceptance criteria
 - Streaming renders incrementally (not all-at-once).

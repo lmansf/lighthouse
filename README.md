@@ -97,6 +97,11 @@ contracts — no cloud database required:
   **Related files** cards
   are clickable on the desktop build — `/api/open` opens the cited file in its
   native app (web deployments report no such capability and the cards stay inert).
+  Answers can be **read aloud** on-device: a **Read aloud** switch in the chat
+  header (remembered across sessions) auto-speaks each finished answer, and every
+  answer has a play/stop button. Speech uses the OS's installed voices via the
+  browser's Web Speech API — nothing leaves your machine — and is hidden when the
+  runtime has no speech support.
 - **Profile/key** are stored locally in `vault/.rag-vault/profile.json` (gitignored).
 
 Swap back to the in-memory mocks by pointing the three exports in
