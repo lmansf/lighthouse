@@ -13,8 +13,26 @@
  */
 import crypto from "node:crypto";
 import path from "node:path";
-import { stateDir, readJson, writeJson } from "./config";
-import { getContactId, accountEmail } from "./license";
+import { stateDir, readJson, writeJson, profilePath } from "./config";
+import { getContactId } from "./license";
+
+const identityPath = () => path.join(stateDir(), "identity.json");
+
+/**
+ * The user's email, read straight from the stored profile / identity files.
+ *
+ * This intentionally does NOT call license.accountEmail() (which calls
+ * profile.getState()): profile.getState() resolves the experiment variants, so
+ * going back through it here would recurse infinitely (getState -> getVariant ->
+ * resolve -> email -> getState -> ...). Reading the files directly breaks that.
+ */
+function currentEmail(): string | undefined {
+  const profile = readJson<{ user?: { email?: string } } | null>(profilePath(), null);
+  const fromProfile = profile?.user?.email?.trim();
+  if (fromProfile) return fromProfile;
+  const identity = readJson<{ email?: string } | null>(identityPath(), null);
+  return identity?.email?.trim() || undefined;
+}
 
 export type OnboardingVariant = "play_first" | "key_first";
 export type DefaultInclusionVariant = "opt_in" | "opt_out";
@@ -73,7 +91,7 @@ function assign<K extends ExperimentName>(experiment: K): Variants[K] {
 function resolve(): Variants {
   // A pilot override always wins once the user's email is known, so the four
   // pilots land in their assigned factorial cells regardless of hash.
-  const email = accountEmail()?.trim().toLowerCase();
+  const email = currentEmail()?.toLowerCase();
   const override = email ? FIRST_USERS[email] : undefined;
   const stored = readJson<Partial<Variants> | null>(experimentsPath(), null);
 
