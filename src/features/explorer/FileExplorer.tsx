@@ -225,6 +225,9 @@ function TreeRow({
         style={{ paddingLeft: `${depth * 18 + 4}px` }}
         role="button"
         tabIndex={0}
+        // Usage logging: a folder/file row, labelled by its name (names only).
+        data-log-type={node.kind === "folder" ? "folder" : "file"}
+        data-log={node.name}
         onClick={activate}
         // Drag a file out to the chat panel to ask about just that file.
         draggable={attachable}

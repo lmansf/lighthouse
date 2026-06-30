@@ -149,7 +149,25 @@ create table if not exists public.purchase_interest (
   contact_id uuid,
   email      text not null
 );
+
+-- UI click events (best-effort usage logging — see "Usage logging" below)
+create table if not exists public.click_events (
+  id          bigint generated always as identity primary key,
+  created_at  timestamptz not null default now(),
+  contact_id  uuid,
+  guid        uuid,
+  email       text,
+  event_type  text,        -- folder | file | toggle | button | link | nav | other
+  label       text,        -- coarse label/name of the touched control (no values)
+  occurred_at timestamptz,
+  app_version text
+);
+create index if not exists click_events_contact_idx on public.click_events (contact_id);
 ```
+
+> The `click_events` table also ships as a migration:
+> `supabase/migrations/20260629120000_click_events.sql` — apply it (SQL Editor or
+> Management API) when you deploy the updated Edge Function.
 
 The Edge Function uses the **service-role** key, which bypasses RLS — so no
 `anon` insert/select policy is needed, and emails stay private (never expose
@@ -191,6 +209,40 @@ Both are **public** and safe to commit/ship. For a local dev build, copy them
 into `.env.local` (which overrides `.env.production`) so dev hits the same
 hosted function. To develop without deploying, set `LICENSE_ENFORCE=1` and
 `LICENSE_SECRET=...` in `.env.local` instead for a self-contained local trial.
+
+## Usage logging (UI click events)
+
+Lighthouse logs coarse UI interactions — folders, files, toggles, buttons,
+links, nav — to understand how the app is used.
+It is **best-effort** and modeled on the launch ping: nothing here can ever block or break a launch.
+
+**Capture.**
+A single delegated, capture-phase click listener (`src/features/usage/useUsageCapture.ts`, mounted in `AppShell`) resolves the nearest interactive element a user touches and records a coarse `type` (`folder|file|toggle|button|link|nav|other`) plus a stable `label`.
+The label prefers an explicit `data-log` attribute, then `aria-label` / `title` / trimmed text.
+**Only names are recorded** — never field values, file contents, or secrets — and labels are length-capped on both the client and the Edge Function.
+
+**Local buffer.**
+Captured events are flushed to `/api/usage` and appended to a size-capped JSONL ring-buffer at `<vault>/.rag-vault/usage-events.jsonl` (`src/server/usage.ts`).
+The buffer keeps the **most recent** actions (max 5000 events / ~1MB), trimming the oldest on write, and tolerates a torn last line.
+
+**Publish on launch + purge.**
+During startup, right after the launch ping, the app calls `/api/usage` `op: "publish"`, which batch-publishes the buffer to the license Edge Function's **`events`** action (keyed by `contact_id` / `guid` / `email` / `app_version`) and **purges** the published lines on success.
+Offline or failed publishes keep the buffer for the next launch.
+
+**Opt-out (default opted IN).**
+The welcome form (`OnboardingPanel`) shows a checkbox — *"Help improve Lighthouse by sharing anonymous usage data"* — **checked by default**.
+Unchecking it persists `optOut: true` to `<vault>/.rag-vault/usage.json`; while opted out nothing is captured, buffered, or published, and any buffered events are dropped.
+**Each trial mint resets consent to the opted-in default** (`startTrial` -> `resetUsageConsent`); the welcome form re-applies the user's explicit choice afterwards, so registering or starting a fresh trial re-opts-in unless the user opts out again.
+
+**Deploy (manual step).**
+Shipping usage logging is the same two manual steps as any Edge Function change:
+
+```sh
+supabase functions deploy license   # adds the `events` action
+# apply supabase/migrations/20260629120000_click_events.sql (SQL Editor or Management API)
+```
+
+Until both are applied the desktop simply buffers locally and retries on the next launch (the publish call fails closed, non-destructively).
 
 ## Licensing model
 
