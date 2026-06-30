@@ -17,6 +17,8 @@
  *      (a CPU build, for broad compatibility — no GPU/driver assumptions).
  *   2. A small instruct model in GGUF — SmolLM2-1.7B-Instruct Q4_K_M (~1 GB),
  *      Apache-2.0 (no-strings, commercial-safe), from Hugging Face.
+ *   3. Piper (rhasspy/piper, MIT) + a neural voice (en_US-lessac-medium, ~63 MB,
+ *      MIT/CC0) into `resources/tts/`, powering on-device read-aloud TTS.
  *
  * Overridable via env (all optional):
  *   LLAMACPP_VERSION   llama.cpp release tag to pin (default: latest)
@@ -214,6 +216,84 @@ function flatten(dir) {
   }
 }
 
+/** Pick the Piper release asset matching this OS/arch (zip on Windows, tar.gz else). */
+function pickPiperAsset(assets) {
+  const os = platform === "win32" ? "windows" : platform === "darwin" ? "macos" : "linux";
+  // Piper asset arch tags: windows→amd64, linux→x86_64/aarch64, macos→x64/aarch64.
+  const arch =
+    process.arch === "arm64"
+      ? "aarch64"
+      : os === "windows"
+        ? "amd64"
+        : os === "macos"
+          ? "x64"
+          : "x86_64";
+  const names = assets
+    .map((a) => a.name)
+    .filter((n) => /\.(zip|tar\.gz|tgz)$/i.test(n) && n.toLowerCase().includes(os));
+  const byArch = names.filter((n) => n.toLowerCase().includes(arch));
+  const name = (byArch[0] || names[0]);
+  if (!name) throw new Error(`no piper asset for ${os}/${arch} in this release`);
+  return assets.find((a) => a.name === name);
+}
+
+/** Move everything from `srcDir` up into `dir`, then remove the empty `srcDir`. */
+function moveUp(srcDir, dir) {
+  for (const f of readdirSync(srcDir, { withFileTypes: true })) {
+    renameSync(join(srcDir, f.name), join(dir, f.name));
+  }
+  rmSync(srcDir, { recursive: true, force: true });
+}
+
+/** Flatten Piper's archive (it unpacks into a `piper/` subfolder) into `dir`. */
+function flattenPiper(dir, piperName) {
+  if (existsSync(join(dir, piperName))) return; // already at top level
+  const srcDir = findDirWith(dir, piperName);
+  if (srcDir && srcDir !== dir) moveUp(srcDir, dir);
+}
+
+/**
+ * Fetch Piper + a neural voice into resources/tts/ for on-device read-aloud TTS.
+ * Mirrors the llama-server flow: resolve the per-OS release asset, extract, and
+ * flatten so `piper(.exe)` and its libraries sit directly in resources/tts/.
+ */
+async function fetchTts() {
+  const ttsDest = join(root, "resources", "tts");
+  mkdirSync(ttsDest, { recursive: true });
+  const piperName = platform === "win32" ? "piper.exe" : "piper";
+  const piperPath = join(ttsDest, piperName);
+
+  // 1. Piper binary (+ libraries, espeak-ng-data)
+  if (!force && existsSync(piperPath)) {
+    console.log(`✓ ${piperName} already present`);
+  } else {
+    console.log(`Resolving piper latest release…`);
+    const release = await getJson("https://api.github.com/repos/rhasspy/piper/releases/latest");
+    const asset = pickPiperAsset(release.assets || []);
+    console.log(`Downloading ${asset.name} (${release.tag_name})`);
+    const archivePath = join(ttsDest, asset.name);
+    await download(asset.browser_download_url, archivePath, "piper");
+    extract(archivePath, ttsDest);
+    rmSync(archivePath, { force: true });
+    flattenPiper(ttsDest, piperName);
+    if (!existsSync(piperPath)) throw new Error(`extracted, but ${piperName} not found in ${ttsDest}`);
+    console.log(`✓ ${piperName}`);
+  }
+
+  // 2. Voice model (.onnx) + its config (.onnx.json) — a clear, natural US voice.
+  const voiceBase =
+    "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium";
+  const onnxPath = join(ttsDest, "en_US-lessac-medium.onnx");
+  const jsonPath = join(ttsDest, "en_US-lessac-medium.onnx.json");
+  if (!force && existsSync(onnxPath) && statSync(onnxPath).size > 1e6) {
+    console.log(`✓ voice already present`);
+  } else {
+    await download(`${voiceBase}.onnx`, onnxPath, "voice");
+    await download(`${voiceBase}.onnx.json`, jsonPath, "voice-config");
+    console.log(`✓ voice en_US-lessac-medium`);
+  }
+}
+
 async function main() {
   mkdirSync(dest, { recursive: true });
   const serverName = platform === "win32" ? "llama-server.exe" : "llama-server";
@@ -247,7 +327,10 @@ async function main() {
     console.log(`✓ ${modelFile}`);
   }
 
-  console.log(`\nBundled local model ready in resources/llm/. Run \`npm run dist\` to package it.`);
+  // 3. Local neural TTS (Piper + voice) for on-device read-aloud.
+  await fetchTts();
+
+  console.log(`\nBundled local model + TTS ready in resources/. Run \`npm run dist\` to package them.`);
 }
 
 main().catch((e) => {

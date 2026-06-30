@@ -91,6 +91,16 @@ export function isDesktopApp(): boolean {
   return process.env.LIGHTHOUSE_DESKTOP === "1";
 }
 
+/**
+ * Root of the bundled offline resources (the local model, the local TTS voice).
+ * electron/main.js sets LIGHTHOUSE_RESOURCES_PATH to Electron's `resourcesPath`
+ * in the packaged app; otherwise we fall back to `./resources` in the repo so it
+ * works under `npm run dev`/tests too.
+ */
+export function resourcesDir(): string {
+  return process.env.LIGHTHOUSE_RESOURCES_PATH?.trim() || path.join(process.cwd(), "resources");
+}
+
 /** Read a JSON file, returning `fallback` if it is missing or unparseable. */
 export function readJson<T>(file: string, fallback: T): T {
   try {

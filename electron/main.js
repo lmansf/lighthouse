@@ -59,6 +59,8 @@ const CONTENT_SECURITY_POLICY = [
   "script-src 'self' 'unsafe-inline'",
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob:",
+  // Read-aloud plays a synthesized WAV via an object URL (blob:).
+  "media-src 'self' blob: data:",
   "font-src 'self' data:",
   "connect-src 'self' http://localhost:* http://127.0.0.1:*",
   "object-src 'none'",
@@ -131,6 +133,12 @@ function startServer() {
       ...process.env,
       ELECTRON_RUN_AS_NODE: "1", // run the Next CLI on Electron's bundled Node
       LIGHTHOUSE_DESKTOP: "1", // gates desktop-only endpoints (e.g. link in place)
+      // Where the bundled offline assets (local model, TTS voice) live, so the
+      // Next API routes can find them. Packaged: Electron's resourcesPath; dev:
+      // the repo's resources/ folder.
+      LIGHTHOUSE_RESOURCES_PATH: app.isPackaged
+        ? process.resourcesPath
+        : path.join(APP_ROOT, "resources"),
       VAULT_DIR: vaultDir(),
       // Let the in-app UI read/change desktop settings (e.g. launch-at-login);
       // the main process re-reads this file on its next launch.
