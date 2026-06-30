@@ -64,12 +64,26 @@ const synth = {
 globalThis.window = { speechSynthesis: synth };
 globalThis.SpeechSynthesisUtterance = FakeUtterance;
 
+// speak() now tries the local neural voice at /api/tts first and only falls back
+// to Web Speech when that route is unavailable. Under `node --test` there is no
+// server, so stand in a fetch that answers 501 ("local TTS unavailable") - exactly
+// what the route returns in dev / plain-web - to drive the Web Speech fallback the
+// rest of these tests exercise.
+globalThis.fetch = () => Promise.resolve({ ok: false, status: 501 });
+
 const { speak, stopSpeaking, markdownToSpeech, isSpeechSupported } = await import(
   "../src/lib/speech.ts"
 );
 
 /** Resolve when speak()'s onEnd fires (once the queue drains or is cancelled). */
 const speakAndWait = (text) => new Promise((resolve) => speak(text, resolve));
+
+// The fallback is reached only after the async /api/tts attempt settles. Drain the
+// microtask queue (without advancing timers, so the fake engine's setTimeout-based
+// onend can't run) until the fallback's first utterance has been handed over.
+const flushToFallback = async () => {
+  for (let i = 0; i < 20; i += 1) await Promise.resolve();
+};
 
 test("isSpeechSupported() detects the fake speechSynthesis", () => {
   assert.equal(isSpeechSupported(), true);
@@ -112,7 +126,9 @@ test("stopSpeaking() cancels the rest of the queue and settles onEnd once", asyn
   speak("Alpha. Bravo. Charlie. Delta.", () => {
     ends += 1;
   });
-  // Only the first chunk has been handed to the engine synchronously.
+  // Once the /api/tts attempt has fallen back, only the first chunk has been
+  // handed to the engine; the rest wait behind its onend.
+  await flushToFallback();
   assert.deepEqual(synth.spoken, ["Alpha."]);
 
   stopSpeaking(); // user hit stop / started a new question
@@ -130,6 +146,7 @@ test("a newer speak() supersedes the old queue, and the old onEnd fires once", a
   speak("Old one. Old two. Old three.", () => {
     firstEnds += 1;
   });
+  await flushToFallback();
   assert.deepEqual(synth.spoken, ["Old one."]);
 
   // A second answer interrupts the first before it finishes.
