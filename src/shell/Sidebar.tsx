@@ -12,6 +12,7 @@ import {
 import { PanelLeftContractRegular, PanelLeftExpandRegular } from "@fluentui/react-icons";
 import { LAYOUT, ACCENTS } from "./theme";
 import { SidebarWater } from "./SidebarWater";
+import { ConversePlaceholder } from "./ConversePlaceholder";
 import { SettingsMenu } from "@/features/license/LicenseGate";
 
 const useStyles = makeStyles({
@@ -66,6 +67,13 @@ const useStyles = makeStyles({
     minHeight: 0,
     overflowY: "auto",
     ...shorthands.padding(0, tokens.spacingHorizontalM),
+  },
+  // Conversational-mode placeholder, between the brand header and the file tree.
+  converse: {
+    position: "relative",
+    zIndex: 1,
+    flexShrink: 0,
+    ...shorthands.padding(tokens.spacingVerticalXS, tokens.spacingHorizontalS, tokens.spacingVerticalS),
   },
   bodyHidden: { display: "none" },
   footer: {
@@ -130,6 +138,11 @@ export function Sidebar({ collapsed, onToggleCollapsed, children }: SidebarProps
           </>
         )}
       </div>
+      {!collapsed && (
+        <div className={styles.converse}>
+          <ConversePlaceholder />
+        </div>
+      )}
       <div className={mergeClasses(styles.body, collapsed && styles.bodyHidden)}>{children}</div>
       <div className={mergeClasses(styles.footer, collapsed && styles.footerCollapsed)}>
         <SettingsMenu />
