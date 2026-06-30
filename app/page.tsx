@@ -33,13 +33,29 @@ export default function Home() {
 
   // Log the launch once on mount (best-effort) and load config (paid toggle),
   // independent of license/onboarding state so the nav reflects it at all times.
+  // After the launch ping, publish any buffered UI usage events and purge them.
   useEffect(() => {
     void loadConfig();
-    void fetch("/api/license", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ op: "ping" }),
-    }).catch(() => {});
+    void (async () => {
+      try {
+        await fetch("/api/license", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ op: "ping" }),
+        });
+      } catch {
+        /* best-effort */
+      }
+      try {
+        await fetch("/api/usage", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ op: "publish" }),
+        });
+      } catch {
+        /* best-effort — buffered events stay for the next launch */
+      }
+    })();
   }, [loadConfig]);
 
   useEffect(() => {
