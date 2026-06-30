@@ -42,10 +42,18 @@ vault/.rag-vault/
 *.tsbuildinfo
 next-env.d.ts
 
+# electron-builder output (packaged app + installer) — large build artifacts.
+/release/
+
 # Bundled local model assets (llama-server binary + .gguf weights) — large and
 # licensed separately; fetched at build time by `npm run fetch:model`.
 /resources/llm/*
 !/resources/llm/.gitkeep
+
+# Bundled local TTS assets (Piper binary + neural voice) — same deal: large and
+# licensed separately, fetched at build time by `npm run fetch:model`.
+/resources/tts/*
+!/resources/tts/.gitkeep
 
 # Lavish review artifacts (local tooling)
 .lavish/
