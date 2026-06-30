@@ -308,18 +308,25 @@ async function assign(body: Record<string, unknown>): Promise<Response> {
       .eq("contact_id", contactId)
       .eq("experiment", exp)
       .limit(1);
+    // A DB error (e.g. the assignments table not migrated yet) must not fabricate an
+    // authoritative variant: bail so the client keeps its local hash fallback.
+    if (existing.error) return json({ ok: false, reason: "error", detail: existing.error.message });
     const prior = existing.data?.[0]?.variant as string | undefined;
     if (prior) {
       variants[exp] = prior;
       continue;
     }
-    // Balance: pick the least-represented variant (ties -> first listed).
+    // Balance: pick the least-represented variant (ties -> first listed). Count-only
+    // head queries stay O(1) per variant and dodge PostgREST's ~1000-row cap.
     const counts: Record<string, number> = {};
-    for (const v of choices) counts[v] = 0;
-    const all = await db.from(ASSIGN_TABLE).select("variant").eq("experiment", exp);
-    for (const row of all.data ?? []) {
-      const v = String((row as { variant: string }).variant);
-      if (v in counts) counts[v] += 1;
+    for (const v of choices) {
+      const c = await db
+        .from(ASSIGN_TABLE)
+        .select("*", { count: "exact", head: true })
+        .eq("experiment", exp)
+        .eq("variant", v);
+      if (c.error) return json({ ok: false, reason: "error", detail: c.error.message });
+      counts[v] = c.count ?? 0;
     }
     let chosen = choices[0];
     let min = Infinity;
