@@ -64,6 +64,12 @@ variant(contactId, experiment) =
 A deterministic hash means the assignment is stable across launches and reproducible from the analytics side, and the salt stops a user's Exp 5 bucket from correlating with their Exp 6 bucket.
 Store the resolved label (not "A"/"B" but the meaningful name, e.g. `play_first`) so the data reads clearly later.
 
+The hash alone splits ~50/50 only at scale and can skew at low N (4 installs might land 3/1), which matters for a small pilot.
+So registration calls the license function's **`assign`** op, which buckets each install into the *least-used* variant per experiment (recorded in the `experiment_assignments` table) and keeps a small pilot close to an even split under serial / low-volume registration.
+It is stable and idempotent (an existing assignment is reused), a pilot-email override still wins, and offline or with the function unconfigured the local hash assignment stands.
+The balanced assignment is applied at registration *before* onboarding branches on the variant, so the user never sees a flip.
+See `src/server/experiment.ts` (`assignBalancedVariants`) and the `assign` op in `supabase/functions/license/index.ts`.
+
 ### 2b. Events to log
 
 The app already sends one `userlogs` row per launch.
@@ -102,6 +108,21 @@ events (
   created_at  timestamptz not null default now()
 )
 ```
+
+Add a thin assignment ledger so the `assign` op can balance the split (one row per `contact_id` + `experiment`, the unique constraint making assignment idempotent):
+
+```
+experiment_assignments (
+  id          bigint generated always as identity primary key,
+  contact_id  text not null,
+  experiment  text not null,   -- onboarding | default_inclusion
+  variant     text not null,   -- play_first|key_first | opt_in|opt_out
+  created_at  timestamptz not null default now(),
+  unique (contact_id, experiment)
+)
+```
+
+This is the assignment source of truth for balancing only; the dashboard still reads variants from `registrations.exp_*` and `events.variant`.
 
 Everything else (`feedback`, `bug_reports`, `purchase_interest`) already joins by `contact_id`, so you can slice those by variant through `registrations` without schema changes.
 

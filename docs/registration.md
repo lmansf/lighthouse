@@ -182,11 +182,25 @@ create table if not exists public.click_events (
   app_version text
 );
 create index if not exists click_events_contact_idx on public.click_events (contact_id);
+
+-- Balanced A/B assignment ledger (the `assign` op's source of truth; see
+-- supabase/migrations/20260630000000_experiment_assignments.sql)
+create table if not exists public.experiment_assignments (
+  id          bigint generated always as identity primary key,
+  contact_id  text not null,
+  experiment  text not null,   -- onboarding | default_inclusion
+  variant     text not null,   -- play_first|key_first | opt_in|opt_out
+  created_at  timestamptz not null default now(),
+  unique (contact_id, experiment)
+);
+create index if not exists experiment_assignments_experiment_idx
+  on public.experiment_assignments (experiment);
 ```
 
-> The `click_events` table also ships as a migration:
-> `supabase/migrations/20260629120000_click_events.sql` — apply it (SQL Editor or
-> Management API) when you deploy the updated Edge Function.
+> The `click_events` and `experiment_assignments` tables also ship as migrations
+> (`supabase/migrations/20260629120000_click_events.sql`,
+> `supabase/migrations/20260630000000_experiment_assignments.sql`) — apply them
+> (SQL Editor or Management API) when you deploy the updated Edge Function.
 
 The Edge Function uses the **service-role** key, which bypasses RLS — so no
 `anon` insert/select policy is needed, and emails stay private (never expose
@@ -214,6 +228,18 @@ record this server-side, both via the service-role key:
   onto their `registrations` row (`exp_onboarding`, `exp_default_inclusion`), so
   `feedback` / `bug_reports` / `userlogs` can all be sliced by variant through
   `registrations` by `contact_id`.
+
+**Balanced assignment.** By default each install picks its variant from a local
+hash of its `contact_id` (~50/50, stable, works offline). For a *small* pilot
+that can skew (4 installs might land 3/1), so registration calls the **`assign`**
+op: it buckets the install into the **least-used** variant per experiment
+(recorded in `experiment_assignments`), keeping the split close to even (A, B, A,
+B…) under serial / low-volume registration. The count-then-insert isn't atomic,
+so a truly-concurrent burst can still land two installs on the same variant; for
+a pilot's registration rate that's a non-issue. It's stable (an existing assignment is
+reused) and idempotent, and upgrades the local hash assignment *before*
+onboarding branches, so the user never sees a flip. A pilot-email entry in
+`FIRST_USERS` still overrides everything; offline, the hash assignment stands.
 
 All of this is best-effort: telemetry never blocks a launch, a query, or
 onboarding, and the app runs normally with `LICENSE_API_URL` unset (the calls

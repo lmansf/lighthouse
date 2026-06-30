@@ -33,7 +33,7 @@ import crypto from "node:crypto";
 import path from "node:path";
 import { stateDir, readJson, writeJson } from "./config";
 import { getState as profileState } from "./profile";
-import { getAllVariants } from "./experiment";
+import { getAllVariants, assignBalancedVariants } from "./experiment";
 import type { Registration } from "./registration";
 import {
   isUsageOptedOut,
@@ -120,7 +120,7 @@ export function paidEnabled(): boolean {
 
 // --- hosted Edge Function ----------------------------------------------------
 /** Call the license Edge Function. Throws on a non-2xx / network error. */
-async function callFn(op: string, extra: Record<string, unknown>): Promise<Record<string, unknown>> {
+export async function callFn(op: string, extra: Record<string, unknown>): Promise<Record<string, unknown>> {
   const url = licenseApi();
   if (!url) throw new Error("LICENSE_API_URL not configured");
   const anon = process.env.SUPABASE_ANON_KEY?.trim();
@@ -199,6 +199,12 @@ export async function startTrial(contact?: Registration): Promise<{ guid: string
   // A fresh trial resets usage-logging consent to its default (opted in). The
   // registration form may then re-apply the user's explicit choice afterwards.
   resetUsageConsent();
+
+  // Balance this install into the under-represented variant server-side, so a
+  // small pilot splits evenly instead of relying on the ~50/50 hash. Best-effort
+  // and idempotent: offline / unconfigured it keeps the local hash assignment.
+  // Done here at registration - before onboarding branches on the variant.
+  await assignBalancedVariants().catch(() => {});
 
   if (licenseApi()) {
     const r = await callFn("start", { contact: useContact ? contactRow(useContact) : undefined });
