@@ -139,9 +139,20 @@ export function speak(text: string, onEnd?: () => void): void {
       const url = URL.createObjectURL(new Blob([buf], { type: "audio/wav" }));
       const audio = new Audio(url);
       activeAudio = audio;
+      // A decode failure fires both `onerror` and a `play()` rejection for the
+      // same MediaError; detach handlers and guard so the OS-voice fallback runs
+      // at most once (autoplay blocks reject play() with no error event).
+      let fellBack = false;
+      const fallBack = () => {
+        if (fellBack) return;
+        fellBack = true;
+        audio.onended = null;
+        audio.onerror = null;
+        speakWithWebSpeech(clean, myToken, settle);
+      };
       audio.onended = settle;
-      audio.onerror = () => speakWithWebSpeech(clean, myToken, settle);
-      audio.play().catch(() => speakWithWebSpeech(clean, myToken, settle));
+      audio.onerror = fallBack;
+      audio.play().catch(fallBack);
     })
     .catch((e) => {
       if (token !== myToken || (e instanceof DOMException && e.name === "AbortError")) return;
