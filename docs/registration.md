@@ -233,8 +233,10 @@ record this server-side, both via the service-role key:
 hash of its `contact_id` (~50/50, stable, works offline). For a *small* pilot
 that can skew (4 installs might land 3/1), so registration calls the **`assign`**
 op: it buckets the install into the **least-used** variant per experiment
-(recorded in `experiment_assignments`), giving exact alternation (A, B, A, B…)
-regardless of who installs from your link. It's stable (an existing assignment is
+(recorded in `experiment_assignments`), keeping the split close to even (A, B, A,
+B…) under serial / low-volume registration. The count-then-insert isn't atomic,
+so a truly-concurrent burst can still land two installs on the same variant; for
+a pilot's registration rate that's a non-issue. It's stable (an existing assignment is
 reused) and idempotent, and upgrades the local hash assignment *before*
 onboarding branches, so the user never sees a flip. A pilot-email entry in
 `FIRST_USERS` still overrides everything; offline, the hash assignment stands.

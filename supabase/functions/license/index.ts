@@ -23,8 +23,9 @@
 //   events     → batch-insert UI click events (best-effort usage logging) into
 //                the click_events table; published on launch and then purged.
 //   assign     → balanced A/B assignment: bucket a contact into the
-//                least-used variant per experiment (exact alternation at low N),
-//                recording it in experiment_assignments. Stable + idempotent.
+//                least-used variant per experiment (even split at low N under
+//                serial registration), recording it in experiment_assignments.
+//                Stable + idempotent.
 //   All form rows carry a stable contact_id so paid vs unpaid can be compared.
 //   issuePaid  → (admin-only; needs x-admin-token == ADMIN_TOKEN) mint/activate
 //                a PAID license for a guid/email with a paid_through date. This
@@ -49,7 +50,8 @@ const EVENT_TYPES = ["folder", "file", "toggle", "button", "link", "nav", "other
 const MAX_EVENTS_PER_BATCH = 5000; // matches the desktop ring-buffer cap
 const ASSIGN_TABLE = Deno.env.get("EXPERIMENT_ASSIGNMENTS_TABLE") ?? "experiment_assignments";
 // The variants of each experiment, in alternation order: with even counts the
-// FIRST listed wins, so installs land A, B, A, B, ... for an exact small-N split.
+// FIRST listed wins, so serial installs land A, B, A, B, ... for an even small-N
+// split (a concurrent burst can still collide since count-then-insert isn't atomic).
 const EXP_VARIANTS: Record<string, string[]> = {
   onboarding: ["play_first", "key_first"],
   default_inclusion: ["opt_in", "opt_out"],
@@ -283,8 +285,10 @@ async function event(body: Record<string, unknown>): Promise<Response> {
  * Balanced A/B assignment. For each requested experiment, returns this contact's
  * variant - reusing an existing assignment (stable across launches), otherwise
  * bucketing them into the variant with the FEWEST assignments so far (ties go to
- * the first listed), then recording it. This makes a small pilot alternate
- * A, B, A, B... instead of relying on a per-install hash that can skew at low N.
+ * the first listed), then recording it. Under serial / low-volume registration
+ * (the pilot case) this keeps a small pilot close to an even split instead of
+ * relying on a per-install hash that can skew at low N. The count-then-insert is
+ * not atomic, so a truly-concurrent burst can still collide on the same variant.
  *
  * Idempotent per (contact_id, experiment) via the table's unique constraint: a
  * lost insert race just re-reads the winning row.
@@ -340,14 +344,21 @@ async function assign(body: Record<string, unknown>): Promise<Response> {
       .from(ASSIGN_TABLE)
       .insert({ contact_id: contactId, experiment: exp, variant: chosen });
     if (error) {
-      // Likely a concurrent assign for the same contact: re-read the winner.
+      // Likely a concurrent assign for the same contact: re-read the winner. If the
+      // insert failed for some other reason and no row can be recovered, the variant
+      // was never recorded - bail so the client keeps its local hash fallback instead
+      // of persisting an unrecorded source:"server" assignment.
       const again = await db
         .from(ASSIGN_TABLE)
         .select("variant")
         .eq("contact_id", contactId)
         .eq("experiment", exp)
         .limit(1);
-      chosen = (again.data?.[0]?.variant as string | undefined) ?? chosen;
+      const recovered = again.data?.[0]?.variant as string | undefined;
+      if (again.error || !recovered) {
+        return json({ ok: false, reason: "error", detail: again.error?.message ?? error.message });
+      }
+      chosen = recovered;
     }
     variants[exp] = chosen;
   }
