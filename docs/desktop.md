@@ -137,7 +137,7 @@ target OS. The branded icons are already committed (see [Icons](#icons) below).
 (bundled into the installer so the packaged app's `next start` needs no Node.js
 toolchain on the user's machine), then `npm run fetch:model`
 (`scripts/fetch-local-model.mjs`), which downloads the `llama-server` binary
-(llama.cpp, MIT) and a small `.gguf` model (Qwen2.5-1.5B-Instruct Q4_K_M, ~1 GB,
+(llama.cpp, MIT) and a small `.gguf` model (SmolLM2-1.7B-Instruct Q4_K_M, ~1 GB,
 Apache-2.0) into `resources/llm/`, and finally `electron-builder` copies that
 folder into the installer via its `extraResources` entry. The model assets are
 gitignored and fetched on the build machine. Use `npm run dist:nomodel` to skip
