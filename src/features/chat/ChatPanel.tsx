@@ -336,6 +336,11 @@ export function ChatPanel() {
   const speechSupported = isSpeechSupported();
   const [readAloud, setReadAloud] = useState(false);
   const [speakingId, setSpeakingId] = useState<string | null>(null);
+  // The streaming `ask()` closure captures `readAloud` from its defining render;
+  // a ref lets the post-stream auto-speak read the latest value so toggling the
+  // switch off mid-stream prevents that answer from being spoken.
+  const readAloudRef = useRef(false);
+  readAloudRef.current = readAloud;
 
   useEffect(() => {
     if (typeof window !== "undefined" && window.localStorage.getItem(READ_ALOUD_KEY) === "1") {
@@ -478,7 +483,7 @@ export function ChatPanel() {
         logEvent("first_query", { source_count: sourceCount });
       }
       // Read the finished answer aloud if the preference is on (on-device TTS).
-      if (readAloud && finalContent.trim()) {
+      if (readAloudRef.current && finalContent.trim()) {
         setSpeakingId(asstId);
         speak(finalContent, () => setSpeakingId((cur) => (cur === asstId ? null : cur)));
       }

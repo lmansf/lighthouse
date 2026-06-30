@@ -33,15 +33,38 @@ export function markdownToSpeech(md: string): string {
     .trim();
 }
 
-/** Stop any in-progress speech. */
+/**
+ * Split speakable text into sentence-sized chunks. Chromium silently stops a
+ * single utterance after ~15s, so a long answer must be spoken as a queue of
+ * shorter utterances rather than one big one.
+ */
+function chunkForSpeech(text: string): string[] {
+  return text.match(/[^.!?]+[.!?]*\s*/g)?.map((s) => s.trim()).filter(Boolean) ?? [text];
+}
+
+// The utterance currently being spoken, held at module scope so Chromium can't
+// garbage-collect it (and drop onend/onerror) before playback finishes.
+// `activeOnEnd` is the in-flight request's settle function; it doubles as the
+// identity check that lets a newer speak()/stopSpeaking() supersede the old
+// queue, so a request's onEnd fires exactly once.
+let activeUtterance: SpeechSynthesisUtterance | null = null;
+let activeOnEnd: (() => void) | null = null;
+
+/** Stop any in-progress speech and clear the queue. */
 export function stopSpeaking(): void {
-  if (isSpeechSupported()) window.speechSynthesis.cancel();
+  if (!isSpeechSupported()) return;
+  const settle = activeOnEnd;
+  activeOnEnd = null;
+  activeUtterance = null;
+  window.speechSynthesis.cancel();
+  settle?.();
 }
 
 /**
  * Speak `text` (Markdown is reduced first). Cancels anything already speaking so
- * a new request interrupts the old. `onEnd` fires when speech finishes or is
- * cancelled, so callers can clear their "speaking" UI state.
+ * a new request interrupts the old. `onEnd` fires once when the whole text
+ * finishes or when stopSpeaking cancels it, so callers can clear their
+ * "speaking" UI state.
  */
 export function speak(text: string, onEnd?: () => void): void {
   if (!isSpeechSupported()) {
@@ -53,10 +76,36 @@ export function speak(text: string, onEnd?: () => void): void {
     onEnd?.();
     return;
   }
-  window.speechSynthesis.cancel();
-  const utterance = new SpeechSynthesisUtterance(clean);
-  utterance.rate = 1;
-  utterance.onend = () => onEnd?.();
-  utterance.onerror = () => onEnd?.();
-  window.speechSynthesis.speak(utterance);
+  // Interrupt and settle any previous request, then claim the queue.
+  stopSpeaking();
+  const chunks = chunkForSpeech(clean);
+  let index = 0;
+  let settled = false;
+
+  const settle = () => {
+    if (settled) return;
+    settled = true;
+    if (activeOnEnd === settle) {
+      activeOnEnd = null;
+      activeUtterance = null;
+    }
+    onEnd?.();
+  };
+  activeOnEnd = settle;
+
+  const speakNext = () => {
+    if (activeOnEnd !== settle) return; // superseded or stopped
+    if (index >= chunks.length) {
+      settle();
+      return;
+    }
+    const utterance = new SpeechSynthesisUtterance(chunks[index++]);
+    utterance.rate = 1;
+    utterance.onend = speakNext;
+    utterance.onerror = settle;
+    activeUtterance = utterance;
+    window.speechSynthesis.speak(utterance);
+  };
+
+  speakNext();
 }
