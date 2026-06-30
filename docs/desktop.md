@@ -141,8 +141,9 @@ target OS. The branded icons are already committed (see [Icons](#icons) below).
 (bundled into the installer so the packaged app's `next start` needs no Node.js
 toolchain on the user's machine), then `npm run fetch:model`
 (`scripts/fetch-local-model.mjs`), which downloads the `llama-server` binary
-(llama.cpp, MIT) and a small `.gguf` model (SmolLM2-1.7B-Instruct Q4_K_M, ~1 GB,
-Apache-2.0) into `resources/llm/`, **plus** the Piper TTS binary (rhasspy/piper,
+(llama.cpp, MIT) and a `.gguf` model (Mistral-7B-Instruct-v0.3 Q4_K_M, ~4.2 GB,
+Apache-2.0) into `resources/llm/` - a CPU-only build that trades speed for
+quality (~a minute per answer, ~6-8 GB RAM) - **plus** the Piper TTS binary (rhasspy/piper,
 MIT) and a neural voice (`en_US-lessac-medium`, ~63 MB, MIT/CC0) into
 `resources/tts/` for on-device read-aloud, and finally `electron-builder` copies
 both folders into the installer via its `extraResources` entries. The bundled

@@ -13,7 +13,7 @@
 ; product as the app shell.
 ;
 ; NOTE: we deliberately do NOT `ShowInstDetails show`. electron-builder does not
-; print to the details LIST during its bulk extraction of the app + the ~1 GB
+; print to the details LIST during its bulk extraction of the app + the ~4.2 GB
 ; on-device model, so revealing the list just renders an empty pane for the whole
 ; install. Instead we keep electron-builder's default progress bar and write the
 ; contextual messages to the status LINE below, where they are actually visible.

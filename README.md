@@ -181,10 +181,12 @@ ways to provide one:
   API key, no separate download, nothing to configure. Build it with
   `npm run dist`, which runs `next build` (so the production `.next` is bundled)
   and `npm run fetch:model` to download the binary (llama.cpp, MIT) and weights
-  (SmolLM2-1.7B-Instruct Q4_K_M, ~1 GB, Apache-2.0) into `resources/llm/`, then
-  packages them into the installer. The model assets are gitignored, fetched on
-  the build machine; `npm run dist:nomodel` skips them (but still runs
+  (Mistral-7B-Instruct-v0.3 Q4_K_M, ~4.2 GB, Apache-2.0) into `resources/llm/`,
+  then packages them into the installer. The model assets are gitignored, fetched
+  on the build machine; `npm run dist:nomodel` skips them (but still runs
   `next build`) for a lean build that relies on a bring-your-own server instead.
+  It is a CPU-only build, so this larger model trades speed for quality: expect
+  roughly a minute per answer on a typical laptop and ~6-8 GB of free RAM.
 - **Bring your own:** run [Ollama](https://ollama.com) or
   [LM Studio](https://lmstudio.ai) yourself and point Lighthouse at it with
   `LIGHTHOUSE_LOCAL_LLM_URL` (default `http://127.0.0.1:8080/v1/chat/completions`;
@@ -194,6 +196,21 @@ ways to provide one:
 
 If the local server isn't reachable, Lighthouse falls back to streaming the most
 relevant passages so you still get a grounded, cited answer.
+
+### Bundled third-party components
+
+Lighthouse redistributes these in the installer under their own licenses:
+
+- **llama.cpp** `llama-server` — MIT © the ggml.ai / llama.cpp authors.
+- **Mistral-7B-Instruct-v0.3** weights — Apache-2.0 © Mistral AI. Used and
+  redistributed under the Apache License 2.0; no usage restrictions.
+- **Piper** TTS engine — MIT © Michael Hansen / the Piper authors — and the
+  `en_US-lessac-medium` voice (see its model card on the
+  [rhasspy/piper-voices](https://huggingface.co/rhasspy/piper-voices) repo for
+  the voice's own license and dataset attribution).
+
+All are permissive, commercial-use licenses, so they impose no restriction on
+selling Lighthouse; their notices are retained here to satisfy attribution.
 
 ## Status
 

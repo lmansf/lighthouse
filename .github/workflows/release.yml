@@ -8,9 +8,10 @@ name: Release
 # Trigger: push a tag like `v0.1.0` (must match package.json "version"), or run
 # it manually from the Actions tab ("Run workflow").
 #
-# NOTE: GitHub release assets are capped at 2 GB per file. With the bundled
-# ~1 GB model the Windows installer should land under that; if a build ever
-# exceeds it, drop to a smaller model or switch to first-run model download.
+# NOTE: GitHub release assets are capped at 2 GB per file. The bundled ~4.2 GB
+# model pushes the installer well past that, so the larger asset must be handled
+# (e.g. drop to a smaller model or switch to first-run model download); a plain
+# upload of an over-2 GB installer will be rejected.
 
 on:
   push:

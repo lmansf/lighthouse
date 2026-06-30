@@ -15,7 +15,7 @@
  *   1. `llama-server` (+ its shared libraries) — llama.cpp, MIT-licensed. The
  *      right per-OS asset is resolved from the ggml-org/llama.cpp GitHub release
  *      (a CPU build, for broad compatibility — no GPU/driver assumptions).
- *   2. A small instruct model in GGUF — SmolLM2-1.7B-Instruct Q4_K_M (~1 GB),
+ *   2. An instruct model in GGUF — Mistral-7B-Instruct-v0.3 Q4_K_M (~4.2 GB),
  *      Apache-2.0 (no-strings, commercial-safe), from Hugging Face.
  *   3. Piper (rhasspy/piper, MIT) + a neural voice (en_US-lessac-medium, ~63 MB,
  *      MIT/CC0) into `resources/tts/`, powering on-device read-aloud TTS.
@@ -40,11 +40,12 @@ const dest = join(root, "resources", "llm");
 const force = process.argv.includes("--force");
 const platform = process.platform; // win32 | darwin | linux
 
-// Default model: SmolLM2-1.7B-Instruct (Hugging Face), Apache-2.0 with no usage
-// restrictions - a small, fully-permissive western model that ships ~1 GB and
-// runs on any machine. Swap with LOCAL_MODEL_URL to bundle a different GGUF.
+// Default model: Mistral-7B-Instruct-v0.3 (Mistral AI, France), Apache-2.0 -
+// a fully-permissive, commercially-sellable western model. Q4_K_M GGUF, ~4.2 GB.
+// Bigger and markedly more capable than the old 1.7B; runs CPU-only (slower, and
+// wants ~6-8 GB free RAM). Swap with LOCAL_MODEL_URL to bundle a different GGUF.
 const DEFAULT_MODEL_URL =
-  "https://huggingface.co/HuggingFaceTB/SmolLM2-1.7B-Instruct-GGUF/resolve/main/smollm2-1.7b-instruct-q4_k_m.gguf";
+  "https://huggingface.co/bartowski/Mistral-7B-Instruct-v0.3-GGUF/resolve/main/Mistral-7B-Instruct-v0.3-Q4_K_M.gguf";
 const modelUrl = process.env.LOCAL_MODEL_URL?.trim() || DEFAULT_MODEL_URL;
 const modelFile = process.env.LOCAL_MODEL_FILE?.trim() || basename(new URL(modelUrl).pathname);
 
@@ -325,6 +326,16 @@ async function main() {
     console.log(`Downloading ${modelFile}`);
     await download(modelUrl, modelPath, "model", process.env.LOCAL_MODEL_SHA256?.trim());
     console.log(`✓ ${modelFile}`);
+  }
+
+  // Only the intended model should ship: the desktop app loads the first .gguf it
+  // finds in resources/llm, and that folder persists between builds, so a model
+  // swap (e.g. the old SmolLM2 weights) would otherwise linger and get picked.
+  for (const f of readdirSync(dest)) {
+    if (f.toLowerCase().endsWith(".gguf") && f !== modelFile) {
+      rmSync(join(dest, f), { force: true });
+      console.log(`  removed stale model ${f}`);
+    }
   }
 
   // 3. Local neural TTS (Piper + voice) for on-device read-aloud.
