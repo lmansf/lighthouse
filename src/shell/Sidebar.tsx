@@ -43,7 +43,7 @@ const useStyles = makeStyles({
     fontWeight: tokens.fontWeightSemibold,
     minWidth: 0,
   },
-  // The beacon: a red lamp throwing a warm amber glow — the lighthouse light.
+  // The beacon: a blue lamp throwing a warm gold glow - the lighthouse light.
   beacon: {
     width: "10px",
     height: "10px",
