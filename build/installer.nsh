@@ -22,7 +22,9 @@
   ; electron-builder runs this AFTER the app + on-device model are unpacked, so
   ; these frame the finish. SetDetailsPrint textonly updates the status line above
   ; the progress bar (visible even with the details list hidden); the short pauses
-  ; let each line be read instead of flashing past in a single frame.
+  ; let each line be read instead of flashing past in a single frame. A silent
+  ; install (/S) shows no UI, so skip the narration and its pacing Sleeps entirely.
+  IfSilent LighthouseInstallSilent
   SetDetailsPrint textonly
   DetailPrint "Finishing setup - bundling the private on-device AI model..."
   Sleep 1000
@@ -33,6 +35,7 @@
   DetailPrint "Ready. Open Lighthouse to build your first vault."
   Sleep 600
   SetDetailsPrint lastused
+  LighthouseInstallSilent:
 !macroend
 
 ; On uninstall, offer to also delete the user's Lighthouse data. The default is
