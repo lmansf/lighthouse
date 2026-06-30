@@ -38,6 +38,7 @@ import type { DragEvent } from "react";
 import type { ChatMessage, ChatTurn, RagReference } from "@/contracts";
 import { chatService } from "@/contracts";
 import { useRagStore } from "@/stores/useRagStore";
+import { useChatStore } from "@/stores/useChatStore";
 import { ACCENTS } from "@/shell/theme";
 import { FILE_DRAG_MIME, parseDraggedFiles, type DraggedFile } from "@/shell/dnd";
 
@@ -299,7 +300,12 @@ export function ChatPanel() {
   );
 
   const [question, setQuestion] = useState("");
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  // The transcript lives in a session store so it survives leaving/returning to
+  // the chat panel and a window reload (see useChatStore).
+  const messages = useChatStore((s) => s.messages);
+  const setMessages = useChatStore((s) => s.setMessages);
+  const persistMessages = useChatStore((s) => s.persist);
+  const clearMessages = useChatStore((s) => s.clear);
   const [streaming, setStreaming] = useState(false);
   // Files explicitly attached to the conversation (dragged from the explorer or
   // dropped from the OS). When present, questions are scoped to just these.
@@ -307,7 +313,8 @@ export function ChatPanel() {
   const [dropping, setDropping] = useState(false);
   const dropDepth = useRef(0);
   const bodyRef = useRef<HTMLDivElement>(null);
-  const idSeq = useRef(0);
+  // Seed the id counter past any restored messages so new ids never collide.
+  const idSeq = useRef(messages.length);
 
   function addAttachments(files: DraggedFile[]) {
     setAttachments((cur) => {
@@ -411,12 +418,14 @@ export function ChatPanel() {
       );
     } finally {
       setStreaming(false);
+      // Save the settled turn for this session (cheap: once per turn, not per token).
+      persistMessages();
     }
   }
 
   function newChat() {
     if (streaming) return;
-    setMessages([]);
+    clearMessages();
     setQuestion("");
     setAttachments([]);
   }
