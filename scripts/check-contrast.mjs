@@ -1,4 +1,4 @@
-// WCAG contrast check for the Lighthouse sand + lighthouse-accent palette.
+// WCAG contrast check for the Lighthouse steel + Forerunner-accent palette.
 // Run: `node scripts/check-contrast.mjs`. Keep the values below in sync with
 // src/shell/theme.ts; this is the guard that the theme stays accessible.
 const hex = (h) => {
@@ -19,11 +19,11 @@ const ratio = (a, b) => {
 };
 
 const P = {
-  bg1: "#FBF5E9", bg2: "#F4E9D2", bg3: "#EADFC5",
-  fg1: "#2A2018", fg2: "#6E5C44", fg3: "#87745A",
-  red: "#C02A20", redText: "#9A2017",
-  sky: "#2C6BA6", skyFill: "#CFE2F2",
-  beam: "#E0A019", beamFill: "#FBE7AC",
+  bg1: "#EAEEF2", bg2: "#DFE5EB", bg3: "#D2DAE2",
+  fg1: "#1A2531", fg2: "#45566A", fg3: "#5E6E80",
+  brand: "#1A7AC0", link: "#15639C", brandText: "#114F80",
+  sky: "#15639C", skyFill: "#D4E6F4",
+  beam: "#E2B453", beamFill: "#F3E3BB", brass: "#C28A2C",
   white: "#FFFFFF",
 };
 
@@ -32,13 +32,13 @@ const checks = [
   ["fg1 on bg2 (sidebar text)", P.fg1, P.bg2, 4.5],
   ["fg1 on bg3 (inset text)", P.fg1, P.bg3, 4.5],
   ["fg2 on bg1 (muted)", P.fg2, P.bg1, 4.5],
-  ["fg2 on bg2 (muted on sand)", P.fg2, P.bg2, 4.5],
-  ["white on red (primary btn)", P.white, P.red, 4.5],
+  ["fg2 on bg2 (muted on steel)", P.fg2, P.bg2, 4.5],
+  ["white on brand blue (primary btn)", P.white, P.brand, 4.5],
   ["white on sky (secondary btn)", P.white, P.sky, 4.5],
-  ["sky link on bg1", P.sky, P.bg1, 4.5],
-  ["sky link on bg2", P.sky, P.bg2, 4.5],
-  ["redText on bg1", P.redText, P.bg1, 4.5],
-  ["fg1 on beam badge", P.fg1, P.beam, 4.5],
+  ["link on bg1", P.link, P.bg1, 4.5],
+  ["link on bg2", P.link, P.bg2, 4.5],
+  ["brandText on bg1 (marks)", P.brandText, P.bg1, 4.5],
+  ["fg1 on beam glint", P.fg1, P.beam, 4.5],
   ["fg1 on beamFill badge", P.fg1, P.beamFill, 4.5],
   ["fg1 on skyFill badge", P.fg1, P.skyFill, 4.5],
 ];
