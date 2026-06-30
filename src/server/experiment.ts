@@ -14,7 +14,7 @@
 import crypto from "node:crypto";
 import path from "node:path";
 import { stateDir, readJson, writeJson, profilePath } from "./config";
-import { getContactId } from "./license";
+import { getContactId, callFn } from "./license";
 
 const identityPath = () => path.join(stateDir(), "identity.json");
 
@@ -43,6 +43,19 @@ export interface Variants {
 }
 
 export type ExperimentName = keyof Variants;
+
+/**
+ * How the persisted assignment was decided. `server` (balanced via the license
+ * function) and `override` (pilot email) are authoritative and never re-rolled;
+ * `hash` is the local fallback and may be upgraded to `server` at registration.
+ */
+type AssignmentSource = "hash" | "override" | "server";
+type StoredVariants = Partial<Variants> & { source?: AssignmentSource };
+
+const isOnboarding = (v: unknown): v is OnboardingVariant =>
+  v === "play_first" || v === "key_first";
+const isDefaultInclusion = (v: unknown): v is DefaultInclusionVariant =>
+  v === "opt_in" || v === "opt_out";
 
 /** Per-experiment salt so a user's two buckets don't correlate. */
 const SALT: Record<ExperimentName, string> = {
@@ -93,28 +106,70 @@ function resolve(): Variants {
   // pilots land in their assigned factorial cells regardless of hash.
   const email = currentEmail()?.toLowerCase();
   const override = email ? FIRST_USERS[email] : undefined;
-  const stored = readJson<Partial<Variants> | null>(experimentsPath(), null);
+  const stored = readJson<StoredVariants | null>(experimentsPath(), null);
 
   if (override) {
     if (
       stored?.onboarding !== override.onboarding ||
-      stored?.default_inclusion !== override.default_inclusion
+      stored?.default_inclusion !== override.default_inclusion ||
+      stored?.source !== "override"
     ) {
-      writeJson(experimentsPath(), override);
+      writeJson(experimentsPath(), { ...override, source: "override" });
     }
     return override;
   }
 
-  if (stored?.onboarding && stored?.default_inclusion) return stored as Variants;
+  if (stored?.onboarding && stored?.default_inclusion) {
+    return { onboarding: stored.onboarding, default_inclusion: stored.default_inclusion };
+  }
 
   // First resolve for a non-pilot user: deterministic hash, then persist. Keep
-  // any partially-stored bucket rather than reshuffling it.
+  // any partially-stored bucket rather than reshuffling it. This is the fallback
+  // until (and unless) registration upgrades it to a server-balanced assignment.
   const resolved: Variants = {
     onboarding: stored?.onboarding ?? assign("onboarding"),
     default_inclusion: stored?.default_inclusion ?? assign("default_inclusion"),
   };
-  writeJson(experimentsPath(), resolved);
+  writeJson(experimentsPath(), { ...resolved, source: stored?.source ?? "hash" });
   return resolved;
+}
+
+/**
+ * Balanced assignment, run once at registration (see license.startTrial). Asks
+ * the license function to bucket this install into the under-represented variant
+ * (round-robin over live counts), so a small pilot splits EVENLY rather than
+ * relying on the ~50/50 hash. Stable and idempotent:
+ *  - a pilot-email override always wins;
+ *  - an assignment already made by the server is kept (never re-rolled);
+ *  - otherwise it upgrades the local hash assignment to the balanced one - done
+ *    before onboarding branches on the variant, so the user never sees a flip.
+ * Best-effort: any failure (offline / unconfigured) leaves the hash in place.
+ */
+export async function assignBalancedVariants(): Promise<Variants> {
+  const email = currentEmail()?.toLowerCase();
+  const override = email ? FIRST_USERS[email] : undefined;
+  if (override) {
+    writeJson(experimentsPath(), { ...override, source: "override" });
+    return override;
+  }
+
+  const stored = readJson<StoredVariants | null>(experimentsPath(), null);
+  if (stored?.source === "server" && stored.onboarding && stored.default_inclusion) {
+    return { onboarding: stored.onboarding, default_inclusion: stored.default_inclusion };
+  }
+
+  try {
+    const r = await callFn("assign", { contactId: getContactId() });
+    const v = (r?.variants ?? {}) as Partial<Variants>;
+    if (isOnboarding(v.onboarding) && isDefaultInclusion(v.default_inclusion)) {
+      const variants: Variants = { onboarding: v.onboarding, default_inclusion: v.default_inclusion };
+      writeJson(experimentsPath(), { ...variants, source: "server" });
+      return variants;
+    }
+  } catch {
+    /* license function unreachable / not configured - keep the hash assignment */
+  }
+  return resolve();
 }
 
 /** The user's variant for one experiment (resolved + persisted on first call). */

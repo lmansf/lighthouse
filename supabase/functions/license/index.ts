@@ -22,6 +22,9 @@
 //                their registration row (exp_onboarding / exp_default_inclusion).
 //   events     → batch-insert UI click events (best-effort usage logging) into
 //                the click_events table; published on launch and then purged.
+//   assign     → balanced A/B assignment: bucket a contact into the
+//                least-used variant per experiment (exact alternation at low N),
+//                recording it in experiment_assignments. Stable + idempotent.
 //   All form rows carry a stable contact_id so paid vs unpaid can be compared.
 //   issuePaid  → (admin-only; needs x-admin-token == ADMIN_TOKEN) mint/activate
 //                a PAID license for a guid/email with a paid_through date. This
@@ -44,6 +47,13 @@ const EVENTS_TABLE = Deno.env.get("EVENTS_TABLE") ?? "events";
 const CLICK_EVENTS_TABLE = Deno.env.get("CLICK_EVENTS_TABLE") ?? "click_events";
 const EVENT_TYPES = ["folder", "file", "toggle", "button", "link", "nav", "other"];
 const MAX_EVENTS_PER_BATCH = 5000; // matches the desktop ring-buffer cap
+const ASSIGN_TABLE = Deno.env.get("EXPERIMENT_ASSIGNMENTS_TABLE") ?? "experiment_assignments";
+// The variants of each experiment, in alternation order: with even counts the
+// FIRST listed wins, so installs land A, B, A, B, ... for an exact small-N split.
+const EXP_VARIANTS: Record<string, string[]> = {
+  onboarding: ["play_first", "key_first"],
+  default_inclusion: ["opt_in", "opt_out"],
+};
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -270,6 +280,74 @@ async function event(body: Record<string, unknown>): Promise<Response> {
 }
 
 /**
+ * Balanced A/B assignment. For each requested experiment, returns this contact's
+ * variant - reusing an existing assignment (stable across launches), otherwise
+ * bucketing them into the variant with the FEWEST assignments so far (ties go to
+ * the first listed), then recording it. This makes a small pilot alternate
+ * A, B, A, B... instead of relying on a per-install hash that can skew at low N.
+ *
+ * Idempotent per (contact_id, experiment) via the table's unique constraint: a
+ * lost insert race just re-reads the winning row.
+ */
+async function assign(body: Record<string, unknown>): Promise<Response> {
+  const contactId = body.contactId ? String(body.contactId) : "";
+  if (!contactId) return json({ ok: false, reason: "rejected", detail: "contactId required" }, 400);
+  const requested =
+    Array.isArray(body.experiments) && body.experiments.length > 0
+      ? (body.experiments as unknown[]).map(String).filter((e) => e in EXP_VARIANTS)
+      : Object.keys(EXP_VARIANTS);
+
+  const db = admin();
+  const variants: Record<string, string> = {};
+  for (const exp of requested) {
+    const choices = EXP_VARIANTS[exp];
+    // Stable: an existing assignment for this contact wins.
+    const existing = await db
+      .from(ASSIGN_TABLE)
+      .select("variant")
+      .eq("contact_id", contactId)
+      .eq("experiment", exp)
+      .limit(1);
+    const prior = existing.data?.[0]?.variant as string | undefined;
+    if (prior) {
+      variants[exp] = prior;
+      continue;
+    }
+    // Balance: pick the least-represented variant (ties -> first listed).
+    const counts: Record<string, number> = {};
+    for (const v of choices) counts[v] = 0;
+    const all = await db.from(ASSIGN_TABLE).select("variant").eq("experiment", exp);
+    for (const row of all.data ?? []) {
+      const v = String((row as { variant: string }).variant);
+      if (v in counts) counts[v] += 1;
+    }
+    let chosen = choices[0];
+    let min = Infinity;
+    for (const v of choices) {
+      if (counts[v] < min) {
+        min = counts[v];
+        chosen = v;
+      }
+    }
+    const { error } = await db
+      .from(ASSIGN_TABLE)
+      .insert({ contact_id: contactId, experiment: exp, variant: chosen });
+    if (error) {
+      // Likely a concurrent assign for the same contact: re-read the winner.
+      const again = await db
+        .from(ASSIGN_TABLE)
+        .select("variant")
+        .eq("contact_id", contactId)
+        .eq("experiment", exp)
+        .limit(1);
+      chosen = (again.data?.[0]?.variant as string | undefined) ?? chosen;
+    }
+    variants[exp] = chosen;
+  }
+  return json({ ok: true, variants });
+}
+
+/**
  * Batch-insert UI click events (best-effort usage logging). The desktop buffers
  * events locally and publishes them on launch, keyed by the same contact_id /
  * guid / email as the other tables. Labels are names only (no field values or
@@ -437,6 +515,8 @@ Deno.serve(async (req: Request) => {
       return await event(body);
     case "events":
       return await events(body);
+    case "assign":
+      return await assign(body);
     case "issuePaid": {
       const admin = Deno.env.get("ADMIN_TOKEN");
       if (!admin || req.headers.get("x-admin-token") !== admin)
