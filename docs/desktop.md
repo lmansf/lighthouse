@@ -137,7 +137,7 @@ target OS. The branded icons are already committed (see [Icons](#icons) below).
 (bundled into the installer so the packaged app's `next start` needs no Node.js
 toolchain on the user's machine), then `npm run fetch:model`
 (`scripts/fetch-local-model.mjs`), which downloads the `llama-server` binary
-(llama.cpp, MIT) and a small `.gguf` model (Qwen2.5-1.5B-Instruct Q4_K_M, ~1 GB,
+(llama.cpp, MIT) and a small `.gguf` model (SmolLM2-1.7B-Instruct Q4_K_M, ~1 GB,
 Apache-2.0) into `resources/llm/`, and finally `electron-builder` copies that
 folder into the installer via its `extraResources` entry. The model assets are
 gitignored and fetched on the build machine. Use `npm run dist:nomodel` to skip
@@ -165,11 +165,21 @@ pull these heavy native deps).
 ### What the end user gets
 
 The Windows installer (NSIS) installs Lighthouse with a Start-Menu and desktop
-shortcut and lets the user pick the install directory. Launching it shows the
-loading splash, starts the bundled server, and swaps in the app once it answers
-— and, unless the user opts out at the one-time
-[launch-at-login](#launch-at-login) prompt, Lighthouse adds itself to login items
-so it stays running in the tray.
+shortcut and lets the user pick the install directory. It is **branded to match
+the app**: the welcome and finish pages carry a cool-steel / sea-sky-blue / brass
+sidebar drawn from the same Forerunner palette as the app shell
+(`src/shell/theme.ts`), and the install step reveals a details log that narrates
+what is happening in the app's voice (setting up Lighthouse, bundling the
+on-device AI model, registering shortcuts). Launching it shows the loading
+splash, starts the bundled server, and swaps in the app once it answers — and,
+unless the user opts out at the one-time [launch-at-login](#launch-at-login)
+prompt, Lighthouse adds itself to login items so it stays running in the tray.
+
+The installer branding lives in `build/`: `installer.nsh` (the electron-builder
+NSIS `include` hook holding the `customInstall` narration and the `customUnInstall`
+data prompt below) and the `installerSidebar.bmp` / `uninstallerSidebar.bmp`
+images, regenerated from the theme palette with `npm run installer:art`
+(`scripts/gen-installer-art.mjs`).
 
 Uninstalling removes the app and asks once whether to **also delete your
 Lighthouse data** — the app settings/logs (`%APPDATA%\Lighthouse`) and the

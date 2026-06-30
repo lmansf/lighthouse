@@ -5,6 +5,7 @@ import { makeStyles, tokens } from "@fluentui/react-components";
 import { useRagStore } from "@/stores/useRagStore";
 import { Sidebar } from "./Sidebar";
 import { StartupPrompt } from "@/features/startup/StartupPrompt";
+import { useUsageCapture } from "@/features/usage/useUsageCapture";
 
 const useStyles = makeStyles({
   root: {
@@ -40,6 +41,10 @@ export function AppShell({ sidebar, main }: AppShellProps) {
   const styles = useStyles();
   const [collapsed, setCollapsed] = useState(false);
   const load = useRagStore((s) => s.load);
+
+  // Capture coarse UI interactions for best-effort usage logging (consent-gated
+  // inside the hook). Mounted here so it covers the whole post-onboarding app.
+  useUsageCapture();
 
   useEffect(() => {
     // A transient backend/IPC failure must not crash the poll loop or surface

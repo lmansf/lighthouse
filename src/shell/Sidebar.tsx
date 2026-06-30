@@ -11,10 +11,12 @@ import {
 } from "@fluentui/react-components";
 import { PanelLeftContractRegular, PanelLeftExpandRegular } from "@fluentui/react-icons";
 import { LAYOUT, ACCENTS } from "./theme";
+import { SidebarWater } from "./SidebarWater";
 import { SettingsMenu } from "@/features/license/LicenseGate";
 
 const useStyles = makeStyles({
   sidebar: {
+    position: "relative", // anchors the water backdrop behind the content
     display: "flex",
     flexDirection: "column",
     height: "100%",
@@ -26,6 +28,8 @@ const useStyles = makeStyles({
   },
   collapsed: { width: `${LAYOUT.sidebarCollapsedWidth}px` },
   header: {
+    position: "relative",
+    zIndex: 1,
     display: "flex",
     alignItems: "center",
     justifyContent: "space-between",
@@ -43,7 +47,7 @@ const useStyles = makeStyles({
     fontWeight: tokens.fontWeightSemibold,
     minWidth: 0,
   },
-  // The beacon: a red lamp throwing a warm amber glow — the lighthouse light.
+  // The beacon: a blue lamp throwing a warm gold glow - the lighthouse light.
   beacon: {
     width: "10px",
     height: "10px",
@@ -56,6 +60,8 @@ const useStyles = makeStyles({
   // cramped against the left border / right scrollbar. Aligns with the header
   // and footer's horizontal padding.
   body: {
+    position: "relative",
+    zIndex: 1,
     flex: 1,
     minHeight: 0,
     overflowY: "auto",
@@ -63,6 +69,8 @@ const useStyles = makeStyles({
   },
   bodyHidden: { display: "none" },
   footer: {
+    position: "relative",
+    zIndex: 1,
     display: "flex",
     alignItems: "center",
     gap: tokens.spacingHorizontalS,
@@ -92,6 +100,7 @@ export function Sidebar({ collapsed, onToggleCollapsed, children }: SidebarProps
 
   return (
     <div className={mergeClasses(styles.sidebar, collapsed && styles.collapsed)}>
+      {!collapsed && <SidebarWater />}
       <div className={mergeClasses(styles.header, collapsed && styles.headerCollapsed)}>
         {collapsed ? (
           <Tooltip content="Expand files" relationship="label">

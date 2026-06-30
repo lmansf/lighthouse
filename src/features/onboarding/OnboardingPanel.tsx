@@ -71,6 +71,8 @@ export function OnboardingPanel() {
   const [city, setCity] = useState("");
   const [stateField, setStateField] = useState("");
   const [doNotContact, setDoNotContact] = useState(false);
+  // Usage logging is opt-OUT: checked (opted in) by default. Cleared = opt out.
+  const [shareUsage, setShareUsage] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const emailPrefilled = useRef(false);
   const startedLogged = useRef(false);
@@ -109,6 +111,9 @@ export function OnboardingPanel() {
           doNotContact,
           city,
           state: stateField,
+          // Honored server-side AFTER the trial is minted (which resets consent
+          // to the opted-in default), so the user's choice here wins.
+          usageLoggingOptOut: !shareUsage,
         }),
       });
       const result = await res.json().catch(() => null);
@@ -177,6 +182,11 @@ export function OnboardingPanel() {
           onChange={(_, d) => setDoNotContact(Boolean(d.checked))}
           label="Do not contact me"
         />
+        <Checkbox
+          checked={shareUsage}
+          onChange={(_, d) => setShareUsage(Boolean(d.checked))}
+          label="Help improve Lighthouse by sharing anonymous usage data"
+        />
         <div className={styles.row}>
           <Button
             appearance="primary"
@@ -191,8 +201,17 @@ export function OnboardingPanel() {
             onClick={() =>
               void (async () => {
                 // Skipping still starts a trial (no contact info) so the user
-                // isn't dropped straight onto the "trial ended" screen.
+                // isn't dropped straight onto the "trial ended" screen. The
+                // trial reset opts usage logging back in, so only persist the
+                // user's choice when they actually opted out.
                 await startTrial();
+                if (!shareUsage) {
+                  await fetch("/api/usage", {
+                    method: "POST",
+                    headers: { "content-type": "application/json" },
+                    body: JSON.stringify({ op: "consent", optOut: true }),
+                  }).catch(() => {});
+                }
                 await finishRegistration();
                 if (onboarding.onboardingVariant === "play_first") logEvent("sample_vault_loaded");
               })()

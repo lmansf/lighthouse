@@ -20,6 +20,8 @@
 //                active experiment, stamped with experiment + variant). `ping`
 //                and `feedback` also persist the user's assigned variants onto
 //                their registration row (exp_onboarding / exp_default_inclusion).
+//   events     → batch-insert UI click events (best-effort usage logging) into
+//                the click_events table; published on launch and then purged.
 //   All form rows carry a stable contact_id so paid vs unpaid can be compared.
 //   issuePaid  → (admin-only; needs x-admin-token == ADMIN_TOKEN) mint/activate
 //                a PAID license for a guid/email with a paid_through date. This
@@ -39,6 +41,9 @@ const USERLOGS_TABLE = Deno.env.get("USERLOGS_TABLE") ?? "userlogs";
 const BUGS_TABLE = Deno.env.get("BUGS_TABLE") ?? "bug_reports";
 const NOTIFY_TABLE = Deno.env.get("NOTIFY_TABLE") ?? "purchase_interest";
 const EVENTS_TABLE = Deno.env.get("EVENTS_TABLE") ?? "events";
+const CLICK_EVENTS_TABLE = Deno.env.get("CLICK_EVENTS_TABLE") ?? "click_events";
+const EVENT_TYPES = ["folder", "file", "toggle", "button", "link", "nav", "other"];
+const MAX_EVENTS_PER_BATCH = 5000; // matches the desktop ring-buffer cap
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -264,6 +269,41 @@ async function event(body: Record<string, unknown>): Promise<Response> {
   return json({ ok: !error });
 }
 
+/**
+ * Batch-insert UI click events (best-effort usage logging). The desktop buffers
+ * events locally and publishes them on launch, keyed by the same contact_id /
+ * guid / email as the other tables. Labels are names only (no field values or
+ * file contents); we clamp them again here defensively.
+ */
+async function events(body: Record<string, unknown>): Promise<Response> {
+  const list = Array.isArray(body.events) ? body.events : [];
+  if (!list.length) return json({ ok: true, inserted: 0 });
+  const contactId = body.contactId ? String(body.contactId) : null;
+  const guid = body.guid ? String(body.guid) : null;
+  const email = body.email ? String(body.email) : null;
+  const appVersion = body.version ? String(body.version) : null;
+
+  const rows = list.slice(0, MAX_EVENTS_PER_BATCH).map((raw) => {
+    const e = (raw ?? {}) as Record<string, unknown>;
+    const type = EVENT_TYPES.includes(String(e.type)) ? String(e.type) : "other";
+    const label = e.label ? String(e.label).slice(0, 200) : null;
+    const ts = e.at ? Date.parse(String(e.at)) : NaN;
+    return {
+      contact_id: contactId,
+      guid,
+      email,
+      event_type: type,
+      label,
+      occurred_at: Number.isNaN(ts) ? null : new Date(ts).toISOString(),
+      app_version: appVersion,
+    };
+  });
+
+  const { error } = await admin().from(CLICK_EVENTS_TABLE).insert(rows);
+  if (error) return json({ ok: false, reason: "rejected", detail: error.message });
+  return json({ ok: true, inserted: rows.length });
+}
+
 interface Decoded {
   guid: string;
   type?: "trial" | "paid";
@@ -395,6 +435,8 @@ Deno.serve(async (req: Request) => {
       return await ping(body);
     case "event":
       return await event(body);
+    case "events":
+      return await events(body);
     case "issuePaid": {
       const admin = Deno.env.get("ADMIN_TOKEN");
       if (!admin || req.headers.get("x-admin-token") !== admin)

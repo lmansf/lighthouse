@@ -1,6 +1,6 @@
 {
   "name": "rag-vault",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "private": true,
   "description": "Lighthouse — a local-first RAG vault for your documents.",
   "author": "Lighthouse",
@@ -12,6 +12,7 @@
     "lint": "next lint",
     "test": "tsc --noEmit",
     "icons": "npm install --no-save sharp@^0.33.5 png-to-ico@^2.1.8 && node scripts/gen-icons.mjs",
+    "installer:art": "npm install --no-save sharp@^0.33.5 && node scripts/gen-installer-art.mjs",
     "electron": "electron .",
     "fetch:model": "node scripts/fetch-local-model.mjs",
     "dist": "next build && node scripts/fetch-local-model.mjs && electron-builder",
@@ -84,8 +85,10 @@
       "installerIcon": "build/icon.ico",
       "uninstallerIcon": "build/icon.ico",
       "installerHeaderIcon": "build/icon.ico",
+      "installerSidebar": "build/installerSidebar.bmp",
+      "uninstallerSidebar": "build/uninstallerSidebar.bmp",
       "uninstallDisplayName": "Lighthouse",
-      "include": "build/uninstaller.nsh"
+      "include": "build/installer.nsh"
     }
   },
   "dependencies": {

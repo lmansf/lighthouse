@@ -35,6 +35,12 @@ import { stateDir, readJson, writeJson } from "./config";
 import { getState as profileState } from "./profile";
 import { getAllVariants } from "./experiment";
 import type { Registration } from "./registration";
+import {
+  isUsageOptedOut,
+  readUsageBuffer,
+  purgeUsageBuffer,
+  resetUsageConsent,
+} from "./usage";
 
 const TRIAL_DAYS = 14; // sign-in days a trial lasts
 const GRACE_DAYS = 14; // paid: grace window after paid_through before locking
@@ -189,6 +195,10 @@ export function accountEmail(): string | undefined {
 export async function startTrial(contact?: Registration): Promise<{ guid: string }> {
   const useContact = contact ?? loadIdentity() ?? null;
   if (useContact) writeJson(identityPath(), useContact);
+
+  // A fresh trial resets usage-logging consent to its default (opted in). The
+  // registration form may then re-apply the user's explicit choice afterwards.
+  resetUsageConsent();
 
   if (licenseApi()) {
     const r = await callFn("start", { contact: useContact ? contactRow(useContact) : undefined });
@@ -451,6 +461,35 @@ export async function recordEvent(name: string, props: Record<string, unknown> =
     });
   } catch {
     /* telemetry must never break the app */
+  }
+}
+
+/**
+ * Publish buffered UI click events to Supabase, then purge what was sent. Called
+ * during startup right after `pingLaunch`. Best-effort and non-blocking: opted
+ * out, offline, or not hosted ⇒ nothing happens and the buffer is kept for next
+ * launch. The buffer is ring-capped (see usage.ts), so a single batch is bounded
+ * (~5000 events / ~1MB). Keyed by contactId/guid/email/version like the ping.
+ */
+export async function publishUsageEvents(): Promise<void> {
+  if (!licenseApi() || isUsageOptedOut()) return;
+  const { events, lineCount } = readUsageBuffer();
+  if (!events.length) return;
+  const lic = readJson<LocalLicense | null>(licensePath(), null);
+  try {
+    const r = await callFn("events", {
+      contactId: getContactId(),
+      guid: lic?.guid,
+      email: accountEmail(),
+      version: process.env.npm_package_version,
+      events,
+    });
+    if (r.ok === false) return; // keep the buffer; retry next launch
+    // Purge exactly the lines we read (preserving any appended since), so a
+    // dropped/sanitized line is cleared too rather than retried forever.
+    purgeUsageBuffer(lineCount);
+  } catch {
+    /* offline / unreachable — keep the buffer for the next launch */
   }
 }
 
