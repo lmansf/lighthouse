@@ -89,6 +89,13 @@ export function synthesize(text: string): Promise<Buffer> {
         reject(e);
       }
     });
+    // If Piper dies early (e.g. an unloadable .onnx that passed existsSync),
+    // writing to its closed stdin emits EPIPE here; without this handler it would
+    // surface as an uncaughtException and crash the server. 'close' still settles.
+    proc.stdin.on("error", (e) => {
+      rmSync(outFile, { force: true });
+      reject(e);
+    });
     proc.stdin.write(text);
     proc.stdin.end();
   });

@@ -140,7 +140,7 @@ export function speak(text: string, onEnd?: () => void): void {
       const audio = new Audio(url);
       activeAudio = audio;
       audio.onended = settle;
-      audio.onerror = settle;
+      audio.onerror = () => speakWithWebSpeech(clean, myToken, settle);
       audio.play().catch(() => speakWithWebSpeech(clean, myToken, settle));
     })
     .catch((e) => {
