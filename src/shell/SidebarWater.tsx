@@ -39,26 +39,6 @@ const useStyles = makeStyles({
     animationIterationCount: "infinite",
     "@media (prefers-reduced-motion: reduce)": { animationName: "none" },
   },
-  // A faint brass-lit sheen drifting sideways across the surface - the beacon's
-  // reflection on the water.
-  sheen: {
-    position: "absolute",
-    left: 0,
-    right: 0,
-    bottom: "18%",
-    height: "90px",
-    background:
-      "linear-gradient(90deg, transparent 0%, rgba(226,180,83,0.10) 45%, rgba(255,255,255,0.10) 50%, rgba(226,180,83,0.10) 55%, transparent 100%)",
-    animationName: {
-      from: { transform: "translateX(-30%)" },
-      to: { transform: "translateX(30%)" },
-    },
-    animationDuration: "13s",
-    animationTimingFunction: "ease-in-out",
-    animationIterationCount: "infinite",
-    animationDirection: "alternate",
-    "@media (prefers-reduced-motion: reduce)": { animationName: "none" },
-  },
   // Foamy white rings expanding and fading on the surface.
   ring: {
     position: "absolute",
@@ -90,7 +70,6 @@ export function SidebarWater() {
   return (
     <div className={styles.root} aria-hidden>
       <div className={styles.water} />
-      <div className={styles.sheen} />
       <div className={`${styles.ring} ${styles.ring1}`} />
       <div className={`${styles.ring} ${styles.ring2}`} />
       <div className={`${styles.ring} ${styles.ring3}`} />

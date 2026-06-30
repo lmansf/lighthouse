@@ -47,6 +47,7 @@ import { isSpeechSupported, speak, stopSpeaking } from "@/lib/speech";
 
 const READ_ALOUD_KEY = "lighthouse.chat.readAloud";
 import { useChatStore } from "@/stores/useChatStore";
+import { ConversePlaceholder } from "@/shell/ConversePlaceholder";
 import { ACCENTS } from "@/shell/theme";
 import { FILE_DRAG_MIME, parseDraggedFiles, type DraggedFile } from "@/shell/dnd";
 
@@ -113,6 +114,10 @@ const useStyles = makeStyles({
     flexDirection: "column",
     flex: 1,
     minHeight: 0,
+    // Lift the composer clear of the fixed bug-report FAB parked in the
+    // bottom-right corner (40px tall + its bottom margin), so the "Ask" button
+    // is never overlapped at any window width.
+    paddingBottom: "56px",
   },
   header: {
     display: "flex",
@@ -651,6 +656,7 @@ export function ChatPanel() {
                 />
               </Tooltip>
             )}
+            <ConversePlaceholder />
             <Button
               appearance="subtle"
               icon={<AddRegular />}

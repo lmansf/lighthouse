@@ -99,9 +99,12 @@ contracts — no cloud database required:
   native app (web deployments report no such capability and the cards stay inert).
   Answers can be **read aloud** on-device: a **Read aloud** switch in the chat
   header (remembered across sessions) auto-speaks each finished answer, and every
-  answer has a play/stop button. Speech uses the OS's installed voices via the
-  browser's Web Speech API — nothing leaves your machine — and is hidden when the
-  runtime has no speech support.
+  answer has a play/stop button. Speech is synthesized by a **bundled local
+  neural voice** (Piper) served from `/api/tts` - realistic and entirely on your
+  machine, so the answer text never leaves it. When no local voice is bundled (a
+  plain web deploy or `npm run dev`) it falls back to the OS's installed voices
+  via the browser's Web Speech API; the controls are hidden only when the runtime
+  has no speech support at all.
 - **Profile/key** are stored locally in `vault/.rag-vault/profile.json` (gitignored).
 
 Swap back to the in-memory mocks by pointing the three exports in

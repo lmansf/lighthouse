@@ -7,19 +7,21 @@ import type { ModelProvider } from "../types";
  */
 export const MODEL_PROVIDERS: ModelProvider[] = [
   {
-    id: "anthropic",
-    label: "Anthropic Claude",
-    models: ["claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5"],
-    apiKeyUrl: "https://console.anthropic.com/settings/keys",
-  },
-  {
     // A private model that runs entirely on this machine — no key, no network,
     // nothing leaves your environment. Talks to a local OpenAI-compatible
     // inference server (llama.cpp's `llama-server`, Ollama, LM Studio, etc.).
+    // Listed first so it is the default selection on first sign-in (private by
+    // default); users can still switch to a hosted provider before they start.
     id: "local",
     label: "Local model (private)",
     models: ["lighthouse-local"],
     apiKeyUrl: "https://github.com/lmansf/lighthouse#local-model",
+  },
+  {
+    id: "anthropic",
+    label: "Anthropic Claude",
+    models: ["claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5"],
+    apiKeyUrl: "https://console.anthropic.com/settings/keys",
   },
   {
     id: "openai",

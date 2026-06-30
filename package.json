@@ -38,12 +38,20 @@
       "!**/.env.local",
       "!**/.env.*.local",
       "!supabase/**/*",
-      "!resources/llm/**/*"
+      "!resources/llm/**/*",
+      "!resources/tts/**/*"
     ],
     "extraResources": [
       {
         "from": "resources/llm",
         "to": "llm",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "resources/tts",
+        "to": "tts",
         "filter": [
           "**/*"
         ]
@@ -75,6 +83,7 @@
       "category": "Utility"
     },
     "nsis": {
+      "artifactName": "Lighthouse-Setup.${ext}",
       "oneClick": false,
       "perMachine": false,
       "allowToChangeInstallationDirectory": true,

@@ -12,7 +12,6 @@
  */
 import { useState } from "react";
 import {
-  Badge,
   Button,
   Dialog,
   DialogActions,
@@ -28,12 +27,6 @@ import {
 import { ChatSparkleRegular } from "@fluentui/react-icons";
 
 const useStyles = makeStyles({
-  button: {
-    justifyContent: "flex-start",
-    width: "100%",
-    gap: tokens.spacingHorizontalS,
-  },
-  badge: { marginLeft: "auto" },
   body: { color: tokens.colorNeutralForeground2 },
 });
 
@@ -46,15 +39,12 @@ export function ConversePlaceholder() {
       <Button
         appearance="subtle"
         icon={<ChatSparkleRegular />}
-        className={styles.button}
         data-log="converse-coming-soon"
         data-log-type="nav"
+        title="Conversational mode (coming soon)"
         onClick={() => setOpen(true)}
       >
         Converse
-        <Badge className={styles.badge} appearance="tint" color="brand" size="small">
-          Soon
-        </Badge>
       </Button>
 
       <Dialog open={open} onOpenChange={(_, d) => setOpen(d.open)}>
