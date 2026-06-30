@@ -24,8 +24,11 @@ const LOCAL_LLM_URL =
 // set LIGHTHOUSE_LOCAL_LLM_MODEL to the pulled model (e.g. "llama3.2") in that case.
 const LOCAL_LLM_MODEL = process.env.LIGHTHOUSE_LOCAL_LLM_MODEL?.trim() || "";
 // How long to wait for the local server to start responding (headers) before
-// giving up and falling back to extractive passages.
-const LOCAL_CONNECT_TIMEOUT_MS = 45_000;
+// giving up and falling back to extractive passages. The 2-minute bound covers
+// a one-time cold load + CPU prefill of the larger bundled model (Mistral-7B
+// Q4_K_M, ~4.2 GB) on the first question after launch, so the first answer
+// isn't dropped to the passage fallback while the model is still warming up.
+const LOCAL_CONNECT_TIMEOUT_MS = 120_000;
 
 export interface Ctx {
   name: string;
