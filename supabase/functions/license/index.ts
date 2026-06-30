@@ -16,6 +16,10 @@
 //   feedback   → record a feedback-form submission (post-purchase survey).
 //   bug        → record an in-app bug report.
 //   ping       → log an app launch to the userlogs table.
+//   event      → record an A/B funnel event into the events table (one row per
+//                active experiment, stamped with experiment + variant). `ping`
+//                and `feedback` also persist the user's assigned variants onto
+//                their registration row (exp_onboarding / exp_default_inclusion).
 //   events     → batch-insert UI click events (best-effort usage logging) into
 //                the click_events table; published on launch and then purged.
 //   All form rows carry a stable contact_id so paid vs unpaid can be compared.
@@ -36,6 +40,7 @@ const FEEDBACK_TABLE = Deno.env.get("FEEDBACK_TABLE") ?? "feedback";
 const USERLOGS_TABLE = Deno.env.get("USERLOGS_TABLE") ?? "userlogs";
 const BUGS_TABLE = Deno.env.get("BUGS_TABLE") ?? "bug_reports";
 const NOTIFY_TABLE = Deno.env.get("NOTIFY_TABLE") ?? "purchase_interest";
+const EVENTS_TABLE = Deno.env.get("EVENTS_TABLE") ?? "events";
 const CLICK_EVENTS_TABLE = Deno.env.get("CLICK_EVENTS_TABLE") ?? "click_events";
 const EVENT_TYPES = ["folder", "file", "toggle", "button", "link", "nav", "other"];
 const MAX_EVENTS_PER_BATCH = 5000; // matches the desktop ring-buffer cap
@@ -168,6 +173,7 @@ async function feedback(f: Feedback): Promise<Response> {
     notify_when_available: Boolean(f.notifyWhenAvailable),
   });
   if (error) return json({ ok: false, reason: "rejected", detail: error.message });
+  await persistExperiments(f.contactId, (f as { experiments?: Experiments }).experiments);
   return json({ ok: true });
 }
 
@@ -212,6 +218,54 @@ async function ping(body: Record<string, unknown>): Promise<Response> {
     event: "launch",
     app_version: body.version ? String(body.version) : null,
   });
+  // Stamp the user's current experiment variants onto their registration row so
+  // userlogs/feedback/etc. can be sliced by variant through registrations.
+  await persistExperiments(body.contactId, body.experiments);
+  return json({ ok: !error });
+}
+
+/** Map of experiment -> assigned variant, as sent by the desktop app. */
+type Experiments = Record<string, unknown> | undefined;
+
+/**
+ * Best-effort: persist the user's assigned variants onto their registration row
+ * (matched by stable contact_id). A no-op when there's no contact, no variants,
+ * or no matching row yet — telemetry must never fail because of this.
+ */
+async function persistExperiments(contactId: unknown, experiments: Experiments): Promise<void> {
+  const id = contactId ? String(contactId) : "";
+  if (!id || !experiments || typeof experiments !== "object") return;
+  const patch: Record<string, string> = {};
+  if (experiments.onboarding) patch.exp_onboarding = String(experiments.onboarding);
+  if (experiments.default_inclusion) patch.exp_default_inclusion = String(experiments.default_inclusion);
+  if (Object.keys(patch).length === 0) return;
+  await admin().from(TABLE).update(patch).eq("contact_id", id);
+}
+
+/**
+ * Record a funnel/telemetry event. Writes ONE row per active experiment, each
+ * stamped with that experiment + the user's variant, so a single `variant`
+ * column is unambiguous. With no variants assigned yet, records one untagged
+ * row. Best-effort — never blocks the app.
+ */
+async function event(body: Record<string, unknown>): Promise<Response> {
+  const contactId = body.contactId ? String(body.contactId) : "";
+  const name = body.name ? String(body.name) : "";
+  if (!contactId || !name) return json({ ok: false, reason: "rejected", detail: "contactId and name required" }, 400);
+  const props = body.props && typeof body.props === "object" ? body.props : {};
+  const experiments = (body.experiments ?? {}) as Record<string, unknown>;
+  const tagged = Object.entries(experiments).filter(([, v]) => Boolean(v));
+  const rows =
+    tagged.length > 0
+      ? tagged.map(([experiment, variant]) => ({
+          contact_id: contactId,
+          name,
+          experiment,
+          variant: String(variant),
+          props,
+        }))
+      : [{ contact_id: contactId, name, experiment: null, variant: null, props }];
+  const { error } = await admin().from(EVENTS_TABLE).insert(rows);
   return json({ ok: !error });
 }
 
@@ -379,6 +433,8 @@ Deno.serve(async (req: Request) => {
       return await bug(body);
     case "ping":
       return await ping(body);
+    case "event":
+      return await event(body);
     case "events":
       return await events(body);
     case "issuePaid": {

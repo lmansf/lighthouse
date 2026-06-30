@@ -33,6 +33,7 @@ import crypto from "node:crypto";
 import path from "node:path";
 import { stateDir, readJson, writeJson } from "./config";
 import { getState as profileState } from "./profile";
+import { getAllVariants } from "./experiment";
 import type { Registration } from "./registration";
 import {
   isUsageOptedOut,
@@ -48,6 +49,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const licensePath = () => path.join(stateDir(), "license.json");
 const identityPath = () => path.join(stateDir(), "identity.json");
 const contactIdPath = () => path.join(stateDir(), "contact.json");
+const launchPath = () => path.join(stateDir(), "launch.json");
 
 /**
  * A stable per-user contact id, generated once and kept across trials, locks,
@@ -55,7 +57,7 @@ const contactIdPath = () => path.join(stateDir(), "contact.json");
  * role). Stamped on every form/log row so paid vs unpaid contacts can be told
  * apart in Supabase.
  */
-function getContactId(): string {
+export function getContactId(): string {
   const existing = readJson<{ id?: string } | null>(contactIdPath(), null);
   if (existing?.id) return existing.id;
   const id = crypto.randomUUID();
@@ -179,7 +181,7 @@ function contactRow(c: Registration) {
  * left feedback / checked out — in which case the license identity has no email.
  * Falls back to that license identity.
  */
-function accountEmail(): string | undefined {
+export function accountEmail(): string | undefined {
   const fromProfile = profileState().user?.email?.trim();
   if (fromProfile) return fromProfile;
   return loadIdentity()?.email || undefined;
@@ -309,7 +311,9 @@ export async function submitFeedback(f: FeedbackInput): Promise<{ ok: boolean }>
   });
   if (!licenseApi()) return { ok: true };
   try {
-    const r = await callFn("feedback", { feedback: { ...f, contactId: getContactId() } });
+    const r = await callFn("feedback", {
+      feedback: { ...f, contactId: getContactId(), experiments: getAllVariants() },
+    });
     return { ok: r.ok !== false };
   } catch {
     return { ok: false };
@@ -417,9 +421,46 @@ export async function pingLaunch(): Promise<void> {
       guid: lic?.guid,
       email: accountEmail(),
       version: process.env.npm_package_version,
+      // Stamp the user's variants so userlogs rows can be sliced by experiment.
+      experiments: getAllVariants(),
     });
   } catch {
     /* logging must never break a launch */
+  }
+  // Derive a `returned` event: any launch on a later calendar day than the
+  // first, at most once per day. Best-effort and never blocks the launch.
+  try {
+    const launch = readJson<{ firstDay?: string; lastReturnedDay?: string }>(launchPath(), {});
+    const today = utcDay();
+    if (!launch.firstDay) {
+      writeJson(launchPath(), { ...launch, firstDay: today });
+    } else if (today !== launch.firstDay && launch.lastReturnedDay !== today) {
+      writeJson(launchPath(), { ...launch, lastReturnedDay: today });
+      const day = Math.round((Date.parse(today) - Date.parse(launch.firstDay)) / DAY_MS);
+      void recordEvent("returned", { day });
+    }
+  } catch {
+    /* returned-event derivation is best-effort */
+  }
+}
+
+/**
+ * Record a funnel/telemetry event to the `events` table (best-effort; hosted
+ * mode only). Every event carries the user's variant for each active experiment
+ * so the dashboard can split any metric by variant. Like pingLaunch, this must
+ * never throw into a launch, a query, or onboarding - all errors are swallowed.
+ */
+export async function recordEvent(name: string, props: Record<string, unknown> = {}): Promise<void> {
+  if (!licenseApi()) return;
+  try {
+    await callFn("event", {
+      contactId: getContactId(),
+      name,
+      experiments: getAllVariants(),
+      props,
+    });
+  } catch {
+    /* telemetry must never break the app */
   }
 }
 

@@ -38,6 +38,7 @@ import type { DragEvent } from "react";
 import type { ChatMessage, ChatTurn, RagReference } from "@/contracts";
 import { chatService } from "@/contracts";
 import { useRagStore } from "@/stores/useRagStore";
+import { logEvent } from "@/lib/logEvent";
 import { useChatStore } from "@/stores/useChatStore";
 import { ACCENTS } from "@/shell/theme";
 import { FILE_DRAG_MIME, parseDraggedFiles, type DraggedFile } from "@/shell/dnd";
@@ -315,6 +316,8 @@ export function ChatPanel() {
   const bodyRef = useRef<HTMLDivElement>(null);
   // Seed the id counter past any restored messages so new ids never collide.
   const idSeq = useRef(messages.length);
+  // Fires the activation event only on the first answered question this session.
+  const firstQueryLogged = useRef(false);
 
   function addAttachments(files: DraggedFile[]) {
     setAttachments((cur) => {
@@ -396,6 +399,7 @@ export function ChatPanel() {
     setQuestion("");
     setStreaming(true);
     const attachmentIds = attachments.map((a) => a.id);
+    let sourceCount = 0;
     try {
       for await (const chunk of chatService.ask(q, includedFileIds, history, attachmentIds)) {
         if (chunk.delta) {
@@ -405,8 +409,17 @@ export function ChatPanel() {
         }
         if (chunk.references) {
           const refs = chunk.references;
+          sourceCount = refs.length;
           setMessages((m) => m.map((x) => (x.id === asstId ? { ...x, references: refs } : x)));
         }
+      }
+      // An answer rendered. `source_count` (incl. 0) is the empty-answer signal
+      // for the default-inclusion experiment; the first answer of a session is
+      // the onboarding activation event.
+      logEvent("answer_rendered", { source_count: sourceCount });
+      if (!firstQueryLogged.current) {
+        firstQueryLogged.current = true;
+        logEvent("first_query", { source_count: sourceCount });
       }
     } catch {
       setMessages((m) =>

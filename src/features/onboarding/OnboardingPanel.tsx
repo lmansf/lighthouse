@@ -26,6 +26,7 @@ import {
 import { MODEL_PROVIDERS } from "@/contracts";
 import { useAuthStore } from "@/stores/useAuthStore";
 import { useLicenseStore } from "@/stores/useLicenseStore";
+import { logEvent } from "@/lib/logEvent";
 
 const useStyles = makeStyles({
   panel: {
@@ -74,6 +75,14 @@ export function OnboardingPanel() {
   const [shareUsage, setShareUsage] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const emailPrefilled = useRef(false);
+  const startedLogged = useRef(false);
+
+  // The activation funnel begins when onboarding first appears.
+  useEffect(() => {
+    if (startedLogged.current) return;
+    startedLogged.current = true;
+    logEvent("onboarding_started");
+  }, []);
 
   // Prefill the registration email from the signed-in user, once.
   useEffect(() => {
@@ -115,6 +124,8 @@ export function OnboardingPanel() {
       /* network error — proceed regardless; the user can't be blocked here */
     }
     await finishRegistration();
+    // play_first drops the user straight into the sample vault from here.
+    if (onboarding.onboardingVariant === "play_first") logEvent("sample_vault_loaded");
     setSubmitting(false);
   }
 
@@ -202,6 +213,7 @@ export function OnboardingPanel() {
                   }).catch(() => {});
                 }
                 await finishRegistration();
+                if (onboarding.onboardingVariant === "play_first") logEvent("sample_vault_loaded");
               })()
             }
           >
@@ -271,7 +283,11 @@ export function OnboardingPanel() {
         <Button
           appearance="primary"
           disabled={providerId !== "local" && !apiKey}
-          onClick={() => void selectModel(providerId, modelId, apiKey)}
+          onClick={() => {
+            // Activation guardrail: did they connect a real (cloud) key?
+            if (providerId !== "local" && apiKey) logEvent("api_key_entered");
+            void selectModel(providerId, modelId, apiKey);
+          }}
         >
           Finish setup
         </Button>

@@ -150,6 +150,25 @@ create table if not exists public.purchase_interest (
   email      text not null
 );
 
+-- A/B experiments: per-user variant on the registration, plus a thin events
+-- table for funnel steps (see supabase/migrations/20260629000000_experiments_events.sql
+-- and docs/experiments/onboarding-and-defaults-ab-tests.md).
+alter table public.registrations
+  add column if not exists exp_onboarding text,          -- play_first | key_first | null
+  add column if not exists exp_default_inclusion text;   -- opt_in | opt_out | null
+
+create table if not exists public.events (
+  id          bigint generated always as identity primary key,
+  contact_id  text not null,
+  name        text not null,   -- onboarding_started, first_query, answer_rendered, ...
+  experiment  text,            -- which experiment this row belongs to (null = untagged)
+  variant     text,            -- the user's variant of that experiment
+  props       jsonb not null default '{}'::jsonb,  -- e.g. { "source_count": 0 }
+  created_at  timestamptz not null default now()
+);
+create index if not exists events_name_created_at_idx on public.events (name, created_at);
+create index if not exists events_contact_id_idx on public.events (contact_id);
+
 -- UI click events (best-effort usage logging — see "Usage logging" below)
 create table if not exists public.click_events (
   id          bigint generated always as identity primary key,
@@ -172,6 +191,34 @@ create index if not exists click_events_contact_idx on public.click_events (cont
 The Edge Function uses the **service-role** key, which bypasses RLS — so no
 `anon` insert/select policy is needed, and emails stay private (never expose
 `select` to `anon`).
+
+### A/B experiment telemetry
+
+The desktop app assigns each install a variant per experiment (see
+`src/server/experiment.ts`) and tags every telemetry call with them. Two seams
+record this server-side, both via the service-role key:
+
+- The **`event`** op inserts one `events` row **per active experiment**, each
+  stamped with `experiment` + the user's `variant` (so a single `variant` column
+  is unambiguous), plus a `props` jsonb. Event names:
+  - Funnel: `onboarding_started`, `sample_vault_loaded`, `first_query`,
+    `api_key_entered`, `answer_rendered` (`{ source_count }`), `returned`.
+  - File activity (privacy-safe - **counts and a coarse dimension only, never a
+    name, path, extension, size, or content**): `file_added` / `file_removed`
+    (`{ kind: "file" | "folder" }`, emitted by diffing the vault scan against a
+    local snapshot, so files copied in or deleted *outside* the app still count)
+    and `file_made_available` / `file_made_unavailable` (`{ scope: "file" |
+    "folder" | "source" }`, one per include/exclude click - the click, not the
+    folder's cascade).
+- The **`ping`** and **`feedback`** ops also persist the user's current variants
+  onto their `registrations` row (`exp_onboarding`, `exp_default_inclusion`), so
+  `feedback` / `bug_reports` / `userlogs` can all be sliced by variant through
+  `registrations` by `contact_id`.
+
+All of this is best-effort: telemetry never blocks a launch, a query, or
+onboarding, and the app runs normally with `LICENSE_API_URL` unset (the calls
+no-op). The companion **lighthouse-analytics** dashboard reads these for its
+Experiments page.
 
 ## 2. Deploy the Edge Function
 
