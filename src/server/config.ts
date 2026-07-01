@@ -112,9 +112,35 @@ export function readJson<T>(file: string, fallback: T): T {
 
 let writeCounter = 0;
 
-/** Write a JSON file atomically (write-temp-then-rename) to avoid torn reads. */
+/**
+ * Write a JSON file atomically and durably. These files hold private state —
+ * OAuth tokens, the model API key, and vault inclusion/reference curation — so:
+ *   - create the temp file with owner-only (0600) permissions so it isn't
+ *     group/world-readable on POSIX;
+ *   - fsync the data before rename and fsync the directory after, so a crash or
+ *     power-loss can't leave torn reads or silently lose the just-written state.
+ */
 export function writeJson(file: string, value: unknown): void {
   const tmp = `${file}.${process.pid}.${writeCounter++}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(value, null, 2), "utf8");
+  const data = JSON.stringify(value, null, 2);
+  const fd = fs.openSync(tmp, "w", 0o600);
+  try {
+    fs.writeFileSync(fd, data, "utf8");
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
   fs.renameSync(tmp, file);
+  // Make the rename itself durable. Directory fsync isn't supported everywhere
+  // (e.g. Windows), so this is best-effort.
+  try {
+    const dir = fs.openSync(path.dirname(file), "r");
+    try {
+      fs.fsyncSync(dir);
+    } finally {
+      fs.closeSync(dir);
+    }
+  } catch {
+    /* directory fsync unsupported on this platform — the data fsync above still holds */
+  }
 }

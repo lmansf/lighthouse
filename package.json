@@ -10,7 +10,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "test": "tsc --noEmit",
+    "test": "tsc --noEmit && node --test \"test/**/*.test.mjs\"",
+    "typecheck": "tsc --noEmit",
     "icons": "npm install --no-save sharp@^0.33.5 png-to-ico@^2.1.8 && node scripts/gen-icons.mjs",
     "installer:art": "npm install --no-save sharp@^0.33.5 && node scripts/gen-installer-art.mjs",
     "electron": "electron .",
@@ -39,7 +40,9 @@
       "!**/.env.*.local",
       "!supabase/**/*",
       "!resources/llm/**/*",
-      "!resources/tts/**/*"
+      "!resources/tts/**/*",
+      "!**/.rag-vault/**",
+      "!**/connectors/**"
     ],
     "extraResources": [
       {
