@@ -144,7 +144,10 @@ toolchain on the user's machine), then `npm run fetch:model`
 (llama.cpp, MIT) into `resources/llm/` **plus** the Piper TTS binary
 (rhasspy/piper, MIT) and a neural voice (`en_US-lessac-medium`, ~63 MB, MIT/CC0)
 into `resources/tts/` for on-device read-aloud, and finally `electron-builder`
-copies both folders into the installer via its `extraResources` entries. The
+copies both folders into the installer via its `extraResources` entries - though
+the `llm` entry carries a `!**/*.gguf` filter, so a stray or dev-only model left
+in `resources/llm` (the runtime fallback `modelsDir()` reads in `npm run dev`) can
+never be packaged. The
 model weights are **not** bundled: Mistral-7B-Instruct-v0.3 Q4_K_M (~4.2 GB,
 Apache-2.0) is past NSIS's 2 GB installer limit, so the app downloads it on demand
 when the user opts into the private model (the **＋** in the model picker →

@@ -46,7 +46,8 @@
         "from": "resources/llm",
         "to": "llm",
         "filter": [
-          "**/*"
+          "**/*",
+          "!**/*.gguf"
         ]
       },
       {
