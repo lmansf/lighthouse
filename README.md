@@ -181,7 +181,9 @@ ways to provide one:
   limit, so it can't go in the installer. Instead the private model is a one-time,
   opt-in download: pick **"Local model (private)"** and click the **＋** next to it
   to fetch the weights (Apache-2.0, from Hugging Face) into your user data dir,
-  with a progress indicator. The desktop app then launches `llama-server` on
+  with a progress indicator. Once present the entry reads **"Installed"** with a
+  trash button that uninstalls the model (freeing the ~4.2 GB or letting you
+  re-test the download). The desktop app then launches `llama-server` on
   `127.0.0.1:8080` against it automatically (and on every later launch), shutting
   it down on quit. It's a CPU-only build, so it trades speed for quality: expect
   roughly a minute per answer on a typical laptop and ~6-8 GB of free RAM. Build

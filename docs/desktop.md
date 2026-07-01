@@ -221,7 +221,8 @@ above). The private model weights are not bundled; when the user opts in, the
 Next server downloads them (`app/api/model` → `src/server/localModel.ts`) into
 `<userData>/models`, and the desktop app auto-launches the local inference server
 on `127.0.0.1:8080` against that file - at download time and on every later
-launch (`watchForModel` polls for it) - stopping it on quit. Main sets
+launch (`reconcileModel` polls to start it when a download lands and to perform
+an uninstall) - stopping it on quit. Main sets
 `LIGHTHOUSE_MODELS_DIR` (where the model is downloaded/read) and
 `LIGHTHOUSE_RESOURCES_PATH` so the Next API routes can locate both - Electron's
 `resourcesPath` when packaged, the repo's `resources/` folder otherwise
