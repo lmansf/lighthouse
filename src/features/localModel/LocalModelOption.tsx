@@ -4,8 +4,9 @@
  * The install affordance shown next to the "Local model (private)" entry in the
  * model picker. The private model is a large (~4.2 GB) one-time download that we
  * don't bundle, so it's opt-in: a "＋" starts the download, a spinner shows
- * progress, and a check marks it installed. Rendered inside a Fluent `Option`,
- * so clicks on the button must not also select the option.
+ * progress, and once present it reads "Installed" with an Uninstall control (to
+ * free the space or re-test a fresh install). Rendered inside a Fluent `Option`,
+ * so clicks on these controls must not also select the option.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -16,15 +17,17 @@ import {
   shorthands,
   tokens,
 } from "@fluentui/react-components";
-import { AddRegular, CheckmarkCircleFilled } from "@fluentui/react-icons";
+import { AddRegular, CheckmarkCircleFilled, DeleteRegular } from "@fluentui/react-icons";
+
+type ModelStatus = "ready" | "absent" | "downloading" | "uninstalling" | "error";
 
 interface ModelState {
-  status: "ready" | "absent" | "downloading" | "error";
+  status: ModelStatus;
   received: number;
   total: number;
 }
 
-/** Poll the local-model status, exposing it plus an `install()` trigger. */
+/** Poll the local-model status, exposing it plus `install()` / `uninstall()`. */
 export function useLocalModel() {
   const [state, setState] = useState<ModelState>({ status: "absent", received: 0, total: 0 });
   const statusRef = useRef(state.status);
@@ -41,21 +44,33 @@ export function useLocalModel() {
 
   useEffect(() => {
     void poll();
-    // Poll quickly while a download is in flight, lazily otherwise.
-    const id = setInterval(() => void poll(), statusRef.current === "downloading" ? 1000 : 5000);
+    // Poll quickly while something is in flight, lazily otherwise.
+    const inFlight = statusRef.current === "downloading" || statusRef.current === "uninstalling";
+    const id = setInterval(() => void poll(), inFlight ? 1000 : 5000);
     return () => clearInterval(id);
   }, [poll, state.status]);
 
   const install = useCallback(async () => {
+    setState((s) => ({ ...s, status: "downloading" })); // optimistic - instant feedback
     try {
       const r = await fetch("/api/model", { method: "POST" });
       if (r.ok) setState(await r.json());
     } catch {
-      /* the next poll will reflect reality */
+      void poll();
     }
-  }, []);
+  }, [poll]);
 
-  return { ...state, install };
+  const uninstall = useCallback(async () => {
+    setState((s) => ({ ...s, status: "uninstalling" })); // optimistic
+    try {
+      const r = await fetch("/api/model", { method: "DELETE" });
+      if (r.ok) setState(await r.json());
+    } catch {
+      void poll();
+    }
+  }, [poll]);
+
+  return { ...state, install, uninstall };
 }
 
 const useStyles = makeStyles({
@@ -82,16 +97,16 @@ const useStyles = makeStyles({
     fontSize: tokens.fontSizeBase200,
     whiteSpace: "nowrap",
   },
-  addBtn: { minWidth: "auto", ...shorthands.padding("0", tokens.spacingHorizontalXS) },
+  iconBtn: { minWidth: "auto", ...shorthands.padding("0", tokens.spacingHorizontalXS) },
 });
 
-/** Option content for the local provider: label + its install state / trigger. */
+/** Option content for the local provider: label + its install state / controls. */
 export function LocalModelOption({ label }: { label: string }) {
   const styles = useStyles();
-  const { status, received, total, install } = useLocalModel();
+  const { status, received, total, install, uninstall } = useLocalModel();
   const pct = total ? Math.floor((received / total) * 100) : 0;
 
-  // A click on the install button must not bubble up and select the option.
+  // Clicks on these controls must not bubble up and select the option.
   const swallow = (e: React.SyntheticEvent) => e.stopPropagation();
 
   return (
@@ -101,11 +116,33 @@ export function LocalModelOption({ label }: { label: string }) {
         <span className={styles.installed}>
           <CheckmarkCircleFilled fontSize={16} />
           Installed
+          <Tooltip
+            content="Uninstall the private model (~4.2 GB) to free space or re-test the download"
+            relationship="label"
+          >
+            <Button
+              className={styles.iconBtn}
+              size="small"
+              appearance="subtle"
+              icon={<DeleteRegular />}
+              aria-label="Uninstall the private model"
+              onMouseDown={swallow}
+              onClick={(e) => {
+                swallow(e);
+                void uninstall();
+              }}
+            />
+          </Tooltip>
         </span>
       ) : status === "downloading" ? (
         <span className={styles.progress} aria-label={`Downloading private model, ${pct}%`}>
           <Spinner size="tiny" />
           {pct}%
+        </span>
+      ) : status === "uninstalling" ? (
+        <span className={styles.progress} aria-label="Uninstalling private model">
+          <Spinner size="tiny" />
+          Removing…
         </span>
       ) : (
         <Tooltip
@@ -117,7 +154,7 @@ export function LocalModelOption({ label }: { label: string }) {
           relationship="label"
         >
           <Button
-            className={styles.addBtn}
+            className={styles.iconBtn}
             size="small"
             appearance="subtle"
             icon={<AddRegular />}

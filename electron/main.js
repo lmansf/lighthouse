@@ -124,7 +124,7 @@ function findModel() {
 /**
  * Launch the bundled local inference server (issue #24, "Local model") against
  * the installed model, if there is one. The `.gguf` is fetched on demand (see
- * app/api/model), so at first launch there may be nothing to run — `watchForModel`
+ * app/api/model), so at first launch there may be nothing to run — `reconcileModel`
  * starts the server the moment the download lands. When no binary is bundled at
  * all this is a no-op, and the "Local model" provider instead targets any
  * OpenAI-compatible server the user runs themselves (Ollama, LM Studio) via the
@@ -147,25 +147,79 @@ function startLocalLlm() {
     llmProc = null;
     closeFd(out);
     if (code) console.error(`local model exited with code ${code}${signal ? ` (${signal})` : ""}`);
+    // If this exit was to release the memory-mapped weights for an uninstall,
+    // finish deleting them now that the file is unlocked.
+    if (uninstalling) finishUninstall();
   });
 }
 
-/**
- * The model can be installed after launch (the user clicks "＋" in the picker and
- * the Next server downloads it). Poll for it and bring the server up once it
- * lands — fs.watch is unreliable on Windows, so mirror the vault's polling. The
- * timer is unref'd so it never keeps the app alive on its own.
- */
-function watchForModel() {
-  const timer = setInterval(() => {
-    if (llmProc) {
-      clearInterval(timer);
-      return;
+// Uninstall coordination: the Next server (app/api/model DELETE) drops a marker
+// file, since only main owns the llama-server whose mmap locks the .gguf on
+// Windows. We stop the server, then delete the weights, then clear the marker.
+const UNINSTALL_MARKER = ".uninstall";
+let uninstalling = false;
+
+/** All bundled/downloaded `.gguf` files across the search dirs. */
+function modelGgufFiles() {
+  const files = [];
+  for (const dir of [modelsDir(), llmRoot()]) {
+    try {
+      for (const f of fs.readdirSync(dir)) {
+        if (f.toLowerCase().endsWith(".gguf")) files.push(path.join(dir, f));
+      }
+    } catch {
+      /* dir may not exist */
     }
-    if (findModel()) startLocalLlm();
-    if (llmProc) clearInterval(timer);
-  }, 5000);
-  if (typeof timer.unref === "function") timer.unref();
+  }
+  return files;
+}
+
+/**
+ * Delete the model weights (the server is already stopped). Only clear the marker
+ * once the weights are actually gone, so a rare still-locked file retries on the
+ * next reconcile tick rather than silently leaving the model in place.
+ */
+function finishUninstall() {
+  let remaining = false;
+  for (const f of modelGgufFiles()) {
+    try {
+      fs.rmSync(f, { force: true });
+    } catch (e) {
+      console.error("uninstall: could not remove", f, e);
+      remaining = true;
+    }
+  }
+  if (!remaining) {
+    try {
+      fs.rmSync(path.join(modelsDir(), UNINSTALL_MARKER), { force: true });
+    } catch {
+      /* best-effort */
+    }
+  }
+  uninstalling = false;
+}
+
+/**
+ * Keep the local model server in sync with what's on disk, on a poll (fs.watch
+ * is unreliable on Windows). Start llama-server when a model appears (e.g. a
+ * download just finished), and honor an uninstall request: drop the running
+ * server first so its memory-mapped `.gguf` unlocks, then delete the weights
+ * (finishUninstall runs from the server's exit handler). Unref'd so it never
+ * keeps the app alive on its own.
+ */
+function reconcileModel() {
+  if (fs.existsSync(path.join(modelsDir(), UNINSTALL_MARKER))) {
+    if (llmProc) {
+      if (!uninstalling) {
+        uninstalling = true;
+        llmProc.kill(); // weights are deleted from the exit handler once released
+      }
+      return; // wait for the server to exit before deleting
+    }
+    finishUninstall(); // nothing holding the file — delete immediately
+    return;
+  }
+  if (!llmProc && findModel()) startLocalLlm();
 }
 
 function startServer() {
@@ -442,7 +496,9 @@ if (!app.requestSingleInstanceLock()) {
     // prompt writes runOnStartup to the settings file; we honor it each launch.
     app.setLoginItemSettings({ openAtLogin: loadSettings().runOnStartup !== false });
     startLocalLlm(); // bring up the local model if one is already installed…
-    if (!llmProc) watchForModel(); // …otherwise start it the moment one is downloaded
+    // …and keep reconciling: start it when a download lands, and handle uninstalls.
+    const modelTimer = setInterval(reconcileModel, 3000);
+    if (typeof modelTimer.unref === "function") modelTimer.unref();
     startServer();
     buildMenu();
     createTray();

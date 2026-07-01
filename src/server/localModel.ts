@@ -12,7 +12,16 @@
  * against the file as soon as it lands, so the private model becomes usable
  * without a restart.
  */
-import { createWriteStream, existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
+import {
+  createWriteStream,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import https from "node:https";
 import { resourcesDir } from "./config";
@@ -25,10 +34,13 @@ const MODEL_FILE = process.env.LIGHTHOUSE_LOCAL_MODEL_FILE?.trim() || "Mistral-7
 /** A real model is hundreds of MB; guards against counting a stub/partial as ready. */
 const MIN_BYTES = 1e8;
 
+/** Marker file electron/main.js watches to perform an uninstall (see requestUninstall). */
+const UNINSTALL_MARKER = ".uninstall";
+
 /**
- * Where the model lives. In the packaged app electron/main.js sets
- * LIGHTHOUSE_MODELS_DIR to `<userData>/models` (writable, survives updates);
- * in dev we fall back to `resources/llm` so a locally fetched model still works.
+ * Where NEW downloads are written. In the packaged app electron/main.js sets
+ * LIGHTHOUSE_MODELS_DIR to `<userData>/models` (writable, survives updates); in
+ * dev we fall back to `resources/llm` so a locally fetched model still works.
  */
 export function modelsDir(): string {
   const dir = process.env.LIGHTHOUSE_MODELS_DIR?.trim() || join(resourcesDir(), "llm");
@@ -36,19 +48,39 @@ export function modelsDir(): string {
   return dir;
 }
 
-/** Absolute path to a present, non-trivial `.gguf`, or null if none is installed. */
-function installedModel(): string | null {
-  try {
-    const f = readdirSync(modelsDir()).find(
-      (n) => n.toLowerCase().endsWith(".gguf") && statSync(join(modelsDir(), n)).size > MIN_BYTES,
-    );
-    return f ? join(modelsDir(), f) : null;
-  } catch {
-    return null; // no models directory yet
-  }
+/**
+ * Every directory a usable model might sit in - the download target plus the
+ * bundled `resources/llm` (where an older Lighthouse could have left one). This
+ * MUST match electron/main.js `findModel()` so the picker's "installed" state
+ * agrees with what llama-server actually runs; otherwise a leftover model looks
+ * uninstalled (a dead "＋") even though the local model works.
+ */
+function searchDirs(): string[] {
+  const download = process.env.LIGHTHOUSE_MODELS_DIR?.trim() || join(resourcesDir(), "llm");
+  return [...new Set([download, join(resourcesDir(), "llm")])];
 }
 
-export type ModelStatus = "ready" | "absent" | "downloading" | "error";
+/** Absolute path to a present, non-trivial `.gguf` in any search dir, or null. */
+function installedModel(): string | null {
+  for (const dir of searchDirs()) {
+    try {
+      const f = readdirSync(dir).find(
+        (n) => n.toLowerCase().endsWith(".gguf") && statSync(join(dir, n)).size > MIN_BYTES,
+      );
+      if (f) return join(dir, f);
+    } catch {
+      /* dir may not exist yet */
+    }
+  }
+  return null;
+}
+
+/** True while an uninstall has been requested but main.js hasn't finished it. */
+function uninstallPending(): boolean {
+  return existsSync(join(modelsDir(), UNINSTALL_MARKER));
+}
+
+export type ModelStatus = "ready" | "absent" | "downloading" | "uninstalling" | "error";
 
 interface Progress {
   status: ModelStatus;
@@ -64,10 +96,30 @@ let progress: Progress = { status: "absent", received: 0, total: 0 };
 
 /** Current model state; reports "ready" the moment an installed model is present. */
 export function modelStatus(): Progress {
+  if (uninstallPending()) return { status: "uninstalling", received: 0, total: 0 };
   if (progress.status === "downloading") return progress;
   if (installedModel()) return { status: "ready", received: 0, total: 0 };
   if (progress.status === "error") return progress;
   return { status: "absent", received: 0, total: 0 };
+}
+
+/**
+ * Request removal of the installed model. The `.gguf` is likely memory-mapped
+ * (locked) by a running llama-server, which only electron/main.js can stop - so
+ * we drop a marker it watches: main stops the server, deletes the weights, and
+ * clears the marker. Lets the user free the ~4.2 GB or re-test a fresh install.
+ */
+export function requestUninstall(): Progress {
+  if (!installedModel() && !uninstallPending()) {
+    return { status: "absent", received: 0, total: 0 };
+  }
+  try {
+    writeFileSync(join(modelsDir(), UNINSTALL_MARKER), String(Date.now()));
+  } catch {
+    /* best-effort; the poll will reflect reality */
+  }
+  progress = { status: "absent", received: 0, total: 0 }; // clear any prior error
+  return { status: "uninstalling", received: 0, total: 0 };
 }
 
 /** Kick off the one-time model download if it isn't already present or running. */
