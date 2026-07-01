@@ -64,10 +64,10 @@ let progress: Progress = { status: "absent", received: 0, total: 0 };
 
 /** Current model state; reports "ready" the moment an installed model is present. */
 export function modelStatus(): Progress {
-  if (progress.status !== "downloading" && installedModel()) {
-    return { status: "ready", received: 0, total: 0 };
-  }
-  return progress;
+  if (progress.status === "downloading") return progress;
+  if (installedModel()) return { status: "ready", received: 0, total: 0 };
+  if (progress.status === "error") return progress;
+  return { status: "absent", received: 0, total: 0 };
 }
 
 /** Kick off the one-time model download if it isn't already present or running. */
@@ -91,24 +91,28 @@ export function startDownload(): Progress {
 }
 
 /** GET that follows redirects across hosts (HF resolve → CDN), resolving the response. */
-function get(url: string): Promise<import("node:http").IncomingMessage> {
+function get(url: string, redirects = 5): Promise<import("node:http").IncomingMessage> {
   return new Promise((resolve, reject) => {
-    https
-      .get(url, { headers: { "user-agent": "lighthouse-app" } }, (res) => {
-        const { statusCode, headers } = res;
-        if (statusCode && statusCode >= 300 && statusCode < 400 && headers.location) {
-          res.resume();
-          resolve(get(new URL(headers.location, url).toString()));
+    const req = https.get(url, { headers: { "user-agent": "lighthouse-app" } }, (res) => {
+      const { statusCode, headers } = res;
+      if (statusCode && statusCode >= 300 && statusCode < 400 && headers.location) {
+        res.resume();
+        if (redirects <= 0) {
+          reject(new Error(`too many redirects fetching ${url}`));
           return;
         }
-        if (statusCode !== 200) {
-          res.resume();
-          reject(new Error(`GET ${url} → ${statusCode}`));
-          return;
-        }
-        resolve(res);
-      })
-      .on("error", reject);
+        resolve(get(new URL(headers.location, url).toString(), redirects - 1));
+        return;
+      }
+      if (statusCode !== 200) {
+        res.resume();
+        reject(new Error(`GET ${url} → ${statusCode}`));
+        return;
+      }
+      resolve(res);
+    });
+    req.setTimeout(30_000, () => req.destroy(new Error(`request timed out fetching ${url}`)));
+    req.on("error", reject);
   });
 }
 
@@ -122,6 +126,10 @@ async function download(): Promise<void> {
   const tmp = `${dest}.part`;
   const res = await get(MODEL_URL);
   const total = Number(res.headers["content-length"] || 0);
+  if (!total) {
+    res.destroy();
+    throw new Error("download unverifiable: server did not report a Content-Length");
+  }
   progress = { status: "downloading", received: 0, total };
   try {
     await new Promise<void>((resolve, reject) => {
@@ -134,7 +142,7 @@ async function download(): Promise<void> {
       out.on("error", reject);
       res.on("error", reject);
     });
-    if (total && progress.received !== total) {
+    if (progress.received !== total) {
       throw new Error(`incomplete download (${progress.received}/${total} bytes)`);
     }
   } catch (err) {
