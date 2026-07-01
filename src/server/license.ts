@@ -196,7 +196,7 @@ export async function startTrial(contact?: Registration): Promise<{ guid: string
   const useContact = contact ?? loadIdentity() ?? null;
   if (useContact) writeJson(identityPath(), useContact);
 
-  // A fresh trial resets usage-logging consent to its default (opted in). The
+  // A fresh trial resets usage-logging consent to its default (opted OUT). The
   // registration form may then re-apply the user's explicit choice afterwards.
   resetUsageConsent();
 

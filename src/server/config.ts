@@ -77,7 +77,13 @@ export const SHAREPOINT_REDIRECT_URI =
  * Lives beside the vault state, never inside the repo or the app bundle.
  */
 export function connectorsDir(): string {
-  const dir = path.join(stateDir(), "connectors");
+  // OAuth refresh/access tokens live here. Prefer a location OUTSIDE the vault:
+  // the vault defaults to the user's Documents folder, which is routinely synced
+  // to OneDrive/iCloud and swept into backups — a long-lived credential should
+  // not ride along. The desktop shell sets LIGHTHOUSE_CONNECTORS_DIR to its
+  // private userData dir; plain web/dev falls back to the in-vault path.
+  const override = process.env.LIGHTHOUSE_CONNECTORS_DIR?.trim();
+  const dir = override || path.join(stateDir(), "connectors");
   fs.mkdirSync(dir, { recursive: true });
   return dir;
 }

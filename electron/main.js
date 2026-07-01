@@ -256,6 +256,9 @@ function startServer() {
       // Where the Next server downloads (and reads) the optional private model,
       // matching what findModel() watches so llama-server picks it up.
       LIGHTHOUSE_MODELS_DIR: modelsDir(),
+      // Keep OAuth connector tokens in the app's private data dir, NOT inside the
+      // vault (which defaults to the cloud-synced Documents folder).
+      LIGHTHOUSE_CONNECTORS_DIR: path.join(app.getPath("userData"), "connectors"),
       VAULT_DIR: vaultDir(),
       // Let the in-app UI read/change desktop settings (e.g. launch-at-login);
       // the main process re-reads this file on its next launch.
