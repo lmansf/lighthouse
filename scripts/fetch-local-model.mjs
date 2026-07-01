@@ -15,22 +15,22 @@
  *   1. `llama-server` (+ its shared libraries) — llama.cpp, MIT-licensed. The
  *      right per-OS asset is resolved from the ggml-org/llama.cpp GitHub release
  *      (a CPU build, for broad compatibility — no GPU/driver assumptions).
- *   2. An instruct model in GGUF — Mistral-7B-Instruct-v0.3 Q4_K_M (~4.2 GB),
- *      Apache-2.0 (no-strings, commercial-safe), from Hugging Face.
- *   3. Piper (rhasspy/piper, MIT) + a neural voice (en_US-lessac-medium, ~63 MB,
+ *   2. Piper (rhasspy/piper, MIT) + a neural voice (en_US-lessac-medium, ~63 MB,
  *      MIT/CC0) into `resources/tts/`, powering on-device read-aloud TTS.
+ *
+ * It does NOT fetch the private model weights: Mistral-7B-Instruct-v0.3 is ~4.2 GB,
+ * well past NSIS's (and GitHub's) 2 GB limit, so it can't be bundled. The app
+ * downloads it on demand instead (opt-in "＋" in the model picker → app/api/model
+ * → the user's data dir). See src/server/localModel.ts.
  *
  * Overridable via env (all optional):
  *   LLAMACPP_VERSION   llama.cpp release tag to pin (default: latest)
  *   LLAMACPP_SHA256    expected SHA-256 of the llama.cpp release archive (optional)
- *   LOCAL_MODEL_URL    direct URL to a .gguf to use instead of the default
- *   LOCAL_MODEL_FILE   output filename for the .gguf (default: derived from URL)
- *   LOCAL_MODEL_SHA256 expected SHA-256 of the .gguf, verified after download (optional)
  *   GITHUB_TOKEN       lifts the unauthenticated GitHub API rate limit (optional)
  */
 import { createWriteStream, existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { dirname, join, basename } from "node:path";
+import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import https from "node:https";
@@ -39,15 +39,6 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const dest = join(root, "resources", "llm");
 const force = process.argv.includes("--force");
 const platform = process.platform; // win32 | darwin | linux
-
-// Default model: Mistral-7B-Instruct-v0.3 (Mistral AI, France), Apache-2.0 -
-// a fully-permissive, commercially-sellable western model. Q4_K_M GGUF, ~4.2 GB.
-// Bigger and markedly more capable than the old 1.7B; runs CPU-only (slower, and
-// wants ~6-8 GB free RAM). Swap with LOCAL_MODEL_URL to bundle a different GGUF.
-const DEFAULT_MODEL_URL =
-  "https://huggingface.co/bartowski/Mistral-7B-Instruct-v0.3-GGUF/resolve/main/Mistral-7B-Instruct-v0.3-Q4_K_M.gguf";
-const modelUrl = process.env.LOCAL_MODEL_URL?.trim() || DEFAULT_MODEL_URL;
-const modelFile = process.env.LOCAL_MODEL_FILE?.trim() || basename(new URL(modelUrl).pathname);
 
 const LLAMACPP_API = "https://api.github.com/repos/ggml-org/llama.cpp/releases";
 
@@ -299,7 +290,6 @@ async function main() {
   mkdirSync(dest, { recursive: true });
   const serverName = platform === "win32" ? "llama-server.exe" : "llama-server";
   const serverPath = join(dest, serverName);
-  const modelPath = join(dest, modelFile);
 
   // 1. llama-server binary
   if (!force && existsSync(serverPath)) {
@@ -319,29 +309,11 @@ async function main() {
     console.log(`✓ ${serverName}`);
   }
 
-  // 2. GGUF weights
-  if (!force && existsSync(modelPath) && statSync(modelPath).size > 1e8) {
-    console.log(`✓ ${modelFile} already present`);
-  } else {
-    console.log(`Downloading ${modelFile}`);
-    await download(modelUrl, modelPath, "model", process.env.LOCAL_MODEL_SHA256?.trim());
-    console.log(`✓ ${modelFile}`);
-  }
-
-  // Only the intended model should ship: the desktop app loads the first .gguf it
-  // finds in resources/llm, and that folder persists between builds, so a model
-  // swap (e.g. the old SmolLM2 weights) would otherwise linger and get picked.
-  for (const f of readdirSync(dest)) {
-    if (f.toLowerCase().endsWith(".gguf") && f !== modelFile) {
-      rmSync(join(dest, f), { force: true });
-      console.log(`  removed stale model ${f}`);
-    }
-  }
-
-  // 3. Local neural TTS (Piper + voice) for on-device read-aloud.
+  // 2. Local neural TTS (Piper + voice) for on-device read-aloud.
   await fetchTts();
 
-  console.log(`\nBundled local model + TTS ready in resources/. Run \`npm run dist\` to package them.`);
+  console.log(`\nBundled llama-server + TTS ready in resources/. The private model is`);
+  console.log(`downloaded on demand at runtime (not bundled). Run \`npm run dist\` to package.`);
 }
 
 main().catch((e) => {
