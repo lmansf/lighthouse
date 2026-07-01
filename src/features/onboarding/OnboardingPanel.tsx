@@ -24,6 +24,7 @@ import {
   tokens,
 } from "@fluentui/react-components";
 import { MODEL_PROVIDERS } from "@/contracts";
+import { LocalModelOption } from "@/features/localModel/LocalModelOption";
 import { useAuthStore } from "@/stores/useAuthStore";
 import { useLicenseStore } from "@/stores/useLicenseStore";
 import { logEvent } from "@/lib/logEvent";
@@ -244,8 +245,8 @@ export function OnboardingPanel() {
             }}
           >
             {MODEL_PROVIDERS.map((p) => (
-              <Option key={p.id} value={p.id}>
-                {p.label}
+              <Option key={p.id} value={p.id} text={p.label}>
+                {p.id === "local" ? <LocalModelOption label={p.label} /> : p.label}
               </Option>
             ))}
           </Dropdown>

@@ -141,13 +141,16 @@ target OS. The branded icons are already committed (see [Icons](#icons) below).
 (bundled into the installer so the packaged app's `next start` needs no Node.js
 toolchain on the user's machine), then `npm run fetch:model`
 (`scripts/fetch-local-model.mjs`), which downloads the `llama-server` binary
-(llama.cpp, MIT) and a `.gguf` model (Mistral-7B-Instruct-v0.3 Q4_K_M, ~4.2 GB,
-Apache-2.0) into `resources/llm/` - a CPU-only build that trades speed for
-quality (~a minute per answer, ~6-8 GB RAM) - **plus** the Piper TTS binary (rhasspy/piper,
-MIT) and a neural voice (`en_US-lessac-medium`, ~63 MB, MIT/CC0) into
-`resources/tts/` for on-device read-aloud, and finally `electron-builder` copies
-both folders into the installer via its `extraResources` entries. The bundled
-assets are gitignored and fetched on the build machine. Use `npm run dist:nomodel`
+(llama.cpp, MIT) into `resources/llm/` **plus** the Piper TTS binary
+(rhasspy/piper, MIT) and a neural voice (`en_US-lessac-medium`, ~63 MB, MIT/CC0)
+into `resources/tts/` for on-device read-aloud, and finally `electron-builder`
+copies both folders into the installer via its `extraResources` entries. The
+model weights are **not** bundled: Mistral-7B-Instruct-v0.3 Q4_K_M (~4.2 GB,
+Apache-2.0) is past NSIS's 2 GB installer limit, so the app downloads it on demand
+when the user opts into the private model (the **＋** in the model picker →
+`app/api/model` → `<userData>/models`) - a CPU-only path that trades speed for
+quality (~a minute per answer, ~6-8 GB RAM). The bundled assets are gitignored
+and fetched on the build machine. Use `npm run dist:nomodel`
 to skip the fetch (it still runs `next build`) for a lean build that relies on a
 bring-your-own server instead (and falls back to the OS's Web Speech voices for
 read-aloud). The fetch script takes env overrides (pinned `llama.cpp` version,
@@ -208,15 +211,19 @@ config (`LICENSE_API_URL` + `SUPABASE_ANON_KEY` + `CHECKOUT_API_URL`, plus the
 [registration.md](./registration.md) for the welcome form and subscriptions.
 `VAULT_DIR` is set automatically by the desktop app from your chosen folder.
 
-A `dist` build bundles a `llama-server` binary and a `.gguf` model under
-`resources/llm/`, plus the Piper TTS binary and a neural voice under
-`resources/tts/` for on-device read-aloud (see
-[Building a distributable installer](#building-a-distributable-installer) above).
-The desktop app auto-launches the local inference server on `127.0.0.1:8080` at
-startup and stops it on quit, so the "Local model (private)" provider works with
-no setup. It also sets `LIGHTHOUSE_RESOURCES_PATH` so the Next API routes can
-locate the bundled assets - Electron's `resourcesPath` when packaged, the repo's
-`resources/` folder otherwise (`npm run dev` / tests). A `dist:nomodel` build
-ships nothing there, so the provider targets an external server via
+A `dist` build bundles a `llama-server` binary under `resources/llm/`, plus the
+Piper TTS binary and a neural voice under `resources/tts/` for on-device
+read-aloud (see [Building a distributable installer](#building-a-distributable-installer)
+above). The private model weights are not bundled; when the user opts in, the
+Next server downloads them (`app/api/model` → `src/server/localModel.ts`) into
+`<userData>/models`, and the desktop app auto-launches the local inference server
+on `127.0.0.1:8080` against that file - at download time and on every later
+launch (`watchForModel` polls for it) - stopping it on quit. Main sets
+`LIGHTHOUSE_MODELS_DIR` (where the model is downloaded/read) and
+`LIGHTHOUSE_RESOURCES_PATH` so the Next API routes can locate both - Electron's
+`resourcesPath` when packaged, the repo's `resources/` folder otherwise
+(`npm run dev` / tests). Until the model is installed, the "Local model (private)"
+provider falls back to passage streaming; a `dist:nomodel` build also skips the
+bundled binaries, so the provider targets an external server via
 `LIGHTHOUSE_LOCAL_LLM_URL` and read-aloud falls back to the OS's Web Speech
 voices.

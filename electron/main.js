@@ -89,29 +89,55 @@ function vaultDir() {
   return dir;
 }
 
-/**
- * Optionally launch a bundled local inference server (issue #24, "Local model").
- * If a `llama-server`-style binary and a `.gguf` model are packaged under
- * resources/llm, spawn it on :8080 — the default the app's "Local model"
- * provider talks to. When nothing is bundled this is a no-op, and that provider
- * instead targets any OpenAI-compatible server the user runs themselves (Ollama,
- * LM Studio) via the LIGHTHOUSE_LOCAL_LLM_URL the Next server reads.
- */
-function startLocalLlm() {
-  const root = process.resourcesPath
+/** The bundled `llama-server` binaries + libraries (small; shipped in the installer). */
+function llmRoot() {
+  return process.resourcesPath
     ? path.join(process.resourcesPath, "llm")
     : path.join(APP_ROOT, "resources", "llm");
-  const bin = path.join(root, process.platform === "win32" ? "llama-server.exe" : "llama-server");
-  let model = null;
-  try {
-    model = fs.readdirSync(root).find((f) => f.toLowerCase().endsWith(".gguf"));
-  } catch {
-    /* no bundled model directory */
+}
+
+/**
+ * Where the (optional, large) private model lives. It's NOT bundled — the
+ * installer would blow past NSIS's 2 GB limit — so the user opts in from the
+ * model picker and the Next server downloads it here, into a writable per-user
+ * dir that survives app updates.
+ */
+function modelsDir() {
+  const dir = path.join(app.getPath("userData"), "models");
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+/** First installed `.gguf` — the downloaded model, or a dev-bundled one in resources/llm. */
+function findModel() {
+  for (const dir of [modelsDir(), llmRoot()]) {
+    try {
+      const f = fs.readdirSync(dir).find((n) => n.toLowerCase().endsWith(".gguf"));
+      if (f) return path.join(dir, f);
+    } catch {
+      /* dir may not exist yet */
+    }
   }
-  if (!model || !fs.existsSync(bin)) return; // nothing bundled — rely on an external server
+  return null;
+}
+
+/**
+ * Launch the bundled local inference server (issue #24, "Local model") against
+ * the installed model, if there is one. The `.gguf` is fetched on demand (see
+ * app/api/model), so at first launch there may be nothing to run — `watchForModel`
+ * starts the server the moment the download lands. When no binary is bundled at
+ * all this is a no-op, and the "Local model" provider instead targets any
+ * OpenAI-compatible server the user runs themselves (Ollama, LM Studio) via the
+ * LIGHTHOUSE_LOCAL_LLM_URL the Next server reads.
+ */
+function startLocalLlm() {
+  if (llmProc) return; // already running
+  const bin = path.join(llmRoot(), process.platform === "win32" ? "llama-server.exe" : "llama-server");
+  const model = findModel();
+  if (!model || !fs.existsSync(bin)) return; // model not installed yet — nothing to run
   const out = logFd("local-model.log");
-  llmProc = spawn(bin, ["-m", path.join(root, model), "--host", "127.0.0.1", "--port", "8080"], {
-    cwd: root,
+  llmProc = spawn(bin, ["-m", model, "--host", "127.0.0.1", "--port", "8080"], {
+    cwd: llmRoot(),
     // Log to a file and hide the console window — no terminal pops up for the user.
     stdio: ["ignore", out, out],
     windowsHide: true,
@@ -122,6 +148,24 @@ function startLocalLlm() {
     closeFd(out);
     if (code) console.error(`local model exited with code ${code}${signal ? ` (${signal})` : ""}`);
   });
+}
+
+/**
+ * The model can be installed after launch (the user clicks "＋" in the picker and
+ * the Next server downloads it). Poll for it and bring the server up once it
+ * lands — fs.watch is unreliable on Windows, so mirror the vault's polling. The
+ * timer is unref'd so it never keeps the app alive on its own.
+ */
+function watchForModel() {
+  const timer = setInterval(() => {
+    if (llmProc) {
+      clearInterval(timer);
+      return;
+    }
+    if (findModel()) startLocalLlm();
+    if (llmProc) clearInterval(timer);
+  }, 5000);
+  if (typeof timer.unref === "function") timer.unref();
 }
 
 function startServer() {
@@ -139,6 +183,9 @@ function startServer() {
       LIGHTHOUSE_RESOURCES_PATH: app.isPackaged
         ? process.resourcesPath
         : path.join(APP_ROOT, "resources"),
+      // Where the Next server downloads (and reads) the optional private model,
+      // matching what findModel() watches so llama-server picks it up.
+      LIGHTHOUSE_MODELS_DIR: modelsDir(),
       VAULT_DIR: vaultDir(),
       // Let the in-app UI read/change desktop settings (e.g. launch-at-login);
       // the main process re-reads this file on its next launch.
@@ -394,7 +441,8 @@ if (!app.requestSingleInstanceLock()) {
     // Launch at login unless the user turned it off (default on). The in-app
     // prompt writes runOnStartup to the settings file; we honor it each launch.
     app.setLoginItemSettings({ openAtLogin: loadSettings().runOnStartup !== false });
-    startLocalLlm(); // bring up the bundled local model first, if present
+    startLocalLlm(); // bring up the local model if one is already installed…
+    if (!llmProc) watchForModel(); // …otherwise start it the moment one is downloaded
     startServer();
     buildMenu();
     createTray();

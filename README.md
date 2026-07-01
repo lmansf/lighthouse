@@ -175,18 +175,18 @@ This is the privacy-first option for governance-conscious teams.
 Lighthouse talks to a local **OpenAI chat-completions compatible** server. Two
 ways to provide one:
 
-- **Bundled (zero setup):** the installer ships a `llama-server` binary and a
-  small `.gguf` model under `resources/llm/`, and the desktop app launches it
-  automatically on `127.0.0.1:8080` at startup and shuts it down on quit — no
-  API key, no separate download, nothing to configure. Build it with
-  `npm run dist`, which runs `next build` (so the production `.next` is bundled)
-  and `npm run fetch:model` to download the binary (llama.cpp, MIT) and weights
-  (Mistral-7B-Instruct-v0.3 Q4_K_M, ~4.2 GB, Apache-2.0) into `resources/llm/`,
-  then packages them into the installer. The model assets are gitignored, fetched
-  on the build machine; `npm run dist:nomodel` skips them (but still runs
-  `next build`) for a lean build that relies on a bring-your-own server instead.
-  It is a CPU-only build, so this larger model trades speed for quality: expect
-  roughly a minute per answer on a typical laptop and ~6-8 GB of free RAM.
+- **Bundled engine + opt-in model:** the installer ships the `llama-server`
+  binary (llama.cpp, MIT) under `resources/llm/`, but **not** the model weights —
+  Mistral-7B-Instruct-v0.3 Q4_K_M is ~4.2 GB, past NSIS's (and GitHub's) 2 GB
+  limit, so it can't go in the installer. Instead the private model is a one-time,
+  opt-in download: pick **"Local model (private)"** and click the **＋** next to it
+  to fetch the weights (Apache-2.0, from Hugging Face) into your user data dir,
+  with a progress indicator. The desktop app then launches `llama-server` on
+  `127.0.0.1:8080` against it automatically (and on every later launch), shutting
+  it down on quit. It's a CPU-only build, so it trades speed for quality: expect
+  roughly a minute per answer on a typical laptop and ~6-8 GB of free RAM. Build
+  the app with `npm run dist`, which runs `next build` and `npm run fetch:model`
+  (the binary + the Piper TTS assets only — the model is fetched at runtime).
 - **Bring your own:** run [Ollama](https://ollama.com) or
   [LM Studio](https://lmstudio.ai) yourself and point Lighthouse at it with
   `LIGHTHOUSE_LOCAL_LLM_URL` (default `http://127.0.0.1:8080/v1/chat/completions`;
@@ -197,17 +197,21 @@ ways to provide one:
 If the local server isn't reachable, Lighthouse falls back to streaming the most
 relevant passages so you still get a grounded, cited answer.
 
-### Bundled third-party components
+### Third-party components
 
-Lighthouse redistributes these in the installer under their own licenses:
+Bundled in the installer under their own licenses:
 
 - **llama.cpp** `llama-server` — MIT © the ggml.ai / llama.cpp authors.
-- **Mistral-7B-Instruct-v0.3** weights — Apache-2.0 © Mistral AI. Used and
-  redistributed under the Apache License 2.0; no usage restrictions.
 - **Piper** TTS engine — MIT © Michael Hansen / the Piper authors — and the
   `en_US-lessac-medium` voice (see its model card on the
   [rhasspy/piper-voices](https://huggingface.co/rhasspy/piper-voices) repo for
   the voice's own license and dataset attribution).
+
+Downloaded on demand (not bundled), used under its own license:
+
+- **Mistral-7B-Instruct-v0.3** weights — Apache-2.0 © Mistral AI; no usage
+  restrictions. Fetched from Hugging Face into the user's data dir when they opt
+  in to the private model.
 
 All are permissive, commercial-use licenses, so they impose no restriction on
 selling Lighthouse; their notices are retained here to satisfy attribution.

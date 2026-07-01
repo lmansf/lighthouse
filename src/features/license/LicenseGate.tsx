@@ -43,6 +43,7 @@ import {
   StarRegular,
 } from "@fluentui/react-icons";
 import { MODEL_PROVIDERS } from "@/contracts";
+import { LocalModelOption } from "@/features/localModel/LocalModelOption";
 import { useLicenseStore, type FeedbackInput, type LicenseStatus } from "@/stores/useLicenseStore";
 import { useAuthStore } from "@/stores/useAuthStore";
 
@@ -560,8 +561,8 @@ function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean
                   }}
                 >
                   {MODEL_PROVIDERS.map((p) => (
-                    <Option key={p.id} value={p.id}>
-                      {p.label}
+                    <Option key={p.id} value={p.id} text={p.label}>
+                      {p.id === "local" ? <LocalModelOption label={p.label} /> : p.label}
                     </Option>
                   ))}
                 </Dropdown>
