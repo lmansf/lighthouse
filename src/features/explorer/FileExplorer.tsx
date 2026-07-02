@@ -251,9 +251,12 @@ function TreeRow({
         style={{ paddingLeft: `${depth * 18 + 4}px` }}
         role="button"
         tabIndex={0}
-        // Usage logging: a folder/file row, labelled by its name (names only).
+        // Usage logging: record only the COARSE kind (folder vs file), never the
+        // node's name. Private document/folder names are PII and must not leave
+        // the machine — the global click-capture ships data-log labels to the
+        // hosted usage endpoint keyed to the user's email/contact id.
         data-log-type={node.kind === "folder" ? "folder" : "file"}
-        data-log={node.name}
+        data-log={node.kind === "folder" ? "folder" : "file"}
         onClick={activate}
         // Drag a file out to the chat panel to ask about just that file.
         draggable={attachable}

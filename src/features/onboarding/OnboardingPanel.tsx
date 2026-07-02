@@ -72,8 +72,9 @@ export function OnboardingPanel() {
   const [city, setCity] = useState("");
   const [stateField, setStateField] = useState("");
   const [doNotContact, setDoNotContact] = useState(false);
-  // Usage logging is opt-OUT: checked (opted in) by default. Cleared = opt out.
-  const [shareUsage, setShareUsage] = useState(true);
+  // Usage logging is opt-IN: unchecked by default. The user must actively check
+  // it to share analytics (which include their account email).
+  const [shareUsage, setShareUsage] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const emailPrefilled = useRef(false);
   const startedLogged = useRef(false);
@@ -113,7 +114,7 @@ export function OnboardingPanel() {
           city,
           state: stateField,
           // Honored server-side AFTER the trial is minted (which resets consent
-          // to the opted-in default), so the user's choice here wins.
+          // to the opted-out default), so the user's explicit choice here wins.
           usageLoggingOptOut: !shareUsage,
         }),
       });
@@ -186,7 +187,7 @@ export function OnboardingPanel() {
         <Checkbox
           checked={shareUsage}
           onChange={(_, d) => setShareUsage(Boolean(d.checked))}
-          label="Help improve Lighthouse by sharing anonymous usage data"
+          label="Help improve Lighthouse by sharing usage analytics — includes your account email and which features you use, never your files, their names, or their contents"
         />
         <div className={styles.row}>
           <Button
@@ -202,17 +203,15 @@ export function OnboardingPanel() {
             onClick={() =>
               void (async () => {
                 // Skipping still starts a trial (no contact info) so the user
-                // isn't dropped straight onto the "trial ended" screen. The
-                // trial reset opts usage logging back in, so only persist the
-                // user's choice when they actually opted out.
+                // isn't dropped straight onto the "trial ended" screen. The trial
+                // reset sets consent to the opted-out default, so persist the
+                // user's explicit choice either way (opt-in only if they checked).
                 await startTrial();
-                if (!shareUsage) {
-                  await fetch("/api/usage", {
-                    method: "POST",
-                    headers: { "content-type": "application/json" },
-                    body: JSON.stringify({ op: "consent", optOut: true }),
-                  }).catch(() => {});
-                }
+                await fetch("/api/usage", {
+                  method: "POST",
+                  headers: { "content-type": "application/json" },
+                  body: JSON.stringify({ op: "consent", optOut: !shareUsage }),
+                }).catch(() => {});
                 await finishRegistration();
                 if (onboarding.onboardingVariant === "play_first") logEvent("sample_vault_loaded");
               })()

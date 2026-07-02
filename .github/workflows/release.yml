@@ -22,7 +22,36 @@ permissions:
   contents: write # create the release and upload installer assets
 
 jobs:
+  # Gate: types, tests, and lint must pass before anything is built or published.
+  # Previously the pipeline only built + published, so a broken typecheck or a
+  # failing test could be cut into a signed release with nothing catching it.
+  check:
+    name: Typecheck, tests & lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Tests
+        run: npm run test:extract
+      # Lint is advisory until eslint + eslint-config-next are pinned in
+      # package.json (kept out of this change to avoid a package-lock version bump
+      # that couldn't be verified here). Installed ad hoc; failures don't block the
+      # release. Flip `continue-on-error` off once the deps are pinned and green.
+      - name: Lint (advisory)
+        continue-on-error: true
+        run: |
+          npm install --no-save eslint@^8.57.1 eslint-config-next@15.5.19
+          npx next lint
+
   build:
+    needs: check
     strategy:
       fail-fast: false
       matrix:

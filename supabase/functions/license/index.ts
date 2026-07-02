@@ -73,7 +73,15 @@ function admin() {
 
 // --- AES-256-GCM (Web Crypto). Token = base64(iv[12] || ciphertext+tag). ------
 async function aesKey(): Promise<CryptoKey> {
-  const secret = Deno.env.get("LICENSE_SECRET") ?? "lighthouse-insecure-default-secret";
+  // Fail closed: refuse to run with a public, source-committed default secret.
+  // A missing secret degrades to controlled errors (see the handler's try/catch),
+  // which the client treats as offline grace — never as a forgeable "valid".
+  const secret = Deno.env.get("LICENSE_SECRET");
+  if (!secret) {
+    throw new Error(
+      "LICENSE_SECRET is not configured. Run `supabase secrets set LICENSE_SECRET=<long random string>` before deploying.",
+    );
+  }
   const material = new TextEncoder().encode("lighthouse-license-v1:" + secret);
   const hash = await crypto.subtle.digest("SHA-256", material);
   return crypto.subtle.importKey("raw", hash, { name: "AES-GCM" }, false, ["encrypt", "decrypt"]);
@@ -434,14 +442,20 @@ async function check(licenseKey: string): Promise<Response> {
       }
     | undefined;
 
-  const type = (row?.license_type ?? decoded.type ?? "trial") as "trial" | "paid";
   const guid = decoded.guid;
+  // Entitlement is authoritative from the DB row. A genuine paid or trial license
+  // always has a backing row (issuePaid/activate upsert one), so a token WITHOUT a
+  // row — including a "paid" token forged from a leaked or defaulted signing
+  // secret — cannot prove standing. Report "none" rather than trusting the token's
+  // own decoded.type / decoded.paidThrough claims.
+  if (!row) return json({ status: "none", guid });
+  const type = (row.license_type ?? "trial") as "trial" | "paid";
   const now = Date.now();
 
   if (type === "paid") {
     // Paid vaults are NEVER locked destructively. Past paid_through → grace,
     // then locked (files kept, sign-in gate) until renewed.
-    const end = row?.paid_through ?? decoded.paidThrough ?? null;
+    const end = row.paid_through ?? null;
     if (!end) return json({ status: "valid", licenseType: "paid", guid }); // open-ended
     const endMs = Date.parse(end);
     const graceUntil = new Date(endMs + (row?.grace_days ?? GRACE_DAYS) * DAY_MS).toISOString();
@@ -455,9 +469,8 @@ async function check(licenseKey: string): Promise<Response> {
   // Nothing is ever deleted — once the allowance is spent the status is
   // "expired" and the app locks (greyed vault + sign-in gate).
   // A trial carries no expiry in its token — the sign-in-day count lives only in
-  // the row. Without one (never registered, or deleted) it can't be counted, so
-  // report "none" (prompt to start a trial) rather than an unbounded "valid".
-  if (!row) return json({ status: "none", licenseType: "trial", guid });
+  // the row, which is guaranteed present here (row-less tokens returned "none"
+  // above).
   const trialDays = row.trial_days ?? TRIAL_DAYS;
   let activeDays = row.active_days ?? 0;
   const today = new Date().toISOString().slice(0, 10); // UTC YYYY-MM-DD
@@ -516,6 +529,17 @@ Deno.serve(async (req: Request) => {
   if (req.method !== "POST") return json({ error: "POST only" }, 405);
 
   const body = await req.json().catch(() => ({}));
+  try {
+    return await route(body, req);
+  } catch (err) {
+    // Controlled failure (e.g. a missing LICENSE_SECRET) — never leak a stack and
+    // never fall through to a state a client could read as a valid entitlement.
+    console.error("license fn error:", err instanceof Error ? err.message : err);
+    return json({ status: "error", error: "server error" }, 500);
+  }
+});
+
+async function route(body: Record<string, unknown>, req: Request): Promise<Response> {
   switch (body.op) {
     case "start":
       return await start((body.contact ?? {}) as Contact);
@@ -544,4 +568,4 @@ Deno.serve(async (req: Request) => {
     default:
       return json({ error: "unknown op" }, 400);
   }
-});
+}

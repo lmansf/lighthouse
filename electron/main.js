@@ -9,8 +9,17 @@ const { spawn } = require("node:child_process");
 const path = require("node:path");
 const fs = require("node:fs");
 const http = require("node:http");
+const crypto = require("node:crypto");
 
 const PORT = Number(process.env.LIGHTHOUSE_PORT || 3777);
+// Per-launch shared secret. The renderer authenticates to the local API via its
+// same-origin Origin header; header-less callers (this main process) must present
+// this token instead. It lets the server reject any other local process/user that
+// hits the port without an Origin, closing the old "no Origin ⇒ trusted" hole.
+const API_TOKEN = crypto.randomBytes(32).toString("hex");
+// Everything addresses the server as 127.0.0.1 (never "localhost", which can
+// resolve to IPv6 ::1 and miss our IPv4-only bind).
+const SERVER_ORIGIN = `http://127.0.0.1:${PORT}`;
 const APP_ROOT = path.join(__dirname, "..");
 const WINDOW_ICON = path.join(APP_ROOT, "assets", "icon.png");
 const TRAY_ICON = path.join(APP_ROOT, "assets", "tray.png");
@@ -225,10 +234,17 @@ function reconcileModel() {
 function startServer() {
   const nextBin = path.join(APP_ROOT, "node_modules", "next", "dist", "bin", "next");
   const out = logFd("server.log");
-  serverProc = spawn(process.execPath, [nextBin, "start", "-p", String(PORT)], {
+  // Bind to loopback ONLY. `next start` defaults its host to 0.0.0.0, which would
+  // expose the local API (and every unauthenticated file/link/open route) to any
+  // device on the same network. The renderer always talks to 127.0.0.1, so this
+  // is transparent to the app while removing the entire LAN attack surface. Both
+  // the `-H` flag and HOSTNAME are set so neither Next default can re-widen it.
+  serverProc = spawn(process.execPath, [nextBin, "start", "-p", String(PORT), "-H", "127.0.0.1"], {
     cwd: APP_ROOT,
     env: {
       ...process.env,
+      HOSTNAME: "127.0.0.1", // belt-and-suspenders: never bind beyond loopback
+      LIGHTHOUSE_API_TOKEN: API_TOKEN, // header-less callers must present this
       ELECTRON_RUN_AS_NODE: "1", // run the Next CLI on Electron's bundled Node
       LIGHTHOUSE_DESKTOP: "1", // gates desktop-only endpoints (e.g. link in place)
       // Where the bundled offline assets (local model, TTS voice) live, so the
@@ -240,6 +256,9 @@ function startServer() {
       // Where the Next server downloads (and reads) the optional private model,
       // matching what findModel() watches so llama-server picks it up.
       LIGHTHOUSE_MODELS_DIR: modelsDir(),
+      // Keep OAuth connector tokens in the app's private data dir, NOT inside the
+      // vault (which defaults to the cloud-synced Documents folder).
+      LIGHTHOUSE_CONNECTORS_DIR: path.join(app.getPath("userData"), "connectors"),
       VAULT_DIR: vaultDir(),
       // Let the in-app UI read/change desktop settings (e.g. launch-at-login);
       // the main process re-reads this file on its next launch.
@@ -257,7 +276,7 @@ function startServer() {
 
 function waitForServer(cb, tries = 0) {
   http
-    .get(`http://localhost:${PORT}/api/rag`, (res) => {
+    .get(`${SERVER_ORIGIN}/api/rag`, (res) => {
       res.resume();
       cb(null);
     })
@@ -284,11 +303,20 @@ function createWindow() {
   // Open external links (e.g. the Microsoft device-login page) in the system
   // browser rather than a new Electron window.
   win.webContents.setWindowOpenHandler(({ url }) => {
-    if (/^https?:\/\//i.test(url) && !url.startsWith(`http://localhost:${PORT}`)) {
+    if (/^https?:\/\//i.test(url) && !url.startsWith(SERVER_ORIGIN)) {
       shell.openExternal(url);
       return { action: "deny" };
     }
     return { action: "allow" };
+  });
+  // Keep the top frame pinned to the app origin. Without this a malicious link or
+  // redirect could navigate the whole window to a remote/file URL inside the
+  // Electron context; instead we block it and hand external URLs to the OS browser.
+  win.webContents.on("will-navigate", (e, url) => {
+    if (!url.startsWith(SERVER_ORIGIN)) {
+      e.preventDefault();
+      if (/^https?:\/\//i.test(url)) shell.openExternal(url);
+    }
   });
   win.once("ready-to-show", () => win.show());
   // Closing hides to tray instead of quitting (persistent app).
@@ -302,7 +330,7 @@ function createWindow() {
 
 /** Swap the splash for the live app once the local server is answering. */
 function showApp() {
-  if (win && !win.isDestroyed()) win.loadURL(`http://localhost:${PORT}`);
+  if (win && !win.isDestroyed()) win.loadURL(SERVER_ORIGIN);
 }
 
 /** Replace the loading splash with a static error state when startup fails. */
@@ -310,14 +338,19 @@ function showError() {
   if (win && !win.isDestroyed()) win.loadFile(path.join(__dirname, "error.html"));
 }
 
-/** POST to the running local server's /api/rag (no Origin ⇒ same-origin OK). */
+/** POST to the running local server's /api/rag. This caller sends no Origin, so
+ *  it authenticates with the per-launch API token instead. */
 function postRag(body) {
   return new Promise((resolve, reject) => {
     const data = Buffer.from(JSON.stringify(body));
     const req = http.request(
       {
-        host: "localhost", port: PORT, path: "/api/rag", method: "POST",
-        headers: { "content-type": "application/json", "content-length": data.length },
+        host: "127.0.0.1", port: PORT, path: "/api/rag", method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "content-length": data.length,
+          "x-lighthouse-token": API_TOKEN,
+        },
       },
       (res) => {
         let buf = "";

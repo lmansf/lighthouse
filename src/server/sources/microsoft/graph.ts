@@ -20,9 +20,25 @@ const MAX_MIRROR_BYTES = 50_000_000;
 
 const nodeId = (driveId: string, itemId: string) => `${SHAREPOINT_SOURCE_ID}::${driveId}::${itemId}`;
 
+/** True only for Microsoft Graph hosts — the sole place we'll send the token. */
+function isGraphHost(url: string): boolean {
+  try {
+    const h = new URL(url).hostname.toLowerCase();
+    return h === "graph.microsoft.com" || h.endsWith(".graph.microsoft.com");
+  } catch {
+    return false;
+  }
+}
+
 async function graphGet(pathOrUrl: string): Promise<Record<string, unknown>> {
   const token = await getAccessToken();
   const url = pathOrUrl.startsWith("http") ? pathOrUrl : `${GRAPH}${pathOrUrl}`;
+  // Follow-on URLs (e.g. @odata.nextLink paging) come from Graph responses. Only
+  // ever attach the bearer token to a Graph host, so a tampered/injected URL in a
+  // response can't be used to exfiltrate the access token to an attacker.
+  if (!isGraphHost(url)) {
+    throw new Error(`refusing to send Graph token to non-Graph host: ${new URL(url).host}`);
+  }
   const res = await fetch(url, { headers: { authorization: `Bearer ${token}` } });
   if (!res.ok) {
     const body = await res.text().catch(() => "");

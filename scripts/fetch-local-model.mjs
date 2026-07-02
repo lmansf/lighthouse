@@ -160,10 +160,14 @@ function score(name) {
  */
 function extract(archivePath, outDir) {
   const isTar = /\.(tar\.gz|tgz)$/i.test(archivePath);
+  // PowerShell single-quoted strings escape a literal quote by doubling it.
+  // Escape both paths so an archive/asset name containing a `'` can't break out
+  // of the quotes and inject arbitrary PowerShell.
+  const psQuote = (s) => `'${String(s).replace(/'/g, "''")}'`;
   const [cmd, cmdArgs] = isTar
     ? ["tar", ["-xzf", archivePath, "-C", outDir]]
     : platform === "win32"
-      ? ["powershell", ["-NoProfile", "-NonInteractive", "-Command", `Expand-Archive -Path '${archivePath}' -DestinationPath '${outDir}' -Force`]]
+      ? ["powershell", ["-NoProfile", "-NonInteractive", "-Command", `Expand-Archive -Path ${psQuote(archivePath)} -DestinationPath ${psQuote(outDir)} -Force`]]
       : ["unzip", ["-o", archivePath, "-d", outDir]];
   const r = spawnSync(cmd, cmdArgs, { stdio: "inherit" });
   if (r.status !== 0) {

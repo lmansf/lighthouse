@@ -8,15 +8,15 @@
  * success (see license.ts `publishUsageEvents`). Nothing here may ever break a
  * launch: every path is best-effort and swallows its own errors.
  *
- * Consent: capture is ON by default (opted in). The user can opt out at
- * registration (OnboardingPanel); the flag is persisted in `usage.json` and is
- * reset to the default (opted in) every time a trial is minted (license.ts
- * `startTrial`). While opted out nothing is captured, buffered, or published,
- * and any buffered-but-unpublished events are dropped.
+ * Consent: capture is OFF by default (opted out). The user must explicitly opt
+ * in at registration (OnboardingPanel); the flag is persisted in `usage.json`
+ * and a trial mint resets it to the opted-out default (license.ts `startTrial`),
+ * so a new trial never silently re-enables capture. While opted out nothing is
+ * captured, buffered, or published, and any buffered events are dropped.
  *
- * Privacy: only coarse labels/names are recorded (a control's text, aria-label,
- * or a file/folder name) — never field values, file contents, or secrets. Each
- * label is length-capped on both ends of the wire.
+ * Privacy: only coarse labels are recorded (a control's text/aria-label or the
+ * coarse folder/file kind) — never file/folder names, field values, file
+ * contents, or secrets. Each label is length-capped on both ends of the wire.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -56,9 +56,10 @@ interface UsageConsent {
   optOut?: boolean;
 }
 
-/** Whether the user has opted OUT of usage logging (default: opted in). */
+/** Whether the user has opted OUT of usage logging. Default is opted OUT:
+ *  capture stays off until the user explicitly opts in (optOut === false). */
 export function isUsageOptedOut(): boolean {
-  return readJson<UsageConsent>(consentPath(), {}).optOut === true;
+  return readJson<UsageConsent>(consentPath(), {}).optOut !== false;
 }
 
 /**
@@ -70,9 +71,11 @@ export function setUsageOptOut(optOut: boolean): void {
   if (optOut) clearUsageBuffer();
 }
 
-/** Reset consent to the default (opted in). Called when a trial is minted. */
+/** Reset consent to the default (opted OUT). Called when a trial is minted so a
+ *  new trial never silently re-enables capture; the user's explicit choice is
+ *  persisted afterward by the onboarding flow. */
 export function resetUsageConsent(): void {
-  writeJson(consentPath(), { optOut: false } satisfies UsageConsent);
+  writeJson(consentPath(), { optOut: true } satisfies UsageConsent);
 }
 
 /** Drop the local buffer (best-effort). */

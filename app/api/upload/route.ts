@@ -8,6 +8,7 @@ export const dynamic = "force-dynamic";
 
 const MAX_FILE_BYTES = 25 * 1024 * 1024; // 25 MB per file
 const MAX_FILES = 50;
+const MAX_TOTAL_BYTES = 200 * 1024 * 1024; // 200 MB per request (aggregate cap)
 
 export async function POST(req: Request) {
   if (!isSameOrigin(req)) {
@@ -37,6 +38,7 @@ export async function POST(req: Request) {
   const added: { newId: string }[] = [];
   const skipped: { name: string; reason: string }[] = [];
   let accepted = 0;
+  let totalBytes = 0;
   for (const { file, path: rel } of items) {
     if (accepted >= MAX_FILES) {
       skipped.push({ name: file.name, reason: `exceeds max of ${MAX_FILES} files` });
@@ -44,6 +46,12 @@ export async function POST(req: Request) {
     }
     if (file.size > MAX_FILE_BYTES) {
       skipped.push({ name: file.name, reason: `exceeds ${MAX_FILE_BYTES / (1024 * 1024)}MB limit` });
+      continue;
+    }
+    // Bound total bytes read into memory per request, so a batch of many
+    // under-limit files can't be used to exhaust memory.
+    if (totalBytes + file.size > MAX_TOTAL_BYTES) {
+      skipped.push({ name: file.name, reason: `request exceeds ${MAX_TOTAL_BYTES / (1024 * 1024)}MB total` });
       continue;
     }
     // Derive a sub-directory from the relative path (everything but the file
@@ -54,6 +62,7 @@ export async function POST(req: Request) {
       const bytes = Buffer.from(await file.arrayBuffer());
       added.push(addFile(file.name, bytes, target));
       accepted++;
+      totalBytes += file.size;
     } catch (err) {
       skipped.push({ name: file.name, reason: err instanceof Error ? err.message : "upload failed" });
     }
