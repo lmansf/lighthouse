@@ -23,10 +23,17 @@
  * downloads it on demand instead (opt-in "＋" in the model picker → app/api/model
  * → the user's data dir). See src/server/localModel.ts.
  *
+ * All default assets are PINNED to a specific version/revision and verified
+ * against a committed SHA-256 (see ASSET_SHA256 below); the build fails closed on
+ * any missing or mismatched digest, so a compromised CDN / mutated upstream / MITM
+ * can't slip a tampered binary into the installer. Run
+ * `npm run fetch:model -- --record` to (re)compute digests when bumping a version,
+ * then paste the printed values into ASSET_SHA256 and commit.
+ *
  * Overridable via env (all optional):
- *   LLAMACPP_VERSION   llama.cpp release tag to pin (default: latest)
- *   LLAMACPP_SHA256    expected SHA-256 of the llama.cpp release archive (optional)
- *   GITHUB_TOKEN       lifts the unauthenticated GitHub API rate limit (optional)
+ *   LLAMACPP_VERSION   override the pinned llama.cpp release tag
+ *   PIPER_VERSION      override the pinned piper release tag
+ *   GITHUB_TOKEN       lifts the unauthenticated GitHub API rate limit
  */
 import { createWriteStream, existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -41,6 +48,28 @@ const force = process.argv.includes("--force");
 const platform = process.platform; // win32 | darwin | linux
 
 const LLAMACPP_API = "https://api.github.com/repos/ggml-org/llama.cpp/releases";
+
+// --- Pinned, integrity-verified build assets --------------------------------
+// Each default asset is pinned to a specific version/revision AND a SHA-256.
+// Bump the version + digest together: GitHub release digests come from the
+// release API's asset `digest` field, the HF voice digest from its LFS oid, and
+// anything else from `--record`. Keys are the asset filenames the pickers resolve
+// for the platforms the release pipeline builds (Windows x64, macOS arm64).
+const LLAMACPP_VERSION = "b9859"; // ggml-org/llama.cpp release tag
+const PIPER_VERSION = "2023.11.14-2"; // rhasspy/piper release tag
+const VOICE_REVISION = "e21c7de8d4eab79b902f0d61e662b3f21664b8d2"; // rhasspy/piper-voices commit
+const ASSET_SHA256 = {
+  "llama-b9859-bin-win-cpu-x64.zip": "c9aa80f233a7d1749341860f11723b912d4cfd6eec19434c3d00bba0abc9f85c",
+  "llama-b9859-bin-macos-arm64.tar.gz": "21e720ac103d28d7585a52b8023fb86fc0736c90ad92c1e75053207630e90df6",
+  "piper_windows_amd64.zip": "f3c58906402b24f3a96d92145f58acba6d86c9b5db896d207f78dc80811efcea",
+  "piper_macos_aarch64.tar.gz": "6b1eb03b3735946cb35216e063e7eebcc33a6bbf5dd96ec0217959bf1cdcb0cc",
+  "en_US-lessac-medium.onnx": "5efe09e69902187827af646e1a6e9d269dee769f9877d17b16b1b46eeaaf019f",
+  "en_US-lessac-medium.onnx.json": "efe19c417bed055f2d69908248c6ba650fa135bc868b0e6abb3da181dab690a0",
+};
+// `--record` recomputes and prints digests (to bootstrap a version bump) instead
+// of enforcing them; the normal path fails closed on any missing/mismatched hash.
+const RECORD = process.argv.includes("--record");
+const recorded = {};
 
 /** GET that follows redirects across hosts and resolves with the response. */
 function get(url, headers = {}) {
@@ -77,16 +106,27 @@ async function getJson(url) {
 }
 
 /**
- * Stream a download to disk with a coarse progress line. Writes to a `.part`
- * temp file and renames into place only after the byte count matches
- * content-length (and the optional SHA-256), so an interrupted run never leaves
- * a truncated/tampered file that a later run mistakes for a complete one.
+ * Stream a download to disk with a coarse progress line, verifying its SHA-256.
+ * Writes to a `.part` temp file and renames into place only after the byte count
+ * matches content-length AND the digest matches the pinned value, so an
+ * interrupted OR tampered download never lands as a "complete" file.
+ *
+ * `assetName` keys into ASSET_SHA256. A missing or mismatched digest is a hard
+ * failure (fail closed) — except under `--record`, which records the computed
+ * digest so a maintainer can pin it.
  */
-async function download(url, outPath, label, expectedSha256) {
+async function download(url, outPath, label, assetName) {
+  const expected = ASSET_SHA256[assetName]?.trim().toLowerCase();
+  if (!expected && !RECORD) {
+    throw new Error(
+      `${label}: no pinned SHA-256 for "${assetName}". Run \`npm run fetch:model -- --record\` ` +
+        `to compute it, add it to ASSET_SHA256 in scripts/fetch-local-model.mjs, and commit.`,
+    );
+  }
   const res = await get(url);
   const total = Number(res.headers["content-length"] || 0);
   const tmpPath = `${outPath}.part`;
-  const hash = expectedSha256 ? createHash("sha256") : null;
+  const hash = createHash("sha256");
   let seen = 0;
   let lastPct = -1;
   try {
@@ -94,7 +134,7 @@ async function download(url, outPath, label, expectedSha256) {
       const out = createWriteStream(tmpPath);
       res.on("data", (c) => {
         seen += c.length;
-        if (hash) hash.update(c);
+        hash.update(c);
         if (total) {
           const pct = Math.floor((seen / total) * 100);
           if (pct !== lastPct && pct % 5 === 0) {
@@ -111,11 +151,14 @@ async function download(url, outPath, label, expectedSha256) {
     if (total && seen !== total) {
       throw new Error(`${label}: incomplete download (${seen}/${total} bytes)`);
     }
-    if (hash) {
-      const got = hash.digest("hex");
-      if (got !== expectedSha256.trim().toLowerCase()) {
-        throw new Error(`${label}: SHA-256 mismatch (expected ${expectedSha256.trim()}, got ${got})`);
+    const got = hash.digest("hex");
+    if (expected) {
+      if (got !== expected) {
+        throw new Error(`${label}: SHA-256 mismatch for "${assetName}"\n  expected ${expected}\n  got      ${got}`);
       }
+    } else {
+      recorded[assetName] = got; // --record
+      process.stdout.write(`\r  [record] ${assetName}: ${got}\n`);
     }
   } catch (e) {
     rmSync(tmpPath, { force: true });
@@ -263,12 +306,13 @@ async function fetchTts() {
   if (!force && existsSync(piperPath)) {
     console.log(`✓ ${piperName} already present`);
   } else {
-    console.log(`Resolving piper latest release…`);
-    const release = await getJson("https://api.github.com/repos/rhasspy/piper/releases/latest");
+    const piperTag = process.env.PIPER_VERSION?.trim() || PIPER_VERSION;
+    console.log(`Resolving piper ${piperTag} release…`);
+    const release = await getJson(`https://api.github.com/repos/rhasspy/piper/releases/tags/${piperTag}`);
     const asset = pickPiperAsset(release.assets || []);
     console.log(`Downloading ${asset.name} (${release.tag_name})`);
     const archivePath = join(ttsDest, asset.name);
-    await download(asset.browser_download_url, archivePath, "piper");
+    await download(asset.browser_download_url, archivePath, "piper", asset.name);
     extract(archivePath, ttsDest);
     rmSync(archivePath, { force: true });
     flattenPiper(ttsDest, piperName);
@@ -278,14 +322,14 @@ async function fetchTts() {
 
   // 2. Voice model (.onnx) + its config (.onnx.json) — a clear, natural US voice.
   const voiceBase =
-    "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium";
+    `https://huggingface.co/rhasspy/piper-voices/resolve/${VOICE_REVISION}/en/en_US/lessac/medium/en_US-lessac-medium`;
   const onnxPath = join(ttsDest, "en_US-lessac-medium.onnx");
   const jsonPath = join(ttsDest, "en_US-lessac-medium.onnx.json");
   if (!force && existsSync(onnxPath) && statSync(onnxPath).size > 1e6) {
     console.log(`✓ voice already present`);
   } else {
-    await download(`${voiceBase}.onnx`, onnxPath, "voice");
-    await download(`${voiceBase}.onnx.json`, jsonPath, "voice-config");
+    await download(`${voiceBase}.onnx`, onnxPath, "voice", "en_US-lessac-medium.onnx");
+    await download(`${voiceBase}.onnx.json`, jsonPath, "voice-config", "en_US-lessac-medium.onnx.json");
     console.log(`✓ voice en_US-lessac-medium`);
   }
 }
@@ -299,13 +343,13 @@ async function main() {
   if (!force && existsSync(serverPath)) {
     console.log(`✓ ${serverName} already present`);
   } else {
-    const tag = process.env.LLAMACPP_VERSION?.trim();
-    console.log(`Resolving llama.cpp ${tag || "latest"} release…`);
-    const release = await getJson(tag ? `${LLAMACPP_API}/tags/${tag}` : `${LLAMACPP_API}/latest`);
+    const tag = process.env.LLAMACPP_VERSION?.trim() || LLAMACPP_VERSION;
+    console.log(`Resolving llama.cpp ${tag} release…`);
+    const release = await getJson(`${LLAMACPP_API}/tags/${tag}`);
     const asset = pickAsset(release.assets || []);
     console.log(`Downloading ${asset.name} (${release.tag_name})`);
     const archivePath = join(dest, asset.name);
-    await download(asset.browser_download_url, archivePath, "llama-server", process.env.LLAMACPP_SHA256?.trim());
+    await download(asset.browser_download_url, archivePath, "llama-server", asset.name);
     extract(archivePath, dest);
     rmSync(archivePath, { force: true });
     flatten(dest);
@@ -315,6 +359,11 @@ async function main() {
 
   // 2. Local neural TTS (Piper + voice) for on-device read-aloud.
   await fetchTts();
+
+  if (RECORD && Object.keys(recorded).length) {
+    console.log(`\n--record: paste these into ASSET_SHA256 (scripts/fetch-local-model.mjs), then commit:`);
+    for (const [k, v] of Object.entries(recorded)) console.log(`  ${JSON.stringify(k)}: ${JSON.stringify(v)},`);
+  }
 
   console.log(`\nBundled llama-server + TTS ready in resources/. The private model is`);
   console.log(`downloaded on demand at runtime (not bundled). Run \`npm run dist\` to package.`);

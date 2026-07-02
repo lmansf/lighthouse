@@ -78,7 +78,17 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # No signing certificates in CI — build an unsigned macOS app rather
-          # than failing on a missing identity. (Notarize later for no warning.)
-          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+          # Code signing — active ONLY when the matching repo secrets are set. With
+          # none present the build falls back to unsigned (CSC_IDENTITY_AUTO_DISCOVERY
+          # is turned off so electron-builder doesn't fail hunting for an identity,
+          # and build/notarize.cjs no-ops without the Apple creds). To sign + notarize,
+          # add these secrets — nothing else needs to change:
+          #   CSC_LINK / CSC_KEY_PASSWORD  base64 .p12 code-signing cert + password (mac & win)
+          #   APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID  (macOS notarization)
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          CSC_IDENTITY_AUTO_DISCOVERY: ${{ secrets.CSC_LINK != '' }}
         run: npm run release

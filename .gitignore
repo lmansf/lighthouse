@@ -18,6 +18,8 @@
 !/build/installer.nsh
 !/build/installerSidebar.bmp
 !/build/uninstallerSidebar.bmp
+!/build/entitlements.mac.plist
+!/build/notarize.cjs
 
 # misc
 .DS_Store
