@@ -4,12 +4,13 @@
 // local port, shows it in a window, keeps files in a real local directory,
 // launches at login, lives in the tray, and adds native Add files / Choose
 // vault folder dialogs. Run after `npm run build` via `npm run electron`.
-const { app, BrowserWindow, Menu, Tray, dialog, shell, nativeImage, session } = require("electron");
+const { app, BrowserWindow, Menu, Tray, dialog, shell, nativeImage, session, ipcMain } = require("electron");
 const { spawn } = require("node:child_process");
 const path = require("node:path");
 const fs = require("node:fs");
 const http = require("node:http");
 const crypto = require("node:crypto");
+const updater = require("./updater");
 
 const PORT = Number(process.env.LIGHTHOUSE_PORT || 3777);
 // Per-launch shared secret. The renderer authenticates to the local API via its
@@ -28,6 +29,12 @@ let serverProc = null;
 let llmProc = null;
 let win = null;
 let tray = null;
+// Auto-updater state. `bootPhase` is true only while the splash is showing; it
+// gates the privileged "restart to update" action so live app content (loaded by
+// showApp) can never trigger an install. See docs/auto-updater-design.md.
+let lastUpdateState = { phase: "checking" };
+let updateAvailable = false;
+let bootPhase = true;
 
 /**
  * Open (append) a log file in the per-user data dir for a child process's
@@ -294,12 +301,21 @@ function createWindow() {
     backgroundColor: "#FBF5E9", // sandy cream — matches the theme, no flash
     title: "Lighthouse",
     icon: WINDOW_ICON,
-    webPreferences: { contextIsolation: true },
+    webPreferences: {
+      contextIsolation: true,
+      preload: path.join(__dirname, "preload.js"), // exposes read-only update state
+    },
   });
   // Show a branded splash immediately (a local file, so it paints in well under a
   // second) while the local engine boots; `showApp()` swaps to the live app once
   // the server answers. This keeps the user from staring at an empty screen.
   win.loadFile(path.join(__dirname, "splash.html"));
+  // webContents.send isn't buffered, so re-emit the latest update state whenever a
+  // document finishes loading — covers the splash arriving after the first emit,
+  // and re-arms across the splash→app swap and any reload().
+  win.webContents.on("did-finish-load", () => {
+    if (win && !win.isDestroyed()) win.webContents.send("update:state", lastUpdateState);
+  });
   // Open external links (e.g. the Microsoft device-login page) in the system
   // browser rather than a new Electron window.
   win.webContents.setWindowOpenHandler(({ url }) => {
@@ -330,7 +346,19 @@ function createWindow() {
 
 /** Swap the splash for the live app once the local server is answering. */
 function showApp() {
+  bootPhase = false; // live app content loads now; it must not trigger an install
   if (win && !win.isDestroyed()) win.loadURL(SERVER_ORIGIN);
+}
+
+/** Broadcast an update-state change to the current document and refresh the tray. */
+function setUpdateState(s) {
+  lastUpdateState = s;
+  if (win && !win.isDestroyed()) win.webContents.send("update:state", s);
+  const avail = s.phase === "available" || s.phase === "ready";
+  if (avail !== updateAvailable) {
+    updateAvailable = avail;
+    if (tray) setTrayMenu();
+  }
 }
 
 /** Replace the loading splash with a static error state when startup fails. */
@@ -480,26 +508,41 @@ function buildMenu() {
   );
 }
 
+/** (Re)build the tray menu. Surfaces an "Update available" item when the updater
+ *  has found a newer release — the durable notice, since the splash is gone within
+ *  ~2s of launch. */
+function setTrayMenu() {
+  if (!tray) return;
+  const items = [
+    { label: "Show Lighthouse", click: () => win && win.show() },
+    { label: "Add files…", click: addFilesDialog },
+  ];
+  if (updateAvailable) {
+    items.push(
+      { type: "separator" },
+      { label: "Update available — download…", click: () => shell.openExternal(updater.RELEASE_PAGE_URL) },
+    );
+  }
+  items.push(
+    { type: "separator" },
+    {
+      label: "Quit",
+      click: () => {
+        app.isQuitting = true;
+        app.quit();
+      },
+    },
+  );
+  tray.setContextMenu(Menu.buildFromTemplate(items));
+}
+
 function createTray() {
   // A real branded tray icon, falling back to empty if the asset is missing.
   let trayImg = nativeImage.createFromPath(TRAY_ICON);
   trayImg = trayImg.isEmpty() ? nativeImage.createEmpty() : trayImg.resize({ width: 16, height: 16 });
   tray = new Tray(trayImg);
   tray.setToolTip("Lighthouse");
-  tray.setContextMenu(
-    Menu.buildFromTemplate([
-      { label: "Show Lighthouse", click: () => win && win.show() },
-      { label: "Add files…", click: addFilesDialog },
-      { type: "separator" },
-      {
-        label: "Quit",
-        click: () => {
-          app.isQuitting = true;
-          app.quit();
-        },
-      },
-    ]),
-  );
+  setTrayMenu();
   tray.on("click", () => win && win.show());
 }
 
@@ -535,7 +578,22 @@ if (!app.requestSingleInstanceLock()) {
     startServer();
     buildMenu();
     createTray();
+
+    // Update actions, registered once. `update:open` uses a hard-coded release URL
+    // (benign). `update:restart` is gated to Phase B AND to the boot window, so live
+    // app content (loaded by showApp) can never trigger an install.
+    ipcMain.on("update:open", () => shell.openExternal(updater.RELEASE_PAGE_URL));
+    ipcMain.on("update:restart", () => {
+      if (!updater.UPDATER_CAN_AUTO_INSTALL || bootPhase) return;
+      app.isQuitting = true; // so win.on("close") doesn't hide-to-tray
+      updater.quitAndInstall();
+    });
+
     createWindow(); // show the splash right away; swap to the app when ready
+    // Check for updates during the splash — parallel, non-blocking, best-effort.
+    // Never awaited, never gates showApp(), never routed to showError(). Only in a
+    // packaged build (dev has no update feed).
+    if (app.isPackaged) updater.checkForUpdates(setUpdateState);
     waitForServer((err) => {
       if (err) {
         dialog.showErrorBox(
