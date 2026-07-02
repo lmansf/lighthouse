@@ -16,6 +16,21 @@ const LOCAL_MODEL_ID = "lighthouse-local";
 interface StoredProfile extends OnboardingState {
   /** Kept server-side only; surfaced to the client solely as `hasApiKey`. */
   apiKey?: string;
+  /** Whether the user has ever explicitly saved a model choice (server-only).
+   *  Distinguishes the INITIAL selection from later changes, for analytics. */
+  modelEverSelected?: boolean;
+}
+
+/** Result of a model selection so the API route can emit a `model_selected`
+ *  analytics event (initial choice + any change) — profile.ts must NOT import the
+ *  telemetry layer (license.ts imports profile.ts, so that would be a cycle). */
+export interface ModelSelectionResult {
+  initial: boolean;
+  changed: boolean;
+  provider: string;
+  model: string;
+  previousProvider: string | null;
+  previousModel: string | null;
 }
 
 const EMPTY: StoredProfile = {
@@ -35,8 +50,9 @@ function save(p: StoredProfile): void {
 
 /** Public onboarding state — never includes the raw key. */
 export function getState(): OnboardingState {
-  const { apiKey, ...pub } = load();
+  const { apiKey, modelEverSelected, ...pub } = load();
   void apiKey;
+  void modelEverSelected;
   return {
     ...pub,
     hasApiKey: Boolean(apiKey) || pub.hasApiKey,
@@ -60,7 +76,7 @@ export function register(name: string, email: string): User {
   return user;
 }
 
-export function finishRegistration(): void {
+export function finishRegistration(): ModelSelectionResult | null {
   const p = load();
   // Onboarding A/B: play_first defers the API-key prompt - drop straight into the
   // workspace on the bundled, key-less local model so the user reaches a real
@@ -68,20 +84,30 @@ export function finishRegistration(): void {
   // (the select-model UI stays reachable). key_first keeps the classic flow:
   // pick a model and paste a key during onboarding.
   if (getVariant("onboarding") === "play_first") {
-    save({
-      ...p,
-      providerId: p.providerId ?? LOCAL_PROVIDER_ID,
-      modelId: p.modelId ?? LOCAL_MODEL_ID,
-      step: "done",
-    });
-    return;
+    const providerId = p.providerId ?? LOCAL_PROVIDER_ID;
+    const modelId = p.modelId ?? LOCAL_MODEL_ID;
+    const initial = !p.modelEverSelected;
+    save({ ...p, providerId, modelId, step: "done", modelEverSelected: true });
+    // play_first assigns the local model WITHOUT an explicit user selection, so
+    // report it as the initial model — otherwise these users are invisible in
+    // "which models people use" until they happen to switch to a cloud model.
+    return initial
+      ? { initial: true, changed: false, provider: providerId, model: modelId, previousProvider: p.providerId, previousModel: p.modelId }
+      : null;
   }
   save({ ...p, step: "select-model" });
+  return null;
 }
 
-export function selectModel(providerId: string, modelId: string, apiKey: string): void {
+export function selectModel(
+  providerId: string,
+  modelId: string,
+  apiKey: string,
+): ModelSelectionResult {
   const p = load();
   const key = apiKey.trim();
+  const initial = !p.modelEverSelected;
+  const changed = p.providerId !== providerId || p.modelId !== modelId;
   save({
     ...p,
     providerId,
@@ -89,7 +115,16 @@ export function selectModel(providerId: string, modelId: string, apiKey: string)
     apiKey: key || p.apiKey,
     hasApiKey: Boolean(key) || p.hasApiKey,
     step: "done",
+    modelEverSelected: true,
   });
+  return {
+    initial,
+    changed,
+    provider: providerId,
+    model: modelId,
+    previousProvider: p.providerId,
+    previousModel: p.modelId,
+  };
 }
 
 export function completeOnboarding(): void {

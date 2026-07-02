@@ -343,12 +343,10 @@ export function FeedbackForm({
   const [f, setF] = useState<FeedbackInput>({
     firstName: "",
     lastName: "",
-    email: "",
     easeOfUse: 5,
     overallValue: 5,
     liked: "",
     changeOrAdd: "",
-    doNotContact: false,
     notifyWhenAvailable: false,
   });
   const [busy, setBusy] = useState(false);
@@ -399,14 +397,6 @@ export function FeedbackForm({
       <Field label="What's one feature you would change or add?">
         <Textarea value={f.changeOrAdd} onChange={(_, d) => set({ changeOrAdd: d.value })} />
       </Field>
-      <Field label="Email">
-        <Input type="email" value={f.email} onChange={(_, d) => set({ email: d.value })} />
-      </Field>
-      <Checkbox
-        checked={f.doNotContact}
-        onChange={(_, d) => set({ doNotContact: Boolean(d.checked) })}
-        label="Do not contact me"
-      />
       {showNotify && (
         <Checkbox
           checked={Boolean(f.notifyWhenAvailable)}
@@ -418,7 +408,7 @@ export function FeedbackForm({
       <Button
         className={styles.full}
         appearance="primary"
-        disabled={busy || !f.email.trim()}
+        disabled={busy}
         icon={busy ? <Spinner size="tiny" /> : undefined}
         onClick={() => void submit()}
       >
