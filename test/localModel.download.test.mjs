@@ -92,6 +92,9 @@ const MB = 1024 * 1024;
 const SIZE = 100 * MB + MB; // just over the module's 1e8-byte "real model" guard
 const FILE = "test-model-Q4_K_M.gguf";
 const CHUNK = Buffer.alloc(MB, 0); // 1 MB of zeros, streamed repeatedly
+// The first MB carries the "GGUF" magic so the completed file passes the module's
+// real-model check (detection requires the magic, not just size).
+const FIRST_CHUNK = Buffer.concat([Buffer.from("GGUF"), Buffer.alloc(MB - 4, 0)]);
 
 // Server behaviour is switched per phase via this mutable knob.
 let mode = "full"; // "full" | "interrupt"
@@ -123,9 +126,10 @@ async function withServer(run) {
         res.end();
         return;
       }
-      sent += CHUNK.length;
+      const chunk = sent === 0 ? FIRST_CHUNK : CHUNK; // first chunk carries the GGUF magic
+      sent += chunk.length;
       // Throttle a touch so the "downloading" state is observable to a poller.
-      res.write(CHUNK, () => setTimeout(pump, 8));
+      res.write(chunk, () => setTimeout(pump, 8));
     };
     pump();
   });

@@ -29,7 +29,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { register } from "node:module";
 import {
-  mkdtempSync, mkdirSync, existsSync, rmSync, openSync, ftruncateSync, closeSync, readdirSync,
+  mkdtempSync, mkdirSync, existsSync, rmSync, openSync, writeSync, ftruncateSync, closeSync, readdirSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -44,10 +44,12 @@ function log(...a) {
   console.log("[uninstall]", ...a);
 }
 
-/** Create a `.gguf` of `size` bytes fast (sparse), to clear the >100MB guard. */
+/** Create a `.gguf` of `size` bytes fast (sparse), to clear the >100MB guard.
+ *  Starts with the "GGUF" magic so it passes the module's real-model check. */
 function makeModel(dir, name, size) {
   const p = path.join(dir, name);
   const fd = openSync(p, "w");
+  writeSync(fd, Buffer.from("GGUF")); // valid GGUF magic (detection requires it)
   ftruncateSync(fd, size);
   closeSync(fd);
   return p;
