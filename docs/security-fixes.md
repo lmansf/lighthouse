@@ -8,6 +8,28 @@ vendor's cloud, counts as a real boundary crossed).
 
 ---
 
+## 2026-07-02 — Regression fix: same-origin check broke all mutations (v0.2.5)
+
+- **`isSameOrigin` 403'd the app's own requests** — _High (functional regression I
+  introduced in v0.2.4)._ After the loopback-hardening changed the renderer to load
+  `127.0.0.1`, the same-origin check compared `Origin.host` to `req.url.host` — but
+  Next reports `req.url` host as `localhost`, so the `localhost` vs `127.0.0.1`
+  mismatch rejected **every mutating POST** (file inclusion toggle, model install,
+  upload, settings) with 403. Users saw file selection and local-model install as
+  "broken." **Fix:** require the Origin to be a loopback host on the same port
+  (rather than an exact host-string match); still blocks cross-site (non-loopback
+  Origin), DNS-rebinding (non-loopback Host), other-loopback-port pages, and
+  header-less callers lacking the token. Verified end-to-end + with a unit test
+  covering all cases. `src/server/http.ts`.
+- **Stale local-model detection** — `main.js findModel()` now requires the same
+  ≥100 MB size as the picker's `installedModel()`, so a leftover stub/partial
+  `.gguf` from an old install isn't loaded (and doesn't show a dead "Installed").
+  With the 403 fixed, uninstall + reinstall now work to clear a cached model.
+- **Subtle version badge** added (bottom-left, `NEXT_PUBLIC_APP_VERSION` from
+  package.json) so the running build is identifiable.
+
+---
+
 ## 2026-07-02 — Auto-updater (Phase A), lint gate, PII verification
 
 - **Auto-updater implemented (Phase A, notify-only)** — `electron/updater.js`,
