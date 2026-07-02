@@ -25,6 +25,9 @@ interface ModelState {
   status: ModelStatus;
   received: number;
   total: number;
+  /** A `.gguf` leftover exists that can be removed even when it isn't a usable
+   *  model (status "absent"/"error") — lets the user clear a stale/corrupt file. */
+  removable?: boolean;
 }
 
 /** Poll the local-model status, exposing it plus `install()` / `uninstall()`. */
@@ -98,12 +101,13 @@ const useStyles = makeStyles({
     whiteSpace: "nowrap",
   },
   iconBtn: { minWidth: "auto", ...shorthands.padding("0", tokens.spacingHorizontalXS) },
+  actions: { display: "inline-flex", alignItems: "center", gap: tokens.spacingHorizontalXXS },
 });
 
 /** Option content for the local provider: label + its install state / controls. */
 export function LocalModelOption({ label }: { label: string }) {
   const styles = useStyles();
-  const { status, received, total, install, uninstall } = useLocalModel();
+  const { status, received, total, removable, install, uninstall } = useLocalModel();
   const pct = total ? Math.floor((received / total) * 100) : 0;
 
   // Clicks on these controls must not bubble up and select the option.
@@ -145,27 +149,50 @@ export function LocalModelOption({ label }: { label: string }) {
           Removing…
         </span>
       ) : (
-        <Tooltip
-          content={
-            status === "error"
-              ? "Install failed - click to retry (~4.2 GB, one time)"
-              : "Install the private model (~4.2 GB, one time). Runs fully on your machine."
-          }
-          relationship="label"
-        >
-          <Button
-            className={styles.iconBtn}
-            size="small"
-            appearance="subtle"
-            icon={<AddRegular />}
-            aria-label="Install the private model"
-            onMouseDown={swallow}
-            onClick={(e) => {
-              swallow(e);
-              void install();
-            }}
-          />
-        </Tooltip>
+        <span className={styles.actions}>
+          {removable && (
+            <Tooltip
+              content="Remove the leftover model file — it isn't a usable model. Clears it so you can install a clean copy."
+              relationship="label"
+            >
+              <Button
+                className={styles.iconBtn}
+                size="small"
+                appearance="subtle"
+                icon={<DeleteRegular />}
+                aria-label="Remove the leftover model file"
+                onMouseDown={swallow}
+                onClick={(e) => {
+                  swallow(e);
+                  void uninstall();
+                }}
+              />
+            </Tooltip>
+          )}
+          <Tooltip
+            content={
+              status === "error"
+                ? "Install failed - click to retry (~4.2 GB, one time)"
+                : removable
+                  ? "Install a fresh copy of the private model (~4.2 GB, one time)."
+                  : "Install the private model (~4.2 GB, one time). Runs fully on your machine."
+            }
+            relationship="label"
+          >
+            <Button
+              className={styles.iconBtn}
+              size="small"
+              appearance="subtle"
+              icon={<AddRegular />}
+              aria-label="Install the private model"
+              onMouseDown={swallow}
+              onClick={(e) => {
+                swallow(e);
+                void install();
+              }}
+            />
+          </Tooltip>
+        </span>
       )}
     </span>
   );

@@ -88,6 +88,20 @@ function installedModel(): string | null {
 
 /** True if the file starts with the GGUF magic ("GGUF") — a real model file, not
  *  a stray/corrupt/wrong file that merely happens to be large. */
+/** True if ANY `.gguf` exists in a search dir — a real model OR a stale/corrupt/
+ *  wrong leftover from an older install. Used so uninstall can always clear one,
+ *  even when it isn't a usable model. */
+function hasModelFile(): boolean {
+  for (const dir of searchDirs()) {
+    try {
+      if (readdirSync(dir).some((n) => n.toLowerCase().endsWith(".gguf"))) return true;
+    } catch {
+      /* dir may not exist yet */
+    }
+  }
+  return false;
+}
+
 function isGgufFile(path: string): boolean {
   let fd: number | undefined;
   try {
@@ -115,6 +129,10 @@ interface Progress {
   received: number;
   total: number;
   error?: string;
+  /** True when a `.gguf` file exists that uninstall would remove — including a
+   *  corrupt/partial/wrong leftover that isn't a usable model (status "absent"),
+   *  so the UI can always offer to clear it. */
+  removable?: boolean;
 }
 
 // One download at a time, tracked in module state so GET /api/model can report
@@ -126,8 +144,11 @@ export function modelStatus(): Progress {
   if (uninstallPending()) return { status: "uninstalling", received: 0, total: 0 };
   if (progress.status === "downloading") return progress;
   if (installedModel()) return { status: "ready", received: 0, total: 0 };
-  if (progress.status === "error") return progress;
-  return { status: "absent", received: 0, total: 0 };
+  // No usable model. A leftover file may still exist (corrupt/partial/wrong .gguf
+  // from an older install) — surface it as removable so the user can clear it.
+  const removable = hasModelFile();
+  if (progress.status === "error") return { ...progress, removable };
+  return { status: "absent", received: 0, total: 0, removable };
 }
 
 /**
@@ -137,7 +158,9 @@ export function modelStatus(): Progress {
  * clears the marker. Lets the user free the ~4.2 GB or re-test a fresh install.
  */
 export function requestUninstall(): Progress {
-  if (!installedModel() && !uninstallPending()) {
+  // Clear ANY model file, not just a valid one — a corrupt/partial/wrong leftover
+  // is exactly what a user needs to remove to get back to a clean install.
+  if (!hasModelFile() && !uninstallPending()) {
     return { status: "absent", received: 0, total: 0 };
   }
   try {
