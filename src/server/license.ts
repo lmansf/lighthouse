@@ -289,12 +289,10 @@ export async function activateLicense(licenseKey: string): Promise<LicenseResult
 export interface FeedbackInput {
   firstName: string;
   lastName: string;
-  email: string;
   easeOfUse: number;
   overallValue: number;
   liked: string;
   changeOrAdd: string;
-  doNotContact: boolean;
   notifyWhenAvailable?: boolean; // "email me when purchasing opens" (pre-launch)
 }
 
@@ -306,19 +304,25 @@ export interface FeedbackInput {
  * stored.
  */
 export async function submitFeedback(f: FeedbackInput): Promise<{ ok: boolean }> {
+  // Feedback is always from the signed-in account: link it by the stable contact
+  // id and stamp the account's own email — the form no longer asks for an email
+  // or a contact preference. doNotContact keeps whatever the account already set
+  // (e.g. at registration).
   const existing = loadIdentity();
+  const email = accountEmail() ?? existing?.email ?? "";
+  const doNotContact = existing?.doNotContact ?? false;
   writeJson(identityPath(), {
     firstName: f.firstName,
     lastName: f.lastName,
-    email: f.email,
-    doNotContact: f.doNotContact,
+    email,
+    doNotContact,
     city: existing?.city ?? "",
     state: existing?.state ?? "",
   });
   if (!licenseApi()) return { ok: true };
   try {
     const r = await callFn("feedback", {
-      feedback: { ...f, contactId: getContactId(), experiments: getAllVariants() },
+      feedback: { ...f, email, doNotContact, contactId: getContactId(), experiments: getAllVariants() },
     });
     return { ok: r.ok !== false };
   } catch {

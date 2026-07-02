@@ -51,20 +51,19 @@ export async function POST(req: Request) {
     }
 
     case "feedback": {
-      // Submit the feedback form (unlocks 14-day re-trials for the email).
+      // Submit the feedback form. Linked to the signed-in account server-side
+      // (contact id + the account's email), so the form no longer collects one.
       const f = body.feedback as Partial<FeedbackInput> | undefined;
-      if (!f || typeof f.email !== "string" || !f.email.trim()) {
-        return NextResponse.json({ ok: false, reason: "rejected", detail: "email required" }, { status: 400 });
+      if (!f) {
+        return NextResponse.json({ ok: false, reason: "rejected", detail: "feedback required" }, { status: 400 });
       }
       const result = await submitFeedback({
         firstName: String(f.firstName ?? "").trim(),
         lastName: String(f.lastName ?? "").trim(),
-        email: f.email.trim(),
         easeOfUse: Number(f.easeOfUse ?? 0),
         overallValue: Number(f.overallValue ?? 0),
         liked: String(f.liked ?? "").trim(),
         changeOrAdd: String(f.changeOrAdd ?? "").trim(),
-        doNotContact: Boolean(f.doNotContact),
         notifyWhenAvailable: Boolean(f.notifyWhenAvailable),
       });
       return NextResponse.json(result);

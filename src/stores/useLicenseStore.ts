@@ -23,12 +23,10 @@ export type LicenseType = "trial" | "paid";
 export interface FeedbackInput {
   firstName: string;
   lastName: string;
-  email: string;
   easeOfUse: number;
   overallValue: number;
   liked: string;
   changeOrAdd: string;
-  doNotContact: boolean;
   notifyWhenAvailable?: boolean;
 }
 
