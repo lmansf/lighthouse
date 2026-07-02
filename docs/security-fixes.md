@@ -8,6 +8,23 @@ vendor's cloud, counts as a real boundary crossed).
 
 ---
 
+## 2026-07-02 — Local-model detection + version badge placement (v0.2.6)
+
+- **Stale/corrupt cached model blocked fresh installs and failed to run.**
+  `installedModel()` (localModel.ts) and `findModel()` (main.js) counted any
+  `.gguf` ≥100 MB as installed **without validating it's a real model file**, so a
+  corrupt/wrong/half-written leftover from a previous version read as "Installed"
+  (no install button → "install doesn't happen") and was handed to llama-server
+  (→ local model "still failing"). **Fix:** both now require the file to begin with
+  the **GGUF magic** ("GGUF"); a non-model file is treated as *not installed*, so
+  the install button reappears, a fresh download proceeds, and llama-server is
+  never handed junk. Verified live: a 150 MB non-GGUF file → `absent`, a valid
+  GGUF-magic file → `ready`.
+- **Version badge overlapped the settings gear.** Moved from bottom-left (where the
+  settings gear is pinned) to bottom-right, just above the bug-report FAB.
+
+---
+
 ## 2026-07-02 — Regression fix: same-origin check broke all mutations (v0.2.5)
 
 - **`isSameOrigin` 403'd the app's own requests** — _High (functional regression I

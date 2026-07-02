@@ -130,12 +130,29 @@ function modelsDir() {
 // NOT a usable model — ignore it so llama-server doesn't try (and fail) to load it,
 // and so the picker still offers a fresh install rather than a dead "Installed".
 const MIN_MODEL_BYTES = 1e8;
+/** True if the file starts with the GGUF magic — a real model, not stray/corrupt
+ *  junk that merely happens to be large. Must match localModel.ts isGgufFile(). */
+function isGgufFile(p) {
+  let fd;
+  try {
+    fd = fs.openSync(p, "r");
+    const buf = Buffer.alloc(4);
+    fs.readSync(fd, buf, 0, 4, 0);
+    return buf.toString("latin1") === "GGUF";
+  } catch {
+    return false;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+}
 function findModel() {
   for (const dir of [modelsDir(), llmRoot()]) {
     try {
-      const f = fs.readdirSync(dir).find(
-        (n) => n.toLowerCase().endsWith(".gguf") && fs.statSync(path.join(dir, n)).size > MIN_MODEL_BYTES,
-      );
+      const f = fs.readdirSync(dir).find((n) => {
+        if (!n.toLowerCase().endsWith(".gguf")) return false;
+        const p = path.join(dir, n);
+        return fs.statSync(p).size > MIN_MODEL_BYTES && isGgufFile(p);
+      });
       if (f) return path.join(dir, f);
     } catch {
       /* dir may not exist yet */

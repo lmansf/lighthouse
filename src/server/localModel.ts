@@ -13,9 +13,12 @@
  * without a restart.
  */
 import {
+  closeSync,
   createWriteStream,
   existsSync,
   mkdirSync,
+  openSync,
+  readSync,
   readdirSync,
   renameSync,
   rmSync,
@@ -60,19 +63,43 @@ function searchDirs(): string[] {
   return [...new Set([download, join(resourcesDir(), "llm")])];
 }
 
-/** Absolute path to a present, non-trivial `.gguf` in any search dir, or null. */
+/**
+ * Absolute path to a present, USABLE `.gguf` in any search dir, or null. A file
+ * only counts if it's non-trivial in size AND begins with the GGUF magic — so a
+ * corrupt / wrong / half-written leftover from an older install is treated as
+ * "not installed" (the picker offers a fresh install instead of a dead
+ * "Installed", and llama-server is never handed junk). Must match main.js
+ * `findModel()`.
+ */
 function installedModel(): string | null {
   for (const dir of searchDirs()) {
     try {
-      const f = readdirSync(dir).find(
-        (n) => n.toLowerCase().endsWith(".gguf") && statSync(join(dir, n)).size > MIN_BYTES,
-      );
-      if (f) return join(dir, f);
+      for (const n of readdirSync(dir)) {
+        if (!n.toLowerCase().endsWith(".gguf")) continue;
+        const p = join(dir, n);
+        if (statSync(p).size > MIN_BYTES && isGgufFile(p)) return p;
+      }
     } catch {
       /* dir may not exist yet */
     }
   }
   return null;
+}
+
+/** True if the file starts with the GGUF magic ("GGUF") — a real model file, not
+ *  a stray/corrupt/wrong file that merely happens to be large. */
+function isGgufFile(path: string): boolean {
+  let fd: number | undefined;
+  try {
+    fd = openSync(path, "r");
+    const buf = Buffer.alloc(4);
+    readSync(fd, buf, 0, 4, 0);
+    return buf.toString("latin1") === "GGUF";
+  } catch {
+    return false;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
 }
 
 /** True while an uninstall has been requested but main.js hasn't finished it. */
