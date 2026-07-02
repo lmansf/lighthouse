@@ -53,12 +53,17 @@ jobs:
 
   build:
     needs: check
+    # "true" only when a signing cert secret is configured; "false" (unsigned)
+    # otherwise. Referencing secrets in a job-level env is allowed, and a step `if`
+    # can read it. Must NOT be overridden in the build step's own env.
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: ${{ secrets.CSC_LINK != '' }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: windows-latest # → Lighthouse-Setup .exe (NSIS), x64
-          - os: macos-latest # → Lighthouse .dmg, arm64 (unsigned)
+          - os: macos-latest # → Lighthouse .dmg, arm64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -71,25 +76,33 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # `npm run release` = fetch the llama-server binary + GGUF into
-      # resources/llm, then electron-builder builds and publishes to a draft
-      # release tagged v<version>. Both matrix jobs publish to the same draft,
-      # so the .exe and .dmg attach together.
+      # Populate the signing env ONLY when the certs exist. Critically, do NOT set
+      # these from (empty) secrets in a plain env block: an empty CSC_LINK makes
+      # electron-builder try to read "" as a cert file and fail ("… not a file").
+      # Skipping this step leaves them unset, so the build is cleanly unsigned. To
+      # sign + notarize, add these repo secrets — nothing else changes:
+      #   CSC_LINK / CSC_KEY_PASSWORD                 base64 .p12 cert + password (mac & win)
+      #   APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID    (macOS notarization)
+      # See docs/auto-updater-design.md §3 for the key-custody caveat (prefer
+      # cloud/HSM signing over a raw cert in Actions secrets).
+      - name: Configure code signing
+        if: ${{ env.CSC_IDENTITY_AUTO_DISCOVERY == 'true' }}
+        shell: bash
+        run: |
+          {
+            echo "CSC_LINK=${{ secrets.CSC_LINK }}"
+            echo "CSC_KEY_PASSWORD=${{ secrets.CSC_KEY_PASSWORD }}"
+            echo "APPLE_ID=${{ secrets.APPLE_ID }}"
+            echo "APPLE_APP_SPECIFIC_PASSWORD=${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}"
+            echo "APPLE_TEAM_ID=${{ secrets.APPLE_TEAM_ID }}"
+          } >> "$GITHUB_ENV"
+
+      # `npm run release` = fetch the pinned, hash-verified llama-server + TTS into
+      # resources/, then electron-builder builds and publishes to a draft release
+      # tagged v<version>. Both matrix jobs publish to the same draft, so the .exe
+      # and .dmg attach together. build/notarize.cjs activates once APPLE_* are set.
       - name: Build and publish installer
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Code signing — active ONLY when the matching repo secrets are set. With
-          # none present the build falls back to unsigned (CSC_IDENTITY_AUTO_DISCOVERY
-          # is turned off so electron-builder doesn't fail hunting for an identity,
-          # and build/notarize.cjs no-ops without the Apple creds). To sign + notarize,
-          # add these secrets — nothing else needs to change:
-          #   CSC_LINK / CSC_KEY_PASSWORD  base64 .p12 code-signing cert + password (mac & win)
-          #   APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID  (macOS notarization)
-          CSC_LINK: ${{ secrets.CSC_LINK }}
-          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          CSC_IDENTITY_AUTO_DISCOVERY: ${{ secrets.CSC_LINK != '' }}
         run: npm run release
