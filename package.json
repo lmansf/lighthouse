@@ -1,6 +1,6 @@
 {
   "name": "rag-vault",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "private": true,
   "description": "Lighthouse — a local-first RAG vault for your documents.",
   "author": "Lighthouse",
@@ -67,6 +67,7 @@
     "directories": {
       "output": "release"
     },
+    "afterSign": "build/notarize.cjs",
     "publish": [
       {
         "provider": "github",
@@ -80,7 +81,11 @@
     },
     "mac": {
       "target": "dmg",
-      "category": "public.app-category.productivity"
+      "category": "public.app-category.productivity",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist"
     },
     "linux": {
       "target": "AppImage",

@@ -8,6 +8,31 @@ vendor's cloud, counts as a real boundary crossed).
 
 ---
 
+## 2026-07-02 — Release hardening (v0.2.4, branch `feat/release-hardening-0.2.4`)
+
+- **Bundled binaries/model fetched unpinned with no integrity check** — _Medium
+  (supply chain)._ `scripts/fetch-local-model.mjs` resolved llama.cpp `latest` and
+  the HF voice from `main` with an optional, unset SHA-256, so the executables baked
+  into every installer were unverified.
+  **Fix:** pin exact versions (llama.cpp `b9859`, piper `2023.11.14-2`, voice commit
+  `e21c7de8…`) and verify each asset against a committed `ASSET_SHA256` map; the
+  build now **fails closed** on any missing/mismatched digest. `--record` bootstraps
+  digests on a version bump. `scripts/fetch-local-model.mjs`.
+- **Installers unsigned / un-notarized** — _Medium (trust/UX)._ Added code-signing
+  scaffolding that stays inert on unsigned builds and activates automatically once
+  cert secrets are provided: `build/entitlements.mac.plist` (hardened-runtime),
+  `build/notarize.cjs` (afterSign hook — no-ops without `APPLE_*`), `mac`
+  hardenedRuntime/entitlements, and conditional signing env in `release.yml`
+  (`CSC_IDENTITY_AUTO_DISCOVERY` gated on `secrets.CSC_LINK`). Certs are still
+  required from the maintainer to actually sign; see `docs/auto-updater-design.md`
+  §3 for the key-custody caveat (prefer cloud/HSM signing over a raw cert in CI).
+- **Auto-updater** — designed (not yet implemented): `docs/auto-updater-design.md`
+  — launch-time, splash-integrated, `electron-updater`, **notify-only while
+  unsigned** (no in-process download/execute of unverifiable installers), flipping
+  to auto-install only once signing + notarization are live.
+
+---
+
 ## 2026-07-01 — Review remediation (branch `security/harden-review`)
 
 Source: full multi-agent security + code-quality review of `origin/main` (v0.2.3),
