@@ -125,10 +125,17 @@ function modelsDir() {
 }
 
 /** First installed `.gguf` — the downloaded model, or a dev-bundled one in resources/llm. */
+// Must stay >= localModel.ts MIN_BYTES so this and the picker's "installed" check
+// agree: a stub or partial (< ~100 MB) .gguf left by an old/interrupted install is
+// NOT a usable model — ignore it so llama-server doesn't try (and fail) to load it,
+// and so the picker still offers a fresh install rather than a dead "Installed".
+const MIN_MODEL_BYTES = 1e8;
 function findModel() {
   for (const dir of [modelsDir(), llmRoot()]) {
     try {
-      const f = fs.readdirSync(dir).find((n) => n.toLowerCase().endsWith(".gguf"));
+      const f = fs.readdirSync(dir).find(
+        (n) => n.toLowerCase().endsWith(".gguf") && fs.statSync(path.join(dir, n)).size > MIN_MODEL_BYTES,
+      );
       if (f) return path.join(dir, f);
     } catch {
       /* dir may not exist yet */

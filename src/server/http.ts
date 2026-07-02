@@ -7,31 +7,32 @@
  * machine can still reach the port and a rebound DNS name can still resolve to
  * loopback, so authorization is layered:
  *
- *   1. Host allowlist — the request's own Host must be a loopback host. This
- *      defeats DNS rebinding (a page on evil.com rebound to 127.0.0.1 sends
- *      Host: evil.com, which is rejected here regardless of Origin).
- *   2. Origin present → require it to be same-origin. Blocks browser CSRF and
- *      cross-site POSTs (a malicious page always sends an Origin).
- *   3. Origin absent → a non-browser caller (the Electron main process, curl,
+ *   1. Host allowlist — the request's own host must be a loopback host. Defeats
+ *      DNS rebinding (a page on evil.com rebound to 127.0.0.1 sends Host: evil.com).
+ *   2. Origin present → require it to be a loopback host on the SAME PORT. We do
+ *      NOT require an exact host-string match, because Next's `req.url` host can be
+ *      "localhost" even when the renderer reached the server via "127.0.0.1" — an
+ *      exact match wrongly 403s the app's own same-origin requests. Loopback host +
+ *      matching port still blocks cross-site POSTs (their Origin is not loopback).
+ *   3. Origin absent → a non-browser caller (the Electron main process, curl, or
  *      another local process). Require the per-launch shared secret the desktop
- *      shell injects via LIGHTHOUSE_API_TOKEN, closing the old "no Origin ⇒
- *      allowed" bypass.
+ *      shell injects via LIGHTHOUSE_API_TOKEN.
  *   4. No token configured (plain `next dev`/`next start` outside the desktop
  *      shell) → allow header-less requests so local development keeps working.
  *
- * Kept named `isSameOrigin` for continuity with existing route call-sites; it now
- * enforces the loopback Host allowlist and honors the desktop token too.
+ * Kept named `isSameOrigin` for continuity with existing route call-sites.
  */
 export function isSameOrigin(req: Request): boolean {
-  const reqHost = hostOf(req.url);
+  const reqUrl = safeUrl(req.url);
   // (1) DNS-rebinding defense: only ever answer as a loopback host.
-  if (reqHost === null || !isLoopbackHost(reqHost)) return false;
+  if (!reqUrl || !isLoopbackHost(reqUrl.hostname)) return false;
 
   const origin = req.headers.get("origin");
   if (origin) {
-    // (2) Same-origin (compares host + port).
-    const originHost = hostOf(origin);
-    return originHost !== null && originHost === reqHost;
+    // (2) Same-origin for a loopback server: loopback host + same port. (Not an
+    // exact host match — see the doc comment; localhost vs 127.0.0.1 must both pass.)
+    const o = safeUrl(origin);
+    return o !== null && isLoopbackHost(o.hostname) && o.port === reqUrl.port;
   }
 
   // (3) Header-less caller — require the injected token.
@@ -41,29 +42,19 @@ export function isSameOrigin(req: Request): boolean {
   return provided != null && timingSafeEqual(provided, token);
 }
 
-/** The `host` (hostname + optional port) of a URL, or null if unparseable. */
-function hostOf(url: string): string | null {
+/** Parse a URL, or null if unparseable. */
+function safeUrl(u: string): URL | null {
   try {
-    return new URL(url).host;
+    return new URL(u);
   } catch {
     return null;
   }
 }
 
-/** True for loopback hosts (ignores port): 127.0.0.0/8, ::1, or localhost. */
-function isLoopbackHost(host: string): boolean {
-  let hostname = host;
-  try {
-    hostname = new URL(`http://${host}`).hostname;
-  } catch {
-    /* fall back to the raw host string */
-  }
-  hostname = hostname.replace(/^\[|\]$/g, "").toLowerCase(); // unwrap IPv6 brackets
-  return (
-    hostname === "localhost" ||
-    hostname === "::1" ||
-    /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(hostname)
-  );
+/** True for loopback hostnames: 127.0.0.0/8, ::1, or localhost. */
+function isLoopbackHost(hostname: string): boolean {
+  const h = hostname.replace(/^\[|\]$/g, "").toLowerCase(); // unwrap IPv6 brackets
+  return h === "localhost" || h === "::1" || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h);
 }
 
 /** Length-checked constant-time string comparison so the token can't be probed
