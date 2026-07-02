@@ -1,9 +1,13 @@
 # Auto-updater design — launch-time, splash-integrated
 
-Status: **design / not yet implemented.** Target: `electron/main.js` (v0.2.4),
-tray-resident app, builds currently **unsigned**. Produced from a multi-lens
-design pass (mechanism / launch-integration / security / ops) plus an adversarial
-review; the corrections from that review are folded in and flagged inline.
+Status: **Phase A implemented** (notify-only). Ships in `electron/updater.js`,
+`electron/preload.js`, and the `main.js`/`splash.html` wiring described below;
+`electron-updater` is a runtime dependency. **Phase B (auto-download +
+install-on-quit) remains gated** behind `UPDATER_CAN_AUTO_INSTALL = false` in
+`electron/updater.js` until code signing + notarization are live. Target:
+`electron/main.js` (v0.2.4), tray-resident app, builds currently **unsigned**.
+Produced from a multi-lens design pass plus an adversarial review; the corrections
+from that review are folded in and flagged inline.
 
 ## 1. Recommendation in one paragraph
 

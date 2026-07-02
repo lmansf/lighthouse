@@ -41,15 +41,11 @@ jobs:
         run: npm run typecheck
       - name: Tests
         run: npm run test:extract
-      # Lint is advisory until eslint + eslint-config-next are pinned in
-      # package.json (kept out of this change to avoid a package-lock version bump
-      # that couldn't be verified here). Installed ad hoc; failures don't block the
-      # release. Flip `continue-on-error` off once the deps are pinned and green.
-      - name: Lint (advisory)
-        continue-on-error: true
-        run: |
-          npm install --no-save eslint@^8.57.1 eslint-config-next@15.5.19
-          npx next lint
+      # Blocking: eslint + eslint-config-next are pinned in devDependencies and
+      # installed by `npm ci`, and `next lint` passes clean, so a lint regression
+      # now fails the gate and blocks the release.
+      - name: Lint
+        run: npm run lint
 
   build:
     needs: check

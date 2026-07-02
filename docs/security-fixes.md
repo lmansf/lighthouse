@@ -8,6 +8,29 @@ vendor's cloud, counts as a real boundary crossed).
 
 ---
 
+## 2026-07-02 — Auto-updater (Phase A), lint gate, PII verification
+
+- **Auto-updater implemented (Phase A, notify-only)** — `electron/updater.js`,
+  `electron/preload.js`, `main.js`, `splash.html`. Checks for updates on launch
+  during the splash (non-blocking, 8s-bounded, best-effort), and surfaces an
+  "Update available" tray item / splash line that opens the release page. It
+  **never downloads or executes an installer in-process** while builds are
+  unsigned (electron-updater's hash is integrity, not authenticity). Auto-install
+  stays gated behind `UPDATER_CAN_AUTO_INSTALL = false` until code signing +
+  notarization land. The privileged "restart to update" IPC is gated to the boot
+  window so live app content can't trigger an install. See
+  `docs/auto-updater-design.md`.
+- **Lint gate is now blocking** — `eslint@^8.57.1` + `eslint-config-next` pinned in
+  devDependencies; `next lint` passes clean, so `release.yml`'s check job runs
+  `npm run lint` as a hard gate (was advisory / `continue-on-error`).
+- **Historical file-name PII purge — verified unnecessary.** Audited the Supabase
+  backend (project `yyiqwpcqpohzyrzwyxqk`): the `click_events` table (the only
+  place file/folder names were ever sent) is **empty (0 rows)**, as is `events`.
+  No file/folder-name PII accumulated server-side, so no purge was needed. (The
+  client-side leak was fixed on 2026-07-01; new events send only the coarse kind.)
+
+---
+
 ## 2026-07-02 — Release hardening (v0.2.4, branch `feat/release-hardening-0.2.4`)
 
 - **Bundled binaries/model fetched unpinned with no integrity check** — _Medium
