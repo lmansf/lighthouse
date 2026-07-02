@@ -535,6 +535,7 @@ function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean
       // Empty key ⇒ keep the existing one (selectModel falls back to the stored key).
       await selectModel(providerId, modelId, apiKey);
       setSaved(true);
+      setOpen(false); // close immediately on success — no separate "Close" click
     } catch {
       setError("Couldn't save your model settings. Please check your connection and try again.");
     } finally {
