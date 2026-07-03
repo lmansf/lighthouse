@@ -50,6 +50,7 @@ import { useChatStore } from "@/stores/useChatStore";
 import { ConversePlaceholder } from "@/shell/ConversePlaceholder";
 import { ACCENTS } from "@/shell/theme";
 import { FILE_DRAG_MIME, parseDraggedFiles, type DraggedFile } from "@/shell/dnd";
+import { pathsForFiles } from "@/shell/desktopBridge";
 
 const useStyles = makeStyles({
   panel: {
@@ -312,6 +313,7 @@ export function ChatPanel() {
   const nodes = useRagStore((s) => s.nodes);
   const desktop = useRagStore((s) => s.desktop);
   const upload = useRagStore((s) => s.upload);
+  const linkPaths = useRagStore((s) => s.linkPaths);
   const includedFileIds = useMemo(
     () => nodes.filter((n) => n.kind === "file" && n.ragIncluded).map((n) => n.id),
     [nodes],
@@ -398,17 +400,30 @@ export function ChatPanel() {
     setAttachments((cur) => cur.filter((a) => a.id !== id));
   }
 
-  // OS files dropped onto chat: upload into the vault, then attach the new nodes.
+  // OS files dropped onto chat: LINK them in place when their real paths are
+  // available (desktop) - no copy is made - then attach the linked file nodes
+  // to the question. Files without a path (plain browser) upload as before.
   async function attachOsFiles(list: FileList) {
-    const { addedIds } = await upload(Array.from(list));
-    if (!addedIds.length) return;
-    const byId = new Map(useRagStore.getState().nodes.map((n) => [n.id, n]));
-    addAttachments(
-      addedIds
-        .map((id) => byId.get(id))
-        .filter((n): n is NonNullable<typeof n> => !!n)
-        .map((n) => ({ id: n.id, name: n.name })),
-    );
+    const files = Array.from(list);
+    const { paths, unresolved } = pathsForFiles(files);
+    const attach: { id: string; name: string }[] = [];
+    if (paths.length) {
+      const { linked } = await linkPaths(paths);
+      // Only file nodes are attachable; a linked folder still lands in the
+      // explorer, where its contents can be included for retrieval.
+      attach.push(...linked.filter((l) => l.kind === "file").map((l) => ({ id: l.id, name: l.name })));
+    }
+    if (unresolved.length) {
+      const { addedIds } = await upload(unresolved);
+      const byId = new Map(useRagStore.getState().nodes.map((n) => [n.id, n]));
+      attach.push(
+        ...addedIds
+          .map((id) => byId.get(id))
+          .filter((n): n is NonNullable<typeof n> => !!n)
+          .map((n) => ({ id: n.id, name: n.name })),
+      );
+    }
+    if (attach.length) addAttachments(attach);
   }
 
   const isFileDrag = (e: DragEvent) =>

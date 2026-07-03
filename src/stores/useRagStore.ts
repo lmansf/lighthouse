@@ -37,6 +37,12 @@ interface RagStore {
   selectionMode: boolean;
   /** Ids picked while in selection mode. */
   selectedIds: string[];
+  /**
+   * Progress of an in-flight add (linking or uploading); null when idle. The
+   * explorer renders it as a processing overlay so a big add never reads as a
+   * frozen app.
+   */
+  processing: { done: number; total: number; label: string } | null;
 
   load: () => Promise<void>;
   setSelectionMode: (on: boolean) => void;
@@ -60,6 +66,16 @@ interface RagStore {
   ) => Promise<{ addedIds: string[]; skipped: { name: string; reason: string }[] }>;
   /** Link a file/folder by its real path instead of copying (desktop-only). */
   addReference: (path: string) => Promise<void>;
+  /**
+   * Link several files/folders in place by absolute path (desktop-only),
+   * tracking `processing`. Returns the linked nodes (so a caller can e.g.
+   * attach them to a question) and any per-path failures (e.g. a path that
+   * overlaps an existing link) for the caller to surface.
+   */
+  linkPaths: (paths: string[]) => Promise<{
+    linked: { id: string; name: string; kind: "file" | "folder" }[];
+    failed: { path: string; reason: string }[];
+  }>;
   /** Remove a reference (unlink); real files are left in place. */
   removeReference: (refId: string) => Promise<void>;
   /**
@@ -88,6 +104,7 @@ export const useRagStore = create<RagStore>((set, get) => ({
   desktop: false,
   selectionMode: false,
   selectedIds: [],
+  processing: null,
 
   load: async () => {
     const [sources, nodes, caps] = await Promise.all([
@@ -143,23 +160,87 @@ export const useRagStore = create<RagStore>((set, get) => ({
 
   upload: async (files, dir = null) => {
     if (files.length === 0) return { addedIds: [], skipped: [] };
-    const fd = new FormData();
-    if (dir) fd.append("dir", dir);
+    // One giant multipart POST gave no feedback until the entire body had
+    // uploaded - a big drop read as a frozen app. Send bounded batches and
+    // advance `processing` between them so the overlay shows real progress.
+    const MAX_BATCH_FILES = 25;
+    const MAX_BATCH_BYTES = 64 * 1024 * 1024;
+    const batches: File[][] = [];
+    let batch: File[] = [];
+    let batchBytes = 0;
     for (const f of files) {
-      fd.append("files", f);
-      // For a folder drop/pick the browser sets webkitRelativePath (e.g.
-      // "docs/2024/q1.md"); send it so the server recreates the structure.
-      fd.append("paths", f.webkitRelativePath || "");
+      if (batch.length > 0 && (batch.length >= MAX_BATCH_FILES || batchBytes + f.size > MAX_BATCH_BYTES)) {
+        batches.push(batch);
+        batch = [];
+        batchBytes = 0;
+      }
+      batch.push(f);
+      batchBytes += f.size;
     }
-    const res = await fetch("/api/upload", { method: "POST", body: fd });
-    const data: { added?: { newId: string }[]; skipped?: { name: string; reason: string }[] } =
-      res.ok ? await res.json().catch(() => ({})) : {};
-    const addedIds = (data.added ?? []).map((a) => a.newId);
-    const skipped = res.ok
-      ? (data.skipped ?? [])
-      : files.map((f) => ({ name: f.name, reason: "upload request failed" }));
+    if (batch.length > 0) batches.push(batch);
+
+    set({ processing: { done: 0, total: files.length, label: "Adding" } });
+    const addedIds: string[] = [];
+    const skipped: { name: string; reason: string }[] = [];
+    try {
+      for (const b of batches) {
+        const fd = new FormData();
+        if (dir) fd.append("dir", dir);
+        for (const f of b) {
+          fd.append("files", f);
+          // For a folder drop/pick the browser sets webkitRelativePath (e.g.
+          // "docs/2024/q1.md"); send it so the server recreates the structure.
+          fd.append("paths", f.webkitRelativePath || "");
+        }
+        try {
+          const res = await fetch("/api/upload", { method: "POST", body: fd });
+          const data: { added?: { newId: string }[]; skipped?: { name: string; reason: string }[] } =
+            res.ok ? await res.json().catch(() => ({})) : {};
+          if (res.ok) {
+            addedIds.push(...(data.added ?? []).map((a) => a.newId));
+            skipped.push(...(data.skipped ?? []));
+          } else {
+            skipped.push(...b.map((f) => ({ name: f.name, reason: "upload request failed" })));
+          }
+        } catch {
+          // e.g. an unreadable directory entry in the FileList aborts the fetch
+          skipped.push(...b.map((f) => ({ name: f.name, reason: "could not be read" })));
+        }
+        set((s) => ({
+          processing: s.processing && { ...s.processing, done: s.processing.done + b.length },
+        }));
+      }
+    } finally {
+      set({ processing: null });
+    }
     await get().load();
     return { addedIds, skipped };
+  },
+
+  linkPaths: async (paths) => {
+    if (paths.length === 0) return { linked: [], failed: [] };
+    set({ processing: { done: 0, total: paths.length, label: "Linking" } });
+    const linked: { id: string; name: string; kind: "file" | "folder" }[] = [];
+    const failed: { path: string; reason: string }[] = [];
+    try {
+      for (const p of paths) {
+        try {
+          const { id, kind } = await ragService.addReference(p);
+          // Reference names are the path's basename (see server addReference).
+          const name = p.split(/[\\/]/).filter(Boolean).pop() ?? p;
+          linked.push({ id, name, kind });
+        } catch (err) {
+          failed.push({ path: p, reason: err instanceof Error ? err.message : "could not be linked" });
+        }
+        set((s) => ({
+          processing: s.processing && { ...s.processing, done: s.processing.done + 1 },
+        }));
+      }
+    } finally {
+      set({ processing: null });
+    }
+    await get().load();
+    return { linked, failed };
   },
 
   addReference: async (path) => {

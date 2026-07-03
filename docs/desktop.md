@@ -53,13 +53,18 @@ npm run electron
 - **Persistent** — launches at login (see [Launch at login](#launch-at-login))
   and stays in the system tray. Closing the window hides it to the tray; quit
   from the tray menu to fully exit.
-- **Add files / folders (copy)** — `File ▸ Add files…` and `File ▸ Add folder…`
-  copy items into your vault. A folder keeps its structure.
-- **Link files / folders (no copy)** — `File ▸ Link files…` and
-  `File ▸ Link folder…` add items **by reference**, reading them from their real
-  location on disk so no second copy is made. Unlink any time from the tree
-  (the real files are left in place).
-- Everything added — copied or linked — arrives **excluded by default**, matching
+- **Adds are link-first (no copy)** - dropping files or folders onto the
+  explorer, and the toolbar's `Browse… ▸ Files/Folder… (linked in place)`,
+  add items **by reference**: they are read from their real location on disk,
+  so no second copy is made and whole folders work instantly.
+  `File ▸ Link files…` / `File ▸ Link folder…` do the same from the menu bar.
+  Unlink any time from the tree (the real files are left in place).
+  While a large add runs, the explorer shows a processing overlay with
+  progress instead of appearing frozen.
+- **Copy in (explicit)** - `Browse… ▸ Copy files in…` / `Copy folder in…` and
+  `File ▸ Add files…` / `File ▸ Add folder…` copy items into your vault when
+  you want the vault to own a duplicate. A folder keeps its structure.
+- Everything added - copied or linked - arrives **excluded by default**, matching
   the app's exclusion rules; you opt items into the RAG index in the tree.
 - **Choose vault folder…** points Lighthouse at any directory; **Open vault
   folder** reveals it in your OS file manager.
