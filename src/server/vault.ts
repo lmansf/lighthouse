@@ -471,6 +471,14 @@ export function addReference(inputPath: string): { id: string; kind: "file" | "f
   for (const [id, r] of Object.entries(state.references)) {
     const rp = path.resolve(r.path);
     if (rp === abs) return { id, kind: r.kind };
+    // A path INSIDE an already-linked folder is already indexed as a descendant
+    // of that reference. Resolve it to that existing node id (the same id the
+    // walk produces) instead of re-linking, so a drop of an already-covered file
+    // succeeds idempotently rather than failing as an overlap.
+    if (r.kind === "folder" && isWithin(rp, abs)) {
+      const rel = path.relative(rp, abs).split(path.sep).join("/");
+      return { id: `${id}/${rel}`, kind };
+    }
     if (pathsOverlap(abs, rp)) {
       throw new Error("overlaps an existing reference");
     }
