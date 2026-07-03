@@ -450,10 +450,15 @@ export function FileExplorer() {
     );
   };
 
+  /** Link paths in place, returning any per-path failures as skip records. */
+  const linkFailures = async (paths: string[]) => {
+    const { failed } = await linkPaths(paths);
+    return failed.map((f) => ({ name: f.path, reason: f.reason }));
+  };
+
   /** Link paths in place and surface any per-path failures. */
   const linkAndReport = async (paths: string[]) => {
-    const { failed } = await linkPaths(paths);
-    reportSkipped(failed.map((f) => ({ name: f.path, reason: f.reason })));
+    reportSkipped(await linkFailures(paths));
   };
 
   /**
@@ -470,11 +475,12 @@ export function FileExplorer() {
       const { paths, unresolved } = pathsForFiles(files);
       if (paths.length > 0) {
         void (async () => {
-          await linkAndReport(paths);
+          const problems = await linkFailures(paths);
           if (unresolved.length > 0) {
             const { skipped } = await upload(unresolved);
-            reportSkipped(skipped);
+            problems.push(...skipped);
           }
+          reportSkipped(problems);
         })();
         return;
       }
