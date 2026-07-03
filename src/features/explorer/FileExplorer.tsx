@@ -451,10 +451,9 @@ export function FileExplorer() {
   };
 
   /** Link paths in place and surface any per-path failures. */
-  const linkAndReport = (paths: string[]) => {
-    void linkPaths(paths).then(({ failed }) => {
-      reportSkipped(failed.map((f) => ({ name: f.path, reason: f.reason })));
-    });
+  const linkAndReport = async (paths: string[]) => {
+    const { failed } = await linkPaths(paths);
+    reportSkipped(failed.map((f) => ({ name: f.path, reason: f.reason })));
   };
 
   /**
@@ -470,8 +469,13 @@ export function FileExplorer() {
     if (opts.preferLink !== false) {
       const { paths, unresolved } = pathsForFiles(files);
       if (paths.length > 0) {
-        linkAndReport(paths);
-        if (unresolved.length > 0) void upload(unresolved).then(({ skipped }) => reportSkipped(skipped));
+        void (async () => {
+          await linkAndReport(paths);
+          if (unresolved.length > 0) {
+            const { skipped } = await upload(unresolved);
+            reportSkipped(skipped);
+          }
+        })();
         return;
       }
     }
@@ -556,7 +560,7 @@ export function FileExplorer() {
                       icon={<LinkRegular />}
                       onClick={() => {
                         void desktopBridge()?.linkDialog(false).then((paths) => {
-                          if (paths.length) linkAndReport(paths);
+                          if (paths.length) void linkAndReport(paths);
                         });
                       }}
                     >
@@ -566,7 +570,7 @@ export function FileExplorer() {
                       icon={<LinkRegular />}
                       onClick={() => {
                         void desktopBridge()?.linkDialog(true).then((paths) => {
-                          if (paths.length) linkAndReport(paths);
+                          if (paths.length) void linkAndReport(paths);
                         });
                       }}
                     >
