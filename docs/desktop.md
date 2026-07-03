@@ -196,7 +196,8 @@ images, regenerated from the theme palette with `npm run installer:art`
 (`scripts/gen-installer-art.mjs`).
 
 Uninstalling removes the app and asks once whether to **also delete your
-Lighthouse data** — the app settings/logs (`%APPDATA%\Lighthouse`) and the
+Lighthouse data** — the app settings/logs (`%APPDATA%\rag-vault`, Electron's
+userData folder, named after the package name) and the
 default vault (`Documents\Lighthouse Vault`) along with the files in it. The
 default answer (and a silent `/S` uninstall) is **No**, so your documents and
 settings are never deleted by accident and a reinstall picks up where you left
