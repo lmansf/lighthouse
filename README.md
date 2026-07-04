@@ -55,9 +55,11 @@ contracts — no cloud database required:
   background (and on a toolbar **Refresh**), so files copied into the vault folder
   outside an in-app upload appear on their own. Files can also be moved within the vault (`op:move`), which
   carries their inclusion flags to the new location. Whole folders upload with
-  their structure, and the desktop app can **link** files/folders in place
-  (`op:addReference` / `op:removeReference`) — indexing them from their real
-  location on disk instead of copying a second time. Items can be **removed from
+  their structure. On the **desktop** adds are **link-first**: dropped or picked
+  files/folders are **linked** in place (`op:addReference` / `op:removeReference`)
+  — indexed from their real location on disk with nothing copied, so whole
+  folders register instantly — and copying into the vault is the explicit
+  secondary option. Items can be **removed from
   the vault** non-destructively (`op:remove`): a vault file/folder moves to a
   recoverable trash (`.rag-vault/trash/<date>/`) and a linked item only unlinks,
   leaving your real files in place.
@@ -90,7 +92,8 @@ contracts — no cloud database required:
   (prior turns — capped to the last few — are threaded to the model, and a bare
   follow-up blends in the previous question to anchor retrieval); **New chat**
   starts fresh. **Attach files to a question** by dragging one from the explorer
-  onto the chat panel, or dropping files from your OS onto it (those upload into
+  onto the chat panel, or dropping files from your OS onto it (on the desktop
+  those **link** into the vault in place — no copy — otherwise they upload into
   the vault first); attachments show as removable pills and scope the question
   (and its follow-ups) to just those files — even ones you haven't included
   globally — until you clear them or start a **New chat**. The answer's
