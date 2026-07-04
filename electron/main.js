@@ -472,6 +472,22 @@ async function addFolderDialog() {
   win.webContents.reload();
 }
 
+/**
+ * Renderer-invoked native picker for linking in place (Browse… → Link items).
+ * Returns the picked absolute paths; the renderer registers the references via
+ * its own service so the explorer refreshes without a full window reload.
+ */
+ipcMain.handle("vault:link-dialog", async (_e, directory) => {
+  if (!win) return [];
+  const r = await dialog.showOpenDialog(win, {
+    title: directory
+      ? "Link a folder in place (not copied)"
+      : "Link files in place (not copied)",
+    properties: directory ? ["openDirectory"] : ["openFile", "multiSelections"],
+  });
+  return r.canceled ? [] : r.filePaths;
+});
+
 /** Link files or a folder in place (added by reference — no copy is made). */
 async function linkDialog(directory) {
   if (!win) return;

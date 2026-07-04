@@ -28,6 +28,8 @@ interface ModelState {
   /** A `.gguf` leftover exists that can be removed even when it isn't a usable
    *  model (status "absent"/"error") — lets the user clear a stale/corrupt file. */
   removable?: boolean;
+  /** Why the last install attempt failed (status "error"). */
+  error?: string;
 }
 
 /** Poll the local-model status, exposing it plus `install()` / `uninstall()`. */
@@ -102,16 +104,41 @@ const useStyles = makeStyles({
   },
   iconBtn: { minWidth: "auto", ...shorthands.padding("0", tokens.spacingHorizontalXS) },
   actions: { display: "inline-flex", alignItems: "center", gap: tokens.spacingHorizontalXXS },
+  errorText: {
+    color: tokens.colorStatusDangerForeground1,
+    fontSize: tokens.fontSizeBase200,
+    whiteSpace: "nowrap",
+  },
 });
 
 /** Option content for the local provider: label + its install state / controls. */
 export function LocalModelOption({ label }: { label: string }) {
   const styles = useStyles();
-  const { status, received, total, removable, install, uninstall } = useLocalModel();
+  const { status, received, total, removable, error, install, uninstall } = useLocalModel();
   const pct = total ? Math.floor((received / total) * 100) : 0;
 
   // Clicks on these controls must not bubble up and select the option.
   const swallow = (e: React.SyntheticEvent) => e.stopPropagation();
+
+  /**
+   * Fire an action from a button INSIDE a Fluent Option. The listbox closes -
+   * and unmounts this row - on the option's mousedown, so a plain onClick never
+   * fires (the button is gone before the click completes): the control reads as
+   * dead. Trigger on mousedown instead, before the unmount; keep onClick for
+   * keyboard activation. The server ops are idempotent, so if both ever fire
+   * for one gesture the second is a no-op.
+   */
+  const act = (action: () => Promise<void>) => ({
+    onMouseDown: (e: React.MouseEvent) => {
+      e.preventDefault(); // don't steal focus / trigger option selection
+      swallow(e);
+      void action();
+    },
+    onClick: (e: React.MouseEvent) => {
+      swallow(e);
+      void action();
+    },
+  });
 
   return (
     <span className={styles.row}>
@@ -130,11 +157,7 @@ export function LocalModelOption({ label }: { label: string }) {
               appearance="subtle"
               icon={<DeleteRegular />}
               aria-label="Uninstall the private model"
-              onMouseDown={swallow}
-              onClick={(e) => {
-                swallow(e);
-                void uninstall();
-              }}
+              {...act(uninstall)}
             />
           </Tooltip>
         </span>
@@ -150,6 +173,13 @@ export function LocalModelOption({ label }: { label: string }) {
         </span>
       ) : (
         <span className={styles.actions}>
+          {/* A failed install must be VISIBLE, not tooltip-only - otherwise a
+              click on ＋ that errors out reads as "the button does nothing". */}
+          {status === "error" && (
+            <Tooltip content={error || "The download failed."} relationship="description">
+              <span className={styles.errorText}>install failed - retry</span>
+            </Tooltip>
+          )}
           {removable && (
             <Tooltip
               content="Remove the leftover model file — it isn't a usable model. Clears it so you can install a clean copy."
@@ -161,11 +191,7 @@ export function LocalModelOption({ label }: { label: string }) {
                 appearance="subtle"
                 icon={<DeleteRegular />}
                 aria-label="Remove the leftover model file"
-                onMouseDown={swallow}
-                onClick={(e) => {
-                  swallow(e);
-                  void uninstall();
-                }}
+                {...act(uninstall)}
               />
             </Tooltip>
           )}
@@ -185,11 +211,7 @@ export function LocalModelOption({ label }: { label: string }) {
               appearance="subtle"
               icon={<AddRegular />}
               aria-label="Install the private model"
-              onMouseDown={swallow}
-              onClick={(e) => {
-                swallow(e);
-                void install();
-              }}
+              {...act(install)}
             />
           </Tooltip>
         </span>

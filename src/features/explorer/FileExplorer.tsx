@@ -4,9 +4,10 @@
  * [TEAM: explorer]
  *
  * File tree for the local vault. Renders the real node tree (top-level items and
- * nested folders), lets you toggle items in/out of the RAG index, add files or
- * whole folders (copied into the vault), and shows items *linked* in place
- * (added by reference, not copied).
+ * nested folders), lets you toggle items in/out of the RAG index, and adds
+ * files or whole folders. On the desktop, adds are LINK-FIRST: dropped or
+ * picked items are referenced in place (no copy); copying into the vault is
+ * the explicit secondary option. In a plain browser, adds upload bytes.
  *
  * Keep using `useRagStore` (do not import other features directly).
  */
@@ -61,6 +62,7 @@ import { useRagStore } from "@/stores/useRagStore";
 import { useAuthStore } from "@/stores/useAuthStore";
 import { logEvent } from "@/lib/logEvent";
 import { FILE_DRAG_MIME, serializeDraggedFiles } from "@/shell/dnd";
+import { desktopBridge, pathsForFiles } from "@/shell/desktopBridge";
 
 const useStyles = makeStyles({
   panel: {
@@ -68,10 +70,34 @@ const useStyles = makeStyles({
     flexDirection: "column",
     minHeight: 0,
     height: "100%",
+    position: "relative", // anchors the processing overlay
     ...shorthands.borderRadius(tokens.borderRadiusLarge),
     ...shorthands.border("2px", "dashed", "transparent"),
     transitionProperty: "border-color, background-color",
     transitionDuration: tokens.durationFaster,
+  },
+  processingOverlay: {
+    position: "absolute",
+    inset: 0,
+    zIndex: 10,
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: tokens.spacingVerticalM,
+    backgroundColor: tokens.colorNeutralBackgroundAlpha2,
+    backdropFilter: "blur(2px)",
+    ...shorthands.borderRadius(tokens.borderRadiusLarge),
+  },
+  addNotice: {
+    display: "flex",
+    alignItems: "center",
+    gap: tokens.spacingHorizontalS,
+    padding: `${tokens.spacingVerticalS} ${tokens.spacingHorizontalM}`,
+    marginBottom: tokens.spacingVerticalM,
+    borderRadius: tokens.borderRadiusMedium,
+    backgroundColor: tokens.colorStatusWarningBackground1,
+    color: tokens.colorStatusWarningForeground1,
   },
   panelDragging: {
     ...shorthands.borderColor(tokens.colorBrandStroke1),
@@ -369,6 +395,9 @@ export function FileExplorer() {
   const removeFromVault = useRagStore((s) => s.removeFromVault);
   const refresh = useRagStore((s) => s.load);
   const upload = useRagStore((s) => s.upload);
+  const linkPaths = useRagStore((s) => s.linkPaths);
+  const processing = useRagStore((s) => s.processing);
+  const desktop = useRagStore((s) => s.desktop);
   const sharepoint = useRagStore((s) => s.sharepoint);
   const connectSharePoint = useRagStore((s) => s.connectSharePoint);
   const closeSharePointDialog = useRagStore((s) => s.closeSharePointDialog);
@@ -407,16 +436,56 @@ export function FileExplorer() {
   }, [nodes]);
   const childrenOf = (id: string | null) => childrenByParent.get(id) ?? [];
 
-  const sendFiles = (list: FileList | null) => {
+  // Outcome of the last add (link or upload) worth telling the user about -
+  // rendered as a dismissible banner instead of a silent console.warn.
+  const [addNotice, setAddNotice] = useState<string | null>(null);
+
+  const reportSkipped = (skipped: { name: string; reason: string }[]) => {
+    if (skipped.length === 0) return;
+    const shown = skipped.slice(0, 3).map((s) => `${s.name} (${s.reason})`).join(", ");
+    setAddNotice(
+      `${skipped.length} item${skipped.length > 1 ? "s" : ""} could not be added: ` +
+        shown +
+        (skipped.length > 3 ? `, and ${skipped.length - 3} more` : ""),
+    );
+  };
+
+  /** Link paths in place, returning any per-path failures as skip records. */
+  const linkFailures = async (paths: string[]) => {
+    const { failed } = await linkPaths(paths);
+    return failed.map((f) => ({ name: f.path, reason: f.reason }));
+  };
+
+  /** Link paths in place and surface any per-path failures. */
+  const linkAndReport = async (paths: string[]) => {
+    reportSkipped(await linkFailures(paths));
+  };
+
+  /**
+   * Add files coming from an OS drop or a picker. On the desktop, dropped items
+   * resolve to their real paths and are LINKED in place - no copy is made, and
+   * whole folders work (a browser FileList cannot read a directory's bytes).
+   * Anything without a path (e.g. an image dragged out of a web page) falls
+   * back to a byte upload into the vault.
+   */
+  const sendFiles = (list: FileList | null, opts: { preferLink?: boolean } = {}) => {
     if (!list || !list.length) return;
-    void upload(Array.from(list)).then(({ skipped }) => {
-      if (skipped.length) {
-        console.warn(
-          `Skipped ${skipped.length} file(s): ` +
-            skipped.map((s) => `${s.name} (${s.reason})`).join(", "),
-        );
+    const files = Array.from(list);
+    if (opts.preferLink !== false) {
+      const { paths, unresolved } = pathsForFiles(files);
+      if (paths.length > 0) {
+        void (async () => {
+          const problems = await linkFailures(paths);
+          if (unresolved.length > 0) {
+            const { skipped } = await upload(unresolved);
+            problems.push(...skipped);
+          }
+          reportSkipped(problems);
+        })();
+        return;
       }
-    });
+    }
+    void upload(files).then(({ skipped }) => reportSkipped(skipped));
   };
 
   return (
@@ -458,7 +527,7 @@ export function FileExplorer() {
             multiple
             hidden
             onChange={(e) => {
-              sendFiles(e.target.files);
+              sendFiles(e.target.files, { preferLink: false }); // explicit copy
               e.target.value = "";
             }}
           />
@@ -476,7 +545,7 @@ export function FileExplorer() {
             multiple
             hidden
             onChange={(e) => {
-              sendFiles(e.target.files);
+              sendFiles(e.target.files, { preferLink: false }); // explicit copy
               e.target.value = "";
             }}
           />
@@ -488,17 +557,45 @@ export function FileExplorer() {
             </MenuTrigger>
             <MenuPopover>
               <MenuList>
+                {/* Link-first on the desktop: files stay where they are and are
+                    read in place - no duplicate copy is made. Copying in stays
+                    available below as the explicit secondary option. */}
+                {desktop && (
+                  <>
+                    <MenuItem
+                      icon={<LinkRegular />}
+                      onClick={() => {
+                        void desktopBridge()?.linkDialog(false).then((paths) => {
+                          if (paths.length) void linkAndReport(paths);
+                        });
+                      }}
+                    >
+                      Files… (linked in place)
+                    </MenuItem>
+                    <MenuItem
+                      icon={<LinkRegular />}
+                      onClick={() => {
+                        void desktopBridge()?.linkDialog(true).then((paths) => {
+                          if (paths.length) void linkAndReport(paths);
+                        });
+                      }}
+                    >
+                      Folder… (linked in place)
+                    </MenuItem>
+                    <MenuDivider />
+                  </>
+                )}
                 <MenuItem
                   icon={<DocumentRegular />}
                   onClick={() => fileInputRef.current?.click()}
                 >
-                  Files…
+                  {desktop ? "Copy files in…" : "Files…"}
                 </MenuItem>
                 <MenuItem
                   icon={<FolderAddRegular />}
                   onClick={() => folderInputRef.current?.click()}
                 >
-                  Folder…
+                  {desktop ? "Copy folder in…" : "Folder…"}
                 </MenuItem>
                 <MenuDivider />
                 <MenuItem
@@ -533,6 +630,34 @@ export function FileExplorer() {
           <Text size={200}>
             Your files are visible to AI by default - <b>you control what it sees</b>.
             Click any file, folder, or source to take it out.
+          </Text>
+        </div>
+      )}
+
+      {addNotice && (
+        <div className={styles.addNotice}>
+          <Text size={200}>{addNotice}</Text>
+          <span className={styles.spacer} />
+          <Button
+            icon={<DismissRegular />}
+            size="small"
+            appearance="subtle"
+            aria-label="Dismiss"
+            onClick={() => setAddNotice(null)}
+          />
+        </div>
+      )}
+
+      {processing && (
+        <div className={styles.processingOverlay} role="status" aria-live="polite">
+          <Spinner size="large" />
+          <Text size={400} weight="semibold">
+            {processing.label} {Math.min(processing.done + 1, processing.total)} of {processing.total}…
+          </Text>
+          <Text size={200}>
+            {processing.label === "Linking"
+              ? "Files are referenced in place - nothing is copied."
+              : "Copying files into your vault."}
           </Text>
         </div>
       )}

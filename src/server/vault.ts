@@ -86,6 +86,23 @@ function resolveAbs(id: string, state: VaultState): string {
 }
 function saveState(s: VaultState): void {
   writeJson(statePath(), s);
+  invalidateWalkCache(); // inclusion flags and references feed the walked tree
+}
+
+/**
+ * Short-lived snapshot of the walked tree. A walk is a full synchronous
+ * recursive scan of the vault AND every linked folder; with a large tree (a
+ * whole desktop linked in, thousands of files) re-walking on every API call
+ * blocks the server's event loop and the entire app reads as frozen. Every
+ * in-app mutation invalidates the snapshot immediately, so app actions never
+ * see stale data; the TTL only bounds how long a change made OUTSIDE the app
+ * (files copied in by hand) can go unnoticed between scans.
+ */
+const WALK_TTL_MS = 3_000;
+let walkCache: { root: string; nodes: FileNode[]; at: number } | null = null;
+
+function invalidateWalkCache(): void {
+  walkCache = null;
 }
 
 /**
@@ -156,6 +173,15 @@ const mimeOf = (name: string) => MIME[path.extname(name).toLowerCase()];
 
 /** A node id is its POSIX-relative path from the vault root (stable + unique). */
 function walk(root: string): FileNode[] {
+  if (walkCache && walkCache.root === root && Date.now() - walkCache.at < WALK_TTL_MS) {
+    return walkCache.nodes;
+  }
+  const nodes = walkUncached(root);
+  walkCache = { root, nodes, at: Date.now() };
+  return nodes;
+}
+
+function walkUncached(root: string): FileNode[] {
   const out: FileNode[] = [];
   const state = loadState();
   const defaultIn = defaultIncluded(); // resolve the variant once for this walk
@@ -412,6 +438,7 @@ export function addFile(name: string, bytes: Buffer, destParentId: string | null
   }
   fs.mkdirSync(path.dirname(abs), { recursive: true });
   fs.writeFileSync(abs, bytes);
+  invalidateWalkCache(); // a new file exists that no state write announced
   return { newId: finalId };
 }
 
@@ -444,6 +471,14 @@ export function addReference(inputPath: string): { id: string; kind: "file" | "f
   for (const [id, r] of Object.entries(state.references)) {
     const rp = path.resolve(r.path);
     if (rp === abs) return { id, kind: r.kind };
+    // A path INSIDE an already-linked folder is already indexed as a descendant
+    // of that reference. Resolve it to that existing node id (the same id the
+    // walk produces) instead of re-linking, so a drop of an already-covered file
+    // succeeds idempotently rather than failing as an overlap.
+    if (r.kind === "folder" && isWithin(rp, abs)) {
+      const rel = path.relative(rp, abs).split(path.sep).join("/");
+      return { id: `${id}/${rel}`, kind };
+    }
     if (pathsOverlap(abs, rp)) {
       throw new Error("overlaps an existing reference");
     }
