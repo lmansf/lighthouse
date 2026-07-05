@@ -1,14 +1,32 @@
-# Desktop installers for the native (Tauri) shell — manual dispatch while the
-# Electron pipeline (release.yml) remains the shipping path. Produces NSIS
-# (Windows), DMG (macOS), and AppImage/deb (Linux) bundles as artifacts.
+# Native (Tauri/Rust) desktop installers, attached to a GitHub release.
 #
-# Signing/notarization secrets are wired the same way as release.yml when
-# available; unsigned bundles still build (the in-app updater stays
-# notify-only until signing is live — see native/README.md).
+# Builds the static-export UI, fetches the pinned llama-server + Piper voice,
+# bundles the Tauri app per OS (NSIS / DMG / AppImage+deb), and uploads the
+# results to the release named by `release_tag` (draft or published). The
+# Windows installer is uploaded as `Lighthouse-Setup.exe` so the lhvault.app
+# download button keeps auto-detecting it. With `replace_electron`, the old
+# Electron installers are removed from that release afterwards, making it a
+# native release; the electron-updater manifests (latest*.yml) are kept so
+# 0.2.x installs still see the new version in their notify-only update check.
+#
+# Unsigned until CSC/notarization secrets are wired (same posture as
+# release.yml); the in-app updater stays notify-only accordingly.
 name: desktop-release
 
 on:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release tag to attach the native bundles to"
+        required: true
+        default: "v0.3.0"
+      replace_electron:
+        description: "Remove the Electron installers from that release after upload"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
 
 jobs:
   bundle:
@@ -16,15 +34,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
           - os: windows-latest
           - os: macos-latest
+          - os: ubuntu-latest
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: npm
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -37,24 +56,105 @@ jobs:
             libayatana-appindicator3-dev librsvg2-dev patchelf
       - name: Install JS deps
         run: npm ci
-      - name: Static-export the UI (IPC mode)
+      - name: Static-export the UI (arms IPC mode — no local port in the app)
         run: node scripts/build-ui-static.mjs
       - name: Fetch bundled engines (llama-server + Piper voice)
+        # Best-effort: a registry hiccup shouldn't kill the build — the app
+        # degrades to BYO local model / Web Speech without bundled engines.
+        continue-on-error: true
         run: node scripts/fetch-local-model.mjs
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build bundles
-        run: |
-          npm install --no-save @tauri-apps/cli@^2
-          npx tauri build --config crates/lighthouse-desktop/tauri.conf.json
+      - name: Build Tauri bundles
         working-directory: native/crates/lighthouse-desktop
-      - uses: actions/upload-artifact@v4
+        run: npx --yes @tauri-apps/cli@^2 build
+      - name: Collect assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist-assets
+          case "${{ runner.os }}" in
+            Windows)
+              # Stable name the website's download button auto-detects.
+              cp native/target/release/bundle/nsis/*-setup.exe dist-assets/Lighthouse-Setup.exe
+              ;;
+            macOS)
+              cp native/target/release/bundle/dmg/*.dmg dist-assets/
+              ;;
+            Linux)
+              cp native/target/release/bundle/appimage/*.AppImage dist-assets/ || true
+              cp native/target/release/bundle/deb/*.deb dist-assets/ || true
+              ;;
+          esac
+          ls -la dist-assets
+      - name: Upload to release ${{ inputs.release_tag }}
+        uses: actions/github-script@v7
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
         with:
-          name: lighthouse-desktop-${{ matrix.os }}
-          path: |
-            native/target/release/bundle/**/*.AppImage
-            native/target/release/bundle/**/*.deb
-            native/target/release/bundle/**/*.dmg
-            native/target/release/bundle/**/*.exe
-            native/target/release/bundle/**/*.msi
-          if-no-files-found: warn
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const tag = process.env.RELEASE_TAG;
+            // List (not getByTag) so a still-draft release is found too.
+            const releases = await github.paginate(github.rest.repos.listReleases,
+              { owner: context.repo.owner, repo: context.repo.repo, per_page: 100 });
+            const rel = releases.find(r => r.tag_name === tag);
+            if (!rel) return core.setFailed(`no release (draft or published) with tag ${tag}`);
+            const assets = await github.paginate(github.rest.repos.listReleaseAssets,
+              { owner: context.repo.owner, repo: context.repo.repo, release_id: rel.id, per_page: 100 });
+            for (const name of fs.readdirSync('dist-assets')) {
+              const existing = assets.find(a => a.name === name);
+              if (existing) {
+                await github.rest.repos.deleteReleaseAsset(
+                  { owner: context.repo.owner, repo: context.repo.repo, asset_id: existing.id });
+                core.info(`replaced existing asset ${name}`);
+              }
+              const file = path.join('dist-assets', name);
+              await github.rest.repos.uploadReleaseAsset({
+                owner: context.repo.owner, repo: context.repo.repo,
+                release_id: rel.id, name,
+                data: fs.readFileSync(file),
+                headers: {
+                  'content-type': 'application/octet-stream',
+                  'content-length': fs.statSync(file).size,
+                },
+              });
+              core.info(`uploaded ${name}`);
+            }
+
+  finalize:
+    needs: bundle
+    if: ${{ inputs.replace_electron }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Remove Electron installers from the release
+        uses: actions/github-script@v7
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        with:
+          script: |
+            const tag = process.env.RELEASE_TAG;
+            const version = tag.replace(/^v/, '');
+            const releases = await github.paginate(github.rest.repos.listReleases,
+              { owner: context.repo.owner, repo: context.repo.repo, per_page: 100 });
+            const rel = releases.find(r => r.tag_name === tag);
+            if (!rel) return core.setFailed(`no release with tag ${tag}`);
+            const assets = await github.paginate(github.rest.repos.listReleaseAssets,
+              { owner: context.repo.owner, repo: context.repo.repo, release_id: rel.id, per_page: 100 });
+            // electron-builder outputs; the tauri bundles use different names
+            // (and the tauri NSIS was uploaded over Lighthouse-Setup.exe).
+            // latest*.yml stay so 0.2.x notify-only update checks keep working.
+            const electron = [
+              `Lighthouse-${version}-arm64.dmg`,
+              `Lighthouse-${version}-arm64.dmg.blockmap`,
+              'Lighthouse-Setup.exe.blockmap',
+            ];
+            for (const name of electron) {
+              const a = assets.find(x => x.name === name);
+              if (a) {
+                await github.rest.repos.deleteReleaseAsset(
+                  { owner: context.repo.owner, repo: context.repo.repo, asset_id: a.id });
+                core.info(`removed ${name}`);
+              }
+            }
