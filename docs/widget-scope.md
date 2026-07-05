@@ -221,3 +221,62 @@ Voice input (the literal "wyspering" — natural follow-up once the widget
 exists), inline AI answers in the dropdown (start with hand-off to main chat;
 an inline mini-answer is a W5 candidate), Linux tray parity quirks, signing
 infrastructure (tracked separately; prerequisite only for W3-Windows).
+
+---
+
+## 7. Execution status
+
+This section is the durable record of the build — update it as phases land.
+
+| Phase | Status | Notes |
+|---|---|---|
+| **W1 — Widget MVP** | 🔨 in progress | breakdown below |
+| **W2 — Vault-explorer window** | ⬜ not started | `app/explorer/page.tsx` + lazy window; 📁 button upgrades from open-folder to explorer window |
+| **W3 — Whisper mode (hold Ctrl+Super+Shift)** | ⬜ not started | Windows hook → macOS flagsChanged/TCC → X11; Wayland = portal keyed chord only; Preferences shortcut recorder |
+| **W4 — Polish & launch** | ⬜ not started | animations, multi-monitor placement, first-run hint, marketing copy |
+
+### W1 task breakdown
+1. **Rust shell** — hidden `widget` window created at setup
+   (`WebviewWindowBuilder`, decorations off, always-on-top, skip-taskbar,
+   560×56, `WebviewUrl::App("widget")`); label-aware `CloseRequested`
+   (widget hides) and `Focused(false)` → hide-unless-pinned; summon re-centers
+   when off-screen; tray gains "Show search bar".
+2. **Rust commands** (app commands need no ACL — verified):
+   `widget_hide`, `widget_set_pin{pinned}` (stores pin in managed state +
+   `set_always_on_top`), `widget_resize{height}` (dropdown growth without
+   window-API permissions), `show_main{seedQuestion?}` (raise main + emit
+   `ask-question` to the main webview), `open_vault_dir` (W1 placeholder for
+   the 📁 button; W2 rewires it to the explorer window).
+3. **Hotkey Tier 1** — new dep `tauri-plugin-global-shortcut`, register
+   `Ctrl+Super+Shift+Space` at setup (SUPER≡Cmd on macOS → ⌃⇧⌘Space);
+   handler toggles the widget; registration failure logged, never fatal
+   (Wayland = expected no-op; tray summon is the fallback).
+4. **Capabilities** — `capabilities/widget.json`: `windows:["widget"]`,
+   `core:default` (event listen) + `core:window:allow-start-dragging`
+   (frameless drag). Everything else rides app commands.
+5. **UI** — `app/widget/page.tsx` (static export emits `widget/index.html`;
+   providers/theme/IPC free via root layout): opaque rounded pill, input +
+   📌/📁/✕, results = client-side name matches over the cached tree
+   (1-char instant, "hidden from AI" badge) + debounced `op:"search"`
+   passages; ↑/↓/Enter keyboard nav; Enter opens file (`/api/open`);
+   Ctrl/Cmd+Enter or "Ask Lighthouse →" row = `show_main` with the query;
+   Esc hides; license-locked state disables search with an unlock link.
+6. **Shared hook** — extract AppShell's load/poll/`lighthouse:vault-changed`
+   effect into `src/shell/useVaultTree.ts`; widget mounts it WITHOUT
+   usage-capture/launch-ping/global-shortcut singletons.
+7. **Chat seed** — transport re-broadcasts the `ask-question` event as
+   `lighthouse:ask-question`; ChatPanel listener fills the composer and
+   auto-asks (prefills only if a stream is already running).
+8. **Verify** — tsc/lint/tests; static export contains `widget/index.html`;
+   Playwright over the exported widget page (search, keyboard nav, locked
+   state, ask hand-off event); `cargo check` + suites.
+
+### W1 frozen contract (UI ↔ shell)
+- Commands: `widget_hide()`, `widget_set_pin{pinned:bool}`,
+  `widget_resize{height:f64}`, `show_main{seedQuestion?:string}`,
+  `open_vault_dir()`.
+- Events: Rust emits `ask-question {question}` to the main window; the
+  transport re-broadcasts DOM `lighthouse:ask-question`; widget listens to
+  the existing `lighthouse:vault-changed` for freshness.
+- Widget window label: `widget`; route `/widget`; logical size 560×56
+  collapsed, height driven by `widget_resize` up to 420.
