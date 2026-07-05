@@ -12,7 +12,7 @@ import {
 import { PanelLeftContractRegular, PanelLeftExpandRegular } from "@fluentui/react-icons";
 import { LAYOUT, ACCENTS } from "./theme";
 import { SidebarWater } from "./SidebarWater";
-import { SettingsMenu } from "@/features/license/LicenseGate";
+import { SettingsMenu, TrialBadge } from "@/features/license/LicenseGate";
 
 const useStyles = makeStyles({
   sidebar: {
@@ -81,6 +81,8 @@ const useStyles = makeStyles({
   },
   footerCollapsed: { justifyContent: "center", ...shorthands.padding(tokens.spacingVerticalS, 0) },
   footerLabel: { color: tokens.colorNeutralForeground3 },
+  // Pushes the trial countdown to the footer's right edge, away from the gear.
+  footerTrial: { marginLeft: "auto", minWidth: 0, display: "inline-flex" },
 });
 
 interface SidebarProps {
@@ -92,7 +94,8 @@ interface SidebarProps {
 
 /**
  * Collapsible left sidebar (Databricks/Genie style): brand + collapse toggle on
- * top, the file explorer in the middle, and the settings gear pinned bottom-left.
+ * top, the file explorer in the middle, and the settings gear (plus the trial
+ * countdown, when a trial is running) pinned bottom-left.
  * Collapsed, it shrinks to a thin icon rail that still exposes expand + settings.
  */
 export function Sidebar({ collapsed, onToggleCollapsed, children }: SidebarProps) {
@@ -134,9 +137,16 @@ export function Sidebar({ collapsed, onToggleCollapsed, children }: SidebarProps
       <div className={mergeClasses(styles.footer, collapsed && styles.footerCollapsed)}>
         <SettingsMenu />
         {!collapsed && (
-          <Text size={200} className={styles.footerLabel}>
-            Settings
-          </Text>
+          <>
+            <Text size={200} className={styles.footerLabel}>
+              Settings
+            </Text>
+            {/* Trial countdown (renders nothing outside a running trial). Hidden
+                while collapsed — the thin rail has no room for a text pill. */}
+            <span className={styles.footerTrial}>
+              <TrialBadge />
+            </span>
+          </>
         )}
       </div>
     </div>

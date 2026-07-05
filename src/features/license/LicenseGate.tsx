@@ -42,14 +42,17 @@ import {
   MailRegular,
   OpenRegular,
   OptionsRegular,
+  QuestionCircleRegular,
   SettingsRegular,
   SignOutRegular,
   StarRegular,
 } from "@fluentui/react-icons";
 import { MODEL_PROVIDERS } from "@/contracts";
 import { LocalModelOption, LocalModelInstallPanel } from "@/features/localModel/LocalModelOption";
+import { QuickStartDialog } from "@/features/help/QuickStart";
 import { useLicenseStore, type FeedbackInput, type LicenseStatus } from "@/stores/useLicenseStore";
 import { useAuthStore } from "@/stores/useAuthStore";
+import { useThemeStore } from "@/stores/useThemeStore";
 
 const LH_REPO = "https://github.com/lmansf/lighthouse";
 
@@ -113,6 +116,33 @@ const useStyles = makeStyles({
   // Preferences dialog: sections separated by a little vertical air.
   prefFields: { display: "flex", flexDirection: "column", gap: tokens.spacingVerticalL },
   prefHint: { color: tokens.colorNeutralForeground3, fontSize: tokens.fontSizeBase200 },
+  // Opt-in feedback entry under the registration choice — deliberately quiet so
+  // the choice stays the headline (the old flow gated it behind the survey).
+  feedbackLink: { alignSelf: "center", fontSize: tokens.fontSizeBase200 },
+  // Trial countdown pill in the sidebar footer. Neutral so it informs without
+  // shouting; flips to warning colors when the trial is nearly over.
+  trialPill: {
+    height: "24px",
+    minWidth: "auto",
+    ...shorthands.padding(0, tokens.spacingHorizontalS),
+    fontSize: tokens.fontSizeBase200,
+    fontWeight: tokens.fontWeightRegular,
+    whiteSpace: "nowrap",
+    backgroundColor: tokens.colorNeutralBackground3,
+    color: tokens.colorNeutralForeground2,
+    ":hover": {
+      backgroundColor: tokens.colorNeutralBackground3Hover,
+      color: tokens.colorNeutralForeground2,
+    },
+  },
+  trialPillUrgent: {
+    backgroundColor: tokens.colorStatusWarningBackground2,
+    color: tokens.colorStatusWarningForeground2,
+    ":hover": {
+      backgroundColor: tokens.colorStatusWarningBackground2,
+      color: tokens.colorStatusWarningForeground2,
+    },
+  },
 });
 
 /** 0–5 rating as a compact segmented row. */
@@ -441,17 +471,17 @@ export function PostPurchaseFeedback() {
 
 /**
  * Lock gate shown in the LEFT RAIL while the vault (greyed in the main pane) is
- * locked. When paid is off, an ended trial shows the feedback form (with the
- * notify checkbox) first, then a thank-you and the registration choice. Other
- * locks — and everything when paid is on — go straight to the choice.
+ * locked. It lands directly on the registration choice — getting back in is the
+ * user's goal, so the survey never blocks the door. An ended trial offers a
+ * quiet opt-in "Share quick feedback" link under the choice instead, which runs
+ * the trial-end form and returns to the choice via the thank-you step.
  */
 export function LicenseGate({ status }: { status: LicenseStatus }) {
   const styles = useStyles();
-  const paidEnabled = useLicenseStore((s) => s.paidEnabled);
-  // null until the user advances; the entry step is derived each render so the
-  // async paidEnabled config can't strand an expired trial on the feedback form.
+  // null until the user navigates; the entry step is always the choice so
+  // feedback stays opt-in (it used to gate an expired trial).
   const [step, setStep] = useState<"feedback" | "thanks" | "choose" | null>(null);
-  const resolvedStep = step ?? (status === "expired" && !paidEnabled ? "feedback" : "choose");
+  const resolvedStep = step ?? "choose";
 
   return (
     <div className={styles.rail}>
@@ -459,7 +489,7 @@ export function LicenseGate({ status }: { status: LicenseStatus }) {
         <>
           <FeedbackForm mode="trial-end" onDone={() => setStep("thanks")} />
           <Button appearance="subtle" onClick={() => setStep("choose")}>
-            Skip — I have a key or want to start a trial
+            Back
           </Button>
         </>
       )}
@@ -478,8 +508,53 @@ export function LicenseGate({ status }: { status: LicenseStatus }) {
           </Button>
         </>
       )}
-      {resolvedStep === "choose" && <RegistrationChoice />}
+      {resolvedStep === "choose" && (
+        <>
+          <RegistrationChoice />
+          {/* Only a genuinely ended trial earns the trial-end feedback ask. */}
+          {status === "expired" && (
+            <Link appearance="subtle" className={styles.feedbackLink} onClick={() => setStep("feedback")}>
+              Share quick feedback
+            </Link>
+          )}
+        </>
+      )}
     </div>
+  );
+}
+
+/**
+ * Compact trial countdown for the sidebar footer: "Trial · N days left".
+ * Renders only for a running trial with a known remaining-days count — every
+ * other license state renders nothing, so it can be mounted unconditionally.
+ * Clicking it opens the purchase dialog (subscribe / get-notified), making the
+ * countdown itself the path to acting on it.
+ */
+export function TrialBadge() {
+  const styles = useStyles();
+  const status = useLicenseStore((s) => s.status);
+  const licenseType = useLicenseStore((s) => s.licenseType);
+  const remainingDays = useLicenseStore((s) => s.remainingDays);
+  const [dlg, setDlg] = useState(false);
+
+  if (licenseType !== "trial" || status !== "valid" || remainingDays == null) return null;
+
+  // The last few days warrant the warning tint — before that, stay neutral.
+  const urgent = remainingDays <= 3;
+
+  return (
+    <>
+      <Button
+        className={mergeClasses(styles.trialPill, urgent && styles.trialPillUrgent)}
+        appearance="subtle"
+        size="small"
+        shape="circular"
+        onClick={() => setDlg(true)}
+      >
+        Trial · {remainingDays} day{remainingDays === 1 ? "" : "s"} left
+      </Button>
+      <PurchaseDialog open={dlg} setOpen={setDlg} />
+    </>
   );
 }
 
@@ -629,14 +704,17 @@ function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean
 
 /**
  * General preferences — the home for user-controllable settings that aren't the
- * model choice. Today: whether newly-added files are searchable by default
- * (also asked once during onboarding), sharing usage analytics, and (desktop
- * only) launching Lighthouse at login. Each change applies immediately.
+ * model choice. Today: appearance (light/dark/system), whether newly-added
+ * files are searchable by default (also asked once during onboarding), sharing
+ * usage analytics, and (desktop only) launching Lighthouse at login. Each
+ * change applies immediately.
  */
 function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean) => void }) {
   const styles = useStyles();
   const defaultInclusion = useAuthStore((s) => s.onboarding.defaultInclusion);
   const setDefaultInclusion = useAuthStore((s) => s.setDefaultInclusion);
+  const themeMode = useThemeStore((s) => s.mode);
+  const setThemeMode = useThemeStore((s) => s.setMode);
 
   const [shareUsage, setShareUsage] = useState<boolean | null>(null);
   const [desktop, setDesktop] = useState(false);
@@ -679,7 +757,10 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
     void fetch("/api/settings", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ runOnStartup: next }),
+      // Flipping this IS startup consent — record startupAsked so the shell's
+      // consent-first boot gate honors the choice (and the deferred startup
+      // prompt stays quiet).
+      body: JSON.stringify({ runOnStartup: next, startupAsked: true }),
     }).catch(() => {});
   }
 
@@ -690,6 +771,22 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
           <DialogTitle>Preferences</DialogTitle>
           <DialogContent>
             <div className={styles.prefFields}>
+              {/* First: appearance is the most-reached-for preference. Applies
+                  instantly via the theme store — no save step. */}
+              <Field label="Appearance">
+                <RadioGroup
+                  layout="horizontal"
+                  value={themeMode}
+                  onChange={(_, d) =>
+                    setThemeMode(d.value === "light" || d.value === "dark" ? d.value : "system")
+                  }
+                >
+                  <Radio value="light" label="Light" />
+                  <Radio value="dark" label="Dark" />
+                  <Radio value="system" label="Match system" />
+                </RadioGroup>
+              </Field>
+
               <Field label="When you add files, should the AI see them by default?">
                 <RadioGroup
                   value={inclusion}
@@ -747,6 +844,21 @@ export function SettingsMenu() {
   const [dlg, setDlg] = useState(false);
   const [aiDlg, setAiDlg] = useState(false);
   const [prefDlg, setPrefDlg] = useState(false);
+  const [quickStartDlg, setQuickStartDlg] = useState(false);
+
+  // Other features (chat empty states, explorer hints, …) deep-link into these
+  // dialogs by dispatching window CustomEvents — the menu owns the dialogs, so
+  // it's the one place that listens. Mounted once, cleaned up on unmount.
+  useEffect(() => {
+    const openAiModels = () => setAiDlg(true);
+    const openPreferences = () => setPrefDlg(true);
+    window.addEventListener("lighthouse:open-ai-models", openAiModels);
+    window.addEventListener("lighthouse:open-preferences", openPreferences);
+    return () => {
+      window.removeEventListener("lighthouse:open-ai-models", openAiModels);
+      window.removeEventListener("lighthouse:open-preferences", openPreferences);
+    };
+  }, []);
 
   return (
     <>
@@ -790,6 +902,9 @@ export function SettingsMenu() {
               {paidEnabled ? "Subscribe — $14.99/month" : "Get notified when purchasing opens"}
             </MenuItem>
             <MenuDivider />
+            <MenuItem icon={<QuestionCircleRegular />} onClick={() => setQuickStartDlg(true)}>
+              Quick start
+            </MenuItem>
             <MenuItem
               icon={<OpenRegular />}
               onClick={() => window.open(LH_REPO, "_blank", "noopener,noreferrer")}
@@ -802,6 +917,7 @@ export function SettingsMenu() {
       <PurchaseDialog open={dlg} setOpen={setDlg} />
       <AiModelsDialog open={aiDlg} setOpen={setAiDlg} />
       <PreferencesDialog open={prefDlg} setOpen={setPrefDlg} />
+      <QuickStartDialog open={quickStartDlg} setOpen={setQuickStartDlg} />
     </>
   );
 }

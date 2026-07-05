@@ -11,14 +11,22 @@
  * preserved per assistant turn.
  */
 
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent,
+} from "react";
 import {
   Badge,
   Button,
   Card,
-  Input,
   Switch,
   Text,
+  Textarea,
   Title3,
   Tooltip,
   makeStyles,
@@ -28,29 +36,47 @@ import {
 } from "@fluentui/react-components";
 import {
   AddRegular,
+  ArrowDownRegular,
   AttachRegular,
+  CheckmarkRegular,
+  CopyRegular,
   DismissRegular,
+  DocumentAddRegular,
   DocumentRegular,
+  ErrorCircleRegular,
   OpenRegular,
   SendRegular,
+  SettingsRegular,
   Speaker2Regular,
   SpeakerOffRegular,
+  SquareRegular,
+  WarningRegular,
 } from "@fluentui/react-icons";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { DragEvent } from "react";
-import type { ChatMessage, ChatTurn, RagReference } from "@/contracts";
-import { chatService } from "@/contracts";
+import type { ChatTurn, RagReference } from "@/contracts";
+import { chatService, MODEL_PROVIDERS } from "@/contracts";
 import { useRagStore } from "@/stores/useRagStore";
+import { useAuthStore } from "@/stores/useAuthStore";
 import { logEvent } from "@/lib/logEvent";
 import { isSpeechSupported, speak, stopSpeaking } from "@/lib/speech";
-
-const READ_ALOUD_KEY = "lighthouse.chat.readAloud";
-import { useChatStore } from "@/stores/useChatStore";
+import { useChatStore, type TranscriptMessage } from "@/stores/useChatStore";
 import { ConversePlaceholder } from "@/shell/ConversePlaceholder";
 import { ACCENTS } from "@/shell/theme";
 import { FILE_DRAG_MIME, parseDraggedFiles, type DraggedFile } from "@/shell/dnd";
-import { pathsForFiles } from "@/shell/desktopBridge";
+import { isDesktopShell, pathsForFiles } from "@/shell/desktopBridge";
+
+const READ_ALOUD_KEY = "lighthouse.chat.readAloud";
+
+// A user this close to the bottom (px) counts as "pinned": we keep auto-
+// scrolling for them as tokens stream in. Scrolling further up releases the
+// pin so the view is never yanked back down mid-read.
+const PIN_THRESHOLD = 80;
+
+// Composer auto-grow cap: ~6 lines of fontSizeBase300 (20px line height) plus
+// the Textarea's vertical padding. Beyond this the textarea scrolls internally.
+const COMPOSER_MAX_HEIGHT = 132;
 
 const useStyles = makeStyles({
   panel: {
@@ -138,6 +164,15 @@ const useStyles = makeStyles({
     marginBottom: tokens.spacingVerticalM,
   },
   headerMeta: { display: "flex", alignItems: "center", gap: tokens.spacingHorizontalS },
+  // Positioning context for the floating "Jump to latest" pill, which hovers
+  // over the scrolling transcript rather than taking layout space.
+  bodyWrap: {
+    position: "relative",
+    display: "flex",
+    flexDirection: "column",
+    flex: 1,
+    minHeight: 0,
+  },
   body: {
     flex: 1,
     minHeight: 0,
@@ -145,6 +180,16 @@ const useStyles = makeStyles({
     display: "flex",
     flexDirection: "column",
     gap: tokens.spacingVerticalL,
+  },
+  // Floating re-pin affordance shown when the user has scrolled up mid-stream.
+  // A subtle Button needs its own surface + shadow to stay readable over text.
+  jumpPill: {
+    position: "absolute",
+    bottom: tokens.spacingVerticalM,
+    left: "50%",
+    transform: "translateX(-50%)",
+    backgroundColor: tokens.colorNeutralBackground1,
+    boxShadow: tokens.shadow8,
   },
   // Pre-conversation: the prompt sits centered in the rail (Google-style),
   // rather than pinned to the bottom.
@@ -161,6 +206,27 @@ const useStyles = makeStyles({
   },
   heroComposer: { width: "100%", maxWidth: "640px", marginTop: tokens.spacingVerticalS },
   heroHint: { color: tokens.colorNeutralForeground2, maxWidth: "420px" },
+  // Gentle pre-flight warning shown in the hero when no files are visible to
+  // AI yet — informs without blocking (Ask stays enabled).
+  noFilesCard: {
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    gap: tokens.spacingVerticalS,
+    maxWidth: "460px",
+    ...shorthands.padding(tokens.spacingVerticalM, tokens.spacingHorizontalL),
+    borderRadius: tokens.borderRadiusMedium,
+    backgroundColor: tokens.colorStatusWarningBackground1,
+    color: tokens.colorStatusWarningForeground1,
+  },
+  // Suggested prompts built from the user's own file names — clicking fills the
+  // composer (never auto-sends) so the question stays editable.
+  suggestRow: {
+    display: "flex",
+    flexWrap: "wrap",
+    justifyContent: "center",
+    gap: tokens.spacingHorizontalS,
+  },
 
   turn: { display: "flex", flexDirection: "column", gap: tokens.spacingVerticalXS },
   // The user's question — a compact tinted bubble aligned to the right.
@@ -219,17 +285,57 @@ const useStyles = makeStyles({
       color: tokens.colorNeutralForeground2,
     },
   },
+  // [n] citation markers rendered as clickable superscript chips that jump to
+  // the matching reference card below the answer.
+  citeChip: {
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    verticalAlign: "super",
+    minWidth: "16px",
+    height: "16px",
+    ...shorthands.padding("0", tokens.spacingHorizontalXS),
+    marginLeft: "1px",
+    marginRight: "1px",
+    fontSize: tokens.fontSizeBase100,
+    lineHeight: "1",
+    fontWeight: tokens.fontWeightSemibold,
+    color: tokens.colorBrandForeground2,
+    backgroundColor: tokens.colorBrandBackground2,
+    ...shorthands.border("0"),
+    borderRadius: tokens.borderRadiusCircular,
+    cursor: "pointer",
+    ":hover": { backgroundColor: tokens.colorBrandBackground2Hover },
+  },
   refs: {
     display: "flex",
     flexDirection: "column",
     gap: tokens.spacingVerticalS,
     marginTop: tokens.spacingVerticalM,
   },
-  speakBtn: {
-    marginTop: tokens.spacingVerticalXXS,
+  // Per-answer actions (read aloud, copy) in one quiet row under the answer.
+  answerActions: {
+    display: "flex",
+    alignItems: "center",
     alignSelf: "flex-start",
-    color: tokens.colorNeutralForeground3,
+    gap: tokens.spacingHorizontalXXS,
+    marginTop: tokens.spacingVerticalXXS,
   },
+  actionBtn: { color: tokens.colorNeutralForeground3 },
+  // Inline failure banner for a turn that couldn't get an answer — mirrors the
+  // addNotice pattern, in danger colors, with Retry + settings escape hatches.
+  errorNotice: {
+    display: "flex",
+    alignItems: "center",
+    flexWrap: "wrap",
+    gap: tokens.spacingHorizontalS,
+    padding: `${tokens.spacingVerticalS} ${tokens.spacingHorizontalM}`,
+    borderRadius: tokens.borderRadiusMedium,
+    backgroundColor: tokens.colorStatusDangerBackground1,
+    color: tokens.colorStatusDangerForeground1,
+  },
+  // Quiet one-liners: the "(stopped)" note and the zero-references honesty note.
+  quietNote: { color: tokens.colorNeutralForeground3 },
   refCard: {
     display: "flex",
     alignItems: "center",
@@ -241,13 +347,45 @@ const useStyles = makeStyles({
     ":hover": { backgroundColor: tokens.colorNeutralBackground2Hover },
     ":hover .open-affordance": { opacity: 1 },
   },
+  // Brief highlight when a citation chip jumps to this card (class is toggled
+  // for ~1.2s): a brand-tinted background that fades back out.
+  refCardFlash: {
+    animationName: {
+      from: { backgroundColor: tokens.colorBrandBackground2 },
+      to: { backgroundColor: "transparent" },
+    },
+    animationDuration: "1.2s",
+    animationTimingFunction: "ease-out",
+  },
   openIcon: { opacity: 0, transition: "opacity 120ms ease", color: tokens.colorNeutralForeground3 },
   refMeta: { display: "flex", flexDirection: "column", flex: 1, minWidth: 0 },
   composer: {
     display: "flex",
+    // The textarea grows downward as the draft gets longer; keep the send
+    // button anchored to its bottom edge rather than stretching it.
+    alignItems: "flex-end",
     gap: tokens.spacingHorizontalS,
     marginTop: tokens.spacingVerticalM,
   },
+  // Multiline composer: starts one line tall (matching the Input it replaced)
+  // and auto-grows with the draft up to COMPOSER_MAX_HEIGHT. The min/max here
+  // override the Textarea's built-in medium-size bounds.
+  composerField: {
+    flexGrow: 1,
+    minHeight: "32px",
+    "& textarea": {
+      height: "auto",
+      maxHeight: `${COMPOSER_MAX_HEIGHT}px`,
+    },
+  },
+  // Faint guidance under the composer: keyboard hint + where answers come from.
+  composerMeta: {
+    display: "flex",
+    flexDirection: "column",
+    rowGap: tokens.spacingVerticalXXS,
+    marginTop: tokens.spacingVerticalXS,
+  },
+  metaLine: { color: tokens.colorNeutralForeground3 },
   empty: { color: tokens.colorNeutralForeground3 },
 
   // --- Loading signal: a small, subtle Lighthouse beacon that gently pulses.
@@ -302,9 +440,132 @@ const useStyles = makeStyles({
   },
 });
 
-const markdownComponents: Components = {
-  a: ({ node, ...props }) => <a {...props} target="_blank" rel="noopener noreferrer" />,
-};
+/** DOM id for a turn's nth reference card ([n] chips scroll to these). */
+function citeCardId(turnId: string, n: number): string {
+  return `cite-${turnId}-${n}`;
+}
+
+/**
+ * Matches [n] citation markers the model emits per its citation contract (see
+ * SYSTEM_PROMPT in src/server/llm.ts). Capped at 3 digits so ordinary
+ * bracketed prose isn't misread as a citation.
+ */
+const CITATION_MARKER = /\[(\d{1,3})\]/g;
+
+/** Minimal mdast node shape — just enough to walk the tree and split text nodes. */
+interface MdNode {
+  type: string;
+  value?: string;
+  url?: string;
+  children?: MdNode[];
+}
+
+/**
+ * Remark plugin (a plain tree transform — no added dependency) that splits
+ * "[n]" markers out of plain-text nodes into links targeting `#lh-cite-n`, so
+ * the `a` component override below renders them as clickable chips. Working on
+ * the mdast rather than regexing the source keeps markers inside code blocks /
+ * inline code verbatim, and skipping `link` nodes never nests a link in a link.
+ */
+function remarkCitations() {
+  return (tree: unknown) => splitCitationMarkers(tree as MdNode);
+}
+
+function splitCitationMarkers(node: MdNode): void {
+  if (!node.children) return;
+  const next: MdNode[] = [];
+  for (const child of node.children) {
+    if (child.type === "text" && typeof child.value === "string") {
+      // Fresh regex per node: the shared constant is /g and stateful.
+      const re = new RegExp(CITATION_MARKER.source, "g");
+      let last = 0;
+      let match: RegExpExecArray | null;
+      while ((match = re.exec(child.value))) {
+        if (match.index > last) {
+          next.push({ type: "text", value: child.value.slice(last, match.index) });
+        }
+        next.push({
+          type: "link",
+          url: `#lh-cite-${match[1]}`,
+          children: [{ type: "text", value: match[1] }],
+        });
+        last = match.index + match[0].length;
+      }
+      if (last === 0) {
+        next.push(child); // no markers — keep the node untouched
+      } else if (last < child.value.length) {
+        next.push({ type: "text", value: child.value.slice(last) });
+      }
+    } else {
+      if (child.type !== "link") splitCitationMarkers(child);
+      next.push(child);
+    }
+  }
+  node.children = next;
+}
+
+/** Reduce a thrown ask() failure to a short plain-language reason for the banner. */
+function describeAskError(err: unknown): string {
+  // fetch() rejects with a TypeError when the network/server is unreachable.
+  if (err instanceof TypeError) return "the model service couldn't be reached";
+  if (err instanceof Error && err.message) return err.message;
+  return "something unexpected went wrong";
+}
+
+/** Trim long file names so suggestion chips stay one-line scannable. */
+function shortName(name: string): string {
+  return name.length > 28 ? `${name.slice(0, 27).trimEnd()}…` : name;
+}
+
+/**
+ * Renders an assistant answer's Markdown, upgrading [n] citation markers into
+ * clickable superscript chips that jump to the matching reference card below.
+ * Memoized so finished turns don't re-render on every streamed token.
+ */
+const AnswerMarkdown = memo(function AnswerMarkdown({
+  content,
+  turnId,
+  onCite,
+}: {
+  content: string;
+  turnId: string;
+  onCite: (turnId: string, n: number) => void;
+}) {
+  const styles = useStyles();
+  const components = useMemo<Components>(
+    () => ({
+      a: ({ node, href, children, ...props }) => {
+        // Links minted by remarkCitations carry a #lh-cite-n anchor; render
+        // those as citation chips instead of navigable links.
+        const cite = href?.match(/^#lh-cite-(\d+)$/);
+        if (cite) {
+          const n = Number(cite[1]);
+          return (
+            <button
+              type="button"
+              className={styles.citeChip}
+              aria-label={`Go to reference ${n}`}
+              onClick={() => onCite(turnId, n)}
+            >
+              {n}
+            </button>
+          );
+        }
+        return (
+          <a {...props} href={href} target="_blank" rel="noopener noreferrer">
+            {children}
+          </a>
+        );
+      },
+    }),
+    [styles, turnId, onCite],
+  );
+  return (
+    <ReactMarkdown remarkPlugins={[remarkGfm, remarkCitations]} components={components}>
+      {content}
+    </ReactMarkdown>
+  );
+});
 
 /** Subtle Lighthouse beacon loader, shown briefly while we wait for the first token. */
 function LighthouseLoader({ className, dotClass }: { className: string; dotClass: string }) {
@@ -324,10 +585,24 @@ export function ChatPanel() {
   const desktop = useRagStore((s) => s.desktop);
   const upload = useRagStore((s) => s.upload);
   const linkPaths = useRagStore((s) => s.linkPaths);
-  const includedFileIds = useMemo(
-    () => nodes.filter((n) => n.kind === "file" && n.ragIncluded).map((n) => n.id),
+  // Included files with names (for the suggestion chips) and ids (for asks).
+  const includedFiles = useMemo(
+    () =>
+      nodes.filter((n) => n.kind === "file" && n.ragIncluded).map((n) => ({ id: n.id, name: n.name })),
     [nodes],
   );
+  const includedFileIds = useMemo(() => includedFiles.map((f) => f.id), [includedFiles]);
+
+  // Who answers, for the provenance line: the local model keeps everything on
+  // this device; a hosted provider receives excerpts of files visible to AI.
+  // No provider chosen yet means the private local default (see MODEL_PROVIDERS).
+  const providerId = useAuthStore((s) => s.onboarding.providerId);
+  const providerLabel =
+    MODEL_PROVIDERS.find((p) => p.id === providerId)?.label ?? "your AI provider";
+  const provenance =
+    !providerId || providerId === "local"
+      ? "Private — answers are generated entirely on this device."
+      : `Excerpts from files visible to AI are sent to ${providerLabel} to answer your questions.`;
 
   const [question, setQuestion] = useState("");
   // The transcript lives in a session store so it survives leaving/returning to
@@ -337,6 +612,8 @@ export function ChatPanel() {
   const persistMessages = useChatStore((s) => s.persist);
   const clearMessages = useChatStore((s) => s.clear);
   const [streaming, setStreaming] = useState(false);
+  // Cancels the in-flight ask() when the user presses Stop.
+  const abortRef = useRef<AbortController | null>(null);
   // Files explicitly attached to the conversation (dragged from the explorer or
   // dropped from the OS). When present, questions are scoped to just these.
   const [attachments, setAttachments] = useState<DraggedFile[]>([]);
@@ -346,10 +623,36 @@ export function ChatPanel() {
   const [dropping, setDropping] = useState(false);
   const dropDepth = useRef(0);
   const bodyRef = useRef<HTMLDivElement>(null);
-  // Seed the id counter past any restored messages so new ids never collide.
-  const idSeq = useRef(messages.length);
+  const composerRef = useRef<HTMLTextAreaElement>(null);
+  // Seed the id counter past the HIGHEST restored id (not the length): Retry
+  // removes a failed pair but mints higher ids, so ids can run ahead of the
+  // transcript length — seeding from length would mint duplicates after a
+  // reload and stream new tokens into an old turn.
+  const idSeq = useRef(
+    messages.reduce((max, m) => Math.max(max, Number(m.id.slice(1)) || 0), 0),
+  );
   // Fires the activation event only on the first answered question this session.
   const firstQueryLogged = useRef(false);
+
+  // "Pinned" = the user is at (or near) the bottom of the transcript, so it's
+  // safe to keep auto-scrolling as tokens stream in. The ref mirrors the state
+  // for use inside the scroll effect without retriggering it.
+  const [pinned, setPinned] = useState(true);
+  const pinnedRef = useRef(true);
+
+  // Copy-answer feedback: which message briefly shows the checkmark.
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+  const copyTimer = useRef<number | null>(null);
+  // Citation-chip flash: "turnId:n" for the card currently highlighted.
+  const [flashCite, setFlashCite] = useState<string | null>(null);
+  const flashTimer = useRef<number | null>(null);
+  useEffect(
+    () => () => {
+      if (copyTimer.current !== null) window.clearTimeout(copyTimer.current);
+      if (flashTimer.current !== null) window.clearTimeout(flashTimer.current);
+    },
+    [],
+  );
 
   // Read-aloud (on-device TTS): a remembered preference to auto-speak each new
   // answer, plus which message is speaking right now (for the per-message button).
@@ -455,8 +758,60 @@ export function ChatPanel() {
     reportSkipped(skipped);
   }
 
+  // Inside the Tauri shell, OS file drags arrive via the NATIVE drag-drop
+  // events (rebroadcast as lighthouse:os-* CustomEvents) — the DOM "Files"
+  // events never fire on Windows and would double-handle drops on macOS, so
+  // the DOM path only reacts to OS files on the web. Internal drags from the
+  // explorer (FILE_DRAG_MIME) are DOM-native everywhere and stay as they are.
   const isFileDrag = (e: DragEvent) =>
-    e.dataTransfer.types.includes(FILE_DRAG_MIME) || e.dataTransfer.types.includes("Files");
+    e.dataTransfer.types.includes(FILE_DRAG_MIME) ||
+    (!isDesktopShell() && e.dataTransfer.types.includes("Files"));
+
+  // Link OS-dropped paths in place and attach the resulting file nodes — the
+  // native-event twin of attachOsFiles (which handles browser File objects).
+  const attachOsPaths = async (paths: string[]) => {
+    const { linked, failed } = await linkPaths(paths);
+    const attach = linked
+      .filter((l) => l.kind === "file")
+      .map((l) => ({ id: l.id, name: l.name }));
+    if (attach.length) addAttachments(attach);
+    reportSkipped(
+      failed.map((f) => ({
+        name: f.path.split(/[\\/]/).filter(Boolean).pop() ?? f.path,
+        reason: f.reason,
+      })),
+    );
+  };
+  const attachOsPathsRef = useRef(attachOsPaths);
+  attachOsPathsRef.current = attachOsPaths;
+
+  // Native OS drag-drop (desktop shell): highlight while the pointer is over
+  // the chat pane, and attach on a drop inside it. Drops elsewhere belong to
+  // the explorer, which claims everything outside this pane.
+  useEffect(() => {
+    if (!isDesktopShell()) return;
+    const overChat = (x: number, y: number) =>
+      Boolean(document.elementFromPoint(x, y)?.closest('[data-lh-pane="chat"]'));
+    const onDrag = (e: Event) => {
+      const { x, y } = (e as CustomEvent<{ x: number; y: number }>).detail ?? { x: -1, y: -1 };
+      setDropping(overChat(x, y));
+    };
+    const onLeave = () => setDropping(false);
+    const onDrop = (e: Event) => {
+      const detail = (e as CustomEvent<{ paths?: string[]; x: number; y: number }>).detail;
+      setDropping(false);
+      if (!detail?.paths?.length || !overChat(detail.x, detail.y)) return;
+      void attachOsPathsRef.current(detail.paths).catch(() => {});
+    };
+    window.addEventListener("lighthouse:os-drag", onDrag);
+    window.addEventListener("lighthouse:os-drag-leave", onLeave);
+    window.addEventListener("lighthouse:os-drop", onDrop);
+    return () => {
+      window.removeEventListener("lighthouse:os-drag", onDrag);
+      window.removeEventListener("lighthouse:os-drag-leave", onLeave);
+      window.removeEventListener("lighthouse:os-drop", onDrop);
+    };
+  }, []);
 
   const dropHandlers = {
     onDragEnter: (e: DragEvent) => {
@@ -486,31 +841,107 @@ export function ChatPanel() {
     },
   };
 
-  // Keep the newest turn in view as the transcript grows and tokens stream in.
+  // Keep the newest turn in view as the transcript grows and tokens stream in —
+  // but only while the user is pinned near the bottom. Scrolling up to re-read
+  // releases the pin (see handleBodyScroll) so the view is never yanked down.
   useEffect(() => {
     const el = bodyRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
+    if (el && pinnedRef.current) el.scrollTop = el.scrollHeight;
   }, [messages]);
 
-  async function ask() {
-    const q = question.trim();
+  function handleBodyScroll() {
+    const el = bodyRef.current;
+    if (!el) return;
+    // A small band above the bottom still counts as pinned, so touchpad wobble
+    // or reflow from a streaming token doesn't spuriously release the pin.
+    const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+    const next = distance < PIN_THRESHOLD;
+    pinnedRef.current = next;
+    setPinned(next);
+  }
+
+  function jumpToLatest() {
+    pinnedRef.current = true;
+    setPinned(true);
+    const el = bodyRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }
+
+  // Focus the composer on mount so the user can just start typing.
+  useEffect(() => {
+    composerRef.current?.focus();
+  }, []);
+
+  // Auto-grow the composer with the draft (one line up to ~six); beyond the cap
+  // the textarea scrolls internally. Measured off scrollHeight, so pasted
+  // multi-line text sizes correctly too.
+  useEffect(() => {
+    const el = composerRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, COMPOSER_MAX_HEIGHT)}px`;
+  }, [question]);
+
+  // Other features start a fresh conversation by dispatching this window event
+  // (e.g. the settings menu) rather than reaching into chat internals. The ref
+  // indirection keeps the listener mounted once while calling the latest closure.
+  const newChatRef = useRef<() => void>(() => {});
+  useEffect(() => {
+    const onNewChat = () => newChatRef.current();
+    window.addEventListener("lighthouse:new-chat", onNewChat);
+    return () => window.removeEventListener("lighthouse:new-chat", onNewChat);
+  }, []);
+
+  /** Mark a turn as stopped-by-user, keeping whatever content already streamed. */
+  function markStopped(asstId: string) {
+    setMessages((m) => m.map((x) => (x.id === asstId ? { ...x, stopped: true } : x)));
+  }
+
+  async function sendQuestion(q: string) {
     if (!q || streaming) return;
-    // The conversation so far (completed turns only) becomes the model's history.
-    const history: ChatTurn[] = messages.map((m) => ({ role: m.role, content: m.content }));
-    const userMsg: ChatMessage = { id: `u${++idSeq.current}`, role: "user", content: q };
+    // The conversation so far (completed turns only — failed turns are excluded)
+    // becomes the model's history. Read from the store, not the render closure,
+    // so a retry that just removed its failed turn builds the right history.
+    const history: ChatTurn[] = useChatStore
+      .getState()
+      .messages.filter((m) => !m.error && m.content)
+      .map((m) => ({ role: m.role, content: m.content }));
+    const attachmentIds = attachments.map((a) => a.id);
+    const userMsg: TranscriptMessage = { id: `u${++idSeq.current}`, role: "user", content: q };
     const asstId = `a${++idSeq.current}`;
-    const asstMsg: ChatMessage = { id: asstId, role: "assistant", content: "", references: [] };
+    const asstMsg: TranscriptMessage = {
+      id: asstId,
+      role: "assistant",
+      content: "",
+      references: [],
+      // Recorded at ask time: whether any files were visible to AI (included or
+      // attached) — drives the zero-reference honesty note on the finished answer.
+      hadSources: includedFileIds.length > 0 || attachmentIds.length > 0,
+    };
     setMessages((m) => [...m, userMsg, asstMsg]);
-    setQuestion("");
     setStreaming(true);
+    // Asking always re-pins: the user wants to watch their new answer arrive.
+    pinnedRef.current = true;
+    setPinned(true);
     // A new question interrupts any answer being read aloud.
     stopSpeaking();
     setSpeakingId(null);
-    const attachmentIds = attachments.map((a) => a.id);
+    const controller = new AbortController();
+    abortRef.current = controller;
     let sourceCount = 0;
     let finalContent = "";
     try {
-      for await (const chunk of chatService.ask(q, includedFileIds, history, attachmentIds)) {
+      for await (const chunk of chatService.ask(
+        q,
+        includedFileIds,
+        history,
+        attachmentIds,
+        controller.signal,
+      )) {
+        // Stop pressed: some transports (the Tauri fetch interceptor) don't
+        // honor AbortSignal, so also bail out of the loop explicitly and keep
+        // the partially-streamed answer.
+        if (controller.signal.aborted) break;
         if (chunk.delta) {
           finalContent += chunk.delta;
           setMessages((m) =>
@@ -523,32 +954,71 @@ export function ChatPanel() {
           setMessages((m) => m.map((x) => (x.id === asstId ? { ...x, references: refs } : x)));
         }
       }
-      // An answer rendered. `source_count` (incl. 0) is the empty-answer signal
-      // for the default-inclusion experiment; the first answer of a session is
-      // the onboarding activation event.
-      logEvent("answer_rendered", { source_count: sourceCount });
-      if (!firstQueryLogged.current) {
-        firstQueryLogged.current = true;
-        logEvent("first_query", { source_count: sourceCount });
+      if (controller.signal.aborted) {
+        markStopped(asstId);
+      } else {
+        // An answer rendered. `source_count` (incl. 0) is the empty-answer signal
+        // for the default-inclusion experiment; the first answer of a session is
+        // the onboarding activation event.
+        logEvent("answer_rendered", { source_count: sourceCount });
+        if (!firstQueryLogged.current) {
+          firstQueryLogged.current = true;
+          logEvent("first_query", { source_count: sourceCount });
+        }
+        // Read the finished answer aloud if the preference is on (on-device TTS).
+        // Stopped and failed turns never reach this branch, so TTS only ever
+        // reads completed answers.
+        if (readAloudRef.current && finalContent.trim()) {
+          setSpeakingId(asstId);
+          speak(finalContent, () => setSpeakingId((cur) => (cur === asstId ? null : cur)));
+        }
       }
-      // Read the finished answer aloud if the preference is on (on-device TTS).
-      if (readAloudRef.current && finalContent.trim()) {
-        setSpeakingId(asstId);
-        speak(finalContent, () => setSpeakingId((cur) => (cur === asstId ? null : cur)));
+    } catch (err) {
+      if (controller.signal.aborted || (err instanceof DOMException && err.name === "AbortError")) {
+        // Stop pressed while the request was in flight: keep what streamed.
+        markStopped(asstId);
+      } else {
+        // Network/HTTP failure: mark the turn failed so it renders the inline
+        // retry banner. Any partial content stays visible above it.
+        setMessages((m) =>
+          m.map((x) => (x.id === asstId ? { ...x, error: describeAskError(err) } : x)),
+        );
       }
-    } catch {
-      setMessages((m) =>
-        m.map((x) =>
-          x.id === asstId && !x.content
-            ? { ...x, content: "Something went wrong reaching the model. Please try again." }
-            : x,
-        ),
-      );
     } finally {
+      abortRef.current = null;
       setStreaming(false);
       // Save the settled turn for this session (cheap: once per turn, not per token).
       persistMessages();
+      // Hand focus back for the follow-up — but only if the user hasn't moved
+      // focus elsewhere (e.g. the explorer's search box) while it streamed.
+      const active = document.activeElement;
+      if (!active || active === document.body || active.closest('[data-lh-pane="chat"]')) {
+        composerRef.current?.focus();
+      }
     }
+  }
+
+  function ask() {
+    const q = question.trim();
+    if (!q || streaming) return;
+    setQuestion("");
+    void sendQuestion(q);
+  }
+
+  /** Abort the in-flight answer; the partial text is kept with a "(stopped)" note. */
+  function stopStreaming() {
+    abortRef.current?.abort();
+  }
+
+  /** Re-send a failed turn's question, removing the failed turn first. */
+  function retryTurn(asstId: string) {
+    if (streaming) return;
+    const msgs = useChatStore.getState().messages;
+    const idx = msgs.findIndex((m) => m.id === asstId);
+    const prev = idx > 0 ? msgs[idx - 1] : undefined;
+    if (!prev || prev.role !== "user") return;
+    setMessages((m) => m.filter((x) => x.id !== asstId && x.id !== prev.id));
+    void sendQuestion(prev.content);
   }
 
   function newChat() {
@@ -559,6 +1029,43 @@ export function ChatPanel() {
     setQuestion("");
     setAttachments([]);
   }
+  newChatRef.current = newChat;
+
+  /** Copy an answer's raw Markdown; the icon flips to a checkmark briefly. */
+  async function copyAnswer(id: string, content: string) {
+    try {
+      await navigator.clipboard.writeText(content);
+    } catch {
+      // Clipboard API unavailable (older webviews / stricter permissions):
+      // fall back to the legacy hidden-textarea path.
+      const ta = document.createElement("textarea");
+      ta.value = content;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      try {
+        document.execCommand("copy");
+      } catch {
+        /* nothing else to try */
+      }
+      ta.remove();
+    }
+    setCopiedId(id);
+    if (copyTimer.current !== null) window.clearTimeout(copyTimer.current);
+    copyTimer.current = window.setTimeout(() => setCopiedId(null), 1500);
+  }
+
+  // Clicking a [n] chip scrolls that turn's nth reference card into view and
+  // flashes it briefly so the eye lands on the right card.
+  const handleCitationClick = useCallback((turnId: string, n: number) => {
+    const card = document.getElementById(citeCardId(turnId, n));
+    if (!card) return; // marker without a matching reference — nothing to jump to
+    card.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    setFlashCite(`${turnId}:${n}`);
+    if (flashTimer.current !== null) window.clearTimeout(flashTimer.current);
+    flashTimer.current = window.setTimeout(() => setFlashCite(null), 1200);
+  }, []);
 
   // Open a cited file in its native app (desktop only; the route no-ops on web).
   async function openFile(fileId: string) {
@@ -568,6 +1075,42 @@ export function ChatPanel() {
       body: JSON.stringify({ nodeId: fileId }),
     }).catch(() => {});
   }
+
+  function handleComposerKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
+    // Enter sends; Shift+Enter inserts a newline. `isComposing` guards IME
+    // composition (e.g. Japanese input), where Enter commits the composition
+    // rather than the message.
+    if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+      e.preventDefault();
+      ask();
+    }
+  }
+
+  /** Fill the composer with a suggested prompt (never auto-send) and focus it. */
+  function applySuggestion(fill: string) {
+    setQuestion(fill);
+    composerRef.current?.focus();
+  }
+
+  // Up to 3 starter prompts built from the user's actual included file names.
+  const suggestions = useMemo(() => {
+    if (includedFiles.length === 0) return [];
+    const first = includedFiles[0].name;
+    const second = (includedFiles[1] ?? includedFiles[0]).name;
+    return [
+      { label: `Summarize "${shortName(first)}"`, fill: `Summarize "${first}"` },
+      {
+        label: `What are the key points in "${shortName(second)}"?`,
+        fill: `What are the key points in "${second}"?`,
+      },
+      // Open-ended starter: fill ends with a space so the user completes it.
+      { label: "What do my files say about…", fill: "What do my files say about " },
+    ];
+  }, [includedFiles]);
+
+  const visibleBadgeText = `${includedFileIds.length} ${
+    includedFileIds.length === 1 ? "file" : "files"
+  } visible to AI`;
 
   const attachmentBar =
     attachments.length > 0 ? (
@@ -616,32 +1159,53 @@ export function ChatPanel() {
       )}
       {attachmentBar}
       <div className={styles.composer}>
-        <Input
-          style={{ flex: 1 }}
+        <Textarea
+          ref={composerRef}
+          className={styles.composerField}
+          resize="none"
+          rows={1}
           value={question}
           placeholder={attachments.length > 0 ? "Ask about the attached files…" : placeholder}
           onChange={(_, d) => setQuestion(d.value)}
-          onKeyDown={(e) => e.key === "Enter" && void ask()}
+          onKeyDown={handleComposerKeyDown}
         />
-        <Button appearance="primary" icon={<SendRegular />} disabled={streaming} onClick={() => void ask()}>
-          Ask
-        </Button>
+        {streaming ? (
+          <Button appearance="secondary" icon={<SquareRegular />} onClick={stopStreaming}>
+            Stop
+          </Button>
+        ) : (
+          <Button appearance="primary" icon={<SendRegular />} onClick={() => ask()}>
+            Ask
+          </Button>
+        )}
+      </div>
+      <div className={styles.composerMeta}>
+        <Text size={200} className={styles.metaLine}>
+          Enter to send · Shift+Enter for a new line
+        </Text>
+        <Text size={200} className={styles.metaLine}>
+          {provenance}
+        </Text>
       </div>
     </div>
   );
 
-  function References({ references }: { references: RagReference[] }) {
+  function References({ turnId, references }: { turnId: string; references: RagReference[] }) {
     return (
       <div className={styles.refs}>
         <Text weight="semibold" size={200}>
           Related files
         </Text>
-        {references.map((r) => (
+        {references.map((r, i) => (
           <Card
             key={r.fileId}
-            className={
-              desktop ? mergeClasses(styles.refCard, styles.refCardInteractive) : styles.refCard
-            }
+            // Anchor for the [n] citation chips in the answer above.
+            id={citeCardId(turnId, i + 1)}
+            className={mergeClasses(
+              styles.refCard,
+              desktop && styles.refCardInteractive,
+              flashCite === `${turnId}:${i + 1}` && styles.refCardFlash,
+            )}
             appearance="filled-alternative"
             {...(desktop
               ? {
@@ -654,6 +1218,10 @@ export function ChatPanel() {
                 }
               : {})}
           >
+            {/* Number matches the [n] markers in the answer text. */}
+            <Badge appearance="tint" shape="circular" size="small">
+              {i + 1}
+            </Badge>
             <DocumentRegular fontSize={24} />
             <div className={styles.refMeta}>
               <Text weight="semibold" truncate>
@@ -675,6 +1243,7 @@ export function ChatPanel() {
   if (messages.length === 0 && !streaming) {
     return (
       <section
+        data-lh-pane="chat"
         className={mergeClasses(styles.panel, dropping ? styles.panelDropping : undefined)}
         {...dropHandlers}
       >
@@ -682,11 +1251,45 @@ export function ChatPanel() {
           <span className={styles.beacon} />
           <Title3>Ask Lighthouse</Title3>
           <Text className={styles.heroHint}>
-            I&apos;ll answer using only the files you&apos;ve included. Drag a file from the
+            I&apos;ll answer using only the files visible to AI. Drag a file from the
             explorer (or drop one here) to ask about just that file.
           </Text>
-          <Badge appearance="tint">{includedFileIds.length} sources available</Badge>
-          <div className={styles.heroComposer}>{composer("Ask about your included files…")}</div>
+          {includedFileIds.length === 0 && attachments.length === 0 ? (
+            // Pre-flight: nothing is visible to AI yet. Inform gently and offer
+            // the fix, but never block asking.
+            <div className={styles.noFilesCard}>
+              <WarningRegular fontSize={20} />
+              <Text size={300}>
+                The AI can&apos;t see any files yet. Answers will be generic until you add
+                files and make them visible.
+              </Text>
+              <Button
+                appearance="primary"
+                icon={<DocumentAddRegular />}
+                onClick={() => window.dispatchEvent(new CustomEvent("lighthouse:browse-files"))}
+              >
+                Add files
+              </Button>
+            </div>
+          ) : (
+            <>
+              <Badge appearance="tint">{visibleBadgeText}</Badge>
+              <div className={styles.suggestRow}>
+                {suggestions.map((s) => (
+                  <Button
+                    key={s.label}
+                    appearance="secondary"
+                    size="small"
+                    shape="circular"
+                    onClick={() => applySuggestion(s.fill)}
+                  >
+                    {s.label}
+                  </Button>
+                ))}
+              </div>
+            </>
+          )}
+          <div className={styles.heroComposer}>{composer("Ask about the files visible to AI…")}</div>
         </div>
       </section>
     );
@@ -696,6 +1299,7 @@ export function ChatPanel() {
 
   return (
     <section
+      data-lh-pane="chat"
       className={mergeClasses(styles.panel, dropping ? styles.panelDropping : undefined)}
       {...dropHandlers}
     >
@@ -703,7 +1307,7 @@ export function ChatPanel() {
         <div className={styles.header}>
           <Title3>Ask</Title3>
           <div className={styles.headerMeta}>
-            <Badge appearance="tint">{includedFileIds.length} sources available</Badge>
+            <Badge appearance="tint">{visibleBadgeText}</Badge>
             {speechSupported && (
               <Tooltip content="Read new answers aloud (on-device)" relationship="label">
                 <Switch
@@ -726,46 +1330,127 @@ export function ChatPanel() {
           </div>
         </div>
 
-        <div className={styles.body} ref={bodyRef}>
-          {messages.map((m) =>
-            m.role === "user" ? (
-              <div key={m.id} className={styles.turn}>
-                <div className={styles.question}>{m.content}</div>
-              </div>
-            ) : (
-              <div key={m.id} className={styles.turn}>
-                {streaming && !m.content && m.id === lastId ? (
-                  <LighthouseLoader className={styles.loader} dotClass={styles.loaderDot} />
-                ) : (
-                  <>
-                    <div className={styles.answer}>
-                      <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
-                        {m.content}
-                      </ReactMarkdown>
-                      {streaming && m.id === lastId && <span className={styles.beaconInline} />}
-                    </div>
-                    {speechSupported && m.content && !(streaming && m.id === lastId) && (
-                      <Tooltip
-                        content={speakingId === m.id ? "Stop" : "Read this answer aloud"}
-                        relationship="label"
-                      >
-                        <Button
-                          className={styles.speakBtn}
-                          appearance="subtle"
-                          size="small"
-                          icon={speakingId === m.id ? <SpeakerOffRegular /> : <Speaker2Regular />}
-                          aria-label={speakingId === m.id ? "Stop reading" : "Read this answer aloud"}
-                          onClick={() => toggleSpeak(m.id, m.content)}
-                        />
-                      </Tooltip>
-                    )}
-                    {m.references && m.references.length > 0 && (
-                      <References references={m.references} />
-                    )}
-                  </>
-                )}
-              </div>
-            ),
+        <div className={styles.bodyWrap}>
+          <div className={styles.body} ref={bodyRef} onScroll={handleBodyScroll}>
+            {messages.map((m) =>
+              m.role === "user" ? (
+                <div key={m.id} className={styles.turn}>
+                  <div className={styles.question}>{m.content}</div>
+                </div>
+              ) : (
+                <div key={m.id} className={styles.turn}>
+                  {streaming && !m.content && m.id === lastId ? (
+                    <LighthouseLoader className={styles.loader} dotClass={styles.loaderDot} />
+                  ) : (
+                    <>
+                      {m.content && (
+                        <div className={styles.answer}>
+                          <AnswerMarkdown
+                            content={m.content}
+                            turnId={m.id}
+                            onCite={handleCitationClick}
+                          />
+                          {streaming && m.id === lastId && <span className={styles.beaconInline} />}
+                        </div>
+                      )}
+                      {m.stopped && (
+                        <Text size={200} className={styles.quietNote}>
+                          (stopped)
+                        </Text>
+                      )}
+                      {m.error && (
+                        <div className={styles.errorNotice}>
+                          <ErrorCircleRegular fontSize={16} />
+                          <Text size={200}>Couldn&apos;t get an answer — {m.error}.</Text>
+                          <span style={{ flex: 1 }} />
+                          <Button
+                            size="small"
+                            appearance="secondary"
+                            disabled={streaming}
+                            onClick={() => retryTurn(m.id)}
+                          >
+                            Retry
+                          </Button>
+                          <Button
+                            size="small"
+                            appearance="subtle"
+                            icon={<SettingsRegular />}
+                            onClick={() =>
+                              window.dispatchEvent(new CustomEvent("lighthouse:open-ai-models"))
+                            }
+                          >
+                            AI model settings
+                          </Button>
+                        </div>
+                      )}
+                      {/* Failed turns get no actions (Retry is the action) and are never spoken. */}
+                      {!m.error && m.content && !(streaming && m.id === lastId) && (
+                        <div className={styles.answerActions}>
+                          {speechSupported && (
+                            <Tooltip
+                              content={speakingId === m.id ? "Stop" : "Read this answer aloud"}
+                              relationship="label"
+                            >
+                              <Button
+                                className={styles.actionBtn}
+                                appearance="subtle"
+                                size="small"
+                                icon={
+                                  speakingId === m.id ? <SpeakerOffRegular /> : <Speaker2Regular />
+                                }
+                                aria-label={
+                                  speakingId === m.id ? "Stop reading" : "Read this answer aloud"
+                                }
+                                onClick={() => toggleSpeak(m.id, m.content)}
+                              />
+                            </Tooltip>
+                          )}
+                          <Tooltip
+                            content={copiedId === m.id ? "Copied" : "Copy answer"}
+                            relationship="label"
+                          >
+                            <Button
+                              className={styles.actionBtn}
+                              appearance="subtle"
+                              size="small"
+                              icon={copiedId === m.id ? <CheckmarkRegular /> : <CopyRegular />}
+                              aria-label="Copy answer"
+                              onClick={() => void copyAnswer(m.id, m.content)}
+                            />
+                          </Tooltip>
+                        </div>
+                      )}
+                      {m.references && m.references.length > 0 && (
+                        <References turnId={m.id} references={m.references} />
+                      )}
+                      {/* Honesty note: files were visible, yet nothing matched. */}
+                      {!m.error &&
+                        !m.stopped &&
+                        m.hadSources &&
+                        m.content &&
+                        (m.references?.length ?? 0) === 0 &&
+                        !(streaming && m.id === lastId) && (
+                          <Text size={200} className={styles.quietNote}>
+                            No matching passages were found in your files for this answer.
+                          </Text>
+                        )}
+                    </>
+                  )}
+                </div>
+              ),
+            )}
+          </div>
+          {streaming && !pinned && (
+            <Button
+              className={styles.jumpPill}
+              appearance="subtle"
+              size="small"
+              shape="circular"
+              icon={<ArrowDownRegular />}
+              onClick={jumpToLatest}
+            >
+              Jump to latest
+            </Button>
           )}
         </div>
 

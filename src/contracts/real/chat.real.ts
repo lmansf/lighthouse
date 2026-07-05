@@ -9,15 +9,22 @@ class RealChatService implements ChatService {
     includedFileIds: string[],
     history: ChatTurn[] = [],
     attachmentFileIds: string[] = [],
+    signal?: AbortSignal,
   ): AsyncIterable<ChatChunk> {
+    // `signal` cancels both the request and (once streaming) the body reader —
+    // aborting rejects the pending read with an AbortError, which propagates out
+    // of this generator so the chat UI can keep the partial answer.
     const res = await fetch("/api/chat", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ question, includedFileIds, history, attachmentFileIds }),
+      signal,
     });
     if (!res.ok || !res.body) {
-      yield { delta: `Chat failed (${res.status}).`, done: true };
-      return;
+      // Throw (rather than yielding a fake answer) so the chat UI renders its
+      // plain-language failure banner with a Retry affordance. The message is
+      // phrased to slot into "Couldn't get an answer — {reason}."
+      throw new Error(`the model service returned an error (HTTP ${res.status})`);
     }
 
     const reader = res.body.getReader();

@@ -2,7 +2,9 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Main window: core APIs plus the dialog/autostart/opener plugins.",
-  "windows": ["main"],
+  "windows": [
+    "main"
+  ],
   "permissions": [
     "core:default",
     "core:window:allow-show",
@@ -11,6 +13,7 @@
     "core:webview:allow-internal-toggle-devtools",
     "dialog:default",
     "autostart:default",
-    "opener:default"
+    "opener:default",
+    "window-state:default"
   ]
 }

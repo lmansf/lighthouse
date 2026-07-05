@@ -72,12 +72,16 @@ export interface ChatService {
    * carries prior turns so follow-up questions ("tell me more about the second
    * one") resolve against the ongoing conversation. When `attachmentFileIds` is
    * non-empty the answer is scoped to just those files (the user attached them to
-   * this question), regardless of the global included set.
+   * this question), regardless of the global included set. An aborted `signal`
+   * cancels the in-flight request (the chat UI's Stop button); implementations
+   * should surface the abort by throwing (an `AbortError` DOMException) so the
+   * caller can keep the partial answer and settle its state.
    */
   ask(
     question: string,
     includedFileIds: string[],
     history?: ChatTurn[],
     attachmentFileIds?: string[],
+    signal?: AbortSignal,
   ): AsyncIterable<ChatChunk>;
 }

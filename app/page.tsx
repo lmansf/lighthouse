@@ -10,6 +10,7 @@ import { ChatPanel } from "@/features/chat/ChatPanel";
 import { LicenseGate, GraceBanner, PostPurchaseFeedback } from "@/features/license/LicenseGate";
 import { BugReport } from "@/features/feedback/BugReport";
 import { FeedbackNudge } from "@/features/feedback/FeedbackNudge";
+import { QuickStartAuto } from "@/features/help/QuickStart";
 import { VersionBadge } from "@/shell/VersionBadge";
 
 /**
@@ -122,6 +123,13 @@ export default function Home() {
       <BugReport />
       <VersionBadge />
       {onboarded && <FeedbackNudge />}
+      {/* First-run tutorial: only once the working shell is actually on screen
+          (onboarded and the license check has RESOLVED unlocked) — mounting
+          during the transient "unknown" status would flash the tour over a
+          lock gate and burn its once-per-install flag before it was seen. */}
+      {onboarded && (status === "valid" || status === "grace" || status === "disabled") && (
+        <QuickStartAuto />
+      )}
     </>
   );
 }

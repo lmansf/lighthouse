@@ -25,6 +25,10 @@ export function markdownToSpeech(md: string): string {
     .replace(/`([^`]+)`/g, "$1") // inline code → its text
     .replace(/!\[[^\]]*\]\([^)]*\)/g, "") // images → nothing
     .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1") // links → link text
+    // [1]-style citation markers (the chat renders them as chips) → silence,
+    // so TTS never reads "bracket one". Runs after link handling so real
+    // markdown links keep their text.
+    .replace(/\[\d{1,3}\]/g, "")
     .replace(/^\s{0,3}#{1,6}\s+/gm, "") // headings
     .replace(/^\s{0,3}>\s?/gm, "") // blockquotes
     .replace(/^\s*[-*+]\s+/gm, "") // bullet list markers

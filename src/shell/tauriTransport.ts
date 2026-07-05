@@ -104,15 +104,40 @@ async function handleUpload(core: TauriCore, init: RequestInit | undefined): Pro
   return json({ added, skipped });
 }
 
-function handleChat(core: TauriCore, body: Record<string, unknown>): Response {
+function handleChat(
+  core: TauriCore,
+  body: Record<string, unknown>,
+  signal?: AbortSignal | null,
+): Response {
   const encoder = new TextEncoder();
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
+      // Honor AbortSignal like a real fetch would: without this, Stop was
+      // inert on the desktop until the next token happened to arrive (the
+      // reader's pending read() never rejected). The engine keeps generating
+      // in the background — same as an aborted HTTP fetch server-side — but
+      // the UI settles instantly.
+      let settled = false;
+      const finish = (fn: () => void) => {
+        if (settled) return;
+        settled = true;
+        fn();
+      };
+      if (signal?.aborted) {
+        finish(() => controller.error(new DOMException("The user aborted a request.", "AbortError")));
+        return;
+      }
+      signal?.addEventListener(
+        "abort",
+        () => finish(() => controller.error(new DOMException("The user aborted a request.", "AbortError"))),
+        { once: true },
+      );
       const channel = new core.Channel<unknown>();
       channel.onmessage = (chunk) => {
+        if (settled) return; // aborted — drop late chunks
         controller.enqueue(encoder.encode(JSON.stringify(chunk) + "\n"));
         const done = (chunk as { done?: boolean }).done;
-        if (done) controller.close();
+        if (done) finish(() => controller.close());
       };
       core
         .invoke("chat_ask", {
@@ -123,6 +148,7 @@ function handleChat(core: TauriCore, body: Record<string, unknown>): Response {
           onChunk: channel,
         })
         .catch((err) => {
+          if (settled) return;
           // Mirror the route: errors surface as an italic delta, then a
           // terminal chunk, never a broken stream.
           controller.enqueue(
@@ -131,7 +157,7 @@ function handleChat(core: TauriCore, body: Record<string, unknown>): Response {
           controller.enqueue(
             encoder.encode(JSON.stringify({ delta: "", references: [], done: true }) + "\n"),
           );
-          controller.close();
+          finish(() => controller.close());
         });
     },
   });
@@ -159,7 +185,7 @@ async function route(
     case "/api/rag":
       return method === "GET" ? call("rag_list") : call("rag_op", { body });
     case "/api/chat":
-      return handleChat(core, body);
+      return handleChat(core, body, init?.signal);
     case "/api/tts": {
       try {
         const wav = await core.invoke<ArrayBuffer>("tts_synthesize", {
@@ -213,10 +239,54 @@ async function route(
 /** Paths from the most recent OS drag-drop, consumed by `pathForFile`. */
 let lastDroppedPaths: string[] = [];
 
+/**
+ * Native drag position → CSS client coordinates. Only WebView2 (Windows)
+ * reports physical device pixels; WKWebView (macOS) and WebKitGTK (Linux)
+ * already deliver logical coordinates despite the payload's Physical label —
+ * dividing those by devicePixelRatio would halve them on HiDPI displays and
+ * misroute drops between the explorer and chat panes.
+ */
+const DRAG_POS_IS_PHYSICAL =
+  typeof navigator !== "undefined" && navigator.userAgent.includes("Windows");
+
+function toClientXY(pos: { x?: number; y?: number } | undefined): { x: number; y: number } {
+  const scale = DRAG_POS_IS_PHYSICAL ? window.devicePixelRatio || 1 : 1;
+  return { x: (pos?.x ?? 0) / scale, y: (pos?.y ?? 0) / scale };
+}
+
 function installDesktopBridge(core: TauriCore, eventApi: TauriEvent): void {
-  void eventApi.listen<{ paths?: string[] }>("tauri://drag-drop", (e) => {
-    lastDroppedPaths = e.payload?.paths ?? [];
+  // --- OS drag-drop, driven by the NATIVE events. On Windows, WebView2 never
+  // delivers DOM drag events while Tauri's drag-drop handler is active — so
+  // the DOM-based handlers the explorer/chat used were dead there and OS drops
+  // did nothing. The native events fire on every platform and carry real
+  // paths (whole folders included), so they are the single source of truth on
+  // the desktop: re-broadcast them as window CustomEvents for the UI, which
+  // ignores DOM "Files" drags inside the shell (see isDesktopShell()).
+  type DragPayload = { paths?: string[]; position?: { x: number; y: number } };
+  const broadcast = (name: string, detail?: unknown) =>
+    window.dispatchEvent(new CustomEvent(name, { detail }));
+  void eventApi.listen<DragPayload>("tauri://drag-enter", (e) => {
+    broadcast("lighthouse:os-drag", toClientXY(e.payload?.position));
   });
+  void eventApi.listen<DragPayload>("tauri://drag-over", (e) => {
+    broadcast("lighthouse:os-drag", toClientXY(e.payload?.position));
+  });
+  void eventApi.listen("tauri://drag-leave", () => {
+    broadcast("lighthouse:os-drag-leave");
+  });
+  void eventApi.listen<DragPayload>("tauri://drag-drop", (e) => {
+    lastDroppedPaths = e.payload?.paths ?? [];
+    broadcast("lighthouse:os-drop", {
+      paths: e.payload?.paths ?? [],
+      ...toClientXY(e.payload?.position),
+    });
+  });
+
+  // --- Vault freshness pushed from the shell (tray/menu adds, the FS watcher)
+  // so the tree refreshes instantly without the old full-page reload and
+  // without leaning on the polling loop.
+  void eventApi.listen("vault-changed", () => broadcast("lighthouse:vault-changed"));
+  void eventApi.listen("vault-generation", () => broadcast("lighthouse:vault-changed"));
   const bridge = {
     // Correlate the DOM File with the shell's drag-drop payload by basename —
     // both fire from the same gesture. Consumed on match so duplicate names

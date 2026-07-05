@@ -57,8 +57,23 @@ impl Default for StoredProfile {
     }
 }
 
+/// Provider ids the app can actually answer with (mirrors the TS server's
+/// KNOWN_PROVIDER_IDS). Earlier builds offered openai/google/mistral in the
+/// picker but never wired them to a backend — a profile that still carries one
+/// is normalized to the private local default, so the UI never claims excerpts
+/// go to a provider that is never called. The stored key is left untouched.
+const KNOWN_PROVIDER_IDS: [&str; 2] = [LOCAL_PROVIDER_ID, "anthropic"];
+
 fn load() -> StoredProfile {
-    read_json(&profile_path(), StoredProfile::default())
+    let mut p: StoredProfile = read_json(&profile_path(), StoredProfile::default());
+    if let Some(id) = p.provider_id.as_deref() {
+        if !KNOWN_PROVIDER_IDS.contains(&id) {
+            p.provider_id = Some(LOCAL_PROVIDER_ID.to_string());
+            p.model_id = Some(LOCAL_MODEL_ID.to_string());
+            save(&p);
+        }
+    }
+    p
 }
 
 fn save(p: &StoredProfile) {

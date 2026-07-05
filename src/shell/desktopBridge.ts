@@ -19,6 +19,17 @@ export function desktopBridge(): DesktopBridge | null {
 }
 
 /**
+ * True inside the Tauri desktop shell. There, OS file drags arrive via the
+ * NATIVE drag-drop events (re-broadcast as `lighthouse:os-drag`/`os-drop`
+ * CustomEvents by the transport) and DOM "Files" drag handlers must stand
+ * down — on Windows the DOM events never fire at all, and on macOS/Linux
+ * reacting to both would double-add every drop.
+ */
+export function isDesktopShell(): boolean {
+  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+}
+
+/**
  * Resolve OS-dropped files to their real absolute paths. Only meaningful on
  * the desktop; a file that cannot be resolved (e.g. an image dragged out of a
  * web page rather than off the disk) comes back under `unresolved` so the
