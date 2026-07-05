@@ -32,6 +32,10 @@ struct StoredProfile {
     /// Whether the user has ever explicitly saved a model choice (server-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     model_ever_selected: Option<bool>,
+    /// The user's explicit default-inclusion choice ("include"/"exclude"), if
+    /// made during onboarding. Absent ⇒ fall back to the experiment variant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    default_inclusion_choice: Option<String>,
 }
 
 fn default_step() -> String {
@@ -48,6 +52,7 @@ impl Default for StoredProfile {
             has_api_key: false,
             api_key: None,
             model_ever_selected: None,
+            default_inclusion_choice: None,
         }
     }
 }
@@ -71,6 +76,33 @@ pub struct OnboardingState {
     pub has_api_key: bool,
     pub onboarding_variant: String,
     pub default_inclusion_variant: String,
+    /// The effective default-inclusion behavior ("include"/"exclude").
+    pub default_inclusion: String,
+}
+
+/// The user's *effective* default-inclusion behavior: their explicit onboarding
+/// choice if made, else derived from the assigned experiment variant
+/// (opt_out → include, opt_in → exclude). Single source of truth for the vault
+/// engine and the UI.
+pub fn effective_default_inclusion() -> String {
+    match load().default_inclusion_choice.as_deref() {
+        Some("include") => "include".to_string(),
+        Some("exclude") => "exclude".to_string(),
+        _ => {
+            if get_variant("default_inclusion") == "opt_out" {
+                "include".to_string()
+            } else {
+                "exclude".to_string()
+            }
+        }
+    }
+}
+
+/// Persist the user's explicit include/exclude-by-default choice.
+pub fn set_default_inclusion(value: &str) {
+    let mut p = load();
+    p.default_inclusion_choice = Some(if value == "exclude" { "exclude" } else { "include" }.to_string());
+    save(&p);
 }
 
 pub fn get_state() -> OnboardingState {
@@ -83,6 +115,7 @@ pub fn get_state() -> OnboardingState {
         has_api_key: p.api_key.map(|k| !k.is_empty()).unwrap_or(false) || p.has_api_key,
         onboarding_variant: get_variant("onboarding"),
         default_inclusion_variant: get_variant("default_inclusion"),
+        default_inclusion: effective_default_inclusion(),
     }
 }
 

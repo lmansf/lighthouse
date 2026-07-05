@@ -17,7 +17,6 @@ use crate::config::{
     read_json, state_dir, state_path, utc_day, vault_dir, write_json, VAULT_SOURCE_ID,
 };
 use crate::contracts::{DataSource, FileNode, NodeKind, RagReference};
-use crate::experiment::get_variant;
 use crate::extract::{extract_rich_text, is_rich_file};
 
 /// An item referenced in place (not copied) — its real absolute path on disk.
@@ -191,10 +190,11 @@ pub fn invalidate_walk_cache() {
     *WALK_CACHE.lock().unwrap() = None;
 }
 
-/// Whether absent inclusion flags default to INCLUDED (`default_inclusion` A/B:
-/// `opt_out` includes everything by default; `opt_in` keeps default-excluded).
+/// Whether absent inclusion flags default to INCLUDED. Honors the user's
+/// explicit onboarding choice first (`include`/`exclude`), falling back to the
+/// `default_inclusion` A/B experiment variant when they haven't chosen.
 fn default_included() -> bool {
-    get_variant("default_inclusion") == "opt_out"
+    crate::profile::effective_default_inclusion() == "include"
 }
 
 /// Effective inclusion. An ancestor folder explicitly excluded always forces a

@@ -249,6 +249,13 @@ pub fn profile_op(body: Value) -> Result<Value, String> {
             body["modelId"].as_str().unwrap_or(""),
             body["apiKey"].as_str().unwrap_or(""),
         ))),
+        Some("setDefaultInclusion") => {
+            let v = body["value"].as_str().unwrap_or("");
+            if v != "include" && v != "exclude" {
+                return Err("value must be include or exclude".into());
+            }
+            profile::set_default_inclusion(v);
+        }
         Some("completeOnboarding") => profile::complete_onboarding(),
         Some("signOut") => profile::sign_out(),
         _ => return Err("unknown op".into()),

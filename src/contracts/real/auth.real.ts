@@ -63,6 +63,9 @@ class RealAuthService implements AuthService {
   async selectModel(providerId: string, modelId: string, apiKey: string): Promise<void> {
     await post("selectModel", { providerId, modelId, apiKey });
   }
+  async setDefaultInclusion(value: "include" | "exclude"): Promise<void> {
+    await post("setDefaultInclusion", { value });
+  }
   async completeOnboarding(): Promise<void> {
     await post("completeOnboarding");
   }

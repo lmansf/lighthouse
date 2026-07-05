@@ -18,6 +18,8 @@ import {
   Input,
   Link,
   Option,
+  Radio,
+  RadioGroup,
   Text,
   Title3,
   makeStyles,
@@ -56,6 +58,7 @@ export function OnboardingPanel() {
   const signIn = useAuthStore((s) => s.signIn);
   const finishRegistration = useAuthStore((s) => s.finishRegistration);
   const selectModel = useAuthStore((s) => s.selectModel);
+  const setDefaultInclusion = useAuthStore((s) => s.setDefaultInclusion);
   const signOut = useAuthStore((s) => s.signOut);
   const startTrial = useLicenseStore((s) => s.startTrial);
 
@@ -75,9 +78,22 @@ export function OnboardingPanel() {
   // Usage logging is opt-IN: unchecked by default. The user must actively check
   // it to share analytics (which include their account email).
   const [shareUsage, setShareUsage] = useState(false);
+  // Default-inclusion choice: whether newly-added files are searchable by
+  // default. Pre-filled from the current effective default; the user can change
+  // it. `touched` stops the background-loaded default from overwriting a choice.
+  const [inclusionPref, setInclusionPref] = useState<"include" | "exclude">("include");
+  const inclusionTouched = useRef(false);
   const [submitting, setSubmitting] = useState(false);
   const emailPrefilled = useRef(false);
   const startedLogged = useRef(false);
+
+  // Sync the radio to the effective default once the profile has loaded, unless
+  // the user has already picked.
+  useEffect(() => {
+    if (!inclusionTouched.current && onboarding.defaultInclusion) {
+      setInclusionPref(onboarding.defaultInclusion);
+    }
+  }, [onboarding.defaultInclusion]);
 
   // The activation funnel begins when onboarding first appears.
   useEffect(() => {
@@ -125,6 +141,8 @@ export function OnboardingPanel() {
     } catch {
       /* network error — proceed regardless; the user can't be blocked here */
     }
+    // Persist the include/exclude-by-default choice before advancing.
+    await setDefaultInclusion(inclusionPref).catch(() => {});
     await finishRegistration();
     // play_first drops the user straight into the sample vault from here.
     if (onboarding.onboardingVariant === "play_first") logEvent("sample_vault_loaded");
@@ -189,6 +207,25 @@ export function OnboardingPanel() {
           onChange={(_, d) => setShareUsage(Boolean(d.checked))}
           label="Help improve Lighthouse by sharing usage analytics — includes your account email and which features you use, never your files, their names, or their contents"
         />
+        <Field label="When you add files, should the AI see them by default?">
+          <RadioGroup
+            value={inclusionPref}
+            onChange={(_, d) => {
+              inclusionTouched.current = true;
+              setInclusionPref(d.value === "exclude" ? "exclude" : "include");
+            }}
+          >
+            <Radio
+              value="include"
+              label="Include everything by default — files are searchable as soon as you add them (toggle off anything you want to hide)"
+            />
+            <Radio
+              value="exclude"
+              label="Keep files out by default — nothing is searchable until you include it (more careful; you opt each one in)"
+            />
+          </RadioGroup>
+        </Field>
+        <Text className={styles.hint}>You can change this anytime; it only sets the starting point for files you add.</Text>
         <div className={styles.row}>
           <Button
             appearance="primary"
@@ -212,6 +249,7 @@ export function OnboardingPanel() {
                   headers: { "content-type": "application/json" },
                   body: JSON.stringify({ op: "consent", optOut: !shareUsage }),
                 }).catch(() => {});
+                await setDefaultInclusion(inclusionPref).catch(() => {});
                 await finishRegistration();
                 if (onboarding.onboardingVariant === "play_first") logEvent("sample_vault_loaded");
               })()

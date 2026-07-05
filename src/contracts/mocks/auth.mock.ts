@@ -45,6 +45,10 @@ class MockAuthService implements AuthService {
     };
   }
 
+  async setDefaultInclusion(value: "include" | "exclude"): Promise<void> {
+    this.state = { ...this.state, defaultInclusion: value };
+  }
+
   async completeOnboarding(): Promise<void> {
     this.state = { ...this.state, step: "done" };
   }

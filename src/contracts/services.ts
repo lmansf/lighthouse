@@ -58,6 +58,8 @@ export interface AuthService {
   /** Advance past the welcome/registration step (whether submitted or skipped). */
   finishRegistration(): Promise<void>;
   selectModel(providerId: string, modelId: string, apiKey: string): Promise<void>;
+  /** Set whether newly-added files are searchable by default (chosen at onboarding). */
+  setDefaultInclusion(value: "include" | "exclude"): Promise<void>;
   completeOnboarding(): Promise<void>;
   signOut(): Promise<void>;
 }
