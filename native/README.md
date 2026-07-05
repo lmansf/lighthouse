@@ -26,7 +26,12 @@ directions.
 | Idle RSS (server process) | **6.4 MB** | a full Node + Next server process |
 | Retrieval, 10,000-file corpus (release) | **cold index+query 276 ms; warm query 128 ms** — full corpus scored | re-reads/re-chunks per query, silently truncated at 4,000 chunks |
 | Static-export UI bundle | **2.1 MB** embedded in the shell binary | served by the Next process |
+| Complete desktop app binary (shell + engine + UI) | **22.2 MB** release (19.5 MB stripped) + OS webview | Electron runtime (bundled Chromium + Node) + `node_modules` + `.next` |
 | Desktop data transport | **Tauri IPC — no TCP port, no loopback-auth surface** | localhost HTTP + Origin/token defenses |
+
+Webview memory is the OS's (WebKitGTK/WebView2/WKWebView — order of a
+browser tab) and replaces bundled Chromium; the engine side is the 6.4 MB
+process above instead of a Node server.
 
 ## Headless E2E evidence (Phases 3–4)
 
