@@ -43,7 +43,7 @@ import {
   StarRegular,
 } from "@fluentui/react-icons";
 import { MODEL_PROVIDERS } from "@/contracts";
-import { LocalModelOption } from "@/features/localModel/LocalModelOption";
+import { LocalModelOption, LocalModelInstallPanel } from "@/features/localModel/LocalModelOption";
 import { useLicenseStore, type FeedbackInput, type LicenseStatus } from "@/stores/useLicenseStore";
 import { useAuthStore } from "@/stores/useAuthStore";
 
@@ -574,6 +574,7 @@ function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean
                   ))}
                 </Dropdown>
               </Field>
+              {provider.id === "local" && <LocalModelInstallPanel />}
               {provider.id !== "local" && (
                 <Field
                   label="API key"

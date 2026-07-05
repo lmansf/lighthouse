@@ -82,7 +82,12 @@ export function BugReport() {
       open={open}
       onOpenChange={(_, d) => {
         setOpen(d.open);
-        if (!d.open) reset();
+        // Reset on OPEN, not just close. The "Close" button below calls
+        // setOpen(false) directly, which never fires onOpenChange — so a
+        // close-then-reopen used to keep `done`/the old text, stranding the
+        // user on the "Thank you!" screen forever (one report per session).
+        // Resetting on every open guarantees a fresh form each time.
+        if (d.open) reset();
       }}
     >
       <DialogTrigger disableButtonEnhancement>
@@ -113,9 +118,16 @@ export function BugReport() {
           </DialogContent>
           <DialogActions>
             {done ? (
-              <Button appearance="primary" onClick={() => setOpen(false)}>
-                Close
-              </Button>
+              <>
+                {/* Let the user file another report right away, without having
+                    to close and reopen the dialog. */}
+                <Button appearance="secondary" onClick={reset}>
+                  Report another
+                </Button>
+                <Button appearance="primary" onClick={() => setOpen(false)}>
+                  Close
+                </Button>
+              </>
             ) : (
               <>
                 <DialogTrigger disableButtonEnhancement>
