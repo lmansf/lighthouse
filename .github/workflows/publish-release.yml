@@ -34,14 +34,19 @@ jobs:
               { owner: context.repo.owner, repo: context.repo.repo, per_page: 100 });
             const rel = releases.find(r => r.tag_name === tag);
             if (!rel) return core.setFailed(`no release with tag ${tag}`);
-            if (!rel.draft) return core.info(`${tag} is already published: ${rel.html_url}`);
+            // Normalize to a full, public, latest-eligible release. GitHub
+            // excludes both drafts and prereleases from "latest", which the
+            // website download button and the update check rely on — so clear
+            // prerelease too, not just draft.
             const params = {
               owner: context.repo.owner,
               repo: context.repo.repo,
               release_id: rel.id,
               draft: false,
+              prerelease: false,
+              make_latest: 'true',
             };
             const body = process.env.RELEASE_BODY;
             if (body && body.trim()) params.body = body;
             const { data } = await github.rest.repos.updateRelease(params);
-            core.info(`published ${data.html_url}`);
+            core.info(`published ${data.html_url} (draft=${data.draft} prerelease=${data.prerelease})`);
