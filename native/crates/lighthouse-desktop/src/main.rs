@@ -13,6 +13,7 @@
 
 mod commands;
 mod supervise;
+mod whisper;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -79,6 +80,17 @@ pub fn open_explorer(app: &AppHandle) {
 #[derive(Default)]
 pub struct WidgetPin(std::sync::atomic::AtomicBool);
 
+/// Focus-edge counter that turns hide-on-blur into "hide only if focus
+/// STAYS gone". On Windows the top-level window loses native focus the
+/// moment WebView2's child control takes it (WM_KILLFOCUS on the parent,
+/// and wry moves focus programmatically on every activation), so a literal
+/// hide-on-blur dismissed the bar the instant it was summoned. Every focus
+/// edge bumps the epoch; a blur only hides when no edge follows within the
+/// grace window. The runtime then synthesizes Focused(true) from the
+/// webview's own GotFocus, which lands well inside the grace period.
+#[derive(Default)]
+pub struct WidgetFocusEpoch(std::sync::atomic::AtomicU64);
+
 pub fn set_widget_pinned(app: &AppHandle, pinned: bool) {
     if let Some(state) = app.try_state::<WidgetPin>() {
         state.0.store(pinned, std::sync::atomic::Ordering::Relaxed);
@@ -127,15 +139,23 @@ fn save_widget_pos(app: &AppHandle) {
 }
 
 /// Summon (or dismiss) the floating search bar — the hotkey/tray gesture.
+/// Summoning means "the bar INSTEAD of the window": a visible main window is
+/// tucked into the taskbar first so the pill is unmistakably the surface in
+/// charge (and can't sit lost behind or under the full app).
 pub fn toggle_widget(app: &AppHandle) {
     let Some(w) = app.get_webview_window(WIDGET_LABEL) else {
         return;
     };
     if w.is_visible().unwrap_or(false) {
         hide_widget(app);
-    } else {
-        show_widget(app, true);
+        return;
     }
+    if let Some(main) = main_window(app) {
+        if main.is_visible().unwrap_or(false) && !main.is_minimized().unwrap_or(false) {
+            let _ = main.minimize();
+        }
+    }
+    show_widget(app, true);
 }
 
 /// "widget" = the experimental desktop-widget presentation: the floating
@@ -547,6 +567,7 @@ fn main() {
         .manage(Supervisor::default())
         .manage(UpdateState::default())
         .manage(WidgetPin::default())
+        .manage(WidgetFocusEpoch::default())
         .manage(ServerPort::default())
         .invoke_handler(tauri::generate_handler![
             commands::rag_list,
@@ -602,11 +623,29 @@ fn main() {
                         let _ = window.hide();
                     }
                 }
-                // Spotlight-style dismissal: an UNPINNED search bar hides the
-                // moment it loses focus; the 📌 pin keeps it up.
-                tauri::WindowEvent::Focused(false) if window.label() == WIDGET_LABEL => {
-                    if !widget_pinned(window.app_handle()) {
-                        hide_widget(window.app_handle());
+                // Spotlight-style dismissal: an UNPINNED search bar hides
+                // when it loses focus; the 📌 pin keeps it up. Deferred via
+                // the focus epoch: Windows fires a spurious window-level blur
+                // while handing focus to the WebView2 child (see
+                // WidgetFocusEpoch), so hide only if no focus edge follows.
+                tauri::WindowEvent::Focused(focused) if window.label() == WIDGET_LABEL => {
+                    let app = window.app_handle().clone();
+                    let Some(epoch) = app.try_state::<WidgetFocusEpoch>() else {
+                        return;
+                    };
+                    let seen = epoch.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                    if !focused && !widget_pinned(&app) {
+                        tauri::async_runtime::spawn(async move {
+                            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                            let unchanged = app
+                                .state::<WidgetFocusEpoch>()
+                                .0
+                                .load(std::sync::atomic::Ordering::Relaxed)
+                                == seen;
+                            if unchanged && !widget_pinned(&app) {
+                                hide_widget(&app);
+                            }
+                        });
                     }
                 }
                 _ => {}
@@ -741,6 +780,12 @@ fn main() {
                 if let Err(e) = register {
                     eprintln!("summon hotkey unavailable ({e}); use the tray's \"Show search bar\"");
                 }
+            }
+
+            // W3 Whisper mode: the opt-in modifier-only tap chord. Only ever
+            // active when the user enabled it in Preferences (whisper.rs).
+            if read_settings(&handle)["whisperMode"].as_bool() == Some(true) {
+                whisper::set_enabled(&handle, true);
             }
 
             // Phase 5 watcher: event-driven tree/index freshness + a pushed

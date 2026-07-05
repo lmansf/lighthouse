@@ -468,6 +468,7 @@ pub fn settings_get() -> Value {
         "runOnStartup": s.run_on_startup != Some(false),
         "startupAsked": s.startup_asked == Some(true),
         "uiMode": s.ui_mode, // null until the first-run chooser is answered
+        "whisperMode": s.whisper_mode == Some(true),
     })
 }
 
@@ -477,9 +478,10 @@ pub fn settings_set(
     run_on_startup: Option<bool>,
     startup_asked: Option<bool>,
     ui_mode: Option<String>,
+    whisper_mode: Option<bool>,
 ) -> Value {
     let switched_mode = ui_mode.clone();
-    let s = settings::write_desktop_settings(run_on_startup, startup_asked, ui_mode);
+    let s = settings::write_desktop_settings(run_on_startup, startup_asked, ui_mode, whisper_mode);
     // Autostart is CONSENT-FIRST (mirrors the boot gate in main.rs): only
     // touch the OS registration once the startup prompt has been answered.
     // Unrelated writes — e.g. the first-run uiMode chooser — must not enroll.
@@ -502,11 +504,16 @@ pub fn settings_set(
         }
         let _ = app.emit_to(crate::WIDGET_LABEL, "widget-pin", json!({ "pinned": pinned }));
     }
+    // Whisper mode (W3) starts/stops its keyboard hook live — no relaunch.
+    if let Some(on) = whisper_mode {
+        crate::whisper::set_enabled(&app, on);
+    }
     json!({
         "ok": true,
         "runOnStartup": s.run_on_startup != Some(false),
         "startupAsked": s.startup_asked == Some(true),
         "uiMode": s.ui_mode,
+        "whisperMode": s.whisper_mode == Some(true),
     })
 }
 

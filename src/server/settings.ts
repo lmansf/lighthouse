@@ -26,6 +26,12 @@ export interface DesktopSettings {
    * answered yet.
    */
   uiMode?: "window" | "widget";
+  /**
+   * W3 "Whisper mode": summon the search bar by tapping Ctrl+Super+Shift with
+   * no other key. Opt-in (it installs an OS keyboard hook where supported);
+   * default off.
+   */
+  whisperMode?: boolean;
 }
 
 function settingsFile(): string | null {

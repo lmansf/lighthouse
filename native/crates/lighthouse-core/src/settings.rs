@@ -27,6 +27,11 @@ pub struct DesktopSettings {
     /// been answered yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ui_mode: Option<String>,
+    /// W3 "Whisper mode": summon the search bar by tapping Ctrl+Super+Shift
+    /// with no other key. Opt-in (it installs an OS keyboard hook where
+    /// supported); default off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub whisper_mode: Option<bool>,
     /// Keys this struct doesn't model (e.g. the shell's hand-persisted
     /// `widgetPos`) must survive a read-modify-write round trip — without
     /// this flatten, any Preferences toggle would silently delete them.
@@ -56,6 +61,7 @@ pub fn write_desktop_settings(
     run_on_startup: Option<bool>,
     startup_asked: Option<bool>,
     ui_mode: Option<String>,
+    whisper_mode: Option<bool>,
 ) -> DesktopSettings {
     let Some(f) = settings_file() else {
         return DesktopSettings::default();
@@ -70,6 +76,9 @@ pub fn write_desktop_settings(
     // Only the two known modes are storable — anything else is a client bug.
     if matches!(ui_mode.as_deref(), Some("window") | Some("widget")) {
         next.ui_mode = ui_mode;
+    }
+    if whisper_mode.is_some() {
+        next.whisper_mode = whisper_mode;
     }
     write_json(&f, &next); // best-effort: a read-only location just means unsaved
     next
