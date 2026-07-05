@@ -14,6 +14,7 @@
 
 type TauriCore = typeof import("@tauri-apps/api/core");
 type TauriEvent = typeof import("@tauri-apps/api/event");
+type TauriWebviewWindow = typeof import("@tauri-apps/api/webviewWindow");
 
 function isTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -255,7 +256,11 @@ function toClientXY(pos: { x?: number; y?: number } | undefined): { x: number; y
   return { x: (pos?.x ?? 0) / scale, y: (pos?.y ?? 0) / scale };
 }
 
-function installDesktopBridge(core: TauriCore, eventApi: TauriEvent): void {
+function installDesktopBridge(
+  core: TauriCore,
+  eventApi: TauriEvent,
+  webviewWindow: TauriWebviewWindow,
+): void {
   // --- OS drag-drop, driven by the NATIVE events. On Windows, WebView2 never
   // delivers DOM drag events while Tauri's drag-drop handler is active — so
   // the DOM-based handlers the explorer/chat used were dead there and OS drops
@@ -263,25 +268,48 @@ function installDesktopBridge(core: TauriCore, eventApi: TauriEvent): void {
   // paths (whole folders included), so they are the single source of truth on
   // the desktop: re-broadcast them as window CustomEvents for the UI, which
   // ignores DOM "Files" drags inside the shell (see isDesktopShell()).
+  //
+  // Drag events are PER-WINDOW state: a bare listen() defaults to
+  // EventTarget.Any and hears EVERY window's drags, so with more than one
+  // webview (main + widget + explorer) a single OS drop would be processed by
+  // each of them — the same file added twice, or attached to a chat pane the
+  // user never dropped on. Scope them to this window's label.
   type DragPayload = { paths?: string[]; position?: { x: number; y: number } };
+  const here = { target: webviewWindow.getCurrentWebviewWindow().label };
   const broadcast = (name: string, detail?: unknown) =>
     window.dispatchEvent(new CustomEvent(name, { detail }));
-  void eventApi.listen<DragPayload>("tauri://drag-enter", (e) => {
-    broadcast("lighthouse:os-drag", toClientXY(e.payload?.position));
-  });
-  void eventApi.listen<DragPayload>("tauri://drag-over", (e) => {
-    broadcast("lighthouse:os-drag", toClientXY(e.payload?.position));
-  });
-  void eventApi.listen("tauri://drag-leave", () => {
-    broadcast("lighthouse:os-drag-leave");
-  });
-  void eventApi.listen<DragPayload>("tauri://drag-drop", (e) => {
-    lastDroppedPaths = e.payload?.paths ?? [];
-    broadcast("lighthouse:os-drop", {
-      paths: e.payload?.paths ?? [],
-      ...toClientXY(e.payload?.position),
-    });
-  });
+  void eventApi.listen<DragPayload>(
+    "tauri://drag-enter",
+    (e) => {
+      broadcast("lighthouse:os-drag", toClientXY(e.payload?.position));
+    },
+    here,
+  );
+  void eventApi.listen<DragPayload>(
+    "tauri://drag-over",
+    (e) => {
+      broadcast("lighthouse:os-drag", toClientXY(e.payload?.position));
+    },
+    here,
+  );
+  void eventApi.listen(
+    "tauri://drag-leave",
+    () => {
+      broadcast("lighthouse:os-drag-leave");
+    },
+    here,
+  );
+  void eventApi.listen<DragPayload>(
+    "tauri://drag-drop",
+    (e) => {
+      lastDroppedPaths = e.payload?.paths ?? [];
+      broadcast("lighthouse:os-drop", {
+        paths: e.payload?.paths ?? [],
+        ...toClientXY(e.payload?.position),
+      });
+    },
+    here,
+  );
 
   // --- Vault freshness pushed from the shell (tray/menu adds, the FS watcher)
   // so the tree refreshes instantly without the old full-page reload and
@@ -295,6 +323,12 @@ function installDesktopBridge(core: TauriCore, eventApi: TauriEvent): void {
   void eventApi.listen<{ question?: string }>("ask-question", (e) => {
     const question = e.payload?.question;
     if (question) broadcast("lighthouse:ask-question", { question });
+  });
+
+  // --- Shell-driven pin changes (switching interface mode applies the new
+  // mode's pin semantics) so the widget's pin button tracks the shell state.
+  void eventApi.listen<{ pinned?: boolean }>("widget-pin", (e) => {
+    broadcast("lighthouse:widget-pin", { pinned: e.payload?.pinned === true });
   });
   const bridge = {
     // Correlate the DOM File with the shell's drag-drop payload by basename —
@@ -331,8 +365,9 @@ export function installTauriTransport(): void {
   const modules = Promise.all([
     import("@tauri-apps/api/core"),
     import("@tauri-apps/api/event"),
-  ]).then(([core, eventApi]) => {
-    installDesktopBridge(core, eventApi);
+    import("@tauri-apps/api/webviewWindow"),
+  ]).then(([core, eventApi, webviewWindow]) => {
+    installDesktopBridge(core, eventApi, webviewWindow);
     return core;
   });
   const original = window.fetch.bind(window);

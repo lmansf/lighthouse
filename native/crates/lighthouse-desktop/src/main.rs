@@ -512,7 +512,8 @@ fn main() {
             if args.iter().any(|a| a == "--autostarted") {
                 return;
             }
-            if widget_mode(app) {
+            // Fall back to main when no widget window exists (dev/server mode).
+            if widget_mode(app) && app.get_webview_window(WIDGET_LABEL).is_some() {
                 show_widget(app, true);
             } else if let Some(win) = main_window(app) {
                 let _ = win.show();

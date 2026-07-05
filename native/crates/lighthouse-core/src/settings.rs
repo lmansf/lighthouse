@@ -27,6 +27,11 @@ pub struct DesktopSettings {
     /// been answered yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ui_mode: Option<String>,
+    /// Keys this struct doesn't model (e.g. the shell's hand-persisted
+    /// `widgetPos`) must survive a read-modify-write round trip — without
+    /// this flatten, any Preferences toggle would silently delete them.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 fn settings_file() -> Option<PathBuf> {
