@@ -1,0 +1,22 @@
+[package]
+name = "lighthouse-server"
+description = "Local API façade: the 13 Lighthouse routes over axum, wire-compatible with the Next.js server."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+lighthouse-core = { path = "../lighthouse-core" }
+anyhow = { workspace = true }
+async-stream = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+bytes = { workspace = true }
+axum = { workspace = true }
+url = "2"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+reqwest = { workspace = true }

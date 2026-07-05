@@ -1,0 +1,213 @@
+//! Child-process supervision + update notification (port of the
+//! electron/main.js responsibilities that live beside the window).
+//!
+//! - llama-server lifecycle: start when a usable model exists, honor the
+//!   uninstall marker handshake (stop the server so its mmap releases the
+//!   weights, delete them, clear the marker), kill on quit.
+//! - Notify-only update check against GitHub releases — the same Phase A
+//!   posture as the Electron updater (no auto-download while builds are
+//!   unsigned; flip to tauri-plugin-updater once signing keys exist).
+
+use std::fs;
+use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
+use std::sync::Mutex;
+
+use lighthouse_core::config::resources_dir;
+use lighthouse_core::local_model::{find_installed_model, model_gguf_files, uninstall_marker_path};
+use tauri::{AppHandle, Emitter, Manager};
+
+pub const RELEASE_PAGE_URL: &str = "https://github.com/lmansf/lighthouse/releases/latest";
+
+#[derive(Default)]
+pub struct Supervisor {
+    llm: Mutex<Option<Child>>,
+    uninstalling: Mutex<bool>,
+}
+
+fn llm_root() -> PathBuf {
+    resources_dir().join("llm")
+}
+
+fn log_file(app: &AppHandle, name: &str) -> Option<fs::File> {
+    let dir = app.path().app_data_dir().ok()?;
+    let _ = fs::create_dir_all(&dir);
+    fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join(name))
+        .ok()
+}
+
+impl Supervisor {
+    /// Launch the bundled local inference server against the installed model,
+    /// if there is one. No-op when either half is missing.
+    pub fn start_local_llm(&self, app: &AppHandle) {
+        let mut guard = self.llm.lock().unwrap_or_else(|p| p.into_inner());
+        if guard.is_some() {
+            return; // already running
+        }
+        let bin = llm_root().join(if cfg!(windows) {
+            "llama-server.exe"
+        } else {
+            "llama-server"
+        });
+        let Some(model) = find_installed_model() else {
+            return;
+        };
+        if !bin.exists() {
+            return;
+        }
+        let mut cmd = Command::new(&bin);
+        cmd.arg("-m")
+            .arg(&model)
+            .args(["--host", "127.0.0.1", "--port", "8080"])
+            .current_dir(llm_root())
+            .stdin(Stdio::null());
+        // Log to a file instead of a console window.
+        match (
+            log_file(app, "local-model.log"),
+            log_file(app, "local-model.log"),
+        ) {
+            (Some(out), Some(err)) => {
+                cmd.stdout(Stdio::from(out)).stderr(Stdio::from(err));
+            }
+            _ => {
+                cmd.stdout(Stdio::null()).stderr(Stdio::null());
+            }
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        }
+        match cmd.spawn() {
+            Ok(child) => *guard = Some(child),
+            Err(e) => eprintln!("local model failed to start: {e}"),
+        }
+    }
+
+    /// Keep the local model server in sync with what's on disk (3 s tick).
+    /// Start llama-server when a model appears (a download just finished) and
+    /// drive the uninstall handshake to completion.
+    pub fn reconcile(&self, app: &AppHandle) {
+        if uninstall_marker_path().exists() {
+            let mut guard = self.llm.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some(child) = guard.as_mut() {
+                // Reap if it already exited; otherwise ask it to stop so the
+                // memory-mapped weights unlock before deletion.
+                match child.try_wait() {
+                    Ok(Some(_)) => {
+                        *guard = None;
+                        drop(guard);
+                        self.finish_uninstall();
+                    }
+                    _ => {
+                        let mut uninstalling =
+                            self.uninstalling.lock().unwrap_or_else(|p| p.into_inner());
+                        if !*uninstalling {
+                            *uninstalling = true;
+                            let _ = child.kill();
+                        }
+                        // wait for exit on a later tick
+                    }
+                }
+            } else {
+                drop(guard);
+                self.finish_uninstall(); // nothing holding the file
+            }
+            return;
+        }
+        {
+            let mut guard = self.llm.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some(child) = guard.as_mut() {
+                if matches!(child.try_wait(), Ok(Some(_))) {
+                    *guard = None; // crashed/exited — allow a restart below
+                }
+            }
+        }
+        self.start_local_llm(app);
+    }
+
+    /// Delete the weights, then clear the marker only once they're gone (a
+    /// still-locked file retries next tick rather than silently staying).
+    fn finish_uninstall(&self) {
+        let mut remaining = false;
+        for f in model_gguf_files() {
+            if fs::remove_file(&f).is_err() && f.exists() {
+                eprintln!("uninstall: could not remove {}", f.display());
+                remaining = true;
+            }
+        }
+        if !remaining {
+            let _ = fs::remove_file(uninstall_marker_path());
+        }
+        *self.uninstalling.lock().unwrap_or_else(|p| p.into_inner()) = false;
+    }
+
+    pub fn shutdown(&self) {
+        if let Some(mut child) = self.llm.lock().unwrap_or_else(|p| p.into_inner()).take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+/// Latest-release info surfaced to the tray + splash ("notify-only Phase A").
+#[derive(Default)]
+pub struct UpdateState(pub Mutex<Option<String>>); // newer version, when found
+
+fn version_tuple(v: &str) -> Option<(u64, u64, u64)> {
+    let v = v.trim().trim_start_matches('v');
+    let mut it = v.split('.').map(|p| {
+        p.chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect::<String>()
+            .parse::<u64>()
+            .ok()
+    });
+    Some((it.next()??, it.next()??, it.next().flatten().unwrap_or(0)))
+}
+
+/// Best-effort check for a newer GitHub release. Never blocks startup, never
+/// downloads, never fails the app — it only arms the tray notice + an event.
+pub async fn check_for_updates(app: AppHandle) {
+    let current = env!("CARGO_PKG_VERSION");
+    let client = match reqwest::Client::builder()
+        .user_agent("lighthouse-app")
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let Ok(res) = client
+        .get("https://api.github.com/repos/lmansf/lighthouse/releases/latest")
+        .send()
+        .await
+    else {
+        let _ = app.emit("update:state", serde_json::json!({ "phase": "none" }));
+        return;
+    };
+    let Ok(body) = res.json::<serde_json::Value>().await else {
+        return;
+    };
+    let latest = body["tag_name"].as_str().unwrap_or_default();
+    let newer = matches!(
+        (version_tuple(latest), version_tuple(current)),
+        (Some(l), Some(c)) if l > c
+    );
+    if newer {
+        if let Some(state) = app.try_state::<UpdateState>() {
+            *state.0.lock().unwrap_or_else(|p| p.into_inner()) =
+                Some(latest.trim_start_matches('v').to_string());
+        }
+        let _ = app.emit(
+            "update:state",
+            serde_json::json!({ "phase": "available", "version": latest, "url": RELEASE_PAGE_URL }),
+        );
+        crate::rebuild_tray_menu(&app);
+    } else {
+        let _ = app.emit("update:state", serde_json::json!({ "phase": "none" }));
+    }
+}
