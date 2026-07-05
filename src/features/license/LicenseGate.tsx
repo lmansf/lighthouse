@@ -24,7 +24,10 @@ import {
   MenuPopover,
   MenuTrigger,
   Option,
+  Radio,
+  RadioGroup,
   Spinner,
+  Switch,
   Text,
   Textarea,
   Title3,
@@ -38,6 +41,7 @@ import {
   KeyRegular,
   MailRegular,
   OpenRegular,
+  OptionsRegular,
   SettingsRegular,
   SignOutRegular,
   StarRegular,
@@ -106,6 +110,9 @@ const useStyles = makeStyles({
   profileText: { display: "flex", flexDirection: "column", minWidth: 0 },
   modelFields: { display: "flex", flexDirection: "column", gap: tokens.spacingVerticalM },
   savedNote: { color: tokens.colorPaletteGreenForeground1, fontSize: tokens.fontSizeBase200 },
+  // Preferences dialog: sections separated by a little vertical air.
+  prefFields: { display: "flex", flexDirection: "column", gap: tokens.spacingVerticalL },
+  prefHint: { color: tokens.colorNeutralForeground3, fontSize: tokens.fontSizeBase200 },
 });
 
 /** 0–5 rating as a compact segmented row. */
@@ -620,6 +627,118 @@ function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean
   );
 }
 
+/**
+ * General preferences — the home for user-controllable settings that aren't the
+ * model choice. Today: whether newly-added files are searchable by default
+ * (also asked once during onboarding), sharing usage analytics, and (desktop
+ * only) launching Lighthouse at login. Each change applies immediately.
+ */
+function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean) => void }) {
+  const styles = useStyles();
+  const defaultInclusion = useAuthStore((s) => s.onboarding.defaultInclusion);
+  const setDefaultInclusion = useAuthStore((s) => s.setDefaultInclusion);
+
+  const [shareUsage, setShareUsage] = useState<boolean | null>(null);
+  const [desktop, setDesktop] = useState(false);
+  const [runOnStartup, setRunOnStartup] = useState(true);
+
+  // Load the file-backed prefs (usage consent, launch-at-login) when opened.
+  useEffect(() => {
+    if (!open) return;
+    let alive = true;
+    void fetch("/api/usage")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => alive && d && setShareUsage(!d.optOut))
+      .catch(() => {});
+    void fetch("/api/settings")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (!alive || !d) return;
+        setDesktop(Boolean(d.desktop));
+        setRunOnStartup(d.runOnStartup !== false);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [open]);
+
+  const inclusion = defaultInclusion ?? "include";
+
+  function updateUsage(next: boolean) {
+    setShareUsage(next);
+    void fetch("/api/usage", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ op: "consent", optOut: !next }),
+    }).catch(() => {});
+  }
+
+  function updateStartup(next: boolean) {
+    setRunOnStartup(next);
+    void fetch("/api/settings", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ runOnStartup: next }),
+    }).catch(() => {});
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={(_, d) => setOpen(d.open)}>
+      <DialogSurface>
+        <DialogBody>
+          <DialogTitle>Preferences</DialogTitle>
+          <DialogContent>
+            <div className={styles.prefFields}>
+              <Field label="When you add files, should the AI see them by default?">
+                <RadioGroup
+                  value={inclusion}
+                  onChange={(_, d) =>
+                    void setDefaultInclusion(d.value === "exclude" ? "exclude" : "include")
+                  }
+                >
+                  <Radio
+                    value="include"
+                    label="Include everything by default — files are searchable as soon as you add them (toggle off anything you want to hide)"
+                  />
+                  <Radio
+                    value="exclude"
+                    label="Keep files out by default — nothing is searchable until you include it"
+                  />
+                </RadioGroup>
+                <Text className={styles.prefHint}>
+                  Only affects files you add from now on; files you&apos;ve already included or
+                  excluded keep their setting.
+                </Text>
+              </Field>
+
+              <Switch
+                checked={shareUsage ?? false}
+                disabled={shareUsage === null}
+                onChange={(_, d) => updateUsage(Boolean(d.checked))}
+                label="Share usage analytics — your account email and which features you use, never your files, their names, or their contents"
+              />
+
+              {desktop && (
+                <Switch
+                  checked={runOnStartup}
+                  onChange={(_, d) => updateStartup(Boolean(d.checked))}
+                  label="Launch Lighthouse when I sign in to my computer"
+                />
+              )}
+            </div>
+          </DialogContent>
+          <DialogActions>
+            <Button appearance="primary" onClick={() => setOpen(false)}>
+              Done
+            </Button>
+          </DialogActions>
+        </DialogBody>
+      </DialogSurface>
+    </Dialog>
+  );
+}
+
 export function SettingsMenu() {
   const styles = useStyles();
   const paidEnabled = useLicenseStore((s) => s.paidEnabled);
@@ -627,6 +746,7 @@ export function SettingsMenu() {
   const signOut = useAuthStore((s) => s.signOut);
   const [dlg, setDlg] = useState(false);
   const [aiDlg, setAiDlg] = useState(false);
+  const [prefDlg, setPrefDlg] = useState(false);
 
   return (
     <>
@@ -655,6 +775,9 @@ export function SettingsMenu() {
                 <MenuDivider />
               </>
             )}
+            <MenuItem icon={<OptionsRegular />} onClick={() => setPrefDlg(true)}>
+              Preferences
+            </MenuItem>
             <MenuItem icon={<BrainCircuitRegular />} onClick={() => setAiDlg(true)}>
               AI models
             </MenuItem>
@@ -678,6 +801,7 @@ export function SettingsMenu() {
       </Menu>
       <PurchaseDialog open={dlg} setOpen={setDlg} />
       <AiModelsDialog open={aiDlg} setOpen={setAiDlg} />
+      <PreferencesDialog open={prefDlg} setOpen={setPrefDlg} />
     </>
   );
 }
