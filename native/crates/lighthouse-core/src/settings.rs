@@ -21,6 +21,12 @@ pub struct DesktopSettings {
     /// Whether the one-time "run on startup?" prompt has been answered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub startup_asked: Option<bool>,
+    /// How the app presents itself at launch: "window" (classic, the default)
+    /// or "widget" (experimental — the floating search bar IS the app; the
+    /// main window stays in the tray). None = the first-run chooser hasn't
+    /// been answered yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ui_mode: Option<String>,
 }
 
 fn settings_file() -> Option<PathBuf> {
@@ -44,6 +50,7 @@ pub fn read_desktop_settings() -> DesktopSettings {
 pub fn write_desktop_settings(
     run_on_startup: Option<bool>,
     startup_asked: Option<bool>,
+    ui_mode: Option<String>,
 ) -> DesktopSettings {
     let Some(f) = settings_file() else {
         return DesktopSettings::default();
@@ -54,6 +61,10 @@ pub fn write_desktop_settings(
     }
     if startup_asked.is_some() {
         next.startup_asked = startup_asked;
+    }
+    // Only the two known modes are storable — anything else is a client bug.
+    if matches!(ui_mode.as_deref(), Some("window") | Some("widget")) {
+        next.ui_mode = ui_mode;
     }
     write_json(&f, &next); // best-effort: a read-only location just means unsaved
     next

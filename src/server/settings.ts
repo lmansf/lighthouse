@@ -19,6 +19,13 @@ export interface DesktopSettings {
   runOnStartup?: boolean;
   /** Whether the one-time "run on startup?" prompt has been answered. */
   startupAsked?: boolean;
+  /**
+   * How the app presents itself at launch: "window" (classic, the default) or
+   * "widget" (experimental — the floating search bar IS the app; the main
+   * window stays in the tray). Unset = the first-run chooser hasn't been
+   * answered yet.
+   */
+  uiMode?: "window" | "widget";
 }
 
 function settingsFile(): string | null {

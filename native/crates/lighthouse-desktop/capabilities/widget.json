@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "widget",
+  "description": "Floating search-bar widget: core APIs (event listen for vault-changed) plus frameless dragging. Window mutations (hide/pin/resize) ride app commands, which need no ACL grant.",
+  "windows": ["widget"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging"
+  ]
+}

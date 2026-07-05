@@ -298,6 +298,7 @@ async fn wire_protocol_end_to_end() {
         .unwrap();
     assert_eq!(s["desktop"], false);
     assert_eq!(s["runOnStartup"], true, "defaults on");
+    assert_eq!(s["uiMode"], Value::Null, "no mode until the chooser answers");
 
     // --- /api/usage consent round-trip ---------------------------------------------
     let u: Value = client
