@@ -34,7 +34,8 @@
     ],
     "icon": [
       "icons/icon.png",
-      "icons/icon.ico"
+      "icons/icon.ico",
+      "icons/icon.icns"
     ],
     "category": "Productivity",
     "shortDescription": "Curate which of your files and data sources your AI can see.",
