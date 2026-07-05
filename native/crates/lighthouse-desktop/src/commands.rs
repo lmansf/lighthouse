@@ -419,18 +419,23 @@ pub async fn connect_op(body: Value) -> Result<Value, String> {
     }
 }
 
+// The model commands are async so they run on the Tauri async runtime, NOT the
+// main thread. That (a) gives `start_download()` an ambient Tokio runtime to
+// spawn onto, and (b) contains any future panic in this path to the task —
+// sync commands run on the main thread, where a panic exits the whole app
+// (which is exactly how the Install click used to crash the desktop build).
 #[tauri::command]
-pub fn model_status() -> Value {
+pub async fn model_status() -> Value {
     serde_json::to_value(local_model::model_status()).unwrap_or_else(|_| json!({}))
 }
 
 #[tauri::command]
-pub fn model_download() -> Value {
+pub async fn model_download() -> Value {
     serde_json::to_value(local_model::start_download()).unwrap_or_else(|_| json!({}))
 }
 
 #[tauri::command]
-pub fn model_uninstall() -> Value {
+pub async fn model_uninstall() -> Value {
     serde_json::to_value(local_model::request_uninstall()).unwrap_or_else(|_| json!({}))
 }
 
