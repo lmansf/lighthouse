@@ -1,0 +1,33 @@
+# CI for the native (Rust) engine in native/ — build + parity tests.
+# Kept separate from release.yml: the JS app's pipeline is untouched by the
+# rewrite until the shell swap (Phase 3+).
+name: native
+
+on:
+  push:
+    paths:
+      - "native/**"
+      - "test/fixtures/**"
+      - ".github/workflows/native.yml"
+  pull_request:
+    paths:
+      - "native/**"
+      - "test/fixtures/**"
+      - ".github/workflows/native.yml"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: native
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native
+      - name: Build
+        run: cargo build --workspace --locked
+      - name: Test
+        run: cargo test --workspace --locked

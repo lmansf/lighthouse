@@ -375,6 +375,12 @@ Key structural changes and why they pay:
 
 Strangler pattern along the existing contracts seam; the app ships at every phase.
 
+> **Execution status:** Phases 1–2 are implemented in [`native/`](../native/README.md)
+> — `lighthouse-core` (the full engine, state-compatible with `.rag-vault/`)
+> and `lighthouse-server` (all 13 routes, wire-compatible, NDJSON chat), with
+> 33 parity/wire tests and a `native.yml` CI job. Phases 3–5 (Tauri shell, IPC
+> transport swap, persistent index) remain.
+
 | Phase | Scope | Exit criteria | Effort (1–2 eng) |
 |---|---|---|---|
 | **0. Baseline & harness** | Benchmarks (startup, RSS, retrieval latency vs corpus size), golden-output capture, fixture vault, CI scaffold | Reproducible numbers + snapshot suite | 1–2 wks |
