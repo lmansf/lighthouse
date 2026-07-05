@@ -304,6 +304,13 @@ pub async fn profile_post(headers: HeaderMap, body: Option<Json<Value>>) -> Resp
             body["modelId"].as_str().unwrap_or(""),
             body["apiKey"].as_str().unwrap_or(""),
         ))),
+        Some("setDefaultInclusion") => {
+            let v = body["value"].as_str().unwrap_or("");
+            if v != "include" && v != "exclude" {
+                return bad_request("value must be include or exclude");
+            }
+            profile::set_default_inclusion(v);
+        }
         Some("completeOnboarding") => profile::complete_onboarding(),
         Some("signOut") => profile::sign_out(),
         _ => return bad_request("unknown op"),

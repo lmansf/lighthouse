@@ -6,6 +6,7 @@ import {
   register,
   finishRegistration,
   selectModel,
+  setDefaultInclusion,
   completeOnboarding,
   signOut,
 } from "@/server/profile";
@@ -59,6 +60,12 @@ export async function POST(req: Request) {
           String(body.apiKey ?? ""),
         ),
       );
+      break;
+    case "setDefaultInclusion":
+      if (body.value !== "include" && body.value !== "exclude") {
+        return NextResponse.json({ error: "value must be include or exclude" }, { status: 400 });
+      }
+      setDefaultInclusion(body.value);
       break;
     case "completeOnboarding":
       completeOnboarding();

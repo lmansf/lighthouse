@@ -17,7 +17,7 @@ import {
   readJson,
   writeJson,
 } from "./config";
-import { getVariant } from "./experiment";
+import { effectiveDefaultInclusion } from "./profile";
 import { recordEvent } from "./license";
 import { isRichFile, extractRichText } from "./extract";
 
@@ -115,14 +115,15 @@ export function resolveNodePath(nodeId: string): string {
 }
 
 /**
- * Whether absent inclusion flags default to INCLUDED. This is the
- * `default_inclusion` A/B experiment: `opt_out` includes everything by default
- * (the user opts pieces out), `opt_in` keeps the original default-excluded
- * behavior (nothing in until toggled on). Resolved once per walk and threaded
- * into isEffectivelyIncluded so a big tree isn't re-reading the variant per node.
+ * Whether absent inclusion flags default to INCLUDED. Honors the user's explicit
+ * onboarding choice first (`include` ⇒ new files are searchable by default, the
+ * user opts pieces out; `exclude` ⇒ nothing in until toggled on), falling back
+ * to the `default_inclusion` A/B experiment variant when they haven't chosen.
+ * Resolved once per walk and threaded into isEffectivelyIncluded so a big tree
+ * isn't re-reading the preference per node.
  */
 function defaultIncluded(): boolean {
-  return getVariant("default_inclusion") === "opt_out";
+  return effectiveDefaultInclusion() === "include";
 }
 
 /**

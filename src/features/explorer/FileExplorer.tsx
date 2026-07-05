@@ -402,9 +402,14 @@ export function FileExplorer() {
   const connectSharePoint = useRagStore((s) => s.connectSharePoint);
   const closeSharePointDialog = useRagStore((s) => s.closeSharePointDialog);
   const disconnectSharePoint = useRagStore((s) => s.disconnectSharePoint);
-  // default-inclusion A/B: opt_out includes everything by default, so it carries
-  // a prominent "you control what AI sees" reassurance.
-  const optOut = useAuthStore((s) => s.onboarding.defaultInclusionVariant) === "opt_out";
+  // The user's effective default-inclusion behavior (explicit onboarding choice,
+  // else the assigned A/B variant). "include" carries a prominent "you control
+  // what AI sees" reassurance since files are searchable the moment they're added.
+  const defaultInclusion = useAuthStore(
+    (s) => s.onboarding.defaultInclusion ??
+      (s.onboarding.defaultInclusionVariant === "opt_out" ? "include" : undefined),
+  );
+  const includeByDefault = defaultInclusion === "include";
 
   const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
   const isSelected = (id: string) => selectedSet.has(id);
@@ -624,7 +629,7 @@ export function FileExplorer() {
         </div>
       </div>
 
-      {optOut && (
+      {includeByDefault && (
         <div className={styles.controlNote}>
           <ShieldKeyholeRegular fontSize={20} className={styles.controlNoteIcon} />
           <Text size={200}>
