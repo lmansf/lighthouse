@@ -287,6 +287,14 @@ function installDesktopBridge(core: TauriCore, eventApi: TauriEvent): void {
   // without leaning on the polling loop.
   void eventApi.listen("vault-changed", () => broadcast("lighthouse:vault-changed"));
   void eventApi.listen("vault-generation", () => broadcast("lighthouse:vault-changed"));
+
+  // --- Widget → chat hand-off: the shell raises the main window and emits
+  // this with the query typed into the floating search bar ("Ask Lighthouse
+  // →"); the chat panel listens for the DOM event and asks it.
+  void eventApi.listen<{ question?: string }>("ask-question", (e) => {
+    const question = e.payload?.question;
+    if (question) broadcast("lighthouse:ask-question", { question });
+  });
   const bridge = {
     // Correlate the DOM File with the shell's drag-drop payload by basename —
     // both fire from the same gesture. Consumed on match so duplicate names

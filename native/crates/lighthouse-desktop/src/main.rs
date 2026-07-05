@@ -24,6 +24,46 @@ use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
 
 use supervise::{Supervisor, UpdateState, RELEASE_PAGE_URL};
 
+/// Desktop widget (docs/widget-scope.md §7): window label, collapsed size,
+/// and the pin flag that decides whether losing focus hides the bar.
+pub const WIDGET_LABEL: &str = "widget";
+pub const WIDGET_WIDTH: f64 = 560.0;
+const WIDGET_HEIGHT: f64 = 56.0;
+
+/// Pinned = stay visible on blur. Managed state so the blur handler and the
+/// widget_set_pin command agree.
+#[derive(Default)]
+pub struct WidgetPin(std::sync::atomic::AtomicBool);
+
+pub fn set_widget_pinned(app: &AppHandle, pinned: bool) {
+    if let Some(state) = app.try_state::<WidgetPin>() {
+        state.0.store(pinned, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+fn widget_pinned(app: &AppHandle) -> bool {
+    app.try_state::<WidgetPin>()
+        .map(|s| s.0.load(std::sync::atomic::Ordering::Relaxed))
+        .unwrap_or(false)
+}
+
+/// Summon (or dismiss) the floating search bar. Re-centers when the saved
+/// position landed off every current monitor (e.g. an unplugged display).
+pub fn toggle_widget(app: &AppHandle) {
+    let Some(w) = app.get_webview_window(WIDGET_LABEL) else {
+        return;
+    };
+    if w.is_visible().unwrap_or(false) {
+        let _ = w.hide();
+        return;
+    }
+    if w.current_monitor().ok().flatten().is_none() {
+        let _ = w.center();
+    }
+    let _ = w.show();
+    let _ = w.set_focus();
+}
+
 /// Launch the platform's default opener for a path, detached.
 pub fn open_with_os(abs: &Path) {
     let (cmd, arg) = if cfg!(windows) {
@@ -80,7 +120,7 @@ fn write_settings(app: &AppHandle, patch: Value) {
 }
 
 /// The local vault directory (persisted; defaults under the user's Documents).
-fn vault_dir_setting(app: &AppHandle) -> PathBuf {
+pub fn vault_dir_setting(app: &AppHandle) -> PathBuf {
     let from_settings = read_settings(app)["vaultDir"].as_str().map(PathBuf::from);
     let dir = from_settings.unwrap_or_else(|| {
         app.path()
@@ -168,10 +208,12 @@ pub fn rebuild_tray_menu(app: &AppHandle) {
     };
     let build = || -> tauri::Result<Menu<tauri::Wry>> {
         let show = MenuItem::with_id(app, "show", "Show Lighthouse", true, None::<&str>)?;
+        let widget = MenuItem::with_id(app, "widget", "Show search bar", true, None::<&str>)?;
         let add = MenuItem::with_id(app, "add-files", "Add files…", true, None::<&str>)?;
         let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
         let menu = Menu::new(app)?;
         menu.append(&show)?;
+        menu.append(&widget)?;
         menu.append(&add)?;
         if update_available {
             menu.append(&PredefinedMenuItem::separator(app)?)?;
@@ -296,6 +338,7 @@ fn handle_menu(app: &AppHandle, id: &str) {
                 let _ = win.set_focus();
             }
         }
+        "widget" => toggle_widget(app),
         "quit" => {
             app.exit(0);
         }
@@ -390,8 +433,10 @@ fn main() {
         // desktop convention the shell was missing (every launch reopened at
         // the built-in 1280x820 in an OS-chosen spot).
         .plugin(tauri_plugin_window_state::Builder::default().build())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(Supervisor::default())
         .manage(UpdateState::default())
+        .manage(WidgetPin::default())
         .invoke_handler(tauri::generate_handler![
             commands::rag_list,
             commands::rag_op,
@@ -419,13 +464,29 @@ fn main() {
             commands::update_state,
             commands::watch_generation,
             commands::diag_report,
+            commands::widget_hide,
+            commands::widget_set_pin,
+            commands::widget_resize,
+            commands::show_main,
+            commands::open_vault_dir,
         ])
         .on_menu_event(|app, event| handle_menu(app, event.id().as_ref()))
         .on_window_event(|window, event| {
-            // Closing hides to tray instead of quitting (persistent app).
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                api.prevent_close();
-                let _ = window.hide();
+            match event {
+                // Closing hides to tray instead of quitting (persistent app);
+                // for the widget, "close" and "dismiss" are the same gesture.
+                tauri::WindowEvent::CloseRequested { api, .. } => {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+                // Spotlight-style dismissal: an UNPINNED search bar hides the
+                // moment it loses focus; the 📌 pin keeps it up.
+                tauri::WindowEvent::Focused(false) if window.label() == WIDGET_LABEL => {
+                    if !widget_pinned(window.app_handle()) {
+                        let _ = window.hide();
+                    }
+                }
+                _ => {}
             }
         })
         .setup(|app| {
@@ -477,6 +538,52 @@ fn main() {
                 .build(app)?;
             let _ = tray; // menu attached below (needs managed UpdateState)
             rebuild_tray_menu(&handle);
+
+            // --- Desktop widget: a hidden, frameless, always-on-top search
+            // bar (docs/widget-scope.md §7 W1). Created up front so the first
+            // summon is instant; only meaningful with a bundled UI (the
+            // /widget static route). Note: skip_taskbar is a no-op on macOS
+            // and visible_on_all_workspaces is unsupported on Windows — both
+            // are best-effort per platform.
+            if has_bundled_ui(&handle) {
+                let built = tauri::WebviewWindowBuilder::new(
+                    app,
+                    WIDGET_LABEL,
+                    tauri::WebviewUrl::App("widget".into()),
+                )
+                .title("Lighthouse Search")
+                .inner_size(WIDGET_WIDTH, WIDGET_HEIGHT)
+                .decorations(false)
+                .resizable(false)
+                .always_on_top(true)
+                .skip_taskbar(true)
+                .visible(false)
+                .focused(false)
+                .build();
+                if let Err(e) = built {
+                    eprintln!("widget window failed to build: {e}");
+                }
+            }
+
+            // Tier-1 summon hotkey (keyed chord; the modifier-only "Whisper
+            // mode" is scoped as W3). Registered here rather than via the
+            // plugin builder so a failure — expected on Wayland, where the
+            // X11-only backend can't register anything — degrades to the
+            // tray's "Show search bar" item instead of failing the launch.
+            {
+                use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+                let register = handle.global_shortcut().on_shortcut(
+                    "ctrl+super+shift+space",
+                    |app, _shortcut, event| {
+                        if event.state() == ShortcutState::Pressed {
+                            toggle_widget(app);
+                        }
+                    },
+                );
+                if let Err(e) = register {
+                    eprintln!("summon hotkey unavailable ({e}); use the tray's \"Show search bar\"");
+                }
+            }
 
             // Phase 5 watcher: event-driven tree/index freshness + a pushed
             // "vault-generation" event replacing the UI's 4 s poll.
@@ -552,6 +659,12 @@ fn main() {
                                         .parse()
                                         .expect("loopback url");
                                     let _ = win.navigate(url);
+                                }
+                                if let Some(w) = handle.get_webview_window(WIDGET_LABEL) {
+                                    let url = format!("http://127.0.0.1:{port}/widget")
+                                        .parse()
+                                        .expect("loopback url");
+                                    let _ = w.navigate(url);
                                 }
                             }
                         }

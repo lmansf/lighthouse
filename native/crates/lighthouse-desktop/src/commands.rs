@@ -57,7 +57,8 @@ pub async fn rag_list() -> Value {
 }
 
 #[tauri::command]
-pub async fn rag_op(body: Value) -> Result<Value, String> {
+pub async fn rag_op(app: AppHandle, body: Value) -> Result<Value, String> {
+    use tauri::Emitter;
     match body["op"].as_str() {
         Some("include") => {
             let (Some(node_id), Some(included)) =
@@ -66,6 +67,11 @@ pub async fn rag_op(body: Value) -> Result<Value, String> {
                 return Err("nodeId and included required".into());
             };
             sources::set_included(node_id, included).await;
+            // Visibility flips don't touch vault files, so the FS watcher
+            // never pushes them — broadcast explicitly so OTHER windows (the
+            // widget, the future explorer window) refresh instantly instead
+            // of waiting out their poll.
+            let _ = app.emit("vault-changed", ());
             Ok(json!({ "ok": true }))
         }
         Some("source") => {
@@ -73,6 +79,7 @@ pub async fn rag_op(body: Value) -> Result<Value, String> {
                 return Err("available required".into());
             };
             sources::set_source_available(available, body["sourceId"].as_str()).await;
+            let _ = app.emit("vault-changed", ());
             Ok(json!({ "ok": true }))
         }
         Some("search") => {
@@ -637,4 +644,68 @@ pub fn watch_generation() -> u64 {
 #[tauri::command]
 pub fn diag_report(payload: String) {
     eprintln!("[diag] {payload}");
+}
+
+// --- Desktop widget (docs/widget-scope.md §7, W1 frozen contract). All are
+// plain app commands so the widget webview needs no extra ACL grants; window
+// mutations happen Rust-side, which also keeps the pin state authoritative
+// for the blur-hide decision in main.rs. ---
+
+/// Hide the widget (Esc, the ✕ button, or after a result action).
+#[tauri::command]
+pub fn widget_hide(app: AppHandle) {
+    if let Some(w) = app.get_webview_window(crate::WIDGET_LABEL) {
+        let _ = w.hide();
+    }
+}
+
+/// Pin = keep the widget visible when it loses focus (and stay always-on-top;
+/// the widget is created always-on-top either way so it can float over the
+/// desktop, but an unpinned bar auto-hides on blur — see main.rs).
+#[tauri::command]
+pub fn widget_set_pin(app: AppHandle, pinned: bool) {
+    crate::set_widget_pinned(&app, pinned);
+    if let Some(w) = app.get_webview_window(crate::WIDGET_LABEL) {
+        let _ = w.set_always_on_top(true);
+        if pinned {
+            // A pinned bar should survive workspace switches where the OS
+            // supports it (macOS/Linux; a no-op on Windows).
+            let _ = w.set_visible_on_all_workspaces(true);
+        }
+    }
+}
+
+/// Grow/shrink the widget window as the results dropdown renders. Height is
+/// clamped shell-side so a misbehaving page can't fill the screen.
+#[tauri::command]
+pub fn widget_resize(app: AppHandle, height: f64) {
+    const MIN: f64 = 56.0;
+    const MAX: f64 = 420.0;
+    if let Some(w) = app.get_webview_window(crate::WIDGET_LABEL) {
+        let clamped = height.clamp(MIN, MAX);
+        let _ = w.set_size(tauri::LogicalSize::new(crate::WIDGET_WIDTH, clamped));
+    }
+}
+
+/// Raise the main window; with a seed question, hand it to the chat panel
+/// ("Ask Lighthouse →" from the widget). The transport re-broadcasts the
+/// event as a DOM CustomEvent the ChatPanel listens for.
+#[tauri::command]
+pub fn show_main(app: AppHandle, seed_question: Option<String>) {
+    use tauri::Emitter;
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.show();
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+    }
+    if let Some(q) = seed_question.filter(|q| !q.trim().is_empty()) {
+        let _ = app.emit_to("main", "ask-question", json!({ "question": q }));
+    }
+}
+
+/// Open the vault directory in the OS file manager (widget 📁 button — W1
+/// placeholder; W2 rewires the button to the vault-explorer window).
+#[tauri::command]
+pub fn open_vault_dir(app: AppHandle) {
+    crate::open_with_os(&crate::vault_dir_setting(&app));
 }
