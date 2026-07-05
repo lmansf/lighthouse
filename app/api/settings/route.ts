@@ -14,6 +14,7 @@ export async function GET() {
     desktop: isDesktopApp(),
     runOnStartup: s.runOnStartup !== false, // default on
     startupAsked: Boolean(s.startupAsked),
+    uiMode: s.uiMode ?? null, // null until the first-run chooser is answered
   });
 }
 
@@ -25,13 +26,16 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, reason: "settings apply to the desktop app only" }, { status: 400 });
   }
   const body = await req.json().catch(() => ({}));
-  const patch: { runOnStartup?: boolean; startupAsked?: boolean } = {};
+  const patch: { runOnStartup?: boolean; startupAsked?: boolean; uiMode?: "window" | "widget" } =
+    {};
   if (typeof body.runOnStartup === "boolean") patch.runOnStartup = body.runOnStartup;
   if (typeof body.startupAsked === "boolean") patch.startupAsked = body.startupAsked;
+  if (body.uiMode === "window" || body.uiMode === "widget") patch.uiMode = body.uiMode;
   const s = writeDesktopSettings(patch);
   return NextResponse.json({
     ok: true,
     runOnStartup: s.runOnStartup !== false,
     startupAsked: Boolean(s.startupAsked),
+    uiMode: s.uiMode ?? null,
   });
 }

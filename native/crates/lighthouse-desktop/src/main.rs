@@ -47,21 +47,65 @@ fn widget_pinned(app: &AppHandle) -> bool {
         .unwrap_or(false)
 }
 
-/// Summon (or dismiss) the floating search bar. Re-centers when the saved
-/// position landed off every current monitor (e.g. an unplugged display).
+/// Show the floating search bar. Re-centers when the saved position landed
+/// off every current monitor (e.g. an unplugged display). `focus` is false
+/// only for the polite widget-mode boot at OS login.
+pub fn show_widget(app: &AppHandle, focus: bool) {
+    let Some(w) = app.get_webview_window(WIDGET_LABEL) else {
+        return;
+    };
+    if w.current_monitor().ok().flatten().is_none() {
+        let _ = w.center();
+    }
+    let _ = w.show();
+    if focus {
+        let _ = w.set_focus();
+    }
+}
+
+/// Dismiss the widget, remembering where the user dragged it (the widget is
+/// denylisted from the window-state plugin — its size is contents-driven and
+/// it must never restore visible — so position is persisted by hand here).
+pub fn hide_widget(app: &AppHandle) {
+    let Some(w) = app.get_webview_window(WIDGET_LABEL) else {
+        return;
+    };
+    save_widget_pos(app);
+    let _ = w.hide();
+}
+
+fn save_widget_pos(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window(WIDGET_LABEL) {
+        if let Ok(p) = w.outer_position() {
+            write_settings(app, serde_json::json!({ "widgetPos": [p.x, p.y] }));
+        }
+    }
+}
+
+/// Summon (or dismiss) the floating search bar — the hotkey/tray gesture.
 pub fn toggle_widget(app: &AppHandle) {
     let Some(w) = app.get_webview_window(WIDGET_LABEL) else {
         return;
     };
     if w.is_visible().unwrap_or(false) {
-        let _ = w.hide();
-        return;
+        hide_widget(app);
+    } else {
+        show_widget(app, true);
     }
-    if w.current_monitor().ok().flatten().is_none() {
-        let _ = w.center();
-    }
-    let _ = w.show();
-    let _ = w.set_focus();
+}
+
+/// "widget" = the experimental desktop-widget presentation: the floating
+/// search bar IS the app at launch and the main window stays in the tray.
+/// Anything else (including unset — the first-run chooser not yet answered)
+/// behaves as the classic window mode.
+fn widget_mode(app: &AppHandle) -> bool {
+    read_settings(app)["uiMode"].as_str() == Some("widget")
+}
+
+/// Whether this process was started by the OS login autostart entry (the
+/// registration passes --autostarted). Used to avoid stealing focus at login.
+fn launched_by_autostart() -> bool {
+    std::env::args().any(|a| a == "--autostarted")
 }
 
 /// Launch the platform's default opener for a path, detached.
@@ -417,22 +461,43 @@ fn handle_menu(app: &AppHandle, id: &str) {
 
 fn main() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            if let Some(win) = main_window(app) {
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            // A login autostart firing while we're already running should stay
+            // silent; a user double-clicking the app icon expects their mode's
+            // primary surface to appear.
+            if args.iter().any(|a| a == "--autostarted") {
+                return;
+            }
+            if widget_mode(app) {
+                show_widget(app, true);
+            } else if let Some(win) = main_window(app) {
                 let _ = win.show();
                 let _ = win.set_focus();
             }
         }))
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
-            None,
+            // Lets the running app tell a login launch from a user launch.
+            Some(vec!["--autostarted"]),
         ))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         // Remember window size/position/maximized across restarts — a basic
         // desktop convention the shell was missing (every launch reopened at
-        // the built-in 1280x820 in an OS-chosen spot).
-        .plugin(tauri_plugin_window_state::Builder::default().build())
+        // the built-in 1280x820 in an OS-chosen spot). VISIBLE is excluded:
+        // the plugin re-shows any window whose state saved visible, which
+        // would override the uiMode launch decision below. The widget is
+        // denylisted outright — its height is contents-driven and it must
+        // always start hidden; its position is persisted in settings instead.
+        .plugin(
+            tauri_plugin_window_state::Builder::default()
+                .with_state_flags(
+                    tauri_plugin_window_state::StateFlags::all()
+                        .difference(tauri_plugin_window_state::StateFlags::VISIBLE),
+                )
+                .with_denylist(&[WIDGET_LABEL])
+                .build(),
+        )
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(Supervisor::default())
         .manage(UpdateState::default())
@@ -465,6 +530,7 @@ fn main() {
             commands::watch_generation,
             commands::diag_report,
             commands::widget_hide,
+            commands::widget_show,
             commands::widget_set_pin,
             commands::widget_resize,
             commands::show_main,
@@ -474,16 +540,21 @@ fn main() {
         .on_window_event(|window, event| {
             match event {
                 // Closing hides to tray instead of quitting (persistent app);
-                // for the widget, "close" and "dismiss" are the same gesture.
+                // for the widget, "close" and "dismiss" are the same gesture
+                // (routed through hide_widget so its position is remembered).
                 tauri::WindowEvent::CloseRequested { api, .. } => {
                     api.prevent_close();
-                    let _ = window.hide();
+                    if window.label() == WIDGET_LABEL {
+                        hide_widget(window.app_handle());
+                    } else {
+                        let _ = window.hide();
+                    }
                 }
                 // Spotlight-style dismissal: an UNPINNED search bar hides the
                 // moment it loses focus; the 📌 pin keeps it up.
                 tauri::WindowEvent::Focused(false) if window.label() == WIDGET_LABEL => {
                     if !widget_pinned(window.app_handle()) {
-                        let _ = window.hide();
+                        hide_widget(window.app_handle());
                     }
                 }
                 _ => {}
@@ -560,8 +631,43 @@ fn main() {
                 .visible(false)
                 .focused(false)
                 .build();
-                if let Err(e) = built {
-                    eprintln!("widget window failed to build: {e}");
+                match built {
+                    Err(e) => eprintln!("widget window failed to build: {e}"),
+                    Ok(w) => {
+                        // Hand-rolled position memory (see the window-state
+                        // denylist note above). A stale off-screen position is
+                        // healed by show_widget's re-center check.
+                        if let Some(pos) = read_settings(&handle)["widgetPos"].as_array() {
+                            if let (Some(x), Some(y)) =
+                                (pos.first().and_then(Value::as_i64), pos.get(1).and_then(Value::as_i64))
+                            {
+                                let _ = w.set_position(tauri::PhysicalPosition::new(x as i32, y as i32));
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Launch presentation. The main window is configured hidden and
+            // ONE surface is raised here by the user's uiMode: the classic
+            // window (default, and always the fallback when no widget window
+            // exists — e.g. dev server mode), or the experimental desktop
+            // widget, pinned so it survives losing focus. Login autostarts
+            // never steal focus.
+            {
+                let focus = !launched_by_autostart();
+                if widget_mode(&handle) && handle.get_webview_window(WIDGET_LABEL).is_some() {
+                    set_widget_pinned(&handle, true);
+                    if let Some(w) = handle.get_webview_window(WIDGET_LABEL) {
+                        // Same treatment widget_set_pin applies on a user pin.
+                        let _ = w.set_visible_on_all_workspaces(true);
+                    }
+                    show_widget(&handle, focus);
+                } else if let Some(win) = main_window(&handle) {
+                    let _ = win.show();
+                    if focus {
+                        let _ = win.set_focus();
+                    }
                 }
             }
 
@@ -679,6 +785,7 @@ fn main() {
         .run(|app, event| {
             match event {
                 tauri::RunEvent::Exit => {
+                    save_widget_pos(app); // quitting with the bar up still remembers its spot
                     app.state::<Supervisor>().shutdown();
                 }
                 // macOS: clicking the Dock icon while the window is hidden to

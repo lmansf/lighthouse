@@ -1,10 +1,11 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useAuthStore } from "@/stores/useAuthStore";
 import { useLicenseStore, isLocked } from "@/stores/useLicenseStore";
 import { AppShell } from "@/shell/AppShell";
 import { OnboardingPanel } from "@/features/onboarding/OnboardingPanel";
+import { ModeChooserAuto } from "@/features/onboarding/ModeChooser";
 import { FileExplorer } from "@/features/explorer/FileExplorer";
 import { ChatPanel } from "@/features/chat/ChatPanel";
 import { LicenseGate, GraceBanner, PostPurchaseFeedback } from "@/features/license/LicenseGate";
@@ -26,6 +27,11 @@ import { VersionBadge } from "@/shell/VersionBadge";
 export default function Home() {
   const step = useAuthStore((s) => s.onboarding.step);
   const onboarded = step === "done";
+
+  // First-run interface choice (window vs widget): the quick-start tour holds
+  // until the chooser has settled — shown and answered, or skipped — so the
+  // two dialogs never stack.
+  const [modeSettled, setModeSettled] = useState(false);
 
   const status = useLicenseStore((s) => s.status);
   const graceUntil = useLicenseStore((s) => s.graceUntil);
@@ -123,12 +129,17 @@ export default function Home() {
       <BugReport />
       <VersionBadge />
       {onboarded && <FeedbackNudge />}
-      {/* First-run tutorial: only once the working shell is actually on screen
+      {/* First-run surfaces: only once the working shell is actually on screen
           (onboarded and the license check has RESOLVED unlocked) — mounting
-          during the transient "unknown" status would flash the tour over a
-          lock gate and burn its once-per-install flag before it was seen. */}
+          during the transient "unknown" status would flash them over a lock
+          gate and burn the tour's once-per-install flag before it was seen.
+          The mode chooser (desktop: window vs widget) goes first; the tour
+          waits for it to settle so the two dialogs never stack. */}
       {onboarded && (status === "valid" || status === "grace" || status === "disabled") && (
-        <QuickStartAuto />
+        <>
+          <ModeChooserAuto onSettled={() => setModeSettled(true)} />
+          {modeSettled && <QuickStartAuto />}
+        </>
       )}
     </>
   );

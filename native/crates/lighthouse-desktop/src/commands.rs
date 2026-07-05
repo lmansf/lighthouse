@@ -467,6 +467,7 @@ pub fn settings_get() -> Value {
         "desktop": true,
         "runOnStartup": s.run_on_startup != Some(false),
         "startupAsked": s.startup_asked == Some(true),
+        "uiMode": s.ui_mode, // null until the first-run chooser is answered
     })
 }
 
@@ -475,13 +476,15 @@ pub fn settings_set(
     app: AppHandle,
     run_on_startup: Option<bool>,
     startup_asked: Option<bool>,
+    ui_mode: Option<String>,
 ) -> Value {
-    let s = settings::write_desktop_settings(run_on_startup, startup_asked);
+    let s = settings::write_desktop_settings(run_on_startup, startup_asked, ui_mode);
     crate::apply_autostart(&app, s.run_on_startup != Some(false));
     json!({
         "ok": true,
         "runOnStartup": s.run_on_startup != Some(false),
         "startupAsked": s.startup_asked == Some(true),
+        "uiMode": s.ui_mode,
     })
 }
 
@@ -654,9 +657,14 @@ pub fn diag_report(payload: String) {
 /// Hide the widget (Esc, the ✕ button, or after a result action).
 #[tauri::command]
 pub fn widget_hide(app: AppHandle) {
-    if let Some(w) = app.get_webview_window(crate::WIDGET_LABEL) {
-        let _ = w.hide();
-    }
+    crate::hide_widget(&app);
+}
+
+/// Summon the widget from the UI (the first-run mode chooser and Preferences
+/// use it to demo widget mode the moment it's picked).
+#[tauri::command]
+pub fn widget_show(app: AppHandle) {
+    crate::show_widget(&app, true);
 }
 
 /// Pin = keep the widget visible when it loses focus (and stay always-on-top;

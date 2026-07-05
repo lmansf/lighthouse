@@ -233,6 +233,22 @@ export function WidgetBar() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
+  // In widget mode the shell boots the bar pinned (it IS the app's resting
+  // presence, so blur must not dismiss it) — reflect that in the pin button.
+  // One read at mount; after that the button and shell move in lockstep.
+  useEffect(() => {
+    let alive = true;
+    void fetch("/api/settings")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (alive && d?.uiMode === "widget") setPinned(true);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
+
   // Layer 1 — NAME matches: instant, client-side, case-insensitive substring
   // over file-kind nodes (the explorer's search-filter matching), so 1-char
   // queries and AI-hidden files still hit. Capped to keep the pill compact.

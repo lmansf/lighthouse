@@ -744,6 +744,7 @@ pub async fn settings_get() -> Response {
         "desktop": is_desktop_app(),
         "runOnStartup": s.run_on_startup != Some(false), // default on
         "startupAsked": s.startup_asked == Some(true),
+        "uiMode": s.ui_mode, // null until the first-run chooser is answered
     }))
     .into_response()
 }
@@ -763,11 +764,13 @@ pub async fn settings_post(headers: HeaderMap, body: Option<Json<Value>>) -> Res
     let s = settings::write_desktop_settings(
         body["runOnStartup"].as_bool(),
         body["startupAsked"].as_bool(),
+        body["uiMode"].as_str().map(String::from),
     );
     Json(json!({
         "ok": true,
         "runOnStartup": s.run_on_startup != Some(false),
         "startupAsked": s.startup_asked == Some(true),
+        "uiMode": s.ui_mode,
     }))
     .into_response()
 }

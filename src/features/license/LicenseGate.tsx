@@ -50,6 +50,7 @@ import {
 import { MODEL_PROVIDERS } from "@/contracts";
 import { LocalModelOption, LocalModelInstallPanel } from "@/features/localModel/LocalModelOption";
 import { QuickStartDialog } from "@/features/help/QuickStart";
+import { showWidget, summonHotkey } from "@/features/onboarding/ModeChooser";
 import { useLicenseStore, type FeedbackInput, type LicenseStatus } from "@/stores/useLicenseStore";
 import { useAuthStore } from "@/stores/useAuthStore";
 import { useThemeStore } from "@/stores/useThemeStore";
@@ -719,6 +720,7 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
   const [shareUsage, setShareUsage] = useState<boolean | null>(null);
   const [desktop, setDesktop] = useState(false);
   const [runOnStartup, setRunOnStartup] = useState(true);
+  const [uiMode, setUiMode] = useState<"window" | "widget">("window");
 
   // Load the file-backed prefs (usage consent, launch-at-login) when opened.
   useEffect(() => {
@@ -734,6 +736,7 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
         if (!alive || !d) return;
         setDesktop(Boolean(d.desktop));
         setRunOnStartup(d.runOnStartup !== false);
+        setUiMode(d.uiMode === "widget" ? "widget" : "window");
       })
       .catch(() => {});
     return () => {
@@ -762,6 +765,17 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
       // prompt stays quiet).
       body: JSON.stringify({ runOnStartup: next, startupAsked: true }),
     }).catch(() => {});
+  }
+
+  function updateUiMode(next: "window" | "widget") {
+    setUiMode(next);
+    void fetch("/api/settings", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ uiMode: next }),
+    }).catch(() => {});
+    // Make the switch tangible right away instead of "at next launch".
+    if (next === "widget") void showWidget();
   }
 
   return (
@@ -822,6 +836,24 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
                   onChange={(_, d) => updateStartup(Boolean(d.checked))}
                   label="Launch Lighthouse when I sign in to my computer"
                 />
+              )}
+
+              {desktop && (
+                <Field label="Interface">
+                  <RadioGroup
+                    value={uiMode}
+                    onChange={(_, d) => updateUiMode(d.value === "widget" ? "widget" : "window")}
+                  >
+                    <Radio value="window" label="Window mode — the regular app window" />
+                    <Radio
+                      value="widget"
+                      label="Widget mode (experimental) — a floating search bar lives on your desktop; the main window stays in the tray until you open it"
+                    />
+                  </RadioGroup>
+                  <Text className={styles.prefHint}>
+                    In either mode, {summonHotkey()} summons the search bar from anywhere.
+                  </Text>
+                </Field>
               )}
             </div>
           </DialogContent>
