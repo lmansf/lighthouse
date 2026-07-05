@@ -146,13 +146,38 @@ pub fn resolve_node_path(node_id: &str) -> anyhow::Result<PathBuf> {
     resolve_abs(node_id, &load_state())
 }
 
+/// The real roots of every linked reference (for the FS watcher).
+pub fn reference_roots() -> Vec<PathBuf> {
+    load_state()
+        .references
+        .values()
+        .map(|r| resolve_path(&r.path))
+        .collect()
+}
+
+/// Reference roots paired with their `extN` ids (for path→id mapping).
+pub fn reference_roots_with_ids() -> Vec<(String, PathBuf)> {
+    load_state()
+        .references
+        .iter()
+        .map(|(id, r)| (id.clone(), resolve_path(&r.path)))
+        .collect()
+}
+
 // --- walk cache ---------------------------------------------------------------
 
-/// Short-lived snapshot of the walked tree. A walk is a full synchronous
-/// recursive scan of the vault AND every linked folder; the TTL only bounds how
-/// long a change made OUTSIDE the app can go unnoticed. Every in-app mutation
-/// invalidates the snapshot immediately.
-const WALK_TTL_MS: u128 = 3_000;
+/// Snapshot TTL for the walked tree. With the Phase 5 watcher active, external
+/// changes invalidate the snapshot by event, so the TTL is only a deep
+/// fallback (60 s); without a watcher it keeps the legacy 3 s bound on how
+/// long an outside change can go unnoticed. Every in-app mutation invalidates
+/// immediately either way.
+fn walk_ttl_ms() -> u128 {
+    if crate::watch::is_active() {
+        60_000
+    } else {
+        3_000
+    }
+}
 
 struct WalkCache {
     root: PathBuf,
@@ -262,7 +287,7 @@ fn walk(root: &Path) -> Vec<FileNode> {
     {
         let cache = WALK_CACHE.lock().unwrap();
         if let Some(c) = cache.as_ref() {
-            if c.root == root && c.at.elapsed().as_millis() < WALK_TTL_MS {
+            if c.root == root && c.at.elapsed().as_millis() < walk_ttl_ms() {
                 return c.nodes.clone();
             }
         }
@@ -759,14 +784,13 @@ pub fn active_included_file_ids() -> Vec<String> {
 
 // --- text reading ---------------------------------------------------------------
 
-/// Per-file read cap: the first slice is enough for relevance matching, and a
-/// 150 MB CSV must not stall or OOM a query.
-const MAX_TEXT_BYTES: u64 = 1_000_000;
-
-/// Read text from an absolute path — rich formats (pdf/docx/xlsx) go through the
-/// extractor with its own size handling and cache; plain text is read directly,
-/// capped at MAX_TEXT_BYTES.
-pub fn read_text_abs(abs: &Path) -> String {
+/// Read text from an absolute path — rich formats (pdf/docx/xlsx) go through
+/// the extractor with its own size handling and cache; plain text is read
+/// directly, capped at `cap` bytes so one pathological file can't dominate
+/// memory. The index (Phase 5) passes a generous, env-tunable cap; the legacy
+/// 1 MB bound existed only to protect the per-query read path that no longer
+/// exists.
+pub fn read_text_abs_capped(abs: &Path, cap: u64) -> String {
     let name = abs.to_string_lossy();
     if is_rich_file(&name) {
         return extract_rich_text(abs, &ext_of(&name));
@@ -775,18 +799,18 @@ pub fn read_text_abs(abs: &Path) -> String {
         return String::new();
     }
     let size = fs::metadata(abs).map(|m| m.len()).unwrap_or(0);
-    if size <= MAX_TEXT_BYTES {
+    if size <= cap {
         return fs::read(abs)
             .map(|b| String::from_utf8_lossy(&b).into_owned())
             .unwrap_or_default();
     }
-    // Large file: read only the first MAX_TEXT_BYTES.
+    // Large file: read only the first `cap` bytes.
     use std::io::Read;
     let Ok(f) = fs::File::open(abs) else {
         return String::new();
     };
-    let mut buf = vec![0u8; MAX_TEXT_BYTES as usize];
-    let mut taken = f.take(MAX_TEXT_BYTES);
+    let mut buf = vec![0u8; cap as usize];
+    let mut taken = f.take(cap);
     let mut read = 0usize;
     loop {
         match taken.read(&mut buf[read..]) {
@@ -841,7 +865,7 @@ fn singular(t: &str) -> &str {
 }
 
 /// Searchable tokens from a file's name and path.
-fn name_tokens_of(id: &str, name: &str) -> Vec<String> {
+pub fn name_tokens_of(id: &str, name: &str) -> Vec<String> {
     tokenize(&format!("{} {}", id.replace('/', " "), name))
 }
 
@@ -1214,13 +1238,6 @@ fn build_listing(nodes: &[FileNode], intent: &Listing) -> Retrieved {
 
 // --- chunking & retrieval -----------------------------------------------------------
 
-struct Chunk {
-    file_id: String,
-    name: String,
-    text: String,
-    tf: HashMap<String, f64>,
-}
-
 /// Split like JS `text.split(/\s+/)` (leading/trailing empties preserved so
 /// window alignment matches the TS chunker exactly).
 fn js_split_ws(text: &str) -> Vec<&str> {
@@ -1264,7 +1281,9 @@ fn js_split_ws(text: &str) -> Vec<&str> {
     out
 }
 
-fn chunks_of(text: &str, file_id: &str, name: &str) -> Vec<Chunk> {
+/// 120-word chunks with 25-word overlap — identical windows to the TS engine.
+/// Term frequencies are attached by the index at build time.
+pub fn chunk_texts_of(text: &str) -> Vec<String> {
     let words = js_split_ws(text);
     const SIZE: usize = 120;
     const OVERLAP: usize = 25;
@@ -1274,16 +1293,7 @@ fn chunks_of(text: &str, file_id: &str, name: &str) -> Vec<Chunk> {
         let end = (i + SIZE).min(words.len());
         let slice = words[i..end].join(" ").trim().to_string();
         if !slice.is_empty() {
-            let mut tf: HashMap<String, f64> = HashMap::new();
-            for t in tokenize(&slice) {
-                *tf.entry(t).or_insert(0.0) += 1.0;
-            }
-            chunks.push(Chunk {
-                file_id: file_id.to_string(),
-                name: name.to_string(),
-                text: slice,
-                tf,
-            });
+            chunks.push(slice);
         }
         if i + SIZE >= words.len() {
             break;
@@ -1312,9 +1322,6 @@ pub struct ExternalItem {
     pub name: String,
     pub abs: PathBuf,
 }
-
-/// Bound total chunks scored per query so many/large files can't stall it.
-const MAX_TOTAL_CHUNKS: usize = 4000;
 
 /// Retrieval over the included files: TF-IDF cosine over content chunks combined
 /// with a filename/path match, plus catalog/listing enumeration.
@@ -1368,72 +1375,67 @@ pub fn retrieve(
         };
     }
 
-    // Unified retrieval items: vault files (read by node id) and mirrored cloud
-    // files (read by absolute mirror path).
-    struct Item {
-        id: String,
-        name: String,
-        path_for: String,
-        abs: Option<PathBuf>,
-    }
-    let items: Vec<Item> = nodes
+    // Unified retrieval items served by the persistent index (Phase 5): vault
+    // files by node id, mirrored cloud files by absolute mirror path. Stale or
+    // missing entries are rebuilt in parallel inside `entries_for`.
+    let items: Vec<crate::index::IndexItem> = nodes
         .iter()
-        .map(|n| Item {
+        .map(|n| crate::index::IndexItem {
             id: n.id.clone(),
             name: n.name.clone(),
             path_for: n.id.clone(),
             abs: resolve_abs(&n.id, &state).ok(),
         })
-        .chain(external.iter().map(|e| Item {
+        .chain(external.iter().map(|e| crate::index::IndexItem {
             id: e.id.clone(),
             name: e.name.clone(),
             path_for: String::new(),
             abs: Some(e.abs.clone()),
         }))
         .collect();
+    let entries = crate::index::entries_for(&items);
 
-    let mut name_toks: HashMap<String, Vec<String>> = HashMap::new();
-    for it in &items {
-        name_toks.insert(it.id.clone(), name_tokens_of(&it.path_for, &it.name));
-    }
-    let mut preview: HashMap<String, String> = HashMap::new();
-    let mut chunks: Vec<Chunk> = Vec::new();
-    'items: for it in &items {
-        let text = it.abs.as_deref().map(read_text_abs).unwrap_or_default();
-        if !text.trim().is_empty() {
-            let cs = chunks_of(&text, &it.id, &it.name);
-            preview.insert(
-                it.id.clone(),
-                cs.first()
-                    .map(|c| c.text.chars().take(240).collect())
-                    .unwrap_or_default(),
-            );
-            for c in cs {
-                chunks.push(c);
-                if chunks.len() >= MAX_TOTAL_CHUNKS {
-                    break 'items;
-                }
+    // Chunks scored this query. The legacy 4,000-chunk cap protected the
+    // per-query read loop; from the index a far larger budget is cheap, and
+    // hitting it is logged instead of silent.
+    let max_chunks = crate::index::max_query_chunks();
+    type ChunkRef<'a> = (
+        &'a str,
+        &'a crate::index::FileEntry,
+        &'a crate::index::IndexedChunk,
+    );
+    let mut chunk_refs: Vec<ChunkRef> = Vec::new();
+    'items: for item in &items {
+        let Some(entry) = entries.get(&item.id) else {
+            continue;
+        };
+        for c in &entry.chunks {
+            if chunk_refs.len() >= max_chunks {
+                eprintln!(
+                    "retrieve: chunk budget {max_chunks} reached; some included content was not scored this query"
+                );
+                break 'items;
             }
-        }
-        if chunks.len() >= MAX_TOTAL_CHUNKS {
-            break;
+            chunk_refs.push((item.id.as_str(), entry, c));
         }
     }
 
-    // --- content scoring (TF-IDF cosine over chunks) ---
+    // --- content scoring (TF-IDF cosine over chunks; identical math to TS) ---
     struct Scored<'a> {
-        c: &'a Chunk,
+        file_id: &'a str,
+        name: &'a str,
+        text: &'a str,
         score: f64,
     }
     let mut scored: Vec<Scored> = Vec::new();
-    if !chunks.is_empty() {
+    if !chunk_refs.is_empty() {
         let mut df: HashMap<&str, f64> = HashMap::new();
-        for c in &chunks {
+        for (_, _, c) in &chunk_refs {
             for t in c.tf.keys() {
                 *df.entry(t.as_str()).or_insert(0.0) += 1.0;
             }
         }
-        let n = chunks.len() as f64;
+        let n = chunk_refs.len() as f64;
         let idf = |t: &str| ((n + 1.0) / (df.get(t).copied().unwrap_or(0.0) + 1.0)).ln() + 1.0;
         let mut qtf: HashMap<String, f64> = HashMap::new();
         for t in &qtokens {
@@ -1450,7 +1452,7 @@ pub fn retrieve(
             (v, if norm.sqrt() == 0.0 { 1.0 } else { norm.sqrt() })
         };
         let (qv, qnorm) = vec_of(&qtf);
-        for c in &chunks {
+        for (file_id, entry, c) in &chunk_refs {
             let (dv, dnorm) = vec_of(&c.tf);
             let mut dot = 0.0;
             for (t, w) in &qv {
@@ -1458,14 +1460,16 @@ pub fn retrieve(
             }
             let mut score = dot / (qnorm * dnorm);
             // Nudge a chunk up when its file also matches by name.
-            let (hits, strong) = name_match(
-                &qtokens,
-                name_toks.get(&c.file_id).map(Vec::as_slice).unwrap_or(&[]),
-            );
+            let (hits, strong) = name_match(&qtokens, &entry.name_tokens);
             if strong {
                 score += 0.2 * (hits as f64 / qtokens.len() as f64);
             }
-            scored.push(Scored { c, score });
+            scored.push(Scored {
+                file_id,
+                name: entry.name.as_str(),
+                text: c.text.as_str(),
+                score,
+            });
         }
     }
 
@@ -1481,28 +1485,28 @@ pub fn retrieve(
         .iter()
         .filter(|s| s.score > 0.0)
         .map(|s| Cand {
-            file_id: s.c.file_id.clone(),
-            name: s.c.name.clone(),
-            text: s.c.text.clone(),
+            file_id: s.file_id.to_string(),
+            name: s.name.to_string(),
+            text: s.text.to_string(),
             score: s.score,
         })
         .collect();
     let present: HashSet<String> = cands.iter().map(|c| c.file_id.clone()).collect();
-    for it in &items {
-        if present.contains(&it.id) {
+    for item in &items {
+        if present.contains(&item.id) {
             continue;
         }
-        let (hits, strong) = name_match(
-            &qtokens,
-            name_toks.get(&it.id).map(Vec::as_slice).unwrap_or(&[]),
-        );
+        let Some(entry) = entries.get(&item.id) else {
+            continue;
+        };
+        let (hits, strong) = name_match(&qtokens, &entry.name_tokens);
         if hits == 0 || !strong {
             continue;
         }
-        let pv = preview.get(&it.id).cloned().unwrap_or_default();
+        let pv = entry.preview.clone();
         cands.push(Cand {
-            file_id: it.id.clone(),
-            name: it.name.clone(),
+            file_id: item.id.clone(),
+            name: item.name.clone(),
             text: if pv.is_empty() {
                 "(matched by file name; no readable text could be extracted)".to_string()
             } else {

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/lighthouse-core", "crates/lighthouse-server"]
+members = ["crates/lighthouse-core", "crates/lighthouse-server", "crates/lighthouse-desktop"]
 
 [workspace.package]
 version = "0.2.10"
@@ -9,7 +9,7 @@ license = "UNLICENSED"
 
 [workspace.dependencies]
 anyhow = "1"
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "process", "io-util", "signal"] }
 futures = "0.3"
@@ -25,6 +25,8 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 uuid = { version = "1", features = ["v4"] }
 scrypt = { version = "0.11", default-features = false }
 base64 = "0.22"
+rayon = "1"
+notify = "7"
 calamine = "0.26"
 pdf-extract = "0.7"
 zip = { version = "2", default-features = false, features = ["deflate"] }

@@ -13,6 +13,10 @@ async fn main() -> anyhow::Result<()> {
         .and_then(|p| p.parse().ok())
         .unwrap_or(3777);
 
+    // Phase 5: event-driven freshness (index invalidation + live tree) with a
+    // TTL fallback where no watcher backend exists.
+    lighthouse_core::watch::start();
+
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
     eprintln!("lighthouse-server listening on http://127.0.0.1:{port}");
     axum::serve(listener, lighthouse_server::app()).await?;

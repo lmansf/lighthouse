@@ -27,6 +27,8 @@ calamine = { workspace = true }
 pdf-extract = { workspace = true }
 zip = { workspace = true }
 quick-xml = { workspace = true }
+rayon = { workspace = true }
+notify = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -171,11 +171,13 @@ fn unavailable_source_empties_retrieval() {
 }
 
 #[test]
-fn large_files_are_read_capped_not_stalled() {
+fn indexed_files_are_searchable_past_the_legacy_1mb_cap() {
     let vault_dir = tempfile::tempdir().unwrap();
     let _guard = common::lock_env(vault_dir.path());
 
-    // 2 MB file: needle placed past the 1 MB cap must be invisible; one inside visible.
+    // Phase 5: the legacy 1 MB per-file cap protected the per-query read loop;
+    // with the persistent index, content past 1 MB is retrievable (default cap
+    // 8 MB, env-tunable), and content past the configured cap stays invisible.
     let mut big = String::with_capacity(2_100_000);
     big.push_str("findable-prefix-token appears early. ");
     while big.len() < 1_050_000 {
@@ -191,11 +193,22 @@ fn large_files_are_read_capped_not_stalled() {
     let early = vault::retrieve("findable prefix token", &ids, 5, &[], &[]);
     assert!(
         !early.references.is_empty(),
-        "content inside the 1MB cap is retrievable"
+        "prefix content is retrievable"
     );
     let late = vault::retrieve("hidden suffix needle", &ids, 5, &[], &[]);
     assert!(
-        late.references.is_empty(),
-        "content past the 1MB per-file cap is not indexed (documented cap parity)"
+        !late.references.is_empty(),
+        "content past the legacy 1MB cap is now indexed and retrievable"
+    );
+
+    // A tighter env cap still bounds one pathological file.
+    std::env::set_var("LIGHTHOUSE_INDEX_MAX_FILE_BYTES", "1000000");
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    write(&vault_dir.path().join("big.txt"), &big); // new mtime ⇒ entry rebuilds
+    let capped = vault::retrieve("hidden suffix needle", &ids, 5, &[], &[]);
+    std::env::remove_var("LIGHTHOUSE_INDEX_MAX_FILE_BYTES");
+    assert!(
+        capped.references.is_empty(),
+        "content past the configured cap is not indexed"
     );
 }

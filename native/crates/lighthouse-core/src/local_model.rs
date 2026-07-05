@@ -119,6 +119,40 @@ fn uninstall_pending() -> bool {
     models_dir().join(UNINSTALL_MARKER).exists()
 }
 
+// --- shell-facing helpers (the desktop shell owns llama-server and the
+// uninstall handshake; these expose the same discovery the picker uses so the
+// two always agree) ---
+
+/// First installed, usable `.gguf` (size + magic checked), or None.
+pub fn find_installed_model() -> Option<PathBuf> {
+    installed_model()
+}
+
+/// Every `.gguf` in the search dirs — usable or leftover — for uninstall.
+pub fn model_gguf_files() -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    for dir in search_dirs() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            if e.file_name()
+                .to_string_lossy()
+                .to_lowercase()
+                .ends_with(".gguf")
+            {
+                files.push(e.path());
+            }
+        }
+    }
+    files
+}
+
+/// The marker file the shell watches to perform an uninstall.
+pub fn uninstall_marker_path() -> PathBuf {
+    models_dir().join(UNINSTALL_MARKER)
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Progress {
     pub status: String, // ready | absent | downloading | uninstalling | error
