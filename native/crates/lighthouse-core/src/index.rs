@@ -2,10 +2,13 @@
 //!
 //! Replaces the per-query re-read/re-chunk/re-tokenize loop: each included
 //! file's chunked, term-frequency'd representation is built once, kept in
-//! memory, persisted to `.rag-vault/cache/index-v1.json`, and revalidated by a
-//! cheap `stat` (mtime+size key — the same key the extraction cache uses).
-//! Correctness never depends on the FS watcher: a stale entry is detected at
-//! query time by its key and rebuilt, in parallel across files (rayon).
+//! memory, persisted to `.rag-vault/cache/index-v1.json` (compact JSON,
+//! written by a DEBOUNCED background flusher — see `mark_dirty`), and
+//! revalidated by a cheap `stat` (mtime+size key — the same key the
+//! extraction cache uses). Correctness never depends on the FS watcher or on
+//! persistence: a stale entry is detected at query time by its key and
+//! rebuilt, in parallel across files on a BOUNDED rayon pool (see
+//! `build_pool`) so a big corpus indexes politely.
 //!
 //! The legacy 1 MB per-file read cap and 4,000-chunk query cap exist in the TS
 //! engine purely to protect Node's event loop; with the index off the query
@@ -15,13 +18,46 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::config::{read_json, state_dir, write_json};
+use crate::config::{read_json, state_dir, write_json_compact};
 use crate::vault::{chunk_texts_of, name_tokens_of, read_text_abs_capped};
+
+/// Threads used for index builds and load-time tf rebuilds. Deliberately a
+/// FRACTION of the machine (half the cores, capped at 4) — the global rayon
+/// pool would peg every core when a freshly-linked corpus indexes, which is
+/// exactly the "app is stressing the computer" complaint. Override with
+/// LIGHTHOUSE_INDEX_THREADS.
+fn build_pool() -> Option<&'static rayon::ThreadPool> {
+    static POOL: OnceLock<Option<rayon::ThreadPool>> = OnceLock::new();
+    POOL.get_or_init(|| {
+        let cores = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        let threads = std::env::var("LIGHTHOUSE_INDEX_THREADS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or_else(|| (cores / 2).clamp(1, 4));
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .thread_name(|i| format!("lh-index-{i}"))
+            .build()
+            .ok()
+    })
+    .as_ref()
+}
+
+/// Run `f` on the bounded build pool (global pool only as a fallback).
+fn in_build_pool<R: Send>(f: impl FnOnce() -> R + Send) -> R {
+    match build_pool() {
+        Some(pool) => pool.install(f),
+        None => f(),
+    }
+}
 
 /// Per-file byte cap for indexed text (bounds one pathological file, not the
 /// corpus). Rich formats are additionally clamped by the extraction cache.
@@ -87,16 +123,19 @@ fn load_from_disk(sd: &Path) -> HashMap<String, Arc<FileEntry>> {
     let Some(disk) = disk.filter(|d| d.v == DISK_VERSION) else {
         return HashMap::new();
     };
-    // Rebuild the skipped tf maps in parallel.
+    // Rebuild the skipped tf maps in parallel — on the bounded pool, since a
+    // big corpus makes this a full re-tokenization pass.
     let mut files: Vec<(String, FileEntry)> = disk
         .files
         .into_iter()
         .map(|(id, e)| (id, Arc::try_unwrap(e).unwrap_or_else(|a| (*a).clone())))
         .collect();
-    files.par_iter_mut().for_each(|(_, e)| {
-        for c in &mut e.chunks {
-            c.tf = tf_of(&c.text);
-        }
+    in_build_pool(|| {
+        files.par_iter_mut().for_each(|(_, e)| {
+            for c in &mut e.chunks {
+                c.tf = tf_of(&c.text);
+            }
+        });
     });
     files.into_iter().map(|(id, e)| (id, Arc::new(e))).collect()
 }
@@ -106,7 +145,55 @@ fn persist(sd: &Path, files: &HashMap<String, Arc<FileEntry>>) {
         v: DISK_VERSION,
         files: files.clone(),
     };
-    write_json(&disk_path(sd), &disk);
+    write_json_compact(&disk_path(sd), &disk);
+}
+
+// --- debounced persistence ------------------------------------------------------
+//
+// The index used to be re-serialized and fsync'd IN FULL after every call
+// that built anything — on a large corpus that is a hundreds-of-MB write per
+// query while the watcher trickles invalidations in. Persistence is only a
+// warm-start cache (correctness comes from the per-query mtime+size keys),
+// so writes are batched: builds mark the index dirty and a background
+// flusher writes at most once per interval. `flush_now` exists for shutdown.
+
+static DIRTY: AtomicBool = AtomicBool::new(false);
+static FLUSHER: OnceLock<()> = OnceLock::new();
+
+fn flush_snapshot() {
+    let snap = {
+        let guard = STATE.lock().unwrap_or_else(|p| p.into_inner());
+        guard
+            .as_ref()
+            .map(|s| (s.state_dir.clone(), s.files.clone()))
+    };
+    if let Some((sd, files)) = snap {
+        persist(&sd, &files);
+    }
+}
+
+fn mark_dirty() {
+    DIRTY.store(true, Ordering::Release);
+    FLUSHER.get_or_init(|| {
+        std::thread::Builder::new()
+            .name("lh-index-flush".into())
+            .spawn(|| loop {
+                std::thread::sleep(std::time::Duration::from_secs(5));
+                if DIRTY.swap(false, Ordering::AcqRel) {
+                    flush_snapshot();
+                }
+            })
+            .map(|_| ())
+            .unwrap_or(()); // no flusher thread ⇒ flush_now/shutdown still works
+    });
+}
+
+/// Write any pending index changes to disk immediately (shutdown hook; losing
+/// a pending flush is never wrong — the cache is just cold next launch).
+pub fn flush_now() {
+    if DIRTY.swap(false, Ordering::AcqRel) {
+        flush_snapshot();
+    }
 }
 
 fn tf_of(text: &str) -> HashMap<String, f64> {
@@ -201,25 +288,28 @@ pub fn entries_for(items: &[IndexItem]) -> HashMap<String, Arc<FileEntry>> {
         return out;
     }
 
-    // Build outside the lock, in parallel across files.
-    let built: Vec<(String, Arc<FileEntry>)> = misses
-        .par_iter()
-        .map(|(item, key)| {
-            let entry = match item.abs.as_deref() {
-                Some(abs) => build_entry(&item.name, &item.path_for, abs, key.clone()),
-                None => FileEntry {
-                    key: key.clone(),
-                    name: item.name.clone(),
-                    name_tokens: name_tokens_of(&item.path_for, &item.name),
-                    preview: String::new(),
-                    chunks: Vec::new(),
-                },
-            };
-            (item.id.clone(), Arc::new(entry))
-        })
-        .collect();
+    // Build outside the lock, parallel across files — on the BOUNDED pool so
+    // a freshly-linked corpus indexes politely instead of pegging every core.
+    let built: Vec<(String, Arc<FileEntry>)> = in_build_pool(|| {
+        misses
+            .par_iter()
+            .map(|(item, key)| {
+                let entry = match item.abs.as_deref() {
+                    Some(abs) => build_entry(&item.name, &item.path_for, abs, key.clone()),
+                    None => FileEntry {
+                        key: key.clone(),
+                        name: item.name.clone(),
+                        name_tokens: name_tokens_of(&item.path_for, &item.name),
+                        preview: String::new(),
+                        chunks: Vec::new(),
+                    },
+                };
+                (item.id.clone(), Arc::new(entry))
+            })
+            .collect()
+    });
 
-    let snapshot = {
+    {
         let mut guard = STATE.lock().unwrap_or_else(|p| p.into_inner());
         let state = match guard.as_mut() {
             Some(s) if s.state_dir == sd => s,
@@ -235,9 +325,8 @@ pub fn entries_for(items: &[IndexItem]) -> HashMap<String, Arc<FileEntry>> {
             out.insert(id.clone(), entry.clone());
             state.files.insert(id, entry);
         }
-        state.files.clone()
-    };
-    persist(&sd, &snapshot);
+    }
+    mark_dirty(); // batched write — see the debounced-persistence block above
     out
 }
 

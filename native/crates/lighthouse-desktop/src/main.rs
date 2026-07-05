@@ -515,6 +515,8 @@ fn handle_menu(app: &AppHandle, id: &str) {
                         std::env::set_var("VAULT_DIR", &dir);
                         lighthouse_core::index::invalidate_all();
                         refresh_ui(&handle);
+                        // Index the new vault in the background right away.
+                        lighthouse_core::vault::warm_index_async();
                     }
                 });
         }
@@ -791,6 +793,14 @@ fn main() {
             // Phase 5 watcher: event-driven tree/index freshness + a pushed
             // "vault-generation" event replacing the UI's 4 s poll.
             lighthouse_core::watch::start();
+
+            // Pre-warm the retrieval index off the interactive path (bounded
+            // threads inside): the first question after a launch — or after
+            // linking a big folder — used to pay the whole corpus build.
+            tauri::async_runtime::spawn(async {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                lighthouse_core::vault::warm_index_async();
+            });
             {
                 let handle = handle.clone();
                 tauri::async_runtime::spawn(async move {
@@ -886,6 +896,7 @@ fn main() {
             match event {
                 tauri::RunEvent::Exit => {
                     save_widget_pos(app); // quitting with the bar up still remembers its spot
+                    lighthouse_core::index::flush_now(); // don't lose the warm cache
                     app.state::<Supervisor>().shutdown();
                 }
                 // macOS: clicking the Dock icon while the window is hidden to

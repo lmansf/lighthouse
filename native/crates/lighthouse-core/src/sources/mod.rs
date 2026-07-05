@@ -35,6 +35,11 @@ pub async fn set_included(node_id: &str, included: bool) {
     } else {
         vault::set_included(node_id, included);
     }
+    // Newly-included content indexes in the background (single-flight, cheap
+    // stat pass when nothing changed) so the next question doesn't pay for it.
+    if included {
+        vault::warm_index_async();
+    }
 }
 
 pub async fn set_source_available(available: bool, source_id: Option<&str>) {
