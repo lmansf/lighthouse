@@ -461,14 +461,20 @@ pub fn open_node(node_id: String) -> Result<Value, String> {
 }
 
 #[tauri::command]
-pub fn settings_get() -> Value {
+pub fn settings_get(app: AppHandle) -> Value {
     let s = settings::read_desktop_settings();
+    let hotkey_ok = app
+        .try_state::<crate::HotkeyOk>()
+        .map(|h| h.0.load(std::sync::atomic::Ordering::Relaxed))
+        .unwrap_or(false);
     json!({
         "desktop": true,
         "runOnStartup": s.run_on_startup != Some(false),
         "startupAsked": s.startup_asked == Some(true),
         "uiMode": s.ui_mode, // null until the first-run chooser is answered
         "whisperMode": s.whisper_mode == Some(true),
+        // False on Wayland — the UI swaps hotkey copy for the tray fallback.
+        "summonHotkeyOk": hotkey_ok,
     })
 }
 
@@ -501,6 +507,12 @@ pub fn settings_set(
             if pinned {
                 let _ = w.set_visible_on_all_workspaces(true);
             }
+        }
+        if !pinned {
+            // Switching back to window mode dismisses the bar too — leaving
+            // an always-on-top pill floating over the "regular window" mode
+            // the user just chose reads as the switch not working.
+            crate::hide_widget(&app);
         }
         let _ = app.emit_to(crate::WIDGET_LABEL, "widget-pin", json!({ "pinned": pinned }));
     }

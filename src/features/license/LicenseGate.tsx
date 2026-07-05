@@ -722,6 +722,9 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
   const [runOnStartup, setRunOnStartup] = useState(true);
   const [uiMode, setUiMode] = useState<"window" | "widget">("window");
   const [whisperMode, setWhisperMode] = useState(false);
+  // False when the shell couldn't register the global shortcut (Wayland) —
+  // the hint then points at the tray instead of promising a dead hotkey.
+  const [hotkeyOk, setHotkeyOk] = useState(true);
   // Whisper's low-level hook only exists on Windows so far (widget-scope §3);
   // hide the switch elsewhere rather than offering a toggle that can't work.
   const isWindows = typeof navigator !== "undefined" && navigator.userAgent.includes("Windows");
@@ -742,6 +745,7 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
         setRunOnStartup(d.runOnStartup !== false);
         setUiMode(d.uiMode === "widget" ? "widget" : "window");
         setWhisperMode(d.whisperMode === true);
+        setHotkeyOk(d.summonHotkeyOk !== false);
       })
       .catch(() => {});
     return () => {
@@ -866,7 +870,9 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
                     />
                   </RadioGroup>
                   <Text className={styles.prefHint}>
-                    In either mode, {summonHotkey()} summons the search bar from anywhere.
+                    {hotkeyOk
+                      ? `In either mode, ${summonHotkey()} summons the search bar from anywhere.`
+                      : "Your system doesn't support the global shortcut — summon the search bar with the tray icon's “Show search bar”."}
                   </Text>
                 </Field>
               )}

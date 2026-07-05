@@ -169,6 +169,13 @@ export function ModeChooserAuto({ onSettled }: { onSettled: () => void }) {
   const [open, setOpen] = useState(false);
   const [selected, setSelected] = useState<UiMode>("window");
   const [saving, setSaving] = useState(false);
+  // False when the shell couldn't register the global shortcut (Wayland) —
+  // the hint then points at the tray instead of promising a dead hotkey.
+  // Absent (web parity route) counts as fine: the chooser only opens on
+  // desktop installs anyway. (`desktop: true` alone is a sufficient gate
+  // today — the legacy Electron shell that also set it stopped shipping at
+  // 0.3.1, and the Tauri no-bundle dev mode degrades to window mode.)
+  const [hotkeyOk, setHotkeyOk] = useState(true);
 
   // onSettled must fire exactly once whatever path resolves the chooser; the
   // ref keeps the mount effect off the (inline, per-render) prop identity.
@@ -189,8 +196,10 @@ export function ModeChooserAuto({ onSettled }: { onSettled: () => void }) {
         if (!alive) return;
         // Only a desktop install that has never chosen gets asked; anything
         // else (web build, already chosen, unreadable settings) settles now.
-        if (d && d.desktop === true && d.uiMode == null) setOpen(true);
-        else settle();
+        if (d && d.desktop === true && d.uiMode == null) {
+          setHotkeyOk(d.summonHotkeyOk !== false);
+          setOpen(true);
+        } else settle();
       })
       .catch(() => {
         if (alive) settle();
@@ -270,8 +279,9 @@ export function ModeChooserAuto({ onSettled }: { onSettled: () => void }) {
                 />
               </div>
               <Text size={200} className={styles.hint}>
-                Either way, {hotkey} summons the search bar from anywhere. Change this anytime in
-                Preferences.
+                {hotkeyOk
+                  ? `Either way, ${hotkey} summons the search bar from anywhere. Change this anytime in Preferences.`
+                  : "Your system doesn't support the global shortcut, so summon the search bar from the tray icon's “Show search bar”. Change modes anytime in Preferences."}
               </Text>
             </div>
           </DialogContent>

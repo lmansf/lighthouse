@@ -80,6 +80,13 @@ pub fn open_explorer(app: &AppHandle) {
 #[derive(Default)]
 pub struct WidgetPin(std::sync::atomic::AtomicBool);
 
+/// Whether the keyed summon hotkey actually registered — false on Wayland,
+/// where the X11-only backend can't grab anything. settings_get exposes it so
+/// the UI can swap its hotkey promises for the tray fallback instead of
+/// advertising a shortcut the shell already knows is dead.
+#[derive(Default)]
+pub struct HotkeyOk(pub std::sync::atomic::AtomicBool);
+
 /// Focus-edge counter that turns hide-on-blur into "hide only if focus
 /// STAYS gone". On Windows the top-level window loses native focus the
 /// moment WebView2's child control takes it (WM_KILLFOCUS on the parent,
@@ -224,7 +231,10 @@ fn write_settings(app: &AppHandle, patch: Value) {
     if let Some(dir) = f.parent() {
         let _ = fs::create_dir_all(dir);
     }
-    let _ = fs::write(&f, serde_json::to_string_pretty(&s).unwrap_or_default());
+    // Same atomic temp+rename writer the core uses — this file has TWO
+    // writers (core's settings_set and this raw merge), and a plain
+    // fs::write could tear or interleave with the other side's rename.
+    lighthouse_core::config::write_json(&f, &s);
 }
 
 /// The local vault directory (persisted; defaults under the user's Documents).
@@ -570,6 +580,7 @@ fn main() {
         .manage(UpdateState::default())
         .manage(WidgetPin::default())
         .manage(WidgetFocusEpoch::default())
+        .manage(HotkeyOk::default())
         .manage(ServerPort::default())
         .invoke_handler(tauri::generate_handler![
             commands::rag_list,
@@ -779,8 +790,15 @@ fn main() {
                         }
                     },
                 );
-                if let Err(e) = register {
-                    eprintln!("summon hotkey unavailable ({e}); use the tray's \"Show search bar\"");
+                match register {
+                    Ok(()) => {
+                        if let Some(ok) = handle.try_state::<HotkeyOk>() {
+                            ok.0.store(true, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
+                    Err(e) => eprintln!(
+                        "summon hotkey unavailable ({e}); use the tray's \"Show search bar\""
+                    ),
                 }
             }
 
