@@ -711,9 +711,16 @@ pub fn show_main(app: AppHandle, seed_question: Option<String>) {
     }
 }
 
-/// Open the vault directory in the OS file manager (widget 📁 button — W1
-/// placeholder; W2 rewires the button to the vault-explorer window).
+/// Open the vault directory in the OS file manager (File menu; also kept for
+/// anything that wants the literal folder rather than the explorer window).
 #[tauri::command]
 pub fn open_vault_dir(app: AppHandle) {
     crate::open_with_os(&crate::vault_dir_setting(&app));
+}
+
+/// Open (or raise) the standalone vault-explorer window — the widget's 📁
+/// button (W2). Same FileExplorer as the main sidebar, in its own window.
+#[tauri::command]
+pub fn open_explorer(app: AppHandle) {
+    crate::open_explorer(&app);
 }

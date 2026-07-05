@@ -232,7 +232,7 @@ This section is the durable record of the build — update it as phases land.
 |---|---|---|
 | **W1 — Widget MVP** | ✅ done — **released in 0.3.4** | shell + UI landed; static export emits `widget.html` (resolver's first fallback). |
 | **W1.5 — Interface mode choice** | ✅ done — released in 0.3.4 | `uiMode` setting ("window" \| "widget", null = unasked): first-run chooser dialog (widget carries an **Experimental** badge; Esc = keep window) + Preferences "Interface" radio; both hotkeys work in both modes. Widget-mode boot: main stays in tray, widget shows pinned, no focus steal on `--autostarted` launches; mode-aware single-instance raise (fixes the W4 note). Widget denylisted from window-state plugin (its restore would re-show/resize the bar); VISIBLE flag dropped app-wide (launch surface is now uiMode's call); widget position hand-persisted (`widgetPos`). |
-| **W2 — Vault-explorer window** | ⬜ next | `app/explorer/page.tsx` + lazy window; 📁 button upgrades from open-folder (current W1 behavior) to explorer window |
+| **W2 — Vault-explorer window** | ✅ done | `app/explorer/page.tsx` mounts the shared FileExplorer (license-gated, focus re-check) in a lazily-created decorated `explorer` window that REALLY closes (label-aware CloseRequested); widget 📁 rewired from open-folder to `open_explorer`; `ServerPort` state lets no-bundle dev mode build the window's loopback URL; capability `default` covers main+explorer; static export emits `explorer.html`. |
 | **W3 — Whisper mode (hold Ctrl+Super+Shift)** | ⬜ not started | Windows hook → macOS flagsChanged/TCC → X11; Wayland = portal keyed chord only; Preferences shortcut recorder |
 | **W4 — Polish & launch** | ⬜ not started | animations, multi-monitor placement, first-run hint, marketing copy |
 

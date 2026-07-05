@@ -30,6 +30,50 @@ pub const WIDGET_LABEL: &str = "widget";
 pub const WIDGET_WIDTH: f64 = 560.0;
 const WIDGET_HEIGHT: f64 = 56.0;
 
+/// W2: the standalone vault-explorer window (widget 📁 button). Unlike main
+/// and the widget it is created lazily and REALLY closes — it's a satellite
+/// view, not a resident surface.
+pub const EXPLORER_LABEL: &str = "explorer";
+
+/// Port of the embedded loopback server, when one is running (no bundled UI
+/// or LIGHTHOUSE_SERVE=1). Lazily-created windows need it to build their URL;
+/// 0 = no server, use the bundled-asset route.
+#[derive(Default)]
+pub struct ServerPort(std::sync::atomic::AtomicU16);
+
+/// Open (or raise) the vault-explorer window.
+pub fn open_explorer(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window(EXPLORER_LABEL) {
+        let _ = w.show();
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+        return;
+    }
+    let port = app
+        .try_state::<ServerPort>()
+        .map(|p| p.0.load(std::sync::atomic::Ordering::Relaxed))
+        .unwrap_or(0);
+    let url = if has_bundled_ui(app) {
+        tauri::WebviewUrl::App("explorer".into())
+    } else if port != 0 {
+        match format!("http://127.0.0.1:{port}/explorer").parse() {
+            Ok(u) => tauri::WebviewUrl::External(u),
+            Err(_) => return,
+        }
+    } else {
+        return; // no UI to show yet (embedded server still starting)
+    };
+    let built = tauri::WebviewWindowBuilder::new(app, EXPLORER_LABEL, url)
+        .title("Lighthouse — Vault")
+        .inner_size(760.0, 640.0)
+        .min_inner_size(480.0, 400.0)
+        .center()
+        .build();
+    if let Err(e) = built {
+        eprintln!("explorer window failed to build: {e}");
+    }
+}
+
 /// Pinned = stay visible on blur. Managed state so the blur handler and the
 /// widget_set_pin command agree.
 #[derive(Default)]
@@ -502,6 +546,7 @@ fn main() {
         .manage(Supervisor::default())
         .manage(UpdateState::default())
         .manage(WidgetPin::default())
+        .manage(ServerPort::default())
         .invoke_handler(tauri::generate_handler![
             commands::rag_list,
             commands::rag_op,
@@ -535,6 +580,7 @@ fn main() {
             commands::widget_resize,
             commands::show_main,
             commands::open_vault_dir,
+            commands::open_explorer,
         ])
         .on_menu_event(|app, event| handle_menu(app, event.id().as_ref()))
         .on_window_event(|window, event| {
@@ -542,7 +588,12 @@ fn main() {
                 // Closing hides to tray instead of quitting (persistent app);
                 // for the widget, "close" and "dismiss" are the same gesture
                 // (routed through hide_widget so its position is remembered).
+                // The explorer is the exception: a lazily-created satellite
+                // window that genuinely closes (recreated on next 📁).
                 tauri::WindowEvent::CloseRequested { api, .. } => {
+                    if window.label() == EXPLORER_LABEL {
+                        return;
+                    }
                     api.prevent_close();
                     if window.label() == WIDGET_LABEL {
                         hide_widget(window.app_handle());
@@ -759,6 +810,9 @@ fn main() {
                     match start_embedded_server().await {
                         Ok(port) => {
                             eprintln!("embedded API on http://127.0.0.1:{port}");
+                            if let Some(s) = handle.try_state::<ServerPort>() {
+                                s.0.store(port, std::sync::atomic::Ordering::Relaxed);
+                            }
                             if !ipc_ui {
                                 if let Some(win) = main_window(&handle) {
                                     let url = format!("http://127.0.0.1:{port}")

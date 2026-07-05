@@ -438,9 +438,9 @@ export function WidgetBar() {
           className={styles.iconBtn}
           appearance="subtle"
           icon={<FolderRegular />}
-          aria-label="Open vault folder"
-          title="Open vault folder"
-          onClick={() => void invokeShell("open_vault_dir")}
+          aria-label="Open vault explorer"
+          title="Open vault explorer — see what's in your vault and what the AI can read"
+          onClick={() => void invokeShell("open_explorer")}
         />
         <Button
           className={styles.iconBtn}
