@@ -11,13 +11,20 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Button,
+  ProgressBar,
   Spinner,
+  Text,
   Tooltip,
   makeStyles,
   shorthands,
   tokens,
 } from "@fluentui/react-components";
-import { AddRegular, CheckmarkCircleFilled, DeleteRegular } from "@fluentui/react-icons";
+import {
+  AddRegular,
+  ArrowDownloadRegular,
+  CheckmarkCircleFilled,
+  DeleteRegular,
+} from "@fluentui/react-icons";
 
 type ModelStatus = "ready" | "absent" | "downloading" | "uninstalling" | "error";
 
@@ -109,7 +116,128 @@ const useStyles = makeStyles({
     fontSize: tokens.fontSizeBase200,
     whiteSpace: "nowrap",
   },
+  panel: {
+    display: "flex",
+    flexDirection: "column",
+    gap: tokens.spacingVerticalS,
+    ...shorthands.padding(tokens.spacingVerticalM, tokens.spacingHorizontalM),
+    ...shorthands.border("1px", "solid", tokens.colorNeutralStroke2),
+    borderRadius: tokens.borderRadiusMedium,
+    backgroundColor: tokens.colorNeutralBackground2,
+  },
+  panelHead: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: tokens.spacingHorizontalS,
+  },
+  panelTitle: { display: "inline-flex", alignItems: "center", gap: tokens.spacingHorizontalXS },
+  panelHint: { color: tokens.colorNeutralForeground3, fontSize: tokens.fontSizeBase200 },
+  panelReady: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: tokens.spacingHorizontalXS,
+    color: tokens.colorPaletteGreenForeground1,
+    fontWeight: tokens.fontWeightSemibold,
+  },
+  panelProgressRow: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: tokens.spacingHorizontalS,
+    fontSize: tokens.fontSizeBase200,
+    color: tokens.colorNeutralForeground2,
+  },
 });
+
+/** Human-readable size, e.g. "4.2 GB" / "512 MB". */
+function humanBytes(n: number): string {
+  if (!n) return "";
+  const gb = n / 1_000_000_000;
+  if (gb >= 1) return `${gb.toFixed(1)} GB`;
+  return `${Math.round(n / 1_000_000)} MB`;
+}
+
+/**
+ * A full-width, unmissable install panel for the private local model — shown in
+ * the model picker (onboarding + the settings "AI models" dialog) whenever the
+ * local provider is selected. This is the primary install affordance: the tiny
+ * "＋" inside the dropdown option is easy to miss and unmounts when the dropdown
+ * closes, so on its own a user couldn't tell whether the model installed. This
+ * panel prompts the install, streams live download progress, and confirms
+ * "Installed" — all in the panel body where it stays visible.
+ */
+export function LocalModelInstallPanel() {
+  const styles = useStyles();
+  const { status, received, total, removable, error, install, uninstall } = useLocalModel();
+  const pct = total ? Math.min(100, Math.floor((received / total) * 100)) : 0;
+
+  return (
+    <div className={styles.panel}>
+      <div className={styles.panelHead}>
+        <span className={styles.panelTitle}>
+          {status === "ready" ? (
+            <span className={styles.panelReady}>
+              <CheckmarkCircleFilled fontSize={18} />
+              Local model installed
+            </span>
+          ) : (
+            <Text weight="semibold">On-device private model</Text>
+          )}
+        </span>
+
+        {status === "ready" ? (
+          <Tooltip
+            content="Uninstall the private model (~4.2 GB) to free space or re-test the download"
+            relationship="label"
+          >
+            <Button size="small" appearance="subtle" icon={<DeleteRegular />} onClick={() => void uninstall()}>
+              Uninstall
+            </Button>
+          </Tooltip>
+        ) : status === "downloading" || status === "uninstalling" ? (
+          <Spinner size="tiny" />
+        ) : (
+          <Button
+            appearance="primary"
+            size="small"
+            icon={<ArrowDownloadRegular />}
+            onClick={() => void install()}
+          >
+            {status === "error" ? "Retry install" : removable ? "Reinstall" : "Install"}
+          </Button>
+        )}
+      </div>
+
+      {status === "downloading" ? (
+        <>
+          <ProgressBar value={total ? received / total : undefined} shape="rounded" thickness="large" />
+          <div className={styles.panelProgressRow}>
+            <span>Downloading the private model…</span>
+            <span>
+              {total ? `${pct}% · ${humanBytes(received)} / ${humanBytes(total)}` : humanBytes(received)}
+            </span>
+          </div>
+        </>
+      ) : status === "uninstalling" ? (
+        <Text className={styles.panelHint}>Removing the private model…</Text>
+      ) : status === "ready" ? (
+        <Text className={styles.panelHint}>
+          Answers are generated entirely on your machine — no API key, nothing leaves your computer.
+        </Text>
+      ) : status === "error" ? (
+        <Text className={styles.errorText}>
+          {error || "The download failed."} — check your connection and click Retry install.
+        </Text>
+      ) : (
+        <Text className={styles.panelHint}>
+          A one-time ~4.2 GB download runs the AI fully on your machine (no API key, fully private).
+          Click Install to download it{removable ? " — this replaces an unusable leftover file" : ""}.
+        </Text>
+      )}
+    </div>
+  );
+}
 
 /** Option content for the local provider: label + its install state / controls. */
 export function LocalModelOption({ label }: { label: string }) {

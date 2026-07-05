@@ -24,7 +24,7 @@ import {
   tokens,
 } from "@fluentui/react-components";
 import { MODEL_PROVIDERS } from "@/contracts";
-import { LocalModelOption } from "@/features/localModel/LocalModelOption";
+import { LocalModelOption, LocalModelInstallPanel } from "@/features/localModel/LocalModelOption";
 import { useAuthStore } from "@/stores/useAuthStore";
 import { useLicenseStore } from "@/stores/useLicenseStore";
 import { logEvent } from "@/lib/logEvent";
@@ -263,6 +263,7 @@ export function OnboardingPanel() {
             ))}
           </Dropdown>
         </Field>
+        {providerId === "local" && <LocalModelInstallPanel />}
         {providerId !== "local" && (
           <Field
             label="API key"
