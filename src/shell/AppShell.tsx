@@ -2,9 +2,8 @@
 
 import { useEffect, useState } from "react";
 import { makeStyles, tokens } from "@fluentui/react-components";
-import { useRagStore } from "@/stores/useRagStore";
 import { Sidebar } from "./Sidebar";
-import { isDesktopShell } from "./desktopBridge";
+import { useVaultTree } from "./useVaultTree";
 import { StartupPrompt } from "@/features/startup/StartupPrompt";
 import { useUsageCapture } from "@/features/usage/useUsageCapture";
 
@@ -41,42 +40,14 @@ interface AppShellProps {
 export function AppShell({ sidebar, main }: AppShellProps) {
   const styles = useStyles();
   const [collapsed, setCollapsed] = useState(false);
-  const load = useRagStore((s) => s.load);
 
   // Capture coarse UI interactions for best-effort usage logging (consent-gated
   // inside the hook). Mounted here so it covers the whole post-onboarding app.
   useUsageCapture();
 
-  useEffect(() => {
-    // A transient backend/IPC failure must not crash the poll loop or surface
-    // an unhandled rejection; log and let the next tick recover.
-    const refresh = () => {
-      void load().catch((err) => {
-        console.error("Failed to refresh the vault tree", err);
-      });
-    };
-    refresh();
-    // Keep the tree live. Inside the desktop shell the engine PUSHES changes
-    // (tray/menu adds, the FS watcher) via `lighthouse:vault-changed`, so the
-    // poll is only a slow safety net there; on the web there is no push
-    // channel and the 4 s poll does the work. Polling is a fresh scan rather
-    // than fs.watch, which is unreliable on Windows/WSL-mounted and network
-    // paths.
-    const POLL_MS = isDesktopShell() ? 15000 : 4000;
-    const tick = () => {
-      if (!document.hidden) refresh();
-    };
-    const timer = setInterval(tick, POLL_MS);
-    window.addEventListener("focus", tick);
-    document.addEventListener("visibilitychange", tick);
-    window.addEventListener("lighthouse:vault-changed", refresh);
-    return () => {
-      clearInterval(timer);
-      window.removeEventListener("focus", tick);
-      document.removeEventListener("visibilitychange", tick);
-      window.removeEventListener("lighthouse:vault-changed", refresh);
-    };
-  }, [load]);
+  // One-time RAG data load + poll/push freshness (shared with the desktop
+  // widget window via the hook — see src/shell/useVaultTree.ts).
+  useVaultTree();
 
   // Global keyboard shortcuts (documented in the Quick start guide):
   // Ctrl/Cmd+N — new chat · Ctrl/Cmd+B — toggle the file sidebar ·

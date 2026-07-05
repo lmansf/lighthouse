@@ -230,8 +230,8 @@ This section is the durable record of the build — update it as phases land.
 
 | Phase | Status | Notes |
 |---|---|---|
-| **W1 — Widget MVP** | 🔨 in progress | breakdown below |
-| **W2 — Vault-explorer window** | ⬜ not started | `app/explorer/page.tsx` + lazy window; 📁 button upgrades from open-folder to explorer window |
+| **W1 — Widget MVP** | ✅ done | shell + UI landed; static export emits `widget.html` (resolver's first fallback). Single-instance second-launch still raises main (revisit in W4). |
+| **W2 — Vault-explorer window** | ⬜ next | `app/explorer/page.tsx` + lazy window; 📁 button upgrades from open-folder (current W1 behavior) to explorer window |
 | **W3 — Whisper mode (hold Ctrl+Super+Shift)** | ⬜ not started | Windows hook → macOS flagsChanged/TCC → X11; Wayland = portal keyed chord only; Preferences shortcut recorder |
 | **W4 — Polish & launch** | ⬜ not started | animations, multi-monitor placement, first-run hint, marketing copy |
 

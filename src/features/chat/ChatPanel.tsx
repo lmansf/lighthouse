@@ -892,6 +892,34 @@ export function ChatPanel() {
     return () => window.removeEventListener("lighthouse:new-chat", onNewChat);
   }, []);
 
+  // The desktop widget's "Ask Lighthouse →" hand-off: Rust `show_main` emits
+  // `ask-question` to this window and the transport re-broadcasts it as this
+  // DOM event (docs/widget-scope.md, W1 contract). Send it through the same
+  // path as pressing Ask — unless an answer is already streaming, in which
+  // case only prefill the composer so the in-flight turn isn't clobbered.
+  // Same latest-closure ref pattern as readAloudRef: the listener mounts once
+  // while the handler always sees fresh state.
+  const askSeedRef = useRef<(q: string) => void>(() => {});
+  askSeedRef.current = (q: string) => {
+    const seed = q.trim();
+    if (!seed) return;
+    if (streaming) {
+      setQuestion(seed);
+      return;
+    }
+    // Mirror ask(): the composer clears and the question goes out.
+    setQuestion("");
+    void sendQuestion(seed);
+  };
+  useEffect(() => {
+    const onAskQuestion = (e: Event) => {
+      const question = (e as CustomEvent<{ question?: string }>).detail?.question;
+      if (typeof question === "string") askSeedRef.current(question);
+    };
+    window.addEventListener("lighthouse:ask-question", onAskQuestion);
+    return () => window.removeEventListener("lighthouse:ask-question", onAskQuestion);
+  }, []);
+
   /** Mark a turn as stopped-by-user, keeping whatever content already streamed. */
   function markStopped(asstId: string) {
     setMessages((m) => m.map((x) => (x.id === asstId ? { ...x, stopped: true } : x)));
