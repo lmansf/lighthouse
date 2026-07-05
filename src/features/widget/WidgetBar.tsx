@@ -235,7 +235,8 @@ export function WidgetBar() {
 
   // In widget mode the shell boots the bar pinned (it IS the app's resting
   // presence, so blur must not dismiss it) — reflect that in the pin button.
-  // One read at mount; after that the button and shell move in lockstep.
+  // One read at mount, then live echoes whenever the shell re-applies pin
+  // semantics (the user switching interface mode at runtime).
   useEffect(() => {
     let alive = true;
     void fetch("/api/settings")
@@ -244,8 +245,14 @@ export function WidgetBar() {
         if (alive && d?.uiMode === "widget") setPinned(true);
       })
       .catch(() => {});
+    const onPin = (e: Event) => {
+      const detail = (e as CustomEvent<{ pinned?: boolean }>).detail;
+      setPinned(detail?.pinned === true);
+    };
+    window.addEventListener("lighthouse:widget-pin", onPin);
     return () => {
       alive = false;
+      window.removeEventListener("lighthouse:widget-pin", onPin);
     };
   }, []);
 
@@ -438,9 +445,9 @@ export function WidgetBar() {
           className={styles.iconBtn}
           appearance="subtle"
           icon={<FolderRegular />}
-          aria-label="Open vault folder"
-          title="Open vault folder"
-          onClick={() => void invokeShell("open_vault_dir")}
+          aria-label="Open vault explorer"
+          title="Open vault explorer — see what's in your vault and what the AI can read"
+          onClick={() => void invokeShell("open_explorer")}
         />
         <Button
           className={styles.iconBtn}

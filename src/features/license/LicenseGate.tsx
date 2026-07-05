@@ -721,6 +721,10 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
   const [desktop, setDesktop] = useState(false);
   const [runOnStartup, setRunOnStartup] = useState(true);
   const [uiMode, setUiMode] = useState<"window" | "widget">("window");
+  const [whisperMode, setWhisperMode] = useState(false);
+  // Whisper's low-level hook only exists on Windows so far (widget-scope §3);
+  // hide the switch elsewhere rather than offering a toggle that can't work.
+  const isWindows = typeof navigator !== "undefined" && navigator.userAgent.includes("Windows");
 
   // Load the file-backed prefs (usage consent, launch-at-login) when opened.
   useEffect(() => {
@@ -737,6 +741,7 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
         setDesktop(Boolean(d.desktop));
         setRunOnStartup(d.runOnStartup !== false);
         setUiMode(d.uiMode === "widget" ? "widget" : "window");
+        setWhisperMode(d.whisperMode === true);
       })
       .catch(() => {});
     return () => {
@@ -776,6 +781,16 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
     }).catch(() => {});
     // Make the switch tangible right away instead of "at next launch".
     if (next === "widget") void showWidget();
+  }
+
+  function updateWhisper(next: boolean) {
+    setWhisperMode(next);
+    // The shell starts/stops the keyboard hook live — no relaunch needed.
+    void fetch("/api/settings", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ whisperMode: next }),
+    }).catch(() => {});
   }
 
   return (
@@ -852,6 +867,20 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
                   </RadioGroup>
                   <Text className={styles.prefHint}>
                     In either mode, {summonHotkey()} summons the search bar from anywhere.
+                  </Text>
+                </Field>
+              )}
+
+              {desktop && isWindows && (
+                <Field label="Whisper summon (experimental)">
+                  <Switch
+                    checked={whisperMode}
+                    onChange={(_, d) => updateWhisper(Boolean(d.checked))}
+                    label="Tap Ctrl + Win + Shift — all three together, nothing else — to summon the search bar"
+                  />
+                  <Text className={styles.prefHint}>
+                    Uses a Windows keyboard hook while enabled; the {summonHotkey()} shortcut keeps
+                    working either way.
                   </Text>
                 </Field>
               )}

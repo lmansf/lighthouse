@@ -282,15 +282,28 @@ fn mime_of(name: &str) -> Option<String> {
     Some(m.to_string())
 }
 
+/// Serializes cache rebuilds: the tree poll, a window-focus refresh, and a
+/// watcher push routinely land TOGETHER on a just-invalidated cache, and each
+/// caller used to re-walk the whole tree in parallel — a stat storm exactly
+/// when the vault is busiest. Losers of this lock re-check the cache and
+/// ride the winner's snapshot.
+static WALK_BUILD: Mutex<()> = Mutex::new(());
+
+fn cached_walk(root: &Path) -> Option<Vec<FileNode>> {
+    let cache = WALK_CACHE.lock().unwrap();
+    cache.as_ref().and_then(|c| {
+        (c.root == root && c.at.elapsed().as_millis() < walk_ttl_ms()).then(|| c.nodes.clone())
+    })
+}
+
 /// A node id is its POSIX-relative path from the vault root (stable + unique).
 fn walk(root: &Path) -> Vec<FileNode> {
-    {
-        let cache = WALK_CACHE.lock().unwrap();
-        if let Some(c) = cache.as_ref() {
-            if c.root == root && c.at.elapsed().as_millis() < walk_ttl_ms() {
-                return c.nodes.clone();
-            }
-        }
+    if let Some(nodes) = cached_walk(root) {
+        return nodes;
+    }
+    let _build = WALK_BUILD.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(nodes) = cached_walk(root) {
+        return nodes; // someone rebuilt while we waited for the lock
     }
     let nodes = walk_uncached(root);
     *WALK_CACHE.lock().unwrap() = Some(WalkCache {
@@ -707,6 +720,9 @@ pub fn add_reference(input_path: &str) -> anyhow::Result<(String, String)> {
         },
     );
     save_state(&state);
+    // Index the newly-linked content in the background now, so the first
+    // question afterwards doesn't stall on building it interactively.
+    warm_index_async();
     Ok((id, kind.to_string()))
 }
 
@@ -1321,6 +1337,42 @@ pub struct ExternalItem {
     pub id: String,
     pub name: String,
     pub abs: PathBuf,
+}
+
+/// Build the retrieval index for everything currently included, on a
+/// background thread (bounded parallelism inside `entries_for`). Called after
+/// linking a folder and at desktop boot so the FIRST question never pays the
+/// whole corpus build interactively — that wait was the "load times are very
+/// slow after linking a large number of files" complaint. Single-flight: a
+/// request that lands while one is running is dropped (the per-query key
+/// check self-heals any gap).
+pub fn warm_index_async() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static WARMING: AtomicBool = AtomicBool::new(false);
+    if WARMING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let spawned = std::thread::Builder::new()
+        .name("lh-index-warm".into())
+        .spawn(|| {
+            let ids: HashSet<String> = active_included_file_ids().into_iter().collect();
+            let state = load_state();
+            let items: Vec<crate::index::IndexItem> = walk(&vault_dir())
+                .into_iter()
+                .filter(|n| n.kind == NodeKind::File && ids.contains(&n.id))
+                .map(|n| crate::index::IndexItem {
+                    abs: resolve_abs(&n.id, &state).ok(),
+                    path_for: n.id.clone(),
+                    id: n.id,
+                    name: n.name,
+                })
+                .collect();
+            let _ = crate::index::entries_for(&items);
+            WARMING.store(false, Ordering::SeqCst);
+        });
+    if spawned.is_err() {
+        WARMING.store(false, Ordering::SeqCst);
+    }
 }
 
 /// Retrieval over the included files: TF-IDF cosine over content chunks combined

@@ -125,6 +125,19 @@ static WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// permissions, fsync data before rename, best-effort directory fsync after).
 pub fn write_json<T: Serialize>(file: &Path, value: &T) {
     let data = serde_json::to_string_pretty(value).unwrap_or_else(|_| "null".to_string());
+    write_atomic(file, data);
+}
+
+/// Compact sibling of [`write_json`] for large machine-only files (the
+/// retrieval index): identical atomic+durable path, without pretty-print
+/// inflation — on a big corpus the index is tens-to-hundreds of MB, where
+/// the pretty form costs real serialize time and disk bandwidth per flush.
+pub fn write_json_compact<T: Serialize>(file: &Path, value: &T) {
+    let data = serde_json::to_string(value).unwrap_or_else(|_| "null".to_string());
+    write_atomic(file, data);
+}
+
+fn write_atomic(file: &Path, data: String) {
     let n = WRITE_COUNTER.fetch_add(1, Ordering::Relaxed);
     let tmp = file.with_file_name(format!(
         "{}.{}.{}.tmp",

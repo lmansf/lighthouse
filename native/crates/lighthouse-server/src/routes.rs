@@ -745,6 +745,7 @@ pub async fn settings_get() -> Response {
         "runOnStartup": s.run_on_startup != Some(false), // default on
         "startupAsked": s.startup_asked == Some(true),
         "uiMode": s.ui_mode, // null until the first-run chooser is answered
+        "whisperMode": s.whisper_mode == Some(true), // opt-in, default off
     }))
     .into_response()
 }
@@ -765,12 +766,14 @@ pub async fn settings_post(headers: HeaderMap, body: Option<Json<Value>>) -> Res
         body["runOnStartup"].as_bool(),
         body["startupAsked"].as_bool(),
         body["uiMode"].as_str().map(String::from),
+        body["whisperMode"].as_bool(),
     );
     Json(json!({
         "ok": true,
         "runOnStartup": s.run_on_startup != Some(false),
         "startupAsked": s.startup_asked == Some(true),
         "uiMode": s.ui_mode,
+        "whisperMode": s.whisper_mode == Some(true),
     }))
     .into_response()
 }

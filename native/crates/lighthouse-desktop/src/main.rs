@@ -13,6 +13,7 @@
 
 mod commands;
 mod supervise;
+mod whisper;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -30,10 +31,65 @@ pub const WIDGET_LABEL: &str = "widget";
 pub const WIDGET_WIDTH: f64 = 560.0;
 const WIDGET_HEIGHT: f64 = 56.0;
 
+/// W2: the standalone vault-explorer window (widget 📁 button). Unlike main
+/// and the widget it is created lazily and REALLY closes — it's a satellite
+/// view, not a resident surface.
+pub const EXPLORER_LABEL: &str = "explorer";
+
+/// Port of the embedded loopback server, when one is running (no bundled UI
+/// or LIGHTHOUSE_SERVE=1). Lazily-created windows need it to build their URL;
+/// 0 = no server, use the bundled-asset route.
+#[derive(Default)]
+pub struct ServerPort(std::sync::atomic::AtomicU16);
+
+/// Open (or raise) the vault-explorer window.
+pub fn open_explorer(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window(EXPLORER_LABEL) {
+        let _ = w.show();
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+        return;
+    }
+    let port = app
+        .try_state::<ServerPort>()
+        .map(|p| p.0.load(std::sync::atomic::Ordering::Relaxed))
+        .unwrap_or(0);
+    let url = if has_bundled_ui(app) {
+        tauri::WebviewUrl::App("explorer".into())
+    } else if port != 0 {
+        match format!("http://127.0.0.1:{port}/explorer").parse() {
+            Ok(u) => tauri::WebviewUrl::External(u),
+            Err(_) => return,
+        }
+    } else {
+        return; // no UI to show yet (embedded server still starting)
+    };
+    let built = tauri::WebviewWindowBuilder::new(app, EXPLORER_LABEL, url)
+        .title("Lighthouse — Vault")
+        .inner_size(760.0, 640.0)
+        .min_inner_size(480.0, 400.0)
+        .center()
+        .build();
+    if let Err(e) = built {
+        eprintln!("explorer window failed to build: {e}");
+    }
+}
+
 /// Pinned = stay visible on blur. Managed state so the blur handler and the
 /// widget_set_pin command agree.
 #[derive(Default)]
 pub struct WidgetPin(std::sync::atomic::AtomicBool);
+
+/// Focus-edge counter that turns hide-on-blur into "hide only if focus
+/// STAYS gone". On Windows the top-level window loses native focus the
+/// moment WebView2's child control takes it (WM_KILLFOCUS on the parent,
+/// and wry moves focus programmatically on every activation), so a literal
+/// hide-on-blur dismissed the bar the instant it was summoned. Every focus
+/// edge bumps the epoch; a blur only hides when no edge follows within the
+/// grace window. The runtime then synthesizes Focused(true) from the
+/// webview's own GotFocus, which lands well inside the grace period.
+#[derive(Default)]
+pub struct WidgetFocusEpoch(std::sync::atomic::AtomicU64);
 
 pub fn set_widget_pinned(app: &AppHandle, pinned: bool) {
     if let Some(state) = app.try_state::<WidgetPin>() {
@@ -83,15 +139,23 @@ fn save_widget_pos(app: &AppHandle) {
 }
 
 /// Summon (or dismiss) the floating search bar — the hotkey/tray gesture.
+/// Summoning means "the bar INSTEAD of the window": a visible main window is
+/// tucked into the taskbar first so the pill is unmistakably the surface in
+/// charge (and can't sit lost behind or under the full app).
 pub fn toggle_widget(app: &AppHandle) {
     let Some(w) = app.get_webview_window(WIDGET_LABEL) else {
         return;
     };
     if w.is_visible().unwrap_or(false) {
         hide_widget(app);
-    } else {
-        show_widget(app, true);
+        return;
     }
+    if let Some(main) = main_window(app) {
+        if main.is_visible().unwrap_or(false) && !main.is_minimized().unwrap_or(false) {
+            let _ = main.minimize();
+        }
+    }
+    show_widget(app, true);
 }
 
 /// "widget" = the experimental desktop-widget presentation: the floating
@@ -451,6 +515,8 @@ fn handle_menu(app: &AppHandle, id: &str) {
                         std::env::set_var("VAULT_DIR", &dir);
                         lighthouse_core::index::invalidate_all();
                         refresh_ui(&handle);
+                        // Index the new vault in the background right away.
+                        lighthouse_core::vault::warm_index_async();
                     }
                 });
         }
@@ -468,7 +534,8 @@ fn main() {
             if args.iter().any(|a| a == "--autostarted") {
                 return;
             }
-            if widget_mode(app) {
+            // Fall back to main when no widget window exists (dev/server mode).
+            if widget_mode(app) && app.get_webview_window(WIDGET_LABEL).is_some() {
                 show_widget(app, true);
             } else if let Some(win) = main_window(app) {
                 let _ = win.show();
@@ -502,6 +569,8 @@ fn main() {
         .manage(Supervisor::default())
         .manage(UpdateState::default())
         .manage(WidgetPin::default())
+        .manage(WidgetFocusEpoch::default())
+        .manage(ServerPort::default())
         .invoke_handler(tauri::generate_handler![
             commands::rag_list,
             commands::rag_op,
@@ -535,6 +604,7 @@ fn main() {
             commands::widget_resize,
             commands::show_main,
             commands::open_vault_dir,
+            commands::open_explorer,
         ])
         .on_menu_event(|app, event| handle_menu(app, event.id().as_ref()))
         .on_window_event(|window, event| {
@@ -542,7 +612,12 @@ fn main() {
                 // Closing hides to tray instead of quitting (persistent app);
                 // for the widget, "close" and "dismiss" are the same gesture
                 // (routed through hide_widget so its position is remembered).
+                // The explorer is the exception: a lazily-created satellite
+                // window that genuinely closes (recreated on next 📁).
                 tauri::WindowEvent::CloseRequested { api, .. } => {
+                    if window.label() == EXPLORER_LABEL {
+                        return;
+                    }
                     api.prevent_close();
                     if window.label() == WIDGET_LABEL {
                         hide_widget(window.app_handle());
@@ -550,11 +625,29 @@ fn main() {
                         let _ = window.hide();
                     }
                 }
-                // Spotlight-style dismissal: an UNPINNED search bar hides the
-                // moment it loses focus; the 📌 pin keeps it up.
-                tauri::WindowEvent::Focused(false) if window.label() == WIDGET_LABEL => {
-                    if !widget_pinned(window.app_handle()) {
-                        hide_widget(window.app_handle());
+                // Spotlight-style dismissal: an UNPINNED search bar hides
+                // when it loses focus; the 📌 pin keeps it up. Deferred via
+                // the focus epoch: Windows fires a spurious window-level blur
+                // while handing focus to the WebView2 child (see
+                // WidgetFocusEpoch), so hide only if no focus edge follows.
+                tauri::WindowEvent::Focused(focused) if window.label() == WIDGET_LABEL => {
+                    let app = window.app_handle().clone();
+                    let Some(epoch) = app.try_state::<WidgetFocusEpoch>() else {
+                        return;
+                    };
+                    let seen = epoch.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                    if !focused && !widget_pinned(&app) {
+                        tauri::async_runtime::spawn(async move {
+                            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                            let unchanged = app
+                                .state::<WidgetFocusEpoch>()
+                                .0
+                                .load(std::sync::atomic::Ordering::Relaxed)
+                                == seen;
+                            if unchanged && !widget_pinned(&app) {
+                                hide_widget(&app);
+                            }
+                        });
                     }
                 }
                 _ => {}
@@ -691,9 +784,23 @@ fn main() {
                 }
             }
 
+            // W3 Whisper mode: the opt-in modifier-only tap chord. Only ever
+            // active when the user enabled it in Preferences (whisper.rs).
+            if read_settings(&handle)["whisperMode"].as_bool() == Some(true) {
+                whisper::set_enabled(&handle, true);
+            }
+
             // Phase 5 watcher: event-driven tree/index freshness + a pushed
             // "vault-generation" event replacing the UI's 4 s poll.
             lighthouse_core::watch::start();
+
+            // Pre-warm the retrieval index off the interactive path (bounded
+            // threads inside): the first question after a launch — or after
+            // linking a big folder — used to pay the whole corpus build.
+            tauri::async_runtime::spawn(async {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                lighthouse_core::vault::warm_index_async();
+            });
             {
                 let handle = handle.clone();
                 tauri::async_runtime::spawn(async move {
@@ -759,6 +866,9 @@ fn main() {
                     match start_embedded_server().await {
                         Ok(port) => {
                             eprintln!("embedded API on http://127.0.0.1:{port}");
+                            if let Some(s) = handle.try_state::<ServerPort>() {
+                                s.0.store(port, std::sync::atomic::Ordering::Relaxed);
+                            }
                             if !ipc_ui {
                                 if let Some(win) = main_window(&handle) {
                                     let url = format!("http://127.0.0.1:{port}")
@@ -786,6 +896,7 @@ fn main() {
             match event {
                 tauri::RunEvent::Exit => {
                     save_widget_pos(app); // quitting with the bar up still remembers its spot
+                    lighthouse_core::index::flush_now(); // don't lose the warm cache
                     app.state::<Supervisor>().shutdown();
                 }
                 // macOS: clicking the Dock icon while the window is hidden to

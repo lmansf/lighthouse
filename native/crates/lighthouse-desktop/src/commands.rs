@@ -468,6 +468,7 @@ pub fn settings_get() -> Value {
         "runOnStartup": s.run_on_startup != Some(false),
         "startupAsked": s.startup_asked == Some(true),
         "uiMode": s.ui_mode, // null until the first-run chooser is answered
+        "whisperMode": s.whisper_mode == Some(true),
     })
 }
 
@@ -477,14 +478,42 @@ pub fn settings_set(
     run_on_startup: Option<bool>,
     startup_asked: Option<bool>,
     ui_mode: Option<String>,
+    whisper_mode: Option<bool>,
 ) -> Value {
-    let s = settings::write_desktop_settings(run_on_startup, startup_asked, ui_mode);
-    crate::apply_autostart(&app, s.run_on_startup != Some(false));
+    let switched_mode = ui_mode.clone();
+    let s = settings::write_desktop_settings(run_on_startup, startup_asked, ui_mode, whisper_mode);
+    // Autostart is CONSENT-FIRST (mirrors the boot gate in main.rs): only
+    // touch the OS registration once the startup prompt has been answered.
+    // Unrelated writes — e.g. the first-run uiMode chooser — must not enroll.
+    if s.startup_asked == Some(true) {
+        crate::apply_autostart(&app, s.run_on_startup != Some(false));
+    }
+    // Switching interface mode at runtime applies the mode's pin semantics
+    // immediately, like a boot would: widget mode pins the bar (it's the
+    // app's resting surface — blur must not dismiss it), window mode returns
+    // it to transient. The widget page hears the echo and syncs its button.
+    if let Some(mode) = switched_mode.as_deref() {
+        use tauri::Emitter;
+        let pinned = mode == "widget";
+        crate::set_widget_pinned(&app, pinned);
+        if let Some(w) = app.get_webview_window(crate::WIDGET_LABEL) {
+            let _ = w.set_always_on_top(true);
+            if pinned {
+                let _ = w.set_visible_on_all_workspaces(true);
+            }
+        }
+        let _ = app.emit_to(crate::WIDGET_LABEL, "widget-pin", json!({ "pinned": pinned }));
+    }
+    // Whisper mode (W3) starts/stops its keyboard hook live — no relaunch.
+    if let Some(on) = whisper_mode {
+        crate::whisper::set_enabled(&app, on);
+    }
     json!({
         "ok": true,
         "runOnStartup": s.run_on_startup != Some(false),
         "startupAsked": s.startup_asked == Some(true),
         "uiMode": s.ui_mode,
+        "whisperMode": s.whisper_mode == Some(true),
     })
 }
 
@@ -711,9 +740,16 @@ pub fn show_main(app: AppHandle, seed_question: Option<String>) {
     }
 }
 
-/// Open the vault directory in the OS file manager (widget 📁 button — W1
-/// placeholder; W2 rewires the button to the vault-explorer window).
+/// Open the vault directory in the OS file manager (File menu; also kept for
+/// anything that wants the literal folder rather than the explorer window).
 #[tauri::command]
 pub fn open_vault_dir(app: AppHandle) {
     crate::open_with_os(&crate::vault_dir_setting(&app));
+}
+
+/// Open (or raise) the standalone vault-explorer window — the widget's 📁
+/// button (W2). Same FileExplorer as the main sidebar, in its own window.
+#[tauri::command]
+pub fn open_explorer(app: AppHandle) {
+    crate::open_explorer(&app);
 }

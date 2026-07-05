@@ -27,12 +27,19 @@ fn index_persists_and_rebuilds_incrementally() {
     vault::set_included("b.md", true);
     let ids: Vec<String> = vec!["a.md".into(), "b.md".into()];
 
-    // First query builds and persists both entries.
+    // First query builds both entries; persistence is DEBOUNCED (a background
+    // flusher batches writes), so flush explicitly before reading the disk.
     let r = vault::retrieve("zebras migration", &ids, 5, &[], &[]);
     assert_eq!(r.references[0].file_id, "a.md");
     let index_file = vault_dir.path().join(".rag-vault/cache/index-v1.json");
+    lighthouse_core::index::flush_now();
     let disk = std::fs::read_to_string(&index_file).expect("index persisted to disk");
     assert!(disk.contains("zebras"), "chunk text persisted");
+    assert_eq!(
+        disk.lines().count(),
+        1,
+        "index is compact JSON — pretty-printing a corpus-sized file cost real time per flush"
+    );
 
     // Editing one file re-indexes only it (the other entry's key is unchanged;
     // the persisted index reflects the new content after the next query).
@@ -43,6 +50,14 @@ fn index_persists_and_rebuilds_incrementally() {
     );
     let r = vault::retrieve("quasars telescopes", &ids, 5, &[], &[]);
     assert_eq!(r.references[0].file_id, "a.md");
+    // The rebuild is in memory right away, but the disk write is deferred —
+    // that deferral is the fix for the full-file fsync storm on big corpora.
+    let disk = std::fs::read_to_string(&index_file).unwrap();
+    assert!(
+        !disk.contains("quasars"),
+        "persistence is debounced, not per-query"
+    );
+    lighthouse_core::index::flush_now();
     let disk = std::fs::read_to_string(&index_file).unwrap();
     assert!(
         disk.contains("quasars"),
@@ -96,6 +111,43 @@ fn watcher_invalidates_walk_cache_and_bumps_generation() {
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
     assert!(seen, "external change must surface via the watcher");
+}
+
+/// Linking a folder warms the index in the background — the first question
+/// afterwards must not pay the corpus build (the "slow after linking a large
+/// number of files" report).
+#[test]
+fn linking_warms_the_index_in_the_background() {
+    let vault_dir = tempfile::tempdir().unwrap();
+    let _guard = common::lock_env(vault_dir.path());
+
+    let linked = tempfile::tempdir().unwrap();
+    write(
+        &linked.path().join("notes.md"),
+        "linked corpus mentions bioluminescence extensively",
+    );
+    let (ref_id, kind) = vault::add_reference(&linked.path().to_string_lossy()).unwrap();
+    assert_eq!(kind, "folder");
+    vault::set_included(&ref_id, true);
+
+    // No query is ever issued — the background warm alone must index the
+    // linked content (poll: the warm thread races this test).
+    let index_file = vault_dir.path().join(".rag-vault/cache/index-v1.json");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+    let mut warmed = false;
+    while std::time::Instant::now() < deadline {
+        lighthouse_core::vault::warm_index_async(); // idempotent; re-kick in case inclusion landed after the link's warm
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        lighthouse_core::index::flush_now();
+        if std::fs::read_to_string(&index_file)
+            .map(|d| d.contains("bioluminescence"))
+            .unwrap_or(false)
+        {
+            warmed = true;
+            break;
+        }
+    }
+    assert!(warmed, "background warm must index linked content unprompted");
 }
 
 /// Perf gate (generous bounds so CI stays stable): a 2,000-file corpus must

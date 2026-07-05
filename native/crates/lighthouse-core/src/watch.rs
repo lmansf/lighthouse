@@ -119,23 +119,47 @@ fn run() {
         loop {
             match rx.recv_timeout(Duration::from_secs(10)) {
                 Ok(Ok(event)) => {
+                    // Coalesce the burst: copying or linking a big folder
+                    // emits thousands of events, and one invalidation per
+                    // event meant a tree re-walk (and a UI refresh) per
+                    // event. Drain everything that arrives inside a short
+                    // window, then invalidate ONCE for the whole batch.
+                    let mut events = vec![event];
+                    let deadline = std::time::Instant::now() + Duration::from_millis(400);
+                    loop {
+                        let left = deadline.saturating_duration_since(std::time::Instant::now());
+                        if left.is_zero() {
+                            break;
+                        }
+                        match rx.recv_timeout(left) {
+                            Ok(Ok(e)) => events.push(e),
+                            Ok(Err(_)) => {}
+                            Err(_) => break,
+                        }
+                    }
+
                     let vault = vault_dir();
                     let refs: Vec<(String, PathBuf)> = crate::vault::reference_roots_with_ids();
-                    let mut ids: Vec<String> = Vec::new();
+                    let mut ids: HashSet<String> = HashSet::new();
                     let mut relevant = false;
-                    for path in &event.paths {
-                        let mapped = ids_for_path(path, &vault, &refs);
-                        if !mapped.is_empty()
-                            || path.starts_with(crate::sources::microsoft::mirror_dir())
-                        {
-                            relevant = true;
+                    let mut mirror_churn = false;
+                    for event in &events {
+                        for path in &event.paths {
+                            let mapped = ids_for_path(path, &vault, &refs);
+                            if !mapped.is_empty() {
+                                relevant = true;
+                            } else if path.starts_with(crate::sources::microsoft::mirror_dir()) {
+                                relevant = true;
+                                mirror_churn = true; // ids unmappable — full drop
+                            }
+                            ids.extend(mapped);
                         }
-                        ids.extend(mapped);
                     }
                     if relevant {
-                        if ids.is_empty() {
-                            crate::index::invalidate_all(); // mirror churn: ids unmappable
+                        if mirror_churn || ids.is_empty() {
+                            crate::index::invalidate_all();
                         } else {
+                            let ids: Vec<String> = ids.into_iter().collect();
                             crate::index::invalidate_ids(&ids);
                         }
                         crate::vault::invalidate_walk_cache();
