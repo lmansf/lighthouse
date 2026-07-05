@@ -2,7 +2,7 @@
   "name": "rag-vault",
   "version": "0.2.10",
   "private": true,
-  "description": "Lighthouse — a local-first RAG vault for your documents.",
+  "description": "Lighthouse \u2014 a local-first RAG vault for your documents.",
   "author": "Lighthouse",
   "main": "electron/main.js",
   "scripts": {
@@ -19,7 +19,9 @@
     "dist": "next build && node scripts/fetch-local-model.mjs && electron-builder",
     "dist:nomodel": "next build && electron-builder",
     "release": "next build && node scripts/fetch-local-model.mjs && electron-builder --publish always",
-    "test:extract": "node --test \"test/**/*.test.mjs\""
+    "test:extract": "node --test \"test/**/*.test.mjs\"",
+    "build:ui-static": "node scripts/build-ui-static.mjs",
+    "desktop:build": "node scripts/build-ui-static.mjs && cd native && cargo build --release -p lighthouse-desktop"
   },
   "build": {
     "appId": "com.lighthouse.app",
@@ -112,6 +114,7 @@
   "dependencies": {
     "@fluentui/react-components": "^9.54.0",
     "@fluentui/react-icons": "^2.0.245",
+    "@tauri-apps/api": "^2.11.1",
     "electron-updater": "^6.8.9",
     "mammoth": "^1.12.0",
     "next": "^15.5.19",

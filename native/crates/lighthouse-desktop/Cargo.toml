@@ -1,0 +1,31 @@
+[package]
+name = "lighthouse-desktop"
+description = "Lighthouse desktop shell (Tauri 2): window, tray, dialogs, process supervision, IPC transport — replaces the Electron shell."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+lighthouse-core = { path = "../lighthouse-core" }
+lighthouse-server = { path = "../lighthouse-server" }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+reqwest = { workspace = true }
+rand = { workspace = true }
+hex = { workspace = true }
+axum = { workspace = true }
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-single-instance = "2"
+tauri-plugin-autostart = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+
+[[bin]]
+name = "lighthouse-desktop"
+path = "src/main.rs"

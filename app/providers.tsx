@@ -10,6 +10,7 @@ import {
   renderToStyleElements,
 } from "@fluentui/react-components";
 import { lighthouseTheme } from "@/shell/theme";
+import { installTauriTransport } from "@/shell/tauriTransport";
 
 /**
  * Fluent UI v9 (Griffel) SSR wiring for the Next.js App Router.
@@ -17,6 +18,10 @@ import { lighthouseTheme } from "@/shell/theme";
  * flash of unstyled content, and applies the Lighthouse (sandy-beach) theme.
  */
 export function Providers({ children }: { children: React.ReactNode }) {
+  // Inside the Tauri shell, /api/* calls ride IPC (there is no local HTTP
+  // server there); a no-op everywhere else. Installed before any feature
+  // component mounts so no call can slip through.
+  useState(() => installTauriTransport());
   const [renderer] = useState(() => createDOMRenderer());
 
   useServerInsertedHTML(() => {

@@ -375,11 +375,18 @@ Key structural changes and why they pay:
 
 Strangler pattern along the existing contracts seam; the app ships at every phase.
 
-> **Execution status:** Phases 1–2 are implemented in [`native/`](../native/README.md)
-> — `lighthouse-core` (the full engine, state-compatible with `.rag-vault/`)
-> and `lighthouse-server` (all 13 routes, wire-compatible, NDJSON chat), with
-> 33 parity/wire tests and a `native.yml` CI job. Phases 3–5 (Tauri shell, IPC
-> transport swap, persistent index) remain.
+> **Execution status: all five phases are implemented** in
+> [`native/`](../native/README.md). Phases 1–2: `lighthouse-core` (the full
+> engine, state-compatible with `.rag-vault/`) + `lighthouse-server` (all 13
+> routes, wire-compatible, NDJSON chat). Phase 3: `lighthouse-desktop`, a
+> Tauri 2 shell with tray/menus/dialogs/autostart/single-instance,
+> llama-server supervision incl. the uninstall handshake, and a notify-only
+> update check. Phase 4: the React UI static-exports into the shell and every
+> `/api/*` call rides Tauri IPC (`src/shell/tauriTransport.ts`) — the desktop
+> build runs with **no TCP port**. Phase 5: persistent incremental index + FS
+> watcher; 10k-file retrieval measured at 276 ms cold / 128 ms warm (release).
+> Headless E2E evidence and remaining caveats (signed updater, warm TTS,
+> interactive desktop QA, installer signing) are in `native/README.md`.
 
 | Phase | Scope | Exit criteria | Effort (1–2 eng) |
 |---|---|---|---|

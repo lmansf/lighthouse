@@ -1,0 +1,547 @@
+//! Lighthouse desktop shell (Tauri 2) — Phase 3 of docs/rewrite-scope.md.
+//!
+//! Replaces electron/main.js: window + tray (close hides, quit from tray),
+//! native Add/Link/Choose-vault dialogs, launch-at-login, single instance,
+//! llama-server supervision with the uninstall marker handshake, and a
+//! notify-only update check. The engine runs IN-PROCESS: with a bundled UI
+//! (`scripts/build-ui-static.mjs` → `ui-dist/` + `.lighthouse-ui` marker) all
+//! data flows over Tauri IPC and no TCP port exists (Phase 4); without one, an
+//! embedded loopback server + the same per-launch token serve the Next UI
+//! exactly like the Electron shell did (LIGHTHOUSE_SERVE=1 forces this).
+
+#![cfg_attr(all(not(debug_assertions), windows), windows_subsystem = "windows")]
+
+mod commands;
+mod supervise;
+
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use serde_json::Value;
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
+use tauri::tray::TrayIconBuilder;
+use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
+
+use supervise::{Supervisor, UpdateState, RELEASE_PAGE_URL};
+
+/// Launch the platform's default opener for a path, detached.
+pub fn open_with_os(abs: &Path) {
+    let (cmd, arg) = if cfg!(windows) {
+        ("explorer.exe", abs.as_os_str().to_owned())
+    } else if cfg!(target_os = "macos") {
+        ("open", abs.as_os_str().to_owned())
+    } else {
+        ("xdg-open", abs.as_os_str().to_owned())
+    };
+    let _ = std::process::Command::new(cmd)
+        .arg(arg)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+}
+
+pub fn apply_autostart(app: &AppHandle, enable: bool) {
+    use tauri_plugin_autostart::ManagerExt;
+    let autolaunch = app.autolaunch();
+    let _ = if enable {
+        autolaunch.enable()
+    } else {
+        autolaunch.disable()
+    };
+}
+
+fn settings_file(app: &AppHandle) -> PathBuf {
+    app.path()
+        .app_data_dir()
+        .unwrap_or_else(|_| std::env::temp_dir())
+        .join("lighthouse-settings.json")
+}
+
+fn read_settings(app: &AppHandle) -> Value {
+    fs::read_to_string(settings_file(app))
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_else(|| serde_json::json!({}))
+}
+
+fn write_settings(app: &AppHandle, patch: Value) {
+    let mut s = read_settings(app);
+    if let (Some(obj), Some(p)) = (s.as_object_mut(), patch.as_object()) {
+        for (k, v) in p {
+            obj.insert(k.clone(), v.clone());
+        }
+    }
+    let f = settings_file(app);
+    if let Some(dir) = f.parent() {
+        let _ = fs::create_dir_all(dir);
+    }
+    let _ = fs::write(&f, serde_json::to_string_pretty(&s).unwrap_or_default());
+}
+
+/// The local vault directory (persisted; defaults under the user's Documents).
+fn vault_dir_setting(app: &AppHandle) -> PathBuf {
+    let from_settings = read_settings(app)["vaultDir"].as_str().map(PathBuf::from);
+    let dir = from_settings.unwrap_or_else(|| {
+        app.path()
+            .document_dir()
+            .unwrap_or_else(|_| {
+                app.path()
+                    .app_data_dir()
+                    .unwrap_or_else(|_| std::env::temp_dir())
+            })
+            .join("Lighthouse Vault")
+    });
+    let _ = fs::create_dir_all(&dir);
+    dir
+}
+
+/// Wire the engine's environment before any core call (the core reads env per
+/// call, so a later "Choose vault folder…" can re-point VAULT_DIR live).
+fn bootstrap_env(app: &AppHandle) {
+    std::env::set_var("LIGHTHOUSE_DESKTOP", "1");
+    std::env::set_var("VAULT_DIR", vault_dir_setting(app));
+    std::env::set_var("LIGHTHOUSE_SETTINGS_FILE", settings_file(app));
+    if let Ok(data) = app.path().app_data_dir() {
+        let models = data.join("models");
+        let connectors = data.join("connectors");
+        let _ = fs::create_dir_all(&models);
+        let _ = fs::create_dir_all(&connectors);
+        std::env::set_var("LIGHTHOUSE_MODELS_DIR", &models);
+        std::env::set_var("LIGHTHOUSE_CONNECTORS_DIR", &connectors);
+    }
+    // Bundled offline assets (llama-server, Piper voice). Packaged builds have
+    // them under the resource dir; dev runs fall back to the repo's resources/.
+    let resource_root = app
+        .path()
+        .resource_dir()
+        .ok()
+        .filter(|d| d.join("llm").exists() || d.join("tts").exists());
+    let dev_root = std::env::current_dir()
+        .ok()
+        .map(|d| d.join("../../../resources"))
+        .filter(|d| d.exists());
+    if let Some(root) = resource_root.or(dev_root) {
+        std::env::set_var("LIGHTHOUSE_RESOURCES_PATH", root);
+    }
+}
+
+/// Whether a real UI bundle is compiled in (Phase 4 IPC mode) — the static
+/// build drops a `lighthouse-ui.json` marker beside its assets.
+fn has_bundled_ui(app: &AppHandle) -> bool {
+    app.asset_resolver()
+        .get("/lighthouse-ui.json".into())
+        .is_some()
+        || app
+            .asset_resolver()
+            .get("lighthouse-ui.json".into())
+            .is_some()
+}
+
+/// Embedded loopback API server (server-UI mode and web parity). Returns the
+/// bound port once the server is accepting.
+async fn start_embedded_server() -> anyhow::Result<u16> {
+    let token = hex::encode(rand::random::<[u8; 32]>());
+    std::env::set_var("LIGHTHOUSE_API_TOKEN", &token);
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?;
+    let port = listener.local_addr()?.port();
+    tauri::async_runtime::spawn(async move {
+        if let Err(e) = axum::serve(listener, lighthouse_server::app()).await {
+            eprintln!("embedded server exited: {e}");
+        }
+    });
+    Ok(port)
+}
+
+fn main_window(app: &AppHandle) -> Option<WebviewWindow> {
+    app.get_webview_window("main")
+}
+
+/// (Re)build the tray menu, surfacing an update notice when one is known.
+pub fn rebuild_tray_menu(app: &AppHandle) {
+    let update_available = app
+        .try_state::<UpdateState>()
+        .map(|s| s.0.lock().map(|g| g.is_some()).unwrap_or(false))
+        .unwrap_or(false);
+    let Some(tray) = app.tray_by_id("main-tray") else {
+        return;
+    };
+    let build = || -> tauri::Result<Menu<tauri::Wry>> {
+        let show = MenuItem::with_id(app, "show", "Show Lighthouse", true, None::<&str>)?;
+        let add = MenuItem::with_id(app, "add-files", "Add files…", true, None::<&str>)?;
+        let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+        let menu = Menu::new(app)?;
+        menu.append(&show)?;
+        menu.append(&add)?;
+        if update_available {
+            menu.append(&PredefinedMenuItem::separator(app)?)?;
+            menu.append(&MenuItem::with_id(
+                app,
+                "update-open",
+                "Update available — download…",
+                true,
+                None::<&str>,
+            )?)?;
+        }
+        menu.append(&PredefinedMenuItem::separator(app)?)?;
+        menu.append(&quit)?;
+        Ok(menu)
+    };
+    if let Ok(menu) = build() {
+        let _ = tray.set_menu(Some(menu));
+    }
+}
+
+fn build_app_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
+    let file = Submenu::with_items(
+        app,
+        "File",
+        true,
+        &[
+            &MenuItem::with_id(app, "add-files", "Add files…", true, Some("CmdOrCtrl+O"))?,
+            &MenuItem::with_id(app, "add-folder", "Add folder…", true, None::<&str>)?,
+            &PredefinedMenuItem::separator(app)?,
+            &MenuItem::with_id(
+                app,
+                "link-files",
+                "Link files… (no copy)",
+                true,
+                None::<&str>,
+            )?,
+            &MenuItem::with_id(
+                app,
+                "link-folder",
+                "Link folder… (no copy)",
+                true,
+                None::<&str>,
+            )?,
+            &PredefinedMenuItem::separator(app)?,
+            &MenuItem::with_id(
+                app,
+                "choose-vault",
+                "Choose vault folder…",
+                true,
+                None::<&str>,
+            )?,
+            &MenuItem::with_id(app, "open-vault", "Open vault folder", true, None::<&str>)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::quit(app, None)?,
+        ],
+    )?;
+    let edit = Submenu::with_items(
+        app,
+        "Edit",
+        true,
+        &[
+            &PredefinedMenuItem::undo(app, None)?,
+            &PredefinedMenuItem::redo(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::cut(app, None)?,
+            &PredefinedMenuItem::copy(app, None)?,
+            &PredefinedMenuItem::paste(app, None)?,
+            &PredefinedMenuItem::select_all(app, None)?,
+        ],
+    )?;
+    Menu::with_items(app, &[&file, &edit])
+}
+
+/// Copy a directory into the vault (dotfiles skipped), like the Electron
+/// "Add folder…" flow.
+fn copy_dir_into(src: &Path, dest: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(dest)?;
+    for e in fs::read_dir(src)?.flatten() {
+        let name = e.file_name();
+        if name.to_string_lossy().starts_with('.') {
+            continue;
+        }
+        let s = e.path();
+        let d = dest.join(&name);
+        if e.file_type()?.is_dir() {
+            copy_dir_into(&s, &d)?;
+        } else if e.file_type()?.is_file() {
+            fs::copy(&s, &d)?;
+        }
+    }
+    Ok(())
+}
+
+fn unique_dest(dir: &Path, name: &str) -> PathBuf {
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((s, e)) if !s.is_empty() => (s.to_string(), format!(".{e}")),
+        _ => (name.to_string(), String::new()),
+    };
+    let mut dest = dir.join(name);
+    let mut i = 1u32;
+    while dest.exists() {
+        dest = dir.join(format!("{stem} ({i}){ext}"));
+        i += 1;
+    }
+    dest
+}
+
+fn refresh_ui(app: &AppHandle) {
+    lighthouse_core::vault::invalidate_walk_cache();
+    let _ = app.emit("vault-changed", ());
+    if let Some(win) = main_window(app) {
+        let _ = win.eval("window.location.reload()");
+    }
+}
+
+fn handle_menu(app: &AppHandle, id: &str) {
+    use tauri_plugin_dialog::DialogExt;
+    match id {
+        "show" => {
+            if let Some(win) = main_window(app) {
+                let _ = win.show();
+                let _ = win.set_focus();
+            }
+        }
+        "quit" => {
+            app.exit(0);
+        }
+        "update-open" => open_with_os(Path::new(RELEASE_PAGE_URL)),
+        "add-files" => {
+            let handle = app.clone();
+            app.dialog()
+                .file()
+                .set_title("Add files to your vault")
+                .pick_files(move |paths| {
+                    let vault = vault_dir_setting(&handle);
+                    for p in paths
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter_map(|f| f.into_path().ok())
+                    {
+                        let name = p.file_name().map(|s| s.to_string_lossy().to_string());
+                        if let Some(name) = name {
+                            let _ = fs::copy(&p, unique_dest(&vault, &name));
+                        }
+                    }
+                    refresh_ui(&handle);
+                });
+        }
+        "add-folder" => {
+            let handle = app.clone();
+            app.dialog()
+                .file()
+                .set_title("Add a folder to your vault (copies it in)")
+                .pick_folder(move |path| {
+                    if let Some(src) = path.and_then(|f| f.into_path().ok()) {
+                        let vault = vault_dir_setting(&handle);
+                        if let Some(name) = src.file_name().map(|s| s.to_string_lossy().to_string())
+                        {
+                            let dest = unique_dest(&vault, &name);
+                            let _ = copy_dir_into(&src, &dest);
+                        }
+                    }
+                    refresh_ui(&handle);
+                });
+        }
+        "link-files" | "link-folder" => {
+            let directory = id == "link-folder";
+            let handle = app.clone();
+            tauri::async_runtime::spawn(async move {
+                let paths = commands::pick_link_paths(handle.clone(), directory).await;
+                for p in paths {
+                    if let Err(e) = lighthouse_core::sources::add_reference(&p).await {
+                        eprintln!("could not link {p}: {e}");
+                    }
+                }
+                refresh_ui(&handle);
+            });
+        }
+        "choose-vault" => {
+            let handle = app.clone();
+            app.dialog()
+                .file()
+                .set_title("Choose your vault folder")
+                .pick_folder(move |path| {
+                    if let Some(dir) = path.and_then(|f| f.into_path().ok()) {
+                        write_settings(
+                            &handle,
+                            serde_json::json!({ "vaultDir": dir.to_string_lossy() }),
+                        );
+                        std::env::set_var("VAULT_DIR", &dir);
+                        lighthouse_core::index::invalidate_all();
+                        refresh_ui(&handle);
+                    }
+                });
+        }
+        "open-vault" => open_with_os(&vault_dir_setting(app)),
+        _ => {}
+    }
+}
+
+fn main() {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(win) = main_window(app) {
+                let _ = win.show();
+                let _ = win.set_focus();
+            }
+        }))
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
+        .manage(Supervisor::default())
+        .manage(UpdateState::default())
+        .invoke_handler(tauri::generate_handler![
+            commands::rag_list,
+            commands::rag_op,
+            commands::chat_ask,
+            commands::tts_available,
+            commands::tts_synthesize,
+            commands::profile_get,
+            commands::profile_op,
+            commands::license_op,
+            commands::usage_get,
+            commands::usage_op,
+            commands::event_record,
+            commands::connect_op,
+            commands::model_status,
+            commands::model_download,
+            commands::model_uninstall,
+            commands::open_node,
+            commands::settings_get,
+            commands::settings_set,
+            commands::add_paths,
+            commands::pick_link_paths,
+            commands::register_config,
+            commands::register_start,
+            commands::upload_file,
+            commands::update_state,
+            commands::watch_generation,
+            commands::diag_report,
+        ])
+        .on_menu_event(|app, event| handle_menu(app, event.id().as_ref()))
+        .on_window_event(|window, event| {
+            // Closing hides to tray instead of quitting (persistent app).
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
+        .setup(|app| {
+            let handle = app.handle().clone();
+            bootstrap_env(&handle);
+
+            // Launch at login unless the user turned it off (default on).
+            let run_on_startup = read_settings(&handle)["runOnStartup"].as_bool() != Some(false);
+            apply_autostart(&handle, run_on_startup);
+
+            // App menu + tray.
+            if let Ok(menu) = build_app_menu(&handle) {
+                let _ = app.set_menu(menu);
+            }
+            let tray_icon = app.default_window_icon().cloned();
+            let mut tray = TrayIconBuilder::with_id("main-tray").tooltip("Lighthouse");
+            if let Some(icon) = tray_icon {
+                tray = tray.icon(icon);
+            }
+            let tray = tray
+                .on_tray_icon_event(|tray, event| {
+                    if let tauri::tray::TrayIconEvent::Click { .. } = event {
+                        if let Some(win) = main_window(tray.app_handle()) {
+                            let _ = win.show();
+                            let _ = win.set_focus();
+                        }
+                    }
+                })
+                .build(app)?;
+            let _ = tray; // menu attached below (needs managed UpdateState)
+            rebuild_tray_menu(&handle);
+
+            // Phase 5 watcher: event-driven tree/index freshness + a pushed
+            // "vault-generation" event replacing the UI's 4 s poll.
+            lighthouse_core::watch::start();
+            {
+                let handle = handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    let mut last = lighthouse_core::watch::generation();
+                    loop {
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                        let now = lighthouse_core::watch::generation();
+                        if now != last {
+                            last = now;
+                            let _ = handle.emit("vault-generation", now);
+                        }
+                    }
+                });
+            }
+
+            // llama-server supervision: start now if a model is installed, and
+            // reconcile every 3 s (downloads landing, uninstall handshake).
+            {
+                let handle = handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    loop {
+                        handle.state::<Supervisor>().reconcile(&handle);
+                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    }
+                });
+            }
+
+            // Notify-only update check, parallel and best-effort.
+            tauri::async_runtime::spawn(supervise::check_for_updates(handle.clone()));
+
+            // Boot diagnostics (LIGHTHOUSE_DIAG=1): capture early JS errors,
+            // then report the webview's state + a live fetch probe into the
+            // shell log — how headless CI smoke-tests prove the UI→IPC→engine
+            // pipeline without a display.
+            if std::env::var("LIGHTHOUSE_DIAG").map(|v| v == "1").unwrap_or(false) {
+                let handle = handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+                    if let Some(win) = main_window(&handle) {
+                        let _ = win.eval(
+                            "window.__LH_ERRORS=window.__LH_ERRORS||[];window.onerror=function(m,s,l){window.__LH_ERRORS.push(String(m)+' @'+s+':'+l)};window.addEventListener('unhandledrejection',function(e){window.__LH_ERRORS.push('rej: '+((e.reason&&e.reason.message)||String(e.reason)))});",
+                        );
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                    if let Some(win) = main_window(&handle) {
+                        let _ = win.eval(
+                            "window.__TAURI_INTERNALS__.invoke('diag_report',{payload:JSON.stringify({ready:document.readyState,title:document.title,scripts:document.scripts.length,bodyLen:(document.body&&document.body.innerHTML.length)||0,tauri:!!window.__TAURI_INTERNALS__,fetchHead:String(window.fetch).slice(0,80),errors:window.__LH_ERRORS||['collector-not-installed']})});",
+                        );
+                        let _ = win.eval(
+                            "fetch('/api/rag').then(function(r){return r.json()}).then(function(j){window.__TAURI_INTERNALS__.invoke('diag_report',{payload:'fetch-ok nodes='+(j.nodes?j.nodes.length:'?')+' desktop='+j.desktop})}).catch(function(e){window.__TAURI_INTERNALS__.invoke('diag_report',{payload:'fetch-fail '+String(e)})});",
+                        );
+                    }
+                });
+            }
+
+            // UI transport: bundled static UI ⇒ pure IPC, no TCP port at all.
+            // No bundle (or LIGHTHOUSE_SERVE=1) ⇒ embedded loopback server.
+            let ipc_ui = has_bundled_ui(&handle);
+            let force_serve = std::env::var("LIGHTHOUSE_SERVE").map(|v| v == "1").unwrap_or(false);
+            if !ipc_ui || force_serve {
+                let handle = handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    match start_embedded_server().await {
+                        Ok(port) => {
+                            eprintln!("embedded API on http://127.0.0.1:{port}");
+                            if !ipc_ui {
+                                if let Some(win) = main_window(&handle) {
+                                    let url = format!("http://127.0.0.1:{port}")
+                                        .parse()
+                                        .expect("loopback url");
+                                    let _ = win.navigate(url);
+                                }
+                            }
+                        }
+                        Err(e) => eprintln!("embedded server failed to start: {e}"),
+                    }
+                });
+            }
+            Ok(())
+        })
+        .build(tauri::generate_context!())
+        .expect("error while building Lighthouse")
+        .run(|app, event| {
+            if let tauri::RunEvent::Exit = event {
+                app.state::<Supervisor>().shutdown();
+            }
+        });
+}

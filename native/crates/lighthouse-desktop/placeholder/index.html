@@ -1,0 +1,32 @@
+<!doctype html>
+<!-- Placeholder splash. The real UI is produced by
+     `node scripts/build-ui-static.mjs` (Next.js static export into ui-dist/
+     plus a `lighthouse-ui.json` marker -> the shell runs in IPC mode). With
+     only this placeholder embedded, the shell boots its embedded loopback
+     server and navigates the window there instead. -->
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Lighthouse</title>
+    <style>
+      html, body { height: 100%; margin: 0; }
+      body {
+        display: flex; align-items: center; justify-content: center;
+        background: #fbf5e9; color: #4a4438;
+        font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+      }
+      .card { text-align: center; }
+      .beacon {
+        width: 14px; height: 14px; border-radius: 50%; background: #c73e1d;
+        margin: 0 auto 14px; animation: pulse 1.2s ease-in-out infinite;
+      }
+      @keyframes pulse { 50% { opacity: 0.25; transform: scale(0.8); } }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <div class="beacon"></div>
+      <div>Starting Lighthouse…</div>
+    </div>
+  </body>
+</html>

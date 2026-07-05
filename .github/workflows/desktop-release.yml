@@ -1,0 +1,60 @@
+# Desktop installers for the native (Tauri) shell — manual dispatch while the
+# Electron pipeline (release.yml) remains the shipping path. Produces NSIS
+# (Windows), DMG (macOS), and AppImage/deb (Linux) bundles as artifacts.
+#
+# Signing/notarization secrets are wired the same way as release.yml when
+# available; unsigned bundles still build (the in-app updater stays
+# notify-only until signing is live — see native/README.md).
+name: desktop-release
+
+on:
+  workflow_dispatch:
+
+jobs:
+  bundle:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+          - os: windows-latest
+          - os: macos-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native
+      - name: Linux system deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev patchelf
+      - name: Install JS deps
+        run: npm ci
+      - name: Static-export the UI (IPC mode)
+        run: node scripts/build-ui-static.mjs
+      - name: Fetch bundled engines (llama-server + Piper voice)
+        run: node scripts/fetch-local-model.mjs
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build bundles
+        run: |
+          npm install --no-save @tauri-apps/cli@^2
+          npx tauri build --config crates/lighthouse-desktop/tauri.conf.json
+        working-directory: native/crates/lighthouse-desktop
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lighthouse-desktop-${{ matrix.os }}
+          path: |
+            native/target/release/bundle/**/*.AppImage
+            native/target/release/bundle/**/*.deb
+            native/target/release/bundle/**/*.dmg
+            native/target/release/bundle/**/*.exe
+            native/target/release/bundle/**/*.msi
+          if-no-files-found: warn
