@@ -24,14 +24,30 @@ interface RagStore {
   sources: DataSource[];
   nodes: FileNode[];
   /**
+   * Human-readable failure from the last visibility change (optimistic toggles
+   * reconcile against the server; when the POST fails we reload and put the
+   * reason here). The explorer surfaces it in its notice banner, then clears it.
+   */
+  lastError: string | null;
+  clearLastError: () => void;
+  /**
+   * Bumped on every optimistic visibility write. `load()` captures it before
+   * fetching and discards a snapshot that raced with a newer optimistic flip —
+   * otherwise the background poll could overwrite a just-toggled eye with
+   * stale server state and the row would flicker wrong until the next poll.
+   */
+  mutationEpoch: number;
+  /** Visibility POSTs still in flight — load() holds snapshots while > 0. */
+  pendingWrites: number;
+  /**
    * True only on the desktop build, where filesystem-backed actions (opening a
    * cited file natively) work. The web deployment reports false so the UI can
    * hide affordances the server would refuse.
    */
   desktop: boolean;
   /**
-   * Selection mode: clicking a row picks it (multi-select) instead of toggling
-   * its RAG inclusion, so the user can select several files and then apply one
+   * Selection mode: clicking a row picks it (multi-select) instead of its
+   * navigation action, so the user can select several files and then apply one
    * action — "make visible" (include) or "remove" (exclude) — to all of them.
    */
   selectionMode: boolean;
@@ -98,20 +114,55 @@ interface RagStore {
   includedFileIds: () => string[];
 }
 
+/**
+ * Collect the given ids plus every descendant id — the client-side mirror of
+ * the server's setIncluded cascade, so optimistic visibility flips paint the
+ * same rows the server will actually change.
+ */
+function withDescendants(nodes: FileNode[], rootIds: string[]): Set<string> {
+  const childIds = new Map<string, string[]>();
+  for (const n of nodes) {
+    if (n.parentId === null) continue;
+    const arr = childIds.get(n.parentId);
+    if (arr) arr.push(n.id);
+    else childIds.set(n.parentId, [n.id]);
+  }
+  const ids = new Set<string>();
+  const stack = [...rootIds];
+  while (stack.length > 0) {
+    const id = stack.pop()!;
+    if (ids.has(id)) continue;
+    ids.add(id);
+    for (const child of childIds.get(id) ?? []) stack.push(child);
+  }
+  return ids;
+}
+
 export const useRagStore = create<RagStore>((set, get) => ({
   sources: [],
   nodes: [],
+  lastError: null,
+  mutationEpoch: 0,
+  pendingWrites: 0,
   desktop: false,
   selectionMode: false,
   selectedIds: [],
   processing: null,
 
+  clearLastError: () => set({ lastError: null }),
+
   load: async () => {
+    const epoch = get().mutationEpoch;
     const [sources, nodes, caps] = await Promise.all([
       ragService.listSources(),
       ragService.listNodes(),
       ragService.capabilities(),
     ]);
+    // A visibility flip landed while this snapshot was in flight (epoch moved),
+    // or one is still being written (pendingWrites) — either way the snapshot
+    // is stale or mixed, and applying it would undo the optimistic state.
+    // Drop it; each write reconciles with a fresh load() when it settles.
+    if (get().mutationEpoch !== epoch || get().pendingWrites > 0) return;
     set({ sources, nodes, desktop: caps.desktop });
   },
 
@@ -129,17 +180,73 @@ export const useRagStore = create<RagStore>((set, get) => ({
 
   applySelection: async (include) => {
     const ids = get().selectedIds;
-    // setIncluded cascades to a folder's descendants, so picking a folder works.
-    for (const id of ids) await ragService.setIncluded(id, include);
-    // Keep the selection so the "Visible to AI" toggle reflects the new state.
-    set({ nodes: await ragService.listNodes() });
+    if (ids.length === 0) return;
+    // Optimistic: paint the whole selection (and each folder's descendants,
+    // mirroring the server cascade) before the POSTs so the bulk switch
+    // responds instantly. The selection is kept so the stateful "Visible to
+    // AI" toggle reflects the result.
+    const affected = withDescendants(get().nodes, ids);
+    set((s) => ({
+      mutationEpoch: s.mutationEpoch + 1,
+      pendingWrites: s.pendingWrites + 1,
+      nodes: s.nodes.map((n) =>
+        affected.has(n.id) ? { ...n, ragIncluded: include } : n,
+      ),
+    }));
+    try {
+      // setIncluded cascades to a folder's descendants, so picking a folder works.
+      for (const id of ids) await ragService.setIncluded(id, include);
+    } catch (err) {
+      set({
+        lastError: `Could not change AI visibility: ${
+          err instanceof Error && err.message ? err.message : "request failed"
+        }`,
+      });
+    } finally {
+      // Reconcile with the server's truth on success AND failure: the engine
+      // can veto part of a change (e.g. re-including a file under an excluded
+      // ancestor), so the optimistic paint is a prediction, not the record.
+      set((s) => ({
+        pendingWrites: s.pendingWrites - 1,
+        mutationEpoch: s.mutationEpoch + 1,
+      }));
+      if (get().pendingWrites === 0) await get().load().catch(() => {});
+    }
   },
 
   toggleIncluded: async (nodeId) => {
     const node = get().nodes.find((n) => n.id === nodeId);
     if (!node) return;
-    await ragService.setIncluded(nodeId, !node.ragIncluded);
-    set({ nodes: await ragService.listNodes() });
+    const included = !node.ragIncluded;
+    // Optimistic: flip locally first (folders flip all descendants, mirroring
+    // the server cascade) so the eye toggle feels instant even when the vault
+    // is slow; reconcile against the server only on failure.
+    const affected = withDescendants(get().nodes, [nodeId]);
+    set((s) => ({
+      mutationEpoch: s.mutationEpoch + 1,
+      pendingWrites: s.pendingWrites + 1,
+      nodes: s.nodes.map((n) =>
+        affected.has(n.id) ? { ...n, ragIncluded: included } : n,
+      ),
+    }));
+    try {
+      await ragService.setIncluded(nodeId, included);
+    } catch (err) {
+      set({
+        lastError: `Could not change AI visibility: ${
+          err instanceof Error && err.message ? err.message : "request failed"
+        }`,
+      });
+    } finally {
+      // Reconcile with the server's truth on success AND failure (see
+      // applySelection) — and only when the last in-flight write settles, so
+      // rapid toggles don't fetch a mixed snapshot mid-batch.
+      set((s) => ({
+        pendingWrites: s.pendingWrites - 1,
+        mutationEpoch: s.mutationEpoch + 1,
+      }));
+      if (get().pendingWrites === 0) await get().load().catch(() => {});
+    }
   },
 
   toggleSourceAvailable: async (sourceId) => {

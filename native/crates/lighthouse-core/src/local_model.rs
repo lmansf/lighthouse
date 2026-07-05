@@ -232,19 +232,28 @@ pub fn request_uninstall() -> Progress {
 }
 
 /// Kick off the one-time model download if it isn't already present or running.
-/// Requires a Tokio runtime (the server provides one).
+///
+/// Safe to call from ANY thread. When a Tokio runtime is ambient (the axum
+/// server), the download runs on it; otherwise it runs on a dedicated thread
+/// with its own runtime. The desktop shell invokes commands from outside a
+/// runtime context — a bare `tokio::spawn` here panics ("no reactor running"),
+/// and since sync Tauri commands execute on the main thread, that panic took
+/// the whole app down the moment the user clicked Install.
 pub fn start_download() -> Progress {
     {
-        let progress = current_progress();
-        if progress.status == "downloading" {
-            return progress;
+        // Check-and-mark under one lock so two rapid calls can't both spawn.
+        let mut guard = PROGRESS.lock().unwrap();
+        if let Some(p) = guard.as_ref() {
+            if p.status == "downloading" {
+                return p.clone();
+            }
         }
+        if installed_model().is_some() {
+            return Progress::simple("ready");
+        }
+        *guard = Some(Progress::simple("downloading"));
     }
-    if installed_model().is_some() {
-        return Progress::simple("ready");
-    }
-    set_progress(Progress::simple("downloading"));
-    tokio::spawn(async {
+    let task = async {
         match download().await {
             Ok(()) => set_progress(Progress::simple("ready")),
             Err(e) => {
@@ -258,7 +267,23 @@ pub fn start_download() -> Progress {
                 });
             }
         }
-    });
+    };
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        handle.spawn(task);
+    } else {
+        std::thread::spawn(move || {
+            match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                Ok(rt) => rt.block_on(task),
+                Err(e) => set_progress(Progress {
+                    status: "error".to_string(),
+                    received: 0,
+                    total: 0,
+                    error: Some(format!("could not start the download runtime: {e}")),
+                    removable: None,
+                }),
+            }
+        });
+    }
     current_progress()
 }
 

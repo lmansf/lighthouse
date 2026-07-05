@@ -281,10 +281,10 @@ fn unique_dest(dir: &Path, name: &str) -> PathBuf {
 
 fn refresh_ui(app: &AppHandle) {
     lighthouse_core::vault::invalidate_walk_cache();
+    // The UI listens for this (see tauriTransport) and re-reads the vault tree.
+    // Never reload the webview here — a full reload killed in-flight streamed
+    // answers, chat attachments, and scroll position just to refresh a list.
     let _ = app.emit("vault-changed", ());
-    if let Some(win) = main_window(app) {
-        let _ = win.eval("window.location.reload()");
-    }
 }
 
 fn handle_menu(app: &AppHandle, id: &str) {
@@ -386,6 +386,10 @@ fn main() {
         ))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        // Remember window size/position/maximized across restarts — a basic
+        // desktop convention the shell was missing (every launch reopened at
+        // the built-in 1280x820 in an OS-chosen spot).
+        .plugin(tauri_plugin_window_state::Builder::default().build())
         .manage(Supervisor::default())
         .manage(UpdateState::default())
         .invoke_handler(tauri::generate_handler![
@@ -428,9 +432,20 @@ fn main() {
             let handle = app.handle().clone();
             bootstrap_env(&handle);
 
-            // Launch at login unless the user turned it off (default on).
-            let run_on_startup = read_settings(&handle)["runOnStartup"].as_bool() != Some(false);
-            apply_autostart(&handle, run_on_startup);
+            // Launch at login is CONSENT-FIRST: only touch the OS autostart
+            // registration once the user has answered the startup prompt
+            // (startupAsked). Earlier builds registered autostart on first boot
+            // before ever asking — undo that premature registration here so
+            // unasked users are not silently enrolled.
+            {
+                let s = read_settings(&handle);
+                let asked = s["startupAsked"].as_bool() == Some(true);
+                if asked {
+                    apply_autostart(&handle, s["runOnStartup"].as_bool() != Some(false));
+                } else {
+                    apply_autostart(&handle, false);
+                }
+            }
 
             // App menu + tray.
             if let Ok(menu) = build_app_menu(&handle) {
@@ -442,8 +457,17 @@ fn main() {
                 tray = tray.icon(icon);
             }
             let tray = tray
+                // Platform convention: LEFT click raises the app; the menu is
+                // for right-click only. (Without this, Windows opened the menu
+                // AND raised the window on the same left click.)
+                .show_menu_on_left_click(false)
                 .on_tray_icon_event(|tray, event| {
-                    if let tauri::tray::TrayIconEvent::Click { .. } = event {
+                    if let tauri::tray::TrayIconEvent::Click {
+                        button: tauri::tray::MouseButton::Left,
+                        button_state: tauri::tray::MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
                         if let Some(win) = main_window(tray.app_handle()) {
                             let _ = win.show();
                             let _ = win.set_focus();
@@ -540,8 +564,21 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("error while building Lighthouse")
         .run(|app, event| {
-            if let tauri::RunEvent::Exit = event {
-                app.state::<Supervisor>().shutdown();
+            match event {
+                tauri::RunEvent::Exit => {
+                    app.state::<Supervisor>().shutdown();
+                }
+                // macOS: clicking the Dock icon while the window is hidden to
+                // the tray must bring it back — without this the app looked
+                // permanently gone (the Dock was the one place users tried).
+                #[cfg(target_os = "macos")]
+                tauri::RunEvent::Reopen { .. } => {
+                    if let Some(win) = main_window(app) {
+                        let _ = win.show();
+                        let _ = win.set_focus();
+                    }
+                }
+                _ => {}
             }
         });
 }

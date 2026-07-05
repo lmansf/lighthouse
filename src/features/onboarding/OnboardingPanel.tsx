@@ -1,12 +1,13 @@
 "use client";
 
 /**
- * [TEAM: onboarding] PLACEHOLDER.
- *
- * Working stub for the left-rail onboarding flow: a sign-in slide, then a
- * model-select slide where the user picks a provider/model and pastes a key,
- * with a contextual "get your key" link per provider. The onboarding team
- * expands this into the full multi-slide registration. Drive `useAuthStore`.
+ * [TEAM: onboarding] Left-rail onboarding flow, three slides driven by
+ * `useAuthStore`: a welcome/email slide (no password — the local auth service
+ * only ever uses the email, so we don't pretend to check one), an optional
+ * registration slide, and a model-select slide where the user picks a
+ * provider/model and pastes a key, with a contextual "get your key" link per
+ * provider and a soft (never blocking) gate when the local model isn't
+ * installed yet.
  */
 
 import { useEffect, useRef, useState } from "react";
@@ -20,13 +21,18 @@ import {
   Option,
   Radio,
   RadioGroup,
+  Spinner,
   Text,
   Title3,
   makeStyles,
   tokens,
 } from "@fluentui/react-components";
 import { MODEL_PROVIDERS } from "@/contracts";
-import { LocalModelOption, LocalModelInstallPanel } from "@/features/localModel/LocalModelOption";
+import {
+  LocalModelOption,
+  LocalModelInstallPanel,
+  useLocalModel,
+} from "@/features/localModel/LocalModelOption";
 import { useAuthStore } from "@/stores/useAuthStore";
 import { useLicenseStore } from "@/stores/useLicenseStore";
 import { logEvent } from "@/lib/logEvent";
@@ -39,6 +45,19 @@ const useStyles = makeStyles({
     padding: tokens.spacingHorizontalL,
   },
   hint: { color: tokens.colorNeutralForeground3 },
+  // Quiet progress marker ("Step n of 3") so the user knows how much is left.
+  stepLabel: { color: tokens.colorNeutralForeground3 },
+  // Welcome-slide value bullets: a plain list, tightened so it reads as part
+  // of the panel rather than document prose.
+  bullets: {
+    margin: "0",
+    paddingLeft: tokens.spacingHorizontalXL,
+    display: "flex",
+    flexDirection: "column",
+    gap: tokens.spacingVerticalXS,
+  },
+  errorText: { color: tokens.colorStatusDangerForeground1 },
+  warningText: { color: tokens.colorStatusWarningForeground2 },
   signedIn: {
     display: "flex",
     flexDirection: "column",
@@ -52,6 +71,49 @@ const useStyles = makeStyles({
   },
 });
 
+// Deliberately loose: just "something@something.tld". Real validation happens
+// when mail is actually sent; this only catches obvious typos before submit.
+const EMAIL_RE = /.+@.+\..+/;
+
+/**
+ * The select-model slide's primary action, with a soft gate for the local
+ * model: if the private model isn't installed yet the user can still finish
+ * (onboarding must never hard-block), but the button stops over-promising
+ * ("Finish anyway") and a warning explains where to get the model later.
+ * Split out as a component because `useLocalModel` polls `/api/model`, and
+ * mounting it only on this slide keeps the earlier slides from polling.
+ */
+function FinishSetupButton({
+  providerId,
+  disabled,
+  onFinish,
+}: {
+  providerId: string;
+  disabled: boolean;
+  onFinish: () => void;
+}) {
+  const styles = useStyles();
+  const { status, received, total } = useLocalModel();
+  const localNotReady = providerId === "local" && status !== "ready";
+  // Percent only when the total is known — early in a download it isn't yet.
+  const pct = total ? ` — ${Math.min(100, Math.floor((received / total) * 100))}%` : "";
+
+  return (
+    <>
+      {localNotReady && (
+        <Text size={200} className={styles.warningText}>
+          {status === "downloading"
+            ? `The private model is still downloading${pct}. You can finish now and check on it later in Settings → AI models.`
+            : "The private model isn't installed yet — install it above, or finish now and add it later in Settings → AI models."}
+        </Text>
+      )}
+      <Button appearance="primary" disabled={disabled} onClick={onFinish}>
+        {localNotReady ? "Finish anyway" : "Finish setup"}
+      </Button>
+    </>
+  );
+}
+
 export function OnboardingPanel() {
   const styles = useStyles();
   const onboarding = useAuthStore((s) => s.onboarding);
@@ -63,7 +125,11 @@ export function OnboardingPanel() {
   const startTrial = useLicenseStore((s) => s.startTrial);
 
   const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
+  // Set on an invalid submit attempt (not while typing — no red flash mid-word);
+  // cleared as soon as the address becomes valid again.
+  const [emailInvalid, setEmailInvalid] = useState(false);
+  const [signingIn, setSigningIn] = useState(false);
+  const [signInError, setSignInError] = useState<string | null>(null);
   const [providerId, setProviderId] = useState(MODEL_PROVIDERS[0].id);
   const [modelId, setModelId] = useState(MODEL_PROVIDERS[0].models[0]);
   const [apiKey, setApiKey] = useState("");
@@ -116,6 +182,27 @@ export function OnboardingPanel() {
 
   const provider = MODEL_PROVIDERS.find((p) => p.id === providerId)!;
 
+  async function submitSignIn() {
+    if (!EMAIL_RE.test(email)) {
+      setEmailInvalid(true);
+      return;
+    }
+    setEmailInvalid(false);
+    setSignInError(null);
+    setSigningIn(true);
+    try {
+      // There is no password: the auth service is a local single-user profile
+      // keyed by email alone (see auth.real.ts), so we don't collect one.
+      await signIn(email, "");
+    } catch {
+      setSignInError(
+        "Something went wrong signing you in. Check your connection and try again.",
+      );
+    } finally {
+      setSigningIn(false);
+    }
+  }
+
   async function submitRegistration() {
     setSubmitting(true);
     try {
@@ -144,33 +231,57 @@ export function OnboardingPanel() {
     // Persist the include/exclude-by-default choice before advancing.
     await setDefaultInclusion(inclusionPref).catch(() => {});
     await finishRegistration();
-    // play_first drops the user straight into the sample vault from here.
-    if (onboarding.onboardingVariant === "play_first") logEvent("sample_vault_loaded");
     setSubmitting(false);
   }
 
   if (onboarding.step === "sign-in") {
     return (
       <div className={styles.panel}>
+        <Text size={200} className={styles.stepLabel}>
+          Step 1 of 3
+        </Text>
         <Title3>Welcome</Title3>
-        <Text className={styles.hint}>Sign in to set up your Lighthouse.</Text>
-        <Field label="Email">
-          <Input value={email} onChange={(_, d) => setEmail(d.value)} type="email" />
-        </Field>
-        <Field label="Password">
+        <ul className={styles.bullets}>
+          <li>
+            <Text>Your files stay on your machine.</Text>
+          </li>
+          <li>
+            <Text>Chat with an AI grounded in your own documents.</Text>
+          </li>
+          <li>
+            <Text>Free 14-day trial — no card needed.</Text>
+          </li>
+        </ul>
+        <Field
+          label="Email"
+          validationMessage={
+            emailInvalid ? "That doesn't look like an email address — check for typos." : undefined
+          }
+        >
           <Input
-            value={password}
-            onChange={(_, d) => setPassword(d.value)}
-            type="password"
+            value={email}
+            onChange={(_, d) => {
+              setEmail(d.value);
+              // Clear the error the moment the address becomes valid, so the
+              // red state doesn't linger after the user has fixed it.
+              if (emailInvalid && EMAIL_RE.test(d.value)) setEmailInvalid(false);
+            }}
+            type="email"
           />
         </Field>
         <Button
           appearance="primary"
-          disabled={!email}
-          onClick={() => void signIn(email, password)}
+          disabled={!email || signingIn}
+          icon={signingIn ? <Spinner size="tiny" /> : undefined}
+          onClick={() => void submitSignIn()}
         >
           Continue
         </Button>
+        {signInError && (
+          <Text size={200} className={styles.errorText}>
+            {signInError}
+          </Text>
+        )}
       </div>
     );
   }
@@ -178,6 +289,9 @@ export function OnboardingPanel() {
   if (onboarding.step === "register") {
     return (
       <div className={styles.panel}>
+        <Text size={200} className={styles.stepLabel}>
+          Step 2 of 3
+        </Text>
         <Title3>Welcome aboard</Title3>
         <Text className={styles.hint}>
           Tell us a little about you, or skip — it&apos;s optional.
@@ -251,7 +365,6 @@ export function OnboardingPanel() {
                 }).catch(() => {});
                 await setDefaultInclusion(inclusionPref).catch(() => {});
                 await finishRegistration();
-                if (onboarding.onboardingVariant === "play_first") logEvent("sample_vault_loaded");
               })()
             }
           >
@@ -265,11 +378,17 @@ export function OnboardingPanel() {
   if (onboarding.step === "select-model") {
     return (
       <div className={styles.panel}>
+        <Text size={200} className={styles.stepLabel}>
+          Step 3 of 3
+        </Text>
         <Title3>Choose your model</Title3>
         <Text className={styles.hint}>
           {providerId === "local"
             ? "The local model runs entirely on your machine — no API key, nothing leaves your computer."
-            : "Pick your primary model and add its API key."}
+            : // The privacy tradeoff of a cloud model must be stated where the
+              // choice is made, not buried in docs: retrieved excerpts of
+              // AI-visible files leave the machine with every question.
+              `Pick your primary model and add its API key. To answer questions, excerpts of the files you make visible are sent to ${provider.label}.`}
         </Text>
         <Field label="Provider">
           <Dropdown
@@ -319,17 +438,15 @@ export function OnboardingPanel() {
             />
           </Field>
         )}
-        <Button
-          appearance="primary"
+        <FinishSetupButton
+          providerId={providerId}
           disabled={providerId !== "local" && !apiKey}
-          onClick={() => {
+          onFinish={() => {
             // Activation guardrail: did they connect a real (cloud) key?
             if (providerId !== "local" && apiKey) logEvent("api_key_entered");
             void selectModel(providerId, modelId, apiKey);
           }}
-        >
-          Finish setup
-        </Button>
+        />
       </div>
     );
   }

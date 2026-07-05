@@ -3,16 +3,20 @@
 /**
  * [TEAM: explorer]
  *
- * File tree for the local vault. Renders the real node tree (top-level items and
- * nested folders), lets you toggle items in/out of the RAG index, and adds
- * files or whole folders. On the desktop, adds are LINK-FIRST: dropped or
- * picked items are referenced in place (no copy); copying into the vault is
- * the explicit secondary option. In a plain browser, adds upload bytes.
+ * File tree for the local vault. Renders the real node tree (top-level items
+ * and nested folders) and adds files or whole folders. Navigation and AI
+ * visibility are deliberately SEPARATE gestures: clicking a folder row only
+ * expands/collapses it, and what the AI can see changes only through the
+ * explicit per-row eye toggle (or the right-click menu / bulk selection bar) —
+ * a stray click must never silently change visibility. On the desktop, adds
+ * are LINK-FIRST: dropped or picked items are referenced in place (no copy);
+ * copying into the vault is the explicit secondary option. In a plain browser,
+ * adds upload bytes.
  *
  * Keep using `useRagStore` (do not import other features directly).
  */
 
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Badge,
   Button,
@@ -31,10 +35,12 @@ import {
   MenuList,
   MenuPopover,
   MenuTrigger,
+  SearchBox,
   Spinner,
   Switch,
   Text,
   Title3,
+  ToggleButton,
   Tooltip,
   makeStyles,
   shorthands,
@@ -50,6 +56,8 @@ import {
   DismissRegular,
   DocumentRegular,
   DocumentPdfRegular,
+  EyeOffRegular,
+  EyeRegular,
   FolderRegular,
   FolderAddRegular,
   FolderOpenRegular,
@@ -62,7 +70,10 @@ import { useRagStore } from "@/stores/useRagStore";
 import { useAuthStore } from "@/stores/useAuthStore";
 import { logEvent } from "@/lib/logEvent";
 import { FILE_DRAG_MIME, serializeDraggedFiles } from "@/shell/dnd";
-import { desktopBridge, pathsForFiles } from "@/shell/desktopBridge";
+import { desktopBridge, isDesktopShell, pathsForFiles } from "@/shell/desktopBridge";
+
+/** Persists dismissal of the include-by-default note so it isn't permanent noise. */
+const CONTROL_NOTE_DISMISSED_KEY = "lighthouse.controlNote.dismissed";
 
 const useStyles = makeStyles({
   panel: {
@@ -128,6 +139,13 @@ const useStyles = makeStyles({
     color: tokens.colorNeutralForeground2,
   },
   controlNoteIcon: { color: tokens.colorBrandForeground1, flexShrink: 0 },
+  filterBar: {
+    display: "flex",
+    alignItems: "center",
+    gap: tokens.spacingHorizontalS,
+    marginBottom: tokens.spacingVerticalS,
+  },
+  search: { flex: 1, minWidth: "120px" },
   scroll: {
     flex: 1,
     minHeight: 0,
@@ -167,6 +185,21 @@ const useStyles = makeStyles({
     textAlign: "center",
     color: tokens.colorNeutralForeground3,
   },
+  // First-run card shown when the vault has no files at all - a real call to
+  // action instead of the terse per-source one-liner.
+  emptyState: {
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    gap: tokens.spacingVerticalM,
+    ...shorthands.padding(tokens.spacingVerticalXXL, tokens.spacingHorizontalL),
+    marginTop: tokens.spacingVerticalL,
+    textAlign: "center",
+    ...shorthands.borderRadius(tokens.borderRadiusLarge),
+    ...shorthands.border("1px", "dashed", tokens.colorNeutralStroke1),
+  },
+  emptyStateIcon: { fontSize: "40px", color: tokens.colorBrandForeground1 },
+  emptyStatePrivacy: { color: tokens.colorNeutralForeground3 },
   removeError: {
     marginTop: tokens.spacingVerticalS,
     color: tokens.colorPaletteRedForeground1,
@@ -199,6 +232,9 @@ const useStyles = makeStyles({
     backgroundColor: tokens.colorNeutralBackground2,
   },
   check: { flexShrink: 0 },
+  // The eye reads as part of the row until you need it; brand color marks the
+  // "visible to AI" state so scanning the tree shows what the AI can see.
+  eyeOn: { color: tokens.colorBrandForeground1 },
   chevron: {
     display: "flex",
     alignItems: "center",
@@ -231,6 +267,13 @@ interface TreeRowProps {
   onSelect: (id: string) => void;
   onUnlink: (id: string) => void;
   onRemove: (id: string) => void;
+  /**
+   * Ids the active search/filter keeps, or null when no filter is active.
+   * Children outside the set are not rendered.
+   */
+  visibleIds: Set<string> | null;
+  /** True while a search query is active: matched ancestors stay expanded. */
+  forceExpand: boolean;
 }
 
 function TreeRow({
@@ -243,21 +286,32 @@ function TreeRow({
   onSelect,
   onUnlink,
   onRemove,
+  visibleIds,
+  forceExpand,
 }: TreeRowProps) {
   const styles = useStyles();
   const [open, setOpen] = useState(depth < 1); // top-level folders open by default
+  // A search must reveal matches nested in collapsed folders, so it wins over
+  // the user's manual open/closed state while the query is active.
+  const expanded = forceExpand || open;
   const kids = node.kind === "folder" ? childrenOf(node.id) : [];
+  const shownKids = visibleIds ? kids.filter((k) => visibleIds.has(k.id)) : kids;
   const selected = selectionMode && isSelected(node.id);
   // Cloud-connector files (namespaced ids) live remotely, not in the local vault
   // that attachment retrieval walks, so only local-vault files can be attached.
   const attachable = node.kind === "file" && !node.id.startsWith(`${node.sourceId}::`);
-  // In selection mode a click picks the row; otherwise it toggles RAG inclusion.
+  // Row clicks NAVIGATE only. Visibility lives exclusively on the explicit eye
+  // toggle (and the context menu) so a misclick can never silently change what
+  // the AI sees — especially a folder click, which cascades server-side.
   const activate = () => {
     if (selectionMode) {
       onSelect(node.id);
       return;
     }
-    // Privacy-safe availability telemetry: count THIS click (not the folder's
+    if (node.kind === "folder") setOpen((o) => !o);
+  };
+  const toggleVisibility = () => {
+    // Privacy-safe availability telemetry: count THIS toggle (not the folder's
     // cascade of descendants); the row's current state decides the direction and
     // `scope` is a coarse kind only - never a name, id, or path.
     logEvent(node.ragIncluded ? "file_made_unavailable" : "file_made_available", {
@@ -265,6 +319,9 @@ function TreeRow({
     });
     onToggle(node.id);
   };
+  const eyeLabel = node.ragIncluded
+    ? "Visible to AI — click to hide"
+    : "Hidden from AI — click to show";
 
   return (
     <div>
@@ -277,6 +334,7 @@ function TreeRow({
         style={{ paddingLeft: `${depth * 18 + 4}px` }}
         role="button"
         tabIndex={0}
+        aria-expanded={node.kind === "folder" ? expanded : undefined}
         // Usage logging: record only the COARSE kind (folder vs file), never the
         // node's name. Private document/folder names are PII and must not leave
         // the machine — the global click-capture ships data-log labels to the
@@ -284,6 +342,21 @@ function TreeRow({
         data-log-type={node.kind === "folder" ? "folder" : "file"}
         data-log={node.kind === "folder" ? "folder" : "file"}
         onClick={activate}
+        onKeyDown={(e) => {
+          // Keys on inner controls (the eye, unlink, checkbox) bubble up here;
+          // only handle keys aimed at the row itself.
+          if (e.target !== e.currentTarget) return;
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault(); // Space must not scroll the tree
+            activate();
+          } else if (node.kind === "folder" && e.key === "ArrowRight") {
+            e.preventDefault();
+            setOpen(true);
+          } else if (node.kind === "folder" && e.key === "ArrowLeft") {
+            e.preventDefault();
+            setOpen(false);
+          }
+        }}
         // Drag a file out to the chat panel to ask about just that file.
         draggable={attachable}
         onDragStart={(e) => {
@@ -304,7 +377,7 @@ function TreeRow({
           }}
         >
           {node.kind === "folder" ? (
-            open ? <ChevronDownRegular /> : <ChevronRightRegular />
+            expanded ? <ChevronDownRegular /> : <ChevronRightRegular />
           ) : null}
         </span>
         {selectionMode && (
@@ -329,11 +402,6 @@ function TreeRow({
             </Badge>
           </Tooltip>
         )}
-        {node.ragIncluded && (
-          <Badge size="small" appearance="tint" color="brand">
-            included
-          </Badge>
-        )}
         {node.external && node.parentId === null && (
           <Tooltip content="Unlink (leaves the real files in place)" relationship="label">
             <Button
@@ -348,19 +416,39 @@ function TreeRow({
             />
           </Tooltip>
         )}
+        <Tooltip content={eyeLabel} relationship="label">
+          <Button
+            appearance="subtle"
+            size="small"
+            className={node.ragIncluded ? styles.eyeOn : undefined}
+            icon={node.ragIncluded ? <EyeRegular /> : <EyeOffRegular />}
+            aria-label={eyeLabel}
+            aria-pressed={node.ragIncluded}
+            onClick={(e) => {
+              e.stopPropagation();
+              toggleVisibility();
+            }}
+          />
+        </Tooltip>
       </div>
         </MenuTrigger>
         <MenuPopover>
           <MenuList>
+            <MenuItem
+              icon={node.ragIncluded ? <EyeOffRegular /> : <EyeRegular />}
+              onClick={toggleVisibility}
+            >
+              {node.ragIncluded ? "Hide from AI" : "Visible to AI"}
+            </MenuItem>
             <MenuItem icon={<DeleteRegular />} onClick={() => onRemove(node.id)}>
               Remove from vault
             </MenuItem>
           </MenuList>
         </MenuPopover>
       </Menu>
-      {node.kind === "folder" && open && (
+      {node.kind === "folder" && expanded && (
         <div>
-          {kids.map((k) => (
+          {shownKids.map((k) => (
             <TreeRow
               key={k.id}
               node={k}
@@ -372,6 +460,8 @@ function TreeRow({
               onSelect={onSelect}
               onUnlink={onUnlink}
               onRemove={onRemove}
+              visibleIds={visibleIds}
+              forceExpand={forceExpand}
             />
           ))}
         </div>
@@ -398,6 +488,8 @@ export function FileExplorer() {
   const linkPaths = useRagStore((s) => s.linkPaths);
   const processing = useRagStore((s) => s.processing);
   const desktop = useRagStore((s) => s.desktop);
+  const lastError = useRagStore((s) => s.lastError);
+  const clearLastError = useRagStore((s) => s.clearLastError);
   const sharepoint = useRagStore((s) => s.sharepoint);
   const connectSharePoint = useRagStore((s) => s.connectSharePoint);
   const closeSharePointDialog = useRagStore((s) => s.closeSharePointDialog);
@@ -428,7 +520,33 @@ export function FileExplorer() {
   const dragDepth = useRef(0);
   const [dragging, setDragging] = useState(false);
 
+  // Search + "Only visible to AI" filter over the tree.
+  const [query, setQuery] = useState("");
+  const [onlyVisible, setOnlyVisible] = useState(false);
+
+  // The include-by-default note is reassurance, not a control - once read it
+  // can be dismissed for good (persisted so it doesn't return every launch).
+  const [controlNoteDismissed, setControlNoteDismissed] = useState(false);
+  useEffect(() => {
+    try {
+      if (window.localStorage.getItem(CONTROL_NOTE_DISMISSED_KEY) === "1") {
+        setControlNoteDismissed(true);
+      }
+    } catch {
+      /* private mode / storage full - the note simply shows again */
+    }
+  }, []);
+  const dismissControlNote = () => {
+    setControlNoteDismissed(true);
+    try {
+      window.localStorage.setItem(CONTROL_NOTE_DISMISSED_KEY, "1");
+    } catch {
+      /* private mode / storage full - dismissal lasts for this session only */
+    }
+  };
+
   const includedCount = nodes.filter((n) => n.kind === "file" && n.ragIncluded).length;
+  const fileCount = nodes.filter((n) => n.kind === "file").length;
   // Index children by parent once so recursive tree rendering is O(n), not O(n^2).
   const childrenByParent = useMemo(() => {
     const map = new Map<string | null, FileNode[]>();
@@ -441,9 +559,39 @@ export function FileExplorer() {
   }, [nodes]);
   const childrenOf = (id: string | null) => childrenByParent.get(id) ?? [];
 
+  const trimmedQuery = query.trim().toLowerCase();
+  const filterActive = trimmedQuery !== "" || onlyVisible;
+  // Rows the active search/filter keeps: direct matches plus every ancestor,
+  // so a match nested inside collapsed folders stays reachable. null means no
+  // filter - render everything. One pass over `nodes` keeps this cheap.
+  const visibleIds = useMemo(() => {
+    if (!filterActive) return null;
+    const set = new Set<string>();
+    for (const n of nodes) {
+      const matches =
+        (trimmedQuery === "" || n.name.toLowerCase().includes(trimmedQuery)) &&
+        (!onlyVisible || n.ragIncluded);
+      if (!matches) continue;
+      let cur: FileNode | undefined = n;
+      while (cur && !set.has(cur.id)) {
+        set.add(cur.id);
+        cur = cur.parentId === null ? undefined : nodeById.get(cur.parentId);
+      }
+    }
+    return set;
+  }, [filterActive, nodes, trimmedQuery, onlyVisible, nodeById]);
+
   // Outcome of the last add (link or upload) worth telling the user about -
   // rendered as a dismissible banner instead of a silent console.warn.
   const [addNotice, setAddNotice] = useState<string | null>(null);
+
+  // Optimistic visibility toggles reconcile in the store; when a POST fails the
+  // store reloads and reports here, and the same notice banner surfaces it.
+  useEffect(() => {
+    if (!lastError) return;
+    setAddNotice(lastError);
+    clearLastError();
+  }, [lastError, clearLastError]);
 
   const reportSkipped = (skipped: { name: string; reason: string }[]) => {
     if (skipped.length === 0) return;
@@ -493,27 +641,95 @@ export function FileExplorer() {
     void upload(files).then(({ skipped }) => reportSkipped(skipped));
   };
 
+  /**
+   * The single "add files" entry point shared by the toolbar's Browse menu,
+   * the first-run empty state, and the app-wide "lighthouse:browse-files"
+   * event: on the desktop the native link-in-place picker (link-first, no
+   * copy), on the web the hidden file input.
+   */
+  const browseForFiles = () => {
+    if (desktop) {
+      void desktopBridge()?.linkDialog(false).then((paths) => {
+        if (paths.length) void linkAndReport(paths);
+      });
+      return;
+    }
+    fileInputRef.current?.click();
+  };
+  // Latest-closure ref so the mount-once window listener below never goes
+  // stale (same pattern as chat's readAloudRef).
+  const browseRef = useRef(browseForFiles);
+  browseRef.current = browseForFiles;
+  useEffect(() => {
+    const onBrowse = () => browseRef.current();
+    window.addEventListener("lighthouse:browse-files", onBrowse);
+    return () => window.removeEventListener("lighthouse:browse-files", onBrowse);
+  }, []);
+
+  // Native OS drag-drop (desktop shell). The DOM "Files" events below never
+  // fire on Windows (WebView2 suppresses them while Tauri's native handler is
+  // active) and would double-handle drops on macOS — so inside the shell, the
+  // native events (rebroadcast as lighthouse:os-* CustomEvents, carrying real
+  // paths and folder support) are the only OS-drop path. The explorer claims
+  // every drop that isn't over the chat pane: adding to the vault is the
+  // primary intent, and it must work even where this sidebar isn't the exact
+  // drop point. Ignored while the vault is locked (the section sits inert).
+  const sectionRef = useRef<HTMLElement>(null);
+  const linkAndReportRef = useRef(linkAndReport);
+  linkAndReportRef.current = linkAndReport;
+  useEffect(() => {
+    if (!isDesktopShell()) return;
+    const overChat = (x: number, y: number) =>
+      Boolean(document.elementFromPoint(x, y)?.closest('[data-lh-pane="chat"]'));
+    const locked = () => Boolean(sectionRef.current?.closest("[inert]"));
+    const onDrag = (e: Event) => {
+      const { x, y } = (e as CustomEvent<{ x: number; y: number }>).detail ?? { x: -1, y: -1 };
+      setDragging(!locked() && !overChat(x, y));
+    };
+    const onLeave = () => setDragging(false);
+    const onDrop = (e: Event) => {
+      const detail = (e as CustomEvent<{ paths?: string[]; x: number; y: number }>).detail;
+      setDragging(false);
+      if (!detail?.paths?.length || locked() || overChat(detail.x, detail.y)) return;
+      void linkAndReportRef.current(detail.paths);
+    };
+    window.addEventListener("lighthouse:os-drag", onDrag);
+    window.addEventListener("lighthouse:os-drag-leave", onLeave);
+    window.addEventListener("lighthouse:os-drop", onDrop);
+    return () => {
+      window.removeEventListener("lighthouse:os-drag", onDrag);
+      window.removeEventListener("lighthouse:os-drag-leave", onLeave);
+      window.removeEventListener("lighthouse:os-drop", onDrop);
+    };
+  }, []);
+
+  // DOM drag handlers: the OS-drop path for the WEB build only — inside the
+  // desktop shell the native events above own OS drops (see isDesktopShell).
+  const domOsDrag = (e: React.DragEvent) =>
+    !isDesktopShell() && e.dataTransfer.types.includes("Files");
+
   return (
     <section
+      ref={sectionRef}
       className={`${styles.panel}${dragging ? ` ${styles.panelDragging}` : ""}`}
       onDragEnter={(e) => {
         // Only react to OS file drops — ignore internal drags (e.g. dragging a
         // row out to the chat panel), which don't carry "Files".
-        if (!e.dataTransfer.types.includes("Files")) return;
+        if (!domOsDrag(e)) return;
         dragDepth.current += 1;
         setDragging(true);
       }}
       onDragOver={(e) => {
-        if (!e.dataTransfer.types.includes("Files")) return;
+        if (!domOsDrag(e)) return;
         e.preventDefault();
       }}
       onDragLeave={(e) => {
-        if (!e.dataTransfer.types.includes("Files")) return;
+        if (!domOsDrag(e)) return;
         dragDepth.current = Math.max(0, dragDepth.current - 1);
         if (dragDepth.current === 0) setDragging(false);
       }}
       onDrop={(e) => {
-        if (!e.dataTransfer.types.includes("Files")) return;
+        if (!domOsDrag(e)) return;
         e.preventDefault();
         dragDepth.current = 0;
         setDragging(false);
@@ -524,7 +740,7 @@ export function FileExplorer() {
         <Title3>Files</Title3>
         <div className={styles.toolbar}>
           <Badge appearance="tint" color="brand">
-            {includedCount} in RAG
+            {includedCount} of {fileCount} visible to AI
           </Badge>
           <input
             ref={fileInputRef}
@@ -567,14 +783,7 @@ export function FileExplorer() {
                     available below as the explicit secondary option. */}
                 {desktop && (
                   <>
-                    <MenuItem
-                      icon={<LinkRegular />}
-                      onClick={() => {
-                        void desktopBridge()?.linkDialog(false).then((paths) => {
-                          if (paths.length) void linkAndReport(paths);
-                        });
-                      }}
-                    >
+                    <MenuItem icon={<LinkRegular />} onClick={browseForFiles}>
                       Files… (linked in place)
                     </MenuItem>
                     <MenuItem
@@ -629,13 +838,21 @@ export function FileExplorer() {
         </div>
       </div>
 
-      {includeByDefault && (
+      {includeByDefault && !controlNoteDismissed && (
         <div className={styles.controlNote}>
           <ShieldKeyholeRegular fontSize={20} className={styles.controlNoteIcon} />
           <Text size={200}>
             Your files are visible to AI by default - <b>you control what it sees</b>.
-            Click any file, folder, or source to take it out.
+            Use the eye on any file or folder to hide it.
           </Text>
+          <span className={styles.spacer} />
+          <Button
+            icon={<DismissRegular />}
+            size="small"
+            appearance="subtle"
+            aria-label="Dismiss"
+            onClick={dismissControlNote}
+          />
         </div>
       )}
 
@@ -698,70 +915,124 @@ export function FileExplorer() {
         </div>
       )}
 
+      {nodes.length > 0 && (
+        <div className={styles.filterBar}>
+          <SearchBox
+            className={styles.search}
+            size="small"
+            placeholder="Search files"
+            value={query}
+            onChange={(_, d) => setQuery(d.value)}
+          />
+          <ToggleButton
+            size="small"
+            appearance="subtle"
+            icon={<EyeRegular />}
+            checked={onlyVisible}
+            onClick={() => setOnlyVisible((v) => !v)}
+          >
+            Only visible to AI
+          </ToggleButton>
+        </div>
+      )}
+
       <div className={styles.scroll}>
-        {sources.map((source) => {
-          const roots = nodes.filter(
-            (n) => n.sourceId === source.id && n.parentId === null,
-          );
-          return (
-            <div key={source.id}>
-              <div className={styles.sourceLabel}>
-                {/* "sharepoint" is the cloud connector's source id (see config). */}
-                {source.id === "sharepoint" ? (
-                  <CloudArrowUpRegular />
-                ) : source.kind === "database" ? (
-                  <DatabaseRegular />
+        {nodes.length === 0 && sources.length <= 1 ? (
+          // First-run: nothing added yet across any source, so the per-source
+          // one-liners would just repeat themselves - show one real call to
+          // action instead. Drag-drop onto the whole panel still works.
+          <div className={styles.emptyState}>
+            <FolderAddRegular className={styles.emptyStateIcon} />
+            <Text size={400} weight="semibold">
+              Add your first files
+            </Text>
+            <Text size={300}>
+              Drag files or folders here, or browse — they stay on your machine.
+            </Text>
+            <Button appearance="primary" icon={<FolderOpenRegular />} onClick={browseForFiles}>
+              Browse…
+            </Button>
+            <Text size={200} className={styles.emptyStatePrivacy}>
+              Files never leave your computer unless you choose a cloud AI model.
+            </Text>
+          </div>
+        ) : visibleIds && visibleIds.size === 0 ? (
+          <div className={styles.empty}>
+            <Text size={300}>No matches</Text>
+          </div>
+        ) : (
+          sources.map((source) => {
+            const roots = nodes.filter(
+              (n) =>
+                n.sourceId === source.id &&
+                n.parentId === null &&
+                (!visibleIds || visibleIds.has(n.id)),
+            );
+            // While filtering, drop whole sources with no matches instead of
+            // rendering an orphaned header.
+            if (filterActive && roots.length === 0) return null;
+            return (
+              <div key={source.id}>
+                <div className={styles.sourceLabel}>
+                  {/* "sharepoint" is the cloud connector's source id (see config). */}
+                  {source.id === "sharepoint" ? (
+                    <CloudArrowUpRegular />
+                  ) : source.kind === "database" ? (
+                    <DatabaseRegular />
+                  ) : (
+                    <FolderRegular />
+                  )}
+                  <Text weight="semibold">{source.name}</Text>
+                  {!source.available && (
+                    <Badge appearance="outline" color="danger">
+                      unavailable
+                    </Badge>
+                  )}
+                  {source.id === "sharepoint" && (
+                    <>
+                      <span className={styles.spacer} />
+                      <Tooltip content="Disconnect SharePoint" relationship="label">
+                        <Button
+                          icon={<PlugDisconnectedRegular />}
+                          size="small"
+                          appearance="subtle"
+                          aria-label="Disconnect SharePoint"
+                          onClick={() => void disconnectSharePoint()}
+                        />
+                      </Tooltip>
+                    </>
+                  )}
+                </div>
+                {roots.length === 0 ? (
+                  <div className={styles.empty}>
+                    <Text size={300}>
+                      No files yet. Use <b>Browse…</b>, or drag items here.
+                    </Text>
+                  </div>
                 ) : (
-                  <FolderRegular />
-                )}
-                <Text weight="semibold">{source.name}</Text>
-                {!source.available && (
-                  <Badge appearance="outline" color="danger">
-                    unavailable
-                  </Badge>
-                )}
-                {source.id === "sharepoint" && (
-                  <>
-                    <span className={styles.spacer} />
-                    <Tooltip content="Disconnect SharePoint" relationship="label">
-                      <Button
-                        icon={<PlugDisconnectedRegular />}
-                        size="small"
-                        appearance="subtle"
-                        aria-label="Disconnect SharePoint"
-                        onClick={() => void disconnectSharePoint()}
+                  <div className={source.available ? undefined : styles.dimmed}>
+                    {roots.map((node) => (
+                      <TreeRow
+                        key={node.id}
+                        node={node}
+                        depth={0}
+                        childrenOf={childrenOf}
+                        selectionMode={selectionMode}
+                        isSelected={isSelected}
+                        onToggle={(id) => void toggleIncluded(id)}
+                        onSelect={(id) => toggleSelected(id)}
+                        onUnlink={(id) => void removeReference(id)}
+                        onRemove={(id) => setPendingRemove([id])}
+                        visibleIds={visibleIds}
+                        forceExpand={filterActive}
                       />
-                    </Tooltip>
-                  </>
+                    ))}
+                  </div>
                 )}
               </div>
-              {roots.length === 0 ? (
-                <div className={styles.empty}>
-                  <Text size={300}>
-                    No files yet. Use <b>Browse…</b>, or drag items here.
-                  </Text>
-                </div>
-              ) : (
-                <div className={source.available ? undefined : styles.dimmed}>
-                  {roots.map((node) => (
-                    <TreeRow
-                      key={node.id}
-                      node={node}
-                      depth={0}
-                      childrenOf={childrenOf}
-                      selectionMode={selectionMode}
-                      isSelected={isSelected}
-                      onToggle={(id) => void toggleIncluded(id)}
-                      onSelect={(id) => toggleSelected(id)}
-                      onUnlink={(id) => void removeReference(id)}
-                      onRemove={(id) => setPendingRemove([id])}
-                    />
-                  ))}
-                </div>
-              )}
-            </div>
-          );
-        })}
+            );
+          })
+        )}
       </div>
 
       <Dialog

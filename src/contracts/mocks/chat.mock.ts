@@ -12,15 +12,23 @@ class MockChatService implements ChatService {
     question: string,
     includedFileIds: string[],
     history: ChatTurn[] = [],
+    attachmentFileIds: string[] = [],
+    signal?: AbortSignal,
   ): AsyncIterable<ChatChunk> {
-    const references = await ragService.search(question, includedFileIds);
+    // Mirror the real service: explicit attachments scope retrieval to just
+    // those files, otherwise the globally included set is searched.
+    const scope = attachmentFileIds.length ? attachmentFileIds : includedFileIds;
+    const references = await ragService.search(question, scope);
     const followUp = history.some((t) => t.role === "user");
     const answer = includedFileIds.length
-      ? `${followUp ? "Following up: " : ""}Based on the ${includedFileIds.length} included source(s), here is what I found regarding "${question}". This is a mock answer streamed in realtime to demonstrate the chat seam.`
-      : `Nothing is currently included in the RAG index, so I can't ground an answer. Highlight some files in the explorer and ask again.`;
+      ? `${followUp ? "Following up: " : ""}Based on the ${includedFileIds.length} file(s) visible to AI, here is what I found regarding "${question}". This is a mock answer streamed in realtime to demonstrate the chat seam.`
+      : `None of your files are visible to AI yet, so I can't ground an answer. Include some files in the explorer and ask again.`;
 
     const words = answer.split(" ");
     for (let i = 0; i < words.length; i++) {
+      // Honor Stop: surface the abort the same way a cancelled fetch would, so
+      // the chat UI's partial-answer handling is exercised in mock mode too.
+      if (signal?.aborted) throw new DOMException("The user stopped this answer.", "AbortError");
       await delay(28);
       yield {
         delta: (i === 0 ? "" : " ") + words[i],

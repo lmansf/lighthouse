@@ -1,4 +1,5 @@
 import {
+  createDarkTheme,
   createLightTheme,
   type BrandVariants,
   type Theme,
@@ -8,7 +9,9 @@ import {
  * Lighthouse theme - a cool steel light palette (bright blue-grey neutrals)
  * with a Forerunner sea-sky blue as the primary brand (buttons, the beacon
  * lamp, links) and a subtle brass/gold as the secondary accent: the beacon's
- * luminous glint, highlights, and included-file marks.
+ * luminous glint, highlights, and included-file marks. A matching dark-steel
+ * variant (`darkLighthouseTheme`) mirrors the same character for dark mode;
+ * app/providers.tsx picks between the two from the theme store.
  *
  * Aesthetic: Halo Forerunner architecture (bright silver-steel surfaces,
  * luminous blue lights, faint gold glints) crossed with a beach/lighthouse
@@ -79,11 +82,77 @@ export const lighthouseTheme: Theme = {
   colorBrandBackgroundSelected: "#155E99",
 };
 
+const darkBase = createDarkTheme(forerunnerBlue);
+
+/**
+ * Dark Lighthouse - the same steel-and-beacon character on a night canvas:
+ * dark blue-grey slate instead of Fluent's default warm greys, so surfaces
+ * still read as Forerunner metal rather than generic dark mode.
+ *
+ * scripts/check-contrast.mjs is hardcoded to the light palette, so the dark
+ * pairings were verified with the same WCAG math in a scratch run; the
+ * resulting ratios are cited inline below. Keep them in sync if you retune.
+ */
+export const darkLighthouseTheme: Theme = {
+  ...darkBase,
+  // Same soft radii as the light theme.
+  borderRadiusMedium: "8px",
+  borderRadiusLarge: "12px",
+  borderRadiusXLarge: "16px",
+  // Dark steel slate (blue-grey nights). Mirrors the light ramp's structure:
+  // bg1 canvas -> bg2 raised -> bg3 inset, but hover LIGHTENS and pressed
+  // darkens (the Fluent dark convention - light rises toward the user).
+  colorNeutralBackground1: "#151B22", // app canvas (night steel)
+  colorNeutralBackground1Hover: "#1C242E",
+  colorNeutralBackground1Pressed: "#101519",
+  colorNeutralBackground1Selected: "#1A222B",
+  colorNeutralBackground2: "#1B232C", // sidebar / raised surfaces
+  colorNeutralBackground2Hover: "#222C37",
+  colorNeutralBackground2Pressed: "#161C24",
+  colorNeutralBackground3: "#222C37", // deeper inset (code, wells)
+  colorNeutralBackground3Hover: "#2A3541",
+  // Subtle-button states, re-tinted from Fluent's warm greys to the slate so
+  // toolbar/icon-button hovers don't look brownish on the blue-grey canvas.
+  colorSubtleBackgroundHover: "#28323E",
+  colorSubtleBackgroundPressed: "#202933",
+  colorSubtleBackgroundSelected: "#253040",
+  // Strokes invert the light ramp: stroke1 is the strongest (lightest) line.
+  colorNeutralStroke1: "#3D4A58",
+  colorNeutralStroke2: "#303B47",
+  colorNeutralStroke3: "#242E39",
+  // Cool slate text, lightened for the night canvas. Ratios on bg1/bg2/bg3:
+  // fg1 14.3/13.1/11.7 (AAA), fg2 8.6/7.9/7.0 (AAA), fg3 6.0/5.5 (AA+).
+  colorNeutralForeground1: "#E4EAF1",
+  colorNeutralForeground2: "#ABB8C6",
+  colorNeutralForeground3: "#8B9AAB",
+  // Links move up the brand ramp to the lighter sky blues so they clear WCAG
+  // AA as text on the night steel: link 7.2/6.6/5.9 on bg1/bg2/bg3, hover
+  // 9.0 on bg1, pressed 5.8/5.3 on bg1/bg2.
+  colorBrandForegroundLink: "#63AFE0",
+  colorBrandForegroundLinkHover: "#84C2E8",
+  colorBrandForegroundLinkPressed: "#459CD6",
+  colorBrandForegroundLinkSelected: "#84C2E8",
+  // Primary buttons keep the light theme's blues: white text clears AA on all
+  // of them here too (4.6 on rest, 6.8 hover, 8.6 pressed). Hover must stay
+  // DARKER than rest - the lighter ramp step (#2E8CCC) drops white text to
+  // 3.7, failing AA.
+  colorBrandBackground: "#1A7AC0",
+  colorBrandBackgroundHover: "#155E99",
+  colorBrandBackgroundPressed: "#114F80",
+  colorBrandBackgroundSelected: "#155E99",
+};
+
 /**
  * Lighthouse accent colors beyond the blue brand, for sparing use in features:
  * sea-sky blue (links, info, secondary text), brass/gold glints (the beacon
  * light, highlights, badges), and a soft white for cards on the steel. All
  * pairings are contrast-checked (WCAG AA) - see scripts/check-contrast.mjs.
+ *
+ * These are tuned for the LIGHT canvas. The brass glints (`beam`, `brass`)
+ * also read well on the dark steel (9.0 and 5.8 on dark bg1), but `sky`,
+ * `brandText`, and the pale fills do not - as dark-mode text they fall below
+ * AA (e.g. sky is 2.7 on dark bg1). Prefer Fluent `tokens` (which the dark
+ * theme remaps) over ACCENTS for anything that must survive both modes.
  */
 export const ACCENTS = {
   // Sea-sky blue for links, info, and secondary text on the steel canvas.

@@ -1,12 +1,16 @@
 "use client";
 
 /**
- * A gentle, one-time feedback nudge. After the user has actively used Lighthouse
- * for a few minutes (counting only time the window is visible), a small
- * non-invasive bubble slides up in the bottom-left corner asking "What do you
- * think so far?". Expanding it opens the same feedback form used elsewhere
- * (in "mid-session" mode). It appears at most once per install — dismissing or
- * submitting records a localStorage flag so it never nags again.
+ * A gentle feedback nudge. After the user has actively used Lighthouse for a
+ * few minutes (counting only time the window is visible), a small non-invasive
+ * bubble slides up in the bottom-left corner asking "What do you think so
+ * far?". Expanding it opens the same feedback form used elsewhere (in
+ * "mid-session" mode).
+ *
+ * Persistence semantics: only a SUBMITTED form sets the permanent shown flag
+ * (never ask again). Dismissing the bubble or "Maybe later" merely snoozes —
+ * a snoozedUntil timestamp a few days out — so a "not right now" doesn't
+ * silently discard the user's only chance to be asked.
  */
 import { useEffect, useRef, useState } from "react";
 import {
@@ -15,7 +19,6 @@ import {
   DialogBody,
   DialogContent,
   DialogSurface,
-  Text,
   makeStyles,
   shorthands,
   tokens,
@@ -25,8 +28,12 @@ import { FeedbackForm } from "@/features/license/LicenseGate";
 
 /** Active (window-visible) time before the nudge surfaces. */
 const NUDGE_AFTER_MS = 5 * 60 * 1000;
-/** localStorage key — set once the nudge has been shown, so it never repeats. */
+/** localStorage key — set only when feedback was SUBMITTED; never ask again. */
 const SHOWN_KEY = "lighthouse.feedbackNudge.shown";
+/** localStorage key — epoch ms until which a dismissed/"maybe later" nudge sleeps. */
+const SNOOZED_UNTIL_KEY = "lighthouse.feedbackNudge.snoozedUntil";
+/** How long a snooze lasts — long enough to not nag, short enough to still ask. */
+const SNOOZE_MS = 3 * 24 * 60 * 60 * 1000;
 
 const useStyles = makeStyles({
   bubble: {
@@ -65,9 +72,12 @@ export function FeedbackNudge() {
   const since = useRef<number | null>(null);
 
   useEffect(() => {
-    // Already shown on this install? Never nudge again.
+    // Feedback already submitted on this install, or the nudge is snoozed into
+    // the future? Stay quiet. (getItem(null) → Number(null) is 0 → not snoozed.)
     try {
       if (localStorage.getItem(SHOWN_KEY)) return;
+      const snoozedUntil = Number(localStorage.getItem(SNOOZED_UNTIL_KEY));
+      if (Number.isFinite(snoozedUntil) && snoozedUntil > Date.now()) return;
     } catch {
       return; // storage blocked — don't risk nagging every load
     }
@@ -88,14 +98,13 @@ export function FeedbackNudge() {
     const timer = setInterval(() => {
       const live = since.current != null ? Date.now() - since.current : 0;
       if (activeMs.current + live >= NUDGE_AFTER_MS) {
+        // Another modal is up (quick-start tour, bug report, a dialog) —
+        // don't pile a second interruption on top; retry next tick.
+        if (document.querySelector(".fui-DialogSurface")) return;
         clearInterval(timer);
         document.removeEventListener("visibilitychange", onVisibility);
-        // Mark shown the moment it surfaces, so a reload mid-nudge won't repeat it.
-        try {
-          localStorage.setItem(SHOWN_KEY, "1");
-        } catch {
-          /* best effort */
-        }
+        // Nothing is persisted at surface time — only the user's response
+        // (submit ⇒ permanent flag, dismiss/"maybe later" ⇒ snooze) decides.
         setVisible(true);
       }
     }, 15 * 1000);
@@ -107,7 +116,25 @@ export function FeedbackNudge() {
     };
   }, []);
 
-  function dismiss() {
+  /** "Not right now" (bubble ✕, dialog dismiss, "Maybe later"): sleep a few days. */
+  function snooze() {
+    try {
+      localStorage.setItem(SNOOZED_UNTIL_KEY, String(Date.now() + SNOOZE_MS));
+    } catch {
+      /* best effort */
+    }
+    setOpen(false);
+    setVisible(false);
+  }
+
+  /** Feedback submitted: record the permanent flag so we never ask again. */
+  function complete() {
+    try {
+      localStorage.setItem(SHOWN_KEY, "1");
+      localStorage.removeItem(SNOOZED_UNTIL_KEY); // moot once permanently done
+    } catch {
+      /* best effort */
+    }
     setOpen(false);
     setVisible(false);
   }
@@ -131,24 +158,21 @@ export function FeedbackNudge() {
             appearance="subtle"
             icon={<DismissRegular />}
             aria-label="Dismiss"
-            onClick={() => setVisible(false)}
+            onClick={snooze}
           />
         </div>
       )}
 
-      <Dialog open={open} onOpenChange={(_, d) => !d.open && dismiss()}>
+      {/* Esc / click-away is a "not now", not a "never" — snooze, don't burn. */}
+      <Dialog open={open} onOpenChange={(_, d) => !d.open && snooze()}>
         <DialogSurface>
           <DialogBody>
             <DialogContent>
               <div style={{ display: "flex", flexDirection: "column", gap: tokens.spacingVerticalM }}>
-                <FeedbackForm mode="mid-session" onDone={dismiss} />
-                <Text
-                  as="span"
-                  style={{ textAlign: "center", cursor: "pointer", color: tokens.colorNeutralForeground3 }}
-                  onClick={dismiss}
-                >
+                <FeedbackForm mode="mid-session" onDone={complete} />
+                <Button appearance="subtle" onClick={snooze}>
                   Maybe later
-                </Text>
+                </Button>
               </div>
             </DialogContent>
           </DialogBody>

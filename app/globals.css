@@ -11,9 +11,23 @@ body {
 
 body {
   font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
-  /* Cream base matching the light theme so there is no flash before Fluent paints. */
-  background-color: #FBF5E9;
-  color: #1f1f1f;
+  /* Match the light theme's steel canvas (colorNeutralBackground1 in
+     src/shell/theme.ts) so the pre-hydration frame doesn't flash a wrong
+     color before Fluent paints. */
+  background-color: #EAEEF2;
+  color: #1A2531;
+}
+
+/* Dark-OS pre-hydration frame: match darkLighthouseTheme's night-steel canvas.
+   Media query (not [data-theme]) on purpose - the SSR markup always ships
+   data-theme="light", so keying off the attribute would force a light flash on
+   dark systems. Once React mounts, providers.tsx syncs data-theme and
+   color-scheme to the store and the Fluent theme takes over painting. */
+@media (prefers-color-scheme: dark) {
+  body {
+    background-color: #151B22;
+    color: #E4EAF1;
+  }
 }
 
 #__next,

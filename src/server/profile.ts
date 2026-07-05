@@ -48,8 +48,24 @@ const EMPTY: StoredProfile = {
   hasApiKey: false,
 };
 
+/**
+ * Provider ids the app can actually answer with (see llm.ts and the picker in
+ * contracts/mocks/providers.ts). Profiles written by earlier builds may carry
+ * a provider we no longer offer (openai/google/mistral were listed but never
+ * wired to a backend) — normalize those to the private local default so the
+ * UI never claims excerpts go to a provider that is never called. The stored
+ * API key is left untouched in case the provider returns.
+ */
+const KNOWN_PROVIDER_IDS = new Set([LOCAL_PROVIDER_ID, "anthropic"]);
+
 function load(): StoredProfile {
-  return { ...EMPTY, ...readJson(profilePath(), EMPTY) };
+  const p: StoredProfile = { ...EMPTY, ...readJson(profilePath(), EMPTY) };
+  if (p.providerId && !KNOWN_PROVIDER_IDS.has(p.providerId)) {
+    const migrated = { ...p, providerId: LOCAL_PROVIDER_ID, modelId: LOCAL_MODEL_ID };
+    save(migrated);
+    return migrated;
+  }
+  return p;
 }
 function save(p: StoredProfile): void {
   writeJson(profilePath(), p);

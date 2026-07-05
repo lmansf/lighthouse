@@ -13,6 +13,8 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
+    // data-theme here is only the SSR default; Providers re-syncs it (and
+    // color-scheme) to the resolved theme from the theme store after mount.
     <html lang="en" data-theme="light">
       <body>
         <Providers>{children}</Providers>

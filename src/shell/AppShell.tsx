@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { makeStyles, tokens } from "@fluentui/react-components";
 import { useRagStore } from "@/stores/useRagStore";
 import { Sidebar } from "./Sidebar";
+import { isDesktopShell } from "./desktopBridge";
 import { StartupPrompt } from "@/features/startup/StartupPrompt";
 import { useUsageCapture } from "@/features/usage/useUsageCapture";
 
@@ -55,24 +56,48 @@ export function AppShell({ sidebar, main }: AppShellProps) {
       });
     };
     refresh();
-    // Keep the tree live: re-read the vault on an interval and whenever the
-    // window regains focus, so files added *outside* an in-app upload — copied
-    // into the vault folder directly, or via a native dialog — appear without a
-    // manual reload. Polling (a fresh scan) is used rather than fs.watch, which
-    // is unreliable on Windows/WSL-mounted and network paths.
-    const POLL_MS = 4000;
+    // Keep the tree live. Inside the desktop shell the engine PUSHES changes
+    // (tray/menu adds, the FS watcher) via `lighthouse:vault-changed`, so the
+    // poll is only a slow safety net there; on the web there is no push
+    // channel and the 4 s poll does the work. Polling is a fresh scan rather
+    // than fs.watch, which is unreliable on Windows/WSL-mounted and network
+    // paths.
+    const POLL_MS = isDesktopShell() ? 15000 : 4000;
     const tick = () => {
       if (!document.hidden) refresh();
     };
     const timer = setInterval(tick, POLL_MS);
     window.addEventListener("focus", tick);
     document.addEventListener("visibilitychange", tick);
+    window.addEventListener("lighthouse:vault-changed", refresh);
     return () => {
       clearInterval(timer);
       window.removeEventListener("focus", tick);
       document.removeEventListener("visibilitychange", tick);
+      window.removeEventListener("lighthouse:vault-changed", refresh);
     };
   }, [load]);
+
+  // Global keyboard shortcuts (documented in the Quick start guide):
+  // Ctrl/Cmd+N — new chat · Ctrl/Cmd+B — toggle the file sidebar ·
+  // Ctrl/Cmd+, — open Preferences. Features receive them as CustomEvents so
+  // the shell stays decoupled from feature internals.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return;
+      const fire = (name: string) => {
+        e.preventDefault();
+        window.dispatchEvent(new CustomEvent(name));
+      };
+      if (e.key === "n" || e.key === "N") fire("lighthouse:new-chat");
+      else if (e.key === "b" || e.key === "B") {
+        e.preventDefault();
+        setCollapsed((c) => !c);
+      } else if (e.key === ",") fire("lighthouse:open-preferences");
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   return (
     <main className={styles.root}>

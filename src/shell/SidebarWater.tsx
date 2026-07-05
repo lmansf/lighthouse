@@ -1,6 +1,7 @@
 "use client";
 
-import { makeStyles, tokens } from "@fluentui/react-components";
+import { makeStyles, mergeClasses, shorthands } from "@fluentui/react-components";
+import { useThemeStore } from "@/stores/useThemeStore";
 
 /**
  * A gentle water backdrop for the left sidebar: a cool sea-sky "waterline" that
@@ -8,6 +9,11 @@ import { makeStyles, tokens } from "@fluentui/react-components";
  * water around the base of the lighthouse, in the Forerunner palette (see
  * theme.ts). It sits BEHIND the file list (absolute, pointer-events: none) and
  * is concentrated in the lower third so the rows above stay perfectly legible.
+ *
+ * The wash is translucent rgba over the theme canvas; Fluent tokens carry no
+ * alpha variants, so the tints are hardcoded here mirroring the Forerunner
+ * ramp in theme.ts, with a dark variant swapped in off the resolved theme
+ * (moonlit sky blues at lower opacity, so it stays a whisper at night).
  *
  * Motion is slow and low-contrast, and fully disabled under
  * `prefers-reduced-motion: reduce`.
@@ -39,6 +45,13 @@ const useStyles = makeStyles({
     animationIterationCount: "infinite",
     "@media (prefers-reduced-motion: reduce)": { animationName: "none" },
   },
+  // Dark-mode water: same shape, tinted with the lighter sky blues from the
+  // dark ramp (brand 110, #63AFE0) at lower opacity - moonlight on the water
+  // rather than a daytime wash, so the night-steel canvas stays calm.
+  waterDark: {
+    background:
+      "linear-gradient(to top, rgba(99,175,224,0.12) 0%, rgba(99,175,224,0.05) 45%, rgba(99,175,224,0.015) 80%, transparent 100%)",
+  },
   // Foamy white rings expanding and fading on the surface.
   ring: {
     position: "absolute",
@@ -57,6 +70,13 @@ const useStyles = makeStyles({
     animationIterationCount: "infinite",
     "@media (prefers-reduced-motion: reduce)": { animationName: "none", opacity: 0.18 },
   },
+  // Dark-mode foam: pale sky blue (brand 130, #A6D3F0) instead of white, and
+  // dimmer both animated and static - full-strength white rings would glare
+  // against the dark steel.
+  ringDark: {
+    ...shorthands.borderColor("rgba(166,211,240,0.28)"),
+    "@media (prefers-reduced-motion: reduce)": { opacity: 0.1 },
+  },
   ring1: { left: "12%", bottom: "12%" },
   ring2: { left: "52%", bottom: "20%", width: "90px", height: "30px", animationDuration: "11s", animationDelay: "2.5s" },
   ring3: { left: "30%", bottom: "6%", width: "70px", height: "24px", animationDuration: "9.5s", animationDelay: "5s" },
@@ -64,15 +84,15 @@ const useStyles = makeStyles({
 
 export function SidebarWater() {
   const styles = useStyles();
-  // tokens import kept for palette alignment if this is themed further; the
-  // gradients above mirror the Forerunner blue/brass values from theme.ts.
-  void tokens;
+  const dark = useThemeStore((s) => s.resolved) === "dark";
+  // mergeClasses (not string concat) so the dark overrides reliably win the
+  // Griffel property conflicts against the base water/ring styles.
   return (
     <div className={styles.root} aria-hidden>
-      <div className={styles.water} />
-      <div className={`${styles.ring} ${styles.ring1}`} />
-      <div className={`${styles.ring} ${styles.ring2}`} />
-      <div className={`${styles.ring} ${styles.ring3}`} />
+      <div className={mergeClasses(styles.water, dark && styles.waterDark)} />
+      <div className={mergeClasses(styles.ring, styles.ring1, dark && styles.ringDark)} />
+      <div className={mergeClasses(styles.ring, styles.ring2, dark && styles.ringDark)} />
+      <div className={mergeClasses(styles.ring, styles.ring3, dark && styles.ringDark)} />
     </div>
   );
 }
