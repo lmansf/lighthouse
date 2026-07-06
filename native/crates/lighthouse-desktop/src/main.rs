@@ -11,6 +11,7 @@
 
 #![cfg_attr(all(not(debug_assertions), windows), windows_subsystem = "windows")]
 
+mod boot_guard;
 mod commands;
 mod supervise;
 mod whisper;
@@ -80,6 +81,13 @@ pub fn open_explorer(app: &AppHandle) {
 #[derive(Default)]
 pub struct WidgetPin(std::sync::atomic::AtomicBool);
 
+/// Whether the keyed summon hotkey actually registered — false on Wayland,
+/// where the X11-only backend can't grab anything. settings_get exposes it so
+/// the UI can swap its hotkey promises for the tray fallback instead of
+/// advertising a shortcut the shell already knows is dead.
+#[derive(Default)]
+pub struct HotkeyOk(pub std::sync::atomic::AtomicBool);
+
 /// Focus-edge counter that turns hide-on-blur into "hide only if focus
 /// STAYS gone". On Windows the top-level window loses native focus the
 /// moment WebView2's child control takes it (WM_KILLFOCUS on the parent,
@@ -103,10 +111,51 @@ fn widget_pinned(app: &AppHandle) -> bool {
         .unwrap_or(false)
 }
 
+/// Create the (hidden) widget window if it doesn't exist yet — idempotent,
+/// meaningful only with a bundled UI (the /widget static route). Normally
+/// called shortly after boot so the first summon is instant, but every
+/// summon path also calls it, so a deferred or skipped boot creation (safe
+/// mode) just means the first summon pays the webview spin-up.
+/// Note: skip_taskbar is a no-op on macOS and visible_on_all_workspaces is
+/// unsupported on Windows — both are best-effort per platform.
+pub fn ensure_widget_window(app: &AppHandle) {
+    if app.get_webview_window(WIDGET_LABEL).is_some() || !has_bundled_ui(app) {
+        return;
+    }
+    let built =
+        tauri::WebviewWindowBuilder::new(app, WIDGET_LABEL, tauri::WebviewUrl::App("widget".into()))
+            .title("Lighthouse Search")
+            .inner_size(WIDGET_WIDTH, WIDGET_HEIGHT)
+            .decorations(false)
+            .resizable(false)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .visible(false)
+            .focused(false)
+            .build();
+    match built {
+        Err(e) => eprintln!("widget window failed to build: {e}"),
+        Ok(w) => {
+            // Hand-rolled position memory (see the window-state denylist
+            // note). A stale off-screen position is healed by show_widget's
+            // re-center check.
+            if let Some(pos) = read_settings(app)["widgetPos"].as_array() {
+                if let (Some(x), Some(y)) = (
+                    pos.first().and_then(Value::as_i64),
+                    pos.get(1).and_then(Value::as_i64),
+                ) {
+                    let _ = w.set_position(tauri::PhysicalPosition::new(x as i32, y as i32));
+                }
+            }
+        }
+    }
+}
+
 /// Show the floating search bar. Re-centers when the saved position landed
 /// off every current monitor (e.g. an unplugged display). `focus` is false
 /// only for the polite widget-mode boot at OS login.
 pub fn show_widget(app: &AppHandle, focus: bool) {
+    ensure_widget_window(app); // lazy in safe mode / the first seconds of boot
     let Some(w) = app.get_webview_window(WIDGET_LABEL) else {
         return;
     };
@@ -224,7 +273,10 @@ fn write_settings(app: &AppHandle, patch: Value) {
     if let Some(dir) = f.parent() {
         let _ = fs::create_dir_all(dir);
     }
-    let _ = fs::write(&f, serde_json::to_string_pretty(&s).unwrap_or_default());
+    // Same atomic temp+rename writer the core uses — this file has TWO
+    // writers (core's settings_set and this raw merge), and a plain
+    // fs::write could tear or interleave with the other side's rename.
+    lighthouse_core::config::write_json(&f, &s);
 }
 
 /// The local vault directory (persisted; defaults under the user's Documents).
@@ -526,6 +578,9 @@ fn handle_menu(app: &AppHandle, id: &str) {
 }
 
 fn main() {
+    // Must run before the builder: safe mode's webview flags only count if
+    // they're in the environment before any webview process is spawned.
+    let _safe = boot_guard::begin(env!("CARGO_PKG_VERSION"));
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             // A login autostart firing while we're already running should stay
@@ -570,6 +625,7 @@ fn main() {
         .manage(UpdateState::default())
         .manage(WidgetPin::default())
         .manage(WidgetFocusEpoch::default())
+        .manage(HotkeyOk::default())
         .manage(ServerPort::default())
         .invoke_handler(tauri::generate_handler![
             commands::rag_list,
@@ -703,42 +759,21 @@ fn main() {
             let _ = tray; // menu attached below (needs managed UpdateState)
             rebuild_tray_menu(&handle);
 
-            // --- Desktop widget: a hidden, frameless, always-on-top search
-            // bar (docs/widget-scope.md §7 W1). Created up front so the first
-            // summon is instant; only meaningful with a bundled UI (the
-            // /widget static route). Note: skip_taskbar is a no-op on macOS
-            // and visible_on_all_workspaces is unsupported on Windows — both
-            // are best-effort per platform.
-            if has_bundled_ui(&handle) {
-                let built = tauri::WebviewWindowBuilder::new(
-                    app,
-                    WIDGET_LABEL,
-                    tauri::WebviewUrl::App("widget".into()),
-                )
-                .title("Lighthouse Search")
-                .inner_size(WIDGET_WIDTH, WIDGET_HEIGHT)
-                .decorations(false)
-                .resizable(false)
-                .always_on_top(true)
-                .skip_taskbar(true)
-                .visible(false)
-                .focused(false)
-                .build();
-                match built {
-                    Err(e) => eprintln!("widget window failed to build: {e}"),
-                    Ok(w) => {
-                        // Hand-rolled position memory (see the window-state
-                        // denylist note above). A stale off-screen position is
-                        // healed by show_widget's re-center check.
-                        if let Some(pos) = read_settings(&handle)["widgetPos"].as_array() {
-                            if let (Some(x), Some(y)) =
-                                (pos.first().and_then(Value::as_i64), pos.get(1).and_then(Value::as_i64))
-                            {
-                                let _ = w.set_position(tauri::PhysicalPosition::new(x as i32, y as i32));
-                            }
-                        }
-                    }
-                }
+            // --- Desktop widget (docs/widget-scope.md §7 W1): in widget mode
+            // it IS the launch surface, so it's created now. In window mode
+            // its creation is DEFERRED a few seconds — a second webview at
+            // t=0 doubles the first-launch process storm (WebView2 spawns a
+            // family of processes per webview, all under antivirus scrutiny
+            // on an unsigned first run) — and skipped entirely in safe mode;
+            // every summon path creates it on demand via ensure_widget_window.
+            if widget_mode(&handle) {
+                ensure_widget_window(&handle);
+            } else if !boot_guard::safe_mode() {
+                let handle = handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    ensure_widget_window(&handle);
+                });
             }
 
             // Launch presentation. The main window is configured hidden and
@@ -764,6 +799,14 @@ fn main() {
                 }
             }
 
+            // The launch is declared healthy 20 s in — a machine-freezing
+            // boot never gets there, and the NEXT launch then comes up in
+            // safe mode (see boot_guard.rs). Clean exits also mark ready.
+            tauri::async_runtime::spawn(async {
+                tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+                boot_guard::mark_ready();
+            });
+
             // Tier-1 summon hotkey (keyed chord; the modifier-only "Whisper
             // mode" is scoped as W3). Registered here rather than via the
             // plugin builder so a failure — expected on Wayland, where the
@@ -779,14 +822,25 @@ fn main() {
                         }
                     },
                 );
-                if let Err(e) = register {
-                    eprintln!("summon hotkey unavailable ({e}); use the tray's \"Show search bar\"");
+                match register {
+                    Ok(()) => {
+                        if let Some(ok) = handle.try_state::<HotkeyOk>() {
+                            ok.0.store(true, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
+                    Err(e) => eprintln!(
+                        "summon hotkey unavailable ({e}); use the tray's \"Show search bar\""
+                    ),
                 }
             }
 
             // W3 Whisper mode: the opt-in modifier-only tap chord. Only ever
             // active when the user enabled it in Preferences (whisper.rs).
-            if read_settings(&handle)["whisperMode"].as_bool() == Some(true) {
+            // Safe mode leaves the keyboard hook out — a global input hook is
+            // precisely what to rule out while diagnosing a frozen machine.
+            if !boot_guard::safe_mode()
+                && read_settings(&handle)["whisperMode"].as_bool() == Some(true)
+            {
                 whisper::set_enabled(&handle, true);
             }
 
@@ -797,10 +851,13 @@ fn main() {
             // Pre-warm the retrieval index off the interactive path (bounded
             // threads inside): the first question after a launch — or after
             // linking a big folder — used to pay the whole corpus build.
-            tauri::async_runtime::spawn(async {
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                lighthouse_core::vault::warm_index_async();
-            });
+            // Skipped in safe mode: a minimal boot does nothing optional.
+            if !boot_guard::safe_mode() {
+                tauri::async_runtime::spawn(async {
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    lighthouse_core::vault::warm_index_async();
+                });
+            }
             {
                 let handle = handle.clone();
                 tauri::async_runtime::spawn(async move {
@@ -897,6 +954,7 @@ fn main() {
                 tauri::RunEvent::Exit => {
                     save_widget_pos(app); // quitting with the bar up still remembers its spot
                     lighthouse_core::index::flush_now(); // don't lose the warm cache
+                    boot_guard::mark_ready(); // an orderly exit is a healthy launch
                     app.state::<Supervisor>().shutdown();
                 }
                 // macOS: clicking the Dock icon while the window is hidden to
