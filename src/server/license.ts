@@ -331,6 +331,27 @@ export async function submitFeedback(f: FeedbackInput): Promise<{ ok: boolean }>
 }
 
 /**
+ * Record a feature-interest vote — which of the shelved features (read-aloud,
+ * converse, …) the user would actually use. Linked by the stable contact id and
+ * stored in its own `feature_interest` Supabase table (separate from feedback).
+ * In local-dev (no hosted function) the vote is accepted but not stored.
+ */
+export async function submitFeatureInterest(
+  shown: string[],
+  wanted: string[],
+): Promise<{ ok: boolean }> {
+  if (!licenseApi()) return { ok: true };
+  try {
+    const r = await callFn("featureInterest", {
+      vote: { shown, wanted, contactId: getContactId() },
+    });
+    return { ok: r.ok !== false };
+  } catch {
+    return { ok: false };
+  }
+}
+
+/**
  * Register interest in purchasing while paid mode is off ("notify me when
  * purchasing opens"). Lands in the same Supabase pipeline, tagged by contact id.
  */

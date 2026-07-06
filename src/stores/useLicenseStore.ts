@@ -58,6 +58,8 @@ interface LicenseStore {
   activate: (licenseKey: string) => Promise<boolean>;
   submitFeedback: (f: FeedbackInput) => Promise<boolean>;
   submitNotify: (email: string) => Promise<boolean>;
+  /** Record a feature-interest vote (which shelved features the user would use). */
+  submitFeatureInterest: (shown: string[], wanted: string[]) => Promise<boolean>;
   subscribe: (email: string) => Promise<void>;
   cancelSubscribe: () => void;
   dismissSubscribeError: () => void;
@@ -182,6 +184,15 @@ export const useLicenseStore = create<LicenseStore>((set, get) => ({
   submitNotify: async (email: string) => {
     try {
       const data = await postLicense("notify", { email });
+      return Boolean(data.ok);
+    } catch {
+      return false;
+    }
+  },
+
+  submitFeatureInterest: async (shown: string[], wanted: string[]) => {
+    try {
+      const data = await postLicense("featureInterest", { shown, wanted });
       return Boolean(data.ok);
     } catch {
       return false;

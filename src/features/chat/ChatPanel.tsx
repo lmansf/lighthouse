@@ -33,7 +33,6 @@ import {
   PopoverSurface,
   PopoverTrigger,
   SearchBox,
-  Switch,
   Text,
   Textarea,
   Title3,
@@ -61,8 +60,6 @@ import {
   OpenRegular,
   SendRegular,
   SettingsRegular,
-  Speaker2Regular,
-  SpeakerOffRegular,
   SquareRegular,
   ThumbDislikeRegular,
   ThumbLikeRegular,
@@ -76,15 +73,11 @@ import { chatService, MODEL_PROVIDERS } from "@/contracts";
 import { useRagStore } from "@/stores/useRagStore";
 import { useAuthStore } from "@/stores/useAuthStore";
 import { logEvent } from "@/lib/logEvent";
-import { isSpeechSupported, speak, stopSpeaking } from "@/lib/speech";
 import { useChatStore, type TranscriptMessage } from "@/stores/useChatStore";
-import { ConversePlaceholder } from "@/shell/ConversePlaceholder";
 import { modKey } from "@/features/onboarding/ModeChooser";
 import { ACCENTS } from "@/shell/theme";
 import { FILE_DRAG_MIME, parseDraggedFiles, type DraggedFile } from "@/shell/dnd";
 import { isDesktopShell, pathsForFiles } from "@/shell/desktopBridge";
-
-const READ_ALOUD_KEY = "lighthouse.chat.readAloud";
 
 // A user this close to the bottom (px) counts as "pinned": we keep auto-
 // scrolling for them as tokens stream in. Scrolling further up releases the
@@ -843,50 +836,6 @@ export function ChatPanel() {
     [],
   );
 
-  // Read-aloud (on-device TTS): a remembered preference to auto-speak each new
-  // answer, plus which message is speaking right now (for the per-message button).
-  const speechSupported = isSpeechSupported();
-  const [readAloud, setReadAloud] = useState(false);
-  const [speakingId, setSpeakingId] = useState<string | null>(null);
-  // The streaming `ask()` closure captures `readAloud` from its defining render;
-  // a ref lets the post-stream auto-speak read the latest value so toggling the
-  // switch off mid-stream prevents that answer from being spoken.
-  const readAloudRef = useRef(false);
-  readAloudRef.current = readAloud;
-
-  useEffect(() => {
-    if (typeof window !== "undefined" && window.localStorage.getItem(READ_ALOUD_KEY) === "1") {
-      setReadAloud(true);
-    }
-  }, []);
-
-  function setReadAloudPref(on: boolean) {
-    setReadAloud(on);
-    try {
-      window.localStorage.setItem(READ_ALOUD_KEY, on ? "1" : "0");
-    } catch {
-      /* private mode / storage full - the in-session toggle still works */
-    }
-    if (!on) {
-      stopSpeaking();
-      setSpeakingId(null);
-    }
-  }
-
-  /** Speak a message's answer, or stop if it's already the one playing. */
-  function toggleSpeak(id: string, content: string) {
-    if (speakingId === id) {
-      stopSpeaking();
-      setSpeakingId(null);
-      return;
-    }
-    setSpeakingId(id);
-    speak(content, () => setSpeakingId((cur) => (cur === id ? null : cur)));
-  }
-
-  // Stop any speech when the panel unmounts.
-  useEffect(() => () => stopSpeaking(), []);
-
   function addAttachments(files: DraggedFile[]) {
     setAttachments((cur) => {
       const seen = new Set(cur.map((a) => a.id));
@@ -1086,8 +1035,8 @@ export function ChatPanel() {
   // DOM event (docs/widget-scope.md, W1 contract). Send it through the same
   // path as pressing Ask — unless an answer is already streaming, in which
   // case only prefill the composer so the in-flight turn isn't clobbered.
-  // Same latest-closure ref pattern as readAloudRef: the listener mounts once
-  // while the handler always sees fresh state.
+  // Latest-closure ref pattern: the listener mounts once while the handler
+  // always sees fresh state.
   const askSeedRef = useRef<(q: string) => void>(() => {});
   askSeedRef.current = (q: string) => {
     const seed = q.trim();
@@ -1140,9 +1089,6 @@ export function ChatPanel() {
     // Asking always re-pins: the user wants to watch their new answer arrive.
     pinnedRef.current = true;
     setPinned(true);
-    // A new question interrupts any answer being read aloud.
-    stopSpeaking();
-    setSpeakingId(null);
     const controller = new AbortController();
     abortRef.current = controller;
     let sourceCount = 0;
@@ -1181,13 +1127,6 @@ export function ChatPanel() {
         if (!firstQueryLogged.current) {
           firstQueryLogged.current = true;
           logEvent("first_query", { source_count: sourceCount });
-        }
-        // Read the finished answer aloud if the preference is on (on-device TTS).
-        // Stopped and failed turns never reach this branch, so TTS only ever
-        // reads completed answers.
-        if (readAloudRef.current && finalContent.trim()) {
-          setSpeakingId(asstId);
-          speak(finalContent, () => setSpeakingId((cur) => (cur === asstId ? null : cur)));
         }
       }
     } catch (err) {
@@ -1245,8 +1184,6 @@ export function ChatPanel() {
     setEditingId(null);
     // Nothing to archive when the conversation is already empty — just stay put.
     if (messages.length === 0) return;
-    stopSpeaking();
-    setSpeakingId(null);
     newConversation();
     // The prior conversation is safe in history; offer a few seconds to jump
     // back to it rather than hunting for it in the drawer.
@@ -1268,8 +1205,6 @@ export function ChatPanel() {
       setHistoryOpen(false);
       return;
     }
-    stopSpeaking();
-    setSpeakingId(null);
     openConversation(id);
     setHistoryOpen(false);
     setShowUndo(false);
@@ -1908,16 +1843,6 @@ export function ChatPanel() {
           <Title3>Ask</Title3>
           <div className={styles.headerMeta}>
             <Badge appearance="tint">{visibleBadgeText}</Badge>
-            {speechSupported && (
-              <Tooltip content="Read new answers aloud (on-device)" relationship="label">
-                <Switch
-                  checked={readAloud}
-                  onChange={(_, d) => setReadAloudPref(Boolean(d.checked))}
-                  label="Read aloud"
-                />
-              </Tooltip>
-            )}
-            <ConversePlaceholder />
             {historyButton}
             <Button
               appearance="subtle"
@@ -2034,25 +1959,6 @@ export function ChatPanel() {
                       {/* Failed turns get no actions (Retry is the action) and are never spoken. */}
                       {!m.error && m.content && !(streaming && m.id === lastId) && (
                         <div className={styles.answerActions}>
-                          {speechSupported && (
-                            <Tooltip
-                              content={speakingId === m.id ? "Stop" : "Read this answer aloud"}
-                              relationship="label"
-                            >
-                              <Button
-                                className={styles.actionBtn}
-                                appearance="subtle"
-                                size="small"
-                                icon={
-                                  speakingId === m.id ? <SpeakerOffRegular /> : <Speaker2Regular />
-                                }
-                                aria-label={
-                                  speakingId === m.id ? "Stop reading" : "Read this answer aloud"
-                                }
-                                onClick={() => toggleSpeak(m.id, m.content)}
-                              />
-                            </Tooltip>
-                          )}
                           <Tooltip
                             content={copiedId === m.id ? "Copied" : "Copy answer"}
                             relationship="label"
