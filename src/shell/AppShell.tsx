@@ -37,9 +37,28 @@ interface AppShellProps {
  * workspace (chat). Owned by the shell team. It also kicks the one-time RAG
  * data load so every feature sees populated stores on first paint.
  */
+/** Remembered across launches, like the theme — a rail user shouldn't have to
+ *  re-collapse the sidebar every single time they open the app. */
+const SIDEBAR_COLLAPSED_KEY = "lighthouse.sidebar.collapsed";
+
 export function AppShell({ sidebar, main }: AppShellProps) {
   const styles = useStyles();
-  const [collapsed, setCollapsed] = useState(false);
+  const [collapsed, setCollapsed] = useState(() => {
+    if (typeof window === "undefined") return false;
+    try {
+      return window.localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
+  // Persist the collapsed choice so it survives a relaunch.
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(SIDEBAR_COLLAPSED_KEY, collapsed ? "1" : "0");
+    } catch {
+      /* storage blocked — the in-session state still works */
+    }
+  }, [collapsed]);
 
   // Capture coarse UI interactions for best-effort usage logging (consent-gated
   // inside the hook). Mounted here so it covers the whole post-onboarding app.

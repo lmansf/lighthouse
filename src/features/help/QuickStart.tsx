@@ -30,6 +30,7 @@ import {
   LightbulbRegular,
   ShieldCheckmarkRegular,
 } from "@fluentui/react-icons";
+import { modKey } from "@/features/onboarding/ModeChooser";
 
 /** localStorage key — set once the auto-open has fired, so it never repeats. */
 const SHOWN_KEY = "lighthouse.quickstart.shown";
@@ -130,6 +131,9 @@ function Step({
 /** The one-page tutorial. Controlled, so the settings menu can reopen it. */
 export function QuickStartDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean) => void }) {
   const styles = useStyles();
+  // Spell the command modifier for the user's platform (⌘ on macOS, Ctrl else),
+  // rather than the generic "Ctrl/Cmd".
+  const mod = modKey();
   return (
     <Dialog open={open} onOpenChange={(_, d) => setOpen(d.open)}>
       <DialogSurface>
@@ -172,10 +176,10 @@ export function QuickStartDialog({ open, setOpen }: { open: boolean; setOpen: (b
                     <kbd className={styles.kbd}>Shift + Enter</kbd> for a new line.
                   </li>
                   <li>
-                    <kbd className={styles.kbd}>Ctrl/Cmd + N</kbd> starts a new chat.
+                    <kbd className={styles.kbd}>{mod} + N</kbd> starts a new chat.
                   </li>
                   <li>
-                    <kbd className={styles.kbd}>Ctrl/Cmd + B</kbd> hides the file list.
+                    <kbd className={styles.kbd}>{mod} + B</kbd> hides the file list.
                   </li>
                 </ul>
               </div>
