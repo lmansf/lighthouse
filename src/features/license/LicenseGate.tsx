@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import {
   Avatar,
   Button,
@@ -50,7 +50,7 @@ import {
 import { MODEL_PROVIDERS } from "@/contracts";
 import { LocalModelOption, LocalModelInstallPanel } from "@/features/localModel/LocalModelOption";
 import { QuickStartDialog } from "@/features/help/QuickStart";
-import { showWidget, summonHotkey } from "@/features/onboarding/ModeChooser";
+import { showWidget, summonHotkey, prettyShortcut } from "@/features/onboarding/ModeChooser";
 import { useLicenseStore, type FeedbackInput, type LicenseStatus } from "@/stores/useLicenseStore";
 import { useAuthStore } from "@/stores/useAuthStore";
 import { useThemeStore } from "@/stores/useThemeStore";
@@ -117,6 +117,24 @@ const useStyles = makeStyles({
   // Preferences dialog: sections separated by a little vertical air.
   prefFields: { display: "flex", flexDirection: "column", gap: tokens.spacingVerticalL },
   prefHint: { color: tokens.colorNeutralForeground3, fontSize: tokens.fontSizeBase200 },
+  // Waiting-on-permission note under the whisper switch — warning tint so it
+  // reads as "action needed" without the alarm of a hard error red.
+  prefWarn: { color: tokens.colorStatusWarningForeground1, fontSize: tokens.fontSizeBase200 },
+  // Summon-shortcut recorder: the chord chip, Change, and Reset on one line.
+  shortcutRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: tokens.spacingHorizontalS,
+    flexWrap: "wrap",
+  },
+  // The current chord as a small monospace keycap (mirrors QuickStart's kbd).
+  shortcutValue: {
+    ...shorthands.padding(tokens.spacingVerticalXXS, tokens.spacingHorizontalS),
+    backgroundColor: tokens.colorNeutralBackground3,
+    borderRadius: tokens.borderRadiusMedium,
+    fontFamily: tokens.fontFamilyMonospace,
+    fontSize: tokens.fontSizeBase200,
+  },
   // Opt-in feedback entry under the registration choice — deliberately quiet so
   // the choice stays the headline (the old flow gated it behind the survey).
   feedbackLink: { alignSelf: "center", fontSize: tokens.fontSizeBase200 },
@@ -704,6 +722,46 @@ function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean
 }
 
 /**
+ * Map a keydown's main (non-modifier) key to a tauri accelerator token, or null
+ * when the event carries only modifiers (so the recorder keeps listening).
+ * Letters → `Key<Upper>`, digits → `Digit<n>`, space → "Space", named keys pass
+ * through (ArrowUp, Enter, F5…), and we fall back to `code` when it already
+ * looks like an accelerator token.
+ */
+function mainKeyToken(e: KeyboardEvent): string | null {
+  const k = e.key;
+  if (!k || k === "Control" || k === "Shift" || k === "Alt" || k === "Meta" || k === "OS") {
+    return null;
+  }
+  if (k === " " || k === "Space" || k === "Spacebar") return "Space";
+  if (/^[a-z]$/i.test(k)) return `Key${k.toUpperCase()}`;
+  if (/^[0-9]$/.test(k)) return `Digit${k}`;
+  if (/^[A-Z][A-Za-z0-9]*$/.test(k)) return k;
+  if (/^(Key[A-Z]|Digit[0-9]|Numpad[A-Za-z0-9]+|F\d{1,2}|Arrow(Up|Down|Left|Right))$/.test(e.code)) {
+    return e.code;
+  }
+  return null;
+}
+
+/**
+ * Build a tauri global-hotkey accelerator from a keydown: modifiers in a fixed
+ * order (control→"ctrl", meta→"super", alt→"alt", shift→"shift") joined by "+"
+ * with one non-modifier key appended. Null unless at least one modifier AND a
+ * main key are present — a bare key can't be a global shortcut.
+ */
+function accelFromEvent(e: KeyboardEvent): string | null {
+  const key = mainKeyToken(e);
+  if (!key) return null;
+  const mods: string[] = [];
+  if (e.ctrlKey) mods.push("ctrl");
+  if (e.metaKey) mods.push("super");
+  if (e.altKey) mods.push("alt");
+  if (e.shiftKey) mods.push("shift");
+  if (mods.length === 0) return null;
+  return [...mods, key].join("+");
+}
+
+/**
  * General preferences — the home for user-controllable settings that aren't the
  * model choice. Today: appearance (light/dark/system), whether newly-added
  * files are searchable by default (also asked once during onboarding), sharing
@@ -722,12 +780,26 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
   const [runOnStartup, setRunOnStartup] = useState(true);
   const [uiMode, setUiMode] = useState<"window" | "widget">("window");
   const [whisperMode, setWhisperMode] = useState(false);
+  // macOS Accessibility state for whisper: "pending" = the system prompt is up
+  // and we're waiting for the grant; else granted/unsupported/unknown. Only
+  // surfaced as a note while whisper is on and still pending.
+  const [whisperPermission, setWhisperPermission] = useState<string>("unknown");
+  // The live summon accelerator (tauri syntax) and the inline recorder's state.
+  const [summonShortcut, setSummonShortcut] = useState("ctrl+super+shift+space");
+  const [recording, setRecording] = useState(false);
+  const [shortcutError, setShortcutError] = useState<string | null>(null);
   // False when the shell couldn't register the global shortcut (Wayland) —
   // the hint then points at the tray instead of promising a dead hotkey.
   const [hotkeyOk, setHotkeyOk] = useState(true);
-  // Whisper's low-level hook only exists on Windows so far (widget-scope §3);
-  // hide the switch elsewhere rather than offering a toggle that can't work.
+  // Whisper's low-level hook exists on Windows (keyboard hook) and macOS
+  // (Accessibility); hide the switch elsewhere rather than offering a toggle
+  // that can't work. (widget-scope §3 + W3/W4.)
   const isWindows = typeof navigator !== "undefined" && navigator.userAgent.includes("Windows");
+  const isMac =
+    typeof navigator !== "undefined" && navigator.userAgent.includes("Mac") && !isWindows;
+  const whisperCapable = isWindows || isMac;
+  // The modifier tap-chord, spelled per platform (whisper is modifier-only).
+  const whisperChord = isMac ? "Control + ⌘ + Shift" : "Ctrl + Win + Shift";
 
   // Load the file-backed prefs (usage consent, launch-at-login) when opened.
   useEffect(() => {
@@ -745,6 +817,12 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
         setRunOnStartup(d.runOnStartup !== false);
         setUiMode(d.uiMode === "widget" ? "widget" : "window");
         setWhisperMode(d.whisperMode === true);
+        setWhisperPermission(typeof d.whisperPermission === "string" ? d.whisperPermission : "unknown");
+        setSummonShortcut(
+          typeof d.summonShortcut === "string" && d.summonShortcut
+            ? d.summonShortcut
+            : "ctrl+super+shift+space",
+        );
         setHotkeyOk(d.summonHotkeyOk !== false);
       })
       .catch(() => {});
@@ -795,6 +873,52 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ whisperMode: next }),
     }).catch(() => {});
+  }
+
+  // Send a new (or "" to reset) accelerator. The shell VALIDATES: on ok it
+  // echoes the registered chord; on ok:false it keeps the old value and returns
+  // a reason — so we never assume the change stuck.
+  async function saveShortcut(next: string) {
+    setShortcutError(null);
+    try {
+      const r = await fetch("/api/settings", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ summonShortcut: next }),
+      });
+      const d = r.ok ? await r.json() : null;
+      if (d && d.ok === true) {
+        setSummonShortcut(typeof d.summonShortcut === "string" ? d.summonShortcut : next);
+      } else {
+        setShortcutError(
+          (d && typeof d.reason === "string" && d.reason) ||
+            "That shortcut couldn't be registered — try another combination.",
+        );
+        // The server echoes the unchanged current chord; reflect it verbatim.
+        if (d && typeof d.summonShortcut === "string") setSummonShortcut(d.summonShortcut);
+      }
+    } catch {
+      setShortcutError("Couldn't save the shortcut. Please try again.");
+    }
+  }
+
+  function resetShortcut() {
+    setRecording(false);
+    // "" resets to the default; the shell echoes the default back on success.
+    void saveShortcut("");
+  }
+
+  function onRecordKeyDown(e: ReactKeyboardEvent<HTMLInputElement>) {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.key === "Escape") {
+      setRecording(false);
+      return;
+    }
+    const accel = accelFromEvent(e.nativeEvent);
+    if (!accel) return; // only modifiers (or no modifier) so far — keep listening
+    setRecording(false);
+    void saveShortcut(accel);
   }
 
   return (
@@ -877,16 +1001,68 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
                 </Field>
               )}
 
-              {desktop && isWindows && (
+              {/* Only when a keyed shortcut can actually register — hidden on
+                  Wayland (summonHotkeyOk === false), where no global hotkey works. */}
+              {desktop && hotkeyOk && (
+                <Field label="Summon shortcut">
+                  {recording ? (
+                    <div className={styles.shortcutRow}>
+                      <Input
+                        className={styles.full}
+                        autoFocus
+                        readOnly
+                        value=""
+                        placeholder="Press keys…"
+                        aria-label="Record a new summon shortcut"
+                        onKeyDown={onRecordKeyDown}
+                        onBlur={() => setRecording(false)}
+                      />
+                      <Button size="small" appearance="subtle" onClick={() => setRecording(false)}>
+                        Cancel
+                      </Button>
+                    </div>
+                  ) : (
+                    <div className={styles.shortcutRow}>
+                      <Text className={styles.shortcutValue}>{prettyShortcut(summonShortcut)}</Text>
+                      <Button
+                        size="small"
+                        aria-label="Record a new summon shortcut"
+                        onClick={() => {
+                          setShortcutError(null);
+                          setRecording(true);
+                        }}
+                      >
+                        Change
+                      </Button>
+                      <Button size="small" appearance="subtle" onClick={resetShortcut}>
+                        Reset to default
+                      </Button>
+                    </div>
+                  )}
+                  {shortcutError && <Text className={styles.error}>{shortcutError}</Text>}
+                  <Text className={styles.prefHint}>
+                    Press this combination anywhere to summon the floating search bar.
+                  </Text>
+                </Field>
+              )}
+
+              {desktop && whisperCapable && (
                 <Field label="Whisper summon (experimental)">
                   <Switch
                     checked={whisperMode}
                     onChange={(_, d) => updateWhisper(Boolean(d.checked))}
-                    label="Tap Ctrl + Win + Shift — all three together, nothing else — to summon the search bar"
+                    label={`Tap ${whisperChord} — all three together, nothing else — to summon the search bar`}
                   />
+                  {whisperMode && whisperPermission === "pending" && (
+                    <Text className={styles.prefWarn}>
+                      Waiting for Accessibility permission — enable Lighthouse in System Settings →
+                      Privacy &amp; Security → Accessibility, then it starts automatically.
+                    </Text>
+                  )}
                   <Text className={styles.prefHint}>
-                    Uses a Windows keyboard hook while enabled; the {summonHotkey()} shortcut keeps
-                    working either way.
+                    {isMac
+                      ? `Uses macOS Accessibility while enabled; the ${summonHotkey()} shortcut keeps working either way.`
+                      : `Uses a Windows keyboard hook while enabled; the ${summonHotkey()} shortcut keeps working either way.`}
                   </Text>
                 </Field>
               )}

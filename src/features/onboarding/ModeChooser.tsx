@@ -19,6 +19,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Badge,
   Button,
+  Checkbox,
   Dialog,
   DialogActions,
   DialogBody,
@@ -50,6 +51,49 @@ export function summonHotkey(): string {
     if (ua.includes("Windows")) return "Ctrl + Win + Shift + Space";
   }
   return "Ctrl + Super + Shift + Space";
+}
+
+/**
+ * Render a tauri global-hotkey accelerator ("ctrl+super+shift+space") as a
+ * human-readable chord ("Ctrl + Super + Shift + Space"). The `super` modifier
+ * follows the platform (⌘ on macOS, "Win" on Windows, else "Super"); main-key
+ * tokens drop their "Key"/"Digit" prefixes (KeyP → P, Digit3 → 3) and are
+ * title-cased. Guarded for SSR like `summonHotkey`, and only rendered
+ * client-side, so the UA branch never trips a hydration mismatch.
+ */
+export function prettyShortcut(accel: string): string {
+  if (!accel) return "";
+  const ua = typeof navigator !== "undefined" ? navigator.userAgent : "";
+  const isWindows = ua.includes("Windows");
+  const isMac = ua.includes("Mac") && !isWindows;
+  const superLabel = isMac ? "⌘" : isWindows ? "Win" : "Super";
+  return accel
+    .split("+")
+    .map((raw) => {
+      const part = raw.trim();
+      if (!part) return "";
+      switch (part.toLowerCase()) {
+        case "ctrl":
+        case "control":
+          return "Ctrl";
+        case "super":
+        case "meta":
+        case "cmd":
+        case "command":
+          return superLabel;
+        case "alt":
+        case "option":
+          return "Alt";
+        case "shift":
+          return "Shift";
+        default: {
+          const token = part.replace(/^Key(?=[A-Z]$)/, "").replace(/^Digit(?=[0-9]$)/, "");
+          return token.charAt(0).toUpperCase() + token.slice(1);
+        }
+      }
+    })
+    .filter(Boolean)
+    .join(" + ");
 }
 
 /**
@@ -169,6 +213,10 @@ export function ModeChooserAuto({ onSettled }: { onSettled: () => void }) {
   const [open, setOpen] = useState(false);
   const [selected, setSelected] = useState<UiMode>("window");
   const [saving, setSaving] = useState(false);
+  // Launch-at-login consent, asked here so widget mode (which hides the main
+  // window) can't strand the separate startup prompt. Default on, like the
+  // settings default; the choice rides the same POST as the mode.
+  const [runOnStartup, setRunOnStartup] = useState(true);
   // False when the shell couldn't register the global shortcut (Wayland) —
   // the hint then points at the tray instead of promising a dead hotkey.
   // Absent (web parity route) counts as fine: the chooser only opens on
@@ -209,13 +257,15 @@ export function ModeChooserAuto({ onSettled }: { onSettled: () => void }) {
     };
   }, [settle]);
 
-  /** Persist the choice — best-effort: a failed POST must never trap the user. */
+  /** Persist the choice — best-effort: a failed POST must never trap the user.
+   *  Bundles the launch-at-login consent + startupAsked with the mode in one
+   *  POST, so answering the chooser also answers the startup question. */
   async function persist(mode: UiMode) {
     try {
       await fetch("/api/settings", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ uiMode: mode }),
+        body: JSON.stringify({ uiMode: mode, runOnStartup, startupAsked: true }),
       });
     } catch {
       /* best-effort — the chooser still settles */
@@ -283,6 +333,11 @@ export function ModeChooserAuto({ onSettled }: { onSettled: () => void }) {
                   ? `Either way, ${hotkey} summons the search bar from anywhere. Change this anytime in Preferences.`
                   : "Your system doesn't support the global shortcut, so summon the search bar from the tray icon's “Show search bar”. Change modes anytime in Preferences."}
               </Text>
+              <Checkbox
+                checked={runOnStartup}
+                onChange={(_, d) => setRunOnStartup(Boolean(d.checked))}
+                label="Launch Lighthouse when I sign in"
+              />
             </div>
           </DialogContent>
           <DialogActions>

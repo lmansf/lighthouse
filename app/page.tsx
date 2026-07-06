@@ -12,6 +12,7 @@ import { LicenseGate, GraceBanner, PostPurchaseFeedback } from "@/features/licen
 import { BugReport } from "@/features/feedback/BugReport";
 import { FeedbackNudge } from "@/features/feedback/FeedbackNudge";
 import { QuickStartAuto } from "@/features/help/QuickStart";
+import { SummonHint } from "@/features/widget/SummonHint";
 import { VersionBadge } from "@/shell/VersionBadge";
 
 /**
@@ -138,7 +139,15 @@ export default function Home() {
       {onboarded && (status === "valid" || status === "grace" || status === "disabled") && (
         <>
           <ModeChooserAuto onSettled={() => setModeSettled(true)} />
-          {modeSettled && <QuickStartAuto />}
+          {/* Both the tour and the summon hint wait for the chooser to settle
+              so neither stacks behind that first-run modal. */}
+          {modeSettled && (
+            <>
+              <QuickStartAuto />
+              {/* First-run summon hint (desktop only, self-gated once-shown). */}
+              <SummonHint />
+            </>
+          )}
         </>
       )}
     </>

@@ -102,6 +102,23 @@ const useStyles = makeStyles({
     ...shorthands.borderRadius(tokens.borderRadiusXLarge),
     overflow: "hidden",
   },
+  // A quick fade + scale-in replayed on every summon (window "focus"): a pure
+  // flourish on top of the resting pill — it never gates the drag region or the
+  // input, and the end state is the pill's normal state. transform-origin top so
+  // it settles from the top edge down. Reduced motion keeps the fade, no move.
+  rootEnter: {
+    animationName: {
+      from: { opacity: 0.6, transform: "translateY(-4px) scale(0.98)" },
+      to: { opacity: 1, transform: "translateY(0) scale(1)" },
+    },
+    animationDuration: "140ms",
+    animationTimingFunction: "ease-out",
+    transformOrigin: "top center",
+    "@media (prefers-reduced-motion: reduce)": {
+      animationName: { from: { opacity: 0.6 }, to: { opacity: 1 } },
+      transform: "none",
+    },
+  },
   pill: {
     display: "flex",
     alignItems: "center",
@@ -299,6 +316,25 @@ export function WidgetBar() {
     };
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
+  }, []);
+
+  // Entry flourish: each summon focuses the window, so toggle a short-lived
+  // animation class on the root to replay the fade/scale-in. The class only
+  // re-arms on focus (cleared after the run), so steady-state renders — typing,
+  // resizing — never restart it, and it never touches drag/focus behavior.
+  const [entering, setEntering] = useState(false);
+  const enterTimer = useRef<number | null>(null);
+  useEffect(() => {
+    const onFocus = () => {
+      setEntering(true);
+      if (enterTimer.current !== null) window.clearTimeout(enterTimer.current);
+      enterTimer.current = window.setTimeout(() => setEntering(false), 220);
+    };
+    window.addEventListener("focus", onFocus);
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      if (enterTimer.current !== null) window.clearTimeout(enterTimer.current);
+    };
   }, []);
 
   // Escape works from anywhere in the window (focus may have left the input),
@@ -575,7 +611,7 @@ export function WidgetBar() {
   };
 
   return (
-    <div className={styles.root}>
+    <div className={mergeClasses(styles.root, entering && styles.rootEnter)}>
       {/* "deep" drag region: any empty chrome in the pill drags the frameless
           window; Tauri's injected drag script exempts the input and buttons,
           so typing/clicking is never hijacked (widget-scope §1.1). */}
