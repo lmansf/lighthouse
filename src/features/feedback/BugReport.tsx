@@ -21,16 +21,21 @@ import {
 import { BugRegular } from "@fluentui/react-icons";
 
 const useStyles = makeStyles({
+  // A quiet neutral affordance, not a brand-primary blob: parked in the corner
+  // it shouldn't compete with the app's real primary actions.
   fab: {
     position: "fixed",
     right: tokens.spacingHorizontalL,
     bottom: tokens.spacingVerticalL,
     zIndex: 900,
     minWidth: "auto",
-    width: "40px",
-    height: "40px",
+    width: "36px",
+    height: "36px",
     borderRadius: "50%",
+    backgroundColor: tokens.colorNeutralBackground1,
+    color: tokens.colorNeutralForeground3,
     boxShadow: tokens.shadow8,
+    ":hover": { color: tokens.colorNeutralForeground1 },
   },
   fields: { display: "flex", flexDirection: "column", gap: tokens.spacingVerticalM },
   thanks: { color: tokens.colorNeutralForeground2 },
@@ -92,7 +97,7 @@ export function BugReport() {
     >
       <DialogTrigger disableButtonEnhancement>
         <Tooltip content="Report a bug" relationship="label">
-          <Button className={styles.fab} appearance="primary" icon={<BugRegular />} aria-label="Report a bug" />
+          <Button className={styles.fab} appearance="subtle" icon={<BugRegular />} aria-label="Report a bug" />
         </Tooltip>
       </DialogTrigger>
       <DialogSurface>
@@ -106,10 +111,10 @@ export function BugReport() {
               </Text>
             ) : (
               <div className={styles.fields}>
-                <Field label="Describe where the bug is happening">
+                <Field label="Where is the bug happening? (optional)">
                   <Textarea value={where} onChange={(_, d) => setWhere(d.value)} />
                 </Field>
-                <Field label="Describe the bug">
+                <Field label="Describe the bug" required>
                   <Textarea value={what} onChange={(_, d) => setWhat(d.value)} />
                 </Field>
                 {err && <Text className={styles.error}>{err}</Text>}
@@ -135,7 +140,7 @@ export function BugReport() {
                 </DialogTrigger>
                 <Button
                   appearance="primary"
-                  disabled={busy || (!where.trim() && !what.trim())}
+                  disabled={busy || !what.trim()}
                   icon={busy ? <Spinner size="tiny" /> : undefined}
                   onClick={() => void submit()}
                 >

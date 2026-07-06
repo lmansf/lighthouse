@@ -483,6 +483,23 @@ pub async fn submit_feedback(f: &FeedbackInput) -> bool {
     }
 }
 
+/// Record a feature-interest vote — which shelved features the user would use.
+/// Linked by the stable contact id; stored in its own `feature_interest` table.
+pub async fn submit_feature_interest(shown: &[String], wanted: &[String]) -> bool {
+    if license_api().is_none() {
+        return true;
+    }
+    let vote = json!({
+        "shown": shown,
+        "wanted": wanted,
+        "contactId": get_contact_id(),
+    });
+    match call_fn("featureInterest", json!({ "vote": vote })).await {
+        Ok(r) => r["ok"] != false,
+        Err(_) => false,
+    }
+}
+
 /// Register interest in purchasing while paid mode is off.
 pub async fn submit_notify(email: &str) -> bool {
     let trimmed = email.trim();

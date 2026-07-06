@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import { makeStyles, mergeClasses, shorthands } from "@fluentui/react-components";
 import { useThemeStore } from "@/stores/useThemeStore";
 
@@ -80,19 +81,39 @@ const useStyles = makeStyles({
   ring1: { left: "12%", bottom: "12%" },
   ring2: { left: "52%", bottom: "20%", width: "90px", height: "30px", animationDuration: "11s", animationDelay: "2.5s" },
   ring3: { left: "30%", bottom: "6%", width: "70px", height: "24px", animationDuration: "9.5s", animationDelay: "5s" },
+  // Freeze every ripple while the window is in the background — decorative
+  // compositor work shouldn't run when the app isn't even on screen.
+  paused: { animationPlayState: "paused" },
 });
 
 export function SidebarWater() {
   const styles = useStyles();
   const dark = useThemeStore((s) => s.resolved) === "dark";
+  // Pause the ripples when the window is blurred / hidden, so the three infinite
+  // animations don't keep the compositor busy while the app is in the
+  // background (they resume the moment it's focused again).
+  const [animate, setAnimate] = useState(true);
+  useEffect(() => {
+    const sync = () => setAnimate(!document.hidden && document.hasFocus());
+    sync();
+    window.addEventListener("focus", sync);
+    window.addEventListener("blur", sync);
+    document.addEventListener("visibilitychange", sync);
+    return () => {
+      window.removeEventListener("focus", sync);
+      window.removeEventListener("blur", sync);
+      document.removeEventListener("visibilitychange", sync);
+    };
+  }, []);
+  const paused = !animate && styles.paused;
   // mergeClasses (not string concat) so the dark overrides reliably win the
   // Griffel property conflicts against the base water/ring styles.
   return (
     <div className={styles.root} aria-hidden>
-      <div className={mergeClasses(styles.water, dark && styles.waterDark)} />
-      <div className={mergeClasses(styles.ring, styles.ring1, dark && styles.ringDark)} />
-      <div className={mergeClasses(styles.ring, styles.ring2, dark && styles.ringDark)} />
-      <div className={mergeClasses(styles.ring, styles.ring3, dark && styles.ringDark)} />
+      <div className={mergeClasses(styles.water, dark && styles.waterDark, paused)} />
+      <div className={mergeClasses(styles.ring, styles.ring1, dark && styles.ringDark, paused)} />
+      <div className={mergeClasses(styles.ring, styles.ring2, dark && styles.ringDark, paused)} />
+      <div className={mergeClasses(styles.ring, styles.ring3, dark && styles.ringDark, paused)} />
     </div>
   );
 }

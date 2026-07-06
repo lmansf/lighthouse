@@ -5,6 +5,7 @@ import {
   startTrial,
   activateLicense,
   submitFeedback,
+  submitFeatureInterest,
   submitNotify,
   submitBug,
   pingLaunch,
@@ -76,6 +77,14 @@ export async function POST(req: Request) {
         return NextResponse.json({ ok: false, reason: "rejected", detail: "email required" }, { status: 400 });
       }
       return NextResponse.json(await submitNotify(email));
+    }
+
+    case "featureInterest": {
+      // Which shelved features the user would use. `shown` = all offered ids,
+      // `wanted` = the ones they'd use (⊆ shown). Stored in its own table.
+      const shown = Array.isArray(body.shown) ? body.shown.map(String) : [];
+      const wanted = Array.isArray(body.wanted) ? body.wanted.map(String) : [];
+      return NextResponse.json(await submitFeatureInterest(shown, wanted));
     }
 
     case "bug": {

@@ -54,6 +54,18 @@ export function summonHotkey(): string {
 }
 
 /**
+ * The primary command-modifier key, spelled for the user's platform: ⌘ on
+ * macOS, "Ctrl" everywhere else. Guarded for SSR (defaults to "Ctrl") and only
+ * ever rendered client-side, so the UA branch never trips a hydration mismatch.
+ * Shared by the in-app shortcut hints (sidebar, settings) and the Quick Start
+ * tour so a single helper decides how ⌘/Ctrl is shown across the app.
+ */
+export function modKey(): string {
+  if (typeof navigator !== "undefined" && navigator.userAgent.includes("Mac")) return "⌘";
+  return "Ctrl";
+}
+
+/**
  * Render a tauri global-hotkey accelerator ("ctrl+super+shift+space") as a
  * human-readable chord ("Ctrl + Super + Shift + Space"). The `super` modifier
  * follows the platform (⌘ on macOS, "Win" on Windows, else "Super"); main-key
@@ -214,9 +226,11 @@ export function ModeChooserAuto({ onSettled }: { onSettled: () => void }) {
   const [selected, setSelected] = useState<UiMode>("window");
   const [saving, setSaving] = useState(false);
   // Launch-at-login consent, asked here so widget mode (which hides the main
-  // window) can't strand the separate startup prompt. Default on, like the
-  // settings default; the choice rides the same POST as the mode.
-  const [runOnStartup, setRunOnStartup] = useState(true);
+  // window) can't strand the separate startup prompt. Opt-IN (default off): a
+  // first-run user shouldn't be enrolled into autostart just by clicking
+  // Continue — they tick the box if they want it. Still changeable in
+  // Preferences either way.
+  const [runOnStartup, setRunOnStartup] = useState(false);
   // False when the shell couldn't register the global shortcut (Wayland) —
   // the hint then points at the tray instead of promising a dead hotkey.
   // Absent (web parity route) counts as fine: the chooser only opens on
@@ -224,6 +238,9 @@ export function ModeChooserAuto({ onSettled }: { onSettled: () => void }) {
   // today — the legacy Electron shell that also set it stopped shipping at
   // 0.3.1, and the Tauri no-bundle dev mode degrades to window mode.)
   const [hotkeyOk, setHotkeyOk] = useState(true);
+  // Widget hand-off confirmation: choosing widget mode tucks the main window
+  // into the tray, so a one-time note reassures the user it didn't just quit.
+  const [trayHintOpen, setTrayHintOpen] = useState(false);
 
   // onSettled must fire exactly once whatever path resolves the chooser; the
   // ref keeps the mount effect off the (inline, per-render) prop identity.
@@ -284,9 +301,17 @@ export function ModeChooserAuto({ onSettled }: { onSettled: () => void }) {
   async function confirm() {
     setSaving(true);
     await persist(selected, true); // explicit consent for launch-at-login
-    // Show the widget right away so the choice has a visible effect — picking
-    // widget mode and seeing nothing happen would read as broken.
-    if (selected === "widget") await showWidget();
+    if (selected === "widget") {
+      // Show the widget right away so the choice has a visible effect — picking
+      // widget mode and seeing nothing happen would read as broken…
+      await showWidget();
+      // …then confirm the hand-off before settling: the main window is tucking
+      // into the tray, and vanishing with no word reads as "the app quit".
+      setSaving(false);
+      setOpen(false);
+      setTrayHintOpen(true);
+      return;
+    }
     setOpen(false);
     settle();
   }
@@ -304,6 +329,7 @@ export function ModeChooserAuto({ onSettled }: { onSettled: () => void }) {
   const hotkey = summonHotkey();
 
   return (
+    <>
     <Dialog
       open={open}
       // alert: clicking outside must not silently dismiss a one-time question.
@@ -346,7 +372,7 @@ export function ModeChooserAuto({ onSettled }: { onSettled: () => void }) {
               <Checkbox
                 checked={runOnStartup}
                 onChange={(_, d) => setRunOnStartup(Boolean(d.checked))}
-                label="Launch Lighthouse when I sign in"
+                label="Open Lighthouse when I sign in to my computer"
               />
             </div>
           </DialogContent>
@@ -363,5 +389,43 @@ export function ModeChooserAuto({ onSettled }: { onSettled: () => void }) {
         </DialogBody>
       </DialogSurface>
     </Dialog>
+
+    {/* Widget hand-off: confirm the move to the tray so the disappearing main
+        window never reads as "the app quit". Settles the chooser on ack. */}
+    <Dialog
+      open={trayHintOpen}
+      modalType="alert"
+      onOpenChange={(_, d) => {
+        if (!d.open) {
+          setTrayHintOpen(false);
+          settle();
+        }
+      }}
+    >
+      <DialogSurface>
+        <DialogBody>
+          <DialogTitle>Lighthouse is now in your tray</DialogTitle>
+          <DialogContent>
+            <Text>
+              {hotkeyOk
+                ? `The main window is tucked away. Press ${hotkey} anywhere to summon the floating search bar — and open the full window whenever you need it from the Lighthouse tray icon.`
+                : "The main window is tucked away. Open the search bar (and the full window) anytime from the Lighthouse tray icon’s menu."}
+            </Text>
+          </DialogContent>
+          <DialogActions>
+            <Button
+              appearance="primary"
+              onClick={() => {
+                setTrayHintOpen(false);
+                settle();
+              }}
+            >
+              Got it
+            </Button>
+          </DialogActions>
+        </DialogBody>
+      </DialogSurface>
+    </Dialog>
+    </>
   );
 }

@@ -347,6 +347,16 @@ pub async fn license_op(body: Value) -> Result<Value, String> {
             };
             Ok(json!({ "ok": license::submit_feedback(&input).await }))
         }
+        Some("featureInterest") => {
+            let to_ids = |v: &serde_json::Value| -> Vec<String> {
+                v.as_array()
+                    .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                    .unwrap_or_default()
+            };
+            let shown = to_ids(&body["shown"]);
+            let wanted = to_ids(&body["wanted"]);
+            Ok(json!({ "ok": license::submit_feature_interest(&shown, &wanted).await }))
+        }
         Some("notify") => {
             let email = body["email"].as_str().unwrap_or("");
             if email.trim().is_empty() {

@@ -8,7 +8,12 @@ import { OnboardingPanel } from "@/features/onboarding/OnboardingPanel";
 import { ModeChooserAuto } from "@/features/onboarding/ModeChooser";
 import { FileExplorer } from "@/features/explorer/FileExplorer";
 import { ChatPanel } from "@/features/chat/ChatPanel";
-import { LicenseGate, GraceBanner, PostPurchaseFeedback } from "@/features/license/LicenseGate";
+import {
+  LicenseGate,
+  GraceBanner,
+  PostPurchaseFeedback,
+  PurchaseProgress,
+} from "@/features/license/LicenseGate";
 import { BugReport } from "@/features/feedback/BugReport";
 import { FeedbackNudge } from "@/features/feedback/FeedbackNudge";
 import { QuickStartAuto } from "@/features/help/QuickStart";
@@ -128,6 +133,8 @@ export default function Home() {
     <>
       {shell}
       <BugReport />
+      {/* Global checkout progress / error banner (covers every subscribe entry). */}
+      <PurchaseProgress />
       <VersionBadge />
       {onboarded && <FeedbackNudge />}
       {/* First-run surfaces: only once the working shell is actually on screen

@@ -14,9 +14,12 @@
  * exists). On the web build both paths are silent, so it renders nothing.
  */
 import { useEffect, useState } from "react";
-import { Button, Text, makeStyles, shorthands, tokens } from "@fluentui/react-components";
+import { Button, Link, Text, Tooltip, makeStyles, shorthands, tokens } from "@fluentui/react-components";
 import { ArrowDownloadRegular } from "@fluentui/react-icons";
 import { isDesktopShell } from "@/shell/desktopBridge";
+
+/** Releases page — the fallback when an in-app update can't start. */
+const RELEASES_URL = "https://github.com/lmansf/lighthouse/releases";
 
 type UpdateState = {
   phase?: string;
@@ -40,6 +43,7 @@ const useStyles = makeStyles({
   card: {
     display: "flex",
     alignItems: "center",
+    flexWrap: "wrap",
     gap: tokens.spacingHorizontalS,
     width: "100%",
     boxSizing: "border-box",
@@ -50,12 +54,17 @@ const useStyles = makeStyles({
     marginBottom: tokens.spacingVerticalS,
   },
   text: { flexGrow: 1, minWidth: 0 },
+  // Update-failure line: the reason + a link to the releases page, so a failed
+  // click never looks like a dead button.
+  errorRow: { flexBasis: "100%", display: "flex", alignItems: "center", gap: tokens.spacingHorizontalXS },
+  errorText: { color: tokens.colorStatusDangerForeground1 },
 });
 
 export function UpdateNotice({ collapsed }: { collapsed?: boolean }) {
   const styles = useStyles();
   const [update, setUpdate] = useState<UpdateState | null>(null);
   const [busy, setBusy] = useState(false);
+  const [failed, setFailed] = useState(false);
 
   useEffect(() => {
     // The boot event may have fired before this mounted — ask once, and keep
@@ -72,18 +81,48 @@ export function UpdateNotice({ collapsed }: { collapsed?: boolean }) {
     return () => window.removeEventListener("lighthouse:update-state", onState);
   }, []);
 
-  if (!update || collapsed) return null;
+  if (!update) return null;
 
-  const install = () => {
+  // Do the invoke inline (rather than via invokeShell, which swallows errors)
+  // so a genuine failure surfaces instead of silently re-enabling the button.
+  const install = async () => {
     setBusy(true);
-    void invokeShell("update_now").then((r) => {
+    setFailed(false);
+    if (!isDesktopShell()) {
+      setBusy(false);
+      return;
+    }
+    try {
+      const core = await import("@tauri-apps/api/core");
+      const res = (await core.invoke("update_now")) as { ok?: boolean } | undefined;
       // Windows exits into the installer before this resolves; if we're still
       // here the shell opened a dmg or the releases page — stand down.
-      const res = r as { ok?: boolean } | undefined;
       setBusy(false);
       if (res && res.ok === false) setUpdate(null); // fell back to the page
-    });
+    } catch (err) {
+      console.error('Shell command "update_now" failed', err);
+      setBusy(false);
+      setFailed(true);
+    }
   };
+
+  // Collapsed rail: a compact download dot so an update is never hidden behind a
+  // thin sidebar.
+  if (collapsed) {
+    return (
+      <Tooltip content={`Update to Lighthouse ${update.version}`} relationship="label">
+        <Button
+          size="small"
+          appearance="primary"
+          shape="circular"
+          icon={<ArrowDownloadRegular />}
+          aria-label={`Update to Lighthouse ${update.version}`}
+          disabled={busy}
+          onClick={() => void install()}
+        />
+      </Tooltip>
+    );
+  }
 
   return (
     <div className={styles.card}>
@@ -95,10 +134,20 @@ export function UpdateNotice({ collapsed }: { collapsed?: boolean }) {
         appearance="primary"
         icon={<ArrowDownloadRegular />}
         disabled={busy}
-        onClick={install}
+        onClick={() => void install()}
       >
         {busy ? "Downloading…" : update.canInstall ? "Update" : "Get it"}
       </Button>
+      {failed && (
+        <div className={styles.errorRow}>
+          <Text size={200} className={styles.errorText}>
+            Update couldn&apos;t start.
+          </Text>
+          <Link href={RELEASES_URL} target="_blank" rel="noreferrer">
+            Download from Releases →
+          </Link>
+        </div>
+      )}
     </div>
   );
 }

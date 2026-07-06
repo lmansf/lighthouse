@@ -46,6 +46,9 @@ interface LicenseStore {
   activating: boolean;
   activateError: string | null;
   purchasing: boolean;
+  // Surfaced when checkout can't start, or the post-checkout poll times out —
+  // so the subscribe path never dead-ends in silence.
+  subscribeError: string | null;
   paidEnabled: boolean;
   pendingFeedback: boolean; // show the post-purchase feedback form once
   check: () => Promise<LicenseStatus>;
@@ -55,8 +58,11 @@ interface LicenseStore {
   activate: (licenseKey: string) => Promise<boolean>;
   submitFeedback: (f: FeedbackInput) => Promise<boolean>;
   submitNotify: (email: string) => Promise<boolean>;
+  /** Record a feature-interest vote (which shelved features the user would use). */
+  submitFeatureInterest: (shown: string[], wanted: string[]) => Promise<boolean>;
   subscribe: (email: string) => Promise<void>;
   cancelSubscribe: () => void;
+  dismissSubscribeError: () => void;
   dismissFeedback: () => void;
 }
 
@@ -90,6 +96,7 @@ export const useLicenseStore = create<LicenseStore>((set, get) => ({
   activating: false,
   activateError: null,
   purchasing: false,
+  subscribeError: null,
   paidEnabled: false,
   pendingFeedback: false,
 
@@ -183,11 +190,22 @@ export const useLicenseStore = create<LicenseStore>((set, get) => ({
     }
   },
 
+  submitFeatureInterest: async (shown: string[], wanted: string[]) => {
+    try {
+      const data = await postLicense("featureInterest", { shown, wanted });
+      return Boolean(data.ok);
+    } catch {
+      return false;
+    }
+  },
+
   dismissFeedback: () => set({ pendingFeedback: false }),
+
+  dismissSubscribeError: () => set({ subscribeError: null }),
 
   // Stop waiting on a checkout the user abandoned in the browser; the poll loop
   // sees purchasing=false and breaks, freeing the Subscribe/Renew controls.
-  cancelSubscribe: () => set({ purchasing: false }),
+  cancelSubscribe: () => set({ purchasing: false, subscribeError: null }),
 
   // Open Stripe checkout in the browser, then poll until the webhook upgrades
   // this install to paid — the vault unlocks itself, no key entry. The email
@@ -198,7 +216,7 @@ export const useLicenseStore = create<LicenseStore>((set, get) => ({
     // licenseType='paid', so a real purchase is the moment paid_through ADVANCES
     // past this — not merely "paid & grace", which is already true on entry.
     const entryThrough = Date.parse(get().trialEnd ?? "");
-    set({ purchasing: true });
+    set({ purchasing: true, subscribeError: null });
     try {
       const r = await fetch("/api/license", {
         method: "POST",
@@ -207,12 +225,19 @@ export const useLicenseStore = create<LicenseStore>((set, get) => ({
       });
       const { url } = (await r.json().catch(() => ({}))) as { url?: string };
       if (!url) {
-        set({ purchasing: false });
+        // Checkout couldn't start — say so instead of closing the dialog on a
+        // silent no-op, which reads as "nothing happened".
+        set({
+          purchasing: false,
+          subscribeError:
+            "We couldn't start checkout — the payment service didn't respond. Please try again in a moment.",
+        });
         return;
       }
       window.open(url, "_blank", "noopener,noreferrer");
       // Poll check() for up to ~10 minutes; stop once the webhook extends our
       // paid_through (covers both a first purchase and a renewal from grace).
+      let confirmed = false;
       for (let i = 0; i < 200; i++) {
         await new Promise((res) => setTimeout(res, 3000));
         const status = await get().check();
@@ -223,10 +248,21 @@ export const useLicenseStore = create<LicenseStore>((set, get) => ({
           // Purchase confirmed — queue the post-purchase feedback survey, shown
           // after Stripe's receipt and before the app reopens to chat.
           set({ pendingFeedback: true });
+          confirmed = true;
           break;
         }
         if (!get().purchasing) break; // cancelled elsewhere
       }
+      // The poll ran its course without seeing payment and wasn't cancelled:
+      // tell the user rather than going silently inert.
+      if (!confirmed && get().purchasing) {
+        set({
+          subscribeError:
+            "We haven't seen your payment go through yet. If you completed checkout it can take a minute — you can keep using Lighthouse and it'll unlock automatically.",
+        });
+      }
+    } catch {
+      set({ subscribeError: "Couldn't reach the payment service. Please try again." });
     } finally {
       set({ purchasing: false });
     }

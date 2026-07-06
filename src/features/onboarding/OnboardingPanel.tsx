@@ -83,15 +83,7 @@ const EMAIL_RE = /.+@.+\..+/;
  * Split out as a component because `useLocalModel` polls `/api/model`, and
  * mounting it only on this slide keeps the earlier slides from polling.
  */
-function FinishSetupButton({
-  providerId,
-  disabled,
-  onFinish,
-}: {
-  providerId: string;
-  disabled: boolean;
-  onFinish: () => void;
-}) {
+function FinishSetupButton({ providerId, disabled }: { providerId: string; disabled: boolean }) {
   const styles = useStyles();
   const { status, received, total } = useLocalModel();
   const localNotReady = providerId === "local" && status !== "ready";
@@ -107,7 +99,8 @@ function FinishSetupButton({
             : "The private model isn't installed yet — install it above, or finish now and add it later in Settings → AI models."}
         </Text>
       )}
-      <Button appearance="primary" disabled={disabled} onClick={onFinish}>
+      {/* type=submit so the enclosing form's onSubmit (Enter or click) finishes. */}
+      <Button appearance="primary" type="submit" disabled={disabled}>
         {localNotReady ? "Finish anyway" : "Finish setup"}
       </Button>
     </>
@@ -122,6 +115,7 @@ export function OnboardingPanel() {
   const selectModel = useAuthStore((s) => s.selectModel);
   const setDefaultInclusion = useAuthStore((s) => s.setDefaultInclusion);
   const signOut = useAuthStore((s) => s.signOut);
+  const setStep = useAuthStore((s) => s.setStep);
   const startTrial = useLicenseStore((s) => s.startTrial);
 
   const [email, setEmail] = useState("");
@@ -234,9 +228,23 @@ export function OnboardingPanel() {
     setSubmitting(false);
   }
 
+  /** Commit the model choice (shared by the Finish button and Enter-to-submit). */
+  function finishSetup() {
+    if (providerId !== "local" && !apiKey) return;
+    // Activation guardrail: did they connect a real (cloud) key?
+    if (providerId !== "local" && apiKey) logEvent("api_key_entered");
+    void selectModel(providerId, modelId, apiKey);
+  }
+
   if (onboarding.step === "sign-in") {
     return (
-      <div className={styles.panel}>
+      <form
+        className={styles.panel}
+        onSubmit={(e) => {
+          e.preventDefault();
+          void submitSignIn();
+        }}
+      >
         <Text size={200} className={styles.stepLabel}>
           Step 1 of 3
         </Text>
@@ -271,9 +279,9 @@ export function OnboardingPanel() {
         </Field>
         <Button
           appearance="primary"
+          type="submit"
           disabled={!email || signingIn}
           icon={signingIn ? <Spinner size="tiny" /> : undefined}
-          onClick={() => void submitSignIn()}
         >
           Continue
         </Button>
@@ -282,13 +290,20 @@ export function OnboardingPanel() {
             {signInError}
           </Text>
         )}
-      </div>
+      </form>
     );
   }
 
   if (onboarding.step === "register") {
     return (
-      <div className={styles.panel}>
+      <form
+        className={styles.panel}
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (submitting || !regEmail) return;
+          void submitRegistration();
+        }}
+      >
         <Text size={200} className={styles.stepLabel}>
           Step 2 of 3
         </Text>
@@ -342,14 +357,19 @@ export function OnboardingPanel() {
         <Text className={styles.hint}>You can change this anytime; it only sets the starting point for files you add.</Text>
         <div className={styles.row}>
           <Button
-            appearance="primary"
-            disabled={submitting || !regEmail}
-            onClick={() => void submitRegistration()}
+            appearance="subtle"
+            type="button"
+            disabled={submitting}
+            onClick={() => setStep("sign-in")}
           >
+            Back
+          </Button>
+          <Button appearance="primary" type="submit" disabled={submitting || !regEmail}>
             Submit
           </Button>
           <Button
             appearance="subtle"
+            type="button"
             disabled={submitting}
             onClick={() =>
               void (async () => {
@@ -371,13 +391,19 @@ export function OnboardingPanel() {
             Skip
           </Button>
         </div>
-      </div>
+      </form>
     );
   }
 
   if (onboarding.step === "select-model") {
     return (
-      <div className={styles.panel}>
+      <form
+        className={styles.panel}
+        onSubmit={(e) => {
+          e.preventDefault();
+          finishSetup();
+        }}
+      >
         <Text size={200} className={styles.stepLabel}>
           Step 3 of 3
         </Text>
@@ -438,16 +464,11 @@ export function OnboardingPanel() {
             />
           </Field>
         )}
-        <FinishSetupButton
-          providerId={providerId}
-          disabled={providerId !== "local" && !apiKey}
-          onFinish={() => {
-            // Activation guardrail: did they connect a real (cloud) key?
-            if (providerId !== "local" && apiKey) logEvent("api_key_entered");
-            void selectModel(providerId, modelId, apiKey);
-          }}
-        />
-      </div>
+        <FinishSetupButton providerId={providerId} disabled={providerId !== "local" && !apiKey} />
+        <Button appearance="subtle" type="button" onClick={() => setStep("register")}>
+          Back
+        </Button>
+      </form>
     );
   }
 

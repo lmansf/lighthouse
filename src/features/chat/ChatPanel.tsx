@@ -24,7 +24,15 @@ import {
   Badge,
   Button,
   Card,
-  Switch,
+  DrawerBody,
+  DrawerHeader,
+  DrawerHeaderTitle,
+  Input,
+  OverlayDrawer,
+  Popover,
+  PopoverSurface,
+  PopoverTrigger,
+  SearchBox,
   Text,
   Textarea,
   Title3,
@@ -36,20 +44,25 @@ import {
 } from "@fluentui/react-components";
 import {
   AddRegular,
+  ArrowClockwiseRegular,
   ArrowDownRegular,
+  ArrowUndoRegular,
   AttachRegular,
   CheckmarkRegular,
   CopyRegular,
+  DeleteRegular,
   DismissRegular,
   DocumentAddRegular,
   DocumentRegular,
+  EditRegular,
   ErrorCircleRegular,
+  HistoryRegular,
   OpenRegular,
   SendRegular,
   SettingsRegular,
-  Speaker2Regular,
-  SpeakerOffRegular,
   SquareRegular,
+  ThumbDislikeRegular,
+  ThumbLikeRegular,
   WarningRegular,
 } from "@fluentui/react-icons";
 import ReactMarkdown, { type Components } from "react-markdown";
@@ -60,14 +73,11 @@ import { chatService, MODEL_PROVIDERS } from "@/contracts";
 import { useRagStore } from "@/stores/useRagStore";
 import { useAuthStore } from "@/stores/useAuthStore";
 import { logEvent } from "@/lib/logEvent";
-import { isSpeechSupported, speak, stopSpeaking } from "@/lib/speech";
 import { useChatStore, type TranscriptMessage } from "@/stores/useChatStore";
-import { ConversePlaceholder } from "@/shell/ConversePlaceholder";
+import { modKey } from "@/features/onboarding/ModeChooser";
 import { ACCENTS } from "@/shell/theme";
 import { FILE_DRAG_MIME, parseDraggedFiles, type DraggedFile } from "@/shell/dnd";
 import { isDesktopShell, pathsForFiles } from "@/shell/desktopBridge";
-
-const READ_ALOUD_KEY = "lighthouse.chat.readAloud";
 
 // A user this close to the bottom (px) counts as "pinned": we keep auto-
 // scrolling for them as tokens stream in. Scrolling further up releases the
@@ -80,6 +90,7 @@ const COMPOSER_MAX_HEIGHT = 132;
 
 const useStyles = makeStyles({
   panel: {
+    position: "relative",
     display: "flex",
     flexDirection: "column",
     minHeight: 0,
@@ -90,6 +101,9 @@ const useStyles = makeStyles({
     transitionProperty: "border-color, background-color",
     transitionDuration: tokens.durationFaster,
   },
+  // Top-right History affordance for the empty (pre-conversation) hero, so past
+  // chats are reachable even before the main header exists.
+  heroHistory: { position: "absolute", top: tokens.spacingVerticalM, right: tokens.spacingHorizontalM },
   // Highlight while a file is being dragged over the chat (from the explorer or
   // the OS), mirroring the explorer's drop affordance.
   panelDropping: {
@@ -438,6 +452,117 @@ const useStyles = makeStyles({
     animationIterationCount: "infinite",
     animationTimingFunction: "ease-in-out",
   },
+
+  // --- New chat "Undo" bar: a quiet reassurance strip shown briefly after a
+  //     New chat archives the prior conversation, with one click back to it. ---
+  undoBar: {
+    display: "flex",
+    alignItems: "center",
+    gap: tokens.spacingHorizontalS,
+    padding: `${tokens.spacingVerticalS} ${tokens.spacingHorizontalM}`,
+    marginBottom: tokens.spacingVerticalS,
+    borderRadius: tokens.borderRadiusMedium,
+    backgroundColor: tokens.colorNeutralBackground3,
+    color: tokens.colorNeutralForeground2,
+  },
+
+  // --- Recent-chats drawer ---
+  historyDrawer: { width: "min(380px, 90vw)" },
+  histSearch: { width: "100%", marginBottom: tokens.spacingVerticalM },
+  histList: { display: "flex", flexDirection: "column", gap: tokens.spacingVerticalXXS },
+  histEmpty: {
+    color: tokens.colorNeutralForeground3,
+    textAlign: "center",
+    ...shorthands.padding(tokens.spacingVerticalXXL, tokens.spacingHorizontalL),
+  },
+  histRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: tokens.spacingHorizontalXS,
+    ...shorthands.padding(tokens.spacingVerticalXS, tokens.spacingHorizontalS),
+    borderRadius: tokens.borderRadiusMedium,
+    ":hover": { backgroundColor: tokens.colorNeutralBackground2Hover },
+    ":hover .hist-actions": { opacity: 1 },
+  },
+  histRowActive: { backgroundColor: tokens.colorBrandBackground2 },
+  histRowMain: {
+    display: "flex",
+    flexDirection: "column",
+    flex: 1,
+    minWidth: 0,
+    ...shorthands.padding("2px", "0"),
+    cursor: "pointer",
+    ...shorthands.border("none"),
+    backgroundColor: "transparent",
+    textAlign: "left",
+    color: "inherit",
+  },
+  histTitle: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+  histTime: { color: tokens.colorNeutralForeground3 },
+  histActions: { display: "flex", gap: "0", opacity: 0, transition: "opacity 120ms ease" },
+  histEditRow: { display: "flex", alignItems: "center", gap: tokens.spacingHorizontalXS, flex: 1 },
+  histConfirm: {
+    display: "flex",
+    alignItems: "center",
+    gap: tokens.spacingHorizontalXS,
+    flex: 1,
+    flexWrap: "wrap",
+  },
+  histConfirmText: { color: tokens.colorStatusDangerForeground1, flex: 1, minWidth: "100px" },
+
+  // --- Inline question editor (the edit-your-question pencil) ---
+  questionRow: {
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "flex-end",
+    gap: tokens.spacingVerticalXXS,
+    ":hover .q-actions": { opacity: 1 },
+    ":focus-within .q-actions": { opacity: 1 },
+  },
+  questionActions: {
+    display: "flex",
+    gap: "0",
+    opacity: 0,
+    transition: "opacity 120ms ease",
+  },
+  editWrap: { alignSelf: "stretch", display: "flex", flexDirection: "column", gap: tokens.spacingVerticalXS },
+  editActions: { display: "flex", justifyContent: "flex-end", gap: tokens.spacingHorizontalS },
+
+  // Selected thumb: filled brand color so the chosen rating reads as "set".
+  thumbActive: { color: tokens.colorBrandForeground1 },
+
+  // --- Attach picker popover: quick search over the vault's own files ---
+  attachSurface: {
+    width: "320px",
+    maxWidth: "90vw",
+    ...shorthands.padding(tokens.spacingVerticalS),
+    display: "flex",
+    flexDirection: "column",
+    gap: tokens.spacingVerticalS,
+  },
+  attachList: {
+    display: "flex",
+    flexDirection: "column",
+    maxHeight: "260px",
+    overflowY: "auto",
+    gap: "1px",
+  },
+  attachItem: {
+    display: "flex",
+    alignItems: "center",
+    gap: tokens.spacingHorizontalS,
+    ...shorthands.padding(tokens.spacingVerticalXS, tokens.spacingHorizontalS),
+    borderRadius: tokens.borderRadiusMedium,
+    cursor: "pointer",
+    ...shorthands.border("none"),
+    backgroundColor: "transparent",
+    color: "inherit",
+    width: "100%",
+    textAlign: "left",
+    ":hover": { backgroundColor: tokens.colorNeutralBackground2Hover },
+  },
+  attachItemName: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 },
+  attachEmpty: { color: tokens.colorNeutralForeground3, ...shorthands.padding(tokens.spacingVerticalM, tokens.spacingHorizontalS) },
 });
 
 /** DOM id for a turn's nth reference card ([n] chips scroll to these). */
@@ -515,6 +640,31 @@ function describeAskError(err: unknown): string {
 /** Trim long file names so suggestion chips stay one-line scannable. */
 function shortName(name: string): string {
   return name.length > 28 ? `${name.slice(0, 27).trimEnd()}…` : name;
+}
+
+/**
+ * Strip [n] citation markers for "copy answer": the numbers point at reference
+ * cards that don't come along with the copied text, so they're noise on paste.
+ * Also tidies the spaces/space-before-punctuation the removal leaves behind.
+ */
+function stripCitations(content: string): string {
+  return content
+    .replace(/\s*\[\d{1,3}\]/g, "")
+    .replace(/[ \t]{2,}/g, " ")
+    .replace(/[ \t]+([.,;:!?])/g, "$1");
+}
+
+/** Compact "how long ago" for the recent-chats list (e.g. "3m", "2h", "Apr 5"). */
+function formatRelativeTime(ts: number): string {
+  const diff = Date.now() - ts;
+  const min = Math.round(diff / 60000);
+  if (min < 1) return "just now";
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.round(min / 60);
+  if (hr < 24) return `${hr}h ago`;
+  const day = Math.round(hr / 24);
+  if (day < 7) return `${day}d ago`;
+  return new Date(ts).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
 /**
@@ -610,8 +760,32 @@ export function ChatPanel() {
   const messages = useChatStore((s) => s.messages);
   const setMessages = useChatStore((s) => s.setMessages);
   const persistMessages = useChatStore((s) => s.persist);
-  const clearMessages = useChatStore((s) => s.clear);
+  const conversations = useChatStore((s) => s.conversations);
+  const currentId = useChatStore((s) => s.currentId);
+  const newConversation = useChatStore((s) => s.newConversation);
+  const undoNewConversation = useChatStore((s) => s.undoNewConversation);
+  const openConversation = useChatStore((s) => s.openConversation);
+  const renameConversation = useChatStore((s) => s.renameConversation);
+  const deleteConversation = useChatStore((s) => s.deleteConversation);
   const [streaming, setStreaming] = useState(false);
+
+  // Recent-chats drawer + its inline rename/delete affordances.
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [histSearch, setHistSearch] = useState("");
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameText, setRenameText] = useState("");
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  // "Started a new chat — Undo" strip, auto-dismissed after a few seconds.
+  const [showUndo, setShowUndo] = useState(false);
+  const undoTimer = useRef<number | null>(null);
+  // Inline editing of a past question (id of the user message being edited).
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editText, setEditText] = useState("");
+  // Attach-picker popover (quick search over the vault's own files) + its query.
+  const [attachOpen, setAttachOpen] = useState(false);
+  const [attachSearch, setAttachSearch] = useState("");
+  // Per-answer 👍/👎, remembered for the session so the choice reads as "set".
+  const [ratings, setRatings] = useState<Record<string, "up" | "down">>({});
   // Cancels the in-flight ask() when the user presses Stop.
   const abortRef = useRef<AbortController | null>(null);
   // Files explicitly attached to the conversation (dragged from the explorer or
@@ -631,6 +805,13 @@ export function ChatPanel() {
   const idSeq = useRef(
     messages.reduce((max, m) => Math.max(max, Number(m.id.slice(1)) || 0), 0),
   );
+  // Re-seed the id counter when the active conversation changes (open / undo /
+  // delete), so new turns never collide with ids already in the loaded
+  // transcript. Read from the store so we see the just-switched messages.
+  useEffect(() => {
+    const msgs = useChatStore.getState().messages;
+    idSeq.current = msgs.reduce((max, m) => Math.max(max, Number(m.id.slice(1)) || 0), 0);
+  }, [currentId]);
   // Fires the activation event only on the first answered question this session.
   const firstQueryLogged = useRef(false);
 
@@ -650,53 +831,10 @@ export function ChatPanel() {
     () => () => {
       if (copyTimer.current !== null) window.clearTimeout(copyTimer.current);
       if (flashTimer.current !== null) window.clearTimeout(flashTimer.current);
+      if (undoTimer.current !== null) window.clearTimeout(undoTimer.current);
     },
     [],
   );
-
-  // Read-aloud (on-device TTS): a remembered preference to auto-speak each new
-  // answer, plus which message is speaking right now (for the per-message button).
-  const speechSupported = isSpeechSupported();
-  const [readAloud, setReadAloud] = useState(false);
-  const [speakingId, setSpeakingId] = useState<string | null>(null);
-  // The streaming `ask()` closure captures `readAloud` from its defining render;
-  // a ref lets the post-stream auto-speak read the latest value so toggling the
-  // switch off mid-stream prevents that answer from being spoken.
-  const readAloudRef = useRef(false);
-  readAloudRef.current = readAloud;
-
-  useEffect(() => {
-    if (typeof window !== "undefined" && window.localStorage.getItem(READ_ALOUD_KEY) === "1") {
-      setReadAloud(true);
-    }
-  }, []);
-
-  function setReadAloudPref(on: boolean) {
-    setReadAloud(on);
-    try {
-      window.localStorage.setItem(READ_ALOUD_KEY, on ? "1" : "0");
-    } catch {
-      /* private mode / storage full - the in-session toggle still works */
-    }
-    if (!on) {
-      stopSpeaking();
-      setSpeakingId(null);
-    }
-  }
-
-  /** Speak a message's answer, or stop if it's already the one playing. */
-  function toggleSpeak(id: string, content: string) {
-    if (speakingId === id) {
-      stopSpeaking();
-      setSpeakingId(null);
-      return;
-    }
-    setSpeakingId(id);
-    speak(content, () => setSpeakingId((cur) => (cur === id ? null : cur)));
-  }
-
-  // Stop any speech when the panel unmounts.
-  useEffect(() => () => stopSpeaking(), []);
 
   function addAttachments(files: DraggedFile[]) {
     setAttachments((cur) => {
@@ -897,8 +1035,8 @@ export function ChatPanel() {
   // DOM event (docs/widget-scope.md, W1 contract). Send it through the same
   // path as pressing Ask — unless an answer is already streaming, in which
   // case only prefill the composer so the in-flight turn isn't clobbered.
-  // Same latest-closure ref pattern as readAloudRef: the listener mounts once
-  // while the handler always sees fresh state.
+  // Latest-closure ref pattern: the listener mounts once while the handler
+  // always sees fresh state.
   const askSeedRef = useRef<(q: string) => void>(() => {});
   askSeedRef.current = (q: string) => {
     const seed = q.trim();
@@ -951,9 +1089,6 @@ export function ChatPanel() {
     // Asking always re-pins: the user wants to watch their new answer arrive.
     pinnedRef.current = true;
     setPinned(true);
-    // A new question interrupts any answer being read aloud.
-    stopSpeaking();
-    setSpeakingId(null);
     const controller = new AbortController();
     abortRef.current = controller;
     let sourceCount = 0;
@@ -992,13 +1127,6 @@ export function ChatPanel() {
         if (!firstQueryLogged.current) {
           firstQueryLogged.current = true;
           logEvent("first_query", { source_count: sourceCount });
-        }
-        // Read the finished answer aloud if the preference is on (on-device TTS).
-        // Stopped and failed turns never reach this branch, so TTS only ever
-        // reads completed answers.
-        if (readAloudRef.current && finalContent.trim()) {
-          setSpeakingId(asstId);
-          speak(finalContent, () => setSpeakingId((cur) => (cur === asstId ? null : cur)));
         }
       }
     } catch (err) {
@@ -1051,23 +1179,102 @@ export function ChatPanel() {
 
   function newChat() {
     if (streaming) return;
-    stopSpeaking();
-    setSpeakingId(null);
-    clearMessages();
     setQuestion("");
     setAttachments([]);
+    setEditingId(null);
+    // Nothing to archive when the conversation is already empty — just stay put.
+    if (messages.length === 0) return;
+    newConversation();
+    // The prior conversation is safe in history; offer a few seconds to jump
+    // back to it rather than hunting for it in the drawer.
+    setShowUndo(true);
+    if (undoTimer.current !== null) window.clearTimeout(undoTimer.current);
+    undoTimer.current = window.setTimeout(() => setShowUndo(false), 8000);
   }
   newChatRef.current = newChat;
 
-  /** Copy an answer's raw Markdown; the icon flips to a checkmark briefly. */
+  function undoNewChat() {
+    if (undoTimer.current !== null) window.clearTimeout(undoTimer.current);
+    setShowUndo(false);
+    undoNewConversation();
+  }
+
+  /** Open a past conversation from the recent-chats drawer. */
+  function openChat(id: string) {
+    if (streaming || id === currentId) {
+      setHistoryOpen(false);
+      return;
+    }
+    openConversation(id);
+    setHistoryOpen(false);
+    setShowUndo(false);
+    setQuestion("");
+    setAttachments([]);
+    setEditingId(null);
+  }
+
+  /** Begin editing a past question in place (pencil affordance / ArrowUp). */
+  function startEdit(userId: string, current: string) {
+    if (streaming) return;
+    setEditingId(userId);
+    setEditText(current);
+  }
+  function cancelEdit() {
+    setEditingId(null);
+    setEditText("");
+  }
+  /** Save an edited question: drop it (and everything after) and re-ask. */
+  function saveEdit(userId: string) {
+    const next = editText.trim();
+    setEditingId(null);
+    setEditText("");
+    if (!next || streaming) return;
+    const msgs = useChatStore.getState().messages;
+    const idx = msgs.findIndex((m) => m.id === userId);
+    if (idx < 0 || msgs[idx].role !== "user") return;
+    setMessages((m) => m.slice(0, idx));
+    void sendQuestion(next);
+  }
+  /** Regenerate an answer: drop the question+answer pair (and after) and re-ask. */
+  function regenerate(asstId: string) {
+    if (streaming) return;
+    const msgs = useChatStore.getState().messages;
+    const idx = msgs.findIndex((m) => m.id === asstId);
+    const prev = idx > 0 ? msgs[idx - 1] : undefined;
+    if (!prev || prev.role !== "user") return;
+    setMessages((m) => m.slice(0, idx - 1));
+    void sendQuestion(prev.content);
+  }
+
+  /** Record a 👍/👎 on an answer (a quality signal); clicking again clears it. */
+  function rateAnswer(id: string, rating: "up" | "down") {
+    setRatings((r) => {
+      const next = { ...r };
+      if (next[id] === rating) delete next[id];
+      else next[id] = rating;
+      return next;
+    });
+    logEvent("answer_feedback", { rating });
+  }
+
+  /** Commit an inline rename from the recent-chats drawer. */
+  function commitRename(id: string) {
+    const t = renameText.trim();
+    if (t) renameConversation(id, t);
+    setRenamingId(null);
+    setRenameText("");
+  }
+
+  /** Copy an answer's Markdown (minus [n] markers); the icon flips to a check. */
   async function copyAnswer(id: string, content: string) {
+    const text = stripCitations(content);
     try {
-      await navigator.clipboard.writeText(content);
+      await navigator.clipboard.writeText(text);
     } catch {
       // Clipboard API unavailable (older webviews / stricter permissions):
       // fall back to the legacy hidden-textarea path.
       const ta = document.createElement("textarea");
-      ta.value = content;
+      ta.value = text;
       ta.style.position = "fixed";
       ta.style.opacity = "0";
       document.body.appendChild(ta);
@@ -1111,6 +1318,18 @@ export function ChatPanel() {
     if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault();
       ask();
+      return;
+    }
+    // ArrowUp on an empty composer edits your last question — the familiar
+    // chat convention for "fix what I just asked".
+    if (e.key === "ArrowUp" && !question && !streaming && messages.length > 0) {
+      for (let i = messages.length - 1; i >= 0; i -= 1) {
+        if (messages[i].role === "user") {
+          e.preventDefault();
+          startEdit(messages[i].id, messages[i].content);
+          break;
+        }
+      }
     }
   }
 
@@ -1135,6 +1354,27 @@ export function ChatPanel() {
       { label: "What do my files say about…", fill: "What do my files say about " },
     ];
   }, [includedFiles]);
+
+  // Recent conversations for the history drawer: real (non-empty) chats, newest
+  // first, filtered by the search box (title match).
+  const recentChats = useMemo(() => {
+    const q = histSearch.trim().toLowerCase();
+    return conversations
+      .filter((c) => c.messages.length > 0)
+      .filter((c) => !q || c.title.toLowerCase().includes(q))
+      .sort((a, b) => b.updatedAt - a.updatedAt);
+  }, [conversations, histSearch]);
+
+  // Vault files offered by the attach picker: files not already attached,
+  // filtered by the picker's search, capped so the list stays snappy.
+  const attachableFiles = useMemo(() => {
+    const attached = new Set(attachments.map((a) => a.id));
+    const q = attachSearch.trim().toLowerCase();
+    return nodes
+      .filter((n) => n.kind === "file" && !attached.has(n.id))
+      .filter((n) => !q || n.name.toLowerCase().includes(q))
+      .slice(0, 50);
+  }, [nodes, attachments, attachSearch]);
 
   const visibleBadgeText = `${includedFileIds.length} ${
     includedFileIds.length === 1 ? "file" : "files"
@@ -1170,8 +1410,91 @@ export function ChatPanel() {
       </div>
     ) : null;
 
+  const attachButton = (
+    <Popover
+      open={attachOpen}
+      onOpenChange={(_, d) => {
+        setAttachOpen(d.open);
+        if (!d.open) setAttachSearch("");
+      }}
+      trapFocus
+      positioning="above-start"
+    >
+      <PopoverTrigger disableButtonEnhancement>
+        <Tooltip content="Attach files to this question" relationship="label">
+          <Button appearance="subtle" icon={<AttachRegular />} aria-label="Attach files" />
+        </Tooltip>
+      </PopoverTrigger>
+      <PopoverSurface className={styles.attachSurface}>
+        <SearchBox
+          placeholder="Search your files…"
+          value={attachSearch}
+          onChange={(_, d) => setAttachSearch(d.value)}
+        />
+        <div className={styles.attachList}>
+          {attachableFiles.length === 0 ? (
+            <Text size={200} className={styles.attachEmpty}>
+              {nodes.some((n) => n.kind === "file")
+                ? "No matching files."
+                : "No files in your vault yet."}
+            </Text>
+          ) : (
+            attachableFiles.map((n) => (
+              <button
+                key={n.id}
+                type="button"
+                className={styles.attachItem}
+                onClick={() => {
+                  addAttachments([{ id: n.id, name: n.name }]);
+                  setAttachOpen(false);
+                  setAttachSearch("");
+                }}
+              >
+                <DocumentRegular fontSize={16} />
+                <span className={styles.attachItemName} title={n.name}>
+                  {n.name}
+                </span>
+              </button>
+            ))
+          )}
+        </div>
+        <Button
+          appearance="subtle"
+          size="small"
+          icon={<DocumentAddRegular />}
+          onClick={() => {
+            setAttachOpen(false);
+            window.dispatchEvent(new CustomEvent("lighthouse:browse-files"));
+          }}
+        >
+          Add files to vault…
+        </Button>
+      </PopoverSurface>
+    </Popover>
+  );
+
   const composer = (placeholder: string) => (
     <div>
+      {showUndo && (
+        <div className={styles.undoBar}>
+          <ArrowUndoRegular fontSize={16} />
+          <Text size={200}>Started a new chat — the previous one is saved in your history.</Text>
+          <span style={{ flex: 1 }} />
+          <Button size="small" appearance="primary" onClick={undoNewChat}>
+            Undo
+          </Button>
+          <Button
+            size="small"
+            appearance="subtle"
+            icon={<DismissRegular />}
+            aria-label="Dismiss"
+            onClick={() => {
+              if (undoTimer.current !== null) window.clearTimeout(undoTimer.current);
+              setShowUndo(false);
+            }}
+          />
+        </div>
+      )}
       {addNotice && (
         <div className={styles.addNotice}>
           <Text size={200}>{addNotice}</Text>
@@ -1187,6 +1510,7 @@ export function ChatPanel() {
       )}
       {attachmentBar}
       <div className={styles.composer}>
+        {attachButton}
         <Textarea
           ref={composerRef}
           className={styles.composerField}
@@ -1210,6 +1534,7 @@ export function ChatPanel() {
       <div className={styles.composerMeta}>
         <Text size={200} className={styles.metaLine}>
           Enter to send · Shift+Enter for a new line
+          {messages.length > 0 ? " · ↑ to edit your last question" : ""}
         </Text>
         <Text size={200} className={styles.metaLine}>
           {provenance}
@@ -1267,6 +1592,185 @@ export function ChatPanel() {
     );
   }
 
+  const historyButton = (
+    <Button
+      appearance="subtle"
+      icon={<HistoryRegular />}
+      onClick={() => setHistoryOpen(true)}
+      title="Recent chats"
+    >
+      History
+    </Button>
+  );
+
+  const historyDrawer = (
+    <OverlayDrawer
+      position="start"
+      open={historyOpen}
+      onOpenChange={(_, d) => {
+        setHistoryOpen(d.open);
+        if (!d.open) {
+          setRenamingId(null);
+          setConfirmDeleteId(null);
+          setHistSearch("");
+        }
+      }}
+      className={styles.historyDrawer}
+    >
+      <DrawerHeader>
+        <DrawerHeaderTitle
+          action={
+            <Button
+              appearance="subtle"
+              aria-label="Close"
+              icon={<DismissRegular />}
+              onClick={() => setHistoryOpen(false)}
+            />
+          }
+        >
+          Recent chats
+        </DrawerHeaderTitle>
+      </DrawerHeader>
+      <DrawerBody>
+        <Button
+          appearance="secondary"
+          icon={<AddRegular />}
+          disabled={streaming || messages.length === 0}
+          onClick={() => {
+            newChat();
+            setHistoryOpen(false);
+          }}
+          style={{ width: "100%", marginBottom: tokens.spacingVerticalM }}
+        >
+          New chat
+        </Button>
+        <SearchBox
+          className={styles.histSearch}
+          placeholder="Search chats…"
+          value={histSearch}
+          onChange={(_, d) => setHistSearch(d.value)}
+        />
+        {recentChats.length === 0 ? (
+          <Text className={styles.histEmpty}>
+            {histSearch
+              ? "No chats match your search."
+              : "Your past conversations will appear here."}
+          </Text>
+        ) : (
+          <div className={styles.histList}>
+            {recentChats.map((c) => {
+              const active = c.id === currentId;
+              if (renamingId === c.id) {
+                return (
+                  <div key={c.id} className={styles.histRow}>
+                    <div className={styles.histEditRow}>
+                      <Input
+                        value={renameText}
+                        onChange={(_, d) => setRenameText(d.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") commitRename(c.id);
+                          if (e.key === "Escape") setRenamingId(null);
+                        }}
+                        autoFocus
+                        style={{ flex: 1 }}
+                      />
+                      <Button
+                        size="small"
+                        appearance="primary"
+                        icon={<CheckmarkRegular />}
+                        aria-label="Save name"
+                        onClick={() => commitRename(c.id)}
+                      />
+                      <Button
+                        size="small"
+                        appearance="subtle"
+                        icon={<DismissRegular />}
+                        aria-label="Cancel rename"
+                        onClick={() => setRenamingId(null)}
+                      />
+                    </div>
+                  </div>
+                );
+              }
+              if (confirmDeleteId === c.id) {
+                return (
+                  <div key={c.id} className={styles.histRow}>
+                    <div className={styles.histConfirm}>
+                      <Text size={200} className={styles.histConfirmText}>
+                        Delete this chat?
+                      </Text>
+                      <Button
+                        size="small"
+                        appearance="primary"
+                        onClick={() => {
+                          deleteConversation(c.id);
+                          setConfirmDeleteId(null);
+                        }}
+                      >
+                        Delete
+                      </Button>
+                      <Button
+                        size="small"
+                        appearance="subtle"
+                        onClick={() => setConfirmDeleteId(null)}
+                      >
+                        Cancel
+                      </Button>
+                    </div>
+                  </div>
+                );
+              }
+              return (
+                <div
+                  key={c.id}
+                  className={mergeClasses(styles.histRow, active && styles.histRowActive)}
+                >
+                  <button
+                    type="button"
+                    className={styles.histRowMain}
+                    onClick={() => openChat(c.id)}
+                    disabled={streaming}
+                  >
+                    <Text
+                      size={300}
+                      weight={active ? "semibold" : "regular"}
+                      className={styles.histTitle}
+                    >
+                      {c.title}
+                    </Text>
+                    <Text size={200} className={styles.histTime}>
+                      {formatRelativeTime(c.updatedAt)}
+                    </Text>
+                  </button>
+                  <div className={mergeClasses(styles.histActions, "hist-actions")}>
+                    <Button
+                      size="small"
+                      appearance="subtle"
+                      icon={<EditRegular />}
+                      aria-label="Rename chat"
+                      onClick={() => {
+                        setRenamingId(c.id);
+                        setRenameText(c.title);
+                        setConfirmDeleteId(null);
+                      }}
+                    />
+                    <Button
+                      size="small"
+                      appearance="subtle"
+                      icon={<DeleteRegular />}
+                      aria-label="Delete chat"
+                      onClick={() => setConfirmDeleteId(c.id)}
+                    />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </DrawerBody>
+    </OverlayDrawer>
+  );
+
   // Before the first question, center the prompt in the rail (Google-style).
   if (messages.length === 0 && !streaming) {
     return (
@@ -1275,6 +1779,8 @@ export function ChatPanel() {
         className={mergeClasses(styles.panel, dropping ? styles.panelDropping : undefined)}
         {...dropHandlers}
       >
+        {historyDrawer}
+        {recentChats.length > 0 && <div className={styles.heroHistory}>{historyButton}</div>}
         <div className={styles.hero}>
           <span className={styles.beacon} />
           <Title3>Ask Lighthouse</Title3>
@@ -1331,27 +1837,19 @@ export function ChatPanel() {
       className={mergeClasses(styles.panel, dropping ? styles.panelDropping : undefined)}
       {...dropHandlers}
     >
+      {historyDrawer}
       <div className={styles.conversation}>
         <div className={styles.header}>
           <Title3>Ask</Title3>
           <div className={styles.headerMeta}>
             <Badge appearance="tint">{visibleBadgeText}</Badge>
-            {speechSupported && (
-              <Tooltip content="Read new answers aloud (on-device)" relationship="label">
-                <Switch
-                  checked={readAloud}
-                  onChange={(_, d) => setReadAloudPref(Boolean(d.checked))}
-                  label="Read aloud"
-                />
-              </Tooltip>
-            )}
-            <ConversePlaceholder />
+            {historyButton}
             <Button
               appearance="subtle"
               icon={<AddRegular />}
               disabled={streaming}
               onClick={newChat}
-              title="Start a fresh conversation"
+              title={`Start a fresh conversation (${modKey()}+N)`}
             >
               New chat
             </Button>
@@ -1363,7 +1861,54 @@ export function ChatPanel() {
             {messages.map((m) =>
               m.role === "user" ? (
                 <div key={m.id} className={styles.turn}>
-                  <div className={styles.question}>{m.content}</div>
+                  {editingId === m.id ? (
+                    <div className={styles.editWrap}>
+                      <Textarea
+                        value={editText}
+                        onChange={(_, d) => setEditText(d.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+                            e.preventDefault();
+                            saveEdit(m.id);
+                          }
+                          if (e.key === "Escape") cancelEdit();
+                        }}
+                        autoFocus
+                        resize="vertical"
+                      />
+                      <div className={styles.editActions}>
+                        <Button size="small" appearance="subtle" onClick={cancelEdit}>
+                          Cancel
+                        </Button>
+                        <Button
+                          size="small"
+                          appearance="primary"
+                          icon={<SendRegular />}
+                          onClick={() => saveEdit(m.id)}
+                        >
+                          Update
+                        </Button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className={styles.questionRow}>
+                      <div className={styles.question}>{m.content}</div>
+                      {!streaming && (
+                        <div className={mergeClasses(styles.questionActions, "q-actions")}>
+                          <Tooltip content="Edit & resend" relationship="label">
+                            <Button
+                              size="small"
+                              appearance="subtle"
+                              className={styles.actionBtn}
+                              icon={<EditRegular />}
+                              aria-label="Edit question"
+                              onClick={() => startEdit(m.id, m.content)}
+                            />
+                          </Tooltip>
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               ) : (
                 <div key={m.id} className={styles.turn}>
@@ -1414,25 +1959,6 @@ export function ChatPanel() {
                       {/* Failed turns get no actions (Retry is the action) and are never spoken. */}
                       {!m.error && m.content && !(streaming && m.id === lastId) && (
                         <div className={styles.answerActions}>
-                          {speechSupported && (
-                            <Tooltip
-                              content={speakingId === m.id ? "Stop" : "Read this answer aloud"}
-                              relationship="label"
-                            >
-                              <Button
-                                className={styles.actionBtn}
-                                appearance="subtle"
-                                size="small"
-                                icon={
-                                  speakingId === m.id ? <SpeakerOffRegular /> : <Speaker2Regular />
-                                }
-                                aria-label={
-                                  speakingId === m.id ? "Stop reading" : "Read this answer aloud"
-                                }
-                                onClick={() => toggleSpeak(m.id, m.content)}
-                              />
-                            </Tooltip>
-                          )}
                           <Tooltip
                             content={copiedId === m.id ? "Copied" : "Copy answer"}
                             relationship="label"
@@ -1444,6 +1970,41 @@ export function ChatPanel() {
                               icon={copiedId === m.id ? <CheckmarkRegular /> : <CopyRegular />}
                               aria-label="Copy answer"
                               onClick={() => void copyAnswer(m.id, m.content)}
+                            />
+                          </Tooltip>
+                          <Tooltip content="Regenerate answer" relationship="label">
+                            <Button
+                              className={styles.actionBtn}
+                              appearance="subtle"
+                              size="small"
+                              icon={<ArrowClockwiseRegular />}
+                              aria-label="Regenerate answer"
+                              disabled={streaming}
+                              onClick={() => regenerate(m.id)}
+                            />
+                          </Tooltip>
+                          <Tooltip content="Good answer" relationship="label">
+                            <Button
+                              className={ratings[m.id] === "up" ? styles.thumbActive : styles.actionBtn}
+                              appearance="subtle"
+                              size="small"
+                              icon={<ThumbLikeRegular />}
+                              aria-label="Good answer"
+                              aria-pressed={ratings[m.id] === "up"}
+                              onClick={() => rateAnswer(m.id, "up")}
+                            />
+                          </Tooltip>
+                          <Tooltip content="Needs work" relationship="label">
+                            <Button
+                              className={
+                                ratings[m.id] === "down" ? styles.thumbActive : styles.actionBtn
+                              }
+                              appearance="subtle"
+                              size="small"
+                              icon={<ThumbDislikeRegular />}
+                              aria-label="Bad answer"
+                              aria-pressed={ratings[m.id] === "down"}
+                              onClick={() => rateAnswer(m.id, "down")}
                             />
                           </Tooltip>
                         </div>

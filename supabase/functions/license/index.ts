@@ -14,6 +14,9 @@
 //                locked | none — they NEVER report a destructive expiry; once
 //                past `paid_through` they enter a grace window, then lock.
 //   feedback   → record a feedback-form submission (post-purchase survey).
+//   featureInterest → record a feature-interest vote (which shelved features a
+//                user would use) into the feature_interest table — one row per
+//                shown feature, `wanted` flagged. Separate from feedback.
 //   bug        → record an in-app bug report.
 //   ping       → log an app launch to the userlogs table.
 //   event      → record an A/B funnel event into the events table (one row per
@@ -48,6 +51,7 @@ const FEEDBACK_TABLE = Deno.env.get("FEEDBACK_TABLE") ?? "feedback";
 const USERLOGS_TABLE = Deno.env.get("USERLOGS_TABLE") ?? "userlogs";
 const BUGS_TABLE = Deno.env.get("BUGS_TABLE") ?? "bug_reports";
 const NOTIFY_TABLE = Deno.env.get("NOTIFY_TABLE") ?? "purchase_interest";
+const FEATURE_INTEREST_TABLE = Deno.env.get("FEATURE_INTEREST_TABLE") ?? "feature_interest";
 const EVENTS_TABLE = Deno.env.get("EVENTS_TABLE") ?? "events";
 const CLICK_EVENTS_TABLE = Deno.env.get("CLICK_EVENTS_TABLE") ?? "click_events";
 const LEADERBOARD_VIEW = Deno.env.get("COMING_SOON_LEADERBOARD_VIEW") ?? "coming_soon_leaderboard";
@@ -199,6 +203,38 @@ async function feedback(f: Feedback): Promise<Response> {
   });
   if (error) return json({ ok: false, reason: "rejected", detail: error.message });
   await persistExperiments(f.contactId, (f as { experiments?: Experiments }).experiments);
+  return json({ ok: true });
+}
+
+interface FeatureVote {
+  contactId?: string;
+  shown?: unknown; // string[] of feature ids offered
+  wanted?: unknown; // string[] of feature ids the user would use (⊆ shown)
+  version?: string;
+}
+
+/**
+ * Record a feature-interest vote — which shelved features a user would use.
+ * Writes ONE ROW PER SHOWN FEATURE with `wanted` flagged, so per-feature demand
+ * (and its yes-rate) reads directly. Kept in its own table, separate from
+ * feedback. A vote with nothing wanted still records the shown rows (all
+ * wanted=false) — "none of these" is itself a signal.
+ */
+async function featureInterest(body: Record<string, unknown>): Promise<Response> {
+  const v = (body.vote ?? {}) as FeatureVote;
+  const shown = Array.isArray(v.shown) ? v.shown.map(String).filter(Boolean) : [];
+  if (!shown.length) return json({ ok: false, reason: "rejected", detail: "no features" }, 400);
+  const wanted = new Set(Array.isArray(v.wanted) ? v.wanted.map(String) : []);
+  const contactId = v.contactId ? String(v.contactId) : body.contactId ? String(body.contactId) : null;
+  const appVersion = v.version ? String(v.version) : body.version ? String(body.version) : null;
+  const rows = shown.slice(0, 50).map((feature) => ({
+    contact_id: contactId,
+    feature,
+    wanted: wanted.has(feature),
+    app_version: appVersion,
+  }));
+  const { error } = await admin().from(FEATURE_INTEREST_TABLE).insert(rows);
+  if (error) return json({ ok: false, reason: "rejected", detail: error.message });
   return json({ ok: true });
 }
 
@@ -570,6 +606,8 @@ async function route(body: Record<string, unknown>, req: Request): Promise<Respo
       return await check(String(body.licenseKey ?? ""));
     case "feedback":
       return await feedback((body.feedback ?? {}) as Feedback);
+    case "featureInterest":
+      return await featureInterest(body);
     case "notify":
       return await notify(body);
     case "bug":

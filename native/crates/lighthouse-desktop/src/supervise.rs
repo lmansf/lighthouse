@@ -62,6 +62,16 @@ impl Supervisor {
         cmd.arg("-m")
             .arg(&model)
             .args(["--host", "127.0.0.1", "--port", "8080"])
+            // Force the legacy C++ chat-template path. Recent llama-server builds
+            // default to Jinja and, for `/v1/chat/completions`, try to auto-
+            // generate a tool-call parser by probing the model's embedded
+            // template — which fails on some templates with
+            // "Unable to generate parser for this template", 400-ing EVERY chat
+            // request (the app then falls back to raw passages). We don't use
+            // tool-calls; the legacy path auto-detects Mistral's [INST] format
+            // and formats correctly. Any build new enough to hit that error
+            // supports this flag, so it's safe.
+            .arg("--no-jinja")
             .current_dir(llm_root())
             .stdin(Stdio::null());
         // Log to a file instead of a console window.

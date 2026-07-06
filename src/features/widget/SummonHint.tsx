@@ -4,11 +4,12 @@
  * First-run summon hint: a one-time, dismissible banner that teaches the global
  * summon shortcut. Desktop-only (there is no global hotkey on the web build),
  * shown once ever. It waits until the Quick Start tour has been seen (its flag
- * is set) so it never appears BEHIND that auto-opening modal and auto-dismisses
- * unread — in practice it greets the user on the launch after onboarding.
- * Dismissal (the "Got it" button or the auto-hide timer) is what writes the
- * flag; auto-hide only burns the flag once the banner has actually been on
- * screen. Mirrors QuickStart's localStorage-gated pattern.
+ * is set) so it never appears BEHIND that auto-opening modal — in practice it
+ * greets the user on the launch after onboarding. It persists until the user
+ * acknowledges it ("Got it" or the ✕): this banner teaches the app's signature
+ * feature, so it must never blink out unread before the user notices it.
+ * Dismissal is what writes the once-flag. Mirrors QuickStart's localStorage-
+ * gated pattern.
  */
 import { useCallback, useEffect, useState } from "react";
 import { Button, Text, makeStyles, shorthands, tokens } from "@fluentui/react-components";
@@ -21,8 +22,6 @@ const SHOWN_KEY = "lighthouse.summonhint.shown";
 /** The Quick Start tour's own once-flag — we wait for it to be set so the two
  *  first-run surfaces never stack (the hint would lose behind the tour modal). */
 const QUICKSTART_SHOWN_KEY = "lighthouse.quickstart.shown";
-/** Fade out on its own after this long even if untouched. */
-const AUTO_DISMISS_MS = 12_000;
 
 const useStyles = makeStyles({
   // A floating banner near the bottom-center of the screen. Sits above app
@@ -122,13 +121,6 @@ export function SummonHint() {
       alive = false;
     };
   }, [tourAlreadyShown]);
-
-  // Auto-dismiss (and set the flag) a while after it appears.
-  useEffect(() => {
-    if (!shortcut) return;
-    const t = window.setTimeout(dismiss, AUTO_DISMISS_MS);
-    return () => window.clearTimeout(t);
-  }, [shortcut, dismiss]);
 
   if (!shortcut) return null;
 

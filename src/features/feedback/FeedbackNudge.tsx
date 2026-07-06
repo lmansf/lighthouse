@@ -4,8 +4,8 @@
  * A gentle feedback nudge. After the user has actively used Lighthouse for a
  * few minutes (counting only time the window is visible), a small non-invasive
  * bubble slides up in the bottom-left corner asking "What do you think so
- * far?". Expanding it opens the same feedback form used elsewhere (in
- * "mid-session" mode).
+ * far?". Expanding it opens a single-question feature-interest vote (which
+ * shelved features they'd use) rather than a long survey.
  *
  * Persistence semantics: only a SUBMITTED form sets the permanent shown flag
  * (never ask again). Dismissing the bubble or "Maybe later" merely snoozes —
@@ -24,7 +24,7 @@ import {
   tokens,
 } from "@fluentui/react-components";
 import { ChatSparkleRegular, DismissRegular } from "@fluentui/react-icons";
-import { FeedbackForm } from "@/features/license/LicenseGate";
+import { FeatureInterestVote } from "@/features/feedback/FeatureInterestVote";
 
 /** Active (window-visible) time before the nudge surfaces. */
 const NUDGE_AFTER_MS = 5 * 60 * 1000;
@@ -169,7 +169,7 @@ export function FeedbackNudge() {
           <DialogBody>
             <DialogContent>
               <div style={{ display: "flex", flexDirection: "column", gap: tokens.spacingVerticalM }}>
-                <FeedbackForm mode="mid-session" onDone={complete} />
+                <FeatureInterestVote onDone={complete} />
                 <Button appearance="subtle" onClick={snooze}>
                   Maybe later
                 </Button>

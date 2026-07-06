@@ -14,6 +14,7 @@ import { LAYOUT, ACCENTS } from "./theme";
 import { SidebarWater } from "./SidebarWater";
 import { SettingsMenu, TrialBadge } from "@/features/license/LicenseGate";
 import { UpdateNotice } from "@/features/update/UpdateNotice";
+import { modKey } from "@/features/onboarding/ModeChooser";
 
 const useStyles = makeStyles({
   sidebar: {
@@ -26,8 +27,37 @@ const useStyles = makeStyles({
     backgroundColor: tokens.colorNeutralBackground2,
     ...shorthands.borderRight("1px", "solid", tokens.colorNeutralStroke2),
     overflow: "hidden",
+    // Glide between widths instead of snapping; honored off for reduced motion.
+    transitionProperty: "width",
+    transitionDuration: tokens.durationSlow,
+    transitionTimingFunction: tokens.curveEasyEase,
+    "@media (prefers-reduced-motion: reduce)": { transitionDuration: "0.01ms" },
   },
   collapsed: { width: `${LAYOUT.sidebarCollapsedWidth}px` },
+  // The water backdrop stays mounted and fades with the collapse so it no
+  // longer blinks in/out as the rail toggles.
+  waterWrap: {
+    position: "absolute",
+    inset: 0,
+    zIndex: 0,
+    opacity: 1,
+    transitionProperty: "opacity",
+    transitionDuration: tokens.durationSlow,
+    transitionTimingFunction: tokens.curveEasyEase,
+    "@media (prefers-reduced-motion: reduce)": { transitionDuration: "0.01ms" },
+  },
+  waterWrapHidden: { opacity: 0 },
+  // Compact affordances for the collapsed rail (update + trial dots), stacked
+  // and centered above the settings gear.
+  railAffordances: {
+    position: "relative",
+    zIndex: 1,
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    gap: tokens.spacingVerticalXS,
+    marginBottom: tokens.spacingVerticalXS,
+  },
   header: {
     position: "relative",
     zIndex: 1,
@@ -102,12 +132,16 @@ interface SidebarProps {
 export function Sidebar({ collapsed, onToggleCollapsed, children }: SidebarProps) {
   const styles = useStyles();
 
+  const toggleHint = `(${modKey()}+B)`;
+
   return (
     <div className={mergeClasses(styles.sidebar, collapsed && styles.collapsed)}>
-      {!collapsed && <SidebarWater />}
+      <div className={mergeClasses(styles.waterWrap, collapsed && styles.waterWrapHidden)} aria-hidden>
+        <SidebarWater />
+      </div>
       <div className={mergeClasses(styles.header, collapsed && styles.headerCollapsed)}>
         {collapsed ? (
-          <Tooltip content="Expand files" relationship="label">
+          <Tooltip content={`Expand files ${toggleHint}`} relationship="label">
             <Button
               appearance="subtle"
               size="small"
@@ -122,7 +156,7 @@ export function Sidebar({ collapsed, onToggleCollapsed, children }: SidebarProps
               <span className={styles.beacon} />
               <Text weight="semibold">Lighthouse</Text>
             </span>
-            <Tooltip content="Collapse files" relationship="label">
+            <Tooltip content={`Collapse files ${toggleHint}`} relationship="label">
               <Button
                 appearance="subtle"
                 size="small"
@@ -135,8 +169,17 @@ export function Sidebar({ collapsed, onToggleCollapsed, children }: SidebarProps
         )}
       </div>
       <div className={mergeClasses(styles.body, collapsed && styles.bodyHidden)}>{children}</div>
-      {/* Above Settings: the one-line "new version" nudge (desktop only). */}
-      {!collapsed && <UpdateNotice />}
+      {/* Above Settings: the one-line "new version" nudge (desktop only). In the
+          collapsed rail the update and trial countdown each become a compact dot
+          so neither is hidden just because the sidebar is thin. */}
+      {collapsed ? (
+        <div className={styles.railAffordances}>
+          <UpdateNotice collapsed />
+          <TrialBadge collapsed />
+        </div>
+      ) : (
+        <UpdateNotice />
+      )}
       <div className={mergeClasses(styles.footer, collapsed && styles.footerCollapsed)}>
         <SettingsMenu />
         {!collapsed && (
@@ -144,8 +187,6 @@ export function Sidebar({ collapsed, onToggleCollapsed, children }: SidebarProps
             <Text size={200} className={styles.footerLabel}>
               Settings
             </Text>
-            {/* Trial countdown (renders nothing outside a running trial). Hidden
-                while collapsed — the thin rail has no room for a text pill. */}
             <span className={styles.footerTrial}>
               <TrialBadge />
             </span>

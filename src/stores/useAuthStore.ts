@@ -9,6 +9,13 @@ import { authService, subscribeAuth } from "@/contracts";
 interface AuthStore {
   onboarding: OnboardingState;
   refresh: () => void;
+  /**
+   * Client-only step override for onboarding Back navigation. The server stays
+   * authoritative on forward moves — every mutation re-syncs `onboarding` from
+   * its response — so this only ever rewinds the visible step; re-submitting
+   * re-advances it.
+   */
+  setStep: (step: OnboardingState["step"]) => void;
   signIn: (email: string, password: string) => Promise<void>;
   register: (name: string, email: string, password: string) => Promise<void>;
   finishRegistration: () => Promise<void>;
@@ -27,6 +34,8 @@ export const useAuthStore = create<AuthStore>((set) => {
   onboarding: authService.getState(),
 
   refresh: () => set({ onboarding: authService.getState() }),
+
+  setStep: (step) => set((s) => ({ onboarding: { ...s.onboarding, step } })),
 
   signIn: async (email, password) => {
     await authService.signIn(email, password);

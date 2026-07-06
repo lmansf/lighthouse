@@ -134,7 +134,7 @@ export function StartupPrompt() {
               <Switch
                 checked={on}
                 onChange={(_, d) => setOn(Boolean(d.checked))}
-                label="Open Lighthouse when I sign in"
+                label="Open Lighthouse when I sign in to my computer"
               />
             </div>
           </DialogContent>

@@ -31,6 +31,7 @@ import {
   Text,
   Textarea,
   Title3,
+  Tooltip,
   makeStyles,
   mergeClasses,
   shorthands,
@@ -52,7 +53,7 @@ import { MODEL_PROVIDERS } from "@/contracts";
 import { LocalModelOption, LocalModelInstallPanel } from "@/features/localModel/LocalModelOption";
 import { QuickStartDialog } from "@/features/help/QuickStart";
 import { ExperimentsDialog } from "@/features/experiments/ExperimentsDialog";
-import { showWidget, summonHotkey, prettyShortcut } from "@/features/onboarding/ModeChooser";
+import { showWidget, summonHotkey, prettyShortcut, modKey } from "@/features/onboarding/ModeChooser";
 import { useLicenseStore, type FeedbackInput, type LicenseStatus } from "@/stores/useLicenseStore";
 import { useAuthStore } from "@/stores/useAuthStore";
 import { useThemeStore } from "@/stores/useThemeStore";
@@ -119,6 +120,9 @@ const useStyles = makeStyles({
   // Preferences dialog: sections separated by a little vertical air.
   prefFields: { display: "flex", flexDirection: "column", gap: tokens.spacingVerticalL },
   prefHint: { color: tokens.colorNeutralForeground3, fontSize: tokens.fontSizeBase200 },
+  // Hydration placeholder / load-failure row for the desktop-only settings, so
+  // "still loading" and "load failed" don't both look like "unsupported".
+  prefLoadingRow: { display: "flex", alignItems: "center", gap: tokens.spacingHorizontalS, color: tokens.colorNeutralForeground3 },
   // Waiting-on-permission note under the whisper switch — warning tint so it
   // reads as "action needed" without the alarm of a hard error red.
   prefWarn: { color: tokens.colorStatusWarningForeground1, fontSize: tokens.fontSizeBase200 },
@@ -164,6 +168,46 @@ const useStyles = makeStyles({
       color: tokens.colorStatusWarningForeground2,
     },
   },
+  // Collapsed-rail trial dot: a small circular day-count that fits the thin rail.
+  trialDot: {
+    minWidth: "28px",
+    width: "28px",
+    height: "28px",
+    ...shorthands.padding(0),
+    fontSize: tokens.fontSizeBase200,
+    backgroundColor: tokens.colorNeutralBackground3,
+    color: tokens.colorNeutralForeground2,
+    ":hover": {
+      backgroundColor: tokens.colorNeutralBackground3Hover,
+      color: tokens.colorNeutralForeground2,
+    },
+  },
+  // Plan/status line in the Settings menu profile header (Tier D).
+  planLine: { color: tokens.colorNeutralForeground3, fontSize: tokens.fontSizeBase200 },
+  // Global purchase-in-progress / error banner, floating bottom-center so it
+  // covers every subscribe entry point (trial badge, settings, grace), not just
+  // the lock gate.
+  purchaseBar: {
+    position: "fixed",
+    left: "50%",
+    bottom: tokens.spacingVerticalXL,
+    transform: "translateX(-50%)",
+    zIndex: 2000,
+    display: "flex",
+    alignItems: "center",
+    gap: tokens.spacingHorizontalM,
+    maxWidth: "min(560px, calc(100vw - 32px))",
+    ...shorthands.padding(tokens.spacingVerticalS, tokens.spacingHorizontalL),
+    ...shorthands.border("1px", "solid", tokens.colorNeutralStroke1),
+    borderRadius: tokens.borderRadiusLarge,
+    backgroundColor: tokens.colorNeutralBackground1,
+    boxShadow: tokens.shadow16,
+  },
+  purchaseBarText: { flex: 1, minWidth: 0 },
+  // A menu item laid out as a row so a shortcut hint can sit at the right edge.
+  menuItemRow: { display: "flex", width: "100%", alignItems: "center" },
+  // Right-aligned keyboard-shortcut hint inside a menu item.
+  menuShortcut: { marginLeft: "auto", paddingLeft: tokens.spacingHorizontalM, color: tokens.colorNeutralForeground3, fontFamily: tokens.fontFamilyMonospace, fontSize: tokens.fontSizeBase200 },
 });
 
 /** 0–5 rating as a compact segmented row. */
@@ -314,26 +358,31 @@ function PurchaseDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean
 }
 
 /** Registration choice: the buy/notify slot, plus start-a-trial and activate. */
-function RegistrationChoice() {
+function RegistrationChoice({ status }: { status: LicenseStatus }) {
   const styles = useStyles();
   const paidEnabled = useLicenseStore((s) => s.paidEnabled);
   const startTrial = useLicenseStore((s) => s.startTrial);
   const starting = useLicenseStore((s) => s.starting);
   const startError = useLicenseStore((s) => s.startError);
-  const purchasing = useLicenseStore((s) => s.purchasing);
-  const cancelSubscribe = useLicenseStore((s) => s.cancelSubscribe);
   const [dlg, setDlg] = useState(false);
+
+  // A user who has never had a trial (status "none") shouldn't be told to start
+  // "another" one — branch the copy so first-run reads right.
+  const firstTime = status === "none";
+  const trialLabel = firstTime ? "Start your free 14-day trial" : "Start another 14-day trial";
 
   return (
     <>
       <div className={styles.beaconRow}>
         <span className={styles.beacon} />
-        <Title3>Keep using Lighthouse</Title3>
+        <Title3>{firstTime ? "Start using Lighthouse" : "Keep using Lighthouse"}</Title3>
       </div>
       <Text className={styles.body}>
         {paidEnabled
-          ? "Subscribe for unlimited use, or start another 14-day trial. Either way your vault stays exactly as it is."
-          : "Start another 14-day trial — your vault stays exactly as it is. Want to buy when it's ready?"}
+          ? `Subscribe for unlimited use, or ${
+              firstTime ? "start your free 14-day trial" : "start another 14-day trial"
+            } — no card needed. Either way your vault stays exactly as it is.`
+          : `${trialLabel} — no card needed; your vault stays exactly as it is. Want to buy when it's ready?`}
       </Text>
 
       {/* Prominent slot: Subscribe (paid on) or Get-notified (paid off). */}
@@ -351,17 +400,7 @@ function RegistrationChoice() {
           "Get notified when purchasing opens"
         )}
       </Button>
-      {paidEnabled && purchasing && (
-        <>
-          <Text className={styles.muted}>
-            Complete your purchase in the browser — this unlocks automatically once
-            payment goes through.
-          </Text>
-          <Button className={styles.full} appearance="subtle" size="small" onClick={() => cancelSubscribe()}>
-            Cancel
-          </Button>
-        </>
-      )}
+      {/* Purchase-in-progress feedback is now shown globally by PurchaseProgress. */}
 
       <Button
         className={mergeClasses(styles.full, paidEnabled ? styles.trialGhost : "")}
@@ -370,7 +409,7 @@ function RegistrationChoice() {
         icon={starting ? <Spinner size="tiny" /> : undefined}
         onClick={() => void startTrial()}
       >
-        {starting ? "Starting…" : "Start a 14-day trial"}
+        {starting ? "Starting…" : trialLabel}
       </Button>
       {startError && <Text className={styles.error}>{startError}</Text>}
 
@@ -531,7 +570,7 @@ export function LicenseGate({ status }: { status: LicenseStatus }) {
       )}
       {resolvedStep === "choose" && (
         <>
-          <RegistrationChoice />
+          <RegistrationChoice status={status} />
           {/* Only a genuinely ended trial earns the trial-end feedback ask. */}
           {status === "expired" && (
             <Link appearance="subtle" className={styles.feedbackLink} onClick={() => setStep("feedback")}>
@@ -551,7 +590,7 @@ export function LicenseGate({ status }: { status: LicenseStatus }) {
  * Clicking it opens the purchase dialog (subscribe / get-notified), making the
  * countdown itself the path to acting on it.
  */
-export function TrialBadge() {
+export function TrialBadge({ collapsed }: { collapsed?: boolean }) {
   const styles = useStyles();
   const status = useLicenseStore((s) => s.status);
   const licenseType = useLicenseStore((s) => s.licenseType);
@@ -562,6 +601,29 @@ export function TrialBadge() {
 
   // The last few days warrant the warning tint — before that, stay neutral.
   const urgent = remainingDays <= 3;
+  const label = `Trial · ${remainingDays} day${remainingDays === 1 ? "" : "s"} left`;
+
+  // Collapsed rail: a compact day-count dot the user can still click, rather
+  // than the countdown vanishing entirely when the sidebar is thin.
+  if (collapsed) {
+    return (
+      <>
+        <Tooltip content={label} relationship="label">
+          <Button
+            className={mergeClasses(styles.trialDot, urgent && styles.trialPillUrgent)}
+            appearance="subtle"
+            size="small"
+            shape="circular"
+            aria-label={label}
+            onClick={() => setDlg(true)}
+          >
+            {remainingDays}
+          </Button>
+        </Tooltip>
+        <PurchaseDialog open={dlg} setOpen={setDlg} />
+      </>
+    );
+  }
 
   return (
     <>
@@ -572,7 +634,7 @@ export function TrialBadge() {
         shape="circular"
         onClick={() => setDlg(true)}
       >
-        Trial · {remainingDays} day{remainingDays === 1 ? "" : "s"} left
+        {label}
       </Button>
       <PurchaseDialog open={dlg} setOpen={setDlg} />
     </>
@@ -604,7 +666,6 @@ function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean
   const [modelId, setModelId] = useState(onboarding.modelId ?? firstModelFor(providerId));
   const [apiKey, setApiKey] = useState("");
   const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   // Re-sync the fields to the saved settings on the open transition.
@@ -615,7 +676,6 @@ function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean
     setProviderId(pid);
     setModelId(current.modelId ?? firstModelFor(pid));
     setApiKey("");
-    setSaved(false);
     setError(null);
   }, [open]);
 
@@ -627,8 +687,7 @@ function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean
     try {
       // Empty key ⇒ keep the existing one (selectModel falls back to the stored key).
       await selectModel(providerId, modelId, apiKey);
-      setSaved(true);
-      setOpen(false); // close immediately on success — no separate "Close" click
+      setOpen(false); // close immediately on success — the close IS the confirmation
     } catch {
       setError("Couldn't save your model settings. Please check your connection and try again.");
     } finally {
@@ -651,7 +710,6 @@ function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean
                     const p = MODEL_PROVIDERS.find((x) => x.id === d.optionValue)!;
                     setProviderId(p.id);
                     setModelId(p.models[0]);
-                    setSaved(false);
                   }}
                 >
                   {MODEL_PROVIDERS.map((p) => (
@@ -667,7 +725,6 @@ function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean
                   selectedOptions={[modelId]}
                   onOptionSelect={(_, d) => {
                     setModelId(d.optionValue!);
-                    setSaved(false);
                   }}
                 >
                   {provider.models.map((m) => (
@@ -692,7 +749,6 @@ function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean
                     value={apiKey}
                     onChange={(_, d) => {
                       setApiKey(d.value);
-                      setSaved(false);
                     }}
                     placeholder={
                       onboarding.hasApiKey ? "•••••••• saved — leave blank to keep" : "sk-…"
@@ -701,7 +757,6 @@ function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean
                 </Field>
               )}
               {error && <Text className={styles.error}>{error}</Text>}
-              {saved && <Text className={styles.savedNote}>Saved.</Text>}
             </div>
           </DialogContent>
           <DialogActions>
@@ -793,6 +848,14 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
   // False when the shell couldn't register the global shortcut (Wayland) —
   // the hint then points at the tray instead of promising a dead hotkey.
   const [hotkeyOk, setHotkeyOk] = useState(true);
+  // Settings hydration state: distinguishes "still loading" from "loaded, not a
+  // desktop build" from "load failed" — so the desktop options don't silently
+  // vanish (indistinguishable from unsupported) on a transient error.
+  const [settingsLoad, setSettingsLoad] = useState<"loading" | "ready" | "error">("loading");
+  const [reloadKey, setReloadKey] = useState(0);
+  // Surfaced when an optimistic settings write fails and is rolled back, so a
+  // control never lies about a change that didn't actually persist.
+  const [saveError, setSaveError] = useState<string | null>(null);
   // Whisper's low-level hook exists on Windows (keyboard hook) and macOS
   // (Accessibility); hide the switch elsewhere rather than offering a toggle
   // that can't work. (widget-scope §3 + W3/W4.)
@@ -808,18 +871,25 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
   // The modifier tap-chord, spelled per platform (whisper is modifier-only).
   const whisperChord = isMac ? "Control + ⌘ + Shift" : "Ctrl + Win + Shift";
 
-  // Load the file-backed prefs (usage consent, launch-at-login) when opened.
+  // Load the file-backed prefs (usage consent, launch-at-login, …) when opened
+  // or when Retry bumps reloadKey. The settings fetch drives settingsLoad so a
+  // failure shows a retry note instead of quietly hiding the desktop options.
   useEffect(() => {
     if (!open) return;
     let alive = true;
+    setSettingsLoad("loading");
+    setSaveError(null);
     void fetch("/api/usage")
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => alive && d && setShareUsage(!d.optOut))
       .catch(() => {});
     void fetch("/api/settings")
-      .then((r) => (r.ok ? r.json() : null))
+      .then((r) => {
+        if (!r.ok) throw new Error(`settings ${r.status}`);
+        return r.json();
+      })
       .then((d) => {
-        if (!alive || !d) return;
+        if (!alive) return;
         setDesktop(Boolean(d.desktop));
         setRunOnStartup(d.runOnStartup !== false);
         setUiMode(d.uiMode === "widget" ? "widget" : "window");
@@ -831,49 +901,84 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
             : "ctrl+super+shift+space",
         );
         setHotkeyOk(d.summonHotkeyOk !== false);
+        setSettingsLoad("ready");
       })
-      .catch(() => {});
+      .catch(() => {
+        if (alive) setSettingsLoad("error");
+      });
     return () => {
       alive = false;
     };
-  }, [open]);
+  }, [open, reloadKey]);
 
   const inclusion = defaultInclusion ?? "include";
 
+  const SAVE_FAILED = "That change couldn't be saved — please check your connection and try again.";
+
+  /** POST a settings patch, rolling the optimistic UI back (and noting it) on
+   *  failure so a control never shows a change that didn't actually persist.
+   *  Resolves to the Response on success, or null on failure. */
+  async function postSetting(
+    body: Record<string, unknown>,
+    revert: () => void,
+  ): Promise<Response | null> {
+    setSaveError(null);
+    try {
+      const r = await fetch("/api/settings", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!r.ok) throw new Error(`settings ${r.status}`);
+      return r;
+    } catch {
+      revert();
+      setSaveError(SAVE_FAILED);
+      return null;
+    }
+  }
+
   function updateUsage(next: boolean) {
+    const prev = shareUsage;
     setShareUsage(next);
+    setSaveError(null);
     void fetch("/api/usage", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ op: "consent", optOut: !next }),
-    }).catch(() => {});
+    })
+      .then((r) => {
+        if (!r.ok) throw new Error();
+      })
+      .catch(() => {
+        setShareUsage(prev);
+        setSaveError(SAVE_FAILED);
+      });
   }
 
   function updateStartup(next: boolean) {
+    const prev = runOnStartup;
     setRunOnStartup(next);
-    void fetch("/api/settings", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      // Flipping this IS startup consent — record startupAsked so the shell's
-      // consent-first boot gate honors the choice (and the deferred startup
-      // prompt stays quiet).
-      body: JSON.stringify({ runOnStartup: next, startupAsked: true }),
-    }).catch(() => {});
+    // Flipping this IS startup consent — record startupAsked so the shell's
+    // consent-first boot gate honors the choice (and the deferred startup
+    // prompt stays quiet).
+    void postSetting({ runOnStartup: next, startupAsked: true }, () => setRunOnStartup(prev));
   }
 
   function updateUiMode(next: "window" | "widget") {
+    const prev = uiMode;
     setUiMode(next);
-    void fetch("/api/settings", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ uiMode: next }),
-    }).catch(() => {});
-    // Make the switch tangible right away instead of "at next launch".
-    if (next === "widget") void showWidget();
+    void postSetting({ uiMode: next }, () => setUiMode(prev)).then((r) => {
+      // Make the switch tangible right away instead of "at next launch" — but
+      // only once the write actually stuck.
+      if (r && next === "widget") void showWidget();
+    });
   }
 
   function updateWhisper(next: boolean) {
+    const prev = whisperMode;
     setWhisperMode(next);
+    setSaveError(null);
     // The shell starts/stops the keyboard hook live — no relaunch needed. On
     // macOS enabling may go "pending" while Accessibility is granted; re-read
     // the state (and poll briefly) so the waiting-for-permission note appears
@@ -883,11 +988,17 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ whisperMode: next }),
     })
-      .then((r) => (r.ok ? r.json() : null))
+      .then((r) => {
+        if (!r.ok) throw new Error();
+        return r.json();
+      })
       .then((d) => {
         if (d && typeof d.whisperPermission === "string") setWhisperPermission(d.whisperPermission);
       })
-      .catch(() => {});
+      .catch(() => {
+        setWhisperMode(prev);
+        setSaveError(SAVE_FAILED);
+      });
     if (next) {
       // Accessibility can flip to granted a few seconds later — refresh the
       // note without needing the user to reopen the dialog. Bounded polls.
@@ -1003,11 +1114,37 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
                 label="Share usage analytics — your account email and which features you use, never your files, their names, or their contents"
               />
 
+              {/* Desktop settings hydrate here. Show a spinner while loading and
+                  a retry on failure, so a transient error never masquerades as
+                  "this build has no desktop options". */}
+              {settingsLoad === "loading" && (
+                <div className={styles.prefLoadingRow}>
+                  <Spinner size="tiny" />
+                  <Text size={200} className={styles.prefHint}>
+                    Loading your settings…
+                  </Text>
+                </div>
+              )}
+              {settingsLoad === "error" && (
+                <div className={styles.prefLoadingRow}>
+                  <Text size={200} className={styles.error}>
+                    Couldn&apos;t load your settings — some options may be unavailable.
+                  </Text>
+                  <Button
+                    size="small"
+                    appearance="secondary"
+                    onClick={() => setReloadKey((k) => k + 1)}
+                  >
+                    Retry
+                  </Button>
+                </div>
+              )}
+
               {desktop && (
                 <Switch
                   checked={runOnStartup}
                   onChange={(_, d) => updateStartup(Boolean(d.checked))}
-                  label="Launch Lighthouse when I sign in to my computer"
+                  label="Open Lighthouse when I sign in to my computer"
                 />
               )}
 
@@ -1096,6 +1233,13 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
                   </Text>
                 </Field>
               )}
+
+              {/* A failed optimistic write is rolled back above; say so here. */}
+              {saveError && (
+                <Text size={200} className={styles.error}>
+                  {saveError}
+                </Text>
+              )}
             </div>
           </DialogContent>
           <DialogActions>
@@ -1109,11 +1253,32 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
   );
 }
 
+/** One-line plan/trial summary for the Settings menu — answers "what am I on?"
+ *  where a user looks for it. Null when the license isn't enforced. */
+function planSummary(
+  status: LicenseStatus,
+  licenseType: "trial" | "paid" | null,
+  remainingDays: number | null,
+): string | null {
+  if (licenseType === "paid" && status === "valid") return "Subscribed";
+  if (status === "grace") return "Subscription ended · renewal due";
+  if (licenseType === "trial" && status === "valid" && remainingDays != null) {
+    return `Trial · ${remainingDays} day${remainingDays === 1 ? "" : "s"} left`;
+  }
+  if (status === "expired") return "Trial ended";
+  if (status === "locked") return "Subscription ended";
+  return null; // "disabled"/"unknown" — nothing meaningful to show
+}
+
 export function SettingsMenu() {
   const styles = useStyles();
   const paidEnabled = useLicenseStore((s) => s.paidEnabled);
+  const status = useLicenseStore((s) => s.status);
+  const licenseType = useLicenseStore((s) => s.licenseType);
+  const remainingDays = useLicenseStore((s) => s.remainingDays);
   const user = useAuthStore((s) => s.onboarding.user);
   const signOut = useAuthStore((s) => s.signOut);
+  const plan = planSummary(status, licenseType, remainingDays);
   const [dlg, setDlg] = useState(false);
   const [aiDlg, setAiDlg] = useState(false);
   const [prefDlg, setPrefDlg] = useState(false);
@@ -1153,6 +1318,12 @@ export function SettingsMenu() {
                     <Text size={200} className={styles.muted} truncate>
                       {user.email}
                     </Text>
+                    {/* Plan/trial status, answered right where the account lives. */}
+                    {plan && (
+                      <Text size={200} className={styles.planLine} truncate>
+                        {plan}
+                      </Text>
+                    )}
                   </div>
                 </div>
                 <MenuItem icon={<SignOutRegular />} onClick={() => void signOut()}>
@@ -1162,7 +1333,10 @@ export function SettingsMenu() {
               </>
             )}
             <MenuItem icon={<OptionsRegular />} onClick={() => setPrefDlg(true)}>
-              Preferences
+              <span className={styles.menuItemRow}>
+                Preferences
+                <span className={styles.menuShortcut}>{modKey()}+,</span>
+              </span>
             </MenuItem>
             <MenuItem icon={<BrainCircuitRegular />} onClick={() => setAiDlg(true)}>
               AI models
@@ -1200,6 +1374,49 @@ export function SettingsMenu() {
   );
 }
 
+/**
+ * Global purchase feedback: while a checkout is in flight it explains that the
+ * purchase completes in the browser (with a Cancel), and if checkout can't start
+ * or the poll times out it shows why. Mounted once at the app root so it covers
+ * every entry point — the trial badge, the Settings menu, the grace banner — not
+ * only the lock gate where the inline note used to live.
+ */
+export function PurchaseProgress() {
+  const styles = useStyles();
+  const purchasing = useLicenseStore((s) => s.purchasing);
+  const subscribeError = useLicenseStore((s) => s.subscribeError);
+  const cancelSubscribe = useLicenseStore((s) => s.cancelSubscribe);
+  const dismissSubscribeError = useLicenseStore((s) => s.dismissSubscribeError);
+
+  if (!purchasing && !subscribeError) return null;
+
+  return (
+    <div className={styles.purchaseBar} role="status">
+      {purchasing ? (
+        <>
+          <Spinner size="tiny" />
+          <Text size={200} className={styles.purchaseBarText}>
+            Complete your purchase in the browser — Lighthouse unlocks itself once payment goes
+            through.
+          </Text>
+          <Button size="small" appearance="subtle" onClick={() => cancelSubscribe()}>
+            Cancel
+          </Button>
+        </>
+      ) : (
+        <>
+          <Text size={200} className={mergeClasses(styles.purchaseBarText, styles.error)}>
+            {subscribeError}
+          </Text>
+          <Button size="small" appearance="subtle" onClick={() => dismissSubscribeError()}>
+            Dismiss
+          </Button>
+        </>
+      )}
+    </div>
+  );
+}
+
 /** Grace banner for a lapsed PAID subscription that's still usable. */
 export function GraceBanner({ graceUntil }: { graceUntil: string | null }) {
   const subscribe = useLicenseStore((s) => s.subscribe);
@@ -1225,9 +1442,11 @@ export function GraceBanner({ graceUntil }: { graceUntil: string | null }) {
     >
       <Text weight="semibold">
         Your subscription has ended.
-        {days !== null
-          ? ` You have ${days} day${days === 1 ? "" : "s"} to renew before your vault is locked.`
-          : " Renew to keep access before your vault is locked."}
+        {days === null
+          ? " Renew to keep access before your vault is locked."
+          : days === 0
+            ? " Renew today to keep access before your vault is locked."
+            : ` You have ${days} day${days === 1 ? "" : "s"} to renew before your vault is locked.`}
       </Text>
       {paidEnabled && (
         <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
