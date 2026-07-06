@@ -38,6 +38,14 @@ export interface FileNode {
   external?: boolean;
 }
 
+/**
+ * Opaque token returned by `RagService.removeFromVault`. Hold onto it and pass
+ * it to `restoreFromVault` to undo the removal (re-link, restore flags, or move
+ * a trashed file back). The shape is engine-defined; the UI treats it as a
+ * blob it round-trips.
+ */
+export type RestoreToken = Record<string, unknown>;
+
 /** A model provider the user can pick during onboarding. */
 export interface ModelProvider {
   id: string;

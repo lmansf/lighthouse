@@ -1,5 +1,5 @@
 import type { RagService } from "../services";
-import type { DataSource, FileNode, RagReference } from "../types";
+import type { DataSource, FileNode, RagReference, RestoreToken } from "../types";
 import { SEED_NODES, SEED_SOURCES } from "./files";
 
 /**
@@ -75,9 +75,72 @@ class MockRagService implements RagService {
     this.nodes = this.nodes.filter((n) => n.id !== refId && !n.id.startsWith(`${refId}/`));
   }
 
-  async removeFromVault(nodeId: string): Promise<void> {
+  async moveNode(fromId: string, toParentId: string | null): Promise<{ newId: string }> {
+    const node = this.nodes.find((n) => n.id === fromId);
+    if (!node) throw new Error("source not found");
+    if (toParentId !== null) {
+      // A folder can't be moved into itself or one of its own descendants.
+      if (this.descendantIds(fromId).has(toParentId)) {
+        throw new Error("cannot move a folder into itself");
+      }
+      const parent = this.nodes.find((n) => n.id === toParentId);
+      if (!parent || parent.kind === "file") throw new Error("destination is not a folder");
+    }
+    // The mock keeps arbitrary (non-path) ids, so a reparent is just a
+    // parent/source swap — descendants reference this node by id, unchanged, so
+    // the whole subtree follows. The real engine rewrites path-derived ids.
+    const sourceId =
+      toParentId === null
+        ? node.sourceId
+        : this.nodes.find((n) => n.id === toParentId)?.sourceId ?? node.sourceId;
+    this.nodes = this.nodes.map((n) =>
+      n.id === fromId ? { ...n, parentId: toParentId, sourceId } : n,
+    );
+    return { newId: fromId };
+  }
+
+  async renameNode(id: string, newName: string): Promise<{ newId: string }> {
+    const node = this.nodes.find((n) => n.id === id);
+    if (!node) throw new Error("source not found");
+    const slash = id.lastIndexOf("/");
+    const newId = slash >= 0 ? `${id.slice(0, slash)}/${newName}` : newName;
+    if (newId !== id && this.nodes.some((n) => n.id === newId)) {
+      throw new Error("destination already exists");
+    }
+    // Remap every node's id + parentId onto the new prefix so descendants follow.
+    const remap = (x: string) =>
+      x === id ? newId : x.startsWith(`${id}/`) ? newId + x.slice(id.length) : x;
+    this.nodes = this.nodes.map((n) => ({
+      ...n,
+      id: remap(n.id),
+      parentId: n.parentId === null ? null : remap(n.parentId),
+      name: n.id === id ? newName : n.name,
+    }));
+    return { newId };
+  }
+
+  async createFolder(parentId: string | null, name: string): Promise<{ newId: string }> {
+    const newId = parentId ? `${parentId}/${name}` : name;
+    if (this.nodes.some((n) => n.id === newId)) throw new Error("already exists");
+    const sourceId = parentId
+      ? this.nodes.find((n) => n.id === parentId)?.sourceId ?? "vault"
+      : this.sources[0]?.id ?? "vault";
+    this.nodes.push({ id: newId, parentId, sourceId, name, kind: "folder", ragIncluded: false });
+    return { newId };
+  }
+
+  async removeFromVault(nodeId: string): Promise<RestoreToken> {
     const ids = this.descendantIds(nodeId);
+    // Stash the removed nodes in the token so restore can re-insert them.
+    const removed = this.nodes.filter((n) => ids.has(n.id)).map((n) => ({ ...n }));
     this.nodes = this.nodes.filter((n) => !ids.has(n.id));
+    return { kind: "mock", nodes: removed };
+  }
+
+  async restoreFromVault(token: RestoreToken): Promise<void> {
+    const nodes = (token as { nodes?: FileNode[] }).nodes ?? [];
+    const have = new Set(this.nodes.map((n) => n.id));
+    this.nodes.push(...nodes.filter((n) => !have.has(n.id)).map((n) => ({ ...n })));
   }
 
   async capabilities(): Promise<{ desktop: boolean }> {

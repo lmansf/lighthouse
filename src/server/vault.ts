@@ -419,6 +419,55 @@ export function moveNode(fromId: string, toParentId: string | null): { newId: st
 }
 
 /**
+ * Rename a node in place (same parent, new basename), carrying its inclusion
+ * flags and its subtree's. Refuses empty / dotfile / separator names and an
+ * existing destination. Vault-resident nodes only.
+ */
+export function renameNode(id: string, newName: string): { newId: string } {
+  if (!id) throw new Error("id required");
+  const clean = newName.trim();
+  if (!clean || clean.startsWith(".") || clean.includes("/") || clean.includes("\\")) {
+    throw new Error("invalid name");
+  }
+  const fromAbs = safeAbs(id);
+  if (!fs.existsSync(fromAbs)) throw new Error("source not found");
+  const slash = id.lastIndexOf("/");
+  const newId = slash >= 0 ? `${id.slice(0, slash)}/${clean}` : clean;
+  if (newId === id) return { newId }; // no-op rename
+  const toAbs = safeAbs(newId);
+  if (fs.existsSync(toAbs)) throw new Error("destination already exists");
+  fs.renameSync(fromAbs, toAbs);
+  // Remap the node and every descendant's inclusion flag onto the new prefix.
+  const state = loadState();
+  const next: Record<string, boolean> = {};
+  for (const [k, v] of Object.entries(state.included)) {
+    if (k === id) next[newId] = v;
+    else if (k.startsWith(`${id}/`)) next[newId + k.slice(id.length)] = v;
+    else next[k] = v;
+  }
+  state.included = next;
+  saveState(state);
+  return { newId };
+}
+
+/**
+ * Create an empty folder under a parent (or the vault root when null). Returns
+ * its id. Refuses empty / dotfile / separator names and existing paths.
+ */
+export function createFolder(parentId: string | null, name: string): { newId: string } {
+  const clean = name.trim();
+  if (!clean || clean.startsWith(".") || clean.includes("/") || clean.includes("\\")) {
+    throw new Error("invalid folder name");
+  }
+  const newId = parentId ? `${parentId}/${clean}` : clean;
+  const abs = safeAbs(newId);
+  if (fs.existsSync(abs)) throw new Error("a file or folder with that name already exists");
+  fs.mkdirSync(abs, { recursive: true });
+  invalidateWalkCache(); // a new (empty, excluded) folder no state write announced
+  return { newId };
+}
+
+/**
  * Write an uploaded file into the vault (optionally under a folder). The name is
  * reduced to a basename and collisions get a " (n)" suffix, so a client can
  * never write outside the vault or clobber an existing file. No state entry is
@@ -501,32 +550,52 @@ export function addReference(inputPath: string): { id: string; kind: "file" | "f
  * (and its subtree's) are dropped. The trash lives under the hidden state dir,
  * so it never reappears in the tree, and can be restored by hand.
  */
-export function removeFromVault(nodeId: string): void {
+/** A token returned by removeFromVault; pass to restoreFromVault to undo. */
+export type RestoreDescriptor =
+  | { kind: "unlink"; root: string; path: string; included: Record<string, boolean> }
+  | { kind: "flags"; included: Record<string, boolean> }
+  | { kind: "trash"; id: string; trashPath: string; included: Record<string, boolean> };
+
+/** Collect + drop the inclusion flags for a node and its subtree, returning the
+ *  removed (id → included) pairs so a restore can put them back exactly. */
+function takeIncludedSubtree(
+  state: ReturnType<typeof loadState>,
+  nodeId: string,
+): Record<string, boolean> {
+  const taken: Record<string, boolean> = {};
+  for (const k of Object.keys(state.included)) {
+    if (k === nodeId || k.startsWith(`${nodeId}/`)) {
+      taken[k] = state.included[k];
+      delete state.included[k];
+    }
+  }
+  return taken;
+}
+
+export function removeFromVault(nodeId: string): RestoreDescriptor {
   const state = loadState();
   const refId = refIdOf(nodeId, state.references);
   // The reference root itself: unlink the whole link; never move or delete the
-  // real external files.
+  // real external files. Restore re-links the same real path.
   if (refId === nodeId) {
-    removeReference(refId);
-    return;
+    const realPath = state.references[nodeId]?.path ?? "";
+    const included = takeIncludedSubtree(state, nodeId);
+    delete state.references[nodeId];
+    saveState(state);
+    return { kind: "unlink", root: nodeId, path: realPath, included };
   }
   // A node *inside* a linked folder: unlinking the whole reference here would
   // drop every sibling too, and we must never touch the user's real external
   // files. Scope the removal to just this node's subtree by dropping its
   // inclusion flags; the link itself stays intact.
   if (refId) {
-    for (const k of Object.keys(state.included)) {
-      if (k === nodeId || k.startsWith(`${nodeId}/`)) delete state.included[k];
-    }
+    const included = takeIncludedSubtree(state, nodeId);
     saveState(state);
-    return;
+    return { kind: "flags", included };
   }
   const abs = safeAbs(nodeId); // refuses to escape the vault
   if (abs === vaultDir()) throw new Error("cannot remove the vault root");
-  // Drop inclusion flags for the node and its descendants regardless of move.
-  for (const k of Object.keys(state.included)) {
-    if (k === nodeId || k.startsWith(`${nodeId}/`)) delete state.included[k];
-  }
+  const included = takeIncludedSubtree(state, nodeId);
   if (fs.existsSync(abs)) {
     const day = new Date().toISOString().slice(0, 10);
     const trashDir = path.join(stateDir(), "trash", day);
@@ -536,8 +605,50 @@ export function removeFromVault(nodeId: string): void {
     const base = dest.slice(0, dest.length - ext.length);
     for (let i = 1; fs.existsSync(dest); i++) dest = `${base} (${i})${ext}`;
     fs.renameSync(abs, dest);
+    saveState(state);
+    return { kind: "trash", id: nodeId, trashPath: dest, included };
   }
   saveState(state);
+  return { kind: "flags", included };
+}
+
+/**
+ * Reverse a removeFromVault using the descriptor it returned. Non-destructive:
+ * refuses to overwrite if something now occupies the original location. Returns
+ * the node's (possibly new) id.
+ */
+export function restoreFromVault(desc: RestoreDescriptor): { id?: string; ok?: boolean } {
+  if (desc.kind === "unlink") {
+    if (!desc.path) throw new Error("nothing to restore");
+    const { id: newRoot } = addReference(desc.path); // may get a fresh extN id
+    const state = loadState();
+    for (const [k, v] of Object.entries(desc.included)) {
+      const newKey =
+        k === desc.root
+          ? newRoot
+          : k.startsWith(`${desc.root}/`)
+            ? `${newRoot}/${k.slice(desc.root.length + 1)}`
+            : k;
+      state.included[newKey] = v;
+    }
+    saveState(state);
+    return { id: newRoot };
+  }
+  if (desc.kind === "flags") {
+    const state = loadState();
+    for (const [k, v] of Object.entries(desc.included)) state.included[k] = v;
+    saveState(state);
+    return { ok: true };
+  }
+  // trash: move the file back to its original location, refusing to clobber.
+  const abs = safeAbs(desc.id);
+  if (fs.existsSync(abs)) throw new Error("something already exists at the original location");
+  fs.mkdirSync(path.dirname(abs), { recursive: true });
+  fs.renameSync(desc.trashPath, abs);
+  const state = loadState();
+  for (const [k, v] of Object.entries(desc.included)) state.included[k] = v;
+  saveState(state);
+  return { id: desc.id };
 }
 
 /** Drop a reference (unlink). Leaves the real files on disk untouched. */

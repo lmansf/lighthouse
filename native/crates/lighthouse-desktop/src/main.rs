@@ -385,6 +385,37 @@ pub fn open_with_os(abs: &Path) {
         .spawn();
 }
 
+/// Reveal a path in the OS file manager, *selecting* it inside its containing
+/// folder where the platform supports that (Windows Explorer, macOS Finder).
+/// Linux has no portable "select the file" verb, so we open the containing
+/// folder instead — the closest honest equivalent. Best-effort like
+/// `open_with_os`: a missing file manager never crashes the caller.
+pub fn reveal_with_os(abs: &Path) {
+    let mut command = if cfg!(windows) {
+        // Explorer parses its own command line; the reliable form is a single
+        // "/select,<path>" argument (splitting it into "/select," + path drops
+        // the selection). A non-file path just opens Explorer at a default.
+        let mut c = std::process::Command::new("explorer.exe");
+        c.arg(format!("/select,{}", abs.display()));
+        c
+    } else if cfg!(target_os = "macos") {
+        let mut c = std::process::Command::new("open");
+        c.arg("-R").arg(abs.as_os_str());
+        c
+    } else {
+        // No portable Linux "reveal + select" — open the containing directory.
+        let dir = if abs.is_dir() { abs } else { abs.parent().unwrap_or(abs) };
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(dir.as_os_str());
+        c
+    };
+    let _ = command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+}
+
 pub fn apply_autostart(app: &AppHandle, enable: bool) {
     use tauri_plugin_autostart::ManagerExt;
     let autolaunch = app.autolaunch();
@@ -810,6 +841,7 @@ fn main() {
             commands::model_download,
             commands::model_uninstall,
             commands::open_node,
+            commands::reveal_node,
             commands::settings_get,
             commands::settings_set,
             commands::add_paths,

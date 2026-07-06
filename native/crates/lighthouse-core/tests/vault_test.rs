@@ -183,6 +183,82 @@ fn remove_of_linked_root_unlinks_and_leaves_real_files() {
 }
 
 #[test]
+fn remove_then_restore_brings_file_and_flags_back() {
+    let vault_dir = tempfile::tempdir().unwrap();
+    let _guard = common::lock_env(vault_dir.path());
+
+    write(&vault_dir.path().join("keep.md"), "hello");
+    vault::set_included("keep.md", true);
+    let token = vault::remove_from_vault("keep.md").unwrap();
+    assert!(!vault_dir.path().join("keep.md").exists(), "moved to trash");
+    assert!(vault::active_included_file_ids().is_empty());
+
+    let out = vault::restore_from_vault(&token).unwrap();
+    assert_eq!(out["id"], "keep.md");
+    assert!(
+        vault_dir.path().join("keep.md").exists(),
+        "restored from trash to its original location"
+    );
+    // Its AI-visibility flag came back with it.
+    assert_eq!(
+        vault::active_included_file_ids(),
+        vec!["keep.md".to_string()]
+    );
+}
+
+#[test]
+fn rename_carries_flags_and_refuses_collisions() {
+    let vault_dir = tempfile::tempdir().unwrap();
+    let _guard = common::lock_env(vault_dir.path());
+
+    write(&vault_dir.path().join("old.md"), "hi");
+    vault::set_included("old.md", true);
+    let new_id = vault::rename_node("old.md", "new.md").unwrap();
+    assert_eq!(new_id, "new.md");
+    assert!(!vault_dir.path().join("old.md").exists());
+    assert!(vault_dir.path().join("new.md").exists());
+    // The AI-visibility flag travels to the new id.
+    assert_eq!(vault::active_included_file_ids(), vec!["new.md".to_string()]);
+
+    // A rename onto an existing name is refused, not clobbered.
+    write(&vault_dir.path().join("taken.md"), "other");
+    let err = vault::rename_node("new.md", "taken.md").expect_err("collision");
+    assert_eq!(err.to_string(), "destination already exists");
+}
+
+#[test]
+fn create_folder_makes_an_empty_dir_and_rejects_bad_names() {
+    let vault_dir = tempfile::tempdir().unwrap();
+    let _guard = common::lock_env(vault_dir.path());
+
+    let id = vault::create_folder(None, "Reports").unwrap();
+    assert_eq!(id, "Reports");
+    assert!(vault_dir.path().join("Reports").is_dir());
+    // Nested under a parent.
+    let nested = vault::create_folder(Some("Reports"), "2026").unwrap();
+    assert_eq!(nested, "Reports/2026");
+    assert!(vault_dir.path().join("Reports/2026").is_dir());
+    // Separators and dotfiles are refused.
+    assert!(vault::create_folder(None, "a/b").is_err());
+    assert!(vault::create_folder(None, ".hidden").is_err());
+    // A name that already exists is refused.
+    assert!(vault::create_folder(None, "Reports").is_err());
+}
+
+#[test]
+fn restore_refuses_to_clobber_an_existing_file() {
+    let vault_dir = tempfile::tempdir().unwrap();
+    let _guard = common::lock_env(vault_dir.path());
+
+    write(&vault_dir.path().join("dup.md"), "one");
+    let token = vault::remove_from_vault("dup.md").unwrap();
+    // Something new now occupies the original path — restore must not overwrite.
+    write(&vault_dir.path().join("dup.md"), "two");
+    let err = vault::restore_from_vault(&token).expect_err("must refuse to clobber");
+    assert!(err.to_string().contains("already exists"));
+}
+
+#[test]
 fn add_file_suffixes_collisions_and_rejects_dotfiles() {
     let vault_dir = tempfile::tempdir().unwrap();
     let _guard = common::lock_env(vault_dir.path());

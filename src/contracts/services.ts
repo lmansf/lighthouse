@@ -13,6 +13,7 @@ import type {
   FileNode,
   OnboardingState,
   RagReference,
+  RestoreToken,
   User,
 } from "./types";
 
@@ -37,10 +38,25 @@ export interface RagService {
   /** Remove a reference (unlink); the real files on disk are left untouched. */
   removeReference(refId: string): Promise<void>;
   /**
+   * Move a node under a new parent folder within the same source (a vault-
+   * internal reparent), or to the source root when `toParentId` is null. The
+   * node's AI-visibility flags travel with it. Returns the node's new id (ids
+   * are path-derived, so a move renames the id). Throws if the destination
+   * already holds a same-named item, or the source can't move (e.g. cloud).
+   */
+  moveNode(fromId: string, toParentId: string | null): Promise<{ newId: string }>;
+  /** Rename a node in place (same parent, new basename). Returns the new id. */
+  renameNode(id: string, newName: string): Promise<{ newId: string }>;
+  /** Create an empty folder under a parent (or the vault root, null). */
+  createFolder(parentId: string | null, name: string): Promise<{ newId: string }>;
+  /**
    * Remove a node from the vault, non-destructively: a linked item unlinks, a
    * vault-resident item moves to a recoverable trash. Throws on failure.
+   * Returns a token that `restoreFromVault` can replay to undo the removal.
    */
-  removeFromVault(nodeId: string): Promise<void>;
+  removeFromVault(nodeId: string): Promise<RestoreToken>;
+  /** Undo a removeFromVault from the token it returned. Throws on failure. */
+  restoreFromVault(token: RestoreToken): Promise<void>;
   /**
    * Capabilities of the running deployment. `desktop` is true only in the
    * packaged desktop app, where filesystem-backed actions (opening a cited file

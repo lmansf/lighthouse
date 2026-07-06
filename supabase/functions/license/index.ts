@@ -30,6 +30,10 @@
 //   issuePaid  → (admin-only; needs x-admin-token == ADMIN_TOKEN) mint/activate
 //                a PAID license for a guid/email with a paid_through date. This
 //                is the seam the Stripe webhook calls.
+//   comingSoonLeaderboard → (admin-only; x-admin-token == ADMIN_TOKEN) the
+//                cross-user ranking of "coming soon" features by interest,
+//                aggregated from coming_soon_interest events via the
+//                coming_soon_leaderboard view. Returns [{feature,clicks,users}].
 //
 // Deploy:  supabase functions deploy license
 //          supabase secrets set LICENSE_SECRET="<long random string>"
@@ -46,6 +50,7 @@ const BUGS_TABLE = Deno.env.get("BUGS_TABLE") ?? "bug_reports";
 const NOTIFY_TABLE = Deno.env.get("NOTIFY_TABLE") ?? "purchase_interest";
 const EVENTS_TABLE = Deno.env.get("EVENTS_TABLE") ?? "events";
 const CLICK_EVENTS_TABLE = Deno.env.get("CLICK_EVENTS_TABLE") ?? "click_events";
+const LEADERBOARD_VIEW = Deno.env.get("COMING_SOON_LEADERBOARD_VIEW") ?? "coming_soon_leaderboard";
 const EVENT_TYPES = ["folder", "file", "toggle", "button", "link", "nav", "other"];
 const MAX_EVENTS_PER_BATCH = 5000; // matches the desktop ring-buffer cap
 const ASSIGN_TABLE = Deno.env.get("EXPERIMENT_ASSIGNMENTS_TABLE") ?? "experiment_assignments";
@@ -408,6 +413,24 @@ async function events(body: Record<string, unknown>): Promise<Response> {
   return json({ ok: true, inserted: rows.length });
 }
 
+/**
+ * Cross-user "coming soon" interest leaderboard. Returns the per-feature ranking
+ * of which teasers have drawn the most interest, aggregated from the
+ * `coming_soon_interest` events via the `coming_soon_leaderboard` view (which
+ * dedupes the per-experiment row fan-out — see the view's migration). Shape:
+ * [{ feature, clicks, users }], most-wanted first. Internal product analytics —
+ * admin-gated at the route, never exposed to the app or anon callers.
+ */
+async function comingSoonLeaderboard(): Promise<Response> {
+  const { data, error } = await admin()
+    .from(LEADERBOARD_VIEW)
+    .select("feature, clicks, users")
+    .order("clicks", { ascending: false })
+    .order("users", { ascending: false });
+  if (error) return json({ ok: false, reason: "error", detail: error.message });
+  return json({ ok: true, leaderboard: data ?? [] });
+}
+
 interface Decoded {
   guid: string;
   type?: "trial" | "paid";
@@ -564,6 +587,13 @@ async function route(body: Record<string, unknown>, req: Request): Promise<Respo
       if (!admin || req.headers.get("x-admin-token") !== admin)
         return json({ ok: false, reason: "unauthorized" }, 401);
       return await issuePaid(body);
+    }
+    case "comingSoonLeaderboard": {
+      // Internal analytics — same admin gate as issuePaid.
+      const admin = Deno.env.get("ADMIN_TOKEN");
+      if (!admin || req.headers.get("x-admin-token") !== admin)
+        return json({ ok: false, reason: "unauthorized" }, 401);
+      return await comingSoonLeaderboard();
     }
     default:
       return json({ error: "unknown op" }, 400);

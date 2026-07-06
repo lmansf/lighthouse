@@ -14,6 +14,8 @@ import {
   removeReference as vaultRemoveReference,
   removeFromVault as vaultRemoveFromVault,
   moveNode as vaultMoveNode,
+  renameNode as vaultRenameNode,
+  createFolder as vaultCreateFolder,
 } from "../vault";
 import type { DataSource, FileNode } from "@/contracts";
 import type { SourceConnector } from "./types";
@@ -44,7 +46,13 @@ export const localVault: SourceConnector = {
   async moveNode(fromId, toParentId) {
     return vaultMoveNode(fromId, toParentId);
   },
+  async rename(id, newName) {
+    return vaultRenameNode(id, newName);
+  },
+  async createFolder(parentId, name) {
+    return vaultCreateFolder(parentId, name);
+  },
   async remove(nodeId) {
-    vaultRemoveFromVault(nodeId);
+    return vaultRemoveFromVault(nodeId);
   },
 };
