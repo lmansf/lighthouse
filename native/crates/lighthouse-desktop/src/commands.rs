@@ -92,19 +92,23 @@ pub async fn rag_op(app: AppHandle, body: Value) -> Result<Value, String> {
             let Some(from) = body["from"].as_str() else {
                 return Err("from required".into());
             };
-            sources::move_node(from, body["toParentId"].as_str())
+            let new_id = sources::move_node(from, body["toParentId"].as_str())
                 .await
-                .map(|new_id| json!({ "newId": new_id }))
-                .map_err(|e| err_string(e, "move failed"))
+                .map_err(|e| err_string(e, "move failed"))?;
+            // Structural edits: broadcast so every window re-reads the tree at
+            // once (the FS watcher is best-effort and per-window polls lag).
+            let _ = app.emit("vault-changed", ());
+            Ok(json!({ "newId": new_id }))
         }
         Some("addReference") => {
             let Some(path) = body["path"].as_str().filter(|p| !p.trim().is_empty()) else {
                 return Err("path required".into());
             };
-            sources::add_reference(path)
+            let (id, kind) = sources::add_reference(path)
                 .await
-                .map(|(id, kind)| json!({ "id": id, "kind": kind }))
-                .map_err(|e| err_string(e, "link failed"))
+                .map_err(|e| err_string(e, "link failed"))?;
+            let _ = app.emit("vault-changed", ());
+            Ok(json!({ "id": id, "kind": kind }))
         }
         Some("removeReference") => {
             let Some(ref_id) = body["refId"].as_str() else {
@@ -112,8 +116,9 @@ pub async fn rag_op(app: AppHandle, body: Value) -> Result<Value, String> {
             };
             sources::remove_reference(ref_id)
                 .await
-                .map(|_| json!({ "ok": true }))
-                .map_err(|e| err_string(e, "unlink failed"))
+                .map_err(|e| err_string(e, "unlink failed"))?;
+            let _ = app.emit("vault-changed", ());
+            Ok(json!({ "ok": true }))
         }
         Some("remove") => {
             let Some(node_id) = body["nodeId"].as_str().filter(|n| !n.trim().is_empty()) else {
@@ -121,8 +126,9 @@ pub async fn rag_op(app: AppHandle, body: Value) -> Result<Value, String> {
             };
             sources::remove_from_vault(node_id)
                 .await
-                .map(|_| json!({ "ok": true }))
-                .map_err(|e| err_string(e, "remove failed"))
+                .map_err(|e| err_string(e, "remove failed"))?;
+            let _ = app.emit("vault-changed", ());
+            Ok(json!({ "ok": true }))
         }
         _ => Err("unknown op".into()),
     }

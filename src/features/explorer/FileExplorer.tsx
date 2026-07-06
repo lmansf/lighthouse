@@ -1233,7 +1233,9 @@ export function FileExplorer() {
               Drop to add
             </Text>
             <Text size={300} className={styles.dropHint}>
-              They stay on your machine
+              {desktop
+                ? "Linked in place — your files aren't copied"
+                : "They stay on your machine"}
             </Text>
           </div>
         </div>
