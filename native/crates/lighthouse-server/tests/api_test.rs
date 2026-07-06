@@ -299,6 +299,10 @@ async fn wire_protocol_end_to_end() {
     assert_eq!(s["desktop"], false);
     assert_eq!(s["runOnStartup"], true, "defaults on");
     assert_eq!(s["uiMode"], Value::Null, "no mode until the chooser answers");
+    assert_eq!(
+        s["summonShortcut"], "ctrl+super+shift+space",
+        "the default keyed summon chord when none is set"
+    );
 
     // --- /api/usage consent round-trip ---------------------------------------------
     let u: Value = client

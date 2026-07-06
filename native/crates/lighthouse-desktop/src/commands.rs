@@ -473,6 +473,12 @@ pub fn settings_get(app: AppHandle) -> Value {
         "startupAsked": s.startup_asked == Some(true),
         "uiMode": s.ui_mode, // null until the first-run chooser is answered
         "whisperMode": s.whisper_mode == Some(true),
+        // "granted" | "pending" (macOS Accessibility) | "unsupported" | "unknown"
+        "whisperPermission": crate::whisper::permission_state(),
+        "summonShortcut": s
+            .summon_shortcut
+            .as_deref()
+            .unwrap_or(settings::DEFAULT_SUMMON_SHORTCUT),
         // False on Wayland — the UI swaps hotkey copy for the tray fallback.
         "summonHotkeyOk": hotkey_ok,
     })
@@ -485,9 +491,63 @@ pub fn settings_set(
     startup_asked: Option<bool>,
     ui_mode: Option<String>,
     whisper_mode: Option<bool>,
+    summon_shortcut: Option<String>,
 ) -> Value {
+    // A new summon shortcut must PARSE before anything persists — saving an
+    // unregistrable string would strand the user with no hotkey at all.
+    // Empty string = reset to the default chord.
+    if let Some(accel) = summon_shortcut.as_deref().map(str::trim) {
+        if !accel.is_empty()
+            && accel
+                .parse::<tauri_plugin_global_shortcut::Shortcut>()
+                .is_err()
+        {
+            let s = settings::read_desktop_settings();
+            return json!({
+                "ok": false,
+                "reason": "that key combination can't be registered",
+                "summonShortcut": s
+                    .summon_shortcut
+                    .as_deref()
+                    .unwrap_or(settings::DEFAULT_SUMMON_SHORTCUT),
+            });
+        }
+    }
     let switched_mode = ui_mode.clone();
-    let s = settings::write_desktop_settings(run_on_startup, startup_asked, ui_mode, whisper_mode);
+    let shortcut_changed = summon_shortcut.is_some();
+    // Remember the working chord so a new one that PARSES but fails to
+    // register (another app already owns it) can be rolled back instead of
+    // stranding the user hotkey-less with a broken value persisted.
+    let prev_shortcut = settings::read_desktop_settings().summon_shortcut;
+    let s = settings::write_desktop_settings(
+        run_on_startup,
+        startup_asked,
+        ui_mode,
+        whisper_mode,
+        summon_shortcut,
+    );
+    if shortcut_changed && !crate::register_summon_shortcut(&app) {
+        // The new chord didn't register — restore the previous one so the
+        // summon hotkey keeps working, and report the failure to the UI.
+        // Pass "" (not None) when the previous value was the default, so the
+        // writer actually overwrites the bad chord instead of leaving it.
+        settings::write_desktop_settings(
+            None,
+            None,
+            None,
+            None,
+            Some(prev_shortcut.clone().unwrap_or_default()),
+        );
+        crate::register_summon_shortcut(&app);
+        return json!({
+            "ok": false,
+            "reason": "another app already uses that shortcut — kept the previous one",
+            "summonShortcut": prev_shortcut
+                .as_deref()
+                .unwrap_or(settings::DEFAULT_SUMMON_SHORTCUT),
+            "summonHotkeyOk": true,
+        });
+    }
     // Autostart is CONSENT-FIRST (mirrors the boot gate in main.rs): only
     // touch the OS registration once the startup prompt has been answered.
     // Unrelated writes — e.g. the first-run uiMode chooser — must not enroll.
@@ -520,12 +580,22 @@ pub fn settings_set(
     if let Some(on) = whisper_mode {
         crate::whisper::set_enabled(&app, on);
     }
+    let hotkey_ok = app
+        .try_state::<crate::HotkeyOk>()
+        .map(|h| h.0.load(std::sync::atomic::Ordering::Relaxed))
+        .unwrap_or(false);
     json!({
         "ok": true,
         "runOnStartup": s.run_on_startup != Some(false),
         "startupAsked": s.startup_asked == Some(true),
         "uiMode": s.ui_mode,
         "whisperMode": s.whisper_mode == Some(true),
+        "whisperPermission": crate::whisper::permission_state(),
+        "summonShortcut": s
+            .summon_shortcut
+            .as_deref()
+            .unwrap_or(settings::DEFAULT_SUMMON_SHORTCUT),
+        "summonHotkeyOk": hotkey_ok,
     })
 }
 

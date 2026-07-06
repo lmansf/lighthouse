@@ -746,6 +746,10 @@ pub async fn settings_get() -> Response {
         "startupAsked": s.startup_asked == Some(true),
         "uiMode": s.ui_mode, // null until the first-run chooser is answered
         "whisperMode": s.whisper_mode == Some(true), // opt-in, default off
+        "summonShortcut": s
+            .summon_shortcut
+            .as_deref()
+            .unwrap_or(settings::DEFAULT_SUMMON_SHORTCUT),
     }))
     .into_response()
 }
@@ -767,6 +771,7 @@ pub async fn settings_post(headers: HeaderMap, body: Option<Json<Value>>) -> Res
         body["startupAsked"].as_bool(),
         body["uiMode"].as_str().map(String::from),
         body["whisperMode"].as_bool(),
+        body["summonShortcut"].as_str().map(String::from),
     );
     Json(json!({
         "ok": true,
@@ -774,6 +779,10 @@ pub async fn settings_post(headers: HeaderMap, body: Option<Json<Value>>) -> Res
         "startupAsked": s.startup_asked == Some(true),
         "uiMode": s.ui_mode,
         "whisperMode": s.whisper_mode == Some(true),
+        "summonShortcut": s
+            .summon_shortcut
+            .as_deref()
+            .unwrap_or(settings::DEFAULT_SUMMON_SHORTCUT),
     }))
     .into_response()
 }
