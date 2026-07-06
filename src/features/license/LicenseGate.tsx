@@ -797,7 +797,12 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
   const isWindows = typeof navigator !== "undefined" && navigator.userAgent.includes("Windows");
   const isMac =
     typeof navigator !== "undefined" && navigator.userAgent.includes("Mac") && !isWindows;
-  const whisperCapable = isWindows || isMac;
+  // Whisper has a backend on all three desktops (Windows hook, macOS monitor,
+  // Linux/X11 raw input) — the shell reports "unsupported" ONLY on Wayland,
+  // where no global input is available. So capability is "desktop and not
+  // explicitly unsupported", which correctly includes X11 Linux (previously
+  // the switch was hidden on all of Linux, stranding the X11 backend).
+  const whisperCapable = whisperPermission !== "unsupported";
   // The modifier tap-chord, spelled per platform (whisper is modifier-only).
   const whisperChord = isMac ? "Control + ⌘ + Shift" : "Ctrl + Win + Shift";
 
@@ -867,12 +872,35 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
 
   function updateWhisper(next: boolean) {
     setWhisperMode(next);
-    // The shell starts/stops the keyboard hook live — no relaunch needed.
+    // The shell starts/stops the keyboard hook live — no relaunch needed. On
+    // macOS enabling may go "pending" while Accessibility is granted; re-read
+    // the state (and poll briefly) so the waiting-for-permission note appears
+    // in this same session instead of only after reopening Preferences.
     void fetch("/api/settings", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ whisperMode: next }),
-    }).catch(() => {});
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (d && typeof d.whisperPermission === "string") setWhisperPermission(d.whisperPermission);
+      })
+      .catch(() => {});
+    if (next) {
+      // Accessibility can flip to granted a few seconds later — refresh the
+      // note without needing the user to reopen the dialog. Bounded polls.
+      let n = 0;
+      const poll = window.setInterval(() => {
+        n += 1;
+        void fetch("/api/settings")
+          .then((r) => (r.ok ? r.json() : null))
+          .then((d) => {
+            if (d && typeof d.whisperPermission === "string") setWhisperPermission(d.whisperPermission);
+            if ((d && d.whisperPermission === "granted") || n >= 6) window.clearInterval(poll);
+          })
+          .catch(() => window.clearInterval(poll));
+      }, 3000);
+    }
   }
 
   // Send a new (or "" to reset) accelerator. The shell VALIDATES: on ok it

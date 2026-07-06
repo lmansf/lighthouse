@@ -3,9 +3,12 @@
 /**
  * First-run summon hint: a one-time, dismissible banner that teaches the global
  * summon shortcut. Desktop-only (there is no global hotkey on the web build),
- * shown once ever — the flag is written when it's dismissed (the "Got it"
- * button, or the ~12s auto-dismiss), so a reload while it's up doesn't burn the
- * one showing before it's read. Mirrors QuickStart's localStorage-gated pattern.
+ * shown once ever. It waits until the Quick Start tour has been seen (its flag
+ * is set) so it never appears BEHIND that auto-opening modal and auto-dismisses
+ * unread — in practice it greets the user on the launch after onboarding.
+ * Dismissal (the "Got it" button or the auto-hide timer) is what writes the
+ * flag; auto-hide only burns the flag once the banner has actually been on
+ * screen. Mirrors QuickStart's localStorage-gated pattern.
  */
 import { useCallback, useEffect, useState } from "react";
 import { Button, Text, makeStyles, shorthands, tokens } from "@fluentui/react-components";
@@ -15,6 +18,9 @@ import { prettyShortcut } from "@/features/onboarding/ModeChooser";
 
 /** localStorage key — set on dismiss so the hint never returns. */
 const SHOWN_KEY = "lighthouse.summonhint.shown";
+/** The Quick Start tour's own once-flag — we wait for it to be set so the two
+ *  first-run surfaces never stack (the hint would lose behind the tour modal). */
+const QUICKSTART_SHOWN_KEY = "lighthouse.quickstart.shown";
 /** Fade out on its own after this long even if untouched. */
 const AUTO_DISMISS_MS = 12_000;
 
@@ -74,6 +80,10 @@ export function SummonHint() {
     if (!isDesktopShell()) return;
     try {
       if (localStorage.getItem(SHOWN_KEY) === "1") return;
+      // Hold until the Quick Start tour has been seen, so this never opens
+      // behind that modal and auto-dismisses unread. Not-yet-seen → skip this
+      // launch (don't burn the flag); it greets on a later launch.
+      if (localStorage.getItem(QUICKSTART_SHOWN_KEY) !== "1") return;
     } catch {
       return; // storage blocked — don't risk greeting on every launch
     }

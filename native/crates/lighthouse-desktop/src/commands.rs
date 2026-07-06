@@ -515,6 +515,10 @@ pub fn settings_set(
     }
     let switched_mode = ui_mode.clone();
     let shortcut_changed = summon_shortcut.is_some();
+    // Remember the working chord so a new one that PARSES but fails to
+    // register (another app already owns it) can be rolled back instead of
+    // stranding the user hotkey-less with a broken value persisted.
+    let prev_shortcut = settings::read_desktop_settings().summon_shortcut;
     let s = settings::write_desktop_settings(
         run_on_startup,
         startup_asked,
@@ -522,10 +526,27 @@ pub fn settings_set(
         whisper_mode,
         summon_shortcut,
     );
-    if shortcut_changed {
-        // Re-register live: drop the old chord, arm the new one, refresh the
-        // HotkeyOk flag the UI copy keys off.
+    if shortcut_changed && !crate::register_summon_shortcut(&app) {
+        // The new chord didn't register — restore the previous one so the
+        // summon hotkey keeps working, and report the failure to the UI.
+        // Pass "" (not None) when the previous value was the default, so the
+        // writer actually overwrites the bad chord instead of leaving it.
+        settings::write_desktop_settings(
+            None,
+            None,
+            None,
+            None,
+            Some(prev_shortcut.clone().unwrap_or_default()),
+        );
         crate::register_summon_shortcut(&app);
+        return json!({
+            "ok": false,
+            "reason": "another app already uses that shortcut — kept the previous one",
+            "summonShortcut": prev_shortcut
+                .as_deref()
+                .unwrap_or(settings::DEFAULT_SUMMON_SHORTCUT),
+            "summonHotkeyOk": true,
+        });
     }
     // Autostart is CONSENT-FIRST (mirrors the boot gate in main.rs): only
     // touch the OS registration once the startup prompt has been answered.

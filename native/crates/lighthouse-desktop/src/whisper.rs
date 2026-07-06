@@ -188,10 +188,14 @@ mod imp {
     /// 2 granted · 1 pending (asked, waiting on Accessibility) · 0 unknown.
     static PERMISSION: AtomicU8 = AtomicU8::new(0);
 
-    /// The installed monitor object. AppKit hands us a Retained<AnyObject>
-    /// that is only ever created/used/removed on the main thread; the wrapper
-    /// exists purely so the static Mutex can hold it.
-    struct MonitorHandle(Retained<AnyObject>);
+    /// The installed monitor objects. AppKit hands us Retained<AnyObject>s
+    /// only ever created/used/removed on the main thread; the wrapper exists
+    /// purely so the static Mutex can hold them. TWO monitors are needed: a
+    /// GLOBAL monitor sees events while OTHER apps are focused, and a LOCAL
+    /// monitor sees events while LIGHTHOUSE itself is focused — without the
+    /// local one, a second chord tap to DISMISS the summoned (focused) widget
+    /// would never be seen, so the whisper could open but never re-toggle.
+    struct MonitorHandle(Option<Retained<AnyObject>>, Option<Retained<AnyObject>>);
     unsafe impl Send for MonitorHandle {}
     static MONITOR: Mutex<Option<MonitorHandle>> = Mutex::new(None);
 
@@ -263,22 +267,39 @@ mod imp {
         if guard.is_some() {
             return;
         }
-        let handler_app = app.clone();
-        let block = RcBlock::new(move |ev: NonNull<NSEvent>| handle(&handler_app, ev));
         let mask = NSEventMask::FlagsChanged | NSEventMask::KeyDown;
-        match NSEvent::addGlobalMonitorForEventsMatchingMask_handler(mask, &block) {
-            Some(m) => {
-                *guard = Some(MonitorHandle(m));
-                PERMISSION.store(2, Ordering::Relaxed);
-            }
-            None => eprintln!("whisper: NSEvent global monitor failed to install"),
+        // Global monitor: events while another app is focused.
+        let g_app = app.clone();
+        let g_block = RcBlock::new(move |ev: NonNull<NSEvent>| handle(&g_app, ev));
+        let global = NSEvent::addGlobalMonitorForEventsMatchingMask_handler(mask, &g_block);
+        // Local monitor: events while Lighthouse is focused (the summoned
+        // widget). Its handler must return the event to let it through; we
+        // never swallow input — the whisper only observes.
+        let l_app = app.clone();
+        let l_block = RcBlock::new(move |ev: NonNull<NSEvent>| -> *mut NSEvent {
+            handle(&l_app, ev);
+            ev.as_ptr()
+        });
+        let local = unsafe {
+            NSEvent::addLocalMonitorForEventsMatchingMask_handler(mask, &l_block)
+        };
+        if global.is_none() && local.is_none() {
+            eprintln!("whisper: NSEvent monitors failed to install");
+            return;
         }
+        *guard = Some(MonitorHandle(global, local));
+        PERMISSION.store(2, Ordering::Relaxed);
     }
 
     fn uninstall() {
         if let Ok(mut guard) = MONITOR.lock() {
-            if let Some(MonitorHandle(m)) = guard.take() {
-                unsafe { NSEvent::removeMonitor(&m) };
+            if let Some(MonitorHandle(g, l)) = guard.take() {
+                if let Some(m) = g {
+                    unsafe { NSEvent::removeMonitor(&m) };
+                }
+                if let Some(m) = l {
+                    unsafe { NSEvent::removeMonitor(&m) };
+                }
             }
         }
         PREV.store(0, Ordering::Relaxed);
@@ -424,34 +445,51 @@ mod imp {
         )?
         .check()?;
 
+        // Recompute the chord mask from the REAL keyboard state rather than
+        // accumulating press/release deltas — a delta model leaves a stuck
+        // bit if a release is ever missed (another app's grab, a fast
+        // chord), which would later fire the whisper spuriously. QueryKeymap
+        // is ground truth: a 32-byte bitmap, bit `kc` set when key `kc` is
+        // physically down. Only queried on modifier events (not on typing).
+        let true_mods = |conn: &x11rb::rust_connection::RustConnection| -> u8 {
+            let km = match conn.query_keymap().map_err(|_| ()).and_then(|c| c.reply().map_err(|_| ())) {
+                Ok(km) => km,
+                Err(()) => return MODS.load(Ordering::Relaxed), // keep last on a hiccup
+            };
+            let down = |set: &HashSet<u8>| set.iter().any(|&kc| {
+                km.keys.get((kc / 8) as usize).is_some_and(|b| b & (1 << (kc % 8)) != 0)
+            });
+            (if down(&ctrl) { CTRL } else { 0 })
+                | (if down(&sup) { SUPER } else { 0 })
+                | (if down(&shift) { SHIFT } else { 0 })
+        };
+
         loop {
-            match conn.wait_for_event()? {
-                Event::XinputRawKeyPress(e) => {
-                    let bit = bit_of(e.detail as u8);
-                    if bit == 0 {
-                        if MODS.load(Ordering::Relaxed) != 0 {
-                            DIRTY.store(true, Ordering::Relaxed);
-                        }
-                    } else {
-                        MODS.fetch_or(bit, Ordering::Relaxed);
-                    }
+            let (detail, press) = match conn.wait_for_event()? {
+                Event::XinputRawKeyPress(e) => (e.detail as u8, true),
+                Event::XinputRawKeyRelease(e) => (e.detail as u8, false),
+                _ => continue,
+            };
+            if bit_of(detail) == 0 {
+                // A non-modifier keypress during a held chord dirties it.
+                if press && MODS.load(Ordering::Relaxed) != 0 {
+                    DIRTY.store(true, Ordering::Relaxed);
                 }
-                Event::XinputRawKeyRelease(e) => {
-                    let bit = bit_of(e.detail as u8);
-                    if bit != 0 {
-                        let before = MODS.fetch_and(!bit, Ordering::Relaxed);
-                        if before == ALL
-                            && !DIRTY.load(Ordering::Relaxed)
-                            && WANTED.load(Ordering::Relaxed)
-                        {
-                            fire();
-                        }
-                        if before & !bit == 0 {
-                            DIRTY.store(false, Ordering::Relaxed);
-                        }
-                    }
-                }
-                _ => {}
+                continue;
+            }
+            // Modifier event: resync from ground truth, then act on the edge.
+            let cur = true_mods(&conn);
+            let before = MODS.swap(cur, Ordering::Relaxed);
+            if !press
+                && before == ALL
+                && cur != ALL
+                && !DIRTY.load(Ordering::Relaxed)
+                && WANTED.load(Ordering::Relaxed)
+            {
+                fire();
+            }
+            if cur == 0 {
+                DIRTY.store(false, Ordering::Relaxed);
             }
         }
     }
