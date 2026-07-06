@@ -100,6 +100,29 @@ pub async fn rag_op(app: AppHandle, body: Value) -> Result<Value, String> {
             let _ = app.emit("vault-changed", ());
             Ok(json!({ "newId": new_id }))
         }
+        Some("rename") => {
+            let Some(id) = body["id"].as_str() else {
+                return Err("id required".into());
+            };
+            let Some(name) = body["name"].as_str() else {
+                return Err("name required".into());
+            };
+            let new_id = sources::rename_node(id, name)
+                .await
+                .map_err(|e| err_string(e, "rename failed"))?;
+            let _ = app.emit("vault-changed", ());
+            Ok(json!({ "newId": new_id }))
+        }
+        Some("newFolder") => {
+            let Some(name) = body["name"].as_str() else {
+                return Err("name required".into());
+            };
+            let new_id = sources::create_folder(body["parentId"].as_str(), name)
+                .await
+                .map_err(|e| err_string(e, "could not create folder"))?;
+            let _ = app.emit("vault-changed", ());
+            Ok(json!({ "newId": new_id }))
+        }
         Some("addReference") => {
             let Some(path) = body["path"].as_str().filter(|p| !p.trim().is_empty()) else {
                 return Err("path required".into());

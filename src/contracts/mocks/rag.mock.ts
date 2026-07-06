@@ -99,6 +99,36 @@ class MockRagService implements RagService {
     return { newId: fromId };
   }
 
+  async renameNode(id: string, newName: string): Promise<{ newId: string }> {
+    const node = this.nodes.find((n) => n.id === id);
+    if (!node) throw new Error("source not found");
+    const slash = id.lastIndexOf("/");
+    const newId = slash >= 0 ? `${id.slice(0, slash)}/${newName}` : newName;
+    if (newId !== id && this.nodes.some((n) => n.id === newId)) {
+      throw new Error("destination already exists");
+    }
+    // Remap every node's id + parentId onto the new prefix so descendants follow.
+    const remap = (x: string) =>
+      x === id ? newId : x.startsWith(`${id}/`) ? newId + x.slice(id.length) : x;
+    this.nodes = this.nodes.map((n) => ({
+      ...n,
+      id: remap(n.id),
+      parentId: n.parentId === null ? null : remap(n.parentId),
+      name: n.id === id ? newName : n.name,
+    }));
+    return { newId };
+  }
+
+  async createFolder(parentId: string | null, name: string): Promise<{ newId: string }> {
+    const newId = parentId ? `${parentId}/${name}` : name;
+    if (this.nodes.some((n) => n.id === newId)) throw new Error("already exists");
+    const sourceId = parentId
+      ? this.nodes.find((n) => n.id === parentId)?.sourceId ?? "vault"
+      : this.sources[0]?.id ?? "vault";
+    this.nodes.push({ id: newId, parentId, sourceId, name, kind: "folder", ragIncluded: false });
+    return { newId };
+  }
+
   async removeFromVault(nodeId: string): Promise<RestoreToken> {
     const ids = this.descendantIds(nodeId);
     // Stash the removed nodes in the token so restore can re-insert them.

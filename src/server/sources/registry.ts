@@ -80,6 +80,22 @@ export async function moveNode(
   return c.moveNode(fromId, toParentId);
 }
 
+export async function renameNode(id: string, newName: string): Promise<{ newId: string }> {
+  const c = connectorFor(id);
+  if (!c.rename) throw new Error("rename is unsupported for this source");
+  return c.rename(id, newName);
+}
+
+export async function createFolder(
+  parentId: string | null,
+  name: string,
+): Promise<{ newId: string }> {
+  // A null parent means the vault root; otherwise route to the owning source.
+  const c = parentId ? connectorFor(parentId) : localVault;
+  if (!c.createFolder) throw new Error("new folders are unsupported for this source");
+  return c.createFolder(parentId, name);
+}
+
 export async function removeFromVault(nodeId: string): Promise<RestoreDescriptor> {
   const c = connectorFor(nodeId);
   if (!c.remove) throw new Error("remove is unsupported for this source");

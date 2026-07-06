@@ -45,6 +45,10 @@ export interface RagService {
    * already holds a same-named item, or the source can't move (e.g. cloud).
    */
   moveNode(fromId: string, toParentId: string | null): Promise<{ newId: string }>;
+  /** Rename a node in place (same parent, new basename). Returns the new id. */
+  renameNode(id: string, newName: string): Promise<{ newId: string }>;
+  /** Create an empty folder under a parent (or the vault root, null). */
+  createFolder(parentId: string | null, name: string): Promise<{ newId: string }>;
   /**
    * Remove a node from the vault, non-destructively: a linked item unlinks, a
    * vault-resident item moves to a recoverable trash. Throws on failure.

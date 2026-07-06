@@ -103,6 +103,10 @@ interface RagStore {
    * (with the engine's reason) if the move is refused, so the UI can surface it.
    */
   moveNode: (fromId: string, toParentId: string | null) => Promise<void>;
+  /** Rename a node in place; reloads after. Rejects with the engine's reason. */
+  renameNode: (id: string, newName: string) => Promise<void>;
+  /** Create an empty folder under a parent (or vault root, null); reloads after. */
+  createFolder: (parentId: string | null, name: string) => Promise<void>;
   /**
    * Remove nodes from the vault (non-destructive: linked items unlink, vault
    * items move to a recoverable trash). Clears successfully-removed ids from the
@@ -382,6 +386,16 @@ export const useRagStore = create<RagStore>((set, get) => ({
     // authoritative tree. Errors (e.g. a name collision at the destination)
     // propagate to the caller to surface.
     await ragService.moveNode(fromId, toParentId);
+    await get().load();
+  },
+
+  renameNode: async (id, newName) => {
+    await ragService.renameNode(id, newName);
+    await get().load();
+  },
+
+  createFolder: async (parentId, name) => {
+    await ragService.createFolder(parentId, name);
     await get().load();
   },
 

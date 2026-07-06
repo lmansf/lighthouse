@@ -7,6 +7,8 @@ import {
   setSourceAvailable,
   retrieve,
   moveNode,
+  renameNode,
+  createFolder,
   addReference,
   removeReference,
   removeFromVault,
@@ -62,6 +64,35 @@ export async function POST(req: Request) {
       } catch (err) {
         return NextResponse.json(
           { error: err instanceof Error ? err.message : "move failed" },
+          { status: 400 },
+        );
+      }
+    }
+
+    case "rename": {
+      if (typeof body.id !== "string" || typeof body.name !== "string") {
+        return NextResponse.json({ error: "id and name required" }, { status: 400 });
+      }
+      try {
+        return NextResponse.json(await renameNode(body.id, body.name));
+      } catch (err) {
+        return NextResponse.json(
+          { error: err instanceof Error ? err.message : "rename failed" },
+          { status: 400 },
+        );
+      }
+    }
+
+    case "newFolder": {
+      if (typeof body.name !== "string") {
+        return NextResponse.json({ error: "name required" }, { status: 400 });
+      }
+      try {
+        const parentId = typeof body.parentId === "string" ? body.parentId : null;
+        return NextResponse.json(await createFolder(parentId, body.name));
+      } catch (err) {
+        return NextResponse.json(
+          { error: err instanceof Error ? err.message : "could not create folder" },
           { status: 400 },
         );
       }

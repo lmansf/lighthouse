@@ -419,6 +419,55 @@ export function moveNode(fromId: string, toParentId: string | null): { newId: st
 }
 
 /**
+ * Rename a node in place (same parent, new basename), carrying its inclusion
+ * flags and its subtree's. Refuses empty / dotfile / separator names and an
+ * existing destination. Vault-resident nodes only.
+ */
+export function renameNode(id: string, newName: string): { newId: string } {
+  if (!id) throw new Error("id required");
+  const clean = newName.trim();
+  if (!clean || clean.startsWith(".") || clean.includes("/") || clean.includes("\\")) {
+    throw new Error("invalid name");
+  }
+  const fromAbs = safeAbs(id);
+  if (!fs.existsSync(fromAbs)) throw new Error("source not found");
+  const slash = id.lastIndexOf("/");
+  const newId = slash >= 0 ? `${id.slice(0, slash)}/${clean}` : clean;
+  if (newId === id) return { newId }; // no-op rename
+  const toAbs = safeAbs(newId);
+  if (fs.existsSync(toAbs)) throw new Error("destination already exists");
+  fs.renameSync(fromAbs, toAbs);
+  // Remap the node and every descendant's inclusion flag onto the new prefix.
+  const state = loadState();
+  const next: Record<string, boolean> = {};
+  for (const [k, v] of Object.entries(state.included)) {
+    if (k === id) next[newId] = v;
+    else if (k.startsWith(`${id}/`)) next[newId + k.slice(id.length)] = v;
+    else next[k] = v;
+  }
+  state.included = next;
+  saveState(state);
+  return { newId };
+}
+
+/**
+ * Create an empty folder under a parent (or the vault root when null). Returns
+ * its id. Refuses empty / dotfile / separator names and existing paths.
+ */
+export function createFolder(parentId: string | null, name: string): { newId: string } {
+  const clean = name.trim();
+  if (!clean || clean.startsWith(".") || clean.includes("/") || clean.includes("\\")) {
+    throw new Error("invalid folder name");
+  }
+  const newId = parentId ? `${parentId}/${clean}` : clean;
+  const abs = safeAbs(newId);
+  if (fs.existsSync(abs)) throw new Error("a file or folder with that name already exists");
+  fs.mkdirSync(abs, { recursive: true });
+  invalidateWalkCache(); // a new (empty, excluded) folder no state write announced
+  return { newId };
+}
+
+/**
  * Write an uploaded file into the vault (optionally under a folder). The name is
  * reduced to a basename and collisions get a " (n)" suffix, so a client can
  * never write outside the vault or clobber an existing file. No state entry is

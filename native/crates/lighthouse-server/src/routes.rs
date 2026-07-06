@@ -81,6 +81,24 @@ pub async fn rag_post(headers: HeaderMap, body: Option<Json<Value>>) -> Response
                 Err(e) => bad_request(&err_message(&e, "move failed")),
             }
         }
+        Some("rename") => {
+            let (Some(id), Some(name)) = (body["id"].as_str(), body["name"].as_str()) else {
+                return bad_request("id and name required");
+            };
+            match sources::rename_node(id, name).await {
+                Ok(new_id) => Json(json!({ "newId": new_id })).into_response(),
+                Err(e) => bad_request(&err_message(&e, "rename failed")),
+            }
+        }
+        Some("newFolder") => {
+            let Some(name) = body["name"].as_str() else {
+                return bad_request("name required");
+            };
+            match sources::create_folder(body["parentId"].as_str(), name).await {
+                Ok(new_id) => Json(json!({ "newId": new_id })).into_response(),
+                Err(e) => bad_request(&err_message(&e, "could not create folder")),
+            }
+        }
         Some("addReference") => {
             if !is_desktop_app() {
                 return (

@@ -56,6 +56,16 @@ class RealRagService implements RagService {
     return res as { newId: string };
   }
 
+  async renameNode(id: string, newName: string): Promise<{ newId: string }> {
+    const res = await post({ op: "rename", id, name: newName });
+    return res as { newId: string };
+  }
+
+  async createFolder(parentId: string | null, name: string): Promise<{ newId: string }> {
+    const res = await post({ op: "newFolder", parentId, name });
+    return res as { newId: string };
+  }
+
   async removeFromVault(nodeId: string): Promise<RestoreToken> {
     const res = await post({ op: "remove", nodeId });
     return (res.restore ?? {}) as RestoreToken;

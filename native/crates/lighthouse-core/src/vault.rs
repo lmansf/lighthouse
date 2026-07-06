@@ -612,6 +612,70 @@ pub fn move_node(from_id: &str, to_parent_id: Option<&str>) -> anyhow::Result<St
     Ok(new_id)
 }
 
+/// Rename a node in place (same parent, new basename), carrying its inclusion
+/// flags and its subtree's. Refuses empty / dotfile / separator names and a
+/// destination that already exists. Vault-resident nodes only.
+pub fn rename_node(id: &str, new_name: &str) -> anyhow::Result<String> {
+    if id.is_empty() {
+        anyhow::bail!("id required");
+    }
+    let clean = new_name.trim();
+    if clean.is_empty() || clean.starts_with('.') || clean.contains('/') || clean.contains('\\') {
+        anyhow::bail!("invalid name");
+    }
+    let from_abs = safe_abs(id)?;
+    if fs::metadata(&from_abs).is_err() {
+        anyhow::bail!("source not found");
+    }
+    let new_id = match id.rsplit_once('/') {
+        Some((parent, _)) => format!("{parent}/{clean}"),
+        None => clean.to_string(),
+    };
+    if new_id == id {
+        return Ok(new_id); // no-op rename
+    }
+    let to_abs = safe_abs(&new_id)?;
+    if fs::metadata(&to_abs).is_ok() {
+        anyhow::bail!("destination already exists");
+    }
+    fs::rename(&from_abs, &to_abs)?;
+    // Remap the node and every descendant's inclusion flag (same as move_node).
+    let mut state = load_state();
+    let mut next: HashMap<String, bool> = HashMap::new();
+    for (k, v) in &state.included {
+        if k == id {
+            next.insert(new_id.clone(), *v);
+        } else if k.starts_with(&format!("{id}/")) {
+            next.insert(format!("{new_id}{}", &k[id.len()..]), *v);
+        } else {
+            next.insert(k.clone(), *v);
+        }
+    }
+    state.included = next;
+    save_state(&state);
+    Ok(new_id)
+}
+
+/// Create an empty folder under a parent (or the vault root when None). Returns
+/// its id. Refuses empty / dotfile / separator names and existing paths.
+pub fn create_folder(parent_id: Option<&str>, name: &str) -> anyhow::Result<String> {
+    let clean = name.trim();
+    if clean.is_empty() || clean.starts_with('.') || clean.contains('/') || clean.contains('\\') {
+        anyhow::bail!("invalid folder name");
+    }
+    let new_id = match parent_id {
+        Some(p) if !p.is_empty() => format!("{p}/{clean}"),
+        _ => clean.to_string(),
+    };
+    let abs = safe_abs(&new_id)?;
+    if fs::metadata(&abs).is_ok() {
+        anyhow::bail!("a file or folder with that name already exists");
+    }
+    fs::create_dir_all(&abs)?;
+    invalidate_walk_cache(); // a new (empty, excluded) folder — no state entry
+    Ok(new_id)
+}
+
 /// Write an uploaded file into the vault (optionally under a folder). Collisions
 /// get a " (n)" suffix. No state entry is created, so an uploaded file follows
 /// the default-inclusion experiment like any external add.

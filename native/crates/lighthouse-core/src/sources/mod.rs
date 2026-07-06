@@ -69,6 +69,20 @@ pub async fn move_node(from_id: &str, to_parent_id: Option<&str>) -> anyhow::Res
     vault::move_node(from_id, to_parent_id)
 }
 
+pub async fn rename_node(id: &str, new_name: &str) -> anyhow::Result<String> {
+    if sharepoint::owns_id(id) {
+        anyhow::bail!("rename is unsupported for this source");
+    }
+    vault::rename_node(id, new_name)
+}
+
+pub async fn create_folder(parent_id: Option<&str>, name: &str) -> anyhow::Result<String> {
+    if parent_id.is_some_and(sharepoint::owns_id) {
+        anyhow::bail!("new folders are unsupported for this source");
+    }
+    vault::create_folder(parent_id, name)
+}
+
 pub async fn remove_from_vault(node_id: &str) -> anyhow::Result<serde_json::Value> {
     if sharepoint::owns_id(node_id) {
         anyhow::bail!("remove is unsupported for this source");

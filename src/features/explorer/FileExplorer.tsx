@@ -28,6 +28,7 @@ import {
   DialogSurface,
   DialogTitle,
   DialogTrigger,
+  Input,
   Menu,
   MenuDivider,
   MenuItem,
@@ -64,6 +65,7 @@ import {
   FolderOpenRegular,
   LinkRegular,
   OpenRegular,
+  RenameRegular,
   ShieldKeyholeRegular,
   SparkleFilled,
 } from "@fluentui/react-icons";
@@ -382,6 +384,10 @@ interface TreeRowProps {
   onReveal: (id: string) => void;
   /** Reparent a node under a folder (or the vault root, null). */
   onMove: (fromId: string, toParentId: string | null) => void;
+  /** Open the rename dialog for a node (local vault nodes only). */
+  onRename: (id: string, currentName: string) => void;
+  /** Create a new folder inside this folder. */
+  onNewFolderInside: (parentId: string) => void;
   /**
    * Valid move destinations for this node — the vault root plus every folder
    * except the node itself and its own descendants — or [] when it can't move
@@ -413,6 +419,8 @@ function TreeRow({
   onOpen,
   onReveal,
   onMove,
+  onRename,
+  onNewFolderInside,
   moveTargetsFor,
   visibleIds,
   forceExpand,
@@ -439,6 +447,9 @@ function TreeRow({
   const revealable = desktop && !isRemote;
   const moveTargets = moveTargetsFor(node);
   const movable = moveTargets.length > 0;
+  // Rename + "new folder inside" apply to any local vault node (a linked, cloud,
+  // or database node can't be renamed and doesn't hold vault children).
+  const editable = !node.external && !isRemote && node.kind !== "database";
   // Row clicks NAVIGATE only. Visibility lives exclusively on the explicit eye
   // toggle (and the context menu) so a misclick can never silently change what
   // the AI sees — especially a folder click, which cascades server-side.
@@ -647,7 +658,17 @@ function TreeRow({
                 </MenuPopover>
               </Menu>
             )}
-            {(openable || revealable || movable) && <MenuDivider />}
+            {editable && (
+              <MenuItem icon={<RenameRegular />} onClick={() => onRename(node.id, node.name)}>
+                Rename…
+              </MenuItem>
+            )}
+            {editable && node.kind === "folder" && (
+              <MenuItem icon={<FolderAddRegular />} onClick={() => onNewFolderInside(node.id)}>
+                New folder inside…
+              </MenuItem>
+            )}
+            {(openable || revealable || movable || editable) && <MenuDivider />}
             <MenuItem
               icon={node.ragIncluded ? <EyeOffRegular /> : <EyeRegular />}
               onClick={toggleVisibility}
@@ -683,6 +704,8 @@ function TreeRow({
               onOpen={onOpen}
               onReveal={onReveal}
               onMove={onMove}
+              onRename={onRename}
+              onNewFolderInside={onNewFolderInside}
               moveTargetsFor={moveTargetsFor}
               visibleIds={visibleIds}
               forceExpand={forceExpand}
@@ -711,6 +734,8 @@ export function FileExplorer() {
   const removeFromVault = useRagStore((s) => s.removeFromVault);
   const restoreLast = useRagStore((s) => s.restoreLast);
   const moveNode = useRagStore((s) => s.moveNode);
+  const renameNode = useRagStore((s) => s.renameNode);
+  const createFolder = useRagStore((s) => s.createFolder);
   const refresh = useRagStore((s) => s.load);
   const upload = useRagStore((s) => s.upload);
   const linkPaths = useRagStore((s) => s.linkPaths);
@@ -908,6 +933,41 @@ export function FileExplorer() {
   const handleMove = (fromId: string, toParentId: string | null) => {
     void moveNode(fromId, toParentId).catch((err) =>
       setAddNotice(err instanceof Error ? err.message : "Move failed."),
+    );
+  };
+
+  // Rename and "new folder" share one small name dialog: `mode` picks the copy
+  // and which store action runs; `targetId` is the node to rename or the parent
+  // to create in (null = vault root for a new folder).
+  const [namePrompt, setNamePrompt] = useState<
+    { mode: "rename" | "newFolder"; targetId: string | null; initial: string } | null
+  >(null);
+  const [nameValue, setNameValue] = useState("");
+  const [nameError, setNameError] = useState<string | null>(null);
+  const openRename = (id: string, current: string) => {
+    setNamePrompt({ mode: "rename", targetId: id, initial: current });
+    setNameValue(current);
+    setNameError(null);
+  };
+  const openNewFolder = (parentId: string | null) => {
+    setNamePrompt({ mode: "newFolder", targetId: parentId, initial: "" });
+    setNameValue("");
+    setNameError(null);
+  };
+  const submitName = () => {
+    if (!namePrompt) return;
+    const name = nameValue.trim();
+    if (!name) {
+      setNameError("Enter a name.");
+      return;
+    }
+    const action =
+      namePrompt.mode === "rename"
+        ? renameNode(namePrompt.targetId as string, name)
+        : createFolder(namePrompt.targetId, name);
+    void action.then(
+      () => setNamePrompt(null),
+      (err) => setNameError(err instanceof Error ? err.message : "Something went wrong."),
     );
   };
 
@@ -1195,6 +1255,15 @@ export function FileExplorer() {
               </MenuList>
             </MenuPopover>
           </Menu>
+          <Tooltip content="Create a new folder in the vault" relationship="label">
+            <Button
+              icon={<FolderAddRegular />}
+              size="small"
+              appearance="subtle"
+              aria-label="New folder"
+              onClick={() => openNewFolder(null)}
+            />
+          </Tooltip>
           {desktop && (
             <Tooltip content="Open the vault folder in your file manager" relationship="label">
               <Button
@@ -1475,6 +1544,8 @@ export function FileExplorer() {
                         onOpen={openNode}
                         onReveal={revealNode}
                         onMove={handleMove}
+                        onRename={openRename}
+                        onNewFolderInside={(pid) => openNewFolder(pid)}
                         moveTargetsFor={moveTargetsFor}
                         visibleIds={visibleIds}
                         forceExpand={filterActive}
@@ -1535,6 +1606,49 @@ export function FileExplorer() {
                 }}
               >
                 Remove
+              </Button>
+            </DialogActions>
+          </DialogBody>
+        </DialogSurface>
+      </Dialog>
+
+      {/* Shared Rename / New-folder name dialog. */}
+      <Dialog
+        open={namePrompt !== null}
+        onOpenChange={(_, d) => {
+          if (!d.open) setNamePrompt(null);
+        }}
+      >
+        <DialogSurface>
+          <DialogBody>
+            <DialogTitle>{namePrompt?.mode === "rename" ? "Rename" : "New folder"}</DialogTitle>
+            <DialogContent>
+              <Input
+                value={nameValue}
+                onChange={(_, d) => setNameValue(d.value)}
+                placeholder={namePrompt?.mode === "rename" ? "New name" : "Folder name"}
+                aria-label={namePrompt?.mode === "rename" ? "New name" : "Folder name"}
+                autoFocus
+                style={{ width: "100%" }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    submitName();
+                  }
+                }}
+              />
+              {nameError && (
+                <Text as="p" className={styles.removeError}>
+                  {nameError}
+                </Text>
+              )}
+            </DialogContent>
+            <DialogActions>
+              <DialogTrigger disableButtonEnhancement>
+                <Button appearance="secondary">Cancel</Button>
+              </DialogTrigger>
+              <Button appearance="primary" onClick={submitName}>
+                {namePrompt?.mode === "rename" ? "Rename" : "Create"}
               </Button>
             </DialogActions>
           </DialogBody>
