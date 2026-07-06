@@ -16,7 +16,7 @@
  * Keep using `useRagStore` (do not import other features directly).
  */
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Badge,
   Button,
@@ -28,7 +28,7 @@ import {
   DialogSurface,
   DialogTitle,
   DialogTrigger,
-  Link,
+  Input,
   Menu,
   MenuDivider,
   MenuItem,
@@ -36,7 +36,6 @@ import {
   MenuPopover,
   MenuTrigger,
   SearchBox,
-  Spinner,
   Switch,
   Text,
   Title3,
@@ -48,6 +47,7 @@ import {
 } from "@fluentui/react-components";
 import {
   ArrowDownloadRegular,
+  ArrowSortRegular,
   ArrowSyncRegular,
   CheckmarkCircleFilled,
   ChevronDownRegular,
@@ -60,11 +60,13 @@ import {
   DocumentPdfRegular,
   EyeOffRegular,
   EyeRegular,
+  FolderArrowRightRegular,
   FolderRegular,
   FolderAddRegular,
   FolderOpenRegular,
   LinkRegular,
-  PlugDisconnectedRegular,
+  OpenRegular,
+  RenameRegular,
   ShieldKeyholeRegular,
   SparkleFilled,
 } from "@fluentui/react-icons";
@@ -73,7 +75,7 @@ import { useRagStore } from "@/stores/useRagStore";
 import { useAuthStore } from "@/stores/useAuthStore";
 import { logEvent } from "@/lib/logEvent";
 import { recordInterest } from "@/lib/comingSoon";
-import { FILE_DRAG_MIME, serializeDraggedFiles } from "@/shell/dnd";
+import { FILE_DRAG_MIME, parseDraggedFiles, serializeDraggedFiles } from "@/shell/dnd";
 import { desktopBridge, isDesktopShell, pathsForFiles } from "@/shell/desktopBridge";
 
 /** Persists dismissal of the include-by-default note so it isn't permanent noise. */
@@ -265,27 +267,6 @@ const useStyles = makeStyles({
     marginTop: tokens.spacingVerticalL,
     marginBottom: tokens.spacingVerticalS,
   },
-  connectBody: {
-    display: "flex",
-    flexDirection: "column",
-    gap: tokens.spacingVerticalM,
-    alignItems: "flex-start",
-  },
-  deviceCode: {
-    fontFamily: tokens.fontFamilyMonospace,
-    fontSize: tokens.fontSizeHero800,
-    fontWeight: tokens.fontWeightSemibold,
-    letterSpacing: "0.15em",
-    ...shorthands.padding(tokens.spacingVerticalS, tokens.spacingHorizontalM),
-    backgroundColor: tokens.colorNeutralBackground3,
-    ...shorthands.borderRadius(tokens.borderRadiusMedium),
-    userSelect: "all",
-  },
-  waitingRow: {
-    display: "flex",
-    alignItems: "center",
-    gap: tokens.spacingHorizontalS,
-  },
   empty: {
     ...shorthands.padding(tokens.spacingVerticalXL, tokens.spacingHorizontalL),
     textAlign: "center",
@@ -339,6 +320,12 @@ const useStyles = makeStyles({
     animationTimingFunction: tokens.curveDecelerateMid,
     "@media (prefers-reduced-motion: reduce)": { animationName: "none" },
   },
+  // A folder lights up as a "move into here" target while a file row is dragged
+  // over it — the reparent gesture that surfaces the engine's op:move.
+  rowDropInto: {
+    backgroundColor: tokens.colorBrandBackground2,
+    ...shorthands.outline("2px", "solid", tokens.colorBrandStroke1),
+  },
   actionBar: {
     display: "flex",
     alignItems: "center",
@@ -353,6 +340,13 @@ const useStyles = makeStyles({
   // The eye reads as part of the row until you need it; brand color marks the
   // "visible to AI" state so scanning the tree shows what the AI can see.
   eyeOn: { color: tokens.colorBrandForeground1 },
+  // A folder that's only partly visible to AI — distinct from a solid on/off.
+  eyePartial: { color: tokens.colorBrandForeground2 },
+  size: {
+    color: tokens.colorNeutralForeground3,
+    flexShrink: 0,
+    fontVariantNumeric: "tabular-nums",
+  },
   chevron: {
     display: "flex",
     alignItems: "center",
@@ -366,6 +360,53 @@ const useStyles = makeStyles({
   spacer: { flex: 1 },
   dimmed: { opacity: 0.45 },
 });
+
+/** Cloud-connector nodes carry ids namespaced `${sourceId}::…` and live off-disk. */
+function isRemoteId(node: FileNode): boolean {
+  return node.id.startsWith(`${node.sourceId}::`);
+}
+
+/** Compact human-readable byte size (e.g. "3.4 MB"), or "" when unknown. */
+function formatSize(bytes: number | undefined): string {
+  if (bytes === undefined || bytes < 0) return "";
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let v = bytes / 1024;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i += 1;
+  }
+  return `${v < 10 ? v.toFixed(1) : Math.round(v)} ${units[i]}`;
+}
+
+type SortKey = "name" | "size" | "type";
+interface SortState {
+  key: SortKey;
+  dir: "asc" | "desc";
+}
+
+/** Lower-case extension for type sorting (files only); folders sort as "". */
+function extOf(node: FileNode): string {
+  if (node.kind !== "file") return "";
+  const dot = node.name.lastIndexOf(".");
+  return dot > 0 ? node.name.slice(dot + 1).toLowerCase() : "";
+}
+
+/** Comparator for sibling nodes: folders always first, then by the chosen key. */
+function makeComparator(sort: SortState): (a: FileNode, b: FileNode) => number {
+  const mul = sort.dir === "asc" ? 1 : -1;
+  return (a, b) => {
+    // Folders/databases group above files regardless of direction.
+    const rank = (n: FileNode) => (n.kind === "file" ? 1 : 0);
+    if (rank(a) !== rank(b)) return rank(a) - rank(b);
+    let cmp = 0;
+    if (sort.key === "size") cmp = (a.size ?? 0) - (b.size ?? 0);
+    else if (sort.key === "type") cmp = extOf(a).localeCompare(extOf(b));
+    if (cmp === 0) cmp = a.name.localeCompare(b.name, undefined, { numeric: true });
+    return cmp * mul;
+  };
+}
 
 function fileIcon(node: FileNode, className: string) {
   if (node.kind === "database") return <DatabaseRegular className={className} />;
@@ -383,8 +424,32 @@ interface TreeRowProps {
   isSelected: (id: string) => boolean;
   onToggle: (id: string) => void;
   onSelect: (id: string) => void;
+  /** Begin a selection from a hover checkbox (enters selection mode + picks). */
+  onStartSelect: (id: string) => void;
   onUnlink: (id: string) => void;
   onRemove: (id: string) => void;
+  /** True in the desktop shell, where opening/revealing real files works. */
+  desktop: boolean;
+  /** Open a file in its native application. */
+  onOpen: (id: string) => void;
+  /** Reveal a node in the OS file manager (selecting it in its folder). */
+  onReveal: (id: string) => void;
+  /** Reparent a node under a folder (or the vault root, null). */
+  onMove: (fromId: string, toParentId: string | null) => void;
+  /** Open the rename dialog for a node (local vault nodes only). */
+  onRename: (id: string, currentName: string) => void;
+  /** Create a new folder inside this folder. */
+  onNewFolderInside: (parentId: string) => void;
+  /**
+   * Valid move destinations for this node — the vault root plus every folder
+   * except the node itself and its own descendants — or [] when it can't move
+   * (a linked, cloud, or database node). Drives the "Move to…" submenu.
+   */
+  moveTargetsFor: (node: FileNode) => { id: string | null; name: string }[];
+  /** Sibling comparator (folders first, then the chosen sort key). */
+  compareNodes: (a: FileNode, b: FileNode) => number;
+  /** Folder id → whether all/some/none of its file descendants are AI-visible. */
+  folderVisibility: Map<string, "all" | "some" | "none">;
   /**
    * Ids the active search/filter keeps, or null when no filter is active.
    * Children outside the set are not rendered.
@@ -404,23 +469,55 @@ function TreeRow({
   isSelected,
   onToggle,
   onSelect,
+  onStartSelect,
   onUnlink,
   onRemove,
+  desktop,
+  onOpen,
+  onReveal,
+  onMove,
+  onRename,
+  onNewFolderInside,
+  moveTargetsFor,
+  compareNodes,
+  folderVisibility,
   visibleIds,
   forceExpand,
   justAdded,
 }: TreeRowProps) {
   const styles = useStyles();
   const [open, setOpen] = useState(depth < 1); // top-level folders open by default
+  // A folder highlights while a dragged file row hovers it (internal move).
+  const [dropInto, setDropInto] = useState(false);
+  // Reveal a select checkbox on hover, so selection can start without first
+  // flipping the global "Selection mode" switch.
+  const [hovered, setHovered] = useState(false);
   // A search must reveal matches nested in collapsed folders, so it wins over
   // the user's manual open/closed state while the query is active.
   const expanded = forceExpand || open;
   const kids = node.kind === "folder" ? childrenOf(node.id) : [];
-  const shownKids = visibleIds ? kids.filter((k) => visibleIds.has(k.id)) : kids;
+  const shownKids = (visibleIds ? kids.filter((k) => visibleIds.has(k.id)) : kids)
+    .slice()
+    .sort(compareNodes);
+  // A folder's eye reflects its descendants: all visible, some, or none.
+  const folderVis = node.kind === "folder" ? folderVisibility.get(node.id) ?? "none" : null;
+  const partialVis = folderVis === "some";
+  const eyeShown = folderVis ? folderVis !== "none" : node.ragIncluded;
   const selected = selectionMode && isSelected(node.id);
-  // Cloud-connector files (namespaced ids) live remotely, not in the local vault
-  // that attachment retrieval walks, so only local-vault files can be attached.
-  const attachable = node.kind === "file" && !node.id.startsWith(`${node.sourceId}::`);
+  // Cloud-connector nodes carry namespaced ids and live remotely, not on the
+  // local disk — so open / reveal / move (all real-path operations) don't apply.
+  const isRemote = node.id.startsWith(`${node.sourceId}::`);
+  // Only local-vault files can be attached to a chat question.
+  const attachable = node.kind === "file" && !isRemote;
+  // Open natively (files), reveal in the OS file manager (files or folders),
+  // and reparent (op:move) — all desktop-only, local-only.
+  const openable = desktop && node.kind === "file" && !isRemote;
+  const revealable = desktop && !isRemote;
+  const moveTargets = moveTargetsFor(node);
+  const movable = moveTargets.length > 0;
+  // Rename + "new folder inside" apply to any local vault node (a linked, cloud,
+  // or database node can't be renamed and doesn't hold vault children).
+  const editable = !node.external && !isRemote && node.kind !== "database";
   // Row clicks NAVIGATE only. Visibility lives exclusively on the explicit eye
   // toggle (and the context menu) so a misclick can never silently change what
   // the AI sees — especially a folder click, which cascades server-side.
@@ -440,9 +537,11 @@ function TreeRow({
     });
     onToggle(node.id);
   };
-  const eyeLabel = node.ragIncluded
-    ? "Visible to AI — click to hide"
-    : "Hidden from AI — click to show";
+  const eyeLabel = partialVis
+    ? "Some files visible to AI — click to show all"
+    : eyeShown
+      ? "Visible to AI — click to hide"
+      : "Hidden from AI — click to show";
 
   return (
     <div>
@@ -451,7 +550,9 @@ function TreeRow({
       <div
         className={`${styles.row}${node.ragIncluded ? ` ${styles.rowIncluded}` : ""}${
           selected ? ` ${styles.rowSelected}` : ""
-        }${justAdded.has(node.id) ? ` ${styles.rowJustAdded}` : ""}`}
+        }${justAdded.has(node.id) ? ` ${styles.rowJustAdded}` : ""}${
+          dropInto ? ` ${styles.rowDropInto}` : ""
+        }`}
         style={{ paddingLeft: `${depth * 18 + 4}px` }}
         role="button"
         tabIndex={0}
@@ -463,6 +564,48 @@ function TreeRow({
         data-log-type={node.kind === "folder" ? "folder" : "file"}
         data-log={node.kind === "folder" ? "folder" : "file"}
         onClick={activate}
+        // Double-click opens the file in its native app (desktop-only). Folders
+        // keep their single-click expand; a stray double-click there is a no-op.
+        onDoubleClick={() => {
+          if (openable) onOpen(node.id);
+        }}
+        onMouseEnter={() => setHovered(true)}
+        onMouseLeave={() => setHovered(false)}
+        // A folder is a drop target for an internal MOVE: dragging a file row
+        // (which carries FILE_DRAG_MIME) onto it reparents the file. OS file
+        // drops carry "Files" instead and are handled by the section; internal
+        // drags never do, so the two paths never cross.
+        onDragOver={
+          node.kind === "folder"
+            ? (e) => {
+                if (!e.dataTransfer.types.includes(FILE_DRAG_MIME)) return;
+                e.preventDefault();
+                e.stopPropagation();
+                e.dataTransfer.dropEffect = "move";
+                if (!dropInto) setDropInto(true);
+              }
+            : undefined
+        }
+        onDragLeave={
+          node.kind === "folder" ? () => dropInto && setDropInto(false) : undefined
+        }
+        onDrop={
+          node.kind === "folder"
+            ? (e) => {
+                const dragged = parseDraggedFiles(e.dataTransfer);
+                if (dragged.length === 0) return;
+                e.preventDefault();
+                e.stopPropagation();
+                setDropInto(false);
+                // Move every dragged file into this folder, skipping a no-op
+                // drop onto the file's own parent; the engine rejects invalid
+                // moves (into itself / a name clash) and the store surfaces it.
+                for (const f of dragged) {
+                  if (f.id !== node.id) onMove(f.id, node.id);
+                }
+              }
+            : undefined
+        }
         onKeyDown={(e) => {
           // Keys on inner controls (the eye, unlink, checkbox) bubble up here;
           // only handle keys aimed at the row itself.
@@ -486,7 +629,9 @@ function TreeRow({
             FILE_DRAG_MIME,
             serializeDraggedFiles([{ id: node.id, name: node.name }]),
           );
-          e.dataTransfer.effectAllowed = "copy";
+          // copyMove: a drop on the chat pane attaches (copy); a drop on a
+          // folder row reparents (move). Both effects must be allowed here.
+          e.dataTransfer.effectAllowed = "copyMove";
         }}
       >
         <span
@@ -501,13 +646,15 @@ function TreeRow({
             expanded ? <ChevronDownRegular /> : <ChevronRightRegular />
           ) : null}
         </span>
-        {selectionMode && (
+        {(selectionMode || selected || hovered) && (
           <Checkbox
             className={styles.check}
             checked={selected}
             onClick={(e) => {
               e.stopPropagation();
-              onSelect(node.id);
+              // Outside selection mode, ticking a hover checkbox starts one.
+              if (selectionMode) onSelect(node.id);
+              else onStartSelect(node.id);
             }}
             aria-label={`Select ${node.name}`}
           />
@@ -537,14 +684,19 @@ function TreeRow({
             />
           </Tooltip>
         )}
+        {node.kind === "file" && node.size !== undefined && (
+          <Text size={200} className={styles.size}>
+            {formatSize(node.size)}
+          </Text>
+        )}
         <Tooltip content={eyeLabel} relationship="label">
           <Button
             appearance="subtle"
             size="small"
-            className={node.ragIncluded ? styles.eyeOn : undefined}
-            icon={node.ragIncluded ? <EyeRegular /> : <EyeOffRegular />}
+            className={partialVis ? styles.eyePartial : eyeShown ? styles.eyeOn : undefined}
+            icon={eyeShown ? <EyeRegular /> : <EyeOffRegular />}
             aria-label={eyeLabel}
-            aria-pressed={node.ragIncluded}
+            aria-pressed={folderVis ? folderVis === "all" : node.ragIncluded}
             onClick={(e) => {
               e.stopPropagation();
               toggleVisibility();
@@ -555,12 +707,58 @@ function TreeRow({
         </MenuTrigger>
         <MenuPopover>
           <MenuList>
+            {openable && (
+              <MenuItem icon={<OpenRegular />} onClick={() => onOpen(node.id)}>
+                Open
+              </MenuItem>
+            )}
+            {revealable && (
+              <MenuItem icon={<FolderOpenRegular />} onClick={() => onReveal(node.id)}>
+                Open containing folder
+              </MenuItem>
+            )}
+            {movable && (
+              <Menu>
+                <MenuTrigger disableButtonEnhancement>
+                  <MenuItem icon={<FolderArrowRightRegular />}>Move to…</MenuItem>
+                </MenuTrigger>
+                <MenuPopover>
+                  <MenuList>
+                    {moveTargets.map((t) => (
+                      <MenuItem
+                        key={t.id ?? "__root__"}
+                        icon={<FolderRegular />}
+                        onClick={() => onMove(node.id, t.id)}
+                      >
+                        {t.name}
+                      </MenuItem>
+                    ))}
+                  </MenuList>
+                </MenuPopover>
+              </Menu>
+            )}
+            {editable && (
+              <MenuItem icon={<RenameRegular />} onClick={() => onRename(node.id, node.name)}>
+                Rename…
+              </MenuItem>
+            )}
+            {editable && node.kind === "folder" && (
+              <MenuItem icon={<FolderAddRegular />} onClick={() => onNewFolderInside(node.id)}>
+                New folder inside…
+              </MenuItem>
+            )}
+            {(openable || revealable || movable || editable) && <MenuDivider />}
             <MenuItem
               icon={node.ragIncluded ? <EyeOffRegular /> : <EyeRegular />}
               onClick={toggleVisibility}
             >
               {node.ragIncluded ? "Hide from AI" : "Visible to AI"}
             </MenuItem>
+            {node.external && node.parentId === null && (
+              <MenuItem icon={<DismissRegular />} onClick={() => onUnlink(node.id)}>
+                Unlink (leave files in place)
+              </MenuItem>
+            )}
             <MenuItem icon={<DeleteRegular />} onClick={() => onRemove(node.id)}>
               Remove from vault
             </MenuItem>
@@ -579,8 +777,18 @@ function TreeRow({
               isSelected={isSelected}
               onToggle={onToggle}
               onSelect={onSelect}
+              onStartSelect={onStartSelect}
               onUnlink={onUnlink}
               onRemove={onRemove}
+              desktop={desktop}
+              onOpen={onOpen}
+              onReveal={onReveal}
+              onMove={onMove}
+              onRename={onRename}
+              onNewFolderInside={onNewFolderInside}
+              moveTargetsFor={moveTargetsFor}
+              compareNodes={compareNodes}
+              folderVisibility={folderVisibility}
               visibleIds={visibleIds}
               forceExpand={forceExpand}
               justAdded={justAdded}
@@ -606,6 +814,10 @@ export function FileExplorer() {
   const toggleIncluded = useRagStore((s) => s.toggleIncluded);
   const removeReference = useRagStore((s) => s.removeReference);
   const removeFromVault = useRagStore((s) => s.removeFromVault);
+  const restoreLast = useRagStore((s) => s.restoreLast);
+  const moveNode = useRagStore((s) => s.moveNode);
+  const renameNode = useRagStore((s) => s.renameNode);
+  const createFolder = useRagStore((s) => s.createFolder);
   const refresh = useRagStore((s) => s.load);
   const upload = useRagStore((s) => s.upload);
   const linkPaths = useRagStore((s) => s.linkPaths);
@@ -613,10 +825,6 @@ export function FileExplorer() {
   const desktop = useRagStore((s) => s.desktop);
   const lastError = useRagStore((s) => s.lastError);
   const clearLastError = useRagStore((s) => s.clearLastError);
-  const sharepoint = useRagStore((s) => s.sharepoint);
-  const connectSharePoint = useRagStore((s) => s.connectSharePoint);
-  const closeSharePointDialog = useRagStore((s) => s.closeSharePointDialog);
-  const disconnectSharePoint = useRagStore((s) => s.disconnectSharePoint);
   // The user's effective default-inclusion behavior (explicit onboarding choice,
   // else the assigned A/B variant). "include" carries a prominent "you control
   // what AI sees" reassurance since files are searchable the moment they're added.
@@ -652,13 +860,29 @@ export function FileExplorer() {
   // slide-in payoff as the add flash, its own copy and timer.
   const [interestNote, setInterestNote] = useState<string | null>(null);
   const interestTimer = useRef<number | null>(null);
+  // "Removed N — Undo": a transient banner that restores the last removal in one
+  // click, so no one has to hand-dig `.rag-vault/trash`. Auto-retires.
+  const [removedCount, setRemovedCount] = useState<number | null>(null);
+  const undoTimer = useRef<number | null>(null);
   useEffect(
     () => () => {
       if (flashTimer.current) window.clearTimeout(flashTimer.current);
       if (interestTimer.current) window.clearTimeout(interestTimer.current);
+      if (undoTimer.current) window.clearTimeout(undoTimer.current);
     },
     [],
   );
+  const showUndo = (count: number) => {
+    if (count <= 0) return;
+    setRemovedCount(count);
+    if (undoTimer.current) window.clearTimeout(undoTimer.current);
+    undoTimer.current = window.setTimeout(() => setRemovedCount(null), 8000);
+  };
+  const undoRemove = () => {
+    setRemovedCount(null);
+    if (undoTimer.current) window.clearTimeout(undoTimer.current);
+    void restoreLast();
+  };
   const celebrate = (ids: string[]) => {
     if (ids.length === 0) return;
     setJustAdded(new Set(ids));
@@ -682,6 +906,8 @@ export function FileExplorer() {
   // Search + "Only visible to AI" filter over the tree.
   const [query, setQuery] = useState("");
   const [onlyVisible, setOnlyVisible] = useState(false);
+  const [sort, setSort] = useState<SortState>({ key: "name", dir: "asc" });
+  const compareNodes = useMemo(() => makeComparator(sort), [sort]);
 
   // The include-by-default note is reassurance, not a control - once read it
   // can be dismissed for good (persisted so it doesn't return every launch).
@@ -717,6 +943,40 @@ export function FileExplorer() {
     return map;
   }, [nodes]);
   const childrenOf = (id: string | null) => childrenByParent.get(id) ?? [];
+
+  // For each folder, whether ALL / SOME / NONE of its file descendants are
+  // visible to AI — so a folder's eye can show a distinct "partially exposed"
+  // state instead of a plain on/off that hides the real picture.
+  const folderVisibility = useMemo(() => {
+    const map = new Map<string, "all" | "some" | "none">();
+    const counts = new Map<string, { inc: number; total: number }>();
+    const visit = (id: string): { inc: number; total: number } => {
+      const cached = counts.get(id);
+      if (cached) return cached;
+      let inc = 0;
+      let total = 0;
+      for (const c of childrenByParent.get(id) ?? []) {
+        if (c.kind === "file") {
+          total += 1;
+          if (c.ragIncluded) inc += 1;
+        } else {
+          const sub = visit(c.id);
+          inc += sub.inc;
+          total += sub.total;
+        }
+      }
+      const res = { inc, total };
+      counts.set(id, res);
+      return res;
+    };
+    for (const n of nodes) {
+      if (n.kind !== "file") {
+        const { inc, total } = visit(n.id);
+        map.set(n.id, total === 0 || inc === 0 ? "none" : inc === total ? "all" : "some");
+      }
+    }
+    return map;
+  }, [nodes, childrenByParent]);
 
   const trimmedQuery = query.trim().toLowerCase();
   const filterActive = trimmedQuery !== "" || onlyVisible;
@@ -761,6 +1021,119 @@ export function FileExplorer() {
         (skipped.length > 3 ? `, and ${skipped.length - 3} more` : ""),
     );
   };
+
+  // --- Desktop file actions: open natively, reveal in the OS file manager, and
+  // reparent (op:move). Failures surface in the notice banner, never silently.
+  const notifyIfError = async (res: Response, fallback: string) => {
+    if (res.ok) return;
+    const data = (await res.json().catch(() => ({}))) as { error?: string };
+    setAddNotice(data.error || fallback);
+  };
+  const openNode = (nodeId: string) => {
+    void fetch("/api/open", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ nodeId }),
+    })
+      .then((res) => notifyIfError(res, "Couldn't open the file."))
+      .catch(() => setAddNotice("Couldn't open the file."));
+  };
+  // A blank node id opens the vault folder itself (the toolbar button).
+  const revealNode = (nodeId: string) => {
+    void fetch("/api/reveal", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(nodeId ? { nodeId } : {}),
+    })
+      .then((res) => notifyIfError(res, "Couldn't open the folder."))
+      .catch(() => setAddNotice("Couldn't open the folder."));
+  };
+  const handleMove = (fromId: string, toParentId: string | null) => {
+    void moveNode(fromId, toParentId).catch((err) =>
+      setAddNotice(err instanceof Error ? err.message : "Move failed."),
+    );
+  };
+
+  // Rename and "new folder" share one small name dialog: `mode` picks the copy
+  // and which store action runs; `targetId` is the node to rename or the parent
+  // to create in (null = vault root for a new folder).
+  const [namePrompt, setNamePrompt] = useState<
+    { mode: "rename" | "newFolder"; targetId: string | null; initial: string } | null
+  >(null);
+  const [nameValue, setNameValue] = useState("");
+  const [nameError, setNameError] = useState<string | null>(null);
+  const openRename = (id: string, current: string) => {
+    setNamePrompt({ mode: "rename", targetId: id, initial: current });
+    setNameValue(current);
+    setNameError(null);
+  };
+  const openNewFolder = (parentId: string | null) => {
+    setNamePrompt({ mode: "newFolder", targetId: parentId, initial: "" });
+    setNameValue("");
+    setNameError(null);
+  };
+  const submitName = () => {
+    if (!namePrompt) return;
+    const name = nameValue.trim();
+    if (!name) {
+      setNameError("Enter a name.");
+      return;
+    }
+    const action =
+      namePrompt.mode === "rename"
+        ? renameNode(namePrompt.targetId as string, name)
+        : createFolder(namePrompt.targetId, name);
+    void action.then(
+      () => setNamePrompt(null),
+      (err) => setNameError(err instanceof Error ? err.message : "Something went wrong."),
+    );
+  };
+
+  // Every local vault folder with a shallow "a / b / c" path label so same-named
+  // folders in the Move-to menu are distinguishable. Computed once per tree.
+  const folderTargets = useMemo(() => {
+    const pathName = (n: FileNode): string => {
+      const parts: string[] = [];
+      let cur: FileNode | undefined = n;
+      while (cur) {
+        parts.unshift(cur.name);
+        cur = cur.parentId === null ? undefined : nodeById.get(cur.parentId);
+      }
+      return parts.join(" / ");
+    };
+    return nodes
+      .filter((n) => n.kind === "folder" && !n.external && !isRemoteId(n))
+      .map((n) => ({ id: n.id, name: pathName(n), sourceId: n.sourceId, parentId: n.parentId }));
+  }, [nodes, nodeById]);
+
+  // Valid move destinations for a node: the vault root plus every folder in the
+  // same source, minus the node itself, its descendants, and its current parent
+  // (a no-op). Empty when the node can't move (linked, cloud, or a database).
+  const moveTargetsFor = useCallback(
+    (node: FileNode): { id: string | null; name: string }[] => {
+      if (node.external || isRemoteId(node) || node.kind === "database") return [];
+      const blocked = new Set<string>([node.id]);
+      const stack = [node.id];
+      while (stack.length) {
+        const id = stack.pop()!;
+        for (const c of childrenByParent.get(id) ?? []) {
+          if (c.kind === "folder" && !blocked.has(c.id)) {
+            blocked.add(c.id);
+            stack.push(c.id);
+          }
+        }
+      }
+      const targets: { id: string | null; name: string }[] = [];
+      if (node.parentId !== null) targets.push({ id: null, name: "Vault root" });
+      for (const f of folderTargets) {
+        if (f.sourceId === node.sourceId && !blocked.has(f.id) && f.id !== node.parentId) {
+          targets.push({ id: f.id, name: f.name });
+        }
+      }
+      return targets;
+    },
+    [folderTargets, childrenByParent],
+  );
 
   /** Link paths in place, returning the new ids and any per-path failures. */
   const linkResult = async (paths: string[]) => {
@@ -1000,6 +1373,26 @@ export function FileExplorer() {
               </MenuList>
             </MenuPopover>
           </Menu>
+          <Tooltip content="Create a new folder in the vault" relationship="label">
+            <Button
+              icon={<FolderAddRegular />}
+              size="small"
+              appearance="subtle"
+              aria-label="New folder"
+              onClick={() => openNewFolder(null)}
+            />
+          </Tooltip>
+          {desktop && (
+            <Tooltip content="Open the vault folder in your file manager" relationship="label">
+              <Button
+                icon={<FolderOpenRegular />}
+                size="small"
+                appearance="subtle"
+                aria-label="Open vault folder"
+                onClick={() => revealNode("")}
+              />
+            </Tooltip>
+          )}
           <Tooltip content="Re-scan the vault for new files" relationship="label">
             <Button
               icon={<ArrowSyncRegular />}
@@ -1044,7 +1437,9 @@ export function FileExplorer() {
               Drop to add
             </Text>
             <Text size={300} className={styles.dropHint}>
-              They stay on your machine
+              {desktop
+                ? "Linked in place — your files aren't copied"
+                : "They stay on your machine"}
             </Text>
           </div>
         </div>
@@ -1056,6 +1451,20 @@ export function FileExplorer() {
           <Text size={300} weight="semibold">
             Added {addFlash} {addFlash === 1 ? "file" : "files"}
           </Text>
+        </div>
+      )}
+
+      {removedCount !== null && (
+        <div className={styles.controlNote} role="status" aria-live="polite">
+          <DeleteRegular fontSize={18} className={styles.controlNoteIcon} />
+          <Text size={200}>
+            Removed {removedCount} {removedCount === 1 ? "item" : "items"} — moved to the
+            vault&apos;s trash.
+          </Text>
+          <span className={styles.spacer} />
+          <Button size="small" appearance="primary" onClick={undoRemove}>
+            Undo
+          </Button>
         </div>
       )}
 
@@ -1180,6 +1589,36 @@ export function FileExplorer() {
           >
             Only visible to AI
           </ToggleButton>
+          <Menu>
+            <MenuTrigger disableButtonEnhancement>
+              <Tooltip content="Sort files" relationship="label">
+                <Button size="small" appearance="subtle" icon={<ArrowSortRegular />} aria-label="Sort" />
+              </Tooltip>
+            </MenuTrigger>
+            <MenuPopover>
+              <MenuList>
+                {(["name", "size", "type"] as const).map((key) => {
+                  const active = sort.key === key;
+                  const label = key === "name" ? "Name" : key === "size" ? "Size" : "Type";
+                  return (
+                    <MenuItem
+                      key={key}
+                      // Re-picking the active key flips direction; a new key starts ascending.
+                      onClick={() =>
+                        setSort((s) => ({
+                          key,
+                          dir: s.key === key && s.dir === "asc" ? "desc" : "asc",
+                        }))
+                      }
+                    >
+                      {label}
+                      {active ? (sort.dir === "asc" ? "  ↑" : "  ↓") : ""}
+                    </MenuItem>
+                  );
+                })}
+              </MenuList>
+            </MenuPopover>
+          </Menu>
         </div>
       )}
 
@@ -1209,45 +1648,26 @@ export function FileExplorer() {
           </div>
         ) : (
           sources.map((source) => {
-            const roots = nodes.filter(
-              (n) =>
-                n.sourceId === source.id &&
-                n.parentId === null &&
-                (!visibleIds || visibleIds.has(n.id)),
-            );
+            const roots = nodes
+              .filter(
+                (n) =>
+                  n.sourceId === source.id &&
+                  n.parentId === null &&
+                  (!visibleIds || visibleIds.has(n.id)),
+              )
+              .sort(compareNodes);
             // While filtering, drop whole sources with no matches instead of
             // rendering an orphaned header.
             if (filterActive && roots.length === 0) return null;
             return (
               <div key={source.id}>
                 <div className={styles.sourceLabel}>
-                  {/* "sharepoint" is the cloud connector's source id (see config). */}
-                  {source.id === "sharepoint" ? (
-                    <CloudArrowUpRegular />
-                  ) : source.kind === "database" ? (
-                    <DatabaseRegular />
-                  ) : (
-                    <FolderRegular />
-                  )}
+                  {source.kind === "database" ? <DatabaseRegular /> : <FolderRegular />}
                   <Text weight="semibold">{source.name}</Text>
                   {!source.available && (
                     <Badge appearance="outline" color="danger">
                       unavailable
                     </Badge>
-                  )}
-                  {source.id === "sharepoint" && (
-                    <>
-                      <span className={styles.spacer} />
-                      <Tooltip content="Disconnect SharePoint" relationship="label">
-                        <Button
-                          icon={<PlugDisconnectedRegular />}
-                          size="small"
-                          appearance="subtle"
-                          aria-label="Disconnect SharePoint"
-                          onClick={() => void disconnectSharePoint()}
-                        />
-                      </Tooltip>
-                    </>
                   )}
                 </div>
                 {roots.length === 0 ? (
@@ -1268,8 +1688,21 @@ export function FileExplorer() {
                         isSelected={isSelected}
                         onToggle={(id) => void toggleIncluded(id)}
                         onSelect={(id) => toggleSelected(id)}
+                        onStartSelect={(id) => {
+                          setSelectionMode(true);
+                          toggleSelected(id);
+                        }}
                         onUnlink={(id) => void removeReference(id)}
                         onRemove={(id) => setPendingRemove([id])}
+                        desktop={desktop}
+                        onOpen={openNode}
+                        onReveal={revealNode}
+                        onMove={handleMove}
+                        onRename={openRename}
+                        onNewFolderInside={(pid) => openNewFolder(pid)}
+                        moveTargetsFor={moveTargetsFor}
+                        compareNodes={compareNodes}
+                        folderVisibility={folderVisibility}
                         visibleIds={visibleIds}
                         forceExpand={filterActive}
                         justAdded={justAdded}
@@ -1297,8 +1730,8 @@ export function FileExplorer() {
             <DialogTitle>Remove from vault?</DialogTitle>
             <DialogContent>
               {pendingRemove?.length === 1
-                ? "This item will be moved to the vault's trash and dropped from the index. Linked items are only unlinked — your real files stay where they are. You can restore from .rag-vault/trash."
-                : `These ${pendingRemove?.length ?? 0} items will be moved to the vault's trash and dropped from the index. Linked items are only unlinked. You can restore from .rag-vault/trash.`}
+                ? "This item will be moved to the vault's trash and dropped from the index. Linked items are only unlinked — your real files stay where they are. You can Undo right after, or restore later from .rag-vault/trash."
+                : `These ${pendingRemove?.length ?? 0} items will be moved to the vault's trash and dropped from the index. Linked items are only unlinked. You can Undo right after, or restore later from .rag-vault/trash.`}
               {removeError && (
                 <Text as="p" className={styles.removeError}>
                   {removeError}
@@ -1315,8 +1748,12 @@ export function FileExplorer() {
                   const ids = pendingRemove;
                   if (!ids) return;
                   setRemoveError(null);
+                  const count = ids.length;
                   void removeFromVault(ids).then(
-                    () => setPendingRemove(null),
+                    () => {
+                      setPendingRemove(null);
+                      showUndo(count);
+                    },
                     (err) =>
                       setRemoveError(
                         err instanceof Error ? err.message : "Removal failed",
@@ -1331,64 +1768,43 @@ export function FileExplorer() {
         </DialogSurface>
       </Dialog>
 
-      {/* SharePoint device-code sign-in. */}
+      {/* Shared Rename / New-folder name dialog. */}
       <Dialog
-        open={sharepoint.open}
+        open={namePrompt !== null}
         onOpenChange={(_, d) => {
-          if (!d.open) closeSharePointDialog();
+          if (!d.open) setNamePrompt(null);
         }}
       >
         <DialogSurface>
           <DialogBody>
-            <DialogTitle>Connect SharePoint</DialogTitle>
-            <DialogContent className={styles.connectBody}>
-              {sharepoint.phase === "starting" && (
-                <div className={styles.waitingRow}>
-                  <Spinner size="tiny" />
-                  <Text>Starting sign-in…</Text>
-                </div>
-              )}
-
-              {sharepoint.phase === "waiting" && (
-                <>
-                  <Text>
-                    1. Open{" "}
-                    <Link href={sharepoint.verificationUri} target="_blank" rel="noreferrer">
-                      {sharepoint.verificationUri?.replace(/^https?:\/\//, "")}
-                    </Link>{" "}
-                    and enter this code:
-                  </Text>
-                  <span className={styles.deviceCode}>{sharepoint.userCode}</span>
-                  <Text size={300}>
-                    2. Sign in with your work or school account and approve access.
-                  </Text>
-                  <div className={styles.waitingRow}>
-                    <Spinner size="tiny" />
-                    <Text size={300}>Waiting for you to finish in the browser…</Text>
-                  </div>
-                </>
-              )}
-
-              {sharepoint.phase === "connected" && (
-                <Text>✅ Connected. Your SharePoint files now appear in the list.</Text>
-              )}
-
-              {sharepoint.phase === "expired" && (
-                <Text>The code expired before sign-in completed. Please try again.</Text>
-              )}
-
-              {sharepoint.phase === "error" && (
-                <Text>Could not connect: {sharepoint.error}</Text>
+            <DialogTitle>{namePrompt?.mode === "rename" ? "Rename" : "New folder"}</DialogTitle>
+            <DialogContent>
+              <Input
+                value={nameValue}
+                onChange={(_, d) => setNameValue(d.value)}
+                placeholder={namePrompt?.mode === "rename" ? "New name" : "Folder name"}
+                aria-label={namePrompt?.mode === "rename" ? "New name" : "Folder name"}
+                autoFocus
+                style={{ width: "100%" }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    submitName();
+                  }
+                }}
+              />
+              {nameError && (
+                <Text as="p" className={styles.removeError}>
+                  {nameError}
+                </Text>
               )}
             </DialogContent>
             <DialogActions>
-              {(sharepoint.phase === "expired" || sharepoint.phase === "error") && (
-                <Button appearance="primary" onClick={() => void connectSharePoint()}>
-                  Try again
-                </Button>
-              )}
-              <Button appearance="secondary" onClick={() => closeSharePointDialog()}>
-                {sharepoint.phase === "connected" ? "Done" : "Cancel"}
+              <DialogTrigger disableButtonEnhancement>
+                <Button appearance="secondary">Cancel</Button>
+              </DialogTrigger>
+              <Button appearance="primary" onClick={submitName}>
+                {namePrompt?.mode === "rename" ? "Rename" : "Create"}
               </Button>
             </DialogActions>
           </DialogBody>

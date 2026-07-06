@@ -7,7 +7,12 @@
  * and aggregates listings across all of them.
  */
 import type { DataSource, FileNode } from "@/contracts";
-import { retrieve as vaultRetrieve, type Retrieved } from "../vault";
+import {
+  retrieve as vaultRetrieve,
+  restoreFromVault as vaultRestoreFromVault,
+  type Retrieved,
+  type RestoreDescriptor,
+} from "../vault";
 import { localVault } from "./local";
 import { sharepoint } from "./sharepoint";
 import type { SourceConnector } from "./types";
@@ -75,10 +80,34 @@ export async function moveNode(
   return c.moveNode(fromId, toParentId);
 }
 
-export async function removeFromVault(nodeId: string): Promise<void> {
+export async function renameNode(id: string, newName: string): Promise<{ newId: string }> {
+  const c = connectorFor(id);
+  if (!c.rename) throw new Error("rename is unsupported for this source");
+  return c.rename(id, newName);
+}
+
+export async function createFolder(
+  parentId: string | null,
+  name: string,
+): Promise<{ newId: string }> {
+  // A null parent means the vault root; otherwise route to the owning source.
+  const c = parentId ? connectorFor(parentId) : localVault;
+  if (!c.createFolder) throw new Error("new folders are unsupported for this source");
+  return c.createFolder(parentId, name);
+}
+
+export async function removeFromVault(nodeId: string): Promise<RestoreDescriptor> {
   const c = connectorFor(nodeId);
   if (!c.remove) throw new Error("remove is unsupported for this source");
-  await c.remove(nodeId);
+  return c.remove(nodeId);
+}
+
+/** Undo a removeFromVault from its descriptor. Restore is a vault-only op — the
+ *  token encodes what to reverse, so it routes straight to the vault engine. */
+export async function restoreFromVault(
+  desc: RestoreDescriptor,
+): Promise<{ id?: string; ok?: boolean }> {
+  return vaultRestoreFromVault(desc);
 }
 
 /**

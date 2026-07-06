@@ -38,6 +38,9 @@ import {
   DismissRegular,
   DocumentPdfRegular,
   DocumentRegular,
+  EyeOffRegular,
+  EyeRegular,
+  FolderOpenRegular,
   FolderRegular,
   OpenRegular,
   PinFilled,
@@ -199,6 +202,15 @@ const useStyles = makeStyles({
     color: tokens.colorNeutralForeground3,
   },
   badge: { flexShrink: 0 },
+  // Quick-actions on the selected result row: act without opening the window.
+  rowActions: {
+    display: "flex",
+    alignItems: "center",
+    gap: tokens.spacingHorizontalXXS,
+    flexShrink: 0,
+  },
+  actionBtn: { color: tokens.colorNeutralForeground3 },
+  actionOn: { color: tokens.colorBrandForeground1 },
   // Trial-over note: replaces actionable results; the only affordance left is
   // raising the main window, where the lock gate lives.
   lockNote: {
@@ -283,6 +295,10 @@ export function WidgetBar() {
   // AppShell (no usage capture, no shortcuts): see useVaultTree.
   useVaultTree();
   const nodes = useRagStore((s) => s.nodes);
+  const toggleIncluded = useRagStore((s) => s.toggleIncluded);
+  const desktop = useRagStore((s) => s.desktop);
+  // Look up a result's live node (for its current AI-visibility state).
+  const nodesById = useMemo(() => new Map(nodes.map((n) => [n.id, n])), [nodes]);
 
   // License: the widget reads the lock state itself — mounting search bare
   // would silently bypass the trial gate (widget-scope §2.4). Re-check on
@@ -492,6 +508,54 @@ export function WidgetBar() {
     // keeps the answer up next to the document it just opened.
     if (!opts?.keep) hide();
   };
+
+  // --- Row quick-actions: act on a result WITHOUT opening the explorer window
+  // — the whole point of staying in the pill. The bar stays put (no hide) so
+  // the toggle's effect is visible and you can keep curating.
+  const revealNode = (nodeId: string) => {
+    void fetch("/api/reveal", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ nodeId }),
+    }).catch(() => {});
+  };
+  const toggleVisibility = (fileId: string) => void toggleIncluded(fileId);
+
+  /** Eye (AI-visibility) + reveal cluster, shown on the selected result row.
+   *  onMouseDown preventDefault keeps focus in the input (like the rows do). */
+  const rowActions = (fileId: string, included: boolean) => (
+    <span className={styles.rowActions}>
+      <Button
+        size="small"
+        appearance="subtle"
+        className={included ? styles.actionOn : styles.actionBtn}
+        icon={included ? <EyeRegular /> : <EyeOffRegular />}
+        aria-label={included ? "Hide from AI" : "Show to AI"}
+        aria-pressed={included}
+        title={included ? "Visible to AI — click to hide" : "Hidden from AI — click to show"}
+        onMouseDown={(e) => e.preventDefault()}
+        onClick={(e) => {
+          e.stopPropagation();
+          toggleVisibility(fileId);
+        }}
+      />
+      {desktop && (
+        <Button
+          size="small"
+          appearance="subtle"
+          className={styles.actionBtn}
+          icon={<FolderOpenRegular />}
+          aria-label="Open containing folder"
+          title="Open containing folder"
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={(e) => {
+            e.stopPropagation();
+            revealNode(fileId);
+          }}
+        />
+      )}
+    </span>
+  );
 
   /**
    * Ask INSIDE the widget: stream the answer into a compact panel under the
@@ -711,15 +775,22 @@ export function WidgetBar() {
                       <Text size={300} className={styles.rowLabel}>
                         {row.node.name}
                       </Text>
-                      {!row.node.ragIncluded && (
-                        <Badge
-                          className={styles.badge}
-                          size="small"
-                          appearance="outline"
-                          color="informative"
-                        >
-                          hidden from AI
-                        </Badge>
+                      {/* Selected row: act on it in place (eye + reveal) instead
+                          of the passive badge — the pill's answer to "found it,
+                          can't touch it". Other rows keep the at-a-glance badge. */}
+                      {i === sel ? (
+                        rowActions(row.node.id, row.node.ragIncluded)
+                      ) : (
+                        !row.node.ragIncluded && (
+                          <Badge
+                            className={styles.badge}
+                            size="small"
+                            appearance="outline"
+                            color="informative"
+                          >
+                            hidden from AI
+                          </Badge>
+                        )
                       )}
                     </>
                   )}
@@ -734,10 +805,14 @@ export function WidgetBar() {
                           {row.ref.snippet}
                         </Text>
                       </div>
-                      {/* Score badge, matching chat's reference cards. */}
-                      <Badge className={styles.badge} appearance="outline">
-                        {Math.round(row.ref.score * 100)}%
-                      </Badge>
+                      {i === sel ? (
+                        rowActions(row.ref.fileId, nodesById.get(row.ref.fileId)?.ragIncluded ?? true)
+                      ) : (
+                        /* Score badge, matching chat's reference cards. */
+                        <Badge className={styles.badge} appearance="outline">
+                          {Math.round(row.ref.score * 100)}%
+                        </Badge>
+                      )}
                     </>
                   )}
                   {row.kind === "ask" && (

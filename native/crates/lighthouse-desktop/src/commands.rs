@@ -92,19 +92,46 @@ pub async fn rag_op(app: AppHandle, body: Value) -> Result<Value, String> {
             let Some(from) = body["from"].as_str() else {
                 return Err("from required".into());
             };
-            sources::move_node(from, body["toParentId"].as_str())
+            let new_id = sources::move_node(from, body["toParentId"].as_str())
                 .await
-                .map(|new_id| json!({ "newId": new_id }))
-                .map_err(|e| err_string(e, "move failed"))
+                .map_err(|e| err_string(e, "move failed"))?;
+            // Structural edits: broadcast so every window re-reads the tree at
+            // once (the FS watcher is best-effort and per-window polls lag).
+            let _ = app.emit("vault-changed", ());
+            Ok(json!({ "newId": new_id }))
+        }
+        Some("rename") => {
+            let Some(id) = body["id"].as_str() else {
+                return Err("id required".into());
+            };
+            let Some(name) = body["name"].as_str() else {
+                return Err("name required".into());
+            };
+            let new_id = sources::rename_node(id, name)
+                .await
+                .map_err(|e| err_string(e, "rename failed"))?;
+            let _ = app.emit("vault-changed", ());
+            Ok(json!({ "newId": new_id }))
+        }
+        Some("newFolder") => {
+            let Some(name) = body["name"].as_str() else {
+                return Err("name required".into());
+            };
+            let new_id = sources::create_folder(body["parentId"].as_str(), name)
+                .await
+                .map_err(|e| err_string(e, "could not create folder"))?;
+            let _ = app.emit("vault-changed", ());
+            Ok(json!({ "newId": new_id }))
         }
         Some("addReference") => {
             let Some(path) = body["path"].as_str().filter(|p| !p.trim().is_empty()) else {
                 return Err("path required".into());
             };
-            sources::add_reference(path)
+            let (id, kind) = sources::add_reference(path)
                 .await
-                .map(|(id, kind)| json!({ "id": id, "kind": kind }))
-                .map_err(|e| err_string(e, "link failed"))
+                .map_err(|e| err_string(e, "link failed"))?;
+            let _ = app.emit("vault-changed", ());
+            Ok(json!({ "id": id, "kind": kind }))
         }
         Some("removeReference") => {
             let Some(ref_id) = body["refId"].as_str() else {
@@ -112,17 +139,31 @@ pub async fn rag_op(app: AppHandle, body: Value) -> Result<Value, String> {
             };
             sources::remove_reference(ref_id)
                 .await
-                .map(|_| json!({ "ok": true }))
-                .map_err(|e| err_string(e, "unlink failed"))
+                .map_err(|e| err_string(e, "unlink failed"))?;
+            let _ = app.emit("vault-changed", ());
+            Ok(json!({ "ok": true }))
         }
         Some("remove") => {
             let Some(node_id) = body["nodeId"].as_str().filter(|n| !n.trim().is_empty()) else {
                 return Err("nodeId required".into());
             };
-            sources::remove_from_vault(node_id)
+            let restore = sources::remove_from_vault(node_id)
                 .await
-                .map(|_| json!({ "ok": true }))
-                .map_err(|e| err_string(e, "remove failed"))
+                .map_err(|e| err_string(e, "remove failed"))?;
+            let _ = app.emit("vault-changed", ());
+            // Return the restore descriptor so the client can offer Undo.
+            Ok(json!({ "ok": true, "restore": restore }))
+        }
+        Some("restore") => {
+            let token = &body["token"];
+            if !token.is_object() {
+                return Err("token required".into());
+            }
+            let result = sources::restore_from_vault(token)
+                .await
+                .map_err(|e| err_string(e, "restore failed"))?;
+            let _ = app.emit("vault-changed", ());
+            Ok(result)
         }
         _ => Err("unknown op".into()),
     }
@@ -455,6 +496,29 @@ pub fn open_node(node_id: String) -> Result<Value, String> {
         Ok(meta) if !meta.is_file() => Err("not a file".into()),
         Ok(_) => {
             crate::open_with_os(&abs);
+            Ok(json!({ "ok": true }))
+        }
+    }
+}
+
+/// Reveal a vault node in the OS file manager, selecting it inside its folder.
+/// A blank node id (or none) opens the vault directory itself, so the same
+/// route backs both the row action and the toolbar's "Open vault folder".
+/// Works for folders too (a folder reveals/opens in place).
+#[tauri::command]
+pub fn reveal_node(app: AppHandle, node_id: Option<String>) -> Result<Value, String> {
+    match node_id.filter(|s| !s.trim().is_empty()) {
+        None => {
+            crate::open_with_os(&crate::vault_dir_setting(&app));
+            Ok(json!({ "ok": true }))
+        }
+        Some(id) => {
+            let abs = vault::resolve_node_path(&id)
+                .map_err(|e| err_string(e, "could not reveal file"))?;
+            if std::fs::metadata(&abs).is_err() {
+                return Err("file no longer exists".into());
+            }
+            crate::reveal_with_os(&abs);
             Ok(json!({ "ok": true }))
         }
     }

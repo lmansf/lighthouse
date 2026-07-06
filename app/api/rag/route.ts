@@ -7,9 +7,12 @@ import {
   setSourceAvailable,
   retrieve,
   moveNode,
+  renameNode,
+  createFolder,
   addReference,
   removeReference,
   removeFromVault,
+  restoreFromVault,
 } from "@/server/sources/registry";
 import { isSameOrigin } from "@/server/http";
 import { isDesktopApp } from "@/server/config";
@@ -66,6 +69,35 @@ export async function POST(req: Request) {
       }
     }
 
+    case "rename": {
+      if (typeof body.id !== "string" || typeof body.name !== "string") {
+        return NextResponse.json({ error: "id and name required" }, { status: 400 });
+      }
+      try {
+        return NextResponse.json(await renameNode(body.id, body.name));
+      } catch (err) {
+        return NextResponse.json(
+          { error: err instanceof Error ? err.message : "rename failed" },
+          { status: 400 },
+        );
+      }
+    }
+
+    case "newFolder": {
+      if (typeof body.name !== "string") {
+        return NextResponse.json({ error: "name required" }, { status: 400 });
+      }
+      try {
+        const parentId = typeof body.parentId === "string" ? body.parentId : null;
+        return NextResponse.json(await createFolder(parentId, body.name));
+      } catch (err) {
+        return NextResponse.json(
+          { error: err instanceof Error ? err.message : "could not create folder" },
+          { status: 400 },
+        );
+      }
+    }
+
     case "addReference": {
       if (!isDesktopApp()) {
         return NextResponse.json(
@@ -93,21 +125,38 @@ export async function POST(req: Request) {
       await removeReference(body.refId);
       return NextResponse.json({ ok: true });
 
-    case "remove":
+    case "remove": {
       // Remove a node from the vault (non-destructive: links unlink, vault items
-      // move to a recoverable trash).
+      // move to a recoverable trash). Returns a restore token so the client can
+      // offer Undo.
       if (typeof body.nodeId !== "string" || !body.nodeId.trim()) {
         return NextResponse.json({ error: "nodeId required" }, { status: 400 });
       }
       try {
-        await removeFromVault(body.nodeId);
-        return NextResponse.json({ ok: true });
+        const restore = await removeFromVault(body.nodeId);
+        return NextResponse.json({ ok: true, restore });
       } catch (err) {
         return NextResponse.json(
           { error: err instanceof Error ? err.message : "remove failed" },
           { status: 400 },
         );
       }
+    }
+
+    case "restore": {
+      // Undo a previous remove from the token it returned.
+      if (!body.token || typeof body.token !== "object") {
+        return NextResponse.json({ error: "token required" }, { status: 400 });
+      }
+      try {
+        return NextResponse.json(await restoreFromVault(body.token));
+      } catch (err) {
+        return NextResponse.json(
+          { error: err instanceof Error ? err.message : "restore failed" },
+          { status: 400 },
+        );
+      }
+    }
 
     default:
       return NextResponse.json({ error: "unknown op" }, { status: 400 });

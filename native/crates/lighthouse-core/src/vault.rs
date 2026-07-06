@@ -612,6 +612,70 @@ pub fn move_node(from_id: &str, to_parent_id: Option<&str>) -> anyhow::Result<St
     Ok(new_id)
 }
 
+/// Rename a node in place (same parent, new basename), carrying its inclusion
+/// flags and its subtree's. Refuses empty / dotfile / separator names and a
+/// destination that already exists. Vault-resident nodes only.
+pub fn rename_node(id: &str, new_name: &str) -> anyhow::Result<String> {
+    if id.is_empty() {
+        anyhow::bail!("id required");
+    }
+    let clean = new_name.trim();
+    if clean.is_empty() || clean.starts_with('.') || clean.contains('/') || clean.contains('\\') {
+        anyhow::bail!("invalid name");
+    }
+    let from_abs = safe_abs(id)?;
+    if fs::metadata(&from_abs).is_err() {
+        anyhow::bail!("source not found");
+    }
+    let new_id = match id.rsplit_once('/') {
+        Some((parent, _)) => format!("{parent}/{clean}"),
+        None => clean.to_string(),
+    };
+    if new_id == id {
+        return Ok(new_id); // no-op rename
+    }
+    let to_abs = safe_abs(&new_id)?;
+    if fs::metadata(&to_abs).is_ok() {
+        anyhow::bail!("destination already exists");
+    }
+    fs::rename(&from_abs, &to_abs)?;
+    // Remap the node and every descendant's inclusion flag (same as move_node).
+    let mut state = load_state();
+    let mut next: HashMap<String, bool> = HashMap::new();
+    for (k, v) in &state.included {
+        if k == id {
+            next.insert(new_id.clone(), *v);
+        } else if k.starts_with(&format!("{id}/")) {
+            next.insert(format!("{new_id}{}", &k[id.len()..]), *v);
+        } else {
+            next.insert(k.clone(), *v);
+        }
+    }
+    state.included = next;
+    save_state(&state);
+    Ok(new_id)
+}
+
+/// Create an empty folder under a parent (or the vault root when None). Returns
+/// its id. Refuses empty / dotfile / separator names and existing paths.
+pub fn create_folder(parent_id: Option<&str>, name: &str) -> anyhow::Result<String> {
+    let clean = name.trim();
+    if clean.is_empty() || clean.starts_with('.') || clean.contains('/') || clean.contains('\\') {
+        anyhow::bail!("invalid folder name");
+    }
+    let new_id = match parent_id {
+        Some(p) if !p.is_empty() => format!("{p}/{clean}"),
+        _ => clean.to_string(),
+    };
+    let abs = safe_abs(&new_id)?;
+    if fs::metadata(&abs).is_ok() {
+        anyhow::bail!("a file or folder with that name already exists");
+    }
+    fs::create_dir_all(&abs)?;
+    invalidate_walk_cache(); // a new (empty, excluded) folder — no state entry
+    Ok(new_id)
+}
+
 /// Write an uploaded file into the vault (optionally under a folder). Collisions
 /// get a " (n)" suffix. No state entry is created, so an uploaded file follows
 /// the default-inclusion experiment like any external add.
@@ -726,32 +790,68 @@ pub fn add_reference(input_path: &str) -> anyhow::Result<(String, String)> {
     Ok((id, kind.to_string()))
 }
 
+/// Collect + drop the inclusion flags for a node and its subtree, returning the
+/// removed (id → included) pairs so a later restore can put them back exactly.
+fn take_included_subtree(
+    state: &mut VaultState,
+    node_id: &str,
+) -> serde_json::Map<String, serde_json::Value> {
+    let prefix = format!("{node_id}/");
+    let mut taken = serde_json::Map::new();
+    state.included.retain(|k, v| {
+        if k.as_str() == node_id || k.starts_with(prefix.as_str()) {
+            taken.insert(k.clone(), serde_json::Value::Bool(*v));
+            false
+        } else {
+            true
+        }
+    });
+    taken
+}
+
+/// Re-apply an (id → included) map captured by `take_included_subtree`.
+fn restore_included(state: &mut VaultState, included: &serde_json::Map<String, serde_json::Value>) {
+    for (k, v) in included {
+        if let Some(b) = v.as_bool() {
+            state.included.insert(k.clone(), b);
+        }
+    }
+}
+
 /// Remove a node from the vault — non-destructively. A linked item unlinks; a
 /// vault-resident file/folder MOVES to a recoverable trash
-/// (`.rag-vault/trash/<date>/…`) and its inclusion flags are dropped.
-pub fn remove_from_vault(node_id: &str) -> anyhow::Result<()> {
+/// (`.rag-vault/trash/<date>/…`) and its inclusion flags are dropped. Returns a
+/// restore descriptor (fed to `restore_from_vault`) so the removal can be undone
+/// without the user hand-digging the trash folder.
+pub fn remove_from_vault(node_id: &str) -> anyhow::Result<serde_json::Value> {
     let mut state = load_state();
     let ref_id = ref_id_of(node_id, &state.references).map(String::from);
+    // Reference root: unlink; restore re-links the same real path.
     if ref_id.as_deref() == Some(node_id) {
-        remove_reference(node_id);
-        return Ok(());
+        let path = state
+            .references
+            .get(node_id)
+            .map(|r| r.path.clone())
+            .unwrap_or_default();
+        let included = take_included_subtree(&mut state, node_id);
+        state.references.remove(node_id);
+        save_state(&state);
+        return Ok(
+            serde_json::json!({ "kind": "unlink", "root": node_id, "path": path, "included": included }),
+        );
     }
     // A node *inside* a linked folder: scope the removal to just this node's
     // subtree by dropping its inclusion flags; the link itself stays intact.
     if ref_id.is_some() {
-        state
-            .included
-            .retain(|k, _| k != node_id && !k.starts_with(&format!("{node_id}/")));
+        let included = take_included_subtree(&mut state, node_id);
         save_state(&state);
-        return Ok(());
+        return Ok(serde_json::json!({ "kind": "flags", "included": included }));
     }
     let abs = safe_abs(node_id)?; // refuses to escape the vault
     if abs == vault_dir() {
         anyhow::bail!("cannot remove the vault root");
     }
-    state
-        .included
-        .retain(|k, _| k != node_id && !k.starts_with(&format!("{node_id}/")));
+    let included = take_included_subtree(&mut state, node_id);
     if fs::metadata(&abs).is_ok() {
         let trash_dir = state_dir().join("trash").join(utc_day());
         fs::create_dir_all(&trash_dir)?;
@@ -766,9 +866,85 @@ pub fn remove_from_vault(node_id: &str) -> anyhow::Result<()> {
             i += 1;
         }
         fs::rename(&abs, &dest)?;
+        save_state(&state);
+        return Ok(serde_json::json!({
+            "kind": "trash",
+            "id": node_id,
+            "trashPath": dest.to_string_lossy(),
+            "included": included,
+        }));
     }
+    // Nothing on disk to move (already gone) — only flags were dropped.
     save_state(&state);
-    Ok(())
+    Ok(serde_json::json!({ "kind": "flags", "included": included }))
+}
+
+/// Reverse a `remove_from_vault` using the descriptor it returned. Non-
+/// destructive and refuses to overwrite: if something now occupies the original
+/// location, it fails rather than clobbering. Returns the node's (possibly new)
+/// id so the caller can refresh.
+pub fn restore_from_vault(desc: &serde_json::Value) -> anyhow::Result<serde_json::Value> {
+    let included = desc
+        .get("included")
+        .and_then(|v| v.as_object())
+        .cloned()
+        .unwrap_or_default();
+    match desc.get("kind").and_then(|v| v.as_str()) {
+        Some("unlink") => {
+            let path = desc.get("path").and_then(|v| v.as_str()).unwrap_or_default();
+            if path.is_empty() {
+                anyhow::bail!("nothing to restore");
+            }
+            // Re-link the same real path; it may receive a fresh extN id, so
+            // remap the saved flags from the old root prefix onto the new one.
+            let old_root = desc.get("root").and_then(|v| v.as_str()).unwrap_or_default();
+            let (new_root, _kind) = add_reference(path)?;
+            let mut state = load_state();
+            for (k, v) in &included {
+                if let Some(b) = v.as_bool() {
+                    let new_key = if k.as_str() == old_root {
+                        new_root.clone()
+                    } else if let Some(rest) = k.strip_prefix(&format!("{old_root}/")) {
+                        format!("{new_root}/{rest}")
+                    } else {
+                        k.clone()
+                    };
+                    state.included.insert(new_key, b);
+                }
+            }
+            save_state(&state);
+            Ok(serde_json::json!({ "id": new_root }))
+        }
+        Some("flags") => {
+            let mut state = load_state();
+            restore_included(&mut state, &included);
+            save_state(&state);
+            Ok(serde_json::json!({ "ok": true }))
+        }
+        Some("trash") => {
+            let id = desc.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+            let trash_path = desc
+                .get("trashPath")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            if id.is_empty() || trash_path.is_empty() {
+                anyhow::bail!("incomplete restore token");
+            }
+            let abs = safe_abs(id)?;
+            if fs::metadata(&abs).is_ok() {
+                anyhow::bail!("something already exists at the original location");
+            }
+            if let Some(parent) = abs.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::rename(trash_path, &abs)?;
+            let mut state = load_state();
+            restore_included(&mut state, &included);
+            save_state(&state);
+            Ok(serde_json::json!({ "id": id }))
+        }
+        _ => anyhow::bail!("unknown restore token"),
+    }
 }
 
 /// Drop a reference (unlink). Leaves the real files on disk untouched.

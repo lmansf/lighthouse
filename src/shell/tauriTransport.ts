@@ -32,7 +32,7 @@ function errorResponse(path: string, message: string): Response {
     const status = message.includes("unavailable") ? 501 : message === "text required" ? 400 : 500;
     return json({ error: message }, status);
   }
-  if (path === "/api/open" && message === "file no longer exists") {
+  if ((path === "/api/open" || path === "/api/reveal") && message === "file no longer exists") {
     return json({ error: message }, 404);
   }
   if (path === "/api/connect") {
@@ -221,6 +221,8 @@ async function route(
           : call("model_download");
     case "/api/open":
       return call("open_node", { nodeId: typeof body.nodeId === "string" ? body.nodeId : "" });
+    case "/api/reveal":
+      return call("reveal_node", { nodeId: typeof body.nodeId === "string" ? body.nodeId : "" });
     case "/api/upload":
       return handleUpload(core, init);
     case "/api/register":
