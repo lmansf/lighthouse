@@ -148,6 +148,18 @@ const useStyles = makeStyles({
     fontSize: tokens.fontSizeBase200,
     color: tokens.colorNeutralForeground2,
   },
+  // Ease the fill between the ~1s progress polls so it glides instead of
+  // stepping (and looking stalled). Disabled under reduced motion.
+  smoothBar: {
+    "& [class*='fui-ProgressBar__bar']": {
+      transitionProperty: "width",
+      transitionDuration: "1s",
+      transitionTimingFunction: "linear",
+    },
+    "@media (prefers-reduced-motion: reduce)": {
+      "& [class*='fui-ProgressBar__bar']": { transitionDuration: "0.01ms" },
+    },
+  },
 });
 
 /** Human-readable size, e.g. "4.2 GB" / "512 MB". */
@@ -156,6 +168,21 @@ function humanBytes(n: number): string {
   const gb = n / 1_000_000_000;
   if (gb >= 1) return `${gb.toFixed(1)} GB`;
   return `${Math.round(n / 1_000_000)} MB`;
+}
+
+/** Transfer rate, e.g. "12.3 MB/s" / "640 KB/s". Empty when unknown. */
+function humanRate(bps: number): string {
+  if (!bps || bps <= 0) return "";
+  const mb = bps / 1_000_000;
+  if (mb >= 1) return `${mb.toFixed(1)} MB/s`;
+  return `${Math.max(1, Math.round(bps / 1000))} KB/s`;
+}
+
+/** Rough time-remaining, e.g. "~2 min left" / "~40 sec left". Empty when unknown. */
+function humanEta(sec: number): string {
+  if (!sec || !Number.isFinite(sec) || sec <= 0) return "";
+  if (sec < 60) return `~${Math.max(1, Math.round(sec))} sec left`;
+  return `~${Math.round(sec / 60)} min left`;
 }
 
 /**
@@ -171,6 +198,30 @@ export function LocalModelInstallPanel() {
   const styles = useStyles();
   const { status, received, total, removable, error, install, uninstall } = useLocalModel();
   const pct = total ? Math.min(100, Math.floor((received / total) * 100)) : 0;
+
+  // Derive transfer speed + ETA from successive progress samples (the state
+  // itself only reports received/total). Smoothed with an EMA so the readout
+  // doesn't jitter between polls; reset whenever a download isn't in flight.
+  const [rate, setRate] = useState({ bps: 0, etaSec: 0 });
+  const sample = useRef<{ received: number; t: number } | null>(null);
+  useEffect(() => {
+    if (status !== "downloading") {
+      sample.current = null;
+      setRate({ bps: 0, etaSec: 0 });
+      return;
+    }
+    const now = Date.now();
+    const prev = sample.current;
+    sample.current = { received, t: now };
+    if (prev && received > prev.received && now > prev.t) {
+      const inst = ((received - prev.received) / (now - prev.t)) * 1000; // bytes/sec
+      setRate((r) => {
+        const bps = r.bps > 0 ? r.bps * 0.6 + inst * 0.4 : inst;
+        const etaSec = total && bps > 0 ? (total - received) / bps : 0;
+        return { bps, etaSec };
+      });
+    }
+  }, [received, status, total]);
 
   return (
     <div className={styles.panel}>
@@ -211,11 +262,18 @@ export function LocalModelInstallPanel() {
 
       {status === "downloading" ? (
         <>
-          <ProgressBar value={total ? received / total : undefined} shape="rounded" thickness="large" />
+          <ProgressBar
+            className={styles.smoothBar}
+            value={total ? received / total : undefined}
+            shape="rounded"
+            thickness="large"
+          />
           <div className={styles.panelProgressRow}>
             <span>Downloading the private model…</span>
             <span>
               {total ? `${pct}% · ${humanBytes(received)} / ${humanBytes(total)}` : humanBytes(received)}
+              {rate.bps > 0 ? ` · ${humanRate(rate.bps)}` : ""}
+              {rate.etaSec > 0 ? ` · ${humanEta(rate.etaSec)}` : ""}
             </span>
           </div>
         </>
