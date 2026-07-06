@@ -669,11 +669,22 @@ pub fn update_state(app: AppHandle) -> Value {
         .try_state::<crate::supervise::UpdateState>()
         .and_then(|s| s.0.lock().ok().and_then(|g| g.clone()));
     match newer {
-        Some(v) => {
-            json!({ "phase": "available", "version": v, "url": crate::supervise::RELEASE_PAGE_URL })
-        }
+        Some(info) => json!({
+            "phase": "available",
+            "version": info.version,
+            "url": crate::supervise::RELEASE_PAGE_URL,
+            "canInstall": info.asset_url.is_some(),
+        }),
         None => json!({ "phase": "none" }),
     }
+}
+
+/// Click-to-update from the sidebar banner: download this platform's
+/// installer and hand off to it (see supervise::update_now for the
+/// per-platform behavior and fallbacks).
+#[tauri::command]
+pub async fn update_now(app: AppHandle) -> Value {
+    crate::supervise::update_now(app).await
 }
 
 /// Monotonic vault-change counter (the watcher's generation) so the UI can
@@ -724,15 +735,26 @@ pub fn widget_set_pin(app: AppHandle, pinned: bool) {
     }
 }
 
-/// Grow/shrink the widget window as the results dropdown renders. Height is
-/// clamped shell-side so a misbehaving page can't fill the screen.
+/// Grow/shrink the widget window as the results dropdown or the inline
+/// answer panel renders. Height is clamped shell-side so a misbehaving page
+/// can't fill the screen (520 leaves room for a compact streamed answer).
 #[tauri::command]
 pub fn widget_resize(app: AppHandle, height: f64) {
     const MIN: f64 = 56.0;
-    const MAX: f64 = 420.0;
+    const MAX: f64 = 520.0;
     if let Some(w) = app.get_webview_window(crate::WIDGET_LABEL) {
         let clamped = height.clamp(MIN, MAX);
         let _ = w.set_size(tauri::LogicalSize::new(crate::WIDGET_WIDTH, clamped));
+    }
+}
+
+/// Hold = an inline answer is on screen. Blur must not dismiss the bar while
+/// the user reads a "frozen" compact answer (clicking away to their document
+/// is the POINT); Esc/✕ still hide explicitly. Orthogonal to the user's pin.
+#[tauri::command]
+pub fn widget_hold(app: AppHandle, hold: bool) {
+    if let Some(state) = app.try_state::<crate::WidgetHold>() {
+        state.0.store(hold, std::sync::atomic::Ordering::Relaxed);
     }
 }
 

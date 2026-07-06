@@ -331,6 +331,11 @@ function installDesktopBridge(
   void eventApi.listen<{ pinned?: boolean }>("widget-pin", (e) => {
     broadcast("lighthouse:widget-pin", { pinned: e.payload?.pinned === true });
   });
+
+  // --- Update check result (boot-time, best-effort) → the sidebar banner.
+  void eventApi.listen("update:state", (e) => {
+    broadcast("lighthouse:update-state", e.payload);
+  });
   const bridge = {
     // Correlate the DOM File with the shell's drag-drop payload by basename —
     // both fire from the same gesture. Consumed on match so duplicate names
