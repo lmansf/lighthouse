@@ -155,7 +155,45 @@ impl Supervisor {
 
 /// Latest-release info surfaced to the tray + splash ("notify-only Phase A").
 #[derive(Default)]
-pub struct UpdateState(pub Mutex<Option<String>>); // newer version, when found
+/// A newer release, when one is known: version plus (when the release carries
+/// an installer asset for this platform) what to download for click-to-update.
+#[derive(Clone)]
+pub struct UpdateInfo {
+    pub version: String,
+    pub asset_url: Option<String>,
+    pub asset_name: Option<String>,
+}
+
+pub struct UpdateState(pub Mutex<Option<UpdateInfo>>);
+
+impl Default for UpdateState {
+    fn default() -> Self {
+        Self(Mutex::new(None))
+    }
+}
+
+/// The installer asset for THIS platform from a GitHub release's asset list
+/// (the names the desktop-release pipeline publishes: Lighthouse-Setup.exe /
+/// Lighthouse.dmg / *.AppImage / *.deb).
+fn platform_asset(assets: &serde_json::Value) -> Option<(String, String)> {
+    let list = assets.as_array()?;
+    let pick = |pred: &dyn Fn(&str) -> bool| {
+        list.iter().find_map(|a| {
+            let name = a["name"].as_str()?;
+            let url = a["browser_download_url"].as_str()?;
+            pred(&name.to_ascii_lowercase()).then(|| (name.to_string(), url.to_string()))
+        })
+    };
+    if cfg!(windows) {
+        pick(&|n| n.ends_with(".exe"))
+    } else if cfg!(target_os = "macos") {
+        pick(&|n| n.ends_with(".dmg"))
+    } else {
+        // AppImage can at least be downloaded and run; .deb needs dpkg — the
+        // releases page stays the Linux fallback when neither is present.
+        pick(&|n| n.ends_with(".appimage"))
+    }
+}
 
 fn version_tuple(v: &str) -> Option<(u64, u64, u64)> {
     let v = v.trim().trim_start_matches('v');
@@ -198,16 +236,78 @@ pub async fn check_for_updates(app: AppHandle) {
         (Some(l), Some(c)) if l > c
     );
     if newer {
+        let asset = platform_asset(&body["assets"]);
         if let Some(state) = app.try_state::<UpdateState>() {
-            *state.0.lock().unwrap_or_else(|p| p.into_inner()) =
-                Some(latest.trim_start_matches('v').to_string());
+            *state.0.lock().unwrap_or_else(|p| p.into_inner()) = Some(UpdateInfo {
+                version: latest.trim_start_matches('v').to_string(),
+                asset_url: asset.as_ref().map(|(_, u)| u.clone()),
+                asset_name: asset.as_ref().map(|(n, _)| n.clone()),
+            });
         }
         let _ = app.emit(
             "update:state",
-            serde_json::json!({ "phase": "available", "version": latest, "url": RELEASE_PAGE_URL }),
+            serde_json::json!({
+                "phase": "available",
+                "version": latest,
+                "url": RELEASE_PAGE_URL,
+                "canInstall": asset.is_some(),
+            }),
         );
         crate::rebuild_tray_menu(&app);
     } else {
         let _ = app.emit("update:state", serde_json::json!({ "phase": "none" }));
     }
+}
+
+/// Click-to-update. Windows: download the installer beside our app data and
+/// launch it, then exit so it can replace files (NSIS drives the rest).
+/// macOS: download + open the dmg (drag-to-Applications stays manual —
+/// unsigned builds can't self-replace). Linux/no-asset: the releases page.
+pub async fn update_now(app: AppHandle) -> serde_json::Value {
+    let info = app
+        .try_state::<UpdateState>()
+        .and_then(|s| s.0.lock().ok().and_then(|g| g.clone()));
+    let Some(info) = info else {
+        return serde_json::json!({ "ok": false, "reason": "no update known" });
+    };
+    let (Some(url), Some(name)) = (info.asset_url.clone(), info.asset_name.clone()) else {
+        crate::open_with_os(std::path::Path::new(RELEASE_PAGE_URL));
+        return serde_json::json!({ "ok": true, "action": "page" });
+    };
+
+    let dir = app
+        .path()
+        .app_data_dir()
+        .unwrap_or_else(|_| std::env::temp_dir())
+        .join("updates");
+    let _ = fs::create_dir_all(&dir);
+    let dest = dir.join(&name);
+
+    let download = async {
+        let client = reqwest::Client::builder()
+            .user_agent("lighthouse-app")
+            .timeout(std::time::Duration::from_secs(600))
+            .build()?;
+        let bytes = client.get(&url).send().await?.error_for_status()?.bytes().await?;
+        fs::write(&dest, &bytes)?;
+        Ok::<_, anyhow::Error>(())
+    };
+    if let Err(e) = download.await {
+        eprintln!("update download failed: {e}");
+        crate::open_with_os(std::path::Path::new(RELEASE_PAGE_URL));
+        return serde_json::json!({ "ok": false, "reason": "download failed", "action": "page" });
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&dest, fs::Permissions::from_mode(0o755)); // AppImage
+    }
+    crate::open_with_os(&dest);
+    if cfg!(windows) {
+        // Give the installer a beat to start, then get out of its way.
+        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        app.exit(0);
+    }
+    serde_json::json!({ "ok": true, "action": "installing" })
 }

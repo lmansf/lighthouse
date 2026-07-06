@@ -478,6 +478,7 @@ export function FileExplorer() {
   const setSelectionMode = useRagStore((s) => s.setSelectionMode);
   const selectedIds = useRagStore((s) => s.selectedIds);
   const toggleSelected = useRagStore((s) => s.toggleSelected);
+  const selectAll = useRagStore((s) => s.selectAll);
   const clearSelection = useRagStore((s) => s.clearSelection);
   const applySelection = useRagStore((s) => s.applySelection);
   const toggleIncluded = useRagStore((s) => s.toggleIncluded);
@@ -889,6 +890,25 @@ export function FileExplorer() {
           <Text size={300} weight="semibold">
             {selectedIds.length} selected
           </Text>
+          <Button
+            appearance="subtle"
+            size="small"
+            onClick={() => {
+              // Every file the current search/filter shows — with no filter
+              // active, that is genuinely the whole vault in one click.
+              const all = nodes
+                .filter((n) => n.kind === "file" && (!visibleIds || visibleIds.has(n.id)))
+                .map((n) => n.id);
+              selectAll(all);
+            }}
+            title={
+              filterActive
+                ? "Select every file the current filter shows"
+                : "Select every file in the vault"
+            }
+          >
+            Select all
+          </Button>
           <span className={styles.spacer} />
           <Switch
             checked={Boolean(allSelectedVisible)}

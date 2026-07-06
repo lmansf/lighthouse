@@ -63,6 +63,9 @@ interface RagStore {
   load: () => Promise<void>;
   setSelectionMode: (on: boolean) => void;
   toggleSelected: (nodeId: string) => void;
+  /** Replace the selection wholesale (the explorer's "Select all"); turns
+   *  selection mode on so the action bar is there to act on it. */
+  selectAll: (nodeIds: string[]) => void;
   clearSelection: () => void;
   /**
    * Apply include (true) / exclude (false) to every selected node. The selection
@@ -175,6 +178,8 @@ export const useRagStore = create<RagStore>((set, get) => ({
         ? s.selectedIds.filter((id) => id !== nodeId)
         : [...s.selectedIds, nodeId],
     })),
+
+  selectAll: (nodeIds) => set({ selectionMode: true, selectedIds: nodeIds }),
 
   clearSelection: () => set({ selectedIds: [] }),
 

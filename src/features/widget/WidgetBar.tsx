@@ -33,15 +33,21 @@ import {
 } from "@fluentui/react-components";
 import {
   ChatSparkleRegular,
+  CheckmarkRegular,
+  CopyRegular,
   DismissRegular,
   DocumentPdfRegular,
   DocumentRegular,
   FolderRegular,
+  OpenRegular,
   PinFilled,
   PinRegular,
+  SquareRegular,
 } from "@fluentui/react-icons";
-import type { FileNode, RagReference } from "@/contracts";
-import { ragService } from "@/contracts";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import type { ChatTurn, FileNode, RagReference } from "@/contracts";
+import { chatService, ragService } from "@/contracts";
 import { useRagStore } from "@/stores/useRagStore";
 import { useLicenseStore, isLocked } from "@/stores/useLicenseStore";
 import { isDesktopShell } from "@/shell/desktopBridge";
@@ -50,12 +56,15 @@ import { ACCENTS } from "@/shell/theme";
 
 /** Collapsed window height — must match the Rust builder's 560×56 (contract). */
 const PILL_HEIGHT = 56;
-/** Hard cap for the grown window; the dropdown scrolls internally beyond it. */
-const MAX_WINDOW_HEIGHT = 420;
+/** Hard cap for the grown window (shell clamps to the same value); results
+ *  and the inline answer scroll internally beyond it. */
+const MAX_WINDOW_HEIGHT = 520;
 /** Client-side name matches shown at most (content passages layer under). */
 const MAX_NAME_MATCHES = 6;
 /** Debounce for the engine content search — fast enough to feel typeahead. */
 const SEARCH_DEBOUNCE_MS = 150;
+/** Conversation memory carried into follow-up asks (turns, user+assistant). */
+const MAX_HISTORY_TURNS = 8;
 
 /**
  * Invoke a shell (Rust) command from the widget page. Resolves undefined
@@ -167,6 +176,57 @@ const useStyles = makeStyles({
     color: tokens.colorNeutralForeground2,
   },
   lockText: { flexGrow: 1, minWidth: 0 },
+  // The inline answer: a compact chat turn living under the pill — the answer
+  // "freezes" on the desktop (the shell holds blur-hide while it's open).
+  answer: {
+    display: "flex",
+    flexDirection: "column",
+    gap: tokens.spacingVerticalXS,
+    ...shorthands.borderTop("1px", "solid", tokens.colorNeutralStroke2),
+    ...shorthands.padding(tokens.spacingVerticalS, tokens.spacingHorizontalM),
+  },
+  answerHead: {
+    display: "flex",
+    alignItems: "center",
+    gap: tokens.spacingHorizontalXS,
+  },
+  answerQ: {
+    flexGrow: 1,
+    minWidth: 0,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+    color: tokens.colorNeutralForeground3,
+  },
+  answerBody: {
+    overflowY: "auto",
+    maxHeight: "330px",
+    fontSize: tokens.fontSizeBase300,
+    lineHeight: tokens.lineHeightBase300,
+    wordBreak: "break-word",
+    // Compact markdown: tame the default element margins for pill scale.
+    "& p": { marginTop: 0, marginBottom: tokens.spacingVerticalS },
+    "& p:last-child": { marginBottom: 0 },
+    "& ul, & ol": { marginTop: 0, marginBottom: tokens.spacingVerticalS, paddingLeft: "20px" },
+    "& pre": {
+      overflowX: "auto",
+      backgroundColor: tokens.colorNeutralBackground3,
+      ...shorthands.padding(tokens.spacingVerticalXS, tokens.spacingHorizontalS),
+      borderRadius: tokens.borderRadiusMedium,
+      fontSize: tokens.fontSizeBase200,
+    },
+    "& h1, & h2, & h3": {
+      fontSize: tokens.fontSizeBase300,
+      marginTop: tokens.spacingVerticalS,
+      marginBottom: tokens.spacingVerticalXS,
+    },
+  },
+  answerError: { color: tokens.colorPaletteRedForeground1 },
+  refsRow: {
+    display: "flex",
+    flexWrap: "wrap",
+    gap: tokens.spacingHorizontalXS,
+  },
 });
 
 /**
@@ -209,6 +269,26 @@ export function WidgetBar() {
   const [pinned, setPinned] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
+  const answerElRef = useRef<HTMLDivElement>(null);
+
+  // The inline answer — a compact chat turn that streams INSIDE the pill and
+  // stays "frozen" on the desktop until cleared (Esc/✕) or replaced. The
+  // shell's blur-hide is held open while one is on screen (widget_hold).
+  type InlineAnswer = {
+    question: string;
+    content: string;
+    refs: RagReference[];
+    streaming: boolean;
+    error: string | null;
+  };
+  const [answer, setAnswer] = useState<InlineAnswer | null>(null);
+  const answerRef = useRef<InlineAnswer | null>(null);
+  answerRef.current = answer;
+  const abortRef = useRef<AbortController | null>(null);
+  // Completed turns feed follow-up asks (capped so the pill never carries a
+  // whole transcript); survives clears — the "conversation" outlives one card.
+  const historyRef = useRef<ChatTurn[]>([]);
+  const [copied, setCopied] = useState(false);
 
   // A summon re-focuses the input and SELECTS the previous query (never
   // clears it): typing replaces the old search, but a bare Enter can reuse it.
@@ -221,17 +301,30 @@ export function WidgetBar() {
     return () => window.removeEventListener("focus", onFocus);
   }, []);
 
-  // Escape hides from anywhere in the window (focus may have left the input).
+  // Escape works from anywhere in the window (focus may have left the input),
+  // as a ladder: an open answer clears first; a second Esc hides the bar.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         e.preventDefault();
-        void invokeShell("widget_hide");
+        if (answerRef.current) {
+          abortRef.current?.abort();
+          setAnswer(null);
+        } else {
+          void invokeShell("widget_hide");
+        }
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, []);
+
+  // While an answer is on screen the bar must survive losing focus — clicking
+  // back into your document to keep reading is the point of a frozen answer.
+  const held = answer !== null;
+  useEffect(() => {
+    void invokeShell("widget_hold", { hold: held });
+  }, [held]);
 
   // In widget mode the shell boots the bar pinned (it IS the app's resting
   // presence, so blur must not dismiss it) — reflect that in the pin button.
@@ -330,37 +423,109 @@ export function WidgetBar() {
   const showDropdown = rows.length > 0 || locked;
 
   // Drive the window height from what's actually rendered: measure the
-  // dropdown and ask the shell to resize — but only when the value changes,
-  // so steady-state renders don't spam IPC. The shell clamps again anyway.
+  // dropdown and the answer panel and ask the shell to resize — but only when
+  // the value changes, so steady-state renders (and every streamed delta once
+  // at the cap) don't spam IPC. The shell clamps again anyway.
   const lastHeight = useRef(PILL_HEIGHT);
   useEffect(() => {
-    const extra = dropdownRef.current
-      ? Math.ceil(dropdownRef.current.getBoundingClientRect().height)
-      : 0;
+    const measure = (el: HTMLDivElement | null) =>
+      el ? Math.ceil(el.getBoundingClientRect().height) : 0;
+    const extra = measure(dropdownRef.current) + measure(answerElRef.current);
     const height = Math.min(PILL_HEIGHT + extra, MAX_WINDOW_HEIGHT);
     if (height === lastHeight.current) return;
     lastHeight.current = height;
     void invokeShell("widget_resize", { height });
-  }, [rows, locked]);
+  }, [rows, locked, answer, query]);
 
   const hide = () => void invokeShell("widget_hide");
 
-  /** Open a file in its native app (same route the chat reference cards use), then get out of the way. */
-  const openNode = (nodeId: string) => {
+  /** Open a file in its native app (same route the chat reference cards use). */
+  const openNode = (nodeId: string, opts?: { keep?: boolean }) => {
     void fetch("/api/open", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ nodeId }),
     }).catch(() => {});
+    // Result rows get out of the way; a citation chip under a frozen answer
+    // keeps the answer up next to the document it just opened.
+    if (!opts?.keep) hide();
+  };
+
+  /**
+   * Ask INSIDE the widget: stream the answer into a compact panel under the
+   * pill instead of raising the main window ("whisper to your file system",
+   * answered where you whispered). Follow-ups carry capped history.
+   */
+  const askInline = (questionText?: string) => {
+    const q = (questionText ?? query).trim();
+    if (!q || locked || answerRef.current?.streaming) return;
+    const controller = new AbortController();
+    abortRef.current = controller;
+    const history = historyRef.current;
+    setAnswer({ question: q, content: "", refs: [], streaming: true, error: null });
+    setQuery("");
+    setSelected(0);
+    setCopied(false);
+    void (async () => {
+      let content = "";
+      let refs: RagReference[] = [];
+      try {
+        for await (const chunk of chatService.ask(
+          q,
+          includedFileIds,
+          history,
+          [],
+          controller.signal,
+        )) {
+          if (controller.signal.aborted) break;
+          if (chunk.delta) {
+            content += chunk.delta;
+            const soFar = content;
+            setAnswer((a) => (a ? { ...a, content: soFar } : a));
+          }
+          if (chunk.references) refs = chunk.references;
+        }
+        setAnswer((a) => (a ? { ...a, refs, streaming: false } : a));
+        if (content) {
+          const turns: ChatTurn[] = [
+            { role: "user", content: q },
+            { role: "assistant", content },
+          ];
+          historyRef.current = [...historyRef.current, ...turns].slice(-MAX_HISTORY_TURNS);
+        }
+      } catch (err) {
+        // Stop keeps the partial answer quietly; real failures say so inline.
+        const aborted = controller.signal.aborted;
+        const reason = err instanceof Error ? err.message : "something went wrong";
+        setAnswer((a) =>
+          a ? { ...a, streaming: false, error: aborted ? null : reason } : a,
+        );
+      }
+    })();
+  };
+
+  /** Clear the frozen answer (the ✕ / first Esc). Stops a live stream. */
+  const clearAnswer = () => {
+    abortRef.current?.abort();
+    setAnswer(null);
+  };
+
+  /** Escalate to the full app, re-asking there with the same question. */
+  const continueInApp = () => {
+    const q = answerRef.current?.question;
+    abortRef.current?.abort();
+    setAnswer(null);
+    void invokeShell("show_main", q ? { seedQuestion: q } : undefined);
     hide();
   };
 
-  /** Hand the query to the main window's chat ("whisper to your file system"). */
-  const askLighthouse = () => {
-    const q = query.trim();
-    if (!q || locked) return;
-    void invokeShell("show_main", { seedQuestion: q });
-    hide();
+  const copyAnswer = () => {
+    const text = answerRef.current?.content ?? "";
+    if (!text) return;
+    void navigator.clipboard?.writeText(text).then(() => {
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    });
   };
 
   /** Raise the main window bare — where the lock gate / renewal flow lives. */
@@ -373,7 +538,7 @@ export function WidgetBar() {
     // Locked: rows are inert — the lock note under them is the only answer
     // (main-window parity: a locked vault is greyed out and inert).
     if (locked) return;
-    if (row.kind === "ask") askLighthouse();
+    if (row.kind === "ask") askInline();
     else if (row.kind === "name") openNode(row.node.id);
     else openNode(row.ref.fileId);
   };
@@ -393,9 +558,9 @@ export function WidgetBar() {
     } else if (e.key === "Enter" && !e.nativeEvent.isComposing) {
       // isComposing: an IME Enter commits the composition, not the search.
       e.preventDefault();
-      // Ctrl/Cmd+Enter is ALWAYS the ask hand-off, whatever row is selected.
+      // Ctrl/Cmd+Enter ALWAYS asks inline, whatever row is selected.
       if (e.ctrlKey || e.metaKey) {
-        askLighthouse();
+        askInline();
         return;
       }
       const row = rows[sel];
@@ -423,7 +588,7 @@ export function WidgetBar() {
           size="large"
           autoFocus
           value={query}
-          placeholder="Search your files…"
+          placeholder={answer ? "Ask a follow-up or search…" : "Search your files…"}
           aria-label="Search your files"
           aria-activedescendant={rows.length > 0 ? `widget-row-${sel}` : undefined}
           onChange={(_, d) => {
@@ -530,6 +695,84 @@ export function WidgetBar() {
               <Button size="small" appearance="primary" onClick={openLighthouse}>
                 Open Lighthouse
               </Button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* The frozen inline answer: shown while the search box is idle; typing
+          brings results back on top (the answer returns when the box clears,
+          and a new ask replaces it). */}
+      {answer && !query.trim() && (
+        <div ref={answerElRef} className={styles.answer} data-lh-widget-answer>
+          <div className={styles.answerHead}>
+            <ChatSparkleRegular className={styles.rowIcon} />
+            <Text size={200} className={styles.answerQ} title={answer.question}>
+              {answer.question}
+            </Text>
+            {answer.streaming ? (
+              <Button
+                size="small"
+                appearance="subtle"
+                icon={<SquareRegular />}
+                aria-label="Stop answering"
+                title="Stop answering"
+                onClick={() => abortRef.current?.abort()}
+              />
+            ) : (
+              <Button
+                size="small"
+                appearance="subtle"
+                icon={copied ? <CheckmarkRegular /> : <CopyRegular />}
+                aria-label="Copy answer"
+                title="Copy answer"
+                onClick={copyAnswer}
+              />
+            )}
+            <Button
+              size="small"
+              appearance="subtle"
+              icon={<OpenRegular />}
+              aria-label="Continue in Lighthouse"
+              title="Continue in Lighthouse — reopens this question in the full app"
+              onClick={continueInApp}
+            />
+            <Button
+              size="small"
+              appearance="subtle"
+              icon={<DismissRegular />}
+              aria-label="Clear answer (Esc)"
+              title="Clear answer (Esc)"
+              onClick={clearAnswer}
+            />
+          </div>
+          <div className={styles.answerBody}>
+            {answer.content ? (
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{answer.content}</ReactMarkdown>
+            ) : answer.streaming ? (
+              <Text size={200} className={styles.snippet}>
+                Thinking…
+              </Text>
+            ) : null}
+            {answer.error && (
+              <Text size={200} className={styles.answerError}>
+                Couldn&apos;t get an answer — {answer.error}
+              </Text>
+            )}
+          </div>
+          {answer.refs.length > 0 && (
+            <div className={styles.refsRow}>
+              {answer.refs.slice(0, 4).map((r) => (
+                <Button
+                  key={r.fileId}
+                  size="small"
+                  appearance="outline"
+                  title={r.snippet}
+                  onClick={() => openNode(r.fileId, { keep: true })}
+                >
+                  {r.name}
+                </Button>
+              ))}
             </div>
           )}
         </div>

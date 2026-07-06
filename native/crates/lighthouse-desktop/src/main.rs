@@ -88,6 +88,18 @@ pub struct WidgetPin(std::sync::atomic::AtomicBool);
 #[derive(Default)]
 pub struct HotkeyOk(pub std::sync::atomic::AtomicBool);
 
+/// Hold = the widget is showing an inline answer ("frozen" compact chat).
+/// The blur auto-hide respects it like a temporary pin, so users can click
+/// into their document while reading; Esc/✕ still dismiss explicitly.
+#[derive(Default)]
+pub struct WidgetHold(pub std::sync::atomic::AtomicBool);
+
+fn widget_held(app: &AppHandle) -> bool {
+    app.try_state::<WidgetHold>()
+        .map(|s| s.0.load(std::sync::atomic::Ordering::Relaxed))
+        .unwrap_or(false)
+}
+
 /// Focus-edge counter that turns hide-on-blur into "hide only if focus
 /// STAYS gone". On Windows the top-level window loses native focus the
 /// moment WebView2's child control takes it (WM_KILLFOCUS on the parent,
@@ -624,6 +636,7 @@ fn main() {
         .manage(Supervisor::default())
         .manage(UpdateState::default())
         .manage(WidgetPin::default())
+        .manage(WidgetHold::default())
         .manage(WidgetFocusEpoch::default())
         .manage(HotkeyOk::default())
         .manage(ServerPort::default())
@@ -652,11 +665,13 @@ fn main() {
             commands::register_start,
             commands::upload_file,
             commands::update_state,
+            commands::update_now,
             commands::watch_generation,
             commands::diag_report,
             commands::widget_hide,
             commands::widget_show,
             commands::widget_set_pin,
+            commands::widget_hold,
             commands::widget_resize,
             commands::show_main,
             commands::open_vault_dir,
@@ -692,7 +707,7 @@ fn main() {
                         return;
                     };
                     let seen = epoch.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-                    if !focused && !widget_pinned(&app) {
+                    if !focused && !widget_pinned(&app) && !widget_held(&app) {
                         tauri::async_runtime::spawn(async move {
                             tokio::time::sleep(std::time::Duration::from_millis(150)).await;
                             let unchanged = app
@@ -700,7 +715,7 @@ fn main() {
                                 .0
                                 .load(std::sync::atomic::Ordering::Relaxed)
                                 == seen;
-                            if unchanged && !widget_pinned(&app) {
+                            if unchanged && !widget_pinned(&app) && !widget_held(&app) {
                                 hide_widget(&app);
                             }
                         });

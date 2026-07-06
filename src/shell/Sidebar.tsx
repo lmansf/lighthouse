@@ -13,6 +13,7 @@ import { PanelLeftContractRegular, PanelLeftExpandRegular } from "@fluentui/reac
 import { LAYOUT, ACCENTS } from "./theme";
 import { SidebarWater } from "./SidebarWater";
 import { SettingsMenu, TrialBadge } from "@/features/license/LicenseGate";
+import { UpdateNotice } from "@/features/update/UpdateNotice";
 
 const useStyles = makeStyles({
   sidebar: {
@@ -134,6 +135,8 @@ export function Sidebar({ collapsed, onToggleCollapsed, children }: SidebarProps
         )}
       </div>
       <div className={mergeClasses(styles.body, collapsed && styles.bodyHidden)}>{children}</div>
+      {/* Above Settings: the one-line "new version" nudge (desktop only). */}
+      {!collapsed && <UpdateNotice />}
       <div className={mergeClasses(styles.footer, collapsed && styles.footerCollapsed)}>
         <SettingsMenu />
         {!collapsed && (
