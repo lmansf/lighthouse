@@ -35,16 +35,37 @@ async function post(op: string, extra: Record<string, unknown> = {}): Promise<On
   return cached;
 }
 
-if (typeof window !== "undefined") {
+/**
+ * Hydrate the cached profile from the server. In the desktop shell the IPC
+ * transport patches `window.fetch` during the first React render, which can
+ * land AFTER this module first runs — so an early hit reaches a dead app://
+ * URL and 404s (or throws). Without a retry, a RETURNING user's persisted
+ * "done" profile never loads and they're stranded on the sign-in screen every
+ * launch. Retry briefly, but only inside the shell (on the web the real
+ * `/api/profile` answers on the first try, so a non-ok there is genuine).
+ */
+function hydrateFromServer(attempt = 0): void {
   fetch("/api/profile", { cache: "no-store" })
-    .then((r) => (r.ok ? r.json() : null))
+    .then((r) => {
+      if (!r.ok) throw new Error(`profile ${r.status}`);
+      return r.json();
+    })
     .then((s) => {
       if (s) {
         cached = s as OnboardingState;
         notify(); // a returning user's persisted profile now reaches the store
       }
     })
-    .catch(() => {});
+    .catch(() => {
+      const inShell = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+      if (inShell && attempt < 10) {
+        setTimeout(() => hydrateFromServer(attempt + 1), 150);
+      }
+    });
+}
+
+if (typeof window !== "undefined") {
+  hydrateFromServer();
 }
 
 class RealAuthService implements AuthService {
