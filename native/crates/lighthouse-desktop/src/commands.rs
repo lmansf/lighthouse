@@ -554,27 +554,33 @@ pub fn settings_set(
     if s.startup_asked == Some(true) {
         crate::apply_autostart(&app, s.run_on_startup != Some(false));
     }
-    // Switching interface mode at runtime applies the mode's pin semantics
-    // immediately, like a boot would: widget mode pins the bar (it's the
-    // app's resting surface — blur must not dismiss it), window mode returns
-    // it to transient. The widget page hears the echo and syncs its button.
+    // Switching interface mode at runtime applies the mode's RESIDENCY
+    // immediately, like a boot would, and swaps the visible SURFACE whole:
+    // widget mode tucks the main window away and summons the bar (the bar
+    // REPLACES the window — leaving both up made the switch read as broken);
+    // window mode dismisses the bar and brings the window back. The user's
+    // pin (always-on-top) is independent of the mode and untouched here.
+    // Window work is deferred to the main thread: show_widget may lazily
+    // CREATE the widget window, and building a webview from a sync command
+    // handler deadlocks the IPC thread against the main loop.
     if let Some(mode) = switched_mode.as_deref() {
-        use tauri::Emitter;
-        let pinned = mode == "widget";
-        crate::set_widget_pinned(&app, pinned);
-        if let Some(w) = app.get_webview_window(crate::WIDGET_LABEL) {
-            let _ = w.set_always_on_top(true);
-            if pinned {
-                let _ = w.set_visible_on_all_workspaces(true);
+        let resident = mode == "widget";
+        crate::set_widget_resident(&app, resident);
+        let app2 = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            if resident {
+                if let Some(main) = app2.get_webview_window("main") {
+                    let _ = main.hide();
+                }
+                crate::show_widget(&app2, true);
+            } else {
+                crate::hide_widget(&app2);
+                if let Some(main) = app2.get_webview_window("main") {
+                    let _ = main.show();
+                    let _ = main.set_focus();
+                }
             }
-        }
-        if !pinned {
-            // Switching back to window mode dismisses the bar too — leaving
-            // an always-on-top pill floating over the "regular window" mode
-            // the user just chose reads as the switch not working.
-            crate::hide_widget(&app);
-        }
-        let _ = app.emit_to(crate::WIDGET_LABEL, "widget-pin", json!({ "pinned": pinned }));
+        });
     }
     // Whisper mode (W3) starts/stops its keyboard hook live — no relaunch.
     if let Some(on) = whisper_mode {
@@ -783,25 +789,29 @@ pub fn widget_hide(app: AppHandle) {
 }
 
 /// Summon the widget from the UI (the first-run mode chooser and Preferences
-/// use it to demo widget mode the moment it's picked).
+/// use it to demo widget mode the moment it's picked). Async + main-thread
+/// hop for the same reason as open_explorer: show_widget lazily CREATES the
+/// widget window when boot deferred it, and a sync command doing that
+/// deadlocks the IPC handler against the main loop.
 #[tauri::command]
-pub fn widget_show(app: AppHandle) {
-    crate::show_widget(&app, true);
+pub async fn widget_show(app: AppHandle) {
+    let inner = app.clone();
+    let _ = app.run_on_main_thread(move || crate::show_widget(&inner, true));
 }
 
-/// Pin = keep the widget visible when it loses focus (and stay always-on-top;
-/// the widget is created always-on-top either way so it can float over the
-/// desktop, but an unpinned bar auto-hides on blur — see main.rs).
+/// Pin = the user's "keep above other windows" toggle: always-on-top AND no
+/// blur auto-hide. The bar is otherwise a normal-stacking window (created
+/// non-topmost; widget-mode residency only prevents auto-hide), so this is
+/// the one switch that visibly changes stacking — pinned floats over
+/// everything, unpinned lets other windows cover it until the next summon.
 #[tauri::command]
 pub fn widget_set_pin(app: AppHandle, pinned: bool) {
     crate::set_widget_pinned(&app, pinned);
     if let Some(w) = app.get_webview_window(crate::WIDGET_LABEL) {
-        let _ = w.set_always_on_top(true);
-        if pinned {
-            // A pinned bar should survive workspace switches where the OS
-            // supports it (macOS/Linux; a no-op on Windows).
-            let _ = w.set_visible_on_all_workspaces(true);
-        }
+        let _ = w.set_always_on_top(pinned);
+        // A pinned bar should survive workspace switches where the OS
+        // supports it (macOS/Linux; a no-op on Windows).
+        let _ = w.set_visible_on_all_workspaces(pinned);
     }
 }
 
@@ -853,7 +863,15 @@ pub fn open_vault_dir(app: AppHandle) {
 
 /// Open (or raise) the standalone vault-explorer window — the widget's 📁
 /// button (W2). Same FileExplorer as the main sidebar, in its own window.
+///
+/// ASYNC + main-thread hop, deliberately: a SYNC command that builds a
+/// webview window deadlocks the IPC handler against the main loop (the
+/// handler blocks a thread the window creation needs). Field symptom: the
+/// 📁 click produced a stillborn white window on Windows and no window at
+/// all on Linux. Async commands release the IPC thread, and the explicit
+/// run_on_main_thread makes the builder run where GTK/AppKit require it.
 #[tauri::command]
-pub fn open_explorer(app: AppHandle) {
-    crate::open_explorer(&app);
+pub async fn open_explorer(app: AppHandle) {
+    let inner = app.clone();
+    let _ = app.run_on_main_thread(move || crate::open_explorer(&inner));
 }

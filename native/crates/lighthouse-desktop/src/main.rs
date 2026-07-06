@@ -63,7 +63,11 @@ pub fn open_explorer(app: &AppHandle) {
             Err(_) => return,
         }
     } else {
-        return; // no UI to show yet (embedded server still starting)
+        // No bundled assets and the loopback server isn't up yet (dev/server
+        // mode boot). Say so — a silently swallowed click reads as a dead
+        // button (this exact silence hid a broken path during live testing).
+        eprintln!("explorer: UI not ready yet (no bundled assets, server still starting)");
+        return;
     };
     let built = tauri::WebviewWindowBuilder::new(app, EXPLORER_LABEL, url)
         .title("Lighthouse — Vault")
@@ -71,15 +75,45 @@ pub fn open_explorer(app: &AppHandle) {
         .min_inner_size(480.0, 400.0)
         .center()
         .build();
-    if let Err(e) = built {
-        eprintln!("explorer window failed to build: {e}");
+    match built {
+        Err(e) => eprintln!("explorer window failed to build: {e}"),
+        Ok(w) => strip_gtk_menubar(&w),
     }
 }
 
-/// Pinned = stay visible on blur. Managed state so the blur handler and the
-/// widget_set_pin command agree.
+/// On GTK the app-wide menu gets attached to EVERY window, so the frameless
+/// search bar and the explorer sprout a stray "File Edit" strip. Satellite
+/// windows carry no menu — remove it (a no-op elsewhere).
+#[allow(unused_variables)]
+fn strip_gtk_menubar(w: &tauri::WebviewWindow) {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let _ = w.remove_menu();
+}
+
+/// Pinned = the user's explicit "keep above other windows" toggle: always-on-
+/// top AND immune to blur auto-hide. Managed state so the blur handler and
+/// the widget_set_pin command agree.
 #[derive(Default)]
 pub struct WidgetPin(std::sync::atomic::AtomicBool);
+
+/// Resident = widget mode's resting presence: the bar LIVES on the desktop
+/// (blur must not dismiss it) but in NORMAL stacking — other windows may
+/// cover it, and the summon hotkey raises it back. Distinct from the pin:
+/// residency is set by the interface mode, always-on-top only by the user.
+#[derive(Default)]
+pub struct WidgetResident(std::sync::atomic::AtomicBool);
+
+pub fn set_widget_resident(app: &AppHandle, resident: bool) {
+    if let Some(state) = app.try_state::<WidgetResident>() {
+        state.0.store(resident, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+fn widget_resident(app: &AppHandle) -> bool {
+    app.try_state::<WidgetResident>()
+        .map(|s| s.0.load(std::sync::atomic::Ordering::Relaxed))
+        .unwrap_or(false)
+}
 
 /// Whether the keyed summon hotkey actually registered — false on Wayland,
 /// where the X11-only backend can't grab anything. settings_get exposes it so
@@ -134,13 +168,17 @@ pub fn ensure_widget_window(app: &AppHandle) {
     if app.get_webview_window(WIDGET_LABEL).is_some() || !has_bundled_ui(app) {
         return;
     }
+    // NOT always-on-top: the bar rests just above the desktop in normal
+    // stacking — other windows may cover it; summoning raises it (and the
+    // user's pin opts into true always-on-top). A permanently-topmost bar
+    // fought every other window on screen.
     let built =
         tauri::WebviewWindowBuilder::new(app, WIDGET_LABEL, tauri::WebviewUrl::App("widget".into()))
             .title("Lighthouse Search")
             .inner_size(WIDGET_WIDTH, WIDGET_HEIGHT)
             .decorations(false)
             .resizable(false)
-            .always_on_top(true)
+            .always_on_top(false)
             .skip_taskbar(true)
             .visible(false)
             .focused(false)
@@ -148,6 +186,7 @@ pub fn ensure_widget_window(app: &AppHandle) {
     match built {
         Err(e) => eprintln!("widget window failed to build: {e}"),
         Ok(w) => {
+            strip_gtk_menubar(&w);
             // Hand-rolled position memory (see the window-state denylist
             // note). A stale off-screen position is healed by show_widget's
             // re-center check.
@@ -196,7 +235,19 @@ pub fn show_widget(app: &AppHandle, focus: bool) {
     if w.current_monitor().ok().flatten().is_none() {
         let _ = w.center();
     }
+    // RAISE, don't just show: the bar lives in normal stacking now, so a
+    // summon must bring it over whatever covers it. The momentary
+    // always-on-top pulse is the reliable Windows raise (plain focus can be
+    // refused when the request comes from a background process, e.g. the
+    // whisper hook; dropping TOPMOST keeps the window at the top of the
+    // normal band there). set_focus comes LAST because on GTK it maps to
+    // gtk_window_present — the actual raise — and some WMs re-lower the
+    // window when the ABOVE state is removed.
+    let _ = w.set_always_on_top(true);
     let _ = w.show();
+    if !widget_pinned(app) {
+        let _ = w.set_always_on_top(false);
+    }
     if focus {
         let _ = w.set_focus();
     }
@@ -210,6 +261,11 @@ pub fn hide_widget(app: &AppHandle) {
         return;
     };
     save_widget_pos(app);
+    // An explicit dismiss also releases the inline-answer hold — a stale
+    // hold must never make the next summon un-dismissable.
+    if let Some(hold) = app.try_state::<WidgetHold>() {
+        hold.0.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
     let _ = w.hide();
 }
 
@@ -227,10 +283,21 @@ fn save_widget_pos(app: &AppHandle) {
 /// charge (and can't sit lost behind or under the full app).
 pub fn toggle_widget(app: &AppHandle) {
     let Some(w) = app.get_webview_window(WIDGET_LABEL) else {
+        // Lazy boot paths (safe mode) may not have built it yet — summoning
+        // is the demand. show_widget creates it on the spot.
+        show_widget(app, true);
         return;
     };
     if w.is_visible().unwrap_or(false) {
-        hide_widget(app);
+        // Visible AND focused → the user is looking at it: dismiss.
+        // Visible but BURIED/unfocused (normal stacking lets other windows
+        // cover the resident bar) → the summon means "bring it to me":
+        // raise + focus instead of hiding it out from under them.
+        if w.is_focused().unwrap_or(false) {
+            hide_widget(app);
+        } else {
+            show_widget(app, true);
+        }
         return;
     }
     if let Some(main) = main_window(app) {
@@ -688,6 +755,7 @@ fn main() {
         .manage(Supervisor::default())
         .manage(UpdateState::default())
         .manage(WidgetPin::default())
+        .manage(WidgetResident::default())
         .manage(WidgetHold::default())
         .manage(WidgetFocusEpoch::default())
         .manage(HotkeyOk::default())
@@ -759,7 +827,8 @@ fn main() {
                         return;
                     };
                     let seen = epoch.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-                    if !focused && !widget_pinned(&app) && !widget_held(&app) {
+                    if !focused && !widget_pinned(&app) && !widget_held(&app) && !widget_resident(&app)
+                    {
                         tauri::async_runtime::spawn(async move {
                             tokio::time::sleep(std::time::Duration::from_millis(150)).await;
                             let unchanged = app
@@ -767,7 +836,11 @@ fn main() {
                                 .0
                                 .load(std::sync::atomic::Ordering::Relaxed)
                                 == seen;
-                            if unchanged && !widget_pinned(&app) && !widget_held(&app) {
+                            if unchanged
+                                && !widget_pinned(&app)
+                                && !widget_held(&app)
+                                && !widget_resident(&app)
+                            {
                                 hide_widget(&app);
                             }
                         });
@@ -852,11 +925,10 @@ fn main() {
             {
                 let focus = !launched_by_autostart();
                 if widget_mode(&handle) && handle.get_webview_window(WIDGET_LABEL).is_some() {
-                    set_widget_pinned(&handle, true);
-                    if let Some(w) = handle.get_webview_window(WIDGET_LABEL) {
-                        // Same treatment widget_set_pin applies on a user pin.
-                        let _ = w.set_visible_on_all_workspaces(true);
-                    }
+                    // Resident, NOT pinned: the bar is the app's resting
+                    // presence (blur keeps it around) but stacks normally —
+                    // other windows may cover it; the hotkey raises it.
+                    set_widget_resident(&handle, true);
                     show_widget(&handle, focus);
                 } else if let Some(win) = main_window(&handle) {
                     let _ = win.show();
