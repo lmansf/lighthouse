@@ -16,7 +16,7 @@
  * Keep using `useRagStore` (do not import other features directly).
  */
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Badge,
   Button,
@@ -28,7 +28,6 @@ import {
   DialogSurface,
   DialogTitle,
   DialogTrigger,
-  Link,
   Menu,
   MenuDivider,
   MenuItem,
@@ -36,7 +35,6 @@ import {
   MenuPopover,
   MenuTrigger,
   SearchBox,
-  Spinner,
   Switch,
   Text,
   Title3,
@@ -60,11 +58,12 @@ import {
   DocumentPdfRegular,
   EyeOffRegular,
   EyeRegular,
+  FolderArrowRightRegular,
   FolderRegular,
   FolderAddRegular,
   FolderOpenRegular,
   LinkRegular,
-  PlugDisconnectedRegular,
+  OpenRegular,
   ShieldKeyholeRegular,
   SparkleFilled,
 } from "@fluentui/react-icons";
@@ -73,7 +72,7 @@ import { useRagStore } from "@/stores/useRagStore";
 import { useAuthStore } from "@/stores/useAuthStore";
 import { logEvent } from "@/lib/logEvent";
 import { recordInterest } from "@/lib/comingSoon";
-import { FILE_DRAG_MIME, serializeDraggedFiles } from "@/shell/dnd";
+import { FILE_DRAG_MIME, parseDraggedFiles, serializeDraggedFiles } from "@/shell/dnd";
 import { desktopBridge, isDesktopShell, pathsForFiles } from "@/shell/desktopBridge";
 
 /** Persists dismissal of the include-by-default note so it isn't permanent noise. */
@@ -265,27 +264,6 @@ const useStyles = makeStyles({
     marginTop: tokens.spacingVerticalL,
     marginBottom: tokens.spacingVerticalS,
   },
-  connectBody: {
-    display: "flex",
-    flexDirection: "column",
-    gap: tokens.spacingVerticalM,
-    alignItems: "flex-start",
-  },
-  deviceCode: {
-    fontFamily: tokens.fontFamilyMonospace,
-    fontSize: tokens.fontSizeHero800,
-    fontWeight: tokens.fontWeightSemibold,
-    letterSpacing: "0.15em",
-    ...shorthands.padding(tokens.spacingVerticalS, tokens.spacingHorizontalM),
-    backgroundColor: tokens.colorNeutralBackground3,
-    ...shorthands.borderRadius(tokens.borderRadiusMedium),
-    userSelect: "all",
-  },
-  waitingRow: {
-    display: "flex",
-    alignItems: "center",
-    gap: tokens.spacingHorizontalS,
-  },
   empty: {
     ...shorthands.padding(tokens.spacingVerticalXL, tokens.spacingHorizontalL),
     textAlign: "center",
@@ -339,6 +317,12 @@ const useStyles = makeStyles({
     animationTimingFunction: tokens.curveDecelerateMid,
     "@media (prefers-reduced-motion: reduce)": { animationName: "none" },
   },
+  // A folder lights up as a "move into here" target while a file row is dragged
+  // over it — the reparent gesture that surfaces the engine's op:move.
+  rowDropInto: {
+    backgroundColor: tokens.colorBrandBackground2,
+    ...shorthands.outline("2px", "solid", tokens.colorBrandStroke1),
+  },
   actionBar: {
     display: "flex",
     alignItems: "center",
@@ -367,6 +351,11 @@ const useStyles = makeStyles({
   dimmed: { opacity: 0.45 },
 });
 
+/** Cloud-connector nodes carry ids namespaced `${sourceId}::…` and live off-disk. */
+function isRemoteId(node: FileNode): boolean {
+  return node.id.startsWith(`${node.sourceId}::`);
+}
+
 function fileIcon(node: FileNode, className: string) {
   if (node.kind === "database") return <DatabaseRegular className={className} />;
   if (node.kind === "folder") return <FolderRegular className={className} />;
@@ -385,6 +374,20 @@ interface TreeRowProps {
   onSelect: (id: string) => void;
   onUnlink: (id: string) => void;
   onRemove: (id: string) => void;
+  /** True in the desktop shell, where opening/revealing real files works. */
+  desktop: boolean;
+  /** Open a file in its native application. */
+  onOpen: (id: string) => void;
+  /** Reveal a node in the OS file manager (selecting it in its folder). */
+  onReveal: (id: string) => void;
+  /** Reparent a node under a folder (or the vault root, null). */
+  onMove: (fromId: string, toParentId: string | null) => void;
+  /**
+   * Valid move destinations for this node — the vault root plus every folder
+   * except the node itself and its own descendants — or [] when it can't move
+   * (a linked, cloud, or database node). Drives the "Move to…" submenu.
+   */
+  moveTargetsFor: (node: FileNode) => { id: string | null; name: string }[];
   /**
    * Ids the active search/filter keeps, or null when no filter is active.
    * Children outside the set are not rendered.
@@ -406,21 +409,36 @@ function TreeRow({
   onSelect,
   onUnlink,
   onRemove,
+  desktop,
+  onOpen,
+  onReveal,
+  onMove,
+  moveTargetsFor,
   visibleIds,
   forceExpand,
   justAdded,
 }: TreeRowProps) {
   const styles = useStyles();
   const [open, setOpen] = useState(depth < 1); // top-level folders open by default
+  // A folder highlights while a dragged file row hovers it (internal move).
+  const [dropInto, setDropInto] = useState(false);
   // A search must reveal matches nested in collapsed folders, so it wins over
   // the user's manual open/closed state while the query is active.
   const expanded = forceExpand || open;
   const kids = node.kind === "folder" ? childrenOf(node.id) : [];
   const shownKids = visibleIds ? kids.filter((k) => visibleIds.has(k.id)) : kids;
   const selected = selectionMode && isSelected(node.id);
-  // Cloud-connector files (namespaced ids) live remotely, not in the local vault
-  // that attachment retrieval walks, so only local-vault files can be attached.
-  const attachable = node.kind === "file" && !node.id.startsWith(`${node.sourceId}::`);
+  // Cloud-connector nodes carry namespaced ids and live remotely, not on the
+  // local disk — so open / reveal / move (all real-path operations) don't apply.
+  const isRemote = node.id.startsWith(`${node.sourceId}::`);
+  // Only local-vault files can be attached to a chat question.
+  const attachable = node.kind === "file" && !isRemote;
+  // Open natively (files), reveal in the OS file manager (files or folders),
+  // and reparent (op:move) — all desktop-only, local-only.
+  const openable = desktop && node.kind === "file" && !isRemote;
+  const revealable = desktop && !isRemote;
+  const moveTargets = moveTargetsFor(node);
+  const movable = moveTargets.length > 0;
   // Row clicks NAVIGATE only. Visibility lives exclusively on the explicit eye
   // toggle (and the context menu) so a misclick can never silently change what
   // the AI sees — especially a folder click, which cascades server-side.
@@ -451,7 +469,9 @@ function TreeRow({
       <div
         className={`${styles.row}${node.ragIncluded ? ` ${styles.rowIncluded}` : ""}${
           selected ? ` ${styles.rowSelected}` : ""
-        }${justAdded.has(node.id) ? ` ${styles.rowJustAdded}` : ""}`}
+        }${justAdded.has(node.id) ? ` ${styles.rowJustAdded}` : ""}${
+          dropInto ? ` ${styles.rowDropInto}` : ""
+        }`}
         style={{ paddingLeft: `${depth * 18 + 4}px` }}
         role="button"
         tabIndex={0}
@@ -463,6 +483,46 @@ function TreeRow({
         data-log-type={node.kind === "folder" ? "folder" : "file"}
         data-log={node.kind === "folder" ? "folder" : "file"}
         onClick={activate}
+        // Double-click opens the file in its native app (desktop-only). Folders
+        // keep their single-click expand; a stray double-click there is a no-op.
+        onDoubleClick={() => {
+          if (openable) onOpen(node.id);
+        }}
+        // A folder is a drop target for an internal MOVE: dragging a file row
+        // (which carries FILE_DRAG_MIME) onto it reparents the file. OS file
+        // drops carry "Files" instead and are handled by the section; internal
+        // drags never do, so the two paths never cross.
+        onDragOver={
+          node.kind === "folder"
+            ? (e) => {
+                if (!e.dataTransfer.types.includes(FILE_DRAG_MIME)) return;
+                e.preventDefault();
+                e.stopPropagation();
+                e.dataTransfer.dropEffect = "move";
+                if (!dropInto) setDropInto(true);
+              }
+            : undefined
+        }
+        onDragLeave={
+          node.kind === "folder" ? () => dropInto && setDropInto(false) : undefined
+        }
+        onDrop={
+          node.kind === "folder"
+            ? (e) => {
+                const dragged = parseDraggedFiles(e.dataTransfer);
+                if (dragged.length === 0) return;
+                e.preventDefault();
+                e.stopPropagation();
+                setDropInto(false);
+                // Move every dragged file into this folder, skipping a no-op
+                // drop onto the file's own parent; the engine rejects invalid
+                // moves (into itself / a name clash) and the store surfaces it.
+                for (const f of dragged) {
+                  if (f.id !== node.id) onMove(f.id, node.id);
+                }
+              }
+            : undefined
+        }
         onKeyDown={(e) => {
           // Keys on inner controls (the eye, unlink, checkbox) bubble up here;
           // only handle keys aimed at the row itself.
@@ -486,7 +546,9 @@ function TreeRow({
             FILE_DRAG_MIME,
             serializeDraggedFiles([{ id: node.id, name: node.name }]),
           );
-          e.dataTransfer.effectAllowed = "copy";
+          // copyMove: a drop on the chat pane attaches (copy); a drop on a
+          // folder row reparents (move). Both effects must be allowed here.
+          e.dataTransfer.effectAllowed = "copyMove";
         }}
       >
         <span
@@ -555,12 +617,48 @@ function TreeRow({
         </MenuTrigger>
         <MenuPopover>
           <MenuList>
+            {openable && (
+              <MenuItem icon={<OpenRegular />} onClick={() => onOpen(node.id)}>
+                Open
+              </MenuItem>
+            )}
+            {revealable && (
+              <MenuItem icon={<FolderOpenRegular />} onClick={() => onReveal(node.id)}>
+                Open containing folder
+              </MenuItem>
+            )}
+            {movable && (
+              <Menu>
+                <MenuTrigger disableButtonEnhancement>
+                  <MenuItem icon={<FolderArrowRightRegular />}>Move to…</MenuItem>
+                </MenuTrigger>
+                <MenuPopover>
+                  <MenuList>
+                    {moveTargets.map((t) => (
+                      <MenuItem
+                        key={t.id ?? "__root__"}
+                        icon={<FolderRegular />}
+                        onClick={() => onMove(node.id, t.id)}
+                      >
+                        {t.name}
+                      </MenuItem>
+                    ))}
+                  </MenuList>
+                </MenuPopover>
+              </Menu>
+            )}
+            {(openable || revealable || movable) && <MenuDivider />}
             <MenuItem
               icon={node.ragIncluded ? <EyeOffRegular /> : <EyeRegular />}
               onClick={toggleVisibility}
             >
               {node.ragIncluded ? "Hide from AI" : "Visible to AI"}
             </MenuItem>
+            {node.external && node.parentId === null && (
+              <MenuItem icon={<DismissRegular />} onClick={() => onUnlink(node.id)}>
+                Unlink (leave files in place)
+              </MenuItem>
+            )}
             <MenuItem icon={<DeleteRegular />} onClick={() => onRemove(node.id)}>
               Remove from vault
             </MenuItem>
@@ -581,6 +679,11 @@ function TreeRow({
               onSelect={onSelect}
               onUnlink={onUnlink}
               onRemove={onRemove}
+              desktop={desktop}
+              onOpen={onOpen}
+              onReveal={onReveal}
+              onMove={onMove}
+              moveTargetsFor={moveTargetsFor}
               visibleIds={visibleIds}
               forceExpand={forceExpand}
               justAdded={justAdded}
@@ -606,6 +709,7 @@ export function FileExplorer() {
   const toggleIncluded = useRagStore((s) => s.toggleIncluded);
   const removeReference = useRagStore((s) => s.removeReference);
   const removeFromVault = useRagStore((s) => s.removeFromVault);
+  const moveNode = useRagStore((s) => s.moveNode);
   const refresh = useRagStore((s) => s.load);
   const upload = useRagStore((s) => s.upload);
   const linkPaths = useRagStore((s) => s.linkPaths);
@@ -613,10 +717,6 @@ export function FileExplorer() {
   const desktop = useRagStore((s) => s.desktop);
   const lastError = useRagStore((s) => s.lastError);
   const clearLastError = useRagStore((s) => s.clearLastError);
-  const sharepoint = useRagStore((s) => s.sharepoint);
-  const connectSharePoint = useRagStore((s) => s.connectSharePoint);
-  const closeSharePointDialog = useRagStore((s) => s.closeSharePointDialog);
-  const disconnectSharePoint = useRagStore((s) => s.disconnectSharePoint);
   // The user's effective default-inclusion behavior (explicit onboarding choice,
   // else the assigned A/B variant). "include" carries a prominent "you control
   // what AI sees" reassurance since files are searchable the moment they're added.
@@ -761,6 +861,84 @@ export function FileExplorer() {
         (skipped.length > 3 ? `, and ${skipped.length - 3} more` : ""),
     );
   };
+
+  // --- Desktop file actions: open natively, reveal in the OS file manager, and
+  // reparent (op:move). Failures surface in the notice banner, never silently.
+  const notifyIfError = async (res: Response, fallback: string) => {
+    if (res.ok) return;
+    const data = (await res.json().catch(() => ({}))) as { error?: string };
+    setAddNotice(data.error || fallback);
+  };
+  const openNode = (nodeId: string) => {
+    void fetch("/api/open", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ nodeId }),
+    })
+      .then((res) => notifyIfError(res, "Couldn't open the file."))
+      .catch(() => setAddNotice("Couldn't open the file."));
+  };
+  // A blank node id opens the vault folder itself (the toolbar button).
+  const revealNode = (nodeId: string) => {
+    void fetch("/api/reveal", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(nodeId ? { nodeId } : {}),
+    })
+      .then((res) => notifyIfError(res, "Couldn't open the folder."))
+      .catch(() => setAddNotice("Couldn't open the folder."));
+  };
+  const handleMove = (fromId: string, toParentId: string | null) => {
+    void moveNode(fromId, toParentId).catch((err) =>
+      setAddNotice(err instanceof Error ? err.message : "Move failed."),
+    );
+  };
+
+  // Every local vault folder with a shallow "a / b / c" path label so same-named
+  // folders in the Move-to menu are distinguishable. Computed once per tree.
+  const folderTargets = useMemo(() => {
+    const pathName = (n: FileNode): string => {
+      const parts: string[] = [];
+      let cur: FileNode | undefined = n;
+      while (cur) {
+        parts.unshift(cur.name);
+        cur = cur.parentId === null ? undefined : nodeById.get(cur.parentId);
+      }
+      return parts.join(" / ");
+    };
+    return nodes
+      .filter((n) => n.kind === "folder" && !n.external && !isRemoteId(n))
+      .map((n) => ({ id: n.id, name: pathName(n), sourceId: n.sourceId, parentId: n.parentId }));
+  }, [nodes, nodeById]);
+
+  // Valid move destinations for a node: the vault root plus every folder in the
+  // same source, minus the node itself, its descendants, and its current parent
+  // (a no-op). Empty when the node can't move (linked, cloud, or a database).
+  const moveTargetsFor = useCallback(
+    (node: FileNode): { id: string | null; name: string }[] => {
+      if (node.external || isRemoteId(node) || node.kind === "database") return [];
+      const blocked = new Set<string>([node.id]);
+      const stack = [node.id];
+      while (stack.length) {
+        const id = stack.pop()!;
+        for (const c of childrenByParent.get(id) ?? []) {
+          if (c.kind === "folder" && !blocked.has(c.id)) {
+            blocked.add(c.id);
+            stack.push(c.id);
+          }
+        }
+      }
+      const targets: { id: string | null; name: string }[] = [];
+      if (node.parentId !== null) targets.push({ id: null, name: "Vault root" });
+      for (const f of folderTargets) {
+        if (f.sourceId === node.sourceId && !blocked.has(f.id) && f.id !== node.parentId) {
+          targets.push({ id: f.id, name: f.name });
+        }
+      }
+      return targets;
+    },
+    [folderTargets, childrenByParent],
+  );
 
   /** Link paths in place, returning the new ids and any per-path failures. */
   const linkResult = async (paths: string[]) => {
@@ -1000,6 +1178,17 @@ export function FileExplorer() {
               </MenuList>
             </MenuPopover>
           </Menu>
+          {desktop && (
+            <Tooltip content="Open the vault folder in your file manager" relationship="label">
+              <Button
+                icon={<FolderOpenRegular />}
+                size="small"
+                appearance="subtle"
+                aria-label="Open vault folder"
+                onClick={() => revealNode("")}
+              />
+            </Tooltip>
+          )}
           <Tooltip content="Re-scan the vault for new files" relationship="label">
             <Button
               icon={<ArrowSyncRegular />}
@@ -1221,33 +1410,12 @@ export function FileExplorer() {
             return (
               <div key={source.id}>
                 <div className={styles.sourceLabel}>
-                  {/* "sharepoint" is the cloud connector's source id (see config). */}
-                  {source.id === "sharepoint" ? (
-                    <CloudArrowUpRegular />
-                  ) : source.kind === "database" ? (
-                    <DatabaseRegular />
-                  ) : (
-                    <FolderRegular />
-                  )}
+                  {source.kind === "database" ? <DatabaseRegular /> : <FolderRegular />}
                   <Text weight="semibold">{source.name}</Text>
                   {!source.available && (
                     <Badge appearance="outline" color="danger">
                       unavailable
                     </Badge>
-                  )}
-                  {source.id === "sharepoint" && (
-                    <>
-                      <span className={styles.spacer} />
-                      <Tooltip content="Disconnect SharePoint" relationship="label">
-                        <Button
-                          icon={<PlugDisconnectedRegular />}
-                          size="small"
-                          appearance="subtle"
-                          aria-label="Disconnect SharePoint"
-                          onClick={() => void disconnectSharePoint()}
-                        />
-                      </Tooltip>
-                    </>
                   )}
                 </div>
                 {roots.length === 0 ? (
@@ -1270,6 +1438,11 @@ export function FileExplorer() {
                         onSelect={(id) => toggleSelected(id)}
                         onUnlink={(id) => void removeReference(id)}
                         onRemove={(id) => setPendingRemove([id])}
+                        desktop={desktop}
+                        onOpen={openNode}
+                        onReveal={revealNode}
+                        onMove={handleMove}
+                        moveTargetsFor={moveTargetsFor}
                         visibleIds={visibleIds}
                         forceExpand={filterActive}
                         justAdded={justAdded}
@@ -1325,70 +1498,6 @@ export function FileExplorer() {
                 }}
               >
                 Remove
-              </Button>
-            </DialogActions>
-          </DialogBody>
-        </DialogSurface>
-      </Dialog>
-
-      {/* SharePoint device-code sign-in. */}
-      <Dialog
-        open={sharepoint.open}
-        onOpenChange={(_, d) => {
-          if (!d.open) closeSharePointDialog();
-        }}
-      >
-        <DialogSurface>
-          <DialogBody>
-            <DialogTitle>Connect SharePoint</DialogTitle>
-            <DialogContent className={styles.connectBody}>
-              {sharepoint.phase === "starting" && (
-                <div className={styles.waitingRow}>
-                  <Spinner size="tiny" />
-                  <Text>Starting sign-in…</Text>
-                </div>
-              )}
-
-              {sharepoint.phase === "waiting" && (
-                <>
-                  <Text>
-                    1. Open{" "}
-                    <Link href={sharepoint.verificationUri} target="_blank" rel="noreferrer">
-                      {sharepoint.verificationUri?.replace(/^https?:\/\//, "")}
-                    </Link>{" "}
-                    and enter this code:
-                  </Text>
-                  <span className={styles.deviceCode}>{sharepoint.userCode}</span>
-                  <Text size={300}>
-                    2. Sign in with your work or school account and approve access.
-                  </Text>
-                  <div className={styles.waitingRow}>
-                    <Spinner size="tiny" />
-                    <Text size={300}>Waiting for you to finish in the browser…</Text>
-                  </div>
-                </>
-              )}
-
-              {sharepoint.phase === "connected" && (
-                <Text>✅ Connected. Your SharePoint files now appear in the list.</Text>
-              )}
-
-              {sharepoint.phase === "expired" && (
-                <Text>The code expired before sign-in completed. Please try again.</Text>
-              )}
-
-              {sharepoint.phase === "error" && (
-                <Text>Could not connect: {sharepoint.error}</Text>
-              )}
-            </DialogContent>
-            <DialogActions>
-              {(sharepoint.phase === "expired" || sharepoint.phase === "error") && (
-                <Button appearance="primary" onClick={() => void connectSharePoint()}>
-                  Try again
-                </Button>
-              )}
-              <Button appearance="secondary" onClick={() => closeSharePointDialog()}>
-                {sharepoint.phase === "connected" ? "Done" : "Cancel"}
               </Button>
             </DialogActions>
           </DialogBody>

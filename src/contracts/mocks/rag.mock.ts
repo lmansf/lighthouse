@@ -75,6 +75,30 @@ class MockRagService implements RagService {
     this.nodes = this.nodes.filter((n) => n.id !== refId && !n.id.startsWith(`${refId}/`));
   }
 
+  async moveNode(fromId: string, toParentId: string | null): Promise<{ newId: string }> {
+    const node = this.nodes.find((n) => n.id === fromId);
+    if (!node) throw new Error("source not found");
+    if (toParentId !== null) {
+      // A folder can't be moved into itself or one of its own descendants.
+      if (this.descendantIds(fromId).has(toParentId)) {
+        throw new Error("cannot move a folder into itself");
+      }
+      const parent = this.nodes.find((n) => n.id === toParentId);
+      if (!parent || parent.kind === "file") throw new Error("destination is not a folder");
+    }
+    // The mock keeps arbitrary (non-path) ids, so a reparent is just a
+    // parent/source swap — descendants reference this node by id, unchanged, so
+    // the whole subtree follows. The real engine rewrites path-derived ids.
+    const sourceId =
+      toParentId === null
+        ? node.sourceId
+        : this.nodes.find((n) => n.id === toParentId)?.sourceId ?? node.sourceId;
+    this.nodes = this.nodes.map((n) =>
+      n.id === fromId ? { ...n, parentId: toParentId, sourceId } : n,
+    );
+    return { newId: fromId };
+  }
+
   async removeFromVault(nodeId: string): Promise<void> {
     const ids = this.descendantIds(nodeId);
     this.nodes = this.nodes.filter((n) => !ids.has(n.id));

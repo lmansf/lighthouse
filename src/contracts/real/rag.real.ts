@@ -51,6 +51,11 @@ class RealRagService implements RagService {
     await post({ op: "removeReference", refId });
   }
 
+  async moveNode(fromId: string, toParentId: string | null): Promise<{ newId: string }> {
+    const res = await post({ op: "move", from: fromId, toParentId });
+    return res as { newId: string };
+  }
+
   async removeFromVault(nodeId: string): Promise<void> {
     await post({ op: "remove", nodeId });
   }

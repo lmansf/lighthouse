@@ -460,6 +460,29 @@ pub fn open_node(node_id: String) -> Result<Value, String> {
     }
 }
 
+/// Reveal a vault node in the OS file manager, selecting it inside its folder.
+/// A blank node id (or none) opens the vault directory itself, so the same
+/// route backs both the row action and the toolbar's "Open vault folder".
+/// Works for folders too (a folder reveals/opens in place).
+#[tauri::command]
+pub fn reveal_node(app: AppHandle, node_id: Option<String>) -> Result<Value, String> {
+    match node_id.filter(|s| !s.trim().is_empty()) {
+        None => {
+            crate::open_with_os(&crate::vault_dir_setting(&app));
+            Ok(json!({ "ok": true }))
+        }
+        Some(id) => {
+            let abs = vault::resolve_node_path(&id)
+                .map_err(|e| err_string(e, "could not reveal file"))?;
+            if std::fs::metadata(&abs).is_err() {
+                return Err("file no longer exists".into());
+            }
+            crate::reveal_with_os(&abs);
+            Ok(json!({ "ok": true }))
+        }
+    }
+}
+
 #[tauri::command]
 pub fn settings_get(app: AppHandle) -> Value {
     let s = settings::read_desktop_settings();

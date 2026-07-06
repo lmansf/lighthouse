@@ -37,6 +37,14 @@ export interface RagService {
   /** Remove a reference (unlink); the real files on disk are left untouched. */
   removeReference(refId: string): Promise<void>;
   /**
+   * Move a node under a new parent folder within the same source (a vault-
+   * internal reparent), or to the source root when `toParentId` is null. The
+   * node's AI-visibility flags travel with it. Returns the node's new id (ids
+   * are path-derived, so a move renames the id). Throws if the destination
+   * already holds a same-named item, or the source can't move (e.g. cloud).
+   */
+  moveNode(fromId: string, toParentId: string | null): Promise<{ newId: string }>;
+  /**
    * Remove a node from the vault, non-destructively: a linked item unlinks, a
    * vault-resident item moves to a recoverable trash. Throws on failure.
    */

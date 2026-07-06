@@ -98,6 +98,12 @@ interface RagStore {
   /** Remove a reference (unlink); real files are left in place. */
   removeReference: (refId: string) => Promise<void>;
   /**
+   * Move a node under a new parent folder (or the vault root, null), within its
+   * source. AI-visibility flags travel with it. Reloads the tree after; rejects
+   * (with the engine's reason) if the move is refused, so the UI can surface it.
+   */
+  moveNode: (fromId: string, toParentId: string | null) => Promise<void>;
+  /**
    * Remove nodes from the vault (non-destructive: linked items unlink, vault
    * items move to a recoverable trash). Clears successfully-removed ids from the
    * selection and rejects if any removal failed.
@@ -362,6 +368,15 @@ export const useRagStore = create<RagStore>((set, get) => ({
 
   removeReference: async (refId) => {
     await ragService.removeReference(refId);
+    await get().load();
+  },
+
+  moveNode: async (fromId, toParentId) => {
+    // A reparent rewrites path-derived ids across the moved subtree, so rather
+    // than predict them optimistically we let the engine do it and reload the
+    // authoritative tree. Errors (e.g. a name collision at the destination)
+    // propagate to the caller to surface.
+    await ragService.moveNode(fromId, toParentId);
     await get().load();
   },
 
