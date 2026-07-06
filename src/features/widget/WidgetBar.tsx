@@ -127,6 +127,21 @@ const useStyles = makeStyles({
     flexShrink: 0,
     ...shorthands.padding(0, tokens.spacingHorizontalM),
   },
+  // The grip: the beacon plus breathing room, and the pill's one guaranteed
+  // drag surface. The input greedily fills every free pixel of the bar, so
+  // without a dedicated handle there is effectively nowhere to grab a
+  // frameless window — this zone (plus any layout gaps, via the pill's
+  // data-tauri-drag-region) is how the bar moves.
+  grip: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    alignSelf: "stretch",
+    flexShrink: 0,
+    width: "26px",
+    cursor: "grab",
+    ":active": { cursor: "grabbing" },
+  },
   // The beacon: same blue lamp + warm gold glow as the sidebar brand — the
   // one bit of identity on an otherwise chromeless bar.
   beacon: {
@@ -136,6 +151,7 @@ const useStyles = makeStyles({
     flexShrink: 0,
     backgroundColor: tokens.colorBrandBackground,
     boxShadow: `0 0 10px 2px ${ACCENTS.beam}`,
+    pointerEvents: "none", // clicks land on the grip, not the dot
   },
   // The pill itself is the field: strip the Input's own box (border, fill,
   // focus underline) so typing feels like typing into the bar.
@@ -362,27 +378,17 @@ export function WidgetBar() {
     void invokeShell("widget_hold", { hold: held });
   }, [held]);
 
-  // In widget mode the shell boots the bar pinned (it IS the app's resting
-  // presence, so blur must not dismiss it) — reflect that in the pin button.
-  // One read at mount, then live echoes whenever the shell re-applies pin
-  // semantics (the user switching interface mode at runtime).
+  // Pin is purely the user's "keep above other windows" toggle now — widget
+  // mode keeps the bar AROUND via shell-side residency without pinning it,
+  // so nothing here derives pin from the interface mode. Live echoes still
+  // sync the button if the shell ever re-applies pin semantics.
   useEffect(() => {
-    let alive = true;
-    void fetch("/api/settings")
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d) => {
-        if (alive && d?.uiMode === "widget") setPinned(true);
-      })
-      .catch(() => {});
     const onPin = (e: Event) => {
       const detail = (e as CustomEvent<{ pinned?: boolean }>).detail;
       setPinned(detail?.pinned === true);
     };
     window.addEventListener("lighthouse:widget-pin", onPin);
-    return () => {
-      alive = false;
-      window.removeEventListener("lighthouse:widget-pin", onPin);
-    };
+    return () => window.removeEventListener("lighthouse:widget-pin", onPin);
   }, []);
 
   // Layer 1 — NAME matches: instant, client-side, case-insensitive substring
@@ -615,8 +621,27 @@ export function WidgetBar() {
       {/* "deep" drag region: any empty chrome in the pill drags the frameless
           window; Tauri's injected drag script exempts the input and buttons,
           so typing/clicking is never hijacked (widget-scope §1.1). */}
-      <div className={styles.pill} data-tauri-drag-region="deep">
-        <span className={styles.beacon} />
+      <div className={styles.pill} data-tauri-drag-region>
+        {/* Dedicated drag handle. startDragging is the ONLY real path: the
+            data-tauri-drag-region attribute has no handler in Tauri v2's
+            injected scripts (verified against the vendored crates — it's a
+            silent no-op), which is why the bar "couldn't be moved" in the
+            field. webviewWindow is the module the transport already loads,
+            so the dynamic import is guaranteed present in the bundle. */}
+        <div
+          className={styles.grip}
+          data-tauri-drag-region
+          role="presentation"
+          title="Drag to move"
+          onPointerDown={(e) => {
+            if (e.button !== 0 || !isDesktopShell()) return;
+            void import("@tauri-apps/api/webviewWindow")
+              .then((w) => w.getCurrentWebviewWindow().startDragging())
+              .catch(() => {});
+          }}
+        >
+          <span className={styles.beacon} />
+        </div>
         <Input
           ref={inputRef}
           className={styles.input}
@@ -637,9 +662,13 @@ export function WidgetBar() {
           className={mergeClasses(styles.iconBtn, pinned && styles.pinOn)}
           appearance="subtle"
           icon={pinned ? <PinFilled /> : <PinRegular />}
-          aria-label={pinned ? "Unpin — hide when focus leaves" : "Pin — keep on top"}
+          aria-label={pinned ? "Unpin — normal stacking" : "Pin — keep above other windows"}
           aria-pressed={pinned}
-          title={pinned ? "Unpin — hide when focus leaves" : "Pin — keep on top"}
+          title={
+            pinned
+              ? "Unpin — other windows can cover the bar again"
+              : "Pin — keep the bar above every window"
+          }
           onClick={togglePin}
         />
         <Button
