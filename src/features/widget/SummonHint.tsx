@@ -64,6 +64,22 @@ export function SummonHint() {
   const styles = useStyles();
   // The current accelerator to show — non-null only once we've decided to show.
   const [shortcut, setShortcut] = useState<string | null>(null);
+  // Whether the Quick Start tour had ALREADY been shown when this component
+  // first rendered. Captured in a useState initializer (render phase) rather
+  // than in the effect, because QuickStartAuto — a sibling mounted in the same
+  // commit — sets its "shown" flag inside its OWN effect, which runs BEFORE
+  // this component's effect (sibling effect order). Reading the flag in the
+  // effect would therefore always see it already set and fire the hint on the
+  // same first run, behind the tour modal. The render-phase read sees the
+  // pre-this-commit value: unset on first run (defer), set on a later launch
+  // (show, with no tour to occlude it).
+  const [tourAlreadyShown] = useState(() => {
+    try {
+      return localStorage.getItem(QUICKSTART_SHOWN_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
 
   const dismiss = useCallback(() => {
     try {
@@ -78,12 +94,13 @@ export function SummonHint() {
   // keyed shortcut actually registered (summonHotkeyOk !== false).
   useEffect(() => {
     if (!isDesktopShell()) return;
+    // Hold until a launch AFTER the Quick Start tour was seen, so this never
+    // opens behind that modal and auto-dismisses unread. The value is the
+    // render-phase snapshot (see above) — false on the tour's own first run,
+    // so we skip this launch without burning the flag and greet on a later one.
+    if (!tourAlreadyShown) return;
     try {
       if (localStorage.getItem(SHOWN_KEY) === "1") return;
-      // Hold until the Quick Start tour has been seen, so this never opens
-      // behind that modal and auto-dismisses unread. Not-yet-seen → skip this
-      // launch (don't burn the flag); it greets on a later launch.
-      if (localStorage.getItem(QUICKSTART_SHOWN_KEY) !== "1") return;
     } catch {
       return; // storage blocked — don't risk greeting on every launch
     }
@@ -104,7 +121,7 @@ export function SummonHint() {
     return () => {
       alive = false;
     };
-  }, []);
+  }, [tourAlreadyShown]);
 
   // Auto-dismiss (and set the flag) a while after it appears.
   useEffect(() => {
