@@ -37,6 +37,7 @@ import {
   tokens,
 } from "@fluentui/react-components";
 import {
+  BeakerRegular,
   BrainCircuitRegular,
   KeyRegular,
   MailRegular,
@@ -50,6 +51,7 @@ import {
 import { MODEL_PROVIDERS } from "@/contracts";
 import { LocalModelOption, LocalModelInstallPanel } from "@/features/localModel/LocalModelOption";
 import { QuickStartDialog } from "@/features/help/QuickStart";
+import { ExperimentsDialog } from "@/features/experiments/ExperimentsDialog";
 import { showWidget, summonHotkey, prettyShortcut } from "@/features/onboarding/ModeChooser";
 import { useLicenseStore, type FeedbackInput, type LicenseStatus } from "@/stores/useLicenseStore";
 import { useAuthStore } from "@/stores/useAuthStore";
@@ -1116,6 +1118,7 @@ export function SettingsMenu() {
   const [aiDlg, setAiDlg] = useState(false);
   const [prefDlg, setPrefDlg] = useState(false);
   const [quickStartDlg, setQuickStartDlg] = useState(false);
+  const [experimentsDlg, setExperimentsDlg] = useState(false);
 
   // Other features (chat empty states, explorer hints, …) deep-link into these
   // dialogs by dispatching window CustomEvents — the menu owns the dialogs, so
@@ -1164,6 +1167,9 @@ export function SettingsMenu() {
             <MenuItem icon={<BrainCircuitRegular />} onClick={() => setAiDlg(true)}>
               AI models
             </MenuItem>
+            <MenuItem icon={<BeakerRegular />} onClick={() => setExperimentsDlg(true)}>
+              Experiments
+            </MenuItem>
             <MenuDivider />
             <MenuItem
               className={styles.highlightItem}
@@ -1189,6 +1195,7 @@ export function SettingsMenu() {
       <AiModelsDialog open={aiDlg} setOpen={setAiDlg} />
       <PreferencesDialog open={prefDlg} setOpen={setPrefDlg} />
       <QuickStartDialog open={quickStartDlg} setOpen={setQuickStartDlg} />
+      <ExperimentsDialog open={experimentsDlg} setOpen={setExperimentsDlg} />
     </>
   );
 }

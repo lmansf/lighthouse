@@ -66,11 +66,13 @@ import {
   LinkRegular,
   PlugDisconnectedRegular,
   ShieldKeyholeRegular,
+  SparkleFilled,
 } from "@fluentui/react-icons";
 import type { FileNode } from "@/contracts";
 import { useRagStore } from "@/stores/useRagStore";
 import { useAuthStore } from "@/stores/useAuthStore";
 import { logEvent } from "@/lib/logEvent";
+import { recordInterest } from "@/lib/comingSoon";
 import { FILE_DRAG_MIME, serializeDraggedFiles } from "@/shell/dnd";
 import { desktopBridge, isDesktopShell, pathsForFiles } from "@/shell/desktopBridge";
 
@@ -202,6 +204,8 @@ const useStyles = makeStyles({
     "@media (prefers-reduced-motion: reduce)": { animationName: "none" },
   },
   addFlashIcon: { fontSize: "18px", color: tokens.colorStatusSuccessForeground1, flexShrink: 0 },
+  // A menu label that carries a small status badge ("Coming soon") beside it.
+  comingSoonItem: { display: "inline-flex", alignItems: "center", gap: tokens.spacingHorizontalS },
   addNotice: {
     display: "flex",
     alignItems: "center",
@@ -644,7 +648,17 @@ export function FileExplorer() {
   const [justAdded, setJustAdded] = useState<Set<string>>(() => new Set());
   const [addFlash, setAddFlash] = useState<number | null>(null);
   const flashTimer = useRef<number | null>(null);
-  useEffect(() => () => { if (flashTimer.current) window.clearTimeout(flashTimer.current); }, []);
+  // A "coming soon" teaser thanks the user with a brief green note — the same
+  // slide-in payoff as the add flash, its own copy and timer.
+  const [interestNote, setInterestNote] = useState<string | null>(null);
+  const interestTimer = useRef<number | null>(null);
+  useEffect(
+    () => () => {
+      if (flashTimer.current) window.clearTimeout(flashTimer.current);
+      if (interestTimer.current) window.clearTimeout(interestTimer.current);
+    },
+    [],
+  );
   const celebrate = (ids: string[]) => {
     if (ids.length === 0) return;
     setJustAdded(new Set(ids));
@@ -654,6 +668,15 @@ export function FileExplorer() {
       setAddFlash(null);
       setJustAdded(new Set());
     }, 3800);
+  };
+  // Register interest in a not-yet-shipped feature: log it (telemetry event +
+  // the local tally behind the Experiments leaderboard) and thank the user,
+  // without running any real connector flow.
+  const registerInterest = (id: string, thanks: string) => {
+    recordInterest(id);
+    setInterestNote(thanks);
+    if (interestTimer.current) window.clearTimeout(interestTimer.current);
+    interestTimer.current = window.setTimeout(() => setInterestNote(null), 4200);
   };
 
   // Search + "Only visible to AI" filter over the tree.
@@ -960,9 +983,19 @@ export function FileExplorer() {
                 <MenuDivider />
                 <MenuItem
                   icon={<CloudArrowUpRegular />}
-                  onClick={() => void connectSharePoint()}
+                  onClick={() =>
+                    registerInterest(
+                      "sharepoint",
+                      "Thanks for your interest! We'll let you know the moment SharePoint is ready.",
+                    )
+                  }
                 >
-                  Connect SharePoint…
+                  <span className={styles.comingSoonItem}>
+                    SharePoint
+                    <Badge appearance="tint" color="brand" size="small">
+                      Coming soon
+                    </Badge>
+                  </span>
                 </MenuItem>
               </MenuList>
             </MenuPopover>
@@ -1022,6 +1055,15 @@ export function FileExplorer() {
           <CheckmarkCircleFilled className={styles.addFlashIcon} />
           <Text size={300} weight="semibold">
             Added {addFlash} {addFlash === 1 ? "file" : "files"}
+          </Text>
+        </div>
+      )}
+
+      {interestNote && (
+        <div className={styles.addFlash} role="status" aria-live="polite">
+          <SparkleFilled className={styles.addFlashIcon} />
+          <Text size={300} weight="semibold">
+            {interestNote}
           </Text>
         </div>
       )}
