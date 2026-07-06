@@ -32,6 +32,8 @@ export interface DesktopSettings {
    * default off.
    */
   whisperMode?: boolean;
+  /** The keyed summon shortcut (global-hotkey syntax); unset = the default. */
+  summonShortcut?: string;
 }
 
 function settingsFile(): string | null {

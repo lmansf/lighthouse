@@ -37,6 +37,18 @@ windows-sys = { version = "0.60", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
+# W3 Whisper mode, macOS leg: NSEvent global monitor + the Accessibility
+# trust check (whisper.rs). Versions match what tauri/tao already lock.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = ["NSEvent", "block2"] }
+block2 = "0.6"
+core-foundation = "0.10"
+
+# W3 Whisper mode, X11 leg: passive XInput2 raw key events (whisper.rs).
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+x11rb = { version = "0.13", features = ["xinput"] }
+
 [[bin]]
 name = "lighthouse-desktop"
 path = "src/main.rs"

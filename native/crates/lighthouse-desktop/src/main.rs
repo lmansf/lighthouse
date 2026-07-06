@@ -163,14 +163,36 @@ pub fn ensure_widget_window(app: &AppHandle) {
     }
 }
 
-/// Show the floating search bar. Re-centers when the saved position landed
-/// off every current monitor (e.g. an unplugged display). `focus` is false
-/// only for the polite widget-mode boot at OS login.
+/// Show the floating search bar where the user actually is: if its saved
+/// spot is on the monitor the CURSOR is on, keep it (drag positions are
+/// respected per-screen); otherwise place it top-center of the cursor's
+/// monitor — the Spotlight expectation on multi-monitor setups. A position
+/// off every monitor (unplugged display) still heals via center(). `focus`
+/// is false only for the polite widget-mode boot at OS login.
 pub fn show_widget(app: &AppHandle, focus: bool) {
     ensure_widget_window(app); // lazy in safe mode / the first seconds of boot
     let Some(w) = app.get_webview_window(WIDGET_LABEL) else {
         return;
     };
+    if !w.is_visible().unwrap_or(false) {
+        let cursor_monitor = app
+            .cursor_position()
+            .ok()
+            .and_then(|p| app.monitor_from_point(p.x, p.y).ok().flatten());
+        if let Some(m) = cursor_monitor {
+            let on_cursor_monitor = w.outer_position().is_ok_and(|p| {
+                let (mx, my) = (m.position().x, m.position().y);
+                let (mw, mh) = (m.size().width as i32, m.size().height as i32);
+                p.x >= mx && p.x < mx + mw && p.y >= my && p.y < my + mh
+            });
+            if !on_cursor_monitor {
+                let width = (WIDGET_WIDTH * m.scale_factor()) as i32;
+                let x = m.position().x + (m.size().width as i32 - width) / 2;
+                let y = m.position().y + (m.size().height as i32 / 6);
+                let _ = w.set_position(tauri::PhysicalPosition::new(x, y));
+            }
+        }
+    }
     if w.current_monitor().ok().flatten().is_none() {
         let _ = w.center();
     }
@@ -231,6 +253,36 @@ fn widget_mode(app: &AppHandle) -> bool {
 /// registration passes --autostarted). Used to avoid stealing focus at login.
 fn launched_by_autostart() -> bool {
     std::env::args().any(|a| a == "--autostarted")
+}
+
+/// (Re)register the keyed summon chord from settings — at boot and whenever
+/// Preferences records a new one. Drops any previous registration first;
+/// HotkeyOk mirrors the outcome for the UI's copy (false on Wayland, or for
+/// a chord some other app already owns).
+pub fn register_summon_shortcut(app: &AppHandle) -> bool {
+    use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+    let gs = app.global_shortcut();
+    let _ = gs.unregister_all(); // ours is the only registration in this app
+    let accel = read_settings(app)["summonShortcut"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .unwrap_or_else(|| lighthouse_core::settings::DEFAULT_SUMMON_SHORTCUT.to_string());
+    let ok = gs
+        .on_shortcut(accel.as_str(), |app, _shortcut, event| {
+            if event.state() == ShortcutState::Pressed {
+                toggle_widget(app);
+            }
+        })
+        .is_ok();
+    if !ok {
+        eprintln!("summon shortcut \"{accel}\" unavailable; use the tray's \"Show search bar\"");
+    }
+    if let Some(state) = app.try_state::<HotkeyOk>() {
+        state.0.store(ok, std::sync::atomic::Ordering::Relaxed);
+    }
+    ok
 }
 
 /// Launch the platform's default opener for a path, detached.
@@ -822,32 +874,13 @@ fn main() {
                 boot_guard::mark_ready();
             });
 
-            // Tier-1 summon hotkey (keyed chord; the modifier-only "Whisper
-            // mode" is scoped as W3). Registered here rather than via the
-            // plugin builder so a failure — expected on Wayland, where the
-            // X11-only backend can't register anything — degrades to the
-            // tray's "Show search bar" item instead of failing the launch.
-            {
-                use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
-                let register = handle.global_shortcut().on_shortcut(
-                    "ctrl+super+shift+space",
-                    |app, _shortcut, event| {
-                        if event.state() == ShortcutState::Pressed {
-                            toggle_widget(app);
-                        }
-                    },
-                );
-                match register {
-                    Ok(()) => {
-                        if let Some(ok) = handle.try_state::<HotkeyOk>() {
-                            ok.0.store(true, std::sync::atomic::Ordering::Relaxed);
-                        }
-                    }
-                    Err(e) => eprintln!(
-                        "summon hotkey unavailable ({e}); use the tray's \"Show search bar\""
-                    ),
-                }
-            }
+            // Tier-1 summon hotkey — the user's keyed chord from settings
+            // (recordable in Preferences; the modifier-only tap lives in
+            // whisper.rs). Registered here rather than via the plugin builder
+            // so a failure — expected on Wayland, where the X11-only backend
+            // can't register anything — degrades to the tray's "Show search
+            // bar" item instead of failing the launch.
+            register_summon_shortcut(&handle);
 
             // W3 Whisper mode: the opt-in modifier-only tap chord. Only ever
             // active when the user enabled it in Preferences (whisper.rs).

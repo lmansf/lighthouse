@@ -10,6 +10,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::write_json;
 
+/// The out-of-the-box keyed summon chord (Wispr-adjacent, but with a real
+/// key — no standard hotkey API can register a modifier-only chord).
+pub const DEFAULT_SUMMON_SHORTCUT: &str = "ctrl+super+shift+space";
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DesktopSettings {
@@ -32,6 +36,10 @@ pub struct DesktopSettings {
     /// supported); default off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub whisper_mode: Option<bool>,
+    /// The keyed summon shortcut (global-hotkey syntax, e.g.
+    /// "ctrl+super+shift+space" or "ctrl+alt+KeyP"). None = the default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summon_shortcut: Option<String>,
     /// Keys this struct doesn't model (e.g. the shell's hand-persisted
     /// `widgetPos`) must survive a read-modify-write round trip — without
     /// this flatten, any Preferences toggle would silently delete them.
@@ -62,6 +70,7 @@ pub fn write_desktop_settings(
     startup_asked: Option<bool>,
     ui_mode: Option<String>,
     whisper_mode: Option<bool>,
+    summon_shortcut: Option<String>,
 ) -> DesktopSettings {
     let Some(f) = settings_file() else {
         return DesktopSettings::default();
@@ -79,6 +88,11 @@ pub fn write_desktop_settings(
     }
     if whisper_mode.is_some() {
         next.whisper_mode = whisper_mode;
+    }
+    // Syntax is validated by the desktop shell before it saves (it parses the
+    // shortcut and refuses unregistrable strings); empty resets to default.
+    if summon_shortcut.is_some() {
+        next.summon_shortcut = summon_shortcut.filter(|s| !s.trim().is_empty());
     }
     write_json(&f, &next); // best-effort: a read-only location just means unsaved
     next
