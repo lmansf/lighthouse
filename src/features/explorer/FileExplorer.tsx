@@ -47,6 +47,7 @@ import {
 } from "@fluentui/react-components";
 import {
   ArrowDownloadRegular,
+  ArrowSortRegular,
   ArrowSyncRegular,
   CheckmarkCircleFilled,
   ChevronDownRegular,
@@ -339,6 +340,13 @@ const useStyles = makeStyles({
   // The eye reads as part of the row until you need it; brand color marks the
   // "visible to AI" state so scanning the tree shows what the AI can see.
   eyeOn: { color: tokens.colorBrandForeground1 },
+  // A folder that's only partly visible to AI — distinct from a solid on/off.
+  eyePartial: { color: tokens.colorBrandForeground2 },
+  size: {
+    color: tokens.colorNeutralForeground3,
+    flexShrink: 0,
+    fontVariantNumeric: "tabular-nums",
+  },
   chevron: {
     display: "flex",
     alignItems: "center",
@@ -356,6 +364,48 @@ const useStyles = makeStyles({
 /** Cloud-connector nodes carry ids namespaced `${sourceId}::…` and live off-disk. */
 function isRemoteId(node: FileNode): boolean {
   return node.id.startsWith(`${node.sourceId}::`);
+}
+
+/** Compact human-readable byte size (e.g. "3.4 MB"), or "" when unknown. */
+function formatSize(bytes: number | undefined): string {
+  if (bytes === undefined || bytes < 0) return "";
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let v = bytes / 1024;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i += 1;
+  }
+  return `${v < 10 ? v.toFixed(1) : Math.round(v)} ${units[i]}`;
+}
+
+type SortKey = "name" | "size" | "type";
+interface SortState {
+  key: SortKey;
+  dir: "asc" | "desc";
+}
+
+/** Lower-case extension for type sorting (files only); folders sort as "". */
+function extOf(node: FileNode): string {
+  if (node.kind !== "file") return "";
+  const dot = node.name.lastIndexOf(".");
+  return dot > 0 ? node.name.slice(dot + 1).toLowerCase() : "";
+}
+
+/** Comparator for sibling nodes: folders always first, then by the chosen key. */
+function makeComparator(sort: SortState): (a: FileNode, b: FileNode) => number {
+  const mul = sort.dir === "asc" ? 1 : -1;
+  return (a, b) => {
+    // Folders/databases group above files regardless of direction.
+    const rank = (n: FileNode) => (n.kind === "file" ? 1 : 0);
+    if (rank(a) !== rank(b)) return rank(a) - rank(b);
+    let cmp = 0;
+    if (sort.key === "size") cmp = (a.size ?? 0) - (b.size ?? 0);
+    else if (sort.key === "type") cmp = extOf(a).localeCompare(extOf(b));
+    if (cmp === 0) cmp = a.name.localeCompare(b.name, undefined, { numeric: true });
+    return cmp * mul;
+  };
 }
 
 function fileIcon(node: FileNode, className: string) {
@@ -394,6 +444,10 @@ interface TreeRowProps {
    * (a linked, cloud, or database node). Drives the "Move to…" submenu.
    */
   moveTargetsFor: (node: FileNode) => { id: string | null; name: string }[];
+  /** Sibling comparator (folders first, then the chosen sort key). */
+  compareNodes: (a: FileNode, b: FileNode) => number;
+  /** Folder id → whether all/some/none of its file descendants are AI-visible. */
+  folderVisibility: Map<string, "all" | "some" | "none">;
   /**
    * Ids the active search/filter keeps, or null when no filter is active.
    * Children outside the set are not rendered.
@@ -422,6 +476,8 @@ function TreeRow({
   onRename,
   onNewFolderInside,
   moveTargetsFor,
+  compareNodes,
+  folderVisibility,
   visibleIds,
   forceExpand,
   justAdded,
@@ -434,7 +490,13 @@ function TreeRow({
   // the user's manual open/closed state while the query is active.
   const expanded = forceExpand || open;
   const kids = node.kind === "folder" ? childrenOf(node.id) : [];
-  const shownKids = visibleIds ? kids.filter((k) => visibleIds.has(k.id)) : kids;
+  const shownKids = (visibleIds ? kids.filter((k) => visibleIds.has(k.id)) : kids)
+    .slice()
+    .sort(compareNodes);
+  // A folder's eye reflects its descendants: all visible, some, or none.
+  const folderVis = node.kind === "folder" ? folderVisibility.get(node.id) ?? "none" : null;
+  const partialVis = folderVis === "some";
+  const eyeShown = folderVis ? folderVis !== "none" : node.ragIncluded;
   const selected = selectionMode && isSelected(node.id);
   // Cloud-connector nodes carry namespaced ids and live remotely, not on the
   // local disk — so open / reveal / move (all real-path operations) don't apply.
@@ -469,9 +531,11 @@ function TreeRow({
     });
     onToggle(node.id);
   };
-  const eyeLabel = node.ragIncluded
-    ? "Visible to AI — click to hide"
-    : "Hidden from AI — click to show";
+  const eyeLabel = partialVis
+    ? "Some files visible to AI — click to show all"
+    : eyeShown
+      ? "Visible to AI — click to hide"
+      : "Hidden from AI — click to show";
 
   return (
     <div>
@@ -610,14 +674,19 @@ function TreeRow({
             />
           </Tooltip>
         )}
+        {node.kind === "file" && node.size !== undefined && (
+          <Text size={200} className={styles.size}>
+            {formatSize(node.size)}
+          </Text>
+        )}
         <Tooltip content={eyeLabel} relationship="label">
           <Button
             appearance="subtle"
             size="small"
-            className={node.ragIncluded ? styles.eyeOn : undefined}
-            icon={node.ragIncluded ? <EyeRegular /> : <EyeOffRegular />}
+            className={partialVis ? styles.eyePartial : eyeShown ? styles.eyeOn : undefined}
+            icon={eyeShown ? <EyeRegular /> : <EyeOffRegular />}
             aria-label={eyeLabel}
-            aria-pressed={node.ragIncluded}
+            aria-pressed={folderVis ? folderVis === "all" : node.ragIncluded}
             onClick={(e) => {
               e.stopPropagation();
               toggleVisibility();
@@ -707,6 +776,8 @@ function TreeRow({
               onRename={onRename}
               onNewFolderInside={onNewFolderInside}
               moveTargetsFor={moveTargetsFor}
+              compareNodes={compareNodes}
+              folderVisibility={folderVisibility}
               visibleIds={visibleIds}
               forceExpand={forceExpand}
               justAdded={justAdded}
@@ -824,6 +895,8 @@ export function FileExplorer() {
   // Search + "Only visible to AI" filter over the tree.
   const [query, setQuery] = useState("");
   const [onlyVisible, setOnlyVisible] = useState(false);
+  const [sort, setSort] = useState<SortState>({ key: "name", dir: "asc" });
+  const compareNodes = useMemo(() => makeComparator(sort), [sort]);
 
   // The include-by-default note is reassurance, not a control - once read it
   // can be dismissed for good (persisted so it doesn't return every launch).
@@ -859,6 +932,40 @@ export function FileExplorer() {
     return map;
   }, [nodes]);
   const childrenOf = (id: string | null) => childrenByParent.get(id) ?? [];
+
+  // For each folder, whether ALL / SOME / NONE of its file descendants are
+  // visible to AI — so a folder's eye can show a distinct "partially exposed"
+  // state instead of a plain on/off that hides the real picture.
+  const folderVisibility = useMemo(() => {
+    const map = new Map<string, "all" | "some" | "none">();
+    const counts = new Map<string, { inc: number; total: number }>();
+    const visit = (id: string): { inc: number; total: number } => {
+      const cached = counts.get(id);
+      if (cached) return cached;
+      let inc = 0;
+      let total = 0;
+      for (const c of childrenByParent.get(id) ?? []) {
+        if (c.kind === "file") {
+          total += 1;
+          if (c.ragIncluded) inc += 1;
+        } else {
+          const sub = visit(c.id);
+          inc += sub.inc;
+          total += sub.total;
+        }
+      }
+      const res = { inc, total };
+      counts.set(id, res);
+      return res;
+    };
+    for (const n of nodes) {
+      if (n.kind !== "file") {
+        const { inc, total } = visit(n.id);
+        map.set(n.id, total === 0 || inc === 0 ? "none" : inc === total ? "all" : "some");
+      }
+    }
+    return map;
+  }, [nodes, childrenByParent]);
 
   const trimmedQuery = query.trim().toLowerCase();
   const filterActive = trimmedQuery !== "" || onlyVisible;
@@ -1471,6 +1578,36 @@ export function FileExplorer() {
           >
             Only visible to AI
           </ToggleButton>
+          <Menu>
+            <MenuTrigger disableButtonEnhancement>
+              <Tooltip content="Sort files" relationship="label">
+                <Button size="small" appearance="subtle" icon={<ArrowSortRegular />} aria-label="Sort" />
+              </Tooltip>
+            </MenuTrigger>
+            <MenuPopover>
+              <MenuList>
+                {(["name", "size", "type"] as const).map((key) => {
+                  const active = sort.key === key;
+                  const label = key === "name" ? "Name" : key === "size" ? "Size" : "Type";
+                  return (
+                    <MenuItem
+                      key={key}
+                      // Re-picking the active key flips direction; a new key starts ascending.
+                      onClick={() =>
+                        setSort((s) => ({
+                          key,
+                          dir: s.key === key && s.dir === "asc" ? "desc" : "asc",
+                        }))
+                      }
+                    >
+                      {label}
+                      {active ? (sort.dir === "asc" ? "  ↑" : "  ↓") : ""}
+                    </MenuItem>
+                  );
+                })}
+              </MenuList>
+            </MenuPopover>
+          </Menu>
         </div>
       )}
 
@@ -1500,12 +1637,14 @@ export function FileExplorer() {
           </div>
         ) : (
           sources.map((source) => {
-            const roots = nodes.filter(
-              (n) =>
-                n.sourceId === source.id &&
-                n.parentId === null &&
-                (!visibleIds || visibleIds.has(n.id)),
-            );
+            const roots = nodes
+              .filter(
+                (n) =>
+                  n.sourceId === source.id &&
+                  n.parentId === null &&
+                  (!visibleIds || visibleIds.has(n.id)),
+              )
+              .sort(compareNodes);
             // While filtering, drop whole sources with no matches instead of
             // rendering an orphaned header.
             if (filterActive && roots.length === 0) return null;
@@ -1547,6 +1686,8 @@ export function FileExplorer() {
                         onRename={openRename}
                         onNewFolderInside={(pid) => openNewFolder(pid)}
                         moveTargetsFor={moveTargetsFor}
+                        compareNodes={compareNodes}
+                        folderVisibility={folderVisibility}
                         visibleIds={visibleIds}
                         forceExpand={filterActive}
                         justAdded={justAdded}
