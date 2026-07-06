@@ -47,7 +47,9 @@ import {
   tokens,
 } from "@fluentui/react-components";
 import {
+  ArrowDownloadRegular,
   ArrowSyncRegular,
+  CheckmarkCircleFilled,
   ChevronDownRegular,
   ChevronRightRegular,
   CloudArrowUpRegular,
@@ -95,11 +97,111 @@ const useStyles = makeStyles({
     flexDirection: "column",
     alignItems: "center",
     justifyContent: "center",
-    gap: tokens.spacingVerticalM,
     backgroundColor: tokens.colorNeutralBackgroundAlpha2,
-    backdropFilter: "blur(2px)",
+    backdropFilter: "blur(3px)",
     ...shorthands.borderRadius(tokens.borderRadiusLarge),
   },
+  // A calm, self-contained progress card — a determinate bar that eases as it
+  // fills, so a big add reads as steady motion, not a spinning "is it stuck?".
+  progressCard: {
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    gap: tokens.spacingVerticalS,
+    width: "min(300px, 78%)",
+    ...shorthands.padding(tokens.spacingVerticalL, tokens.spacingHorizontalL),
+    backgroundColor: tokens.colorNeutralBackground1,
+    ...shorthands.borderRadius(tokens.borderRadiusXLarge),
+    boxShadow: tokens.shadow28,
+  },
+  progressIcon: {
+    fontSize: "26px",
+    color: tokens.colorBrandForeground1,
+    animationName: { "0%,100%": { transform: "translateY(0)" }, "50%": { transform: "translateY(-3px)" } },
+    animationDuration: "1.5s",
+    animationIterationCount: "infinite",
+    animationTimingFunction: "ease-in-out",
+    "@media (prefers-reduced-motion: reduce)": { animationName: "none" },
+  },
+  progressTrack: {
+    width: "100%",
+    height: "7px",
+    ...shorthands.borderRadius("100px"),
+    backgroundColor: tokens.colorNeutralBackground4,
+    overflow: "hidden",
+  },
+  progressFill: {
+    height: "100%",
+    ...shorthands.borderRadius("100px"),
+    background: `linear-gradient(90deg, ${tokens.colorBrandBackground}, ${tokens.colorBrandBackgroundHover})`,
+    // The buttery part: width changes glide instead of snapping per batch.
+    transitionProperty: "width",
+    transitionDuration: tokens.durationSlow,
+    transitionTimingFunction: tokens.curveEasyEase,
+    minWidth: "7px",
+    "@media (prefers-reduced-motion: reduce)": { transitionDuration: "1ms" },
+  },
+  progressCount: { fontVariantNumeric: "tabular-nums" },
+  // The drop invitation: a full-panel, unmistakable target the moment a file
+  // is dragged over — the #1 action, so it gets the drama.
+  dropOverlay: {
+    position: "absolute",
+    inset: 0,
+    zIndex: 12,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    ...shorthands.padding(tokens.spacingHorizontalL),
+    backgroundColor: tokens.colorBrandBackground2,
+    backdropFilter: "blur(2px)",
+    ...shorthands.borderRadius(tokens.borderRadiusLarge),
+    pointerEvents: "none", // the panel underneath owns the real drop events
+    animationName: { from: { opacity: 0 }, to: { opacity: 1 } },
+    animationDuration: tokens.durationFast,
+  },
+  dropRing: {
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    gap: tokens.spacingVerticalS,
+    textAlign: "center",
+    width: "100%",
+    height: "100%",
+    ...shorthands.padding(tokens.spacingVerticalXL),
+    ...shorthands.border("2px", "dashed", tokens.colorBrandStroke1),
+    ...shorthands.borderRadius(tokens.borderRadiusXLarge),
+    justifyContent: "center",
+    color: tokens.colorBrandForeground1,
+  },
+  dropIcon: {
+    fontSize: "44px",
+    animationName: { "0%,100%": { transform: "translateY(0)" }, "50%": { transform: "translateY(-6px)" } },
+    animationDuration: "1.4s",
+    animationIterationCount: "infinite",
+    animationTimingFunction: "ease-in-out",
+    "@media (prefers-reduced-motion: reduce)": { animationName: "none" },
+  },
+  dropHint: { color: tokens.colorNeutralForeground3 },
+  // The payoff: a brief "added ✓" that slides in and auto-retires.
+  addFlash: {
+    display: "flex",
+    alignItems: "center",
+    gap: tokens.spacingHorizontalS,
+    ...shorthands.padding(tokens.spacingVerticalS, tokens.spacingHorizontalM),
+    marginBottom: tokens.spacingVerticalM,
+    ...shorthands.borderRadius(tokens.borderRadiusMedium),
+    backgroundColor: tokens.colorStatusSuccessBackground1,
+    color: tokens.colorStatusSuccessForeground1,
+    ...shorthands.border("1px", "solid", tokens.colorStatusSuccessBorder1),
+    animationName: {
+      from: { opacity: 0, transform: "translateY(-6px)" },
+      to: { opacity: 1, transform: "translateY(0)" },
+    },
+    animationDuration: tokens.durationNormal,
+    animationTimingFunction: tokens.curveDecelerateMid,
+    "@media (prefers-reduced-motion: reduce)": { animationName: "none" },
+  },
+  addFlashIcon: { fontSize: "18px", color: tokens.colorStatusSuccessForeground1, flexShrink: 0 },
   addNotice: {
     display: "flex",
     alignItems: "center",
@@ -221,6 +323,18 @@ const useStyles = makeStyles({
     backgroundColor: tokens.colorNeutralBackground1Selected,
     ...shorthands.outline("1px", "solid", tokens.colorBrandStroke1),
   },
+  // Freshly-added rows slide in and glow, then settle — so a completed add
+  // has a visible landing spot instead of files silently appearing.
+  rowJustAdded: {
+    animationName: {
+      from: { opacity: 0, transform: "translateY(-5px)", backgroundColor: tokens.colorBrandBackground2 },
+      "60%": { backgroundColor: tokens.colorBrandBackground2 },
+      to: { opacity: 1, transform: "translateY(0)", backgroundColor: "transparent" },
+    },
+    animationDuration: "1.4s",
+    animationTimingFunction: tokens.curveDecelerateMid,
+    "@media (prefers-reduced-motion: reduce)": { animationName: "none" },
+  },
   actionBar: {
     display: "flex",
     alignItems: "center",
@@ -274,6 +388,8 @@ interface TreeRowProps {
   visibleIds: Set<string> | null;
   /** True while a search query is active: matched ancestors stay expanded. */
   forceExpand: boolean;
+  /** Ids added in the last few seconds — these rows play the enter animation. */
+  justAdded: Set<string>;
 }
 
 function TreeRow({
@@ -288,6 +404,7 @@ function TreeRow({
   onRemove,
   visibleIds,
   forceExpand,
+  justAdded,
 }: TreeRowProps) {
   const styles = useStyles();
   const [open, setOpen] = useState(depth < 1); // top-level folders open by default
@@ -330,7 +447,7 @@ function TreeRow({
       <div
         className={`${styles.row}${node.ragIncluded ? ` ${styles.rowIncluded}` : ""}${
           selected ? ` ${styles.rowSelected}` : ""
-        }`}
+        }${justAdded.has(node.id) ? ` ${styles.rowJustAdded}` : ""}`}
         style={{ paddingLeft: `${depth * 18 + 4}px` }}
         role="button"
         tabIndex={0}
@@ -462,6 +579,7 @@ function TreeRow({
               onRemove={onRemove}
               visibleIds={visibleIds}
               forceExpand={forceExpand}
+              justAdded={justAdded}
             />
           ))}
         </div>
@@ -520,6 +638,23 @@ export function FileExplorer() {
   const folderInputRef = useRef<HTMLInputElement>(null);
   const dragDepth = useRef(0);
   const [dragging, setDragging] = useState(false);
+  // The completion payoff: `justAdded` drives the row-enter animation, and
+  // `addFlash` shows the transient "added N ✓" banner. Both clear together
+  // after a beat so they don't linger on a settled list.
+  const [justAdded, setJustAdded] = useState<Set<string>>(() => new Set());
+  const [addFlash, setAddFlash] = useState<number | null>(null);
+  const flashTimer = useRef<number | null>(null);
+  useEffect(() => () => { if (flashTimer.current) window.clearTimeout(flashTimer.current); }, []);
+  const celebrate = (ids: string[]) => {
+    if (ids.length === 0) return;
+    setJustAdded(new Set(ids));
+    setAddFlash(ids.length);
+    if (flashTimer.current) window.clearTimeout(flashTimer.current);
+    flashTimer.current = window.setTimeout(() => {
+      setAddFlash(null);
+      setJustAdded(new Set());
+    }, 3800);
+  };
 
   // Search + "Only visible to AI" filter over the tree.
   const [query, setQuery] = useState("");
@@ -604,15 +739,20 @@ export function FileExplorer() {
     );
   };
 
-  /** Link paths in place, returning any per-path failures as skip records. */
-  const linkFailures = async (paths: string[]) => {
-    const { failed } = await linkPaths(paths);
-    return failed.map((f) => ({ name: f.path, reason: f.reason }));
+  /** Link paths in place, returning the new ids and any per-path failures. */
+  const linkResult = async (paths: string[]) => {
+    const { linked, failed } = await linkPaths(paths);
+    return {
+      addedIds: linked.map((l) => l.id),
+      problems: failed.map((f) => ({ name: f.path, reason: f.reason })),
+    };
   };
 
-  /** Link paths in place and surface any per-path failures. */
+  /** Link paths in place, then celebrate what landed and surface failures. */
   const linkAndReport = async (paths: string[]) => {
-    reportSkipped(await linkFailures(paths));
+    const { addedIds, problems } = await linkResult(paths);
+    celebrate(addedIds);
+    reportSkipped(problems);
   };
 
   /**
@@ -629,17 +769,22 @@ export function FileExplorer() {
       const { paths, unresolved } = pathsForFiles(files);
       if (paths.length > 0) {
         void (async () => {
-          const problems = await linkFailures(paths);
+          const { addedIds, problems } = await linkResult(paths);
           if (unresolved.length > 0) {
-            const { skipped } = await upload(unresolved);
+            const { addedIds: upIds, skipped } = await upload(unresolved);
+            addedIds.push(...upIds);
             problems.push(...skipped);
           }
+          celebrate(addedIds);
           reportSkipped(problems);
         })();
         return;
       }
     }
-    void upload(files).then(({ skipped }) => reportSkipped(skipped));
+    void upload(files).then(({ addedIds, skipped }) => {
+      celebrate(addedIds);
+      reportSkipped(skipped);
+    });
   };
 
   /**
@@ -857,6 +1002,30 @@ export function FileExplorer() {
         </div>
       )}
 
+      {/* Drag invitation — the whole panel becomes an unmistakable target. */}
+      {dragging && (
+        <div className={styles.dropOverlay} aria-hidden>
+          <div className={styles.dropRing}>
+            <ArrowDownloadRegular className={styles.dropIcon} />
+            <Text size={500} weight="semibold">
+              Drop to add
+            </Text>
+            <Text size={300} className={styles.dropHint}>
+              They stay on your machine
+            </Text>
+          </div>
+        </div>
+      )}
+
+      {addFlash !== null && (
+        <div className={styles.addFlash} role="status" aria-live="polite">
+          <CheckmarkCircleFilled className={styles.addFlashIcon} />
+          <Text size={300} weight="semibold">
+            Added {addFlash} {addFlash === 1 ? "file" : "files"}
+          </Text>
+        </div>
+      )}
+
       {addNotice && (
         <div className={styles.addNotice}>
           <Text size={200}>{addNotice}</Text>
@@ -873,15 +1042,31 @@ export function FileExplorer() {
 
       {processing && (
         <div className={styles.processingOverlay} role="status" aria-live="polite">
-          <Spinner size="large" />
-          <Text size={400} weight="semibold">
-            {processing.label} {Math.min(processing.done + 1, processing.total)} of {processing.total}…
-          </Text>
-          <Text size={200}>
-            {processing.label === "Linking"
-              ? "Files are referenced in place - nothing is copied."
-              : "Copying files into your vault."}
-          </Text>
+          <div className={styles.progressCard}>
+            <ArrowDownloadRegular className={styles.progressIcon} />
+            <Text size={400} weight="semibold" className={styles.progressCount}>
+              {processing.label} {Math.min(processing.done + 1, processing.total)} of {processing.total}
+            </Text>
+            <div
+              className={styles.progressTrack}
+              role="progressbar"
+              aria-valuenow={processing.done}
+              aria-valuemin={0}
+              aria-valuemax={processing.total}
+            >
+              <div
+                className={styles.progressFill}
+                style={{
+                  width: `${Math.round((processing.done / Math.max(1, processing.total)) * 100)}%`,
+                }}
+              />
+            </div>
+            <Text size={200} className={styles.dropHint}>
+              {processing.label === "Linking"
+                ? "Referenced in place — nothing is copied."
+                : "Copying files into your vault."}
+            </Text>
+          </div>
         </div>
       )}
 
@@ -1045,6 +1230,7 @@ export function FileExplorer() {
                         onRemove={(id) => setPendingRemove([id])}
                         visibleIds={visibleIds}
                         forceExpand={filterActive}
+                        justAdded={justAdded}
                       />
                     ))}
                   </div>
