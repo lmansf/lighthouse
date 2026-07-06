@@ -111,8 +111,18 @@ pub async fn rag_post(headers: HeaderMap, body: Option<Json<Value>>) -> Response
                 return bad_request("nodeId required");
             };
             match sources::remove_from_vault(node_id).await {
-                Ok(()) => Json(json!({ "ok": true })).into_response(),
+                Ok(restore) => Json(json!({ "ok": true, "restore": restore })).into_response(),
                 Err(e) => bad_request(&err_message(&e, "remove failed")),
+            }
+        }
+        Some("restore") => {
+            let token = &body["token"];
+            if !token.is_object() {
+                return bad_request("token required");
+            }
+            match sources::restore_from_vault(token).await {
+                Ok(result) => Json(result).into_response(),
+                Err(e) => bad_request(&err_message(&e, "restore failed")),
             }
         }
         _ => bad_request("unknown op"),

@@ -124,11 +124,23 @@ pub async fn rag_op(app: AppHandle, body: Value) -> Result<Value, String> {
             let Some(node_id) = body["nodeId"].as_str().filter(|n| !n.trim().is_empty()) else {
                 return Err("nodeId required".into());
             };
-            sources::remove_from_vault(node_id)
+            let restore = sources::remove_from_vault(node_id)
                 .await
                 .map_err(|e| err_string(e, "remove failed"))?;
             let _ = app.emit("vault-changed", ());
-            Ok(json!({ "ok": true }))
+            // Return the restore descriptor so the client can offer Undo.
+            Ok(json!({ "ok": true, "restore": restore }))
+        }
+        Some("restore") => {
+            let token = &body["token"];
+            if !token.is_object() {
+                return Err("token required".into());
+            }
+            let result = sources::restore_from_vault(token)
+                .await
+                .map_err(|e| err_string(e, "restore failed"))?;
+            let _ = app.emit("vault-changed", ());
+            Ok(result)
         }
         _ => Err("unknown op".into()),
     }

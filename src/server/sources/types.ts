@@ -12,6 +12,7 @@
  * while the local vault keeps bare ids (and acts as the fallback owner).
  */
 import type { DataSource, FileNode } from "@/contracts";
+import type { RestoreDescriptor } from "../vault";
 
 export interface SourceConnector {
   /** Stable id; also the `${sourceId}::…` prefix for this source's node ids. */
@@ -49,6 +50,7 @@ export interface SourceConnector {
   /** Move a node within the source, preserving inclusion. */
   moveNode?(fromId: string, toParentId: string | null): Promise<{ newId: string }>;
   /** Remove a node from the source (non-destructive: linked items unlink, vault
-   *  items move to a recoverable trash). */
-  remove?(nodeId: string): Promise<void>;
+   *  items move to a recoverable trash). Returns a descriptor that
+   *  `restoreFromVault` can replay to undo the removal. */
+  remove?(nodeId: string): Promise<RestoreDescriptor>;
 }

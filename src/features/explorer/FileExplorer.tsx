@@ -709,6 +709,7 @@ export function FileExplorer() {
   const toggleIncluded = useRagStore((s) => s.toggleIncluded);
   const removeReference = useRagStore((s) => s.removeReference);
   const removeFromVault = useRagStore((s) => s.removeFromVault);
+  const restoreLast = useRagStore((s) => s.restoreLast);
   const moveNode = useRagStore((s) => s.moveNode);
   const refresh = useRagStore((s) => s.load);
   const upload = useRagStore((s) => s.upload);
@@ -752,13 +753,29 @@ export function FileExplorer() {
   // slide-in payoff as the add flash, its own copy and timer.
   const [interestNote, setInterestNote] = useState<string | null>(null);
   const interestTimer = useRef<number | null>(null);
+  // "Removed N — Undo": a transient banner that restores the last removal in one
+  // click, so no one has to hand-dig `.rag-vault/trash`. Auto-retires.
+  const [removedCount, setRemovedCount] = useState<number | null>(null);
+  const undoTimer = useRef<number | null>(null);
   useEffect(
     () => () => {
       if (flashTimer.current) window.clearTimeout(flashTimer.current);
       if (interestTimer.current) window.clearTimeout(interestTimer.current);
+      if (undoTimer.current) window.clearTimeout(undoTimer.current);
     },
     [],
   );
+  const showUndo = (count: number) => {
+    if (count <= 0) return;
+    setRemovedCount(count);
+    if (undoTimer.current) window.clearTimeout(undoTimer.current);
+    undoTimer.current = window.setTimeout(() => setRemovedCount(null), 8000);
+  };
+  const undoRemove = () => {
+    setRemovedCount(null);
+    if (undoTimer.current) window.clearTimeout(undoTimer.current);
+    void restoreLast();
+  };
   const celebrate = (ids: string[]) => {
     if (ids.length === 0) return;
     setJustAdded(new Set(ids));
@@ -1250,6 +1267,20 @@ export function FileExplorer() {
         </div>
       )}
 
+      {removedCount !== null && (
+        <div className={styles.controlNote} role="status" aria-live="polite">
+          <DeleteRegular fontSize={18} className={styles.controlNoteIcon} />
+          <Text size={200}>
+            Removed {removedCount} {removedCount === 1 ? "item" : "items"} — moved to the
+            vault&apos;s trash.
+          </Text>
+          <span className={styles.spacer} />
+          <Button size="small" appearance="primary" onClick={undoRemove}>
+            Undo
+          </Button>
+        </div>
+      )}
+
       {interestNote && (
         <div className={styles.addFlash} role="status" aria-live="polite">
           <SparkleFilled className={styles.addFlashIcon} />
@@ -1472,8 +1503,8 @@ export function FileExplorer() {
             <DialogTitle>Remove from vault?</DialogTitle>
             <DialogContent>
               {pendingRemove?.length === 1
-                ? "This item will be moved to the vault's trash and dropped from the index. Linked items are only unlinked — your real files stay where they are. You can restore from .rag-vault/trash."
-                : `These ${pendingRemove?.length ?? 0} items will be moved to the vault's trash and dropped from the index. Linked items are only unlinked. You can restore from .rag-vault/trash.`}
+                ? "This item will be moved to the vault's trash and dropped from the index. Linked items are only unlinked — your real files stay where they are. You can Undo right after, or restore later from .rag-vault/trash."
+                : `These ${pendingRemove?.length ?? 0} items will be moved to the vault's trash and dropped from the index. Linked items are only unlinked. You can Undo right after, or restore later from .rag-vault/trash.`}
               {removeError && (
                 <Text as="p" className={styles.removeError}>
                   {removeError}
@@ -1490,8 +1521,12 @@ export function FileExplorer() {
                   const ids = pendingRemove;
                   if (!ids) return;
                   setRemoveError(null);
+                  const count = ids.length;
                   void removeFromVault(ids).then(
-                    () => setPendingRemove(null),
+                    () => {
+                      setPendingRemove(null);
+                      showUndo(count);
+                    },
                     (err) =>
                       setRemoveError(
                         err instanceof Error ? err.message : "Removal failed",

@@ -13,6 +13,7 @@ import type {
   FileNode,
   OnboardingState,
   RagReference,
+  RestoreToken,
   User,
 } from "./types";
 
@@ -47,8 +48,11 @@ export interface RagService {
   /**
    * Remove a node from the vault, non-destructively: a linked item unlinks, a
    * vault-resident item moves to a recoverable trash. Throws on failure.
+   * Returns a token that `restoreFromVault` can replay to undo the removal.
    */
-  removeFromVault(nodeId: string): Promise<void>;
+  removeFromVault(nodeId: string): Promise<RestoreToken>;
+  /** Undo a removeFromVault from the token it returned. Throws on failure. */
+  restoreFromVault(token: RestoreToken): Promise<void>;
   /**
    * Capabilities of the running deployment. `desktop` is true only in the
    * packaged desktop app, where filesystem-backed actions (opening a cited file

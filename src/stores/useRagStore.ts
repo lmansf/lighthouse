@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { DataSource, FileNode } from "@/contracts";
+import type { DataSource, FileNode, RestoreToken } from "@/contracts";
 import { ragService } from "@/contracts";
 import { logEvent } from "@/lib/logEvent";
 
@@ -106,9 +106,14 @@ interface RagStore {
   /**
    * Remove nodes from the vault (non-destructive: linked items unlink, vault
    * items move to a recoverable trash). Clears successfully-removed ids from the
-   * selection and rejects if any removal failed.
+   * selection, stashes restore tokens (for Undo), and rejects if any removal
+   * failed.
    */
   removeFromVault: (nodeIds: string[]) => Promise<void>;
+  /** Restore tokens from the most recent removal batch — powers the Undo. */
+  lastRemoved: RestoreToken[];
+  /** Undo the last removal: re-link, restore flags, or move a trashed file back. */
+  restoreLast: () => Promise<void>;
 
   /** SharePoint connection flow state (device-code dialog + polling). */
   sharepoint: SharePointConnect;
@@ -382,19 +387,39 @@ export const useRagStore = create<RagStore>((set, get) => ({
 
   removeFromVault: async (nodeIds) => {
     const failed: string[] = [];
+    const tokens: RestoreToken[] = [];
     for (const nodeId of nodeIds) {
       try {
-        await ragService.removeFromVault(nodeId);
+        tokens.push(await ragService.removeFromVault(nodeId));
       } catch {
         failed.push(nodeId);
       }
     }
-    // Keep whatever failed selected so the user can retry; drop the rest.
-    set({ selectedIds: failed });
+    // Keep whatever failed selected so the user can retry; drop the rest. Stash
+    // the restore tokens so the explorer can offer a one-click Undo.
+    set({ selectedIds: failed, lastRemoved: tokens });
     await get().load();
     if (failed.length) {
       throw new Error(`Failed to remove ${failed.length} of ${nodeIds.length} item(s)`);
     }
+  },
+
+  lastRemoved: [],
+
+  restoreLast: async () => {
+    const tokens = get().lastRemoved;
+    if (tokens.length === 0) return;
+    set({ lastRemoved: [] }); // consume: Undo is one-shot per removal batch
+    for (const t of tokens) {
+      // Swallow per-token failures (e.g. a slot got reused, or the original
+      // path is now occupied) so one bad token doesn't block restoring the rest.
+      try {
+        await ragService.restoreFromVault(t);
+      } catch {
+        /* skip un-restorable token */
+      }
+    }
+    await get().load();
   },
 
   sharepoint: { open: false, phase: "idle" },

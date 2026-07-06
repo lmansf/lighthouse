@@ -45,6 +45,6 @@ export const localVault: SourceConnector = {
     return vaultMoveNode(fromId, toParentId);
   },
   async remove(nodeId) {
-    vaultRemoveFromVault(nodeId);
+    return vaultRemoveFromVault(nodeId);
   },
 };

@@ -1,6 +1,6 @@
 /** Real RagService — talks to the local `/api/rag` route (filesystem-backed). */
 import type { RagService } from "../services";
-import type { DataSource, FileNode, RagReference } from "../types";
+import type { DataSource, FileNode, RagReference, RestoreToken } from "../types";
 
 async function getTree(): Promise<{ sources: DataSource[]; nodes: FileNode[]; desktop: boolean }> {
   const r = await fetch("/api/rag", { cache: "no-store" });
@@ -56,8 +56,13 @@ class RealRagService implements RagService {
     return res as { newId: string };
   }
 
-  async removeFromVault(nodeId: string): Promise<void> {
-    await post({ op: "remove", nodeId });
+  async removeFromVault(nodeId: string): Promise<RestoreToken> {
+    const res = await post({ op: "remove", nodeId });
+    return (res.restore ?? {}) as RestoreToken;
+  }
+
+  async restoreFromVault(token: RestoreToken): Promise<void> {
+    await post({ op: "restore", token });
   }
 
   async capabilities(): Promise<{ desktop: boolean }> {
