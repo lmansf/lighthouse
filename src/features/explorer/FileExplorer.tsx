@@ -424,6 +424,8 @@ interface TreeRowProps {
   isSelected: (id: string) => boolean;
   onToggle: (id: string) => void;
   onSelect: (id: string) => void;
+  /** Begin a selection from a hover checkbox (enters selection mode + picks). */
+  onStartSelect: (id: string) => void;
   onUnlink: (id: string) => void;
   onRemove: (id: string) => void;
   /** True in the desktop shell, where opening/revealing real files works. */
@@ -467,6 +469,7 @@ function TreeRow({
   isSelected,
   onToggle,
   onSelect,
+  onStartSelect,
   onUnlink,
   onRemove,
   desktop,
@@ -486,6 +489,9 @@ function TreeRow({
   const [open, setOpen] = useState(depth < 1); // top-level folders open by default
   // A folder highlights while a dragged file row hovers it (internal move).
   const [dropInto, setDropInto] = useState(false);
+  // Reveal a select checkbox on hover, so selection can start without first
+  // flipping the global "Selection mode" switch.
+  const [hovered, setHovered] = useState(false);
   // A search must reveal matches nested in collapsed folders, so it wins over
   // the user's manual open/closed state while the query is active.
   const expanded = forceExpand || open;
@@ -563,6 +569,8 @@ function TreeRow({
         onDoubleClick={() => {
           if (openable) onOpen(node.id);
         }}
+        onMouseEnter={() => setHovered(true)}
+        onMouseLeave={() => setHovered(false)}
         // A folder is a drop target for an internal MOVE: dragging a file row
         // (which carries FILE_DRAG_MIME) onto it reparents the file. OS file
         // drops carry "Files" instead and are handled by the section; internal
@@ -638,13 +646,15 @@ function TreeRow({
             expanded ? <ChevronDownRegular /> : <ChevronRightRegular />
           ) : null}
         </span>
-        {selectionMode && (
+        {(selectionMode || selected || hovered) && (
           <Checkbox
             className={styles.check}
             checked={selected}
             onClick={(e) => {
               e.stopPropagation();
-              onSelect(node.id);
+              // Outside selection mode, ticking a hover checkbox starts one.
+              if (selectionMode) onSelect(node.id);
+              else onStartSelect(node.id);
             }}
             aria-label={`Select ${node.name}`}
           />
@@ -767,6 +777,7 @@ function TreeRow({
               isSelected={isSelected}
               onToggle={onToggle}
               onSelect={onSelect}
+              onStartSelect={onStartSelect}
               onUnlink={onUnlink}
               onRemove={onRemove}
               desktop={desktop}
@@ -1677,6 +1688,10 @@ export function FileExplorer() {
                         isSelected={isSelected}
                         onToggle={(id) => void toggleIncluded(id)}
                         onSelect={(id) => toggleSelected(id)}
+                        onStartSelect={(id) => {
+                          setSelectionMode(true);
+                          toggleSelected(id);
+                        }}
                         onUnlink={(id) => void removeReference(id)}
                         onRemove={(id) => setPendingRemove([id])}
                         desktop={desktop}
