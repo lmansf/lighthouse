@@ -258,14 +258,23 @@ export function ModeChooserAuto({ onSettled }: { onSettled: () => void }) {
   }, [settle]);
 
   /** Persist the choice — best-effort: a failed POST must never trap the user.
-   *  Bundles the launch-at-login consent + startupAsked with the mode in one
-   *  POST, so answering the chooser also answers the startup question. */
-  async function persist(mode: UiMode) {
+   *  `withStartup` carries the launch-at-login consent + startupAsked only on
+   *  the EXPLICIT Continue path (the user saw and could untick the checkbox).
+   *  Esc must NOT enroll autostart — pressing Escape to skip a dialog is not
+   *  consent — so the dismiss path omits those keys, leaving startup unasked
+   *  for the deferred StartupPrompt to handle in the (always-available) main
+   *  window it falls back to. */
+  async function persist(mode: UiMode, withStartup: boolean) {
+    const body: Record<string, unknown> = { uiMode: mode };
+    if (withStartup) {
+      body.runOnStartup = runOnStartup;
+      body.startupAsked = true;
+    }
     try {
       await fetch("/api/settings", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ uiMode: mode, runOnStartup, startupAsked: true }),
+        body: JSON.stringify(body),
       });
     } catch {
       /* best-effort — the chooser still settles */
@@ -274,7 +283,7 @@ export function ModeChooserAuto({ onSettled }: { onSettled: () => void }) {
 
   async function confirm() {
     setSaving(true);
-    await persist(selected);
+    await persist(selected, true); // explicit consent for launch-at-login
     // Show the widget right away so the choice has a visible effect — picking
     // widget mode and seeing nothing happen would read as broken.
     if (selected === "widget") await showWidget();
@@ -283,10 +292,11 @@ export function ModeChooserAuto({ onSettled }: { onSettled: () => void }) {
   }
 
   /** Esc (or any non-Continue close): choosing nothing keeps the default —
-   *  record "window" so the question never re-asks on later launches. */
+   *  record "window" so the question never re-asks on later launches, but do
+   *  NOT enroll autostart (no explicit consent was given). */
   function dismiss() {
     if (saving || settledRef.current) return;
-    void persist("window");
+    void persist("window", false);
     setOpen(false);
     settle();
   }
