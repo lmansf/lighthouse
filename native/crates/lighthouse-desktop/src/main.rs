@@ -202,32 +202,48 @@ pub fn ensure_widget_window(app: &AppHandle) {
     }
 }
 
-/// Show the floating search bar where the user actually is: if its saved
-/// spot is on the monitor the CURSOR is on, keep it (drag positions are
-/// respected per-screen); otherwise place it top-center of the cursor's
-/// monitor — the Spotlight expectation on multi-monitor setups. A position
-/// off every monitor (unplugged display) still heals via center(). `focus`
-/// is false only for the polite widget-mode boot at OS login.
+/// Show the floating search bar. Placement rule: if the user has DRAGGED it
+/// to a spot on the screen it's appearing on, keep that (per-screen drag
+/// memory). Otherwise — first launch, or summoning onto a screen it's never
+/// been dragged on — CENTER it on that screen (where the cursor is, else the
+/// current/primary monitor). A position off every monitor (unplugged display)
+/// still heals via center(). `focus` is false only for the polite widget-mode
+/// boot at OS login.
 pub fn show_widget(app: &AppHandle, focus: bool) {
     ensure_widget_window(app); // lazy in safe mode / the first seconds of boot
     let Some(w) = app.get_webview_window(WIDGET_LABEL) else {
         return;
     };
     if !w.is_visible().unwrap_or(false) {
-        let cursor_monitor = app
+        // A remembered drag position, if any (ensure_widget_window applied it).
+        let saved = read_settings(app)["widgetPos"].as_array().and_then(|a| {
+            match (
+                a.first().and_then(Value::as_i64),
+                a.get(1).and_then(Value::as_i64),
+            ) {
+                (Some(x), Some(y)) => Some((x as i32, y as i32)),
+                _ => None,
+            }
+        });
+        // Appear on the cursor's screen, else the one the window is on, else
+        // the primary — never nowhere.
+        let monitor = app
             .cursor_position()
             .ok()
-            .and_then(|p| app.monitor_from_point(p.x, p.y).ok().flatten());
-        if let Some(m) = cursor_monitor {
-            let on_cursor_monitor = w.outer_position().is_ok_and(|p| {
-                let (mx, my) = (m.position().x, m.position().y);
-                let (mw, mh) = (m.size().width as i32, m.size().height as i32);
-                p.x >= mx && p.x < mx + mw && p.y >= my && p.y < my + mh
-            });
-            if !on_cursor_monitor {
+            .and_then(|p| app.monitor_from_point(p.x, p.y).ok().flatten())
+            .or_else(|| w.current_monitor().ok().flatten())
+            .or_else(|| app.primary_monitor().ok().flatten());
+        if let Some(m) = monitor {
+            let (mx, my) = (m.position().x, m.position().y);
+            let (mw, mh) = (m.size().width as i32, m.size().height as i32);
+            let saved_here =
+                saved.is_some_and(|(x, y)| x >= mx && x < mx + mw && y >= my && y < my + mh);
+            if !saved_here {
+                // No drag memory for this screen → center the pill on it.
                 let width = (WIDGET_WIDTH * m.scale_factor()) as i32;
-                let x = m.position().x + (m.size().width as i32 - width) / 2;
-                let y = m.position().y + (m.size().height as i32 / 6);
+                let height = (WIDGET_HEIGHT * m.scale_factor()) as i32;
+                let x = mx + (mw - width) / 2;
+                let y = my + (mh - height) / 2;
                 let _ = w.set_position(tauri::PhysicalPosition::new(x, y));
             }
         }
@@ -440,6 +456,23 @@ fn bootstrap_env(app: &AppHandle) {
         let _ = fs::create_dir_all(&connectors);
         std::env::set_var("LIGHTHOUSE_MODELS_DIR", &models);
         std::env::set_var("LIGHTHOUSE_CONNECTORS_DIR", &connectors);
+
+        // The signed-in profile lives in this private data dir so it survives
+        // vault moves / re-points (which otherwise stranded it and forced a
+        // sign-in on every launch). One-time migration: if there's no profile
+        // here yet but an earlier build left one inside the vault, carry it
+        // over so returning users stay signed in.
+        let _ = fs::create_dir_all(&data);
+        let profile = data.join("profile.json");
+        if !profile.exists() {
+            let legacy = vault_dir_setting(app)
+                .join(".rag-vault")
+                .join("profile.json");
+            if legacy.exists() {
+                let _ = fs::copy(&legacy, &profile);
+            }
+        }
+        std::env::set_var("LIGHTHOUSE_PROFILE_FILE", &profile);
     }
     // Bundled offline assets (llama-server, Piper voice). Packaged builds have
     // them under the resource dir; dev runs fall back to the repo's resources/.

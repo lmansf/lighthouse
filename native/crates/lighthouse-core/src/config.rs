@@ -61,6 +61,17 @@ pub fn state_path() -> PathBuf {
 }
 
 pub fn profile_path() -> PathBuf {
+    // The signed-in profile (identity + onboarding completion) must persist
+    // INDEPENDENT of the vault folder — a vault can be moved, re-pointed, or
+    // cloud-synced, and `current_dir()`-relative resolution can differ between
+    // launches, any of which would strand the profile and force a fresh
+    // sign-in. This is the same rule connector credentials already follow
+    // (see connectors_dir). The desktop shell sets LIGHTHOUSE_PROFILE_FILE to
+    // its private data dir; the web/dev build (no shell) falls back to the
+    // vault's .rag-vault for parity.
+    if let Some(p) = env_trimmed("LIGHTHOUSE_PROFILE_FILE") {
+        return PathBuf::from(p);
+    }
     state_dir().join("profile.json")
 }
 
