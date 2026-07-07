@@ -1237,6 +1237,14 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
                       Privacy &amp; Security → Accessibility, then it starts automatically.
                     </Text>
                   )}
+                  {whisperMode && whisperPermission === "failed" && (
+                    <Text className={styles.error}>
+                      The whisper listener couldn&apos;t start, so the tap isn&apos;t active —
+                      antivirus tools sometimes block keyboard listeners. Try turning it off and
+                      on again, or restart Lighthouse. The {summonHotkey()} shortcut works either
+                      way.
+                    </Text>
+                  )}
                   <Text className={styles.prefHint}>
                     {isMac
                       ? `Uses macOS Accessibility while enabled; the ${summonHotkey()} shortcut keeps working either way.`

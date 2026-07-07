@@ -31,6 +31,7 @@ mod imp {
 
     use tauri::AppHandle;
     use windows_sys::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
+    use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows_sys::Win32::System::Threading::GetCurrentThreadId;
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
         VK_CONTROL, VK_LCONTROL, VK_LSHIFT, VK_LWIN, VK_RCONTROL, VK_RSHIFT, VK_RWIN, VK_SHIFT,
@@ -56,6 +57,11 @@ mod imp {
     /// Serializes enable/disable and owns the pump thread. The u32 is the
     /// pump thread's id, the WM_QUIT mailbox for a clean unhook.
     static PUMP: Mutex<Option<(u32, JoinHandle<()>)>> = Mutex::new(None);
+    /// Install outcome for permission_state(): 0 off/never · 1 the last
+    /// enable FAILED (hook refused — typically aggressive antivirus) · 2
+    /// active. A GUI build has no stderr, so this is how a dead hook becomes
+    /// visible in Preferences instead of leaving the toggle ON over nothing.
+    static STATE: AtomicU8 = AtomicU8::new(0);
 
     fn modifier_bit(vk: u32) -> u8 {
         // The LL hook reports side-specific codes for physical keys; the
@@ -128,8 +134,13 @@ mod imp {
                     // PostThreadMessage(WM_QUIT) can never miss.
                     let mut msg = MaybeUninit::<MSG>::uninit();
                     PeekMessageW(msg.as_mut_ptr(), std::ptr::null_mut(), 0, 0, PM_NOREMOVE);
-                    let hook =
-                        SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), std::ptr::null_mut(), 0);
+                    // A real module handle, not NULL: LL hooks are documented
+                    // to ignore hMod, but some Windows configurations (and
+                    // security tooling that vets hook installs) reject a NULL
+                    // one — and this hook silently failing is exactly the
+                    // field report "whisper is on but never fires".
+                    let hmod = GetModuleHandleW(std::ptr::null());
+                    let hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), hmod, 0);
                     if hook.is_null() {
                         eprintln!("whisper: keyboard hook failed to install");
                         let _ = tx.send(0);
@@ -144,23 +155,37 @@ mod imp {
                     MODS.store(0, Ordering::Relaxed);
                     DIRTY.store(false, Ordering::Relaxed);
                 });
-            if let Ok(handle) = handle {
-                match rx.recv() {
-                    Ok(tid) if tid != 0 => *pump = Some((tid, handle)),
+            let installed = match handle {
+                Ok(handle) => match rx.recv() {
+                    Ok(tid) if tid != 0 => {
+                        *pump = Some((tid, handle));
+                        true
+                    }
                     _ => {
                         let _ = handle.join(); // hook never installed
+                        false
                     }
-                }
+                },
+                Err(_) => false,
+            };
+            STATE.store(if installed { 2 } else { 1 }, Ordering::Relaxed);
+        } else {
+            if let Some((tid, handle)) = pump.take() {
+                unsafe { PostThreadMessageW(tid, WM_QUIT, 0, 0) };
+                let _ = handle.join(); // pump exits promptly on WM_QUIT
             }
-        } else if let Some((tid, handle)) = pump.take() {
-            unsafe { PostThreadMessageW(tid, WM_QUIT, 0, 0) };
-            let _ = handle.join(); // pump exits promptly on WM_QUIT
+            STATE.store(0, Ordering::Relaxed);
         }
     }
 
-    /// Windows needs no OS permission for the hook.
+    /// Windows needs no OS permission for the hook — but the install itself
+    /// can be refused (aggressive antivirus). "failed" lets Preferences say
+    /// so instead of presenting an ON toggle over a chord that never fires.
     pub fn permission_state() -> &'static str {
-        "granted"
+        match STATE.load(Ordering::Relaxed) {
+            1 => "failed",
+            _ => "granted",
+        }
     }
 }
 
