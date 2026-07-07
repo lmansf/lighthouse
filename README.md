@@ -3,6 +3,8 @@
 Curate which of your files and data sources your AI can see.
 Browse files in a calm, sandy-beach File-Explorer-style UI (red used sparingly as the beacon accent), toggle items **in** or **out** of the RAG index, and ask a Google-style chat that answers only from what you've included. Local-first: your documents stay in a folder on your own machine.
 
+**Download:** installers for Windows, macOS, and Linux at **[lhvault.app](https://lhvault.app)** — or straight from the [latest release](https://github.com/lmansf/lighthouse/releases/latest).
+
 > The npm package is still named `rag-vault`; the product and repo are **Lighthouse**.
 
 ## Run it
