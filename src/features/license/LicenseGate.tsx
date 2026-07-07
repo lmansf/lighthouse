@@ -57,6 +57,7 @@ import { showWidget, summonHotkey, prettyShortcut, modKey } from "@/features/onb
 import { useLicenseStore, type FeedbackInput, type LicenseStatus } from "@/stores/useLicenseStore";
 import { useAuthStore } from "@/stores/useAuthStore";
 import { useThemeStore } from "@/stores/useThemeStore";
+import { useChatStore } from "@/stores/useChatStore";
 
 const LH_REPO = "https://github.com/lmansf/lighthouse";
 
@@ -831,6 +832,10 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
   const setDefaultInclusion = useAuthStore((s) => s.setDefaultInclusion);
   const themeMode = useThemeStore((s) => s.mode);
   const setThemeMode = useThemeStore((s) => s.setMode);
+  // Chat-history persistence is a client-side, per-device choice (localStorage,
+  // not a server setting) — it lives in the chat store, off by default.
+  const saveChats = useChatStore((s) => s.persistEnabled);
+  const setSaveChats = useChatStore((s) => s.setPersistEnabled);
 
   const [shareUsage, setShareUsage] = useState<boolean | null>(null);
   const [desktop, setDesktop] = useState(false);
@@ -1112,6 +1117,12 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
                 disabled={shareUsage === null}
                 onChange={(_, d) => updateUsage(Boolean(d.checked))}
                 label="Share usage analytics — your account email and which features you use, never your files, their names, or their contents"
+              />
+
+              <Switch
+                checked={saveChats}
+                onChange={(_, d) => setSaveChats(Boolean(d.checked))}
+                label="Save chats on this device — kept locally and cleared automatically after two weeks (off by default; delete any chat from the history panel)"
               />
 
               {/* Desktop settings hydrate here. Show a spinner while loading and
