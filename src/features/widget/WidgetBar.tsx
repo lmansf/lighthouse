@@ -338,11 +338,21 @@ export function WidgetBar() {
   // whole transcript); survives clears — the "conversation" outlives one card.
   const historyRef = useRef<ChatTurn[]>([]);
   const [copied, setCopied] = useState(false);
+  // A file was just opened FROM the bar. Opening a file must never dismiss the
+  // chat — clicking into the document you just opened is not "I'm done here" —
+  // so the bar is held open across the ensuing focus-steal and stays put "in
+  // the back" until you deliberately dismiss it (Esc/✕) or summon it again.
+  // Cleared on the next focus so normal click-away dismissal resumes once you
+  // return to the bar.
+  const [openHold, setOpenHold] = useState(false);
 
   // A summon re-focuses the input and SELECTS the previous query (never
   // clears it): typing replaces the old search, but a bare Enter can reuse it.
   useEffect(() => {
     const onFocus = () => {
+      // Returning to the bar ends the just-opened-a-file hold, so a later
+      // click-away dismisses normally again.
+      setOpenHold(false);
       inputRef.current?.focus();
       inputRef.current?.select();
     };
@@ -387,9 +397,11 @@ export function WidgetBar() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  // While an answer is on screen the bar must survive losing focus — clicking
-  // back into your document to keep reading is the point of a frozen answer.
-  const held = answer !== null;
+  // The bar must survive losing focus while an answer is frozen on screen —
+  // clicking back into your document to keep reading is the point — and equally
+  // right after you open a file FROM the bar, so the chat persists in the back
+  // beside the file instead of vanishing the instant the file steals focus.
+  const held = answer !== null || openHold;
   useEffect(() => {
     void invokeShell("widget_hold", { hold: held });
   }, [held]);
@@ -497,16 +509,19 @@ export function WidgetBar() {
 
   const hide = () => void invokeShell("widget_hide");
 
-  /** Open a file in its native app (same route the chat reference cards use). */
-  const openNode = (nodeId: string, opts?: { keep?: boolean }) => {
+  /** Open a file in its native app (same route the chat reference cards use).
+   *  Opening a file never dismisses the bar: hold it open FIRST so the blur that
+   *  follows the file grabbing focus is already suppressed, and leave it up "in
+   *  the back" beside the document. You dismiss it deliberately (Esc/✕), or it
+   *  steps aside on your next summon — it no longer vanishes the moment you open
+   *  a file (which used to tear down even the resident widget). */
+  const openNode = (nodeId: string) => {
+    setOpenHold(true);
     void fetch("/api/open", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ nodeId }),
     }).catch(() => {});
-    // Result rows get out of the way; a citation chip under a frozen answer
-    // keeps the answer up next to the document it just opened.
-    if (!opts?.keep) hide();
   };
 
   // --- Row quick-actions: act on a result WITHOUT opening the explorer window
@@ -908,7 +923,7 @@ export function WidgetBar() {
                   size="small"
                   appearance="outline"
                   title={r.snippet}
-                  onClick={() => openNode(r.fileId, { keep: true })}
+                  onClick={() => openNode(r.fileId)}
                 >
                   {r.name}
                 </Button>
