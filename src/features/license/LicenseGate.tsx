@@ -57,6 +57,7 @@ import { showWidget, summonHotkey, prettyShortcut, modKey } from "@/features/onb
 import { useLicenseStore, type FeedbackInput, type LicenseStatus } from "@/stores/useLicenseStore";
 import { useAuthStore } from "@/stores/useAuthStore";
 import { useThemeStore } from "@/stores/useThemeStore";
+import { useChatStore } from "@/stores/useChatStore";
 
 const LH_REPO = "https://github.com/lmansf/lighthouse";
 
@@ -831,6 +832,10 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
   const setDefaultInclusion = useAuthStore((s) => s.setDefaultInclusion);
   const themeMode = useThemeStore((s) => s.mode);
   const setThemeMode = useThemeStore((s) => s.setMode);
+  // Chat-history persistence is a client-side, per-device choice (localStorage,
+  // not a server setting) — it lives in the chat store, off by default.
+  const saveChats = useChatStore((s) => s.persistEnabled);
+  const setSaveChats = useChatStore((s) => s.setPersistEnabled);
 
   const [shareUsage, setShareUsage] = useState<boolean | null>(null);
   const [desktop, setDesktop] = useState(false);
@@ -1114,6 +1119,12 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
                 label="Share usage analytics — your account email and which features you use, never your files, their names, or their contents"
               />
 
+              <Switch
+                checked={saveChats}
+                onChange={(_, d) => setSaveChats(Boolean(d.checked))}
+                label="Save chats on this device — kept locally and cleared automatically after two weeks (off by default; delete any chat from the history panel)"
+              />
+
               {/* Desktop settings hydrate here. Show a spinner while loading and
                   a retry on failure, so a transient error never masquerades as
                   "this build has no desktop options". */}
@@ -1224,6 +1235,14 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
                     <Text className={styles.prefWarn}>
                       Waiting for Accessibility permission — enable Lighthouse in System Settings →
                       Privacy &amp; Security → Accessibility, then it starts automatically.
+                    </Text>
+                  )}
+                  {whisperMode && whisperPermission === "failed" && (
+                    <Text className={styles.error}>
+                      The whisper listener couldn&apos;t start, so the tap isn&apos;t active —
+                      antivirus tools sometimes block keyboard listeners. Try turning it off and
+                      on again, or restart Lighthouse. The {summonHotkey()} shortcut works either
+                      way.
                     </Text>
                   )}
                   <Text className={styles.prefHint}>

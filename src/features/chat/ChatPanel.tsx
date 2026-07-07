@@ -33,6 +33,7 @@ import {
   PopoverSurface,
   PopoverTrigger,
   SearchBox,
+  Switch,
   Text,
   Textarea,
   Title3,
@@ -468,6 +469,18 @@ const useStyles = makeStyles({
 
   // --- Recent-chats drawer ---
   historyDrawer: { width: "min(380px, 90vw)" },
+  // Opt-in persistence control at the top of the drawer: a switch plus a hint
+  // line that spells out where chats live and when they expire.
+  histPersist: {
+    display: "flex",
+    flexDirection: "column",
+    gap: tokens.spacingVerticalXS,
+    ...shorthands.padding(tokens.spacingVerticalS, tokens.spacingHorizontalM),
+    marginBottom: tokens.spacingVerticalM,
+    borderRadius: tokens.borderRadiusMedium,
+    backgroundColor: tokens.colorNeutralBackground2,
+  },
+  histPersistHint: { color: tokens.colorNeutralForeground3 },
   histSearch: { width: "100%", marginBottom: tokens.spacingVerticalM },
   histList: { display: "flex", flexDirection: "column", gap: tokens.spacingVerticalXXS },
   histEmpty: {
@@ -767,6 +780,8 @@ export function ChatPanel() {
   const openConversation = useChatStore((s) => s.openConversation);
   const renameConversation = useChatStore((s) => s.renameConversation);
   const deleteConversation = useChatStore((s) => s.deleteConversation);
+  const historyPersistEnabled = useChatStore((s) => s.persistEnabled);
+  const setHistoryPersist = useChatStore((s) => s.setPersistEnabled);
   const [streaming, setStreaming] = useState(false);
 
   // Recent-chats drawer + its inline rename/delete affordances.
@@ -1632,6 +1647,20 @@ export function ChatPanel() {
         </DrawerHeaderTitle>
       </DrawerHeader>
       <DrawerBody>
+        {/* Saving is opt-in: off by default, kept on this device when on, and
+            auto-cleared after two weeks. */}
+        <div className={styles.histPersist}>
+          <Switch
+            checked={historyPersistEnabled}
+            onChange={(_, d) => setHistoryPersist(Boolean(d.checked))}
+            label="Save chats on this device"
+          />
+          <Text size={200} className={styles.histPersistHint}>
+            {historyPersistEnabled
+              ? "Kept on this device and cleared automatically after two weeks. Delete any chat with its trash icon."
+              : "Chats aren't being saved — they clear when you close the app. Turn this on to keep them here."}
+          </Text>
+        </div>
         <Button
           appearance="secondary"
           icon={<AddRegular />}
@@ -1654,7 +1683,9 @@ export function ChatPanel() {
           <Text className={styles.histEmpty}>
             {histSearch
               ? "No chats match your search."
-              : "Your past conversations will appear here."}
+              : historyPersistEnabled
+                ? "Your saved chats will appear here."
+                : "Chats from this session will appear here."}
           </Text>
         ) : (
           <div className={styles.histList}>

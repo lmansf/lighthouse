@@ -2,23 +2,30 @@ import { create } from "zustand";
 import type { ChatMessage } from "@/contracts";
 
 /**
- * Persistent, multi-conversation chat history.
+ * Multi-conversation chat history — OFF by default, opt-in per device.
  *
- * The transcript used to be session-only (mirrored to `sessionStorage`, wiped
- * on "New chat" and gone the moment the app fully closed). This store keeps
- * conversations on disk instead: they survive a full app restart, a "recent
- * chats" list lets users reopen / rename / delete past conversations, and
- * "New chat" no longer destroys anything — it starts a fresh conversation while
- * the previous one stays in the list (with a one-click Undo back to it).
+ * By default nothing is written to disk: conversations live only in memory for
+ * the current session (the recent-chats list still works, but everything clears
+ * when the app closes). When the user turns on "save chats on this device"
+ * (setPersistEnabled), conversations are mirrored to localStorage so they
+ * survive a restart — deletable individually, and dropped automatically once
+ * they've gone untouched for two weeks.
+ *
+ * "New chat" never destroys anything — it starts a fresh conversation while the
+ * previous one stays in the list (with a one-click Undo back to it).
  *
  * `localStorage` is genuinely disk-backed in both the browser and the desktop
  * webview, so a single client-side store covers web and desktop with no
  * server/IPC parity to maintain — chat history is UI state, not vault state.
  */
 const KEY = "lighthouse.chat.history.v1";
-// The pre-history session-only key, migrated once so an in-progress transcript
-// isn't dropped when a user upgrades into this version.
+// Opt-in flag: "1" once the user has turned on saving chats to this device.
+const PERSIST_KEY = "lighthouse.chat.persist";
+// The pre-history session-only key, migrated once (only when saving is on) so an
+// in-progress transcript isn't dropped when a user upgrades into this version.
 const LEGACY_KEY = "lighthouse.chat.transcript.v1";
+// Saved chats untouched for this long are pruned automatically (on load + save).
+const TWO_WEEKS_MS = 14 * 24 * 60 * 60 * 1000;
 // Safety cap so a long-lived install can't grow history past localStorage's
 // quota; the oldest conversations are shed first (see save()).
 const MAX_CONVERSATIONS = 200;
@@ -83,6 +90,30 @@ function deriveTitle(messages: TranscriptMessage[]): string {
   return t.length > 60 ? `${t.slice(0, 59).trimEnd()}…` : t;
 }
 
+/** Whether the user has opted into saving chats on this device (default off). */
+function persistEnabled(): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    return window.localStorage.getItem(PERSIST_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Drop conversations untouched for over two weeks — but never the active one, so
+ * a chat you're in the middle of never vanishes out from under you. `now` is
+ * injectable so the two-week cutoff is unit-testable without waiting a fortnight.
+ */
+export function pruneByAge(
+  conversations: Conversation[],
+  currentId: string,
+  now: number = Date.now(),
+): Conversation[] {
+  const cutoff = now - TWO_WEEKS_MS;
+  return conversations.filter((c) => c.id === currentId || c.updatedAt >= cutoff);
+}
+
 /** Seed history from any pre-history session transcript (one-time migration). */
 function migrateLegacy(): Conversation[] {
   try {
@@ -102,7 +133,21 @@ function migrateLegacy(): Conversation[] {
 }
 
 function bootstrap(): Persisted {
-  if (typeof window === "undefined") {
+  // Saving off (or SSR): start fresh, in memory only — nothing is read from disk.
+  if (typeof window === "undefined" || !persistEnabled()) {
+    // Honor "off = nothing of mine is stored": drop any transcript left on disk
+    // (e.g. from an earlier version that saved by default) so never-opted-in —
+    // and opted-back-out — genuinely leaves nothing behind, and a later opt-in
+    // starts clean instead of resurrecting or clobbering stale history. Guarded
+    // by the persistEnabled() check above, whose "1" read can only be readably
+    // false when the user hasn't opted in, so a real saved history is never hit.
+    if (typeof window !== "undefined") {
+      try {
+        window.localStorage.removeItem(KEY);
+      } catch {
+        /* ignore */
+      }
+    }
     const c = emptyConversation();
     return { conversations: [c], currentId: c.id };
   }
@@ -110,13 +155,14 @@ function bootstrap(): Persisted {
     const raw = window.localStorage.getItem(KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as Partial<Persisted>;
-      const conversations = Array.isArray(parsed.conversations) ? parsed.conversations : [];
-      if (conversations.length) {
+      const all = Array.isArray(parsed.conversations) ? parsed.conversations : [];
+      if (all.length) {
         const currentId =
-          parsed.currentId && conversations.some((c) => c.id === parsed.currentId)
+          parsed.currentId && all.some((c) => c.id === parsed.currentId)
             ? parsed.currentId
-            : conversations[0].id;
-        return { conversations, currentId };
+            : all[0].id;
+        // Auto-expire anything untouched for over two weeks (keeps the active one).
+        return { conversations: pruneByAge(all, currentId), currentId };
       }
     }
     const migrated = migrateLegacy();
@@ -129,10 +175,11 @@ function bootstrap(): Persisted {
 }
 
 function save(conversations: Conversation[], currentId: string): void {
-  if (typeof window === "undefined") return;
-  // Drop empty, non-current conversations (an abandoned "New chat") and cap the
-  // total count, newest-first.
-  let keep = conversations
+  // In-memory only unless the user has opted into saving chats on this device.
+  if (typeof window === "undefined" || !persistEnabled()) return;
+  // Expire >2wk-untouched chats, drop empty non-current ones (an abandoned "New
+  // chat"), and cap the total count, newest-first.
+  let keep = pruneByAge(conversations, currentId)
     .filter((c) => c.id === currentId || c.messages.length > 0)
     .slice()
     .sort((a, b) => b.updatedAt - a.updatedAt)
@@ -168,9 +215,17 @@ interface ChatStore {
   messages: TranscriptMessage[];
   /** The conversation the most recent "New chat" left behind, for one-click Undo. */
   lastLeftId: string | null;
+  /** Whether chats are being saved to this device (opt-in; default off). */
+  persistEnabled: boolean;
 
   /** Replace the active transcript (value or updater, mirrors React's setState). */
   setMessages: (next: MessagesUpdater) => void;
+  /**
+   * Turn saving chats on this device on or off. On → immediately writes the
+   * current in-memory conversations to disk; off → clears everything already on
+   * disk (they've opted out of storage) but keeps this session in memory.
+   */
+  setPersistEnabled: (on: boolean) => void;
   /**
    * Fold the live transcript into its conversation and write to disk. Called
    * once a turn settles rather than on every streamed token, so streaming stays
@@ -200,6 +255,7 @@ export const useChatStore = create<ChatStore>((set) => {
     currentId: current.id,
     messages: current.messages,
     lastLeftId: null,
+    persistEnabled: persistEnabled(),
 
     setMessages: (next) =>
       set((s) => ({
@@ -208,6 +264,28 @@ export const useChatStore = create<ChatStore>((set) => {
             ? (next as (p: TranscriptMessage[]) => TranscriptMessage[])(s.messages)
             : next,
       })),
+
+    setPersistEnabled: (on) =>
+      set((s) => {
+        try {
+          // Set the flag first so save()'s persistEnabled() check sees the new value.
+          window.localStorage.setItem(PERSIST_KEY, on ? "1" : "0");
+        } catch {
+          /* storage blocked — the in-session toggle still works */
+        }
+        if (on) {
+          // Start saving: flush the current in-memory conversations to disk.
+          save(s.conversations, s.currentId);
+        } else {
+          // Stop saving and clear what's already on disk — they opted out.
+          try {
+            window.localStorage.removeItem(KEY);
+          } catch {
+            /* ignore */
+          }
+        }
+        return { persistEnabled: on };
+      }),
 
     persist: () =>
       set((s) => {

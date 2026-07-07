@@ -1027,6 +1027,21 @@ fn main() {
                 && read_settings(&handle)["whisperMode"].as_bool() == Some(true)
             {
                 whisper::set_enabled(&handle, true);
+                // A login-time install can fail transiently (security tooling
+                // scrutinizes hooks hardest in a boot's first seconds, login
+                // autostarts especially). One quiet retry half a minute in
+                // rescues that case; a still-failed hook is surfaced in
+                // Preferences via whisperPermission = "failed" instead of
+                // leaving the toggle ON over a chord that never fires.
+                let handle2 = handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    if whisper::permission_state() == "failed"
+                        && read_settings(&handle2)["whisperMode"].as_bool() == Some(true)
+                    {
+                        whisper::set_enabled(&handle2, true);
+                    }
+                });
             }
 
             // Phase 5 watcher: event-driven tree/index freshness + a pushed
