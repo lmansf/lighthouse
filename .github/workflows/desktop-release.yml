@@ -67,6 +67,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Build Tauri bundles
         working-directory: native/crates/lighthouse-desktop
+        shell: bash
         env:
           # linuxdeploy strips every ELF it finds in the AppDir. The prebuilt
           # piper/onnxruntime/espeak libraries (bundled for on-device TTS since
@@ -75,7 +76,17 @@ jobs:
           # ship unstripped on every other OS anyway, and our own release
           # binary is small. Harmless on Windows/macOS (env is unused there).
           NO_STRIP: "true"
-        run: npx --yes @tauri-apps/cli@^2 build --verbose
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            # linuxdeploy resolves the NEEDED entries of ELFs it finds in the
+            # AppDir against the system loader paths only — it ignores the
+            # RUNPATH those files carry. Piper's neighbor libraries
+            # (libespeak-ng & co.) live beside the binary, so point the
+            # resolver at them; the $ORIGIN RUNPATH stamped at fetch time
+            # covers the runtime loader.
+            export LD_LIBRARY_PATH="$GITHUB_WORKSPACE/resources/tts${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          fi
+          npx --yes @tauri-apps/cli@^2 build --verbose
       - name: Collect assets
         shell: bash
         run: |
