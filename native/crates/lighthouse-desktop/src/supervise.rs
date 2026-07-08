@@ -23,6 +23,12 @@ pub const RELEASE_PAGE_URL: &str = "https://github.com/lmansf/lighthouse/release
 pub struct Supervisor {
     llm: Mutex<Option<Child>>,
     uninstalling: Mutex<bool>,
+    /// When the current llama-server was spawned — feeds the GPU crash guard.
+    spawned_at: Mutex<Option<std::time::Instant>>,
+    /// Consecutive fast exits (died < 20 s after spawn). Two in a row with GPU
+    /// offload enabled reads as "the Vulkan driver can't do this" — we persist
+    /// llmDisableGpu and relaunch CPU-only rather than crash-looping.
+    quick_crashes: Mutex<u32>,
 }
 
 fn llm_root() -> PathBuf {
@@ -80,6 +86,17 @@ impl Supervisor {
             .args(["-c", "6144"])
             .current_dir(llm_root())
             .stdin(Stdio::null());
+        // GPU offload: the bundled build carries dynamic backends (Vulkan on
+        // Windows/Linux, Metal on macOS) with a built-in CPU fallback when no
+        // usable device/driver exists, so asking for full offload is safe on
+        // GPU-less machines. The one pathological case — a Vulkan driver that
+        // crashes the process — is handled by the quick-crash guard in
+        // reconcile(), which persists llmDisableGpu and relaunches CPU-only.
+        let gpu_disabled =
+            crate::read_settings(app)["llmDisableGpu"].as_bool() == Some(true);
+        if !gpu_disabled {
+            cmd.args(["-ngl", "999"]);
+        }
         // Log to a file instead of a console window.
         match (
             log_file(app, "local-model.log"),
@@ -100,6 +117,8 @@ impl Supervisor {
         match cmd.spawn() {
             Ok(child) => {
                 *guard = Some(child);
+                *self.spawned_at.lock().unwrap_or_else(|p| p.into_inner()) =
+                    Some(std::time::Instant::now());
                 // Warm the model in the background: wait until /health says the
                 // weights are loaded, then run a 1-token completion that pages
                 // the mmap'd GGUF in off disk and pre-fills the system prompt's
@@ -160,6 +179,35 @@ impl Supervisor {
             if let Some(child) = guard.as_mut() {
                 if matches!(child.try_wait(), Ok(Some(_))) {
                     *guard = None; // crashed/exited — allow a restart below
+                    drop(guard);
+                    // GPU crash guard: a server that dies twice within 20 s of
+                    // spawning while offload is on almost certainly hit a bad
+                    // Vulkan driver. Persist llmDisableGpu so every future
+                    // launch (this boot and the next) runs CPU-only instead of
+                    // crash-looping. Delete the key from the settings file to
+                    // re-try GPU after a driver update.
+                    let lived = self
+                        .spawned_at
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .take()
+                        .map(|t| t.elapsed());
+                    let mut quick =
+                        self.quick_crashes.lock().unwrap_or_else(|p| p.into_inner());
+                    if lived.is_some_and(|d| d < std::time::Duration::from_secs(20)) {
+                        *quick += 1;
+                    } else {
+                        *quick = 0;
+                    }
+                    let gpu_enabled =
+                        crate::read_settings(app)["llmDisableGpu"].as_bool() != Some(true);
+                    if *quick >= 2 && gpu_enabled {
+                        *quick = 0;
+                        eprintln!(
+                            "local model: crashed twice right after start with GPU offload — disabling GPU offload (llmDisableGpu)"
+                        );
+                        crate::write_settings(app, serde_json::json!({ "llmDisableGpu": true }));
+                    }
                 }
             }
         }

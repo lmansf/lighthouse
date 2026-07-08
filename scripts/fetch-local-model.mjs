@@ -13,8 +13,10 @@
  *
  * What it fetches:
  *   1. `llama-server` (+ its shared libraries) — llama.cpp, MIT-licensed. The
- *      right per-OS asset is resolved from the ggml-org/llama.cpp GitHub release
- *      (a CPU build, for broad compatibility — no GPU/driver assumptions).
+ *      right per-OS asset is resolved from the ggml-org/llama.cpp GitHub release:
+ *      the VULKAN build on Windows/Linux (GPU offload with a dynamic CPU
+ *      fallback in the same archive — runs fine on GPU-less machines), the
+ *      default arm64 build (Metal) on macOS. See pickAsset().
  *   2. Piper (rhasspy/piper, MIT) + a neural voice (en_US-lessac-medium, ~63 MB,
  *      MIT/CC0) into `resources/tts/`, powering on-device read-aloud TTS.
  *
@@ -59,7 +61,14 @@ const LLAMACPP_VERSION = "b9859"; // ggml-org/llama.cpp release tag
 const PIPER_VERSION = "2023.11.14-2"; // rhasspy/piper release tag
 const VOICE_REVISION = "e21c7de8d4eab79b902f0d61e662b3f21664b8d2"; // rhasspy/piper-voices commit
 const ASSET_SHA256 = {
+  // Vulkan builds (preferred on win/linux): GPU offload with a dynamic CPU
+  // fallback backend in the same archive. Digests from the release API's
+  // asset `digest` field, same source as the entries below.
+  "llama-b9859-bin-win-vulkan-x64.zip": "5e7794aa22ba34c8e223934b0b3e14cd441612f26e9f06a4a0e5f47b9e7f577b",
+  "llama-b9859-bin-ubuntu-vulkan-x64.tar.gz": "8968e8b74ca1fdafe51013560eff42bdaf99872a58918c3085f1e1dd77ddc7c1",
+  // CPU fallbacks (used only if a release lacks a Vulkan asset for the OS).
   "llama-b9859-bin-win-cpu-x64.zip": "c9aa80f233a7d1749341860f11723b912d4cfd6eec19434c3d00bba0abc9f85c",
+  "llama-b9859-bin-ubuntu-x64.tar.gz": "7a434a404669534ee67f2e53363109053a54c3ee13f487cbc17a3455ac5930f4",
   "llama-b9859-bin-macos-arm64.tar.gz": "21e720ac103d28d7585a52b8023fb86fc0736c90ad92c1e75053207630e90df6",
   "piper_windows_amd64.zip": "f3c58906402b24f3a96d92145f58acba6d86c9b5db896d207f78dc80811efcea",
   "piper_macos_aarch64.tar.gz": "6b1eb03b3735946cb35216e063e7eebcc33a6bbf5dd96ec0217959bf1cdcb0cc",
@@ -168,7 +177,20 @@ async function download(url, outPath, label, assetName) {
   process.stdout.write(`\r  ${label}: done (${(seen / 1e6).toFixed(0)} MB)            \n`);
 }
 
-/** Pick the llama.cpp release asset matching this OS — prefer a plain CPU build. */
+/**
+ * Pick the llama.cpp release asset matching this OS — prefer the VULKAN build
+ * on Windows/Linux, falling back to the plain CPU build when the release has
+ * no Vulkan asset for this OS/arch.
+ *
+ * Why Vulkan is safe to bundle: current llama.cpp release archives are built
+ * with dynamic backend loading — the Vulkan archive also carries the CPU
+ * backend, and llama-server enumerates usable devices at startup, running
+ * fully on CPU when no Vulkan driver/device exists. On machines WITH any GPU
+ * (including Intel/AMD iGPUs) prompt processing and generation run 3–20×
+ * faster with `-ngl` offload (set by the desktop supervisor, which also
+ * disables offload persistently if a broken driver crashes the server —
+ * see supervise.rs). macOS arm64 builds carry Metal by default; no change.
+ */
 function pickAsset(assets) {
   const arch = process.arch === "arm64" ? "arm64" : "x64";
   const os = platform === "win32" ? "win" : platform === "darwin" ? "macos" : "ubuntu";
@@ -176,12 +198,12 @@ function pickAsset(assets) {
     .map((a) => a.name)
     // Windows ships .zip; macOS/Linux ship .tar.gz on current llama.cpp releases.
     .filter((n) => /\.(zip|tar\.gz|tgz)$/i.test(n) && n.includes(os))
-    // exclude GPU/driver-specific builds — bundle a portable CPU build
-    .filter((n) => !/cuda|hip|vulkan|sycl|kompute/i.test(n));
-  // macOS assets are arch-tagged; win/linux x64 CPU builds usually are too.
+    // Exclude driver-stack-specific builds we can't assume end users have
+    // (CUDA/ROCm/SYCL/OpenVINO need vendor runtimes; Vulkan is OS-generic).
+    .filter((n) => !/cuda|hip|rocm|sycl|kompute|openvino|s390x/i.test(n));
+  // macOS assets are arch-tagged; win/linux x64 builds usually are too.
   const byArch = candidates.filter((n) => n.includes(arch));
   const pool = byArch.length ? byArch : candidates;
-  // Prefer an explicit "cpu" build, else broadest instruction set (avx2 > others).
   const ranked = pool.sort((a, b) => score(b) - score(a));
   const name = ranked[0];
   if (!name) throw new Error(`no llama.cpp asset for ${os}/${arch} in this release`);
@@ -189,6 +211,7 @@ function pickAsset(assets) {
 }
 function score(name) {
   let s = 0;
+  if (/vulkan/i.test(name)) s += 200; // GPU-capable with built-in CPU fallback
   if (/cpu/i.test(name)) s += 100;
   if (/avx2/i.test(name)) s += 50;
   if (/x64|amd64/i.test(name)) s += 5;
