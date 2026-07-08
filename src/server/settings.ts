@@ -34,6 +34,13 @@ export interface DesktopSettings {
   whisperMode?: boolean;
   /** The keyed summon shortcut (global-hotkey syntax); unset = the default. */
   summonShortcut?: string;
+  /**
+   * B2 hybrid search: embed indexed chunks with the bundled on-device model
+   * and fuse vector similarity into retrieval. Default ON (unset = on). The
+   * TS engine never embeds (desktop-only feature) — it just round-trips the
+   * preference for the UI.
+   */
+  semanticSearch?: boolean;
 }
 
 function settingsFile(): string | null {

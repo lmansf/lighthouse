@@ -60,6 +60,17 @@ const LLAMACPP_API = "https://api.github.com/repos/ggml-org/llama.cpp/releases";
 const LLAMACPP_VERSION = "b9859"; // ggml-org/llama.cpp release tag
 const PIPER_VERSION = "2023.11.14-2"; // rhasspy/piper release tag
 const VOICE_REVISION = "e21c7de8d4eab79b902f0d61e662b3f21664b8d2"; // rhasspy/piper-voices commit
+// B2 hybrid search: the bundled embedding model (Apache-2.0), served by the
+// SAME llama-server binary above with `--embedding` on a second port. Bundled
+// in the installer (+~137 MB) so semantic search works with zero setup; lives
+// in resources/embed/ — NEVER resources/llm/, where model discovery would
+// mistake it for an installed chat model.
+const EMBED_REPO = "nomic-ai/nomic-embed-text-v1.5-GGUF"; // Hugging Face repo
+// Pinned repo commit. Empty = not yet pinned: the normal path fails closed and
+// `--record` resolves the current main, prints it, and computes the digest —
+// paste both here (same bootstrap flow as ASSET_SHA256).
+const EMBED_REVISION = "";
+const EMBED_FILE = "nomic-embed-text-v1.5.Q8_0.gguf";
 const ASSET_SHA256 = {
   // Vulkan builds (preferred on win/linux): GPU offload with a dynamic CPU
   // fallback backend in the same archive. Digests from the release API's
@@ -357,6 +368,39 @@ async function fetchTts() {
   }
 }
 
+/**
+ * Fetch the bundled embedding model (B2 hybrid search) into resources/embed/.
+ * Platform-independent (one GGUF for all three OS builds), pinned to a repo
+ * revision + SHA-256 like everything else. `--record` bootstraps the pins:
+ * it resolves the repo's current main commit and computes the digest.
+ */
+async function fetchEmbed() {
+  const embedDest = join(root, "resources", "embed");
+  mkdirSync(embedDest, { recursive: true });
+  const outPath = join(embedDest, EMBED_FILE);
+  if (!force && existsSync(outPath) && statSync(outPath).size > 1e8) {
+    console.log(`✓ embedding model already present`);
+    return;
+  }
+  let revision = process.env.EMBED_REVISION?.trim() || EMBED_REVISION;
+  if (!revision) {
+    if (!RECORD) {
+      throw new Error(
+        `embedding model: EMBED_REVISION is not pinned. Run \`npm run fetch:model -- --record\`, ` +
+          `then paste the printed revision + digest into scripts/fetch-local-model.mjs and commit.`,
+      );
+    }
+    const meta = await getJson(`https://huggingface.co/api/models/${EMBED_REPO}`);
+    revision = meta.sha;
+    if (!revision) throw new Error(`embedding model: could not resolve ${EMBED_REPO} revision`);
+    console.log(`  [record] EMBED_REVISION: ${JSON.stringify(revision)}`);
+  }
+  const url = `https://huggingface.co/${EMBED_REPO}/resolve/${revision}/${EMBED_FILE}`;
+  console.log(`Downloading ${EMBED_FILE} (${EMBED_REPO}@${revision.slice(0, 12)})`);
+  await download(url, outPath, "embedding model", EMBED_FILE);
+  console.log(`✓ ${EMBED_FILE}`);
+}
+
 async function main() {
   mkdirSync(dest, { recursive: true });
   const serverName = platform === "win32" ? "llama-server.exe" : "llama-server";
@@ -382,6 +426,9 @@ async function main() {
 
   // 2. Local neural TTS (Piper + voice) for on-device read-aloud.
   await fetchTts();
+
+  // 3. Bundled embedding model for B2 hybrid search (resources/embed/).
+  await fetchEmbed();
 
   if (RECORD && Object.keys(recorded).length) {
     console.log(`\n--record: paste these into ASSET_SHA256 (scripts/fetch-local-model.mjs), then commit:`);

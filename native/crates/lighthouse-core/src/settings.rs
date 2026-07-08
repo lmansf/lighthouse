@@ -40,6 +40,11 @@ pub struct DesktopSettings {
     /// "ctrl+super+shift+space" or "ctrl+alt+KeyP"). None = the default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summon_shortcut: Option<String>,
+    /// B2 hybrid search: embed indexed chunks with the bundled on-device model
+    /// and fuse vector similarity into retrieval. Default ON (None = on);
+    /// turning it off also stops the embedding server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_search: Option<bool>,
     /// Keys this struct doesn't model (e.g. the shell's hand-persisted
     /// `widgetPos`) must survive a read-modify-write round trip — without
     /// this flatten, any Preferences toggle would silently delete them.
@@ -71,6 +76,7 @@ pub fn write_desktop_settings(
     ui_mode: Option<String>,
     whisper_mode: Option<bool>,
     summon_shortcut: Option<String>,
+    semantic_search: Option<bool>,
 ) -> DesktopSettings {
     let Some(f) = settings_file() else {
         return DesktopSettings::default();
@@ -93,6 +99,9 @@ pub fn write_desktop_settings(
     // shortcut and refuses unregistrable strings); empty resets to default.
     if summon_shortcut.is_some() {
         next.summon_shortcut = summon_shortcut.filter(|s| !s.trim().is_empty());
+    }
+    if semantic_search.is_some() {
+        next.semantic_search = semantic_search;
     }
     write_json(&f, &next); // best-effort: a read-only location just means unsaved
     next

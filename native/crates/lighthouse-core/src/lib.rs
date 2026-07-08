@@ -9,6 +9,7 @@
 pub mod analytics;
 pub mod config;
 pub mod contracts;
+pub mod embed;
 pub mod experiment;
 pub mod extract;
 pub mod index;

@@ -1594,6 +1594,9 @@ pub fn warm_index_async() {
                 })
                 .collect();
             let _ = crate::index::entries_for(&items);
+            // Vectors may be cold even when every index entry was a hit (first
+            // boot after enabling B2, sidecar deleted, embed server was down).
+            crate::embed::nudge_warm();
             WARMING.store(false, Ordering::SeqCst);
         });
     if spawned.is_err() {
@@ -1730,13 +1733,33 @@ pub fn retrieve(
             (v, if norm.sqrt() == 0.0 { 1.0 } else { norm.sqrt() })
         };
         let (qv, qnorm) = vec_of(&qtf);
-        for (file_id, entry, c) in &chunk_refs {
+        let mut lex: Vec<f64> = Vec::with_capacity(chunk_refs.len());
+        for (_, _, c) in &chunk_refs {
             let (dv, dnorm) = vec_of(&c.tf);
             let mut dot = 0.0;
             for (t, w) in &qv {
                 dot += w * dv.get(t).copied().unwrap_or(0.0);
             }
-            let mut score = dot / (qnorm * dnorm);
+            lex.push(dot / (qnorm * dnorm));
+        }
+        // Hybrid search (B2): when the local embedding server is up and the
+        // scored chunks have current vectors, replace the raw lexical scores
+        // with RRF-fused lexical+vector scores. None ⇒ exactly today's path.
+        let chunk_meta: Vec<(String, String, usize)> = {
+            let mut ord: HashMap<&str, usize> = HashMap::new();
+            chunk_refs
+                .iter()
+                .map(|(id, entry, _)| {
+                    let o = ord.entry(id).or_insert(0);
+                    let meta = (id.to_string(), entry.key.clone(), *o);
+                    *o += 1;
+                    meta
+                })
+                .collect()
+        };
+        let base = crate::embed::hybrid_scores(query, &chunk_meta, &lex).unwrap_or(lex);
+        for (i, (file_id, entry, c)) in chunk_refs.iter().enumerate() {
+            let mut score = base[i];
             // Nudge a chunk up when its file also matches by name.
             let (hits, strong) = name_match(&qtokens, &entry.name_tokens);
             if strong {

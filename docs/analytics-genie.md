@@ -95,18 +95,34 @@ header line prepended to every chunk**. Prose keeps the existing word windows.
 Implemented identically in both engines (parity-tested) since it changes what
 retrieval returns.
 
-### B2. Local embeddings + hybrid search (DESIGNED — needs a bundling decision)
+### B2. Local embeddings + hybrid search (BUILT — bundled in the installer)
 
-TF-IDF is blind to meaning ("Q3 revenue" ≠ "third-quarter sales"). Plan:
+TF-IDF is blind to meaning ("Q3 revenue" ≠ "third-quarter sales"). Decision:
+**bundle the model in the installer** (+~137 MB) so semantic search works with
+zero setup. How it ships:
 
-- A small embedding model (nomic-embed-text v1.5 GGUF, ~130 MB) served by the
-  same llama-server we already supervise (`--embedding`, second port), vectors
-  stored beside the existing index, **hybrid score = reciprocal-rank fusion**
-  of lexical + vector lists, all on-device.
-- **The decision needed:** +130 MB — bundled in the installer, or downloaded
-  on demand like the chat model? (Recommendation: on-demand, same
-  hash-verified path as the 7B; embeddings then activate transparently.)
-- Not started so the installer-size call is yours.
+- **Model**: nomic-embed-text v1.5 Q8_0 GGUF in `resources/embed/` (its own
+  resource dir — never `resources/llm/`, where chat-model discovery would
+  mistake it for an installed 7B). Fetched at build time by
+  `scripts/fetch-local-model.mjs`, pinned revision + SHA-256, fail-closed;
+  the `asset-digests` workflow records pins and live-smokes the stack.
+- **Serving**: the SAME bundled llama-server, second instance —
+  `--embedding --pooling mean`, port 8091, CPU-only (tiny model; never
+  contends with the chat model for VRAM; immune to the Vulkan crash class).
+  Supervised like the chat instance (start/stop with the toggle, quick-exit
+  give-up guard, killed on quit, skipped in safe mode).
+- **Vectors**: every indexed chunk embeds in a background warm pass
+  (single-flight, nudged by index builds / boot / server-healthy), quantized
+  to i8 (~769 B/chunk) in a binary sidecar (`cache/vectors-v1.bin`) keyed by
+  the index's own `mtimeMs:size` freshness key.
+- **Retrieval**: query embeds with a tight timeout; per-chunk cosine fuses
+  with the lexical ranking via **reciprocal-rank fusion** (k=60, top-rank
+  in both legs ≡ 1.0 on the existing score scale, name-match nudge applies
+  after). Degrades to pure lexical whenever the server is down, vectors are
+  <80 % warm (avoids over-ranking half-embedded corpora), or the
+  **Preferences → Semantic search** toggle is off (default on).
+- **TS twin**: stays lexical (desktop-only, like the analytics engine); the
+  dev server just round-trips the preference.
 
 ## Phase C — depth (DESIGNED)
 

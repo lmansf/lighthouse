@@ -329,7 +329,29 @@ pub fn entries_for(items: &[IndexItem]) -> HashMap<String, Arc<FileEntry>> {
         }
     }
     mark_dirty(); // batched write — see the debounced-persistence block above
+    crate::embed::nudge_warm(); // fresh entries may need vectors (B2)
     out
+}
+
+/// (id, freshness key, chunk texts) for every in-memory entry — the embedding
+/// warm pass (crate::embed) diffs this against its sidecar to find chunks that
+/// still need vectors. Snapshot semantics: cheap Arc clones under the lock.
+pub fn snapshot_chunks() -> Vec<(String, String, Vec<String>)> {
+    let guard = STATE.lock().unwrap_or_else(|p| p.into_inner());
+    let Some(state) = guard.as_ref() else {
+        return Vec::new();
+    };
+    state
+        .files
+        .iter()
+        .map(|(id, e)| {
+            (
+                id.clone(),
+                e.key.clone(),
+                e.chunks.iter().map(|c| c.text.clone()).collect(),
+            )
+        })
+        .collect()
 }
 
 /// Drop entries for changed node ids (watcher nicety — correctness comes from

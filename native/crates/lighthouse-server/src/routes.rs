@@ -773,6 +773,7 @@ pub async fn settings_get() -> Response {
             .summon_shortcut
             .as_deref()
             .unwrap_or(settings::DEFAULT_SUMMON_SHORTCUT),
+        "semanticSearch": s.semantic_search != Some(false), // default on
     }))
     .into_response()
 }
@@ -795,6 +796,7 @@ pub async fn settings_post(headers: HeaderMap, body: Option<Json<Value>>) -> Res
         body["uiMode"].as_str().map(String::from),
         body["whisperMode"].as_bool(),
         body["summonShortcut"].as_str().map(String::from),
+        body["semanticSearch"].as_bool(),
     );
     Json(json!({
         "ok": true,
@@ -806,6 +808,7 @@ pub async fn settings_post(headers: HeaderMap, body: Option<Json<Value>>) -> Res
             .summon_shortcut
             .as_deref()
             .unwrap_or(settings::DEFAULT_SUMMON_SHORTCUT),
+        "semanticSearch": s.semantic_search != Some(false),
     }))
     .into_response()
 }
