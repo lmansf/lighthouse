@@ -201,6 +201,119 @@ pub fn answer_pipeline(
         let initial =
             sources::retrieve(&retrieval_query, &included_file_ids, &attachment_file_ids, 5).await;
 
+        // --- Analytics branch (docs/analytics-genie.md): aggregate ask over
+        //     tabular files → model writes SQL, DataFusion executes, the model
+        //     narrates the verified result. Any failure falls through silently
+        //     to the paths below — analytics can only add capability. ---
+        if has_real_model(&cfg) && crate::analytics::analytics_cue(&question) {
+            let candidate_ids: Vec<String> = if !attachment_file_ids.is_empty() {
+                attachment_file_ids.clone()
+            } else {
+                let active: std::collections::HashSet<String> =
+                    vault::active_included_file_ids().into_iter().collect();
+                included_file_ids
+                    .iter()
+                    .filter(|id| active.contains(*id))
+                    .cloned()
+                    .collect()
+            };
+            let mut files: Vec<(String, String, std::path::PathBuf)> = Vec::new();
+            for id in candidate_ids {
+                if files.len() >= crate::analytics::MAX_TABLE_FILES {
+                    break;
+                }
+                if let Some((name, abs)) = vault::doc_path(&id) {
+                    if crate::analytics::is_tabular(&name) {
+                        files.push((id, name, abs));
+                    }
+                }
+            }
+            if !files.is_empty() {
+                yield progress("Reading table schemas…".to_string(), 1, 4);
+                let ctx = datafusion::prelude::SessionContext::new();
+                let regs = crate::analytics::register_tables(&ctx, &files).await;
+                if !regs.is_empty() {
+                    let sql_ctxs: Vec<Ctx> = regs
+                        .iter()
+                        .map(|r| Ctx { name: r.file_name.clone(), text: r.card.clone(), score: 1.0 })
+                        .collect();
+                    yield progress("Writing a query…".to_string(), 2, 4);
+                    let raw = collect(llm::stream_answer(
+                        crate::analytics::sql_question(&question),
+                        sql_ctxs.clone(),
+                        cfg.clone(),
+                        history.clone(),
+                    ))
+                    .await;
+                    let mut attempt = crate::analytics::extract_sql(&strip_markers(&raw));
+                    let mut outcome: Option<(String, String, usize, bool)> = None;
+                    for round in 0..2 {
+                        let Some(sql) = attempt.clone() else { break };
+                        yield progress("Running the query…".to_string(), 3, 4);
+                        match crate::analytics::run_query(&ctx, &sql).await {
+                            Ok((md, shown, more)) => {
+                                outcome = Some((sql, md, shown, more));
+                                break;
+                            }
+                            Err(err) if round == 0 => {
+                                // One correction round with the engine's error.
+                                let retry_q = format!(
+                                    "{}\n\nYour previous SQL failed.\nPrevious SQL: {sql}\nError: {err}\nWrite a corrected single SELECT statement.",
+                                    crate::analytics::sql_question(&question)
+                                );
+                                let raw2 = collect(llm::stream_answer(
+                                    retry_q,
+                                    sql_ctxs.clone(),
+                                    cfg.clone(),
+                                    history.clone(),
+                                ))
+                                .await;
+                                attempt = crate::analytics::extract_sql(&strip_markers(&raw2));
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                    if let Some((sql, md, shown, more)) = outcome {
+                        yield progress("Summarizing results…".to_string(), 4, 4);
+                        let mut ctxs: Vec<Ctx> = vec![Ctx {
+                            name: "query result — computed exactly by Lighthouse".to_string(),
+                            text: format!(
+                                "SQL:\n{sql}\n\nResult ({shown} row(s){}):\n{md}",
+                                if more { ", truncated" } else { "" }
+                            ),
+                            score: 1.0,
+                        }];
+                        ctxs.extend(regs.iter().map(|r| Ctx {
+                            name: format!("{} — schema", r.file_name),
+                            text: r.card.clone(),
+                            score: 0.0,
+                        }));
+                        let mut answer =
+                            llm::stream_answer(question.clone(), ctxs, cfg.clone(), history.clone());
+                        while let Some(d) = answer.next().await {
+                            yield delta(d);
+                        }
+                        // Deterministic transparency — never model-generated.
+                        yield delta(format!("\n\n*Query used:*\n```sql\n{sql}\n```\n"));
+                        let mut seen: std::collections::HashSet<String> =
+                            std::collections::HashSet::new();
+                        let refs: Vec<RagReference> = regs
+                            .iter()
+                            .filter(|r| seen.insert(r.file_id.clone()))
+                            .map(|r| RagReference {
+                                file_id: r.file_id.clone(),
+                                name: r.file_name.clone(),
+                                snippet: r.card.chars().take(240).collect(),
+                                score: 0.9,
+                            })
+                            .collect();
+                        yield final_chunk(refs);
+                        return;
+                    }
+                }
+            }
+        }
+
         // --- Decide: synthesis or single-shot ---
         let mut docs: Vec<DocCandidate> = Vec::new();
         if has_real_model(&cfg) {

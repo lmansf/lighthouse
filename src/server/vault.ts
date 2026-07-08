@@ -913,18 +913,66 @@ function buildListing(nodes: FileNode[], intent: Listing): Retrieved {
 interface Chunk { fileId: string; name: string; text: string; tf: Map<string, number>; }
 
 function chunksOf(text: string, fileId: string, name: string): Chunk[] {
-  const words = text.split(/\s+/);
-  const SIZE = 120, OVERLAP = 25;
-  const chunks: Chunk[] = [];
-  for (let i = 0; i < words.length; i += SIZE - OVERLAP) {
-    const slice = words.slice(i, i + SIZE).join(" ").trim();
-    if (!slice) continue;
+  const texts = chunkTextsNamed(name, text);
+  return texts.map((slice) => {
     const tf = new Map<string, number>();
     for (const t of tokenize(slice)) tf.set(t, (tf.get(t) ?? 0) + 1);
-    chunks.push({ fileId, name, text: slice, tf });
-    if (i + SIZE >= words.length) break;
+    return { fileId, name, text: slice, tf };
+  });
+}
+
+/**
+ * Structure-aware chunking (docs/analytics-genie.md, B1): tabular extracts
+ * chunk by ROWS with the header line(s) prepended to every chunk, so a chunk
+ * holding row 400 still carries its column names; prose keeps the 120-word
+ * windows. KEEP BYTE-IDENTICAL with the Rust twin (vault.rs chunk_texts_named).
+ */
+export function chunkTextsNamed(name: string, text: string): string[] {
+  const lower = name.toLowerCase();
+  const tabular = [".csv", ".tsv", ".parquet", ".xlsx", ".xls"].some((e) => lower.endsWith(e));
+  if (tabular) return chunkTabular(name, text);
+  return chunkTextsProse(text);
+}
+
+function chunkTabular(name: string, text: string): string[] {
+  const ROWS = 30, ROW_OVERLAP = 5;
+  const lower = name.toLowerCase();
+  // Workbook extracts prepend the sheet name above each sheet's CSV; carry
+  // BOTH the sheet line and the header row into every chunk.
+  const headerLines = lower.endsWith(".xlsx") || lower.endsWith(".xls") ? 2 : 1;
+  const chunks: string[] = [];
+  for (const block of text.split("\n\n")) {
+    const lines = block
+      .split("\n")
+      .map((l) => l.replace(/\s+$/, ""))
+      .filter((l) => l.trim() !== "");
+    if (lines.length === 0) continue;
+    const h = Math.min(headerLines, Math.max(0, lines.length - 1));
+    if (lines.length <= h + 1) {
+      chunks.push(lines.join("\n"));
+      continue;
+    }
+    const header = lines.slice(0, h).join("\n");
+    const data = lines.slice(h);
+    for (let i = 0; i < data.length; i += ROWS - ROW_OVERLAP) {
+      const body = data.slice(i, i + ROWS).join("\n");
+      chunks.push(header ? `${header}\n${body}` : body);
+      if (i + ROWS >= data.length) break;
+    }
   }
   return chunks;
+}
+
+function chunkTextsProse(text: string): string[] {
+  const words = text.split(/\s+/);
+  const SIZE = 120, OVERLAP = 25;
+  const out: string[] = [];
+  for (let i = 0; i < words.length; i += SIZE - OVERLAP) {
+    const slice = words.slice(i, i + SIZE).join(" ").trim();
+    if (slice) out.push(slice);
+    if (i + SIZE >= words.length) break;
+  }
+  return out;
 }
 
 export interface Retrieved {

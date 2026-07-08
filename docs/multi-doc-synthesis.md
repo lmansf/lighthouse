@@ -100,6 +100,12 @@ the pre-answer loader line, so long synthesis runs narrate themselves
 
 ## Later phases
 
+> **Update:** aggregation over tabular files shipped as a dedicated analytics
+> branch — the model writes SQL and DataFusion executes it in-process, which
+> strictly subsumes the `aggregate(…)` tool sketched below. See
+> docs/analytics-genie.md. The tool-loop phases remain future work for
+> *prose* navigation (search/read/section tools).
+
 - **Phase 2 — hosted function calling:** expose `search_vault`, `read_section`,
   `extract_table`, `aggregate(op, column, group_by, filter)` as native tools for
   Anthropic/OpenAI-compatible providers; the engine executes, the model plans.

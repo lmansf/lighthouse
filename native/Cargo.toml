@@ -32,7 +32,15 @@ pdf-extract = "0.7"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 quick-xml = "0.36"
 axum = { version = "0.7", features = ["multipart"] }
+datafusion = "54"
 tempfile = "3"
+
+# DataFusion makes debug-info dev builds enormous (~1 GB per linked test
+# binary, >20 GB per target dir) — too big for CI runner disks and most dev
+# containers. Symbol names survive in backtraces; flip locally if you need
+# line-level debugging.
+[profile.dev]
+debug = 0
 
 [profile.release]
 lto = "thin"

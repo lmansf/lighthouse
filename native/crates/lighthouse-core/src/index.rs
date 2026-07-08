@@ -25,7 +25,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::config::{read_json, state_dir, write_json_compact};
-use crate::vault::{chunk_texts_of, name_tokens_of, read_text_abs_capped};
+use crate::vault::{chunk_texts_named, name_tokens_of, read_text_abs_capped};
 
 /// Threads used for index builds and load-time tf rebuilds. Deliberately a
 /// FRACTION of the machine (half the cores, capped at 4) — the global rayon
@@ -101,7 +101,9 @@ struct DiskIndex {
     files: HashMap<String, Arc<FileEntry>>,
 }
 
-const DISK_VERSION: u32 = 1;
+// v2: structure-aware tabular chunking + parquet extraction (B1) changed
+// chunk layouts — stale v1 entries must rebuild, not linger.
+const DISK_VERSION: u32 = 2;
 
 struct IndexState {
     /// The vault this in-memory index belongs to (tests and vault switches
@@ -221,7 +223,7 @@ fn build_entry(name: &str, path_for: &str, abs: &Path, key: String) -> FileEntry
     let chunk_texts = if text.trim().is_empty() {
         Vec::new()
     } else {
-        chunk_texts_of(&text)
+        chunk_texts_named(name, &text)
     };
     let preview = chunk_texts
         .first()

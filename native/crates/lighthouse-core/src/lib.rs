@@ -6,6 +6,7 @@
 //! wire protocol during the migration. Where behavior is intentionally
 //! different it is called out with a `PARITY:` comment.
 
+pub mod analytics;
 pub mod config;
 pub mod contracts;
 pub mod experiment;

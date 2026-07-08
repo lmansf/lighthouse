@@ -1473,6 +1473,56 @@ fn js_split_ws(text: &str) -> Vec<&str> {
     out
 }
 
+/// Structure-aware chunking (docs/analytics-genie.md, B1): tabular extracts
+/// chunk by ROWS with the header line(s) prepended to every chunk, so a chunk
+/// holding row 400 still carries its column names; prose keeps the word
+/// windows below. KEEP BYTE-IDENTICAL with the TS chunker (vault.ts chunksOf).
+pub fn chunk_texts_named(name: &str, text: &str) -> Vec<String> {
+    if crate::analytics::is_tabular(name) {
+        return chunk_tabular(name, text);
+    }
+    chunk_texts_of(text)
+}
+
+fn chunk_tabular(name: &str, text: &str) -> Vec<String> {
+    const ROWS: usize = 30;
+    const ROW_OVERLAP: usize = 5;
+    let lower = name.to_lowercase();
+    // Workbook extracts prepend the sheet name above each sheet's CSV; carry
+    // BOTH the sheet line and the header row into every chunk.
+    let header_lines = if lower.ends_with(".xlsx") || lower.ends_with(".xls") { 2 } else { 1 };
+    let mut chunks: Vec<String> = Vec::new();
+    // Blank-line-separated blocks (one per sheet for workbooks).
+    for block in text.split("\n\n") {
+        let lines: Vec<&str> = block
+            .split('\n')
+            .map(str::trim_end)
+            .filter(|l| !l.trim().is_empty())
+            .collect();
+        if lines.is_empty() {
+            continue;
+        }
+        let h = header_lines.min(lines.len().saturating_sub(1));
+        if lines.len() <= h + 1 {
+            chunks.push(lines.join("\n"));
+            continue;
+        }
+        let header = lines[..h].join("\n");
+        let data = &lines[h..];
+        let mut i = 0usize;
+        while i < data.len() {
+            let end = (i + ROWS).min(data.len());
+            let body = data[i..end].join("\n");
+            chunks.push(if header.is_empty() { body } else { format!("{header}\n{body}") });
+            if i + ROWS >= data.len() {
+                break;
+            }
+            i += ROWS - ROW_OVERLAP;
+        }
+    }
+    chunks
+}
+
 /// 120-word chunks with 25-word overlap — identical windows to the TS engine.
 /// Term frequencies are attached by the index at build time.
 pub fn chunk_texts_of(text: &str) -> Vec<String> {
@@ -1813,4 +1863,59 @@ pub fn doc_text(file_id: &str, preview_chars: Option<usize>) -> Option<(String, 
         None => text,
     };
     Some((node.name, text))
+}
+
+/// A file's display name + resolved absolute path, for the analytics engine
+/// (crate::analytics) — csv/tsv/parquet register with DataFusion by real path.
+pub fn doc_path(file_id: &str) -> Option<(String, PathBuf)> {
+    let node = walk(&vault_dir())
+        .into_iter()
+        .find(|n| n.kind == NodeKind::File && n.id == file_id)?;
+    let state = load_state();
+    let abs = resolve_abs(file_id, &state).ok()?;
+    Some((node.name, abs))
+}
+
+#[cfg(test)]
+mod chunk_tests {
+    use super::chunk_texts_named;
+
+    /// PARITY FIXTURE — mirrored in test/chunker.test.mjs. 70 data rows chunk
+    /// as 1-30 / 26-55 / 51-70, every chunk led by the header line.
+    #[test]
+    fn csv_rows_chunk_with_header_prepended() {
+        let mut text = String::from("region,amount\n");
+        for i in 1..=70 {
+            text.push_str(&format!("r{i},{i}\n"));
+        }
+        let chunks = chunk_texts_named("sales.csv", &text);
+        assert_eq!(chunks.len(), 3);
+        for c in &chunks {
+            assert!(c.starts_with("region,amount\n"), "{c}");
+        }
+        assert!(chunks[0].ends_with("r30,30"));
+        assert!(chunks[1].contains("r26,26") && chunks[1].ends_with("r55,55"));
+        assert!(chunks[2].contains("r51,51") && chunks[2].ends_with("r70,70"));
+    }
+
+    #[test]
+    fn workbook_blocks_carry_sheet_and_header_lines() {
+        let mut text = String::from("Sheet1\nh1,h2\na,1\nb,2\nc,3\n\nSheet2\nh1,h2\n");
+        for i in 1..=40 {
+            text.push_str(&format!("x{i},{i}\n"));
+        }
+        let chunks = chunk_texts_named("book.xlsx", &text);
+        assert_eq!(chunks.len(), 3); // sheet1: 1 chunk · sheet2: rows 1-30, 26-40
+        assert!(chunks[0].starts_with("Sheet1\nh1,h2\n"));
+        assert!(chunks[1].starts_with("Sheet2\nh1,h2\n") && chunks[1].ends_with("x30,30"));
+        assert!(chunks[2].starts_with("Sheet2\nh1,h2\n") && chunks[2].ends_with("x40,40"));
+    }
+
+    #[test]
+    fn prose_keeps_word_windows() {
+        let text = (1..=300).map(|i| format!("w{i}")).collect::<Vec<_>>().join(" ");
+        let chunks = chunk_texts_named("notes.md", &text);
+        assert_eq!(chunks.len(), 3); // 120-word windows, 95-word step
+        assert!(chunks[0].starts_with("w1 ") && chunks[0].ends_with("w120"));
+    }
 }
