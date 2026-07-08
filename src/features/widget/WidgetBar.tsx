@@ -329,6 +329,8 @@ export function WidgetBar() {
     refs: RagReference[];
     streaming: boolean;
     error: string | null;
+    /** Engine stage note ("Reading q3.csv (2/5)…") shown until tokens arrive. */
+    progress?: string | null;
   };
   const [answer, setAnswer] = useState<InlineAnswer | null>(null);
   const answerRef = useRef<InlineAnswer | null>(null);
@@ -599,10 +601,14 @@ export function WidgetBar() {
           controller.signal,
         )) {
           if (controller.signal.aborted) break;
+          if (chunk.progress) {
+            const label = chunk.progress.label;
+            setAnswer((a) => (a ? { ...a, progress: label } : a));
+          }
           if (chunk.delta) {
             content += chunk.delta;
             const soFar = content;
-            setAnswer((a) => (a ? { ...a, content: soFar } : a));
+            setAnswer((a) => (a ? { ...a, content: soFar, progress: null } : a));
           }
           if (chunk.references) refs = chunk.references;
         }
@@ -906,7 +912,7 @@ export function WidgetBar() {
               <ReactMarkdown remarkPlugins={[remarkGfm]}>{answer.content}</ReactMarkdown>
             ) : answer.streaming ? (
               <Text size={200} className={styles.snippet}>
-                Thinking…
+                {answer.progress || "Thinking…"}
               </Text>
             ) : null}
             {answer.error && (

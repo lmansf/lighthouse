@@ -1792,3 +1792,25 @@ pub fn retrieve(
         contexts,
     }
 }
+
+/// A file's display name + extracted text, for the synthesis pipeline
+/// (crate::synth): table profiles need the full content; `preview_chars`
+/// bounds the map-step fallback used when a query's tokens miss the file.
+/// Mirrors src/server/vault.ts::docText.
+pub fn doc_text(file_id: &str, preview_chars: Option<usize>) -> Option<(String, String)> {
+    const DOC_TEXT_CAP: u64 = 4 * 1024 * 1024;
+    let node = walk(&vault_dir())
+        .into_iter()
+        .find(|n| n.kind == NodeKind::File && n.id == file_id)?;
+    let state = load_state();
+    let abs = resolve_abs(file_id, &state).ok()?;
+    let text = read_text_abs_capped(&abs, DOC_TEXT_CAP);
+    if text.trim().is_empty() {
+        return None;
+    }
+    let text = match preview_chars {
+        Some(n) => text.chars().take(n).collect(),
+        None => text,
+    };
+    Some((node.name, text))
+}

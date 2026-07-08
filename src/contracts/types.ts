@@ -124,12 +124,23 @@ export interface ChatMessage {
   references?: RagReference[];
 }
 
+/** Progress note streamed before answer text while the engine works through a
+ *  multi-step plan (e.g. multi-document synthesis) — rendered in the loader. */
+export interface ChatProgress {
+  /** Human-readable stage, e.g. "Reading q3-summary.csv (2/5)…". */
+  label: string;
+  step: number;
+  total: number;
+}
+
 /** A streamed chunk emitted while the assistant answers. */
 export interface ChatChunk {
   /** Incremental answer text to append. */
   delta: string;
   /** Final references, present on the terminating chunk. */
   references?: RagReference[];
+  /** Pre-answer progress (multi-document synthesis stages). */
+  progress?: ChatProgress;
   /** True on the last chunk of a response. */
   done: boolean;
 }

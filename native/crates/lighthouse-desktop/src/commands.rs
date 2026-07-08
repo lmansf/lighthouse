@@ -194,42 +194,21 @@ pub async fn chat_ask(
         let skip = turns.len().saturating_sub(8);
         turns.into_iter().skip(skip).collect()
     };
-    let last_user_turn = history.iter().rev().find(|t| t.role == "user");
-    let retrieval_query = match last_user_turn {
-        Some(t) => format!("{}\n{}", t.content, question),
-        None => question.clone(),
-    };
-    let retrieved = sources::retrieve(
-        &retrieval_query,
-        &included_file_ids,
-        &attachment_file_ids,
-        5,
-    )
-    .await;
     let cfg = profile::model_config();
-    let contexts: Vec<lighthouse_core::llm::Ctx> = retrieved
-        .contexts
-        .iter()
-        .map(|c| lighthouse_core::llm::Ctx {
-            name: c.name.clone(),
-            text: c.text.clone(),
-            score: c.score,
-        })
-        .collect();
-
-    let mut stream = lighthouse_core::llm::stream_answer(question, contexts, cfg, history);
-    while let Some(delta) = stream.next().await {
-        let _ = on_chunk.send(ChatChunk {
-            delta,
-            references: None,
-            done: false,
-        });
+    // The whole ask path — single-shot RAG or multi-document synthesis, with
+    // pre-answer progress chunks (docs/multi-doc-synthesis.md) — lives in the
+    // engine pipeline, shared with the axum route (retrieval-query blending
+    // included).
+    let mut chunks = lighthouse_core::synth::answer_pipeline(
+        question,
+        included_file_ids,
+        attachment_file_ids,
+        history,
+        cfg,
+    );
+    while let Some(c) = chunks.next().await {
+        let _ = on_chunk.send(c);
     }
-    let _ = on_chunk.send(ChatChunk {
-        delta: String::new(),
-        references: Some(retrieved.references),
-        done: true,
-    });
     Ok(())
 }
 

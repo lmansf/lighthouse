@@ -17,6 +17,8 @@ pub mod local_model;
 pub mod profile;
 pub mod settings;
 pub mod sources;
+pub mod synth;
+pub mod table_profile;
 pub mod tts;
 pub mod usage;
 pub mod vault;

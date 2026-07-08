@@ -1081,3 +1081,19 @@ export async function retrieve(
   }));
   return { references, contexts };
 }
+
+/**
+ * A file's display name + extracted text, for the synthesis pipeline: table
+ * profiles need the full content; `previewChars` bounds the map-step fallback
+ * used when a generic query's tokens miss the file's content entirely.
+ */
+export async function docText(
+  fileId: string,
+  previewChars?: number,
+): Promise<{ name: string; text: string } | null> {
+  const node = walk(vaultDir()).find((n) => n.kind === "file" && n.id === fileId);
+  if (!node) return null;
+  const text = await readText(fileId, loadState());
+  if (!text.trim()) return null;
+  return { name: node.name, text: previewChars ? text.slice(0, previewChars) : text };
+}
