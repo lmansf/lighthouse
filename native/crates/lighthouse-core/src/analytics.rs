@@ -22,6 +22,10 @@ use datafusion::prelude::{CsvReadOptions, ParquetReadOptions, SessionContext};
 /// Budgets — conservative caps so one query can't stall or flood an answer.
 pub const MAX_TABLE_FILES: usize = 4;
 const MAX_SHEETS_PER_BOOK: usize = 4;
+/// Tables registered across ALL files: 4 workbooks × 4 sheets would otherwise
+/// put 16 schema cards in the SQL prompt — a field report had the local
+/// model's whole 6144-token window blown by exactly this class of overflow.
+const MAX_TABLES_TOTAL: usize = 6;
 const MAX_XLSX_ROWS: usize = 100_000;
 const MAX_XLSX_COLS: usize = 64;
 const QUERY_TIMEOUT_SECS: u64 = 10;
@@ -29,6 +33,14 @@ const MAX_RESULT_ROWS: usize = 200;
 const MAX_RESULT_COLS: usize = 24;
 const MAX_CELL_CHARS: usize = 80;
 const SAMPLE_ROWS: usize = 3;
+/// Per schema card (prompt block), chars. Wide sheets get their sample rows
+/// clipped rather than eating the context window.
+const MAX_CARD_CHARS: usize = 1200;
+/// The narration prompt sees at most this much of the result — enough to
+/// answer and quote from; the 200-row execution cap is for correctness
+/// semantics, not for stuffing the model's context.
+const NARRATE_MAX_ROWS: usize = 40;
+const NARRATE_MAX_CHARS: usize = 6000;
 
 // --- Intent ----------------------------------------------------------------------
 
@@ -124,6 +136,9 @@ pub async fn register_tables(
     let mut regs: Vec<TableReg> = Vec::new();
     let mut used: Vec<String> = Vec::new();
     for (file_id, name, abs) in files.iter().take(MAX_TABLE_FILES) {
+        if regs.len() >= MAX_TABLES_TOTAL {
+            break;
+        }
         let lower = name.to_lowercase();
         let mut base = sanitize_table_name(name);
         if used.contains(&base) {
@@ -149,6 +164,9 @@ pub async fn register_tables(
             register_workbook(ctx, &base, abs)
         };
         for table in registered {
+            if regs.len() >= MAX_TABLES_TOTAL {
+                break;
+            }
             if let Some(card) = table_card(ctx, &table).await {
                 used.push(base.clone());
                 regs.push(TableReg {
@@ -268,9 +286,17 @@ async fn table_card(ctx: &SessionContext, table: &str) -> Option<String> {
         .and_then(|b| b.column(0).as_any().downcast_ref::<datafusion::arrow::array::Int64Array>())
         .map(|a| a.value(0))
         .unwrap_or(0);
-    Some(format!(
+    let card = format!(
         "table {table} — {n} rows\ncolumns: {schema_line}\nsample rows:\n{sample_md}"
-    ))
+    );
+    // Wide sheets can render enormous sample rows; a card is a prompt block,
+    // so clip it rather than let one table eat the local model's window.
+    if card.chars().count() > MAX_CARD_CHARS {
+        let clipped: String = card.chars().take(MAX_CARD_CHARS).collect();
+        Some(format!("{clipped}…"))
+    } else {
+        Some(card)
+    }
 }
 
 // --- SQL guard -------------------------------------------------------------------
@@ -317,8 +343,13 @@ pub fn guard_sql(sql: &str) -> Result<(), String> {
 
 /// A verified query result, ready for the narration prompt and the chat.
 pub struct QueryResult {
-    /// Markdown table (row/col/cell caps applied).
+    /// Markdown table FOR THE NARRATION PROMPT — capped to NARRATE_MAX_ROWS /
+    /// NARRATE_MAX_CHARS with an explicit truncation note, so a wide/tall
+    /// result can never blow the local model's context window (a 0.6.0 field
+    /// report hit 12.6k prompt tokens against the 6144 window this way).
     pub markdown: String,
+    /// Total rows the query produced (up to the execution cap) — NOT the rows
+    /// present in `markdown`.
     pub shown: usize,
     pub truncated: bool,
     /// Engine-built chart spec JSON when the result is chartable (Phase C) —
@@ -338,9 +369,29 @@ pub async fn run_query(ctx: &SessionContext, sql: &str) -> Result<QueryResult, S
         .await
         .map_err(|_| format!("query exceeded {QUERY_TIMEOUT_SECS}s"))?
         .map_err(|e| e.to_string())?;
-    let (markdown, shown, truncated) = batches_to_markdown(&batches, MAX_RESULT_ROWS, MAX_RESULT_COLS);
+    let (_, shown, truncated) = batches_to_markdown(&batches, MAX_RESULT_ROWS, MAX_RESULT_COLS);
     if shown == 0 {
         return Err("the query returned no rows".into());
+    }
+    let (mut markdown, in_prompt, _) =
+        batches_to_markdown(&batches, NARRATE_MAX_ROWS.min(MAX_RESULT_ROWS), MAX_RESULT_COLS);
+    if markdown.chars().count() > NARRATE_MAX_CHARS {
+        // Cut whole lines from the end until it fits — a mid-row cut would
+        // leave a mangled table for the model to misread.
+        let mut kept = String::with_capacity(NARRATE_MAX_CHARS);
+        for line in markdown.lines() {
+            if kept.chars().count() + line.chars().count() + 1 > NARRATE_MAX_CHARS {
+                break;
+            }
+            kept.push_str(line);
+            kept.push('\n');
+        }
+        markdown = kept.trim_end().to_string();
+    }
+    if in_prompt < shown || markdown.lines().count().saturating_sub(2) < in_prompt {
+        markdown.push_str(&format!(
+            "\n\n(first rows of {shown} total — narrate from these and tell the user the full count)"
+        ));
     }
     let chart = if truncated { None } else { chart_spec_from_batches(&batches) };
     Ok(QueryResult {
@@ -618,6 +669,70 @@ mod tests {
         for l in ["NE", "widget-9000", "July", "20245", "2024-7"] {
             assert!(!looks_temporal(l), "{l}");
         }
+    }
+
+    #[tokio::test]
+    async fn narration_markdown_is_capped_but_counts_stay_honest() {
+        // 100-row result: execution keeps all rows (shown=100), but the
+        // narration payload carries at most NARRATE_MAX_ROWS plus a note —
+        // the overflow that blew a local 6144-token window in the field.
+        let labels: Vec<String> = (0..100).map(|i| format!("row{i}")).collect();
+        let values: Vec<f64> = (0..100).map(|i| i as f64).collect();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("label", DataType::Utf8, false),
+            Field::new("v", DataType::Float64, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(StringArray::from(labels.iter().map(String::as_str).collect::<Vec<_>>())),
+                Arc::new(Float64Array::from(values)),
+            ],
+        )
+        .unwrap();
+        let mem = MemTable::try_new(schema, vec![vec![batch]]).unwrap();
+        let ctx = SessionContext::new();
+        ctx.register_table("tall", Arc::new(mem)).unwrap();
+
+        let res = run_query(&ctx, "SELECT label, v FROM tall ORDER BY v").await.unwrap();
+        assert_eq!(res.shown, 100);
+        assert!(!res.truncated);
+        // Header + separator + ≤40 data rows + blank + note.
+        let data_rows = res.markdown.lines().filter(|l| l.starts_with("| row")).count();
+        assert!(data_rows <= 40, "narration carries {data_rows} rows");
+        assert!(res.markdown.chars().count() <= 6_200, "{}", res.markdown.len());
+        assert!(res.markdown.contains("of 100 total"), "{}", res.markdown);
+    }
+
+    #[tokio::test]
+    async fn table_cards_are_clipped_for_wide_tables() {
+        // 40 long-named text columns would render a card far past the prompt
+        // budget; the card must clip instead.
+        let n = 40usize;
+        let fields: Vec<Field> = (0..n)
+            .map(|i| Field::new(format!("very_long_column_name_number_{i}"), DataType::Utf8, false))
+            .collect();
+        let cols: Vec<ArrayRef> = (0..n)
+            .map(|i| {
+                Arc::new(StringArray::from(vec![
+                    format!("some fairly long cell value {i} aaaaaaaaaaaaaaaaaaaaaaaa"),
+                    format!("another fairly long cell value {i} bbbbbbbbbbbbbbbbbbbb"),
+                    format!("third fairly long cell value {i} cccccccccccccccccccccc"),
+                ])) as ArrayRef
+            })
+            .collect();
+        let schema = Arc::new(Schema::new(fields));
+        let batch = RecordBatch::try_new(schema.clone(), cols).unwrap();
+        let mem = MemTable::try_new(schema, vec![vec![batch]]).unwrap();
+        let ctx = SessionContext::new();
+        ctx.register_table("wide", Arc::new(mem)).unwrap();
+
+        let card = table_card(&ctx, "wide").await.expect("card");
+        assert!(
+            card.chars().count() <= super::MAX_CARD_CHARS + 1,
+            "card is {} chars",
+            card.chars().count()
+        );
     }
 
     #[tokio::test]
