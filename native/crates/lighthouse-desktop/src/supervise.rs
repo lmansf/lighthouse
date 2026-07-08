@@ -23,6 +23,22 @@ pub const RELEASE_PAGE_URL: &str = "https://github.com/lmansf/lighthouse/release
 pub struct Supervisor {
     llm: Mutex<Option<Child>>,
     uninstalling: Mutex<bool>,
+    /// When the current llama-server was spawned — feeds the GPU crash guard.
+    spawned_at: Mutex<Option<std::time::Instant>>,
+    /// Consecutive fast exits (died < 20 s after spawn). Two in a row with GPU
+    /// offload enabled reads as "the Vulkan driver can't do this" — we persist
+    /// llmDisableGpu and relaunch CPU-only rather than crash-looping.
+    quick_crashes: Mutex<u32>,
+    /// Second llama-server instance serving the bundled embedding model (B2
+    /// hybrid search) — CPU-only, port 8091, no uninstall handshake (the
+    /// weights are installer-owned). See start_embed_llm.
+    embed: Mutex<Option<Child>>,
+    embed_spawned_at: Mutex<Option<std::time::Instant>>,
+    /// Consecutive fast exits of the embed server. Three in a row (port taken,
+    /// unusable weights, too-old bundled build) means "not on this machine/
+    /// boot" — stop respawning instead of crash-looping; retrieval simply
+    /// stays lexical.
+    embed_quick_exits: Mutex<u32>,
 }
 
 fn llm_root() -> PathBuf {
@@ -72,8 +88,25 @@ impl Supervisor {
             // and formats correctly. Any build new enough to hit that error
             // supports this flag, so it's safe.
             .arg("--no-jinja")
+            // Context window: the server default (4096) silently context-shifts
+            // once system prompt + history + retrieved chunks outgrow it —
+            // dropping the oldest turns mid-conversation degrades answers with
+            // no visible sign. 6144 covers long chats while keeping the KV
+            // cache (~0.75 GB fp16) affordable on 8 GB machines.
+            .args(["-c", "6144"])
             .current_dir(llm_root())
             .stdin(Stdio::null());
+        // GPU offload: the bundled build carries dynamic backends (Vulkan on
+        // Windows/Linux, Metal on macOS) with a built-in CPU fallback when no
+        // usable device/driver exists, so asking for full offload is safe on
+        // GPU-less machines. The one pathological case — a Vulkan driver that
+        // crashes the process — is handled by the quick-crash guard in
+        // reconcile(), which persists llmDisableGpu and relaunches CPU-only.
+        let gpu_disabled =
+            crate::read_settings(app)["llmDisableGpu"].as_bool() == Some(true);
+        if !gpu_disabled {
+            cmd.args(["-ngl", "999"]);
+        }
         // Log to a file instead of a console window.
         match (
             log_file(app, "local-model.log"),
@@ -92,15 +125,182 @@ impl Supervisor {
             cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
         }
         match cmd.spawn() {
-            Ok(child) => *guard = Some(child),
+            Ok(child) => {
+                *guard = Some(child);
+                *self.spawned_at.lock().unwrap_or_else(|p| p.into_inner()) =
+                    Some(std::time::Instant::now());
+                // Warm the model in the background: wait until /health says the
+                // weights are loaded, then run a 1-token completion that pages
+                // the mmap'd GGUF in off disk and pre-fills the system prompt's
+                // KV cache (llm::warm_local_model). With cache_prompt on every
+                // real request, the user's FIRST question then pays only for
+                // its own retrieved context instead of a full cold start.
+                tauri::async_runtime::spawn(async {
+                    let client = reqwest::Client::new();
+                    for _ in 0..120 {
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        match client.get("http://127.0.0.1:8080/health").send().await {
+                            Ok(r) if r.status().is_success() => {
+                                lighthouse_core::llm::warm_local_model().await;
+                                return;
+                            }
+                            _ => {}
+                        }
+                    }
+                });
+            }
             Err(e) => eprintln!("local model failed to start: {e}"),
         }
+    }
+
+    /// Launch the embedding llama-server (B2 hybrid search) when semantic
+    /// search is on, the bundled model + binary exist, and this isn't a
+    /// safe-mode boot. CPU-only on purpose: the model is ~137 MB and fast on
+    /// CPU, embedding must never contend with the chat model for VRAM, and
+    /// the Vulkan crash class that safe mode exists for can't reach it.
+    fn start_embed_llm(&self, app: &AppHandle) {
+        let mut guard = self.embed.lock().unwrap_or_else(|p| p.into_inner());
+        if guard.is_some() {
+            return; // already running
+        }
+        if crate::boot_guard::safe_mode() {
+            return;
+        }
+        if *self
+            .embed_quick_exits
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            >= 3
+        {
+            return; // gave up this boot — see the field comment
+        }
+        let enabled = crate::read_settings(app)["semanticSearch"].as_bool() != Some(false);
+        if !enabled {
+            return;
+        }
+        let Some(model) = lighthouse_core::embed::bundled_embed_model() else {
+            return; // dev run / stripped install — hybrid search silently off
+        };
+        let bin = llm_root().join(if cfg!(windows) {
+            "llama-server.exe"
+        } else {
+            "llama-server"
+        });
+        if !bin.exists() {
+            return;
+        }
+        let mut cmd = Command::new(&bin);
+        cmd.arg("-m")
+            .arg(&model)
+            .args(["--host", "127.0.0.1"])
+            .args(["--port", &lighthouse_core::embed::EMBED_PORT.to_string()])
+            // Embeddings endpoint + sequence pooling. nomic-embed's GGUF
+            // carries pooling metadata, but stating it keeps us independent of
+            // build defaults.
+            .args(["--embedding", "--pooling", "mean"])
+            // Chunks are capped well under this before embedding (embed.rs);
+            // 2048 keeps the context buffers tiny.
+            .args(["-c", "2048"])
+            // CPU-only (see doc comment above).
+            .args(["-ngl", "0"])
+            .current_dir(llm_root())
+            .stdin(Stdio::null());
+        match (
+            log_file(app, "local-embed.log"),
+            log_file(app, "local-embed.log"),
+        ) {
+            (Some(out), Some(err)) => {
+                cmd.stdout(Stdio::from(out)).stderr(Stdio::from(err));
+            }
+            _ => {
+                cmd.stdout(Stdio::null()).stderr(Stdio::null());
+            }
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        }
+        match cmd.spawn() {
+            Ok(child) => {
+                *guard = Some(child);
+                *self
+                    .embed_spawned_at
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner()) = Some(std::time::Instant::now());
+                // Once healthy, kick the vector warm pass so a fresh install
+                // embeds its corpus in the background instead of at first ask.
+                tauri::async_runtime::spawn(async {
+                    let client = reqwest::Client::new();
+                    let url = format!(
+                        "http://127.0.0.1:{}/health",
+                        lighthouse_core::embed::EMBED_PORT
+                    );
+                    for _ in 0..60 {
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        match client.get(&url).send().await {
+                            Ok(r) if r.status().is_success() => {
+                                lighthouse_core::embed::nudge_warm();
+                                return;
+                            }
+                            _ => {}
+                        }
+                    }
+                });
+            }
+            Err(e) => eprintln!("embedding server failed to start: {e}"),
+        }
+    }
+
+    /// Keep the embedding server in sync with the toggle (and count crashes).
+    fn reconcile_embed(&self, app: &AppHandle) {
+        let enabled = crate::read_settings(app)["semanticSearch"].as_bool() != Some(false);
+        {
+            let mut guard = self.embed.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some(child) = guard.as_mut() {
+                if !enabled {
+                    // Toggled off: stop the server (retrieval already went
+                    // lexical the moment the setting was written).
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    *guard = None;
+                    return;
+                }
+                if matches!(child.try_wait(), Ok(Some(_))) {
+                    *guard = None; // exited — maybe respawn below
+                    let lived = self
+                        .embed_spawned_at
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .take()
+                        .map(|t| t.elapsed());
+                    let mut quick = self
+                        .embed_quick_exits
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner());
+                    if lived.is_some_and(|d| d < std::time::Duration::from_secs(20)) {
+                        *quick += 1;
+                        if *quick == 3 {
+                            eprintln!(
+                                "embedding server exited quickly {quick} times — giving up until next launch (hybrid search stays off, retrieval is lexical)"
+                            );
+                        }
+                    } else {
+                        *quick = 0;
+                    }
+                }
+            }
+        }
+        self.start_embed_llm(app);
     }
 
     /// Keep the local model server in sync with what's on disk (3 s tick).
     /// Start llama-server when a model appears (a download just finished) and
     /// drive the uninstall handshake to completion.
     pub fn reconcile(&self, app: &AppHandle) {
+        // The embedding server is independent of the chat model's install/
+        // uninstall lifecycle below — reconcile it first, unconditionally.
+        self.reconcile_embed(app);
         if uninstall_marker_path().exists() {
             let mut guard = self.llm.lock().unwrap_or_else(|p| p.into_inner());
             if let Some(child) = guard.as_mut() {
@@ -133,6 +333,35 @@ impl Supervisor {
             if let Some(child) = guard.as_mut() {
                 if matches!(child.try_wait(), Ok(Some(_))) {
                     *guard = None; // crashed/exited — allow a restart below
+                    drop(guard);
+                    // GPU crash guard: a server that dies twice within 20 s of
+                    // spawning while offload is on almost certainly hit a bad
+                    // Vulkan driver. Persist llmDisableGpu so every future
+                    // launch (this boot and the next) runs CPU-only instead of
+                    // crash-looping. Delete the key from the settings file to
+                    // re-try GPU after a driver update.
+                    let lived = self
+                        .spawned_at
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .take()
+                        .map(|t| t.elapsed());
+                    let mut quick =
+                        self.quick_crashes.lock().unwrap_or_else(|p| p.into_inner());
+                    if lived.is_some_and(|d| d < std::time::Duration::from_secs(20)) {
+                        *quick += 1;
+                    } else {
+                        *quick = 0;
+                    }
+                    let gpu_enabled =
+                        crate::read_settings(app)["llmDisableGpu"].as_bool() != Some(true);
+                    if *quick >= 2 && gpu_enabled {
+                        *quick = 0;
+                        eprintln!(
+                            "local model: crashed twice right after start with GPU offload — disabling GPU offload (llmDisableGpu)"
+                        );
+                        crate::write_settings(app, serde_json::json!({ "llmDisableGpu": true }));
+                    }
                 }
             }
         }
@@ -157,6 +386,10 @@ impl Supervisor {
 
     pub fn shutdown(&self) {
         if let Some(mut child) = self.llm.lock().unwrap_or_else(|p| p.into_inner()).take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        if let Some(mut child) = self.embed.lock().unwrap_or_else(|p| p.into_inner()).take() {
             let _ = child.kill();
             let _ = child.wait();
         }

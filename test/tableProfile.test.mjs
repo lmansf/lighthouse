@@ -1,0 +1,95 @@
+/**
+ * Unit tests for the deterministic table profiler (src/server/tableProfile.ts).
+ *
+ * THE PARITY FIXTURE: `SALES_CSV` → `SALES_PROFILE` below is asserted
+ * byte-for-byte here AND in lighthouse-core/src/table_profile.rs's unit test.
+ * If you change the profile format, update both expected strings together.
+ *
+ * Run: `node --test test/tableProfile.test.mjs`
+ */
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { register } from "node:module";
+
+register("./_ts-extensionless-hook.mjs", import.meta.url);
+
+const { tableProfile, parseDelimited, isProfileable } = await import(
+  "../src/server/tableProfile.ts"
+);
+
+const SALES_CSV = [
+  "Date,Region,Sales",
+  "2016-01-05,NE,100.50",
+  "2016-03-10,NW,200",
+  "2016-11-20,NE,49.50",
+  "2017-02-14,SE,300",
+  "2017-06-30,NE,150.25",
+  "2017-09-01,NW,174.75",
+].join("\n");
+
+const SALES_PROFILE = [
+  "[TABLE PROFILE — computed exactly by Lighthouse from sales.csv; these statistics are authoritative]",
+  "rows: 6 (excluding header)",
+  "columns: Date (date: years 2016–2017); Region (text: 3 distinct); Sales (number: sum 975, mean 162.5, min 49.5, max 300)",
+  "sum of Sales by year(Date): 2016: 350 · 2017: 625",
+  "sum of Sales by Region: NE: 300.25 · NW: 374.75 · SE: 300",
+].join("\n");
+
+test("PARITY FIXTURE: sales.csv profile matches the pinned string exactly", () => {
+  assert.equal(tableProfile("sales.csv", SALES_CSV), SALES_PROFILE);
+});
+
+test("parseDelimited handles quoted fields, escaped quotes, CRLF", () => {
+  const rows = parseDelimited('a,"b,1","say ""hi"""\r\nx,y,z\n', ",");
+  assert.deepEqual(rows, [
+    ["a", "b,1", 'say "hi"'],
+    ["x", "y", "z"],
+  ]);
+});
+
+test("currency symbols, thousands separators, and (negatives) parse", () => {
+  const csv = ["Item,Amount", "a,$1,200.50".replace("$1,200", '"$1,200'), "b,(300)", "c,€99"].join(
+    "\n",
+  );
+  // Row a's amount is quoted "$1,200.50" so the comma stays inside the field.
+  const fixed = 'Item,Amount\na,"$1,200.50"\nb,(300)\nc,€99';
+  const p = tableProfile("m.csv", fixed);
+  assert.ok(p);
+  assert.match(p, /sum 999\.5, mean 333\.17, min -300, max 1200\.5/);
+});
+
+test("non-tables return null (prose, single column, too few rows)", () => {
+  assert.equal(tableProfile("notes.csv", "just some prose\nwithout structure"), null);
+  assert.equal(tableProfile("one.csv", "header\n1\n2\n3"), null);
+  assert.equal(tableProfile("tiny.csv", "a,b\n1,2"), null);
+});
+
+test("tsv delimiter honored via file name", () => {
+  const tsv = "Name\tQty\nx\t1\ny\t2\nz\t3";
+  const p = tableProfile("data.tsv", tsv);
+  assert.ok(p);
+  assert.match(p, /rows: 3/);
+  assert.match(p, /Qty \(number: sum 6, mean 2, min 1, max 3\)/);
+});
+
+test("high-cardinality text columns get no group-by; years outside 2..6 skip rollup", () => {
+  const rows = ["Id,Val"];
+  for (let i = 0; i < 20; i += 1) rows.push(`id-${i},1`);
+  const p = tableProfile("ids.csv", rows.join("\n"));
+  assert.ok(p);
+  assert.ok(!p.includes("by Id"), "20-distinct text column must not group");
+});
+
+test("profile is capped", () => {
+  const rows = ["K,V"];
+  for (let i = 0; i < 8; i += 1) rows.push(`key-with-a-rather-long-name-${i},${i}`);
+  const p = tableProfile("k.csv", rows.join("\n"));
+  assert.ok(p && p.length <= 1200);
+});
+
+test("isProfileable gates by extension", () => {
+  assert.equal(isProfileable("a.csv"), true);
+  assert.equal(isProfileable("b.TSV"), true);
+  assert.equal(isProfileable("c.xlsx"), false);
+  assert.equal(isProfileable("d.md"), false);
+});

@@ -730,12 +730,22 @@ const AnswerMarkdown = memo(function AnswerMarkdown({
   );
 });
 
-/** Subtle Lighthouse beacon loader, shown briefly while we wait for the first token. */
-function LighthouseLoader({ className, dotClass }: { className: string; dotClass: string }) {
+/** Subtle Lighthouse beacon loader, shown briefly while we wait for the first
+ *  token. Multi-document synthesis narrates its stages through `label`
+ *  ("Reading q3-summary.csv (2/5)…") instead of the generic "Searching…". */
+function LighthouseLoader({
+  className,
+  dotClass,
+  label,
+}: {
+  className: string;
+  dotClass: string;
+  label?: string | null;
+}) {
   return (
     <div className={className}>
       <span className={dotClass} />
-      <Text size={300}>Searching…</Text>
+      <Text size={300}>{label || "Searching…"}</Text>
     </div>
   );
 }
@@ -783,6 +793,9 @@ export function ChatPanel() {
   const historyPersistEnabled = useChatStore((s) => s.persistEnabled);
   const setHistoryPersist = useChatStore((s) => s.setPersistEnabled);
   const [streaming, setStreaming] = useState(false);
+  // Pre-answer stage note from the engine ("Reading q3.csv (2/5)…") — shown in
+  // the loader while multi-document synthesis works; cleared on the first token.
+  const [progressLabel, setProgressLabel] = useState<string | null>(null);
 
   // Recent-chats drawer + its inline rename/delete affordances.
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -1120,7 +1133,9 @@ export function ChatPanel() {
         // honor AbortSignal, so also bail out of the loop explicitly and keep
         // the partially-streamed answer.
         if (controller.signal.aborted) break;
+        if (chunk.progress) setProgressLabel(chunk.progress.label);
         if (chunk.delta) {
+          setProgressLabel(null); // the answer is starting — stage notes are done
           finalContent += chunk.delta;
           setMessages((m) =>
             m.map((x) => (x.id === asstId ? { ...x, content: x.content + chunk.delta } : x)),
@@ -1158,6 +1173,7 @@ export function ChatPanel() {
     } finally {
       abortRef.current = null;
       setStreaming(false);
+      setProgressLabel(null);
       // Save the settled turn for this session (cheap: once per turn, not per token).
       persistMessages();
       // Hand focus back for the follow-up — but only if the user hasn't moved
@@ -1944,7 +1960,11 @@ export function ChatPanel() {
               ) : (
                 <div key={m.id} className={styles.turn}>
                   {streaming && !m.content && m.id === lastId ? (
-                    <LighthouseLoader className={styles.loader} dotClass={styles.loaderDot} />
+                    <LighthouseLoader
+                      className={styles.loader}
+                      dotClass={styles.loaderDot}
+                      label={progressLabel}
+                    />
                   ) : (
                     <>
                       {m.content && (

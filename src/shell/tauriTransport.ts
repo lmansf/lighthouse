@@ -236,6 +236,7 @@ async function route(
             uiMode: body.uiMode === "window" || body.uiMode === "widget" ? body.uiMode : null,
             whisperMode: typeof body.whisperMode === "boolean" ? body.whisperMode : null,
             summonShortcut: typeof body.summonShortcut === "string" ? body.summonShortcut : null,
+            semanticSearch: typeof body.semanticSearch === "boolean" ? body.semanticSearch : null,
           });
     default:
       return json({ error: "unknown route" }, 404);

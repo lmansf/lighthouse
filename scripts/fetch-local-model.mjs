@@ -13,8 +13,10 @@
  *
  * What it fetches:
  *   1. `llama-server` (+ its shared libraries) — llama.cpp, MIT-licensed. The
- *      right per-OS asset is resolved from the ggml-org/llama.cpp GitHub release
- *      (a CPU build, for broad compatibility — no GPU/driver assumptions).
+ *      right per-OS asset is resolved from the ggml-org/llama.cpp GitHub release:
+ *      the VULKAN build on Windows/Linux (GPU offload with a dynamic CPU
+ *      fallback in the same archive — runs fine on GPU-less machines), the
+ *      default arm64 build (Metal) on macOS. See pickAsset().
  *   2. Piper (rhasspy/piper, MIT) + a neural voice (en_US-lessac-medium, ~63 MB,
  *      MIT/CC0) into `resources/tts/`, powering on-device read-aloud TTS.
  *
@@ -58,13 +60,37 @@ const LLAMACPP_API = "https://api.github.com/repos/ggml-org/llama.cpp/releases";
 const LLAMACPP_VERSION = "b9859"; // ggml-org/llama.cpp release tag
 const PIPER_VERSION = "2023.11.14-2"; // rhasspy/piper release tag
 const VOICE_REVISION = "e21c7de8d4eab79b902f0d61e662b3f21664b8d2"; // rhasspy/piper-voices commit
+// B2 hybrid search: the bundled embedding model (Apache-2.0), served by the
+// SAME llama-server binary above with `--embedding` on a second port. Bundled
+// in the installer (+~137 MB) so semantic search works with zero setup; lives
+// in resources/embed/ — NEVER resources/llm/, where model discovery would
+// mistake it for an installed chat model.
+const EMBED_REPO = "nomic-ai/nomic-embed-text-v1.5-GGUF"; // Hugging Face repo
+// Pinned repo commit (recorded by the asset-digests workflow; re-record when
+// bumping). Empty = not yet pinned: the normal path fails closed and
+// `--record` resolves the current main, prints it, and computes the digest.
+const EMBED_REVISION = "0188c9bf409793f810680a5a431e7b899c46104c";
+const EMBED_FILE = "nomic-embed-text-v1.5.Q8_0.gguf";
 const ASSET_SHA256 = {
+  // Vulkan builds (preferred on win/linux): GPU offload with a dynamic CPU
+  // fallback backend in the same archive. Digests from the release API's
+  // asset `digest` field, same source as the entries below.
+  "llama-b9859-bin-win-vulkan-x64.zip": "5e7794aa22ba34c8e223934b0b3e14cd441612f26e9f06a4a0e5f47b9e7f577b",
+  "llama-b9859-bin-ubuntu-vulkan-x64.tar.gz": "8968e8b74ca1fdafe51013560eff42bdaf99872a58918c3085f1e1dd77ddc7c1",
+  // CPU fallbacks (used only if a release lacks a Vulkan asset for the OS).
   "llama-b9859-bin-win-cpu-x64.zip": "c9aa80f233a7d1749341860f11723b912d4cfd6eec19434c3d00bba0abc9f85c",
+  "llama-b9859-bin-ubuntu-x64.tar.gz": "7a434a404669534ee67f2e53363109053a54c3ee13f487cbc17a3455ac5930f4",
   "llama-b9859-bin-macos-arm64.tar.gz": "21e720ac103d28d7585a52b8023fb86fc0736c90ad92c1e75053207630e90df6",
   "piper_windows_amd64.zip": "f3c58906402b24f3a96d92145f58acba6d86c9b5db896d207f78dc80811efcea",
   "piper_macos_aarch64.tar.gz": "6b1eb03b3735946cb35216e063e7eebcc33a6bbf5dd96ec0217959bf1cdcb0cc",
+  // Linux piper was never pinned — the fetch step on Linux release runners had
+  // been failing closed here (TTS quietly missing from Linux bundles). Digest
+  // recorded by the first asset-digests run.
+  "piper_linux_x86_64.tar.gz": "a50cb45f355b7af1f6d758c1b360717877ba0a398cc8cbe6d2a7a3a26e225992",
   "en_US-lessac-medium.onnx": "5efe09e69902187827af646e1a6e9d269dee769f9877d17b16b1b46eeaaf019f",
   "en_US-lessac-medium.onnx.json": "efe19c417bed055f2d69908248c6ba650fa135bc868b0e6abb3da181dab690a0",
+  // B2 embedding model (see EMBED_* above) — one GGUF for all three OS builds.
+  "nomic-embed-text-v1.5.Q8_0.gguf": "3e24342164b3d94991ba9692fdc0dd08e3fd7362e0aacc396a9a5c54a544c3b7",
 };
 // `--record` recomputes and prints digests (to bootstrap a version bump) instead
 // of enforcing them; the normal path fails closed on any missing/mismatched hash.
@@ -168,7 +194,20 @@ async function download(url, outPath, label, assetName) {
   process.stdout.write(`\r  ${label}: done (${(seen / 1e6).toFixed(0)} MB)            \n`);
 }
 
-/** Pick the llama.cpp release asset matching this OS — prefer a plain CPU build. */
+/**
+ * Pick the llama.cpp release asset matching this OS — prefer the VULKAN build
+ * on Windows/Linux, falling back to the plain CPU build when the release has
+ * no Vulkan asset for this OS/arch.
+ *
+ * Why Vulkan is safe to bundle: current llama.cpp release archives are built
+ * with dynamic backend loading — the Vulkan archive also carries the CPU
+ * backend, and llama-server enumerates usable devices at startup, running
+ * fully on CPU when no Vulkan driver/device exists. On machines WITH any GPU
+ * (including Intel/AMD iGPUs) prompt processing and generation run 3–20×
+ * faster with `-ngl` offload (set by the desktop supervisor, which also
+ * disables offload persistently if a broken driver crashes the server —
+ * see supervise.rs). macOS arm64 builds carry Metal by default; no change.
+ */
 function pickAsset(assets) {
   const arch = process.arch === "arm64" ? "arm64" : "x64";
   const os = platform === "win32" ? "win" : platform === "darwin" ? "macos" : "ubuntu";
@@ -176,12 +215,12 @@ function pickAsset(assets) {
     .map((a) => a.name)
     // Windows ships .zip; macOS/Linux ship .tar.gz on current llama.cpp releases.
     .filter((n) => /\.(zip|tar\.gz|tgz)$/i.test(n) && n.includes(os))
-    // exclude GPU/driver-specific builds — bundle a portable CPU build
-    .filter((n) => !/cuda|hip|vulkan|sycl|kompute/i.test(n));
-  // macOS assets are arch-tagged; win/linux x64 CPU builds usually are too.
+    // Exclude driver-stack-specific builds we can't assume end users have
+    // (CUDA/ROCm/SYCL/OpenVINO need vendor runtimes; Vulkan is OS-generic).
+    .filter((n) => !/cuda|hip|rocm|sycl|kompute|openvino|s390x/i.test(n));
+  // macOS assets are arch-tagged; win/linux x64 builds usually are too.
   const byArch = candidates.filter((n) => n.includes(arch));
   const pool = byArch.length ? byArch : candidates;
-  // Prefer an explicit "cpu" build, else broadest instruction set (avx2 > others).
   const ranked = pool.sort((a, b) => score(b) - score(a));
   const name = ranked[0];
   if (!name) throw new Error(`no llama.cpp asset for ${os}/${arch} in this release`);
@@ -189,6 +228,7 @@ function pickAsset(assets) {
 }
 function score(name) {
   let s = 0;
+  if (/vulkan/i.test(name)) s += 200; // GPU-capable with built-in CPU fallback
   if (/cpu/i.test(name)) s += 100;
   if (/avx2/i.test(name)) s += 50;
   if (/x64|amd64/i.test(name)) s += 5;
@@ -334,6 +374,39 @@ async function fetchTts() {
   }
 }
 
+/**
+ * Fetch the bundled embedding model (B2 hybrid search) into resources/embed/.
+ * Platform-independent (one GGUF for all three OS builds), pinned to a repo
+ * revision + SHA-256 like everything else. `--record` bootstraps the pins:
+ * it resolves the repo's current main commit and computes the digest.
+ */
+async function fetchEmbed() {
+  const embedDest = join(root, "resources", "embed");
+  mkdirSync(embedDest, { recursive: true });
+  const outPath = join(embedDest, EMBED_FILE);
+  if (!force && existsSync(outPath) && statSync(outPath).size > 1e8) {
+    console.log(`✓ embedding model already present`);
+    return;
+  }
+  let revision = process.env.EMBED_REVISION?.trim() || EMBED_REVISION;
+  if (!revision) {
+    if (!RECORD) {
+      throw new Error(
+        `embedding model: EMBED_REVISION is not pinned. Run \`npm run fetch:model -- --record\`, ` +
+          `then paste the printed revision + digest into scripts/fetch-local-model.mjs and commit.`,
+      );
+    }
+    const meta = await getJson(`https://huggingface.co/api/models/${EMBED_REPO}`);
+    revision = meta.sha;
+    if (!revision) throw new Error(`embedding model: could not resolve ${EMBED_REPO} revision`);
+    console.log(`  [record] EMBED_REVISION: ${JSON.stringify(revision)}`);
+  }
+  const url = `https://huggingface.co/${EMBED_REPO}/resolve/${revision}/${EMBED_FILE}`;
+  console.log(`Downloading ${EMBED_FILE} (${EMBED_REPO}@${revision.slice(0, 12)})`);
+  await download(url, outPath, "embedding model", EMBED_FILE);
+  console.log(`✓ ${EMBED_FILE}`);
+}
+
 async function main() {
   mkdirSync(dest, { recursive: true });
   const serverName = platform === "win32" ? "llama-server.exe" : "llama-server";
@@ -359,6 +432,9 @@ async function main() {
 
   // 2. Local neural TTS (Piper + voice) for on-device read-aloud.
   await fetchTts();
+
+  // 3. Bundled embedding model for B2 hybrid search (resources/embed/).
+  await fetchEmbed();
 
   if (RECORD && Object.keys(recorded).length) {
     console.log(`\n--record: paste these into ASSET_SHA256 (scripts/fetch-local-model.mjs), then commit:`);

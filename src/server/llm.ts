@@ -227,6 +227,13 @@ async function* streamLocal(
         model,
         max_tokens: 1024,
         stream: true,
+        // llama-server extension (harmlessly ignored by Ollama/LM Studio):
+        // reuse the KV cache for the longest common prefix with the previous
+        // request. The system prompt + conversation history ARE that prefix,
+        // so follow-up turns only pay prompt-processing for the newly
+        // retrieved context and question — on CPU that's the difference
+        // between re-reading ~3k tokens and ~800. Keep in sync with llm.rs.
+        cache_prompt: true,
         messages: [
           { role: "system", content: SYSTEM_PROMPT },
           ...priorTurns.map((t) => ({ role: t.role, content: t.content })),

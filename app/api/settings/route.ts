@@ -17,6 +17,7 @@ export async function GET() {
     uiMode: s.uiMode ?? null, // null until the first-run chooser is answered
     whisperMode: s.whisperMode === true, // opt-in, default off
     summonShortcut: s.summonShortcut ?? "ctrl+super+shift+space",
+    semanticSearch: s.semanticSearch !== false, // default on
   });
 }
 
@@ -34,12 +35,14 @@ export async function POST(req: Request) {
     uiMode?: "window" | "widget";
     whisperMode?: boolean;
     summonShortcut?: string;
+    semanticSearch?: boolean;
   } = {};
   if (typeof body.runOnStartup === "boolean") patch.runOnStartup = body.runOnStartup;
   if (typeof body.startupAsked === "boolean") patch.startupAsked = body.startupAsked;
   if (body.uiMode === "window" || body.uiMode === "widget") patch.uiMode = body.uiMode;
   if (typeof body.whisperMode === "boolean") patch.whisperMode = body.whisperMode;
   if (typeof body.summonShortcut === "string") patch.summonShortcut = body.summonShortcut;
+  if (typeof body.semanticSearch === "boolean") patch.semanticSearch = body.semanticSearch;
   const s = writeDesktopSettings(patch);
   return NextResponse.json({
     ok: true,
@@ -48,5 +51,6 @@ export async function POST(req: Request) {
     uiMode: s.uiMode ?? null,
     whisperMode: s.whisperMode === true,
     summonShortcut: s.summonShortcut ?? "ctrl+super+shift+space",
+    semanticSearch: s.semanticSearch !== false,
   });
 }

@@ -840,6 +840,8 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
   const [shareUsage, setShareUsage] = useState<boolean | null>(null);
   const [desktop, setDesktop] = useState(false);
   const [runOnStartup, setRunOnStartup] = useState(true);
+  // B2 hybrid search: on-device embeddings fused into retrieval. Default on.
+  const [semanticSearch, setSemanticSearch] = useState(true);
   const [uiMode, setUiMode] = useState<"window" | "widget">("window");
   const [whisperMode, setWhisperMode] = useState(false);
   // macOS Accessibility state for whisper: "pending" = the system prompt is up
@@ -897,6 +899,7 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
         if (!alive) return;
         setDesktop(Boolean(d.desktop));
         setRunOnStartup(d.runOnStartup !== false);
+        setSemanticSearch(d.semanticSearch !== false);
         setUiMode(d.uiMode === "widget" ? "widget" : "window");
         setWhisperMode(d.whisperMode === true);
         setWhisperPermission(typeof d.whisperPermission === "string" ? d.whisperPermission : "unknown");
@@ -968,6 +971,12 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
     // consent-first boot gate honors the choice (and the deferred startup
     // prompt stays quiet).
     void postSetting({ runOnStartup: next, startupAsked: true }, () => setRunOnStartup(prev));
+  }
+
+  function updateSemantic(next: boolean) {
+    const prev = semanticSearch;
+    setSemanticSearch(next);
+    void postSetting({ semanticSearch: next }, () => setSemanticSearch(prev));
   }
 
   function updateUiMode(next: "window" | "widget") {
@@ -1156,6 +1165,14 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
                   checked={runOnStartup}
                   onChange={(_, d) => updateStartup(Boolean(d.checked))}
                   label="Open Lighthouse when I sign in to my computer"
+                />
+              )}
+
+              {desktop && (
+                <Switch
+                  checked={semanticSearch}
+                  onChange={(_, d) => updateSemantic(Boolean(d.checked))}
+                  label="Semantic search — a small bundled model (runs entirely on this computer) helps questions find files by meaning, not just matching words"
                 />
               )}
 

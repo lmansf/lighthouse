@@ -1,8 +1,9 @@
-/** Chat endpoint: retrieve from the included set, then stream a grounded answer
- *  as newline-delimited ChatChunk JSON (the final line carries references). */
+/** Chat endpoint: the full answer pipeline (single-shot RAG or multi-document
+ *  synthesis — see docs/multi-doc-synthesis.md) streamed as newline-delimited
+ *  ChatChunk JSON. Progress chunks precede the answer; the final line carries
+ *  references. */
 import type { ChatChunk, ChatTurn } from "@/contracts";
-import { retrieve } from "@/server/sources/registry";
-import { streamAnswer } from "@/server/llm";
+import { answerPipeline } from "@/server/synth";
 import { modelConfig } from "@/server/profile";
 import { isSameOrigin } from "@/server/http";
 
@@ -37,12 +38,6 @@ export async function POST(req: Request) {
         .slice(-8) // cap context: last few turns are enough and bound token cost
     : [];
 
-  // A bare follow-up ("what about the second one?") retrieves poorly on its own,
-  // so blend in the previous user turn to anchor retrieval to the topic.
-  const lastUserTurn = [...history].reverse().find((t) => t.role === "user");
-  const retrievalQuery = lastUserTurn ? `${lastUserTurn.content}\n${question}` : question;
-
-  const { references, contexts } = await retrieve(retrievalQuery, includedFileIds, attachmentFileIds);
   const cfg = modelConfig();
 
   const encoder = new TextEncoder();
@@ -51,15 +46,21 @@ export async function POST(req: Request) {
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
       try {
-        for await (const delta of streamAnswer(question, contexts, cfg, history)) {
-          controller.enqueue(line({ delta, done: false }));
+        for await (const chunk of answerPipeline(
+          question,
+          includedFileIds,
+          attachmentFileIds,
+          history,
+          cfg,
+        )) {
+          controller.enqueue(line(chunk));
         }
       } catch (err) {
         controller.enqueue(
           line({ delta: `\n\n_(error: ${err instanceof Error ? err.message : "unknown"})_`, done: false }),
         );
+        controller.enqueue(line({ delta: "", references: [], done: true }));
       }
-      controller.enqueue(line({ delta: "", references, done: true }));
       controller.close();
     },
   });

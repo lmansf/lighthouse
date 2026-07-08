@@ -29,6 +29,7 @@ zip = { workspace = true }
 quick-xml = { workspace = true }
 rayon = { workspace = true }
 notify = { workspace = true }
+datafusion = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

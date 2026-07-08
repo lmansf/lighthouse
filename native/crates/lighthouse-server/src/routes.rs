@@ -193,28 +193,7 @@ pub async fn chat_post(headers: HeaderMap, body: Option<Json<Value>>) -> Respons
         })
         .unwrap_or_default();
 
-    // A bare follow-up retrieves poorly on its own: blend in the previous user
-    // turn to anchor retrieval to the topic.
-    let last_user_turn = history.iter().rev().find(|t| t.role == "user");
-    let retrieval_query = match last_user_turn {
-        Some(t) => format!("{}\n{}", t.content, question),
-        None => question.clone(),
-    };
-
-    let retrieved =
-        sources::retrieve(&retrieval_query, &included_file_ids, &attachment_ids, 5).await;
     let cfg = profile::model_config();
-
-    let contexts: Vec<lighthouse_core::llm::Ctx> = retrieved
-        .contexts
-        .iter()
-        .map(|c| lighthouse_core::llm::Ctx {
-            name: c.name.clone(),
-            text: c.text.clone(),
-            score: c.score,
-        })
-        .collect();
-    let references = retrieved.references;
 
     let line = |c: &ChatChunk| -> bytes::Bytes {
         bytes::Bytes::from(format!(
@@ -223,16 +202,21 @@ pub async fn chat_post(headers: HeaderMap, body: Option<Json<Value>>) -> Respons
         ))
     };
 
+    // The whole ask path — single-shot RAG or multi-document synthesis, with
+    // pre-answer progress chunks (docs/multi-doc-synthesis.md) — lives in the
+    // engine pipeline, so this route and the desktop IPC command behave
+    // identically (retrieval-query blending included).
     let stream = async_stream::stream! {
-        let mut answer = lighthouse_core::llm::stream_answer(question, contexts, cfg, history);
-        while let Some(delta) = answer.next().await {
-            yield Ok::<bytes::Bytes, std::convert::Infallible>(line(&ChatChunk {
-                delta,
-                references: None,
-                done: false,
-            }));
+        let mut chunks = lighthouse_core::synth::answer_pipeline(
+            question,
+            included_file_ids,
+            attachment_ids,
+            history,
+            cfg,
+        );
+        while let Some(c) = chunks.next().await {
+            yield Ok::<bytes::Bytes, std::convert::Infallible>(line(&c));
         }
-        yield Ok(line(&ChatChunk { delta: String::new(), references: Some(references), done: true }));
     };
 
     Response::builder()
@@ -789,6 +773,7 @@ pub async fn settings_get() -> Response {
             .summon_shortcut
             .as_deref()
             .unwrap_or(settings::DEFAULT_SUMMON_SHORTCUT),
+        "semanticSearch": s.semantic_search != Some(false), // default on
     }))
     .into_response()
 }
@@ -811,6 +796,7 @@ pub async fn settings_post(headers: HeaderMap, body: Option<Json<Value>>) -> Res
         body["uiMode"].as_str().map(String::from),
         body["whisperMode"].as_bool(),
         body["summonShortcut"].as_str().map(String::from),
+        body["semanticSearch"].as_bool(),
     );
     Json(json!({
         "ok": true,
@@ -822,6 +808,7 @@ pub async fn settings_post(headers: HeaderMap, body: Option<Json<Value>>) -> Res
             .summon_shortcut
             .as_deref()
             .unwrap_or(settings::DEFAULT_SUMMON_SHORTCUT),
+        "semanticSearch": s.semantic_search != Some(false),
     }))
     .into_response()
 }

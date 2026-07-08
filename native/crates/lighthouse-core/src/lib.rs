@@ -6,8 +6,10 @@
 //! wire protocol during the migration. Where behavior is intentionally
 //! different it is called out with a `PARITY:` comment.
 
+pub mod analytics;
 pub mod config;
 pub mod contracts;
+pub mod embed;
 pub mod experiment;
 pub mod extract;
 pub mod index;
@@ -17,6 +19,8 @@ pub mod local_model;
 pub mod profile;
 pub mod settings;
 pub mod sources;
+pub mod synth;
+pub mod table_profile;
 pub mod tts;
 pub mod usage;
 pub mod vault;

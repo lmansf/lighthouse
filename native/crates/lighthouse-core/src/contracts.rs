@@ -51,11 +51,24 @@ pub struct ChatTurn {
     pub content: String,
 }
 
+/// Pre-answer stage note streamed while the engine works through a multi-step
+/// plan (multi-document synthesis) — rendered in the chat loader.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatProgress {
+    /// Human-readable stage, e.g. "Reading q3-summary.csv (2/5)…".
+    pub label: String,
+    pub step: usize,
+    pub total: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatChunk {
     pub delta: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub references: Option<Vec<RagReference>>,
+    /// Pre-answer progress (multi-document synthesis stages).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub progress: Option<ChatProgress>,
     pub done: bool,
 }
 

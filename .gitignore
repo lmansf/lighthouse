@@ -57,6 +57,11 @@ next-env.d.ts
 /resources/tts/*
 !/resources/tts/.gitkeep
 
+# Bundled embedding model (nomic-embed GGUF, B2 hybrid search) — fetched at
+# build time by `npm run fetch:model`.
+/resources/embed/*
+!/resources/embed/.gitkeep
+
 # Lavish review artifacts (local tooling)
 .lavish/
 

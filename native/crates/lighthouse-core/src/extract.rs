@@ -16,7 +16,7 @@ use sha1::{Digest, Sha1};
 use crate::config::state_dir;
 
 /// Document formats we recover text from beyond plain UTF-8 files.
-const RICH_EXT: &[&str] = &[".pdf", ".docx", ".xlsx", ".xls"];
+const RICH_EXT: &[&str] = &[".pdf", ".docx", ".xlsx", ".xls", ".parquet"];
 
 pub fn is_rich_file(name: &str) -> bool {
     let ext = match name.rsplit_once('.') {
@@ -102,6 +102,44 @@ fn extract_docx(buf: &[u8]) -> anyhow::Result<String> {
     Ok(paragraphs.join("\n\n"))
 }
 
+/// Render a Parquet file's schema + head rows as CSV-shaped text so its
+/// content is searchable (it was name-match-only before; docs/analytics-genie.md).
+/// The analytics engine queries the file directly — this is only for retrieval.
+fn extract_parquet(abs: &Path) -> anyhow::Result<String> {
+    use datafusion::arrow::util::display::array_value_to_string;
+    use datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    const MAX_ROWS: usize = 200;
+    let file = fs::File::open(abs)?;
+    let reader = ParquetRecordBatchReaderBuilder::try_new(file)?.build()?;
+    let mut lines: Vec<String> = Vec::new();
+    let mut rows = 0usize;
+    for batch in reader {
+        let batch = batch?;
+        if lines.is_empty() {
+            lines.push(
+                batch
+                    .schema()
+                    .fields()
+                    .iter()
+                    .map(|f| csv_cell(f.name().clone()))
+                    .collect::<Vec<_>>()
+                    .join(","),
+            );
+        }
+        for row in 0..batch.num_rows() {
+            if rows >= MAX_ROWS {
+                return Ok(lines.join("\n"));
+            }
+            let cells: Vec<String> = (0..batch.num_columns())
+                .map(|c| csv_cell(array_value_to_string(batch.column(c), row).unwrap_or_default()))
+                .collect();
+            lines.push(cells.join(","));
+            rows += 1;
+        }
+    }
+    Ok(lines.join("\n"))
+}
+
 /// Format a spreadsheet cell like SheetJS's CSV output (quote when needed).
 fn csv_cell(raw: String) -> String {
     if raw.contains(',') || raw.contains('"') || raw.contains('\n') {
@@ -111,7 +149,7 @@ fn csv_cell(raw: String) -> String {
     }
 }
 
-fn cell_text(cell: &calamine::Data) -> String {
+pub(crate) fn cell_text(cell: &calamine::Data) -> String {
     use calamine::Data;
     match cell {
         Data::Empty => String::new(),
@@ -162,6 +200,7 @@ fn extract_by_ext(abs: &Path, ext: &str) -> anyhow::Result<String> {
         ".pdf" => extract_pdf(&fs::read(abs)?),
         ".docx" => extract_docx(&fs::read(abs)?),
         ".xlsx" | ".xls" => extract_xlsx(abs),
+        ".parquet" => extract_parquet(abs),
         _ => Ok(String::new()),
     }
 }
