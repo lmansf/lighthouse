@@ -66,10 +66,10 @@ const VOICE_REVISION = "e21c7de8d4eab79b902f0d61e662b3f21664b8d2"; // rhasspy/pi
 // in resources/embed/ — NEVER resources/llm/, where model discovery would
 // mistake it for an installed chat model.
 const EMBED_REPO = "nomic-ai/nomic-embed-text-v1.5-GGUF"; // Hugging Face repo
-// Pinned repo commit. Empty = not yet pinned: the normal path fails closed and
-// `--record` resolves the current main, prints it, and computes the digest —
-// paste both here (same bootstrap flow as ASSET_SHA256).
-const EMBED_REVISION = "";
+// Pinned repo commit (recorded by the asset-digests workflow; re-record when
+// bumping). Empty = not yet pinned: the normal path fails closed and
+// `--record` resolves the current main, prints it, and computes the digest.
+const EMBED_REVISION = "0188c9bf409793f810680a5a431e7b899c46104c";
 const EMBED_FILE = "nomic-embed-text-v1.5.Q8_0.gguf";
 const ASSET_SHA256 = {
   // Vulkan builds (preferred on win/linux): GPU offload with a dynamic CPU
@@ -83,8 +83,14 @@ const ASSET_SHA256 = {
   "llama-b9859-bin-macos-arm64.tar.gz": "21e720ac103d28d7585a52b8023fb86fc0736c90ad92c1e75053207630e90df6",
   "piper_windows_amd64.zip": "f3c58906402b24f3a96d92145f58acba6d86c9b5db896d207f78dc80811efcea",
   "piper_macos_aarch64.tar.gz": "6b1eb03b3735946cb35216e063e7eebcc33a6bbf5dd96ec0217959bf1cdcb0cc",
+  // Linux piper was never pinned — the fetch step on Linux release runners had
+  // been failing closed here (TTS quietly missing from Linux bundles). Digest
+  // recorded by the first asset-digests run.
+  "piper_linux_x86_64.tar.gz": "a50cb45f355b7af1f6d758c1b360717877ba0a398cc8cbe6d2a7a3a26e225992",
   "en_US-lessac-medium.onnx": "5efe09e69902187827af646e1a6e9d269dee769f9877d17b16b1b46eeaaf019f",
   "en_US-lessac-medium.onnx.json": "efe19c417bed055f2d69908248c6ba650fa135bc868b0e6abb3da181dab690a0",
+  // B2 embedding model (see EMBED_* above) — one GGUF for all three OS builds.
+  "nomic-embed-text-v1.5.Q8_0.gguf": "3e24342164b3d94991ba9692fdc0dd08e3fd7362e0aacc396a9a5c54a544c3b7",
 };
 // `--record` recomputes and prints digests (to bootstrap a version bump) instead
 // of enforcing them; the normal path fails closed on any missing/mismatched hash.
