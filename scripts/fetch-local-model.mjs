@@ -324,11 +324,32 @@ function moveUp(srcDir, dir) {
   rmSync(srcDir, { recursive: true, force: true });
 }
 
-/** Flatten Piper's archive (it unpacks into a `piper/` subfolder) into `dir`. */
+/** True when `p` exists AND is a regular file (a directory doesn't count). */
+function isFileAt(p) {
+  return statSync(p, { throwIfNoEntry: false })?.isFile() ?? false;
+}
+
+/**
+ * Flatten Piper's archive (it unpacks into a `piper/` subfolder) into `dir`.
+ *
+ * Two traps, both hit in production before this shape:
+ * - The extracted FOLDER is named exactly like the BINARY ("piper/piper"), so
+ *   an existsSync() "already flat?" probe matches the folder and skips the
+ *   flatten entirely — piper then lives nested forever (the v0.6.0 Linux
+ *   AppImage failure: linuxdeploy found the nested unpatched libs). Probe with
+ *   isFile instead.
+ * - Moving the folder's contents up would rename the `piper` FILE onto the
+ *   `piper` FOLDER path itself (EISDIR). Park the folder under a temp name
+ *   first so the move-up can never collide.
+ */
 function flattenPiper(dir, piperName) {
-  if (existsSync(join(dir, piperName))) return; // already at top level
+  if (isFileAt(join(dir, piperName))) return; // already at top level
   const srcDir = findDirWith(dir, piperName);
-  if (srcDir && srcDir !== dir) moveUp(srcDir, dir);
+  if (!srcDir || srcDir === dir) return;
+  const tmp = join(dir, ".piper-extract-tmp");
+  rmSync(tmp, { recursive: true, force: true });
+  renameSync(srcDir, tmp);
+  moveUp(tmp, dir);
 }
 
 /**
@@ -367,7 +388,7 @@ async function fetchTts() {
   const piperPath = join(ttsDest, piperName);
 
   // 1. Piper binary (+ libraries, espeak-ng-data)
-  if (!force && existsSync(piperPath)) {
+  if (!force && isFileAt(piperPath)) {
     console.log(`✓ ${piperName} already present`);
   } else {
     const piperTag = process.env.PIPER_VERSION?.trim() || PIPER_VERSION;
@@ -380,10 +401,12 @@ async function fetchTts() {
     extract(archivePath, ttsDest);
     rmSync(archivePath, { force: true });
     flattenPiper(ttsDest, piperName);
-    if (!existsSync(piperPath)) throw new Error(`extracted, but ${piperName} not found in ${ttsDest}`);
-    patchPiperRpath(ttsDest);
+    if (!isFileAt(piperPath)) throw new Error(`extracted, but ${piperName} not found in ${ttsDest}`);
     console.log(`✓ ${piperName}`);
   }
+  // Outside the else: a piper left by an older fetch gets its RUNPATH fixed
+  // too (patchelf --set-rpath is idempotent).
+  patchPiperRpath(ttsDest);
 
   // 2. Voice model (.onnx) + its config (.onnx.json) — a clear, natural US voice.
   const voiceBase =
