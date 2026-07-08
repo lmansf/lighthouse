@@ -8,7 +8,10 @@
 #                  runs), then a live smoke test of the B2 embedding stack:
 #                  boot the fetched llama-server with --embedding against the
 #                  fetched GGUF and assert /v1/embeddings returns sane vectors
-#                  (related text pairs must out-score unrelated ones).
+#                  (related text pairs must out-score unrelated ones). Then the
+#                  retrieval eval: the golden-question benchmark (lexical vs
+#                  hybrid, examples/retrieval_eval.rs) runs against the REAL
+#                  model and enforces its quality floors.
 name: asset-digests
 
 on:
@@ -75,3 +78,22 @@ jobs:
             if (!(rel > unrel + 0.05)) throw new Error(`no semantic separation: related ${rel} vs unrelated ${unrel}`);
             console.log("embedding stack OK");
           '
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native
+      - name: Retrieval eval (golden set, lexical vs hybrid on the real model)
+        run: |
+          set -euo pipefail
+          resources/llm/llama-server -m resources/embed/*.gguf \
+            --host 127.0.0.1 --port 8091 --embedding --pooling mean -c 2048 -ngl 0 &
+          SERVER=$!
+          trap 'kill $SERVER 2>/dev/null || true' EXIT
+          ok=""
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8091/health >/dev/null 2>&1; then ok=1; break; fi
+            sleep 2
+          done
+          [ -n "$ok" ] || { echo "embedding server never became healthy"; exit 1; }
+          cd native
+          LIGHTHOUSE_EMBED_URL=http://127.0.0.1:8091 cargo run -p lighthouse-core --example retrieval_eval

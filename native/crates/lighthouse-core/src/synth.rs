@@ -246,13 +246,13 @@ pub fn answer_pipeline(
                     ))
                     .await;
                     let mut attempt = crate::analytics::extract_sql(&strip_markers(&raw));
-                    let mut outcome: Option<(String, String, usize, bool)> = None;
+                    let mut outcome: Option<(String, crate::analytics::QueryResult)> = None;
                     for round in 0..2 {
                         let Some(sql) = attempt.clone() else { break };
                         yield progress("Running the query…".to_string(), 3, 4);
                         match crate::analytics::run_query(&ctx, &sql).await {
-                            Ok((md, shown, more)) => {
-                                outcome = Some((sql, md, shown, more));
+                            Ok(res) => {
+                                outcome = Some((sql, res));
                                 break;
                             }
                             Err(err) if round == 0 => {
@@ -273,13 +273,15 @@ pub fn answer_pipeline(
                             Err(_) => break,
                         }
                     }
-                    if let Some((sql, md, shown, more)) = outcome {
+                    if let Some((sql, res)) = outcome {
                         yield progress("Summarizing results…".to_string(), 4, 4);
                         let mut ctxs: Vec<Ctx> = vec![Ctx {
                             name: "query result — computed exactly by Lighthouse".to_string(),
                             text: format!(
-                                "SQL:\n{sql}\n\nResult ({shown} row(s){}):\n{md}",
-                                if more { ", truncated" } else { "" }
+                                "SQL:\n{sql}\n\nResult ({} row(s){}):\n{}",
+                                res.shown,
+                                if res.truncated { ", truncated" } else { "" },
+                                res.markdown
                             ),
                             score: 1.0,
                         }];
@@ -295,6 +297,12 @@ pub fn answer_pipeline(
                         }
                         // Deterministic transparency — never model-generated.
                         yield delta(format!("\n\n*Query used:*\n```sql\n{sql}\n```\n"));
+                        // Chartable result → engine-built spec the chat renders
+                        // as SVG (Phase C). Data comes straight from the query
+                        // batches; the model never sees or writes this block.
+                        if let Some(chart) = &res.chart {
+                            yield delta(format!("\n```lighthouse-chart\n{chart}\n```\n"));
+                        }
                         let mut seen: std::collections::HashSet<String> =
                             std::collections::HashSet::new();
                         let refs: Vec<RagReference> = regs

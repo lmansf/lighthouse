@@ -127,11 +127,23 @@ pub fn stream_answer(
             match failed {
                 None => return,
                 Some(msg) => {
-                    let note = format!(
-                        "\n\n_(Local model unavailable — {}{})_\n\n",
-                        msg,
-                        if emitted { "." } else { "; is the local model running? Falling back to passages." }
-                    );
+                    // An oversized prompt is OUR bug (the budgets above should
+                    // make it unreachable) — don't tell the user to check
+                    // whether the model is running; it is.
+                    let too_big = msg.contains("exceed_context_size")
+                        || msg.contains("exceeds the available context size");
+                    let note = if too_big {
+                        format!(
+                            "\n\n_(This question plus its context didn't fit the local model's window — {}. Answering from the most relevant passages instead.)_\n\n",
+                            msg
+                        )
+                    } else {
+                        format!(
+                            "\n\n_(Local model unavailable — {}{})_\n\n",
+                            msg,
+                            if emitted { "." } else { "; is the local model running? Falling back to passages." }
+                        )
+                    };
                     yield note;
                     if emitted {
                         return;
@@ -292,6 +304,67 @@ async fn stream_claude(
     })
 }
 
+// --- Local prompt budget -----------------------------------------------------------
+//
+// The local server runs a FIXED 6144-token window (supervise.rs) and rejects
+// oversized prompts with a 400 instead of answering — a 0.6.0 field report hit
+// 12.6k prompt tokens from an analytics result table. The Claude path has a
+// 200k window and keeps the unbounded TS-parity packing; the LOCAL path clamps
+// here as a last line of defense (analytics also caps its own payloads).
+// Budgets are chars, sized at ~4 chars/token: system (~0.9k tok) + history
+// (≤1.5k) + contexts (≤2.8k) + question leaves >1k tokens for the answer.
+
+/// Per context block / all blocks combined, chars.
+const LOCAL_CTX_BLOCK_MAX_CHARS: usize = 6_000;
+const LOCAL_CTX_TOTAL_MAX_CHARS: usize = 11_000;
+/// Prior-turn history kept for the local prompt, chars (newest turns win).
+const LOCAL_HISTORY_MAX_CHARS: usize = 6_000;
+
+/// Clamp contexts to the local budget: each block clipped, then whole blocks
+/// dropped lowest-score-first until the total fits. Order is preserved (the
+/// numbered citations must keep matching what the answer refers to).
+fn clamp_local_contexts(contexts: &[Ctx]) -> Vec<Ctx> {
+    let mut out: Vec<Ctx> = contexts
+        .iter()
+        .map(|c| {
+            let mut c = c.clone();
+            if c.text.chars().count() > LOCAL_CTX_BLOCK_MAX_CHARS {
+                c.text = c.text.chars().take(LOCAL_CTX_BLOCK_MAX_CHARS).collect::<String>() + "…";
+            }
+            c
+        })
+        .collect();
+    let total = |cs: &[Ctx]| cs.iter().map(|c| c.text.chars().count()).sum::<usize>();
+    while out.len() > 1 && total(&out) > LOCAL_CTX_TOTAL_MAX_CHARS {
+        let (worst, _) = out
+            .iter()
+            .enumerate()
+            .min_by(|(_, a), (_, b)| {
+                a.score.partial_cmp(&b.score).unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|(i, c)| (i, c.score))
+            .unwrap_or((out.len() - 1, 0.0));
+        out.remove(worst);
+    }
+    out
+}
+
+/// Newest prior turns whose combined size fits the local history budget.
+fn clamp_local_history(history: &[ChatTurn]) -> Vec<ChatTurn> {
+    let mut kept: Vec<ChatTurn> = Vec::new();
+    let mut used = 0usize;
+    for t in history.iter().rev() {
+        let n = t.content.chars().count();
+        if used + n > LOCAL_HISTORY_MAX_CHARS {
+            break;
+        }
+        used += n;
+        kept.push(t.clone());
+    }
+    kept.reverse();
+    kept
+}
+
 /// Stream from a local OpenAI-compatible chat-completions endpoint. Only the
 /// connect/headers phase is bounded; a long generation stream is never cut.
 async fn stream_local(
@@ -300,12 +373,14 @@ async fn stream_local(
     model: &str,
     history: &[ChatTurn],
 ) -> DeltaStream {
+    let contexts = clamp_local_contexts(contexts);
+    let history = clamp_local_history(history);
     let mut messages: Vec<serde_json::Value> =
         vec![json!({ "role": "system", "content": SYSTEM_PROMPT })];
-    for t in prior_turns(history) {
+    for t in prior_turns(&history) {
         messages.push(json!({ "role": t.role, "content": t.content }));
     }
-    messages.push(json!({ "role": "user", "content": build_prompt(question, contexts) }));
+    messages.push(json!({ "role": "user", "content": build_prompt(question, &contexts) }));
     let body = json!({
         "model": model,
         "max_tokens": 1024,
@@ -447,4 +522,49 @@ pub async fn warm_local_model() {
         .json(&body)
         .send()
         .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ctx(name: &str, chars: usize, score: f64) -> Ctx {
+        Ctx { name: name.into(), text: "x".repeat(chars), score }
+    }
+
+    #[test]
+    fn local_context_budget_clips_blocks_and_drops_lowest_scores() {
+        // One oversized block is clipped to the per-block cap (+ellipsis).
+        let clipped = clamp_local_contexts(&[ctx("big", 50_000, 1.0)]);
+        assert_eq!(clipped.len(), 1);
+        assert!(clipped[0].text.chars().count() <= LOCAL_CTX_BLOCK_MAX_CHARS + 1);
+
+        // Six 5k blocks exceed the total budget: lowest scores drop, the top
+        // block survives, relative order is preserved, and it never empties.
+        let many: Vec<Ctx> = (0..6).map(|i| ctx(&format!("c{i}"), 5_000, i as f64)).collect();
+        let packed = clamp_local_contexts(&many);
+        let total: usize = packed.iter().map(|c| c.text.chars().count()).sum();
+        assert!(total <= LOCAL_CTX_TOTAL_MAX_CHARS, "total {total}");
+        assert!(!packed.is_empty());
+        assert!(packed.iter().any(|c| c.name == "c5"), "highest score must survive");
+        let names: Vec<&str> = packed.iter().map(|c| c.name.as_str()).collect();
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(names, sorted, "citation order must be preserved");
+    }
+
+    #[test]
+    fn local_history_budget_keeps_newest_turns() {
+        let turns: Vec<ChatTurn> = (0..10)
+            .map(|i| ChatTurn {
+                role: if i % 2 == 0 { "user" } else { "assistant" }.into(),
+                content: format!("{i}-{}", "y".repeat(1_500)),
+            })
+            .collect();
+        let kept = clamp_local_history(&turns);
+        let used: usize = kept.iter().map(|t| t.content.chars().count()).sum();
+        assert!(used <= LOCAL_HISTORY_MAX_CHARS, "used {used}");
+        assert!(kept.last().unwrap().content.starts_with("9-"), "newest turn kept");
+        assert!(kept.iter().all(|t| !t.content.starts_with("0-")), "oldest dropped");
+    }
 }
