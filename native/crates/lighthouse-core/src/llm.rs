@@ -310,6 +310,12 @@ async fn stream_local(
         "model": model,
         "max_tokens": 1024,
         "stream": true,
+        // llama-server extension (harmlessly ignored by Ollama/LM Studio):
+        // reuse the KV cache for the longest common prefix with the previous
+        // request. The system prompt + conversation history ARE that prefix,
+        // so follow-up turns only pay prompt-processing for the newly
+        // retrieved context and question. Keep in sync with the TS twin.
+        "cache_prompt": true,
         "messages": messages,
     });
     Box::pin(async_stream::stream! {
@@ -408,4 +414,37 @@ fn extractive(question: &str, contexts: &[Ctx], no_key: bool) -> AnswerStream {
             tokio::time::sleep(Duration::from_millis(6)).await;
         }
     })
+}
+
+/// Warm the local server after a (re)start: a 1-token completion whose only
+/// prefix is the system prompt. This (a) pages the memory-mapped weights in
+/// off disk before the user's first question, and (b) pre-fills the system
+/// prompt's KV cache — which every real request shares via `cache_prompt` —
+/// so even the first ask only pays prompt-processing for its own context.
+/// Best-effort: a failure just means the first ask warms the server instead.
+pub async fn warm_local_model() {
+    let model = {
+        let m = local_llm_model();
+        if m.is_empty() { "lighthouse-local".to_string() } else { m }
+    };
+    let body = json!({
+        "model": model,
+        "max_tokens": 1,
+        "stream": false,
+        "cache_prompt": true,
+        "messages": [
+            { "role": "system", "content": SYSTEM_PROMPT },
+            { "role": "user", "content": "Warm-up." },
+        ],
+    });
+    let client = reqwest::Client::new();
+    // Generous bound: a cold 4 GB mmap read plus system-prompt prefill can take
+    // minutes on a slow disk — this runs in the background, so patience is free.
+    let _ = client
+        .post(local_llm_url())
+        .header("content-type", "application/json")
+        .timeout(Duration::from_secs(600))
+        .json(&body)
+        .send()
+        .await;
 }

@@ -72,6 +72,12 @@ impl Supervisor {
             // and formats correctly. Any build new enough to hit that error
             // supports this flag, so it's safe.
             .arg("--no-jinja")
+            // Context window: the server default (4096) silently context-shifts
+            // once system prompt + history + retrieved chunks outgrow it —
+            // dropping the oldest turns mid-conversation degrades answers with
+            // no visible sign. 6144 covers long chats while keeping the KV
+            // cache (~0.75 GB fp16) affordable on 8 GB machines.
+            .args(["-c", "6144"])
             .current_dir(llm_root())
             .stdin(Stdio::null());
         // Log to a file instead of a console window.
@@ -92,7 +98,28 @@ impl Supervisor {
             cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
         }
         match cmd.spawn() {
-            Ok(child) => *guard = Some(child),
+            Ok(child) => {
+                *guard = Some(child);
+                // Warm the model in the background: wait until /health says the
+                // weights are loaded, then run a 1-token completion that pages
+                // the mmap'd GGUF in off disk and pre-fills the system prompt's
+                // KV cache (llm::warm_local_model). With cache_prompt on every
+                // real request, the user's FIRST question then pays only for
+                // its own retrieved context instead of a full cold start.
+                tauri::async_runtime::spawn(async {
+                    let client = reqwest::Client::new();
+                    for _ in 0..120 {
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        match client.get("http://127.0.0.1:8080/health").send().await {
+                            Ok(r) if r.status().is_success() => {
+                                lighthouse_core::llm::warm_local_model().await;
+                                return;
+                            }
+                            _ => {}
+                        }
+                    }
+                });
+            }
             Err(e) => eprintln!("local model failed to start: {e}"),
         }
     }
