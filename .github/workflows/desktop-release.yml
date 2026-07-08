@@ -67,7 +67,15 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Build Tauri bundles
         working-directory: native/crates/lighthouse-desktop
-        run: npx --yes @tauri-apps/cli@^2 build
+        env:
+          # linuxdeploy strips every ELF it finds in the AppDir. The prebuilt
+          # piper/onnxruntime/espeak libraries (bundled for on-device TTS since
+          # the Linux digest fix) make strip fail, which surfaces only as
+          # "failed to run linuxdeploy". Skip stripping — these prebuilt libs
+          # ship unstripped on every other OS anyway, and our own release
+          # binary is small. Harmless on Windows/macOS (env is unused there).
+          NO_STRIP: "true"
+        run: npx --yes @tauri-apps/cli@^2 build --verbose
       - name: Collect assets
         shell: bash
         run: |
