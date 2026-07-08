@@ -332,6 +332,30 @@ function flattenPiper(dir, piperName) {
 }
 
 /**
+ * Linux only: stamp `$ORIGIN` as the RUNPATH on piper's binary and libraries.
+ * The 2023 piper release only gives the *binary* an rpath — the bundled
+ * libraries have none, so libpiper_phonemize's NEEDED libespeak-ng.so.1
+ * resolves neither for linuxdeploy (AppImage bundling hard-fails with
+ * "Could not find dependency: libespeak-ng.so.1") nor reliably for the
+ * runtime loader. patchelf ships in the release workflow's system deps;
+ * elsewhere this is best-effort with a warning.
+ */
+function patchPiperRpath(dir) {
+  if (platform !== "linux") return;
+  const probe = spawnSync("patchelf", ["--version"], { stdio: "ignore" });
+  if (probe.status !== 0) {
+    console.warn("  patchelf not found — skipping piper RUNPATH fix (AppImage bundling may fail)");
+    return;
+  }
+  const elves = readdirSync(dir).filter((f) => f === "piper" || /\.so(\.|$)/.test(f));
+  for (const f of elves) {
+    const r = spawnSync("patchelf", ["--set-rpath", "$ORIGIN", join(dir, f)], { stdio: "inherit" });
+    if (r.status !== 0) throw new Error(`patchelf failed on ${f}`);
+  }
+  console.log(`  RUNPATH=$ORIGIN stamped on ${elves.length} piper ELF file(s)`);
+}
+
+/**
  * Fetch Piper + a neural voice into resources/tts/ for on-device read-aloud TTS.
  * Mirrors the llama-server flow: resolve the per-OS release asset, extract, and
  * flatten so `piper(.exe)` and its libraries sit directly in resources/tts/.
@@ -357,6 +381,7 @@ async function fetchTts() {
     rmSync(archivePath, { force: true });
     flattenPiper(ttsDest, piperName);
     if (!existsSync(piperPath)) throw new Error(`extracted, but ${piperName} not found in ${ttsDest}`);
+    patchPiperRpath(ttsDest);
     console.log(`✓ ${piperName}`);
   }
 
