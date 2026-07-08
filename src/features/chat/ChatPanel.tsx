@@ -74,6 +74,8 @@ import { chatService, MODEL_PROVIDERS } from "@/contracts";
 import { useRagStore } from "@/stores/useRagStore";
 import { useAuthStore } from "@/stores/useAuthStore";
 import { logEvent } from "@/lib/logEvent";
+import { parseChartSpec, tableToCsv } from "@/lib/chartSpec";
+import { AnalyticsChart } from "@/features/chat/AnalyticsChart";
 import { useChatStore, type TranscriptMessage } from "@/stores/useChatStore";
 import { modKey } from "@/features/onboarding/ModeChooser";
 import { ACCENTS } from "@/shell/theme";
@@ -321,6 +323,23 @@ const useStyles = makeStyles({
     borderRadius: tokens.borderRadiusCircular,
     cursor: "pointer",
     ":hover": { backgroundColor: tokens.colorBrandBackground2Hover },
+  },
+  // Chat tables: horizontal scroll for wide results + a hover "Copy CSV"
+  // affordance (analytics result tables are the heavy user, but any markdown
+  // table gets it).
+  tableWrap: {
+    position: "relative",
+    overflowX: "auto",
+    ":hover .lh-copy-csv": { opacity: 1 },
+    ":focus-within .lh-copy-csv": { opacity: 1 },
+  },
+  copyCsvBtn: {
+    position: "absolute",
+    top: "2px",
+    right: "2px",
+    opacity: 0,
+    transitionProperty: "opacity",
+    transitionDuration: tokens.durationFaster,
   },
   refs: {
     display: "flex",
@@ -680,9 +699,84 @@ function formatRelativeTime(ts: number): string {
   return new Date(ts).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
+/** The fence language the analytics engine uses for verified chart specs. */
+const CHART_LANG = "language-lighthouse-chart";
+
+/** All text under a hast node — cell contents may nest strong/em/code. */
+function hastText(node: unknown): string {
+  if (typeof node !== "object" || node === null) return "";
+  const n = node as { type?: string; value?: string; children?: unknown[] };
+  if (n.type === "text") return n.value ?? "";
+  return (n.children ?? []).map(hastText).join("");
+}
+
+/** Rows (header first) of a hast <table>, for the copy-as-CSV affordance. */
+function hastTableRows(table: unknown): string[][] {
+  const rows: string[][] = [];
+  const walk = (node: unknown) => {
+    if (typeof node !== "object" || node === null) return;
+    const n = node as { tagName?: string; children?: unknown[] };
+    if (n.tagName === "tr") {
+      const cells = (n.children ?? [])
+        .filter((c) => {
+          const t = (c as { tagName?: string }).tagName;
+          return t === "td" || t === "th";
+        })
+        .map((c) => hastText(c).trim());
+      if (cells.length) rows.push(cells);
+      return;
+    }
+    (n.children ?? []).forEach(walk);
+  };
+  walk(table);
+  return rows;
+}
+
+/** Hover "Copy CSV" button on chat tables; flips to a checkmark briefly. */
+function CopyCsvButton({ rows }: { rows: string[][] }) {
+  const styles = useStyles();
+  const [copied, setCopied] = useState(false);
+  return (
+    <Tooltip content="Copy table as CSV" relationship="label">
+      <Button
+        size="small"
+        appearance="secondary"
+        className={mergeClasses(styles.copyCsvBtn, "lh-copy-csv")}
+        icon={copied ? <CheckmarkRegular /> : <CopyRegular />}
+        aria-label="Copy table as CSV"
+        onClick={() => {
+          void navigator.clipboard
+            .writeText(tableToCsv(rows))
+            .then(() => {
+              setCopied(true);
+              logEvent("chat_table_copy_csv");
+              window.setTimeout(() => setCopied(false), 1600);
+            })
+            .catch(() => {});
+        }}
+      />
+    </Tooltip>
+  );
+}
+
+/** True when a hast <pre> wraps exactly a lighthouse-chart code fence. */
+function isChartPre(node: unknown): boolean {
+  const child = (node as { children?: unknown[] })?.children?.[0] as
+    | { tagName?: string; properties?: { className?: unknown } }
+    | undefined;
+  const cls = child?.properties?.className;
+  return (
+    child?.tagName === "code" && Array.isArray(cls) && cls.includes(CHART_LANG)
+  );
+}
+
 /**
  * Renders an assistant answer's Markdown, upgrading [n] citation markers into
  * clickable superscript chips that jump to the matching reference card below.
+ * Analytics extras (Phase C): ```lighthouse-chart fences render as theme-aware
+ * SVG charts (the spec is engine-built from the verified query result — a
+ * malformed spec falls back to a visible code block, never a broken drawing),
+ * and every table gets a hover copy-as-CSV button.
  * Memoized so finished turns don't re-render on every streamed token.
  */
 const AnswerMarkdown = memo(function AnswerMarkdown({
@@ -718,6 +812,30 @@ const AnswerMarkdown = memo(function AnswerMarkdown({
           <a {...props} href={href} target="_blank" rel="noopener noreferrer">
             {children}
           </a>
+        );
+      },
+      // Unwrap the <pre> around chart fences so the figure isn't inside
+      // preformatted text; all other code blocks keep their default <pre>.
+      pre: ({ node, children, ...props }) =>
+        isChartPre(node) ? <>{children}</> : <pre {...props}>{children}</pre>,
+      code: ({ node, className, children, ...props }) => {
+        if (className?.split(" ").includes(CHART_LANG)) {
+          const spec = parseChartSpec(String(children ?? ""));
+          if (spec) return <AnalyticsChart spec={spec} />;
+        }
+        return (
+          <code {...props} className={className}>
+            {children}
+          </code>
+        );
+      },
+      table: ({ node, children, ...props }) => {
+        const rows = hastTableRows(node);
+        return (
+          <div className={styles.tableWrap}>
+            {rows.length > 1 && <CopyCsvButton rows={rows} />}
+            <table {...props}>{children}</table>
+          </div>
         );
       },
     }),

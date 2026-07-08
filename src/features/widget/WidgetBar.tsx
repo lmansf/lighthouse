@@ -909,7 +909,12 @@ export function WidgetBar() {
           </div>
           <div className={styles.answerBody}>
             {answer.content ? (
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{answer.content}</ReactMarkdown>
+              // The pill is too small for the analytics charts the engine can
+              // append (```lighthouse-chart fences) — strip them here; the
+              // numbers are in the prose, and the main window draws the chart.
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                {answer.content.replace(/```lighthouse-chart[\s\S]*?(```|$)/g, "")}
+              </ReactMarkdown>
             ) : answer.streaming ? (
               <Text size={200} className={styles.snippet}>
                 {answer.progress || "Thinking…"}

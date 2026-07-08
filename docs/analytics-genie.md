@@ -124,18 +124,26 @@ zero setup. How it ships:
 - **TS twin**: stays lexical (desktop-only, like the analytics engine); the
   dev server just round-trips the preference.
 
-## Phase C — depth (DESIGNED)
+## Phase C — depth
 
-- **Charts in chat**: deterministic SVG (bar/line) rendered by the engine from
-  small group-by results — needs a chat renderer component for inline SVG
-  (ReactMarkdown is sanitized today); worth doing together with a "copy as
-  CSV" affordance on result tables.
-- **PDF layout/tables**: current extraction is text-only and serves prose RAG;
-  PDF *table* extraction is research-grade — revisit after A/B prove out, or
-  lean on hosted-model vision for the rare scanned-table ask (privacy opt-in).
-- **NL→SQL few-shots**: once real usage exists, add 3–5 curated examples per
-  common shape (top-N, month-over-month, share-of-total) to the SQL prompt —
-  the cheapest accuracy lift for the local 7B.
+- **Charts in chat (BUILT)**: chartable results (label column + 1–3 numeric
+  columns, 2–24 rows) become an engine-built JSON spec in a
+  `lighthouse-chart` code fence — data straight from the query batches, never
+  model text. The chat renderer draws it as a theme-aware SVG (bar; line when
+  the labels read as dates/quarters); a malformed spec degrades to a visible
+  code block; the widget pill strips the fence (the numbers are in the prose).
+  Spec validation + axis math live in `src/lib/chartSpec.ts` (node-tested);
+  the emitter is `core::analytics::chart_spec_from_batches` (unit-tested).
+- **Copy as CSV (BUILT)**: every table in a chat answer gets a hover
+  copy-as-CSV button (RFC-4180 quoting via `tableToCsv`).
+- **NL→SQL few-shots (BUILT)**: five curated examples (top-N, trend,
+  month-over-month via LAG, share-of-total via a window over an aggregate,
+  join) ride in the SQL prompt with deliberately generic names; a unit test
+  rejects any example the engine's own guard wouldn't accept.
+- **PDF layout/tables (DESIGNED)**: current extraction is text-only and serves
+  prose RAG; PDF *table* extraction is research-grade — revisit after A/B/C
+  prove out, or lean on hosted-model vision for the rare scanned-table ask
+  (privacy opt-in).
 
 ---
 
@@ -144,6 +152,11 @@ zero setup. How it ships:
 - Unit fixtures: csv + parquet (written by the test) + the committed xlsx
   extraction fixture; intent detection; SQL guard (rejects UPDATE/DROP/multi-
   statement/subquery-smuggled DML); result formatting caps; join across
-  csv+parquet; chunker parity fixtures in both suites.
+  csv+parquet; chunker parity fixtures in both suites; chart-spec fixtures in
+  both languages (emitter in Rust, parser/axis math in TS).
 - The synthesis smokes must stay green (analytics never fires in them — no
   tabular files in scope).
+- **Retrieval quality floors**: `examples/retrieval_eval.rs` scores lexical vs
+  hybrid on a golden set (paraphrase questions lexical can't answer + keyword
+  questions it must keep winning); the asset-digests verify workflow runs it
+  against the real bundled model and fails on any floor violation.
