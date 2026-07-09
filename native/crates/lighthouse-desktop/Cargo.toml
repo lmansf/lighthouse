@@ -29,9 +29,14 @@ tauri-plugin-window-state = "2"
 tauri-plugin-global-shortcut = "2"
 
 # W3 Whisper mode: the WH_KEYBOARD_LL tap-chord hook (whisper.rs).
+# Win32_System_JobObjects (+ Win32_Security, which gates CreateJobObjectW's
+# SECURITY_ATTRIBUTES param): the kill-on-close job that ties supervised
+# children (llama-server) to the shell's lifetime (assign_to_death_job).
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.60", features = [
     "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
     "Win32_System_LibraryLoader",
     "Win32_System_Threading",
     "Win32_UI_Input_KeyboardAndMouse",

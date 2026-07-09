@@ -46,6 +46,11 @@
       "../../../resources/llm": "llm",
       "../../../resources/tts": "tts",
       "../../../resources/embed": "embed"
+    },
+    "windows": {
+      "nsis": {
+        "installerHooks": "./installer-hooks.nsh"
+      }
     }
   }
 }
