@@ -349,17 +349,30 @@ export function WidgetBar() {
   const [openHold, setOpenHold] = useState(false);
 
   // A summon re-focuses the input and SELECTS the previous query (never
-  // clears it): typing replaces the old search, but a bare Enter can reuse it.
+  // clears it): typing replaces the old search, but a bare Enter can reuse
+  // it — and hands-free dictation replaces it without a click. The
+  // visibilitychange leg is a belt for hidden→shown summons where Windows
+  // delivers webview focus without a window `focus` event reaching the page.
   useEffect(() => {
+    const armInput = () => {
+      inputRef.current?.focus();
+      inputRef.current?.select();
+    };
     const onFocus = () => {
       // Returning to the bar ends the just-opened-a-file hold, so a later
       // click-away dismisses normally again.
       setOpenHold(false);
-      inputRef.current?.focus();
-      inputRef.current?.select();
+      armInput();
+    };
+    const onVisible = () => {
+      if (!document.hidden) armInput();
     };
     window.addEventListener("focus", onFocus);
-    return () => window.removeEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
   }, []);
 
   // Entry flourish: each summon focuses the window, so toggle a short-lived
