@@ -1085,8 +1085,20 @@ fn main() {
                 });
             }
 
-            // Notify-only update check, parallel and best-effort.
-            tauri::async_runtime::spawn(supervise::check_for_updates(handle.clone()));
+            // Notify-only update check, parallel and best-effort: once at
+            // boot, then every 6 h. The app is tray-resident for days at a
+            // time, so a boot-only check never noticed releases that shipped
+            // mid-run — the banner/tray notice simply never appeared until
+            // the next manual restart.
+            {
+                let handle = handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    loop {
+                        supervise::check_for_updates(handle.clone()).await;
+                        tokio::time::sleep(std::time::Duration::from_secs(6 * 60 * 60)).await;
+                    }
+                });
+            }
 
             // Boot diagnostics (LIGHTHOUSE_DIAG=1): capture early JS errors,
             // then report the webview's state + a live fetch probe into the

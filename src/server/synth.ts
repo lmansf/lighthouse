@@ -10,7 +10,7 @@
  */
 import type { ChatChunk, ChatTurn, RagReference } from "@/contracts";
 import { retrieve as registryRetrieve } from "./sources/registry";
-import { retrieve as vaultRetrieve, docText, activeIncludedFileIds } from "./vault";
+import { retrieve as vaultRetrieve, docText, activeIncludedFileIds, namedButExcluded } from "./vault";
 import { streamAnswer, type Ctx } from "./llm";
 import { isProfileable, tableProfile } from "./tableProfile";
 
@@ -141,6 +141,22 @@ export async function* answerPipeline(
   const retrievalQuery = lastUserTurn ? `${lastUserTurn.content}\n${question}` : question;
 
   const initial = await registryRetrieve(retrievalQuery, includedFileIds, attachmentFileIds, 5);
+
+  // Honesty note (deterministic, engine text): the question names a vault
+  // file that ISN'T included — say so up front instead of letting the model
+  // deny the file exists. Skipped for attachment-scoped asks. KEEP IN SYNC
+  // with the Rust pipeline (synth.rs).
+  if (attachmentFileIds.length === 0) {
+    const missing = namedButExcluded(question);
+    if (missing.length > 0) {
+      const names = missing.map((n) => `“${n}”`).join(" and ");
+      const [isare, itthem] = missing.length === 1 ? ["is", "it"] : ["are", "them"];
+      yield {
+        delta: `_(${names} ${isare} in your vault but not included, so the AI can't read ${itthem}. Toggle ${itthem} on in the explorer and ask again.)_\n\n`,
+        done: false,
+      };
+    }
+  }
 
   // --- Decide: synthesis or single-shot ---
   let docs: DocCandidate[] = [];

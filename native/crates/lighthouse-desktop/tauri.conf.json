@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Lighthouse",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "identifier": "com.lighthouse.app",
   "build": {
     "frontendDist": "ui-dist"
@@ -46,6 +46,11 @@
       "../../../resources/llm": "llm",
       "../../../resources/tts": "tts",
       "../../../resources/embed": "embed"
+    },
+    "windows": {
+      "nsis": {
+        "installerHooks": "./installer-hooks.nsh"
+      }
     }
   }
 }

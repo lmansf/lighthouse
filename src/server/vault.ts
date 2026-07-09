@@ -752,6 +752,39 @@ function nameTokensOf(id: string, name: string): string[] {
   return tokenize(`${id.replace(/\//g, " ")} ${name}`);
 }
 
+/** Extension-ish tokens that don't count as "naming" a file in a question. */
+const EXT_TOKENS = new Set([
+  "xlsx", "xls", "csv", "tsv", "pdf", "docx", "doc", "md", "txt", "parquet",
+  "pptx", "json", "html", "log",
+]);
+
+/**
+ * Vault files the question NAMES (every meaningful name token appears in the
+ * question) that are NOT currently included — feeds the deterministic
+ * "it exists but the AI can't see it" note in the answer pipeline. KEEP IN
+ * SYNC with vault.rs::named_but_excluded. Returns display names, capped at 2.
+ */
+export function namedButExcluded(question: string): string[] {
+  const qtokens = tokenize(question).map(singular);
+  if (qtokens.length === 0) return [];
+  const active = new Set(activeIncludedFileIds());
+  const out: string[] = [];
+  for (const node of walk(vaultDir())) {
+    if (node.kind !== "file" || active.has(node.id)) continue;
+    const meaningful = tokenize(node.name).filter((t) => t.length >= 3 && !EXT_TOKENS.has(t));
+    if (meaningful.length === 0 || !meaningful.some((t) => t.length >= 4)) continue;
+    const allPresent = meaningful.every((nt0) => {
+      const nt = singular(nt0);
+      return qtokens.some((q) => q === nt || q.includes(nt) || (q.length >= 3 && nt.includes(q)));
+    });
+    if (allPresent) {
+      out.push(node.name);
+      if (out.length === 2) break;
+    }
+  }
+  return out;
+}
+
 /**
  * How strongly the query matches a file's name/path tokens. Substring matching
  * lets "credit"/"card" hit a file literally named "creditcard.csv", and the
@@ -1105,7 +1138,26 @@ export async function retrieve(
     });
   }
 
-  const top = cands.sort((a, b) => b.score - a.score).slice(0, k);
+  const sorted = cands.sort((a, b) => b.score - a.score);
+  const top = sorted.slice(0, k);
+  // Named-file guarantee: a question that strongly names a file MUST surface
+  // that file — keyword-heavy chunks from other files can otherwise crowd it
+  // out of the top-k (and the Rust engine's hybrid scores make that routine;
+  // see vault.rs::retrieve). KEEP IN SYNC with the Rust twin.
+  let named: { id: string; hits: number } | null = null;
+  for (const it of items) {
+    const nm = nameMatch(qtokens, nameToks.get(it.id) ?? []);
+    if (nm.strong && nm.hits > 0 && (!named || nm.hits > named.hits)) {
+      named = { id: it.id, hits: nm.hits };
+    }
+  }
+  if (named && !top.some((c) => c.fileId === named.id)) {
+    const best = sorted.find((c) => c.fileId === named.id);
+    if (best) {
+      if (top.length >= k && top.length > 0) top.pop();
+      top.push(best);
+    }
+  }
   if (top.length === 0) return { references: [], contexts: [] };
 
   const max = top[0].score || 1;

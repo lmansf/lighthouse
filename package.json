@@ -1,8 +1,8 @@
 {
   "name": "rag-vault",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "private": true,
-  "description": "Lighthouse \u2014 a local-first RAG vault for your documents.",
+  "description": "Lighthouse — a local-first RAG vault for your documents.",
   "author": "Lighthouse",
   "main": "electron/main.js",
   "scripts": {

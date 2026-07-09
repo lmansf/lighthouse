@@ -11,6 +11,7 @@
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use lighthouse_core::config::resources_dir;
@@ -39,7 +40,61 @@ pub struct Supervisor {
     /// boot" — stop respawning instead of crash-looping; retrieval simply
     /// stays lexical.
     embed_quick_exits: Mutex<u32>,
+    /// Set by `halt()` when an installer handoff is in progress: reconcile
+    /// must not respawn children whose DLLs the installer is about to replace.
+    halted: AtomicBool,
 }
+
+/// Windows: every supervised child joins a job object configured to kill its
+/// members when the job's last handle closes. The handle is deliberately
+/// leaked, so the OS closes it exactly when THIS process dies — clean quit,
+/// crash, or the installer's hard TerminateProcess — and the children die
+/// with it. Without this, an installer that kills the running app leaves
+/// llama-server orphans holding llm\*.dll loaded (a loaded DLL is an
+/// unwritable file), and extraction fails with "Error opening file for
+/// writing" (0.6.x field reports). Best-effort: on any API failure the
+/// children simply stay unassigned and the installer-side taskkill hook
+/// remains the backstop.
+#[cfg(windows)]
+fn assign_to_death_job(child: &Child) {
+    use std::os::windows::io::AsRawHandle;
+    use std::sync::OnceLock;
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+
+    static JOB: OnceLock<usize> = OnceLock::new();
+    let job = *JOB.get_or_init(|| unsafe {
+        let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+        if job.is_null() {
+            return 0;
+        }
+        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            (&info as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        ) == 0
+        {
+            CloseHandle(job); // a job we can't configure would be a no-op
+            return 0;
+        }
+        job as usize
+    });
+    if job != 0 {
+        unsafe {
+            AssignProcessToJobObject(job as _, child.as_raw_handle() as _);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn assign_to_death_job(_child: &Child) {}
 
 fn llm_root() -> PathBuf {
     resources_dir().join("llm")
@@ -126,6 +181,7 @@ impl Supervisor {
         }
         match cmd.spawn() {
             Ok(child) => {
+                assign_to_death_job(&child); // dies with the shell, no matter how the shell dies
                 *guard = Some(child);
                 *self.spawned_at.lock().unwrap_or_else(|p| p.into_inner()) =
                     Some(std::time::Instant::now());
@@ -223,6 +279,7 @@ impl Supervisor {
         }
         match cmd.spawn() {
             Ok(child) => {
+                assign_to_death_job(&child); // dies with the shell, no matter how the shell dies
                 *guard = Some(child);
                 *self
                     .embed_spawned_at
@@ -298,6 +355,9 @@ impl Supervisor {
     /// Start llama-server when a model appears (a download just finished) and
     /// drive the uninstall handshake to completion.
     pub fn reconcile(&self, app: &AppHandle) {
+        if self.halted.load(Ordering::SeqCst) {
+            return; // installer handoff in progress — nothing may respawn
+        }
         // The embedding server is independent of the chat model's install/
         // uninstall lifecycle below — reconcile it first, unconditionally.
         self.reconcile_embed(app);
@@ -393,6 +453,16 @@ impl Supervisor {
             let _ = child.kill();
             let _ = child.wait();
         }
+    }
+
+    /// Stop every supervised child AND refuse to respawn any (reconcile
+    /// no-ops from here on). Called right before handing off to an installer:
+    /// the children keep DLLs inside the install dir loaded, and on Windows a
+    /// loaded DLL is an unwritable file — the 3 s reconcile tick must not
+    /// resurrect one between our shutdown and the app's exit.
+    pub fn halt(&self) {
+        self.halted.store(true, Ordering::SeqCst);
+        self.shutdown();
     }
 }
 
@@ -491,7 +561,7 @@ pub async fn check_for_updates(app: AppHandle) {
             "update:state",
             serde_json::json!({
                 "phase": "available",
-                "version": latest,
+                "version": latest.trim_start_matches('v'), // match update_state's shape
                 "url": RELEASE_PAGE_URL,
                 "canInstall": asset.is_some(),
             }),
@@ -527,12 +597,19 @@ pub async fn update_now(app: AppHandle) -> serde_json::Value {
     let dest = dir.join(&name);
 
     let download = async {
+        use std::io::Write as _;
         let client = reqwest::Client::builder()
             .user_agent("lighthouse-app")
             .timeout(std::time::Duration::from_secs(600))
             .build()?;
-        let bytes = client.get(&url).send().await?.error_for_status()?.bytes().await?;
-        fs::write(&dest, &bytes)?;
+        // Stream to disk: installers carry the bundled models now (hundreds
+        // of MB) — buffering the whole body would spike memory for nothing.
+        let mut res = client.get(&url).send().await?.error_for_status()?;
+        let mut file = fs::File::create(&dest)?;
+        while let Some(chunk) = res.chunk().await? {
+            file.write_all(&chunk)?;
+        }
+        file.flush()?;
         Ok::<_, anyhow::Error>(())
     };
     if let Err(e) = download.await {
@@ -545,6 +622,18 @@ pub async fn update_now(app: AppHandle) -> serde_json::Value {
     {
         use std::os::unix::fs::PermissionsExt;
         let _ = fs::set_permissions(&dest, fs::Permissions::from_mode(0o755)); // AppImage
+    }
+    if cfg!(windows) {
+        // The installer overwrites llm\/embed\/tts\ inside the install dir,
+        // and our llama-server children keep those DLLs loaded — on Windows a
+        // loaded DLL is an unwritable file ("Error opening file for writing",
+        // the 0.6.x update failure). Stop the children AND the reconcile tick
+        // that would respawn them BEFORE launching the installer; the app
+        // exits below either way. (The installer's PREINSTALL hook also
+        // taskkills strays left behind by crashed sessions.)
+        if let Some(sup) = app.try_state::<Supervisor>() {
+            sup.halt();
+        }
     }
     crate::open_with_os(&dest);
     if cfg!(windows) {

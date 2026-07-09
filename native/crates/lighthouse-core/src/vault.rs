@@ -1822,7 +1822,33 @@ pub fn retrieve(
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    let top: Vec<&Cand> = cands.iter().take(k).collect();
+    let mut top: Vec<&Cand> = cands.iter().take(k).collect();
+    // Named-file guarantee: a question that strongly names a file MUST surface
+    // that file. Before hybrid search this held by accident — name-matched
+    // candidates (0.5–0.9) always beat lexical cosines (~0.05–0.3). RRF fused
+    // scores fill the 0.9–1.0 band, so topically-similar chunks from OTHER
+    // files can crowd the named file out of the top-k (0.6.0 field report:
+    // "the file is not present in the provided context" — about a file named
+    // verbatim in the question). Pin the best-named file's best candidate
+    // into the last slot when ranking dropped it.
+    let named = items
+        .iter()
+        .filter_map(|item| {
+            let entry = entries.get(&item.id)?;
+            let (hits, strong) = name_match(&qtokens, &entry.name_tokens);
+            (strong && hits > 0).then_some((item.id.as_str(), hits))
+        })
+        .max_by_key(|(_, hits)| *hits);
+    if let Some((named_id, _)) = named {
+        if !top.iter().any(|c| c.file_id == named_id) {
+            if let Some(best) = cands.iter().find(|c| c.file_id == named_id) {
+                if top.len() >= k && !top.is_empty() {
+                    top.pop();
+                }
+                top.push(best);
+            }
+        }
+    }
     if top.is_empty() {
         return Retrieved {
             references: vec![],
@@ -1886,6 +1912,50 @@ pub fn doc_text(file_id: &str, preview_chars: Option<usize>) -> Option<(String, 
         None => text,
     };
     Some((node.name, text))
+}
+
+/// Extension-ish tokens that don't count as "naming" a file in a question.
+const EXT_TOKENS: &[&str] = &[
+    "xlsx", "xls", "csv", "tsv", "pdf", "docx", "doc", "md", "txt", "parquet",
+    "pptx", "json", "html", "log",
+];
+
+/// Vault files the question NAMES (every meaningful name token appears in the
+/// question) that are NOT currently included. Feeds the deterministic
+/// "it exists but the AI can't see it" note in the answer pipeline — without
+/// it, asking about an excluded file gets a gaslighting "not present in the
+/// provided context" (0.6.0 field report, verbatim file name in the question).
+/// Returns display names, capped at 2.
+pub fn named_but_excluded(question: &str) -> Vec<String> {
+    let qtokens: Vec<String> = tokenize(question).iter().map(|t| singular(t).to_string()).collect();
+    if qtokens.is_empty() {
+        return Vec::new();
+    }
+    let active: HashSet<String> = active_included_file_ids().into_iter().collect();
+    let mut out = Vec::new();
+    for node in walk(&vault_dir()) {
+        if node.kind != NodeKind::File || active.contains(&node.id) {
+            continue;
+        }
+        let meaningful: Vec<String> = tokenize(&node.name)
+            .into_iter()
+            .filter(|t| t.len() >= 3 && !EXT_TOKENS.contains(&t.as_str()))
+            .collect();
+        if meaningful.is_empty() || !meaningful.iter().any(|t| t.len() >= 4) {
+            continue; // too generic to claim the question "named" it
+        }
+        let all_present = meaningful.iter().all(|nt0| {
+            let nt = singular(nt0);
+            qtokens.iter().any(|q| q == nt || q.contains(nt) || (q.len() >= 3 && nt.contains(q.as_str())))
+        });
+        if all_present {
+            out.push(node.name);
+            if out.len() == 2 {
+                break;
+            }
+        }
+    }
+    out
 }
 
 /// A file's display name + resolved absolute path, for the analytics engine
