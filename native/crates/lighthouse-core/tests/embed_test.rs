@@ -67,7 +67,9 @@ fn spawn_stub() -> u16 {
                         let fin = if hit(&["revenue", "sales", "quarter", "q3"]) { 1.0 } else { 0.01 };
                         let food =
                             if hit(&["cake", "chocolate", "butter", "cocoa", "recipe"]) { 1.0 } else { 0.01 };
-                        serde_json::json!({ "embedding": [fin, food, 0.2, 0.1] })
+                        let tech =
+                            if hit(&["galaxy", "deployment", "cluster", "rollout"]) { 1.0 } else { 0.01 };
+                        serde_json::json!({ "embedding": [fin, food, tech, 0.1] })
                     })
                     .collect();
                 serde_json::json!({ "data": data }).to_string()
@@ -127,9 +129,12 @@ fn hybrid_retrieval_finds_by_meaning_and_honors_the_kill_switch() {
     );
 
     // Pass 2 — poll until the warm pass lands (embeds both files, ~ms).
+    // Re-nudge each tick: the index-build nudge is fired exactly once, and it
+    // can lose the single-flight race to a sibling test's in-flight pass.
     let mut hybrid = None;
     for _ in 0..100 {
         std::thread::sleep(std::time::Duration::from_millis(150));
+        lighthouse_core::embed::nudge_warm();
         let r = vault::retrieve(query, &ids, 5, &[], &[]);
         if !r.references.is_empty() {
             hybrid = Some(r);
@@ -166,4 +171,95 @@ fn hybrid_retrieval_finds_by_meaning_and_honors_the_kill_switch() {
 
     std::env::remove_var("LIGHTHOUSE_EMBED_URL");
     std::env::remove_var("LIGHTHOUSE_SETTINGS_FILE");
+}
+
+/// 0.6.0 regression: hybrid RRF scores fill the 0.9–1.0 band, so chunks from
+/// files that merely MENTION the query's words can crowd out the file the
+/// question literally NAMES (whose own content shares no query words). The
+/// named-file pin must keep it in the top-k.
+#[test]
+fn named_file_survives_hybrid_crowding() {
+    let vault_dir = tempfile::tempdir().unwrap();
+    let _guard = common::lock_env(vault_dir.path());
+    let port = spawn_stub();
+    std::env::set_var("LIGHTHOUSE_EMBED_URL", format!("http://127.0.0.1:{port}"));
+
+    // The wanted file: named like the question, content is bare hostnames —
+    // zero lexical overlap with the query, orthogonal stub vector.
+    write_file(
+        &vault_dir.path().join("1 Galaxy Servers.md"),
+        "srv-001 10.0.0.1 rack-a\nsrv-002 10.0.0.2 rack-b\nsrv-003 10.0.0.3 rack-c",
+    );
+    // Six distractors whose CONTENT mentions the query words (think Samsung
+    // Galaxy notes) — they rank top in BOTH legs (lexical + stub vector).
+    for i in 0..6 {
+        write_file(
+            &vault_dir.path().join(format!("meeting-notes-{i}.md")),
+            &format!(
+                "galaxy deployment cluster rollout discussion {i}: the galaxy cluster deployment servers rollout plan was reviewed inside the meeting."
+            ),
+        );
+    }
+    let ids: Vec<String> = vault::list_nodes()
+        .into_iter()
+        .filter(|n| n.kind == lighthouse_core::contracts::NodeKind::File)
+        .map(|n| n.id)
+        .collect();
+    assert_eq!(ids.len(), 7);
+    for id in &ids {
+        vault::set_included(id, true);
+    }
+
+    let query = "what is inside 1 Galaxy Servers";
+    // Warm the vectors (first retrieve kicks the pass; poll until hybrid is
+    // active — the distractors' fused scores only exist once coverage ≥ 80%).
+    let _ = vault::retrieve(query, &ids, 5, &[], &[]);
+    let mut result = None;
+    for _ in 0..100 {
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        let r = vault::retrieve(query, &ids, 5, &[], &[]);
+        // Hybrid is live once fused display scores appear (>0.45 for the
+        // top distractor is only possible post-fusion; lexical cosines on
+        // this corpus stay far lower).
+        if r.references.first().map(|f| f.score >= 0.99).unwrap_or(false) && r.references.len() > 1 {
+            result = Some(r);
+            break;
+        }
+    }
+    let r = result.expect("hybrid never activated");
+    assert!(
+        r.references.iter().any(|reference| reference.name == "1 Galaxy Servers.md"),
+        "the literally-named file must be retrieved; got {:?}",
+        r.references.iter().map(|f| &f.name).collect::<Vec<_>>()
+    );
+
+    std::env::remove_var("LIGHTHOUSE_EMBED_URL");
+}
+
+/// Companion honesty check: the same named file, EXCLUDED — the pipeline's
+/// note source must flag it (and stop once it's included).
+#[test]
+fn named_but_excluded_flags_the_file() {
+    let vault_dir = tempfile::tempdir().unwrap();
+    let _guard = common::lock_env(vault_dir.path());
+    std::env::remove_var("LIGHTHOUSE_EMBED_URL");
+
+    write_file(&vault_dir.path().join("1 Galaxy Servers.xlsx"), "not a real workbook");
+    write_file(&vault_dir.path().join("recipes.md"), "chocolate cake");
+    // lock_env pins the default-inclusion experiment to opt_in: files start
+    // EXCLUDED, which is exactly the field-report state.
+    let missing = vault::named_but_excluded("how many entries are in 1 Galaxy Servers.xlsx?");
+    assert_eq!(missing, vec!["1 Galaxy Servers.xlsx".to_string()]);
+
+    // Unrelated question: silent.
+    assert!(vault::named_but_excluded("what does the onboarding doc say?").is_empty());
+
+    // Included → no note.
+    let id = vault::list_nodes()
+        .into_iter()
+        .find(|n| n.name == "1 Galaxy Servers.xlsx")
+        .unwrap()
+        .id;
+    vault::set_included(&id, true);
+    assert!(vault::named_but_excluded("how many entries are in 1 Galaxy Servers.xlsx?").is_empty());
 }

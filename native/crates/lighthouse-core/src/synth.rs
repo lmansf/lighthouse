@@ -201,6 +201,31 @@ pub fn answer_pipeline(
         let initial =
             sources::retrieve(&retrieval_query, &included_file_ids, &attachment_file_ids, 5).await;
 
+        // Honesty note (deterministic, engine text): the question names a
+        // vault file that ISN'T included — say so up front instead of letting
+        // the model deny the file exists. Skipped for attachment-scoped asks
+        // (the attach gesture already chose the files).
+        if attachment_file_ids.is_empty() {
+            let missing = tokio::task::spawn_blocking({
+                let q = question.clone();
+                move || vault::named_but_excluded(&q)
+            })
+            .await
+            .unwrap_or_default();
+            if !missing.is_empty() {
+                let names = missing
+                    .iter()
+                    .map(|n| format!("“{n}”"))
+                    .collect::<Vec<_>>()
+                    .join(" and ");
+                let (isare, itthem) =
+                    if missing.len() == 1 { ("is", "it") } else { ("are", "them") };
+                yield delta(format!(
+                    "_({names} {isare} in your vault but not included, so the AI can't read {itthem}. Toggle {itthem} on in the explorer and ask again.)_\n\n"
+                ));
+            }
+        }
+
         // --- Analytics branch (docs/analytics-genie.md): aggregate ask over
         //     tabular files → model writes SQL, DataFusion executes, the model
         //     narrates the verified result. Any failure falls through silently

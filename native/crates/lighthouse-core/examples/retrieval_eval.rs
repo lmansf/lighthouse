@@ -17,7 +17,6 @@
 //! Run: cargo run -p lighthouse-core --example retrieval_eval
 
 use std::fs;
-use std::path::Path;
 
 use lighthouse_core::contracts::NodeKind;
 use lighthouse_core::vault;

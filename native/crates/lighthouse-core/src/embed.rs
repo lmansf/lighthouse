@@ -14,7 +14,7 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use crate::config::{resources_dir, state_dir};
@@ -424,7 +424,7 @@ pub fn rrf_scores(n: usize, lex_ranked: &[usize], vec_ranked: &[usize]) -> Vec<f
 // correctness never depends on it (retrieval checks keys per query).
 
 static WARMING: AtomicBool = AtomicBool::new(false);
-static LAST_NUDGE_MS: AtomicI64 = AtomicI64::new(0);
+static LAST_NUDGE: Mutex<Option<(i64, PathBuf)>> = Mutex::new(None);
 
 /// Ask the warm pass to run soon (no-op if one is running or just ran).
 pub fn nudge_warm() {
@@ -432,14 +432,22 @@ pub fn nudge_warm() {
         return;
     }
     let now = crate::config::now_ms();
-    let last = LAST_NUDGE_MS.load(Ordering::Relaxed);
-    if now - last < 5_000 {
-        return; // debounce bursts (per-query nudges, watcher storms)
+    let sd = state_dir();
+    {
+        let guard = LAST_NUDGE.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some((last, last_sd)) = guard.as_ref() {
+            // Debounce bursts (per-query nudges, watcher storms) — but only
+            // for the SAME vault. A vault switch deserves an immediate pass.
+            if now - last < 5_000 && *last_sd == sd {
+                return;
+            }
+        }
     }
-    LAST_NUDGE_MS.store(now, Ordering::Relaxed);
     if WARMING.swap(true, Ordering::SeqCst) {
-        return;
+        return; // a pass is mid-flight; deliberately unstamped so the next
+                // nudge retries once it finishes (it may have raced a switch)
     }
+    *LAST_NUDGE.lock().unwrap_or_else(|p| p.into_inner()) = Some((now, sd));
     let spawned = std::thread::Builder::new()
         .name("lh-embed-warm".into())
         .spawn(|| {
