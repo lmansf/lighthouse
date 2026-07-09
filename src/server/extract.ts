@@ -85,8 +85,10 @@ async function extractByExt(abs: string, ext: string): Promise<string> {
  * build). Entries tagged with a different version are ignored, forcing a
  * one-time re-extraction — this is how a user recovers from PDFs that an
  * earlier version cached as empty.
+ * v3: matches the Rust engine's docx whitespace fidelity + .doc salvage bump
+ * so the two engines keep sharing cache entries.
  */
-const CACHE_VERSION = 2;
+const CACHE_VERSION = 3;
 
 interface CacheRecord {
   v: number;
