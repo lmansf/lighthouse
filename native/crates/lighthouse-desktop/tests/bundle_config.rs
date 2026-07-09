@@ -28,6 +28,12 @@ fn nsis_installer_hooks_are_wired() {
     for exe in ["llama-server.exe", "piper.exe"] {
         assert!(src.contains(exe), "{exe} is not covered by the installer hooks");
     }
+    // Update kills must not flag the next boot as crashed (sticky safe mode):
+    // the pre-install hook clears boot_guard's in-flight marker.
+    assert!(
+        src.contains("boot-state"),
+        "the PREINSTALL hook must clear boot_guard's boot-state marker"
+    );
 }
 
 /// The hook kills processes by image name, so the names it uses must stay
