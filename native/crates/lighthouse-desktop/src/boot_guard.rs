@@ -112,3 +112,19 @@ pub fn mark_ready() {
         let _ = std::fs::write(marker, "ready");
     }
 }
+
+/// Whether safe mode is version-sticky (the lock file pins it for this build,
+/// so plain restarts never leave it — only an update or `clear_safe_mode`).
+pub fn sticky() -> bool {
+    safe_lock().map(|p| p.exists()).unwrap_or(false)
+}
+
+/// Leave safe mode: drop the sticky lock and mark the boot history healthy.
+/// Takes effect on the NEXT launch (this process keeps its safe-mode webview
+/// flags — they were applied before any window existed).
+pub fn clear_safe_mode() {
+    if let Some(lock) = safe_lock() {
+        let _ = std::fs::remove_file(lock);
+    }
+    mark_ready();
+}

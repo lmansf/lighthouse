@@ -157,6 +157,23 @@ fn widget_pinned(app: &AppHandle) -> bool {
         .unwrap_or(false)
 }
 
+/// Append a timestamped line to app-data/shell.log — the debugging lifeline
+/// for GUI builds, where stderr goes nowhere (0.6.3 field report: widget mode
+/// silently absent on one Windows machine, zero clues). Rotates once past
+/// ~256 KB (shell.log → shell.log.1) so it can run forever. Best-effort.
+pub fn shell_log(app: &AppHandle, msg: &str) {
+    let Ok(dir) = app.path().app_data_dir() else { return };
+    let _ = fs::create_dir_all(&dir);
+    let path = dir.join("shell.log");
+    if fs::metadata(&path).map(|m| m.len() > 256 * 1024).unwrap_or(false) {
+        let _ = fs::rename(&path, dir.join("shell.log.1"));
+    }
+    if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(&path) {
+        use std::io::Write as _;
+        let _ = writeln!(f, "[{}] {}", lighthouse_core::config::now_ms(), msg);
+    }
+}
+
 /// Create the (hidden) widget window if it doesn't exist yet — idempotent,
 /// meaningful only with a bundled UI (the /widget static route). Normally
 /// called shortly after boot so the first summon is instant, but every
@@ -165,7 +182,11 @@ fn widget_pinned(app: &AppHandle) -> bool {
 /// Note: skip_taskbar is a no-op on macOS and visible_on_all_workspaces is
 /// unsupported on Windows — both are best-effort per platform.
 pub fn ensure_widget_window(app: &AppHandle) {
-    if app.get_webview_window(WIDGET_LABEL).is_some() || !has_bundled_ui(app) {
+    if app.get_webview_window(WIDGET_LABEL).is_some() {
+        return;
+    }
+    if !has_bundled_ui(app) {
+        shell_log(app, "widget: creation skipped — bundled-UI marker not found in assets");
         return;
     }
     // NOT always-on-top: the bar rests just above the desktop in normal
@@ -184,8 +205,12 @@ pub fn ensure_widget_window(app: &AppHandle) {
             .focused(false)
             .build();
     match built {
-        Err(e) => eprintln!("widget window failed to build: {e}"),
+        Err(e) => {
+            eprintln!("widget window failed to build: {e}");
+            shell_log(app, &format!("widget: window failed to build: {e}"));
+        }
         Ok(w) => {
+            shell_log(app, "widget: window created");
             strip_gtk_menubar(&w);
             // Hand-rolled position memory (see the window-state denylist
             // note). A stale off-screen position is healed by show_widget's
@@ -212,6 +237,7 @@ pub fn ensure_widget_window(app: &AppHandle) {
 pub fn show_widget(app: &AppHandle, focus: bool) {
     ensure_widget_window(app); // lazy in safe mode / the first seconds of boot
     let Some(w) = app.get_webview_window(WIDGET_LABEL) else {
+        shell_log(app, "widget: show requested but the window is missing (see creation lines above)");
         return;
     };
     if !w.is_visible().unwrap_or(false) {
@@ -1039,18 +1065,76 @@ fn main() {
             // never steal focus.
             {
                 let focus = !launched_by_autostart();
-                if widget_mode(&handle) && handle.get_webview_window(WIDGET_LABEL).is_some() {
+                let want_widget = widget_mode(&handle);
+                shell_log(
+                    &handle,
+                    &format!(
+                        "boot v{} safe_mode={} sticky={} widget_mode={} bundled_ui={} widget_window={}",
+                        env!("CARGO_PKG_VERSION"),
+                        boot_guard::safe_mode(),
+                        boot_guard::sticky(),
+                        want_widget,
+                        has_bundled_ui(&handle),
+                        handle.get_webview_window(WIDGET_LABEL).is_some(),
+                    ),
+                );
+                if want_widget && handle.get_webview_window(WIDGET_LABEL).is_some() {
                     // Resident, NOT pinned: the bar is the app's resting
                     // presence (blur keeps it around) but stacks normally —
                     // other windows may cover it; the hotkey raises it.
                     set_widget_resident(&handle, true);
                     show_widget(&handle, focus);
                 } else if let Some(win) = main_window(&handle) {
+                    if want_widget {
+                        // Widget mode is ON but the bar couldn't be created:
+                        // fall back visibly instead of silently (0.6.3 field
+                        // report — the silence made this undiagnosable).
+                        shell_log(&handle, "boot: widget mode is on but the bar is unavailable — falling back to the window");
+                        use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+                        handle
+                            .dialog()
+                            .message(
+                                "Widget mode couldn't start on this launch, so the main window opened instead.\n\nA diagnostic was written to shell.log in Lighthouse's app-data folder — please share that file if this keeps happening.",
+                            )
+                            .title("Lighthouse — widget mode")
+                            .kind(MessageDialogKind::Warning)
+                            .show(|_| {});
+                    }
                     let _ = win.show();
                     if focus {
                         let _ = win.set_focus();
                     }
                 }
+            }
+
+            // Safe mode was invisible: a launch that dies young (a machine
+            // freeze — or, far more commonly since 0.6.x, an installer's
+            // hard-kill mid-update) flips the next boot into safe mode and a
+            // sticky lock keeps EVERY boot of this version there, with
+            // reduced rendering and background features off, and nothing on
+            // screen ever says so. Say so, and offer the way out.
+            if boot_guard::safe_mode() {
+                use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+                let h = handle.clone();
+                handle
+                    .dialog()
+                    .message(
+                        "Lighthouse started in safe mode because a previous launch was interrupted before it finished starting (an update or forced shutdown can look like this).\n\nSafe mode uses basic graphics and skips background features until it's turned off.\n\nLeave safe mode? This applies on the next launch.",
+                    )
+                    .title("Lighthouse — safe mode")
+                    .kind(MessageDialogKind::Info)
+                    .buttons(MessageDialogButtons::OkCancelCustom(
+                        "Leave safe mode".into(),
+                        "Stay in safe mode".into(),
+                    ))
+                    .show(move |leave| {
+                        if leave {
+                            boot_guard::clear_safe_mode();
+                            shell_log(&h, "safe-mode: user chose to leave — normal boot next launch");
+                        } else {
+                            shell_log(&h, "safe-mode: user chose to stay");
+                        }
+                    });
             }
 
             // The launch is declared healthy 20 s in — a machine-freezing

@@ -860,7 +860,25 @@ pub fn widget_hide(app: AppHandle) {
 #[tauri::command]
 pub async fn widget_show(app: AppHandle) {
     let inner = app.clone();
-    let _ = app.run_on_main_thread(move || crate::show_widget(&inner, true));
+    let _ = app.run_on_main_thread(move || {
+        crate::show_widget(&inner, true);
+        // This command IS the user's explicit "turn widget mode on" gesture
+        // (mode chooser, Preferences demo). A bar that silently fails to
+        // appear reads as a dead toggle (0.6.3 field report) — diagnose
+        // loudly here, never on routine summons.
+        if inner.get_webview_window(crate::WIDGET_LABEL).is_none() {
+            crate::shell_log(&inner, "widget_show: bar unavailable after an explicit enable");
+            use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+            inner
+                .dialog()
+                .message(
+                    "The floating search bar couldn't start on this machine.\n\nA diagnostic was written to shell.log in Lighthouse's app-data folder — please share that file so this can be fixed.",
+                )
+                .title("Lighthouse — widget mode")
+                .kind(MessageDialogKind::Warning)
+                .show(|_| {});
+        }
+    });
 }
 
 /// Pin = the user's "keep above other windows" toggle: always-on-top AND no

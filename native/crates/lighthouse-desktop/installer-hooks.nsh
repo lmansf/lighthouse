@@ -20,6 +20,12 @@
   nsExec::ExecToLog 'taskkill /F /T /IM piper.exe'
   Pop $0
   Sleep 500 ; let the OS release the DLL locks before extraction begins
+  ; An update's hard-kill of the running app must never read as a crash:
+  ; boot_guard.rs flags a launch that died young ("booting" marker left
+  ; behind) and the NEXT boot comes up in sticky safe mode — reduced
+  ; graphics, background features off. Clearing the in-flight marker here
+  ; gives the post-update launch a clean history.
+  Delete "$APPDATA\com.lighthouse.app\boot-state"
 !macroend
 
 ; The uninstaller removes the same locked files — same treatment.
