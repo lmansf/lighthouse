@@ -201,6 +201,23 @@ pub fn answer_pipeline(
         let initial =
             sources::retrieve(&retrieval_query, &included_file_ids, &attachment_file_ids, 5).await;
 
+        // Instant acknowledgment: local models take seconds to a first token,
+        // but retrieval lands in milliseconds — naming the sources NOW makes
+        // the answer visibly start immediately (0.6.x field feedback: "slow to
+        // write… provide something instantly"). The loader shows this label
+        // until real tokens replace it. KEEP IN SYNC with synth.ts.
+        if !initial.references.is_empty() {
+            let names: Vec<&str> =
+                initial.references.iter().take(3).map(|r| r.name.as_str()).collect();
+            let extra = initial.references.len().saturating_sub(names.len());
+            let label = if extra > 0 {
+                format!("Reading {} +{}…", names.join(", "), extra)
+            } else {
+                format!("Reading {}…", names.join(", "))
+            };
+            yield progress(label, 0, 1);
+        }
+
         // Honesty note (deterministic, engine text): the question names a
         // vault file that ISN'T included — say so up front instead of letting
         // the model deny the file exists. Skipped for attachment-scoped asks

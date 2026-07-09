@@ -62,6 +62,55 @@ test("retrieve pins the literally-named file into the top-k under keyword crowdi
   );
 });
 
+// Direct tests of the pin's selection rules (0.6.2 field report: a lone
+// generic token pinned irrelevant files — "recommending the wrong ones").
+// MIRRORS vault.rs::named_pin_tests; token lists are pre-tokenized.
+test("pinnedNamedFile is conservative about what counts as naming a file", async () => {
+  const { pinnedNamedFile } = await import("../src/server/vault.ts");
+  const q = (s) => s.toLowerCase().split(/\s+/);
+
+  // A verbatim name pins.
+  assert.equal(
+    pinnedNamedFile(q("what is inside 1 galaxy servers"), [
+      { id: "1 Galaxy Servers.md", toks: ["1", "galaxy", "servers", "md"] },
+      { id: "meeting-notes-1.md", toks: ["meeting", "notes", "1", "md"] },
+    ]),
+    "1 Galaxy Servers.md",
+  );
+  // A lone generic token ("plan", 4 chars) never pins.
+  assert.equal(
+    pinnedNamedFile(q("what is the plan for the rollout"), [
+      { id: "plan.md", toks: ["plan", "md"] },
+      { id: "roadmap.md", toks: ["roadmap", "md"] },
+    ]),
+    null,
+  );
+  // A distinctive single-token name (≥5 chars) still pins.
+  assert.equal(
+    pinnedNamedFile(q("can you summarize my resume"), [
+      { id: "resume.pdf", toks: ["resume", "pdf"] },
+      { id: "recipes.md", toks: ["recipes", "md"] },
+    ]),
+    "resume.pdf",
+  );
+  // Generic siblings tie → ambiguous → nothing pins.
+  assert.equal(
+    pinnedNamedFile(q("what did the meeting notes say"), [
+      { id: "meeting-notes-1.md", toks: ["meeting", "notes", "1", "md"] },
+      { id: "meeting-notes-2.md", toks: ["meeting", "notes", "2", "md"] },
+    ]),
+    null,
+  );
+  // Fuller name coverage beats partial.
+  assert.equal(
+    pinnedNamedFile(q("what is inside 1 galaxy servers"), [
+      { id: "galaxy servers rollout plan.md", toks: ["galaxy", "servers", "rollout", "plan", "md"] },
+      { id: "1 Galaxy Servers.md", toks: ["1", "galaxy", "servers", "md"] },
+    ]),
+    "1 Galaxy Servers.md",
+  );
+});
+
 test("namedButExcluded flags a named file that isn't included, and only then", async () => {
   const vault = freshVault();
   const { namedButExcluded, listNodes, setIncluded } = await import("../src/server/vault.ts");

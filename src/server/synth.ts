@@ -142,6 +142,21 @@ export async function* answerPipeline(
 
   const initial = await registryRetrieve(retrievalQuery, includedFileIds, attachmentFileIds, 5);
 
+  // Instant acknowledgment: local models take seconds to a first token, but
+  // retrieval lands in milliseconds — naming the sources NOW makes the answer
+  // visibly start immediately (0.6.x field feedback: "slow to write… provide
+  // something instantly"). The loader shows this label until real tokens
+  // replace it. KEEP IN SYNC with synth.rs.
+  if (initial.references.length > 0) {
+    const names = initial.references.slice(0, 3).map((r) => r.name);
+    const extra = initial.references.length - names.length;
+    yield progress(
+      extra > 0 ? `Reading ${names.join(", ")} +${extra}…` : `Reading ${names.join(", ")}…`,
+      0,
+      1,
+    );
+  }
+
   // Honesty note (deterministic, engine text): the question names a vault
   // file that ISN'T included — say so up front instead of letting the model
   // deny the file exists. Skipped for attachment-scoped asks. KEEP IN SYNC

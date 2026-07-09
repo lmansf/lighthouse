@@ -153,9 +153,12 @@ function isEffectivelyIncluded(id: string, state: VaultState, defaultIn = defaul
  * Extensions read directly as UTF-8 text. Rich binary formats (pdf/docx/xlsx)
  * are decoded via parsers in ./extract and are *not* listed here.
  */
+// .xml deliberately absent: app-generated sidecar/config XML in linked folders
+// kept surfacing as AI sources (0.6.x field report). The files stay visible in
+// the explorer — they just never become chunks. KEEP IN SYNC with vault.rs.
 const TEXT_EXT = new Set([
   ".md", ".markdown", ".txt", ".text", ".rst", ".csv", ".tsv", ".json",
-  ".yaml", ".yml", ".log", ".html", ".htm", ".xml", ".js", ".ts", ".tsx",
+  ".yaml", ".yml", ".log", ".html", ".htm", ".js", ".ts", ".tsx",
   ".jsx", ".py", ".java", ".go", ".rb", ".rs", ".c", ".h", ".cpp", ".sh",
   ".sql", ".toml", ".ini", ".env", ".css",
 ]);
@@ -809,6 +812,60 @@ function nameMatch(qTokens: string[], nameToks: string[]): { hits: number; stron
   return { hits, strong };
 }
 
+/**
+ * The named-file pin's target, if any: the single file whose meaningful
+ * name/path tokens the question covers substantially enough to read as "the
+ * user named this file". Deliberately conservative — the pin FORCES a file
+ * into the top-k, so a weak or ambiguous match must select nothing (0.6.2
+ * field report: a lone generic token shared with a filename pinned irrelevant
+ * files). KEEP IN SYNC with vault.rs::pinned_named_file. Rules:
+ *   - coverage: the question must mention at least half of the file's unique
+ *     meaningful name tokens (len ≥ 3, extension tokens dropped);
+ *   - specificity: ≥ 2 covered tokens, or a single-token name whose token is
+ *     ≥ 5 chars ("resume" can pin, "plan" never does);
+ *   - uniqueness: two files with the same coverage signature mean the phrase
+ *     is generic (meeting-notes-1/2/3…) — pin nothing.
+ */
+export function pinnedNamedFile(
+  qtokens: string[],
+  files: { id: string; toks: string[] }[],
+): string | null {
+  let best: { id: string; c: number; m: number } | null = null;
+  let ambiguous = false;
+  for (const f of files) {
+    const uniq = [
+      ...new Set(f.toks.map(singular).filter((t) => t.length >= 3 && !EXT_TOKENS.has(t))),
+    ];
+    if (uniq.length === 0) continue;
+    const covered = uniq.filter((nt) =>
+      qtokens.some((q0) => {
+        const q = singular(q0);
+        return q.length >= 3 && (q === nt || nt.includes(q) || q.includes(nt));
+      }),
+    );
+    const c = covered.length;
+    const m = uniq.length;
+    const specific = c >= 2 || (m === 1 && (covered[0]?.length ?? 0) >= 5);
+    if (c * 2 < m || !specific) continue;
+    if (!best) {
+      best = { id: f.id, c, m };
+      continue;
+    }
+    // Compare coverage fractions via cross-multiplication (c/m vs bc/bm),
+    // then absolute covered count. An exact tie on both is the
+    // generic-siblings case.
+    const lhs = c * best.m;
+    const rhs = best.c * m;
+    if (lhs > rhs || (lhs === rhs && c > best.c)) {
+      best = { id: f.id, c, m };
+      ambiguous = false;
+    } else if (lhs === rhs && c === best.c) {
+      ambiguous = true;
+    }
+  }
+  return best && !ambiguous ? best.id : null;
+}
+
 // --- catalog / listing queries -----------------------------------------------
 interface Listing {
   label: string;
@@ -1144,15 +1201,12 @@ export async function retrieve(
   // that file — keyword-heavy chunks from other files can otherwise crowd it
   // out of the top-k (and the Rust engine's hybrid scores make that routine;
   // see vault.rs::retrieve). KEEP IN SYNC with the Rust twin.
-  let named: { id: string; hits: number } | null = null;
-  for (const it of items) {
-    const nm = nameMatch(qtokens, nameToks.get(it.id) ?? []);
-    if (nm.strong && nm.hits > 0 && (!named || nm.hits > named.hits)) {
-      named = { id: it.id, hits: nm.hits };
-    }
-  }
-  if (named && !top.some((c) => c.fileId === named.id)) {
-    const best = sorted.find((c) => c.fileId === named.id);
+  const named = pinnedNamedFile(
+    qtokens,
+    items.map((it) => ({ id: it.id, toks: nameToks.get(it.id) ?? [] })),
+  );
+  if (named && !top.some((c) => c.fileId === named)) {
+    const best = sorted.find((c) => c.fileId === named);
     if (best) {
       if (top.length >= k && top.length > 0) top.pop();
       top.push(best);

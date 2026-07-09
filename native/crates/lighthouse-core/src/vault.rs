@@ -234,7 +234,9 @@ const TEXT_EXT: &[&str] = &[
     ".log",
     ".html",
     ".htm",
-    ".xml",
+    // .xml deliberately absent: app-generated sidecar/config XML in linked
+    // folders kept surfacing as AI sources (0.6.x field report). The files
+    // stay visible in the explorer — they just never become chunks.
     ".js",
     ".ts",
     ".tsx",
@@ -1084,6 +1086,73 @@ fn name_match(q_tokens: &[String], name_toks: &[String]) -> (usize, bool) {
     (hits, strong)
 }
 
+/// The named-file pin's target, if any: the single file whose meaningful
+/// name/path tokens the question covers substantially enough to read as
+/// "the user named this file". Deliberately conservative — the pin FORCES a
+/// file into the top-k, so a weak or ambiguous match must select nothing
+/// (0.6.2 field report: a lone generic token shared with a filename pinned
+/// irrelevant files — "quoting the right documents but recommending the
+/// wrong ones"). KEEP IN SYNC with vault.ts::pinnedNamedFile. Rules:
+///   - coverage: the question must mention at least half of the file's
+///     unique meaningful name tokens (len ≥ 3, extension tokens dropped);
+///   - specificity: ≥ 2 covered tokens, or a single-token name whose token
+///     is ≥ 5 chars ("resume" can pin, "plan" never does);
+///   - uniqueness: two files with the same coverage signature mean the
+///     phrase is generic (meeting-notes-1/2/3…) — pin nothing.
+fn pinned_named_file<'a>(
+    qtokens: &[String],
+    files: impl Iterator<Item = (&'a str, &'a [String])>,
+) -> Option<&'a str> {
+    let mut best: Option<(&str, usize, usize)> = None; // (id, covered, total)
+    let mut ambiguous = false;
+    for (id, name_toks) in files {
+        let mut uniq: Vec<&str> = name_toks
+            .iter()
+            .map(|t| singular(t))
+            .filter(|t| t.len() >= 3 && !EXT_TOKENS.contains(t))
+            .collect();
+        uniq.sort_unstable();
+        uniq.dedup();
+        if uniq.is_empty() {
+            continue;
+        }
+        let covered: Vec<&str> = uniq
+            .iter()
+            .copied()
+            .filter(|&nt| {
+                qtokens.iter().any(|q0| {
+                    let q = singular(q0);
+                    q.len() >= 3 && (q == nt || nt.contains(q) || q.contains(nt))
+                })
+            })
+            .collect();
+        let (c, m) = (covered.len(), uniq.len());
+        let specific = c >= 2 || (m == 1 && covered.first().is_some_and(|t| t.len() >= 5));
+        if c * 2 < m || !specific {
+            continue;
+        }
+        match best {
+            None => best = Some((id, c, m)),
+            Some((_, bc, bm)) => {
+                // Compare coverage fractions via cross-multiplication (c/m
+                // vs bc/bm), then absolute covered count. An exact tie on
+                // both is the generic-siblings case.
+                let (lhs, rhs) = (c * bm, bc * m);
+                if lhs > rhs || (lhs == rhs && c > bc) {
+                    best = Some((id, c, m));
+                    ambiguous = false;
+                } else if lhs == rhs && c == bc {
+                    ambiguous = true;
+                }
+            }
+        }
+    }
+    if ambiguous {
+        return None;
+    }
+    best.map(|(id, _, _)| id)
+}
+
 // --- catalog / listing queries ----------------------------------------------------
 
 struct Listing {
@@ -1831,15 +1900,15 @@ pub fn retrieve(
     // "the file is not present in the provided context" — about a file named
     // verbatim in the question). Pin the best-named file's best candidate
     // into the last slot when ranking dropped it.
-    let named = items
-        .iter()
-        .filter_map(|item| {
-            let entry = entries.get(&item.id)?;
-            let (hits, strong) = name_match(&qtokens, &entry.name_tokens);
-            (strong && hits > 0).then_some((item.id.as_str(), hits))
-        })
-        .max_by_key(|(_, hits)| *hits);
-    if let Some((named_id, _)) = named {
+    let named = pinned_named_file(
+        &qtokens,
+        items.iter().filter_map(|item| {
+            entries
+                .get(&item.id)
+                .map(|e| (item.id.as_str(), e.name_tokens.as_slice()))
+        }),
+    );
+    if let Some(named_id) = named {
         if !top.iter().any(|c| c.file_id == named_id) {
             if let Some(best) = cands.iter().find(|c| c.file_id == named_id) {
                 if top.len() >= k && !top.is_empty() {
@@ -1967,6 +2036,54 @@ pub fn doc_path(file_id: &str) -> Option<(String, PathBuf)> {
     let state = load_state();
     let abs = resolve_abs(file_id, &state).ok()?;
     Some((node.name, abs))
+}
+
+#[cfg(test)]
+mod named_pin_tests {
+    use super::{name_tokens_of, pinned_named_file, tokenize};
+
+    fn files(ids: &[&str]) -> Vec<(String, Vec<String>)> {
+        ids.iter().map(|id| (id.to_string(), name_tokens_of(id, id))).collect()
+    }
+
+    fn pick<'a>(question: &str, fs: &'a [(String, Vec<String>)]) -> Option<&'a str> {
+        let q = tokenize(question);
+        pinned_named_file(&q, fs.iter().map(|(id, t)| (id.as_str(), t.as_slice())))
+    }
+
+    #[test]
+    fn a_verbatim_name_pins() {
+        let fs = files(&["1 Galaxy Servers.md", "meeting-notes-1.md", "recipes.md"]);
+        assert_eq!(pick("what is inside 1 Galaxy Servers", &fs), Some("1 Galaxy Servers.md"));
+    }
+
+    /// 0.6.2 field report: right quotes, wrong recommended files — a lone
+    /// generic token ("plan") shared with a filename must never force it in.
+    #[test]
+    fn a_lone_generic_token_never_pins() {
+        let fs = files(&["plan.md", "roadmap.md"]);
+        assert_eq!(pick("what is the plan for the rollout", &fs), None);
+    }
+
+    #[test]
+    fn a_distinctive_single_token_name_still_pins() {
+        let fs = files(&["resume.pdf", "recipes.md"]);
+        assert_eq!(pick("can you summarize my resume", &fs), Some("resume.pdf"));
+    }
+
+    /// Same coverage signature across sibling files = a generic phrase, not
+    /// a named file — nothing may be pinned arbitrarily.
+    #[test]
+    fn generic_siblings_tie_and_nothing_pins() {
+        let fs = files(&["meeting-notes-1.md", "meeting-notes-2.md"]);
+        assert_eq!(pick("what did the meeting notes say", &fs), None);
+    }
+
+    #[test]
+    fn fuller_name_coverage_wins_over_partial() {
+        let fs = files(&["galaxy servers rollout plan.md", "1 Galaxy Servers.md"]);
+        assert_eq!(pick("what is inside 1 galaxy servers", &fs), Some("1 Galaxy Servers.md"));
+    }
 }
 
 #[cfg(test)]
