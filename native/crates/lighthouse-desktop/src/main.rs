@@ -266,6 +266,56 @@ pub fn show_widget(app: &AppHandle, focus: bool) {
     }
     if focus {
         let _ = w.set_focus();
+        // Windows: set_focus alone can be REFUSED when the summon comes from
+        // a background context (global hotkey, whisper hook) — the bar raises
+        // but keystrokes and hands-free dictation keep flowing to the
+        // previous app. Force the switch the way launchers do; must run on
+        // the thread that owns the HWND (the main thread).
+        #[cfg(windows)]
+        {
+            let w = w.clone();
+            let _ = app.run_on_main_thread(move || force_keyboard_focus(&w));
+        }
+    }
+}
+
+/// Windows: make a summoned window genuinely take keyboard focus. A plain
+/// SetForegroundWindow from a background process is refused by the OS
+/// foreground lock. The launcher trick (PowerToys Run, Flow Launcher):
+/// briefly attach our input thread to the current foreground window's
+/// thread — the switch then counts as legitimate — hand focus over, and
+/// detach. The webview receives WM_SETFOCUS, the page fires `focus`, and
+/// WidgetBar puts the caret in the (select-all'd) input, so dictation lands
+/// in the box with no click. Call on the main thread only.
+#[cfg(windows)]
+fn force_keyboard_focus(window: &tauri::WebviewWindow) {
+    use windows_sys::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::SetFocus;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        BringWindowToTop, GetForegroundWindow, GetWindowThreadProcessId, SetForegroundWindow,
+    };
+    let Ok(hwnd) = window.hwnd() else { return };
+    let hwnd = hwnd.0 as windows_sys::Win32::Foundation::HWND;
+    unsafe {
+        let fg = GetForegroundWindow();
+        if fg == hwnd {
+            return; // already foreground — nothing to force
+        }
+        let our_thread = GetCurrentThreadId();
+        let fg_thread = if fg.is_null() {
+            0
+        } else {
+            GetWindowThreadProcessId(fg, std::ptr::null_mut())
+        };
+        let attached = fg_thread != 0
+            && fg_thread != our_thread
+            && AttachThreadInput(our_thread, fg_thread, 1) != 0;
+        SetForegroundWindow(hwnd);
+        BringWindowToTop(hwnd);
+        SetFocus(hwnd);
+        if attached {
+            AttachThreadInput(our_thread, fg_thread, 0);
+        }
     }
 }
 
