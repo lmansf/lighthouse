@@ -41,6 +41,15 @@ export interface RagService {
     fileIds: string[],
   ): Promise<{ markdown?: string; chart?: string | null; footer?: string; error?: string }>;
   /**
+   * Engine-derived example questions for the chat empty state: each names real
+   * columns of a real included tabular file, so the analytics path can answer
+   * it ("Total amount by region in sales.csv"). `label` is the chip text,
+   * `question` the full ask submitted on tap. Empty when nothing tabular is
+   * included (or on the web dev twin — the column catalog is desktop-only), in
+   * which case the UI keeps its static empty-state hint.
+   */
+  suggestedAsks(includedFileIds: string[]): Promise<{ label: string; question: string }[]>;
+  /**
    * Link a file or folder by its real absolute path instead of copying it into
    * the vault (reduces duplication). Returns the new node id. Desktop-only —
    * the browser has no access to real filesystem paths.

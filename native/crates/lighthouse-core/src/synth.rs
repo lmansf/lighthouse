@@ -252,6 +252,29 @@ pub fn answer_pipeline(
             }
         }
 
+        // --- Vault meta-answers (openspec: add-vault-meta-answers): anchored
+        //     questions ABOUT the vault (recency, inventory, column
+        //     membership) answer instantly from walk metadata + the column
+        //     catalog — no model call, real references. Runs before analytics
+        //     (meta questions are never aggregates). Any renderer error falls
+        //     through with NOTHING emitted — no partial meta output. ---
+        if attachment_file_ids.is_empty() {
+            if let Some(intent) = crate::meta::meta_intent(&question) {
+                let ids = included_file_ids.clone();
+                let rendered = tokio::task::spawn_blocking(move || {
+                    crate::meta::render_meta(&intent, &ids, crate::config::now_ms())
+                })
+                .await
+                .ok()
+                .and_then(|r| r.ok());
+                if let Some(ans) = rendered {
+                    yield delta(ans.markdown);
+                    yield final_chunk(ans.references);
+                    return;
+                }
+            }
+        }
+
         // --- Analytics branch (docs/analytics-genie.md): aggregate ask over
         //     tabular files → model writes SQL, DataFusion executes, the model
         //     narrates the verified result. Any failure falls through silently

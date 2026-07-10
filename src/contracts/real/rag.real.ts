@@ -54,6 +54,11 @@ class RealRagService implements RagService {
     };
   }
 
+  async suggestedAsks(includedFileIds: string[]): Promise<{ label: string; question: string }[]> {
+    const res = await post({ op: "suggestedAsks", includedFileIds });
+    return Array.isArray(res.asks) ? (res.asks as { label: string; question: string }[]) : [];
+  }
+
   async addReference(path: string): Promise<{ id: string; kind: "file" | "folder" }> {
     const res = await post({ op: "addReference", path });
     return res as { id: string; kind: "file" | "folder" };

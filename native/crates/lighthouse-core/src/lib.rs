@@ -17,6 +17,7 @@ pub mod index;
 pub mod license;
 pub mod llm;
 pub mod local_model;
+pub mod meta;
 pub mod profile;
 pub mod settings;
 pub mod sources;

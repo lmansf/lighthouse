@@ -166,6 +166,12 @@ export async function POST(req: Request) {
         error: "analytics queries run in the desktop engine — this dev server can't execute SQL",
       });
 
+    case "suggestedAsks":
+      // PARITY: suggestions derive from the column catalog, which lives in
+      // the desktop engine only. Empty means the chat keeps its static
+      // empty-state hint — exactly the no-tabular-files behavior.
+      return NextResponse.json({ asks: [] });
+
     default:
       return NextResponse.json({ error: "unknown op" }, { status: 400 });
   }

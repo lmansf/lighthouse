@@ -77,6 +77,20 @@ class MockRagService implements RagService {
     };
   }
 
+  async suggestedAsks(includedFileIds: string[]): Promise<{ label: string; question: string }[]> {
+    // The mock has no column catalog; surface canned asks for the first
+    // included tabular file so the empty-state chips are exercisable offline.
+    const included = new Set(includedFileIds);
+    const sheet = this.nodes.find(
+      (n) => n.kind === "file" && included.has(n.id) && /\.(csv|tsv|xlsx?|parquet)$/i.test(n.name),
+    );
+    if (!sheet) return [];
+    return [
+      { label: "Total amount by region", question: `Total amount by region in ${sheet.name}` },
+      { label: "Monthly trend of amount", question: `Monthly trend of amount in ${sheet.name}` },
+    ];
+  }
+
   async addReference(path: string): Promise<{ id: string; kind: "file" | "folder" }> {
     // The mock has no filesystem; surface a referenced node so the surface is
     // exercised. A real implementation links the true path on disk.

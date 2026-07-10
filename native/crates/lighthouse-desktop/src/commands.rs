@@ -183,6 +183,20 @@ pub async fn rag_op(app: AppHandle, body: Value) -> Result<Value, String> {
                 Err(e) => json!({ "error": e }),
             })
         }
+        // Catalog-derived example questions for the chat empty state — every
+        // one names real columns of a real included file, so the analytics
+        // path can answer it. Empty when nothing tabular is included.
+        Some("suggestedAsks") => {
+            let ids: Vec<String> = body["includedFileIds"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            let asks =
+                tokio::task::spawn_blocking(move || lighthouse_core::meta::suggested_asks(&ids))
+                    .await
+                    .unwrap_or_default();
+            Ok(json!({ "asks": asks }))
+        }
         _ => Err("unknown op".into()),
     }
 }

@@ -1643,6 +1643,32 @@ export function ChatPanel() {
     composerRef.current?.focus();
   }
 
+  // Engine-derived example questions for the empty state — each names real
+  // columns of a real included tabular file, so tapping one is guaranteed
+  // answerable by the analytics path. Fetched when the empty state shows (and
+  // when the included set changes); empty (or a fetch failure) keeps the
+  // static suggestions below. openspec: add-vault-meta-answers.
+  const [engineAsks, setEngineAsks] = useState<{ label: string; question: string }[]>([]);
+  const emptyState = messages.length === 0;
+  useEffect(() => {
+    if (!emptyState || includedFileIds.length === 0) {
+      setEngineAsks([]);
+      return;
+    }
+    let cancelled = false;
+    ragService
+      .suggestedAsks(includedFileIds)
+      .then((asks) => {
+        if (!cancelled) setEngineAsks(Array.isArray(asks) ? asks.slice(0, 4) : []);
+      })
+      .catch(() => {
+        if (!cancelled) setEngineAsks([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [emptyState, includedFileIds]);
+
   // Up to 3 starter prompts built from the user's actual included file names.
   const suggestions = useMemo(() => {
     if (includedFiles.length === 0) return [];
@@ -2129,17 +2155,31 @@ export function ChatPanel() {
             <>
               <Badge appearance="tint">{visibleBadgeText}</Badge>
               <div className={styles.suggestRow}>
-                {suggestions.map((s) => (
-                  <Button
-                    key={s.label}
-                    appearance="secondary"
-                    size="small"
-                    shape="circular"
-                    onClick={() => applySuggestion(s.fill)}
-                  >
-                    {s.label}
-                  </Button>
-                ))}
+                {engineAsks.length > 0
+                  ? // Catalog-derived asks submit immediately — every one is a
+                    // real, answerable question about a real included file.
+                    engineAsks.map((s) => (
+                      <Button
+                        key={s.label}
+                        appearance="secondary"
+                        size="small"
+                        shape="circular"
+                        onClick={() => void sendQuestion(s.question)}
+                      >
+                        {s.label}
+                      </Button>
+                    ))
+                  : suggestions.map((s) => (
+                      <Button
+                        key={s.label}
+                        appearance="secondary"
+                        size="small"
+                        shape="circular"
+                        onClick={() => applySuggestion(s.fill)}
+                      >
+                        {s.label}
+                      </Button>
+                    ))}
               </div>
             </>
           )}
