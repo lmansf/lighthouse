@@ -3,6 +3,8 @@
 //! locally-stored profile plus the chosen model provider/key. The API key never
 //! leaves the machine and is never returned to the client (only `hasApiKey`).
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::config::{profile_path, read_json, write_json};
@@ -26,9 +28,16 @@ struct StoredProfile {
     model_id: Option<String>,
     #[serde(default)]
     has_api_key: bool,
-    /// Kept server-side only; surfaced to the client solely as `hasApiKey`.
+    /// Legacy single key slot from builds that offered one keyed provider
+    /// (Anthropic). Kept in sync with `api_keys["anthropic"]` so a downgrade
+    /// to an older build still finds its key. Server-side only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     api_key: Option<String>,
+    /// One stored key per keyed provider, so switching providers never hands
+    /// one vendor's key to another. Server-side only; surfaced to the client
+    /// solely as `hasApiKey` + `keyedProviders` (never the keys themselves).
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    api_keys: HashMap<String, String>,
     /// Whether the user has ever explicitly saved a model choice (server-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     model_ever_selected: Option<bool>,
@@ -51,6 +60,7 @@ impl Default for StoredProfile {
             model_id: None,
             has_api_key: false,
             api_key: None,
+            api_keys: HashMap::new(),
             model_ever_selected: None,
             default_inclusion_choice: None,
         }
@@ -58,20 +68,38 @@ impl Default for StoredProfile {
 }
 
 /// Provider ids the app can actually answer with (mirrors the TS server's
-/// KNOWN_PROVIDER_IDS). Earlier builds offered openai/google/mistral in the
-/// picker but never wired them to a backend — a profile that still carries one
-/// is normalized to the private local default, so the UI never claims excerpts
-/// go to a provider that is never called. The stored key is left untouched.
-const KNOWN_PROVIDER_IDS: [&str; 2] = [LOCAL_PROVIDER_ID, "anthropic"];
+/// knownProviderIds): local, Anthropic, and every wired OpenAI-compatible
+/// vendor — derived from the engine's own table so the two can't drift. A
+/// profile carrying anything else (a provider from a build that listed more
+/// than it wired, or a removed one) is normalized to the private local
+/// default, so the UI never claims excerpts go to a provider that is never
+/// called. Stored keys are left untouched in case the provider returns.
+fn is_known_provider(id: &str) -> bool {
+    id == LOCAL_PROVIDER_ID || id == "anthropic" || crate::llm::remote_provider(id).is_some()
+}
 
 fn load() -> StoredProfile {
     let mut p: StoredProfile = read_json(&profile_path(), StoredProfile::default());
+    let mut dirty = false;
+    // Migrate the legacy single-key slot into the per-provider map. It can
+    // only be an Anthropic key: every build that wrote it offered exactly one
+    // keyed provider (openai/google/mistral appeared in an ancient picker but
+    // were never wired, and their profiles were normalized to local).
+    if p.api_keys.is_empty() {
+        if let Some(k) = p.api_key.clone().filter(|k| !k.is_empty()) {
+            p.api_keys.insert("anthropic".to_string(), k);
+            dirty = true;
+        }
+    }
     if let Some(id) = p.provider_id.as_deref() {
-        if !KNOWN_PROVIDER_IDS.contains(&id) {
+        if !is_known_provider(id) {
             p.provider_id = Some(LOCAL_PROVIDER_ID.to_string());
             p.model_id = Some(LOCAL_MODEL_ID.to_string());
-            save(&p);
+            dirty = true;
         }
+    }
+    if dirty {
+        save(&p);
     }
     p
 }
@@ -89,6 +117,9 @@ pub struct OnboardingState {
     pub provider_id: Option<String>,
     pub model_id: Option<String>,
     pub has_api_key: bool,
+    /// Provider ids that have a usable key (stored or via env var) — never the
+    /// keys themselves. Lets the UI say "key saved" per provider.
+    pub keyed_providers: Vec<String>,
     pub onboarding_variant: String,
     pub default_inclusion_variant: String,
     /// The effective default-inclusion behavior ("include"/"exclude").
@@ -122,16 +153,37 @@ pub fn set_default_inclusion(value: &str) {
 
 pub fn get_state() -> OnboardingState {
     let p = load();
+    let keyed = keyed_providers(&p);
+    // "Has a key" is now per-provider: true when the SELECTED provider has
+    // one. The legacy stored flag only backs up pre-map anthropic profiles.
+    let has_api_key = match p.provider_id.as_deref() {
+        Some(id) if id != LOCAL_PROVIDER_ID => {
+            keyed.iter().any(|k| k == id) || (id == "anthropic" && p.has_api_key)
+        }
+        _ => false,
+    };
     OnboardingState {
         step: p.step,
         user: p.user,
         provider_id: p.provider_id,
         model_id: p.model_id,
-        has_api_key: p.api_key.map(|k| !k.is_empty()).unwrap_or(false) || p.has_api_key,
+        has_api_key,
+        keyed_providers: keyed,
         onboarding_variant: get_variant("onboarding"),
         default_inclusion_variant: get_variant("default_inclusion"),
         default_inclusion: effective_default_inclusion(),
     }
+}
+
+/// Every keyed provider id with a usable key — stored in the map, in the
+/// legacy slot (anthropic), or supplied via its env var.
+fn keyed_providers(p: &StoredProfile) -> Vec<String> {
+    let mut ids: Vec<&str> = vec!["anthropic"];
+    ids.extend(crate::llm::OPENAI_COMPAT_PROVIDERS.iter().map(|r| r.id));
+    ids.into_iter()
+        .filter(|id| resolve_key(id, p).is_some())
+        .map(String::from)
+        .collect()
 }
 
 pub fn sign_in(email: &str) -> User {
@@ -224,15 +276,20 @@ pub fn select_model(provider_id: &str, model_id: &str, api_key: &str) -> ModelSe
     let initial = !p.model_ever_selected.unwrap_or(false);
     let changed =
         p.provider_id.as_deref() != Some(provider_id) || p.model_id.as_deref() != Some(model_id);
+    // A pasted key is stored under the provider it was pasted FOR; an empty
+    // field keeps that provider's existing key (switch model w/o re-pasting).
+    let mut api_keys = p.api_keys.clone();
+    if !key.is_empty() && provider_id != LOCAL_PROVIDER_ID {
+        api_keys.insert(provider_id.to_string(), key.clone());
+    }
     let next = StoredProfile {
         provider_id: Some(provider_id.to_string()),
         model_id: Some(model_id.to_string()),
-        api_key: if key.is_empty() {
-            p.api_key.clone()
-        } else {
-            Some(key.clone())
-        },
+        // Legacy slot mirrors the anthropic key so a downgraded build still
+        // answers with it (older builds read only this field).
+        api_key: api_keys.get("anthropic").cloned().or(p.api_key.clone()),
         has_api_key: !key.is_empty() || p.has_api_key,
+        api_keys,
         step: "done".to_string(),
         model_ever_selected: Some(true),
         ..p.clone()
@@ -258,16 +315,55 @@ pub fn sign_out() {
     save(&StoredProfile::default());
 }
 
-/// Resolved model config for the chat route (env key overrides stored key).
+/// Resolved model config for the chat route: the SELECTED provider's key,
+/// with its env var (ANTHROPIC_API_KEY, OPENAI_API_KEY, …) taking precedence
+/// over the stored one.
 pub fn model_config() -> ModelCfg {
     let p = load();
-    let env_key = std::env::var("ANTHROPIC_API_KEY")
-        .ok()
-        .map(|k| k.trim().to_string())
-        .filter(|k| !k.is_empty());
+    let api_key = p.provider_id.as_deref().and_then(|id| resolve_key(id, &p));
     ModelCfg {
         provider_id: p.provider_id,
         model_id: p.model_id,
-        api_key: env_key.or(p.api_key).filter(|k| !k.is_empty()),
+        api_key,
     }
+}
+
+/// The key a chat with `provider_id` would use right now (env → stored map →
+/// legacy anthropic slot). None for local/unknown providers or when unkeyed.
+pub fn resolved_key_for(provider_id: &str) -> Option<String> {
+    resolve_key(provider_id, &load())
+}
+
+fn env_var_key(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|k| k.trim().to_string())
+        .filter(|k| !k.is_empty())
+}
+
+fn resolve_key(provider_id: &str, p: &StoredProfile) -> Option<String> {
+    if provider_id == LOCAL_PROVIDER_ID {
+        return None;
+    }
+    let env_name = if provider_id == "anthropic" {
+        Some("ANTHROPIC_API_KEY")
+    } else {
+        crate::llm::remote_provider(provider_id).map(|r| r.env_key)
+    };
+    if let Some(k) = env_name.and_then(env_var_key) {
+        return Some(k);
+    }
+    // Google publishes both spellings; accept the older one too.
+    if provider_id == "google" {
+        if let Some(k) = env_var_key("GOOGLE_API_KEY") {
+            return Some(k);
+        }
+    }
+    if let Some(k) = p.api_keys.get(provider_id).filter(|k| !k.is_empty()) {
+        return Some(k.clone());
+    }
+    if provider_id == "anthropic" {
+        return p.api_key.clone().filter(|k| !k.is_empty());
+    }
+    None
 }

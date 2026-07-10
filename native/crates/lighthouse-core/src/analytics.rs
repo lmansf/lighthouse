@@ -125,6 +125,9 @@ pub struct TableReg {
     pub file_name: String,
     /// "col TYPE, col TYPE, …" + row count + sample rows, ready for a prompt block.
     pub card: String,
+    /// The file's on-disk mtime (epoch ms) when it was registered — i.e. the
+    /// version of the data this ask reads. None if the stat failed.
+    pub modified_ms: Option<i64>,
 }
 
 /// Register every supported file into one context (multi-file joins come free).
@@ -144,6 +147,7 @@ pub async fn register_tables(
         if used.contains(&base) {
             base = format!("{}_{}", base, used.len() + 1);
         }
+        let modified_ms = file_mtime_ms(abs);
         let path = abs.to_string_lossy().to_string();
         let registered: Vec<String> = if lower.ends_with(".csv") || lower.ends_with(".tsv") {
             let delim = if lower.ends_with(".tsv") { b'\t' } else { b',' };
@@ -174,6 +178,7 @@ pub async fn register_tables(
                     file_id: file_id.clone(),
                     file_name: name.clone(),
                     card,
+                    modified_ms,
                 });
             }
         }
@@ -297,6 +302,93 @@ async fn table_card(ctx: &SessionContext, table: &str) -> Option<String> {
     } else {
         Some(card)
     }
+}
+
+// --- Freshness -------------------------------------------------------------------
+//
+// A field report of "analytics still appear to be outdated" turned out to be
+// about the *file*, not the engine: every ask reads the current on-disk bytes
+// (csv/parquet are registered by path, workbooks are opened at ask time), so
+// stale numbers mean a stale file — cloud-sync lag, edits saved to a different
+// copy, or unsaved changes in Excel. The footer below makes that visible in
+// the answer itself instead of leaving the user to guess.
+
+/// Epoch-ms mtime; None when the file or its timestamp can't be read.
+fn file_mtime_ms(abs: &PathBuf) -> Option<i64> {
+    let t = std::fs::metadata(abs).ok()?.modified().ok()?;
+    let d = t.duration_since(std::time::UNIX_EPOCH).ok()?;
+    i64::try_from(d.as_millis()).ok()
+}
+
+/// Human age of the file's last save. Coarse on purpose — "2 hours ago"
+/// answers "is this stale?" better than a UTC timestamp the user must convert.
+pub fn saved_age_label(modified_ms: i64, now_ms: i64) -> String {
+    let delta = now_ms - modified_ms;
+    // Future mtimes happen (clock skew, cloud-sync stamping); read as fresh.
+    if delta < 60_000 {
+        return "just now".to_string();
+    }
+    const LADDER: &[(i64, &str)] = &[
+        (60_000, "minute"),
+        (3_600_000, "hour"),
+        (86_400_000, "day"),
+        (604_800_000, "week"),
+        (2_592_000_000, "month"),
+        (31_536_000_000, "year"),
+    ];
+    let (unit_ms, unit) = LADDER
+        .iter()
+        .rev()
+        .find(|(ms, _)| delta >= *ms)
+        .expect("delta >= one minute");
+    let n = delta / unit_ms;
+    format!("{n} {unit}{} ago", if n == 1 { "" } else { "s" })
+}
+
+/// Word-boundary, case-insensitive "does this SQL reference that table" —
+/// `sales` is not mentioned by `sales_2024` or `presales`.
+pub fn sql_mentions_table(sql: &str, table: &str) -> bool {
+    let hay = sql.to_lowercase();
+    let needle = table.to_lowercase();
+    if needle.is_empty() {
+        return false;
+    }
+    let bytes = hay.as_bytes();
+    let ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let mut from = 0;
+    while let Some(pos) = hay[from..].find(&needle) {
+        let start = from + pos;
+        let end = start + needle.len();
+        if (start == 0 || !ident(bytes[start - 1])) && (end == bytes.len() || !ident(bytes[end])) {
+            return true;
+        }
+        from = start + 1;
+    }
+    false
+}
+
+/// The deterministic footer line naming the files the query read and how
+/// fresh each on-disk copy was at ask time, deduped by file (a workbook can
+/// register several sheets). Only files whose tables the SQL actually
+/// references are named; if none match (the model aliased beyond
+/// recognition), listing every registered file is the honest fallback.
+pub fn freshness_line(regs: &[TableReg], sql: &str, now_ms: i64) -> Option<String> {
+    let hits: Vec<&TableReg> =
+        regs.iter().filter(|r| sql_mentions_table(sql, &r.table)).collect();
+    let used: Vec<&TableReg> = if hits.is_empty() { regs.iter().collect() } else { hits };
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let parts: Vec<String> = used
+        .iter()
+        .filter(|r| seen.insert(r.file_id.as_str()))
+        .map(|r| match r.modified_ms {
+            Some(ms) => format!("“{}” (saved {})", r.file_name, saved_age_label(ms, now_ms)),
+            None => format!("“{}”", r.file_name),
+        })
+        .collect();
+    if parts.is_empty() {
+        return None;
+    }
+    Some(format!("*Computed from:* {}\n", parts.join(", ")))
 }
 
 // --- SQL guard -------------------------------------------------------------------
@@ -570,6 +662,60 @@ mod tests {
     }
 
     #[test]
+    fn saved_age_labels_read_naturally() {
+        let now = 1_700_000_000_000i64;
+        assert_eq!(saved_age_label(now - 5_000, now), "just now");
+        assert_eq!(saved_age_label(now + 120_000, now), "just now"); // future mtime = clock skew
+        assert_eq!(saved_age_label(now - 90_000, now), "1 minute ago");
+        assert_eq!(saved_age_label(now - 45 * 60_000, now), "45 minutes ago");
+        assert_eq!(saved_age_label(now - 5 * 3_600_000, now), "5 hours ago");
+        assert_eq!(saved_age_label(now - 3 * 86_400_000, now), "3 days ago");
+        assert_eq!(saved_age_label(now - 10 * 86_400_000, now), "1 week ago");
+        assert_eq!(saved_age_label(now - 70 * 86_400_000, now), "2 months ago");
+        assert_eq!(saved_age_label(now - 800 * 86_400_000, now), "2 years ago");
+    }
+
+    #[test]
+    fn sql_table_mentions_respect_word_boundaries() {
+        assert!(sql_mentions_table("SELECT * FROM sales s JOIN reps r ON 1=1", "sales"));
+        assert!(sql_mentions_table("select sum(x) from SALES", "sales"));
+        assert!(sql_mentions_table("SELECT * FROM t JOIN orders ON 1=1", "orders"));
+        assert!(!sql_mentions_table("SELECT * FROM sales_2024", "sales"));
+        assert!(!sql_mentions_table("SELECT presales FROM t", "sales"));
+        assert!(!sql_mentions_table("SELECT 1", ""));
+    }
+
+    #[test]
+    fn freshness_line_names_only_queried_files() {
+        let now = 1_700_000_000_000i64;
+        let reg = |table: &str, id: &str, name: &str, ms: Option<i64>| TableReg {
+            table: table.into(),
+            file_id: id.into(),
+            file_name: name.into(),
+            card: String::new(),
+            modified_ms: ms,
+        };
+        let regs = vec![
+            reg("tickets", "f1", "Tickets.xlsx", Some(now - 2 * 3_600_000)),
+            reg("tickets__sheet2", "f1", "Tickets.xlsx", Some(now - 2 * 3_600_000)),
+            reg("regions", "f2", "regions.csv", Some(now - 400 * 86_400_000)),
+        ];
+        let line = freshness_line(&regs, "SELECT * FROM tickets", now).unwrap();
+        assert!(line.contains("Tickets.xlsx") && line.contains("2 hours ago"), "{line}");
+        assert!(!line.contains("regions.csv"), "{line}");
+        // Two sheets of one workbook = one mention (dedup by file id).
+        assert_eq!(line.matches("Tickets.xlsx").count(), 1, "{line}");
+        // Nothing matched (model aliased beyond recognition) → honest
+        // fallback: every registered file.
+        let all = freshness_line(&regs, "SELECT 1", now).unwrap();
+        assert!(all.contains("Tickets.xlsx") && all.contains("regions.csv"), "{all}");
+        // Missing mtime → name only, no fabricated age.
+        let l = freshness_line(&[reg("t", "f9", "x.csv", None)], "SELECT * FROM t", now).unwrap();
+        assert!(l.contains("“x.csv”") && !l.contains("saved"), "{l}");
+        assert!(freshness_line(&[], "SELECT 1", now).is_none());
+    }
+
+    #[test]
     fn sql_extraction_handles_fences_and_prose() {
         assert_eq!(
             extract_sql("Here you go:\n```sql\nSELECT a FROM t;\n```").as_deref(),
@@ -757,6 +903,11 @@ mod tests {
         let regs = register_tables(&ctx, &files).await;
         assert_eq!(regs.len(), 2);
         assert!(regs[0].card.contains("rows"));
+        // Freshly written fixtures stamp as read-just-now.
+        assert!(regs.iter().all(|r| r.modified_ms.is_some()));
+        let fresh = freshness_line(&regs, "SELECT * FROM sales", crate::config::now_ms()).unwrap();
+        assert!(fresh.contains("sales.csv") && fresh.contains("just now"), "{fresh}");
+        assert!(!fresh.contains("regions.csv"), "{fresh}");
 
         // Write one of them back out as parquet, register, and JOIN across formats.
         let pq = dir.join("sales.parquet");

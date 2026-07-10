@@ -51,8 +51,10 @@ question ─► analytics intent? (aggregate cue AND ≥1 tabular file in scope)
               ▼
         exact result table (markdown) + the SQL injected as context blocks
               ▼
-        model narrates; the engine appends "Query used: ```sql …```"
-        deterministically (never model-generated), references = the files
+        model narrates; the engine appends "Query used: ```sql …```" and
+        "Computed from: “file” (saved N ago)" — the files the SQL referenced
+        with their on-disk mtime age — deterministically (never
+        model-generated), references = the files
 ```
 
 Failures at any step fall through to the existing synthesis/profile paths —

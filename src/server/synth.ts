@@ -11,7 +11,7 @@
 import type { ChatChunk, ChatTurn, RagReference } from "@/contracts";
 import { retrieve as registryRetrieve } from "./sources/registry";
 import { retrieve as vaultRetrieve, docText, activeIncludedFileIds, namedButExcluded } from "./vault";
-import { streamAnswer, type Ctx } from "./llm";
+import { remoteProvider, streamAnswer, type Ctx } from "./llm";
 import { isProfileable, tableProfile } from "./tableProfile";
 
 /** Budgets — mirrored in lighthouse-core/src/synth.rs. */
@@ -113,7 +113,9 @@ async function collect(gen: AsyncGenerator<string>): Promise<string> {
 /** Providers that can actually run map calls (the keyless extractive fallback
  *  answers single-shot only — running it 6 times would just paste passages). */
 function hasRealModel(cfg: ModelCfg): boolean {
-  return cfg.providerId === "local" || (cfg.providerId === "anthropic" && !!cfg.apiKey);
+  if (cfg.providerId === "local") return true;
+  const keyed = cfg.providerId === "anthropic" || Boolean(remoteProvider(cfg.providerId));
+  return keyed && !!cfg.apiKey;
 }
 
 const progress = (label: string, step: number, total: number): ChatChunk => ({

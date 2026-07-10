@@ -20,6 +20,11 @@ interface AuthStore {
   register: (name: string, email: string, password: string) => Promise<void>;
   finishRegistration: () => Promise<void>;
   selectModel: (providerId: string, modelId: string, apiKey: string) => Promise<void>;
+  /** Live-test a key (empty string tests the stored one). Never persists. */
+  validateKey: (
+    providerId: string,
+    apiKey: string,
+  ) => Promise<{ ok: boolean; error?: string }>;
   setDefaultInclusion: (value: "include" | "exclude") => Promise<void>;
   completeOnboarding: () => Promise<void>;
   signOut: () => Promise<void>;
@@ -56,6 +61,8 @@ export const useAuthStore = create<AuthStore>((set) => {
     await authService.selectModel(providerId, modelId, apiKey);
     set({ onboarding: authService.getState() });
   },
+
+  validateKey: (providerId, apiKey) => authService.validateKey(providerId, apiKey),
 
   setDefaultInclusion: async (value) => {
     await authService.setDefaultInclusion(value);

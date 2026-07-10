@@ -146,7 +146,9 @@ pub fn strip_markers(text: &str) -> String {
 fn has_real_model(cfg: &ModelCfg) -> bool {
     match cfg.provider_id.as_deref() {
         Some("local") => true,
-        Some("anthropic") => cfg.api_key.as_deref().is_some_and(|k| !k.is_empty()),
+        Some(id) if id == "anthropic" || crate::llm::remote_provider(id).is_some() => {
+            cfg.api_key.as_deref().is_some_and(|k| !k.is_empty())
+        }
         _ => false,
     }
 }
@@ -339,6 +341,15 @@ pub fn answer_pipeline(
                         }
                         // Deterministic transparency — never model-generated.
                         yield delta(format!("\n\n*Query used:*\n```sql\n{sql}\n```\n"));
+                        // …and which file versions it read, so stale-looking
+                        // numbers point at the file, not the engine.
+                        if let Some(fresh) = crate::analytics::freshness_line(
+                            &regs,
+                            &sql,
+                            crate::config::now_ms(),
+                        ) {
+                            yield delta(fresh);
+                        }
                         // Chartable result → engine-built spec the chat renders
                         // as SVG (Phase C). Data comes straight from the query
                         // batches; the model never sees or writes this block.

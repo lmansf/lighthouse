@@ -83,9 +83,12 @@ contracts — no cloud database required:
   1 MB prefix and total chunks are capped, so a huge dataset can't stall a query
   (`src/server/vault.ts`) — local, no embeddings download.
 - **Chat** is a running conversation that streams a grounded answer (`/api/chat`):
-  Anthropic Claude when an API key is configured (set in onboarding or later from
-  the settings gear's **AI models** dialog, or via `ANTHROPIC_API_KEY`), an
-  on-device **local model** when the "Local model
+  a hosted model when an API key is configured — Anthropic Claude, OpenAI GPT,
+  Google Gemini, xAI Grok, Mistral, or DeepSeek, set in onboarding or later from
+  the settings gear's **AI models** dialog (keys are stored per provider and can
+  be live-tested there; `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`,
+  `XAI_API_KEY`, `MISTRAL_API_KEY`, and `DEEPSEEK_API_KEY` each override their
+  provider's stored key) — an on-device **local model** when the "Local model
   (private)" provider is selected (see **[Local model](#local-model)**), otherwise
   a local extractive fallback that needs no network. Answers render as Markdown
   (headings, lists, tables, code, bold, and links that open externally). Each

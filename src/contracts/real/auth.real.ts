@@ -84,6 +84,20 @@ class RealAuthService implements AuthService {
   async selectModel(providerId: string, modelId: string, apiKey: string): Promise<void> {
     await post("selectModel", { providerId, modelId, apiKey });
   }
+  async validateKey(
+    providerId: string,
+    apiKey: string,
+  ): Promise<{ ok: boolean; error?: string }> {
+    // Not routed through post(): the reply is {ok, error?}, not an
+    // OnboardingState, and must not clobber the cached profile.
+    const r = await fetch("/api/profile", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ op: "validateKey", providerId, apiKey }),
+    });
+    if (!r.ok) throw new Error(`POST /api/profile ${r.status}`);
+    return (await r.json()) as { ok: boolean; error?: string };
+  }
   async setDefaultInclusion(value: "include" | "exclude"): Promise<void> {
     await post("setDefaultInclusion", { value });
   }

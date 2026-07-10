@@ -3,6 +3,8 @@
 //!
 //! - Local model: streamed tokens from an on-machine OpenAI-compatible server.
 //! - Anthropic Claude: streamed tokens via the Messages API (no SDK).
+//! - OpenAI / Google / xAI / Mistral / DeepSeek: streamed tokens via each
+//!   vendor's OpenAI-compatible chat-completions endpoint (one shared adapter).
 //! - Otherwise: a fully-local extractive fallback that streams the most
 //!   relevant passages.
 
@@ -16,7 +18,94 @@ use serde_json::json;
 use crate::contracts::ChatTurn;
 
 const ANTHROPIC_URL: &str = "https://api.anthropic.com/v1/messages";
+const ANTHROPIC_MODELS_URL: &str = "https://api.anthropic.com/v1/models";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
+
+// --- Remote OpenAI-compatible providers ---------------------------------------------
+//
+// Every major non-Anthropic vendor speaks the OpenAI chat-completions protocol
+// (SSE `data: {choices:[{delta:{content}}]}`), so ONE adapter covers them all —
+// only the endpoint, key, and token-cap parameter name differ. Anthropic keeps
+// its own Messages-API path. A provider may only appear in the UI picker
+// (contracts/mocks/providers.ts) if it is wired here: an earlier build listed
+// providers it silently ignored, and every answer fell back to keyword
+// extraction while the user believed a cloud model was reading their files.
+// KEEP IN SYNC with REMOTE_PROVIDERS in src/server/llm.ts.
+
+#[derive(Debug, Clone, Copy)]
+pub struct RemoteProvider {
+    pub id: &'static str,
+    /// Human name for error notes ("OpenAI 401: …").
+    pub label: &'static str,
+    pub chat_url: &'static str,
+    /// Cheap authenticated GET (model list) used to test a pasted key.
+    pub models_url: &'static str,
+    /// Env var that overrides the stored key (parity with ANTHROPIC_API_KEY).
+    pub env_key: &'static str,
+    /// Fallback when the profile carries no model id.
+    pub default_model: &'static str,
+    /// OpenAI's gpt-5 family rejects `max_tokens` in favor of
+    /// `max_completion_tokens`; everyone else still takes `max_tokens`.
+    pub max_tokens_param: &'static str,
+}
+
+pub const OPENAI_COMPAT_PROVIDERS: &[RemoteProvider] = &[
+    RemoteProvider {
+        id: "openai",
+        label: "OpenAI",
+        chat_url: "https://api.openai.com/v1/chat/completions",
+        models_url: "https://api.openai.com/v1/models",
+        env_key: "OPENAI_API_KEY",
+        default_model: "gpt-5-mini",
+        max_tokens_param: "max_completion_tokens",
+    },
+    RemoteProvider {
+        id: "google",
+        label: "Google Gemini",
+        chat_url: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+        models_url: "https://generativelanguage.googleapis.com/v1beta/openai/models",
+        env_key: "GEMINI_API_KEY",
+        default_model: "gemini-2.5-flash",
+        max_tokens_param: "max_tokens",
+    },
+    RemoteProvider {
+        id: "xai",
+        label: "xAI Grok",
+        chat_url: "https://api.x.ai/v1/chat/completions",
+        models_url: "https://api.x.ai/v1/models",
+        env_key: "XAI_API_KEY",
+        default_model: "grok-4",
+        max_tokens_param: "max_tokens",
+    },
+    RemoteProvider {
+        id: "mistral",
+        label: "Mistral",
+        chat_url: "https://api.mistral.ai/v1/chat/completions",
+        models_url: "https://api.mistral.ai/v1/models",
+        env_key: "MISTRAL_API_KEY",
+        default_model: "mistral-medium-latest",
+        max_tokens_param: "max_tokens",
+    },
+    RemoteProvider {
+        id: "deepseek",
+        label: "DeepSeek",
+        chat_url: "https://api.deepseek.com/v1/chat/completions",
+        models_url: "https://api.deepseek.com/v1/models",
+        env_key: "DEEPSEEK_API_KEY",
+        default_model: "deepseek-chat",
+        max_tokens_param: "max_tokens",
+    },
+];
+
+pub fn remote_provider(id: &str) -> Option<&'static RemoteProvider> {
+    OPENAI_COMPAT_PROVIDERS.iter().find(|p| p.id == id)
+}
+
+/// Answer budget for hosted providers. Several of their current models are
+/// reasoning models whose (hidden) reasoning tokens bill against the same
+/// completion cap — 1024 would starve the visible answer, so give headroom;
+/// real answers stop naturally long before this.
+const REMOTE_MAX_TOKENS: u32 = 4096;
 
 fn local_llm_url() -> String {
     std::env::var("LIGHTHOUSE_LOCAL_LLM_URL")
@@ -157,8 +246,8 @@ pub fn stream_answer(
             }
         }
 
-        let can_claude = cfg.provider_id.as_deref() == Some("anthropic")
-            && cfg.api_key.as_deref().map(|k| !k.is_empty()).unwrap_or(false);
+        let key = cfg.api_key.clone().unwrap_or_default();
+        let can_claude = cfg.provider_id.as_deref() == Some("anthropic") && !key.is_empty();
         if can_claude {
             let model = cfg.model_id.clone().unwrap_or_else(|| "claude-haiku-4-5".to_string());
             let mut emitted = false;
@@ -196,11 +285,154 @@ pub fn stream_answer(
                 }
             }
         }
-        let mut fb = extractive(&question, &contexts, !can_claude);
+
+        // Any other keyed provider speaks the OpenAI chat-completions protocol.
+        let compat = cfg
+            .provider_id
+            .as_deref()
+            .and_then(remote_provider)
+            .filter(|_| !key.is_empty());
+        if let Some(p) = compat {
+            let model = cfg
+                .model_id
+                .clone()
+                .filter(|m| !m.is_empty())
+                .unwrap_or_else(|| p.default_model.to_string());
+            let mut emitted = false;
+            let mut failed: Option<String> = None;
+            {
+                let mut s =
+                    stream_openai_compat(p, &question, &contexts, &key, &model, &history).await;
+                loop {
+                    match s.next().await {
+                        Some(Ok(delta)) => {
+                            emitted = true;
+                            yield delta;
+                        }
+                        Some(Err(e)) => {
+                            failed = Some(e.to_string());
+                            break;
+                        }
+                        None => break,
+                    }
+                }
+            }
+            match failed {
+                None => return,
+                Some(msg) => {
+                    let note = format!(
+                        "\n\n_(Live model unavailable — {}{})_\n\n",
+                        msg,
+                        if emitted { "." } else { "; falling back to local passages." }
+                    );
+                    yield note;
+                    if emitted {
+                        return;
+                    }
+                }
+            }
+        }
+
+        let keyed = can_claude || compat.is_some();
+        let mut fb = extractive(&question, &contexts, !keyed);
         while let Some(w) = fb.next().await {
             yield w;
         }
     })
+}
+
+/// Stream from a hosted OpenAI-compatible chat-completions endpoint. Same wire
+/// shape as the local path, plus bearer auth; hosted models have large context
+/// windows, so contexts ride unclamped like the Anthropic path.
+async fn stream_openai_compat(
+    provider: &'static RemoteProvider,
+    question: &str,
+    contexts: &[Ctx],
+    api_key: &str,
+    model: &str,
+    history: &[ChatTurn],
+) -> DeltaStream {
+    let mut messages: Vec<serde_json::Value> =
+        vec![json!({ "role": "system", "content": SYSTEM_PROMPT })];
+    for t in prior_turns(history) {
+        messages.push(json!({ "role": t.role, "content": t.content }));
+    }
+    messages.push(json!({ "role": "user", "content": build_prompt(question, contexts) }));
+    let mut body = json!({
+        "model": model,
+        "stream": true,
+        "messages": messages,
+    });
+    body[provider.max_tokens_param] = json!(REMOTE_MAX_TOKENS);
+    let api_key = api_key.to_string();
+    Box::pin(async_stream::stream! {
+        let client = reqwest::Client::new();
+        let res = match client
+            .post(provider.chat_url)
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {api_key}"))
+            .json(&body)
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                yield Err(anyhow::anyhow!(e.to_string()));
+                return;
+            }
+        };
+        if !res.status().is_success() {
+            let status = res.status().as_u16();
+            let text = res.text().await.unwrap_or_default();
+            yield Err(anyhow::anyhow!(
+                "{} {status}: {}",
+                provider.label,
+                text.chars().take(200).collect::<String>()
+            ));
+            return;
+        }
+        let mut inner = sse_deltas(res, |evt| {
+            evt["choices"][0]["delta"]["content"].as_str().map(String::from)
+        });
+        while let Some(item) = inner.next().await {
+            yield item;
+        }
+    })
+}
+
+/// Cheap authenticated probe for "does this key work": GET the provider's
+/// model list. 2xx ⇒ valid. 429 also ⇒ valid — a rate-limited key is still a
+/// working key. Anything else returns a user-facing reason.
+pub async fn validate_key(provider_id: &str, api_key: &str) -> Result<(), String> {
+    let api_key = api_key.trim();
+    if api_key.is_empty() {
+        return Err("no key to test — paste one first".to_string());
+    }
+    let client = reqwest::Client::new();
+    let req = if provider_id == "anthropic" {
+        client
+            .get(ANTHROPIC_MODELS_URL)
+            .header("x-api-key", api_key)
+            .header("anthropic-version", ANTHROPIC_VERSION)
+    } else if let Some(p) = remote_provider(provider_id) {
+        client
+            .get(p.models_url)
+            .header("authorization", format!("Bearer {api_key}"))
+    } else {
+        return Err("this provider doesn't use an API key".to_string());
+    };
+    match req.timeout(Duration::from_secs(10)).send().await {
+        Err(e) => Err(format!("couldn't reach the provider — {e}")),
+        Ok(res) if res.status().is_success() || res.status().as_u16() == 429 => Ok(()),
+        Ok(res) => {
+            let status = res.status().as_u16();
+            let hint = match status {
+                401 | 403 => "the provider rejected this key",
+                _ => "unexpected response from the provider",
+            };
+            Err(format!("{hint} (HTTP {status})"))
+        }
+    }
 }
 
 type DeltaStream = Pin<Box<dyn Stream<Item = anyhow::Result<String>> + Send>>;
@@ -478,7 +710,7 @@ fn extractive(question: &str, contexts: &[Ctx], no_key: bool) -> AnswerStream {
         .collect::<Vec<_>>()
         .join("\n\n")
         + if no_key {
-            "\n\n_Configure an Anthropic key in onboarding for synthesized answers._"
+            "\n\n_Connect an AI model (Settings → AI models) for synthesized answers — the private local model, or an API key from Anthropic, OpenAI, Google, xAI, Mistral, or DeepSeek._"
         } else {
             ""
         };
@@ -551,6 +783,30 @@ mod tests {
         let mut sorted = names.clone();
         sorted.sort();
         assert_eq!(names, sorted, "citation order must be preserved");
+    }
+
+    #[test]
+    fn remote_provider_table_is_sound() {
+        let mut seen = std::collections::HashSet::new();
+        for p in OPENAI_COMPAT_PROVIDERS {
+            assert!(seen.insert(p.id), "duplicate provider id {}", p.id);
+            assert!(p.id != "local" && p.id != "anthropic", "{} collides with a built-in", p.id);
+            for url in [p.chat_url, p.models_url] {
+                assert!(url.starts_with("https://"), "{}: non-https url {url}", p.id);
+            }
+            assert!(p.chat_url.ends_with("/chat/completions"), "{}: {}", p.id, p.chat_url);
+            assert!(
+                p.max_tokens_param == "max_tokens" || p.max_tokens_param == "max_completion_tokens",
+                "{}: unknown token param {}",
+                p.id,
+                p.max_tokens_param
+            );
+            assert!(!p.default_model.is_empty() && !p.env_key.is_empty());
+            assert_eq!(remote_provider(p.id).map(|r| r.id), Some(p.id));
+        }
+        assert!(remote_provider("anthropic").is_none());
+        assert!(remote_provider("local").is_none());
+        assert!(remote_provider("nope").is_none());
     }
 
     #[test]

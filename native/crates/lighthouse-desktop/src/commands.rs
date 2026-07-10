@@ -259,7 +259,7 @@ pub fn profile_get() -> Value {
 }
 
 #[tauri::command]
-pub fn profile_op(body: Value) -> Result<Value, String> {
+pub async fn profile_op(body: Value) -> Result<Value, String> {
     match body["op"].as_str() {
         Some("signIn") => {
             profile::sign_in(body["email"].as_str().unwrap_or(""));
@@ -285,6 +285,22 @@ pub fn profile_op(body: Value) -> Result<Value, String> {
         }
         Some("completeOnboarding") => profile::complete_onboarding(),
         Some("signOut") => profile::sign_out(),
+        // Live "does this key work" probe. A blank key tests the one the
+        // chat would actually use (stored or env). Returns {ok, error?}, NOT
+        // the profile state — and never persists anything.
+        Some("validateKey") => {
+            let provider = body["providerId"].as_str().unwrap_or("").to_string();
+            let pasted = body["apiKey"].as_str().unwrap_or("").trim().to_string();
+            let key = if pasted.is_empty() {
+                profile::resolved_key_for(&provider).unwrap_or_default()
+            } else {
+                pasted
+            };
+            return Ok(match lighthouse_core::llm::validate_key(&provider, &key).await {
+                Ok(()) => json!({ "ok": true }),
+                Err(e) => json!({ "ok": false, "error": e }),
+            });
+        }
         _ => return Err("unknown op".into()),
     }
     Ok(serde_json::to_value(profile::get_state()).unwrap_or_else(|_| json!({})))
