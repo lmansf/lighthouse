@@ -6,13 +6,105 @@
  *   `llama-server`, Ollama, LM Studio, …). Nothing leaves the machine.
  * - Anthropic Claude (when a key + the Anthropic provider are configured):
  *   real streamed tokens via the Messages API over `fetch` (no SDK dependency).
+ * - OpenAI / Google / xAI / Mistral / DeepSeek (key + provider configured):
+ *   real streamed tokens via each vendor's OpenAI-compatible chat-completions
+ *   endpoint — one shared adapter.
  * - Otherwise: a fully-local extractive fallback that streams the most relevant
  *   passages, so the app is useful with zero configuration and zero network.
  */
 import type { ChatTurn } from "@/contracts";
 
 const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
+const ANTHROPIC_MODELS_URL = "https://api.anthropic.com/v1/models";
 const ANTHROPIC_VERSION = "2023-06-01";
+
+/**
+ * Remote OpenAI-compatible providers. Every major non-Anthropic vendor speaks
+ * the OpenAI chat-completions protocol (SSE `choices[0].delta.content`), so
+ * ONE adapter covers them all — only the endpoint, key, and token-cap
+ * parameter name differ. A provider may only appear in the UI picker
+ * (contracts/mocks/providers.ts) if it is wired here: an earlier build listed
+ * providers it silently ignored, and every answer fell back to keyword
+ * extraction while the user believed a cloud model was reading their files.
+ * KEEP IN SYNC with OPENAI_COMPAT_PROVIDERS in
+ * native/crates/lighthouse-core/src/llm.rs.
+ */
+export interface RemoteProvider {
+  id: string;
+  /** Human name for error notes ("OpenAI 401: …"). */
+  label: string;
+  chatUrl: string;
+  /** Cheap authenticated GET (model list) used to test a pasted key. */
+  modelsUrl: string;
+  /** Env var that overrides the stored key (parity with ANTHROPIC_API_KEY). */
+  envKey: string;
+  /** Fallback when the profile carries no model id. */
+  defaultModel: string;
+  /**
+   * OpenAI's gpt-5 family rejects `max_tokens` in favor of
+   * `max_completion_tokens`; everyone else still takes `max_tokens`.
+   */
+  maxTokensParam: "max_tokens" | "max_completion_tokens";
+}
+
+export const REMOTE_PROVIDERS: RemoteProvider[] = [
+  {
+    id: "openai",
+    label: "OpenAI",
+    chatUrl: "https://api.openai.com/v1/chat/completions",
+    modelsUrl: "https://api.openai.com/v1/models",
+    envKey: "OPENAI_API_KEY",
+    defaultModel: "gpt-5-mini",
+    maxTokensParam: "max_completion_tokens",
+  },
+  {
+    id: "google",
+    label: "Google Gemini",
+    chatUrl: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+    modelsUrl: "https://generativelanguage.googleapis.com/v1beta/openai/models",
+    envKey: "GEMINI_API_KEY",
+    defaultModel: "gemini-2.5-flash",
+    maxTokensParam: "max_tokens",
+  },
+  {
+    id: "xai",
+    label: "xAI Grok",
+    chatUrl: "https://api.x.ai/v1/chat/completions",
+    modelsUrl: "https://api.x.ai/v1/models",
+    envKey: "XAI_API_KEY",
+    defaultModel: "grok-4",
+    maxTokensParam: "max_tokens",
+  },
+  {
+    id: "mistral",
+    label: "Mistral",
+    chatUrl: "https://api.mistral.ai/v1/chat/completions",
+    modelsUrl: "https://api.mistral.ai/v1/models",
+    envKey: "MISTRAL_API_KEY",
+    defaultModel: "mistral-medium-latest",
+    maxTokensParam: "max_tokens",
+  },
+  {
+    id: "deepseek",
+    label: "DeepSeek",
+    chatUrl: "https://api.deepseek.com/v1/chat/completions",
+    modelsUrl: "https://api.deepseek.com/v1/models",
+    envKey: "DEEPSEEK_API_KEY",
+    defaultModel: "deepseek-chat",
+    maxTokensParam: "max_tokens",
+  },
+];
+
+export const remoteProvider = (id: string | null): RemoteProvider | undefined =>
+  REMOTE_PROVIDERS.find((p) => p.id === id);
+
+/**
+ * Answer budget for hosted providers. Several of their current models are
+ * reasoning models whose (hidden) reasoning tokens bill against the same
+ * completion cap — 1024 would starve the visible answer, so give headroom;
+ * real answers stop naturally long before this.
+ */
+const REMOTE_MAX_TOKENS = 4096;
 
 // Where the bundled/local inference server listens. Override with
 // LIGHTHOUSE_LOCAL_LLM_URL to point at an existing Ollama/LM Studio instance.
@@ -130,7 +222,135 @@ export async function* streamAnswer(
       if (emitted) return;
     }
   }
-  yield* extractive(question, contexts, !canClaude);
+
+  // Any other keyed provider speaks the OpenAI chat-completions protocol.
+  const compat = cfg.apiKey ? remoteProvider(cfg.providerId) : undefined;
+  if (compat) {
+    let emitted = false;
+    try {
+      for await (const delta of streamOpenAICompat(
+        compat,
+        question,
+        contexts,
+        cfg.apiKey!,
+        cfg.modelId || compat.defaultModel,
+        history,
+      )) {
+        emitted = true;
+        yield delta;
+      }
+      return;
+    } catch (err) {
+      const note = `\n\n_(Live model unavailable — ${
+        err instanceof Error ? err.message : "error"
+      }${emitted ? "." : "; falling back to local passages."})_\n\n`;
+      yield note;
+      if (emitted) return;
+    }
+  }
+
+  yield* extractive(question, contexts, !canClaude && !compat);
+}
+
+/**
+ * Stream from a hosted OpenAI-compatible chat-completions endpoint. Same wire
+ * shape as the local path, plus bearer auth; hosted models have large context
+ * windows, so contexts ride unclamped like the Anthropic path.
+ */
+async function* streamOpenAICompat(
+  provider: RemoteProvider,
+  question: string,
+  contexts: Ctx[],
+  apiKey: string,
+  model: string,
+  history: ChatTurn[] = [],
+): AsyncGenerator<string> {
+  const priorTurns = history.filter(
+    (t) => typeof t.content === "string" && t.content.trim() !== "",
+  );
+  while (priorTurns.length > 0 && priorTurns[0].role !== "user") priorTurns.shift();
+  const res = await fetch(provider.chatUrl, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model,
+      stream: true,
+      [provider.maxTokensParam]: REMOTE_MAX_TOKENS,
+      messages: [
+        { role: "system", content: SYSTEM_PROMPT },
+        ...priorTurns.map((t) => ({ role: t.role, content: t.content })),
+        { role: "user", content: buildPrompt(question, contexts) },
+      ],
+    }),
+  });
+  if (!res.ok || !res.body) {
+    throw new Error(`${provider.label} ${res.status}: ${(await res.text()).slice(0, 200)}`);
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    const lines = buf.split("\n");
+    buf = lines.pop() ?? "";
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith("data:")) continue;
+      const payload = trimmed.slice(5).trim();
+      if (!payload || payload === "[DONE]") continue;
+      try {
+        const evt = JSON.parse(payload);
+        const delta = evt.choices?.[0]?.delta?.content;
+        if (typeof delta === "string" && delta) yield delta;
+      } catch {
+        /* ignore keep-alive / non-JSON frames */
+      }
+    }
+  }
+}
+
+/**
+ * Cheap authenticated probe for "does this key work": GET the provider's
+ * model list. 2xx ⇒ valid. 429 also ⇒ valid — a rate-limited key is still a
+ * working key. Anything else returns a user-facing reason.
+ * KEEP IN SYNC with validate_key in native/crates/lighthouse-core/src/llm.rs.
+ */
+export async function validateKey(
+  providerId: string,
+  apiKey: string,
+): Promise<{ ok: boolean; error?: string }> {
+  const key = apiKey.trim();
+  if (!key) return { ok: false, error: "no key to test — paste one first" };
+  let url: string;
+  let headers: Record<string, string>;
+  if (providerId === "anthropic") {
+    url = ANTHROPIC_MODELS_URL;
+    headers = { "x-api-key": key, "anthropic-version": ANTHROPIC_VERSION };
+  } else {
+    const p = remoteProvider(providerId);
+    if (!p) return { ok: false, error: "this provider doesn't use an API key" };
+    url = p.modelsUrl;
+    headers = { authorization: `Bearer ${key}` };
+  }
+  let res: Response;
+  try {
+    res = await fetch(url, { headers, signal: AbortSignal.timeout(10_000) });
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : "network error";
+    return { ok: false, error: `couldn't reach the provider — ${reason}` };
+  }
+  if (res.ok || res.status === 429) return { ok: true };
+  const hint =
+    res.status === 401 || res.status === 403
+      ? "the provider rejected this key"
+      : "unexpected response from the provider";
+  return { ok: false, error: `${hint} (HTTP ${res.status})` };
 }
 
 async function* streamClaude(
@@ -290,7 +510,9 @@ async function* extractive(question: string, contexts: Ctx[], noKey: boolean): A
       .join("\n\n") +
     // Only nudge about a key when there genuinely isn't one — not when we fell
     // back after a transient model error despite a configured key.
-    (noKey ? `\n\n_Configure an Anthropic key in onboarding for synthesized answers._` : "");
+    (noKey
+      ? `\n\n_Connect an AI model (Settings → AI models) for synthesized answers — the private local model, or an API key from Anthropic, OpenAI, Google, xAI, Mistral, or DeepSeek._`
+      : "");
 
   for (const word of (head + body).split(/(\s+)/)) {
     yield word;

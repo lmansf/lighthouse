@@ -36,13 +36,28 @@ class MockAuthService implements AuthService {
   }
 
   async selectModel(providerId: string, modelId: string, apiKey: string): Promise<void> {
+    const keyed = new Set(this.state.keyedProviders ?? []);
+    if (apiKey.trim()) keyed.add(providerId);
     this.state = {
       ...this.state,
       providerId,
       modelId,
-      hasApiKey: apiKey.trim().length > 0,
+      hasApiKey: keyed.has(providerId),
+      keyedProviders: [...keyed],
       step: "done",
     };
+  }
+
+  async validateKey(
+    _providerId: string,
+    apiKey: string,
+  ): Promise<{ ok: boolean; error?: string }> {
+    // Deterministic mock: any non-empty key "works" unless it contains "bad",
+    // so both UI states are exercisable without network.
+    await new Promise((r) => setTimeout(r, 300));
+    if (!apiKey.trim()) return { ok: false, error: "no key to test — paste one first" };
+    if (apiKey.includes("bad")) return { ok: false, error: "the provider rejected this key (HTTP 401)" };
+    return { ok: true };
   }
 
   async setDefaultInclusion(value: "include" | "exclude"): Promise<void> {

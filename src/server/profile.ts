@@ -8,14 +8,25 @@
 import type { OnboardingState, User } from "@/contracts";
 import { profilePath, readJson, writeJson } from "./config";
 import { getVariant } from "./experiment";
+import { REMOTE_PROVIDERS, remoteProvider } from "./llm";
 
 /** Local model provider (key-less, runs on-device) used by the play_first flow. */
 const LOCAL_PROVIDER_ID = "local";
 const LOCAL_MODEL_ID = "lighthouse-local";
 
 interface StoredProfile extends OnboardingState {
-  /** Kept server-side only; surfaced to the client solely as `hasApiKey`. */
+  /**
+   * Legacy single key slot from builds that offered one keyed provider
+   * (Anthropic). Kept in sync with `apiKeys["anthropic"]` so a downgrade to an
+   * older build still finds its key. Server-side only.
+   */
   apiKey?: string;
+  /**
+   * One stored key per keyed provider, so switching providers never hands one
+   * vendor's key to another. Server-side only; surfaced to the client solely
+   * as `hasApiKey` + `keyedProviders` (never the keys themselves).
+   */
+  apiKeys?: Record<string, string>;
   /** Whether the user has ever explicitly saved a model choice (server-only).
    *  Distinguishes the INITIAL selection from later changes, for analytics. */
   modelEverSelected?: boolean;
@@ -49,22 +60,37 @@ const EMPTY: StoredProfile = {
 };
 
 /**
- * Provider ids the app can actually answer with (see llm.ts and the picker in
- * contracts/mocks/providers.ts). Profiles written by earlier builds may carry
- * a provider we no longer offer (openai/google/mistral were listed but never
- * wired to a backend) — normalize those to the private local default so the
- * UI never claims excerpts go to a provider that is never called. The stored
- * API key is left untouched in case the provider returns.
+ * Provider ids the app can actually answer with: local, Anthropic, and every
+ * wired OpenAI-compatible vendor — derived from the engine's own table so the
+ * two can't drift. A profile carrying anything else (a provider from a build
+ * that listed more than it wired, or a removed one) is normalized to the
+ * private local default, so the UI never claims excerpts go to a provider
+ * that is never called. Stored keys are left untouched in case it returns.
  */
-const KNOWN_PROVIDER_IDS = new Set([LOCAL_PROVIDER_ID, "anthropic"]);
+const KNOWN_PROVIDER_IDS = new Set([
+  LOCAL_PROVIDER_ID,
+  "anthropic",
+  ...REMOTE_PROVIDERS.map((p) => p.id),
+]);
 
 function load(): StoredProfile {
-  const p: StoredProfile = { ...EMPTY, ...readJson(profilePath(), EMPTY) };
-  if (p.providerId && !KNOWN_PROVIDER_IDS.has(p.providerId)) {
-    const migrated = { ...p, providerId: LOCAL_PROVIDER_ID, modelId: LOCAL_MODEL_ID };
-    save(migrated);
-    return migrated;
+  let p: StoredProfile = { ...EMPTY, ...readJson(profilePath(), EMPTY) };
+  let dirty = false;
+  // Migrate the legacy single-key slot into the per-provider map. It can only
+  // be an Anthropic key: every build that wrote it offered exactly one keyed
+  // provider (openai/google/mistral appeared in an ancient picker but were
+  // never wired, and their profiles were normalized to local).
+  if (!p.apiKeys || Object.keys(p.apiKeys).length === 0) {
+    if (p.apiKey) {
+      p = { ...p, apiKeys: { anthropic: p.apiKey } };
+      dirty = true;
+    }
   }
+  if (p.providerId && !KNOWN_PROVIDER_IDS.has(p.providerId)) {
+    p = { ...p, providerId: LOCAL_PROVIDER_ID, modelId: LOCAL_MODEL_ID };
+    dirty = true;
+  }
+  if (dirty) save(p);
   return p;
 }
 function save(p: StoredProfile): void {
@@ -88,21 +114,41 @@ export function setDefaultInclusion(value: "include" | "exclude"): void {
   save({ ...load(), defaultInclusionChoice: value });
 }
 
-/** Public onboarding state — never includes the raw key. */
+/** Public onboarding state — never includes the raw keys. */
 export function getState(): OnboardingState {
-  const { apiKey, modelEverSelected, defaultInclusionChoice, ...pub } = load();
+  const p = load();
+  const { apiKey, apiKeys, modelEverSelected, defaultInclusionChoice, ...pub } = p;
   void apiKey;
+  void apiKeys;
   void modelEverSelected;
   void defaultInclusionChoice;
+  const keyed = keyedProviders(p);
+  // "Has a key" is now per-provider: true when the SELECTED provider has one.
+  // The legacy stored flag only backs up pre-map anthropic profiles.
+  const hasApiKey =
+    Boolean(p.providerId) &&
+    p.providerId !== LOCAL_PROVIDER_ID &&
+    (keyed.includes(p.providerId!) || (p.providerId === "anthropic" && pub.hasApiKey));
   return {
     ...pub,
-    hasApiKey: Boolean(apiKey) || pub.hasApiKey,
+    hasApiKey,
+    keyedProviders: keyed,
     // Surface the A/B variants so the client can branch copy/affordances.
     onboardingVariant: getVariant("onboarding"),
     defaultInclusionVariant: getVariant("default_inclusion"),
     // The effective default (explicit choice or the variant fallback).
     defaultInclusion: effectiveDefaultInclusion(),
   };
+}
+
+/**
+ * Every keyed provider id with a usable key — stored in the map, in the
+ * legacy slot (anthropic), or supplied via its env var.
+ */
+function keyedProviders(p: StoredProfile): string[] {
+  return ["anthropic", ...REMOTE_PROVIDERS.map((r) => r.id)].filter((id) =>
+    Boolean(resolveKey(id, p)),
+  );
 }
 
 export function signIn(email: string): User {
@@ -151,11 +197,18 @@ export function selectModel(
   const key = apiKey.trim();
   const initial = !p.modelEverSelected;
   const changed = p.providerId !== providerId || p.modelId !== modelId;
+  // A pasted key is stored under the provider it was pasted FOR; an empty
+  // field keeps that provider's existing key (switch model w/o re-pasting).
+  const apiKeys = { ...(p.apiKeys ?? {}) };
+  if (key && providerId !== LOCAL_PROVIDER_ID) apiKeys[providerId] = key;
   save({
     ...p,
     providerId,
     modelId,
-    apiKey: key || p.apiKey,
+    apiKeys,
+    // Legacy slot mirrors the anthropic key so a downgraded build still
+    // answers with it (older builds read only this field).
+    apiKey: apiKeys["anthropic"] || p.apiKey,
     hasApiKey: Boolean(key) || p.hasApiKey,
     step: "done",
     modelEverSelected: true,
@@ -178,9 +231,45 @@ export function signOut(): void {
   save({ ...EMPTY });
 }
 
-/** Resolved model config for the chat route (env key overrides stored key). */
+/**
+ * Resolved model config for the chat route: the SELECTED provider's key, with
+ * its env var (ANTHROPIC_API_KEY, OPENAI_API_KEY, …) taking precedence over
+ * the stored one.
+ */
 export function modelConfig(): { providerId: string | null; modelId: string | null; apiKey: string | null } {
   const p = load();
-  const apiKey = process.env.ANTHROPIC_API_KEY?.trim() || p.apiKey || null;
+  const apiKey = p.providerId ? resolveKey(p.providerId, p) : null;
   return { providerId: p.providerId, modelId: p.modelId, apiKey };
+}
+
+/**
+ * The key a chat with `providerId` would use right now (env → stored map →
+ * legacy anthropic slot). Null for local/unknown providers or when unkeyed.
+ */
+export function resolvedKeyFor(providerId: string): string | null {
+  return resolveKey(providerId, load());
+}
+
+function envVarKey(name: string): string | null {
+  const v = process.env[name]?.trim();
+  return v ? v : null;
+}
+
+function resolveKey(providerId: string, p: StoredProfile): string | null {
+  if (providerId === LOCAL_PROVIDER_ID) return null;
+  const envName =
+    providerId === "anthropic" ? "ANTHROPIC_API_KEY" : remoteProvider(providerId)?.envKey;
+  if (envName) {
+    const k = envVarKey(envName);
+    if (k) return k;
+  }
+  // Google publishes both spellings; accept the older one too.
+  if (providerId === "google") {
+    const k = envVarKey("GOOGLE_API_KEY");
+    if (k) return k;
+  }
+  const stored = p.apiKeys?.[providerId];
+  if (stored) return stored;
+  if (providerId === "anthropic" && p.apiKey) return p.apiKey;
+  return null;
 }

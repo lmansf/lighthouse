@@ -146,7 +146,9 @@ pub fn strip_markers(text: &str) -> String {
 fn has_real_model(cfg: &ModelCfg) -> bool {
     match cfg.provider_id.as_deref() {
         Some("local") => true,
-        Some("anthropic") => cfg.api_key.as_deref().is_some_and(|k| !k.is_empty()),
+        Some(id) if id == "anthropic" || crate::llm::remote_provider(id).is_some() => {
+            cfg.api_key.as_deref().is_some_and(|k| !k.is_empty())
+        }
         _ => false,
     }
 }

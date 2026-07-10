@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 
 use lighthouse_core::config::is_desktop_app;
 use lighthouse_core::contracts::{ChatChunk, ChatTurn};
-use lighthouse_core::{license, local_model, profile, settings, sources, tts, usage, vault};
+use lighthouse_core::{license, llm, local_model, profile, settings, sources, tts, usage, vault};
 
 use crate::auth::is_same_origin;
 
@@ -325,6 +325,22 @@ pub async fn profile_post(headers: HeaderMap, body: Option<Json<Value>>) -> Resp
         }
         Some("completeOnboarding") => profile::complete_onboarding(),
         Some("signOut") => profile::sign_out(),
+        // Live "does this key work" probe. A blank key tests the one the
+        // chat would actually use (stored or env). Returns {ok, error?}, NOT
+        // the profile state — and never persists anything.
+        Some("validateKey") => {
+            let provider = body["providerId"].as_str().unwrap_or("");
+            let pasted = body["apiKey"].as_str().unwrap_or("").trim().to_string();
+            let key = if pasted.is_empty() {
+                profile::resolved_key_for(provider).unwrap_or_default()
+            } else {
+                pasted
+            };
+            return match llm::validate_key(provider, &key).await {
+                Ok(()) => Json(json!({ "ok": true })).into_response(),
+                Err(e) => Json(json!({ "ok": false, "error": e })).into_response(),
+            };
+        }
         _ => return bad_request("unknown op"),
     }
     Json(profile::get_state()).into_response()

@@ -9,9 +9,11 @@ import {
   setDefaultInclusion,
   completeOnboarding,
   signOut,
+  resolvedKeyFor,
 } from "@/server/profile";
 import { isSameOrigin } from "@/server/http";
 import { recordEvent } from "@/server/license";
+import { validateKey } from "@/server/llm";
 import type { ModelSelectionResult } from "@/server/profile";
 
 /**
@@ -73,6 +75,15 @@ export async function POST(req: Request) {
     case "signOut":
       signOut();
       break;
+    // Live "does this key work" probe. A blank key tests the one the chat
+    // would actually use (stored or env). Returns {ok, error?}, NOT the
+    // profile state — and never persists anything.
+    case "validateKey": {
+      const providerId = String(body.providerId ?? "");
+      const pasted = String(body.apiKey ?? "").trim();
+      const key = pasted || resolvedKeyFor(providerId) || "";
+      return NextResponse.json(await validateKey(providerId, key));
+    }
     default:
       return NextResponse.json({ error: "unknown op" }, { status: 400 });
   }

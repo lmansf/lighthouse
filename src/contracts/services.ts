@@ -74,6 +74,13 @@ export interface AuthService {
   /** Advance past the welcome/registration step (whether submitted or skipped). */
   finishRegistration(): Promise<void>;
   selectModel(providerId: string, modelId: string, apiKey: string): Promise<void>;
+  /**
+   * Live-test an API key against its provider (a cheap authenticated model-list
+   * GET, engine-side so the key never has to work from the browser). An empty
+   * `apiKey` tests the key already on file for that provider. Never persists
+   * anything — pair with `selectModel` to save.
+   */
+  validateKey(providerId: string, apiKey: string): Promise<{ ok: boolean; error?: string }>;
   /** Set whether newly-added files are searchable by default (chosen at onboarding). */
   setDefaultInclusion(value: "include" | "exclude"): Promise<void>;
   completeOnboarding(): Promise<void>;

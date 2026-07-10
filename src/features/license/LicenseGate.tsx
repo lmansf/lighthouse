@@ -117,6 +117,8 @@ const useStyles = makeStyles({
   },
   profileText: { display: "flex", flexDirection: "column", minWidth: 0 },
   modelFields: { display: "flex", flexDirection: "column", gap: tokens.spacingVerticalM },
+  testKeyRow: { display: "flex", alignItems: "center", gap: tokens.spacingHorizontalS },
+  testKeyOk: { color: tokens.colorPaletteGreenForeground1 },
   savedNote: { color: tokens.colorPaletteGreenForeground1, fontSize: tokens.fontSizeBase200 },
   // Preferences dialog: sections separated by a little vertical air.
   prefFields: { display: "flex", flexDirection: "column", gap: tokens.spacingVerticalL },
@@ -662,12 +664,15 @@ function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean
   const styles = useStyles();
   const onboarding = useAuthStore((s) => s.onboarding);
   const selectModel = useAuthStore((s) => s.selectModel);
+  const validateKey = useAuthStore((s) => s.validateKey);
 
   const [providerId, setProviderId] = useState(onboarding.providerId ?? MODEL_PROVIDERS[0].id);
   const [modelId, setModelId] = useState(onboarding.modelId ?? firstModelFor(providerId));
   const [apiKey, setApiKey] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<{ ok: boolean; error?: string } | null>(null);
 
   // Re-sync the fields to the saved settings on the open transition.
   useEffect(() => {
@@ -678,9 +683,28 @@ function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean
     setModelId(current.modelId ?? firstModelFor(pid));
     setApiKey("");
     setError(null);
+    setTestResult(null);
   }, [open]);
 
   const provider = MODEL_PROVIDERS.find((p) => p.id === providerId) ?? MODEL_PROVIDERS[0];
+  // Per-provider "a key is on file" — falls back to the legacy flag for the
+  // saved provider when an older engine doesn't report keyedProviders yet.
+  const providerHasSavedKey =
+    onboarding.keyedProviders?.includes(providerId) ??
+    (providerId === onboarding.providerId && onboarding.hasApiKey);
+
+  async function testKey() {
+    setTesting(true);
+    setTestResult(null);
+    try {
+      // Empty field ⇒ the engine tests the key it would actually chat with.
+      setTestResult(await validateKey(providerId, apiKey));
+    } catch {
+      setTestResult({ ok: false, error: "couldn't reach the engine — try again" });
+    } finally {
+      setTesting(false);
+    }
+  }
 
   async function save() {
     setSaving(true);
@@ -711,6 +735,10 @@ function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean
                     const p = MODEL_PROVIDERS.find((x) => x.id === d.optionValue)!;
                     setProviderId(p.id);
                     setModelId(p.models[0]);
+                    // Keys are per-provider: never carry a half-typed key (or a
+                    // stale test verdict) from one vendor to another.
+                    setApiKey("");
+                    setTestResult(null);
                   }}
                 >
                   {MODEL_PROVIDERS.map((p) => (
@@ -750,12 +778,38 @@ function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean
                     value={apiKey}
                     onChange={(_, d) => {
                       setApiKey(d.value);
+                      setTestResult(null);
                     }}
                     placeholder={
-                      onboarding.hasApiKey ? "•••••••• saved — leave blank to keep" : "sk-…"
+                      providerHasSavedKey
+                        ? "•••••••• saved — leave blank to keep"
+                        : "Paste your API key"
                     }
                   />
                 </Field>
+              )}
+              {provider.id !== "local" && (apiKey || providerHasSavedKey) && (
+                <div className={styles.testKeyRow}>
+                  <Button
+                    size="small"
+                    appearance="secondary"
+                    disabled={testing}
+                    icon={testing ? <Spinner size="tiny" /> : undefined}
+                    onClick={() => void testKey()}
+                  >
+                    {testing ? "Testing…" : apiKey ? "Test key" : "Test saved key"}
+                  </Button>
+                  {testResult &&
+                    (testResult.ok ? (
+                      <Text size={200} className={styles.testKeyOk}>
+                        ✓ Key works
+                      </Text>
+                    ) : (
+                      <Text size={200} className={styles.error}>
+                        ✗ {testResult.error ?? "the key didn't work"}
+                      </Text>
+                    ))}
+                </div>
               )}
               {error && <Text className={styles.error}>{error}</Text>}
             </div>

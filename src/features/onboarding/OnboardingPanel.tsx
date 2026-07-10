@@ -460,7 +460,7 @@ export function OnboardingPanel() {
               value={apiKey}
               onChange={(_, d) => setApiKey(d.value)}
               type="password"
-              placeholder="sk-…"
+              placeholder="Paste your API key"
             />
           </Field>
         )}

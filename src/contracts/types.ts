@@ -72,8 +72,15 @@ export interface OnboardingState {
   providerId: string | null;
   /** Chosen model id within the provider. */
   modelId: string | null;
-  /** Whether the user has supplied an API key (we never persist the key itself in plaintext beyond the mock). */
+  /** Whether the SELECTED provider has a usable API key (the key itself never reaches the client). */
   hasApiKey: boolean;
+  /**
+   * Provider ids that have a usable key on file (stored or via env var) —
+   * never the keys themselves. Lets the key field say "saved — leave blank to
+   * keep" only for providers that genuinely have one. Optional: absent from
+   * older engines and the plain mock.
+   */
+  keyedProviders?: string[];
   /**
    * A/B onboarding variant for this install (`play_first` drops straight into the
    * workspace on the local model and defers the key prompt; `key_first` is the
