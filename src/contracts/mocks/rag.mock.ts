@@ -1,5 +1,12 @@
 import type { RagService } from "../services";
-import type { DataSource, FileNode, RagReference, RestoreToken } from "../types";
+import type {
+  ChangedPin,
+  DataSource,
+  FileNode,
+  Pin,
+  RagReference,
+  RestoreToken,
+} from "../types";
 import { SEED_NODES, SEED_SOURCES } from "./files";
 
 /**
@@ -96,6 +103,46 @@ class MockRagService implements RagService {
     if (!markdown.trim()) return { error: "markdown required" };
     const name = `${title.trim() || "Chat"}.md`;
     return { savedId: `Lighthouse Notes/${name}`, savedName: name };
+  }
+
+  // In-memory pins so the pin chip, dialog, and banner are exercisable
+  // offline. The mock "primes" a canned summary; rechecks report no changes.
+  private pins: Pin[] = [];
+
+  async pinAsk(
+    question: string,
+    sql: string,
+    fileIds: string[],
+  ): Promise<{ pin?: Pin; error?: string }> {
+    if (!question.trim() || !sql.trim()) return { error: "a pin needs the question and its SQL" };
+    const id = `pin-${sql.length}-${sql.slice(0, 8).replace(/\W/g, "")}`;
+    this.pins = this.pins.filter((p) => p.id !== id);
+    if (this.pins.length >= 20) return { error: "pin limit reached (20) — remove one in the pins dialog first" };
+    const pin: Pin = {
+      id,
+      question: question.trim(),
+      sql: sql.trim(),
+      fileIds,
+      createdMs: Date.now(),
+      lastRunMs: Date.now(),
+      lastSummary: "NE 150 · NW 200",
+    };
+    this.pins.push(pin);
+    return { pin: { ...pin } };
+  }
+
+  async unpinAsk(id: string): Promise<void> {
+    this.pins = this.pins.filter((p) => p.id !== id);
+  }
+
+  async listPins(): Promise<Pin[]> {
+    return this.pins.map((p) => ({ ...p }));
+  }
+
+  async recheckPins(): Promise<{ changed: ChangedPin[]; pins: Pin[] }> {
+    const now = Date.now();
+    this.pins = this.pins.map((p) => ({ ...p, lastRunMs: now }));
+    return { changed: [], pins: this.pins.map((p) => ({ ...p })) };
   }
 
   async suggestedAsks(includedFileIds: string[]): Promise<{ label: string; question: string }[]> {

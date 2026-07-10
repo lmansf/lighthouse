@@ -67,6 +67,7 @@ import {
   ErrorCircleRegular,
   HistoryRegular,
   OpenRegular,
+  PinRegular,
   PlayRegular,
   SaveRegular,
   SendRegular,
@@ -79,7 +80,7 @@ import {
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { DragEvent } from "react";
-import type { AnalyticsMeta, ChatTurn, RagReference } from "@/contracts";
+import type { AnalyticsMeta, ChangedPin, ChatTurn, Pin, RagReference } from "@/contracts";
 import { chatService, MODEL_PROVIDERS, ragService } from "@/contracts";
 import { useRagStore } from "@/stores/useRagStore";
 import { useAuthStore } from "@/stores/useAuthStore";
@@ -404,6 +405,37 @@ const useStyles = makeStyles({
     marginTop: tokens.spacingVerticalXXS,
     color: tokens.colorNeutralForeground3,
   },
+  // --- Pinned questions: the changed-pins alert banner and the dialog. ---
+  pinBanner: {
+    display: "flex",
+    alignItems: "center",
+    flexWrap: "wrap",
+    gap: tokens.spacingHorizontalS,
+    padding: `${tokens.spacingVerticalS} ${tokens.spacingHorizontalM}`,
+    marginBottom: tokens.spacingVerticalS,
+    borderRadius: tokens.borderRadiusMedium,
+    backgroundColor: tokens.colorBrandBackground2,
+    color: tokens.colorNeutralForeground1,
+  },
+  pinDialogSurface: { maxWidth: "640px", width: "92vw" },
+  pinList: {
+    display: "flex",
+    flexDirection: "column",
+    gap: tokens.spacingVerticalS,
+    maxHeight: "48vh",
+    overflowY: "auto",
+  },
+  pinRow: {
+    display: "flex",
+    alignItems: "flex-start",
+    gap: tokens.spacingHorizontalS,
+    padding: `${tokens.spacingVerticalS} ${tokens.spacingHorizontalM}`,
+    borderRadius: tokens.borderRadiusMedium,
+    backgroundColor: tokens.colorNeutralBackground3,
+  },
+  pinRowMain: { display: "flex", flexDirection: "column", gap: "2px", flexGrow: 1, minWidth: 0 },
+  pinStale: { color: tokens.colorPaletteRedForeground1 },
+  pinMeta: { color: tokens.colorNeutralForeground3 },
   // Inline failure banner for a turn that couldn't get an answer — mirrors the
   // addNotice pattern, in danger colors, with Retry + settings escape hatches.
   errorNotice: {
@@ -836,6 +868,8 @@ function RefineChips({
   onEditSql,
   onSave,
   savePending,
+  onPin,
+  pinPending,
 }: {
   meta: AnalyticsMeta;
   isLast: boolean;
@@ -845,6 +879,9 @@ function RefineChips({
   /** Save-as-CSV (desktop engine only — omitted on the web dev twin). */
   onSave?: (meta: AnalyticsMeta) => void;
   savePending?: boolean;
+  /** Pin this answer so vault changes recheck it (desktop rechecks live). */
+  onPin?: (meta: AnalyticsMeta) => void;
+  pinPending?: boolean;
 }) {
   const styles = useStyles();
   return (
@@ -882,6 +919,18 @@ function RefineChips({
           onClick={() => onSave(meta)}
         >
           {savePending ? "Saving…" : "Save as CSV"}
+        </Button>
+      )}
+      {onPin && (
+        <Button
+          appearance="secondary"
+          size="small"
+          shape="circular"
+          icon={<PinRegular />}
+          disabled={disabled || pinPending}
+          onClick={() => onPin(meta)}
+        >
+          {pinPending ? "Pinning…" : "Pin"}
         </Button>
       )}
     </div>
@@ -1076,6 +1125,15 @@ export function ChatPanel() {
     null,
   );
   const exportNoteTimer = useRef<number | null>(null);
+  // --- Pinned questions: per-turn pin outcome, the changed-pins alerts (from
+  //     the shell's watcher-driven recheck pass), and the pins dialog. ---
+  const [pinNotes, setPinNotes] = useState<
+    Record<string, { pending?: boolean; ok?: boolean; error?: string }>
+  >({});
+  const [pinAlerts, setPinAlerts] = useState<ChangedPin[]>([]);
+  const [pinsOpen, setPinsOpen] = useState(false);
+  const [pinList, setPinList] = useState<Pin[]>([]);
+  const [pinsBusy, setPinsBusy] = useState(false);
   // Cancels the in-flight ask() when the user presses Stop.
   const abortRef = useRef<AbortController | null>(null);
   // Files explicitly attached to the conversation (dragged from the explorer or
@@ -1529,6 +1587,113 @@ export function ChatPanel() {
     setExportNote(next);
     if (exportNoteTimer.current !== null) window.clearTimeout(exportNoteTimer.current);
     exportNoteTimer.current = window.setTimeout(() => setExportNote(null), 8000);
+  }
+
+  /**
+   * Pin an analytics answer: the engine watches its files and flags this
+   * question when the computed result changes. Question = the user turn that
+   * produced the answer.
+   */
+  async function pinAnswer(asstId: string, meta: AnalyticsMeta) {
+    const msgs = useChatStore.getState().messages;
+    const idx = msgs.findIndex((x) => x.id === asstId);
+    const prev = idx > 0 ? msgs[idx - 1] : undefined;
+    const question =
+      (prev?.role === "user" ? prev.content : "").trim().replace(/\s+/g, " ").slice(0, 200) ||
+      "Pinned question";
+    setPinNotes((s) => ({ ...s, [asstId]: { pending: true } }));
+    try {
+      const res = await ragService.pinAsk(question, meta.sql, meta.fileIds);
+      if (res.error || !res.pin) {
+        setPinNotes((s) => ({ ...s, [asstId]: { error: res.error ?? "could not pin" } }));
+      } else {
+        setPinNotes((s) => ({ ...s, [asstId]: { ok: true } }));
+        logEvent("analytics_pin");
+      }
+    } catch (err) {
+      setPinNotes((s) => ({
+        ...s,
+        [asstId]: { error: err instanceof Error ? err.message : "could not pin" },
+      }));
+    }
+  }
+
+  // Changed-pin alerts pushed by the desktop shell after its watcher-driven
+  // recheck pass (openspec: add-pinned-questions). Newest wins per pin id.
+  useEffect(() => {
+    const onPinsChanged = (e: Event) => {
+      const changed = (e as CustomEvent<{ changed?: ChangedPin[] }>).detail?.changed;
+      if (!Array.isArray(changed) || changed.length === 0) return;
+      setPinAlerts((prev) => {
+        const ids = new Set(changed.map((c) => c.id));
+        return [...changed, ...prev.filter((p) => !ids.has(p.id))].slice(0, 5);
+      });
+    };
+    window.addEventListener("lighthouse:pins-changed", onPinsChanged);
+    return () => window.removeEventListener("lighthouse:pins-changed", onPinsChanged);
+  }, []);
+
+  // The pins dialog opens from the settings gear (or anywhere) via this event.
+  useEffect(() => {
+    const onOpen = () => setPinsOpen(true);
+    window.addEventListener("lighthouse:open-pins", onOpen);
+    return () => window.removeEventListener("lighthouse:open-pins", onOpen);
+  }, []);
+
+  // Load the pin list whenever the dialog opens.
+  useEffect(() => {
+    if (!pinsOpen) return;
+    let cancelled = false;
+    ragService
+      .listPins()
+      .then((pins) => {
+        if (!cancelled) setPinList(pins);
+      })
+      .catch(() => {
+        if (!cancelled) setPinList([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [pinsOpen]);
+
+  /** Manual re-check from the dialog; changed pins also feed the banner. */
+  async function recheckPinsNow() {
+    if (pinsBusy) return;
+    setPinsBusy(true);
+    try {
+      const { changed, pins } = await ragService.recheckPins();
+      setPinList(pins);
+      if (changed.length > 0) {
+        setPinAlerts((prev) => {
+          const ids = new Set(changed.map((c) => c.id));
+          return [...changed, ...prev.filter((p) => !ids.has(p.id))].slice(0, 5);
+        });
+      }
+    } catch {
+      /* the list simply stays as-is */
+    } finally {
+      setPinsBusy(false);
+    }
+  }
+
+  /** Remove a pin from the dialog. */
+  async function removePin(id: string) {
+    try {
+      await ragService.unpinAsk(id);
+    } catch {
+      /* idempotent — refresh below tells the truth */
+    }
+    setPinList((pins) => pins.filter((p) => p.id !== id));
+    setPinAlerts((alerts) => alerts.filter((a) => a.id !== id));
+  }
+
+  /** Ask a pinned/changed question again — the fresh answer is the drill-down. */
+  function askPinned(question: string, pinId?: string) {
+    if (streaming) return;
+    setPinsOpen(false);
+    if (pinId) setPinAlerts((alerts) => alerts.filter((a) => a.id !== pinId));
+    void sendQuestion(question);
   }
 
   function ask() {
@@ -2071,6 +2236,127 @@ export function ChatPanel() {
     );
   }
 
+  // Changed-pins alert: one dismissible banner; each entry re-asks on click
+  // (the fresh narrated answer IS the drill-down). Rendered in both the hero
+  // and the conversation views — alerts land whenever the vault changes.
+  const pinAlertBanner =
+    pinAlerts.length > 0 ? (
+      <div className={styles.pinBanner} role="status">
+        <PinRegular fontSize={16} />
+        <Text size={200} weight="semibold">
+          {pinAlerts.length === 1 ? "A pinned answer changed:" : "Pinned answers changed:"}
+        </Text>
+        {pinAlerts.map((a) => (
+          <Tooltip
+            key={a.id}
+            content={a.before ? `was: ${a.before} → now: ${a.after}` : `now: ${a.after}`}
+            relationship="description"
+          >
+            <Button
+              size="small"
+              appearance="secondary"
+              shape="circular"
+              disabled={streaming}
+              onClick={() => askPinned(a.question, a.id)}
+            >
+              {a.question.length > 48 ? `${a.question.slice(0, 47)}…` : a.question}
+            </Button>
+          </Tooltip>
+        ))}
+        <span style={{ flex: 1 }} />
+        <Button
+          size="small"
+          appearance="subtle"
+          icon={<DismissRegular />}
+          aria-label="Dismiss pin alerts"
+          onClick={() => setPinAlerts([])}
+        />
+      </div>
+    ) : null;
+
+  // Pins dialog (opened from the settings gear or a pin confirmation): list,
+  // manual re-check, remove; stale pins show the engine's reason.
+  const pinsDialog = (
+    <Dialog
+      open={pinsOpen}
+      onOpenChange={(_, data) => {
+        if (!data.open) setPinsOpen(false);
+      }}
+    >
+      <DialogSurface className={styles.pinDialogSurface}>
+        <DialogBody>
+          <DialogTitle>Pinned questions</DialogTitle>
+          <DialogContent className={styles.sqlDialogContent}>
+            <Text size={200} className={styles.quietNote}>
+              Lighthouse re-runs each pin&apos;s saved query when the files it reads change —
+              no AI involved — and flags the ones whose numbers moved.
+            </Text>
+            {pinList.length === 0 ? (
+              <Text size={300}>
+                No pins yet. Ask a data question, then choose <b>Pin</b> under the answer.
+              </Text>
+            ) : (
+              <div className={styles.pinList}>
+                {pinList.map((p) => (
+                  <div key={p.id} className={styles.pinRow}>
+                    <PinRegular fontSize={16} />
+                    <div className={styles.pinRowMain}>
+                      <Text size={300} weight="semibold">
+                        {p.question}
+                      </Text>
+                      {p.staleReason ? (
+                        <Text size={200} className={styles.pinStale}>
+                          stale: {p.staleReason}
+                        </Text>
+                      ) : (
+                        <Text size={200} className={styles.pinMeta}>
+                          {p.lastSummary ?? "not checked yet"}
+                        </Text>
+                      )}
+                      <Text size={200} className={styles.pinMeta}>
+                        {p.fileIds.length} file{p.fileIds.length === 1 ? "" : "s"} watched
+                        {p.lastRunMs
+                          ? ` · checked ${formatRelativeTime(p.lastRunMs)}`
+                          : ""}
+                      </Text>
+                    </div>
+                    <Button
+                      size="small"
+                      appearance="secondary"
+                      disabled={streaming}
+                      onClick={() => askPinned(p.question)}
+                    >
+                      Ask again
+                    </Button>
+                    <Button
+                      size="small"
+                      appearance="subtle"
+                      icon={<DeleteRegular />}
+                      aria-label={`Remove pin: ${p.question}`}
+                      onClick={() => void removePin(p.id)}
+                    />
+                  </div>
+                ))}
+              </div>
+            )}
+          </DialogContent>
+          <DialogActions>
+            <Button appearance="secondary" onClick={() => setPinsOpen(false)}>
+              Close
+            </Button>
+            <Button
+              appearance="primary"
+              disabled={pinsBusy || pinList.length === 0}
+              onClick={() => void recheckPinsNow()}
+            >
+              {pinsBusy ? "Checking…" : "Re-check now"}
+            </Button>
+          </DialogActions>
+        </DialogBody>
+      </DialogSurface>
+    </Dialog>
+  );
+
   const historyButton = (
     <Button
       appearance="subtle"
@@ -2275,6 +2561,8 @@ export function ChatPanel() {
         {...dropHandlers}
       >
         {historyDrawer}
+        {pinsDialog}
+        {pinAlertBanner}
         {recentChats.length > 0 && <div className={styles.heroHistory}>{historyButton}</div>}
         <div className={styles.hero}>
           <span className={styles.beacon} />
@@ -2347,7 +2635,9 @@ export function ChatPanel() {
       {...dropHandlers}
     >
       {historyDrawer}
+      {pinsDialog}
       <div className={styles.conversation}>
+        {pinAlertBanner}
         <div className={styles.header}>
           <Title3>Ask</Title3>
           <div className={styles.headerMeta}>
@@ -2545,7 +2835,31 @@ export function ChatPanel() {
                               desktop ? (meta) => void saveResultCsv(m.id, meta) : undefined
                             }
                             savePending={savedNotes[m.id]?.pending}
+                            onPin={(meta) => void pinAnswer(m.id, meta)}
+                            pinPending={pinNotes[m.id]?.pending}
                           />
+                          {pinNotes[m.id]?.ok && (
+                            <div className={styles.savedNote}>
+                              <PinRegular fontSize={14} />
+                              <Text size={200}>
+                                Pinned — Lighthouse will flag this question when the underlying
+                                files change.
+                              </Text>
+                              <Button
+                                size="small"
+                                appearance="subtle"
+                                onClick={() => setPinsOpen(true)}
+                              >
+                                View pins
+                              </Button>
+                            </div>
+                          )}
+                          {pinNotes[m.id]?.error && (
+                            <div className={styles.savedNote}>
+                              <ErrorCircleRegular fontSize={14} />
+                              <Text size={200}>Couldn&apos;t pin — {pinNotes[m.id].error}</Text>
+                            </div>
+                          )}
                           {savedNotes[m.id]?.name && (
                             <div className={styles.savedNote}>
                               <CheckmarkRegular fontSize={14} />

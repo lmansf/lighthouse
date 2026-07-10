@@ -1,6 +1,13 @@
 /** Real RagService — talks to the local `/api/rag` route (filesystem-backed). */
 import type { RagService } from "../services";
-import type { DataSource, FileNode, RagReference, RestoreToken } from "../types";
+import type {
+  ChangedPin,
+  DataSource,
+  FileNode,
+  Pin,
+  RagReference,
+  RestoreToken,
+} from "../types";
 
 async function getTree(): Promise<{ sources: DataSource[]; nodes: FileNode[]; desktop: boolean }> {
   const r = await fetch("/api/rag", { cache: "no-store" });
@@ -79,6 +86,34 @@ class RealRagService implements RagService {
       savedId?: string;
       savedName?: string;
       error?: string;
+    };
+  }
+
+  async pinAsk(
+    question: string,
+    sql: string,
+    fileIds: string[],
+  ): Promise<{ pin?: Pin; error?: string }> {
+    return (await post({ op: "pinAsk", question, sql, fileIds })) as {
+      pin?: Pin;
+      error?: string;
+    };
+  }
+
+  async unpinAsk(id: string): Promise<void> {
+    await post({ op: "unpinAsk", id });
+  }
+
+  async listPins(): Promise<Pin[]> {
+    const res = await post({ op: "listPins" });
+    return Array.isArray(res.pins) ? (res.pins as Pin[]) : [];
+  }
+
+  async recheckPins(): Promise<{ changed: ChangedPin[]; pins: Pin[] }> {
+    const res = await post({ op: "recheckPins" });
+    return {
+      changed: Array.isArray(res.changed) ? (res.changed as ChangedPin[]) : [],
+      pins: Array.isArray(res.pins) ? (res.pins as Pin[]) : [],
     };
   }
 

@@ -44,6 +44,7 @@ import {
   MailRegular,
   OpenRegular,
   OptionsRegular,
+  PinRegular,
   QuestionCircleRegular,
   SettingsRegular,
   SignOutRegular,
@@ -1430,6 +1431,16 @@ export function SettingsMenu() {
             </MenuItem>
             <MenuItem icon={<BrainCircuitRegular />} onClick={() => setAiDlg(true)}>
               AI models
+            </MenuItem>
+            <MenuItem
+              icon={<PinRegular />}
+              onClick={() =>
+                // The chat panel owns pin data + the dialog; open it by event
+                // (same cross-feature seam as new-chat / browse-files).
+                window.dispatchEvent(new CustomEvent("lighthouse:open-pins"))
+              }
+            >
+              Pinned questions
             </MenuItem>
             <MenuItem icon={<BeakerRegular />} onClick={() => setExperimentsDlg(true)}>
               Experiments

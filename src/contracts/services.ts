@@ -7,11 +7,13 @@
  */
 
 import type {
+  ChangedPin,
   ChatChunk,
   ChatTurn,
   DataSource,
   FileNode,
   OnboardingState,
+  Pin,
   RagReference,
   RestoreToken,
   User,
@@ -63,6 +65,28 @@ export interface RagService {
     title: string,
     markdown: string,
   ): Promise<{ savedId?: string; savedName?: string; error?: string }>;
+  /**
+   * Pin an analytics answer (question + its exact SQL + files read) so the
+   * engine watches it: vault changes re-run the SQL (guarded, model-free) and
+   * alert when the computed result changes. Re-pinning the same SQL replaces
+   * the pin; past the cap the error explains the limit. The desktop engine
+   * primes the fresh pin's summary immediately.
+   */
+  pinAsk(
+    question: string,
+    sql: string,
+    fileIds: string[],
+  ): Promise<{ pin?: Pin; error?: string }>;
+  /** Remove a pin (idempotent). */
+  unpinAsk(id: string): Promise<void>;
+  /** All pins, oldest first. */
+  listPins(): Promise<Pin[]>;
+  /**
+   * Re-run every pin now (manual refresh). Returns the pins whose computed
+   * result changed plus the refreshed list. PARITY: the web dev twin can't
+   * execute SQL, so it reports no changes and returns the list unchanged.
+   */
+  recheckPins(): Promise<{ changed: ChangedPin[]; pins: Pin[] }>;
   /**
    * Engine-derived example questions for the chat empty state: each names real
    * columns of a real included tabular file, so the analytics path can answer

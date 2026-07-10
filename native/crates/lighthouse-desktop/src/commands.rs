@@ -233,6 +233,44 @@ pub async fn rag_op(app: AppHandle, body: Value) -> Result<Value, String> {
                 Err(e) => json!({ "error": e }),
             })
         }
+        // --- Pinned questions (openspec: add-pinned-questions): persist an
+        //     analytics answer's question + SQL + files; rechecks are guarded
+        //     and model-free. The background scheduler lives in main.rs. ---
+        Some("pinAsk") => {
+            let question = body["question"].as_str().unwrap_or("").to_string();
+            let sql = body["sql"].as_str().unwrap_or("").to_string();
+            let file_ids: Vec<String> = body["fileIds"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            Ok(match lighthouse_core::pins::add(&question, &sql, &file_ids) {
+                Ok(pin) => {
+                    // Prime the fresh pin's digest + summary so the dialog has
+                    // something to show (and the first real change alerts).
+                    let _ = lighthouse_core::pins::recheck_one(&pin.id).await;
+                    let pins = lighthouse_core::pins::list();
+                    let primed =
+                        pins.iter().find(|p| p.id == pin.id).cloned().unwrap_or(pin);
+                    json!({ "pin": primed })
+                }
+                Err(e) => json!({ "error": e }),
+            })
+        }
+        Some("unpinAsk") => {
+            let Some(id) = body["id"].as_str().filter(|s| !s.is_empty()) else {
+                return Err("id required".into());
+            };
+            lighthouse_core::pins::remove(id);
+            Ok(json!({ "ok": true }))
+        }
+        Some("listPins") => Ok(json!({ "pins": lighthouse_core::pins::list() })),
+        Some("recheckPins") => {
+            let changed = lighthouse_core::pins::recheck_all().await;
+            Ok(json!({
+                "changed": changed,
+                "pins": lighthouse_core::pins::list(),
+            }))
+        }
         // Catalog-derived example questions for the chat empty state — every
         // one names real columns of a real included file, so the analytics
         // path can answer it. Empty when nothing tabular is included.

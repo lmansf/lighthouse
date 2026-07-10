@@ -322,6 +322,12 @@ function installDesktopBridge(
   void eventApi.listen("vault-changed", () => broadcast("lighthouse:vault-changed"));
   void eventApi.listen("vault-generation", () => broadcast("lighthouse:vault-changed"));
 
+  // --- Pinned questions whose recomputed result changed (the shell's
+  // watcher-driven recheck pass) → the chat's alert banner.
+  void eventApi.listen<{ changed?: unknown[] }>("pins-changed", (e) => {
+    broadcast("lighthouse:pins-changed", { changed: e.payload?.changed ?? [] });
+  });
+
   // --- Widget → chat hand-off: the shell raises the main window and emits
   // this with the query typed into the floating search bar ("Ask Lighthouse
   // →"); the chat panel listens for the DOM event and asks it.
