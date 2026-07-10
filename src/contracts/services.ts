@@ -35,11 +35,34 @@ export interface RagService {
    * table, the chart spec when chartable, and the provenance footer; a guard
    * rejection or engine failure comes back as `error`. Desktop engine only —
    * the web dev twin answers with an explanatory error.
+   *
+   * With `saveAs` (a name hint), the same run also writes a full-fidelity CSV
+   * (bounded by the engine's save cap) into `Lighthouse Results/` in the
+   * vault — an ordinary file the watcher ingests — and the result additionally
+   * carries `savedId`, `savedName`, and the exported `rows` count.
    */
   analyticsSql(
     sql: string,
     fileIds: string[],
-  ): Promise<{ markdown?: string; chart?: string | null; footer?: string; error?: string }>;
+    saveAs?: string,
+  ): Promise<{
+    markdown?: string;
+    chart?: string | null;
+    footer?: string;
+    error?: string;
+    savedId?: string;
+    savedName?: string;
+    rows?: number;
+  }>;
+  /**
+   * Write a chat transcript (client-rendered markdown) as a note into
+   * `Lighthouse Notes/` in the vault. Implemented in BOTH engines. Returns the
+   * new file's id + final name (collision-suffixed, never overwrites).
+   */
+  exportChat(
+    title: string,
+    markdown: string,
+  ): Promise<{ savedId?: string; savedName?: string; error?: string }>;
   /**
    * Engine-derived example questions for the chat empty state: each names real
    * columns of a real included tabular file, so the analytics path can answer

@@ -717,6 +717,33 @@ pub fn add_file(name: &str, bytes: &[u8], dest_parent_id: Option<&str>) -> anyho
     Ok(final_id)
 }
 
+/// Write an artifact into a named vault folder ("Lighthouse Results",
+/// "Lighthouse Notes") — openspec: add-answer-artifacts. The name hint is
+/// REPAIRED, never rejected (separators and control chars become dashes,
+/// leading dots shed, length capped), then `add_file` supplies the collision
+/// suffix — an existing file is never overwritten. The artifact is an
+/// ordinary vault file: walked, watched, inclusion-ruled. Returns
+/// (node_id, file_name). KEEP IN SYNC with src/server/vault.ts::writeArtifact.
+pub fn write_artifact(
+    subdir: &str,
+    name_hint: &str,
+    ext: &str,
+    bytes: &[u8],
+) -> anyhow::Result<(String, String)> {
+    let mut clean: String = name_hint
+        .chars()
+        .map(|c| if c == '/' || c == '\\' || c.is_control() { '-' } else { c })
+        .take(80)
+        .collect();
+    clean = clean.trim().trim_start_matches('.').trim().to_string();
+    if clean.is_empty() {
+        clean = "result".to_string();
+    }
+    let id = add_file(&format!("{clean}.{ext}"), bytes, Some(subdir))?;
+    let name = id.rsplit('/').next().unwrap_or(&id).to_string();
+    Ok((id, name))
+}
+
 /// Like Node's `path.extname`: extension including the dot, original case.
 fn ext_of_preserving_case(name: &str) -> String {
     match name.rsplit_once('.') {

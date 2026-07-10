@@ -45,11 +45,39 @@ class RealRagService implements RagService {
   async analyticsSql(
     sql: string,
     fileIds: string[],
-  ): Promise<{ markdown?: string; chart?: string | null; footer?: string; error?: string }> {
-    return (await post({ op: "analyticsSql", sql, fileIds })) as {
+    saveAs?: string,
+  ): Promise<{
+    markdown?: string;
+    chart?: string | null;
+    footer?: string;
+    error?: string;
+    savedId?: string;
+    savedName?: string;
+    rows?: number;
+  }> {
+    return (await post({
+      op: "analyticsSql",
+      sql,
+      fileIds,
+      ...(saveAs ? { saveAs } : {}),
+    })) as {
       markdown?: string;
       chart?: string | null;
       footer?: string;
+      error?: string;
+      savedId?: string;
+      savedName?: string;
+      rows?: number;
+    };
+  }
+
+  async exportChat(
+    title: string,
+    markdown: string,
+  ): Promise<{ savedId?: string; savedName?: string; error?: string }> {
+    return (await post({ op: "exportChat", title, markdown })) as {
+      savedId?: string;
+      savedName?: string;
       error?: string;
     };
   }

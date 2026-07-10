@@ -1199,6 +1199,37 @@ mod tests {
         assert!(last_query_used(&[turn("assistant", &big)]).unwrap().len() <= 800);
     }
 
+    #[test]
+    fn csv_writer_is_rfc4180() {
+        // Quotes double, commas/newlines/unicode quote, NULLs render empty.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("name, quoted", DataType::Utf8, false),
+            Field::new("total", DataType::Float64, true),
+        ]));
+        let b = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["say \"hi\"", "line\nbreak", "café"])),
+                Arc::new(Float64Array::from(vec![Some(1.5), None, Some(3.0)])),
+            ],
+        )
+        .unwrap();
+        let (bytes, rows) = batches_to_csv(&[b.clone()], SAVE_MAX_ROWS);
+        let text = String::from_utf8(bytes).unwrap();
+        assert_eq!(rows, 3);
+        let mut lines = text.lines();
+        assert_eq!(lines.next(), Some("\"name, quoted\",total"));
+        assert_eq!(lines.next(), Some("\"say \"\"hi\"\"\",1.5"));
+        // The embedded newline keeps the quoted field on two physical lines.
+        assert_eq!(lines.next(), Some("\"line"));
+        assert_eq!(lines.next(), Some("break\","));
+        assert_eq!(lines.next(), Some("café,3.0"));
+        // The cap truncates data rows, never the header.
+        let (bytes, rows) = batches_to_csv(&[b], 1);
+        assert_eq!(rows, 1);
+        assert_eq!(String::from_utf8(bytes).unwrap().lines().count(), 2);
+    }
+
     fn batch(labels: &[&str], values: &[f64]) -> RecordBatch {
         let schema = Arc::new(Schema::new(vec![
             Field::new("label", DataType::Utf8, false),
@@ -1610,10 +1641,12 @@ pub struct DirectResult {
     pub footer: String,
 }
 
-/// Re-run an answer's SQL against exactly the files it read — the guarded,
-/// model-free path behind Edit SQL, Save-as-CSV, and pin rechecks. Unknown /
-/// no-longer-tabular ids are skipped and noted in the footer.
-pub async fn run_direct(sql: &str, file_ids: &[String]) -> Result<DirectResult, String> {
+/// Resolve an answer's file ids and register them as tables — the shared
+/// front half of every direct (model-free) execution. Unknown / no-longer-
+/// tabular ids are counted so callers can note them in the footer.
+async fn direct_tables(
+    file_ids: &[String],
+) -> Result<(SessionContext, Vec<TableReg>, usize), String> {
     let mut files: Vec<(String, String, PathBuf)> = Vec::new();
     let mut skipped = 0usize;
     for id in file_ids {
@@ -1630,13 +1663,115 @@ pub async fn run_direct(sql: &str, file_ids: &[String]) -> Result<DirectResult, 
     if regs.is_empty() {
         return Err("the files couldn't be registered as tables".to_string());
     }
-    let res = run_query(&ctx, sql).await?;
+    Ok((ctx, regs, skipped))
+}
+
+fn direct_footer(sql: &str, regs: &[TableReg], skipped: usize) -> String {
     let mut footer = format!("*Query used:*\n```sql\n{sql}\n```\n");
-    if let Some(fresh) = freshness_line(&regs, sql, crate::config::now_ms()) {
+    if let Some(fresh) = freshness_line(regs, sql, crate::config::now_ms()) {
         footer.push_str(&fresh);
     }
     if skipped > 0 {
         footer.push_str(&format!("_(skipped {skipped} file(s) no longer in the vault)_\n"));
     }
+    footer
+}
+
+/// Re-run an answer's SQL against exactly the files it read — the guarded,
+/// model-free path behind Edit SQL, Save-as-CSV, and pin rechecks. Unknown /
+/// no-longer-tabular ids are skipped and noted in the footer.
+pub async fn run_direct(sql: &str, file_ids: &[String]) -> Result<DirectResult, String> {
+    let (ctx, regs, skipped) = direct_tables(file_ids).await?;
+    let res = run_query(&ctx, sql).await?;
+    let footer = direct_footer(sql, &regs, skipped);
     Ok(DirectResult { markdown: res.markdown, chart: res.chart, footer })
+}
+
+/// Save-path row cap: full-fidelity export, bounded sanely (the narration
+/// caps stay much smaller — openspec: add-answer-artifacts, design §1).
+pub const SAVE_MAX_ROWS: usize = 100_000;
+
+/// RFC-4180 CSV (quote-doubling) from record batches, capped at `max_rows`
+/// data rows. Returns (bytes, data_row_count). NULLs render empty.
+pub fn batches_to_csv(batches: &[RecordBatch], max_rows: usize) -> (Vec<u8>, usize) {
+    fn field(s: &str) -> String {
+        if s.contains(',') || s.contains('"') || s.contains('\n') || s.contains('\r') {
+            format!("\"{}\"", s.replace('"', "\"\""))
+        } else {
+            s.to_string()
+        }
+    }
+    let Some(first) = batches.iter().find(|b| b.num_columns() > 0) else {
+        return (Vec::new(), 0);
+    };
+    let mut out = String::new();
+    let header: Vec<String> =
+        first.schema().fields().iter().map(|f| field(f.name())).collect();
+    out.push_str(&header.join(","));
+    out.push('\n');
+    let mut rows = 0usize;
+    'outer: for b in batches {
+        for row in 0..b.num_rows() {
+            if rows >= max_rows {
+                break 'outer;
+            }
+            let mut cells: Vec<String> = Vec::with_capacity(b.num_columns());
+            for c in 0..b.num_columns() {
+                let col = b.column(c);
+                let v = if col.is_null(row) {
+                    String::new()
+                } else {
+                    array_value_to_string(col, row).unwrap_or_default()
+                };
+                cells.push(field(&v));
+            }
+            out.push_str(&cells.join(","));
+            out.push('\n');
+            rows += 1;
+        }
+    }
+    (out.into_bytes(), rows)
+}
+
+/// What "Save as CSV" wrote: an ordinary vault file the watcher ingests.
+#[derive(Debug)]
+pub struct SavedResult {
+    pub id: String,
+    pub name: String,
+    pub rows: usize,
+}
+
+/// The save path behind "Save as CSV": one registration, then the normal
+/// narration-capped preview PLUS a full-fidelity execution (SAVE_MAX_ROWS)
+/// written as RFC-4180 CSV into `Lighthouse Results/` — where it becomes
+/// queryable input like any other file. Never overwrites (collision suffix).
+pub async fn run_direct_save(
+    sql: &str,
+    file_ids: &[String],
+    name_hint: &str,
+) -> Result<(DirectResult, SavedResult), String> {
+    let (ctx, regs, skipped) = direct_tables(file_ids).await?;
+    let res = run_query(&ctx, sql).await?; // guard + preview + chart
+    let df = ctx.sql(sql).await.map_err(|e| e.to_string())?;
+    let df = df.limit(0, Some(SAVE_MAX_ROWS)).map_err(|e| e.to_string())?;
+    let batches = tokio::time::timeout(Duration::from_secs(QUERY_TIMEOUT_SECS), df.collect())
+        .await
+        .map_err(|_| format!("query exceeded {QUERY_TIMEOUT_SECS}s"))?
+        .map_err(|e| e.to_string())?;
+    let (bytes, rows) = batches_to_csv(&batches, SAVE_MAX_ROWS);
+    if rows == 0 {
+        return Err("the query returned no rows".into());
+    }
+    let hint = name_hint.to_string();
+    let (id, name) = tokio::task::spawn_blocking(move || {
+        crate::vault::write_artifact("Lighthouse Results", &hint, "csv", &bytes)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+    let footer = direct_footer(sql, &regs, skipped);
+    Ok((
+        DirectResult { markdown: res.markdown, chart: res.chart, footer },
+        SavedResult { id, name, rows },
+    ))
 }

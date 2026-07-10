@@ -68,6 +68,7 @@ import {
   HistoryRegular,
   OpenRegular,
   PlayRegular,
+  SaveRegular,
   SendRegular,
   SettingsRegular,
   SquareRegular,
@@ -393,6 +394,16 @@ const useStyles = makeStyles({
   // The re-run result inside the dialog: same markdown styling as chat answers,
   // scrolling within the dialog so a wide/tall table never outgrows the screen.
   sqlResult: { maxHeight: "40vh", overflowY: "auto" },
+  // Inline confirmation under an answer after Save as CSV — quiet, with a
+  // Reveal affordance (answer artifacts land as ordinary vault files).
+  savedNote: {
+    display: "flex",
+    alignItems: "center",
+    flexWrap: "wrap",
+    gap: tokens.spacingHorizontalS,
+    marginTop: tokens.spacingVerticalXXS,
+    color: tokens.colorNeutralForeground3,
+  },
   // Inline failure banner for a turn that couldn't get an answer — mirrors the
   // addNotice pattern, in danger colors, with Retry + settings escape hatches.
   errorNotice: {
@@ -823,12 +834,17 @@ function RefineChips({
   disabled,
   onAsk,
   onEditSql,
+  onSave,
+  savePending,
 }: {
   meta: AnalyticsMeta;
   isLast: boolean;
   disabled: boolean;
   onAsk: (q: string) => void;
   onEditSql: (meta: AnalyticsMeta) => void;
+  /** Save-as-CSV (desktop engine only — omitted on the web dev twin). */
+  onSave?: (meta: AnalyticsMeta) => void;
+  savePending?: boolean;
 }) {
   const styles = useStyles();
   return (
@@ -856,6 +872,18 @@ function RefineChips({
       >
         Edit SQL
       </Button>
+      {onSave && (
+        <Button
+          appearance="secondary"
+          size="small"
+          shape="circular"
+          icon={<SaveRegular />}
+          disabled={disabled || savePending}
+          onClick={() => onSave(meta)}
+        >
+          {savePending ? "Saving…" : "Save as CSV"}
+        </Button>
+      )}
     </div>
   );
 }
@@ -1039,6 +1067,15 @@ export function ChatPanel() {
   const [sqlDraft, setSqlDraft] = useState("");
   const [sqlRunning, setSqlRunning] = useState(false);
   const [sqlOutcome, setSqlOutcome] = useState<{ content?: string; error?: string } | null>(null);
+  // --- Answer artifacts: per-turn Save-as-CSV outcome, and the transient
+  //     export-chat-to-note confirmation bar. ---
+  const [savedNotes, setSavedNotes] = useState<
+    Record<string, { pending?: boolean; id?: string; name?: string; error?: string }>
+  >({});
+  const [exportNote, setExportNote] = useState<{ id?: string; name?: string; error?: string } | null>(
+    null,
+  );
+  const exportNoteTimer = useRef<number | null>(null);
   // Cancels the in-flight ask() when the user presses Stop.
   const abortRef = useRef<AbortController | null>(null);
   // Files explicitly attached to the conversation (dragged from the explorer or
@@ -1415,6 +1452,83 @@ export function ChatPanel() {
         composerRef.current?.focus();
       }
     }
+  }
+
+  /** Reveal a saved artifact in the OS file manager (desktop shell only). */
+  function revealSaved(nodeId: string) {
+    void fetch("/api/reveal", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ nodeId }),
+    }).catch(() => {});
+  }
+
+  /**
+   * Save an analytics answer's full result as a CSV into the vault
+   * (Lighthouse Results/) — the engine re-runs the answer's own SQL with its
+   * save cap; the file becomes ordinary, queryable vault input. The name hint
+   * is the question that produced the answer.
+   */
+  async function saveResultCsv(asstId: string, meta: AnalyticsMeta) {
+    const msgs = useChatStore.getState().messages;
+    const idx = msgs.findIndex((x) => x.id === asstId);
+    const prev = idx > 0 ? msgs[idx - 1] : undefined;
+    const hint =
+      (prev?.role === "user" ? prev.content : "").trim().replace(/\s+/g, " ").slice(0, 60) ||
+      "Result";
+    setSavedNotes((s) => ({ ...s, [asstId]: { pending: true } }));
+    try {
+      const res = await ragService.analyticsSql(meta.sql, meta.fileIds, hint);
+      if (res.error || !res.savedId) {
+        setSavedNotes((s) => ({ ...s, [asstId]: { error: res.error ?? "save failed" } }));
+      } else {
+        setSavedNotes((s) => ({ ...s, [asstId]: { id: res.savedId, name: res.savedName } }));
+        logEvent("analytics_save_csv", { rows: res.rows ?? 0 });
+      }
+    } catch (err) {
+      setSavedNotes((s) => ({
+        ...s,
+        [asstId]: { error: err instanceof Error ? err.message : "save failed" },
+      }));
+    }
+  }
+
+  /** The transcript as portable markdown — the client owns what's visible. */
+  function transcriptMarkdown(msgs: TranscriptMessage[], title: string): string {
+    const lines: string[] = [`# ${title}`, ""];
+    for (const m of msgs) {
+      if (m.error || !m.content) continue;
+      lines.push(m.role === "user" ? "**You:**" : "**Lighthouse:**", "", m.content, "");
+      if (m.role === "assistant") {
+        if (m.stopped) lines.push("_(stopped)_", "");
+        if (m.references?.length) {
+          lines.push(`_Sources: ${m.references.map((r) => r.name).join(", ")}_`, "");
+        }
+      }
+    }
+    return lines.join("\n");
+  }
+
+  /** Export the conversation as a markdown note into Lighthouse Notes/. */
+  async function exportChatToNote() {
+    const msgs = useChatStore.getState().messages;
+    if (msgs.length === 0 || streaming) return;
+    const title =
+      conversations.find((c) => c.id === currentId)?.title.trim() || "Lighthouse chat";
+    let next: { id?: string; name?: string; error?: string };
+    try {
+      const res = await ragService.exportChat(title, transcriptMarkdown(msgs, title));
+      next =
+        res.error || !res.savedId
+          ? { error: res.error ?? "export failed" }
+          : { id: res.savedId, name: res.savedName };
+      if (!next.error) logEvent("chat_export_note");
+    } catch (err) {
+      next = { error: err instanceof Error ? err.message : "export failed" };
+    }
+    setExportNote(next);
+    if (exportNoteTimer.current !== null) window.clearTimeout(exportNoteTimer.current);
+    exportNoteTimer.current = window.setTimeout(() => setExportNote(null), 8000);
   }
 
   function ask() {
@@ -1825,6 +1939,41 @@ export function ChatPanel() {
           />
         </div>
       )}
+      {exportNote && (
+        <div className={styles.undoBar}>
+          {exportNote.error ? (
+            <>
+              <ErrorCircleRegular fontSize={16} />
+              <Text size={200}>Couldn&apos;t save the note — {exportNote.error}</Text>
+            </>
+          ) : (
+            <>
+              <CheckmarkRegular fontSize={16} />
+              <Text size={200}>Saved “{exportNote.name}” to Lighthouse Notes in your vault.</Text>
+            </>
+          )}
+          <span style={{ flex: 1 }} />
+          {!exportNote.error && desktop && (
+            <Button
+              size="small"
+              appearance="primary"
+              onClick={() => revealSaved(exportNote.id ?? "")}
+            >
+              Reveal
+            </Button>
+          )}
+          <Button
+            size="small"
+            appearance="subtle"
+            icon={<DismissRegular />}
+            aria-label="Dismiss"
+            onClick={() => {
+              if (exportNoteTimer.current !== null) window.clearTimeout(exportNoteTimer.current);
+              setExportNote(null);
+            }}
+          />
+        </div>
+      )}
       {addNotice && (
         <div className={styles.addNotice}>
           <Text size={200}>{addNotice}</Text>
@@ -2204,6 +2353,15 @@ export function ChatPanel() {
           <div className={styles.headerMeta}>
             <Badge appearance="tint">{visibleBadgeText}</Badge>
             {historyButton}
+            <Tooltip content="Save this chat as a note in your vault" relationship="label">
+              <Button
+                appearance="subtle"
+                icon={<SaveRegular />}
+                aria-label="Save chat to a vault note"
+                disabled={streaming}
+                onClick={() => void exportChatToNote()}
+              />
+            </Tooltip>
             <Button
               appearance="subtle"
               icon={<AddRegular />}
@@ -2376,13 +2534,41 @@ export function ChatPanel() {
                       {/* Refinement chips: only under answers carrying analytics
                           metadata (i.e. the engine computed this via SQL). */}
                       {m.analytics && !m.error && !(streaming && m.id === lastId) && (
-                        <RefineChips
-                          meta={m.analytics}
-                          isLast={m.id === lastId}
-                          disabled={streaming}
-                          onAsk={(q) => void sendQuestion(q)}
-                          onEditSql={openSqlEditor}
-                        />
+                        <>
+                          <RefineChips
+                            meta={m.analytics}
+                            isLast={m.id === lastId}
+                            disabled={streaming}
+                            onAsk={(q) => void sendQuestion(q)}
+                            onEditSql={openSqlEditor}
+                            onSave={
+                              desktop ? (meta) => void saveResultCsv(m.id, meta) : undefined
+                            }
+                            savePending={savedNotes[m.id]?.pending}
+                          />
+                          {savedNotes[m.id]?.name && (
+                            <div className={styles.savedNote}>
+                              <CheckmarkRegular fontSize={14} />
+                              <Text size={200}>
+                                Saved “{savedNotes[m.id].name}” to Lighthouse Results — it&apos;s
+                                now a queryable vault file.
+                              </Text>
+                              <Button
+                                size="small"
+                                appearance="subtle"
+                                onClick={() => revealSaved(savedNotes[m.id].id ?? "")}
+                              >
+                                Reveal
+                              </Button>
+                            </div>
+                          )}
+                          {savedNotes[m.id]?.error && (
+                            <div className={styles.savedNote}>
+                              <ErrorCircleRegular fontSize={14} />
+                              <Text size={200}>Couldn&apos;t save — {savedNotes[m.id].error}</Text>
+                            </div>
+                          )}
+                        </>
                       )}
                       {m.references && m.references.length > 0 && (
                         <References turnId={m.id} references={m.references} />

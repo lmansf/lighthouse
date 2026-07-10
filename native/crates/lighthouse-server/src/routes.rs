@@ -142,6 +142,24 @@ pub async fn rag_post(headers: HeaderMap, body: Option<Json<Value>>) -> Response
                 .as_array()
                 .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
                 .unwrap_or_default();
+            // With `saveAs`, the same guarded run also writes a full-fidelity
+            // CSV into Lighthouse Results/ (openspec: add-answer-artifacts).
+            if let Some(hint) = body["saveAs"].as_str() {
+                return match lighthouse_core::analytics::run_direct_save(&sql, &file_ids, hint)
+                    .await
+                {
+                    Ok((r, saved)) => Json(json!({
+                        "markdown": r.markdown,
+                        "chart": r.chart,
+                        "footer": r.footer,
+                        "savedId": saved.id,
+                        "savedName": saved.name,
+                        "rows": saved.rows,
+                    }))
+                    .into_response(),
+                    Err(e) => Json(json!({ "error": e })).into_response(),
+                };
+            }
             return match lighthouse_core::analytics::run_direct(&sql, &file_ids).await {
                 Ok(r) => Json(json!({
                     "markdown": r.markdown,
@@ -149,6 +167,33 @@ pub async fn rag_post(headers: HeaderMap, body: Option<Json<Value>>) -> Response
                     "footer": r.footer,
                 }))
                 .into_response(),
+                Err(e) => Json(json!({ "error": e })).into_response(),
+            };
+        }
+        // Write the client-rendered transcript as a markdown note into
+        // Lighthouse Notes/ (openspec: add-answer-artifacts). Ordinary vault
+        // file: walked, watched, inclusion-ruled.
+        Some("exportChat") => {
+            let title = body["title"].as_str().unwrap_or("Chat").to_string();
+            let markdown = body["markdown"].as_str().unwrap_or("").to_string();
+            if markdown.trim().is_empty() {
+                return bad_request("markdown required");
+            }
+            let written = tokio::task::spawn_blocking(move || {
+                lighthouse_core::vault::write_artifact(
+                    "Lighthouse Notes",
+                    &title,
+                    "md",
+                    markdown.as_bytes(),
+                )
+            })
+            .await
+            .map_err(|e| e.to_string())
+            .and_then(|r| r.map_err(|e| e.to_string()));
+            return match written {
+                Ok((id, name)) => {
+                    Json(json!({ "savedId": id, "savedName": name })).into_response()
+                }
                 Err(e) => Json(json!({ "error": e })).into_response(),
             };
         }

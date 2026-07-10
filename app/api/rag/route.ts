@@ -16,6 +16,7 @@ import {
 } from "@/server/sources/registry";
 import { isSameOrigin } from "@/server/http";
 import { isDesktopApp } from "@/server/config";
+import { writeArtifact } from "@/server/vault";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -171,6 +172,25 @@ export async function POST(req: Request) {
       // the desktop engine only. Empty means the chat keeps its static
       // empty-state hint — exactly the no-tabular-files behavior.
       return NextResponse.json({ asks: [] });
+
+    case "exportChat": {
+      // Write the client-rendered transcript as a markdown note into
+      // Lighthouse Notes/ (openspec: add-answer-artifacts). Implemented in
+      // BOTH engines — writing a vault file needs no desktop machinery.
+      const title = typeof body.title === "string" && body.title.trim() ? body.title : "Chat";
+      const markdown = typeof body.markdown === "string" ? body.markdown : "";
+      if (!markdown.trim()) {
+        return NextResponse.json({ error: "markdown required" }, { status: 400 });
+      }
+      try {
+        const { id, name } = writeArtifact("Lighthouse Notes", title, "md", Buffer.from(markdown, "utf8"));
+        return NextResponse.json({ savedId: id, savedName: name });
+      } catch (err) {
+        return NextResponse.json({
+          error: err instanceof Error ? err.message : "could not write the note",
+        });
+      }
+    }
 
     default:
       return NextResponse.json({ error: "unknown op" }, { status: 400 });

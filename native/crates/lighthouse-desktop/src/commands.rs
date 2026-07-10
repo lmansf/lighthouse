@@ -174,12 +174,62 @@ pub async fn rag_op(app: AppHandle, body: Value) -> Result<Value, String> {
                 .as_array()
                 .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
                 .unwrap_or_default();
+            // With `saveAs`, the same guarded run also writes a full-fidelity
+            // CSV into Lighthouse Results/ (openspec: add-answer-artifacts).
+            if let Some(hint) = body["saveAs"].as_str() {
+                return Ok(
+                    match lighthouse_core::analytics::run_direct_save(&sql, &file_ids, hint)
+                        .await
+                    {
+                        Ok((r, saved)) => {
+                            let _ = app.emit("vault-changed", ());
+                            json!({
+                                "markdown": r.markdown,
+                                "chart": r.chart,
+                                "footer": r.footer,
+                                "savedId": saved.id,
+                                "savedName": saved.name,
+                                "rows": saved.rows,
+                            })
+                        }
+                        Err(e) => json!({ "error": e }),
+                    },
+                );
+            }
             Ok(match lighthouse_core::analytics::run_direct(&sql, &file_ids).await {
                 Ok(r) => json!({
                     "markdown": r.markdown,
                     "chart": r.chart,
                     "footer": r.footer,
                 }),
+                Err(e) => json!({ "error": e }),
+            })
+        }
+        // Write the client-rendered transcript as a markdown note into
+        // Lighthouse Notes/ (openspec: add-answer-artifacts). Ordinary vault
+        // file: walked, watched, inclusion-ruled.
+        Some("exportChat") => {
+            let title = body["title"].as_str().unwrap_or("Chat").to_string();
+            let markdown = body["markdown"].as_str().unwrap_or("").to_string();
+            if markdown.trim().is_empty() {
+                return Err("markdown required".into());
+            }
+            let written = tokio::task::spawn_blocking(move || {
+                lighthouse_core::vault::write_artifact(
+                    "Lighthouse Notes",
+                    &title,
+                    "md",
+                    markdown.as_bytes(),
+                )
+            })
+            .await
+            .map_err(|e| e.to_string())
+            .and_then(|r| r.map_err(|e| e.to_string()));
+            Ok(match written {
+                Ok((id, name)) => {
+                    let _ = app.emit("vault-changed", ());
+                    json!({ "savedId": id, "savedName": name })
+                }
                 Err(e) => json!({ "error": e }),
             })
         }

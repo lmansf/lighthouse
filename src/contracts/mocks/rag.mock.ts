@@ -62,7 +62,16 @@ class MockRagService implements RagService {
   async analyticsSql(
     sql: string,
     _fileIds: string[],
-  ): Promise<{ markdown?: string; chart?: string | null; footer?: string; error?: string }> {
+    saveAs?: string,
+  ): Promise<{
+    markdown?: string;
+    chart?: string | null;
+    footer?: string;
+    error?: string;
+    savedId?: string;
+    savedName?: string;
+    rows?: number;
+  }> {
     // Deterministic mock: SELECTs "succeed" with a canned table so the Edit
     // SQL dialog is fully exercisable offline; anything else is rejected the
     // way the real guard would phrase it.
@@ -74,7 +83,19 @@ class MockRagService implements RagService {
       markdown: "| region | total |\n| --- | --- |\n| NE | 150 |\n| NW | 200 |",
       chart: null,
       footer: `*Query used:*\n\`\`\`sql\n${sql}\n\`\`\`\n*Computed from:* “sales.csv” (saved just now)`,
+      // Pretend save so the Save-as-CSV chip round-trips offline.
+      ...(saveAs ? { savedId: `Lighthouse Results/${saveAs}.csv`, savedName: `${saveAs}.csv`, rows: 2 } : {}),
     };
+  }
+
+  async exportChat(
+    title: string,
+    markdown: string,
+  ): Promise<{ savedId?: string; savedName?: string; error?: string }> {
+    await new Promise((r) => setTimeout(r, 150));
+    if (!markdown.trim()) return { error: "markdown required" };
+    const name = `${title.trim() || "Chat"}.md`;
+    return { savedId: `Lighthouse Notes/${name}`, savedName: name };
   }
 
   async suggestedAsks(includedFileIds: string[]): Promise<{ label: string; question: string }[]> {
