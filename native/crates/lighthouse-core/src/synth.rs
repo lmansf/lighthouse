@@ -339,6 +339,15 @@ pub fn answer_pipeline(
                         }
                         // Deterministic transparency — never model-generated.
                         yield delta(format!("\n\n*Query used:*\n```sql\n{sql}\n```\n"));
+                        // …and which file versions it read, so stale-looking
+                        // numbers point at the file, not the engine.
+                        if let Some(fresh) = crate::analytics::freshness_line(
+                            &regs,
+                            &sql,
+                            crate::config::now_ms(),
+                        ) {
+                            yield delta(fresh);
+                        }
                         // Chartable result → engine-built spec the chat renders
                         // as SVG (Phase C). Data comes straight from the query
                         // batches; the model never sees or writes this block.
