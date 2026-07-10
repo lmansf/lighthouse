@@ -61,6 +61,10 @@ fn cache_path() -> PathBuf {
 /// Column inventory for the given (file_id, name, abs) set, cache-first.
 /// Unreadable/malformed files are omitted; order follows the input.
 pub fn columns_for(files: &[(String, String, PathBuf)]) -> Vec<FileColumns> {
+    // The catalog USES the state dir but never creates it: a caller without
+    // one (unit tests, one-off contexts) gets a correct in-memory answer and
+    // leaves no droppings behind.
+    let persist = state_dir().exists();
     let mut cache: CacheFile = std::fs::read_to_string(cache_path())
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
@@ -97,7 +101,7 @@ pub fn columns_for(files: &[(String, String, PathBuf)]) -> Vec<FileColumns> {
             modified_ms,
         });
     }
-    if dirty {
+    if dirty && persist {
         if let Some(dir) = cache_path().parent() {
             let _ = std::fs::create_dir_all(dir);
         }
