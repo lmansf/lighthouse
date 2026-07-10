@@ -1,0 +1,40 @@
+schema: spec-driven
+
+context: |
+  Lighthouse: local-first AI file vault (desktop app). Users curate which files
+  an AI can see, then chat with grounded, cited answers; "Genie" analytics turns
+  aggregate questions over tabular files into engine-executed SQL with charts.
+
+  Tech stack & architecture:
+  - Rust workspace under native/ is the SHIPPING engine: lighthouse-core
+    (vault/retrieval/extraction/analytics/synthesis), lighthouse-server (axum
+    API), lighthouse-desktop (Tauri 2 shell; commands.rs mirrors routes.rs).
+  - TypeScript dev twin under src/server/ mirrors lighthouse-core (KEEP IN SYNC
+    comments; deliberate divergences carry PARITY comments — analytics is
+    Rust-only by design).
+  - UI: Next.js + Fluent UI under src/features, contracts layer under
+    src/contracts (types + services + real/mock impls), zustand stores.
+  - Analytics: DataFusion SessionContext per ask; model writes ONE guarded
+    SELECT; engine executes; charts via ```lighthouse-chart fences; footer
+    carries "Query used" + "Computed from" freshness stamp (never model text).
+  - Models: local llama-server (6144-token window — budget prompts!) or keyed
+    remote providers (anthropic + 5 OpenAI-compatible vendors).
+
+  Conventions:
+  - Every number shown to users must be engine-computed, never model-generated.
+  - Failures degrade, never break an answer (analytics falls through to
+    retrieval; extraction failures leave files name-findable).
+  - Tests: cargo test --workspace (native/), node --test "test/**/*.test.mjs",
+    tsc --noEmit, next lint. Pure helpers get unit tests in both engines.
+  - Comments state constraints code can't show; match surrounding style.
+
+rules:
+  proposal:
+    - Include a "Non-goals" section to pin scope.
+    - Name the exact engine files/modules the change touches.
+  design:
+    - Call out Rust/TS parity decisions explicitly (mirrored, or PARITY-diverged and why).
+    - State how the change degrades on failure and on the local model's 6144-token window.
+  tasks:
+    - "Order tasks so the engine lands before UI, and tests land with the code they cover."
+    - "Final task of every change: run full verification (cargo + node tests, tsc, lint)."

@@ -69,7 +69,21 @@ pub struct ChatChunk {
     /// Pre-answer progress (multi-document synthesis stages).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub progress: Option<ChatProgress>,
+    /// Structured provenance of an analytics answer, final chunk only — what
+    /// refinement chips, Save-as-CSV, and pins act on (never re-parsed out of
+    /// the markdown). PARITY: the TS engine never takes the analytics branch,
+    /// so it never sets this.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub analytics: Option<AnalyticsMeta>,
     pub done: bool,
+}
+
+/// The exact executed SQL of an analytics answer and the vault files it read.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalyticsMeta {
+    pub sql: String,
+    pub file_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

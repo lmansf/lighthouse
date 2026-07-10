@@ -496,6 +496,36 @@ export function addFile(name: string, bytes: Buffer, destParentId: string | null
 }
 
 /**
+ * Write an artifact into a named vault folder ("Lighthouse Results",
+ * "Lighthouse Notes") — openspec: add-answer-artifacts. The name hint is
+ * REPAIRED, never rejected (separators and control chars become dashes,
+ * leading dots shed, length capped), then addFile supplies the collision
+ * suffix — an existing file is never overwritten. KEEP IN SYNC with
+ * native vault.rs::write_artifact.
+ */
+export function writeArtifact(
+  subdir: string,
+  nameHint: string,
+  ext: string,
+  bytes: Buffer,
+): { id: string; name: string } {
+  let clean = [...nameHint]
+    .slice(0, 80)
+    .map((c) => {
+      const code = c.charCodeAt(0);
+      // Control chars = C0 + DEL + C1, matching Rust's char::is_control().
+      return c === "/" || c === "\\" || code < 32 || (code >= 127 && code <= 159) ? "-" : c;
+    })
+    .join("")
+    .trim()
+    .replace(/^\.+/, "")
+    .trim();
+  if (!clean) clean = "result";
+  const { newId } = addFile(`${clean}.${ext}`, bytes, subdir);
+  return { id: newId, name: newId.split("/").pop() ?? newId };
+}
+
+/**
  * Register a file or folder *in place* (a reference / link) instead of copying
  * it into the vault — this is how the app adds existing files without making a
  * second copy. The path must be an existing absolute path. Re-linking the same

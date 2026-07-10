@@ -165,6 +165,126 @@ pub async fn rag_op(app: AppHandle, body: Value) -> Result<Value, String> {
             let _ = app.emit("vault-changed", ());
             Ok(result)
         }
+        // Deterministic guarded re-execution of an analytics answer's SQL
+        // over exactly the files it read (Edit SQL / refinement plumbing) —
+        // no model, no persistence.
+        Some("analyticsSql") => {
+            let sql = body["sql"].as_str().unwrap_or("").to_string();
+            let file_ids: Vec<String> = body["fileIds"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            // With `saveAs`, the same guarded run also writes a full-fidelity
+            // CSV into Lighthouse Results/ (openspec: add-answer-artifacts).
+            if let Some(hint) = body["saveAs"].as_str() {
+                return Ok(
+                    match lighthouse_core::analytics::run_direct_save(&sql, &file_ids, hint)
+                        .await
+                    {
+                        Ok((r, saved)) => {
+                            let _ = app.emit("vault-changed", ());
+                            json!({
+                                "markdown": r.markdown,
+                                "chart": r.chart,
+                                "footer": r.footer,
+                                "savedId": saved.id,
+                                "savedName": saved.name,
+                                "rows": saved.rows,
+                            })
+                        }
+                        Err(e) => json!({ "error": e }),
+                    },
+                );
+            }
+            Ok(match lighthouse_core::analytics::run_direct(&sql, &file_ids).await {
+                Ok(r) => json!({
+                    "markdown": r.markdown,
+                    "chart": r.chart,
+                    "footer": r.footer,
+                }),
+                Err(e) => json!({ "error": e }),
+            })
+        }
+        // Write the client-rendered transcript as a markdown note into
+        // Lighthouse Notes/ (openspec: add-answer-artifacts). Ordinary vault
+        // file: walked, watched, inclusion-ruled.
+        Some("exportChat") => {
+            let title = body["title"].as_str().unwrap_or("Chat").to_string();
+            let markdown = body["markdown"].as_str().unwrap_or("").to_string();
+            if markdown.trim().is_empty() {
+                return Err("markdown required".into());
+            }
+            let written = tokio::task::spawn_blocking(move || {
+                lighthouse_core::vault::write_artifact(
+                    "Lighthouse Notes",
+                    &title,
+                    "md",
+                    markdown.as_bytes(),
+                )
+            })
+            .await
+            .map_err(|e| e.to_string())
+            .and_then(|r| r.map_err(|e| e.to_string()));
+            Ok(match written {
+                Ok((id, name)) => {
+                    let _ = app.emit("vault-changed", ());
+                    json!({ "savedId": id, "savedName": name })
+                }
+                Err(e) => json!({ "error": e }),
+            })
+        }
+        // --- Pinned questions (openspec: add-pinned-questions): persist an
+        //     analytics answer's question + SQL + files; rechecks are guarded
+        //     and model-free. The background scheduler lives in main.rs. ---
+        Some("pinAsk") => {
+            let question = body["question"].as_str().unwrap_or("").to_string();
+            let sql = body["sql"].as_str().unwrap_or("").to_string();
+            let file_ids: Vec<String> = body["fileIds"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            Ok(match lighthouse_core::pins::add(&question, &sql, &file_ids) {
+                Ok(pin) => {
+                    // Prime the fresh pin's digest + summary so the dialog has
+                    // something to show (and the first real change alerts).
+                    let _ = lighthouse_core::pins::recheck_one(&pin.id).await;
+                    let pins = lighthouse_core::pins::list();
+                    let primed =
+                        pins.iter().find(|p| p.id == pin.id).cloned().unwrap_or(pin);
+                    json!({ "pin": primed })
+                }
+                Err(e) => json!({ "error": e }),
+            })
+        }
+        Some("unpinAsk") => {
+            let Some(id) = body["id"].as_str().filter(|s| !s.is_empty()) else {
+                return Err("id required".into());
+            };
+            lighthouse_core::pins::remove(id);
+            Ok(json!({ "ok": true }))
+        }
+        Some("listPins") => Ok(json!({ "pins": lighthouse_core::pins::list() })),
+        Some("recheckPins") => {
+            let changed = lighthouse_core::pins::recheck_all().await;
+            Ok(json!({
+                "changed": changed,
+                "pins": lighthouse_core::pins::list(),
+            }))
+        }
+        // Catalog-derived example questions for the chat empty state — every
+        // one names real columns of a real included file, so the analytics
+        // path can answer it. Empty when nothing tabular is included.
+        Some("suggestedAsks") => {
+            let ids: Vec<String> = body["includedFileIds"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            let asks =
+                tokio::task::spawn_blocking(move || lighthouse_core::meta::suggested_asks(&ids))
+                    .await
+                    .unwrap_or_default();
+            Ok(json!({ "asks": asks }))
+        }
         _ => Err("unknown op".into()),
     }
 }

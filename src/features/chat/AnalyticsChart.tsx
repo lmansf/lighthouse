@@ -1,6 +1,8 @@
 "use client";
 
-import { Text, makeStyles, tokens } from "@fluentui/react-components";
+import { useRef, useState } from "react";
+import { Button, Text, Tooltip, makeStyles, tokens } from "@fluentui/react-components";
+import { ArrowDownloadRegular, CheckmarkRegular } from "@fluentui/react-icons";
 import { formatTick, niceTicks, scaleLinear, type ChartSpec } from "@/lib/chartSpec";
 
 /**
@@ -16,11 +18,24 @@ const MARGIN = { top: 12, right: 12, bottom: 34, left: 48 };
 
 const useStyles = makeStyles({
   frame: {
+    position: "relative",
     marginTop: tokens.spacingVerticalS,
     marginBottom: tokens.spacingVerticalS,
     maxWidth: `${W}px`,
+    ":hover .lh-chart-png": { opacity: 1 },
+    ":focus-within .lh-chart-png": { opacity: 1 },
   },
   svg: { width: "100%", height: "auto", display: "block" },
+  // Hover-revealed download affordance, mirroring the tables' Copy CSV button.
+  pngBtn: {
+    position: "absolute",
+    top: "0px",
+    right: "0px",
+    opacity: 0,
+    transitionProperty: "opacity",
+    transitionDuration: tokens.durationFaster,
+    backgroundColor: tokens.colorNeutralBackground1,
+  },
   legend: {
     display: "flex",
     gap: tokens.spacingHorizontalM,
@@ -48,8 +63,71 @@ function truncateLabel(l: string): string {
   return l.length > 10 ? `${l.slice(0, 9)}…` : l;
 }
 
+/**
+ * Rasterize the rendered SVG to a 2× PNG and trigger a download
+ * (openspec: add-answer-artifacts). Two theme requirements: the chart's
+ * colors are Fluent CSS variables that a standalone SVG document can't
+ * resolve, so each element's computed fill/stroke is baked into the clone;
+ * and the canvas is painted with the surface's background first so a
+ * dark-mode chart never exports transparent-on-dark. Client-only.
+ */
+function downloadChartPng(svg: SVGSVGElement): void {
+  const clone = svg.cloneNode(true) as SVGSVGElement;
+  const orig = svg.querySelectorAll<SVGElement>("*");
+  const copies = clone.querySelectorAll<SVGElement>("*");
+  orig.forEach((el, i) => {
+    const cs = window.getComputedStyle(el);
+    const copy = copies[i];
+    if (!copy) return;
+    if (el.hasAttribute("fill") || el instanceof SVGTextElement) {
+      copy.setAttribute("fill", cs.fill);
+    }
+    if (el.hasAttribute("stroke")) copy.setAttribute("stroke", cs.stroke);
+  });
+  // Nearest opaque ancestor background = the theme surface behind the chart.
+  let bg = "#ffffff";
+  for (let el: Element | null = svg; el; el = el.parentElement) {
+    const c = window.getComputedStyle(el).backgroundColor;
+    if (c && c !== "transparent" && !c.startsWith("rgba(0, 0, 0, 0)")) {
+      bg = c;
+      break;
+    }
+  }
+  clone.setAttribute("width", String(W));
+  clone.setAttribute("height", String(H));
+  // The on-screen labels inherit the app font from CSS the standalone SVG
+  // won't have — bake it in so the PNG doesn't rasterize in the UA serif.
+  clone.style.fontFamily = window.getComputedStyle(svg).fontFamily;
+  const xml = new XMLSerializer().serializeToString(clone);
+  const svgUrl = URL.createObjectURL(new Blob([xml], { type: "image/svg+xml;charset=utf-8" }));
+  const img = new Image();
+  img.onload = () => {
+    URL.revokeObjectURL(svgUrl);
+    const canvas = document.createElement("canvas");
+    canvas.width = W * 2;
+    canvas.height = H * 2;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    canvas.toBlob((blob) => {
+      if (!blob) return;
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = "lighthouse-chart.png";
+      a.click();
+      window.setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+    }, "image/png");
+  };
+  img.onerror = () => URL.revokeObjectURL(svgUrl);
+  img.src = svgUrl;
+}
+
 export function AnalyticsChart({ spec }: { spec: ChartSpec }) {
   const styles = useStyles();
+  const svgRef = useRef<SVGSVGElement | null>(null);
+  const [exported, setExported] = useState(false);
   const inner = { w: W - MARGIN.left - MARGIN.right, h: H - MARGIN.top - MARGIN.bottom };
 
   const all = spec.series.flatMap((s) => s.values).filter((v): v is number => v !== null);
@@ -72,7 +150,28 @@ export function AnalyticsChart({ spec }: { spec: ChartSpec }) {
 
   return (
     <figure className={styles.frame} aria-label={aria}>
-      <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-hidden="false" className={styles.svg}>
+      <Tooltip content="Download chart as PNG" relationship="label">
+        <Button
+          size="small"
+          appearance="secondary"
+          className={`${styles.pngBtn} lh-chart-png`}
+          icon={exported ? <CheckmarkRegular /> : <ArrowDownloadRegular />}
+          aria-label="Download chart as PNG"
+          onClick={() => {
+            if (!svgRef.current) return;
+            downloadChartPng(svgRef.current);
+            setExported(true);
+            window.setTimeout(() => setExported(false), 1600);
+          }}
+        />
+      </Tooltip>
+      <svg
+        ref={svgRef}
+        viewBox={`0 0 ${W} ${H}`}
+        role="img"
+        aria-hidden="false"
+        className={styles.svg}
+      >
         <title>{aria}</title>
         {/* horizontal gridlines + tick labels */}
         {ticks.map((t) => (

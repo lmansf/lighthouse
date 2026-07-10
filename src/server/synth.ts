@@ -12,6 +12,7 @@ import type { ChatChunk, ChatTurn, RagReference } from "@/contracts";
 import { retrieve as registryRetrieve } from "./sources/registry";
 import { retrieve as vaultRetrieve, docText, activeIncludedFileIds, namedButExcluded } from "./vault";
 import { remoteProvider, streamAnswer, type Ctx } from "./llm";
+import { metaIntent, renderMeta } from "./meta";
 import { isProfileable, tableProfile } from "./tableProfile";
 
 /** Budgets — mirrored in lighthouse-core/src/synth.rs. */
@@ -172,6 +173,23 @@ export async function* answerPipeline(
         delta: `_(${names} ${isare} in your vault but not included, so the AI can't read ${itthem}. Toggle ${itthem} on in the explorer and ask again.)_\n\n`,
         done: false,
       };
+    }
+  }
+
+  // --- Vault meta-answers (openspec: add-vault-meta-answers): anchored
+  //     questions ABOUT the vault (recency, inventory) answer instantly from
+  //     walk metadata — no model call, real references. A null render (incl.
+  //     the PARITY findColumn case — the catalog is desktop-only) falls
+  //     through with NOTHING emitted. KEEP IN SYNC with synth.rs.
+  if (attachmentFileIds.length === 0) {
+    const intent = metaIntent(question);
+    if (intent) {
+      const ans = renderMeta(intent, includedFileIds, Date.now());
+      if (ans) {
+        yield { delta: ans.markdown, done: false };
+        yield { delta: "", references: ans.references, done: true };
+        return;
+      }
     }
   }
 

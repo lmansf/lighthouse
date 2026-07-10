@@ -329,9 +329,42 @@ pub(crate) fn cell_text(cell: &calamine::Data) -> String {
         }
         Data::Int(i) => format!("{i}"),
         Data::Bool(b) => if *b { "TRUE" } else { "FALSE" }.to_string(),
-        Data::DateTime(dt) => format!("{dt}"),
+        // Raw serials ("45123.5") defeat every date GROUP BY; render ISO so
+        // the SQL idioms the few-shots teach (substr(date,1,7)) just work.
+        Data::DateTime(dt) => excel_serial_to_iso(dt.as_f64()),
         Data::DateTimeIso(s) | Data::DurationIso(s) => s.clone(),
         Data::Error(e) => format!("{e:?}"),
+    }
+}
+
+/// Excel 1900-system serial → ISO 8601 text. Epoch 1899-12-30 absorbs Excel's
+/// phantom 1900-02-29 for every date from 1900-03-01 on (the realistic range;
+/// calamine's own chrono conversion picks the same epoch). Whole days render
+/// date-only so month grouping stays clean; day fractions round to the nearest
+/// second. Serials outside a sane date range fall back to the raw number
+/// rather than fabricating a date.
+pub(crate) fn excel_serial_to_iso(serial: f64) -> String {
+    // 2958465 = 9999-12-31; negatives are not dates.
+    if !serial.is_finite() || serial < 0.0 || serial > 2_958_465.0 {
+        return format!("{serial}");
+    }
+    let mut days = serial.trunc() as i64;
+    let mut secs = ((serial - serial.trunc()) * 86_400.0).round() as i64;
+    if secs >= 86_400 {
+        days += 1;
+        secs = 0;
+    }
+    let Some(date) = chrono::NaiveDate::from_ymd_opt(1899, 12, 30)
+        .and_then(|d| d.checked_add_signed(chrono::Duration::days(days)))
+    else {
+        return format!("{serial}");
+    };
+    if secs == 0 {
+        date.format("%Y-%m-%d").to_string()
+    } else {
+        let time = chrono::NaiveTime::from_num_seconds_from_midnight_opt(secs as u32, 0)
+            .unwrap_or(chrono::NaiveTime::MIN);
+        format!("{} {}", date.format("%Y-%m-%d"), time.format("%H:%M:%S"))
     }
 }
 
@@ -378,7 +411,8 @@ fn extract_by_ext(abs: &Path, ext: &str) -> anyhow::Result<String> {
 /// Cache schema version — bump when extraction logic changes in a way that
 /// could alter output. Matches the TS cache so the two engines share entries.
 /// v3: docx whitespace fidelity (Empty-event tabs/breaks) + .doc salvage.
-const CACHE_VERSION: u32 = 3;
+/// v4: Excel datetime cells render as ISO 8601 instead of raw serials.
+const CACHE_VERSION: u32 = 4;
 
 #[derive(Serialize, Deserialize)]
 struct CacheRecord {
@@ -456,6 +490,41 @@ pub fn extract_rich_text(abs: &Path, ext: &str) -> String {
         let _ = fs::write(&cp, json); // best-effort; read-only just means re-parsing
     }
     text
+}
+
+#[cfg(test)]
+mod serial_date_tests {
+    use super::excel_serial_to_iso;
+
+    #[test]
+    fn whole_days_render_date_only() {
+        // 43831 = 2020-01-01 in the 1900 system — a well-known anchor.
+        assert_eq!(excel_serial_to_iso(43_831.0), "2020-01-01");
+        // 61 = 1900-03-01, the first serial unaffected by the phantom leap day.
+        assert_eq!(excel_serial_to_iso(61.0), "1900-03-01");
+    }
+
+    #[test]
+    fn day_fractions_render_seconds() {
+        assert_eq!(excel_serial_to_iso(43_831.5), "2020-01-01 12:00:00");
+        assert_eq!(excel_serial_to_iso(43_831.75), "2020-01-01 18:00:00");
+        // Sub-second fractions round to the nearest second.
+        let one_sec = 1.0 / 86_400.0;
+        assert_eq!(excel_serial_to_iso(43_831.0 + one_sec * 1.4), "2020-01-01 00:00:01");
+    }
+
+    #[test]
+    fn near_midnight_rolls_to_next_day() {
+        // 43831 + 86399.6/86400 rounds up past midnight → date-only next day.
+        assert_eq!(excel_serial_to_iso(43_831.0 + 86_399.6 / 86_400.0), "2020-01-02");
+    }
+
+    #[test]
+    fn non_dates_fall_back_to_the_raw_number() {
+        assert_eq!(excel_serial_to_iso(-5.0), "-5");
+        assert_eq!(excel_serial_to_iso(3_000_000.0), "3000000");
+        assert_eq!(excel_serial_to_iso(f64::NAN), "NaN");
+    }
 }
 
 #[cfg(test)]

@@ -184,6 +184,9 @@ async fn wire_protocol_end_to_end() {
     );
 
     // --- Listing intent over the wire -------------------------------------------
+    // Anchored inventory asks are answered by the deterministic vault
+    // meta-answer stage (openspec: add-vault-meta-answers) — instant, no
+    // model, real references — instead of the retrieval-context listing.
     let res = client
         .post(format!("{base}/api/chat"))
         .json(&json!({
@@ -194,15 +197,24 @@ async fn wire_protocol_end_to_end() {
         .await
         .unwrap();
     let body = res.text().await.unwrap();
-    let full: String = body
+    let lines: Vec<Value> = body
         .lines()
         .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .collect();
+    let full: String = lines
+        .iter()
         .filter_map(|l| l["delta"].as_str().map(String::from))
         .collect();
     assert!(
-        full.contains("2 included files"),
-        "catalog answer enumerates, got: {full}"
+        full.contains("**2 files** visible to AI"),
+        "meta inventory answer enumerates, got: {full}"
     );
+    assert!(
+        full.contains("budget.md") && full.contains("recipe.md"),
+        "both names listed: {full}"
+    );
+    let refs = &lines.last().unwrap()["references"];
+    assert_eq!(refs.as_array().map(|a| a.len()), Some(2), "both files cited: {refs}");
 
     // --- /api/profile lifecycle --------------------------------------------------
     let p: Value = client

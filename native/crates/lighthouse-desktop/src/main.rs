@@ -1040,6 +1040,67 @@ fn main() {
             let _ = tray; // menu attached below (needs managed UpdateState)
             rebuild_tray_menu(&handle);
 
+            // --- Pinned-question rechecks (openspec: add-pinned-questions):
+            // sample the watcher generation every 30 s; when it advanced,
+            // wait for a full 60 s window with no further changes (bulk file
+            // operations collapse into one pass), then re-run every pin's
+            // stored SQL — deterministic, guarded, no model — and emit ONE
+            // `pins-changed` event with the changed set. Emission failures
+            // go to shell.log and the next generation change retries.
+            {
+                let handle = handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    let mut last_seen = lighthouse_core::watch::generation();
+                    // Alerts that couldn't be delivered yet (emit failure) —
+                    // carried into the next pass so they're never lost: the
+                    // digests persist BEFORE the emit, so without this buffer
+                    // a failed emit would silently swallow the change.
+                    let mut pending: Vec<lighthouse_core::pins::ChangedPin> = Vec::new();
+                    loop {
+                        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                        let g = lighthouse_core::watch::generation();
+                        if g == last_seen {
+                            continue;
+                        }
+                        // Quiet debounce: keep waiting while changes keep landing.
+                        let mut quiet = g;
+                        loop {
+                            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                            let now = lighthouse_core::watch::generation();
+                            if now == quiet {
+                                break;
+                            }
+                            quiet = now;
+                        }
+                        last_seen = quiet;
+                        if pending.is_empty() && lighthouse_core::pins::list().is_empty() {
+                            continue;
+                        }
+                        let changed = lighthouse_core::pins::recheck_all().await;
+                        // Newest state wins per pin id; undelivered older
+                        // alerts for other pins ride along.
+                        let fresh: std::collections::HashSet<String> =
+                            changed.iter().map(|c| c.id.clone()).collect();
+                        pending.retain(|p| !fresh.contains(&p.id));
+                        pending.extend(changed);
+                        if pending.is_empty() {
+                            continue;
+                        }
+                        match handle
+                            .emit("pins-changed", serde_json::json!({ "changed": pending }))
+                        {
+                            Ok(()) => pending.clear(),
+                            Err(e) => {
+                                shell_log(
+                                    &handle,
+                                    &format!("pins: emit failed (will retry next pass): {e}"),
+                                );
+                            }
+                        }
+                    }
+                });
+            }
+
             // --- Desktop widget (docs/widget-scope.md §7 W1): in widget mode
             // it IS the launch surface, so it's created now. In window mode
             // its creation is DEFERRED a few seconds — a second webview at

@@ -148,6 +148,46 @@ export interface ChatChunk {
   references?: RagReference[];
   /** Pre-answer progress (multi-document synthesis stages). */
   progress?: ChatProgress;
+  /**
+   * Structured provenance of an analytics answer (final chunk only): the exact
+   * executed SQL and the vault files it read. Drives refinement chips, Edit
+   * SQL, Save-as-CSV, and pins. Desktop engine only — the web dev twin never
+   * takes the analytics branch, so it never sets this.
+   */
+  analytics?: AnalyticsMeta;
   /** True on the last chunk of a response. */
   done: boolean;
+}
+
+/** The exact executed SQL of an analytics answer and the files it read. */
+export interface AnalyticsMeta {
+  sql: string;
+  fileIds: string[];
+}
+
+/**
+ * A pinned analytics question: the engine re-runs its stored SQL when the
+ * watched files change and alerts when the computed result differs. Persisted
+ * engine-side (cap 20). `staleReason` set = the last recheck couldn't run
+ * (file gone, schema drift) — shown in the dialog, never alerts.
+ */
+export interface Pin {
+  id: string;
+  question: string;
+  sql: string;
+  fileIds: string[];
+  createdMs: number;
+  lastRunMs?: number;
+  lastDigest?: string;
+  /** Compact "NE 125 · NW 50" render of the last result (≤3 rows). */
+  lastSummary?: string;
+  staleReason?: string;
+}
+
+/** One changed pin from a recheck pass — the alert payload. */
+export interface ChangedPin {
+  id: string;
+  question: string;
+  before?: string;
+  after: string;
 }

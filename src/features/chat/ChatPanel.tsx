@@ -24,6 +24,12 @@ import {
   Badge,
   Button,
   Card,
+  Dialog,
+  DialogActions,
+  DialogBody,
+  DialogContent,
+  DialogSurface,
+  DialogTitle,
   DrawerBody,
   DrawerHeader,
   DrawerHeaderTitle,
@@ -33,6 +39,7 @@ import {
   PopoverSurface,
   PopoverTrigger,
   SearchBox,
+  Spinner,
   Switch,
   Text,
   Textarea,
@@ -50,6 +57,7 @@ import {
   ArrowUndoRegular,
   AttachRegular,
   CheckmarkRegular,
+  CodeRegular,
   CopyRegular,
   DeleteRegular,
   DismissRegular,
@@ -59,6 +67,9 @@ import {
   ErrorCircleRegular,
   HistoryRegular,
   OpenRegular,
+  PinRegular,
+  PlayRegular,
+  SaveRegular,
   SendRegular,
   SettingsRegular,
   SquareRegular,
@@ -69,8 +80,8 @@ import {
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { DragEvent } from "react";
-import type { ChatTurn, RagReference } from "@/contracts";
-import { chatService, MODEL_PROVIDERS } from "@/contracts";
+import type { AnalyticsMeta, ChangedPin, ChatTurn, Pin, RagReference } from "@/contracts";
+import { chatService, MODEL_PROVIDERS, ragService } from "@/contracts";
 import { useRagStore } from "@/stores/useRagStore";
 import { useAuthStore } from "@/stores/useAuthStore";
 import { logEvent } from "@/lib/logEvent";
@@ -356,6 +367,75 @@ const useStyles = makeStyles({
     marginTop: tokens.spacingVerticalXXS,
   },
   actionBtn: { color: tokens.colorNeutralForeground3 },
+  // --- Analytics refinement: quick-action chips under answers that carry
+  //     analytics metadata, and the Edit SQL dialog they open. ---
+  refineRow: {
+    display: "flex",
+    flexWrap: "wrap",
+    alignItems: "center",
+    gap: tokens.spacingHorizontalXS,
+    marginTop: tokens.spacingVerticalXS,
+  },
+  sqlDialogSurface: { maxWidth: "720px", width: "92vw" },
+  sqlDialogContent: {
+    display: "flex",
+    flexDirection: "column",
+    gap: tokens.spacingVerticalS,
+  },
+  sqlEditor: {
+    width: "100%",
+    "& textarea": { fontFamily: tokens.fontFamilyMonospace, fontSize: tokens.fontSizeBase200 },
+  },
+  sqlStatus: {
+    display: "flex",
+    alignItems: "center",
+    gap: tokens.spacingHorizontalS,
+    color: tokens.colorNeutralForeground3,
+  },
+  // The re-run result inside the dialog: same markdown styling as chat answers,
+  // scrolling within the dialog so a wide/tall table never outgrows the screen.
+  sqlResult: { maxHeight: "40vh", overflowY: "auto" },
+  // Inline confirmation under an answer after Save as CSV — quiet, with a
+  // Reveal affordance (answer artifacts land as ordinary vault files).
+  savedNote: {
+    display: "flex",
+    alignItems: "center",
+    flexWrap: "wrap",
+    gap: tokens.spacingHorizontalS,
+    marginTop: tokens.spacingVerticalXXS,
+    color: tokens.colorNeutralForeground3,
+  },
+  // --- Pinned questions: the changed-pins alert banner and the dialog. ---
+  pinBanner: {
+    display: "flex",
+    alignItems: "center",
+    flexWrap: "wrap",
+    gap: tokens.spacingHorizontalS,
+    padding: `${tokens.spacingVerticalS} ${tokens.spacingHorizontalM}`,
+    marginBottom: tokens.spacingVerticalS,
+    borderRadius: tokens.borderRadiusMedium,
+    backgroundColor: tokens.colorBrandBackground2,
+    color: tokens.colorNeutralForeground1,
+  },
+  pinDialogSurface: { maxWidth: "640px", width: "92vw" },
+  pinList: {
+    display: "flex",
+    flexDirection: "column",
+    gap: tokens.spacingVerticalS,
+    maxHeight: "48vh",
+    overflowY: "auto",
+  },
+  pinRow: {
+    display: "flex",
+    alignItems: "flex-start",
+    gap: tokens.spacingHorizontalS,
+    padding: `${tokens.spacingVerticalS} ${tokens.spacingHorizontalM}`,
+    borderRadius: tokens.borderRadiusMedium,
+    backgroundColor: tokens.colorNeutralBackground3,
+  },
+  pinRowMain: { display: "flex", flexDirection: "column", gap: "2px", flexGrow: 1, minWidth: 0 },
+  pinStale: { color: tokens.colorPaletteRedForeground1 },
+  pinMeta: { color: tokens.colorNeutralForeground3 },
   // Inline failure banner for a turn that couldn't get an answer — mirrors the
   // addNotice pattern, in danger colors, with Retry + settings escape hatches.
   errorNotice: {
@@ -759,6 +839,104 @@ function CopyCsvButton({ rows }: { rows: string[][] }) {
   );
 }
 
+/**
+ * Canned refinement follow-ups for analytics answers. These ride the normal
+ * ask path — the engine sees the conversation's prior "Query used" fence and
+ * adapts that SQL — so the client never rewrites SQL itself (design:
+ * add-analytics-refinement, decision 4).
+ */
+const REFINE_CHIPS: { label: string; ask: string }[] = [
+  { label: "Top 10", ask: "Refine the previous result: only the top 10 rows." },
+  { label: "Monthly", ask: "Refine the previous result: break it down by month." },
+  {
+    label: "As %",
+    ask: "Refine the previous result: show each row as a percentage of the total.",
+  },
+];
+
+/**
+ * Quick-action chips under an analytics answer. The canned three refine "the
+ * previous result", so they render only on the conversation's last turn where
+ * that phrase is unambiguous; Edit SQL re-runs THIS answer's own SQL over its
+ * own files (deterministic, model-free), so it stays useful on older turns.
+ */
+function RefineChips({
+  meta,
+  isLast,
+  disabled,
+  onAsk,
+  onEditSql,
+  onSave,
+  savePending,
+  onPin,
+  pinPending,
+}: {
+  meta: AnalyticsMeta;
+  isLast: boolean;
+  disabled: boolean;
+  onAsk: (q: string) => void;
+  onEditSql: (meta: AnalyticsMeta) => void;
+  /** Save-as-CSV (desktop engine only — omitted on the web dev twin). */
+  onSave?: (meta: AnalyticsMeta) => void;
+  savePending?: boolean;
+  /** Pin this answer so vault changes recheck it (desktop rechecks live). */
+  onPin?: (meta: AnalyticsMeta) => void;
+  pinPending?: boolean;
+}) {
+  const styles = useStyles();
+  return (
+    <div className={styles.refineRow}>
+      {isLast &&
+        REFINE_CHIPS.map((c) => (
+          <Button
+            key={c.label}
+            appearance="secondary"
+            size="small"
+            shape="circular"
+            disabled={disabled}
+            onClick={() => onAsk(c.ask)}
+          >
+            {c.label}
+          </Button>
+        ))}
+      <Button
+        appearance="secondary"
+        size="small"
+        shape="circular"
+        icon={<CodeRegular />}
+        disabled={disabled}
+        onClick={() => onEditSql(meta)}
+      >
+        Edit SQL
+      </Button>
+      {onSave && (
+        <Button
+          appearance="secondary"
+          size="small"
+          shape="circular"
+          icon={<SaveRegular />}
+          disabled={disabled || savePending}
+          onClick={() => onSave(meta)}
+        >
+          {savePending ? "Saving…" : "Save as CSV"}
+        </Button>
+      )}
+      {onPin && (
+        <Button
+          appearance="secondary"
+          size="small"
+          shape="circular"
+          icon={<PinRegular />}
+          disabled={disabled || pinPending}
+          onClick={() => onPin(meta)}
+        >
+          {pinPending ? "Pinning…" : "Pin"}
+        </Button>
+      )}
+    </div>
+  );
+}
+
 /** True when a hast <pre> wraps exactly a lighthouse-chart code fence. */
 function isChartPre(node: unknown): boolean {
   const child = (node as { children?: unknown[] })?.children?.[0] as
@@ -932,6 +1110,42 @@ export function ChatPanel() {
   const [attachSearch, setAttachSearch] = useState("");
   // Per-answer 👍/👎, remembered for the session so the choice reads as "set".
   const [ratings, setRatings] = useState<Record<string, "up" | "down">>({});
+  // --- Edit SQL dialog (analytics refinement): the answer meta being edited
+  //     (null = closed), the SQL draft, and the last run's outcome. ---
+  const [sqlEdit, setSqlEdit] = useState<AnalyticsMeta | null>(null);
+  const [sqlDraft, setSqlDraft] = useState("");
+  const [sqlRunning, setSqlRunning] = useState(false);
+  const [sqlOutcome, setSqlOutcome] = useState<{ content?: string; error?: string } | null>(null);
+  // Generation token for dialog runs: bumped on open/close so a slow query
+  // from a CLOSED dialog can never paint its result into a newer one.
+  const sqlRunSeq = useRef(0);
+  // --- Answer artifacts: per-turn Save-as-CSV outcome, and the transient
+  //     export-chat-to-note confirmation bar. ---
+  const [savedNotes, setSavedNotes] = useState<
+    Record<string, { pending?: boolean; id?: string; name?: string; error?: string }>
+  >({});
+  const [exportNote, setExportNote] = useState<{ id?: string; name?: string; error?: string } | null>(
+    null,
+  );
+  const exportNoteTimer = useRef<number | null>(null);
+  // In-flight guard: a double-click must not write "Chat.md" AND "Chat (1).md".
+  const [exportBusy, setExportBusy] = useState(false);
+  // --- Pinned questions: per-turn pin outcome, the changed-pins alerts (from
+  //     the shell's watcher-driven recheck pass), and the pins dialog. ---
+  const [pinNotes, setPinNotes] = useState<
+    Record<string, { pending?: boolean; ok?: boolean; error?: string }>
+  >({});
+  const [pinAlerts, setPinAlerts] = useState<ChangedPin[]>([]);
+  const [pinsOpen, setPinsOpen] = useState(false);
+  const [pinList, setPinList] = useState<Pin[]>([]);
+  const [pinsBusy, setPinsBusy] = useState(false);
+  // Saved/pinned notes are keyed by message id, and ids RESTART per
+  // conversation — clear both maps on a conversation switch so a new chat's
+  // "a2" never inherits another chat's "Saved…"/"Pinned…" claims.
+  useEffect(() => {
+    setSavedNotes({});
+    setPinNotes({});
+  }, [currentId]);
   // Cancels the in-flight ask() when the user presses Stop.
   const abortRef = useRef<AbortController | null>(null);
   // Files explicitly attached to the conversation (dragged from the explorer or
@@ -978,6 +1192,7 @@ export function ChatPanel() {
       if (copyTimer.current !== null) window.clearTimeout(copyTimer.current);
       if (flashTimer.current !== null) window.clearTimeout(flashTimer.current);
       if (undoTimer.current !== null) window.clearTimeout(undoTimer.current);
+      if (exportNoteTimer.current !== null) window.clearTimeout(exportNoteTimer.current);
     },
     [],
   );
@@ -1264,6 +1479,13 @@ export function ChatPanel() {
           sourceCount = refs.length;
           setMessages((m) => m.map((x) => (x.id === asstId ? { ...x, references: refs } : x)));
         }
+        if (chunk.analytics) {
+          // Structured provenance of an analytics answer (final chunk): the
+          // exact SQL + files read. Stored on the turn to power the refinement
+          // chips and Edit SQL. Desktop engine only — absent elsewhere.
+          const meta = chunk.analytics;
+          setMessages((m) => m.map((x) => (x.id === asstId ? { ...x, analytics: meta } : x)));
+        }
       }
       if (controller.signal.aborted) {
         markStopped(asstId);
@@ -1303,6 +1525,193 @@ export function ChatPanel() {
     }
   }
 
+  /** Reveal a saved artifact in the OS file manager (desktop shell only). */
+  function revealSaved(nodeId: string) {
+    void fetch("/api/reveal", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ nodeId }),
+    }).catch(() => {});
+  }
+
+  /**
+   * Save an analytics answer's full result as a CSV into the vault
+   * (Lighthouse Results/) — the engine re-runs the answer's own SQL with its
+   * save cap; the file becomes ordinary, queryable vault input. The name hint
+   * is the question that produced the answer.
+   */
+  async function saveResultCsv(asstId: string, meta: AnalyticsMeta) {
+    const msgs = useChatStore.getState().messages;
+    const idx = msgs.findIndex((x) => x.id === asstId);
+    const prev = idx > 0 ? msgs[idx - 1] : undefined;
+    const hint =
+      (prev?.role === "user" ? prev.content : "").trim().replace(/\s+/g, " ").slice(0, 60) ||
+      "Result";
+    setSavedNotes((s) => ({ ...s, [asstId]: { pending: true } }));
+    try {
+      const res = await ragService.analyticsSql(meta.sql, meta.fileIds, hint);
+      if (res.error || !res.savedId) {
+        setSavedNotes((s) => ({ ...s, [asstId]: { error: res.error ?? "save failed" } }));
+      } else {
+        setSavedNotes((s) => ({ ...s, [asstId]: { id: res.savedId, name: res.savedName } }));
+        logEvent("analytics_save_csv", { rows: res.rows ?? 0 });
+      }
+    } catch (err) {
+      setSavedNotes((s) => ({
+        ...s,
+        [asstId]: { error: err instanceof Error ? err.message : "save failed" },
+      }));
+    }
+  }
+
+  /** The transcript as portable markdown — the client owns what's visible. */
+  function transcriptMarkdown(msgs: TranscriptMessage[], title: string): string {
+    const lines: string[] = [`# ${title}`, ""];
+    for (const m of msgs) {
+      if (m.error || !m.content) continue;
+      lines.push(m.role === "user" ? "**You:**" : "**Lighthouse:**", "", m.content, "");
+      if (m.role === "assistant") {
+        if (m.stopped) lines.push("_(stopped)_", "");
+        if (m.references?.length) {
+          lines.push(`_Sources: ${m.references.map((r) => r.name).join(", ")}_`, "");
+        }
+      }
+    }
+    return lines.join("\n");
+  }
+
+  /** Export the conversation as a markdown note into Lighthouse Notes/. */
+  async function exportChatToNote() {
+    const msgs = useChatStore.getState().messages;
+    if (msgs.length === 0 || streaming || exportBusy) return;
+    setExportBusy(true);
+    const title =
+      conversations.find((c) => c.id === currentId)?.title.trim() || "Lighthouse chat";
+    let next: { id?: string; name?: string; error?: string };
+    try {
+      const res = await ragService.exportChat(title, transcriptMarkdown(msgs, title));
+      next =
+        res.error || !res.savedId
+          ? { error: res.error ?? "export failed" }
+          : { id: res.savedId, name: res.savedName };
+      if (!next.error) logEvent("chat_export_note");
+    } catch (err) {
+      next = { error: err instanceof Error ? err.message : "export failed" };
+    } finally {
+      setExportBusy(false);
+    }
+    setExportNote(next);
+    if (exportNoteTimer.current !== null) window.clearTimeout(exportNoteTimer.current);
+    exportNoteTimer.current = window.setTimeout(() => setExportNote(null), 8000);
+  }
+
+  /**
+   * Pin an analytics answer: the engine watches its files and flags this
+   * question when the computed result changes. Question = the user turn that
+   * produced the answer.
+   */
+  async function pinAnswer(asstId: string, meta: AnalyticsMeta) {
+    const msgs = useChatStore.getState().messages;
+    const idx = msgs.findIndex((x) => x.id === asstId);
+    const prev = idx > 0 ? msgs[idx - 1] : undefined;
+    const question =
+      (prev?.role === "user" ? prev.content : "").trim().replace(/\s+/g, " ").slice(0, 200) ||
+      "Pinned question";
+    setPinNotes((s) => ({ ...s, [asstId]: { pending: true } }));
+    try {
+      const res = await ragService.pinAsk(question, meta.sql, meta.fileIds);
+      if (res.error || !res.pin) {
+        setPinNotes((s) => ({ ...s, [asstId]: { error: res.error ?? "could not pin" } }));
+      } else {
+        setPinNotes((s) => ({ ...s, [asstId]: { ok: true } }));
+        logEvent("analytics_pin");
+      }
+    } catch (err) {
+      setPinNotes((s) => ({
+        ...s,
+        [asstId]: { error: err instanceof Error ? err.message : "could not pin" },
+      }));
+    }
+  }
+
+  // Changed-pin alerts pushed by the desktop shell after its watcher-driven
+  // recheck pass (openspec: add-pinned-questions). Newest wins per pin id.
+  useEffect(() => {
+    const onPinsChanged = (e: Event) => {
+      const changed = (e as CustomEvent<{ changed?: ChangedPin[] }>).detail?.changed;
+      if (!Array.isArray(changed) || changed.length === 0) return;
+      setPinAlerts((prev) => {
+        const ids = new Set(changed.map((c) => c.id));
+        return [...changed, ...prev.filter((p) => !ids.has(p.id))].slice(0, 5);
+      });
+    };
+    window.addEventListener("lighthouse:pins-changed", onPinsChanged);
+    return () => window.removeEventListener("lighthouse:pins-changed", onPinsChanged);
+  }, []);
+
+  // The pins dialog opens from the settings gear (or anywhere) via this event.
+  useEffect(() => {
+    const onOpen = () => setPinsOpen(true);
+    window.addEventListener("lighthouse:open-pins", onOpen);
+    return () => window.removeEventListener("lighthouse:open-pins", onOpen);
+  }, []);
+
+  // Load the pin list whenever the dialog opens.
+  useEffect(() => {
+    if (!pinsOpen) return;
+    let cancelled = false;
+    ragService
+      .listPins()
+      .then((pins) => {
+        if (!cancelled) setPinList(pins);
+      })
+      .catch(() => {
+        if (!cancelled) setPinList([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [pinsOpen]);
+
+  /** Manual re-check from the dialog; changed pins also feed the banner. */
+  async function recheckPinsNow() {
+    if (pinsBusy) return;
+    setPinsBusy(true);
+    try {
+      const { changed, pins } = await ragService.recheckPins();
+      setPinList(pins);
+      if (changed.length > 0) {
+        setPinAlerts((prev) => {
+          const ids = new Set(changed.map((c) => c.id));
+          return [...changed, ...prev.filter((p) => !ids.has(p.id))].slice(0, 5);
+        });
+      }
+    } catch {
+      /* the list simply stays as-is */
+    } finally {
+      setPinsBusy(false);
+    }
+  }
+
+  /** Remove a pin from the dialog. */
+  async function removePin(id: string) {
+    try {
+      await ragService.unpinAsk(id);
+    } catch {
+      /* idempotent — refresh below tells the truth */
+    }
+    setPinList((pins) => pins.filter((p) => p.id !== id));
+    setPinAlerts((alerts) => alerts.filter((a) => a.id !== id));
+  }
+
+  /** Ask a pinned/changed question again — the fresh answer is the drill-down. */
+  function askPinned(question: string, pinId?: string) {
+    if (streaming) return;
+    setPinsOpen(false);
+    if (pinId) setPinAlerts((alerts) => alerts.filter((a) => a.id !== pinId));
+    void sendQuestion(question);
+  }
+
   function ask() {
     const q = question.trim();
     if (!q || streaming) return;
@@ -1313,6 +1722,59 @@ export function ChatPanel() {
   /** Abort the in-flight answer; the partial text is kept with a "(stopped)" note. */
   function stopStreaming() {
     abortRef.current?.abort();
+  }
+
+  /** Open the Edit SQL dialog seeded with an analytics answer's own query. */
+  function openSqlEditor(meta: AnalyticsMeta) {
+    sqlRunSeq.current += 1; // invalidate any run from a previous dialog
+    setSqlEdit(meta);
+    setSqlDraft(meta.sql);
+    setSqlOutcome(null);
+    setSqlRunning(false);
+  }
+
+  /** Close the dialog, orphaning (not adopting) any still-running query. */
+  function closeSqlEditor() {
+    sqlRunSeq.current += 1;
+    setSqlEdit(null);
+    setSqlRunning(false);
+  }
+
+  /**
+   * Run the edited SQL through the guarded, model-free engine path — same
+   * files as the original answer, single SELECT enforced engine-side. The
+   * result (or the guard's reason) renders inside the dialog; the transcript
+   * is never touched.
+   */
+  async function runSqlDraft() {
+    const meta = sqlEdit;
+    const sql = sqlDraft.trim();
+    if (!meta || !sql || sqlRunning) return;
+    const seq = ++sqlRunSeq.current;
+    setSqlRunning(true);
+    setSqlOutcome(null);
+    try {
+      const res = await ragService.analyticsSql(sql, meta.fileIds);
+      if (seq !== sqlRunSeq.current) return; // dialog closed/reopened meanwhile
+      if (res.error) {
+        setSqlOutcome({ error: res.error });
+      } else {
+        // Compose the same shape a chat analytics answer has: table, then the
+        // chart fence when chartable, then the provenance footer.
+        const parts = [res.markdown ?? ""];
+        if (res.chart) parts.push("```lighthouse-chart\n" + res.chart + "\n```");
+        if (res.footer) parts.push(res.footer);
+        setSqlOutcome({ content: parts.filter(Boolean).join("\n\n") });
+      }
+      logEvent("analytics_sql_run", { outcome: res.error ? "error" : "ok" });
+    } catch (err) {
+      if (seq !== sqlRunSeq.current) return;
+      setSqlOutcome({
+        error: err instanceof Error ? err.message : "the query could not be run",
+      });
+    } finally {
+      if (seq === sqlRunSeq.current) setSqlRunning(false);
+    }
   }
 
   /** Re-send a failed turn's question, removing the failed turn first. */
@@ -1488,6 +1950,36 @@ export function ChatPanel() {
     composerRef.current?.focus();
   }
 
+  // Engine-derived example questions for the empty state — each names real
+  // columns of a real included tabular file, so tapping one is guaranteed
+  // answerable by the analytics path. Fetched when the empty state shows (and
+  // when the included set changes); empty (or a fetch failure) keeps the
+  // static suggestions below. openspec: add-vault-meta-answers.
+  const [engineAsks, setEngineAsks] = useState<{ label: string; question: string }[]>([]);
+  const emptyState = messages.length === 0;
+  // Keyed by VALUE, not array identity: the vault poll rebuilds `nodes` (and
+  // so `includedFileIds`) every few seconds even when nothing changed, and a
+  // per-tick engine round-trip for suggestions would be pure waste.
+  const includedKey = useMemo(() => includedFileIds.join("\n"), [includedFileIds]);
+  useEffect(() => {
+    if (!emptyState || !includedKey) {
+      setEngineAsks([]);
+      return;
+    }
+    let cancelled = false;
+    ragService
+      .suggestedAsks(includedKey.split("\n"))
+      .then((asks) => {
+        if (!cancelled) setEngineAsks(Array.isArray(asks) ? asks.slice(0, 4) : []);
+      })
+      .catch(() => {
+        if (!cancelled) setEngineAsks([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [emptyState, includedKey]);
+
   // Up to 3 starter prompts built from the user's actual included file names.
   const suggestions = useMemo(() => {
     if (includedFiles.length === 0) return [];
@@ -1644,6 +2136,41 @@ export function ChatPanel() {
           />
         </div>
       )}
+      {exportNote && (
+        <div className={styles.undoBar}>
+          {exportNote.error ? (
+            <>
+              <ErrorCircleRegular fontSize={16} />
+              <Text size={200}>Couldn&apos;t save the note — {exportNote.error}</Text>
+            </>
+          ) : (
+            <>
+              <CheckmarkRegular fontSize={16} />
+              <Text size={200}>Saved “{exportNote.name}” to Lighthouse Notes in your vault.</Text>
+            </>
+          )}
+          <span style={{ flex: 1 }} />
+          {!exportNote.error && desktop && (
+            <Button
+              size="small"
+              appearance="primary"
+              onClick={() => revealSaved(exportNote.id ?? "")}
+            >
+              Reveal
+            </Button>
+          )}
+          <Button
+            size="small"
+            appearance="subtle"
+            icon={<DismissRegular />}
+            aria-label="Dismiss"
+            onClick={() => {
+              if (exportNoteTimer.current !== null) window.clearTimeout(exportNoteTimer.current);
+              setExportNote(null);
+            }}
+          />
+        </div>
+      )}
       {addNotice && (
         <div className={styles.addNotice}>
           <Text size={200}>{addNotice}</Text>
@@ -1740,6 +2267,128 @@ export function ChatPanel() {
       </div>
     );
   }
+
+  // Changed-pins alert: one dismissible banner; each entry re-asks on click
+  // (the fresh narrated answer IS the drill-down). Rendered in both the hero
+  // and the conversation views — alerts land whenever the vault changes.
+  const pinAlertBanner =
+    pinAlerts.length > 0 ? (
+      <div className={styles.pinBanner} role="status">
+        <PinRegular fontSize={16} />
+        <Text size={200} weight="semibold">
+          {pinAlerts.length === 1 ? "A pinned answer changed:" : "Pinned answers changed:"}
+        </Text>
+        {pinAlerts.map((a) => (
+          <Tooltip
+            key={a.id}
+            content={a.before ? `was: ${a.before} → now: ${a.after}` : `now: ${a.after}`}
+            relationship="description"
+          >
+            <Button
+              size="small"
+              appearance="secondary"
+              shape="circular"
+              disabled={streaming}
+              onClick={() => askPinned(a.question, a.id)}
+            >
+              {a.question.length > 48 ? `${a.question.slice(0, 47)}…` : a.question}
+            </Button>
+          </Tooltip>
+        ))}
+        <span style={{ flex: 1 }} />
+        <Button
+          size="small"
+          appearance="subtle"
+          icon={<DismissRegular />}
+          aria-label="Dismiss pin alerts"
+          onClick={() => setPinAlerts([])}
+        />
+      </div>
+    ) : null;
+
+  // Pins dialog (opened from the settings gear or a pin confirmation): list,
+  // manual re-check, remove; stale pins show the engine's reason.
+  const pinsDialog = (
+    <Dialog
+      open={pinsOpen}
+      onOpenChange={(_, data) => {
+        if (!data.open) setPinsOpen(false);
+      }}
+    >
+      <DialogSurface className={styles.pinDialogSurface}>
+        <DialogBody>
+          <DialogTitle>Pinned questions</DialogTitle>
+          <DialogContent className={styles.sqlDialogContent}>
+            <Text size={200} className={styles.quietNote}>
+              Lighthouse re-runs each pin&apos;s saved query when the files it reads change —
+              no AI involved — and flags the ones whose numbers moved.
+            </Text>
+            {pinList.length === 0 ? (
+              <Text size={300}>
+                No pins yet. Ask a data question, then choose <b>Pin</b> under the answer.
+              </Text>
+            ) : (
+              <div className={styles.pinList}>
+                {pinList.map((p) => (
+                  <div key={p.id} className={styles.pinRow}>
+                    <PinRegular fontSize={16} />
+                    <div className={styles.pinRowMain}>
+                      <Text size={300} weight="semibold">
+                        {p.question}
+                      </Text>
+                      {p.staleReason ? (
+                        <Text size={200} className={styles.pinStale}>
+                          stale: {p.staleReason}
+                        </Text>
+                      ) : (
+                        <Text size={200} className={styles.pinMeta}>
+                          {p.lastSummary ?? "not checked yet"}
+                        </Text>
+                      )}
+                      <Text size={200} className={styles.pinMeta}>
+                        {p.fileIds.length} file{p.fileIds.length === 1 ? "" : "s"} watched
+                        {p.lastRunMs
+                          ? ` · checked ${formatRelativeTime(p.lastRunMs)}`
+                          : ""}
+                      </Text>
+                    </div>
+                    <Button
+                      size="small"
+                      appearance="secondary"
+                      disabled={streaming}
+                      onClick={() => askPinned(p.question)}
+                    >
+                      Ask again
+                    </Button>
+                    <Button
+                      size="small"
+                      appearance="subtle"
+                      icon={<DeleteRegular />}
+                      aria-label={`Remove pin: ${p.question}`}
+                      disabled={pinsBusy}
+                      onClick={() => void removePin(p.id)}
+                    />
+                  </div>
+                ))}
+              </div>
+            )}
+          </DialogContent>
+          <DialogActions>
+            <Button appearance="secondary" onClick={() => setPinsOpen(false)}>
+              Close
+            </Button>
+            <Button
+              appearance="primary"
+              disabled={pinsBusy || pinList.length === 0}
+              onClick={() => void recheckPinsNow()}
+            >
+              {pinsBusy ? "Checking…" : "Re-check now"}
+            </Button>
+          </DialogActions>
+        </DialogBody>
+      </DialogSurface>
+    </Dialog>
+  );
 
   const historyButton = (
     <Button
@@ -1945,6 +2594,8 @@ export function ChatPanel() {
         {...dropHandlers}
       >
         {historyDrawer}
+        {pinsDialog}
+        {pinAlertBanner}
         {recentChats.length > 0 && <div className={styles.heroHistory}>{historyButton}</div>}
         <div className={styles.hero}>
           <span className={styles.beacon} />
@@ -1974,17 +2625,31 @@ export function ChatPanel() {
             <>
               <Badge appearance="tint">{visibleBadgeText}</Badge>
               <div className={styles.suggestRow}>
-                {suggestions.map((s) => (
-                  <Button
-                    key={s.label}
-                    appearance="secondary"
-                    size="small"
-                    shape="circular"
-                    onClick={() => applySuggestion(s.fill)}
-                  >
-                    {s.label}
-                  </Button>
-                ))}
+                {engineAsks.length > 0
+                  ? // Catalog-derived asks submit immediately — every one is a
+                    // real, answerable question about a real included file.
+                    engineAsks.map((s) => (
+                      <Button
+                        key={s.label}
+                        appearance="secondary"
+                        size="small"
+                        shape="circular"
+                        onClick={() => void sendQuestion(s.question)}
+                      >
+                        {s.label}
+                      </Button>
+                    ))
+                  : suggestions.map((s) => (
+                      <Button
+                        key={s.label}
+                        appearance="secondary"
+                        size="small"
+                        shape="circular"
+                        onClick={() => applySuggestion(s.fill)}
+                      >
+                        {s.label}
+                      </Button>
+                    ))}
               </div>
             </>
           )}
@@ -2003,12 +2668,23 @@ export function ChatPanel() {
       {...dropHandlers}
     >
       {historyDrawer}
+      {pinsDialog}
       <div className={styles.conversation}>
+        {pinAlertBanner}
         <div className={styles.header}>
           <Title3>Ask</Title3>
           <div className={styles.headerMeta}>
             <Badge appearance="tint">{visibleBadgeText}</Badge>
             {historyButton}
+            <Tooltip content="Save this chat as a note in your vault" relationship="label">
+              <Button
+                appearance="subtle"
+                icon={<SaveRegular />}
+                aria-label="Save chat to a vault note"
+                disabled={streaming || exportBusy}
+                onClick={() => void exportChatToNote()}
+              />
+            </Tooltip>
             <Button
               appearance="subtle"
               icon={<AddRegular />}
@@ -2178,6 +2854,69 @@ export function ChatPanel() {
                           </Tooltip>
                         </div>
                       )}
+                      {/* Refinement chips: only under answers carrying analytics
+                          metadata (i.e. the engine computed this via SQL). */}
+                      {m.analytics && !m.error && !(streaming && m.id === lastId) && (
+                        <>
+                          <RefineChips
+                            meta={m.analytics}
+                            isLast={m.id === lastId}
+                            disabled={streaming}
+                            onAsk={(q) => void sendQuestion(q)}
+                            onEditSql={openSqlEditor}
+                            onSave={
+                              desktop ? (meta) => void saveResultCsv(m.id, meta) : undefined
+                            }
+                            savePending={savedNotes[m.id]?.pending}
+                            onPin={(meta) => void pinAnswer(m.id, meta)}
+                            pinPending={pinNotes[m.id]?.pending}
+                          />
+                          {pinNotes[m.id]?.ok && (
+                            <div className={styles.savedNote}>
+                              <PinRegular fontSize={14} />
+                              <Text size={200}>
+                                Pinned — Lighthouse will flag this question when the underlying
+                                files change.
+                              </Text>
+                              <Button
+                                size="small"
+                                appearance="subtle"
+                                onClick={() => setPinsOpen(true)}
+                              >
+                                View pins
+                              </Button>
+                            </div>
+                          )}
+                          {pinNotes[m.id]?.error && (
+                            <div className={styles.savedNote}>
+                              <ErrorCircleRegular fontSize={14} />
+                              <Text size={200}>Couldn&apos;t pin — {pinNotes[m.id].error}</Text>
+                            </div>
+                          )}
+                          {savedNotes[m.id]?.name && (
+                            <div className={styles.savedNote}>
+                              <CheckmarkRegular fontSize={14} />
+                              <Text size={200}>
+                                Saved “{savedNotes[m.id].name}” to Lighthouse Results — it&apos;s
+                                now a queryable vault file.
+                              </Text>
+                              <Button
+                                size="small"
+                                appearance="subtle"
+                                onClick={() => revealSaved(savedNotes[m.id].id ?? "")}
+                              >
+                                Reveal
+                              </Button>
+                            </div>
+                          )}
+                          {savedNotes[m.id]?.error && (
+                            <div className={styles.savedNote}>
+                              <ErrorCircleRegular fontSize={14} />
+                              <Text size={200}>Couldn&apos;t save — {savedNotes[m.id].error}</Text>
+                            </div>
+                          )}
+                        </>
+                      )}
                       {m.references && m.references.length > 0 && (
                         <References turnId={m.id} references={m.references} />
                       )}
@@ -2214,6 +2953,77 @@ export function ChatPanel() {
 
         {composer("Ask a follow-up…")}
       </div>
+
+      {/* Edit SQL: the deterministic escape hatch on analytics answers. Runs
+          the draft through the engine's guarded single-SELECT path over the
+          same files the answer read — instant, model-free, never persisted. */}
+      <Dialog
+        open={sqlEdit !== null}
+        onOpenChange={(_, data) => {
+          if (!data.open) closeSqlEditor();
+        }}
+      >
+        <DialogSurface className={styles.sqlDialogSurface}>
+          <DialogBody>
+            <DialogTitle>Edit SQL</DialogTitle>
+            <DialogContent className={styles.sqlDialogContent}>
+              <Text size={200} className={styles.quietNote}>
+                Runs instantly against the same files as the answer — one read-only SELECT,
+                no AI involved. {modKey()}+Enter to run.
+              </Text>
+              <Textarea
+                className={styles.sqlEditor}
+                value={sqlDraft}
+                onChange={(_, d) => setSqlDraft(d.value)}
+                resize="vertical"
+                rows={6}
+                spellCheck={false}
+                aria-label="SQL query"
+                onKeyDown={(e) => {
+                  if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+                    e.preventDefault();
+                    void runSqlDraft();
+                  }
+                }}
+              />
+              {sqlRunning && (
+                <div className={styles.sqlStatus}>
+                  <Spinner size="tiny" />
+                  <Text size={200}>Running…</Text>
+                </div>
+              )}
+              {sqlOutcome?.error && (
+                <div className={styles.errorNotice}>
+                  <ErrorCircleRegular fontSize={16} />
+                  <Text size={200}>{sqlOutcome.error}</Text>
+                </div>
+              )}
+              {sqlOutcome?.content && (
+                <div className={mergeClasses(styles.answer, styles.sqlResult)}>
+                  <AnswerMarkdown
+                    content={sqlOutcome.content}
+                    turnId="sql-editor"
+                    onCite={handleCitationClick}
+                  />
+                </div>
+              )}
+            </DialogContent>
+            <DialogActions>
+              <Button appearance="secondary" onClick={closeSqlEditor}>
+                Close
+              </Button>
+              <Button
+                appearance="primary"
+                icon={<PlayRegular />}
+                disabled={sqlRunning || !sqlDraft.trim()}
+                onClick={() => void runSqlDraft()}
+              >
+                Run
+              </Button>
+            </DialogActions>
+          </DialogBody>
+        </DialogSurface>
+      </Dialog>
     </section>
   );
 }

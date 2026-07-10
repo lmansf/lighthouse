@@ -699,22 +699,61 @@ pub fn add_file(name: &str, bytes: &[u8], dest_parent_id: Option<&str>) -> anyho
         None => safe_name.clone(),
     };
     let mut abs = safe_abs(&final_id)?;
-    let mut i = 1u32;
-    while fs::metadata(&abs).is_ok() {
-        let alt = format!("{base} ({i}){ext}");
-        final_id = match dest_parent_id {
-            Some(d) => format!("{d}/{alt}"),
-            None => alt,
-        };
-        abs = safe_abs(&final_id)?;
-        i += 1;
-    }
     if let Some(parent) = abs.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::write(&abs, bytes)?;
+    // create_new makes the exists-check and the create one atomic step, so
+    // two concurrent adds with the same name can never clobber each other —
+    // the loser just moves to the next " (N)" suffix.
+    let mut i = 1u32;
+    loop {
+        match fs::OpenOptions::new().write(true).create_new(true).open(&abs) {
+            Ok(mut f) => {
+                use std::io::Write as _;
+                f.write_all(bytes)?;
+                break;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                let alt = format!("{base} ({i}){ext}");
+                final_id = match dest_parent_id {
+                    Some(d) => format!("{d}/{alt}"),
+                    None => alt,
+                };
+                abs = safe_abs(&final_id)?;
+                i += 1;
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
     invalidate_walk_cache(); // a new file exists that no state write announced
     Ok(final_id)
+}
+
+/// Write an artifact into a named vault folder ("Lighthouse Results",
+/// "Lighthouse Notes") — openspec: add-answer-artifacts. The name hint is
+/// REPAIRED, never rejected (separators and control chars become dashes,
+/// leading dots shed, length capped), then `add_file` supplies the collision
+/// suffix — an existing file is never overwritten. The artifact is an
+/// ordinary vault file: walked, watched, inclusion-ruled. Returns
+/// (node_id, file_name). KEEP IN SYNC with src/server/vault.ts::writeArtifact.
+pub fn write_artifact(
+    subdir: &str,
+    name_hint: &str,
+    ext: &str,
+    bytes: &[u8],
+) -> anyhow::Result<(String, String)> {
+    let mut clean: String = name_hint
+        .chars()
+        .map(|c| if c == '/' || c == '\\' || c.is_control() { '-' } else { c })
+        .take(80)
+        .collect();
+    clean = clean.trim().trim_start_matches('.').trim().to_string();
+    if clean.is_empty() {
+        clean = "result".to_string();
+    }
+    let id = add_file(&format!("{clean}.{ext}"), bytes, Some(subdir))?;
+    let name = id.rsplit('/').next().unwrap_or(&id).to_string();
+    Ok((id, name))
 }
 
 /// Like Node's `path.extname`: extension including the dot, original case.

@@ -7,6 +7,7 @@
 //! different it is called out with a `PARITY:` comment.
 
 pub mod analytics;
+pub mod catalog;
 pub mod config;
 pub mod contracts;
 pub mod embed;
@@ -16,6 +17,8 @@ pub mod index;
 pub mod license;
 pub mod llm;
 pub mod local_model;
+pub mod meta;
+pub mod pins;
 pub mod profile;
 pub mod settings;
 pub mod sources;

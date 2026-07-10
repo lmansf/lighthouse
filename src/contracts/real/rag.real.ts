@@ -1,6 +1,13 @@
 /** Real RagService — talks to the local `/api/rag` route (filesystem-backed). */
 import type { RagService } from "../services";
-import type { DataSource, FileNode, RagReference, RestoreToken } from "../types";
+import type {
+  ChangedPin,
+  DataSource,
+  FileNode,
+  Pin,
+  RagReference,
+  RestoreToken,
+} from "../types";
 
 async function getTree(): Promise<{ sources: DataSource[]; nodes: FileNode[]; desktop: boolean }> {
   const r = await fetch("/api/rag", { cache: "no-store" });
@@ -40,6 +47,79 @@ class RealRagService implements RagService {
   async search(query: string, includedFileIds: string[]): Promise<RagReference[]> {
     const res = await post({ op: "search", query, includedFileIds });
     return (res.references as RagReference[]) ?? [];
+  }
+
+  async analyticsSql(
+    sql: string,
+    fileIds: string[],
+    saveAs?: string,
+  ): Promise<{
+    markdown?: string;
+    chart?: string | null;
+    footer?: string;
+    error?: string;
+    savedId?: string;
+    savedName?: string;
+    rows?: number;
+  }> {
+    return (await post({
+      op: "analyticsSql",
+      sql,
+      fileIds,
+      ...(saveAs ? { saveAs } : {}),
+    })) as {
+      markdown?: string;
+      chart?: string | null;
+      footer?: string;
+      error?: string;
+      savedId?: string;
+      savedName?: string;
+      rows?: number;
+    };
+  }
+
+  async exportChat(
+    title: string,
+    markdown: string,
+  ): Promise<{ savedId?: string; savedName?: string; error?: string }> {
+    return (await post({ op: "exportChat", title, markdown })) as {
+      savedId?: string;
+      savedName?: string;
+      error?: string;
+    };
+  }
+
+  async pinAsk(
+    question: string,
+    sql: string,
+    fileIds: string[],
+  ): Promise<{ pin?: Pin; error?: string }> {
+    return (await post({ op: "pinAsk", question, sql, fileIds })) as {
+      pin?: Pin;
+      error?: string;
+    };
+  }
+
+  async unpinAsk(id: string): Promise<void> {
+    await post({ op: "unpinAsk", id });
+  }
+
+  async listPins(): Promise<Pin[]> {
+    const res = await post({ op: "listPins" });
+    return Array.isArray(res.pins) ? (res.pins as Pin[]) : [];
+  }
+
+  async recheckPins(): Promise<{ changed: ChangedPin[]; pins: Pin[] }> {
+    const res = await post({ op: "recheckPins" });
+    return {
+      changed: Array.isArray(res.changed) ? (res.changed as ChangedPin[]) : [],
+      pins: Array.isArray(res.pins) ? (res.pins as Pin[]) : [],
+    };
+  }
+
+  async suggestedAsks(includedFileIds: string[]): Promise<{ label: string; question: string }[]> {
+    const res = await post({ op: "suggestedAsks", includedFileIds });
+    return Array.isArray(res.asks) ? (res.asks as { label: string; question: string }[]) : [];
   }
 
   async addReference(path: string): Promise<{ id: string; kind: "file" | "folder" }> {

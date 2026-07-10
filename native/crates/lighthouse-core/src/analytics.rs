@@ -12,7 +12,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::contracts::ChatTurn;
 use datafusion::arrow::array::{ArrayRef, Float64Array, StringArray};
+use sha1::{Digest, Sha1};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::arrow::util::display::array_value_to_string;
@@ -21,6 +23,9 @@ use datafusion::prelude::{CsvReadOptions, ParquetReadOptions, SessionContext};
 
 /// Budgets — conservative caps so one query can't stall or flood an answer.
 pub const MAX_TABLE_FILES: usize = 4;
+/// Candidates gathered BEFORE grouping — wide enough that a 12-file monthly
+/// family is seen whole; slots (groups count once) still bound registration.
+pub const CANDIDATE_SCAN: usize = 64;
 const MAX_SHEETS_PER_BOOK: usize = 4;
 /// Tables registered across ALL files: 4 workbooks × 4 sheets would otherwise
 /// put 16 schema cards in the SQL prompt — a field report had the local
@@ -88,8 +93,9 @@ pub fn is_tabular(name: &str) -> bool {
 }
 
 /// Lowercased stem, non-alphanumerics folded to `_`, digit-safe, deduped by
-/// the caller. "Q3 Sales (final).xlsx" → "q3_sales_final".
-fn sanitize_table_name(file_name: &str) -> String {
+/// the caller. "Q3 Sales (final).xlsx" → "q3_sales_final". Shared with the
+/// column catalog so cataloged names match SQL names exactly.
+pub(crate) fn sanitize_table_name(file_name: &str) -> String {
     let stem = file_name
         .rsplit_once('.')
         .map(|(s, _)| s)
@@ -117,6 +123,14 @@ fn sanitize_table_name(file_name: &str) -> String {
 
 // --- Registration ----------------------------------------------------------------
 
+/// Provenance of a table unioned from a same-shaped file family.
+#[derive(Debug, Clone)]
+pub struct GroupMeta {
+    pub file_ids: Vec<String>,
+    pub file_names: Vec<String>,
+    pub newest_ms: i64,
+}
+
 /// One registered table and the description the model plans against.
 #[derive(Debug, Clone)]
 pub struct TableReg {
@@ -128,26 +142,149 @@ pub struct TableReg {
     /// The file's on-disk mtime (epoch ms) when it was registered — i.e. the
     /// version of the data this ask reads. None if the stat failed.
     pub modified_ms: Option<i64>,
+    /// Lowercased column names, for deterministic join hints.
+    pub columns: Vec<String>,
+    /// Present when this table unions a file family; file_id/file_name then
+    /// describe the family (first member id, pattern-style label).
+    pub group: Option<GroupMeta>,
 }
 
-/// Register every supported file into one context (multi-file joins come free).
-/// Unreadable/mis-shaped files are skipped — never fatal.
+/// A same-shaped file family destined for one unioned table.
+#[derive(Debug, Clone)]
+pub(crate) struct UnionGroup {
+    pub stem: String,
+    pub ext: String,
+    /// (file_id, name, abs), newest first, capped at MAX_GROUP_FILES.
+    pub members: Vec<(String, String, PathBuf)>,
+}
+
+/// Members per unioned family — bounds one ask's registration work.
+const MAX_GROUP_FILES: usize = 48;
+
+/// Name stem with digit runs (and their surrounding separators) collapsed:
+/// "sales-2025-01.csv" → "sales", "q3_sales" → "q_sales".
+pub(crate) fn union_stem(name: &str) -> String {
+    let stem = name.rsplit_once('.').map(|(s, _)| s).unwrap_or(name).to_lowercase();
+    let mut out = String::new();
+    let mut last_sep = false;
+    for ch in stem.chars() {
+        if ch.is_ascii_digit() {
+            continue;
+        }
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch);
+            last_sep = false;
+        } else if !last_sep && !out.is_empty() {
+            out.push('_');
+            last_sep = true;
+        } else {
+            last_sep = true;
+        }
+    }
+    out.trim_matches('_').to_string()
+}
+
+/// Split candidates into unionable families and singles. Grouping needs BOTH
+/// a shared digit-stripped stem and an identical cataloged column signature —
+/// same-shaped but unrelated files must not silently merge, and renamed
+/// columns split a family rather than misaligning rows.
+pub(crate) fn union_groups(
+    files: &[(String, String, PathBuf)],
+    catalog: &[crate::catalog::FileColumns],
+) -> (Vec<UnionGroup>, Vec<(String, String, PathBuf)>) {
+    use std::collections::HashMap;
+    let signatures: HashMap<&str, Vec<&str>> = catalog
+        .iter()
+        .map(|fc| (fc.id.as_str(), fc.columns.iter().map(|c| c.name.as_str()).collect()))
+        .collect();
+    let mtimes: HashMap<&str, i64> =
+        catalog.iter().map(|fc| (fc.id.as_str(), fc.modified_ms)).collect();
+
+    let mut buckets: HashMap<(String, String, Vec<String>), Vec<(String, String, PathBuf)>> =
+        HashMap::new();
+    let mut singles: Vec<(String, String, PathBuf)> = Vec::new();
+    let mut order: Vec<(String, String, Vec<String>)> = Vec::new();
+    for f in files {
+        let (id, name, _) = f;
+        let Some(sig) = signatures.get(id.as_str()) else {
+            singles.push(f.clone());
+            continue;
+        };
+        let ext = name.rsplit_once('.').map(|(_, e)| e.to_lowercase()).unwrap_or_default();
+        let key = (
+            ext,
+            union_stem(name),
+            sig.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+        );
+        if !buckets.contains_key(&key) {
+            order.push(key.clone());
+        }
+        buckets.entry(key).or_default().push(f.clone());
+    }
+
+    let mut groups = Vec::new();
+    for key in order {
+        let mut members = buckets.remove(&key).unwrap_or_default();
+        if members.len() < 2 || key.1.is_empty() {
+            singles.extend(members);
+            continue;
+        }
+        members.sort_by_key(|(id, _, _)| -mtimes.get(id.as_str()).copied().unwrap_or(0));
+        members.truncate(MAX_GROUP_FILES);
+        groups.push(UnionGroup { stem: key.1, ext: key.0, members });
+    }
+    (groups, singles)
+}
+
+/// Register every supported file into one context (multi-file joins come
+/// free). Same-shaped file families union into one table; failures degrade to
+/// per-file registration. Unreadable/mis-shaped files are skipped — never
+/// fatal.
 pub async fn register_tables(
     ctx: &SessionContext,
     files: &[(String, String, PathBuf)], // (file_id, name, abs)
 ) -> Vec<TableReg> {
+    // A cold catalog pass parses headers+samples for up to CANDIDATE_SCAN
+    // workbooks — blocking work that must not stall the runtime thread.
+    let files_owned = files.to_vec();
+    let catalog = tokio::task::spawn_blocking(move || crate::catalog::columns_for(&files_owned))
+        .await
+        .unwrap_or_default();
+    let (groups, mut singles) = union_groups(files, &catalog);
+
     let mut regs: Vec<TableReg> = Vec::new();
     let mut used: Vec<String> = Vec::new();
-    for (file_id, name, abs) in files.iter().take(MAX_TABLE_FILES) {
-        if regs.len() >= MAX_TABLES_TOTAL {
+    // A group consumes ONE file slot regardless of member count.
+    let mut slots = 0usize;
+    for g in groups {
+        if slots >= MAX_TABLE_FILES || regs.len() >= MAX_TABLES_TOTAL {
+            // Out of room — members may still compete as singles below.
+            singles.extend(g.members);
+            continue;
+        }
+        match register_group(ctx, &g, &mut used).await {
+            Some(reg) => {
+                regs.push(reg);
+                slots += 1;
+            }
+            None => {
+                // Union failed (reader quirk, drifted file) — the newest
+                // members fall back to ordinary per-file registration.
+                singles.extend(g.members);
+            }
+        }
+    }
+
+    for (file_id, name, abs) in singles {
+        if slots >= MAX_TABLE_FILES || regs.len() >= MAX_TABLES_TOTAL {
             break;
         }
         let lower = name.to_lowercase();
-        let mut base = sanitize_table_name(name);
+        let mut base = sanitize_table_name(&name);
         if used.contains(&base) {
             base = format!("{}_{}", base, used.len() + 1);
         }
-        let modified_ms = file_mtime_ms(abs);
+        let modified_ms = file_mtime_ms(&abs);
         let path = abs.to_string_lossy().to_string();
         let registered: Vec<String> = if lower.ends_with(".csv") || lower.ends_with(".tsv") {
             let delim = if lower.ends_with(".tsv") { b'\t' } else { b',' };
@@ -165,28 +302,226 @@ pub async fn register_tables(
                 Err(_) => vec![],
             }
         } else {
-            register_workbook(ctx, &base, abs)
+            register_workbook(ctx, &base, &abs)
         };
+        let mut any = false;
         for table in registered {
             if regs.len() >= MAX_TABLES_TOTAL {
                 break;
             }
-            if let Some(card) = table_card(ctx, &table).await {
+            if let Some((card, columns)) = table_card(ctx, &table).await {
                 used.push(base.clone());
+                any = true;
                 regs.push(TableReg {
                     table: table.clone(),
                     file_id: file_id.clone(),
                     file_name: name.clone(),
                     card,
                     modified_ms,
+                    columns,
+                    group: None,
                 });
             }
+        }
+        if any {
+            slots += 1;
         }
     }
     regs
 }
 
-/// calamine → Arrow MemTable per sheet (row 0 = header; ≥80% numeric column →
+/// Register one unioned table for a file family. CSV/TSV/Parquet union via
+/// DataFusion multi-path reads; workbooks concatenate row matrices and infer
+/// column types ONCE over the combined rows so a column's type can't drift
+/// between members. None ⇒ caller falls back to per-file registration.
+async fn register_group(
+    ctx: &SessionContext,
+    g: &UnionGroup,
+    used: &mut Vec<String>,
+) -> Option<TableReg> {
+    let mut tname = sanitize_table_name(&format!("{}_all", g.stem));
+    if used.contains(&tname) {
+        tname = format!("{}_{}", tname, used.len() + 1);
+    }
+    let paths: Vec<String> =
+        g.members.iter().map(|(_, _, abs)| abs.to_string_lossy().to_string()).collect();
+
+    // How many leading (newest-first) members the table actually covers —
+    // the card, references, and freshness stamp must describe exactly these.
+    let mut covered = g.members.len();
+    let ok = match g.ext.as_str() {
+        "csv" | "tsv" => {
+            let delim = if g.ext == "tsv" { b'\t' } else { b',' };
+            let opts = CsvReadOptions::new().delimiter(delim);
+            match ctx.read_csv(paths.clone(), opts).await {
+                Ok(df) => ctx.register_table(&tname, df.into_view()).is_ok(),
+                Err(_) => false,
+            }
+        }
+        "parquet" => match ctx.read_parquet(paths.clone(), ParquetReadOptions::default()).await {
+            Ok(df) => ctx.register_table(&tname, df.into_view()).is_ok(),
+            Err(_) => false,
+        },
+        "xlsx" | "xls" => {
+            // Whole-sheet parsing is blocking work — keep it off the runtime.
+            let members = g.members.clone();
+            let parsed = tokio::task::spawn_blocking(move || workbook_union_matrix(&members))
+                .await
+                .ok()
+                .flatten();
+            match parsed {
+                Some((schema, batch, included)) => {
+                    covered = included;
+                    MemTable::try_new(schema, vec![vec![batch]])
+                        .ok()
+                        .map(|mem| ctx.register_table(&tname, Arc::new(mem)).is_ok())
+                        .unwrap_or(false)
+                }
+                None => false,
+            }
+        }
+        _ => false,
+    };
+    if !ok {
+        return None;
+    }
+
+    let (card, columns) = table_card(ctx, &tname).await?;
+    used.push(tname.clone());
+    let members = &g.members[..covered];
+    let omitted = g.members.len() - covered;
+    let newest_ms = members.iter().filter_map(|(_, _, abs)| file_mtime_ms(abs)).max().unwrap_or(0);
+    let names: Vec<String> = members.iter().map(|(_, n, _)| n.clone()).collect();
+    let label = format!("{}*.{}", g.stem, g.ext);
+    // The union provenance must survive card clipping — lead with it, and
+    // never claim coverage the row cap didn't deliver.
+    let card = format!(
+        "{} unions {} files ({}{}){}\n{}",
+        tname,
+        members.len(),
+        names.iter().take(3).cloned().collect::<Vec<_>>().join(", "),
+        if names.len() > 3 { ", …" } else { "" },
+        if omitted > 0 {
+            format!(" — row cap: {omitted} older file(s) NOT included")
+        } else {
+            String::new()
+        },
+        card
+    );
+    Some(TableReg {
+        table: tname,
+        file_id: members[0].0.clone(),
+        file_name: label,
+        card,
+        modified_ms: Some(newest_ms),
+        columns,
+        group: Some(GroupMeta {
+            file_ids: members.iter().map(|(id, _, _)| id.clone()).collect(),
+            file_names: names,
+            newest_ms,
+        }),
+    })
+}
+
+/// Build the combined batch for a workbook family (first sheet per member,
+/// detected headers, whole-member appends only). Returns the schema+batch and
+/// how many LEADING members were fully included: a member whose rows would
+/// cross MAX_XLSX_ROWS is omitted entirely — a partially-summed month would
+/// silently skew every aggregate while the card claims full coverage, so the
+/// cap drops whole (oldest-first) members and the caller reports the count.
+/// Pure and blocking (calamine parses whole sheets) — call via spawn_blocking.
+#[allow(clippy::type_complexity)]
+fn workbook_union_matrix(
+    members: &[(String, String, PathBuf)],
+) -> Option<(Arc<Schema>, RecordBatch, usize)> {
+    use calamine::Reader;
+    let mut headers: Option<Vec<String>> = None;
+    let mut data: Vec<Vec<String>> = Vec::new();
+    let mut included = 0usize;
+    for (_, _, abs) in members {
+        let Ok(mut wb) = calamine::open_workbook_auto(abs) else { return None };
+        let Some(sheet) = wb.sheet_names().first().cloned() else { return None };
+        let Ok(range) = wb.worksheet_range(&sheet) else { return None };
+        let all: Vec<Vec<String>> = range
+            .rows()
+            .take(MAX_XLSX_ROWS + HEADER_SCAN_ROWS)
+            .map(|r| r.iter().map(crate::extract::cell_text).collect())
+            .collect();
+        if all.is_empty() {
+            return None;
+        }
+        let h = detect_header_row(&all);
+        let hdr: Vec<String> = all[h]
+            .iter()
+            .take(MAX_XLSX_COLS)
+            .enumerate()
+            .map(|(i, c)| {
+                let s = sanitize_table_name(c);
+                if s.is_empty() || s == "table" { format!("col_{}", i + 1) } else { s }
+            })
+            .collect();
+        match &headers {
+            None => headers = Some(hdr),
+            // The catalog signature already matched, but headers are re-read
+            // here from the live file — a drift since cataloging bails out.
+            Some(existing) if *existing != hdr => return None,
+            _ => {}
+        }
+        let member_rows = all.len().saturating_sub(h + 1);
+        if data.len() + member_rows > MAX_XLSX_ROWS {
+            if included == 0 {
+                // Even the first (newest) member alone exceeds the cap: no
+                // honest union exists — fall back to per-file registration.
+                return None;
+            }
+            break; // whole-member omission; caller reports the shortfall
+        }
+        let width = headers.as_ref().map(Vec::len).unwrap_or(0);
+        for r in &all[h + 1..] {
+            data.push((0..width).map(|i| r.get(i).cloned().unwrap_or_default()).collect());
+        }
+        included += 1;
+    }
+    let headers = headers?;
+    if headers.len() < 2 || data.len() < 2 || included < 2 {
+        return None;
+    }
+    let (schema, batch) = table_from_matrix(&headers, &data)?;
+    Some((schema, batch, included))
+}
+
+/// How many leading rows are scanned for a plausible header.
+const HEADER_SCAN_ROWS: usize = 8;
+
+/// Pick the header row within the first HEADER_SCAN_ROWS rows. Real headers
+/// are wide, textual, and distinct; title rows have one cell, units/data rows
+/// are mostly numeric. A row qualifies with ≥2 non-empty cells that are mostly
+/// non-numeric; the score (textual + distinct counts) must STRICTLY beat every
+/// earlier qualifier to move the header down (ties → earliest). Nothing
+/// qualifies ⇒ row 0, exactly the pre-detection behavior.
+pub(crate) fn detect_header_row(rows: &[Vec<String>]) -> usize {
+    let mut best: Option<(usize, usize)> = None; // (score, row index)
+    for (i, row) in rows.iter().take(HEADER_SCAN_ROWS).enumerate() {
+        let non_empty: Vec<&str> =
+            row.iter().map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+        if non_empty.len() < 2 {
+            continue;
+        }
+        let textual = non_empty.iter().filter(|s| s.parse::<f64>().is_err()).count();
+        if textual * 2 < non_empty.len() {
+            continue; // mostly numbers — a data row, not a header
+        }
+        let distinct: std::collections::HashSet<String> =
+            non_empty.iter().map(|s| s.to_lowercase()).collect();
+        let score = textual + distinct.len();
+        if best.map(|(s, _)| score > s).unwrap_or(true) {
+            best = Some((score, i));
+        }
+    }
+    best.map(|(_, i)| i).unwrap_or(0)
+}
+
+/// calamine → Arrow MemTable per sheet (detected header; ≥80% numeric column →
 /// Float64 with nulls, else Utf8). Returns the registered table names.
 fn register_workbook(ctx: &SessionContext, base: &str, abs: &PathBuf) -> Vec<String> {
     use calamine::Reader;
@@ -200,56 +535,42 @@ fn register_workbook(ctx: &SessionContext, base: &str, abs: &PathBuf) -> Vec<Str
         let Ok(range) = wb.worksheet_range(&sheet) else {
             continue;
         };
-        let mut rows = range.rows();
-        let Some(header_row) = rows.next() else { continue };
-        let headers: Vec<String> = header_row
+        // Stringify once; real workbooks put titles/blank rows above the
+        // header, so the header is detected, not assumed (row 0 fallback).
+        let all: Vec<Vec<String>> = range
+            .rows()
+            .take(MAX_XLSX_ROWS + HEADER_SCAN_ROWS)
+            .map(|r| r.iter().map(crate::extract::cell_text).collect())
+            .collect();
+        if all.is_empty() {
+            continue;
+        }
+        let h = detect_header_row(&all);
+        let headers: Vec<String> = all[h]
             .iter()
             .take(MAX_XLSX_COLS)
             .enumerate()
             .map(|(i, c)| {
-                let h = sanitize_table_name(&crate::extract::cell_text(c));
-                if h.is_empty() || h == "table" { format!("col_{}", i + 1) } else { h }
+                let s = sanitize_table_name(c);
+                if s.is_empty() || s == "table" { format!("col_{}", i + 1) } else { s }
             })
             .collect();
         if headers.len() < 2 {
             continue;
         }
-        let data: Vec<Vec<String>> = rows
+        let data: Vec<Vec<String>> = all[h + 1..]
+            .iter()
             .take(MAX_XLSX_ROWS)
             .map(|r| {
                 (0..headers.len())
-                    .map(|i| r.get(i).map(crate::extract::cell_text).unwrap_or_default())
+                    .map(|i| r.get(i).cloned().unwrap_or_default())
                     .collect()
             })
             .collect();
         if data.len() < 2 {
             continue;
         }
-        let mut fields: Vec<Field> = Vec::new();
-        let mut cols: Vec<ArrayRef> = Vec::new();
-        for (i, h) in headers.iter().enumerate() {
-            let vals: Vec<&String> = data.iter().map(|r| &r[i]).collect();
-            let non_empty = vals.iter().filter(|v| !v.trim().is_empty()).count();
-            let numeric = vals
-                .iter()
-                .filter(|v| !v.trim().is_empty() && v.trim().parse::<f64>().is_ok())
-                .count();
-            if non_empty > 0 && numeric as f64 >= non_empty as f64 * 0.8 {
-                fields.push(Field::new(h, DataType::Float64, true));
-                cols.push(Arc::new(Float64Array::from(
-                    vals.iter()
-                        .map(|v| v.trim().parse::<f64>().ok())
-                        .collect::<Vec<Option<f64>>>(),
-                )));
-            } else {
-                fields.push(Field::new(h, DataType::Utf8, true));
-                cols.push(Arc::new(StringArray::from(
-                    vals.iter().map(|v| v.as_str()).collect::<Vec<&str>>(),
-                )));
-            }
-        }
-        let schema = Arc::new(Schema::new(fields));
-        let Ok(batch) = RecordBatch::try_new(schema.clone(), cols) else {
+        let Some((schema, batch)) = table_from_matrix(&headers, &data) else {
             continue;
         };
         let Ok(mem) = MemTable::try_new(schema, vec![vec![batch]]) else {
@@ -267,9 +588,47 @@ fn register_workbook(ctx: &SessionContext, base: &str, abs: &PathBuf) -> Vec<Str
     out
 }
 
-/// Schema + row count + sample rows for the planning prompt (never the data).
-async fn table_card(ctx: &SessionContext, table: &str) -> Option<String> {
+/// String matrix → typed Arrow batch (≥80% numeric column → Float64 with
+/// nulls, else Utf8). One inference over ALL rows, so unioned members can't
+/// disagree on a column's type.
+fn table_from_matrix(
+    headers: &[String],
+    data: &[Vec<String>],
+) -> Option<(Arc<Schema>, RecordBatch)> {
+    let mut fields: Vec<Field> = Vec::new();
+    let mut cols: Vec<ArrayRef> = Vec::new();
+    for (i, h) in headers.iter().enumerate() {
+        let vals: Vec<&String> = data.iter().map(|r| &r[i]).collect();
+        let non_empty = vals.iter().filter(|v| !v.trim().is_empty()).count();
+        let numeric = vals
+            .iter()
+            .filter(|v| !v.trim().is_empty() && v.trim().parse::<f64>().is_ok())
+            .count();
+        if non_empty > 0 && numeric as f64 >= non_empty as f64 * 0.8 {
+            fields.push(Field::new(h, DataType::Float64, true));
+            cols.push(Arc::new(Float64Array::from(
+                vals.iter()
+                    .map(|v| v.trim().parse::<f64>().ok())
+                    .collect::<Vec<Option<f64>>>(),
+            )));
+        } else {
+            fields.push(Field::new(h, DataType::Utf8, true));
+            cols.push(Arc::new(StringArray::from(
+                vals.iter().map(|v| v.as_str()).collect::<Vec<&str>>(),
+            )));
+        }
+    }
+    let schema = Arc::new(Schema::new(fields));
+    let batch = RecordBatch::try_new(schema.clone(), cols).ok()?;
+    Some((schema, batch))
+}
+
+/// Schema + row count + sample rows for the planning prompt (never the data),
+/// plus the lowercased column names for deterministic join hints.
+async fn table_card(ctx: &SessionContext, table: &str) -> Option<(String, Vec<String>)> {
     let df = ctx.sql(&format!("SELECT * FROM {table} LIMIT {SAMPLE_ROWS}")).await.ok()?;
+    let columns: Vec<String> =
+        df.schema().fields().iter().map(|f| f.name().to_lowercase()).collect();
     let schema_line = df
         .schema()
         .fields()
@@ -296,11 +655,49 @@ async fn table_card(ctx: &SessionContext, table: &str) -> Option<String> {
     );
     // Wide sheets can render enormous sample rows; a card is a prompt block,
     // so clip it rather than let one table eat the local model's window.
-    if card.chars().count() > MAX_CARD_CHARS {
+    let card = if card.chars().count() > MAX_CARD_CHARS {
         let clipped: String = card.chars().take(MAX_CARD_CHARS).collect();
-        Some(format!("{clipped}…"))
+        format!("{clipped}…")
     } else {
-        Some(card)
+        card
+    };
+    Some((card, columns))
+}
+
+/// Deterministic join hints: shared, non-generic column names across distinct
+/// registered tables, rendered as one small prompt block (score 0). Hints
+/// never force a join — the model may ignore them.
+const GENERIC_JOIN_COLS: &[&str] =
+    &["id", "name", "date", "value", "amount", "total", "count", "n", "col_1", "col_2"];
+const MAX_JOIN_HINTS: usize = 12;
+
+pub fn join_hints(regs: &[TableReg]) -> Option<String> {
+    let mut lines: Vec<String> = Vec::new();
+    'outer: for i in 0..regs.len() {
+        for j in i + 1..regs.len() {
+            if regs[i].table == regs[j].table {
+                continue;
+            }
+            for c in &regs[i].columns {
+                if GENERIC_JOIN_COLS.contains(&c.as_str()) {
+                    continue;
+                }
+                if regs[j].columns.contains(c) {
+                    lines.push(format!("- {t1}.{c} = {t2}.{c}", t1 = regs[i].table, t2 = regs[j].table));
+                    if lines.len() >= MAX_JOIN_HINTS {
+                        break 'outer;
+                    }
+                }
+            }
+        }
+    }
+    if lines.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "Join hints (columns shared across tables — use when combining them):\n{}",
+            lines.join("\n")
+        ))
     }
 }
 
@@ -380,9 +777,17 @@ pub fn freshness_line(regs: &[TableReg], sql: &str, now_ms: i64) -> Option<Strin
     let parts: Vec<String> = used
         .iter()
         .filter(|r| seen.insert(r.file_id.as_str()))
-        .map(|r| match r.modified_ms {
-            Some(ms) => format!("“{}” (saved {})", r.file_name, saved_age_label(ms, now_ms)),
-            None => format!("“{}”", r.file_name),
+        .map(|r| match (&r.group, r.modified_ms) {
+            (Some(g), _) => format!(
+                "“{}” ({} files, newest saved {})",
+                r.file_name,
+                g.file_ids.len(),
+                saved_age_label(g.newest_ms, now_ms)
+            ),
+            (None, Some(ms)) => {
+                format!("“{}” (saved {})", r.file_name, saved_age_label(ms, now_ms))
+            }
+            (None, None) => format!("“{}”", r.file_name),
         })
         .collect();
     if parts.is_empty() {
@@ -447,6 +852,10 @@ pub struct QueryResult {
     /// Engine-built chart spec JSON when the result is chartable (Phase C) —
     /// rendered by the UI from a ```lighthouse-chart fence. Never model text.
     pub chart: Option<String>,
+    /// Digest of the FULL execution-capped result (not the narration-clipped
+    /// render) — pin change detection compares this, so a change anywhere in
+    /// the result alerts even past the narration caps.
+    pub digest: String,
 }
 
 /// Run a guarded query with a hard timeout and result caps.
@@ -486,11 +895,15 @@ pub async fn run_query(ctx: &SessionContext, sql: &str) -> Result<QueryResult, S
         ));
     }
     let chart = if truncated { None } else { chart_spec_from_batches(&batches) };
+    let (digest_bytes, _) = batches_to_csv(&batches, MAX_RESULT_ROWS + 1);
+    let digest: String =
+        Sha1::digest(&digest_bytes).iter().map(|b| format!("{b:02x}")).collect();
     Ok(QueryResult {
         markdown,
         shown,
         truncated,
         chart,
+        digest,
     })
 }
 
@@ -655,6 +1068,38 @@ mod tests {
     }
 
     #[test]
+    fn header_row_is_detected_not_assumed() {
+        let rows = |rs: &[&[&str]]| -> Vec<Vec<String>> {
+            rs.iter().map(|r| r.iter().map(|s| s.to_string()).collect()).collect()
+        };
+        // Title row (one cell) above the real header.
+        let sheet = rows(&[
+            &["Q3 Ticket Report"],
+            &[],
+            &["date", "region", "amount"],
+            &["2025-01-02", "NE", "100"],
+        ]);
+        assert_eq!(detect_header_row(&sheet), 2);
+        // Plain sheet: header at row 0 wins ties against textual data rows.
+        let plain = rows(&[&["name", "email"], &["alice", "alice@x.com"]]);
+        assert_eq!(detect_header_row(&plain), 0);
+        // Numeric preamble then header.
+        let preamble = rows(&[&["1", "2", "3"], &["date", "region", "amount"]]);
+        assert_eq!(detect_header_row(&preamble), 1);
+        // Nothing qualifies (all-numeric sheet) → row 0 fallback.
+        let numeric = rows(&[&["1", "2"], &["3", "4"]]);
+        assert_eq!(detect_header_row(&numeric), 0);
+        // Empty input stays at 0.
+        assert_eq!(detect_header_row(&[]), 0);
+        // A wider, more distinct header BELOW a narrow qualifier wins.
+        let wide = rows(&[
+            &["report", "2025"],
+            &["date", "region", "amount", "rep"],
+        ]);
+        assert_eq!(detect_header_row(&wide), 1);
+    }
+
+    #[test]
     fn table_names_sanitize() {
         assert_eq!(sanitize_table_name("Q3 Sales (final).xlsx"), "q3_sales_final");
         assert_eq!(sanitize_table_name("2017.csv"), "t_2017");
@@ -694,6 +1139,8 @@ mod tests {
             file_name: name.into(),
             card: String::new(),
             modified_ms: ms,
+            columns: vec![],
+            group: None,
         };
         let regs = vec![
             reg("tickets", "f1", "Tickets.xlsx", Some(now - 2 * 3_600_000)),
@@ -752,10 +1199,133 @@ mod tests {
             assert_eq!(extract_sql(&fenced).as_deref(), Some(*sql), "{q}");
         }
         // All five ride in the prompt.
-        let prompt = sql_question("top vendors by spend");
+        let prompt = sql_question("top vendors by spend", None);
         for (_, sql) in SQL_FEWSHOTS {
             assert!(prompt.contains(sql));
         }
+    }
+
+    #[test]
+    fn prior_query_rides_only_when_present() {
+        let with = sql_question("same but monthly", Some("SELECT a FROM t"));
+        assert!(with.contains("Previous query from this conversation"), "{with}");
+        assert!(with.contains("SELECT a FROM t"));
+        let without = sql_question("total sales", None);
+        assert!(!without.contains("Previous query"));
+    }
+
+    #[test]
+    fn last_query_used_recovers_the_latest_fence() {
+        let turn = |role: &str, content: &str| ChatTurn { role: role.into(), content: content.into() };
+        // No analytics yet.
+        assert_eq!(last_query_used(&[turn("user", "hi"), turn("assistant", "hello")]), None);
+        // The most recent fenced answer wins, even past a non-analytics turn.
+        let history = vec![
+            turn("user", "totals?"),
+            turn(
+                "assistant",
+                "Totals below.\n\n*Query used:*\n```sql\nSELECT region, SUM(x) FROM t GROUP BY region\n```\n",
+            ),
+            turn("user", "what does the doc say?"),
+            turn("assistant", "The doc says …"),
+        ];
+        assert_eq!(
+            last_query_used(&history).as_deref(),
+            Some("SELECT region, SUM(x) FROM t GROUP BY region")
+        );
+        // Multiple fences in one answer (multi-step) → the LAST fence.
+        let multi = vec![turn(
+            "assistant",
+            "*Queries used (2):*\n```sql\nSELECT 1\n```\n```sql\nSELECT 2\n```\n",
+        )];
+        assert_eq!(last_query_used(&multi).as_deref(), Some("SELECT 2"));
+        // Oversized prior clamps.
+        let big = format!("*Query used:*\n```sql\nSELECT {}\n```", "x".repeat(2000));
+        assert!(last_query_used(&[turn("assistant", &big)]).unwrap().len() <= 800);
+    }
+
+    #[test]
+    fn multi_step_cue_needs_both_cues() {
+        // Analytics + comparison/why ⇒ multi-step.
+        for q in [
+            "Compare total revenue Q3 vs Q4 and explain the drivers",
+            "why did the total drop in november",
+            "what caused the change between the quarterly totals",
+            "difference in average order size versus last year",
+        ] {
+            assert!(multi_step_cue(q), "expected multi-step for {q:?}");
+        }
+        // Single-cue questions stay on the single-query path.
+        for q in [
+            "total sales by region",              // analytics only
+            "compare the two contracts",          // comparison only, no analytics cue
+            "summarize the meeting notes",        // neither
+            "top 10 customers by revenue",        // analytics only
+        ] {
+            assert!(!multi_step_cue(q), "expected single-query for {q:?}");
+        }
+    }
+
+    #[test]
+    fn step_replies_parse_tolerantly() {
+        assert_eq!(
+            parse_step_reply("NEXT_SQL:\n```sql\nSELECT region, SUM(x) FROM t GROUP BY region\n```"),
+            StepReply::Sql("SELECT region, SUM(x) FROM t GROUP BY region".to_string())
+        );
+        assert_eq!(
+            parse_step_reply("SELECT a FROM b"),
+            StepReply::Sql("SELECT a FROM b".to_string())
+        );
+        assert_eq!(parse_step_reply("DONE"), StepReply::Done);
+        assert_eq!(parse_step_reply("done."), StepReply::Done);
+        // Prose with no SQL ends the loop instead of derailing it.
+        assert_eq!(parse_step_reply("The data already answers the question."), StepReply::Done);
+    }
+
+    #[test]
+    fn step_prompt_stays_inside_budget() {
+        // Maximal shape: 3 completed steps, each with a long SQL and a result
+        // at the carry cap — the prompt must stay comfortably under ~8k chars.
+        let steps: Vec<StepRecord> = (0..3)
+            .map(|i| StepRecord {
+                sql: format!("SELECT c{i}, SUM(v) FROM {} GROUP BY c{i} ORDER BY 2 DESC", "t".repeat(120)),
+                result_markdown: "| a | b |\n| 1 | 2 |\n".repeat(200), // > cap, gets clipped
+            })
+            .collect();
+        let q = step_question(&"compare everything and explain why ".repeat(8), &steps);
+        assert!(q.chars().count() < 8_000, "prompt budget blown: {}", q.chars().count());
+        assert!(q.contains("Step 3 SQL"));
+    }
+
+    #[test]
+    fn csv_writer_is_rfc4180() {
+        // Quotes double, commas/newlines/unicode quote, NULLs render empty.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("name, quoted", DataType::Utf8, false),
+            Field::new("total", DataType::Float64, true),
+        ]));
+        let b = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["say \"hi\"", "line\nbreak", "café"])),
+                Arc::new(Float64Array::from(vec![Some(1.5), None, Some(3.0)])),
+            ],
+        )
+        .unwrap();
+        let (bytes, rows) = batches_to_csv(&[b.clone()], SAVE_MAX_ROWS);
+        let text = String::from_utf8(bytes).unwrap();
+        assert_eq!(rows, 3);
+        let mut lines = text.lines();
+        assert_eq!(lines.next(), Some("\"name, quoted\",total"));
+        assert_eq!(lines.next(), Some("\"say \"\"hi\"\"\",1.5"));
+        // The embedded newline keeps the quoted field on two physical lines.
+        assert_eq!(lines.next(), Some("\"line"));
+        assert_eq!(lines.next(), Some("break\","));
+        assert_eq!(lines.next(), Some("café,3.0"));
+        // The cap truncates data rows, never the header.
+        let (bytes, rows) = batches_to_csv(&[b], 1);
+        assert_eq!(rows, 1);
+        assert_eq!(String::from_utf8(bytes).unwrap().lines().count(), 2);
     }
 
     fn batch(labels: &[&str], values: &[f64]) -> RecordBatch {
@@ -873,12 +1443,130 @@ mod tests {
         let ctx = SessionContext::new();
         ctx.register_table("wide", Arc::new(mem)).unwrap();
 
-        let card = table_card(&ctx, "wide").await.expect("card");
+        let (card, columns) = table_card(&ctx, "wide").await.expect("card");
         assert!(
             card.chars().count() <= super::MAX_CARD_CHARS + 1,
             "card is {} chars",
             card.chars().count()
         );
+        assert_eq!(columns.len(), n, "join hints need every column name");
+    }
+
+    #[test]
+    fn union_stems_collapse_digit_runs() {
+        assert_eq!(union_stem("sales-2025-01.csv"), "sales");
+        assert_eq!(union_stem("sales-2025-12.csv"), "sales");
+        assert_eq!(union_stem("q3_sales.xlsx"), "q_sales");
+        assert_eq!(union_stem("regions.csv"), "regions");
+        assert_eq!(union_stem("2025.csv"), "");
+    }
+
+    fn file_cols(id: &str, name: &str, cols: &[&str], ms: i64) -> crate::catalog::FileColumns {
+        crate::catalog::FileColumns {
+            id: id.into(),
+            name: name.into(),
+            columns: cols
+                .iter()
+                .map(|c| crate::catalog::Column {
+                    name: c.to_string(),
+                    kind: crate::catalog::ColumnKind::Text,
+                })
+                .collect(),
+            modified_ms: ms,
+        }
+    }
+
+    #[test]
+    fn union_groups_need_stem_and_signature() {
+        let p = |n: &str| std::path::PathBuf::from(format!("/v/{n}"));
+        let files: Vec<(String, String, std::path::PathBuf)> = vec![
+            ("f1".into(), "sales-2025-01.csv".into(), p("sales-2025-01.csv")),
+            ("f2".into(), "sales-2025-02.csv".into(), p("sales-2025-02.csv")),
+            ("f3".into(), "sales-2025-03.csv".into(), p("sales-2025-03.csv")),
+            ("f4".into(), "regions.csv".into(), p("regions.csv")),
+            ("f5".into(), "vendors.csv".into(), p("vendors.csv")),
+        ];
+        let catalog = vec![
+            file_cols("f1", "sales-2025-01.csv", &["date", "region", "amount"], 3),
+            file_cols("f2", "sales-2025-02.csv", &["date", "region", "amount"], 2),
+            // f3 drifted (renamed column) — must split from the family.
+            file_cols("f3", "sales-2025-03.csv", &["date", "area", "amount"], 1),
+            file_cols("f4", "regions.csv", &["region", "label"], 1),
+            // vendors shares regions' SHAPE but not its stem — no grouping.
+            file_cols("f5", "vendors.csv", &["region", "label"], 1),
+        ];
+        let (groups, singles) = union_groups(&files, &catalog);
+        assert_eq!(groups.len(), 1, "only the matching monthlies group");
+        assert_eq!(groups[0].stem, "sales");
+        let member_ids: Vec<&str> =
+            groups[0].members.iter().map(|(id, _, _)| id.as_str()).collect();
+        assert_eq!(member_ids, vec!["f1", "f2"], "newest first, drifted member excluded");
+        let single_ids: Vec<&str> = singles.iter().map(|(id, _, _)| id.as_str()).collect();
+        assert!(single_ids.contains(&"f3") && single_ids.contains(&"f4") && single_ids.contains(&"f5"));
+    }
+
+    #[test]
+    fn join_hints_skip_generic_columns() {
+        let reg = |table: &str, cols: &[&str]| TableReg {
+            table: table.into(),
+            file_id: table.into(),
+            file_name: format!("{table}.csv"),
+            card: String::new(),
+            modified_ms: None,
+            columns: cols.iter().map(|s| s.to_string()).collect(),
+            group: None,
+        };
+        let regs = vec![
+            reg("tickets", &["id", "region", "priority"]),
+            reg("regions", &["id", "region", "label"]),
+        ];
+        let hints = join_hints(&regs).expect("shared non-generic column");
+        assert!(hints.contains("tickets.region = regions.region"), "{hints}");
+        assert!(!hints.contains(".id ="), "generic id must not hint: {hints}");
+        // No shared specific columns → no block at all.
+        assert!(join_hints(&[reg("a", &["x"]), reg("b", &["y"])]).is_none());
+    }
+
+    #[tokio::test]
+    async fn end_to_end_union_of_monthlies() {
+        let dir = std::env::temp_dir().join(format!("lh-union-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut files: Vec<(String, String, std::path::PathBuf)> = Vec::new();
+        for m in 1..=12 {
+            let name = format!("sales-2025-{m:02}.csv");
+            let path = dir.join(&name);
+            // 2 rows per month, amount = month number each → total 2*78 = 156.
+            std::fs::write(&path, format!("region,amount\nNE,{m}\nNW,{m}\n")).unwrap();
+            files.push((format!("m{m}"), name, path));
+        }
+        let lookup = dir.join("regions.csv");
+        std::fs::write(&lookup, "region,label\nNE,Northeast\nNW,Northwest\n").unwrap();
+        files.push(("lk".into(), "regions.csv".into(), lookup));
+
+        let ctx = SessionContext::new();
+        let regs = register_tables(&ctx, &files).await;
+        let union = regs.iter().find(|r| r.group.is_some()).expect("union table registered");
+        assert_eq!(union.table, "sales_all");
+        assert_eq!(union.group.as_ref().unwrap().file_ids.len(), 12);
+        assert!(union.card.contains("unions 12 files"), "{}", union.card);
+        assert!(regs.iter().any(|r| r.group.is_none()), "lookup registers as a single");
+
+        // The whole year sums across all twelve files.
+        let res = run_query(&ctx, "SELECT SUM(amount) AS total FROM sales_all").await.unwrap();
+        assert!(res.markdown.contains("156"), "{}", res.markdown);
+
+        // Join hints connect the family to the lookup on `region`.
+        let hints = join_hints(&regs).expect("hints");
+        assert!(hints.contains("sales_all.region = regions.region"), "{hints}");
+
+        // Freshness renders the group form.
+        let fresh =
+            freshness_line(&regs, "SELECT SUM(amount) FROM sales_all", crate::config::now_ms())
+                .unwrap();
+        assert!(fresh.contains("(12 files, newest saved"), "{fresh}");
+        assert!(fresh.contains("sales*.csv"), "{fresh}");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
@@ -974,15 +1662,59 @@ pub const SQL_FEWSHOTS: &[(&str, &str)] = &[
     ),
 ];
 
+/// Prior-query context is clamped — the local model's 6144-token window pays
+/// for every char of it.
+const PRIOR_SQL_MAX_CHARS: usize = 800;
+
+/// The most recent executed query in this conversation, recovered from the
+/// deterministic "Query used" fence the engine itself wrote into the last
+/// analytics answer (the client round-trips history, so no storage and no
+/// staleness across restarts). Multi-fence answers yield the LAST fence.
+pub fn last_query_used(history: &[ChatTurn]) -> Option<String> {
+    for t in history.iter().rev() {
+        if t.role != "assistant" || !t.content.contains("Quer") {
+            continue;
+        }
+        if !t.content.contains("Query used") && !t.content.contains("Queries used") {
+            continue;
+        }
+        let mut last: Option<&str> = None;
+        let mut rest = t.content.as_str();
+        while let Some(start) = rest.find("```sql") {
+            let after = &rest[start + 6..];
+            let Some(end) = after.find("```") else { break };
+            let sql = after[..end].trim();
+            if !sql.is_empty() {
+                last = Some(sql);
+            }
+            rest = &after[end + 3..];
+        }
+        if let Some(sql) = last {
+            return Some(sql.chars().take(PRIOR_SQL_MAX_CHARS).collect());
+        }
+    }
+    None
+}
+
 /// The SQL-writing ask handed to the model (schemas ride as context blocks).
 /// The reply is post-processed by extract_sql + the guard, so stray prose or
-/// citation markers from the grounded system prompt are tolerated.
-pub fn sql_question(question: &str) -> String {
+/// citation markers from the grounded system prompt are tolerated. When the
+/// conversation already produced a query, it rides along so refinements
+/// ("same thing but monthly") adapt it instead of starting over.
+pub fn sql_question(question: &str, prior_sql: Option<&str>) -> String {
     let examples = SQL_FEWSHOTS
         .iter()
         .map(|(q, sql)| format!("Q: {q}\nSQL: {sql}"))
         .collect::<Vec<_>>()
         .join("\n");
+    let prior = prior_sql
+        .map(|s| {
+            format!(
+                "\nPrevious query from this conversation — if the question \
+                 refines it, adapt this SQL instead of starting over:\n```sql\n{s}\n```\n"
+            )
+        })
+        .unwrap_or_default();
     format!(
         "You are writing ONE SQL query for DataFusion (PostgreSQL-style syntax). \
          The numbered context blocks describe the available tables: their exact \
@@ -992,7 +1724,282 @@ pub fn sql_question(question: &str) -> String {
          in a ```sql code block — no explanation. Use the exact table and \
          column names as given.\n\n\
          Examples with a GENERIC schema — adapt the table and column names to \
-         the tables described in the context blocks:\n{examples}\n\n\
+         the tables described in the context blocks:\n{examples}\n{prior}\n\
          Question: {question}"
     )
+}
+
+// --- Multi-step analytics (openspec: add-multi-step-analytics) --------------------
+//
+// Comparison/why questions on a keyed REMOTE provider may run up to three
+// sequential verified queries. The cue below gates entry (multi-step costs
+// latency and must be earned); the step prompt + reply parser keep every
+// number engine-computed. Local models never enter — their 6144-token window
+// can't carry multi-step context (synth.rs enforces the gate).
+
+const MULTI_STEP_WORDS: &[&str] = &[
+    "compare", "compared", "comparing", "versus", "vs", "difference", "differences",
+    "why", "driver", "drivers", "explain", "explains", "explained",
+];
+const MULTI_STEP_PHRASES: &[&str] =
+    &["what caused", "change between", "breakdown of the change", "changed between"];
+
+/// Whether an analytics question ALSO reads as a comparison/explanation ask —
+/// the entry gate for the bounded multi-step loop. Same normalization as
+/// `analytics_cue`; single-cue questions keep the single-query path.
+pub fn multi_step_cue(question: &str) -> bool {
+    if !analytics_cue(question) {
+        return false;
+    }
+    let lower = question.to_lowercase();
+    let mut norm = String::with_capacity(lower.len());
+    let mut last_space = true;
+    for ch in lower.chars() {
+        if ch.is_ascii_lowercase() || ch.is_ascii_digit() {
+            norm.push(ch);
+            last_space = false;
+        } else if !last_space {
+            norm.push(' ');
+            last_space = true;
+        }
+    }
+    let padded = format!(" {} ", norm.trim());
+    for p in MULTI_STEP_PHRASES {
+        if padded.contains(&format!(" {p} ")) {
+            return true;
+        }
+    }
+    padded.split(' ').any(|t| MULTI_STEP_WORDS.contains(&t))
+}
+
+/// One executed step: its SQL and the (narration-capped) verified result.
+#[derive(Debug, Clone)]
+pub struct StepRecord {
+    pub sql: String,
+    pub result_markdown: String,
+}
+
+/// The model's answer to "do you need another query?".
+#[derive(Debug, PartialEq)]
+pub enum StepReply {
+    Sql(String),
+    Done,
+}
+
+/// Parse a step reply: `NEXT_SQL:` + one SELECT (fenced or bare) ⇒ Sql;
+/// an explicit DONE — or anything unparseable — ⇒ Done, so a confused model
+/// ends the loop instead of derailing it.
+pub fn parse_step_reply(raw: &str) -> StepReply {
+    let cleaned = raw.trim();
+    if cleaned.to_uppercase().starts_with("DONE") {
+        return StepReply::Done;
+    }
+    match extract_sql(cleaned) {
+        Some(sql) => StepReply::Sql(sql),
+        None => StepReply::Done,
+    }
+}
+
+/// Per prior step, chars of result carried into the next step's prompt.
+const STEP_RESULT_CAP: usize = 1200;
+
+/// The iterative step ask: original question + every completed step's SQL and
+/// capped result. Schema cards ride as context blocks (not in this string).
+/// Budget: ≤ ~8k chars at the 3-step maximum — comfortably inside every
+/// remote window (unit-tested).
+pub fn step_question(question: &str, steps: &[StepRecord]) -> String {
+    let prior = if steps.is_empty() {
+        " (none yet)".to_string()
+    } else {
+        let mut out = String::new();
+        for (i, s) in steps.iter().enumerate() {
+            let capped: String = s.result_markdown.chars().take(STEP_RESULT_CAP).collect();
+            out.push_str(&format!(
+                "\n\nStep {n} SQL:\n{sql}\nStep {n} result:\n{capped}",
+                n = i + 1,
+                sql = s.sql,
+            ));
+        }
+        out
+    };
+    format!(
+        "You are running a multi-step analysis over the user's tables to answer \
+         one question. The table schemas are in the context blocks. You may run \
+         up to 3 SQL queries total, one at a time.\n\
+         Completed steps so far:{prior}\n\n\
+         If one more query would materially improve the answer, reply with exactly:\n\
+         NEXT_SQL:\n```sql\n<one single SELECT statement>\n```\n\
+         Otherwise reply with exactly: DONE\n\n\
+         Rules: one SELECT per step, no other statements; use the exact table and \
+         column names from the context blocks; prefer a query that builds on what \
+         the previous steps showed.\n\n\
+         Question: {question}"
+    )
+}
+
+/// Everything a deterministic re-execution answers with: the (narration-
+/// capped) result table, the chart when chartable, and the standard
+/// provenance footer. `result_digest` covers the FULL execution-capped
+/// result — pin change detection compares it.
+#[derive(Debug)]
+pub struct DirectResult {
+    pub markdown: String,
+    pub chart: Option<String>,
+    pub footer: String,
+    pub result_digest: String,
+}
+
+/// Resolve an answer's file ids and register them as tables — the shared
+/// front half of every direct (model-free) execution. Ids that are unknown,
+/// no longer tabular, or NO LONGER VISIBLE TO AI are skipped and counted so
+/// callers can note them in the footer: exclusion binds here exactly like it
+/// does in the ask pipeline — a stale answer's meta (or a pin) can't keep
+/// reading a file the user has since hidden.
+async fn direct_tables(
+    file_ids: &[String],
+) -> Result<(SessionContext, Vec<TableReg>, usize), String> {
+    let active: std::collections::HashSet<String> =
+        crate::vault::active_included_file_ids().into_iter().collect();
+    let mut files: Vec<(String, String, PathBuf)> = Vec::new();
+    let mut skipped = 0usize;
+    for id in file_ids {
+        if !active.contains(id) {
+            skipped += 1;
+            continue;
+        }
+        match crate::vault::doc_path(id) {
+            Some((name, abs)) if is_tabular(&name) => files.push((id.clone(), name, abs)),
+            _ => skipped += 1,
+        }
+    }
+    if files.is_empty() {
+        return Err("none of the answer's files are available anymore".to_string());
+    }
+    let ctx = SessionContext::new();
+    let regs = register_tables(&ctx, &files).await;
+    if regs.is_empty() {
+        return Err("the files couldn't be registered as tables".to_string());
+    }
+    Ok((ctx, regs, skipped))
+}
+
+fn direct_footer(sql: &str, regs: &[TableReg], skipped: usize) -> String {
+    let mut footer = format!("*Query used:*\n```sql\n{sql}\n```\n");
+    if let Some(fresh) = freshness_line(regs, sql, crate::config::now_ms()) {
+        footer.push_str(&fresh);
+    }
+    if skipped > 0 {
+        footer.push_str(&format!("_(skipped {skipped} file(s) no longer available to AI)_\n"));
+    }
+    footer
+}
+
+/// Re-run an answer's SQL against exactly the files it read — the guarded,
+/// model-free path behind Edit SQL, Save-as-CSV, and pin rechecks. Unknown /
+/// no-longer-tabular ids are skipped and noted in the footer.
+pub async fn run_direct(sql: &str, file_ids: &[String]) -> Result<DirectResult, String> {
+    let (ctx, regs, skipped) = direct_tables(file_ids).await?;
+    let res = run_query(&ctx, sql).await?;
+    let footer = direct_footer(sql, &regs, skipped);
+    Ok(DirectResult {
+        markdown: res.markdown,
+        chart: res.chart,
+        footer,
+        result_digest: res.digest,
+    })
+}
+
+/// Save-path row cap: full-fidelity export, bounded sanely (the narration
+/// caps stay much smaller — openspec: add-answer-artifacts, design §1).
+pub const SAVE_MAX_ROWS: usize = 100_000;
+
+/// RFC-4180 CSV (quote-doubling, CRLF record separators) from record batches,
+/// capped at `max_rows` data rows. Returns (bytes, data_row_count). NULLs
+/// render empty.
+pub fn batches_to_csv(batches: &[RecordBatch], max_rows: usize) -> (Vec<u8>, usize) {
+    fn field(s: &str) -> String {
+        if s.contains(',') || s.contains('"') || s.contains('\n') || s.contains('\r') {
+            format!("\"{}\"", s.replace('"', "\"\""))
+        } else {
+            s.to_string()
+        }
+    }
+    let Some(first) = batches.iter().find(|b| b.num_columns() > 0) else {
+        return (Vec::new(), 0);
+    };
+    let mut out = String::new();
+    let header: Vec<String> =
+        first.schema().fields().iter().map(|f| field(f.name())).collect();
+    out.push_str(&header.join(","));
+    out.push_str("\r\n");
+    let mut rows = 0usize;
+    'outer: for b in batches {
+        for row in 0..b.num_rows() {
+            if rows >= max_rows {
+                break 'outer;
+            }
+            let mut cells: Vec<String> = Vec::with_capacity(b.num_columns());
+            for c in 0..b.num_columns() {
+                let col = b.column(c);
+                let v = if col.is_null(row) {
+                    String::new()
+                } else {
+                    array_value_to_string(col, row).unwrap_or_default()
+                };
+                cells.push(field(&v));
+            }
+            out.push_str(&cells.join(","));
+            out.push_str("\r\n");
+            rows += 1;
+        }
+    }
+    (out.into_bytes(), rows)
+}
+
+/// What "Save as CSV" wrote: an ordinary vault file the watcher ingests.
+#[derive(Debug)]
+pub struct SavedResult {
+    pub id: String,
+    pub name: String,
+    pub rows: usize,
+}
+
+/// The save path behind "Save as CSV": one registration, then the normal
+/// narration-capped preview PLUS a full-fidelity execution (SAVE_MAX_ROWS)
+/// written as RFC-4180 CSV into `Lighthouse Results/` — where it becomes
+/// queryable input like any other file. Never overwrites (collision suffix).
+pub async fn run_direct_save(
+    sql: &str,
+    file_ids: &[String],
+    name_hint: &str,
+) -> Result<(DirectResult, SavedResult), String> {
+    let (ctx, regs, skipped) = direct_tables(file_ids).await?;
+    let res = run_query(&ctx, sql).await?; // guard + preview + chart
+    let df = ctx.sql(sql).await.map_err(|e| e.to_string())?;
+    let df = df.limit(0, Some(SAVE_MAX_ROWS)).map_err(|e| e.to_string())?;
+    let batches = tokio::time::timeout(Duration::from_secs(QUERY_TIMEOUT_SECS), df.collect())
+        .await
+        .map_err(|_| format!("query exceeded {QUERY_TIMEOUT_SECS}s"))?
+        .map_err(|e| e.to_string())?;
+    let (bytes, rows) = batches_to_csv(&batches, SAVE_MAX_ROWS);
+    if rows == 0 {
+        return Err("the query returned no rows".into());
+    }
+    let hint = name_hint.to_string();
+    let (id, name) = tokio::task::spawn_blocking(move || {
+        crate::vault::write_artifact("Lighthouse Results", &hint, "csv", &bytes)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+    let footer = direct_footer(sql, &regs, skipped);
+    Ok((
+        DirectResult {
+            markdown: res.markdown,
+            chart: res.chart,
+            footer,
+            result_digest: res.digest,
+        },
+        SavedResult { id, name, rows },
+    ))
 }

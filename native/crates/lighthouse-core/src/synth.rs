@@ -9,7 +9,7 @@ use std::pin::Pin;
 
 use futures::{Stream, StreamExt};
 
-use crate::contracts::{ChatChunk, ChatProgress, ChatTurn, RagReference};
+use crate::contracts::{AnalyticsMeta, ChatChunk, ChatProgress, ChatTurn, RagReference};
 use crate::llm::{self, Ctx, ModelCfg};
 use crate::table_profile::{is_profileable, table_profile};
 use crate::{sources, vault};
@@ -158,16 +158,23 @@ fn progress(label: String, step: usize, total: usize) -> ChatChunk {
         delta: String::new(),
         references: None,
         progress: Some(ChatProgress { label, step, total }),
+        analytics: None,
         done: false,
     }
 }
 
 fn delta(d: String) -> ChatChunk {
-    ChatChunk { delta: d, references: None, progress: None, done: false }
+    ChatChunk { delta: d, references: None, progress: None, analytics: None, done: false }
 }
 
 fn final_chunk(references: Vec<RagReference>) -> ChatChunk {
-    ChatChunk { delta: String::new(), references: Some(references), progress: None, done: true }
+    ChatChunk {
+        delta: String::new(),
+        references: Some(references),
+        progress: None,
+        analytics: None,
+        done: true,
+    }
 }
 
 async fn collect(mut s: llm::AnswerStream) -> String {
@@ -180,6 +187,55 @@ async fn collect(mut s: llm::AnswerStream) -> String {
 
 fn take_chars(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
+}
+
+/// Citation sample + full read-set from the registered tables. Refs cite up
+/// to 3 real member files per registration (ids the explorer can open);
+/// meta ids flatten EVERY file read (all group members) — what the
+/// refinement chips, Save-as-CSV, and pins act on.
+fn analytics_refs(regs: &[crate::analytics::TableReg]) -> (Vec<RagReference>, Vec<String>) {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut refs: Vec<RagReference> = Vec::new();
+    let mut meta_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut meta_ids: Vec<String> = Vec::new();
+    for r in regs {
+        let snippet: String = r.card.chars().take(240).collect();
+        match &r.group {
+            // A unioned family cites its first members — real ids the
+            // explorer can open.
+            Some(g) => {
+                for (id, name) in g.file_ids.iter().zip(&g.file_names).take(3) {
+                    if seen.insert(id.clone()) {
+                        refs.push(RagReference {
+                            file_id: id.clone(),
+                            name: name.clone(),
+                            snippet: snippet.clone(),
+                            score: 0.9,
+                        });
+                    }
+                }
+                for id in &g.file_ids {
+                    if meta_seen.insert(id.clone()) {
+                        meta_ids.push(id.clone());
+                    }
+                }
+            }
+            None => {
+                if seen.insert(r.file_id.clone()) {
+                    refs.push(RagReference {
+                        file_id: r.file_id.clone(),
+                        name: r.file_name.clone(),
+                        snippet,
+                        score: 0.9,
+                    });
+                }
+                if meta_seen.insert(r.file_id.clone()) {
+                    meta_ids.push(r.file_id.clone());
+                }
+            }
+        }
+    }
+    (refs, meta_ids)
 }
 
 /// The full ask path — see the module docs. Every surface (axum route,
@@ -245,6 +301,29 @@ pub fn answer_pipeline(
             }
         }
 
+        // --- Vault meta-answers (openspec: add-vault-meta-answers): anchored
+        //     questions ABOUT the vault (recency, inventory, column
+        //     membership) answer instantly from walk metadata + the column
+        //     catalog — no model call, real references. Runs before analytics
+        //     (meta questions are never aggregates). Any renderer error falls
+        //     through with NOTHING emitted — no partial meta output. ---
+        if attachment_file_ids.is_empty() {
+            if let Some(intent) = crate::meta::meta_intent(&question) {
+                let ids = included_file_ids.clone();
+                let rendered = tokio::task::spawn_blocking(move || {
+                    crate::meta::render_meta(&intent, &ids, crate::config::now_ms())
+                })
+                .await
+                .ok()
+                .and_then(|r| r.ok());
+                if let Some(ans) = rendered {
+                    yield delta(ans.markdown);
+                    yield final_chunk(ans.references);
+                    return;
+                }
+            }
+        }
+
         // --- Analytics branch (docs/analytics-genie.md): aggregate ask over
         //     tabular files → model writes SQL, DataFusion executes, the model
         //     narrates the verified result. Any failure falls through silently
@@ -263,7 +342,9 @@ pub fn answer_pipeline(
             };
             let mut files: Vec<(String, String, std::path::PathBuf)> = Vec::new();
             for id in candidate_ids {
-                if files.len() >= crate::analytics::MAX_TABLE_FILES {
+                // Scan wide so whole file families are visible to union
+                // grouping; registration slots stay bounded downstream.
+                if files.len() >= crate::analytics::CANDIDATE_SCAN {
                     break;
                 }
                 if let Some((name, abs)) = vault::doc_path(&id) {
@@ -277,13 +358,171 @@ pub fn answer_pipeline(
                 let ctx = datafusion::prelude::SessionContext::new();
                 let regs = crate::analytics::register_tables(&ctx, &files).await;
                 if !regs.is_empty() {
-                    let sql_ctxs: Vec<Ctx> = regs
+                    let mut sql_ctxs: Vec<Ctx> = regs
                         .iter()
                         .map(|r| Ctx { name: r.file_name.clone(), text: r.card.clone(), score: 1.0 })
                         .collect();
+                    if let Some(hints) = crate::analytics::join_hints(&regs) {
+                        sql_ctxs.push(Ctx {
+                            name: "join hints".to_string(),
+                            text: hints,
+                            score: 0.0,
+                        });
+                    }
+                    // --- Multi-step (openspec: add-multi-step-analytics):
+                    //     a comparison/why question on a keyed REMOTE
+                    //     provider may run up to 3 sequential verified
+                    //     queries; the final narration sees every step's
+                    //     result and no raw table data. Local models never
+                    //     enter (their 6144-token window can't carry
+                    //     multi-step context) — behavior there is identical
+                    //     to today. Zero successful steps falls through to
+                    //     the single-query path below, which keeps its own
+                    //     retry; every number stays engine-computed.
+                    let remote_keyed =
+                        cfg.provider_id.as_deref().is_some_and(|id| id != "local");
+                    if remote_keyed && crate::analytics::multi_step_cue(&question) {
+                        let mut steps: Vec<crate::analytics::StepRecord> = Vec::new();
+                        let mut last_chart: Option<String> = None;
+                        'steps: while steps.len() < 3 {
+                            let n = steps.len() + 1;
+                            yield progress(format!("Planning query {n} (of up to 3)…"), n, 4);
+                            let raw = collect(llm::stream_answer(
+                                crate::analytics::step_question(&question, &steps),
+                                sql_ctxs.clone(),
+                                cfg.clone(),
+                                history.clone(),
+                            ))
+                            .await;
+                            let mut attempt =
+                                match crate::analytics::parse_step_reply(&strip_markers(&raw)) {
+                                    crate::analytics::StepReply::Done => break 'steps,
+                                    crate::analytics::StepReply::Sql(sql) => sql,
+                                };
+                            for round in 0..2 {
+                                yield progress(format!("Running query {n}…"), n, 4);
+                                match crate::analytics::run_query(&ctx, &attempt).await {
+                                    Ok(res) => {
+                                        last_chart = res.chart.clone();
+                                        steps.push(crate::analytics::StepRecord {
+                                            sql: attempt.clone(),
+                                            result_markdown: res.markdown,
+                                        });
+                                        continue 'steps;
+                                    }
+                                    Err(err) if round == 0 => {
+                                        // One corrective retry with the
+                                        // engine's error — the same pattern
+                                        // as the single-query path.
+                                        let retry_q = format!(
+                                            "{}\n\nYour previous SQL failed.\nPrevious SQL: {attempt}\nError: {err}\nReply with NEXT_SQL: and a corrected single SELECT statement.",
+                                            crate::analytics::step_question(&question, &steps)
+                                        );
+                                        let raw2 = collect(llm::stream_answer(
+                                            retry_q,
+                                            sql_ctxs.clone(),
+                                            cfg.clone(),
+                                            history.clone(),
+                                        ))
+                                        .await;
+                                        match crate::analytics::parse_step_reply(&strip_markers(
+                                            &raw2,
+                                        )) {
+                                            crate::analytics::StepReply::Sql(sql) => attempt = sql,
+                                            crate::analytics::StepReply::Done => break 'steps,
+                                        }
+                                    }
+                                    // Second failure ends the loop; whatever
+                                    // was collected still narrates below.
+                                    Err(_) => break 'steps,
+                                }
+                            }
+                        }
+                        if !steps.is_empty() {
+                            yield progress("Summarizing results…".to_string(), 4, 4);
+                            let mut ctxs: Vec<Ctx> = steps
+                                .iter()
+                                .enumerate()
+                                .map(|(i, s)| Ctx {
+                                    name: format!(
+                                        "query {} result — computed exactly by Lighthouse",
+                                        i + 1
+                                    ),
+                                    text: format!(
+                                        "SQL:\n{}\n\nResult:\n{}",
+                                        s.sql, s.result_markdown
+                                    ),
+                                    score: 1.0,
+                                })
+                                .collect();
+                            ctxs.extend(regs.iter().map(|r| Ctx {
+                                name: format!("{} — schema", r.file_name),
+                                text: r.card.clone(),
+                                score: 0.0,
+                            }));
+                            let mut answer = llm::stream_answer(
+                                question.clone(),
+                                ctxs,
+                                cfg.clone(),
+                                history.clone(),
+                            );
+                            while let Some(d) = answer.next().await {
+                                yield delta(d);
+                            }
+                            // Deterministic transparency: EVERY executed
+                            // query in order, then ONE freshness stamp over
+                            // the union of files the steps read.
+                            if steps.len() == 1 {
+                                yield delta(format!(
+                                    "\n\n*Query used:*\n```sql\n{}\n```\n",
+                                    steps[0].sql
+                                ));
+                            } else {
+                                yield delta(format!(
+                                    "\n\n*Queries used ({}):*\n",
+                                    steps.len()
+                                ));
+                                for (i, s) in steps.iter().enumerate() {
+                                    yield delta(format!(
+                                        "{}.\n```sql\n{}\n```\n",
+                                        i + 1,
+                                        s.sql
+                                    ));
+                                }
+                            }
+                            let all_sql = steps
+                                .iter()
+                                .map(|s| s.sql.as_str())
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            if let Some(fresh) = crate::analytics::freshness_line(
+                                &regs,
+                                &all_sql,
+                                crate::config::now_ms(),
+                            ) {
+                                yield delta(fresh);
+                            }
+                            if let Some(chart) = &last_chart {
+                                yield delta(format!("\n```lighthouse-chart\n{chart}\n```\n"));
+                            }
+                            // Chips act on the LAST query; the footer shows all.
+                            let (refs, meta_ids) = analytics_refs(&regs);
+                            let mut done = final_chunk(refs);
+                            done.analytics = Some(AnalyticsMeta {
+                                sql: steps.last().map(|s| s.sql.clone()).unwrap_or_default(),
+                                file_ids: meta_ids,
+                            });
+                            yield done;
+                            return;
+                        }
+                    }
+
                     yield progress("Writing a query…".to_string(), 2, 4);
+                    // A refining follow-up should adapt the conversation's
+                    // previous query, not re-derive it from scratch.
+                    let prior_sql = crate::analytics::last_query_used(&history);
                     let raw = collect(llm::stream_answer(
-                        crate::analytics::sql_question(&question),
+                        crate::analytics::sql_question(&question, prior_sql.as_deref()),
                         sql_ctxs.clone(),
                         cfg.clone(),
                         history.clone(),
@@ -303,7 +542,7 @@ pub fn answer_pipeline(
                                 // One correction round with the engine's error.
                                 let retry_q = format!(
                                     "{}\n\nYour previous SQL failed.\nPrevious SQL: {sql}\nError: {err}\nWrite a corrected single SELECT statement.",
-                                    crate::analytics::sql_question(&question)
+                                    crate::analytics::sql_question(&question, prior_sql.as_deref())
                                 );
                                 let raw2 = collect(llm::stream_answer(
                                     retry_q,
@@ -356,19 +595,11 @@ pub fn answer_pipeline(
                         if let Some(chart) = &res.chart {
                             yield delta(format!("\n```lighthouse-chart\n{chart}\n```\n"));
                         }
-                        let mut seen: std::collections::HashSet<String> =
-                            std::collections::HashSet::new();
-                        let refs: Vec<RagReference> = regs
-                            .iter()
-                            .filter(|r| seen.insert(r.file_id.clone()))
-                            .map(|r| RagReference {
-                                file_id: r.file_id.clone(),
-                                name: r.file_name.clone(),
-                                snippet: r.card.chars().take(240).collect(),
-                                score: 0.9,
-                            })
-                            .collect();
-                        yield final_chunk(refs);
+                        // Citations + structured provenance (chips/save/pins).
+                        let (refs, meta_ids) = analytics_refs(&regs);
+                        let mut done = final_chunk(refs);
+                        done.analytics = Some(AnalyticsMeta { sql, file_ids: meta_ids });
+                        yield done;
                         return;
                     }
                 }

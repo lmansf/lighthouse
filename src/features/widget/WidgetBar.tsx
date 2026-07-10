@@ -156,6 +156,16 @@ const useStyles = makeStyles({
     boxShadow: `0 0 10px 2px ${ACCENTS.beam}`,
     pointerEvents: "none", // clicks land on the grip, not the dot
   },
+  // Pinned-answer-changed notification dot beside the beacon; cleared when
+  // the main window opens (where the full alert banner lives).
+  pinAlertDot: {
+    width: "7px",
+    height: "7px",
+    borderRadius: "50%",
+    flexShrink: 0,
+    backgroundColor: tokens.colorPaletteRedBackground3,
+    pointerEvents: "none",
+  },
   // The pill itself is the field: strip the Input's own box (border, fill,
   // focus underline) so typing feels like typing into the bar.
   input: {
@@ -434,6 +444,15 @@ export function WidgetBar() {
     return () => window.removeEventListener("lighthouse:widget-pin", onPin);
   }, []);
 
+  // A pinned ANSWER changed (watcher-driven recheck): show a quiet dot on the
+  // pill; the full alert banner lives in the main window's chat.
+  const [pinAlertDot, setPinAlertDot] = useState(false);
+  useEffect(() => {
+    const onChanged = () => setPinAlertDot(true);
+    window.addEventListener("lighthouse:pins-changed", onChanged);
+    return () => window.removeEventListener("lighthouse:pins-changed", onChanged);
+  }, []);
+
   // Layer 1 — NAME matches: instant, client-side, case-insensitive substring
   // over file-kind nodes (the explorer's search-filter matching), so 1-char
   // queries and AI-hidden files still hit. Capped to keep the pill compact.
@@ -655,6 +674,7 @@ export function WidgetBar() {
     const q = answerRef.current?.question;
     abortRef.current?.abort();
     setAnswer(null);
+    setPinAlertDot(false); // the main window's banner takes over
     void invokeShell("show_main", q ? { seedQuestion: q } : undefined);
     hide();
   };
@@ -670,6 +690,7 @@ export function WidgetBar() {
 
   /** Raise the main window bare — where the lock gate / renewal flow lives. */
   const openLighthouse = () => {
+    setPinAlertDot(false); // the main window's banner takes over
     void invokeShell("show_main");
     hide();
   };
@@ -739,6 +760,13 @@ export function WidgetBar() {
           }}
         >
           <span className={styles.beacon} />
+          {pinAlertDot && (
+            <span
+              className={styles.pinAlertDot}
+              role="status"
+              title="A pinned answer changed — open Lighthouse to see it"
+            />
+          )}
         </div>
         <Input
           ref={inputRef}

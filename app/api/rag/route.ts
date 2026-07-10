@@ -16,6 +16,8 @@ import {
 } from "@/server/sources/registry";
 import { isSameOrigin } from "@/server/http";
 import { isDesktopApp } from "@/server/config";
+import { writeArtifact } from "@/server/vault";
+import { addPin, listPins, removePin } from "@/server/pins";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -155,6 +157,71 @@ export async function POST(req: Request) {
           { error: err instanceof Error ? err.message : "restore failed" },
           { status: 400 },
         );
+      }
+    }
+
+    case "analyticsSql":
+      // PARITY: the SQL engine (DataFusion) lives in the desktop engine only;
+      // the dev server never takes the analytics branch, so there is nothing
+      // to re-execute here. The UI surfaces this as the dialog's error state.
+      return NextResponse.json({
+        error: "analytics queries run in the desktop engine — this dev server can't execute SQL",
+      });
+
+    case "suggestedAsks":
+      // PARITY: suggestions derive from the column catalog, which lives in
+      // the desktop engine only. Empty means the chat keeps its static
+      // empty-state hint — exactly the no-tabular-files behavior.
+      return NextResponse.json({ asks: [] });
+
+    // --- Pinned questions (openspec: add-pinned-questions). PARITY: rechecks
+    //     re-run SQL through DataFusion (desktop engine only) — this dev
+    //     server does CRUD and reports "no changes" on recheck, so pinned
+    //     summaries simply stay as of pin time.
+    case "pinAsk": {
+      const question = typeof body.question === "string" ? body.question : "";
+      const sql = typeof body.sql === "string" ? body.sql : "";
+      const fileIds = Array.isArray(body.fileIds)
+        ? body.fileIds.filter((x: unknown): x is string => typeof x === "string")
+        : [];
+      try {
+        return NextResponse.json({ pin: addPin(question, sql, fileIds) });
+      } catch (err) {
+        return NextResponse.json({
+          error: err instanceof Error ? err.message : "could not pin",
+        });
+      }
+    }
+
+    case "unpinAsk":
+      if (typeof body.id !== "string" || !body.id) {
+        return NextResponse.json({ error: "id required" }, { status: 400 });
+      }
+      removePin(body.id);
+      return NextResponse.json({ ok: true });
+
+    case "listPins":
+      return NextResponse.json({ pins: listPins() });
+
+    case "recheckPins":
+      return NextResponse.json({ changed: [], pins: listPins() });
+
+    case "exportChat": {
+      // Write the client-rendered transcript as a markdown note into
+      // Lighthouse Notes/ (openspec: add-answer-artifacts). Implemented in
+      // BOTH engines — writing a vault file needs no desktop machinery.
+      const title = typeof body.title === "string" && body.title.trim() ? body.title : "Chat";
+      const markdown = typeof body.markdown === "string" ? body.markdown : "";
+      if (!markdown.trim()) {
+        return NextResponse.json({ error: "markdown required" }, { status: 400 });
+      }
+      try {
+        const { id, name } = writeArtifact("Lighthouse Notes", title, "md", Buffer.from(markdown, "utf8"));
+        return NextResponse.json({ savedId: id, savedName: name });
+      } catch (err) {
+        return NextResponse.json({
+          error: err instanceof Error ? err.message : "could not write the note",
+        });
       }
     }
 

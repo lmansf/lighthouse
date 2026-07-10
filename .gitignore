@@ -79,3 +79,4 @@ out/
 native/crates/lighthouse-desktop/gen/
 # Stray artifact dir from experiment.assign test (hardcoded Windows path)
 C:/
+native/crates/lighthouse-core/vault/

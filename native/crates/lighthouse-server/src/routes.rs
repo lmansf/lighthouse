@@ -133,6 +133,126 @@ pub async fn rag_post(headers: HeaderMap, body: Option<Json<Value>>) -> Response
                 Err(e) => bad_request(&err_message(&e, "remove failed")),
             }
         }
+        // Deterministic guarded re-execution of an analytics answer's SQL
+        // over exactly the files it read (Edit SQL / refinement plumbing) —
+        // no model, no persistence.
+        Some("analyticsSql") => {
+            let sql = body["sql"].as_str().unwrap_or("").to_string();
+            let file_ids: Vec<String> = body["fileIds"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            // With `saveAs`, the same guarded run also writes a full-fidelity
+            // CSV into Lighthouse Results/ (openspec: add-answer-artifacts).
+            if let Some(hint) = body["saveAs"].as_str() {
+                return match lighthouse_core::analytics::run_direct_save(&sql, &file_ids, hint)
+                    .await
+                {
+                    Ok((r, saved)) => Json(json!({
+                        "markdown": r.markdown,
+                        "chart": r.chart,
+                        "footer": r.footer,
+                        "savedId": saved.id,
+                        "savedName": saved.name,
+                        "rows": saved.rows,
+                    }))
+                    .into_response(),
+                    Err(e) => Json(json!({ "error": e })).into_response(),
+                };
+            }
+            return match lighthouse_core::analytics::run_direct(&sql, &file_ids).await {
+                Ok(r) => Json(json!({
+                    "markdown": r.markdown,
+                    "chart": r.chart,
+                    "footer": r.footer,
+                }))
+                .into_response(),
+                Err(e) => Json(json!({ "error": e })).into_response(),
+            };
+        }
+        // Write the client-rendered transcript as a markdown note into
+        // Lighthouse Notes/ (openspec: add-answer-artifacts). Ordinary vault
+        // file: walked, watched, inclusion-ruled.
+        Some("exportChat") => {
+            let title = body["title"].as_str().unwrap_or("Chat").to_string();
+            let markdown = body["markdown"].as_str().unwrap_or("").to_string();
+            if markdown.trim().is_empty() {
+                return bad_request("markdown required");
+            }
+            let written = tokio::task::spawn_blocking(move || {
+                lighthouse_core::vault::write_artifact(
+                    "Lighthouse Notes",
+                    &title,
+                    "md",
+                    markdown.as_bytes(),
+                )
+            })
+            .await
+            .map_err(|e| e.to_string())
+            .and_then(|r| r.map_err(|e| e.to_string()));
+            return match written {
+                Ok((id, name)) => {
+                    Json(json!({ "savedId": id, "savedName": name })).into_response()
+                }
+                Err(e) => Json(json!({ "error": e })).into_response(),
+            };
+        }
+        // --- Pinned questions (openspec: add-pinned-questions): persist an
+        //     analytics answer's question + SQL + files; rechecks are guarded
+        //     and model-free. The dev twin mirrors these ops (PARITY: no
+        //     background scheduler anywhere but the desktop shell). ---
+        Some("pinAsk") => {
+            let question = body["question"].as_str().unwrap_or("").to_string();
+            let sql = body["sql"].as_str().unwrap_or("").to_string();
+            let file_ids: Vec<String> = body["fileIds"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            return match lighthouse_core::pins::add(&question, &sql, &file_ids) {
+                Ok(pin) => {
+                    // Prime the fresh pin's digest + summary so the dialog has
+                    // something to show (and the first real change alerts).
+                    let _ = lighthouse_core::pins::recheck_one(&pin.id).await;
+                    let pins = lighthouse_core::pins::list();
+                    let primed =
+                        pins.iter().find(|p| p.id == pin.id).cloned().unwrap_or(pin);
+                    Json(json!({ "pin": primed })).into_response()
+                }
+                Err(e) => Json(json!({ "error": e })).into_response(),
+            };
+        }
+        Some("unpinAsk") => {
+            let Some(id) = body["id"].as_str().filter(|s| !s.is_empty()) else {
+                return bad_request("id required");
+            };
+            lighthouse_core::pins::remove(id);
+            return Json(json!({ "ok": true })).into_response();
+        }
+        Some("listPins") => {
+            return Json(json!({ "pins": lighthouse_core::pins::list() })).into_response();
+        }
+        Some("recheckPins") => {
+            let changed = lighthouse_core::pins::recheck_all().await;
+            return Json(json!({
+                "changed": changed,
+                "pins": lighthouse_core::pins::list(),
+            }))
+            .into_response();
+        }
+        // Catalog-derived example questions for the chat empty state — every
+        // one names real columns of a real included file, so the analytics
+        // path can answer it. Empty when nothing tabular is included.
+        Some("suggestedAsks") => {
+            let ids: Vec<String> = body["includedFileIds"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            let asks =
+                tokio::task::spawn_blocking(move || lighthouse_core::meta::suggested_asks(&ids))
+                    .await
+                    .unwrap_or_default();
+            return Json(json!({ "asks": asks })).into_response();
+        }
         Some("restore") => {
             let token = &body["token"];
             if !token.is_object() {
