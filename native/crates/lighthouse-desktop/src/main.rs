@@ -1051,6 +1051,11 @@ fn main() {
                 let handle = handle.clone();
                 tauri::async_runtime::spawn(async move {
                     let mut last_seen = lighthouse_core::watch::generation();
+                    // Alerts that couldn't be delivered yet (emit failure) —
+                    // carried into the next pass so they're never lost: the
+                    // digests persist BEFORE the emit, so without this buffer
+                    // a failed emit would silently swallow the change.
+                    let mut pending: Vec<lighthouse_core::pins::ChangedPin> = Vec::new();
                     loop {
                         tokio::time::sleep(std::time::Duration::from_secs(30)).await;
                         let g = lighthouse_core::watch::generation();
@@ -1068,15 +1073,28 @@ fn main() {
                             quiet = now;
                         }
                         last_seen = quiet;
-                        if lighthouse_core::pins::list().is_empty() {
+                        if pending.is_empty() && lighthouse_core::pins::list().is_empty() {
                             continue;
                         }
                         let changed = lighthouse_core::pins::recheck_all().await;
-                        if !changed.is_empty() {
-                            if let Err(e) = handle
-                                .emit("pins-changed", serde_json::json!({ "changed": changed }))
-                            {
-                                shell_log(&handle, &format!("pins: emit failed: {e}"));
+                        // Newest state wins per pin id; undelivered older
+                        // alerts for other pins ride along.
+                        let fresh: std::collections::HashSet<String> =
+                            changed.iter().map(|c| c.id.clone()).collect();
+                        pending.retain(|p| !fresh.contains(&p.id));
+                        pending.extend(changed);
+                        if pending.is_empty() {
+                            continue;
+                        }
+                        match handle
+                            .emit("pins-changed", serde_json::json!({ "changed": pending }))
+                        {
+                            Ok(()) => pending.clear(),
+                            Err(e) => {
+                                shell_log(
+                                    &handle,
+                                    &format!("pins: emit failed (will retry next pass): {e}"),
+                                );
                             }
                         }
                     }

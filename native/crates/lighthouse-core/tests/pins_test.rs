@@ -17,6 +17,8 @@ async fn pins_prime_alert_on_change_and_go_stale() {
     let _guard = common::lock_env(vault.path());
     write(&vault.path().join("tickets.csv"), "priority,count\nP1,3\nP2,7\n");
     lighthouse_core::vault::invalidate_walk_cache();
+    // Rechecks honor AI visibility — only included files register.
+    lighthouse_core::vault::set_included("tickets.csv", true);
 
     let sql = "SELECT priority, SUM(count) AS total FROM tickets GROUP BY priority ORDER BY priority";
     let ids = vec!["tickets.csv".to_string()];

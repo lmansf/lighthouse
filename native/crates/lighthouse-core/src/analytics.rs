@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use crate::contracts::ChatTurn;
 use datafusion::arrow::array::{ArrayRef, Float64Array, StringArray};
+use sha1::{Digest, Sha1};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::arrow::util::display::array_value_to_string;
@@ -243,7 +244,12 @@ pub async fn register_tables(
     ctx: &SessionContext,
     files: &[(String, String, PathBuf)], // (file_id, name, abs)
 ) -> Vec<TableReg> {
-    let catalog = crate::catalog::columns_for(files);
+    // A cold catalog pass parses headers+samples for up to CANDIDATE_SCAN
+    // workbooks — blocking work that must not stall the runtime thread.
+    let files_owned = files.to_vec();
+    let catalog = tokio::task::spawn_blocking(move || crate::catalog::columns_for(&files_owned))
+        .await
+        .unwrap_or_default();
     let (groups, mut singles) = union_groups(files, &catalog);
 
     let mut regs: Vec<TableReg> = Vec::new();
@@ -340,6 +346,9 @@ async fn register_group(
     let paths: Vec<String> =
         g.members.iter().map(|(_, _, abs)| abs.to_string_lossy().to_string()).collect();
 
+    // How many leading (newest-first) members the table actually covers —
+    // the card, references, and freshness stamp must describe exactly these.
+    let mut covered = g.members.len();
     let ok = match g.ext.as_str() {
         "csv" | "tsv" => {
             let delim = if g.ext == "tsv" { b'\t' } else { b',' };
@@ -353,7 +362,24 @@ async fn register_group(
             Ok(df) => ctx.register_table(&tname, df.into_view()).is_ok(),
             Err(_) => false,
         },
-        "xlsx" | "xls" => register_workbook_union(ctx, &tname, &g.members),
+        "xlsx" | "xls" => {
+            // Whole-sheet parsing is blocking work — keep it off the runtime.
+            let members = g.members.clone();
+            let parsed = tokio::task::spawn_blocking(move || workbook_union_matrix(&members))
+                .await
+                .ok()
+                .flatten();
+            match parsed {
+                Some((schema, batch, included)) => {
+                    covered = included;
+                    MemTable::try_new(schema, vec![vec![batch]])
+                        .ok()
+                        .map(|mem| ctx.register_table(&tname, Arc::new(mem)).is_ok())
+                        .unwrap_or(false)
+                }
+                None => false,
+            }
+        }
         _ => false,
     };
     if !ok {
@@ -362,58 +388,67 @@ async fn register_group(
 
     let (card, columns) = table_card(ctx, &tname).await?;
     used.push(tname.clone());
-    let newest_ms =
-        g.members.iter().filter_map(|(_, _, abs)| file_mtime_ms(abs)).max().unwrap_or(0);
-    let names: Vec<String> = g.members.iter().map(|(_, n, _)| n.clone()).collect();
+    let members = &g.members[..covered];
+    let omitted = g.members.len() - covered;
+    let newest_ms = members.iter().filter_map(|(_, _, abs)| file_mtime_ms(abs)).max().unwrap_or(0);
+    let names: Vec<String> = members.iter().map(|(_, n, _)| n.clone()).collect();
     let label = format!("{}*.{}", g.stem, g.ext);
-    // The union provenance must survive card clipping — lead with it.
+    // The union provenance must survive card clipping — lead with it, and
+    // never claim coverage the row cap didn't deliver.
     let card = format!(
-        "{} unions {} files ({}{})\n{}",
+        "{} unions {} files ({}{}){}\n{}",
         tname,
-        g.members.len(),
+        members.len(),
         names.iter().take(3).cloned().collect::<Vec<_>>().join(", "),
         if names.len() > 3 { ", …" } else { "" },
+        if omitted > 0 {
+            format!(" — row cap: {omitted} older file(s) NOT included")
+        } else {
+            String::new()
+        },
         card
     );
     Some(TableReg {
         table: tname,
-        file_id: g.members[0].0.clone(),
+        file_id: members[0].0.clone(),
         file_name: label,
         card,
         modified_ms: Some(newest_ms),
         columns,
         group: Some(GroupMeta {
-            file_ids: g.members.iter().map(|(id, _, _)| id.clone()).collect(),
+            file_ids: members.iter().map(|(id, _, _)| id.clone()).collect(),
             file_names: names,
             newest_ms,
         }),
     })
 }
 
-/// Concatenate same-signature workbook sheets into one MemTable (first sheet
-/// per member, detected headers, combined rows capped at MAX_XLSX_ROWS).
-fn register_workbook_union(
-    ctx: &SessionContext,
-    tname: &str,
+/// Build the combined batch for a workbook family (first sheet per member,
+/// detected headers, whole-member appends only). Returns the schema+batch and
+/// how many LEADING members were fully included: a member whose rows would
+/// cross MAX_XLSX_ROWS is omitted entirely — a partially-summed month would
+/// silently skew every aggregate while the card claims full coverage, so the
+/// cap drops whole (oldest-first) members and the caller reports the count.
+/// Pure and blocking (calamine parses whole sheets) — call via spawn_blocking.
+#[allow(clippy::type_complexity)]
+fn workbook_union_matrix(
     members: &[(String, String, PathBuf)],
-) -> bool {
+) -> Option<(Arc<Schema>, RecordBatch, usize)> {
     use calamine::Reader;
     let mut headers: Option<Vec<String>> = None;
     let mut data: Vec<Vec<String>> = Vec::new();
+    let mut included = 0usize;
     for (_, _, abs) in members {
-        if data.len() >= MAX_XLSX_ROWS {
-            break;
-        }
-        let Ok(mut wb) = calamine::open_workbook_auto(abs) else { return false };
-        let Some(sheet) = wb.sheet_names().first().cloned() else { return false };
-        let Ok(range) = wb.worksheet_range(&sheet) else { return false };
+        let Ok(mut wb) = calamine::open_workbook_auto(abs) else { return None };
+        let Some(sheet) = wb.sheet_names().first().cloned() else { return None };
+        let Ok(range) = wb.worksheet_range(&sheet) else { return None };
         let all: Vec<Vec<String>> = range
             .rows()
             .take(MAX_XLSX_ROWS + HEADER_SCAN_ROWS)
             .map(|r| r.iter().map(crate::extract::cell_text).collect())
             .collect();
         if all.is_empty() {
-            return false;
+            return None;
         }
         let h = detect_header_row(&all);
         let hdr: Vec<String> = all[h]
@@ -429,28 +464,30 @@ fn register_workbook_union(
             None => headers = Some(hdr),
             // The catalog signature already matched, but headers are re-read
             // here from the live file — a drift since cataloging bails out.
-            Some(existing) if *existing != hdr => return false,
+            Some(existing) if *existing != hdr => return None,
             _ => {}
+        }
+        let member_rows = all.len().saturating_sub(h + 1);
+        if data.len() + member_rows > MAX_XLSX_ROWS {
+            if included == 0 {
+                // Even the first (newest) member alone exceeds the cap: no
+                // honest union exists — fall back to per-file registration.
+                return None;
+            }
+            break; // whole-member omission; caller reports the shortfall
         }
         let width = headers.as_ref().map(Vec::len).unwrap_or(0);
         for r in &all[h + 1..] {
-            if data.len() >= MAX_XLSX_ROWS {
-                break;
-            }
             data.push((0..width).map(|i| r.get(i).cloned().unwrap_or_default()).collect());
         }
+        included += 1;
     }
-    let Some(headers) = headers else { return false };
-    if headers.len() < 2 || data.len() < 2 {
-        return false;
+    let headers = headers?;
+    if headers.len() < 2 || data.len() < 2 || included < 2 {
+        return None;
     }
-    match table_from_matrix(&headers, &data) {
-        Some((schema, batch)) => MemTable::try_new(schema, vec![vec![batch]])
-            .ok()
-            .map(|mem| ctx.register_table(tname, Arc::new(mem)).is_ok())
-            .unwrap_or(false),
-        None => false,
-    }
+    let (schema, batch) = table_from_matrix(&headers, &data)?;
+    Some((schema, batch, included))
 }
 
 /// How many leading rows are scanned for a plausible header.
@@ -815,6 +852,10 @@ pub struct QueryResult {
     /// Engine-built chart spec JSON when the result is chartable (Phase C) —
     /// rendered by the UI from a ```lighthouse-chart fence. Never model text.
     pub chart: Option<String>,
+    /// Digest of the FULL execution-capped result (not the narration-clipped
+    /// render) — pin change detection compares this, so a change anywhere in
+    /// the result alerts even past the narration caps.
+    pub digest: String,
 }
 
 /// Run a guarded query with a hard timeout and result caps.
@@ -854,11 +895,15 @@ pub async fn run_query(ctx: &SessionContext, sql: &str) -> Result<QueryResult, S
         ));
     }
     let chart = if truncated { None } else { chart_spec_from_batches(&batches) };
+    let (digest_bytes, _) = batches_to_csv(&batches, MAX_RESULT_ROWS + 1);
+    let digest: String =
+        Sha1::digest(&digest_bytes).iter().map(|b| format!("{b:02x}")).collect();
     Ok(QueryResult {
         markdown,
         shown,
         truncated,
         chart,
+        digest,
     })
 }
 
@@ -1794,23 +1839,34 @@ pub fn step_question(question: &str, steps: &[StepRecord]) -> String {
 
 /// Everything a deterministic re-execution answers with: the (narration-
 /// capped) result table, the chart when chartable, and the standard
-/// provenance footer.
+/// provenance footer. `result_digest` covers the FULL execution-capped
+/// result — pin change detection compares it.
 #[derive(Debug)]
 pub struct DirectResult {
     pub markdown: String,
     pub chart: Option<String>,
     pub footer: String,
+    pub result_digest: String,
 }
 
 /// Resolve an answer's file ids and register them as tables — the shared
-/// front half of every direct (model-free) execution. Unknown / no-longer-
-/// tabular ids are counted so callers can note them in the footer.
+/// front half of every direct (model-free) execution. Ids that are unknown,
+/// no longer tabular, or NO LONGER VISIBLE TO AI are skipped and counted so
+/// callers can note them in the footer: exclusion binds here exactly like it
+/// does in the ask pipeline — a stale answer's meta (or a pin) can't keep
+/// reading a file the user has since hidden.
 async fn direct_tables(
     file_ids: &[String],
 ) -> Result<(SessionContext, Vec<TableReg>, usize), String> {
+    let active: std::collections::HashSet<String> =
+        crate::vault::active_included_file_ids().into_iter().collect();
     let mut files: Vec<(String, String, PathBuf)> = Vec::new();
     let mut skipped = 0usize;
     for id in file_ids {
+        if !active.contains(id) {
+            skipped += 1;
+            continue;
+        }
         match crate::vault::doc_path(id) {
             Some((name, abs)) if is_tabular(&name) => files.push((id.clone(), name, abs)),
             _ => skipped += 1,
@@ -1833,7 +1889,7 @@ fn direct_footer(sql: &str, regs: &[TableReg], skipped: usize) -> String {
         footer.push_str(&fresh);
     }
     if skipped > 0 {
-        footer.push_str(&format!("_(skipped {skipped} file(s) no longer in the vault)_\n"));
+        footer.push_str(&format!("_(skipped {skipped} file(s) no longer available to AI)_\n"));
     }
     footer
 }
@@ -1845,15 +1901,21 @@ pub async fn run_direct(sql: &str, file_ids: &[String]) -> Result<DirectResult, 
     let (ctx, regs, skipped) = direct_tables(file_ids).await?;
     let res = run_query(&ctx, sql).await?;
     let footer = direct_footer(sql, &regs, skipped);
-    Ok(DirectResult { markdown: res.markdown, chart: res.chart, footer })
+    Ok(DirectResult {
+        markdown: res.markdown,
+        chart: res.chart,
+        footer,
+        result_digest: res.digest,
+    })
 }
 
 /// Save-path row cap: full-fidelity export, bounded sanely (the narration
 /// caps stay much smaller — openspec: add-answer-artifacts, design §1).
 pub const SAVE_MAX_ROWS: usize = 100_000;
 
-/// RFC-4180 CSV (quote-doubling) from record batches, capped at `max_rows`
-/// data rows. Returns (bytes, data_row_count). NULLs render empty.
+/// RFC-4180 CSV (quote-doubling, CRLF record separators) from record batches,
+/// capped at `max_rows` data rows. Returns (bytes, data_row_count). NULLs
+/// render empty.
 pub fn batches_to_csv(batches: &[RecordBatch], max_rows: usize) -> (Vec<u8>, usize) {
     fn field(s: &str) -> String {
         if s.contains(',') || s.contains('"') || s.contains('\n') || s.contains('\r') {
@@ -1869,7 +1931,7 @@ pub fn batches_to_csv(batches: &[RecordBatch], max_rows: usize) -> (Vec<u8>, usi
     let header: Vec<String> =
         first.schema().fields().iter().map(|f| field(f.name())).collect();
     out.push_str(&header.join(","));
-    out.push('\n');
+    out.push_str("\r\n");
     let mut rows = 0usize;
     'outer: for b in batches {
         for row in 0..b.num_rows() {
@@ -1887,7 +1949,7 @@ pub fn batches_to_csv(batches: &[RecordBatch], max_rows: usize) -> (Vec<u8>, usi
                 cells.push(field(&v));
             }
             out.push_str(&cells.join(","));
-            out.push('\n');
+            out.push_str("\r\n");
             rows += 1;
         }
     }
@@ -1932,7 +1994,12 @@ pub async fn run_direct_save(
     .map_err(|e| e.to_string())?;
     let footer = direct_footer(sql, &regs, skipped);
     Ok((
-        DirectResult { markdown: res.markdown, chart: res.chart, footer },
+        DirectResult {
+            markdown: res.markdown,
+            chart: res.chart,
+            footer,
+            result_digest: res.digest,
+        },
         SavedResult { id, name, rows },
     ))
 }

@@ -48,6 +48,8 @@ async fn save_as_csv_writes_a_queryable_vault_file() {
         "region,amount\nNE,100\nNW,50\nNE,25\n",
     );
     vault::invalidate_walk_cache();
+    // Direct execution honors AI visibility — only included files register.
+    vault::set_included("sales.csv", true);
 
     let ids = vec!["sales.csv".to_string()];
     let (preview, saved) = run_direct_save(
@@ -69,7 +71,7 @@ async fn save_as_csv_writes_a_queryable_vault_file() {
         vault_dir.path().join("Lighthouse Results").join(&saved.name),
     )
     .unwrap();
-    assert_eq!(csv, "region,total\nNE,125\nNW,50\n");
+    assert_eq!(csv, "region,total\r\nNE,125\r\nNW,50\r\n");
 
     // And the walk sees it immediately — it's ordinary vault input now.
     let nodes = vault::list_nodes();

@@ -1116,6 +1116,9 @@ export function ChatPanel() {
   const [sqlDraft, setSqlDraft] = useState("");
   const [sqlRunning, setSqlRunning] = useState(false);
   const [sqlOutcome, setSqlOutcome] = useState<{ content?: string; error?: string } | null>(null);
+  // Generation token for dialog runs: bumped on open/close so a slow query
+  // from a CLOSED dialog can never paint its result into a newer one.
+  const sqlRunSeq = useRef(0);
   // --- Answer artifacts: per-turn Save-as-CSV outcome, and the transient
   //     export-chat-to-note confirmation bar. ---
   const [savedNotes, setSavedNotes] = useState<
@@ -1125,6 +1128,8 @@ export function ChatPanel() {
     null,
   );
   const exportNoteTimer = useRef<number | null>(null);
+  // In-flight guard: a double-click must not write "Chat.md" AND "Chat (1).md".
+  const [exportBusy, setExportBusy] = useState(false);
   // --- Pinned questions: per-turn pin outcome, the changed-pins alerts (from
   //     the shell's watcher-driven recheck pass), and the pins dialog. ---
   const [pinNotes, setPinNotes] = useState<
@@ -1134,6 +1139,13 @@ export function ChatPanel() {
   const [pinsOpen, setPinsOpen] = useState(false);
   const [pinList, setPinList] = useState<Pin[]>([]);
   const [pinsBusy, setPinsBusy] = useState(false);
+  // Saved/pinned notes are keyed by message id, and ids RESTART per
+  // conversation — clear both maps on a conversation switch so a new chat's
+  // "a2" never inherits another chat's "Saved…"/"Pinned…" claims.
+  useEffect(() => {
+    setSavedNotes({});
+    setPinNotes({});
+  }, [currentId]);
   // Cancels the in-flight ask() when the user presses Stop.
   const abortRef = useRef<AbortController | null>(null);
   // Files explicitly attached to the conversation (dragged from the explorer or
@@ -1180,6 +1192,7 @@ export function ChatPanel() {
       if (copyTimer.current !== null) window.clearTimeout(copyTimer.current);
       if (flashTimer.current !== null) window.clearTimeout(flashTimer.current);
       if (undoTimer.current !== null) window.clearTimeout(undoTimer.current);
+      if (exportNoteTimer.current !== null) window.clearTimeout(exportNoteTimer.current);
     },
     [],
   );
@@ -1570,7 +1583,8 @@ export function ChatPanel() {
   /** Export the conversation as a markdown note into Lighthouse Notes/. */
   async function exportChatToNote() {
     const msgs = useChatStore.getState().messages;
-    if (msgs.length === 0 || streaming) return;
+    if (msgs.length === 0 || streaming || exportBusy) return;
+    setExportBusy(true);
     const title =
       conversations.find((c) => c.id === currentId)?.title.trim() || "Lighthouse chat";
     let next: { id?: string; name?: string; error?: string };
@@ -1583,6 +1597,8 @@ export function ChatPanel() {
       if (!next.error) logEvent("chat_export_note");
     } catch (err) {
       next = { error: err instanceof Error ? err.message : "export failed" };
+    } finally {
+      setExportBusy(false);
     }
     setExportNote(next);
     if (exportNoteTimer.current !== null) window.clearTimeout(exportNoteTimer.current);
@@ -1710,9 +1726,18 @@ export function ChatPanel() {
 
   /** Open the Edit SQL dialog seeded with an analytics answer's own query. */
   function openSqlEditor(meta: AnalyticsMeta) {
+    sqlRunSeq.current += 1; // invalidate any run from a previous dialog
     setSqlEdit(meta);
     setSqlDraft(meta.sql);
     setSqlOutcome(null);
+    setSqlRunning(false);
+  }
+
+  /** Close the dialog, orphaning (not adopting) any still-running query. */
+  function closeSqlEditor() {
+    sqlRunSeq.current += 1;
+    setSqlEdit(null);
+    setSqlRunning(false);
   }
 
   /**
@@ -1725,10 +1750,12 @@ export function ChatPanel() {
     const meta = sqlEdit;
     const sql = sqlDraft.trim();
     if (!meta || !sql || sqlRunning) return;
+    const seq = ++sqlRunSeq.current;
     setSqlRunning(true);
     setSqlOutcome(null);
     try {
       const res = await ragService.analyticsSql(sql, meta.fileIds);
+      if (seq !== sqlRunSeq.current) return; // dialog closed/reopened meanwhile
       if (res.error) {
         setSqlOutcome({ error: res.error });
       } else {
@@ -1741,11 +1768,12 @@ export function ChatPanel() {
       }
       logEvent("analytics_sql_run", { outcome: res.error ? "error" : "ok" });
     } catch (err) {
+      if (seq !== sqlRunSeq.current) return;
       setSqlOutcome({
         error: err instanceof Error ? err.message : "the query could not be run",
       });
     } finally {
-      setSqlRunning(false);
+      if (seq === sqlRunSeq.current) setSqlRunning(false);
     }
   }
 
@@ -1929,14 +1957,18 @@ export function ChatPanel() {
   // static suggestions below. openspec: add-vault-meta-answers.
   const [engineAsks, setEngineAsks] = useState<{ label: string; question: string }[]>([]);
   const emptyState = messages.length === 0;
+  // Keyed by VALUE, not array identity: the vault poll rebuilds `nodes` (and
+  // so `includedFileIds`) every few seconds even when nothing changed, and a
+  // per-tick engine round-trip for suggestions would be pure waste.
+  const includedKey = useMemo(() => includedFileIds.join("\n"), [includedFileIds]);
   useEffect(() => {
-    if (!emptyState || includedFileIds.length === 0) {
+    if (!emptyState || !includedKey) {
       setEngineAsks([]);
       return;
     }
     let cancelled = false;
     ragService
-      .suggestedAsks(includedFileIds)
+      .suggestedAsks(includedKey.split("\n"))
       .then((asks) => {
         if (!cancelled) setEngineAsks(Array.isArray(asks) ? asks.slice(0, 4) : []);
       })
@@ -1946,7 +1978,7 @@ export function ChatPanel() {
     return () => {
       cancelled = true;
     };
-  }, [emptyState, includedFileIds]);
+  }, [emptyState, includedKey]);
 
   // Up to 3 starter prompts built from the user's actual included file names.
   const suggestions = useMemo(() => {
@@ -2333,6 +2365,7 @@ export function ChatPanel() {
                       appearance="subtle"
                       icon={<DeleteRegular />}
                       aria-label={`Remove pin: ${p.question}`}
+                      disabled={pinsBusy}
                       onClick={() => void removePin(p.id)}
                     />
                   </div>
@@ -2648,7 +2681,7 @@ export function ChatPanel() {
                 appearance="subtle"
                 icon={<SaveRegular />}
                 aria-label="Save chat to a vault note"
-                disabled={streaming}
+                disabled={streaming || exportBusy}
                 onClick={() => void exportChatToNote()}
               />
             </Tooltip>
@@ -2927,7 +2960,7 @@ export function ChatPanel() {
       <Dialog
         open={sqlEdit !== null}
         onOpenChange={(_, data) => {
-          if (!data.open) setSqlEdit(null);
+          if (!data.open) closeSqlEditor();
         }}
       >
         <DialogSurface className={styles.sqlDialogSurface}>
@@ -2976,7 +3009,7 @@ export function ChatPanel() {
               )}
             </DialogContent>
             <DialogActions>
-              <Button appearance="secondary" onClick={() => setSqlEdit(null)}>
+              <Button appearance="secondary" onClick={closeSqlEditor}>
                 Close
               </Button>
               <Button

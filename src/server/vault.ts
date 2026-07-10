@@ -511,7 +511,11 @@ export function writeArtifact(
 ): { id: string; name: string } {
   let clean = [...nameHint]
     .slice(0, 80)
-    .map((c) => (c === "/" || c === "\\" || c.charCodeAt(0) < 32 ? "-" : c))
+    .map((c) => {
+      const code = c.charCodeAt(0);
+      // Control chars = C0 + DEL + C1, matching Rust's char::is_control().
+      return c === "/" || c === "\\" || code < 32 || (code >= 127 && code <= 159) ? "-" : c;
+    })
     .join("")
     .trim()
     .replace(/^\.+/, "")

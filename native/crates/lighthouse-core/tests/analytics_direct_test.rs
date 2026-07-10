@@ -16,6 +16,8 @@ async fn direct_execution_is_guarded_and_provenanced() {
     let _guard = common::lock_env(vault.path());
     write(&vault.path().join("sales.csv"), "region,amount\nNE,100\nNW,50\n");
     lighthouse_core::vault::invalidate_walk_cache();
+    // Direct execution honors AI visibility — only included files register.
+    lighthouse_core::vault::set_included("sales.csv", true);
 
     let ids = vec!["sales.csv".to_string(), "gone.csv".to_string()];
 

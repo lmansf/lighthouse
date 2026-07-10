@@ -16,8 +16,21 @@
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 use std::path::PathBuf;
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use crate::config::{now_ms, state_dir};
+
+/// Serializes every load-modify-save on the store (adds, removes, recheck
+/// merges). Never held across an await — rechecks snapshot under the lock,
+/// run their queries unlocked, then merge under the lock again.
+static STORE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn store_lock() -> MutexGuard<'static, ()> {
+    STORE_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 /// A briefing list, not a dashboard product.
 pub const MAX_PINS: usize = 20;
@@ -79,7 +92,12 @@ fn save(pins: &[Pin]) {
         let _ = std::fs::create_dir_all(parent);
     }
     if let Ok(json) = serde_json::to_string_pretty(&Store { pins: pins.to_vec() }) {
-        let _ = std::fs::write(path, json);
+        // Atomic temp+rename: a crash mid-write must never leave truncated
+        // JSON, because list() treats a corrupt store as empty (data loss).
+        let tmp = path.with_extension("json.tmp");
+        if std::fs::write(&tmp, json).is_ok() {
+            let _ = std::fs::rename(&tmp, &path);
+        }
     }
 }
 
@@ -98,6 +116,7 @@ pub fn add(question: &str, sql: &str, file_ids: &[String]) -> Result<Pin, String
     if question.is_empty() || sql.is_empty() {
         return Err("a pin needs the question and its SQL".to_string());
     }
+    let _guard = store_lock();
     let mut pins = list();
     let id = pin_id(sql);
     pins.retain(|p| p.id != id); // re-pin replaces
@@ -124,6 +143,7 @@ pub fn add(question: &str, sql: &str, file_ids: &[String]) -> Result<Pin, String
 
 /// Remove a pin by id (idempotent).
 pub fn remove(id: &str) {
+    let _guard = store_lock();
     let mut pins = list();
     pins.retain(|p| p.id != id);
     save(&pins);
@@ -164,8 +184,10 @@ fn summarize(markdown: &str) -> String {
 async fn recheck_pin(pin: &mut Pin) -> Option<ChangedPin> {
     match crate::analytics::run_direct(&pin.sql, &pin.file_ids).await {
         Ok(res) => {
-            let digest: String =
-                Sha1::digest(res.markdown.as_bytes()).iter().map(|b| format!("{b:02x}")).collect();
+            // Full-fidelity digest (the whole execution-capped result), NOT
+            // the narration-clipped markdown — a change in row 45 of 60 must
+            // alert even though the narration only carries the first 40 rows.
+            let digest = res.result_digest.clone();
             let summary = summarize(&res.markdown);
             let changed = pin.last_digest.as_deref().is_some_and(|d| d != digest);
             let before = pin.last_summary.clone();
@@ -190,27 +212,62 @@ async fn recheck_pin(pin: &mut Pin) -> Option<ChangedPin> {
 
 /// Recheck every pin sequentially (≤20 local queries) and persist the new
 /// digests. Returns the pins whose computed result changed.
+///
+/// The snapshot is taken under the store lock, the (potentially slow) queries
+/// run UNLOCKED, and the recomputed state is then merged onto a fresh load BY
+/// ID — so a pin added mid-pass is kept, a pin removed mid-pass stays removed
+/// (and never alerts), and nothing is clobbered by the pass's stale snapshot.
 pub async fn recheck_all() -> Vec<ChangedPin> {
-    let mut pins = list();
-    if pins.is_empty() {
+    let mut snapshot = {
+        let _guard = store_lock();
+        list()
+    };
+    if snapshot.is_empty() {
         return Vec::new();
     }
     let mut changed = Vec::new();
-    for p in &mut pins {
+    for p in &mut snapshot {
         if let Some(c) = recheck_pin(p).await {
             changed.push(c);
         }
     }
-    save(&pins);
+    let surviving: std::collections::HashSet<String> = {
+        let _guard = store_lock();
+        let mut current = list();
+        for c in &mut current {
+            if let Some(updated) = snapshot.iter().find(|u| u.id == c.id) {
+                *c = updated.clone();
+            }
+        }
+        save(&current);
+        current.into_iter().map(|p| p.id).collect()
+    };
+    changed.retain(|c| surviving.contains(&c.id));
     changed
 }
 
-/// Recheck a single pin (used to prime a fresh pin's summary on add).
+/// Recheck a single pin (used to prime a fresh pin's summary on add). Merges
+/// like `recheck_all`: if the pin was removed while its query ran, the update
+/// is dropped and nothing alerts.
 pub async fn recheck_one(id: &str) -> Option<ChangedPin> {
-    let mut pins = list();
-    let idx = pins.iter().position(|p| p.id == id)?;
-    let changed = recheck_pin(&mut pins[idx]).await;
-    save(&pins);
+    let mut pin = {
+        let _guard = store_lock();
+        list().into_iter().find(|p| p.id == id)
+    }?;
+    let changed = recheck_pin(&mut pin).await;
+    let _guard = store_lock();
+    let mut current = list();
+    let mut found = false;
+    for c in &mut current {
+        if c.id == pin.id {
+            *c = pin.clone();
+            found = true;
+        }
+    }
+    if !found {
+        return None; // removed while the query ran
+    }
+    save(&current);
     changed
 }
 

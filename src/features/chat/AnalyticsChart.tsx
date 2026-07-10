@@ -95,6 +95,9 @@ function downloadChartPng(svg: SVGSVGElement): void {
   }
   clone.setAttribute("width", String(W));
   clone.setAttribute("height", String(H));
+  // The on-screen labels inherit the app font from CSS the standalone SVG
+  // won't have — bake it in so the PNG doesn't rasterize in the UA serif.
+  clone.style.fontFamily = window.getComputedStyle(svg).fontFamily;
   const xml = new XMLSerializer().serializeToString(clone);
   const svgUrl = URL.createObjectURL(new Blob([xml], { type: "image/svg+xml;charset=utf-8" }));
   const img = new Image();
