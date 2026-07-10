@@ -186,7 +186,38 @@ pub async fn register_tables(
     regs
 }
 
-/// calamine → Arrow MemTable per sheet (row 0 = header; ≥80% numeric column →
+/// How many leading rows are scanned for a plausible header.
+const HEADER_SCAN_ROWS: usize = 8;
+
+/// Pick the header row within the first HEADER_SCAN_ROWS rows. Real headers
+/// are wide, textual, and distinct; title rows have one cell, units/data rows
+/// are mostly numeric. A row qualifies with ≥2 non-empty cells that are mostly
+/// non-numeric; the score (textual + distinct counts) must STRICTLY beat every
+/// earlier qualifier to move the header down (ties → earliest). Nothing
+/// qualifies ⇒ row 0, exactly the pre-detection behavior.
+pub(crate) fn detect_header_row(rows: &[Vec<String>]) -> usize {
+    let mut best: Option<(usize, usize)> = None; // (score, row index)
+    for (i, row) in rows.iter().take(HEADER_SCAN_ROWS).enumerate() {
+        let non_empty: Vec<&str> =
+            row.iter().map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+        if non_empty.len() < 2 {
+            continue;
+        }
+        let textual = non_empty.iter().filter(|s| s.parse::<f64>().is_err()).count();
+        if textual * 2 < non_empty.len() {
+            continue; // mostly numbers — a data row, not a header
+        }
+        let distinct: std::collections::HashSet<String> =
+            non_empty.iter().map(|s| s.to_lowercase()).collect();
+        let score = textual + distinct.len();
+        if best.map(|(s, _)| score > s).unwrap_or(true) {
+            best = Some((score, i));
+        }
+    }
+    best.map(|(_, i)| i).unwrap_or(0)
+}
+
+/// calamine → Arrow MemTable per sheet (detected header; ≥80% numeric column →
 /// Float64 with nulls, else Utf8). Returns the registered table names.
 fn register_workbook(ctx: &SessionContext, base: &str, abs: &PathBuf) -> Vec<String> {
     use calamine::Reader;
@@ -200,25 +231,35 @@ fn register_workbook(ctx: &SessionContext, base: &str, abs: &PathBuf) -> Vec<Str
         let Ok(range) = wb.worksheet_range(&sheet) else {
             continue;
         };
-        let mut rows = range.rows();
-        let Some(header_row) = rows.next() else { continue };
-        let headers: Vec<String> = header_row
+        // Stringify once; real workbooks put titles/blank rows above the
+        // header, so the header is detected, not assumed (row 0 fallback).
+        let all: Vec<Vec<String>> = range
+            .rows()
+            .take(MAX_XLSX_ROWS + HEADER_SCAN_ROWS)
+            .map(|r| r.iter().map(crate::extract::cell_text).collect())
+            .collect();
+        if all.is_empty() {
+            continue;
+        }
+        let h = detect_header_row(&all);
+        let headers: Vec<String> = all[h]
             .iter()
             .take(MAX_XLSX_COLS)
             .enumerate()
             .map(|(i, c)| {
-                let h = sanitize_table_name(&crate::extract::cell_text(c));
-                if h.is_empty() || h == "table" { format!("col_{}", i + 1) } else { h }
+                let s = sanitize_table_name(c);
+                if s.is_empty() || s == "table" { format!("col_{}", i + 1) } else { s }
             })
             .collect();
         if headers.len() < 2 {
             continue;
         }
-        let data: Vec<Vec<String>> = rows
+        let data: Vec<Vec<String>> = all[h + 1..]
+            .iter()
             .take(MAX_XLSX_ROWS)
             .map(|r| {
                 (0..headers.len())
-                    .map(|i| r.get(i).map(crate::extract::cell_text).unwrap_or_default())
+                    .map(|i| r.get(i).cloned().unwrap_or_default())
                     .collect()
             })
             .collect();
@@ -652,6 +693,38 @@ mod tests {
         assert!(analytics_cue("top 5 customers by revenue"));
         assert!(!analytics_cue("what does the onboarding doc say about SSO?"));
         assert!(!analytics_cue("when is the invoice due?"));
+    }
+
+    #[test]
+    fn header_row_is_detected_not_assumed() {
+        let rows = |rs: &[&[&str]]| -> Vec<Vec<String>> {
+            rs.iter().map(|r| r.iter().map(|s| s.to_string()).collect()).collect()
+        };
+        // Title row (one cell) above the real header.
+        let sheet = rows(&[
+            &["Q3 Ticket Report"],
+            &[],
+            &["date", "region", "amount"],
+            &["2025-01-02", "NE", "100"],
+        ]);
+        assert_eq!(detect_header_row(&sheet), 2);
+        // Plain sheet: header at row 0 wins ties against textual data rows.
+        let plain = rows(&[&["name", "email"], &["alice", "alice@x.com"]]);
+        assert_eq!(detect_header_row(&plain), 0);
+        // Numeric preamble then header.
+        let preamble = rows(&[&["1", "2", "3"], &["date", "region", "amount"]]);
+        assert_eq!(detect_header_row(&preamble), 1);
+        // Nothing qualifies (all-numeric sheet) → row 0 fallback.
+        let numeric = rows(&[&["1", "2"], &["3", "4"]]);
+        assert_eq!(detect_header_row(&numeric), 0);
+        // Empty input stays at 0.
+        assert_eq!(detect_header_row(&[]), 0);
+        // A wider, more distinct header BELOW a narrow qualifier wins.
+        let wide = rows(&[
+            &["report", "2025"],
+            &["date", "region", "amount", "rep"],
+        ]);
+        assert_eq!(detect_header_row(&wide), 1);
     }
 
     #[test]

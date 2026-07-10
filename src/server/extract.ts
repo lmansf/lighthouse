@@ -87,8 +87,11 @@ async function extractByExt(abs: string, ext: string): Promise<string> {
  * earlier version cached as empty.
  * v3: matches the Rust engine's docx whitespace fidelity + .doc salvage bump
  * so the two engines keep sharing cache entries.
+ * v4: the Rust engine renders Excel datetime cells as ISO 8601 (PARITY: this
+ * engine's SheetJS path already emits formatted date text — the bump only
+ * keeps the shared cache in lockstep).
  */
-const CACHE_VERSION = 3;
+const CACHE_VERSION = 4;
 
 interface CacheRecord {
   v: number;
