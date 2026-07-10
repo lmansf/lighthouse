@@ -165,6 +165,24 @@ pub async fn rag_op(app: AppHandle, body: Value) -> Result<Value, String> {
             let _ = app.emit("vault-changed", ());
             Ok(result)
         }
+        // Deterministic guarded re-execution of an analytics answer's SQL
+        // over exactly the files it read (Edit SQL / refinement plumbing) —
+        // no model, no persistence.
+        Some("analyticsSql") => {
+            let sql = body["sql"].as_str().unwrap_or("").to_string();
+            let file_ids: Vec<String> = body["fileIds"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            Ok(match lighthouse_core::analytics::run_direct(&sql, &file_ids).await {
+                Ok(r) => json!({
+                    "markdown": r.markdown,
+                    "chart": r.chart,
+                    "footer": r.footer,
+                }),
+                Err(e) => json!({ "error": e }),
+            })
+        }
         _ => Err("unknown op".into()),
     }
 }

@@ -30,6 +30,17 @@ export interface RagService {
   /** Retrieve references relevant to a query from the currently-included set. */
   search(query: string, includedFileIds: string[]): Promise<RagReference[]>;
   /**
+   * Re-run an analytics answer's SQL over exactly the files it read — the
+   * guarded, model-free path behind Edit SQL. Returns the (capped) result
+   * table, the chart spec when chartable, and the provenance footer; a guard
+   * rejection or engine failure comes back as `error`. Desktop engine only —
+   * the web dev twin answers with an explanatory error.
+   */
+  analyticsSql(
+    sql: string,
+    fileIds: string[],
+  ): Promise<{ markdown?: string; chart?: string | null; footer?: string; error?: string }>;
+  /**
    * Link a file or folder by its real absolute path instead of copying it into
    * the vault (reduces duplication). Returns the new node id. Desktop-only —
    * the browser has no access to real filesystem paths.

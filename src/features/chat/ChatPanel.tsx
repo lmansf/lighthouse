@@ -24,6 +24,12 @@ import {
   Badge,
   Button,
   Card,
+  Dialog,
+  DialogActions,
+  DialogBody,
+  DialogContent,
+  DialogSurface,
+  DialogTitle,
   DrawerBody,
   DrawerHeader,
   DrawerHeaderTitle,
@@ -33,6 +39,7 @@ import {
   PopoverSurface,
   PopoverTrigger,
   SearchBox,
+  Spinner,
   Switch,
   Text,
   Textarea,
@@ -50,6 +57,7 @@ import {
   ArrowUndoRegular,
   AttachRegular,
   CheckmarkRegular,
+  CodeRegular,
   CopyRegular,
   DeleteRegular,
   DismissRegular,
@@ -59,6 +67,7 @@ import {
   ErrorCircleRegular,
   HistoryRegular,
   OpenRegular,
+  PlayRegular,
   SendRegular,
   SettingsRegular,
   SquareRegular,
@@ -69,8 +78,8 @@ import {
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { DragEvent } from "react";
-import type { ChatTurn, RagReference } from "@/contracts";
-import { chatService, MODEL_PROVIDERS } from "@/contracts";
+import type { AnalyticsMeta, ChatTurn, RagReference } from "@/contracts";
+import { chatService, MODEL_PROVIDERS, ragService } from "@/contracts";
 import { useRagStore } from "@/stores/useRagStore";
 import { useAuthStore } from "@/stores/useAuthStore";
 import { logEvent } from "@/lib/logEvent";
@@ -356,6 +365,34 @@ const useStyles = makeStyles({
     marginTop: tokens.spacingVerticalXXS,
   },
   actionBtn: { color: tokens.colorNeutralForeground3 },
+  // --- Analytics refinement: quick-action chips under answers that carry
+  //     analytics metadata, and the Edit SQL dialog they open. ---
+  refineRow: {
+    display: "flex",
+    flexWrap: "wrap",
+    alignItems: "center",
+    gap: tokens.spacingHorizontalXS,
+    marginTop: tokens.spacingVerticalXS,
+  },
+  sqlDialogSurface: { maxWidth: "720px", width: "92vw" },
+  sqlDialogContent: {
+    display: "flex",
+    flexDirection: "column",
+    gap: tokens.spacingVerticalS,
+  },
+  sqlEditor: {
+    width: "100%",
+    "& textarea": { fontFamily: tokens.fontFamilyMonospace, fontSize: tokens.fontSizeBase200 },
+  },
+  sqlStatus: {
+    display: "flex",
+    alignItems: "center",
+    gap: tokens.spacingHorizontalS,
+    color: tokens.colorNeutralForeground3,
+  },
+  // The re-run result inside the dialog: same markdown styling as chat answers,
+  // scrolling within the dialog so a wide/tall table never outgrows the screen.
+  sqlResult: { maxHeight: "40vh", overflowY: "auto" },
   // Inline failure banner for a turn that couldn't get an answer — mirrors the
   // addNotice pattern, in danger colors, with Retry + settings escape hatches.
   errorNotice: {
@@ -759,6 +796,70 @@ function CopyCsvButton({ rows }: { rows: string[][] }) {
   );
 }
 
+/**
+ * Canned refinement follow-ups for analytics answers. These ride the normal
+ * ask path — the engine sees the conversation's prior "Query used" fence and
+ * adapts that SQL — so the client never rewrites SQL itself (design:
+ * add-analytics-refinement, decision 4).
+ */
+const REFINE_CHIPS: { label: string; ask: string }[] = [
+  { label: "Top 10", ask: "Refine the previous result: only the top 10 rows." },
+  { label: "Monthly", ask: "Refine the previous result: break it down by month." },
+  {
+    label: "As %",
+    ask: "Refine the previous result: show each row as a percentage of the total.",
+  },
+];
+
+/**
+ * Quick-action chips under an analytics answer. The canned three refine "the
+ * previous result", so they render only on the conversation's last turn where
+ * that phrase is unambiguous; Edit SQL re-runs THIS answer's own SQL over its
+ * own files (deterministic, model-free), so it stays useful on older turns.
+ */
+function RefineChips({
+  meta,
+  isLast,
+  disabled,
+  onAsk,
+  onEditSql,
+}: {
+  meta: AnalyticsMeta;
+  isLast: boolean;
+  disabled: boolean;
+  onAsk: (q: string) => void;
+  onEditSql: (meta: AnalyticsMeta) => void;
+}) {
+  const styles = useStyles();
+  return (
+    <div className={styles.refineRow}>
+      {isLast &&
+        REFINE_CHIPS.map((c) => (
+          <Button
+            key={c.label}
+            appearance="secondary"
+            size="small"
+            shape="circular"
+            disabled={disabled}
+            onClick={() => onAsk(c.ask)}
+          >
+            {c.label}
+          </Button>
+        ))}
+      <Button
+        appearance="secondary"
+        size="small"
+        shape="circular"
+        icon={<CodeRegular />}
+        disabled={disabled}
+        onClick={() => onEditSql(meta)}
+      >
+        Edit SQL
+      </Button>
+    </div>
+  );
+}
+
 /** True when a hast <pre> wraps exactly a lighthouse-chart code fence. */
 function isChartPre(node: unknown): boolean {
   const child = (node as { children?: unknown[] })?.children?.[0] as
@@ -932,6 +1033,12 @@ export function ChatPanel() {
   const [attachSearch, setAttachSearch] = useState("");
   // Per-answer 👍/👎, remembered for the session so the choice reads as "set".
   const [ratings, setRatings] = useState<Record<string, "up" | "down">>({});
+  // --- Edit SQL dialog (analytics refinement): the answer meta being edited
+  //     (null = closed), the SQL draft, and the last run's outcome. ---
+  const [sqlEdit, setSqlEdit] = useState<AnalyticsMeta | null>(null);
+  const [sqlDraft, setSqlDraft] = useState("");
+  const [sqlRunning, setSqlRunning] = useState(false);
+  const [sqlOutcome, setSqlOutcome] = useState<{ content?: string; error?: string } | null>(null);
   // Cancels the in-flight ask() when the user presses Stop.
   const abortRef = useRef<AbortController | null>(null);
   // Files explicitly attached to the conversation (dragged from the explorer or
@@ -1264,6 +1371,13 @@ export function ChatPanel() {
           sourceCount = refs.length;
           setMessages((m) => m.map((x) => (x.id === asstId ? { ...x, references: refs } : x)));
         }
+        if (chunk.analytics) {
+          // Structured provenance of an analytics answer (final chunk): the
+          // exact SQL + files read. Stored on the turn to power the refinement
+          // chips and Edit SQL. Desktop engine only — absent elsewhere.
+          const meta = chunk.analytics;
+          setMessages((m) => m.map((x) => (x.id === asstId ? { ...x, analytics: meta } : x)));
+        }
       }
       if (controller.signal.aborted) {
         markStopped(asstId);
@@ -1313,6 +1427,47 @@ export function ChatPanel() {
   /** Abort the in-flight answer; the partial text is kept with a "(stopped)" note. */
   function stopStreaming() {
     abortRef.current?.abort();
+  }
+
+  /** Open the Edit SQL dialog seeded with an analytics answer's own query. */
+  function openSqlEditor(meta: AnalyticsMeta) {
+    setSqlEdit(meta);
+    setSqlDraft(meta.sql);
+    setSqlOutcome(null);
+  }
+
+  /**
+   * Run the edited SQL through the guarded, model-free engine path — same
+   * files as the original answer, single SELECT enforced engine-side. The
+   * result (or the guard's reason) renders inside the dialog; the transcript
+   * is never touched.
+   */
+  async function runSqlDraft() {
+    const meta = sqlEdit;
+    const sql = sqlDraft.trim();
+    if (!meta || !sql || sqlRunning) return;
+    setSqlRunning(true);
+    setSqlOutcome(null);
+    try {
+      const res = await ragService.analyticsSql(sql, meta.fileIds);
+      if (res.error) {
+        setSqlOutcome({ error: res.error });
+      } else {
+        // Compose the same shape a chat analytics answer has: table, then the
+        // chart fence when chartable, then the provenance footer.
+        const parts = [res.markdown ?? ""];
+        if (res.chart) parts.push("```lighthouse-chart\n" + res.chart + "\n```");
+        if (res.footer) parts.push(res.footer);
+        setSqlOutcome({ content: parts.filter(Boolean).join("\n\n") });
+      }
+      logEvent("analytics_sql_run", { outcome: res.error ? "error" : "ok" });
+    } catch (err) {
+      setSqlOutcome({
+        error: err instanceof Error ? err.message : "the query could not be run",
+      });
+    } finally {
+      setSqlRunning(false);
+    }
   }
 
   /** Re-send a failed turn's question, removing the failed turn first. */
@@ -2178,6 +2333,17 @@ export function ChatPanel() {
                           </Tooltip>
                         </div>
                       )}
+                      {/* Refinement chips: only under answers carrying analytics
+                          metadata (i.e. the engine computed this via SQL). */}
+                      {m.analytics && !m.error && !(streaming && m.id === lastId) && (
+                        <RefineChips
+                          meta={m.analytics}
+                          isLast={m.id === lastId}
+                          disabled={streaming}
+                          onAsk={(q) => void sendQuestion(q)}
+                          onEditSql={openSqlEditor}
+                        />
+                      )}
                       {m.references && m.references.length > 0 && (
                         <References turnId={m.id} references={m.references} />
                       )}
@@ -2214,6 +2380,77 @@ export function ChatPanel() {
 
         {composer("Ask a follow-up…")}
       </div>
+
+      {/* Edit SQL: the deterministic escape hatch on analytics answers. Runs
+          the draft through the engine's guarded single-SELECT path over the
+          same files the answer read — instant, model-free, never persisted. */}
+      <Dialog
+        open={sqlEdit !== null}
+        onOpenChange={(_, data) => {
+          if (!data.open) setSqlEdit(null);
+        }}
+      >
+        <DialogSurface className={styles.sqlDialogSurface}>
+          <DialogBody>
+            <DialogTitle>Edit SQL</DialogTitle>
+            <DialogContent className={styles.sqlDialogContent}>
+              <Text size={200} className={styles.quietNote}>
+                Runs instantly against the same files as the answer — one read-only SELECT,
+                no AI involved. {modKey()}+Enter to run.
+              </Text>
+              <Textarea
+                className={styles.sqlEditor}
+                value={sqlDraft}
+                onChange={(_, d) => setSqlDraft(d.value)}
+                resize="vertical"
+                rows={6}
+                spellCheck={false}
+                aria-label="SQL query"
+                onKeyDown={(e) => {
+                  if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+                    e.preventDefault();
+                    void runSqlDraft();
+                  }
+                }}
+              />
+              {sqlRunning && (
+                <div className={styles.sqlStatus}>
+                  <Spinner size="tiny" />
+                  <Text size={200}>Running…</Text>
+                </div>
+              )}
+              {sqlOutcome?.error && (
+                <div className={styles.errorNotice}>
+                  <ErrorCircleRegular fontSize={16} />
+                  <Text size={200}>{sqlOutcome.error}</Text>
+                </div>
+              )}
+              {sqlOutcome?.content && (
+                <div className={mergeClasses(styles.answer, styles.sqlResult)}>
+                  <AnswerMarkdown
+                    content={sqlOutcome.content}
+                    turnId="sql-editor"
+                    onCite={handleCitationClick}
+                  />
+                </div>
+              )}
+            </DialogContent>
+            <DialogActions>
+              <Button appearance="secondary" onClick={() => setSqlEdit(null)}>
+                Close
+              </Button>
+              <Button
+                appearance="primary"
+                icon={<PlayRegular />}
+                disabled={sqlRunning || !sqlDraft.trim()}
+                onClick={() => void runSqlDraft()}
+              >
+                Run
+              </Button>
+            </DialogActions>
+          </DialogBody>
+        </DialogSurface>
+      </Dialog>
     </section>
   );
 }

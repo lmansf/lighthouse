@@ -9,7 +9,7 @@ use std::pin::Pin;
 
 use futures::{Stream, StreamExt};
 
-use crate::contracts::{ChatChunk, ChatProgress, ChatTurn, RagReference};
+use crate::contracts::{AnalyticsMeta, ChatChunk, ChatProgress, ChatTurn, RagReference};
 use crate::llm::{self, Ctx, ModelCfg};
 use crate::table_profile::{is_profileable, table_profile};
 use crate::{sources, vault};
@@ -158,16 +158,23 @@ fn progress(label: String, step: usize, total: usize) -> ChatChunk {
         delta: String::new(),
         references: None,
         progress: Some(ChatProgress { label, step, total }),
+        analytics: None,
         done: false,
     }
 }
 
 fn delta(d: String) -> ChatChunk {
-    ChatChunk { delta: d, references: None, progress: None, done: false }
+    ChatChunk { delta: d, references: None, progress: None, analytics: None, done: false }
 }
 
 fn final_chunk(references: Vec<RagReference>) -> ChatChunk {
-    ChatChunk { delta: String::new(), references: Some(references), progress: None, done: true }
+    ChatChunk {
+        delta: String::new(),
+        references: Some(references),
+        progress: None,
+        analytics: None,
+        done: true,
+    }
 }
 
 async fn collect(mut s: llm::AnswerStream) -> String {
@@ -291,8 +298,11 @@ pub fn answer_pipeline(
                         });
                     }
                     yield progress("Writing a query…".to_string(), 2, 4);
+                    // A refining follow-up should adapt the conversation's
+                    // previous query, not re-derive it from scratch.
+                    let prior_sql = crate::analytics::last_query_used(&history);
                     let raw = collect(llm::stream_answer(
-                        crate::analytics::sql_question(&question),
+                        crate::analytics::sql_question(&question, prior_sql.as_deref()),
                         sql_ctxs.clone(),
                         cfg.clone(),
                         history.clone(),
@@ -312,7 +322,7 @@ pub fn answer_pipeline(
                                 // One correction round with the engine's error.
                                 let retry_q = format!(
                                     "{}\n\nYour previous SQL failed.\nPrevious SQL: {sql}\nError: {err}\nWrite a corrected single SELECT statement.",
-                                    crate::analytics::sql_question(&question)
+                                    crate::analytics::sql_question(&question, prior_sql.as_deref())
                                 );
                                 let raw2 = collect(llm::stream_answer(
                                     retry_q,
@@ -399,7 +409,31 @@ pub fn answer_pipeline(
                                 }
                             }
                         }
-                        yield final_chunk(refs);
+                        // Structured provenance for chips / Save-as-CSV /
+                        // pins: EVERY file read (all group members), not just
+                        // the cited sample.
+                        let mut meta_seen: std::collections::HashSet<String> =
+                            std::collections::HashSet::new();
+                        let mut meta_ids: Vec<String> = Vec::new();
+                        for r in &regs {
+                            match &r.group {
+                                Some(g) => {
+                                    for id in &g.file_ids {
+                                        if meta_seen.insert(id.clone()) {
+                                            meta_ids.push(id.clone());
+                                        }
+                                    }
+                                }
+                                None => {
+                                    if meta_seen.insert(r.file_id.clone()) {
+                                        meta_ids.push(r.file_id.clone());
+                                    }
+                                }
+                            }
+                        }
+                        let mut done = final_chunk(refs);
+                        done.analytics = Some(AnalyticsMeta { sql, file_ids: meta_ids });
+                        yield done;
                         return;
                     }
                 }

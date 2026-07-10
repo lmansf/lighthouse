@@ -42,6 +42,18 @@ class RealRagService implements RagService {
     return (res.references as RagReference[]) ?? [];
   }
 
+  async analyticsSql(
+    sql: string,
+    fileIds: string[],
+  ): Promise<{ markdown?: string; chart?: string | null; footer?: string; error?: string }> {
+    return (await post({ op: "analyticsSql", sql, fileIds })) as {
+      markdown?: string;
+      chart?: string | null;
+      footer?: string;
+      error?: string;
+    };
+  }
+
   async addReference(path: string): Promise<{ id: string; kind: "file" | "folder" }> {
     const res = await post({ op: "addReference", path });
     return res as { id: string; kind: "file" | "folder" };

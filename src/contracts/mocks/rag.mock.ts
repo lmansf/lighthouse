@@ -59,6 +59,24 @@ class MockRagService implements RagService {
       .slice(0, 4);
   }
 
+  async analyticsSql(
+    sql: string,
+    _fileIds: string[],
+  ): Promise<{ markdown?: string; chart?: string | null; footer?: string; error?: string }> {
+    // Deterministic mock: SELECTs "succeed" with a canned table so the Edit
+    // SQL dialog is fully exercisable offline; anything else is rejected the
+    // way the real guard would phrase it.
+    await new Promise((r) => setTimeout(r, 200));
+    if (!/^\s*(select|with)\b/i.test(sql)) {
+      return { error: "only SELECT queries are allowed" };
+    }
+    return {
+      markdown: "| region | total |\n| --- | --- |\n| NE | 150 |\n| NW | 200 |",
+      chart: null,
+      footer: `*Query used:*\n\`\`\`sql\n${sql}\n\`\`\`\n*Computed from:* “sales.csv” (saved just now)`,
+    };
+  }
+
   async addReference(path: string): Promise<{ id: string; kind: "file" | "folder" }> {
     // The mock has no filesystem; surface a referenced node so the surface is
     // exercised. A real implementation links the true path on disk.

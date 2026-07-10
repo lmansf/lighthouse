@@ -133,6 +133,25 @@ pub async fn rag_post(headers: HeaderMap, body: Option<Json<Value>>) -> Response
                 Err(e) => bad_request(&err_message(&e, "remove failed")),
             }
         }
+        // Deterministic guarded re-execution of an analytics answer's SQL
+        // over exactly the files it read (Edit SQL / refinement plumbing) —
+        // no model, no persistence.
+        Some("analyticsSql") => {
+            let sql = body["sql"].as_str().unwrap_or("").to_string();
+            let file_ids: Vec<String> = body["fileIds"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            return match lighthouse_core::analytics::run_direct(&sql, &file_ids).await {
+                Ok(r) => Json(json!({
+                    "markdown": r.markdown,
+                    "chart": r.chart,
+                    "footer": r.footer,
+                }))
+                .into_response(),
+                Err(e) => Json(json!({ "error": e })).into_response(),
+            };
+        }
         Some("restore") => {
             let token = &body["token"];
             if !token.is_object() {

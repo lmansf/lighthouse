@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::contracts::ChatTurn;
 use datafusion::arrow::array::{ArrayRef, Float64Array, StringArray};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
@@ -1153,10 +1154,49 @@ mod tests {
             assert_eq!(extract_sql(&fenced).as_deref(), Some(*sql), "{q}");
         }
         // All five ride in the prompt.
-        let prompt = sql_question("top vendors by spend");
+        let prompt = sql_question("top vendors by spend", None);
         for (_, sql) in SQL_FEWSHOTS {
             assert!(prompt.contains(sql));
         }
+    }
+
+    #[test]
+    fn prior_query_rides_only_when_present() {
+        let with = sql_question("same but monthly", Some("SELECT a FROM t"));
+        assert!(with.contains("Previous query from this conversation"), "{with}");
+        assert!(with.contains("SELECT a FROM t"));
+        let without = sql_question("total sales", None);
+        assert!(!without.contains("Previous query"));
+    }
+
+    #[test]
+    fn last_query_used_recovers_the_latest_fence() {
+        let turn = |role: &str, content: &str| ChatTurn { role: role.into(), content: content.into() };
+        // No analytics yet.
+        assert_eq!(last_query_used(&[turn("user", "hi"), turn("assistant", "hello")]), None);
+        // The most recent fenced answer wins, even past a non-analytics turn.
+        let history = vec![
+            turn("user", "totals?"),
+            turn(
+                "assistant",
+                "Totals below.\n\n*Query used:*\n```sql\nSELECT region, SUM(x) FROM t GROUP BY region\n```\n",
+            ),
+            turn("user", "what does the doc say?"),
+            turn("assistant", "The doc says …"),
+        ];
+        assert_eq!(
+            last_query_used(&history).as_deref(),
+            Some("SELECT region, SUM(x) FROM t GROUP BY region")
+        );
+        // Multiple fences in one answer (multi-step) → the LAST fence.
+        let multi = vec![turn(
+            "assistant",
+            "*Queries used (2):*\n```sql\nSELECT 1\n```\n```sql\nSELECT 2\n```\n",
+        )];
+        assert_eq!(last_query_used(&multi).as_deref(), Some("SELECT 2"));
+        // Oversized prior clamps.
+        let big = format!("*Query used:*\n```sql\nSELECT {}\n```", "x".repeat(2000));
+        assert!(last_query_used(&[turn("assistant", &big)]).unwrap().len() <= 800);
     }
 
     fn batch(labels: &[&str], values: &[f64]) -> RecordBatch {
@@ -1493,15 +1533,59 @@ pub const SQL_FEWSHOTS: &[(&str, &str)] = &[
     ),
 ];
 
+/// Prior-query context is clamped — the local model's 6144-token window pays
+/// for every char of it.
+const PRIOR_SQL_MAX_CHARS: usize = 800;
+
+/// The most recent executed query in this conversation, recovered from the
+/// deterministic "Query used" fence the engine itself wrote into the last
+/// analytics answer (the client round-trips history, so no storage and no
+/// staleness across restarts). Multi-fence answers yield the LAST fence.
+pub fn last_query_used(history: &[ChatTurn]) -> Option<String> {
+    for t in history.iter().rev() {
+        if t.role != "assistant" || !t.content.contains("Quer") {
+            continue;
+        }
+        if !t.content.contains("Query used") && !t.content.contains("Queries used") {
+            continue;
+        }
+        let mut last: Option<&str> = None;
+        let mut rest = t.content.as_str();
+        while let Some(start) = rest.find("```sql") {
+            let after = &rest[start + 6..];
+            let Some(end) = after.find("```") else { break };
+            let sql = after[..end].trim();
+            if !sql.is_empty() {
+                last = Some(sql);
+            }
+            rest = &after[end + 3..];
+        }
+        if let Some(sql) = last {
+            return Some(sql.chars().take(PRIOR_SQL_MAX_CHARS).collect());
+        }
+    }
+    None
+}
+
 /// The SQL-writing ask handed to the model (schemas ride as context blocks).
 /// The reply is post-processed by extract_sql + the guard, so stray prose or
-/// citation markers from the grounded system prompt are tolerated.
-pub fn sql_question(question: &str) -> String {
+/// citation markers from the grounded system prompt are tolerated. When the
+/// conversation already produced a query, it rides along so refinements
+/// ("same thing but monthly") adapt it instead of starting over.
+pub fn sql_question(question: &str, prior_sql: Option<&str>) -> String {
     let examples = SQL_FEWSHOTS
         .iter()
         .map(|(q, sql)| format!("Q: {q}\nSQL: {sql}"))
         .collect::<Vec<_>>()
         .join("\n");
+    let prior = prior_sql
+        .map(|s| {
+            format!(
+                "\nPrevious query from this conversation — if the question \
+                 refines it, adapt this SQL instead of starting over:\n```sql\n{s}\n```\n"
+            )
+        })
+        .unwrap_or_default();
     format!(
         "You are writing ONE SQL query for DataFusion (PostgreSQL-style syntax). \
          The numbered context blocks describe the available tables: their exact \
@@ -1511,7 +1595,48 @@ pub fn sql_question(question: &str) -> String {
          in a ```sql code block — no explanation. Use the exact table and \
          column names as given.\n\n\
          Examples with a GENERIC schema — adapt the table and column names to \
-         the tables described in the context blocks:\n{examples}\n\n\
+         the tables described in the context blocks:\n{examples}\n{prior}\n\
          Question: {question}"
     )
+}
+
+/// Everything a deterministic re-execution answers with: the (narration-
+/// capped) result table, the chart when chartable, and the standard
+/// provenance footer.
+#[derive(Debug)]
+pub struct DirectResult {
+    pub markdown: String,
+    pub chart: Option<String>,
+    pub footer: String,
+}
+
+/// Re-run an answer's SQL against exactly the files it read — the guarded,
+/// model-free path behind Edit SQL, Save-as-CSV, and pin rechecks. Unknown /
+/// no-longer-tabular ids are skipped and noted in the footer.
+pub async fn run_direct(sql: &str, file_ids: &[String]) -> Result<DirectResult, String> {
+    let mut files: Vec<(String, String, PathBuf)> = Vec::new();
+    let mut skipped = 0usize;
+    for id in file_ids {
+        match crate::vault::doc_path(id) {
+            Some((name, abs)) if is_tabular(&name) => files.push((id.clone(), name, abs)),
+            _ => skipped += 1,
+        }
+    }
+    if files.is_empty() {
+        return Err("none of the answer's files are available anymore".to_string());
+    }
+    let ctx = SessionContext::new();
+    let regs = register_tables(&ctx, &files).await;
+    if regs.is_empty() {
+        return Err("the files couldn't be registered as tables".to_string());
+    }
+    let res = run_query(&ctx, sql).await?;
+    let mut footer = format!("*Query used:*\n```sql\n{sql}\n```\n");
+    if let Some(fresh) = freshness_line(&regs, sql, crate::config::now_ms()) {
+        footer.push_str(&fresh);
+    }
+    if skipped > 0 {
+        footer.push_str(&format!("_(skipped {skipped} file(s) no longer in the vault)_\n"));
+    }
+    Ok(DirectResult { markdown: res.markdown, chart: res.chart, footer })
 }

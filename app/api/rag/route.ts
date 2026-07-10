@@ -158,6 +158,14 @@ export async function POST(req: Request) {
       }
     }
 
+    case "analyticsSql":
+      // PARITY: the SQL engine (DataFusion) lives in the desktop engine only;
+      // the dev server never takes the analytics branch, so there is nothing
+      // to re-execute here. The UI surfaces this as the dialog's error state.
+      return NextResponse.json({
+        error: "analytics queries run in the desktop engine — this dev server can't execute SQL",
+      });
+
     default:
       return NextResponse.json({ error: "unknown op" }, { status: 400 });
   }

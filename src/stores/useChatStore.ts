@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { ChatMessage } from "@/contracts";
+import type { AnalyticsMeta, ChatMessage } from "@/contracts";
 
 /**
  * Multi-conversation chat history — OFF by default, opt-in per device.
@@ -51,6 +51,11 @@ export interface TranscriptMessage extends ChatMessage {
    * answer comes back with zero references despite available files.
    */
   hadSources?: boolean;
+  /**
+   * Analytics provenance from the final chunk (exact SQL + files read) —
+   * powers refinement chips and Edit SQL on this turn. Desktop engine only.
+   */
+  analytics?: AnalyticsMeta;
 }
 
 /** One saved conversation: its turns plus list metadata (title, timestamps). */

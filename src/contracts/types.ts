@@ -148,6 +148,19 @@ export interface ChatChunk {
   references?: RagReference[];
   /** Pre-answer progress (multi-document synthesis stages). */
   progress?: ChatProgress;
+  /**
+   * Structured provenance of an analytics answer (final chunk only): the exact
+   * executed SQL and the vault files it read. Drives refinement chips, Edit
+   * SQL, Save-as-CSV, and pins. Desktop engine only — the web dev twin never
+   * takes the analytics branch, so it never sets this.
+   */
+  analytics?: AnalyticsMeta;
   /** True on the last chunk of a response. */
   done: boolean;
+}
+
+/** The exact executed SQL of an analytics answer and the files it read. */
+export interface AnalyticsMeta {
+  sql: string;
+  fileIds: string[];
 }
