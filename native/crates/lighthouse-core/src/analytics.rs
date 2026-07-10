@@ -1200,6 +1200,59 @@ mod tests {
     }
 
     #[test]
+    fn multi_step_cue_needs_both_cues() {
+        // Analytics + comparison/why ⇒ multi-step.
+        for q in [
+            "Compare total revenue Q3 vs Q4 and explain the drivers",
+            "why did the total drop in november",
+            "what caused the change between the quarterly totals",
+            "difference in average order size versus last year",
+        ] {
+            assert!(multi_step_cue(q), "expected multi-step for {q:?}");
+        }
+        // Single-cue questions stay on the single-query path.
+        for q in [
+            "total sales by region",              // analytics only
+            "compare the two contracts",          // comparison only, no analytics cue
+            "summarize the meeting notes",        // neither
+            "top 10 customers by revenue",        // analytics only
+        ] {
+            assert!(!multi_step_cue(q), "expected single-query for {q:?}");
+        }
+    }
+
+    #[test]
+    fn step_replies_parse_tolerantly() {
+        assert_eq!(
+            parse_step_reply("NEXT_SQL:\n```sql\nSELECT region, SUM(x) FROM t GROUP BY region\n```"),
+            StepReply::Sql("SELECT region, SUM(x) FROM t GROUP BY region".to_string())
+        );
+        assert_eq!(
+            parse_step_reply("SELECT a FROM b"),
+            StepReply::Sql("SELECT a FROM b".to_string())
+        );
+        assert_eq!(parse_step_reply("DONE"), StepReply::Done);
+        assert_eq!(parse_step_reply("done."), StepReply::Done);
+        // Prose with no SQL ends the loop instead of derailing it.
+        assert_eq!(parse_step_reply("The data already answers the question."), StepReply::Done);
+    }
+
+    #[test]
+    fn step_prompt_stays_inside_budget() {
+        // Maximal shape: 3 completed steps, each with a long SQL and a result
+        // at the carry cap — the prompt must stay comfortably under ~8k chars.
+        let steps: Vec<StepRecord> = (0..3)
+            .map(|i| StepRecord {
+                sql: format!("SELECT c{i}, SUM(v) FROM {} GROUP BY c{i} ORDER BY 2 DESC", "t".repeat(120)),
+                result_markdown: "| a | b |\n| 1 | 2 |\n".repeat(200), // > cap, gets clipped
+            })
+            .collect();
+        let q = step_question(&"compare everything and explain why ".repeat(8), &steps);
+        assert!(q.chars().count() < 8_000, "prompt budget blown: {}", q.chars().count());
+        assert!(q.contains("Step 3 SQL"));
+    }
+
+    #[test]
     fn csv_writer_is_rfc4180() {
         // Quotes double, commas/newlines/unicode quote, NULLs render empty.
         let schema = Arc::new(Schema::new(vec![
@@ -1627,6 +1680,114 @@ pub fn sql_question(question: &str, prior_sql: Option<&str>) -> String {
          column names as given.\n\n\
          Examples with a GENERIC schema — adapt the table and column names to \
          the tables described in the context blocks:\n{examples}\n{prior}\n\
+         Question: {question}"
+    )
+}
+
+// --- Multi-step analytics (openspec: add-multi-step-analytics) --------------------
+//
+// Comparison/why questions on a keyed REMOTE provider may run up to three
+// sequential verified queries. The cue below gates entry (multi-step costs
+// latency and must be earned); the step prompt + reply parser keep every
+// number engine-computed. Local models never enter — their 6144-token window
+// can't carry multi-step context (synth.rs enforces the gate).
+
+const MULTI_STEP_WORDS: &[&str] = &[
+    "compare", "compared", "comparing", "versus", "vs", "difference", "differences",
+    "why", "driver", "drivers", "explain", "explains", "explained",
+];
+const MULTI_STEP_PHRASES: &[&str] =
+    &["what caused", "change between", "breakdown of the change", "changed between"];
+
+/// Whether an analytics question ALSO reads as a comparison/explanation ask —
+/// the entry gate for the bounded multi-step loop. Same normalization as
+/// `analytics_cue`; single-cue questions keep the single-query path.
+pub fn multi_step_cue(question: &str) -> bool {
+    if !analytics_cue(question) {
+        return false;
+    }
+    let lower = question.to_lowercase();
+    let mut norm = String::with_capacity(lower.len());
+    let mut last_space = true;
+    for ch in lower.chars() {
+        if ch.is_ascii_lowercase() || ch.is_ascii_digit() {
+            norm.push(ch);
+            last_space = false;
+        } else if !last_space {
+            norm.push(' ');
+            last_space = true;
+        }
+    }
+    let padded = format!(" {} ", norm.trim());
+    for p in MULTI_STEP_PHRASES {
+        if padded.contains(&format!(" {p} ")) {
+            return true;
+        }
+    }
+    padded.split(' ').any(|t| MULTI_STEP_WORDS.contains(&t))
+}
+
+/// One executed step: its SQL and the (narration-capped) verified result.
+#[derive(Debug, Clone)]
+pub struct StepRecord {
+    pub sql: String,
+    pub result_markdown: String,
+}
+
+/// The model's answer to "do you need another query?".
+#[derive(Debug, PartialEq)]
+pub enum StepReply {
+    Sql(String),
+    Done,
+}
+
+/// Parse a step reply: `NEXT_SQL:` + one SELECT (fenced or bare) ⇒ Sql;
+/// an explicit DONE — or anything unparseable — ⇒ Done, so a confused model
+/// ends the loop instead of derailing it.
+pub fn parse_step_reply(raw: &str) -> StepReply {
+    let cleaned = raw.trim();
+    if cleaned.to_uppercase().starts_with("DONE") {
+        return StepReply::Done;
+    }
+    match extract_sql(cleaned) {
+        Some(sql) => StepReply::Sql(sql),
+        None => StepReply::Done,
+    }
+}
+
+/// Per prior step, chars of result carried into the next step's prompt.
+const STEP_RESULT_CAP: usize = 1200;
+
+/// The iterative step ask: original question + every completed step's SQL and
+/// capped result. Schema cards ride as context blocks (not in this string).
+/// Budget: ≤ ~8k chars at the 3-step maximum — comfortably inside every
+/// remote window (unit-tested).
+pub fn step_question(question: &str, steps: &[StepRecord]) -> String {
+    let prior = if steps.is_empty() {
+        " (none yet)".to_string()
+    } else {
+        let mut out = String::new();
+        for (i, s) in steps.iter().enumerate() {
+            let capped: String = s.result_markdown.chars().take(STEP_RESULT_CAP).collect();
+            out.push_str(&format!(
+                "\n\nStep {n} SQL:\n{sql}\nStep {n} result:\n{capped}",
+                n = i + 1,
+                sql = s.sql,
+            ));
+        }
+        out
+    };
+    format!(
+        "You are running a multi-step analysis over the user's tables to answer \
+         one question. The table schemas are in the context blocks. You may run \
+         up to 3 SQL queries total, one at a time.\n\
+         Completed steps so far:{prior}\n\n\
+         If one more query would materially improve the answer, reply with exactly:\n\
+         NEXT_SQL:\n```sql\n<one single SELECT statement>\n```\n\
+         Otherwise reply with exactly: DONE\n\n\
+         Rules: one SELECT per step, no other statements; use the exact table and \
+         column names from the context blocks; prefer a query that builds on what \
+         the previous steps showed.\n\n\
          Question: {question}"
     )
 }
