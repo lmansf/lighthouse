@@ -21,6 +21,9 @@ use datafusion::prelude::{CsvReadOptions, ParquetReadOptions, SessionContext};
 
 /// Budgets — conservative caps so one query can't stall or flood an answer.
 pub const MAX_TABLE_FILES: usize = 4;
+/// Candidates gathered BEFORE grouping — wide enough that a 12-file monthly
+/// family is seen whole; slots (groups count once) still bound registration.
+pub const CANDIDATE_SCAN: usize = 64;
 const MAX_SHEETS_PER_BOOK: usize = 4;
 /// Tables registered across ALL files: 4 workbooks × 4 sheets would otherwise
 /// put 16 schema cards in the SQL prompt — a field report had the local
@@ -88,8 +91,9 @@ pub fn is_tabular(name: &str) -> bool {
 }
 
 /// Lowercased stem, non-alphanumerics folded to `_`, digit-safe, deduped by
-/// the caller. "Q3 Sales (final).xlsx" → "q3_sales_final".
-fn sanitize_table_name(file_name: &str) -> String {
+/// the caller. "Q3 Sales (final).xlsx" → "q3_sales_final". Shared with the
+/// column catalog so cataloged names match SQL names exactly.
+pub(crate) fn sanitize_table_name(file_name: &str) -> String {
     let stem = file_name
         .rsplit_once('.')
         .map(|(s, _)| s)
@@ -117,6 +121,14 @@ fn sanitize_table_name(file_name: &str) -> String {
 
 // --- Registration ----------------------------------------------------------------
 
+/// Provenance of a table unioned from a same-shaped file family.
+#[derive(Debug, Clone)]
+pub struct GroupMeta {
+    pub file_ids: Vec<String>,
+    pub file_names: Vec<String>,
+    pub newest_ms: i64,
+}
+
 /// One registered table and the description the model plans against.
 #[derive(Debug, Clone)]
 pub struct TableReg {
@@ -128,26 +140,144 @@ pub struct TableReg {
     /// The file's on-disk mtime (epoch ms) when it was registered — i.e. the
     /// version of the data this ask reads. None if the stat failed.
     pub modified_ms: Option<i64>,
+    /// Lowercased column names, for deterministic join hints.
+    pub columns: Vec<String>,
+    /// Present when this table unions a file family; file_id/file_name then
+    /// describe the family (first member id, pattern-style label).
+    pub group: Option<GroupMeta>,
 }
 
-/// Register every supported file into one context (multi-file joins come free).
-/// Unreadable/mis-shaped files are skipped — never fatal.
+/// A same-shaped file family destined for one unioned table.
+#[derive(Debug, Clone)]
+pub(crate) struct UnionGroup {
+    pub stem: String,
+    pub ext: String,
+    /// (file_id, name, abs), newest first, capped at MAX_GROUP_FILES.
+    pub members: Vec<(String, String, PathBuf)>,
+}
+
+/// Members per unioned family — bounds one ask's registration work.
+const MAX_GROUP_FILES: usize = 48;
+
+/// Name stem with digit runs (and their surrounding separators) collapsed:
+/// "sales-2025-01.csv" → "sales", "q3_sales" → "q_sales".
+pub(crate) fn union_stem(name: &str) -> String {
+    let stem = name.rsplit_once('.').map(|(s, _)| s).unwrap_or(name).to_lowercase();
+    let mut out = String::new();
+    let mut last_sep = false;
+    for ch in stem.chars() {
+        if ch.is_ascii_digit() {
+            continue;
+        }
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch);
+            last_sep = false;
+        } else if !last_sep && !out.is_empty() {
+            out.push('_');
+            last_sep = true;
+        } else {
+            last_sep = true;
+        }
+    }
+    out.trim_matches('_').to_string()
+}
+
+/// Split candidates into unionable families and singles. Grouping needs BOTH
+/// a shared digit-stripped stem and an identical cataloged column signature —
+/// same-shaped but unrelated files must not silently merge, and renamed
+/// columns split a family rather than misaligning rows.
+pub(crate) fn union_groups(
+    files: &[(String, String, PathBuf)],
+    catalog: &[crate::catalog::FileColumns],
+) -> (Vec<UnionGroup>, Vec<(String, String, PathBuf)>) {
+    use std::collections::HashMap;
+    let signatures: HashMap<&str, Vec<&str>> = catalog
+        .iter()
+        .map(|fc| (fc.id.as_str(), fc.columns.iter().map(|c| c.name.as_str()).collect()))
+        .collect();
+    let mtimes: HashMap<&str, i64> =
+        catalog.iter().map(|fc| (fc.id.as_str(), fc.modified_ms)).collect();
+
+    let mut buckets: HashMap<(String, String, Vec<String>), Vec<(String, String, PathBuf)>> =
+        HashMap::new();
+    let mut singles: Vec<(String, String, PathBuf)> = Vec::new();
+    let mut order: Vec<(String, String, Vec<String>)> = Vec::new();
+    for f in files {
+        let (id, name, _) = f;
+        let Some(sig) = signatures.get(id.as_str()) else {
+            singles.push(f.clone());
+            continue;
+        };
+        let ext = name.rsplit_once('.').map(|(_, e)| e.to_lowercase()).unwrap_or_default();
+        let key = (
+            ext,
+            union_stem(name),
+            sig.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+        );
+        if !buckets.contains_key(&key) {
+            order.push(key.clone());
+        }
+        buckets.entry(key).or_default().push(f.clone());
+    }
+
+    let mut groups = Vec::new();
+    for key in order {
+        let mut members = buckets.remove(&key).unwrap_or_default();
+        if members.len() < 2 || key.1.is_empty() {
+            singles.extend(members);
+            continue;
+        }
+        members.sort_by_key(|(id, _, _)| -mtimes.get(id.as_str()).copied().unwrap_or(0));
+        members.truncate(MAX_GROUP_FILES);
+        groups.push(UnionGroup { stem: key.1, ext: key.0, members });
+    }
+    (groups, singles)
+}
+
+/// Register every supported file into one context (multi-file joins come
+/// free). Same-shaped file families union into one table; failures degrade to
+/// per-file registration. Unreadable/mis-shaped files are skipped — never
+/// fatal.
 pub async fn register_tables(
     ctx: &SessionContext,
     files: &[(String, String, PathBuf)], // (file_id, name, abs)
 ) -> Vec<TableReg> {
+    let catalog = crate::catalog::columns_for(files);
+    let (groups, mut singles) = union_groups(files, &catalog);
+
     let mut regs: Vec<TableReg> = Vec::new();
     let mut used: Vec<String> = Vec::new();
-    for (file_id, name, abs) in files.iter().take(MAX_TABLE_FILES) {
-        if regs.len() >= MAX_TABLES_TOTAL {
+    // A group consumes ONE file slot regardless of member count.
+    let mut slots = 0usize;
+    for g in groups {
+        if slots >= MAX_TABLE_FILES || regs.len() >= MAX_TABLES_TOTAL {
+            // Out of room — members may still compete as singles below.
+            singles.extend(g.members);
+            continue;
+        }
+        match register_group(ctx, &g, &mut used).await {
+            Some(reg) => {
+                regs.push(reg);
+                slots += 1;
+            }
+            None => {
+                // Union failed (reader quirk, drifted file) — the newest
+                // members fall back to ordinary per-file registration.
+                singles.extend(g.members);
+            }
+        }
+    }
+
+    for (file_id, name, abs) in singles {
+        if slots >= MAX_TABLE_FILES || regs.len() >= MAX_TABLES_TOTAL {
             break;
         }
         let lower = name.to_lowercase();
-        let mut base = sanitize_table_name(name);
+        let mut base = sanitize_table_name(&name);
         if used.contains(&base) {
             base = format!("{}_{}", base, used.len() + 1);
         }
-        let modified_ms = file_mtime_ms(abs);
+        let modified_ms = file_mtime_ms(&abs);
         let path = abs.to_string_lossy().to_string();
         let registered: Vec<String> = if lower.ends_with(".csv") || lower.ends_with(".tsv") {
             let delim = if lower.ends_with(".tsv") { b'\t' } else { b',' };
@@ -165,25 +295,161 @@ pub async fn register_tables(
                 Err(_) => vec![],
             }
         } else {
-            register_workbook(ctx, &base, abs)
+            register_workbook(ctx, &base, &abs)
         };
+        let mut any = false;
         for table in registered {
             if regs.len() >= MAX_TABLES_TOTAL {
                 break;
             }
-            if let Some(card) = table_card(ctx, &table).await {
+            if let Some((card, columns)) = table_card(ctx, &table).await {
                 used.push(base.clone());
+                any = true;
                 regs.push(TableReg {
                     table: table.clone(),
                     file_id: file_id.clone(),
                     file_name: name.clone(),
                     card,
                     modified_ms,
+                    columns,
+                    group: None,
                 });
             }
         }
+        if any {
+            slots += 1;
+        }
     }
     regs
+}
+
+/// Register one unioned table for a file family. CSV/TSV/Parquet union via
+/// DataFusion multi-path reads; workbooks concatenate row matrices and infer
+/// column types ONCE over the combined rows so a column's type can't drift
+/// between members. None ⇒ caller falls back to per-file registration.
+async fn register_group(
+    ctx: &SessionContext,
+    g: &UnionGroup,
+    used: &mut Vec<String>,
+) -> Option<TableReg> {
+    let mut tname = sanitize_table_name(&format!("{}_all", g.stem));
+    if used.contains(&tname) {
+        tname = format!("{}_{}", tname, used.len() + 1);
+    }
+    let paths: Vec<String> =
+        g.members.iter().map(|(_, _, abs)| abs.to_string_lossy().to_string()).collect();
+
+    let ok = match g.ext.as_str() {
+        "csv" | "tsv" => {
+            let delim = if g.ext == "tsv" { b'\t' } else { b',' };
+            let opts = CsvReadOptions::new().delimiter(delim);
+            match ctx.read_csv(paths.clone(), opts).await {
+                Ok(df) => ctx.register_table(&tname, df.into_view()).is_ok(),
+                Err(_) => false,
+            }
+        }
+        "parquet" => match ctx.read_parquet(paths.clone(), ParquetReadOptions::default()).await {
+            Ok(df) => ctx.register_table(&tname, df.into_view()).is_ok(),
+            Err(_) => false,
+        },
+        "xlsx" | "xls" => register_workbook_union(ctx, &tname, &g.members),
+        _ => false,
+    };
+    if !ok {
+        return None;
+    }
+
+    let (card, columns) = table_card(ctx, &tname).await?;
+    used.push(tname.clone());
+    let newest_ms =
+        g.members.iter().filter_map(|(_, _, abs)| file_mtime_ms(abs)).max().unwrap_or(0);
+    let names: Vec<String> = g.members.iter().map(|(_, n, _)| n.clone()).collect();
+    let label = format!("{}*.{}", g.stem, g.ext);
+    // The union provenance must survive card clipping — lead with it.
+    let card = format!(
+        "{} unions {} files ({}{})\n{}",
+        tname,
+        g.members.len(),
+        names.iter().take(3).cloned().collect::<Vec<_>>().join(", "),
+        if names.len() > 3 { ", …" } else { "" },
+        card
+    );
+    Some(TableReg {
+        table: tname,
+        file_id: g.members[0].0.clone(),
+        file_name: label,
+        card,
+        modified_ms: Some(newest_ms),
+        columns,
+        group: Some(GroupMeta {
+            file_ids: g.members.iter().map(|(id, _, _)| id.clone()).collect(),
+            file_names: names,
+            newest_ms,
+        }),
+    })
+}
+
+/// Concatenate same-signature workbook sheets into one MemTable (first sheet
+/// per member, detected headers, combined rows capped at MAX_XLSX_ROWS).
+fn register_workbook_union(
+    ctx: &SessionContext,
+    tname: &str,
+    members: &[(String, String, PathBuf)],
+) -> bool {
+    use calamine::Reader;
+    let mut headers: Option<Vec<String>> = None;
+    let mut data: Vec<Vec<String>> = Vec::new();
+    for (_, _, abs) in members {
+        if data.len() >= MAX_XLSX_ROWS {
+            break;
+        }
+        let Ok(mut wb) = calamine::open_workbook_auto(abs) else { return false };
+        let Some(sheet) = wb.sheet_names().first().cloned() else { return false };
+        let Ok(range) = wb.worksheet_range(&sheet) else { return false };
+        let all: Vec<Vec<String>> = range
+            .rows()
+            .take(MAX_XLSX_ROWS + HEADER_SCAN_ROWS)
+            .map(|r| r.iter().map(crate::extract::cell_text).collect())
+            .collect();
+        if all.is_empty() {
+            return false;
+        }
+        let h = detect_header_row(&all);
+        let hdr: Vec<String> = all[h]
+            .iter()
+            .take(MAX_XLSX_COLS)
+            .enumerate()
+            .map(|(i, c)| {
+                let s = sanitize_table_name(c);
+                if s.is_empty() || s == "table" { format!("col_{}", i + 1) } else { s }
+            })
+            .collect();
+        match &headers {
+            None => headers = Some(hdr),
+            // The catalog signature already matched, but headers are re-read
+            // here from the live file — a drift since cataloging bails out.
+            Some(existing) if *existing != hdr => return false,
+            _ => {}
+        }
+        let width = headers.as_ref().map(Vec::len).unwrap_or(0);
+        for r in &all[h + 1..] {
+            if data.len() >= MAX_XLSX_ROWS {
+                break;
+            }
+            data.push((0..width).map(|i| r.get(i).cloned().unwrap_or_default()).collect());
+        }
+    }
+    let Some(headers) = headers else { return false };
+    if headers.len() < 2 || data.len() < 2 {
+        return false;
+    }
+    match table_from_matrix(&headers, &data) {
+        Some((schema, batch)) => MemTable::try_new(schema, vec![vec![batch]])
+            .ok()
+            .map(|mem| ctx.register_table(tname, Arc::new(mem)).is_ok())
+            .unwrap_or(false),
+        None => false,
+    }
 }
 
 /// How many leading rows are scanned for a plausible header.
@@ -266,31 +532,7 @@ fn register_workbook(ctx: &SessionContext, base: &str, abs: &PathBuf) -> Vec<Str
         if data.len() < 2 {
             continue;
         }
-        let mut fields: Vec<Field> = Vec::new();
-        let mut cols: Vec<ArrayRef> = Vec::new();
-        for (i, h) in headers.iter().enumerate() {
-            let vals: Vec<&String> = data.iter().map(|r| &r[i]).collect();
-            let non_empty = vals.iter().filter(|v| !v.trim().is_empty()).count();
-            let numeric = vals
-                .iter()
-                .filter(|v| !v.trim().is_empty() && v.trim().parse::<f64>().is_ok())
-                .count();
-            if non_empty > 0 && numeric as f64 >= non_empty as f64 * 0.8 {
-                fields.push(Field::new(h, DataType::Float64, true));
-                cols.push(Arc::new(Float64Array::from(
-                    vals.iter()
-                        .map(|v| v.trim().parse::<f64>().ok())
-                        .collect::<Vec<Option<f64>>>(),
-                )));
-            } else {
-                fields.push(Field::new(h, DataType::Utf8, true));
-                cols.push(Arc::new(StringArray::from(
-                    vals.iter().map(|v| v.as_str()).collect::<Vec<&str>>(),
-                )));
-            }
-        }
-        let schema = Arc::new(Schema::new(fields));
-        let Ok(batch) = RecordBatch::try_new(schema.clone(), cols) else {
+        let Some((schema, batch)) = table_from_matrix(&headers, &data) else {
             continue;
         };
         let Ok(mem) = MemTable::try_new(schema, vec![vec![batch]]) else {
@@ -308,9 +550,47 @@ fn register_workbook(ctx: &SessionContext, base: &str, abs: &PathBuf) -> Vec<Str
     out
 }
 
-/// Schema + row count + sample rows for the planning prompt (never the data).
-async fn table_card(ctx: &SessionContext, table: &str) -> Option<String> {
+/// String matrix → typed Arrow batch (≥80% numeric column → Float64 with
+/// nulls, else Utf8). One inference over ALL rows, so unioned members can't
+/// disagree on a column's type.
+fn table_from_matrix(
+    headers: &[String],
+    data: &[Vec<String>],
+) -> Option<(Arc<Schema>, RecordBatch)> {
+    let mut fields: Vec<Field> = Vec::new();
+    let mut cols: Vec<ArrayRef> = Vec::new();
+    for (i, h) in headers.iter().enumerate() {
+        let vals: Vec<&String> = data.iter().map(|r| &r[i]).collect();
+        let non_empty = vals.iter().filter(|v| !v.trim().is_empty()).count();
+        let numeric = vals
+            .iter()
+            .filter(|v| !v.trim().is_empty() && v.trim().parse::<f64>().is_ok())
+            .count();
+        if non_empty > 0 && numeric as f64 >= non_empty as f64 * 0.8 {
+            fields.push(Field::new(h, DataType::Float64, true));
+            cols.push(Arc::new(Float64Array::from(
+                vals.iter()
+                    .map(|v| v.trim().parse::<f64>().ok())
+                    .collect::<Vec<Option<f64>>>(),
+            )));
+        } else {
+            fields.push(Field::new(h, DataType::Utf8, true));
+            cols.push(Arc::new(StringArray::from(
+                vals.iter().map(|v| v.as_str()).collect::<Vec<&str>>(),
+            )));
+        }
+    }
+    let schema = Arc::new(Schema::new(fields));
+    let batch = RecordBatch::try_new(schema.clone(), cols).ok()?;
+    Some((schema, batch))
+}
+
+/// Schema + row count + sample rows for the planning prompt (never the data),
+/// plus the lowercased column names for deterministic join hints.
+async fn table_card(ctx: &SessionContext, table: &str) -> Option<(String, Vec<String>)> {
     let df = ctx.sql(&format!("SELECT * FROM {table} LIMIT {SAMPLE_ROWS}")).await.ok()?;
+    let columns: Vec<String> =
+        df.schema().fields().iter().map(|f| f.name().to_lowercase()).collect();
     let schema_line = df
         .schema()
         .fields()
@@ -337,11 +617,49 @@ async fn table_card(ctx: &SessionContext, table: &str) -> Option<String> {
     );
     // Wide sheets can render enormous sample rows; a card is a prompt block,
     // so clip it rather than let one table eat the local model's window.
-    if card.chars().count() > MAX_CARD_CHARS {
+    let card = if card.chars().count() > MAX_CARD_CHARS {
         let clipped: String = card.chars().take(MAX_CARD_CHARS).collect();
-        Some(format!("{clipped}…"))
+        format!("{clipped}…")
     } else {
-        Some(card)
+        card
+    };
+    Some((card, columns))
+}
+
+/// Deterministic join hints: shared, non-generic column names across distinct
+/// registered tables, rendered as one small prompt block (score 0). Hints
+/// never force a join — the model may ignore them.
+const GENERIC_JOIN_COLS: &[&str] =
+    &["id", "name", "date", "value", "amount", "total", "count", "n", "col_1", "col_2"];
+const MAX_JOIN_HINTS: usize = 12;
+
+pub fn join_hints(regs: &[TableReg]) -> Option<String> {
+    let mut lines: Vec<String> = Vec::new();
+    'outer: for i in 0..regs.len() {
+        for j in i + 1..regs.len() {
+            if regs[i].table == regs[j].table {
+                continue;
+            }
+            for c in &regs[i].columns {
+                if GENERIC_JOIN_COLS.contains(&c.as_str()) {
+                    continue;
+                }
+                if regs[j].columns.contains(c) {
+                    lines.push(format!("- {t1}.{c} = {t2}.{c}", t1 = regs[i].table, t2 = regs[j].table));
+                    if lines.len() >= MAX_JOIN_HINTS {
+                        break 'outer;
+                    }
+                }
+            }
+        }
+    }
+    if lines.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "Join hints (columns shared across tables — use when combining them):\n{}",
+            lines.join("\n")
+        ))
     }
 }
 
@@ -421,9 +739,17 @@ pub fn freshness_line(regs: &[TableReg], sql: &str, now_ms: i64) -> Option<Strin
     let parts: Vec<String> = used
         .iter()
         .filter(|r| seen.insert(r.file_id.as_str()))
-        .map(|r| match r.modified_ms {
-            Some(ms) => format!("“{}” (saved {})", r.file_name, saved_age_label(ms, now_ms)),
-            None => format!("“{}”", r.file_name),
+        .map(|r| match (&r.group, r.modified_ms) {
+            (Some(g), _) => format!(
+                "“{}” ({} files, newest saved {})",
+                r.file_name,
+                g.file_ids.len(),
+                saved_age_label(g.newest_ms, now_ms)
+            ),
+            (None, Some(ms)) => {
+                format!("“{}” (saved {})", r.file_name, saved_age_label(ms, now_ms))
+            }
+            (None, None) => format!("“{}”", r.file_name),
         })
         .collect();
     if parts.is_empty() {
@@ -767,6 +1093,8 @@ mod tests {
             file_name: name.into(),
             card: String::new(),
             modified_ms: ms,
+            columns: vec![],
+            group: None,
         };
         let regs = vec![
             reg("tickets", "f1", "Tickets.xlsx", Some(now - 2 * 3_600_000)),
@@ -946,12 +1274,130 @@ mod tests {
         let ctx = SessionContext::new();
         ctx.register_table("wide", Arc::new(mem)).unwrap();
 
-        let card = table_card(&ctx, "wide").await.expect("card");
+        let (card, columns) = table_card(&ctx, "wide").await.expect("card");
         assert!(
             card.chars().count() <= super::MAX_CARD_CHARS + 1,
             "card is {} chars",
             card.chars().count()
         );
+        assert_eq!(columns.len(), n, "join hints need every column name");
+    }
+
+    #[test]
+    fn union_stems_collapse_digit_runs() {
+        assert_eq!(union_stem("sales-2025-01.csv"), "sales");
+        assert_eq!(union_stem("sales-2025-12.csv"), "sales");
+        assert_eq!(union_stem("q3_sales.xlsx"), "q_sales");
+        assert_eq!(union_stem("regions.csv"), "regions");
+        assert_eq!(union_stem("2025.csv"), "");
+    }
+
+    fn file_cols(id: &str, name: &str, cols: &[&str], ms: i64) -> crate::catalog::FileColumns {
+        crate::catalog::FileColumns {
+            id: id.into(),
+            name: name.into(),
+            columns: cols
+                .iter()
+                .map(|c| crate::catalog::Column {
+                    name: c.to_string(),
+                    kind: crate::catalog::ColumnKind::Text,
+                })
+                .collect(),
+            modified_ms: ms,
+        }
+    }
+
+    #[test]
+    fn union_groups_need_stem_and_signature() {
+        let p = |n: &str| std::path::PathBuf::from(format!("/v/{n}"));
+        let files: Vec<(String, String, std::path::PathBuf)> = vec![
+            ("f1".into(), "sales-2025-01.csv".into(), p("sales-2025-01.csv")),
+            ("f2".into(), "sales-2025-02.csv".into(), p("sales-2025-02.csv")),
+            ("f3".into(), "sales-2025-03.csv".into(), p("sales-2025-03.csv")),
+            ("f4".into(), "regions.csv".into(), p("regions.csv")),
+            ("f5".into(), "vendors.csv".into(), p("vendors.csv")),
+        ];
+        let catalog = vec![
+            file_cols("f1", "sales-2025-01.csv", &["date", "region", "amount"], 3),
+            file_cols("f2", "sales-2025-02.csv", &["date", "region", "amount"], 2),
+            // f3 drifted (renamed column) — must split from the family.
+            file_cols("f3", "sales-2025-03.csv", &["date", "area", "amount"], 1),
+            file_cols("f4", "regions.csv", &["region", "label"], 1),
+            // vendors shares regions' SHAPE but not its stem — no grouping.
+            file_cols("f5", "vendors.csv", &["region", "label"], 1),
+        ];
+        let (groups, singles) = union_groups(&files, &catalog);
+        assert_eq!(groups.len(), 1, "only the matching monthlies group");
+        assert_eq!(groups[0].stem, "sales");
+        let member_ids: Vec<&str> =
+            groups[0].members.iter().map(|(id, _, _)| id.as_str()).collect();
+        assert_eq!(member_ids, vec!["f1", "f2"], "newest first, drifted member excluded");
+        let single_ids: Vec<&str> = singles.iter().map(|(id, _, _)| id.as_str()).collect();
+        assert!(single_ids.contains(&"f3") && single_ids.contains(&"f4") && single_ids.contains(&"f5"));
+    }
+
+    #[test]
+    fn join_hints_skip_generic_columns() {
+        let reg = |table: &str, cols: &[&str]| TableReg {
+            table: table.into(),
+            file_id: table.into(),
+            file_name: format!("{table}.csv"),
+            card: String::new(),
+            modified_ms: None,
+            columns: cols.iter().map(|s| s.to_string()).collect(),
+            group: None,
+        };
+        let regs = vec![
+            reg("tickets", &["id", "region", "priority"]),
+            reg("regions", &["id", "region", "label"]),
+        ];
+        let hints = join_hints(&regs).expect("shared non-generic column");
+        assert!(hints.contains("tickets.region = regions.region"), "{hints}");
+        assert!(!hints.contains(".id ="), "generic id must not hint: {hints}");
+        // No shared specific columns → no block at all.
+        assert!(join_hints(&[reg("a", &["x"]), reg("b", &["y"])]).is_none());
+    }
+
+    #[tokio::test]
+    async fn end_to_end_union_of_monthlies() {
+        let dir = std::env::temp_dir().join(format!("lh-union-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut files: Vec<(String, String, std::path::PathBuf)> = Vec::new();
+        for m in 1..=12 {
+            let name = format!("sales-2025-{m:02}.csv");
+            let path = dir.join(&name);
+            // 2 rows per month, amount = month number each → total 2*78 = 156.
+            std::fs::write(&path, format!("region,amount\nNE,{m}\nNW,{m}\n")).unwrap();
+            files.push((format!("m{m}"), name, path));
+        }
+        let lookup = dir.join("regions.csv");
+        std::fs::write(&lookup, "region,label\nNE,Northeast\nNW,Northwest\n").unwrap();
+        files.push(("lk".into(), "regions.csv".into(), lookup));
+
+        let ctx = SessionContext::new();
+        let regs = register_tables(&ctx, &files).await;
+        let union = regs.iter().find(|r| r.group.is_some()).expect("union table registered");
+        assert_eq!(union.table, "sales_all");
+        assert_eq!(union.group.as_ref().unwrap().file_ids.len(), 12);
+        assert!(union.card.contains("unions 12 files"), "{}", union.card);
+        assert!(regs.iter().any(|r| r.group.is_none()), "lookup registers as a single");
+
+        // The whole year sums across all twelve files.
+        let res = run_query(&ctx, "SELECT SUM(amount) AS total FROM sales_all").await.unwrap();
+        assert!(res.markdown.contains("156"), "{}", res.markdown);
+
+        // Join hints connect the family to the lookup on `region`.
+        let hints = join_hints(&regs).expect("hints");
+        assert!(hints.contains("sales_all.region = regions.region"), "{hints}");
+
+        // Freshness renders the group form.
+        let fresh =
+            freshness_line(&regs, "SELECT SUM(amount) FROM sales_all", crate::config::now_ms())
+                .unwrap();
+        assert!(fresh.contains("(12 files, newest saved"), "{fresh}");
+        assert!(fresh.contains("sales*.csv"), "{fresh}");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

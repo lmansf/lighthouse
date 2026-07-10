@@ -263,7 +263,9 @@ pub fn answer_pipeline(
             };
             let mut files: Vec<(String, String, std::path::PathBuf)> = Vec::new();
             for id in candidate_ids {
-                if files.len() >= crate::analytics::MAX_TABLE_FILES {
+                // Scan wide so whole file families are visible to union
+                // grouping; registration slots stay bounded downstream.
+                if files.len() >= crate::analytics::CANDIDATE_SCAN {
                     break;
                 }
                 if let Some((name, abs)) = vault::doc_path(&id) {
@@ -277,10 +279,17 @@ pub fn answer_pipeline(
                 let ctx = datafusion::prelude::SessionContext::new();
                 let regs = crate::analytics::register_tables(&ctx, &files).await;
                 if !regs.is_empty() {
-                    let sql_ctxs: Vec<Ctx> = regs
+                    let mut sql_ctxs: Vec<Ctx> = regs
                         .iter()
                         .map(|r| Ctx { name: r.file_name.clone(), text: r.card.clone(), score: 1.0 })
                         .collect();
+                    if let Some(hints) = crate::analytics::join_hints(&regs) {
+                        sql_ctxs.push(Ctx {
+                            name: "join hints".to_string(),
+                            text: hints,
+                            score: 0.0,
+                        });
+                    }
                     yield progress("Writing a query…".to_string(), 2, 4);
                     let raw = collect(llm::stream_answer(
                         crate::analytics::sql_question(&question),
@@ -358,16 +367,38 @@ pub fn answer_pipeline(
                         }
                         let mut seen: std::collections::HashSet<String> =
                             std::collections::HashSet::new();
-                        let refs: Vec<RagReference> = regs
-                            .iter()
-                            .filter(|r| seen.insert(r.file_id.clone()))
-                            .map(|r| RagReference {
-                                file_id: r.file_id.clone(),
-                                name: r.file_name.clone(),
-                                snippet: r.card.chars().take(240).collect(),
-                                score: 0.9,
-                            })
-                            .collect();
+                        let mut refs: Vec<RagReference> = Vec::new();
+                        for r in &regs {
+                            let snippet: String = r.card.chars().take(240).collect();
+                            match &r.group {
+                                // A unioned family cites its first members —
+                                // real ids the explorer can open.
+                                Some(g) => {
+                                    for (id, name) in
+                                        g.file_ids.iter().zip(&g.file_names).take(3)
+                                    {
+                                        if seen.insert(id.clone()) {
+                                            refs.push(RagReference {
+                                                file_id: id.clone(),
+                                                name: name.clone(),
+                                                snippet: snippet.clone(),
+                                                score: 0.9,
+                                            });
+                                        }
+                                    }
+                                }
+                                None => {
+                                    if seen.insert(r.file_id.clone()) {
+                                        refs.push(RagReference {
+                                            file_id: r.file_id.clone(),
+                                            name: r.file_name.clone(),
+                                            snippet,
+                                            score: 0.9,
+                                        });
+                                    }
+                                }
+                            }
+                        }
                         yield final_chunk(refs);
                         return;
                     }
