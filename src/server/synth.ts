@@ -258,7 +258,12 @@ export async function* answerPipeline(
       }
       extract = stripMarkers(extract).trim().slice(0, MAP_EXTRACT_CHARS);
       if (!extract || extract.startsWith("NO_RELEVANT_CONTENT")) continue;
-      if (extract.includes("_(Local model unavailable")) continue; // failed mid-map
+      // A model failure mid-map is YIELDED as a "_(… model unavailable — …)_"
+      // note (streamAnswer turns provider errors into a note, not a throw), so
+      // the try/catch above never fires. Skip both the local- and live-model
+      // forms — else a failure note becomes a bogus extract with a fabricated
+      // citation in the reduce. KEEP IN SYNC with synth.rs.
+      if (extract.includes("model unavailable —")) continue;
 
       const snippet = (perDoc.contexts[0]?.text ?? preview.text).slice(0, SNIPPET_CHARS);
       // Exact stats ride along into the reduce so the final answer can quote them.

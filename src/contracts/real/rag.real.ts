@@ -40,8 +40,11 @@ class RealRagService implements RagService {
     await post({ op: "include", nodeId, included });
   }
 
-  async setSourceAvailable(_sourceId: string, available: boolean): Promise<void> {
-    await post({ op: "source", available });
+  async setSourceAvailable(sourceId: string, available: boolean): Promise<void> {
+    // sourceId MUST ride along: the route routes the toggle by it, defaulting
+    // to the local vault when absent — dropping it toggled the wrong source
+    // (e.g. hid the local vault when the user disabled a cloud source).
+    await post({ op: "source", sourceId, available });
   }
 
   async search(query: string, includedFileIds: string[]): Promise<RagReference[]> {

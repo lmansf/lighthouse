@@ -19,7 +19,7 @@ use crate::config::state_dir;
 // .doc is desktop-only capability: the TS dev twin's mammoth parser reads
 // OOXML only, so legacy .doc stays name-match-only there (PARITY divergence,
 // like B2 hybrid search).
-const RICH_EXT: &[&str] = &[".pdf", ".doc", ".docx", ".xlsx", ".xls", ".parquet"];
+const RICH_EXT: &[&str] = &[".pdf", ".doc", ".docx", ".xlsx", ".xlsm", ".xls", ".parquet"];
 
 pub fn is_rich_file(name: &str) -> bool {
     let ext = match name.rsplit_once('.') {
@@ -331,7 +331,23 @@ pub(crate) fn cell_text(cell: &calamine::Data) -> String {
         Data::Bool(b) => if *b { "TRUE" } else { "FALSE" }.to_string(),
         // Raw serials ("45123.5") defeat every date GROUP BY; render ISO so
         // the SQL idioms the few-shots teach (substr(date,1,7)) just work.
-        Data::DateTime(dt) => excel_serial_to_iso(dt.as_f64()),
+        // `as_datetime()` applies the workbook's date-system offset (the
+        // 1462-day 1904 correction for Mac-origin files) and the phantom
+        // 1900-leap fix — `as_f64()` returns the RAW serial, which rendered
+        // 1904-system dates ~4 years early. Durations / out-of-range serials
+        // (as_datetime → None) fall back to the raw-number rendering.
+        Data::DateTime(dt) => match dt.as_datetime() {
+            Some(ndt) => {
+                let d = ndt.date();
+                let t = ndt.time();
+                if t == chrono::NaiveTime::MIN {
+                    d.format("%Y-%m-%d").to_string()
+                } else {
+                    format!("{} {}", d.format("%Y-%m-%d"), t.format("%H:%M:%S"))
+                }
+            }
+            None => excel_serial_to_iso(dt.as_f64()),
+        },
         Data::DateTimeIso(s) | Data::DurationIso(s) => s.clone(),
         Data::Error(e) => format!("{e:?}"),
     }
@@ -400,7 +416,9 @@ fn extract_by_ext(abs: &Path, ext: &str) -> anyhow::Result<String> {
         // extract_docx routes OLE containers (renamed legacy .doc, protected
         // packages) to the salvage path itself, so both extensions share it.
         ".doc" | ".docx" => extract_docx(&fs::read(abs)?),
-        ".xlsx" | ".xls" => extract_xlsx(abs),
+        // .xlsm is a macro-enabled workbook — same OOXML container as .xlsx,
+        // read identically by calamine.
+        ".xlsx" | ".xlsm" | ".xls" => extract_xlsx(abs),
         ".parquet" => extract_parquet(abs),
         _ => Ok(String::new()),
     }
@@ -412,7 +430,9 @@ fn extract_by_ext(abs: &Path, ext: &str) -> anyhow::Result<String> {
 /// could alter output. Matches the TS cache so the two engines share entries.
 /// v3: docx whitespace fidelity (Empty-event tabs/breaks) + .doc salvage.
 /// v4: Excel datetime cells render as ISO 8601 instead of raw serials.
-const CACHE_VERSION: u32 = 4;
+/// v5: Excel dates honor the workbook date-system (1904 files were ~4y early);
+///     .xlsm is now extracted as a workbook. Both invalidate v4 entries.
+const CACHE_VERSION: u32 = 5;
 
 #[derive(Serialize, Deserialize)]
 struct CacheRecord {
@@ -494,7 +514,23 @@ pub fn extract_rich_text(abs: &Path, ext: &str) -> String {
 
 #[cfg(test)]
 mod serial_date_tests {
-    use super::excel_serial_to_iso;
+    use super::{cell_text, excel_serial_to_iso};
+    use calamine::{Data, ExcelDateTime, ExcelDateTimeType};
+
+    #[test]
+    fn datetime_cells_honor_the_workbook_date_system() {
+        // 2020-01-01 in the 1900 system is serial 43831; in the 1904 system
+        // the SAME real date is stored 1462 days lower (42369). Both must
+        // render 2020-01-01 — the old raw-serial path rendered the 1904 file
+        // as 2015-12-31 (~4 years early).
+        let d1900 = Data::DateTime(ExcelDateTime::new(43_831.0, ExcelDateTimeType::DateTime, false));
+        assert_eq!(cell_text(&d1900), "2020-01-01");
+        let d1904 = Data::DateTime(ExcelDateTime::new(42_369.0, ExcelDateTimeType::DateTime, true));
+        assert_eq!(cell_text(&d1904), "2020-01-01");
+        // A datetime with a time component still renders date + time.
+        let noon = Data::DateTime(ExcelDateTime::new(43_831.5, ExcelDateTimeType::DateTime, false));
+        assert_eq!(cell_text(&noon), "2020-01-01 12:00:00");
+    }
 
     #[test]
     fn whole_days_render_date_only() {

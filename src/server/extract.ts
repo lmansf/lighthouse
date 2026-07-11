@@ -13,10 +13,11 @@
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
+import type { WorkBook, WorkSheet } from "xlsx";
 import { stateDir } from "./config";
 
 /** Document formats we recover text from beyond plain UTF-8 files. */
-export const RICH_EXT = new Set([".pdf", ".docx", ".xlsx", ".xls"]);
+export const RICH_EXT = new Set([".pdf", ".docx", ".xlsx", ".xlsm", ".xls"]);
 
 export const isRichFile = (name: string): boolean =>
   RICH_EXT.has(path.extname(name).toLowerCase());
@@ -53,13 +54,23 @@ async function extractDocx(buf: Buffer): Promise<string> {
 
 async function extractXlsx(buf: Buffer): Promise<string> {
   const XLSX = await import("xlsx");
-  const wb = XLSX.read(buf, { type: "buffer" });
-  // Flatten every sheet to CSV under its name, so cell text is searchable and
-  // the sheet a hit came from is recoverable.
-  return wb.SheetNames.map((name) => {
-    const csv = XLSX.utils.sheet_to_csv(wb.Sheets[name]);
-    return `# ${name}\n${csv}`;
-  }).join("\n\n");
+  // cellDates makes date-formatted cells real dates; cellText:false drops the
+  // locale-formatted `w` string so numbers emit raw (matching the Rust
+  // engine's raw floats) and dates format via dateNF. Without this the CSV
+  // carried SheetJS's formatted text (e.g. "1/1/2020"), which (a) breaks the
+  // taught month idiom substr(date,1,7) and (b) diverged from the Rust
+  // engine's ISO 8601 despite sharing a cache version. KEEP IN SYNC with
+  // native extract.rs cell_text.
+  //
+  // The bundled xlsx type stub is minimal (read opts: {type?}, sheet_to_csv/1);
+  // these options are all valid at runtime, so cast narrowly rather than patch
+  // node_modules.
+  const read = XLSX.read as (d: unknown, o: Record<string, unknown>) => WorkBook;
+  const toCsv = XLSX.utils.sheet_to_csv as (ws: WorkSheet, o?: Record<string, unknown>) => string;
+  const wb = read(buf, { type: "buffer", cellDates: true, cellText: false });
+  return wb.SheetNames.map(
+    (name) => `# ${name}\n${toCsv(wb.Sheets[name], { dateNF: "yyyy-mm-dd" })}`,
+  ).join("\n\n");
 }
 
 async function extractByExt(abs: string, ext: string): Promise<string> {
@@ -70,6 +81,7 @@ async function extractByExt(abs: string, ext: string): Promise<string> {
     case ".docx":
       return extractDocx(buf);
     case ".xlsx":
+    case ".xlsm":
     case ".xls":
       return extractXlsx(buf);
     default:
@@ -87,11 +99,13 @@ async function extractByExt(abs: string, ext: string): Promise<string> {
  * earlier version cached as empty.
  * v3: matches the Rust engine's docx whitespace fidelity + .doc salvage bump
  * so the two engines keep sharing cache entries.
- * v4: the Rust engine renders Excel datetime cells as ISO 8601 (PARITY: this
- * engine's SheetJS path already emits formatted date text — the bump only
- * keeps the shared cache in lockstep).
+ * v4: the Rust engine renders Excel datetime cells as ISO 8601.
+ * v5: both engines now render Excel dates as ISO 8601 honoring the workbook
+ * date-system (1904 files were ~4y early), emit raw numbers (cellText:false),
+ * and extract .xlsm as a workbook. Invalidates v4 (which had formatted/locale
+ * date text on this engine and wrong 1904 dates on the Rust engine).
  */
-const CACHE_VERSION = 4;
+const CACHE_VERSION = 5;
 
 interface CacheRecord {
   v: number;

@@ -44,8 +44,14 @@ export function listPins(): Pin[] {
 }
 
 function save(pins: Pin[]): void {
-  fs.mkdirSync(path.dirname(pinsPath()), { recursive: true });
-  fs.writeFileSync(pinsPath(), JSON.stringify({ pins }, null, 2));
+  const target = pinsPath();
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  // Atomic temp+rename (mirrors pins.rs): a crash mid-write must never leave
+  // truncated JSON, because listPins() treats a corrupt store as empty — a
+  // direct writeFileSync could wipe every pin on an interrupted write.
+  const tmp = `${target}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify({ pins }, null, 2));
+  fs.renameSync(tmp, target);
 }
 
 /** Stable id from the pinned SQL — re-pinning the same query replaces. */
