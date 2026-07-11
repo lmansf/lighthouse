@@ -145,6 +145,37 @@ fn widget_held(app: &AppHandle) -> bool {
 #[derive(Default)]
 pub struct WidgetFocusEpoch(std::sync::atomic::AtomicU64);
 
+/// Debounces the main window's "backgrounded" idle timer (background-conserve).
+/// Bumped on every main-window focus edge; a blur arms a delayed suspend keyed
+/// to the value it saw, so a re-focus (or another blur) before the grace
+/// elapses cancels the pending suspend. Same epoch trick as WidgetFocusEpoch.
+#[derive(Default)]
+pub struct MainIdleEpoch(std::sync::atomic::AtomicU64);
+
+/// How long the main window may sit unfocused before background-conserve
+/// suspends the local model servers. Long enough that ordinary alt-tabbing
+/// never pays a re-warm; short enough that leaving the app in the background
+/// genuinely frees resources. Hiding to the tray suspends immediately instead.
+const IDLE_SUSPEND_GRACE_SECS: u64 = 120;
+
+/// Whether background-conserve is on (default true): idle/hidden desktop windows
+/// release the llama-server RAM+CPU. Off keeps the old always-resident behavior.
+fn conserve_enabled(app: &AppHandle) -> bool {
+    read_settings(app)["backgroundConserve"].as_bool() != Some(false)
+}
+
+/// Bring the local servers back after a background-conserve suspend and kick a
+/// reconcile so they respawn immediately rather than on the next 3 s tick.
+/// No-op unless actually suspended, so ordinary focus edges stay cheap.
+pub fn resume_servers(app: &AppHandle) {
+    if let Some(sup) = app.try_state::<Supervisor>() {
+        if sup.is_suspended() {
+            sup.resume();
+            sup.reconcile(app);
+        }
+    }
+}
+
 pub fn set_widget_pinned(app: &AppHandle, pinned: bool) {
     if let Some(state) = app.try_state::<WidgetPin>() {
         state.0.store(pinned, std::sync::atomic::Ordering::Relaxed);
@@ -898,6 +929,7 @@ fn main() {
         .manage(WidgetResident::default())
         .manage(WidgetHold::default())
         .manage(WidgetFocusEpoch::default())
+        .manage(MainIdleEpoch::default())
         .manage(HotkeyOk::default())
         .manage(ServerPort::default())
         .invoke_handler(tauri::generate_handler![
@@ -955,6 +987,16 @@ fn main() {
                         hide_widget(window.app_handle());
                     } else {
                         let _ = window.hide();
+                        // Hidden to the tray = clearly not in use: suspend the
+                        // local model servers now (desktop mode + conserve on),
+                        // freeing their RAM/CPU immediately rather than after
+                        // the unfocus grace. resume on next focus/show.
+                        let app = window.app_handle();
+                        if conserve_enabled(app) && !widget_mode(app) {
+                            if let Some(sup) = app.try_state::<Supervisor>() {
+                                sup.suspend();
+                            }
+                        }
                     }
                 }
                 // Spotlight-style dismissal: an UNPINNED search bar hides
@@ -983,6 +1025,49 @@ fn main() {
                                 && !widget_resident(&app)
                             {
                                 hide_widget(&app);
+                            }
+                        });
+                    }
+                }
+                // Background-conserve: the main window going idle (unfocused
+                // past the grace) suspends the local model servers to free
+                // their RAM/CPU; focusing it brings them back. Desktop mode
+                // only — widget mode keeps the model warm for instant summon.
+                // Epoch-debounced so ordinary alt-tabbing never suspends (and
+                // so never pays a re-warm on return).
+                tauri::WindowEvent::Focused(focused) if window.label() == "main" => {
+                    let app = window.app_handle().clone();
+                    if !conserve_enabled(&app) || widget_mode(&app) {
+                        return;
+                    }
+                    let Some(epoch) = app.try_state::<MainIdleEpoch>() else {
+                        return;
+                    };
+                    let seen =
+                        epoch.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                    if *focused {
+                        resume_servers(&app);
+                    } else {
+                        tauri::async_runtime::spawn(async move {
+                            tokio::time::sleep(std::time::Duration::from_secs(
+                                IDLE_SUSPEND_GRACE_SECS,
+                            ))
+                            .await;
+                            // Suspend only if no focus edge has landed since
+                            // (epoch unchanged) and the window isn't focused now.
+                            let unchanged = app
+                                .state::<MainIdleEpoch>()
+                                .0
+                                .load(std::sync::atomic::Ordering::Relaxed)
+                                == seen;
+                            let refocused = app
+                                .get_webview_window("main")
+                                .and_then(|w| w.is_focused().ok())
+                                .unwrap_or(false);
+                            if unchanged && !refocused {
+                                if let Some(sup) = app.try_state::<Supervisor>() {
+                                    sup.suspend();
+                                }
                             }
                         });
                     }
@@ -1033,6 +1118,10 @@ fn main() {
                         if let Some(win) = main_window(tray.app_handle()) {
                             let _ = win.show();
                             let _ = win.set_focus();
+                            // Bringing the app back from the tray resumes the
+                            // local servers even if programmatic focus doesn't
+                            // emit Focused(true) on this platform.
+                            resume_servers(tray.app_handle());
                         }
                     }
                 })
@@ -1258,7 +1347,22 @@ fn main() {
                 tauri::async_runtime::spawn(async move {
                     let mut last = lighthouse_core::watch::generation();
                     loop {
-                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                        // While background-conserve has us suspended the UI is
+                        // hidden, so park this 2 Hz poll: sleep long and skip
+                        // the emit. `last` isn't advanced, so the first tick
+                        // after resume fires one event if anything changed and
+                        // the (now-visible) UI refreshes once.
+                        let suspended = handle
+                            .try_state::<Supervisor>()
+                            .map(|s| s.is_suspended())
+                            .unwrap_or(false);
+                        tokio::time::sleep(std::time::Duration::from_millis(
+                            if suspended { 2000 } else { 500 },
+                        ))
+                        .await;
+                        if suspended {
+                            continue;
+                        }
                         let now = lighthouse_core::watch::generation();
                         if now != last {
                             last = now;

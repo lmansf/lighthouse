@@ -897,6 +897,10 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
   const [runOnStartup, setRunOnStartup] = useState(true);
   // B2 hybrid search: on-device embeddings fused into retrieval. Default on.
   const [semanticSearch, setSemanticSearch] = useState(true);
+  // Background-conserve: release the local model servers (their RAM/CPU) while
+  // the app sits in the tray or unfocused, bringing them back on return.
+  // Default on. Window mode only — widget mode keeps the model warm.
+  const [backgroundConserve, setBackgroundConserve] = useState(true);
   const [uiMode, setUiMode] = useState<"window" | "widget">("window");
   const [whisperMode, setWhisperMode] = useState(false);
   // macOS Accessibility state for whisper: "pending" = the system prompt is up
@@ -955,6 +959,7 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
         setDesktop(Boolean(d.desktop));
         setRunOnStartup(d.runOnStartup !== false);
         setSemanticSearch(d.semanticSearch !== false);
+        setBackgroundConserve(d.backgroundConserve !== false);
         setUiMode(d.uiMode === "widget" ? "widget" : "window");
         setWhisperMode(d.whisperMode === true);
         setWhisperPermission(typeof d.whisperPermission === "string" ? d.whisperPermission : "unknown");
@@ -1032,6 +1037,12 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
     const prev = semanticSearch;
     setSemanticSearch(next);
     void postSetting({ semanticSearch: next }, () => setSemanticSearch(prev));
+  }
+
+  function updateConserve(next: boolean) {
+    const prev = backgroundConserve;
+    setBackgroundConserve(next);
+    void postSetting({ backgroundConserve: next }, () => setBackgroundConserve(prev));
   }
 
   function updateUiMode(next: "window" | "widget") {
@@ -1228,6 +1239,14 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
                   checked={semanticSearch}
                   onChange={(_, d) => updateSemantic(Boolean(d.checked))}
                   label="Semantic search — a small bundled model (runs entirely on this computer) helps questions find files by meaning, not just matching words"
+                />
+              )}
+
+              {desktop && uiMode !== "widget" && (
+                <Switch
+                  checked={backgroundConserve}
+                  onChange={(_, d) => updateConserve(Boolean(d.checked))}
+                  label="Conserve resources in the background — free up the local AI's memory and CPU while Lighthouse sits in the tray or unfocused, and bring it back when you return (adds a couple of seconds to the first answer after you come back)"
                 />
               )}
 

@@ -45,6 +45,12 @@ pub struct DesktopSettings {
     /// turning it off also stops the embedding server.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub semantic_search: Option<bool>,
+    /// Background-conserve: while the app sits in the tray or unfocused (window
+    /// mode), stop the local llama-server processes to free their RAM+CPU, and
+    /// bring them back on return. Default ON (None = on); off keeps the servers
+    /// resident, as they were before this setting existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_conserve: Option<bool>,
     /// Keys this struct doesn't model (e.g. the shell's hand-persisted
     /// `widgetPos`) must survive a read-modify-write round trip — without
     /// this flatten, any Preferences toggle would silently delete them.
@@ -77,6 +83,7 @@ pub fn write_desktop_settings(
     whisper_mode: Option<bool>,
     summon_shortcut: Option<String>,
     semantic_search: Option<bool>,
+    background_conserve: Option<bool>,
 ) -> DesktopSettings {
     let Some(f) = settings_file() else {
         return DesktopSettings::default();
@@ -102,6 +109,9 @@ pub fn write_desktop_settings(
     }
     if semantic_search.is_some() {
         next.semantic_search = semantic_search;
+    }
+    if background_conserve.is_some() {
+        next.background_conserve = background_conserve;
     }
     write_json(&f, &next); // best-effort: a read-only location just means unsaved
     next

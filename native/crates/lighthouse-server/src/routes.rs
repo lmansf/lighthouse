@@ -910,6 +910,7 @@ pub async fn settings_get() -> Response {
             .as_deref()
             .unwrap_or(settings::DEFAULT_SUMMON_SHORTCUT),
         "semanticSearch": s.semantic_search != Some(false), // default on
+        "backgroundConserve": s.background_conserve != Some(false), // default on
     }))
     .into_response()
 }
@@ -933,6 +934,7 @@ pub async fn settings_post(headers: HeaderMap, body: Option<Json<Value>>) -> Res
         body["whisperMode"].as_bool(),
         body["summonShortcut"].as_str().map(String::from),
         body["semanticSearch"].as_bool(),
+        body["backgroundConserve"].as_bool(),
     );
     Json(json!({
         "ok": true,
@@ -945,6 +947,7 @@ pub async fn settings_post(headers: HeaderMap, body: Option<Json<Value>>) -> Res
             .as_deref()
             .unwrap_or(settings::DEFAULT_SUMMON_SHORTCUT),
         "semanticSearch": s.semantic_search != Some(false),
+        "backgroundConserve": s.background_conserve != Some(false),
     }))
     .into_response()
 }

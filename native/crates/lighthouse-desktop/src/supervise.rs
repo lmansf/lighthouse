@@ -11,7 +11,7 @@
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 use lighthouse_core::config::resources_dir;
@@ -43,6 +43,43 @@ pub struct Supervisor {
     /// Set by `halt()` when an installer handoff is in progress: reconcile
     /// must not respawn children whose DLLs the installer is about to replace.
     halted: AtomicBool,
+    /// Set while the app is backgrounded (hidden to the tray, or sat unfocused
+    /// past the idle grace) with `backgroundConserve` on: reconcile tears the
+    /// children down and refuses to respawn until `resume()`. This frees the
+    /// llama-server RAM + CPU that were the bulk of "the app slows my machine
+    /// even when it isn't the active window". Reversible, unlike `halted`.
+    suspended: AtomicBool,
+}
+
+/// In-flight `chat_ask` streams. `suspend()` and a suspended `reconcile()` must
+/// never kill the chat server out from under a live answer, so teardown of the
+/// chat child is deferred while this is > 0 (the next reconcile tick reaps it
+/// once the stream ends). Embedding calls are short, so the embed child is
+/// never guarded this way.
+static ACTIVE_CHATS: AtomicUsize = AtomicUsize::new(0);
+
+/// RAII counter for one in-flight chat stream — held for the whole lifetime of
+/// a `chat_ask`, decremented on Drop (so an early return or panic still frees
+/// the guard and lets a pending suspend reap the chat child).
+pub struct ChatGuard;
+
+impl ChatGuard {
+    pub fn new() -> Self {
+        ACTIVE_CHATS.fetch_add(1, Ordering::SeqCst);
+        ChatGuard
+    }
+}
+
+impl Default for ChatGuard {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for ChatGuard {
+    fn drop(&mut self) {
+        ACTIVE_CHATS.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 /// Windows: every supervised child joins a job object configured to kill its
@@ -358,6 +395,14 @@ impl Supervisor {
         if self.halted.load(Ordering::SeqCst) {
             return; // installer handoff in progress — nothing may respawn
         }
+        if self.suspended.load(Ordering::SeqCst) {
+            // Backgrounded: keep both children down (reaping the chat child once
+            // any in-flight answer finishes) rather than respawning them, so a
+            // tray-resident app doesn't hold the model's RAM/CPU. resume()
+            // clears the flag and the next tick brings them back.
+            self.idle_teardown();
+            return;
+        }
         // The embedding server is independent of the chat model's install/
         // uninstall lifecycle below — reconcile it first, unconditionally.
         self.reconcile_embed(app);
@@ -463,6 +508,44 @@ impl Supervisor {
     pub fn halt(&self) {
         self.halted.store(true, Ordering::SeqCst);
         self.shutdown();
+    }
+
+    /// Background the local servers: stop them and refuse to respawn until
+    /// `resume()`. The embed child dies immediately; the chat child is spared
+    /// while an answer is still streaming (`ACTIVE_CHATS`) and reaped on a later
+    /// reconcile tick once idle. Called when the app is hidden to the tray, or
+    /// has sat unfocused past the idle grace, with `backgroundConserve` on.
+    /// Idempotent and reversible — unlike `halt()`.
+    pub fn suspend(&self) {
+        self.suspended.store(true, Ordering::SeqCst);
+        self.idle_teardown();
+    }
+
+    /// Foreground again: allow respawns. The caller should run one `reconcile()`
+    /// immediately afterwards so the servers come back (and re-warm) without
+    /// waiting for the next 3 s tick. No-op if not suspended.
+    pub fn resume(&self) {
+        self.suspended.store(false, Ordering::SeqCst);
+    }
+
+    pub fn is_suspended(&self) -> bool {
+        self.suspended.load(Ordering::SeqCst)
+    }
+
+    /// Kill the embed child now, and the chat child too if no answer is
+    /// streaming. A chat streaming at suspend time keeps its server until the
+    /// stream ends, when the next suspended `reconcile()` tick reaps it here.
+    fn idle_teardown(&self) {
+        if let Some(mut child) = self.embed.lock().unwrap_or_else(|p| p.into_inner()).take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        if ACTIVE_CHATS.load(Ordering::SeqCst) == 0 {
+            if let Some(mut child) = self.llm.lock().unwrap_or_else(|p| p.into_inner()).take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
     }
 }
 

@@ -315,6 +315,10 @@ pub async fn chat_ask(
         turns.into_iter().skip(skip).collect()
     };
     let cfg = profile::model_config();
+    // Mark a chat in flight so background-conserve suspension (hide-to-tray /
+    // idle) can't kill the local chat server out from under this stream — the
+    // teardown waits until the guard drops at the end of the ask.
+    let _chat_guard = crate::supervise::ChatGuard::new();
     // The whole ask path — single-shot RAG or multi-document synthesis, with
     // pre-answer progress chunks (docs/multi-doc-synthesis.md) — lives in the
     // engine pipeline, shared with the axum route (retrieval-query blending
@@ -671,6 +675,7 @@ pub fn settings_get(app: AppHandle) -> Value {
         // False on Wayland — the UI swaps hotkey copy for the tray fallback.
         "summonHotkeyOk": hotkey_ok,
         "semanticSearch": s.semantic_search != Some(false), // default on (B2)
+        "backgroundConserve": s.background_conserve != Some(false), // default on
     })
 }
 
@@ -683,6 +688,7 @@ pub fn settings_set(
     whisper_mode: Option<bool>,
     summon_shortcut: Option<String>,
     semantic_search: Option<bool>,
+    background_conserve: Option<bool>,
 ) -> Value {
     // A new summon shortcut must PARSE before anything persists — saving an
     // unregistrable string would strand the user with no hotkey at all.
@@ -717,6 +723,7 @@ pub fn settings_set(
         whisper_mode,
         summon_shortcut,
         semantic_search,
+        background_conserve,
     );
     if shortcut_changed && !crate::register_summon_shortcut(&app) {
         // The new chord didn't register — restore the previous one so the
@@ -729,6 +736,7 @@ pub fn settings_set(
             None,
             None,
             Some(prev_shortcut.clone().unwrap_or_default()),
+            None,
             None,
         );
         crate::register_summon_shortcut(&app);
@@ -802,6 +810,7 @@ pub fn settings_set(
             .unwrap_or(settings::DEFAULT_SUMMON_SHORTCUT),
         "summonHotkeyOk": hotkey_ok,
         "semanticSearch": s.semantic_search != Some(false),
+        "backgroundConserve": s.background_conserve != Some(false),
     })
 }
 
@@ -1066,6 +1075,8 @@ pub fn show_main(app: AppHandle, seed_question: Option<String>) {
         let _ = w.show();
         let _ = w.unminimize();
         let _ = w.set_focus();
+        // Resume the local servers if background-conserve had suspended them.
+        crate::resume_servers(&app);
     }
     if let Some(q) = seed_question.filter(|q| !q.trim().is_empty()) {
         let _ = app.emit_to("main", "ask-question", json!({ "question": q }));
