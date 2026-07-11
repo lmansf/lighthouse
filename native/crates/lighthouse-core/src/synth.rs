@@ -698,9 +698,15 @@ pub fn answer_pipeline(
                 ))
                 .await;
                 let extract = take_chars(strip_markers(&raw).trim(), MAP_EXTRACT_CHARS);
+                // A model failure mid-map is yielded as an "_(… model
+                // unavailable — …)_" note (llm.rs turns provider errors into a
+                // note, not a throw), so the surrounding logic never sees an
+                // Err. Skip BOTH the local- and live-model forms — otherwise a
+                // failure note becomes a bogus extract with a fabricated
+                // citation in the reduce.
                 if extract.is_empty()
                     || extract.starts_with("NO_RELEVANT_CONTENT")
-                    || extract.contains("_(Local model unavailable")
+                    || extract.contains("model unavailable —")
                 {
                     continue;
                 }

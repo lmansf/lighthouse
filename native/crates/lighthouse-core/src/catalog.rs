@@ -117,7 +117,7 @@ fn read_columns(name: &str, abs: &Path) -> Option<Vec<Column>> {
     let lower = name.to_lowercase();
     if lower.ends_with(".csv") || lower.ends_with(".tsv") {
         read_delimited(abs, if lower.ends_with(".tsv") { '\t' } else { ',' })
-    } else if lower.ends_with(".xlsx") || lower.ends_with(".xls") {
+    } else if lower.ends_with(".xlsx") || lower.ends_with(".xlsm") || lower.ends_with(".xls") {
         read_workbook(abs)
     } else if lower.ends_with(".parquet") {
         read_parquet_footer(abs)

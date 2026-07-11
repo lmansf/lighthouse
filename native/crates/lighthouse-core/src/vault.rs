@@ -278,6 +278,7 @@ fn mime_of(name: &str) -> Option<String> {
         ".html" | ".htm" => "text/html",
         ".docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         ".xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        ".xlsm" => "application/vnd.ms-excel.sheet.macroEnabled.12",
         ".xls" => "application/vnd.ms-excel",
         _ => return None,
     };
@@ -747,7 +748,12 @@ pub fn write_artifact(
         .map(|c| if c == '/' || c == '\\' || c.is_control() { '-' } else { c })
         .take(80)
         .collect();
-    clean = clean.trim().trim_start_matches('.').trim().to_string();
+    // Trim whitespace AND U+FEFF (BOM/ZWNBSP): JS String.trim() in the TS twin
+    // (writeArtifact) strips it, but Rust's is_whitespace() does not, so a
+    // name hint echoed from a BOM-prefixed file would otherwise yield a
+    // different filename on each engine.
+    let is_trim = |c: char| c.is_whitespace() || c == '\u{FEFF}';
+    clean = clean.trim_matches(is_trim).trim_start_matches('.').trim_matches(is_trim).to_string();
     if clean.is_empty() {
         clean = "result".to_string();
     }
@@ -1202,9 +1208,9 @@ struct Listing {
 fn listing_exts(kind: &str) -> Vec<&'static str> {
     match kind {
         "dataset" => vec![
-            ".csv", ".tsv", ".xlsx", ".xls", ".parquet", ".json", ".arrow", ".feather",
+            ".csv", ".tsv", ".xlsx", ".xlsm", ".xls", ".parquet", ".json", ".arrow", ".feather",
         ],
-        "spreadsheet" => vec![".csv", ".tsv", ".xlsx", ".xls"],
+        "spreadsheet" => vec![".csv", ".tsv", ".xlsx", ".xlsm", ".xls"],
         "document" => vec![
             ".md",
             ".markdown",
@@ -1306,6 +1312,7 @@ fn listing_qualifier(t: &str) -> Option<Vec<&'static str>> {
         "csv" => vec![".csv"],
         "tsv" => vec![".tsv"],
         "xlsx" => vec![".xlsx"],
+        "xlsm" => vec![".xlsm"],
         "xls" => vec![".xls"],
         "parquet" => vec![".parquet"],
         "json" => vec![".json"],
@@ -1598,7 +1605,8 @@ fn chunk_tabular(name: &str, text: &str) -> Vec<String> {
     let lower = name.to_lowercase();
     // Workbook extracts prepend the sheet name above each sheet's CSV; carry
     // BOTH the sheet line and the header row into every chunk.
-    let header_lines = if lower.ends_with(".xlsx") || lower.ends_with(".xls") { 2 } else { 1 };
+    let header_lines =
+        if lower.ends_with(".xlsx") || lower.ends_with(".xlsm") || lower.ends_with(".xls") { 2 } else { 1 };
     let mut chunks: Vec<String> = Vec::new();
     // Blank-line-separated blocks (one per sheet for workbooks).
     for block in text.split("\n\n") {
@@ -2024,7 +2032,7 @@ pub fn doc_text(file_id: &str, preview_chars: Option<usize>) -> Option<(String, 
 
 /// Extension-ish tokens that don't count as "naming" a file in a question.
 const EXT_TOKENS: &[&str] = &[
-    "xlsx", "xls", "csv", "tsv", "pdf", "docx", "doc", "md", "txt", "parquet",
+    "xlsx", "xlsm", "xls", "csv", "tsv", "pdf", "docx", "doc", "md", "txt", "parquet",
     "pptx", "json", "html", "log",
 ];
 

@@ -231,18 +231,32 @@ pub async fn recheck_all() -> Vec<ChangedPin> {
             changed.push(c);
         }
     }
-    let surviving: std::collections::HashSet<String> = {
+    let merged: std::collections::HashSet<String> = {
         let _guard = store_lock();
         let mut current = list();
+        let mut merged = std::collections::HashSet::new();
         for c in &mut current {
             if let Some(updated) = snapshot.iter().find(|u| u.id == c.id) {
-                *c = updated.clone();
+                // Copy back ONLY the recheck outputs, and only when the pin is
+                // the same instance we rechecked — a re-pin mid-pass resets
+                // created_ms / file_ids, and its digest was computed against
+                // the OLD state, so applying it (or overwriting the edited
+                // question/files with the stale snapshot) would be wrong.
+                if c.created_ms == updated.created_ms && c.file_ids == updated.file_ids {
+                    c.last_run_ms = updated.last_run_ms;
+                    c.last_digest = updated.last_digest.clone();
+                    c.last_summary = updated.last_summary.clone();
+                    c.stale_reason = updated.stale_reason.clone();
+                    merged.insert(c.id.clone());
+                }
             }
         }
         save(&current);
-        current.into_iter().map(|p| p.id).collect()
+        merged
     };
-    changed.retain(|c| surviving.contains(&c.id));
+    // Only pins we actually re-primed can alert (a re-pinned/removed pin's
+    // alert was computed against stale data — drop it).
+    changed.retain(|c| merged.contains(&c.id));
     changed
 }
 
@@ -257,15 +271,21 @@ pub async fn recheck_one(id: &str) -> Option<ChangedPin> {
     let changed = recheck_pin(&mut pin).await;
     let _guard = store_lock();
     let mut current = list();
-    let mut found = false;
+    let mut merged = false;
     for c in &mut current {
-        if c.id == pin.id {
-            *c = pin.clone();
-            found = true;
+        // Same guard as recheck_all: apply only the recheck outputs, and only
+        // if the pin wasn't removed or re-pinned (new created_ms / file_ids)
+        // while the priming query ran.
+        if c.id == pin.id && c.created_ms == pin.created_ms && c.file_ids == pin.file_ids {
+            c.last_run_ms = pin.last_run_ms;
+            c.last_digest = pin.last_digest.clone();
+            c.last_summary = pin.last_summary.clone();
+            c.stale_reason = pin.stale_reason.clone();
+            merged = true;
         }
     }
-    if !found {
-        return None; // removed while the query ran
+    if !merged {
+        return None; // removed or re-pinned while the query ran
     }
     save(&current);
     changed

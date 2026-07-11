@@ -169,6 +169,7 @@ const MIME: Record<string, string> = {
   ".html": "text/html", ".htm": "text/html",
   ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
   ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  ".xlsm": "application/vnd.ms-excel.sheet.macroEnabled.12",
   ".xls": "application/vnd.ms-excel",
 };
 
@@ -787,7 +788,7 @@ function nameTokensOf(id: string, name: string): string[] {
 
 /** Extension-ish tokens that don't count as "naming" a file in a question. */
 const EXT_TOKENS = new Set([
-  "xlsx", "xls", "csv", "tsv", "pdf", "docx", "doc", "md", "txt", "parquet",
+  "xlsx", "xlsm", "xls", "csv", "tsv", "pdf", "docx", "doc", "md", "txt", "parquet",
   "pptx", "json", "html", "log",
 ]);
 
@@ -903,8 +904,8 @@ interface Listing {
 }
 
 const LISTING_EXT: Record<string, string[]> = {
-  dataset: [".csv", ".tsv", ".xlsx", ".xls", ".parquet", ".json", ".arrow", ".feather"],
-  spreadsheet: [".csv", ".tsv", ".xlsx", ".xls"],
+  dataset: [".csv", ".tsv", ".xlsx", ".xlsm", ".xls", ".parquet", ".json", ".arrow", ".feather"],
+  spreadsheet: [".csv", ".tsv", ".xlsx", ".xlsm", ".xls"],
   document: [".md", ".markdown", ".txt", ".text", ".rst", ".doc", ".docx", ".pdf", ".rtf", ".odt"],
   pdf: [".pdf"],
 };
@@ -929,7 +930,7 @@ const LISTING_NOUN = new Set([
 // mapped to the concrete extensions they name. A named type narrows the listing
 // to exactly those extensions, overriding the broad noun-based kind.
 const LISTING_QUALIFIER: Record<string, string[]> = {
-  csv: [".csv"], tsv: [".tsv"], xlsx: [".xlsx"], xls: [".xls"],
+  csv: [".csv"], tsv: [".tsv"], xlsx: [".xlsx"], xlsm: [".xlsm"], xls: [".xls"],
   parquet: [".parquet"], json: [".json"], arrow: [".arrow"], feather: [".feather"],
   md: [".md", ".markdown"], markdown: [".md", ".markdown"],
   txt: [".txt", ".text"], text: [".txt", ".text"], rst: [".rst"], rtf: [".rtf"],
@@ -1049,7 +1050,7 @@ function chunksOf(text: string, fileId: string, name: string): Chunk[] {
  */
 export function chunkTextsNamed(name: string, text: string): string[] {
   const lower = name.toLowerCase();
-  const tabular = [".csv", ".tsv", ".parquet", ".xlsx", ".xls"].some((e) => lower.endsWith(e));
+  const tabular = [".csv", ".tsv", ".parquet", ".xlsx", ".xlsm", ".xls"].some((e) => lower.endsWith(e));
   if (tabular) return chunkTabular(name, text);
   return chunkTextsProse(text);
 }
@@ -1059,7 +1060,8 @@ function chunkTabular(name: string, text: string): string[] {
   const lower = name.toLowerCase();
   // Workbook extracts prepend the sheet name above each sheet's CSV; carry
   // BOTH the sheet line and the header row into every chunk.
-  const headerLines = lower.endsWith(".xlsx") || lower.endsWith(".xls") ? 2 : 1;
+  const headerLines =
+    lower.endsWith(".xlsx") || lower.endsWith(".xlsm") || lower.endsWith(".xls") ? 2 : 1;
   const chunks: string[] = [];
   for (const block of text.split("\n\n")) {
     const lines = block

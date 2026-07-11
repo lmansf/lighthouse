@@ -1139,12 +1139,13 @@ export function ChatPanel() {
   const [pinsOpen, setPinsOpen] = useState(false);
   const [pinList, setPinList] = useState<Pin[]>([]);
   const [pinsBusy, setPinsBusy] = useState(false);
-  // Saved/pinned notes are keyed by message id, and ids RESTART per
-  // conversation — clear both maps on a conversation switch so a new chat's
-  // "a2" never inherits another chat's "Saved…"/"Pinned…" claims.
+  // Saved/pinned notes AND thumbs ratings are keyed by message id, and ids
+  // RESTART per conversation — clear them on a conversation switch so a new
+  // chat's "a2" never inherits another chat's "Saved…"/"Pinned…"/👍.
   useEffect(() => {
     setSavedNotes({});
     setPinNotes({});
+    setRatings({});
   }, [currentId]);
   // Cancels the in-flight ask() when the user presses Stop.
   const abortRef = useRef<AbortController | null>(null);
@@ -1547,9 +1548,15 @@ export function ChatPanel() {
     const hint =
       (prev?.role === "user" ? prev.content : "").trim().replace(/\s+/g, " ").slice(0, 60) ||
       "Result";
+    // Message ids restart per conversation, so a note written after the user
+    // switched chats would attach to an unrelated same-id answer. Drop the
+    // post-await writes if the conversation changed while we saved.
+    const convo = useChatStore.getState().currentId;
+    const stillHere = () => useChatStore.getState().currentId === convo;
     setSavedNotes((s) => ({ ...s, [asstId]: { pending: true } }));
     try {
       const res = await ragService.analyticsSql(meta.sql, meta.fileIds, hint);
+      if (!stillHere()) return;
       if (res.error || !res.savedId) {
         setSavedNotes((s) => ({ ...s, [asstId]: { error: res.error ?? "save failed" } }));
       } else {
@@ -1557,6 +1564,7 @@ export function ChatPanel() {
         logEvent("analytics_save_csv", { rows: res.rows ?? 0 });
       }
     } catch (err) {
+      if (!stillHere()) return;
       setSavedNotes((s) => ({
         ...s,
         [asstId]: { error: err instanceof Error ? err.message : "save failed" },
@@ -1617,9 +1625,15 @@ export function ChatPanel() {
     const question =
       (prev?.role === "user" ? prev.content : "").trim().replace(/\s+/g, " ").slice(0, 200) ||
       "Pinned question";
+    // Same per-conversation guard as saveResultCsv: ids restart per chat, so
+    // don't paint a "Pinned" note onto a same-id answer in a chat the user
+    // switched to mid-request.
+    const convo = useChatStore.getState().currentId;
+    const stillHere = () => useChatStore.getState().currentId === convo;
     setPinNotes((s) => ({ ...s, [asstId]: { pending: true } }));
     try {
       const res = await ragService.pinAsk(question, meta.sql, meta.fileIds);
+      if (!stillHere()) return;
       if (res.error || !res.pin) {
         setPinNotes((s) => ({ ...s, [asstId]: { error: res.error ?? "could not pin" } }));
       } else {
@@ -1627,6 +1641,7 @@ export function ChatPanel() {
         logEvent("analytics_pin");
       }
     } catch (err) {
+      if (!stillHere()) return;
       setPinNotes((s) => ({
         ...s,
         [asstId]: { error: err instanceof Error ? err.message : "could not pin" },

@@ -87,7 +87,11 @@ pub fn analytics_cue(question: &str) -> bool {
 /// File kinds the engine can register as tables.
 pub fn is_tabular(name: &str) -> bool {
     let n = name.to_lowercase();
-    [".csv", ".tsv", ".parquet", ".xlsx", ".xls"]
+    // .xlsm is a macro-enabled workbook — same OOXML format as .xlsx, so it
+    // reads and queries identically. It MUST stay in step with meta.rs's
+    // `kind_label` spreadsheet set, or "which files have column X" contradicts
+    // "what spreadsheets do I have".
+    [".csv", ".tsv", ".parquet", ".xlsx", ".xlsm", ".xls"]
         .iter()
         .any(|e| n.ends_with(e))
 }
@@ -362,7 +366,7 @@ async fn register_group(
             Ok(df) => ctx.register_table(&tname, df.into_view()).is_ok(),
             Err(_) => false,
         },
-        "xlsx" | "xls" => {
+        "xlsx" | "xlsm" | "xls" => {
             // Whole-sheet parsing is blocking work — keep it off the runtime.
             let members = g.members.clone();
             let parsed = tokio::task::spawn_blocking(move || workbook_union_matrix(&members))
