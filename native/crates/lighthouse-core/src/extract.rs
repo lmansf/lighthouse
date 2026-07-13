@@ -1,5 +1,5 @@
 //! Text extraction for "rich" document formats — PDF, Word, Excel (port of
-//! `src/server/extract.ts`).
+//! `src/server/extract.ts`) plus desktop-only PowerPoint, OpenDocument, and RTF.
 //!
 //! Native parsers replace the JS ones (pdf-extract ⇄ unpdf, zip+quick-xml ⇄
 //! mammoth, calamine ⇄ SheetJS). Results are cached on disk keyed by the file's
@@ -24,8 +24,7 @@ use crate::config::state_dir;
 // name-match-only. Adding these was purely additive — none was ever in
 // TEXT_EXT, so no previously-indexed file changes behavior.
 const RICH_EXT: &[&str] = &[
-    ".pdf", ".doc", ".docx", ".xlsx", ".xlsm", ".xls", ".parquet", ".pptx", ".odt", ".odp",
-    ".rtf",
+    ".pdf", ".doc", ".docx", ".xlsx", ".xlsm", ".xls", ".parquet", ".pptx", ".odt", ".odp", ".rtf",
 ];
 
 pub fn is_rich_file(name: &str) -> bool {
@@ -41,6 +40,16 @@ const MAX_EXTRACT_BYTES: usize = 1_000_000;
 /// Refuse to parse a source file larger than this (a *referenced* file can be
 /// arbitrarily large).
 const MAX_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
+/// MAX_SOURCE_BYTES bounds the COMPRESSED file only — deflate expands up to
+/// ~1000:1, so a crafted zip could otherwise inflate to tens of GB in memory
+/// and OOM the app mid-scan. Every zip member is read through `Read::take`
+/// with one of these caps: small per-part for slides (real ones are KB-scale),
+/// generous for a document's single main XML part (revision-heavy Word files
+/// legitimately reach tens of MB).
+const MAX_PART_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_MAIN_XML_BYTES: u64 = 64 * 1024 * 1024;
+/// A deck with more parts than this is not a presentation, it's an attack.
+const MAX_PPTX_PARTS: usize = 2048;
 
 /// Byte-cap (not char-cap) so multi-byte text can't slip past the budget.
 fn clamp(text: &str) -> String {
@@ -85,7 +94,13 @@ fn extract_docx(buf: &[u8]) -> anyhow::Result<String> {
     let mut archive = zip::ZipArchive::new(std::io::Cursor::new(buf))?;
     let main = docx_main_part(&mut archive);
     let mut raw = Vec::new();
-    archive.by_name(&main)?.read_to_end(&mut raw)?;
+    // Capped read: bounds a decompression bomb. A truncated-at-cap legitimate
+    // file yields malformed XML below, which errors (logged, not cached) — but
+    // no real document.xml approaches 64 MB of markup.
+    archive
+        .by_name(&main)?
+        .take(MAX_MAIN_XML_BYTES)
+        .read_to_end(&mut raw)?;
     let xml = String::from_utf8_lossy(&raw);
 
     let mut reader = quick_xml::Reader::from_str(&xml);
@@ -141,21 +156,19 @@ fn extract_docx(buf: &[u8]) -> anyhow::Result<String> {
 /// (the officeDocument relationship — some generators target
 /// word/document2.xml), else `word/document.xml`, else the first
 /// `word/document*.xml` member.
-fn docx_main_part<R: std::io::Read + std::io::Seek>(
-    archive: &mut zip::ZipArchive<R>,
-) -> String {
+fn docx_main_part<R: std::io::Read + std::io::Seek>(archive: &mut zip::ZipArchive<R>) -> String {
     let mut rels = String::new();
     let read_ok = archive
         .by_name("_rels/.rels")
         .ok()
-        .map(|mut f| f.read_to_string(&mut rels).is_ok())
+        // .take: rels files are tiny; an inflated one is a decompression bomb.
+        .map(|f| f.take(MAX_PART_BYTES).read_to_string(&mut rels).is_ok())
         .unwrap_or(false);
     if read_ok {
         let mut reader = quick_xml::Reader::from_str(&rels);
         loop {
             match reader.read_event() {
-                Ok(quick_xml::events::Event::Start(e))
-                | Ok(quick_xml::events::Event::Empty(e)) => {
+                Ok(quick_xml::events::Event::Start(e)) | Ok(quick_xml::events::Event::Empty(e)) => {
                     if e.name().local_name().as_ref() == b"Relationship" {
                         let mut is_doc = false;
                         let mut target: Option<String> = None;
@@ -434,14 +447,21 @@ fn part_number(name: &str) -> u32 {
     tail.parse().unwrap_or(0)
 }
 
-/// Read one archive member fully as lossy UTF-8. OOXML/ODF parts are UTF-8, but
-/// a stray byte should degrade that member, not fail the whole document.
+/// Read one archive member (up to `cap` DECOMPRESSED bytes — see MAX_PART_BYTES)
+/// as lossy UTF-8. OOXML/ODF parts are UTF-8, but a stray byte should degrade
+/// that member, not fail the whole document.
 fn read_member<R: std::io::Read + std::io::Seek>(
     archive: &mut zip::ZipArchive<R>,
     name: &str,
+    cap: u64,
 ) -> Option<String> {
     let mut raw = Vec::new();
-    archive.by_name(name).ok()?.read_to_end(&mut raw).ok()?;
+    archive
+        .by_name(name)
+        .ok()?
+        .take(cap)
+        .read_to_end(&mut raw)
+        .ok()?;
     Some(String::from_utf8_lossy(&raw).into_owned())
 }
 
@@ -477,7 +497,13 @@ fn drawingml_runs(xml: &str) -> Vec<String> {
                 }
             }
             Ok(quick_xml::events::Event::Eof) => break,
-            Err(_) => break,
+            Err(_) => {
+                // Malformed markup mid-run (an encrypted or corrupt member):
+                // drop the partial run so binary junk never lands in the index.
+                // Paragraphs that closed cleanly before the error are kept.
+                current.clear();
+                break;
+            }
             _ => {}
         }
     }
@@ -505,21 +531,35 @@ fn extract_pptx(buf: &[u8]) -> anyhow::Result<String> {
     }
     slides.sort_by_key(|n| part_number(n));
     notes.sort_by_key(|n| part_number(n));
+    slides.truncate(MAX_PPTX_PARTS);
+    notes.truncate(MAX_PPTX_PARTS);
 
+    // Stop reading parts once the output budget is met: the final clamp cuts
+    // at MAX_EXTRACT_BYTES anyway, so later parts can't change the result —
+    // this just bounds work on absurd or hostile decks.
+    let mut total = 0usize;
     let mut blocks: Vec<String> = Vec::new();
     for name in &slides {
-        if let Some(xml) = read_member(&mut archive, name) {
+        if total > MAX_EXTRACT_BYTES {
+            break;
+        }
+        if let Some(xml) = read_member(&mut archive, name, MAX_PART_BYTES) {
             let text = drawingml_runs(&xml).join("\n");
             if !text.trim().is_empty() {
+                total += text.len();
                 blocks.push(text);
             }
         }
     }
     let mut note_text: Vec<String> = Vec::new();
     for name in &notes {
-        if let Some(xml) = read_member(&mut archive, name) {
+        if total > MAX_EXTRACT_BYTES {
+            break;
+        }
+        if let Some(xml) = read_member(&mut archive, name, MAX_PART_BYTES) {
             let text = drawingml_runs(&xml).join("\n");
             if !text.trim().is_empty() {
+                total += text.len();
                 note_text.push(text);
             }
         }
@@ -533,52 +573,132 @@ fn extract_pptx(buf: &[u8]) -> anyhow::Result<String> {
 /// ODF text documents (`.odt`) and presentations (`.odp`) keep displayable text
 /// as character data in `content.xml`. Emit all of it, breaking lines on
 /// paragraph/heading ends and honoring the explicit whitespace elements. Only
-/// `content.xml` is read, so styles and document metadata never leak in.
+/// `content.xml` is read, so styles and document metadata never leak in — and
+/// within it, tracked-change deletions, reviewer comments, and inline binary
+/// data are excluded: text the author removed must not resurface in search.
 fn extract_odf(buf: &[u8]) -> anyhow::Result<String> {
     let mut archive = zip::ZipArchive::new(std::io::Cursor::new(buf))?;
-    let xml = read_member(&mut archive, "content.xml")
+    let xml = read_member(&mut archive, "content.xml", MAX_MAIN_XML_BYTES)
         .ok_or_else(|| anyhow::anyhow!("odf: no content.xml"))?;
 
     let mut reader = quick_xml::Reader::from_str(&xml);
     let mut out: Vec<String> = Vec::new();
     let mut line = String::new();
+    // Depth of subtrees whose character data must never reach the index:
+    // <office:binary-data> (images inlined as base64), <text:tracked-changes>
+    // (holds the DELETED text of tracked changes), and <office:annotation>
+    // (reviewer comments — not visible body prose).
+    let mut skip = 0i32;
+    // An encrypted .odt keeps the zip layout but content.xml is ciphertext:
+    // decoded lossily it parses as one giant element-less text node. Only
+    // flush the trailing line if the member actually contained markup.
+    let mut saw_elem = false;
     loop {
         match reader.read_event() {
             Ok(quick_xml::events::Event::Text(t)) => {
-                line.push_str(&t.unescape().unwrap_or_default());
+                if skip == 0 {
+                    line.push_str(&t.unescape().unwrap_or_default());
+                }
             }
-            Ok(quick_xml::events::Event::Empty(e)) => match e.name().local_name().as_ref() {
-                b"tab" => line.push('\t'),
-                b"line-break" => line.push('\n'),
-                b"s" => line.push(' '),
-                _ => {}
-            },
-            // A paragraph or heading closes a line; ODF nests spans inside these,
-            // so breaking only here keeps a paragraph's runs together.
-            Ok(quick_xml::events::Event::End(e)) => {
-                if matches!(e.name().local_name().as_ref(), b"p" | b"h") {
-                    let taken = std::mem::take(&mut line);
-                    if !taken.trim().is_empty() {
-                        out.push(taken.trim_end().to_string());
+            Ok(quick_xml::events::Event::Start(e)) => {
+                saw_elem = true;
+                if matches!(
+                    e.name().local_name().as_ref(),
+                    b"binary-data" | b"tracked-changes" | b"annotation"
+                ) {
+                    skip += 1;
+                }
+            }
+            Ok(quick_xml::events::Event::Empty(e)) => {
+                saw_elem = true;
+                if skip == 0 {
+                    match e.name().local_name().as_ref() {
+                        b"tab" => line.push('\t'),
+                        b"line-break" => line.push('\n'),
+                        b"s" => line.push(' '),
+                        _ => {}
                     }
                 }
             }
+            // A paragraph or heading closes a line; ODF nests spans inside these,
+            // so breaking only here keeps a paragraph's runs together.
+            Ok(quick_xml::events::Event::End(e)) => {
+                saw_elem = true;
+                match e.name().local_name().as_ref() {
+                    b"binary-data" | b"tracked-changes" | b"annotation" => skip = (skip - 1).max(0),
+                    // A </text:p> inside a skipped subtree must neither flush
+                    // nor clear: `line` holds the ENCLOSING paragraph's text
+                    // (e.g. prose before an inline comment), which continues
+                    // after the subtree closes.
+                    b"p" | b"h" if skip == 0 => {
+                        let taken = std::mem::take(&mut line);
+                        if !taken.trim().is_empty() {
+                            out.push(taken.trim_end().to_string());
+                        }
+                    }
+                    _ => {}
+                }
+            }
             Ok(quick_xml::events::Event::Eof) => break,
-            Err(_) => break,
+            Err(_) => {
+                // Malformed markup: drop the partial line so ciphertext/junk
+                // never lands in the index; cleanly closed paragraphs kept.
+                line.clear();
+                break;
+            }
             _ => {}
         }
     }
-    if !line.trim().is_empty() {
+    if saw_elem && !line.trim().is_empty() {
         out.push(line.trim_end().to_string());
     }
     Ok(out.join("\n"))
 }
 
+/// Decode a `\'hh` escape as Windows-1252, RTF's default codepage. The 0x80–0x9F
+/// block is where Word puts the punctuation it writes constantly — `\'92` is the
+/// apostrophe in every contraction, `\'93`/`\'94` the curly quotes — and mapping
+/// those bytes as raw Latin-1 would inject invisible C1 control characters into
+/// the index instead ("don\u{92}t" would never match a search for "don't").
+/// 0xA0–0xFF is identical to Latin-1; the five undefined bytes pass through.
+fn cp1252_char(b: u8) -> char {
+    match b {
+        0x80 => '€',
+        0x82 => '‚',
+        0x83 => 'ƒ',
+        0x84 => '„',
+        0x85 => '…',
+        0x86 => '†',
+        0x87 => '‡',
+        0x88 => 'ˆ',
+        0x89 => '‰',
+        0x8A => 'Š',
+        0x8B => '‹',
+        0x8C => 'Œ',
+        0x8E => 'Ž',
+        0x91 => '\u{2018}',
+        0x92 => '\u{2019}',
+        0x93 => '\u{201C}',
+        0x94 => '\u{201D}',
+        0x95 => '•',
+        0x96 => '–',
+        0x97 => '—',
+        0x98 => '˜',
+        0x99 => '™',
+        0x9A => 'š',
+        0x9B => '›',
+        0x9C => 'œ',
+        0x9E => 'ž',
+        0x9F => 'Ÿ',
+        other => other as char,
+    }
+}
+
 /// Minimal RTF-to-text. RTF is ASCII with `\control` words and `{group}`
 /// nesting; recover the prose by dropping control words, skipping the ignorable
 /// destinations that hold no body text (font/color/stylesheet tables and any
-/// `{\*..}` group), decoding `\'hh` bytes and `\uN` unicode, and turning
-/// `\par`/`\line`/`\sect` into newlines. Formatting is lost; content is
+/// `{\*..}` group), decoding `\'hh` bytes (cp1252) and `\uN` unicode, and
+/// turning `\par`/`\line`/`\sect` into newlines. Formatting is lost; content is
 /// recovered. Pure char iteration — it can degrade but never panics.
 fn extract_rtf(buf: &[u8]) -> anyhow::Result<String> {
     let text = String::from_utf8_lossy(buf);
@@ -590,9 +710,21 @@ fn extract_rtf(buf: &[u8]) -> anyhow::Result<String> {
     // skip content until the matching close pops us back above it.
     let mut ignore_from: Option<i32> = None;
     let ignoring = |ignore_from: &Option<i32>| ignore_from.is_some();
+    // \ucN: how many fallback units follow each \uN escape. Spec default is 1,
+    // but macOS writers (TextEdit, Notes, Mail) set \uc0 — no fallback at all —
+    // and skipping one anyway would eat a real character after every escape.
+    // (Spec-fully this is group-scoped state; real files set it once, so a
+    // single value is the standard lightweight treatment.)
+    let mut uc: usize = 1;
 
     let mut i = 0;
     while i < n {
+        // The final clamp cuts at MAX_EXTRACT_BYTES, so once the budget is met
+        // further parsing cannot change the result — stop, which also bounds
+        // work on files that are mostly embedded-object hex.
+        if out.len() > MAX_EXTRACT_BYTES {
+            break;
+        }
         let c = chars[i];
         match c {
             '{' => {
@@ -624,12 +756,20 @@ fn extract_rtf(buf: &[u8]) -> anyhow::Result<String> {
                 }
                 // \'hh — a raw byte in hex (cp1252/latin-1 range).
                 if next == '\'' {
-                    if i + 3 < n && chars[i + 2].is_ascii_hexdigit() && chars[i + 3].is_ascii_hexdigit()
+                    if i + 3 < n
+                        && chars[i + 2].is_ascii_hexdigit()
+                        && chars[i + 3].is_ascii_hexdigit()
                     {
                         if !ignoring(&ignore_from) {
                             let hi = chars[i + 2].to_digit(16).unwrap_or(0);
                             let lo = chars[i + 3].to_digit(16).unwrap_or(0);
-                            out.push(((hi * 16 + lo) as u8) as char);
+                            let ch = cp1252_char((hi * 16 + lo) as u8);
+                            // \'00-\'1f and the undefined cp1252 bytes decode
+                            // to control chars — no prose, keep them out of
+                            // the index (tab/newline stay meaningful).
+                            if !ch.is_control() || ch == '\t' || ch == '\n' {
+                                out.push(ch);
+                            }
                         }
                         i += 4;
                     } else {
@@ -669,19 +809,65 @@ fn extract_rtf(buf: &[u8]) -> anyhow::Result<String> {
                                 ignore_from = Some(depth);
                             }
                         }
+                        // \binN: N RAW bytes follow (embedded object/picture
+                        // data). They are not RTF — braces inside them would
+                        // corrupt the group depth — so skip them wholesale.
+                        // Matched BEFORE the ignoring guard because \bin lives
+                        // inside \pict groups, exactly where we're ignoring.
+                        // (Byte count can drift on lossily-decoded input; the
+                        // clamp to the buffer keeps the skip safe regardless.)
+                        "bin" => {
+                            let skip = param.parse::<usize>().unwrap_or(0);
+                            // saturating: a hostile \bin18446744073709551615
+                            // would overflow-panic under dev/test profiles.
+                            j = j.saturating_add(skip).min(n);
+                        }
                         _ if ignoring(&ignore_from) => {}
+                        // \ucN retunes the fallback-unit count for later \uN.
+                        // Honored only outside ignored destinations, which also
+                        // approximates its group-scoped semantics. Clamped: real
+                        // values are 0..2, and this bounds the skip loop.
+                        "uc" => uc = param.parse::<usize>().unwrap_or(1).min(8),
                         "par" | "line" | "sect" | "row" => out.push('\n'),
                         "tab" | "cell" => out.push('\t'),
                         "u" => {
                             if let Ok(code) = param.parse::<i32>() {
-                                let scalar = if code < 0 { (code + 65536) as u32 } else { code as u32 };
+                                let scalar = if code < 0 {
+                                    (code + 65536) as u32
+                                } else {
+                                    code as u32
+                                };
                                 if let Some(ch) = char::from_u32(scalar) {
                                     out.push(ch);
                                 }
                             }
-                            // Skip the ASCII fallback char that follows \uN.
-                            if j < n && !matches!(chars[j], '\\' | '{' | '}') {
-                                j += 1;
+                            // Skip the \ucN fallback units that follow (0 for
+                            // \uc0 files — skipping anyway ate a real char).
+                            // A unit is one plain char or one whole \'hh escape
+                            // (decoding the escape too would double the char:
+                            // "caf\u233\'e9" -> "caféé"). A control word or
+                            // group brace is never a fallback.
+                            let mut remaining = uc;
+                            while remaining > 0 && j < n {
+                                if chars[j] == '\\' {
+                                    if j + 1 < n && chars[j + 1] == '\'' {
+                                        j += 2;
+                                        if j + 1 < n
+                                            && chars[j].is_ascii_hexdigit()
+                                            && chars[j + 1].is_ascii_hexdigit()
+                                        {
+                                            j += 2;
+                                        }
+                                        remaining -= 1;
+                                    } else {
+                                        break;
+                                    }
+                                } else if matches!(chars[j], '{' | '}') {
+                                    break;
+                                } else {
+                                    j += 1;
+                                    remaining -= 1;
+                                }
                             }
                         }
                         _ => {}
@@ -812,7 +998,16 @@ pub fn extract_rich_text(abs: &Path, ext: &str) -> String {
         // Stale key or older schema falls through to a fresh parse below.
     }
 
-    let text = match extract_by_ext(abs, ext) {
+    // Panic isolation around the whole parser dispatch: extraction runs in the
+    // parallel scan pool, where an uncaught panic in a parser dependency would
+    // abort the entire build batch instead of degrading one file (extract_pdf
+    // self-guards; this covers the zip/xml/rtf/calamine paths symmetrically).
+    // A panic is treated like a parse error: logged, NOT cached, retried on
+    // the next scan.
+    let parsed =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| extract_by_ext(abs, ext)))
+            .unwrap_or_else(|_| Err(anyhow::anyhow!("parser panicked")));
+    let text = match parsed {
         Ok(t) => clamp(t.trim()),
         Err(err) => {
             // Degrade gracefully but do NOT cache the failure: log it so empty
@@ -849,12 +1044,24 @@ mod serial_date_tests {
         // the SAME real date is stored 1462 days lower (42369). Both must
         // render 2020-01-01 — the old raw-serial path rendered the 1904 file
         // as 2015-12-31 (~4 years early).
-        let d1900 = Data::DateTime(ExcelDateTime::new(43_831.0, ExcelDateTimeType::DateTime, false));
+        let d1900 = Data::DateTime(ExcelDateTime::new(
+            43_831.0,
+            ExcelDateTimeType::DateTime,
+            false,
+        ));
         assert_eq!(cell_text(&d1900), "2020-01-01");
-        let d1904 = Data::DateTime(ExcelDateTime::new(42_369.0, ExcelDateTimeType::DateTime, true));
+        let d1904 = Data::DateTime(ExcelDateTime::new(
+            42_369.0,
+            ExcelDateTimeType::DateTime,
+            true,
+        ));
         assert_eq!(cell_text(&d1904), "2020-01-01");
         // A datetime with a time component still renders date + time.
-        let noon = Data::DateTime(ExcelDateTime::new(43_831.5, ExcelDateTimeType::DateTime, false));
+        let noon = Data::DateTime(ExcelDateTime::new(
+            43_831.5,
+            ExcelDateTimeType::DateTime,
+            false,
+        ));
         assert_eq!(cell_text(&noon), "2020-01-01 12:00:00");
     }
 
@@ -872,13 +1079,19 @@ mod serial_date_tests {
         assert_eq!(excel_serial_to_iso(43_831.75), "2020-01-01 18:00:00");
         // Sub-second fractions round to the nearest second.
         let one_sec = 1.0 / 86_400.0;
-        assert_eq!(excel_serial_to_iso(43_831.0 + one_sec * 1.4), "2020-01-01 00:00:01");
+        assert_eq!(
+            excel_serial_to_iso(43_831.0 + one_sec * 1.4),
+            "2020-01-01 00:00:01"
+        );
     }
 
     #[test]
     fn near_midnight_rolls_to_next_day() {
         // 43831 + 86399.6/86400 rounds up past midnight → date-only next day.
-        assert_eq!(excel_serial_to_iso(43_831.0 + 86_399.6 / 86_400.0), "2020-01-02");
+        assert_eq!(
+            excel_serial_to_iso(43_831.0 + 86_399.6 / 86_400.0),
+            "2020-01-02"
+        );
     }
 
     #[test]
@@ -1016,7 +1229,8 @@ mod doc_format_tests {
             <a:p><a:r><a:t>Reset the </a:t></a:r><a:r><a:t>firewall</a:t></a:r></a:p>
             <a:p><a:r><a:t>Then reboot</a:t></a:r></a:p>
             </p:spTree></p:cSld></p:sld>"#;
-        let note = r#"<p:notes xmlns:a="x"><a:p><a:r><a:t>Escalate to tier 2</a:t></a:r></a:p></p:notes>"#;
+        let note =
+            r#"<p:notes xmlns:a="x"><a:p><a:r><a:t>Escalate to tier 2</a:t></a:r></a:p></p:notes>"#;
         let buf = zip_of(&[
             ("ppt/slides/slide1.xml", slide),
             ("ppt/notesSlides/notesSlide1.xml", note),
@@ -1031,7 +1245,8 @@ mod doc_format_tests {
 
     #[test]
     fn pptx_orders_slides_numerically() {
-        let s = |t: &str| format!(r#"<p:sld xmlns:a="x"><a:p><a:r><a:t>{t}</a:t></a:r></a:p></p:sld>"#);
+        let s =
+            |t: &str| format!(r#"<p:sld xmlns:a="x"><a:p><a:r><a:t>{t}</a:t></a:r></a:p></p:sld>"#);
         let buf = zip_of(&[
             ("ppt/slides/slide10.xml", &s("TENTH")),
             ("ppt/slides/slide2.xml", &s("SECOND")),
@@ -1065,9 +1280,14 @@ mod doc_format_tests {
         let text = extract_rtf(rtf.as_bytes()).unwrap();
         assert!(text.contains("Hello world"), "got: {text}");
         // \'2c is a comma.
-        assert!(text.contains("Second, line"), "hex escape not decoded: {text}");
+        assert!(
+            text.contains("Second, line"),
+            "hex escape not decoded: {text}"
+        );
         // Font/color/generator destinations must not bleed into the text.
-        assert!(!text.contains("fonttbl") && !text.contains("Times") && !text.contains("generator"));
+        assert!(
+            !text.contains("fonttbl") && !text.contains("Times") && !text.contains("generator")
+        );
     }
 
     #[test]
@@ -1113,7 +1333,9 @@ mod doc_format_tests {
         let text = extract_odf(&zip_of(&[("content.xml", content)])).unwrap();
         assert!(text.contains("Escalate"), "got: {text:?}");
         assert!(text.contains("now."));
-        assert!(!text.contains("P1") && !text.contains("paragraph") && !text.contains("font-weight"));
+        assert!(
+            !text.contains("P1") && !text.contains("paragraph") && !text.contains("font-weight")
+        );
     }
 
     #[test]
@@ -1129,9 +1351,157 @@ mod doc_format_tests {
             \\pard\\sa200\\sl276\\f0\\fs22 Reset the \\b firewall\\b0  and reboot.\\par\n\
             Retention is \\u8722?90 days.\\par}";
         let text = extract_rtf(rtf.as_bytes()).unwrap();
-        assert!(text.contains("Reset the firewall and reboot."), "got: {text:?}");
-        // U+2212 is the minus sign written as 蜢; its '?' fallback is skipped.
-        assert!(text.contains("Retention is \u{2212}90 days."), "unicode/fallback: {text:?}");
-        assert!(!text.contains("Calibri") && !text.contains("Riched20") && !text.contains("colortbl"));
+        assert!(
+            text.contains("Reset the firewall and reboot."),
+            "got: {text:?}"
+        );
+        // U+2212 is the minus sign, written 蜢; its '?' fallback is skipped.
+        assert!(
+            text.contains("Retention is \u{2212}90 days."),
+            "unicode/fallback: {text:?}"
+        );
+        assert!(
+            !text.contains("Calibri") && !text.contains("Riched20") && !text.contains("colortbl")
+        );
+    }
+
+    // --- hardening (adversarial review): hostile and messy real-world inputs ---
+
+    #[test]
+    fn rtf_decodes_cp1252_smart_punctuation() {
+        // \'92 is the apostrophe Word writes in every contraction; \'93/\'94
+        // the curly quotes. Raw Latin-1 would map these to invisible C1
+        // controls and "don't" would never match a search again.
+        let text = extract_rtf(br#"{\rtf1 don\'92t say \'93stop\'94 \'96 ever}"#).unwrap();
+        assert_eq!(
+            text.trim(),
+            "don\u{2019}t say \u{201C}stop\u{201D} \u{2013} ever",
+            "cp1252 mapping"
+        );
+    }
+
+    #[test]
+    fn rtf_unicode_fallback_written_as_hex_escape_is_not_doubled() {
+        // Some writers emit the \uN fallback as a \'hh escape of the same
+        // character; decoding both would double it ("caféé").
+        let text = extract_rtf(br#"{\rtf1 caf\u233\'e9 au lait}"#).unwrap();
+        assert_eq!(text.trim(), "café au lait", "fallback doubled");
+    }
+
+    #[test]
+    fn rtf_bin_payload_bytes_are_not_parsed_as_rtf() {
+        // \bin4 announces 4 RAW bytes ("}}x{") that must not move the group
+        // depth; the pict group then closes for real and B is still in scope.
+        let text = extract_rtf(b"{\\rtf1 A{\\pict\\bin4 }}x{}B}").unwrap();
+        assert_eq!(text.trim(), "AB", "raw \\bin bytes corrupted group depth");
+    }
+
+    #[test]
+    fn odf_skips_inline_binary_data() {
+        // Images can be inlined as base64 character data; that "text" must
+        // never reach the index.
+        let content = r#"<office:document-content xmlns:office="a" xmlns:text="b" xmlns:draw="c">
+            <office:body><office:text>
+            <text:p>Before image.</text:p>
+            <text:p><draw:frame><draw:image><office:binary-data>AAECAwQFBgcICQoLDA0ODw==</office:binary-data></draw:image></draw:frame>After image.</text:p>
+            </office:text></office:body></office:document-content>"#;
+        let text = extract_odf(&zip_of(&[("content.xml", content)])).unwrap();
+        assert!(text.contains("Before image."));
+        assert!(
+            text.contains("After image."),
+            "text after the image kept: {text:?}"
+        );
+        assert!(!text.contains("AAECAwQ"), "inline base64 leaked: {text:?}");
+    }
+
+    #[test]
+    fn odf_garbage_content_yields_empty_not_mojibake() {
+        // An encrypted .odt keeps the zip layout but content.xml is
+        // ciphertext: decoded lossily it is one giant element-less text node,
+        // and must produce nothing rather than pollute the index.
+        let garbage = "q9\u{fffd}\u{7f}J01k~\u{fffd}zR raw bytes, no xml here at all";
+        let text = extract_odf(&zip_of(&[("content.xml", garbage)])).unwrap();
+        assert_eq!(text, "", "ciphertext leaked into the index: {text:?}");
+    }
+
+    #[test]
+    fn pptx_stops_reading_once_the_output_budget_is_met() {
+        let s =
+            |t: &str| format!(r#"<p:sld xmlns:a="x"><a:p><a:r><a:t>{t}</a:t></a:r></a:p></p:sld>"#);
+        let big = "lorem ipsum ".repeat(60_000); // ~720 KB of text per slide
+        let one = s(&format!("ONE {big}"));
+        let two = s(&format!("TWO {big}"));
+        let three = s("THREE");
+        let buf = zip_of(&[
+            ("ppt/slides/slide1.xml", &one),
+            ("ppt/slides/slide2.xml", &two),
+            ("ppt/slides/slide3.xml", &three),
+        ]);
+        let text = extract_pptx(&buf).unwrap();
+        assert!(text.contains("ONE") && text.contains("TWO"));
+        // Slides 1+2 already exceed the 1 MB extraction clamp, so slide 3 is
+        // never read — the clamp would have cut it before it anyway.
+        assert!(!text.contains("THREE"), "read past the output budget");
+    }
+
+    // --- second-pass review fixes ---
+
+    #[test]
+    fn rtf_uc0_files_do_not_lose_the_char_after_unicode() {
+        // macOS writers (TextEdit, Notes, Mail) set \uc0: NO fallback follows
+        // \uN. Unconditionally skipping one unit ate a real character after
+        // every escape ("John's" -> "John'").
+        let rtf: &[u8] = b"{\\rtf1\\uc0 John\\u8217s laptop}";
+        let text = extract_rtf(rtf).unwrap();
+        assert_eq!(text.trim(), "John\u{2019}s laptop", "\\uc0 ate a char");
+    }
+
+    #[test]
+    fn rtf_uc2_skips_both_fallback_units() {
+        let rtf: &[u8] = b"{\\rtf1\\uc2 x\\u8217??y}";
+        let text = extract_rtf(rtf).unwrap();
+        assert_eq!(text.trim(), "x\u{2019}y", "\\uc2 fallback leaked");
+    }
+
+    #[test]
+    fn rtf_huge_bin_count_saturates_instead_of_overflowing() {
+        // usize::MAX as the \bin param would overflow j + skip under the
+        // dev/test profiles (overflow checks on) and abort the scan batch.
+        let text = extract_rtf(b"{\\rtf1 ok \\bin18446744073709551615 junk}").unwrap();
+        assert_eq!(text.trim(), "ok");
+    }
+
+    #[test]
+    fn rtf_control_byte_escapes_do_not_pollute() {
+        // \'00-\'1f decode to C0 controls — no prose, keep them out.
+        let text = extract_rtf(br#"{\rtf1 a\'01\'02b}"#).unwrap();
+        assert_eq!(text.trim(), "ab", "control bytes leaked: {text:?}");
+    }
+
+    #[test]
+    fn odf_excludes_tracked_deletions_and_comments() {
+        // Deleted-but-tracked text and reviewer comments are not visible body
+        // prose; a user who removed confidential text must not find it
+        // resurfacing in search results.
+        let content = r#"<office:document-content xmlns:office="a" xmlns:text="b">
+            <office:body><office:text>
+            <text:tracked-changes><text:changed-region><text:deletion>
+                <text:p>OLD SECRET PASSAGE</text:p>
+            </text:deletion></text:changed-region></text:tracked-changes>
+            <text:p>Visible policy text.</text:p>
+            <text:p>Also visible<office:annotation><text:p>reviewer gripe</text:p></office:annotation> tail.</text:p>
+            </office:text></office:body></office:document-content>"#;
+        let text = extract_odf(&zip_of(&[("content.xml", content)])).unwrap();
+        assert!(text.contains("Visible policy text."));
+        // Prose around an inline comment stays one paragraph.
+        assert!(text.contains("Also visible tail."), "got: {text:?}");
+        assert!(
+            !text.contains("OLD SECRET"),
+            "deleted text indexed: {text:?}"
+        );
+        assert!(
+            !text.contains("reviewer gripe"),
+            "comment indexed: {text:?}"
+        );
     }
 }
