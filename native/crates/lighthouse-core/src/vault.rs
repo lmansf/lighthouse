@@ -8,7 +8,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf, MAIN_SEPARATOR};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
@@ -54,12 +54,33 @@ impl Default for VaultState {
     }
 }
 
+// The vault state (inclusion flags + references) was re-read and JSON-parsed
+// from disk on every call — ≥2× per query, plus once per walk. save_state is
+// the sole writer, so an in-memory copy keyed on state_path() stays coherent
+// in-process; a vault switch changes the path and misses cleanly (mirrors how
+// WALK_CACHE is keyed on root).
+static STATE_CACHE: Mutex<Option<(PathBuf, VaultState)>> = Mutex::new(None);
+
 fn load_state() -> VaultState {
-    read_json(&state_path(), VaultState::default())
+    let path = state_path();
+    {
+        let cache = STATE_CACHE.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some((p, s)) = cache.as_ref() {
+            if *p == path {
+                return s.clone();
+            }
+        }
+    }
+    let s = read_json(&path, VaultState::default());
+    *STATE_CACHE.lock().unwrap_or_else(|p| p.into_inner()) = Some((path, s.clone()));
+    s
 }
 
 fn save_state(s: &VaultState) {
-    write_json(&state_path(), s);
+    let path = state_path();
+    write_json(&path, s);
+    // Keep the cache warm with what we just wrote (sole writer ⇒ coherent).
+    *STATE_CACHE.lock().unwrap_or_else(|p| p.into_inner()) = Some((path, s.clone()));
     invalidate_walk_cache(); // inclusion flags and references feed the walked tree
 }
 
@@ -180,7 +201,9 @@ fn walk_ttl_ms() -> u128 {
 
 struct WalkCache {
     root: PathBuf,
-    nodes: Vec<FileNode>,
+    // Arc so cached_walk hands out a cheap refcount bump instead of deep-cloning
+    // the whole node vector on every walk() call (retrieve alone calls it 2-3×).
+    nodes: Arc<Vec<FileNode>>,
     at: Instant,
 }
 
@@ -292,7 +315,7 @@ fn mime_of(name: &str) -> Option<String> {
 /// ride the winner's snapshot.
 static WALK_BUILD: Mutex<()> = Mutex::new(());
 
-fn cached_walk(root: &Path) -> Option<Vec<FileNode>> {
+fn cached_walk(root: &Path) -> Option<Arc<Vec<FileNode>>> {
     let cache = WALK_CACHE.lock().unwrap();
     cache.as_ref().and_then(|c| {
         (c.root == root && c.at.elapsed().as_millis() < walk_ttl_ms()).then(|| c.nodes.clone())
@@ -300,7 +323,7 @@ fn cached_walk(root: &Path) -> Option<Vec<FileNode>> {
 }
 
 /// A node id is its POSIX-relative path from the vault root (stable + unique).
-fn walk(root: &Path) -> Vec<FileNode> {
+fn walk(root: &Path) -> Arc<Vec<FileNode>> {
     if let Some(nodes) = cached_walk(root) {
         return nodes;
     }
@@ -308,10 +331,10 @@ fn walk(root: &Path) -> Vec<FileNode> {
     if let Some(nodes) = cached_walk(root) {
         return nodes; // someone rebuilt while we waited for the lock
     }
-    let nodes = walk_uncached(root);
+    let nodes = Arc::new(walk_uncached(root));
     *WALK_CACHE.lock().unwrap() = Some(WalkCache {
         root: root.to_path_buf(),
-        nodes: nodes.clone(),
+        nodes: Arc::clone(&nodes),
         at: Instant::now(),
     });
     nodes
@@ -492,7 +515,7 @@ pub fn list_sources() -> Vec<DataSource> {
 pub fn list_nodes() -> Vec<FileNode> {
     let all = walk(&vault_dir());
     record_presence_diff(&all);
-    all
+    (*all).clone()
 }
 
 fn usage_snapshot_path() -> PathBuf {
@@ -532,7 +555,12 @@ fn record_presence_diff(nodes: &[FileNode]) {
             fire_event("file_removed", kind);
         }
     }
-    write_json(&usage_snapshot_path(), &Snapshot { ids: current });
+    // Only rewrite when the set actually changed. The tree poll lands here every
+    // few seconds; rewriting (atomic temp+rename) an identical snapshot each time
+    // was pure idle disk churn — when current == prev the file already holds it.
+    if current != prev {
+        write_json(&usage_snapshot_path(), &Snapshot { ids: current });
+    }
 }
 
 /// Fire-and-forget telemetry (needs a Tokio runtime; silently skipped without one).
@@ -552,7 +580,7 @@ pub fn set_included(node_id: &str, value: bool) {
     let mut grew = true;
     while grew {
         grew = false;
-        for n in &all {
+        for n in all.iter() {
             if let Some(pid) = &n.parent_id {
                 if target.contains(pid) && !target.contains(&n.id) {
                     target.insert(n.id.clone());
@@ -1015,9 +1043,9 @@ pub fn active_included_file_ids() -> Vec<String> {
     }
     let default_in = default_included();
     walk(&vault_dir())
-        .into_iter()
+        .iter()
         .filter(|n| n.kind == NodeKind::File && is_effectively_included(&n.id, &state, default_in))
-        .map(|n| n.id)
+        .map(|n| n.id.clone())
         .collect()
 }
 
@@ -1700,13 +1728,13 @@ pub fn warm_index_async() {
             let ids: HashSet<String> = active_included_file_ids().into_iter().collect();
             let state = load_state();
             let items: Vec<crate::index::IndexItem> = walk(&vault_dir())
-                .into_iter()
+                .iter()
                 .filter(|n| n.kind == NodeKind::File && ids.contains(&n.id))
                 .map(|n| crate::index::IndexItem {
                     abs: resolve_abs(&n.id, &state).ok(),
                     path_for: n.id.clone(),
-                    id: n.id,
-                    name: n.name,
+                    id: n.id.clone(),
+                    name: n.name.clone(),
                 })
                 .collect();
             let _ = crate::index::entries_for(&items);
@@ -1747,8 +1775,9 @@ pub fn retrieve(
 
     let state = load_state();
     let nodes: Vec<FileNode> = walk(&vault_dir())
-        .into_iter()
+        .iter()
         .filter(|n| n.kind == NodeKind::File && idset.contains(&n.id))
+        .cloned()
         .collect();
     if nodes.is_empty() && external.is_empty() {
         return Retrieved {
@@ -1833,28 +1862,46 @@ pub fn retrieve(
             }
         }
         let n = chunk_refs.len() as f64;
-        let idf = |t: &str| ((n + 1.0) / (df.get(t).copied().unwrap_or(0.0) + 1.0)).ln() + 1.0;
-        let mut qtf: HashMap<String, f64> = HashMap::new();
+        // idf precomputed ONCE per unique corpus term. The old closure recomputed
+        // ((n+1)/(df+1)).ln()+1 for every term-occurrence of every chunk on every
+        // query; the fallback here reproduces the old df.get(..).unwrap_or(0.0)
+        // path for query terms absent from the corpus. Scores are bit-identical.
+        let idf_fallback = (n + 1.0).ln() + 1.0;
+        let idf_map: HashMap<&str, f64> = df
+            .iter()
+            .map(|(&t, &d)| (t, ((n + 1.0) / (d + 1.0)).ln() + 1.0))
+            .collect();
+        let idf = |t: &str| idf_map.get(t).copied().unwrap_or(idf_fallback);
+        // Query vector — small (only the query's own terms), materialized once.
+        let mut qtf: HashMap<&str, f64> = HashMap::new();
         for t in &qtokens {
-            *qtf.entry(t.clone()).or_insert(0.0) += 1.0;
+            *qtf.entry(t.as_str()).or_insert(0.0) += 1.0;
         }
-        let vec_of = |tf: &HashMap<String, f64>| -> (HashMap<String, f64>, f64) {
-            let mut v = HashMap::new();
-            let mut norm = 0.0;
-            for (t, f) in tf {
-                let w = f * idf(t);
-                v.insert(t.clone(), w);
-                norm += w * w;
-            }
-            (v, if norm.sqrt() == 0.0 { 1.0 } else { norm.sqrt() })
-        };
-        let (qv, qnorm) = vec_of(&qtf);
+        let mut qv: Vec<(&str, f64)> = Vec::with_capacity(qtf.len());
+        let mut qnorm_sq = 0.0;
+        for (t, f) in &qtf {
+            let w = f * idf(t);
+            qv.push((*t, w));
+            qnorm_sq += w * w;
+        }
+        let qnorm = if qnorm_sq.sqrt() == 0.0 { 1.0 } else { qnorm_sq.sqrt() };
         let mut lex: Vec<f64> = Vec::with_capacity(chunk_refs.len());
         for (_, _, c) in &chunk_refs {
-            let (dv, dnorm) = vec_of(&c.tf);
+            // Document norm: allocation-free fold over the chunk's own terms
+            // (was a full HashMap<String,f64> clone-and-insert per chunk).
+            let mut dnorm_sq = 0.0;
+            for (t, f) in &c.tf {
+                let w = f * idf(t);
+                dnorm_sq += w * w;
+            }
+            let dnorm = if dnorm_sq.sqrt() == 0.0 { 1.0 } else { dnorm_sq.sqrt() };
+            // Dot product touches only the query's ~few terms, looked up in the
+            // chunk — not a full document vector. dv[t] was c.tf[t]*idf(t) or 0.
             let mut dot = 0.0;
-            for (t, w) in &qv {
-                dot += w * dv.get(t).copied().unwrap_or(0.0);
+            for (t, qw) in &qv {
+                if let Some(f) = c.tf.get(*t) {
+                    dot += qw * (f * idf(*t));
+                }
             }
             lex.push(dot / (qnorm * dnorm));
         }
@@ -2015,8 +2062,9 @@ pub fn retrieve(
 pub fn doc_text(file_id: &str, preview_chars: Option<usize>) -> Option<(String, String)> {
     const DOC_TEXT_CAP: u64 = 4 * 1024 * 1024;
     let node = walk(&vault_dir())
-        .into_iter()
-        .find(|n| n.kind == NodeKind::File && n.id == file_id)?;
+        .iter()
+        .find(|n| n.kind == NodeKind::File && n.id == file_id)
+        .cloned()?;
     let state = load_state();
     let abs = resolve_abs(file_id, &state).ok()?;
     let text = read_text_abs_capped(&abs, DOC_TEXT_CAP);
@@ -2049,7 +2097,7 @@ pub fn named_but_excluded(question: &str) -> Vec<String> {
     }
     let active: HashSet<String> = active_included_file_ids().into_iter().collect();
     let mut out = Vec::new();
-    for node in walk(&vault_dir()) {
+    for node in walk(&vault_dir()).iter() {
         if node.kind != NodeKind::File || active.contains(&node.id) {
             continue;
         }
@@ -2065,7 +2113,7 @@ pub fn named_but_excluded(question: &str) -> Vec<String> {
             qtokens.iter().any(|q| q == nt || q.contains(nt) || (q.len() >= 3 && nt.contains(q.as_str())))
         });
         if all_present {
-            out.push(node.name);
+            out.push(node.name.clone());
             if out.len() == 2 {
                 break;
             }
@@ -2078,8 +2126,9 @@ pub fn named_but_excluded(question: &str) -> Vec<String> {
 /// (crate::analytics) — csv/tsv/parquet register with DataFusion by real path.
 pub fn doc_path(file_id: &str) -> Option<(String, PathBuf)> {
     let node = walk(&vault_dir())
-        .into_iter()
-        .find(|n| n.kind == NodeKind::File && n.id == file_id)?;
+        .iter()
+        .find(|n| n.kind == NodeKind::File && n.id == file_id)
+        .cloned()?;
     let state = load_state();
     let abs = resolve_abs(file_id, &state).ok()?;
     Some((node.name, abs))

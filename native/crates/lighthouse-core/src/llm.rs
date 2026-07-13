@@ -157,6 +157,14 @@ fn build_prompt(question: &str, contexts: &[Ctx]) -> String {
     )
 }
 
+/// One process-wide reqwest client (connection pool + TLS config reused across
+/// requests) instead of building a fresh one per call. embed.rs shares its
+/// blocking client the same way; this is the async twin.
+fn http_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(reqwest::Client::new)
+}
+
 /// Prior turns with empty content dropped and the sequence trimmed to begin
 /// with a user turn (Anthropic rejects otherwise; mirrored for the local path).
 fn prior_turns(history: &[ChatTurn]) -> Vec<&ChatTurn> {
@@ -366,7 +374,7 @@ async fn stream_openai_compat(
     body[provider.max_tokens_param] = json!(REMOTE_MAX_TOKENS);
     let api_key = api_key.to_string();
     Box::pin(async_stream::stream! {
-        let client = reqwest::Client::new();
+        let client = http_client();
         let res = match client
             .post(provider.chat_url)
             .header("content-type", "application/json")
@@ -408,7 +416,7 @@ pub async fn validate_key(provider_id: &str, api_key: &str) -> Result<(), String
     if api_key.is_empty() {
         return Err("no key to test — paste one first".to_string());
     }
-    let client = reqwest::Client::new();
+    let client = http_client();
     let req = if provider_id == "anthropic" {
         client
             .get(ANTHROPIC_MODELS_URL)
@@ -498,7 +506,7 @@ async fn stream_claude(
     });
     let api_key = api_key.to_string();
     Box::pin(async_stream::stream! {
-        let client = reqwest::Client::new();
+        let client = http_client();
         let res = match client
             .post(ANTHROPIC_URL)
             .header("content-type", "application/json")
@@ -626,7 +634,7 @@ async fn stream_local(
         "messages": messages,
     });
     Box::pin(async_stream::stream! {
-        let client = reqwest::Client::new();
+        let client = http_client();
         let send = client
             .post(local_llm_url())
             .header("content-type", "application/json")
@@ -744,7 +752,7 @@ pub async fn warm_local_model() {
             { "role": "user", "content": "Warm-up." },
         ],
     });
-    let client = reqwest::Client::new();
+    let client = http_client();
     // Generous bound: a cold 4 GB mmap read plus system-prompt prefill can take
     // minutes on a slow disk — this runs in the background, so patience is free.
     let _ = client
