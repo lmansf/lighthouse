@@ -80,3 +80,5 @@ native/crates/lighthouse-desktop/gen/
 # Stray artifact dir from experiment.assign test (hardcoded Windows path)
 C:/
 native/crates/lighthouse-core/vault/
+# Perf-audit scratch notes (analysis working files, not shipped)
+scratch-perf/

@@ -166,10 +166,16 @@ impl Supervisor {
         if !bin.exists() {
             return;
         }
+        // Cap model threads at half the cores (2..=6) so llama-server can't peg
+        // every core and freeze the UI on CPU-fallback machines; GPU offload
+        // (below) is the common path, where -t only bounds prompt processing.
+        // The index pool (index.rs) already self-caps the same way.
+        let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
         let mut cmd = Command::new(&bin);
         cmd.arg("-m")
             .arg(&model)
             .args(["--host", "127.0.0.1", "--port", "8080"])
+            .args(["-t", &(cores / 2).clamp(2, 6).to_string()])
             // Force the legacy C++ chat-template path. Recent llama-server builds
             // default to Jinja and, for `/v1/chat/completions`, try to auto-
             // generate a tool-call parser by probing the model's embedded
@@ -282,11 +288,15 @@ impl Supervisor {
         if !bin.exists() {
             return;
         }
+        // The embedding warm-pass runs over the whole corpus on CPU; cap it hard
+        // (1..=4 threads) so a background re-embed never saturates the machine.
+        let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
         let mut cmd = Command::new(&bin);
         cmd.arg("-m")
             .arg(&model)
             .args(["--host", "127.0.0.1"])
             .args(["--port", &lighthouse_core::embed::EMBED_PORT.to_string()])
+            .args(["-t", &(cores / 2).clamp(1, 4).to_string()])
             // Embeddings endpoint + sequence pooling. nomic-embed's GGUF
             // carries pooling metadata, but stating it keeps us independent of
             // build defaults.

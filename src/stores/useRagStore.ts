@@ -133,6 +133,53 @@ interface RagStore {
 }
 
 /**
+ * Structural equality for the vault tree between two poll snapshots. The
+ * background poll (useVaultTree) refetches every few seconds and hands `load()`
+ * brand-new arrays of fresh objects even when nothing changed; replacing the
+ * store's `nodes`/`sources` with those forces a full FileExplorer + ChatPanel
+ * re-render on every idle tick. Comparing field-by-field lets `load()` keep the
+ * existing array reference when the content is identical, so idle polls are free
+ * while any real change (add/remove/rename/move/visibility toggle/availability)
+ * still lands. Order is assumed stable across scans (a fresh scan is
+ * deterministic); a reorder only costs one extra — always safe — re-render.
+ */
+function sourcesEqual(a: DataSource[], b: DataSource[]): boolean {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    const x = a[i];
+    const y = b[i];
+    if (x.id !== y.id || x.name !== y.name || x.kind !== y.kind || x.available !== y.available) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function nodesEqual(a: FileNode[], b: FileNode[]): boolean {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    const x = a[i];
+    const y = b[i];
+    if (
+      x.id !== y.id ||
+      x.parentId !== y.parentId ||
+      x.sourceId !== y.sourceId ||
+      x.name !== y.name ||
+      x.kind !== y.kind ||
+      x.mimeType !== y.mimeType ||
+      x.size !== y.size ||
+      x.ragIncluded !== y.ragIncluded ||
+      x.external !== y.external
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
  * Collect the given ids plus every descendant id — the client-side mirror of
  * the server's setIncluded cascade, so optimistic visibility flips paint the
  * same rows the server will actually change.
@@ -181,7 +228,18 @@ export const useRagStore = create<RagStore>((set, get) => ({
     // is stale or mixed, and applying it would undo the optimistic state.
     // Drop it; each write reconciles with a fresh load() when it settles.
     if (get().mutationEpoch !== epoch || get().pendingWrites > 0) return;
-    set({ sources, nodes, desktop: caps.desktop });
+    // Skip the write when the freshly-fetched tree is structurally identical to
+    // what's already in the store: the background poll fires every few seconds
+    // with new-but-equal arrays, and assigning them would re-render the whole
+    // (unmemoized, unvirtualized) explorer + chat on every idle tick forever.
+    // Only the fields that actually changed get a new reference, so a poll that
+    // finds nothing to do costs nothing downstream.
+    const cur = get();
+    const patch: Partial<Pick<RagStore, "sources" | "nodes" | "desktop">> = {};
+    if (!sourcesEqual(cur.sources, sources)) patch.sources = sources;
+    if (!nodesEqual(cur.nodes, nodes)) patch.nodes = nodes;
+    if (cur.desktop !== caps.desktop) patch.desktop = caps.desktop;
+    if (patch.sources || patch.nodes || patch.desktop !== undefined) set(patch);
   },
 
   // Leaving selection mode clears the pending picks so they don't linger.
