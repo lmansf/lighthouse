@@ -60,12 +60,16 @@ const LLAMACPP_API = "https://api.github.com/repos/ggml-org/llama.cpp/releases";
 const LLAMACPP_VERSION = "b9859"; // ggml-org/llama.cpp release tag
 const PIPER_VERSION = "2023.11.14-2"; // rhasspy/piper release tag
 const VOICE_REVISION = "e21c7de8d4eab79b902f0d61e662b3f21664b8d2"; // rhasspy/piper-voices commit
-// Our own mirror of the voice (release tag in THIS repo, populated by the
-// mirror-tts workflow). Tried before HF: the voice is the one asset hosted on
-// HF, whose CDN 403-stormed for hours on 2026-07-13 and blocked every release
-// build. Same pinned SHA-256 verifies both sources, so the mirror is
-// tamper-evident and the fallback order is purely about availability.
-const TTS_MIRROR_TAG = "tts-assets-1";
+// Our own mirror of every HF-hosted asset (release tag in THIS repo,
+// populated by the mirror-hf-assets workflow): the Piper voice pair and the
+// embedding GGUF. Tried before HF, whose CDN 403-stormed for hours on
+// 2026-07-13 and blocked four consecutive release builds. The same pinned
+// SHA-256 verifies both sources, so the mirror is tamper-evident and the
+// fallback order is purely about availability. In --record mode upstream is
+// tried first instead: new pins must be computed from the source of truth,
+// never from a stale mirror.
+const HF_MIRROR_TAG = "hf-assets-1";
+const HF_MIRROR_BASE = `https://github.com/lmansf/lighthouse/releases/download/${HF_MIRROR_TAG}`;
 // B2 hybrid search: the bundled embedding model (Apache-2.0), served by the
 // SAME llama-server binary above with `--embedding` on a second port. Bundled
 // in the installer (+~137 MB) so semantic search works with zero setup; lives
@@ -200,12 +204,14 @@ async function download(url, outPath, label, assetName) {
 }
 
 /**
- * Try each URL in order until one downloads AND verifies; rethrow the last
- * failure only if every source fails. Digest pinning in download() makes the
- * order a pure availability choice — a wrong or tampered mirror can only ever
- * fail closed, never substitute bytes.
+ * Try the mirror then the upstream URL until one downloads AND verifies;
+ * rethrow the last failure only if every source fails. Digest pinning in
+ * download() makes the order a pure availability choice — a wrong or tampered
+ * mirror can only ever fail closed, never substitute bytes. Under --record the
+ * order flips to upstream-first: new pins come from the source of truth.
  */
-async function downloadWithFallback(urls, outPath, label, assetName) {
+async function downloadWithFallback(mirrorUrl, upstreamUrl, outPath, label, assetName) {
+  const urls = RECORD ? [upstreamUrl, mirrorUrl] : [mirrorUrl, upstreamUrl];
   let lastErr;
   for (const url of urls) {
     try {
@@ -436,7 +442,6 @@ async function fetchTts() {
   // 2. Voice model (.onnx) + its config (.onnx.json) — a clear, natural US voice.
   // Mirror first (GitHub→builder is the dependable path), HF upstream second;
   // both verify the same pinned SHA-256.
-  const voiceMirror = `https://github.com/lmansf/lighthouse/releases/download/${TTS_MIRROR_TAG}`;
   const voiceBase =
     `https://huggingface.co/rhasspy/piper-voices/resolve/${VOICE_REVISION}/en/en_US/lessac/medium/en_US-lessac-medium`;
   const onnxPath = join(ttsDest, "en_US-lessac-medium.onnx");
@@ -445,13 +450,15 @@ async function fetchTts() {
     console.log(`✓ voice already present`);
   } else {
     await downloadWithFallback(
-      [`${voiceMirror}/en_US-lessac-medium.onnx`, `${voiceBase}.onnx`],
+      `${HF_MIRROR_BASE}/en_US-lessac-medium.onnx`,
+      `${voiceBase}.onnx`,
       onnxPath,
       "voice",
       "en_US-lessac-medium.onnx",
     );
     await downloadWithFallback(
-      [`${voiceMirror}/en_US-lessac-medium.onnx.json`, `${voiceBase}.onnx.json`],
+      `${HF_MIRROR_BASE}/en_US-lessac-medium.onnx.json`,
+      `${voiceBase}.onnx.json`,
       jsonPath,
       "voice-config",
       "en_US-lessac-medium.onnx.json",
@@ -489,7 +496,9 @@ async function fetchEmbed() {
   }
   const url = `https://huggingface.co/${EMBED_REPO}/resolve/${revision}/${EMBED_FILE}`;
   console.log(`Downloading ${EMBED_FILE} (${EMBED_REPO}@${revision.slice(0, 12)})`);
-  await download(url, outPath, "embedding model", EMBED_FILE);
+  // Mirror first, HF second — same pinned digest verifies both (see
+  // HF_MIRROR_TAG); under --record the helper flips to upstream-first.
+  await downloadWithFallback(`${HF_MIRROR_BASE}/${EMBED_FILE}`, url, outPath, "embedding model", EMBED_FILE);
   console.log(`✓ ${EMBED_FILE}`);
 }
 
