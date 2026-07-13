@@ -573,7 +573,9 @@ fn extract_pptx(buf: &[u8]) -> anyhow::Result<String> {
 /// ODF text documents (`.odt`) and presentations (`.odp`) keep displayable text
 /// as character data in `content.xml`. Emit all of it, breaking lines on
 /// paragraph/heading ends and honoring the explicit whitespace elements. Only
-/// `content.xml` is read, so styles and document metadata never leak in.
+/// `content.xml` is read, so styles and document metadata never leak in — and
+/// within it, tracked-change deletions, reviewer comments, and inline binary
+/// data are excluded: text the author removed must not resurface in search.
 fn extract_odf(buf: &[u8]) -> anyhow::Result<String> {
     let mut archive = zip::ZipArchive::new(std::io::Cursor::new(buf))?;
     let xml = read_member(&mut archive, "content.xml", MAX_MAIN_XML_BYTES)
@@ -582,8 +584,10 @@ fn extract_odf(buf: &[u8]) -> anyhow::Result<String> {
     let mut reader = quick_xml::Reader::from_str(&xml);
     let mut out: Vec<String> = Vec::new();
     let mut line = String::new();
-    // Inside an <office:binary-data> element (an image inlined as base64
-    // character data) — that "text" must never reach the index.
+    // Depth of subtrees whose character data must never reach the index:
+    // <office:binary-data> (images inlined as base64), <text:tracked-changes>
+    // (holds the DELETED text of tracked changes), and <office:annotation>
+    // (reviewer comments — not visible body prose).
     let mut skip = 0i32;
     // An encrypted .odt keeps the zip layout but content.xml is ciphertext:
     // decoded lossily it parses as one giant element-less text node. Only
@@ -598,7 +602,10 @@ fn extract_odf(buf: &[u8]) -> anyhow::Result<String> {
             }
             Ok(quick_xml::events::Event::Start(e)) => {
                 saw_elem = true;
-                if e.name().local_name().as_ref() == b"binary-data" {
+                if matches!(
+                    e.name().local_name().as_ref(),
+                    b"binary-data" | b"tracked-changes" | b"annotation"
+                ) {
                     skip += 1;
                 }
             }
@@ -618,8 +625,12 @@ fn extract_odf(buf: &[u8]) -> anyhow::Result<String> {
             Ok(quick_xml::events::Event::End(e)) => {
                 saw_elem = true;
                 match e.name().local_name().as_ref() {
-                    b"binary-data" => skip = (skip - 1).max(0),
-                    b"p" | b"h" => {
+                    b"binary-data" | b"tracked-changes" | b"annotation" => skip = (skip - 1).max(0),
+                    // A </text:p> inside a skipped subtree must neither flush
+                    // nor clear: `line` holds the ENCLOSING paragraph's text
+                    // (e.g. prose before an inline comment), which continues
+                    // after the subtree closes.
+                    b"p" | b"h" if skip == 0 => {
                         let taken = std::mem::take(&mut line);
                         if !taken.trim().is_empty() {
                             out.push(taken.trim_end().to_string());
@@ -699,6 +710,12 @@ fn extract_rtf(buf: &[u8]) -> anyhow::Result<String> {
     // skip content until the matching close pops us back above it.
     let mut ignore_from: Option<i32> = None;
     let ignoring = |ignore_from: &Option<i32>| ignore_from.is_some();
+    // \ucN: how many fallback units follow each \uN escape. Spec default is 1,
+    // but macOS writers (TextEdit, Notes, Mail) set \uc0 — no fallback at all —
+    // and skipping one anyway would eat a real character after every escape.
+    // (Spec-fully this is group-scoped state; real files set it once, so a
+    // single value is the standard lightweight treatment.)
+    let mut uc: usize = 1;
 
     let mut i = 0;
     while i < n {
@@ -746,7 +763,13 @@ fn extract_rtf(buf: &[u8]) -> anyhow::Result<String> {
                         if !ignoring(&ignore_from) {
                             let hi = chars[i + 2].to_digit(16).unwrap_or(0);
                             let lo = chars[i + 3].to_digit(16).unwrap_or(0);
-                            out.push(cp1252_char((hi * 16 + lo) as u8));
+                            let ch = cp1252_char((hi * 16 + lo) as u8);
+                            // \'00-\'1f and the undefined cp1252 bytes decode
+                            // to control chars — no prose, keep them out of
+                            // the index (tab/newline stay meaningful).
+                            if !ch.is_control() || ch == '\t' || ch == '\n' {
+                                out.push(ch);
+                            }
                         }
                         i += 4;
                     } else {
@@ -795,9 +818,16 @@ fn extract_rtf(buf: &[u8]) -> anyhow::Result<String> {
                         // clamp to the buffer keeps the skip safe regardless.)
                         "bin" => {
                             let skip = param.parse::<usize>().unwrap_or(0);
-                            j = (j + skip).min(n);
+                            // saturating: a hostile \bin18446744073709551615
+                            // would overflow-panic under dev/test profiles.
+                            j = j.saturating_add(skip).min(n);
                         }
                         _ if ignoring(&ignore_from) => {}
+                        // \ucN retunes the fallback-unit count for later \uN.
+                        // Honored only outside ignored destinations, which also
+                        // approximates its group-scoped semantics. Clamped: real
+                        // values are 0..2, and this bounds the skip loop.
+                        "uc" => uc = param.parse::<usize>().unwrap_or(1).min(8),
                         "par" | "line" | "sect" | "row" => out.push('\n'),
                         "tab" | "cell" => out.push('\t'),
                         "u" => {
@@ -811,23 +841,33 @@ fn extract_rtf(buf: &[u8]) -> anyhow::Result<String> {
                                     out.push(ch);
                                 }
                             }
-                            // Skip the fallback that follows \uN. Usually one
-                            // plain char, but writers may emit it as a \'hh
-                            // escape — consume the whole escape, or the
-                            // fallback would ALSO be decoded and the character
-                            // doubled ("caf\u233\'e9" -> "caféé").
-                            if j < n && chars[j] == '\\' {
-                                if j + 1 < n && chars[j + 1] == '\'' {
-                                    j += 2;
-                                    if j + 1 < n
-                                        && chars[j].is_ascii_hexdigit()
-                                        && chars[j + 1].is_ascii_hexdigit()
-                                    {
+                            // Skip the \ucN fallback units that follow (0 for
+                            // \uc0 files — skipping anyway ate a real char).
+                            // A unit is one plain char or one whole \'hh escape
+                            // (decoding the escape too would double the char:
+                            // "caf\u233\'e9" -> "caféé"). A control word or
+                            // group brace is never a fallback.
+                            let mut remaining = uc;
+                            while remaining > 0 && j < n {
+                                if chars[j] == '\\' {
+                                    if j + 1 < n && chars[j + 1] == '\'' {
                                         j += 2;
+                                        if j + 1 < n
+                                            && chars[j].is_ascii_hexdigit()
+                                            && chars[j + 1].is_ascii_hexdigit()
+                                        {
+                                            j += 2;
+                                        }
+                                        remaining -= 1;
+                                    } else {
+                                        break;
                                     }
+                                } else if matches!(chars[j], '{' | '}') {
+                                    break;
+                                } else {
+                                    j += 1;
+                                    remaining -= 1;
                                 }
-                            } else if j < n && !matches!(chars[j], '{' | '}') {
-                                j += 1;
                             }
                         }
                         _ => {}
@@ -958,7 +998,16 @@ pub fn extract_rich_text(abs: &Path, ext: &str) -> String {
         // Stale key or older schema falls through to a fresh parse below.
     }
 
-    let text = match extract_by_ext(abs, ext) {
+    // Panic isolation around the whole parser dispatch: extraction runs in the
+    // parallel scan pool, where an uncaught panic in a parser dependency would
+    // abort the entire build batch instead of degrading one file (extract_pdf
+    // self-guards; this covers the zip/xml/rtf/calamine paths symmetrically).
+    // A panic is treated like a parse error: logged, NOT cached, retried on
+    // the next scan.
+    let parsed =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| extract_by_ext(abs, ext)))
+            .unwrap_or_else(|_| Err(anyhow::anyhow!("parser panicked")));
+    let text = match parsed {
         Ok(t) => clamp(t.trim()),
         Err(err) => {
             // Degrade gracefully but do NOT cache the failure: log it so empty
@@ -1393,5 +1442,66 @@ mod doc_format_tests {
         // Slides 1+2 already exceed the 1 MB extraction clamp, so slide 3 is
         // never read — the clamp would have cut it before it anyway.
         assert!(!text.contains("THREE"), "read past the output budget");
+    }
+
+    // --- second-pass review fixes ---
+
+    #[test]
+    fn rtf_uc0_files_do_not_lose_the_char_after_unicode() {
+        // macOS writers (TextEdit, Notes, Mail) set \uc0: NO fallback follows
+        // \uN. Unconditionally skipping one unit ate a real character after
+        // every escape ("John's" -> "John'").
+        let rtf: &[u8] = b"{\\rtf1\\uc0 John\\u8217s laptop}";
+        let text = extract_rtf(rtf).unwrap();
+        assert_eq!(text.trim(), "John\u{2019}s laptop", "\\uc0 ate a char");
+    }
+
+    #[test]
+    fn rtf_uc2_skips_both_fallback_units() {
+        let rtf: &[u8] = b"{\\rtf1\\uc2 x\\u8217??y}";
+        let text = extract_rtf(rtf).unwrap();
+        assert_eq!(text.trim(), "x\u{2019}y", "\\uc2 fallback leaked");
+    }
+
+    #[test]
+    fn rtf_huge_bin_count_saturates_instead_of_overflowing() {
+        // usize::MAX as the \bin param would overflow j + skip under the
+        // dev/test profiles (overflow checks on) and abort the scan batch.
+        let text = extract_rtf(b"{\\rtf1 ok \\bin18446744073709551615 junk}").unwrap();
+        assert_eq!(text.trim(), "ok");
+    }
+
+    #[test]
+    fn rtf_control_byte_escapes_do_not_pollute() {
+        // \'00-\'1f decode to C0 controls — no prose, keep them out.
+        let text = extract_rtf(br#"{\rtf1 a\'01\'02b}"#).unwrap();
+        assert_eq!(text.trim(), "ab", "control bytes leaked: {text:?}");
+    }
+
+    #[test]
+    fn odf_excludes_tracked_deletions_and_comments() {
+        // Deleted-but-tracked text and reviewer comments are not visible body
+        // prose; a user who removed confidential text must not find it
+        // resurfacing in search results.
+        let content = r#"<office:document-content xmlns:office="a" xmlns:text="b">
+            <office:body><office:text>
+            <text:tracked-changes><text:changed-region><text:deletion>
+                <text:p>OLD SECRET PASSAGE</text:p>
+            </text:deletion></text:changed-region></text:tracked-changes>
+            <text:p>Visible policy text.</text:p>
+            <text:p>Also visible<office:annotation><text:p>reviewer gripe</text:p></office:annotation> tail.</text:p>
+            </office:text></office:body></office:document-content>"#;
+        let text = extract_odf(&zip_of(&[("content.xml", content)])).unwrap();
+        assert!(text.contains("Visible policy text."));
+        // Prose around an inline comment stays one paragraph.
+        assert!(text.contains("Also visible tail."), "got: {text:?}");
+        assert!(
+            !text.contains("OLD SECRET"),
+            "deleted text indexed: {text:?}"
+        );
+        assert!(
+            !text.contains("reviewer gripe"),
+            "comment indexed: {text:?}"
+        );
     }
 }
