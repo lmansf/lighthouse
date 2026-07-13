@@ -104,8 +104,12 @@ async function extractByExt(abs: string, ext: string): Promise<string> {
  * date-system (1904 files were ~4y early), emit raw numbers (cellText:false),
  * and extract .xlsm as a workbook. Invalidates v4 (which had formatted/locale
  * date text on this engine and wrong 1904 dates on the Rust engine).
+ * v6: matches the Rust engine's pptx/odt/odp/rtf extraction bump. This engine
+ * doesn't read those formats (they stay name-match-only here), but the version
+ * must move in lockstep or the two engines endlessly invalidate each other's
+ * shared cache entries.
  */
-const CACHE_VERSION = 5;
+const CACHE_VERSION = 6;
 
 interface CacheRecord {
   v: number;
