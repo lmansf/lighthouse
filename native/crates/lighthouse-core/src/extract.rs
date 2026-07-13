@@ -18,8 +18,15 @@ use crate::config::state_dir;
 /// Document formats we recover text from beyond plain UTF-8 files.
 // .doc is desktop-only capability: the TS dev twin's mammoth parser reads
 // OOXML only, so legacy .doc stays name-match-only there (PARITY divergence,
-// like B2 hybrid search).
-const RICH_EXT: &[&str] = &[".pdf", ".doc", ".docx", ".xlsx", ".xlsm", ".xls", ".parquet"];
+// like B2 hybrid search). The presentation / OpenDocument / RTF formats below
+// are likewise Rust-only for now: the shipping desktop engine reads them; the
+// TS twin has no zip/rtf parser without new npm deps, so it leaves them
+// name-match-only. Adding these was purely additive — none was ever in
+// TEXT_EXT, so no previously-indexed file changes behavior.
+const RICH_EXT: &[&str] = &[
+    ".pdf", ".doc", ".docx", ".xlsx", ".xlsm", ".xls", ".parquet", ".pptx", ".odt", ".odp",
+    ".rtf",
+];
 
 pub fn is_rich_file(name: &str) -> bool {
     let ext = match name.rsplit_once('.') {
@@ -410,6 +417,319 @@ fn extract_xlsx(abs: &Path) -> anyhow::Result<String> {
     Ok(sheets.join("\n\n"))
 }
 
+/// Trailing numeric index of an OOXML part name (`.../slide12.xml` -> 12) so
+/// slide and notes parts sort in presentation order rather than lexically
+/// (slide10 would otherwise sort before slide2).
+fn part_number(name: &str) -> u32 {
+    let stem = name.rsplit('/').next().unwrap_or(name);
+    let stem = stem.strip_suffix(".xml").unwrap_or(stem);
+    let tail: String = stem
+        .chars()
+        .rev()
+        .take_while(|c| c.is_ascii_digit())
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    tail.parse().unwrap_or(0)
+}
+
+/// Read one archive member fully as lossy UTF-8. OOXML/ODF parts are UTF-8, but
+/// a stray byte should degrade that member, not fail the whole document.
+fn read_member<R: std::io::Read + std::io::Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    name: &str,
+) -> Option<String> {
+    let mut raw = Vec::new();
+    archive.by_name(name).ok()?.read_to_end(&mut raw).ok()?;
+    Some(String::from_utf8_lossy(&raw).into_owned())
+}
+
+/// Collect the text of every `<a:t>` run element in a DrawingML part, breaking
+/// paragraphs on `</a:p>`. DrawingML drops its namespace to the same local
+/// names Word uses (`t`/`p`), so this mirrors the docx run reader.
+fn drawingml_runs(xml: &str) -> Vec<String> {
+    let mut reader = quick_xml::Reader::from_str(xml);
+    let mut paras: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut in_text = false;
+    loop {
+        match reader.read_event() {
+            Ok(quick_xml::events::Event::Start(e)) => {
+                if e.name().local_name().as_ref() == b"t" {
+                    in_text = true;
+                }
+            }
+            Ok(quick_xml::events::Event::Empty(e)) => {
+                // <a:br/> is a soft line break inside a text body.
+                if e.name().local_name().as_ref() == b"br" {
+                    current.push('\n');
+                }
+            }
+            Ok(quick_xml::events::Event::End(e)) => match e.name().local_name().as_ref() {
+                b"t" => in_text = false,
+                b"p" => paras.push(std::mem::take(&mut current)),
+                _ => {}
+            },
+            Ok(quick_xml::events::Event::Text(t)) => {
+                if in_text {
+                    current.push_str(&t.unescape().unwrap_or_default());
+                }
+            }
+            Ok(quick_xml::events::Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+    }
+    if !current.is_empty() {
+        paras.push(current);
+    }
+    paras.into_iter().filter(|p| !p.trim().is_empty()).collect()
+}
+
+/// PPTX is a zip of DrawingML XML: on-slide text lives in
+/// `ppt/slides/slideN.xml` and speaker notes — where a runbook's actual
+/// procedure often sits — in `ppt/notesSlides/notesSlideN.xml`. Emit slides in
+/// numeric order, then the notes, so every word is searchable regardless of
+/// where the author put it.
+fn extract_pptx(buf: &[u8]) -> anyhow::Result<String> {
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(buf))?;
+    let mut slides: Vec<String> = Vec::new();
+    let mut notes: Vec<String> = Vec::new();
+    for name in archive.file_names().map(String::from).collect::<Vec<_>>() {
+        if name.starts_with("ppt/slides/slide") && name.ends_with(".xml") {
+            slides.push(name);
+        } else if name.starts_with("ppt/notesSlides/notesSlide") && name.ends_with(".xml") {
+            notes.push(name);
+        }
+    }
+    slides.sort_by_key(|n| part_number(n));
+    notes.sort_by_key(|n| part_number(n));
+
+    let mut blocks: Vec<String> = Vec::new();
+    for name in &slides {
+        if let Some(xml) = read_member(&mut archive, name) {
+            let text = drawingml_runs(&xml).join("\n");
+            if !text.trim().is_empty() {
+                blocks.push(text);
+            }
+        }
+    }
+    let mut note_text: Vec<String> = Vec::new();
+    for name in &notes {
+        if let Some(xml) = read_member(&mut archive, name) {
+            let text = drawingml_runs(&xml).join("\n");
+            if !text.trim().is_empty() {
+                note_text.push(text);
+            }
+        }
+    }
+    if !note_text.is_empty() {
+        blocks.push(format!("Notes:\n{}", note_text.join("\n\n")));
+    }
+    Ok(blocks.join("\n\n"))
+}
+
+/// ODF text documents (`.odt`) and presentations (`.odp`) keep displayable text
+/// as character data in `content.xml`. Emit all of it, breaking lines on
+/// paragraph/heading ends and honoring the explicit whitespace elements. Only
+/// `content.xml` is read, so styles and document metadata never leak in.
+fn extract_odf(buf: &[u8]) -> anyhow::Result<String> {
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(buf))?;
+    let xml = read_member(&mut archive, "content.xml")
+        .ok_or_else(|| anyhow::anyhow!("odf: no content.xml"))?;
+
+    let mut reader = quick_xml::Reader::from_str(&xml);
+    let mut out: Vec<String> = Vec::new();
+    let mut line = String::new();
+    loop {
+        match reader.read_event() {
+            Ok(quick_xml::events::Event::Text(t)) => {
+                line.push_str(&t.unescape().unwrap_or_default());
+            }
+            Ok(quick_xml::events::Event::Empty(e)) => match e.name().local_name().as_ref() {
+                b"tab" => line.push('\t'),
+                b"line-break" => line.push('\n'),
+                b"s" => line.push(' '),
+                _ => {}
+            },
+            // A paragraph or heading closes a line; ODF nests spans inside these,
+            // so breaking only here keeps a paragraph's runs together.
+            Ok(quick_xml::events::Event::End(e)) => {
+                if matches!(e.name().local_name().as_ref(), b"p" | b"h") {
+                    let taken = std::mem::take(&mut line);
+                    if !taken.trim().is_empty() {
+                        out.push(taken.trim_end().to_string());
+                    }
+                }
+            }
+            Ok(quick_xml::events::Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+    }
+    if !line.trim().is_empty() {
+        out.push(line.trim_end().to_string());
+    }
+    Ok(out.join("\n"))
+}
+
+/// Minimal RTF-to-text. RTF is ASCII with `\control` words and `{group}`
+/// nesting; recover the prose by dropping control words, skipping the ignorable
+/// destinations that hold no body text (font/color/stylesheet tables and any
+/// `{\*..}` group), decoding `\'hh` bytes and `\uN` unicode, and turning
+/// `\par`/`\line`/`\sect` into newlines. Formatting is lost; content is
+/// recovered. Pure char iteration — it can degrade but never panics.
+fn extract_rtf(buf: &[u8]) -> anyhow::Result<String> {
+    let text = String::from_utf8_lossy(buf);
+    let chars: Vec<char> = text.chars().collect();
+    let n = chars.len();
+    let mut out = String::new();
+    let mut depth: i32 = 0;
+    // When inside an ignorable destination, the group depth at which it began;
+    // skip content until the matching close pops us back above it.
+    let mut ignore_from: Option<i32> = None;
+    let ignoring = |ignore_from: &Option<i32>| ignore_from.is_some();
+
+    let mut i = 0;
+    while i < n {
+        let c = chars[i];
+        match c {
+            '{' => {
+                depth += 1;
+                i += 1;
+            }
+            '}' => {
+                depth -= 1;
+                if let Some(d) = ignore_from {
+                    if depth < d {
+                        ignore_from = None;
+                    }
+                }
+                i += 1;
+            }
+            '\\' => {
+                if i + 1 >= n {
+                    i += 1;
+                    continue;
+                }
+                let next = chars[i + 1];
+                // Escaped literal brace / backslash.
+                if matches!(next, '\\' | '{' | '}') {
+                    if !ignoring(&ignore_from) {
+                        out.push(next);
+                    }
+                    i += 2;
+                    continue;
+                }
+                // \'hh — a raw byte in hex (cp1252/latin-1 range).
+                if next == '\'' {
+                    if i + 3 < n && chars[i + 2].is_ascii_hexdigit() && chars[i + 3].is_ascii_hexdigit()
+                    {
+                        if !ignoring(&ignore_from) {
+                            let hi = chars[i + 2].to_digit(16).unwrap_or(0);
+                            let lo = chars[i + 3].to_digit(16).unwrap_or(0);
+                            out.push(((hi * 16 + lo) as u8) as char);
+                        }
+                        i += 4;
+                    } else {
+                        i += 2;
+                    }
+                    continue;
+                }
+                // A control WORD: letters, optional signed number, one optional
+                // trailing space that delimits (and is not content).
+                if next.is_ascii_alphabetic() {
+                    let mut j = i + 1;
+                    let mut word = String::new();
+                    while j < n && chars[j].is_ascii_alphabetic() {
+                        word.push(chars[j]);
+                        j += 1;
+                    }
+                    let mut param = String::new();
+                    if j < n && (chars[j] == '-' || chars[j].is_ascii_digit()) {
+                        if chars[j] == '-' {
+                            param.push('-');
+                            j += 1;
+                        }
+                        while j < n && chars[j].is_ascii_digit() {
+                            param.push(chars[j]);
+                            j += 1;
+                        }
+                    }
+                    if j < n && chars[j] == ' ' {
+                        j += 1;
+                    }
+                    match word.as_str() {
+                        // Destinations whose groups carry no body prose.
+                        "fonttbl" | "colortbl" | "stylesheet" | "filetbl" | "listtable"
+                        | "listoverridetable" | "revtbl" | "rsidtbl" | "generator" | "info"
+                        | "themedata" | "colorschememapping" | "datastore" | "pict" | "object" => {
+                            if !ignoring(&ignore_from) {
+                                ignore_from = Some(depth);
+                            }
+                        }
+                        _ if ignoring(&ignore_from) => {}
+                        "par" | "line" | "sect" | "row" => out.push('\n'),
+                        "tab" | "cell" => out.push('\t'),
+                        "u" => {
+                            if let Ok(code) = param.parse::<i32>() {
+                                let scalar = if code < 0 { (code + 65536) as u32 } else { code as u32 };
+                                if let Some(ch) = char::from_u32(scalar) {
+                                    out.push(ch);
+                                }
+                            }
+                            // Skip the ASCII fallback char that follows \uN.
+                            if j < n && !matches!(chars[j], '\\' | '{' | '}') {
+                                j += 1;
+                            }
+                        }
+                        _ => {}
+                    }
+                    i = j;
+                    continue;
+                }
+                // A control SYMBOL: a single non-alphabetic char after '\'.
+                match next {
+                    '*' => {
+                        // Marks the enclosing group as an ignorable destination.
+                        if !ignoring(&ignore_from) {
+                            ignore_from = Some(depth);
+                        }
+                    }
+                    '~' => {
+                        if !ignoring(&ignore_from) {
+                            out.push(' ');
+                        }
+                    }
+                    '\r' | '\n' => {
+                        if !ignoring(&ignore_from) {
+                            out.push('\n');
+                        }
+                    }
+                    _ => {}
+                }
+                i += 2;
+            }
+            '\r' | '\n' => {
+                // Raw newlines in the RTF source are not content.
+                i += 1;
+            }
+            _ => {
+                if !ignoring(&ignore_from) {
+                    out.push(c);
+                }
+                i += 1;
+            }
+        }
+    }
+    Ok(out
+        .lines()
+        .map(|l| l.trim_end())
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
 fn extract_by_ext(abs: &Path, ext: &str) -> anyhow::Result<String> {
     match ext {
         ".pdf" => extract_pdf(&fs::read(abs)?),
@@ -420,6 +740,10 @@ fn extract_by_ext(abs: &Path, ext: &str) -> anyhow::Result<String> {
         // read identically by calamine.
         ".xlsx" | ".xlsm" | ".xls" => extract_xlsx(abs),
         ".parquet" => extract_parquet(abs),
+        ".pptx" => extract_pptx(&fs::read(abs)?),
+        // .odt (text) and .odp (presentation) share the ODF content.xml schema.
+        ".odt" | ".odp" => extract_odf(&fs::read(abs)?),
+        ".rtf" => extract_rtf(&fs::read(abs)?),
         _ => Ok(String::new()),
     }
 }
@@ -432,7 +756,9 @@ fn extract_by_ext(abs: &Path, ext: &str) -> anyhow::Result<String> {
 /// v4: Excel datetime cells render as ISO 8601 instead of raw serials.
 /// v5: Excel dates honor the workbook date-system (1904 files were ~4y early);
 ///     .xlsm is now extracted as a workbook. Both invalidate v4 entries.
-const CACHE_VERSION: u32 = 5;
+/// v6: pptx / odt / odp / rtf now extract text (were name-match-only). Only
+///     adds content for those files; previously cached formats are unchanged.
+const CACHE_VERSION: u32 = 6;
 
 #[derive(Serialize, Deserialize)]
 struct CacheRecord {
@@ -659,5 +985,153 @@ mod docx_tests {
     #[test]
     fn garbage_bytes_error_instead_of_passing_as_empty() {
         assert!(extract_docx(b"this is not a word file at all").is_err());
+    }
+}
+
+#[cfg(test)]
+mod doc_format_tests {
+    use super::{extract_odf, extract_pptx, extract_rtf};
+    use std::io::Write;
+
+    /// Build a minimal zip (stored, no compression) from name→content pairs so
+    /// the pptx/odf extractors can be exercised without fixture files on disk.
+    fn zip_of(entries: &[(&str, &str)]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        {
+            let mut w = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+            let opts = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            for (name, content) in entries {
+                w.start_file(*name, opts).unwrap();
+                w.write_all(content.as_bytes()).unwrap();
+            }
+            w.finish().unwrap();
+        }
+        buf
+    }
+
+    #[test]
+    fn pptx_reads_slide_runs_and_notes() {
+        let slide = r#"<p:sld xmlns:a="x" xmlns:p="y"><p:cSld><p:spTree>
+            <a:p><a:r><a:t>Reset the </a:t></a:r><a:r><a:t>firewall</a:t></a:r></a:p>
+            <a:p><a:r><a:t>Then reboot</a:t></a:r></a:p>
+            </p:spTree></p:cSld></p:sld>"#;
+        let note = r#"<p:notes xmlns:a="x"><a:p><a:r><a:t>Escalate to tier 2</a:t></a:r></a:p></p:notes>"#;
+        let buf = zip_of(&[
+            ("ppt/slides/slide1.xml", slide),
+            ("ppt/notesSlides/notesSlide1.xml", note),
+        ]);
+        let text = extract_pptx(&buf).unwrap();
+        // Runs inside one paragraph join without a break.
+        assert!(text.contains("Reset the firewall"), "got: {text}");
+        assert!(text.contains("Then reboot"));
+        // Speaker notes — where procedures often live — are included.
+        assert!(text.contains("Escalate to tier 2"));
+    }
+
+    #[test]
+    fn pptx_orders_slides_numerically() {
+        let s = |t: &str| format!(r#"<p:sld xmlns:a="x"><a:p><a:r><a:t>{t}</a:t></a:r></a:p></p:sld>"#);
+        let buf = zip_of(&[
+            ("ppt/slides/slide10.xml", &s("TENTH")),
+            ("ppt/slides/slide2.xml", &s("SECOND")),
+        ]);
+        let text = extract_pptx(&buf).unwrap();
+        let second = text.find("SECOND").unwrap();
+        let tenth = text.find("TENTH").unwrap();
+        assert!(second < tenth, "slide2 must precede slide10: {text}");
+    }
+
+    #[test]
+    fn odf_reads_paragraphs_headings_and_whitespace() {
+        let content = r#"<office:document-content xmlns:office="a" xmlns:text="b">
+            <office:body><office:text>
+            <text:h>Password Policy</text:h>
+            <text:p>Rotate every <text:span>90</text:span> days.</text:p>
+            <text:p>Escalate<text:tab/>immediately.</text:p>
+            </office:text></office:body></office:document-content>"#;
+        let buf = zip_of(&[("content.xml", content)]);
+        let text = extract_odf(&buf).unwrap();
+        assert!(text.contains("Password Policy"));
+        // Spans inside a paragraph stay on one line.
+        assert!(text.contains("Rotate every 90 days."), "got: {text}");
+        // <text:tab/> becomes a tab.
+        assert!(text.contains("Escalate\timmediately."), "got: {text:?}");
+    }
+
+    #[test]
+    fn rtf_strips_control_words_tables_and_decodes_escapes() {
+        let rtf = r#"{\rtf1\ansi\deff0 {\fonttbl{\f0\froman Times;}}{\*\generator Word}\f0\fs24 Hello \b world\b0\par Second\'2c line\par}"#;
+        let text = extract_rtf(rtf.as_bytes()).unwrap();
+        assert!(text.contains("Hello world"), "got: {text}");
+        // \'2c is a comma.
+        assert!(text.contains("Second, line"), "hex escape not decoded: {text}");
+        // Font/color/generator destinations must not bleed into the text.
+        assert!(!text.contains("fonttbl") && !text.contains("Times") && !text.contains("generator"));
+    }
+
+    #[test]
+    fn rtf_decodes_unicode_escape_and_skips_fallback() {
+        // café — é is U+00E9 = 233, written \u233 with an ASCII '?' fallback.
+        let text = extract_rtf(r#"{\rtf1 caf\u233?}"#.as_bytes()).unwrap();
+        assert_eq!(text.trim(), "café", "got: {text:?}");
+    }
+
+    #[test]
+    fn malformed_containers_error_not_panic() {
+        assert!(extract_pptx(b"definitely not a zip").is_err());
+        assert!(extract_odf(b"definitely not a zip").is_err());
+        // RTF never errors — worst case it recovers nothing.
+        assert!(extract_rtf(b"no braces here at all").is_ok());
+    }
+
+    // --- realistic structure: the chrome real Office/LibreOffice files carry ---
+
+    #[test]
+    fn pptx_ignores_run_and_body_properties() {
+        // Real slides wrap runs in <p:txBody>/<a:bodyPr> and prefix each run
+        // with <a:rPr> formatting — none of which is body text.
+        let slide = r#"<p:sld xmlns:a="x" xmlns:p="y"><p:cSld><p:spTree><p:sp><p:txBody>
+            <a:bodyPr/><a:lstStyle/>
+            <a:p><a:pPr lvl="0"/><a:r><a:rPr lang="en-US" b="1"/><a:t>Firewall </a:t></a:r><a:r><a:rPr lang="en-US"/><a:t>runbook</a:t></a:r></a:p>
+            </p:txBody></p:sp></p:spTree></p:cSld></p:sld>"#;
+        let text = extract_pptx(&zip_of(&[("ppt/slides/slide1.xml", slide)])).unwrap();
+        assert_eq!(text.trim(), "Firewall runbook", "got: {text:?}");
+    }
+
+    #[test]
+    fn odf_does_not_leak_automatic_styles() {
+        // content.xml opens with an automatic-styles block; its style defs must
+        // never surface as text (they carry no char data, but prove it).
+        let content = r#"<office:document-content xmlns:office="a" xmlns:text="b" xmlns:style="c">
+            <office:automatic-styles>
+              <style:style style:name="P1" style:family="paragraph"><style:text-properties fo:font-weight="bold"/></style:style>
+            </office:automatic-styles>
+            <office:body><office:text>
+              <text:p text:style-name="P1">Escalate<text:s text:c="2"/>now.</text:p>
+            </office:text></office:body></office:document-content>"#;
+        let text = extract_odf(&zip_of(&[("content.xml", content)])).unwrap();
+        assert!(text.contains("Escalate"), "got: {text:?}");
+        assert!(text.contains("now."));
+        assert!(!text.contains("P1") && !text.contains("paragraph") && !text.contains("font-weight"));
+    }
+
+    #[test]
+    fn rtf_realistic_header_and_nested_groups() {
+        // The shape a real WordPad/Word .rtf carries: ansicpg, \uc1, \viewkind,
+        // \pard, nested font/color tables, a \*\generator destination. Real
+        // newlines (\n) follow \par exactly as Word writes them — a control
+        // word must be delimiter-terminated, never glued to the next token.
+        let rtf = "{\\rtf1\\ansi\\ansicpg1252\\deff0\\nouicompat\
+            {\\fonttbl{\\f0\\fnil\\fcharset0 Calibri;}}\
+            {\\colortbl ;\\red0\\green0\\blue0;}\
+            {\\*\\generator Riched20 10.0.19041}\\viewkind4\\uc1\n\
+            \\pard\\sa200\\sl276\\f0\\fs22 Reset the \\b firewall\\b0  and reboot.\\par\n\
+            Retention is \\u8722?90 days.\\par}";
+        let text = extract_rtf(rtf.as_bytes()).unwrap();
+        assert!(text.contains("Reset the firewall and reboot."), "got: {text:?}");
+        // U+2212 is the minus sign written as 蜢; its '?' fallback is skipped.
+        assert!(text.contains("Retention is \u{2212}90 days."), "unicode/fallback: {text:?}");
+        assert!(!text.contains("Calibri") && !text.contains("Riched20") && !text.contains("colortbl"));
     }
 }
