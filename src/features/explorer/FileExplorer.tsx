@@ -16,7 +16,7 @@
  * Keep using `useRagStore` (do not import other features directly).
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Badge,
   Button,
@@ -461,7 +461,11 @@ interface TreeRowProps {
   justAdded: Set<string>;
 }
 
-function TreeRow({
+/** Stable empty move-target list so a closed row's memo isn't broken by a fresh
+ *  `[]` each render (moveTargetsFor only runs while the context menu is open). */
+const NO_MOVE_TARGETS: { id: string | null; name: string }[] = [];
+
+function TreeRowImpl({
   node,
   depth,
   childrenOf,
@@ -487,6 +491,11 @@ function TreeRow({
 }: TreeRowProps) {
   const styles = useStyles();
   const [open, setOpen] = useState(depth < 1); // top-level folders open by default
+  // The row's right-click menu open state. moveTargetsFor is O(rows × folders),
+  // and its result is ONLY consumed by the "Move to…" submenu — so compute it
+  // lazily while the menu is open instead of eagerly for every row on every
+  // render (it used to run for the whole tree on every poll and toggle).
+  const [menuOpen, setMenuOpen] = useState(false);
   // A folder highlights while a dragged file row hovers it (internal move).
   const [dropInto, setDropInto] = useState(false);
   // Reveal a select checkbox on hover, so selection can start without first
@@ -513,7 +522,9 @@ function TreeRow({
   // and reparent (op:move) — all desktop-only, local-only.
   const openable = desktop && node.kind === "file" && !isRemote;
   const revealable = desktop && !isRemote;
-  const moveTargets = moveTargetsFor(node);
+  // Only walk the tree for move destinations once the context menu is open; the
+  // MenuPopover (and thus `movable`/`moveTargets`) only renders while open.
+  const moveTargets = menuOpen ? moveTargetsFor(node) : NO_MOVE_TARGETS;
   const movable = moveTargets.length > 0;
   // Rename + "new folder inside" apply to any local vault node (a linked, cloud,
   // or database node can't be renamed and doesn't hold vault children).
@@ -545,7 +556,7 @@ function TreeRow({
 
   return (
     <div>
-      <Menu openOnContext>
+      <Menu openOnContext onOpenChange={(_, d) => setMenuOpen(d.open)}>
         <MenuTrigger disableButtonEnhancement>
       <div
         className={`${styles.row}${node.ragIncluded ? ` ${styles.rowIncluded}` : ""}${
@@ -800,6 +811,18 @@ function TreeRow({
   );
 }
 
+/**
+ * Memoized so an explorer re-render that leaves a row's props untouched — drag
+ * state, dialogs, notices, the processing overlay, add-flash timers, typing in
+ * the (debounced) search box, and the background vault poll once it no-ops
+ * (useRagStore.load) — doesn't reconcile the row's Fluent subtree. Every prop is
+ * kept referentially stable in FileExplorer (store actions, useCallback
+ * handlers, memoized maps), so the memo actually holds; recursion below renders
+ * the memoized component, so the whole subtree is covered. Rows still update on
+ * the changes that matter: their node, the selection, and filter/visibility.
+ */
+const TreeRow = memo(TreeRowImpl);
+
 export function FileExplorer() {
   const styles = useStyles();
   const sources = useRagStore((s) => s.sources);
@@ -835,7 +858,7 @@ export function FileExplorer() {
   const includeByDefault = defaultInclusion === "include";
 
   const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
-  const isSelected = (id: string) => selectedSet.has(id);
+  const isSelected = useCallback((id: string) => selectedSet.has(id), [selectedSet]);
   const nodeById = useMemo(() => new Map(nodes.map((n) => [n.id, n])), [nodes]);
   // The visibility switch reflects (and sets) the whole selection at once.
   const allSelectedVisible =
@@ -905,6 +928,16 @@ export function FileExplorer() {
 
   // Search + "Only visible to AI" filter over the tree.
   const [query, setQuery] = useState("");
+  // Debounce the query that actually drives filtering: each keystroke otherwise
+  // recomputes `visibleIds` over every node and re-renders the whole (unwindowed)
+  // tree with matches force-expanded. The SearchBox stays bound to `query` for
+  // instant feedback; `debouncedQuery` (150ms, matching WidgetBar) feeds the
+  // filter. `flushSync`-free — a trailing edge is all typing needs.
+  const [debouncedQuery, setDebouncedQuery] = useState("");
+  useEffect(() => {
+    const t = window.setTimeout(() => setDebouncedQuery(query), 150);
+    return () => window.clearTimeout(t);
+  }, [query]);
   const [onlyVisible, setOnlyVisible] = useState(false);
   const [sort, setSort] = useState<SortState>({ key: "name", dir: "asc" });
   const compareNodes = useMemo(() => makeComparator(sort), [sort]);
@@ -942,7 +975,10 @@ export function FileExplorer() {
     }
     return map;
   }, [nodes]);
-  const childrenOf = (id: string | null) => childrenByParent.get(id) ?? [];
+  const childrenOf = useCallback(
+    (id: string | null) => childrenByParent.get(id) ?? [],
+    [childrenByParent],
+  );
 
   // For each folder, whether ALL / SOME / NONE of its file descendants are
   // visible to AI — so a folder's eye can show a distinct "partially exposed"
@@ -978,7 +1014,7 @@ export function FileExplorer() {
     return map;
   }, [nodes, childrenByParent]);
 
-  const trimmedQuery = query.trim().toLowerCase();
+  const trimmedQuery = debouncedQuery.trim().toLowerCase();
   const filterActive = trimmedQuery !== "" || onlyVisible;
   // Rows the active search/filter keeps: direct matches plus every ancestor,
   // so a match nested inside collapsed folders stays reachable. null means no
@@ -1024,35 +1060,47 @@ export function FileExplorer() {
 
   // --- Desktop file actions: open natively, reveal in the OS file manager, and
   // reparent (op:move). Failures surface in the notice banner, never silently.
-  const notifyIfError = async (res: Response, fallback: string) => {
+  // These are passed to the memoized TreeRow, so keep them referentially stable
+  // (useCallback) — an unstable handler would defeat the memo and re-render every
+  // row on any explorer state change.
+  const notifyIfError = useCallback(async (res: Response, fallback: string) => {
     if (res.ok) return;
     const data = (await res.json().catch(() => ({}))) as { error?: string };
     setAddNotice(data.error || fallback);
-  };
-  const openNode = (nodeId: string) => {
-    void fetch("/api/open", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ nodeId }),
-    })
-      .then((res) => notifyIfError(res, "Couldn't open the file."))
-      .catch(() => setAddNotice("Couldn't open the file."));
-  };
+  }, []);
+  const openNode = useCallback(
+    (nodeId: string) => {
+      void fetch("/api/open", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ nodeId }),
+      })
+        .then((res) => notifyIfError(res, "Couldn't open the file."))
+        .catch(() => setAddNotice("Couldn't open the file."));
+    },
+    [notifyIfError],
+  );
   // A blank node id opens the vault folder itself (the toolbar button).
-  const revealNode = (nodeId: string) => {
-    void fetch("/api/reveal", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(nodeId ? { nodeId } : {}),
-    })
-      .then((res) => notifyIfError(res, "Couldn't open the folder."))
-      .catch(() => setAddNotice("Couldn't open the folder."));
-  };
-  const handleMove = (fromId: string, toParentId: string | null) => {
-    void moveNode(fromId, toParentId).catch((err) =>
-      setAddNotice(err instanceof Error ? err.message : "Move failed."),
-    );
-  };
+  const revealNode = useCallback(
+    (nodeId: string) => {
+      void fetch("/api/reveal", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(nodeId ? { nodeId } : {}),
+      })
+        .then((res) => notifyIfError(res, "Couldn't open the folder."))
+        .catch(() => setAddNotice("Couldn't open the folder."));
+    },
+    [notifyIfError],
+  );
+  const handleMove = useCallback(
+    (fromId: string, toParentId: string | null) => {
+      void moveNode(fromId, toParentId).catch((err) =>
+        setAddNotice(err instanceof Error ? err.message : "Move failed."),
+      );
+    },
+    [moveNode],
+  );
 
   // Rename and "new folder" share one small name dialog: `mode` picks the copy
   // and which store action runs; `targetId` is the node to rename or the parent
@@ -1062,16 +1110,31 @@ export function FileExplorer() {
   >(null);
   const [nameValue, setNameValue] = useState("");
   const [nameError, setNameError] = useState<string | null>(null);
-  const openRename = (id: string, current: string) => {
+  const openRename = useCallback((id: string, current: string) => {
     setNamePrompt({ mode: "rename", targetId: id, initial: current });
     setNameValue(current);
     setNameError(null);
-  };
-  const openNewFolder = (parentId: string | null) => {
+  }, []);
+  const openNewFolder = useCallback((parentId: string | null) => {
     setNamePrompt({ mode: "newFolder", targetId: parentId, initial: "" });
     setNameValue("");
     setNameError(null);
-  };
+  }, []);
+
+  // Stable per-row callbacks (forwarding to the store's stable actions), so the
+  // memoized TreeRow isn't re-rendered by every explorer render just because
+  // these props changed identity.
+  const handleToggle = useCallback((id: string) => void toggleIncluded(id), [toggleIncluded]);
+  const handleSelect = useCallback((id: string) => toggleSelected(id), [toggleSelected]);
+  const handleStartSelect = useCallback(
+    (id: string) => {
+      setSelectionMode(true);
+      toggleSelected(id);
+    },
+    [setSelectionMode, toggleSelected],
+  );
+  const handleUnlink = useCallback((id: string) => void removeReference(id), [removeReference]);
+  const handleRemove = useCallback((id: string) => setPendingRemove([id]), []);
   const submitName = () => {
     if (!namePrompt) return;
     const name = nameValue.trim();
@@ -1686,20 +1749,17 @@ export function FileExplorer() {
                         childrenOf={childrenOf}
                         selectionMode={selectionMode}
                         isSelected={isSelected}
-                        onToggle={(id) => void toggleIncluded(id)}
-                        onSelect={(id) => toggleSelected(id)}
-                        onStartSelect={(id) => {
-                          setSelectionMode(true);
-                          toggleSelected(id);
-                        }}
-                        onUnlink={(id) => void removeReference(id)}
-                        onRemove={(id) => setPendingRemove([id])}
+                        onToggle={handleToggle}
+                        onSelect={handleSelect}
+                        onStartSelect={handleStartSelect}
+                        onUnlink={handleUnlink}
+                        onRemove={handleRemove}
                         desktop={desktop}
                         onOpen={openNode}
                         onReveal={revealNode}
                         onMove={handleMove}
                         onRename={openRename}
-                        onNewFolderInside={(pid) => openNewFolder(pid)}
+                        onNewFolderInside={openNewFolder}
                         moveTargetsFor={moveTargetsFor}
                         compareNodes={compareNodes}
                         folderVisibility={folderVisibility}

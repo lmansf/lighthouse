@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import dynamic from "next/dynamic";
 import { useAuthStore } from "@/stores/useAuthStore";
 import { useLicenseStore, isLocked } from "@/stores/useLicenseStore";
 import { AppShell } from "@/shell/AppShell";
@@ -14,11 +15,26 @@ import {
   PostPurchaseFeedback,
   PurchaseProgress,
 } from "@/features/license/LicenseGate";
-import { BugReport } from "@/features/feedback/BugReport";
-import { FeedbackNudge } from "@/features/feedback/FeedbackNudge";
 import { QuickStartAuto } from "@/features/help/QuickStart";
-import { SummonHint } from "@/features/widget/SummonHint";
 import { VersionBadge } from "@/shell/VersionBadge";
+
+// These are pure overlays never on screen at first paint, and — unlike the
+// license/mode-chooser/quick-start surfaces, whose modules are already pulled
+// into the first-paint graph by the sidebar (SettingsMenu/TrialBadge) and the
+// chat/sidebar `modKey` imports — nothing else statically imports them, so
+// deferring them here genuinely keeps their code out of the first-paint chunk.
+const BugReport = dynamic(
+  () => import("@/features/feedback/BugReport").then((m) => m.BugReport),
+  { ssr: false },
+);
+const FeedbackNudge = dynamic(
+  () => import("@/features/feedback/FeedbackNudge").then((m) => m.FeedbackNudge),
+  { ssr: false },
+);
+const SummonHint = dynamic(
+  () => import("@/features/widget/SummonHint").then((m) => m.SummonHint),
+  { ssr: false },
+);
 
 /**
  * Composition root. The shell owns layout; each feature team replaces its own

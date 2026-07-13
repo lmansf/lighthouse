@@ -47,8 +47,7 @@ import {
   PinRegular,
   SquareRegular,
 } from "@fluentui/react-icons";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
+import dynamic from "next/dynamic";
 import type { ChatTurn, FileNode, RagReference } from "@/contracts";
 import { chatService, ragService } from "@/contracts";
 import { useRagStore } from "@/stores/useRagStore";
@@ -56,6 +55,11 @@ import { useLicenseStore, isLocked } from "@/stores/useLicenseStore";
 import { isDesktopShell } from "@/shell/desktopBridge";
 import { useVaultTree } from "@/shell/useVaultTree";
 import { ACCENTS } from "@/shell/theme";
+
+// The markdown stack (~263 KB) only matters once an inline answer is on screen,
+// never for the idle search pill — so the widget window loads it on demand
+// instead of shipping it in its initial chunk. Warmed when an ask begins.
+const MarkdownView = dynamic(() => import("@/shell/MarkdownView"), { ssr: false });
 
 /** Collapsed window height — must match the Rust builder's 560×56 (contract). */
 const PILL_HEIGHT = 56;
@@ -614,6 +618,8 @@ export function WidgetBar() {
   const askInline = (questionText?: string) => {
     const q = (questionText ?? query).trim();
     if (!q || locked || answerRef.current?.streaming) return;
+    // Warm the split markdown chunk so it's ready as the answer streams in.
+    void import("@/shell/MarkdownView");
     const controller = new AbortController();
     abortRef.current = controller;
     const history = historyRef.current;
@@ -953,9 +959,9 @@ export function WidgetBar() {
               // The pill is too small for the analytics charts the engine can
               // append (```lighthouse-chart fences) — strip them here; the
               // numbers are in the prose, and the main window draws the chart.
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                {answer.content.replace(/```lighthouse-chart[\s\S]*?(```|$)/g, "")}
-              </ReactMarkdown>
+              <MarkdownView
+                content={answer.content.replace(/```lighthouse-chart[\s\S]*?(```|$)/g, "")}
+              />
             ) : answer.streaming ? (
               <Text size={200} className={styles.snippet}>
                 {answer.progress || "Thinking…"}

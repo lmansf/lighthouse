@@ -1,7 +1,7 @@
 "use client";
 
 import { useServerInsertedHTML } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState, type ReactElement } from "react";
 import {
   FluentProvider,
   RendererProvider,
@@ -36,9 +36,30 @@ export function Providers({ children }: { children: React.ReactNode }) {
     document.documentElement.style.colorScheme = resolved;
   }, [resolved]);
 
+  // React flushes inserted-HTML several times per page during the static
+  // export, and `renderToStyleElements` re-serializes Griffel's ENTIRE
+  // accumulated stylesheet on every call — not just the delta. Left as-is that
+  // stamps the same ~11 style blocks into <head> a dozen times each (measured:
+  // 121 tags, only 11 distinct, ~327 KB of pure duplicate CSS in index.html
+  // alone), all parsed into the CSSOM before first paint. Track the exact CSS
+  // we've already emitted and drop any block whose contents we've seen, so each
+  // distinct stylesheet block is written exactly once. Deduping on content (not
+  // bucket key) can never drop a rule — every distinct block is still emitted —
+  // so the app stays fully styled.
+  const emittedCss = useRef<Set<string>>(new Set());
   useServerInsertedHTML(() => {
-    const styles = renderToStyleElements(renderer);
-    return <>{styles}</>;
+    const elements = renderToStyleElements(renderer) as ReactElement<{
+      dangerouslySetInnerHTML?: { __html?: string };
+    }>[];
+    const fresh = elements.filter((el) => {
+      // Fall back to the element key for any block without inline CSS (has no
+      // rules to duplicate); dedupe real stylesheets by their exact contents.
+      const sig = el.props?.dangerouslySetInnerHTML?.__html ?? String(el.key ?? "");
+      if (emittedCss.current.has(sig)) return false;
+      emittedCss.current.add(sig);
+      return true;
+    });
+    return fresh.length > 0 ? <>{fresh}</> : null;
   });
 
   return (

@@ -77,8 +77,8 @@ import {
   ThumbLikeRegular,
   WarningRegular,
 } from "@fluentui/react-icons";
-import ReactMarkdown, { type Components } from "react-markdown";
-import remarkGfm from "remark-gfm";
+import dynamic from "next/dynamic";
+import { type Components } from "react-markdown";
 import type { DragEvent } from "react";
 import type { AnalyticsMeta, ChangedPin, ChatTurn, Pin, RagReference } from "@/contracts";
 import { chatService, MODEL_PROVIDERS, ragService } from "@/contracts";
@@ -92,6 +92,17 @@ import { modKey } from "@/features/onboarding/ModeChooser";
 import { ACCENTS } from "@/shell/theme";
 import { FILE_DRAG_MIME, parseDraggedFiles, type DraggedFile } from "@/shell/dnd";
 import { isDesktopShell, pathsForFiles } from "@/shell/desktopBridge";
+
+// The markdown stack (react-markdown + remark-gfm + micromark, ~263 KB) is the
+// single largest chunk and is only needed once a finished answer renders — not
+// for onboarding, an empty chat, or a streaming turn (which renders as plain
+// text, see StreamingAnswer). Load it on demand so it's out of the first-paint
+// bundle; `warmMarkdown()` pre-fetches the chunk the moment a question is asked
+// so it's ready by the time the answer settles (no flash of unstyled answer).
+const MarkdownView = dynamic(() => import("@/shell/MarkdownView"), { ssr: false });
+function warmMarkdown() {
+  void import("@/shell/MarkdownView");
+}
 
 // A user this close to the bottom (px) counts as "pinned": we keep auto-
 // scrolling for them as tokens stream in. Scrolling further up releases the
@@ -312,6 +323,13 @@ const useStyles = makeStyles({
       borderLeftColor: tokens.colorNeutralStroke2,
       color: tokens.colorNeutralForeground2,
     },
+  },
+  // The streaming turn's plain-text surface: preserve the model's newlines and
+  // wrap long tokens, but do no markdown work until the answer settles. Sits
+  // inside `.answer`, so it inherits the same font size and line height.
+  streamingText: {
+    whiteSpace: "pre-wrap",
+    wordBreak: "break-word",
   },
   // [n] citation markers rendered as clickable superscript chips that jump to
   // the matching reference card below the answer.
@@ -1020,9 +1038,98 @@ const AnswerMarkdown = memo(function AnswerMarkdown({
     [styles, turnId, onCite],
   );
   return (
-    <ReactMarkdown remarkPlugins={[remarkGfm, remarkCitations]} components={components}>
-      {content}
-    </ReactMarkdown>
+    <MarkdownView content={content} components={components} remarkPlugins={[remarkCitations]} />
+  );
+});
+
+/**
+ * The in-flight (streaming) turn, rendered as plain pre-wrapped text rather than
+ * re-running the full markdown pipeline. Re-parsing the growing answer on every
+ * flush was O(N²) (remark parse → gfm tables → citation walk → hast → React,
+ * over the WHOLE accumulated answer each time); a long tabular answer paid for
+ * it dearly. Plain text while streaming makes each flush a cheap text update;
+ * the turn does ONE full markdown parse (AnswerMarkdown) the instant it settles,
+ * so the final rendered answer and its citations are byte-identical to before.
+ * Memoized on content so it only updates when the buffered text actually grows.
+ */
+const StreamingAnswer = memo(function StreamingAnswer({
+  content,
+  className,
+}: {
+  content: string;
+  className: string;
+}) {
+  return <div className={className}>{content}</div>;
+});
+
+/**
+ * The "Related files" cards under an answer. Hoisted to module scope: it used to
+ * be declared *inside* ChatPanel, so it got a fresh component identity on every
+ * render and React tore down and rebuilt every reference card (Card + two
+ * Badges + icon + two Texts, ×3–8 per turn) on every streamed token AND every
+ * composer keystroke. As a stable, memoized component the cards only re-render
+ * when that turn's references, the desktop capability, or the citation-flash
+ * target actually change.
+ */
+const References = memo(function References({
+  turnId,
+  references,
+  desktop,
+  flashCite,
+  onOpen,
+}: {
+  turnId: string;
+  references: RagReference[];
+  desktop: boolean;
+  flashCite: string | null;
+  onOpen: (fileId: string) => void;
+}) {
+  const styles = useStyles();
+  return (
+    <div className={styles.refs}>
+      <Text weight="semibold" size={200}>
+        Related files
+      </Text>
+      {references.map((r, i) => (
+        <Card
+          key={r.fileId}
+          // Anchor for the [n] citation chips in the answer above.
+          id={citeCardId(turnId, i + 1)}
+          className={mergeClasses(
+            styles.refCard,
+            desktop && styles.refCardInteractive,
+            flashCite === `${turnId}:${i + 1}` && styles.refCardFlash,
+          )}
+          appearance="filled-alternative"
+          {...(desktop
+            ? {
+                role: "button",
+                tabIndex: 0,
+                title: `Open ${r.name}`,
+                onClick: () => void onOpen(r.fileId),
+                onKeyDown: (e: KeyboardEvent) =>
+                  (e.key === "Enter" || e.key === " ") && void onOpen(r.fileId),
+              }
+            : {})}
+        >
+          {/* Number matches the [n] markers in the answer text. */}
+          <Badge appearance="tint" shape="circular" size="small">
+            {i + 1}
+          </Badge>
+          <DocumentRegular fontSize={24} />
+          <div className={styles.refMeta}>
+            <Text weight="semibold" truncate>
+              {r.name}
+            </Text>
+            <Text size={200} className={styles.empty}>
+              {r.snippet}
+            </Text>
+          </div>
+          {desktop && <OpenRegular className={`${styles.openIcon} open-affordance`} fontSize={18} />}
+          <Badge appearance="outline">{Math.round(r.score * 100)}%</Badge>
+        </Card>
+      ))}
+    </div>
   );
 });
 
@@ -1149,6 +1256,41 @@ export function ChatPanel() {
   }, [currentId]);
   // Cancels the in-flight ask() when the user presses Stop.
   const abortRef = useRef<AbortController | null>(null);
+  // Streamed-token coalescing. `sendQuestion` appends a delta per token inside a
+  // `for await` loop, and each write lands in its own microtask, so React 19
+  // can't batch them — the whole panel re-rendered once per token. Instead we
+  // stash the growing answer in a ref and flush it to the store at most once per
+  // animation frame: renders drop from O(tokens) → O(frames). The turn settles
+  // with a final synchronous flush so no buffered token is ever lost.
+  const streamPendingRef = useRef<{ id: string; content: string } | null>(null);
+  const streamRafRef = useRef<number | null>(null);
+  const writeStreamContent = useCallback(() => {
+    const pending = streamPendingRef.current;
+    if (!pending) return;
+    streamPendingRef.current = null;
+    setMessages((m) =>
+      m.map((x) => (x.id === pending.id ? { ...x, content: pending.content } : x)),
+    );
+  }, [setMessages]);
+  const scheduleStreamFlush = useCallback(
+    (id: string, content: string) => {
+      streamPendingRef.current = { id, content };
+      if (streamRafRef.current === null) {
+        streamRafRef.current = requestAnimationFrame(() => {
+          streamRafRef.current = null;
+          writeStreamContent();
+        });
+      }
+    },
+    [writeStreamContent],
+  );
+  const flushStreamNow = useCallback(() => {
+    if (streamRafRef.current !== null) {
+      cancelAnimationFrame(streamRafRef.current);
+      streamRafRef.current = null;
+    }
+    writeStreamContent();
+  }, [writeStreamContent]);
   // Files explicitly attached to the conversation (dragged from the explorer or
   // dropped from the OS). When present, questions are scoped to just these.
   const [attachments, setAttachments] = useState<DraggedFile[]>([]);
@@ -1194,6 +1336,7 @@ export function ChatPanel() {
       if (flashTimer.current !== null) window.clearTimeout(flashTimer.current);
       if (undoTimer.current !== null) window.clearTimeout(undoTimer.current);
       if (exportNoteTimer.current !== null) window.clearTimeout(exportNoteTimer.current);
+      if (streamRafRef.current !== null) cancelAnimationFrame(streamRafRef.current);
     },
     [],
   );
@@ -1427,6 +1570,9 @@ export function ChatPanel() {
 
   async function sendQuestion(q: string) {
     if (!q || streaming) return;
+    // Warm the split markdown chunk now, while the answer streams as plain text,
+    // so it's ready the instant the turn settles into a full markdown render.
+    warmMarkdown();
     // The conversation so far (completed turns only — failed turns are excluded)
     // becomes the model's history. Read from the store, not the render closure,
     // so a retry that just removed its failed turn builds the right history.
@@ -1471,9 +1617,9 @@ export function ChatPanel() {
         if (chunk.delta) {
           setProgressLabel(null); // the answer is starting — stage notes are done
           finalContent += chunk.delta;
-          setMessages((m) =>
-            m.map((x) => (x.id === asstId ? { ...x, content: x.content + chunk.delta } : x)),
-          );
+          // Buffer the growing answer and flush on the next frame instead of
+          // writing the store per token (see scheduleStreamFlush).
+          scheduleStreamFlush(asstId, finalContent);
         }
         if (chunk.references) {
           const refs = chunk.references;
@@ -1512,6 +1658,10 @@ export function ChatPanel() {
         );
       }
     } finally {
+      // Land every buffered token into the store before the turn settles, so the
+      // finished transcript (and what we persist) holds the complete answer even
+      // if the last frame's flush hadn't fired yet.
+      flushStreamNow();
       abortRef.current = null;
       setStreaming(false);
       setProgressLabel(null);
@@ -1929,13 +2079,15 @@ export function ChatPanel() {
   }, []);
 
   // Open a cited file in its native app (desktop only; the route no-ops on web).
-  async function openFile(fileId: string) {
+  // useCallback so the hoisted, memoized <References> keeps a stable onOpen and
+  // its cards don't re-render as the panel does.
+  const openFile = useCallback(async (fileId: string) => {
     await fetch("/api/open", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ nodeId: fileId }),
     }).catch(() => {});
-  }
+  }, []);
 
   function handleComposerKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
     // Enter sends; Shift+Enter inserts a newline. `isComposing` guards IME
@@ -2233,55 +2385,6 @@ export function ChatPanel() {
       </div>
     </div>
   );
-
-  function References({ turnId, references }: { turnId: string; references: RagReference[] }) {
-    return (
-      <div className={styles.refs}>
-        <Text weight="semibold" size={200}>
-          Related files
-        </Text>
-        {references.map((r, i) => (
-          <Card
-            key={r.fileId}
-            // Anchor for the [n] citation chips in the answer above.
-            id={citeCardId(turnId, i + 1)}
-            className={mergeClasses(
-              styles.refCard,
-              desktop && styles.refCardInteractive,
-              flashCite === `${turnId}:${i + 1}` && styles.refCardFlash,
-            )}
-            appearance="filled-alternative"
-            {...(desktop
-              ? {
-                  role: "button",
-                  tabIndex: 0,
-                  title: `Open ${r.name}`,
-                  onClick: () => void openFile(r.fileId),
-                  onKeyDown: (e: KeyboardEvent) =>
-                    (e.key === "Enter" || e.key === " ") && void openFile(r.fileId),
-                }
-              : {})}
-          >
-            {/* Number matches the [n] markers in the answer text. */}
-            <Badge appearance="tint" shape="circular" size="small">
-              {i + 1}
-            </Badge>
-            <DocumentRegular fontSize={24} />
-            <div className={styles.refMeta}>
-              <Text weight="semibold" truncate>
-                {r.name}
-              </Text>
-              <Text size={200} className={styles.empty}>
-                {r.snippet}
-              </Text>
-            </div>
-            {desktop && <OpenRegular className={`${styles.openIcon} open-affordance`} fontSize={18} />}
-            <Badge appearance="outline">{Math.round(r.score * 100)}%</Badge>
-          </Card>
-        ))}
-      </div>
-    );
-  }
 
   // Changed-pins alert: one dismissible banner; each entry re-asks on click
   // (the fresh narrated answer IS the drill-down). Rendered in both the hero
@@ -2778,11 +2881,17 @@ export function ChatPanel() {
                     <>
                       {m.content && (
                         <div className={styles.answer}>
-                          <AnswerMarkdown
-                            content={m.content}
-                            turnId={m.id}
-                            onCite={handleCitationClick}
-                          />
+                          {streaming && m.id === lastId ? (
+                            // The live turn renders as cheap plain text; it does
+                            // the one full markdown parse when it settles below.
+                            <StreamingAnswer content={m.content} className={styles.streamingText} />
+                          ) : (
+                            <AnswerMarkdown
+                              content={m.content}
+                              turnId={m.id}
+                              onCite={handleCitationClick}
+                            />
+                          )}
                           {streaming && m.id === lastId && <span className={styles.beaconInline} />}
                         </div>
                       )}
@@ -2933,7 +3042,13 @@ export function ChatPanel() {
                         </>
                       )}
                       {m.references && m.references.length > 0 && (
-                        <References turnId={m.id} references={m.references} />
+                        <References
+                          turnId={m.id}
+                          references={m.references}
+                          desktop={desktop}
+                          flashCite={flashCite}
+                          onOpen={openFile}
+                        />
                       )}
                       {/* Honesty note: files were visible, yet nothing matched. */}
                       {!m.error &&

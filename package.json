@@ -5,6 +5,12 @@
   "description": "Lighthouse — a local-first RAG vault for your documents.",
   "author": "Lighthouse",
   "main": "electron/main.js",
+  "//browserslist": "The UI only ever runs in the bundled Tauri webviews (WebView2 / WKWebView / WebKitGTK) and modern desktop browsers for dev — all evergreen. Declaring modern targets stops Next/SWC from emitting the ~110 KB core-js legacy-polyfill bundle (Symbol/URL/Reflect/Promise/fetch are all native here).",
+  "browserslist": [
+    "last 2 Chrome versions",
+    "last 2 Edge versions",
+    "last 2 Safari versions"
+  ],
   "scripts": {
     "dev": "next dev",
     "build": "next build",
