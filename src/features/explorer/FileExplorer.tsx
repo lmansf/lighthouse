@@ -71,6 +71,7 @@ import {
   SparkleFilled,
 } from "@fluentui/react-icons";
 import type { FileNode } from "@/contracts";
+import { flattenVisible, type FlatRow } from "./flatten";
 import { useRagStore } from "@/stores/useRagStore";
 import { useAuthStore } from "@/stores/useAuthStore";
 import { logEvent } from "@/lib/logEvent";
@@ -356,7 +357,16 @@ const useStyles = makeStyles({
     color: tokens.colorNeutralForeground3,
   },
   icon: { fontSize: "20px", flexShrink: 0 },
-  name: { flex: 1, minWidth: 0, wordBreak: "break-word" },
+  // Single-line + ellipsis (was wordBreak: break-word, which let long names wrap
+  // to 2+ lines). Fixed-height rows are what let the tree window/virtualize; the
+  // full name stays reachable via the row's title tooltip.
+  name: {
+    flex: 1,
+    minWidth: 0,
+    whiteSpace: "nowrap",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+  },
   spacer: { flex: 1 },
   dimmed: { opacity: 0.45 },
 });
@@ -419,7 +429,6 @@ function fileIcon(node: FileNode, className: string) {
 interface TreeRowProps {
   node: FileNode;
   depth: number;
-  childrenOf: (id: string) => FileNode[];
   selectionMode: boolean;
   isSelected: (id: string) => boolean;
   onToggle: (id: string) => void;
@@ -446,17 +455,16 @@ interface TreeRowProps {
    * (a linked, cloud, or database node). Drives the "Move to…" submenu.
    */
   moveTargetsFor: (node: FileNode) => { id: string | null; name: string }[];
-  /** Sibling comparator (folders first, then the chosen sort key). */
-  compareNodes: (a: FileNode, b: FileNode) => number;
   /** Folder id → whether all/some/none of its file descendants are AI-visible. */
   folderVisibility: Map<string, "all" | "some" | "none">;
-  /**
-   * Ids the active search/filter keeps, or null when no filter is active.
-   * Children outside the set are not rendered.
-   */
-  visibleIds: Set<string> | null;
-  /** True while a search query is active: matched ancestors stay expanded. */
-  forceExpand: boolean;
+  /** Whether this folder is expanded — resolved by the parent (search force-open
+   *  OR the central expanded set). The tree is flattened + windowed centrally,
+   *  so a row no longer renders its own children. Files ignore this. */
+  expanded: boolean;
+  /** Flip this folder's expanded state (row click / chevron). */
+  onToggleExpand: (id: string) => void;
+  /** Set this folder's expanded state explicitly (ArrowRight / ArrowLeft). */
+  onSetExpanded: (id: string, value: boolean) => void;
   /** Ids added in the last few seconds — these rows play the enter animation. */
   justAdded: Set<string>;
 }
@@ -468,7 +476,6 @@ const NO_MOVE_TARGETS: { id: string | null; name: string }[] = [];
 function TreeRowImpl({
   node,
   depth,
-  childrenOf,
   selectionMode,
   isSelected,
   onToggle,
@@ -483,14 +490,13 @@ function TreeRowImpl({
   onRename,
   onNewFolderInside,
   moveTargetsFor,
-  compareNodes,
   folderVisibility,
-  visibleIds,
-  forceExpand,
+  expanded,
+  onToggleExpand,
+  onSetExpanded,
   justAdded,
 }: TreeRowProps) {
   const styles = useStyles();
-  const [open, setOpen] = useState(depth < 1); // top-level folders open by default
   // The row's right-click menu open state. moveTargetsFor is O(rows × folders),
   // and its result is ONLY consumed by the "Move to…" submenu — so compute it
   // lazily while the menu is open instead of eagerly for every row on every
@@ -501,13 +507,6 @@ function TreeRowImpl({
   // Reveal a select checkbox on hover, so selection can start without first
   // flipping the global "Selection mode" switch.
   const [hovered, setHovered] = useState(false);
-  // A search must reveal matches nested in collapsed folders, so it wins over
-  // the user's manual open/closed state while the query is active.
-  const expanded = forceExpand || open;
-  const kids = node.kind === "folder" ? childrenOf(node.id) : [];
-  const shownKids = (visibleIds ? kids.filter((k) => visibleIds.has(k.id)) : kids)
-    .slice()
-    .sort(compareNodes);
   // A folder's eye reflects its descendants: all visible, some, or none.
   const folderVis = node.kind === "folder" ? folderVisibility.get(node.id) ?? "none" : null;
   const partialVis = folderVis === "some";
@@ -537,7 +536,7 @@ function TreeRowImpl({
       onSelect(node.id);
       return;
     }
-    if (node.kind === "folder") setOpen((o) => !o);
+    if (node.kind === "folder") onToggleExpand(node.id);
   };
   const toggleVisibility = () => {
     // Privacy-safe availability telemetry: count THIS toggle (not the folder's
@@ -626,10 +625,10 @@ function TreeRowImpl({
             activate();
           } else if (node.kind === "folder" && e.key === "ArrowRight") {
             e.preventDefault();
-            setOpen(true);
+            onSetExpanded(node.id, true);
           } else if (node.kind === "folder" && e.key === "ArrowLeft") {
             e.preventDefault();
-            setOpen(false);
+            onSetExpanded(node.id, false);
           }
         }}
         // Drag a file out to the chat panel to ask about just that file.
@@ -650,7 +649,7 @@ function TreeRowImpl({
           onClick={(e) => {
             if (node.kind !== "folder") return;
             e.stopPropagation();
-            setOpen((o) => !o);
+            onToggleExpand(node.id);
           }}
         >
           {node.kind === "folder" ? (
@@ -671,7 +670,7 @@ function TreeRowImpl({
           />
         )}
         {fileIcon(node, styles.icon)}
-        <Text className={styles.name} size={300}>
+        <Text className={styles.name} size={300} title={node.name}>
           {node.name}
         </Text>
         {node.external && (
@@ -776,37 +775,9 @@ function TreeRowImpl({
           </MenuList>
         </MenuPopover>
       </Menu>
-      {node.kind === "folder" && expanded && (
-        <div>
-          {shownKids.map((k) => (
-            <TreeRow
-              key={k.id}
-              node={k}
-              depth={depth + 1}
-              childrenOf={childrenOf}
-              selectionMode={selectionMode}
-              isSelected={isSelected}
-              onToggle={onToggle}
-              onSelect={onSelect}
-              onStartSelect={onStartSelect}
-              onUnlink={onUnlink}
-              onRemove={onRemove}
-              desktop={desktop}
-              onOpen={onOpen}
-              onReveal={onReveal}
-              onMove={onMove}
-              onRename={onRename}
-              onNewFolderInside={onNewFolderInside}
-              moveTargetsFor={moveTargetsFor}
-              compareNodes={compareNodes}
-              folderVisibility={folderVisibility}
-              visibleIds={visibleIds}
-              forceExpand={forceExpand}
-              justAdded={justAdded}
-            />
-          ))}
-        </div>
-      )}
+      {/* Children are no longer rendered here: the tree is flattened once at the
+          panel level (respecting this row's `expanded`) and the flat list is
+          windowed, so only on-screen rows mount instead of the whole subtree. */}
     </div>
   );
 }
@@ -817,11 +788,81 @@ function TreeRowImpl({
  * the (debounced) search box, and the background vault poll once it no-ops
  * (useRagStore.load) — doesn't reconcile the row's Fluent subtree. Every prop is
  * kept referentially stable in FileExplorer (store actions, useCallback
- * handlers, memoized maps), so the memo actually holds; recursion below renders
- * the memoized component, so the whole subtree is covered. Rows still update on
- * the changes that matter: their node, the selection, and filter/visibility.
+ * handlers, memoized maps), so the memo actually holds. With the tree flattened
+ * and windowed, only on-screen rows mount at all — and this memo keeps those
+ * from reconciling on unrelated re-renders. Rows still update on the changes
+ * that matter: their node, selection, expansion, and filter/visibility.
  */
 const TreeRow = memo(TreeRowImpl);
+
+const VROW_H = 34; // must match styles.row minHeight (rows are fixed-height)
+const VOVERSCAN = 10; // rows kept mounted just outside the viewport, each side
+
+/**
+ * Windows a flat row list inside the shared scroll container: it renders only
+ * the rows intersecting the viewport (plus overscan), absolutely positioned in a
+ * spacer sized to the full list so the scrollbar stays honest. The block's own
+ * offset within the scroll content is measured from the DOM (not assumed), so
+ * arbitrary source-header heights above it are handled without guesswork; only
+ * the row height is fixed (34px). Small lists render every row anyway — the math
+ * just resolves to the full range — so there's a single code path.
+ */
+function VirtualRows({
+  rows,
+  scrollRef,
+  renderRow,
+}: {
+  rows: FlatRow[];
+  scrollRef: React.RefObject<HTMLDivElement | null>;
+  renderRow: (row: FlatRow) => React.ReactNode;
+}) {
+  const blockRef = useRef<HTMLDivElement>(null);
+  const [range, setRange] = useState({ start: 0, end: Math.min(rows.length, 40) });
+  const count = rows.length;
+
+  useEffect(() => {
+    const sc = scrollRef.current;
+    const block = blockRef.current;
+    if (!sc || !block) return;
+    const recompute = () => {
+      // Block's top within the scroll *content*, robust to any offsetParent.
+      const blockTop =
+        block.getBoundingClientRect().top - sc.getBoundingClientRect().top + sc.scrollTop;
+      const viewTop = sc.scrollTop - blockTop;
+      const viewBot = viewTop + sc.clientHeight;
+      const start = Math.max(0, Math.floor(viewTop / VROW_H) - VOVERSCAN);
+      const end = Math.min(count, Math.ceil(viewBot / VROW_H) + VOVERSCAN);
+      setRange((prev) => (prev.start === start && prev.end === end ? prev : { start, end }));
+    };
+    recompute();
+    sc.addEventListener("scroll", recompute, { passive: true });
+    window.addEventListener("resize", recompute);
+    return () => {
+      sc.removeEventListener("scroll", recompute);
+      window.removeEventListener("resize", recompute);
+    };
+  }, [scrollRef, count]);
+
+  const visible = rows.slice(range.start, range.end);
+  return (
+    <div ref={blockRef} style={{ position: "relative", height: count * VROW_H }}>
+      {visible.map((row, i) => (
+        <div
+          key={row.node.id}
+          style={{
+            position: "absolute",
+            top: (range.start + i) * VROW_H,
+            left: 0,
+            right: 0,
+            height: VROW_H,
+          }}
+        >
+          {renderRow(row)}
+        </div>
+      ))}
+    </div>
+  );
+}
 
 export function FileExplorer() {
   const styles = useStyles();
@@ -1035,6 +1076,53 @@ export function FileExplorer() {
     }
     return set;
   }, [filterActive, nodes, trimmedQuery, onlyVisible, nodeById]);
+
+  // Central expand/collapse state for the flattened + windowed tree (a folder is
+  // expanded when present in this set). Top-level folders seed open exactly once
+  // — thereafter it's the user's choice, and a folder they collapse stays closed
+  // even as the background poll re-lands the same nodes. An active filter force-
+  // expands every ancestor so matches nested in collapsed folders still show.
+  const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
+  const seededFolders = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const openNow: string[] = [];
+    for (const n of nodes) {
+      if (n.kind === "folder" && !seededFolders.current.has(n.id)) {
+        seededFolders.current.add(n.id);
+        if (n.parentId === null) openNow.push(n.id); // roots open by default, once
+      }
+    }
+    if (openNow.length) {
+      setExpandedIds((prev) => {
+        const next = new Set(prev);
+        for (const id of openNow) next.add(id);
+        return next;
+      });
+    }
+  }, [nodes]);
+  const isExpanded = useCallback(
+    (id: string) => filterActive || expandedIds.has(id),
+    [filterActive, expandedIds],
+  );
+  const toggleExpand = useCallback((id: string) => {
+    setExpandedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+  const setExpanded = useCallback((id: string, value: boolean) => {
+    setExpandedIds((prev) => {
+      if (prev.has(id) === value) return prev;
+      const next = new Set(prev);
+      if (value) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  }, []);
+  // The shared scroll viewport the windowed row blocks measure against.
+  const scrollRef = useRef<HTMLDivElement>(null);
 
   // Outcome of the last add (link or upload) worth telling the user about -
   // rendered as a dismissible banner instead of a silent console.warn.
@@ -1685,7 +1773,7 @@ export function FileExplorer() {
         </div>
       )}
 
-      <div className={styles.scroll}>
+      <div className={styles.scroll} ref={scrollRef}>
         {nodes.length === 0 && sources.length <= 1 ? (
           // First-run: nothing added yet across any source, so the per-source
           // one-liners would just repeat themselves - show one real call to
@@ -1741,33 +1829,35 @@ export function FileExplorer() {
                   </div>
                 ) : (
                   <div className={source.available ? undefined : styles.dimmed}>
-                    {roots.map((node) => (
-                      <TreeRow
-                        key={node.id}
-                        node={node}
-                        depth={0}
-                        childrenOf={childrenOf}
-                        selectionMode={selectionMode}
-                        isSelected={isSelected}
-                        onToggle={handleToggle}
-                        onSelect={handleSelect}
-                        onStartSelect={handleStartSelect}
-                        onUnlink={handleUnlink}
-                        onRemove={handleRemove}
-                        desktop={desktop}
-                        onOpen={openNode}
-                        onReveal={revealNode}
-                        onMove={handleMove}
-                        onRename={openRename}
-                        onNewFolderInside={openNewFolder}
-                        moveTargetsFor={moveTargetsFor}
-                        compareNodes={compareNodes}
-                        folderVisibility={folderVisibility}
-                        visibleIds={visibleIds}
-                        forceExpand={filterActive}
-                        justAdded={justAdded}
-                      />
-                    ))}
+                    <VirtualRows
+                      rows={flattenVisible(roots, childrenOf, compareNodes, isExpanded, visibleIds)}
+                      scrollRef={scrollRef}
+                      renderRow={(row) => (
+                        <TreeRow
+                          node={row.node}
+                          depth={row.depth}
+                          selectionMode={selectionMode}
+                          isSelected={isSelected}
+                          onToggle={handleToggle}
+                          onSelect={handleSelect}
+                          onStartSelect={handleStartSelect}
+                          onUnlink={handleUnlink}
+                          onRemove={handleRemove}
+                          desktop={desktop}
+                          onOpen={openNode}
+                          onReveal={revealNode}
+                          onMove={handleMove}
+                          onRename={openRename}
+                          onNewFolderInside={openNewFolder}
+                          moveTargetsFor={moveTargetsFor}
+                          folderVisibility={folderVisibility}
+                          expanded={isExpanded(row.node.id)}
+                          onToggleExpand={toggleExpand}
+                          onSetExpanded={setExpanded}
+                          justAdded={justAdded}
+                        />
+                      )}
+                    />
                   </div>
                 )}
               </div>
