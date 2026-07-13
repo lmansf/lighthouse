@@ -60,6 +60,12 @@ const LLAMACPP_API = "https://api.github.com/repos/ggml-org/llama.cpp/releases";
 const LLAMACPP_VERSION = "b9859"; // ggml-org/llama.cpp release tag
 const PIPER_VERSION = "2023.11.14-2"; // rhasspy/piper release tag
 const VOICE_REVISION = "e21c7de8d4eab79b902f0d61e662b3f21664b8d2"; // rhasspy/piper-voices commit
+// Our own mirror of the voice (release tag in THIS repo, populated by the
+// mirror-tts workflow). Tried before HF: the voice is the one asset hosted on
+// HF, whose CDN 403-stormed for hours on 2026-07-13 and blocked every release
+// build. Same pinned SHA-256 verifies both sources, so the mirror is
+// tamper-evident and the fallback order is purely about availability.
+const TTS_MIRROR_TAG = "tts-assets-1";
 // B2 hybrid search: the bundled embedding model (Apache-2.0), served by the
 // SAME llama-server binary above with `--embedding` on a second port. Bundled
 // in the installer (+~137 MB) so semantic search works with zero setup; lives
@@ -191,6 +197,25 @@ async function download(url, outPath, label, assetName) {
     throw e;
   }
   renameSync(tmpPath, outPath);
+}
+
+/**
+ * Try each URL in order until one downloads AND verifies; rethrow the last
+ * failure only if every source fails. Digest pinning in download() makes the
+ * order a pure availability choice — a wrong or tampered mirror can only ever
+ * fail closed, never substitute bytes.
+ */
+async function downloadWithFallback(urls, outPath, label, assetName) {
+  let lastErr;
+  for (const url of urls) {
+    try {
+      return await download(url, outPath, label, assetName);
+    } catch (err) {
+      lastErr = err;
+      console.log(`\n  ${label}: source failed (${String(err?.message || err).split("\n")[0]}); trying next`);
+    }
+  }
+  throw lastErr;
   process.stdout.write(`\r  ${label}: done (${(seen / 1e6).toFixed(0)} MB)            \n`);
 }
 
@@ -409,6 +434,9 @@ async function fetchTts() {
   patchPiperRpath(ttsDest);
 
   // 2. Voice model (.onnx) + its config (.onnx.json) — a clear, natural US voice.
+  // Mirror first (GitHub→builder is the dependable path), HF upstream second;
+  // both verify the same pinned SHA-256.
+  const voiceMirror = `https://github.com/lmansf/lighthouse/releases/download/${TTS_MIRROR_TAG}`;
   const voiceBase =
     `https://huggingface.co/rhasspy/piper-voices/resolve/${VOICE_REVISION}/en/en_US/lessac/medium/en_US-lessac-medium`;
   const onnxPath = join(ttsDest, "en_US-lessac-medium.onnx");
@@ -416,8 +444,18 @@ async function fetchTts() {
   if (!force && existsSync(onnxPath) && statSync(onnxPath).size > 1e6) {
     console.log(`✓ voice already present`);
   } else {
-    await download(`${voiceBase}.onnx`, onnxPath, "voice", "en_US-lessac-medium.onnx");
-    await download(`${voiceBase}.onnx.json`, jsonPath, "voice-config", "en_US-lessac-medium.onnx.json");
+    await downloadWithFallback(
+      [`${voiceMirror}/en_US-lessac-medium.onnx`, `${voiceBase}.onnx`],
+      onnxPath,
+      "voice",
+      "en_US-lessac-medium.onnx",
+    );
+    await downloadWithFallback(
+      [`${voiceMirror}/en_US-lessac-medium.onnx.json`, `${voiceBase}.onnx.json`],
+      jsonPath,
+      "voice-config",
+      "en_US-lessac-medium.onnx.json",
+    );
     console.log(`✓ voice en_US-lessac-medium`);
   }
 }
