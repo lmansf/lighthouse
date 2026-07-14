@@ -88,7 +88,9 @@ import { useAuthStore } from "@/stores/useAuthStore";
 import { logEvent } from "@/lib/logEvent";
 import { parseChartSpec, tableToCsv } from "@/lib/chartSpec";
 import { sortRows, type SortDir } from "@/lib/sortTable";
+import { pinChartData } from "@/lib/pinChart";
 import { AnalyticsChart } from "@/features/chat/AnalyticsChart";
+import { PinMiniChart } from "@/features/chat/PinMiniChart";
 import { EgressShield } from "@/features/egress/EgressShield";
 import { useChatStore, type TranscriptMessage } from "@/stores/useChatStore";
 import { modKey } from "@/features/onboarding/ModeChooser";
@@ -455,6 +457,14 @@ const useStyles = makeStyles({
     borderRadius: tokens.borderRadiusMedium,
     backgroundColor: tokens.colorBrandBackground2,
     color: tokens.colorNeutralForeground1,
+  },
+  // One changed pin: its re-ask button with the before→after mini-chart tucked
+  // beneath, so the numbers and the drill-down stay visually paired.
+  pinAlertItem: {
+    display: "inline-flex",
+    flexDirection: "column",
+    alignItems: "flex-start",
+    gap: tokens.spacingVerticalXXS,
   },
   pinDialogSurface: { maxWidth: "640px", width: "92vw" },
   pinList: {
@@ -2540,23 +2550,31 @@ export function ChatPanel() {
         <Text size={200} weight="semibold">
           {pinAlerts.length === 1 ? "A pinned answer changed:" : "Pinned answers changed:"}
         </Text>
-        {pinAlerts.map((a) => (
-          <Tooltip
-            key={a.id}
-            content={a.before ? `was: ${a.before} → now: ${a.after}` : `now: ${a.after}`}
-            relationship="description"
-          >
-            <Button
-              size="small"
-              appearance="secondary"
-              shape="circular"
-              disabled={streaming}
-              onClick={() => askPinned(a.question, a.id)}
-            >
-              {a.question.length > 48 ? `${a.question.slice(0, 47)}…` : a.question}
-            </Button>
-          </Tooltip>
-        ))}
+        {pinAlerts.map((a) => {
+          // When the engine's before/after summaries are cleanly numeric, embed
+          // a tiny before→after chart from those verified numbers; otherwise the
+          // tooltip carries the change as text (pinChartData fails closed).
+          const mini = pinChartData(a.before, a.after);
+          return (
+            <div key={a.id} className={styles.pinAlertItem}>
+              <Tooltip
+                content={a.before ? `was: ${a.before} → now: ${a.after}` : `now: ${a.after}`}
+                relationship="description"
+              >
+                <Button
+                  size="small"
+                  appearance="secondary"
+                  shape="circular"
+                  disabled={streaming}
+                  onClick={() => askPinned(a.question, a.id)}
+                >
+                  {a.question.length > 48 ? `${a.question.slice(0, 47)}…` : a.question}
+                </Button>
+              </Tooltip>
+              {mini && <PinMiniChart data={mini} />}
+            </div>
+          );
+        })}
         <span style={{ flex: 1 }} />
         <Button
           size="small"
