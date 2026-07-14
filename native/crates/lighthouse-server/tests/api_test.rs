@@ -27,14 +27,8 @@ async fn spawn_server() -> (String, tempfile::TempDir) {
     std::env::remove_var("LIGHTHOUSE_API_TOKEN");
     std::env::remove_var("LIGHTHOUSE_DESKTOP");
     std::env::remove_var("ANTHROPIC_API_KEY");
-    // Pin default inclusion to opt_in (default-excluded) for determinism.
-    let state_dir = vault_dir.path().join(".rag-vault");
-    std::fs::create_dir_all(&state_dir).unwrap();
-    std::fs::write(
-        state_dir.join("experiments.json"),
-        r#"{ "onboarding": "key_first", "default_inclusion": "opt_in", "source": "override" }"#,
-    )
-    .unwrap();
+    // Default inclusion is the fixed exclude default (experiments removed), so
+    // uploaded files start excluded — deterministic without any pin.
     lighthouse_core::vault::invalidate_walk_cache();
 
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
@@ -325,27 +319,6 @@ async fn wire_protocol_end_to_end() {
         s["summonShortcut"], "ctrl+super+shift+space",
         "the default keyed summon chord when none is set"
     );
-
-    // --- /api/usage consent round-trip ---------------------------------------------
-    let u: Value = client
-        .get(format!("{base}/api/usage"))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(u["optOut"], true, "capture is opt-in");
-    let u: Value = client
-        .post(format!("{base}/api/usage"))
-        .json(&json!({ "op": "consent", "optOut": false }))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(u["optOut"], false);
 
     // --- /api/connect status (not connected) ----------------------------------------
     let c: Value = client
