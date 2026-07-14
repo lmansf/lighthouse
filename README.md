@@ -15,9 +15,11 @@ security director** who needs to approve all of it.
 **[lhvault.app](https://lhvault.app)** — or straight from the
 [latest release](https://github.com/lmansf/lighthouse/releases/latest).
 
-> The npm package is still named `rag-vault`; the product and repo are
-> **Lighthouse**. The UI is the Forerunner theme — steel blues with a beacon
-> accent — in light and dark.
+> Naming debt, kept on purpose: the npm package is still named `rag-vault`,
+> and the hidden per-vault state directory is `.rag-vault/` — renaming either
+> would break existing installs' upgrades (orphaned indexes and settings), so
+> neither is renamed. The product and repo are **Lighthouse**. The UI is the
+> Forerunner theme — steel blues with a beacon accent — in light and dark.
 
 ## What it does (as of 0.11)
 
@@ -46,8 +48,7 @@ security director** who needs to approve all of it.
   images and scanned PDFs.
 - **Desktop widget + Whisper summon.** A floating ask-bar summonable with a
   keyboard chord (opt-in — it installs an OS keyboard hook only if you turn
-  it on; see `docs/edr-whitelisting.md` once Phase 1 lands), with inline
-  answers and dictation.
+  it on; see `docs/edr-whitelisting.md`), with inline answers and dictation.
 - **Your choice of model.** On-device private model (bundled `llama-server`
   engine + opt-in ~4.2 GB Mistral-7B download, GPU-offloaded where available)
   — or bring a key for Anthropic Claude, OpenAI, Google Gemini, xAI Grok,
@@ -113,14 +114,27 @@ awaits certificates — **[docs/signing.md](docs/signing.md)**.
 
 ## Network & privacy
 
-The complete egress inventory — every host the app *can* contact, when, with
-what payload, and how to turn each off — lives in
-**[docs/data-flows.md](docs/data-flows.md)** (written for a security review).
-The short version: with the private model selected, answering a question
-makes **zero network calls**; cloud calls happen only to the provider you
-configured; telemetry is **opt-in** and coarse; chat history is **opt-in**
-and local; API keys are sealed (AES-256-GCM) on disk; state writes are 0600
-and atomic.
+**Lighthouse collects no analytics and phones nothing home on its own.**
+There is no usage telemetry, no click tracking, no launch ping, no A/B
+experiment machinery — none of it exists in the code. The only bytes that
+ever leave your machine on Lighthouse's behalf are:
+
+1. a request to the **cloud AI provider you configured** (the only path that
+   can carry document content — pick the local model and it's zero calls);
+2. the **license/trial check**;
+3. a **version check** against GitHub releases (a GET, no payload);
+4. **pinned, hash-verified asset downloads you click** (model weights,
+   updates);
+5. a **feedback or bug report you explicitly press Send on** — and the form
+   shows you exactly what it sends before you do.
+
+Two further strictly-you-initiated flows exist and are documented: Subscribe
+checkout (hidden by default) and the Microsoft 365 connector (only if you
+connect it, inbound-only). The complete egress inventory — every host, when
+it fires, what it carries, how to turn it off — is
+**[docs/data-flows.md](docs/data-flows.md)**, written for a security review.
+Chat history is **opt-in** and local; API keys are sealed (AES-256-GCM) on
+disk; state writes are 0600 and atomic.
 
 ## Pricing & trial
 
@@ -197,9 +211,11 @@ Apache-2.0 © Mistral AI.
 
 Shipping: the native desktop app described above, at **0.11.x**, with the
 release pipeline (build → 3-OS smoke → draft → publish) run from this repo.
-In flight on the current roadmap (`docs/roadmap-personas-2026-07.md`):
-code-signing certificates, an org-deployable managed-policy layer, a local
-audit log + egress transparency panel, offline activation, PDF table
-extraction, scheduled briefings, and richer charts. Installers are currently
-**unsigned** (SmartScreen/Gatekeeper warn on first launch); the signing
-pipeline is wired and documented in [docs/signing.md](docs/signing.md).
+Landed from the persona roadmap: the org-deployable managed-policy layer,
+the local audit log + egress transparency panel, offline activation, PDF
+table extraction, briefings, richer charts — and the removal of **all**
+automatic data collection (see §Network & privacy; the only feedback channel
+is the explicit Send-feedback form). Still open: code-signing certificates —
+installers are currently **unsigned** (SmartScreen/Gatekeeper warn on first
+launch); the signing pipeline is wired and documented in
+[docs/signing.md](docs/signing.md).

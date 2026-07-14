@@ -1,5 +1,13 @@
 # A/B Testing Guide: Onboarding (Exp 5) and Default Inclusion (Exp 6)
 
+> **Historical document — the machinery this guide describes no longer
+> exists.** Lighthouse removed all A/B experiment machinery and ambient
+> telemetry (the `assign`/`event` ops, variant persistence, and the funnel
+> instrumentation below were deleted, both engines). Default inclusion is an
+> explicit user setting (onboarding + Preferences), not an experiment
+> variant. Kept for the historical record of what was run and why; nothing
+> in here reflects the shipping product.
+
 This guide covers how to run two experiments end to end: the onboarding flow (play-first vs key-first) and the default RAG inclusion behavior (opt-in vs opt-out).
 It covers the analytics to build first, the branch and flag strategy, and a week-by-week plan for each.
 

@@ -17,26 +17,22 @@
 //   featureInterest → record a feature-interest vote (which shelved features a
 //                user would use) into the feature_interest table — one row per
 //                shown feature, `wanted` flagged. Separate from feedback.
-//   bug        → record an in-app bug report.
-//   ping       → log an app launch to the userlogs table.
-//   event      → record an A/B funnel event into the events table (one row per
-//                active experiment, stamped with experiment + variant). `ping`
-//                and `feedback` also persist the user's assigned variants onto
-//                their registration row (exp_onboarding / exp_default_inclusion).
-//   events     → batch-insert UI click events (best-effort usage logging) into
-//                the click_events table; published on launch and then purged.
-//   assign     → balanced A/B assignment: bucket a contact into the
-//                least-used variant per experiment (even split at low N under
-//                serial registration), recording it in experiment_assignments.
-//                Stable + idempotent.
-//   All form rows carry a stable contact_id so paid vs unpaid can be compared.
+//   bug        → record an in-app feedback/bug report. DE-IDENTIFIED: carries
+//                exactly what the dialog shows the user — {where, what,
+//                version, os, log?} — no contact_id, guid, or email.
 //   issuePaid  → (admin-only; needs x-admin-token == ADMIN_TOKEN) mint/activate
 //                a PAID license for a guid/email with a paid_through date. This
 //                is the seam the Stripe webhook calls.
-//   comingSoonLeaderboard → (admin-only; x-admin-token == ADMIN_TOKEN) the
-//                cross-user ranking of "coming soon" features by interest,
-//                aggregated from coming_soon_interest events via the
-//                coming_soon_leaderboard view. Returns [{feature,clicks,users}].
+//
+//   REMOVED (ambient telemetry, deleted with the client code that emitted it —
+//   see docs/data-flows.md §2): `ping` (launch logs → userlogs), `event`
+//   (funnel events → events), `events` (click capture → click_events),
+//   `assign` (A/B bucketing → experiment_assignments), and the admin
+//   `comingSoonLeaderboard` view read. Those ops now return "unknown op";
+//   their tables are decommission candidates (docs/server-decommission.md).
+//
+//   Every remaining form row except `bug` carries a stable contact_id (the
+//   user typed the surrounding form); `bug` is anonymous by design.
 //
 // Deploy:  supabase functions deploy license
 //          supabase secrets set LICENSE_SECRET="<long random string>"
@@ -48,23 +44,9 @@ const GRACE_DAYS = 14; // paid: grace window after paid_through before locking
 const DAY_MS = 86_400_000;
 const TABLE = Deno.env.get("REGISTRATIONS_TABLE") ?? "registrations";
 const FEEDBACK_TABLE = Deno.env.get("FEEDBACK_TABLE") ?? "feedback";
-const USERLOGS_TABLE = Deno.env.get("USERLOGS_TABLE") ?? "userlogs";
 const BUGS_TABLE = Deno.env.get("BUGS_TABLE") ?? "bug_reports";
 const NOTIFY_TABLE = Deno.env.get("NOTIFY_TABLE") ?? "purchase_interest";
 const FEATURE_INTEREST_TABLE = Deno.env.get("FEATURE_INTEREST_TABLE") ?? "feature_interest";
-const EVENTS_TABLE = Deno.env.get("EVENTS_TABLE") ?? "events";
-const CLICK_EVENTS_TABLE = Deno.env.get("CLICK_EVENTS_TABLE") ?? "click_events";
-const LEADERBOARD_VIEW = Deno.env.get("COMING_SOON_LEADERBOARD_VIEW") ?? "coming_soon_leaderboard";
-const EVENT_TYPES = ["folder", "file", "toggle", "button", "link", "nav", "other"];
-const MAX_EVENTS_PER_BATCH = 5000; // matches the desktop ring-buffer cap
-const ASSIGN_TABLE = Deno.env.get("EXPERIMENT_ASSIGNMENTS_TABLE") ?? "experiment_assignments";
-// The variants of each experiment, in alternation order: with even counts the
-// FIRST listed wins, so serial installs land A, B, A, B, ... for an even small-N
-// split (a concurrent burst can still collide since count-then-insert isn't atomic).
-const EXP_VARIANTS: Record<string, string[]> = {
-  onboarding: ["play_first", "key_first"],
-  default_inclusion: ["opt_in", "opt_out"],
-};
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -202,7 +184,6 @@ async function feedback(f: Feedback): Promise<Response> {
     notify_when_available: Boolean(f.notifyWhenAvailable),
   });
   if (error) return json({ ok: false, reason: "rejected", detail: error.message });
-  await persistExperiments(f.contactId, (f as { experiments?: Experiments }).experiments);
   return json({ ok: true });
 }
 
@@ -250,222 +231,29 @@ async function notify(body: Record<string, unknown>): Promise<Response> {
   return json({ ok: true });
 }
 
-/** Record a bug report from the in-app form. */
+/**
+ * Record a feedback/bug report from the in-app form. DE-IDENTIFIED BY DESIGN:
+ * the payload is exactly what the dialog showed the user — where/what/version/
+ * os and, only with its off-by-default checkbox ticked, a shell.log excerpt.
+ * No contact_id, guid, or email is accepted even if sent; the columns are
+ * written NULL so a modified client can't re-identify a report.
+ */
 async function bug(body: Record<string, unknown>): Promise<Response> {
   const where = body.where ? String(body.where) : null;
   const what = body.what ? String(body.what) : null;
   if (!where && !what) return json({ ok: false, reason: "rejected", detail: "empty report" }, 400);
-  // A contact may file many reports — see migration
-  // 20260628162019_bug_reports_allow_multiple.sql, which removed the UNIQUE
-  // constraint on contact_id (issue #26). Each report is its own row.
   const { error } = await admin().from(BUGS_TABLE).insert({
-    contact_id: body.contactId ? String(body.contactId) : null,
     where_at: where,
     description: what,
-    guid: body.guid ? String(body.guid) : null,
-    email: body.email ? String(body.email) : null,
     app_version: body.version ? String(body.version) : null,
+    os: body.os ? String(body.os).slice(0, 40) : null,
+    // Clamp defensively server-side too (the client caps its excerpt already).
+    log: body.log ? String(body.log).slice(0, 20_000) : null,
   });
   if (error) return json({ ok: false, reason: "rejected", detail: error.message });
   return json({ ok: true });
 }
 
-/** Log an app launch to userlogs. Best-effort — never blocks a launch. */
-async function ping(body: Record<string, unknown>): Promise<Response> {
-  const { error } = await admin().from(USERLOGS_TABLE).insert({
-    contact_id: body.contactId ? String(body.contactId) : null,
-    guid: body.guid ? String(body.guid) : null,
-    email: body.email ? String(body.email) : null,
-    event: "launch",
-    app_version: body.version ? String(body.version) : null,
-  });
-  // Stamp the user's current experiment variants onto their registration row so
-  // userlogs/feedback/etc. can be sliced by variant through registrations.
-  await persistExperiments(body.contactId, body.experiments);
-  return json({ ok: !error });
-}
-
-/** Map of experiment -> assigned variant, as sent by the desktop app. */
-type Experiments = Record<string, unknown> | undefined;
-
-/**
- * Best-effort: persist the user's assigned variants onto their registration row
- * (matched by stable contact_id). A no-op when there's no contact, no variants,
- * or no matching row yet — telemetry must never fail because of this.
- */
-async function persistExperiments(contactId: unknown, experiments: Experiments): Promise<void> {
-  const id = contactId ? String(contactId) : "";
-  if (!id || !experiments || typeof experiments !== "object") return;
-  const patch: Record<string, string> = {};
-  if (experiments.onboarding) patch.exp_onboarding = String(experiments.onboarding);
-  if (experiments.default_inclusion) patch.exp_default_inclusion = String(experiments.default_inclusion);
-  if (Object.keys(patch).length === 0) return;
-  await admin().from(TABLE).update(patch).eq("contact_id", id);
-}
-
-/**
- * Record a funnel/telemetry event. Writes ONE row per active experiment, each
- * stamped with that experiment + the user's variant, so a single `variant`
- * column is unambiguous. With no variants assigned yet, records one untagged
- * row. Best-effort — never blocks the app.
- */
-async function event(body: Record<string, unknown>): Promise<Response> {
-  const contactId = body.contactId ? String(body.contactId) : "";
-  const name = body.name ? String(body.name) : "";
-  if (!contactId || !name) return json({ ok: false, reason: "rejected", detail: "contactId and name required" }, 400);
-  const props = body.props && typeof body.props === "object" ? body.props : {};
-  const experiments = (body.experiments ?? {}) as Record<string, unknown>;
-  const tagged = Object.entries(experiments).filter(([, v]) => Boolean(v));
-  const rows =
-    tagged.length > 0
-      ? tagged.map(([experiment, variant]) => ({
-          contact_id: contactId,
-          name,
-          experiment,
-          variant: String(variant),
-          props,
-        }))
-      : [{ contact_id: contactId, name, experiment: null, variant: null, props }];
-  const { error } = await admin().from(EVENTS_TABLE).insert(rows);
-  return json({ ok: !error });
-}
-
-/**
- * Balanced A/B assignment. For each requested experiment, returns this contact's
- * variant - reusing an existing assignment (stable across launches), otherwise
- * bucketing them into the variant with the FEWEST assignments so far (ties go to
- * the first listed), then recording it. Under serial / low-volume registration
- * (the pilot case) this keeps a small pilot close to an even split instead of
- * relying on a per-install hash that can skew at low N. The count-then-insert is
- * not atomic, so a truly-concurrent burst can still collide on the same variant.
- *
- * Idempotent per (contact_id, experiment) via the table's unique constraint: a
- * lost insert race just re-reads the winning row.
- */
-async function assign(body: Record<string, unknown>): Promise<Response> {
-  const contactId = body.contactId ? String(body.contactId) : "";
-  if (!contactId) return json({ ok: false, reason: "rejected", detail: "contactId required" }, 400);
-  const requested =
-    Array.isArray(body.experiments) && body.experiments.length > 0
-      ? (body.experiments as unknown[]).map(String).filter((e) => e in EXP_VARIANTS)
-      : Object.keys(EXP_VARIANTS);
-
-  const db = admin();
-  const variants: Record<string, string> = {};
-  for (const exp of requested) {
-    const choices = EXP_VARIANTS[exp];
-    // Stable: an existing assignment for this contact wins.
-    const existing = await db
-      .from(ASSIGN_TABLE)
-      .select("variant")
-      .eq("contact_id", contactId)
-      .eq("experiment", exp)
-      .limit(1);
-    // A DB error (e.g. the assignments table not migrated yet) must not fabricate an
-    // authoritative variant: bail so the client keeps its local hash fallback.
-    if (existing.error) return json({ ok: false, reason: "error", detail: existing.error.message });
-    const prior = existing.data?.[0]?.variant as string | undefined;
-    if (prior) {
-      variants[exp] = prior;
-      continue;
-    }
-    // Balance: pick the least-represented variant (ties -> first listed). Count-only
-    // head queries stay O(1) per variant and dodge PostgREST's ~1000-row cap.
-    const counts: Record<string, number> = {};
-    for (const v of choices) {
-      const c = await db
-        .from(ASSIGN_TABLE)
-        .select("*", { count: "exact", head: true })
-        .eq("experiment", exp)
-        .eq("variant", v);
-      if (c.error) return json({ ok: false, reason: "error", detail: c.error.message });
-      counts[v] = c.count ?? 0;
-    }
-    let chosen = choices[0];
-    let min = Infinity;
-    for (const v of choices) {
-      if (counts[v] < min) {
-        min = counts[v];
-        chosen = v;
-      }
-    }
-    const { error } = await db
-      .from(ASSIGN_TABLE)
-      .insert({ contact_id: contactId, experiment: exp, variant: chosen });
-    if (error) {
-      // Likely a concurrent assign for the same contact: re-read the winner. If the
-      // insert failed for some other reason and no row can be recovered, the variant
-      // was never recorded - bail so the client keeps its local hash fallback instead
-      // of persisting an unrecorded source:"server" assignment.
-      const again = await db
-        .from(ASSIGN_TABLE)
-        .select("variant")
-        .eq("contact_id", contactId)
-        .eq("experiment", exp)
-        .limit(1);
-      const recovered = again.data?.[0]?.variant as string | undefined;
-      if (again.error || !recovered) {
-        return json({ ok: false, reason: "error", detail: again.error?.message ?? error.message });
-      }
-      chosen = recovered;
-    }
-    variants[exp] = chosen;
-  }
-  return json({ ok: true, variants });
-}
-
-/**
- * Batch-insert UI click events (best-effort usage logging). The desktop buffers
- * events locally and publishes them on launch, keyed by the same contact_id /
- * guid / email as the other tables. Labels are names only (no field values or
- * file contents); we clamp them again here defensively.
- */
-async function events(body: Record<string, unknown>): Promise<Response> {
-  const list = Array.isArray(body.events) ? body.events : [];
-  if (!list.length) return json({ ok: true, inserted: 0 });
-  const contactId = body.contactId ? String(body.contactId) : null;
-  const guid = body.guid ? String(body.guid) : null;
-  const email = body.email ? String(body.email) : null;
-  const appVersion = body.version ? String(body.version) : null;
-
-  const rows = list.slice(0, MAX_EVENTS_PER_BATCH).map((raw) => {
-    const e = (raw ?? {}) as Record<string, unknown>;
-    const type = EVENT_TYPES.includes(String(e.type)) ? String(e.type) : "other";
-    const label = e.label ? String(e.label).slice(0, 200) : null;
-    const ts = e.at ? Date.parse(String(e.at)) : NaN;
-    return {
-      contact_id: contactId,
-      guid,
-      email,
-      event_type: type,
-      label,
-      occurred_at: Number.isNaN(ts) ? null : new Date(ts).toISOString(),
-      app_version: appVersion,
-    };
-  });
-
-  const { error } = await admin().from(CLICK_EVENTS_TABLE).insert(rows);
-  if (error) return json({ ok: false, reason: "rejected", detail: error.message });
-  return json({ ok: true, inserted: rows.length });
-}
-
-/**
- * Cross-user "coming soon" interest leaderboard. Returns the per-feature ranking
- * of which teasers have drawn the most interest, aggregated from the
- * `coming_soon_interest` events via the `coming_soon_leaderboard` view (which
- * dedupes the per-experiment row fan-out — see the view's migration). Shape:
- * [{ feature, clicks, users }], most-wanted first. Internal product analytics —
- * admin-gated at the route, never exposed to the app or anon callers.
- */
-async function comingSoonLeaderboard(): Promise<Response> {
-  const { data, error } = await admin()
-    .from(LEADERBOARD_VIEW)
-    .select("feature, clicks, users")
-    .order("clicks", { ascending: false })
-    .order("users", { ascending: false });
-  if (error) return json({ ok: false, reason: "error", detail: error.message });
-  return json({ ok: true, leaderboard: data ?? [] });
-}
 
 interface Decoded {
   guid: string;
@@ -612,27 +400,15 @@ async function route(body: Record<string, unknown>, req: Request): Promise<Respo
       return await notify(body);
     case "bug":
       return await bug(body);
-    case "ping":
-      return await ping(body);
-    case "event":
-      return await event(body);
-    case "events":
-      return await events(body);
-    case "assign":
-      return await assign(body);
     case "issuePaid": {
       const admin = Deno.env.get("ADMIN_TOKEN");
       if (!admin || req.headers.get("x-admin-token") !== admin)
         return json({ ok: false, reason: "unauthorized" }, 401);
       return await issuePaid(body);
     }
-    case "comingSoonLeaderboard": {
-      // Internal analytics — same admin gate as issuePaid.
-      const admin = Deno.env.get("ADMIN_TOKEN");
-      if (!admin || req.headers.get("x-admin-token") !== admin)
-        return json({ ok: false, reason: "unauthorized" }, 401);
-      return await comingSoonLeaderboard();
-    }
+    // "ping" / "event" / "events" / "assign" / "comingSoonLeaderboard" were
+    // ambient-telemetry ops; the code that emitted them is deleted, and so are
+    // their handlers — they intentionally fall through to "unknown op".
     default:
       return json({ error: "unknown op" }, 400);
   }

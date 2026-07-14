@@ -94,9 +94,16 @@ alter table public.registrations alter column email drop not null;
 
 ### Feedback, launch logs, bug reports, purchase interest
 
-Every row carries a stable `contact_id` (the same id across a user's re-trials
-and purchase), so you can compare, say, comments from **paid vs unpaid** contacts
-by joining `contact_id` to `registrations`.
+> **Partially decommissioned.** Launch logs (`userlogs`) are dead — the app no
+> longer pings on launch — and bug reports are now **de-identified** (`{where,
+> what, version, os, log?}`, no contact_id/guid/email; see migration
+> `20260714200000_bug_reports_deidentify.sql`). The SQL below is kept as the
+> historical schema; see `docs/server-decommission.md` for what to drop.
+
+Every *feedback / purchase-interest / feature-interest* row carries a stable
+`contact_id` (the same id across a user's re-trials and purchase), so you can
+compare, say, comments from **paid vs unpaid** contacts by joining
+`contact_id` to `registrations`. Bug reports deliberately carry none.
 
 ```sql
 -- Feedback form (post-purchase survey when paid is on; end-of-trial when off;
@@ -208,9 +215,14 @@ The Edge Function uses the **service-role** key, which bypasses RLS — so no
 
 ### A/B experiment telemetry
 
-The desktop app assigns each install a variant per experiment (see
-`src/server/experiment.ts`) and tags every telemetry call with them. Two seams
-record this server-side, both via the service-role key:
+> **Decommissioned.** The experiment machinery was deleted from the product
+> (both engines) along with all ambient telemetry; the `assign`/`event` ops no
+> longer exist on the function. Kept as the historical schema —
+> `docs/server-decommission.md` lists the drops.
+
+The desktop app used to assign each install a variant per experiment and tag
+every telemetry call with them. Two seams recorded this server-side, both via
+the service-role key:
 
 - The **`event`** op inserts one `events` row **per active experiment**, each
   stamped with `experiment` + the user's `variant` (so a single `variant` column
@@ -285,9 +297,14 @@ hosted function. To develop without deploying, set `LICENSE_ENFORCE=1` and
 
 ## Usage logging (UI click events)
 
-Lighthouse logs coarse UI interactions — folders, files, toggles, buttons,
-links, nav — to understand how the app is used.
-It is **best-effort** and modeled on the launch ping: nothing here can ever block or break a launch.
+> **Decommissioned.** Click capture was deleted from the product — the
+> capture hook, the consent toggle, the local buffer, and the `events` op are
+> all gone. Kept as the historical description; `docs/server-decommission.md`
+> lists the drops.
+
+Lighthouse used to log coarse UI interactions — folders, files, toggles,
+buttons, links, nav — to understand how the app was used. It was
+**best-effort** and modeled on the (also retired) launch ping.
 
 **Capture.**
 A single delegated, capture-phase click listener (`src/features/usage/useUsageCapture.ts`, mounted in `AppShell`) resolves the nearest interactive element a user touches and records a coarse `type` (`folder|file|toggle|button|link|nav|other`) plus a stable `label`.

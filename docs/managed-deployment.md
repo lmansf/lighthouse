@@ -42,7 +42,7 @@ the UI shows a managed-configuration error.
 |---|---|---|
 | `allowedProviders` | subset of `local`, `anthropic`, `openai`, `google`, `xai`, `mistral`, `deepseek` | Only listed providers can be selected or called. A pre-existing profile naming a blocked provider still answers — via the on-device extractive path, never the cloud. |
 | `forceLocalOnly` | `true` | Shorthand for `allowedProviders: ["local"]`. If both keys are set, the intersection applies (a contradictory policy is restrictive). |
-| `telemetry` | `"off"` | Silences the launch ping, funnel events, click-event batches, and experiment assignment. The license `check` and explicit user submissions (feedback / bug report) remain — see docs/data-flows.md §2. |
+| `telemetry` | `"off"` | Retained for config compatibility, but it now has nothing left to silence: the launch ping, funnel events, click-event batches, and experiment assignment were **deleted from the product** (both engines). The license `check` and explicit user submissions (feedback / bug report, always click-gated) are the only calls on that host — see docs/data-flows.md §2. |
 | `chatHistory` | `"off"` | Conversations are never persisted; the toggle locks. Existing saved chats are not deleted (lock-not-wipe). |
 | `widgetHotkeys` | `"off"` | The Whisper keyboard hook and the summon shortcut are **never installed** (relevant to EDR posture — see docs/edr-whitelisting.md). |
 | `ocr` | `"off"` | Image/scan text extraction is disabled (returns empty, uncached — flipping policy later re-reads with no cache surgery). |

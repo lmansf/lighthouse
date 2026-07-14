@@ -7,13 +7,22 @@ code — file references are given throughout. Scope: the shipping Rust engine
 (`native/`); the TypeScript twin (`src/server/`, dev-only — see
 `docs/ts-twin.md`) mirrors the same hosts but does not ship.*
 
-**The baseline claim, stated precisely:** with the **local model** selected
-(or no model configured), answering a question makes **zero network calls**
-— retrieval, embeddings, OCR, TTS, and generation are all on-device
-(loopback or in-process; §7). Vault document content can leave the machine
-on exactly one path: the cloud AI provider **you** configure (§1). Every
-other egress carries metadata (identifiers, version, event names), never
-document content.
+**The baseline claim, stated precisely:** Lighthouse contains **no automatic
+data collection**. There is no usage telemetry, no click capture, no launch
+ping, no funnel events, and no A/B experiment machinery — the code for all of
+it has been deleted, not merely disabled. The only bytes that ever leave the
+machine on Lighthouse's behalf are: **(1)** a request to the cloud AI
+provider you configured (§1 — the only path that can carry document
+content), **(2)** the license/trial check (§2), **(3)** the update check
+(§4), **(4)** pinned, hash-verified asset downloads you click (§4–5), and
+**(5)** a feedback/bug report you explicitly pressed **Send** on (§2). Two
+further strictly-user-initiated flows exist: Subscribe checkout (§3, hidden
+by default) and the Microsoft 365 connector (§6, only if you connect it).
+That is the whole list.
+
+With the **local model** selected (or no model configured), answering a
+question makes **zero network calls** — retrieval, embeddings, OCR, TTS, and
+generation are all on-device (loopback or in-process; §7).
 
 ---
 
@@ -37,41 +46,47 @@ chunks** (or the whole document under whole-document answers). Engine:
 **Disable:** select **Local model (private)** or no provider — the engine
 answers from the on-device model or the extractive fallback with zero
 egress (`llm.rs` `stream_local`/`extractive`). A cloud call cannot happen
-without a stored key for the selected provider. *(Planned: the managed
-policy layer adds an org-enforced `allowedProviders`/`forceLocalOnly`.)*
+without a stored key for the selected provider. Organizations can enforce
+this: the managed policy layer's `allowedProviders`/`forceLocalOnly`
+(docs/managed-deployment.md) pins the choice engine-side.
 
-## 2. License & product telemetry — Supabase Edge Function
+## 2. License, trial & explicit feedback — Supabase Edge Function
 
 All ops go to **one host**, baked into shipped builds via `.env.production`:
 `https://yyiqwpcqpohzyrzwyxqk.supabase.co/functions/v1/license`
-(`native/crates/lighthouse-core/src/license.rs`, hub `call_fn`). Identity
-semantics: `contactId` is a **random persistent UUID** minted locally;
-`email`/name leave the machine **only** if you typed them into a form;
-`guid` is the license id; `version` is the app version. **No document
-content, file names, or questions — ever — on this host.**
+(`native/crates/lighthouse-core/src/license.rs`, hub `call_fn`). **No
+document content, file names, or questions — ever — on this host.**
+
+The retired ops, named so a reviewer can grep for their absence: `ping`
+(launch ping), `event` (funnel events), `events` (click-capture batches),
+and `assign` (A/B bucketing) **no longer exist in either engine** — there is
+no code path that emits them.
+
+What remains, exhaustively:
 
 | op | When it fires | Payload |
 |---|---|---|
-| `check` | **every launch**; activating a key | `{licenseKey}` |
-| `ping` | **every launch** | `{contactId, guid, email?, version, experiments}` |
-| `start` | starting the 14-day trial | contact form fields you entered |
-| `assign` | once, at trial start (A/B buckets) | `{contactId}` |
-| `event` | onboarding/feature funnel steps | `{contactId, name, experiments, props}` |
-| `events` | on launch, **only if you opted in** to usage sharing | coarse UI-click labels `[{at, type, label}]` — names of controls, never content |
-| `feedback`, `featureInterest`, `notify`, `bug` | you submitting the respective form | what the form shows, + contactId/version |
+| `check` | **every launch**; activating a key | `{licenseKey}` (an opaque install id — the one automatic call on this host) |
+| `start` | you starting the 14-day trial | the contact form fields you typed |
+| `bug` | you pressing **Send** on the feedback form | `{where, what, version, os, log?}` — exactly what the dialog showed you; the `log` (a shell.log excerpt) only with its off-by-default checkbox ticked, rendered in the dialog first. **No account id, email, or license id.** |
+| `feedback` | you pressing **Send** on the trial survey | the survey fields you typed, plus the account email and contact id (it is a contact-linked survey) |
+| `featureInterest` | you pressing **Send** on the shelved-features vote | `{shown, wanted}` — the feature ids shown and the ones you ticked, nothing else |
+| `notify` | you asking to be emailed when purchasing opens | the email you typed + contact id (that's the point of the form) |
 
-**Honest defaults, stated plainly:** in a hosted (normal) build, `check` +
-`ping` — and funnel `event`s — fire on every launch. There is no per-user
-switch for them; the opt-in toggle covers only the click-event batch
-(`events`, default **off**, buffered locally in `usage-events.jsonl` until
-opted in). **Organizations can silence all of it**: the managed policy key
-`telemetry: "off"` (docs/managed-deployment.md) stops `ping`, `event`,
-`events`, and `assign` at the engine — only the license `check` and
-explicit user submissions (feedback/bug forms) remain. The build-level off
-switch is unsetting `LICENSE_API_URL` (every op no-ops, checked per-call);
-the offline-activation work (Phase 1) removes even the `check` for
-air-gapped deployments. Failure posture: license checks **fail closed to a
-lock, never a wipe** — your files are untouched.
+Identity semantics for the rows above: `contactId` is a **random persistent
+UUID** minted locally; `email`/name leave the machine **only** where the
+table says so — always inside a form you filled in and submitted.
+
+**Defaults, stated plainly:** in a hosted (normal) build, the license
+`check` is the **only** call that fires without a click. Everything else in
+the table requires you to press Send on a form that shows its payload. The
+managed-policy key `telemetry: "off"` is retained for config compatibility
+but now has nothing left to silence. The build-level off switch is unsetting
+`LICENSE_API_URL` (every op no-ops, checked per-call); **offline activation**
+(shipped — `LICENSE_OFFLINE_PUBKEY` + a signed license file,
+docs/managed-deployment.md) removes even the `check` for air-gapped
+deployments. Failure posture: license checks **fail closed to a lock, never
+a wipe** — your files are untouched.
 
 ## 3. Checkout — Supabase + Stripe
 
@@ -163,15 +178,19 @@ huggingface.co` / `cas-bridge.xethub.hf.co`; ocrs models →
 | Egress | Lever |
 |---|---|
 | Cloud AI (the only content path) | choose Local/no provider; don't store a key — or managed policy `allowedProviders`/`forceLocalOnly` (org-wide, engine-enforced) |
-| Launch ping + funnel events + experiment assign | managed policy `telemetry: "off"`; or unset `LICENSE_API_URL` (build-level, also silences the license check) |
-| Click telemetry | opt-in toggle, default **off**; pinned off by `telemetry: "off"` |
+| License `check` | unset `LICENSE_API_URL` (build-level), or offline activation (`LICENSE_OFFLINE_PUBKEY` + signed license file) for air-gapped deployments |
+| Feedback / bug / vote / notify | never without your click on **Send**; the form shows the payload first |
 | Update check | no toggle (GET, no payload); notify-only |
 | Update download | never without your click + a verifiable signature |
 | Model weights download | never without your click |
 | Microsoft connector | never unless connected |
-| Checkout | hidden unless `PAID_ENABLED=1` |
+| Checkout | hidden unless `PAID_ENABLED=1`; fires only on your click |
+
+There is no telemetry row because there is no telemetry: nothing ambient is
+left to disable. The in-app **egress panel** (the header shield) and the
+**local audit log** (§9) let you verify this live — the panel shows every
+host each answer dialed, and the audit record keeps the per-question delta.
 
 *Related: `README.md` §Network & privacy · `docs/signing.md` ·
-`docs/ts-twin.md` · `docs/managed-deployment.md`. Phase 1 ships the in-app
-egress panel (§the header shield) and the local audit log (§9) alongside the
-org policy layer; offline activation follows.*
+`docs/ts-twin.md` · `docs/managed-deployment.md` (managed policy + offline
+activation) · `docs/edr-whitelisting.md`.*
