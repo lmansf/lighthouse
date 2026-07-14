@@ -15,7 +15,7 @@ export interface ChartSeries {
 }
 
 export interface ChartSpec {
-  kind: "bar" | "line";
+  kind: "bar" | "line" | "area";
   x: string[];
   series: ChartSeries[];
 }
@@ -38,7 +38,7 @@ export function parseChartSpec(raw: string): ChartSpec | null {
   }
   if (typeof parsed !== "object" || parsed === null) return null;
   const o = parsed as Record<string, unknown>;
-  if (o.kind !== "bar" && o.kind !== "line") return null;
+  if (o.kind !== "bar" && o.kind !== "line" && o.kind !== "area") return null;
   if (!Array.isArray(o.x) || o.x.length < 2 || o.x.length > MAX_POINTS) return null;
   if (!o.x.every((l) => typeof l === "string")) return null;
   if (!Array.isArray(o.series) || o.series.length < 1 || o.series.length > MAX_SERIES) return null;

@@ -145,7 +145,7 @@ export function AnalyticsChart({ spec }: { spec: ChartSpec }) {
   const labelEvery = n > 16 ? 3 : n > 8 ? 2 : 1;
 
   const aria = `${spec.kind} chart of ${spec.series.map((s) => s.name).join(", ")} across ${n} ${
-    spec.kind === "line" ? "points" : "categories"
+    spec.kind === "bar" ? "categories" : "points"
   }`;
 
   return (
@@ -240,12 +240,27 @@ export function AnalyticsChart({ spec }: { spec: ChartSpec }) {
               const pts = s.values
                 .map((v, i) => (v === null ? null : `${xCenter(i)},${y(v)}`))
                 .filter((p): p is string => p !== null);
+              const stroke = SERIES_FILLS[si % SERIES_FILLS.length];
+              // Area = the line plus a translucent fill down to the baseline.
+              // Only single-series time-series arrive as "area" (the engine's
+              // choice), so overlapping fills aren't a concern; the low opacity
+              // keeps a stray multi-series area legible regardless.
+              const baseY = MARGIN.top + inner.h;
+              const areaPts =
+                spec.kind === "area" && pts.length >= 2
+                  ? `${pts[0].split(",")[0]},${baseY} ${pts.join(" ")} ${
+                      pts[pts.length - 1].split(",")[0]
+                    },${baseY}`
+                  : null;
               return (
                 <g key={`l${si}`}>
+                  {areaPts && (
+                    <polygon points={areaPts} fill={stroke} fillOpacity={0.14} stroke="none" />
+                  )}
                   <polyline
                     points={pts.join(" ")}
                     fill="none"
-                    stroke={SERIES_FILLS[si % SERIES_FILLS.length]}
+                    stroke={stroke}
                     strokeWidth={2}
                     strokeLinejoin="round"
                     strokeLinecap="round"

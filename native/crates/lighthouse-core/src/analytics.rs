@@ -921,9 +921,10 @@ const CHART_MAX_POINTS: usize = 24;
 const CHART_MAX_SERIES: usize = 3;
 
 /// Chartable = one label-ish first column + 1..=3 numeric columns, 2..=24
-/// rows, at least 2 finite values per series. Line when the labels read as
-/// time (dates / YYYY-MM / years), bar otherwise. None = "not a chart" —
-/// answers degrade to the table alone, never to a wrong drawing.
+/// rows, at least 2 finite values per series. When the labels read as time
+/// (dates / YYYY-MM / years): area for a single metric, line for several;
+/// bar otherwise. None = "not a chart" — answers degrade to the table alone,
+/// never to a wrong drawing.
 pub fn chart_spec_from_batches(batches: &[RecordBatch]) -> Option<String> {
     let first = batches.iter().find(|b| b.num_columns() > 0)?;
     let schema = first.schema();
@@ -973,8 +974,19 @@ pub fn chart_spec_from_batches(batches: &[RecordBatch]) -> Option<String> {
         }
     }
 
+    // Time-series read best as a filled area when there's a single metric;
+    // multiple series stay a line (overlapping fills would muddy them);
+    // categorical stays a bar. Renderer accepts all three (chartSpec.ts).
     let temporal = x.iter().all(|l| looks_temporal(l));
-    let kind = if temporal { "line" } else { "bar" };
+    let kind = if temporal {
+        if series.len() == 1 {
+            "area"
+        } else {
+            "line"
+        }
+    } else {
+        "bar"
+    };
     let spec = serde_json::json!({
         "kind": kind,
         "x": x,
@@ -1358,11 +1370,29 @@ mod tests {
         assert_eq!(v["series"][0]["name"], "total");
         assert_eq!(v["series"][0]["values"][2], 300.0);
 
-        // Month labels → line.
+        // Single-series month labels → area (a filled time-series).
         let spec =
             chart_spec_from_batches(&[batch(&["2024-01", "2024-02", "2024-03"], &[1.0, 2.0, 3.0])])
                 .unwrap();
         let v: serde_json::Value = serde_json::from_str(&spec).unwrap();
+        assert_eq!(v["kind"], "area");
+
+        // Multi-series time-series → line (overlapping fills would muddy it).
+        let two_series = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("month", DataType::Utf8, false),
+                Field::new("a", DataType::Float64, true),
+                Field::new("b", DataType::Float64, true),
+            ])),
+            vec![
+                Arc::new(StringArray::from(vec!["2024-01", "2024-02", "2024-03"])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+                Arc::new(Float64Array::from(vec![3.0, 2.0, 1.0])),
+            ],
+        )
+        .unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&chart_spec_from_batches(&[two_series]).unwrap()).unwrap();
         assert_eq!(v["kind"], "line");
 
         // One row is not a chart; neither is a non-numeric value column.

@@ -24,6 +24,13 @@ test("parseChartSpec accepts the engine shape and rejects malformed specs", () =
   assert.equal(spec.x.length, 3);
   assert.equal(spec.series[0].values[2], 300);
 
+  // "area" is an accepted kind (single-series time-series); "pie" is not.
+  const area = parseChartSpec(
+    JSON.stringify({ kind: "area", x: ["2024-01", "2024-02"], series: [{ name: "v", values: [1, 2] }] }),
+  );
+  assert.ok(area);
+  assert.equal(area.kind, "area");
+
   assert.equal(parseChartSpec("not json"), null);
   assert.equal(parseChartSpec(JSON.stringify({ kind: "pie", x: ["a", "b"], series: [] })), null);
   // series length must match x
