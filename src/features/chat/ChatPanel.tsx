@@ -90,6 +90,7 @@ import { logEvent } from "@/lib/logEvent";
 import { parseChartSpec, tableToCsv } from "@/lib/chartSpec";
 import { sortRows, type SortDir } from "@/lib/sortTable";
 import { pinChartData } from "@/lib/pinChart";
+import { recallRelated, type RecallHit } from "@/lib/recall";
 import { AnalyticsChart } from "@/features/chat/AnalyticsChart";
 import { BriefingsPanel } from "@/features/chat/BriefingsPanel";
 import { PinMiniChart } from "@/features/chat/PinMiniChart";
@@ -552,6 +553,19 @@ const useStyles = makeStyles({
   },
   metaLine: { color: tokens.colorNeutralForeground3 },
   empty: { color: tokens.colorNeutralForeground3 },
+
+  // "From earlier chats" recall row above the composer (add-conversation-recall):
+  // a quiet label + tappable chips that reopen a past conversation. Wraps so a
+  // few suggestions never push the composer around.
+  recallBar: {
+    display: "flex",
+    alignItems: "center",
+    flexWrap: "wrap",
+    gap: tokens.spacingHorizontalXS,
+    marginBottom: tokens.spacingVerticalXS,
+  },
+  recallLabel: { color: tokens.colorNeutralForeground3 },
+  recallChip: { maxWidth: "320px" },
 
   // --- Loading signal: a small, subtle Lighthouse beacon that gently pulses.
   //     Compact and unobtrusive — it's gone the moment the answer starts. ---
@@ -2319,6 +2333,16 @@ export function ChatPanel() {
     ];
   }, [includedFiles]);
 
+  // Cross-conversation recall (openspec: add-conversation-recall): prior
+  // exchanges from OTHER chats relevant to the current draft, surfaced passively
+  // (tap to reopen — nothing is injected into the ask). Gated on history
+  // persistence: with nothing stored, there is nothing to recall, so this is
+  // empty whenever "save chats on this device" is off.
+  const recalled = useMemo<RecallHit[]>(() => {
+    if (!historyPersistEnabled) return [];
+    return recallRelated(question, conversations, { currentId });
+  }, [historyPersistEnabled, question, conversations, currentId]);
+
   // Recent conversations for the history drawer: real (non-empty) chats, newest
   // first, filtered by the search box (title match).
   const recentChats = useMemo(() => {
@@ -2505,6 +2529,30 @@ export function ChatPanel() {
             aria-label="Dismiss"
             onClick={() => setAddNotice(null)}
           />
+        </div>
+      )}
+      {recalled.length > 0 && (
+        <div className={styles.recallBar} role="group" aria-label="Related earlier chats">
+          <Text size={200} className={styles.recallLabel}>
+            From earlier chats:
+          </Text>
+          {recalled.map((h) => (
+            <Tooltip
+              key={h.conversationId}
+              content={`In "${h.conversationTitle}" — tap to reopen`}
+              relationship="description"
+            >
+              <Button
+                size="small"
+                appearance="subtle"
+                shape="circular"
+                className={styles.recallChip}
+                onClick={() => openConversation(h.conversationId)}
+              >
+                {h.question.length > 52 ? `${h.question.slice(0, 51)}…` : h.question}
+              </Button>
+            </Tooltip>
+          ))}
         </div>
       )}
       {attachmentBar}
