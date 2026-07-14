@@ -74,6 +74,9 @@ export function parseChartSpec(raw: string): ChartSpec | null {
  */
 export function niceTicks(min: number, max: number, count = 4): number[] {
   if (!Number.isFinite(min) || !Number.isFinite(max)) return [0, 1];
+  // Inverted domain (min > max) would make niceNum(max-min) NaN and return an
+  // empty tick array — a blank axis. Normalize so a future caller can't blank it.
+  if (max < min) [min, max] = [max, min];
   if (min === max) {
     // Degenerate domain: pad around the value so the line isn't on an edge.
     const pad = Math.abs(min) || 1;

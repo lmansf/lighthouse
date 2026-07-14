@@ -640,14 +640,17 @@ pub fn answer_pipeline(
                     }
                     if let Some((sql, res)) = outcome {
                         yield progress("Summarizing results…".to_string(), 4, 4);
+                        // Never present the cap as the total: when truncated the
+                        // true count (from run_query's uncapped COUNT) rides here
+                        // so the narration can state it honestly.
+                        let count_desc = match (res.truncated, res.total) {
+                            (true, Some(t)) => format!("first {} of {} rows", res.shown, t),
+                            (true, None) => format!("first {} rows, truncated", res.shown),
+                            _ => format!("{} row(s)", res.shown),
+                        };
                         let mut ctxs: Vec<Ctx> = vec![Ctx {
                             name: "query result — computed exactly by Lighthouse".to_string(),
-                            text: format!(
-                                "SQL:\n{sql}\n\nResult ({} row(s){}):\n{}",
-                                res.shown,
-                                if res.truncated { ", truncated" } else { "" },
-                                res.markdown
-                            ),
+                            text: format!("SQL:\n{sql}\n\nResult ({count_desc}):\n{}", res.markdown),
                             score: 1.0,
                         }];
                         ctxs.extend(regs.iter().map(|r| Ctx {
@@ -670,6 +673,27 @@ pub fn answer_pipeline(
                             crate::config::now_ms(),
                         ) {
                             yield delta(fresh);
+                        }
+                        // Truncation honesty: a capped result states its true
+                        // total deterministically (matches the model-free
+                        // run_direct footer), so 200 of 12,431 never reads as 200.
+                        if let Some(trunc) = crate::analytics::truncation_footer(
+                            res.shown,
+                            res.truncated,
+                            res.total,
+                        ) {
+                            yield delta(trunc);
+                        }
+                        // Coverage honesty: if the per-ask table caps left some
+                        // in-scope tabular files unanalyzed, say so — a partial
+                        // analysis must never read as the whole vault's.
+                        let dropped = crate::analytics::unregistered_count(&files, &regs);
+                        if dropped > 0 {
+                            yield delta(format!(
+                                "_Analyzed {} of {} in-scope tabular files (engine table limit)._\n",
+                                files.len().saturating_sub(dropped),
+                                files.len(),
+                            ));
                         }
                         // Chartable result → engine-built spec the chat renders
                         // as SVG (Phase C). Data comes straight from the query

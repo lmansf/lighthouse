@@ -14,12 +14,12 @@ use std::time::Duration;
 
 use crate::contracts::ChatTurn;
 use datafusion::arrow::array::{ArrayRef, Float64Array, StringArray};
-use sha1::{Digest, Sha1};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::arrow::util::display::array_value_to_string;
 use datafusion::datasource::MemTable;
 use datafusion::prelude::{CsvReadOptions, ParquetReadOptions, SessionContext};
+use sha1::{Digest, Sha1};
 
 /// Budgets — conservative caps so one query can't stall or flood an answer.
 pub const MAX_TABLE_FILES: usize = 4;
@@ -50,11 +50,39 @@ const NARRATE_MAX_CHARS: usize = 6000;
 // --- Intent ----------------------------------------------------------------------
 
 const CUE_WORDS: &[&str] = &[
-    "sum", "total", "totals", "average", "avg", "mean", "median", "count",
-    "top", "largest", "smallest", "highest", "lowest", "max", "maximum",
-    "min", "minimum", "trend", "trends", "breakdown", "distribution",
-    "percent", "percentage", "share", "ratio", "rank", "ranking",
-    "monthly", "yearly", "quarterly", "analyze", "analyse", "analysis",
+    "sum",
+    "total",
+    "totals",
+    "average",
+    "avg",
+    "mean",
+    "median",
+    "count",
+    "top",
+    "largest",
+    "smallest",
+    "highest",
+    "lowest",
+    "max",
+    "maximum",
+    "min",
+    "minimum",
+    "trend",
+    "trends",
+    "breakdown",
+    "distribution",
+    "percent",
+    "percentage",
+    "share",
+    "ratio",
+    "rank",
+    "ranking",
+    "monthly",
+    "yearly",
+    "quarterly",
+    "analyze",
+    "analyse",
+    "analysis",
 ];
 const CUE_PHRASES: &[&str] = &["how many", "how much", "group by", "per "];
 
@@ -79,9 +107,7 @@ pub fn analytics_cue(question: &str) -> bool {
             return true;
         }
     }
-    padded
-        .split(' ')
-        .any(|t| CUE_WORDS.contains(&t))
+    padded.split(' ').any(|t| CUE_WORDS.contains(&t))
 }
 
 /// File kinds the engine can register as tables.
@@ -117,7 +143,11 @@ pub(crate) fn sanitize_table_name(file_name: &str) -> String {
         }
     }
     let out = out.trim_end_matches('_').to_string();
-    let out = if out.is_empty() { "table".to_string() } else { out };
+    let out = if out.is_empty() {
+        "table".to_string()
+    } else {
+        out
+    };
     if out.chars().next().is_some_and(|c| c.is_ascii_digit()) {
         format!("t_{out}")
     } else {
@@ -168,7 +198,11 @@ const MAX_GROUP_FILES: usize = 48;
 /// Name stem with digit runs (and their surrounding separators) collapsed:
 /// "sales-2025-01.csv" → "sales", "q3_sales" → "q_sales".
 pub(crate) fn union_stem(name: &str) -> String {
-    let stem = name.rsplit_once('.').map(|(s, _)| s).unwrap_or(name).to_lowercase();
+    let stem = name
+        .rsplit_once('.')
+        .map(|(s, _)| s)
+        .unwrap_or(name)
+        .to_lowercase();
     let mut out = String::new();
     let mut last_sep = false;
     for ch in stem.chars() {
@@ -197,12 +231,26 @@ pub(crate) fn union_groups(
     catalog: &[crate::catalog::FileColumns],
 ) -> (Vec<UnionGroup>, Vec<(String, String, PathBuf)>) {
     use std::collections::HashMap;
-    let signatures: HashMap<&str, Vec<&str>> = catalog
+    // Signature = ordered (name:kind) pairs. Folding the cataloged column KIND
+    // in means same-named columns that differ in type (one file's "value" is
+    // text, another's numeric) split into separate families instead of unioning
+    // into a schema-incoherent table whose aggregates are nonsense.
+    let signatures: HashMap<&str, Vec<String>> = catalog
         .iter()
-        .map(|fc| (fc.id.as_str(), fc.columns.iter().map(|c| c.name.as_str()).collect()))
+        .map(|fc| {
+            (
+                fc.id.as_str(),
+                fc.columns
+                    .iter()
+                    .map(|c| format!("{}:{:?}", c.name, c.kind))
+                    .collect(),
+            )
+        })
         .collect();
-    let mtimes: HashMap<&str, i64> =
-        catalog.iter().map(|fc| (fc.id.as_str(), fc.modified_ms)).collect();
+    let mtimes: HashMap<&str, i64> = catalog
+        .iter()
+        .map(|fc| (fc.id.as_str(), fc.modified_ms))
+        .collect();
 
     let mut buckets: HashMap<(String, String, Vec<String>), Vec<(String, String, PathBuf)>> =
         HashMap::new();
@@ -214,12 +262,11 @@ pub(crate) fn union_groups(
             singles.push(f.clone());
             continue;
         };
-        let ext = name.rsplit_once('.').map(|(_, e)| e.to_lowercase()).unwrap_or_default();
-        let key = (
-            ext,
-            union_stem(name),
-            sig.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
-        );
+        let ext = name
+            .rsplit_once('.')
+            .map(|(_, e)| e.to_lowercase())
+            .unwrap_or_default();
+        let key = (ext, union_stem(name), sig.clone());
         if !buckets.contains_key(&key) {
             order.push(key.clone());
         }
@@ -229,15 +276,41 @@ pub(crate) fn union_groups(
     let mut groups = Vec::new();
     for key in order {
         let mut members = buckets.remove(&key).unwrap_or_default();
-        if members.len() < 2 || key.1.is_empty() {
+        // Stem must be a real token (≥2 chars): a single-letter stem like "q"
+        // (from q1.csv/q2.csv) collapses unrelated files, so those stay singles.
+        if members.len() < 2 || key.1.chars().count() < 2 {
             singles.extend(members);
             continue;
         }
         members.sort_by_key(|(id, _, _)| -mtimes.get(id.as_str()).copied().unwrap_or(0));
         members.truncate(MAX_GROUP_FILES);
-        groups.push(UnionGroup { stem: key.1, ext: key.0, members });
+        groups.push(UnionGroup {
+            stem: key.1,
+            ext: key.0,
+            members,
+        });
     }
     (groups, singles)
+}
+
+/// A table name not already in `used`: the base, else base_2, base_3, … until
+/// free. A single `base_{used.len()+1}` guess can equal a name already
+/// registered from another file (e.g. a real `foo_3.csv`), and DataFusion's
+/// `register_*` replaces silently — so the guess could overwrite a live table
+/// and leave two cards pointing at one. Looping to an actually-unused suffix
+/// closes that.
+fn unique_table_name(base: &str, used: &[String]) -> String {
+    if !used.iter().any(|u| u == base) {
+        return base.to_string();
+    }
+    let mut n = 2;
+    loop {
+        let cand = format!("{base}_{n}");
+        if !used.iter().any(|u| u == &cand) {
+            return cand;
+        }
+        n += 1;
+    }
 }
 
 /// Register every supported file into one context (multi-file joins come
@@ -279,15 +352,16 @@ pub async fn register_tables(
         }
     }
 
+    // Keep the NEWEST files when the table caps bite: singles register in this
+    // order and the loop stops at the cap, so leaving walk-order (arbitrary) to
+    // decide which files the analysis sees would drop recent data at random.
+    singles.sort_by_key(|(_, _, abs)| std::cmp::Reverse(file_mtime_ms(abs).unwrap_or(0)));
     for (file_id, name, abs) in singles {
         if slots >= MAX_TABLE_FILES || regs.len() >= MAX_TABLES_TOTAL {
             break;
         }
         let lower = name.to_lowercase();
-        let mut base = sanitize_table_name(&name);
-        if used.contains(&base) {
-            base = format!("{}_{}", base, used.len() + 1);
-        }
+        let base = unique_table_name(&sanitize_table_name(&name), &used);
         let modified_ms = file_mtime_ms(&abs);
         let path = abs.to_string_lossy().to_string();
         let registered: Vec<String> = if lower.ends_with(".csv") || lower.ends_with(".tsv") {
@@ -334,6 +408,27 @@ pub async fn register_tables(
     regs
 }
 
+/// How many of the input tabular files are NOT represented in any registered
+/// table — dropped by the per-ask table caps (MAX_TABLE_FILES / MAX_TABLES_
+/// TOTAL) or unreadable. Drives an honest "analyzed N of M files" disclosure so
+/// an analysis over a fraction of the vault's tables never reads as complete.
+pub fn unregistered_count(files: &[(String, String, PathBuf)], regs: &[TableReg]) -> usize {
+    use std::collections::HashSet;
+    let mut represented: HashSet<&str> = HashSet::new();
+    for r in regs {
+        match &r.group {
+            Some(g) => represented.extend(g.file_ids.iter().map(|s| s.as_str())),
+            None => {
+                represented.insert(r.file_id.as_str());
+            }
+        }
+    }
+    files
+        .iter()
+        .filter(|(id, name, _)| is_tabular(name) && !represented.contains(id.as_str()))
+        .count()
+}
+
 /// Register one unioned table for a file family. CSV/TSV/Parquet union via
 /// DataFusion multi-path reads; workbooks concatenate row matrices and infer
 /// column types ONCE over the combined rows so a column's type can't drift
@@ -343,12 +438,15 @@ async fn register_group(
     g: &UnionGroup,
     used: &mut Vec<String>,
 ) -> Option<TableReg> {
-    let mut tname = sanitize_table_name(&format!("{}_all", g.stem));
-    if used.contains(&tname) {
-        tname = format!("{}_{}", tname, used.len() + 1);
-    }
-    let paths: Vec<String> =
-        g.members.iter().map(|(_, _, abs)| abs.to_string_lossy().to_string()).collect();
+    let tname = unique_table_name(
+        &sanitize_table_name(&format!("{}_all", g.stem)),
+        used.as_slice(),
+    );
+    let paths: Vec<String> = g
+        .members
+        .iter()
+        .map(|(_, _, abs)| abs.to_string_lossy().to_string())
+        .collect();
 
     // How many leading (newest-first) members the table actually covers —
     // the card, references, and freshness stamp must describe exactly these.
@@ -362,7 +460,10 @@ async fn register_group(
                 Err(_) => false,
             }
         }
-        "parquet" => match ctx.read_parquet(paths.clone(), ParquetReadOptions::default()).await {
+        "parquet" => match ctx
+            .read_parquet(paths.clone(), ParquetReadOptions::default())
+            .await
+        {
             Ok(df) => ctx.register_table(&tname, df.into_view()).is_ok(),
             Err(_) => false,
         },
@@ -394,7 +495,11 @@ async fn register_group(
     used.push(tname.clone());
     let members = &g.members[..covered];
     let omitted = g.members.len() - covered;
-    let newest_ms = members.iter().filter_map(|(_, _, abs)| file_mtime_ms(abs)).max().unwrap_or(0);
+    let newest_ms = members
+        .iter()
+        .filter_map(|(_, _, abs)| file_mtime_ms(abs))
+        .max()
+        .unwrap_or(0);
     let names: Vec<String> = members.iter().map(|(_, n, _)| n.clone()).collect();
     let label = format!("{}*.{}", g.stem, g.ext);
     // The union provenance must survive card clipping — lead with it, and
@@ -443,9 +548,15 @@ fn workbook_union_matrix(
     let mut data: Vec<Vec<String>> = Vec::new();
     let mut included = 0usize;
     for (_, _, abs) in members {
-        let Ok(mut wb) = calamine::open_workbook_auto(abs) else { return None };
-        let Some(sheet) = wb.sheet_names().first().cloned() else { return None };
-        let Ok(range) = wb.worksheet_range(&sheet) else { return None };
+        let Ok(mut wb) = calamine::open_workbook_auto(abs) else {
+            return None;
+        };
+        let Some(sheet) = wb.sheet_names().first().cloned() else {
+            return None;
+        };
+        let Ok(range) = wb.worksheet_range(&sheet) else {
+            return None;
+        };
         let all: Vec<Vec<String>> = range
             .rows()
             .take(MAX_XLSX_ROWS + HEADER_SCAN_ROWS)
@@ -461,7 +572,11 @@ fn workbook_union_matrix(
             .enumerate()
             .map(|(i, c)| {
                 let s = sanitize_table_name(c);
-                if s.is_empty() || s == "table" { format!("col_{}", i + 1) } else { s }
+                if s.is_empty() || s == "table" {
+                    format!("col_{}", i + 1)
+                } else {
+                    s
+                }
             })
             .collect();
         match &headers {
@@ -482,7 +597,11 @@ fn workbook_union_matrix(
         }
         let width = headers.as_ref().map(Vec::len).unwrap_or(0);
         for r in &all[h + 1..] {
-            data.push((0..width).map(|i| r.get(i).cloned().unwrap_or_default()).collect());
+            data.push(
+                (0..width)
+                    .map(|i| r.get(i).cloned().unwrap_or_default())
+                    .collect(),
+            );
         }
         included += 1;
     }
@@ -504,20 +623,30 @@ const HEADER_SCAN_ROWS: usize = 8;
 /// earlier qualifier to move the header down (ties → earliest). Nothing
 /// qualifies ⇒ row 0, exactly the pre-detection behavior.
 pub(crate) fn detect_header_row(rows: &[Vec<String>]) -> usize {
-    let mut best: Option<(usize, usize)> = None; // (score, row index)
+    // Score = (all_textual, textual_count), compared lexicographically with
+    // earliest-wins ties. A FULLY-textual row is the strongest header signal,
+    // so a later, partly-numeric DATA row can never displace an earlier
+    // all-textual header — which used to happen when the header carried a blank
+    // or duplicate cell (score = textual + distinct let a wider data row win),
+    // silently promoting the first data row to the header and dropping a record.
+    let mut best: Option<((usize, usize), usize)> = None;
     for (i, row) in rows.iter().take(HEADER_SCAN_ROWS).enumerate() {
-        let non_empty: Vec<&str> =
-            row.iter().map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+        let non_empty: Vec<&str> = row
+            .iter()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
         if non_empty.len() < 2 {
             continue;
         }
-        let textual = non_empty.iter().filter(|s| s.parse::<f64>().is_err()).count();
+        let textual = non_empty
+            .iter()
+            .filter(|s| s.parse::<f64>().is_err())
+            .count();
         if textual * 2 < non_empty.len() {
             continue; // mostly numbers — a data row, not a header
         }
-        let distinct: std::collections::HashSet<String> =
-            non_empty.iter().map(|s| s.to_lowercase()).collect();
-        let score = textual + distinct.len();
+        let score = ((textual == non_empty.len()) as usize, textual);
         if best.map(|(s, _)| score > s).unwrap_or(true) {
             best = Some((score, i));
         }
@@ -556,7 +685,11 @@ fn register_workbook(ctx: &SessionContext, base: &str, abs: &PathBuf) -> Vec<Str
             .enumerate()
             .map(|(i, c)| {
                 let s = sanitize_table_name(c);
-                if s.is_empty() || s == "table" { format!("col_{}", i + 1) } else { s }
+                if s.is_empty() || s == "table" {
+                    format!("col_{}", i + 1)
+                } else {
+                    s
+                }
             })
             .collect();
         if headers.len() < 2 {
@@ -592,9 +725,55 @@ fn register_workbook(ctx: &SessionContext, base: &str, abs: &PathBuf) -> Vec<Str
     out
 }
 
+/// Header names that suggest a date column — used only as a GUARD so a real
+/// measure named "amount"/"total" is never mistaken for serial dates.
+fn header_is_dateish(name: &str) -> bool {
+    let n = name.to_lowercase();
+    [
+        "date",
+        "day",
+        "month",
+        "time",
+        "created",
+        "updated",
+        "modified",
+        "dob",
+        "birth",
+        "expiry",
+        "expire",
+        "due",
+        "_at",
+        "timestamp",
+        "datetime",
+    ]
+    .iter()
+    .any(|t| n.contains(t))
+}
+
+/// Every non-empty value is a WHOLE number in the plausible Excel-serial DATE
+/// range (~1954–2064): the fingerprint of date cells calamine handed back as
+/// raw `Data::Float` (General-formatted cells / legacy .xls) rather than
+/// `Data::DateTime`. Combined with a date-ish header this is a confident
+/// "these are dates, not a measure" — everything else stays numeric.
+fn looks_like_serial_dates(vals: &[&String]) -> bool {
+    let mut any = false;
+    for v in vals {
+        let t = v.trim();
+        if t.is_empty() {
+            continue;
+        }
+        any = true;
+        match t.parse::<f64>() {
+            Ok(f) if f.fract() == 0.0 && (20_000.0..=60_000.0).contains(&f) => {}
+            _ => return false,
+        }
+    }
+    any
+}
+
 /// String matrix → typed Arrow batch (≥80% numeric column → Float64 with
-/// nulls, else Utf8). One inference over ALL rows, so unioned members can't
-/// disagree on a column's type.
+/// nulls, else Utf8; a date-ish serial column → ISO Utf8). One inference over
+/// ALL rows, so unioned members can't disagree on a column's type.
 fn table_from_matrix(
     headers: &[String],
     data: &[Vec<String>],
@@ -608,11 +787,38 @@ fn table_from_matrix(
             .iter()
             .filter(|v| !v.trim().is_empty() && v.trim().parse::<f64>().is_ok())
             .count();
-        if non_empty > 0 && numeric as f64 >= non_empty as f64 * 0.8 {
+        let is_num = non_empty > 0 && numeric as f64 >= non_empty as f64 * 0.8;
+        if is_num && header_is_dateish(h) && looks_like_serial_dates(&vals) {
+            // Excel date serials under a date-ish header: render ISO so month/
+            // year GROUP BY (substr(date,1,7)) works instead of the serials
+            // being summed into a meaningless "authoritative" number.
+            let iso: Vec<String> = vals
+                .iter()
+                .map(|v| {
+                    let t = v.trim();
+                    match t.parse::<f64>() {
+                        Ok(f) if f.fract() == 0.0 && (20_000.0..=60_000.0).contains(&f) => {
+                            crate::extract::excel_serial_to_iso(f)
+                        }
+                        _ => t.to_string(),
+                    }
+                })
+                .collect();
+            fields.push(Field::new(h, DataType::Utf8, true));
+            cols.push(Arc::new(StringArray::from(
+                iso.iter().map(|s| s.as_str()).collect::<Vec<&str>>(),
+            )));
+        } else if is_num {
             fields.push(Field::new(h, DataType::Float64, true));
             cols.push(Arc::new(Float64Array::from(
                 vals.iter()
-                    .map(|v| v.trim().parse::<f64>().ok())
+                    // A recognized-but-non-finite sentinel (NaN / inf / Infinity,
+                    // which Rust's f64 parser accepts) becomes NULL, not a value
+                    // that poisons SUM/AVG to NaN — DataFusion then skips it like
+                    // an empty cell. The column still types numeric (the count
+                    // above accepts the sentinel), so a few NaNs don't flip it to
+                    // text; they just don't corrupt the aggregate.
+                    .map(|v| v.trim().parse::<f64>().ok().filter(|x| x.is_finite()))
                     .collect::<Vec<Option<f64>>>(),
             )));
         } else {
@@ -630,9 +836,16 @@ fn table_from_matrix(
 /// Schema + row count + sample rows for the planning prompt (never the data),
 /// plus the lowercased column names for deterministic join hints.
 async fn table_card(ctx: &SessionContext, table: &str) -> Option<(String, Vec<String>)> {
-    let df = ctx.sql(&format!("SELECT * FROM {table} LIMIT {SAMPLE_ROWS}")).await.ok()?;
-    let columns: Vec<String> =
-        df.schema().fields().iter().map(|f| f.name().to_lowercase()).collect();
+    let df = ctx
+        .sql(&format!("SELECT * FROM {table} LIMIT {SAMPLE_ROWS}"))
+        .await
+        .ok()?;
+    let columns: Vec<String> = df
+        .schema()
+        .fields()
+        .iter()
+        .map(|f| f.name().to_lowercase())
+        .collect();
     let schema_line = df
         .schema()
         .fields()
@@ -651,12 +864,15 @@ async fn table_card(ctx: &SessionContext, table: &str) -> Option<(String, Vec<St
         .ok()?;
     let n = count
         .first()
-        .and_then(|b| b.column(0).as_any().downcast_ref::<datafusion::arrow::array::Int64Array>())
+        .and_then(|b| {
+            b.column(0)
+                .as_any()
+                .downcast_ref::<datafusion::arrow::array::Int64Array>()
+        })
         .map(|a| a.value(0))
         .unwrap_or(0);
-    let card = format!(
-        "table {table} — {n} rows\ncolumns: {schema_line}\nsample rows:\n{sample_md}"
-    );
+    let card =
+        format!("table {table} — {n} rows\ncolumns: {schema_line}\nsample rows:\n{sample_md}");
     // Wide sheets can render enormous sample rows; a card is a prompt block,
     // so clip it rather than let one table eat the local model's window.
     let card = if card.chars().count() > MAX_CARD_CHARS {
@@ -671,9 +887,46 @@ async fn table_card(ctx: &SessionContext, table: &str) -> Option<(String, Vec<St
 /// Deterministic join hints: shared, non-generic column names across distinct
 /// registered tables, rendered as one small prompt block (score 0). Hints
 /// never force a join — the model may ignore them.
-const GENERIC_JOIN_COLS: &[&str] =
-    &["id", "name", "date", "value", "amount", "total", "count", "n", "col_1", "col_2"];
+const GENERIC_JOIN_COLS: &[&str] = &[
+    "id",
+    "name",
+    "date",
+    "value",
+    "amount",
+    "total",
+    "count",
+    "n",
+    // Enum/flag/free-text/temporal columns that two unrelated tables commonly
+    // share but which are NOT trustworthy join keys — a hint on them can steer
+    // the model into a wrong join (and a wrong number).
+    "status",
+    "type",
+    "category",
+    "notes",
+    "note",
+    "priority",
+    "active",
+    "description",
+    "comment",
+    "created_at",
+    "updated_at",
+    "month",
+    "year",
+    "quarter",
+    "label",
+    "key",
+    "code",
+];
 const MAX_JOIN_HINTS: usize = 12;
+
+/// A column too generic to be a trustworthy join key: the curated list above,
+/// OR any auto-generated `col_N` placeholder (headerless files all share
+/// `col_1…col_64`, so two unrelated matrices must not hint `col_3 = col_3`).
+fn is_generic_join_col(c: &str) -> bool {
+    GENERIC_JOIN_COLS.contains(&c)
+        || c.strip_prefix("col_")
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+}
 
 pub fn join_hints(regs: &[TableReg]) -> Option<String> {
     let mut lines: Vec<String> = Vec::new();
@@ -683,11 +936,15 @@ pub fn join_hints(regs: &[TableReg]) -> Option<String> {
                 continue;
             }
             for c in &regs[i].columns {
-                if GENERIC_JOIN_COLS.contains(&c.as_str()) {
+                if is_generic_join_col(c) {
                     continue;
                 }
                 if regs[j].columns.contains(c) {
-                    lines.push(format!("- {t1}.{c} = {t2}.{c}", t1 = regs[i].table, t2 = regs[j].table));
+                    lines.push(format!(
+                        "- {t1}.{c} = {t2}.{c}",
+                        t1 = regs[i].table,
+                        t2 = regs[j].table
+                    ));
                     if lines.len() >= MAX_JOIN_HINTS {
                         break 'outer;
                     }
@@ -774,9 +1031,15 @@ pub fn sql_mentions_table(sql: &str, table: &str) -> bool {
 /// references are named; if none match (the model aliased beyond
 /// recognition), listing every registered file is the honest fallback.
 pub fn freshness_line(regs: &[TableReg], sql: &str, now_ms: i64) -> Option<String> {
-    let hits: Vec<&TableReg> =
-        regs.iter().filter(|r| sql_mentions_table(sql, &r.table)).collect();
-    let used: Vec<&TableReg> = if hits.is_empty() { regs.iter().collect() } else { hits };
+    let hits: Vec<&TableReg> = regs
+        .iter()
+        .filter(|r| sql_mentions_table(sql, &r.table))
+        .collect();
+    let used: Vec<&TableReg> = if hits.is_empty() {
+        regs.iter().collect()
+    } else {
+        hits
+    };
     let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
     let parts: Vec<String> = used
         .iter()
@@ -817,13 +1080,26 @@ pub fn extract_sql(raw: &str) -> Option<String> {
         cleaned
     };
     let upper = body.to_uppercase();
-    let at = upper.find("SELECT").into_iter().chain(upper.find("WITH")).min()?;
+    let at = upper
+        .find("SELECT")
+        .into_iter()
+        .chain(upper.find("WITH"))
+        .min()?;
     let sql = body[at..].trim().trim_end_matches(';').trim().to_string();
-    if sql.is_empty() { None } else { Some(sql) }
+    if sql.is_empty() {
+        None
+    } else {
+        Some(sql)
+    }
 }
 
 /// Read-only by construction: exactly one statement, and it must parse as a
-/// plain query (SELECT / WITH…SELECT). Everything else is rejected up front.
+/// plain query (SELECT / WITH…SELECT) that reads only. Everything else is
+/// rejected up front. A structural `Query(_)` match is NOT enough — sqlparser
+/// wraps `SELECT … INTO` (which DataFusion executes as a CreateMemoryTable DDL,
+/// dodging the timeout + row cap) and data-modifying CTE/query bodies
+/// (INSERT/UPDATE/… — only DataFusion's current non-support keeps them inert)
+/// inside `Statement::Query`, so the body and every CTE are checked recursively.
 pub fn guard_sql(sql: &str) -> Result<(), String> {
     use datafusion::sql::parser::{DFParser, Statement as DFStatement};
     use datafusion::sql::sqlparser::ast::Statement as SqlStatement;
@@ -832,11 +1108,43 @@ pub fn guard_sql(sql: &str) -> Result<(), String> {
         return Err("expected exactly one SQL statement".into());
     }
     match stmts.front() {
-        Some(DFStatement::Statement(s)) => match **s {
-            SqlStatement::Query(_) => Ok(()),
+        Some(DFStatement::Statement(s)) => match &**s {
+            SqlStatement::Query(q) => query_is_read_only(q),
             _ => Err("only SELECT queries are allowed".into()),
         },
         _ => Err("only SELECT queries are allowed".into()),
+    }
+}
+
+/// Recursively confirm a parsed query reads only: no `SELECT … INTO`, and no
+/// data-modifying set-expression as a body or CTE. Whitelists the read-only
+/// body shapes so a future sqlparser variant can't silently pass.
+fn query_is_read_only(q: &datafusion::sql::sqlparser::ast::Query) -> Result<(), String> {
+    if let Some(with) = &q.with {
+        for cte in &with.cte_tables {
+            query_is_read_only(&cte.query)?;
+        }
+    }
+    set_expr_is_read_only(&q.body)
+}
+
+fn set_expr_is_read_only(body: &datafusion::sql::sqlparser::ast::SetExpr) -> Result<(), String> {
+    use datafusion::sql::sqlparser::ast::SetExpr;
+    match body {
+        SetExpr::Select(s) => {
+            if s.into.is_some() {
+                return Err("SELECT ... INTO is not allowed".into());
+            }
+            Ok(())
+        }
+        SetExpr::Query(inner) => query_is_read_only(inner),
+        SetExpr::SetOperation { left, right, .. } => {
+            set_expr_is_read_only(left)?;
+            set_expr_is_read_only(right)
+        }
+        SetExpr::Values(_) => Ok(()),
+        // INSERT / UPDATE / TABLE / any modifying or unrecognized body.
+        _ => Err("only read-only SELECT queries are allowed".into()),
     }
 }
 
@@ -849,10 +1157,15 @@ pub struct QueryResult {
     /// result can never blow the local model's context window (a 0.6.0 field
     /// report hit 12.6k prompt tokens against the 6144 window this way).
     pub markdown: String,
-    /// Total rows the query produced (up to the execution cap) — NOT the rows
-    /// present in `markdown`.
+    /// Rows the engine computed into this result (up to the execution cap) —
+    /// NOT the rows present in `markdown`, and NOT the true total when capped.
     pub shown: usize,
     pub truncated: bool,
+    /// The query's TRUE total row count. `Some(shown)` when not truncated;
+    /// when truncated, `Some(true_total)` from a one-shot `COUNT(*)` over the
+    /// same guarded query, or `None` if that count failed/timed out — never a
+    /// fabricated number. Drives the "first 200 of 12,431" honesty.
+    pub total: Option<usize>,
     /// Engine-built chart spec JSON when the result is chartable (Phase C) —
     /// rendered by the UI from a ```lighthouse-chart fence. Never model text.
     pub chart: Option<String>,
@@ -865,9 +1178,11 @@ pub struct QueryResult {
 /// Run a guarded query with a hard timeout and result caps.
 pub async fn run_query(ctx: &SessionContext, sql: &str) -> Result<QueryResult, String> {
     guard_sql(sql)?;
-    let df = ctx.sql(sql).await.map_err(|e| e.to_string())?;
-    // Post-plan cap: applied after ORDER BY/aggregation, so semantics hold.
-    let df = df
+    let base_df = ctx.sql(sql).await.map_err(|e| e.to_string())?;
+    // Post-plan cap: applied after ORDER BY/aggregation, so semantics hold. The
+    // uncapped `base_df` is kept so an overflowed result can be counted below.
+    let df = base_df
+        .clone()
         .limit(0, Some(MAX_RESULT_ROWS + 1))
         .map_err(|e| e.to_string())?;
     let batches = tokio::time::timeout(Duration::from_secs(QUERY_TIMEOUT_SECS), df.collect())
@@ -878,8 +1193,25 @@ pub async fn run_query(ctx: &SessionContext, sql: &str) -> Result<QueryResult, S
     if shown == 0 {
         return Err("the query returned no rows".into());
     }
-    let (mut markdown, in_prompt, _) =
-        batches_to_markdown(&batches, NARRATE_MAX_ROWS.min(MAX_RESULT_ROWS), MAX_RESULT_COLS);
+    // Truncation honesty: the 201-row probe only tells us the result overflowed,
+    // not by how much — `shown` saturates at the cap. When truncated, count the
+    // UNCAPPED plan once (same guarded query, one bounded aggregate) so the
+    // answer and footer can say "first 200 of 12,431". A count failure/timeout
+    // leaves the total unknown rather than fabricating one; a non-truncated
+    // result's total is exactly `shown`.
+    let total: Option<usize> = if truncated {
+        match tokio::time::timeout(Duration::from_secs(QUERY_TIMEOUT_SECS), base_df.count()).await {
+            Ok(Ok(n)) => Some(n),
+            _ => None,
+        }
+    } else {
+        Some(shown)
+    };
+    let (mut markdown, in_prompt, _) = batches_to_markdown(
+        &batches,
+        NARRATE_MAX_ROWS.min(MAX_RESULT_ROWS),
+        MAX_RESULT_COLS,
+    );
     if markdown.chars().count() > NARRATE_MAX_CHARS {
         // Cut whole lines from the end until it fits — a mid-row cut would
         // leave a mangled table for the model to misread.
@@ -893,21 +1225,56 @@ pub async fn run_query(ctx: &SessionContext, sql: &str) -> Result<QueryResult, S
         }
         markdown = kept.trim_end().to_string();
     }
-    if in_prompt < shown || markdown.lines().count().saturating_sub(2) < in_prompt {
+    if truncated || in_prompt < shown || markdown.lines().count().saturating_sub(2) < in_prompt {
+        // Never claim the cap IS the total. Phrased NEUTRALLY (no "tell the
+        // user …" imperative): the model-free run_direct path renders this same
+        // markdown verbatim to a human (Edit-SQL / Save-CSV preview), so the
+        // note must read as an honest caption, not a model instruction.
+        let note = if truncated {
+            match total {
+                Some(t) => format!(
+                    "showing the first {in_prompt} rows; this query matched {t} rows in total \
+                     (the engine computed the first {shown})."
+                ),
+                None => format!(
+                    "showing the first {in_prompt} rows; this query matched more than {shown} rows \
+                     (only the first {shown} were computed)."
+                ),
+            }
+        } else {
+            format!("showing the first {in_prompt} of {shown} rows.")
+        };
+        markdown.push_str(&format!("\n\n({note})"));
+    }
+    // Column honesty: batches_to_markdown drops columns past MAX_RESULT_COLS
+    // with no signal of its own. Neutral, human-safe wording (run_direct renders
+    // this markdown verbatim), parallel to the row note.
+    let total_cols = batches
+        .iter()
+        .find(|b| b.num_columns() > 0)
+        .map_or(0, |b| b.num_columns());
+    if total_cols > MAX_RESULT_COLS {
         markdown.push_str(&format!(
-            "\n\n(first rows of {shown} total — narrate from these and tell the user the full count)"
+            "\n\n(showing {MAX_RESULT_COLS} of {total_cols} columns.)"
         ));
     }
-    let chart = if truncated { None } else { chart_spec_from_batches(&batches) };
+    let chart = if truncated {
+        None
+    } else {
+        chart_spec_from_batches(&batches)
+    };
     let (digest_bytes, _) = batches_to_csv(&batches, MAX_RESULT_ROWS + 1);
-    let digest: String =
-        Sha1::digest(&digest_bytes).iter().map(|b| format!("{b:02x}")).collect();
+    let digest: String = Sha1::digest(&digest_bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
     Ok(QueryResult {
         markdown,
         shown,
         truncated,
         chart,
         digest,
+        total,
     })
 }
 
@@ -941,7 +1308,12 @@ pub fn chart_spec_from_batches(batches: &[RecordBatch]) -> Option<String> {
     if !(2..=1 + CHART_MAX_SERIES).contains(&ncols) {
         return None;
     }
-    if !schema.fields().iter().skip(1).all(|f| f.data_type().is_numeric()) {
+    if !schema
+        .fields()
+        .iter()
+        .skip(1)
+        .all(|f| f.data_type().is_numeric())
+    {
         return None;
     }
     let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
@@ -1047,7 +1419,10 @@ pub fn batches_to_markdown(
     let cell = |s: String| -> String {
         let s = s.replace('|', "\\|").replace('\n', " ");
         if s.chars().count() > MAX_CELL_CHARS {
-            format!("{}…", s.chars().take(MAX_CELL_CHARS - 1).collect::<String>())
+            format!(
+                "{}…",
+                s.chars().take(MAX_CELL_CHARS - 1).collect::<String>()
+            )
         } else {
             s
         }
@@ -1055,7 +1430,13 @@ pub fn batches_to_markdown(
     let mut lines: Vec<String> = Vec::new();
     lines.push(format!(
         "| {} |",
-        schema.fields().iter().take(ncols).map(|f| cell(f.name().clone())).collect::<Vec<_>>().join(" | ")
+        schema
+            .fields()
+            .iter()
+            .take(ncols)
+            .map(|f| cell(f.name().clone()))
+            .collect::<Vec<_>>()
+            .join(" | ")
     ));
     lines.push(format!("|{}|", " --- |".repeat(ncols)));
     let mut shown = 0;
@@ -1088,14 +1469,18 @@ mod tests {
         assert!(analytics_cue("give me an analysis of the invoices"));
         assert!(analytics_cue("how many orders came from NE?"));
         assert!(analytics_cue("top 5 customers by revenue"));
-        assert!(!analytics_cue("what does the onboarding doc say about SSO?"));
+        assert!(!analytics_cue(
+            "what does the onboarding doc say about SSO?"
+        ));
         assert!(!analytics_cue("when is the invoice due?"));
     }
 
     #[test]
     fn header_row_is_detected_not_assumed() {
         let rows = |rs: &[&[&str]]| -> Vec<Vec<String>> {
-            rs.iter().map(|r| r.iter().map(|s| s.to_string()).collect()).collect()
+            rs.iter()
+                .map(|r| r.iter().map(|s| s.to_string()).collect())
+                .collect()
         };
         // Title row (one cell) above the real header.
         let sheet = rows(&[
@@ -1117,16 +1502,16 @@ mod tests {
         // Empty input stays at 0.
         assert_eq!(detect_header_row(&[]), 0);
         // A wider, more distinct header BELOW a narrow qualifier wins.
-        let wide = rows(&[
-            &["report", "2025"],
-            &["date", "region", "amount", "rep"],
-        ]);
+        let wide = rows(&[&["report", "2025"], &["date", "region", "amount", "rep"]]);
         assert_eq!(detect_header_row(&wide), 1);
     }
 
     #[test]
     fn table_names_sanitize() {
-        assert_eq!(sanitize_table_name("Q3 Sales (final).xlsx"), "q3_sales_final");
+        assert_eq!(
+            sanitize_table_name("Q3 Sales (final).xlsx"),
+            "q3_sales_final"
+        );
         assert_eq!(sanitize_table_name("2017.csv"), "t_2017");
         assert_eq!(sanitize_table_name("__.csv"), "table");
     }
@@ -1147,9 +1532,15 @@ mod tests {
 
     #[test]
     fn sql_table_mentions_respect_word_boundaries() {
-        assert!(sql_mentions_table("SELECT * FROM sales s JOIN reps r ON 1=1", "sales"));
+        assert!(sql_mentions_table(
+            "SELECT * FROM sales s JOIN reps r ON 1=1",
+            "sales"
+        ));
         assert!(sql_mentions_table("select sum(x) from SALES", "sales"));
-        assert!(sql_mentions_table("SELECT * FROM t JOIN orders ON 1=1", "orders"));
+        assert!(sql_mentions_table(
+            "SELECT * FROM t JOIN orders ON 1=1",
+            "orders"
+        ));
         assert!(!sql_mentions_table("SELECT * FROM sales_2024", "sales"));
         assert!(!sql_mentions_table("SELECT presales FROM t", "sales"));
         assert!(!sql_mentions_table("SELECT 1", ""));
@@ -1169,18 +1560,29 @@ mod tests {
         };
         let regs = vec![
             reg("tickets", "f1", "Tickets.xlsx", Some(now - 2 * 3_600_000)),
-            reg("tickets__sheet2", "f1", "Tickets.xlsx", Some(now - 2 * 3_600_000)),
+            reg(
+                "tickets__sheet2",
+                "f1",
+                "Tickets.xlsx",
+                Some(now - 2 * 3_600_000),
+            ),
             reg("regions", "f2", "regions.csv", Some(now - 400 * 86_400_000)),
         ];
         let line = freshness_line(&regs, "SELECT * FROM tickets", now).unwrap();
-        assert!(line.contains("Tickets.xlsx") && line.contains("2 hours ago"), "{line}");
+        assert!(
+            line.contains("Tickets.xlsx") && line.contains("2 hours ago"),
+            "{line}"
+        );
         assert!(!line.contains("regions.csv"), "{line}");
         // Two sheets of one workbook = one mention (dedup by file id).
         assert_eq!(line.matches("Tickets.xlsx").count(), 1, "{line}");
         // Nothing matched (model aliased beyond recognition) → honest
         // fallback: every registered file.
         let all = freshness_line(&regs, "SELECT 1", now).unwrap();
-        assert!(all.contains("Tickets.xlsx") && all.contains("regions.csv"), "{all}");
+        assert!(
+            all.contains("Tickets.xlsx") && all.contains("regions.csv"),
+            "{all}"
+        );
         // Missing mtime → name only, no fabricated age.
         let l = freshness_line(&[reg("t", "f9", "x.csv", None)], "SELECT * FROM t", now).unwrap();
         assert!(l.contains("“x.csv”") && !l.contains("saved"), "{l}");
@@ -1233,7 +1635,10 @@ mod tests {
     #[test]
     fn prior_query_rides_only_when_present() {
         let with = sql_question("same but monthly", Some("SELECT a FROM t"));
-        assert!(with.contains("Previous query from this conversation"), "{with}");
+        assert!(
+            with.contains("Previous query from this conversation"),
+            "{with}"
+        );
         assert!(with.contains("SELECT a FROM t"));
         let without = sql_question("total sales", None);
         assert!(!without.contains("Previous query"));
@@ -1241,9 +1646,15 @@ mod tests {
 
     #[test]
     fn last_query_used_recovers_the_latest_fence() {
-        let turn = |role: &str, content: &str| ChatTurn { role: role.into(), content: content.into() };
+        let turn = |role: &str, content: &str| ChatTurn {
+            role: role.into(),
+            content: content.into(),
+        };
         // No analytics yet.
-        assert_eq!(last_query_used(&[turn("user", "hi"), turn("assistant", "hello")]), None);
+        assert_eq!(
+            last_query_used(&[turn("user", "hi"), turn("assistant", "hello")]),
+            None
+        );
         // The most recent fenced answer wins, even past a non-analytics turn.
         let history = vec![
             turn("user", "totals?"),
@@ -1282,10 +1693,10 @@ mod tests {
         }
         // Single-cue questions stay on the single-query path.
         for q in [
-            "total sales by region",              // analytics only
-            "compare the two contracts",          // comparison only, no analytics cue
-            "summarize the meeting notes",        // neither
-            "top 10 customers by revenue",        // analytics only
+            "total sales by region",       // analytics only
+            "compare the two contracts",   // comparison only, no analytics cue
+            "summarize the meeting notes", // neither
+            "top 10 customers by revenue", // analytics only
         ] {
             assert!(!multi_step_cue(q), "expected single-query for {q:?}");
         }
@@ -1294,7 +1705,9 @@ mod tests {
     #[test]
     fn step_replies_parse_tolerantly() {
         assert_eq!(
-            parse_step_reply("NEXT_SQL:\n```sql\nSELECT region, SUM(x) FROM t GROUP BY region\n```"),
+            parse_step_reply(
+                "NEXT_SQL:\n```sql\nSELECT region, SUM(x) FROM t GROUP BY region\n```"
+            ),
             StepReply::Sql("SELECT region, SUM(x) FROM t GROUP BY region".to_string())
         );
         assert_eq!(
@@ -1304,7 +1717,10 @@ mod tests {
         assert_eq!(parse_step_reply("DONE"), StepReply::Done);
         assert_eq!(parse_step_reply("done."), StepReply::Done);
         // Prose with no SQL ends the loop instead of derailing it.
-        assert_eq!(parse_step_reply("The data already answers the question."), StepReply::Done);
+        assert_eq!(
+            parse_step_reply("The data already answers the question."),
+            StepReply::Done
+        );
     }
 
     #[test]
@@ -1313,12 +1729,19 @@ mod tests {
         // at the carry cap — the prompt must stay comfortably under ~8k chars.
         let steps: Vec<StepRecord> = (0..3)
             .map(|i| StepRecord {
-                sql: format!("SELECT c{i}, SUM(v) FROM {} GROUP BY c{i} ORDER BY 2 DESC", "t".repeat(120)),
+                sql: format!(
+                    "SELECT c{i}, SUM(v) FROM {} GROUP BY c{i} ORDER BY 2 DESC",
+                    "t".repeat(120)
+                ),
                 result_markdown: "| a | b |\n| 1 | 2 |\n".repeat(200), // > cap, gets clipped
             })
             .collect();
         let q = step_question(&"compare everything and explain why ".repeat(8), &steps);
-        assert!(q.chars().count() < 8_000, "prompt budget blown: {}", q.chars().count());
+        assert!(
+            q.chars().count() < 8_000,
+            "prompt budget blown: {}",
+            q.chars().count()
+        );
         assert!(q.contains("Step 3 SQL"));
     }
 
@@ -1422,7 +1845,14 @@ mod tests {
 
     #[test]
     fn temporal_labels_are_recognized() {
-        for l in ["2024", "2024-07", "2024-07-08", "2024-07-08 12:00", "Q3 2024", "q1 2025"] {
+        for l in [
+            "2024",
+            "2024-07",
+            "2024-07-08",
+            "2024-07-08 12:00",
+            "Q3 2024",
+            "q1 2025",
+        ] {
             assert!(looks_temporal(l), "{l}");
         }
         for l in ["NE", "widget-9000", "July", "20245", "2024-7"] {
@@ -1444,7 +1874,9 @@ mod tests {
         let batch = RecordBatch::try_new(
             schema.clone(),
             vec![
-                Arc::new(StringArray::from(labels.iter().map(String::as_str).collect::<Vec<_>>())),
+                Arc::new(StringArray::from(
+                    labels.iter().map(String::as_str).collect::<Vec<_>>(),
+                )),
                 Arc::new(Float64Array::from(values)),
             ],
         )
@@ -1453,14 +1885,25 @@ mod tests {
         let ctx = SessionContext::new();
         ctx.register_table("tall", Arc::new(mem)).unwrap();
 
-        let res = run_query(&ctx, "SELECT label, v FROM tall ORDER BY v").await.unwrap();
+        let res = run_query(&ctx, "SELECT label, v FROM tall ORDER BY v")
+            .await
+            .unwrap();
         assert_eq!(res.shown, 100);
         assert!(!res.truncated);
-        // Header + separator + ≤40 data rows + blank + note.
-        let data_rows = res.markdown.lines().filter(|l| l.starts_with("| row")).count();
+        assert_eq!(res.total, Some(100)); // not truncated ⇒ total is exact
+                                          // Header + separator + ≤40 data rows + blank + note.
+        let data_rows = res
+            .markdown
+            .lines()
+            .filter(|l| l.starts_with("| row"))
+            .count();
         assert!(data_rows <= 40, "narration carries {data_rows} rows");
-        assert!(res.markdown.chars().count() <= 6_200, "{}", res.markdown.len());
-        assert!(res.markdown.contains("of 100 total"), "{}", res.markdown);
+        assert!(
+            res.markdown.chars().count() <= 6_200,
+            "{}",
+            res.markdown.len()
+        );
+        assert!(res.markdown.contains("of 100 rows"), "{}", res.markdown);
     }
 
     #[tokio::test]
@@ -1469,7 +1912,13 @@ mod tests {
         // budget; the card must clip instead.
         let n = 40usize;
         let fields: Vec<Field> = (0..n)
-            .map(|i| Field::new(format!("very_long_column_name_number_{i}"), DataType::Utf8, false))
+            .map(|i| {
+                Field::new(
+                    format!("very_long_column_name_number_{i}"),
+                    DataType::Utf8,
+                    false,
+                )
+            })
             .collect();
         let cols: Vec<ArrayRef> = (0..n)
             .map(|i| {
@@ -1523,9 +1972,21 @@ mod tests {
     fn union_groups_need_stem_and_signature() {
         let p = |n: &str| std::path::PathBuf::from(format!("/v/{n}"));
         let files: Vec<(String, String, std::path::PathBuf)> = vec![
-            ("f1".into(), "sales-2025-01.csv".into(), p("sales-2025-01.csv")),
-            ("f2".into(), "sales-2025-02.csv".into(), p("sales-2025-02.csv")),
-            ("f3".into(), "sales-2025-03.csv".into(), p("sales-2025-03.csv")),
+            (
+                "f1".into(),
+                "sales-2025-01.csv".into(),
+                p("sales-2025-01.csv"),
+            ),
+            (
+                "f2".into(),
+                "sales-2025-02.csv".into(),
+                p("sales-2025-02.csv"),
+            ),
+            (
+                "f3".into(),
+                "sales-2025-03.csv".into(),
+                p("sales-2025-03.csv"),
+            ),
             ("f4".into(), "regions.csv".into(), p("regions.csv")),
             ("f5".into(), "vendors.csv".into(), p("vendors.csv")),
         ];
@@ -1541,11 +2002,20 @@ mod tests {
         let (groups, singles) = union_groups(&files, &catalog);
         assert_eq!(groups.len(), 1, "only the matching monthlies group");
         assert_eq!(groups[0].stem, "sales");
-        let member_ids: Vec<&str> =
-            groups[0].members.iter().map(|(id, _, _)| id.as_str()).collect();
-        assert_eq!(member_ids, vec!["f1", "f2"], "newest first, drifted member excluded");
+        let member_ids: Vec<&str> = groups[0]
+            .members
+            .iter()
+            .map(|(id, _, _)| id.as_str())
+            .collect();
+        assert_eq!(
+            member_ids,
+            vec!["f1", "f2"],
+            "newest first, drifted member excluded"
+        );
         let single_ids: Vec<&str> = singles.iter().map(|(id, _, _)| id.as_str()).collect();
-        assert!(single_ids.contains(&"f3") && single_ids.contains(&"f4") && single_ids.contains(&"f5"));
+        assert!(
+            single_ids.contains(&"f3") && single_ids.contains(&"f4") && single_ids.contains(&"f5")
+        );
     }
 
     #[test]
@@ -1565,7 +2035,10 @@ mod tests {
         ];
         let hints = join_hints(&regs).expect("shared non-generic column");
         assert!(hints.contains("tickets.region = regions.region"), "{hints}");
-        assert!(!hints.contains(".id ="), "generic id must not hint: {hints}");
+        assert!(
+            !hints.contains(".id ="),
+            "generic id must not hint: {hints}"
+        );
         // No shared specific columns → no block at all.
         assert!(join_hints(&[reg("a", &["x"]), reg("b", &["y"])]).is_none());
     }
@@ -1588,24 +2061,38 @@ mod tests {
 
         let ctx = SessionContext::new();
         let regs = register_tables(&ctx, &files).await;
-        let union = regs.iter().find(|r| r.group.is_some()).expect("union table registered");
+        let union = regs
+            .iter()
+            .find(|r| r.group.is_some())
+            .expect("union table registered");
         assert_eq!(union.table, "sales_all");
         assert_eq!(union.group.as_ref().unwrap().file_ids.len(), 12);
         assert!(union.card.contains("unions 12 files"), "{}", union.card);
-        assert!(regs.iter().any(|r| r.group.is_none()), "lookup registers as a single");
+        assert!(
+            regs.iter().any(|r| r.group.is_none()),
+            "lookup registers as a single"
+        );
 
         // The whole year sums across all twelve files.
-        let res = run_query(&ctx, "SELECT SUM(amount) AS total FROM sales_all").await.unwrap();
+        let res = run_query(&ctx, "SELECT SUM(amount) AS total FROM sales_all")
+            .await
+            .unwrap();
         assert!(res.markdown.contains("156"), "{}", res.markdown);
 
         // Join hints connect the family to the lookup on `region`.
         let hints = join_hints(&regs).expect("hints");
-        assert!(hints.contains("sales_all.region = regions.region"), "{hints}");
+        assert!(
+            hints.contains("sales_all.region = regions.region"),
+            "{hints}"
+        );
 
         // Freshness renders the group form.
-        let fresh =
-            freshness_line(&regs, "SELECT SUM(amount) FROM sales_all", crate::config::now_ms())
-                .unwrap();
+        let fresh = freshness_line(
+            &regs,
+            "SELECT SUM(amount) FROM sales_all",
+            crate::config::now_ms(),
+        )
+        .unwrap();
         assert!(fresh.contains("(12 files, newest saved"), "{fresh}");
         assert!(fresh.contains("sales*.csv"), "{fresh}");
 
@@ -1618,13 +2105,13 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("lh-analytics-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let csv = dir.join("sales.csv");
+        std::fs::write(&csv, "region,amount\nNE,100.5\nNW,200\nNE,49.5\nSE,300\n").unwrap();
+        let regions = dir.join("regions.csv");
         std::fs::write(
-            &csv,
-            "region,amount\nNE,100.5\nNW,200\nNE,49.5\nSE,300\n",
+            &regions,
+            "region,label\nNE,Northeast\nNW,Northwest\nSE,Southeast\n",
         )
         .unwrap();
-        let regions = dir.join("regions.csv");
-        std::fs::write(&regions, "region,label\nNE,Northeast\nNW,Northwest\nSE,Southeast\n").unwrap();
 
         let ctx = SessionContext::new();
         let files = vec![
@@ -1637,7 +2124,10 @@ mod tests {
         // Freshly written fixtures stamp as read-just-now.
         assert!(regs.iter().all(|r| r.modified_ms.is_some()));
         let fresh = freshness_line(&regs, "SELECT * FROM sales", crate::config::now_ms()).unwrap();
-        assert!(fresh.contains("sales.csv") && fresh.contains("just now"), "{fresh}");
+        assert!(
+            fresh.contains("sales.csv") && fresh.contains("just now"),
+            "{fresh}"
+        );
         assert!(!fresh.contains("regions.csv"), "{fresh}");
 
         // Write one of them back out as parquet, register, and JOIN across formats.
@@ -1652,9 +2142,13 @@ mod tests {
             )
             .await
             .unwrap();
-        ctx.register_parquet("sales_pq", pq.to_str().unwrap(), ParquetReadOptions::default())
-            .await
-            .unwrap();
+        ctx.register_parquet(
+            "sales_pq",
+            pq.to_str().unwrap(),
+            ParquetReadOptions::default(),
+        )
+        .await
+        .unwrap();
 
         let res = run_query(
             &ctx,
@@ -1664,8 +2158,16 @@ mod tests {
         .unwrap();
         assert_eq!(res.shown, 3);
         assert!(!res.truncated);
-        assert!(res.markdown.contains("Southeast") && res.markdown.contains("300"), "{}", res.markdown);
-        assert!(res.markdown.contains("Northeast") && res.markdown.contains("150"), "{}", res.markdown);
+        assert!(
+            res.markdown.contains("Southeast") && res.markdown.contains("300"),
+            "{}",
+            res.markdown
+        );
+        assert!(
+            res.markdown.contains("Northeast") && res.markdown.contains("150"),
+            "{}",
+            res.markdown
+        );
         // Three labeled numeric rows chart as a bar (Phase C).
         let chart: serde_json::Value =
             serde_json::from_str(res.chart.as_deref().expect("chartable result")).unwrap();
@@ -1781,11 +2283,26 @@ pub fn sql_question(question: &str, prior_sql: Option<&str>) -> String {
 // can't carry multi-step context (synth.rs enforces the gate).
 
 const MULTI_STEP_WORDS: &[&str] = &[
-    "compare", "compared", "comparing", "versus", "vs", "difference", "differences",
-    "why", "driver", "drivers", "explain", "explains", "explained",
+    "compare",
+    "compared",
+    "comparing",
+    "versus",
+    "vs",
+    "difference",
+    "differences",
+    "why",
+    "driver",
+    "drivers",
+    "explain",
+    "explains",
+    "explained",
 ];
-const MULTI_STEP_PHRASES: &[&str] =
-    &["what caused", "change between", "breakdown of the change", "changed between"];
+const MULTI_STEP_PHRASES: &[&str] = &[
+    "what caused",
+    "change between",
+    "breakdown of the change",
+    "changed between",
+];
 
 /// Whether an analytics question ALSO reads as a comparison/explanation ask —
 /// the entry gate for the bounded multi-step loop. Same normalization as
@@ -1901,8 +2418,9 @@ pub struct DirectResult {
 async fn direct_tables(
     file_ids: &[String],
 ) -> Result<(SessionContext, Vec<TableReg>, usize), String> {
-    let active: std::collections::HashSet<String> =
-        crate::vault::active_included_file_ids().into_iter().collect();
+    let active: std::collections::HashSet<String> = crate::vault::active_included_file_ids()
+        .into_iter()
+        .collect();
     let mut files: Vec<(String, String, PathBuf)> = Vec::new();
     let mut skipped = 0usize;
     for id in file_ids {
@@ -1926,13 +2444,57 @@ async fn direct_tables(
     Ok((ctx, regs, skipped))
 }
 
-fn direct_footer(sql: &str, regs: &[TableReg], skipped: usize) -> String {
+/// A grouped-thousands integer: 12431 → "12,431" — read-out friendly for the
+/// truncation footer.
+fn commafy(n: usize) -> String {
+    let s = n.to_string();
+    let b = s.as_bytes();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    for (i, ch) in b.iter().enumerate() {
+        // (len - i) % 3 == 0 marks a thousands boundary. Not `.is_multiple_of`
+        // (stabilized only in 1.87) so the crate builds on older CI toolchains.
+        if i > 0 && (b.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(*ch as char);
+    }
+    out
+}
+
+/// Deterministic "first N of TOTAL rows" disclosure when a result was capped —
+/// never model-generated. `None` when the result wasn't truncated. Drives the
+/// answer + footer honesty on both the ask path and the model-free re-exec path.
+pub fn truncation_footer(shown: usize, truncated: bool, total: Option<usize>) -> Option<String> {
+    if !truncated {
+        return None;
+    }
+    Some(match total {
+        Some(t) => format!(
+            "_Showing the first {} of {} rows._\n",
+            commafy(shown),
+            commafy(t)
+        ),
+        None => {
+            format!(
+                "_Showing the first {} rows; the full result is larger._\n",
+                commafy(shown)
+            )
+        }
+    })
+}
+
+fn direct_footer(sql: &str, regs: &[TableReg], skipped: usize, res: &QueryResult) -> String {
     let mut footer = format!("*Query used:*\n```sql\n{sql}\n```\n");
     if let Some(fresh) = freshness_line(regs, sql, crate::config::now_ms()) {
         footer.push_str(&fresh);
     }
+    if let Some(trunc) = truncation_footer(res.shown, res.truncated, res.total) {
+        footer.push_str(&trunc);
+    }
     if skipped > 0 {
-        footer.push_str(&format!("_(skipped {skipped} file(s) no longer available to AI)_\n"));
+        footer.push_str(&format!(
+            "_(skipped {skipped} file(s) no longer available to AI)_\n"
+        ));
     }
     footer
 }
@@ -1943,7 +2505,7 @@ fn direct_footer(sql: &str, regs: &[TableReg], skipped: usize) -> String {
 pub async fn run_direct(sql: &str, file_ids: &[String]) -> Result<DirectResult, String> {
     let (ctx, regs, skipped) = direct_tables(file_ids).await?;
     let res = run_query(&ctx, sql).await?;
-    let footer = direct_footer(sql, &regs, skipped);
+    let footer = direct_footer(sql, &regs, skipped, &res);
     Ok(DirectResult {
         markdown: res.markdown,
         chart: res.chart,
@@ -1971,8 +2533,12 @@ pub fn batches_to_csv(batches: &[RecordBatch], max_rows: usize) -> (Vec<u8>, usi
         return (Vec::new(), 0);
     };
     let mut out = String::new();
-    let header: Vec<String> =
-        first.schema().fields().iter().map(|f| field(f.name())).collect();
+    let header: Vec<String> = first
+        .schema()
+        .fields()
+        .iter()
+        .map(|f| field(f.name()))
+        .collect();
     out.push_str(&header.join(","));
     out.push_str("\r\n");
     let mut rows = 0usize;
@@ -2019,7 +2585,9 @@ pub async fn run_direct_save(
     let (ctx, regs, skipped) = direct_tables(file_ids).await?;
     let res = run_query(&ctx, sql).await?; // guard + preview + chart
     let df = ctx.sql(sql).await.map_err(|e| e.to_string())?;
-    let df = df.limit(0, Some(SAVE_MAX_ROWS)).map_err(|e| e.to_string())?;
+    let df = df
+        .limit(0, Some(SAVE_MAX_ROWS))
+        .map_err(|e| e.to_string())?;
     let batches = tokio::time::timeout(Duration::from_secs(QUERY_TIMEOUT_SECS), df.collect())
         .await
         .map_err(|_| format!("query exceeded {QUERY_TIMEOUT_SECS}s"))?
@@ -2035,7 +2603,7 @@ pub async fn run_direct_save(
     .await
     .map_err(|e| e.to_string())?
     .map_err(|e| e.to_string())?;
-    let footer = direct_footer(sql, &regs, skipped);
+    let footer = direct_footer(sql, &regs, skipped, &res);
     Ok((
         DirectResult {
             markdown: res.markdown,
@@ -2045,4 +2613,332 @@ pub async fn run_direct_save(
         },
         SavedResult { id, name, rows },
     ))
+}
+
+/// Regression tests for the Genie v3 correctness audit (openspec:
+/// add-analytics-eval-floor). Each asserts a fix that fails without it.
+#[cfg(test)]
+mod g1_regression {
+    use super::*;
+    use datafusion::arrow::array::Array; // is_null / value on downcast arrays
+
+    fn fc(
+        id: &str,
+        name: &str,
+        cols: &[(&str, crate::catalog::ColumnKind)],
+        ms: i64,
+    ) -> crate::catalog::FileColumns {
+        crate::catalog::FileColumns {
+            id: id.into(),
+            name: name.into(),
+            columns: cols
+                .iter()
+                .map(|(n, k)| crate::catalog::Column {
+                    name: (*n).to_string(),
+                    kind: *k,
+                })
+                .collect(),
+            modified_ms: ms,
+        }
+    }
+    fn treg(table: &str, id: &str, cols: &[&str]) -> TableReg {
+        TableReg {
+            table: table.into(),
+            file_id: id.into(),
+            file_name: format!("{id}.csv"),
+            card: String::new(),
+            modified_ms: None,
+            columns: cols.iter().map(|s| s.to_string()).collect(),
+            group: None,
+        }
+    }
+
+    // --- A1/A2: read-only guard closes SELECT INTO + modifying CTE ---
+    #[test]
+    fn guard_rejects_select_into_and_modifying_bodies() {
+        // SELECT … INTO runs a CreateMemoryTable DDL (dodges timeout+cap).
+        assert!(guard_sql("SELECT * INTO exfil FROM sales").is_err());
+        assert!(guard_sql("SELECT a INTO t FROM x WHERE a > 1").is_err());
+        // Data-modifying CTE / query body wrapped inside a Query.
+        assert!(
+            guard_sql("WITH t AS (INSERT INTO x VALUES (1) RETURNING *) SELECT * FROM t").is_err()
+        );
+        assert!(guard_sql("WITH x AS (SELECT 1) INSERT INTO t VALUES (1)").is_err());
+        // Genuine read-only shapes still pass (no over-rejection).
+        assert!(guard_sql("SELECT 1").is_ok());
+        assert!(guard_sql("WITH c AS (SELECT 1 AS a) SELECT a FROM c").is_ok());
+        assert!(guard_sql("SELECT 1 UNION ALL SELECT 2").is_ok());
+        assert!(
+            guard_sql("SELECT * FROM (SELECT region, SUM(x) AS s FROM t GROUP BY region) q")
+                .is_ok()
+        );
+        assert!(guard_sql("SELECT * FROM t WHERE id IN (SELECT id FROM u)").is_ok());
+    }
+
+    // --- D1: a truncated result reports its TRUE total, not the cap ---
+    #[tokio::test]
+    async fn truncation_reports_true_total_not_the_cap() {
+        let n = 250usize;
+        let labels: Vec<String> = (0..n).map(|i| format!("r{i}")).collect();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("label", DataType::Utf8, false),
+            Field::new("v", DataType::Float64, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(StringArray::from(
+                    labels.iter().map(String::as_str).collect::<Vec<_>>(),
+                )),
+                Arc::new(Float64Array::from(
+                    (0..n).map(|i| i as f64).collect::<Vec<_>>(),
+                )),
+            ],
+        )
+        .unwrap();
+        let ctx = SessionContext::new();
+        ctx.register_table(
+            "big",
+            Arc::new(MemTable::try_new(schema, vec![vec![batch]]).unwrap()),
+        )
+        .unwrap();
+
+        let res = run_query(&ctx, "SELECT label, v FROM big").await.unwrap();
+        assert!(res.truncated);
+        assert_eq!(res.shown, MAX_RESULT_ROWS);
+        assert_eq!(res.total, Some(250)); // counted from the uncapped plan
+        assert!(
+            res.markdown.contains("250"),
+            "note must name the true total: {}",
+            res.markdown
+        );
+        assert!(!res.markdown.contains("200 total"));
+        assert!(!res.markdown.contains("tell the user")); // neutral (human-visible)
+        assert_eq!(
+            truncation_footer(res.shown, res.truncated, res.total).as_deref(),
+            Some("_Showing the first 200 of 250 rows._\n")
+        );
+        assert!(res.chart.is_none()); // never chart a truncated result
+    }
+
+    // --- D2: dropped columns past the 24-col cap are disclosed ---
+    #[tokio::test]
+    async fn wide_result_notes_dropped_columns() {
+        let n = 30usize;
+        let fields: Vec<Field> = (0..n)
+            .map(|i| Field::new(format!("c{i}"), DataType::Float64, true))
+            .collect();
+        let cols: Vec<ArrayRef> = (0..n)
+            .map(|_| Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])) as ArrayRef)
+            .collect();
+        let schema = Arc::new(Schema::new(fields));
+        let batch = RecordBatch::try_new(schema.clone(), cols).unwrap();
+        let ctx = SessionContext::new();
+        ctx.register_table(
+            "wide",
+            Arc::new(MemTable::try_new(schema, vec![vec![batch]]).unwrap()),
+        )
+        .unwrap();
+        let res = run_query(&ctx, "SELECT * FROM wide").await.unwrap();
+        assert!(
+            res.markdown.contains("24 of 30 columns"),
+            "{}",
+            res.markdown
+        );
+    }
+
+    // --- F2: a NaN/inf sentinel becomes NULL, not a poisoned aggregate ---
+    #[test]
+    fn nan_sentinel_becomes_null_keeps_column_numeric() {
+        let headers = vec!["region".to_string(), "ratio".to_string()];
+        let data = vec![
+            vec!["NE".to_string(), "1.5".to_string()],
+            vec!["NW".to_string(), "2.0".to_string()],
+            vec!["SE".to_string(), "NaN".to_string()],
+            vec!["NE".to_string(), "3.0".to_string()],
+        ];
+        let (schema, batch) = table_from_matrix(&headers, &data).unwrap();
+        assert_eq!(schema.field(1).data_type(), &DataType::Float64);
+        let col = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        assert!(col.is_null(2), "the NaN cell must be NULL");
+        let sum: f64 = (0..col.len())
+            .filter(|&i| !col.is_null(i))
+            .map(|i| col.value(i))
+            .sum();
+        assert_eq!(sum, 6.5);
+    }
+
+    // --- F1: date-ish serial column → ISO; a measure in range stays numeric ---
+    #[test]
+    fn excel_serial_dates_render_iso_but_measures_stay_numeric() {
+        let headers = vec!["order_date".to_string(), "amount".to_string()];
+        let data = vec![
+            vec!["45658".to_string(), "100".to_string()], // 2025-01-01
+            vec!["45689".to_string(), "200".to_string()],
+            vec!["45658".to_string(), "300".to_string()],
+        ];
+        let (schema, batch) = table_from_matrix(&headers, &data).unwrap();
+        assert_eq!(
+            schema.field(0).data_type(),
+            &DataType::Utf8,
+            "serial dates → text"
+        );
+        let d = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(d.value(0), "2025-01-01");
+        assert_eq!(
+            schema.field(1).data_type(),
+            &DataType::Float64,
+            "amount stays numeric"
+        );
+
+        // A money column of serial-range values under a NON-date header must
+        // NOT be reinterpreted as dates.
+        let h2 = vec!["salary".to_string(), "n".to_string()];
+        let d2 = vec![
+            vec!["45000".to_string(), "1".to_string()],
+            vec!["52000".to_string(), "2".to_string()],
+            vec!["48000".to_string(), "3".to_string()],
+        ];
+        let (s2, _) = table_from_matrix(&h2, &d2).unwrap();
+        assert_eq!(
+            s2.field(0).data_type(),
+            &DataType::Float64,
+            "money must stay numeric"
+        );
+    }
+
+    // --- C3: table-name dedup can't overwrite a registered table ---
+    #[test]
+    fn unique_table_name_avoids_collisions() {
+        assert_eq!(unique_table_name("foo", &[]), "foo");
+        assert_eq!(unique_table_name("foo", &["foo".into()]), "foo_2");
+        // The old `used.len()+1` guess would land on the existing foo_3.
+        let used = vec!["foo".to_string(), "foo_2".to_string(), "foo_3".to_string()];
+        assert_eq!(unique_table_name("foo", &used), "foo_4");
+    }
+
+    // --- C6: generic/enum/col_N columns don't emit join hints ---
+    #[test]
+    fn join_hints_skip_status_and_col_n() {
+        let regs = vec![
+            treg("orders", "orders", &["region", "status", "col_3"]),
+            treg("emps", "emps", &["region", "status", "col_3"]),
+        ];
+        let hints = join_hints(&regs).unwrap();
+        assert!(hints.contains("orders.region = emps.region"));
+        assert!(!hints.contains("status"), "{hints}");
+        assert!(!hints.contains("col_3"), "{hints}");
+    }
+
+    // --- C4: differing column kind, or a single-letter stem, split a family ---
+    #[test]
+    fn union_splits_on_kind_and_short_stem() {
+        use crate::catalog::ColumnKind::{Numeric, Text};
+        let p = |n: &str| PathBuf::from(format!("/v/{n}"));
+        let files = vec![
+            (
+                "a".to_string(),
+                "sales-01.csv".to_string(),
+                p("sales-01.csv"),
+            ),
+            (
+                "b".to_string(),
+                "sales-02.csv".to_string(),
+                p("sales-02.csv"),
+            ),
+        ];
+        // Same names + same stem, but "amount" is numeric in one, text in the
+        // other → different kind signature → must NOT union into one table.
+        let catalog = vec![
+            fc(
+                "a",
+                "sales-01.csv",
+                &[("region", Text), ("amount", Numeric)],
+                2,
+            ),
+            fc(
+                "b",
+                "sales-02.csv",
+                &[("region", Text), ("amount", Text)],
+                1,
+            ),
+        ];
+        let (groups, singles) = union_groups(&files, &catalog);
+        assert!(groups.is_empty(), "differing column kind must split");
+        assert_eq!(singles.len(), 2);
+
+        // Single-letter stem (q1/q2 → "q") never groups, even with identical sig.
+        let qf = vec![
+            ("x".to_string(), "q1.csv".to_string(), p("q1.csv")),
+            ("y".to_string(), "q2.csv".to_string(), p("q2.csv")),
+        ];
+        let qc = vec![
+            fc("x", "q1.csv", &[("id", Text), ("value", Numeric)], 1),
+            fc("y", "q2.csv", &[("id", Text), ("value", Numeric)], 1),
+        ];
+        assert!(
+            union_groups(&qf, &qc).0.is_empty(),
+            "single-letter stem must not union"
+        );
+    }
+
+    // --- C1: files dropped by the table caps are counted for disclosure ---
+    #[test]
+    fn unregistered_count_flags_capped_files() {
+        let files = vec![
+            (
+                "a".to_string(),
+                "a.csv".to_string(),
+                PathBuf::from("/v/a.csv"),
+            ),
+            (
+                "b".to_string(),
+                "b.csv".to_string(),
+                PathBuf::from("/v/b.csv"),
+            ),
+            (
+                "c".to_string(),
+                "c.csv".to_string(),
+                PathBuf::from("/v/c.csv"),
+            ),
+        ];
+        assert_eq!(unregistered_count(&files, &[treg("a", "a", &[])]), 2);
+        // A grouped reg represents all its member ids.
+        let grouped = vec![TableReg {
+            group: Some(GroupMeta {
+                file_ids: vec!["a".into(), "b".into(), "c".into()],
+                file_names: vec![],
+                newest_ms: 0,
+            }),
+            ..treg("all", "a", &[])
+        }];
+        assert_eq!(unregistered_count(&files, &grouped), 0);
+    }
+
+    // --- C2: a data row never displaces an earlier all-textual header ---
+    #[test]
+    fn header_detection_never_promotes_a_data_row() {
+        let rows = |rs: &[&[&str]]| -> Vec<Vec<String>> {
+            rs.iter()
+                .map(|r| r.iter().map(|s| s.to_string()).collect())
+                .collect()
+        };
+        // Real header with a trailing blank; the first data row is wider and
+        // partly numeric — it used to win (score = textual + distinct), dropping
+        // the first record and mislabeling every column.
+        let sheet = rows(&[
+            &["id", "name", ""],
+            &["1", "Bob", "active"],
+            &["2", "Sue", "off"],
+        ]);
+        assert_eq!(detect_header_row(&sheet), 0);
+    }
 }

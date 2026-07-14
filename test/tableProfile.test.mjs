@@ -13,9 +13,17 @@ import { register } from "node:module";
 
 register("./_ts-extensionless-hook.mjs", import.meta.url);
 
-const { tableProfile, parseDelimited, isProfileable } = await import(
+const { tableProfile, parseDelimited, isProfileable, fmtNum } = await import(
   "../src/server/tableProfile.ts"
 );
+
+test("fmtNum rounds negatives away from zero (parity with the Rust twin)", () => {
+  // Was Math.round (half toward +∞), which diverged from Rust's f64::round.
+  assert.equal(fmtNum(-0.125), "-0.13"); // Math.round would give "-0.12"
+  assert.equal(fmtNum(-0.375), "-0.38");
+  assert.equal(fmtNum(0.125), "0.13");
+  assert.equal(fmtNum(-300), "-300");
+});
 
 const SALES_CSV = [
   "Date,Region,Sales",

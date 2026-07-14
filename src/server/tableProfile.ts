@@ -85,7 +85,12 @@ function yearOf(raw: string): number | null {
 
 /** Format with up to 2 decimals, trailing zeros trimmed — no locale, for parity. */
 export function fmtNum(n: number): string {
-  const r = Math.round(n * 100) / 100;
+  // Round half AWAY FROM ZERO to match the Rust twin's `f64::round`. JS
+  // `Math.round` rounds half toward +∞, so it diverged on negative .xx5 sums
+  // (e.g. -0.125 → "-0.12" here vs "-0.13" in Rust) — a byte-parity break in
+  // the "authoritative" profile. Applying the sign after rounding the
+  // magnitude makes both engines round symmetrically.
+  const r = (Math.sign(n) * Math.round(Math.abs(n) * 100)) / 100;
   if (Number.isInteger(r)) return String(r);
   return String(r);
 }

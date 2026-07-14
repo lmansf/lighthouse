@@ -76,6 +76,12 @@ test("niceTicks lands on round numbers and covers the domain", () => {
   const flat = niceTicks(5, 5);
   assert.ok(flat.length >= 2);
   assert.ok(flat[0] <= 5 && flat[flat.length - 1] >= 5);
+
+  // Inverted domain (min > max) is normalized, not blanked (was []).
+  const inv = niceTicks(300, 0);
+  assert.ok(inv.length >= 2, "inverted domain must still produce ticks");
+  assert.equal(inv[0] <= 0, true);
+  assert.equal(inv[inv.length - 1] >= 300, true);
 });
 
 test("scaleLinear maps domain to range (and survives zero-width domains)", () => {

@@ -1588,10 +1588,15 @@ fn chunk_tabular(name: &str, text: &str) -> Vec<String> {
     let mut chunks: Vec<String> = Vec::new();
     // Blank-line-separated blocks (one per sheet for workbooks).
     for block in text.split("\n\n") {
+        // Trim trailing whitespace INCLUDING U+FEFF (BOM/ZWNBSP): JS `\s` and
+        // `String.trim` strip it but Rust's `char::is_whitespace` does not, so a
+        // tabular line ending in a mid-file BOM would chunk differently across
+        // the twins. Match JS so the chunkers stay byte-identical (parity).
+        let ws = |c: char| c.is_whitespace() || c == '\u{feff}';
         let lines: Vec<&str> = block
             .split('\n')
-            .map(str::trim_end)
-            .filter(|l| !l.trim().is_empty())
+            .map(|l| l.trim_end_matches(ws))
+            .filter(|l| !l.trim_matches(ws).is_empty())
             .collect();
         if lines.is_empty() {
             continue;
@@ -2215,5 +2220,16 @@ mod chunk_tests {
         let chunks = chunk_texts_named("notes.md", &text);
         assert_eq!(chunks.len(), 3); // 120-word windows, 95-word step
         assert!(chunks[0].starts_with("w1 ") && chunks[0].ends_with("w120"));
+    }
+
+    #[test]
+    fn tabular_line_trailing_bom_is_trimmed_for_parity() {
+        // A mid-file U+FEFF (BOM/ZWNBSP) at a line end: Rust's char::is_whitespace
+        // doesn't strip it but JS `\s`/trim do, which would drift the twins. Both
+        // now trim it, so the chunk equals the BOM-free version byte-for-byte.
+        let with_bom = "region,amount\nNE,1\u{feff}\nNW,2\n";
+        let plain = "region,amount\nNE,1\nNW,2\n";
+        assert_eq!(chunk_texts_named("t.csv", with_bom), chunk_texts_named("t.csv", plain));
+        assert!(!chunk_texts_named("t.csv", with_bom)[0].contains('\u{feff}'));
     }
 }
