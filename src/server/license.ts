@@ -31,7 +31,7 @@
  */
 import crypto from "node:crypto";
 import path from "node:path";
-import { stateDir, readJson, writeJson } from "./config";
+import { appStateDir, readJson, writeJson } from "./config";
 import { getState as profileState } from "./profile";
 import { getAllVariants, assignBalancedVariants } from "./experiment";
 import type { Registration } from "./registration";
@@ -46,10 +46,12 @@ const TRIAL_DAYS = 14; // sign-in days a trial lasts
 const GRACE_DAYS = 14; // paid: grace window after paid_through before locking
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-const licensePath = () => path.join(stateDir(), "license.json");
-const identityPath = () => path.join(stateDir(), "identity.json");
-const contactIdPath = () => path.join(stateDir(), "contact.json");
-const launchPath = () => path.join(stateDir(), "launch.json");
+// License state is install-global (appStateDir), NOT per-vault: switching
+// vaults must not sign the user out. See config.appStateDir.
+const licensePath = () => path.join(appStateDir(), "license.json");
+const identityPath = () => path.join(appStateDir(), "identity.json");
+const contactIdPath = () => path.join(appStateDir(), "contact.json");
+const launchPath = () => path.join(appStateDir(), "launch.json");
 
 /**
  * A stable per-user contact id, generated once and kept across trials, locks,

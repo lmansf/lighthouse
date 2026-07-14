@@ -75,6 +75,23 @@ pub fn profile_path() -> PathBuf {
     state_dir().join("profile.json")
 }
 
+/// Install-global state (license, identity, contact, launch telemetry) that
+/// must persist across vault switches. A trial/subscription belongs to the
+/// user's install, not to whichever folder happens to be the vault — storing
+/// it in-vault meant "Choose vault folder…" re-pointed the engine at a folder
+/// with no license and silently signed the user out. Same rule the profile
+/// and connector credentials already follow (see profile_path/connectors_dir):
+/// the desktop shell sets LIGHTHOUSE_APP_STATE_DIR to its private data dir;
+/// web/dev falls back to the in-vault state dir for parity.
+pub fn app_state_dir() -> PathBuf {
+    if let Some(p) = env_trimmed("LIGHTHOUSE_APP_STATE_DIR") {
+        let dir = PathBuf::from(p);
+        let _ = fs::create_dir_all(&dir);
+        return dir;
+    }
+    state_dir()
+}
+
 /// Public Entra client id for the SharePoint connector (public PKCE-class
 /// client — carries no secret; overridable for self-hosters).
 pub fn sharepoint_client_id() -> String {

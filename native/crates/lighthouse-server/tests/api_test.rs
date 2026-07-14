@@ -238,8 +238,18 @@ async fn wire_protocol_end_to_end() {
         .unwrap();
     assert_eq!(p["step"], "done");
     assert_eq!(p["hasApiKey"], true, "key presence surfaces, never the key");
+    // 0.11: keys persist SEALED in the install-global secrets store, never as
+    // plaintext in profile.json (and so survive sign-out / vault switches).
     let raw = std::fs::read_to_string(vault_dir.path().join(".rag-vault/profile.json")).unwrap();
-    assert!(raw.contains("sk-test"), "key stored server-side");
+    assert!(!raw.contains("sk-test"), "raw key must not sit in profile.json");
+    let sealed =
+        std::fs::read_to_string(vault_dir.path().join(".rag-vault/secrets.json")).unwrap();
+    assert!(!sealed.contains("sk-test"), "raw key must not sit in secrets.json");
+    assert_eq!(
+        lighthouse_core::profile::resolved_key_for("anthropic").as_deref(),
+        Some("sk-test"),
+        "key resolvable by the engine at request time"
+    );
     assert!(
         !serde_json::to_string(&p).unwrap().contains("sk-test"),
         "key never in a response"

@@ -111,8 +111,13 @@ async function extractByExt(abs: string, ext: string): Promise<string> {
  * v7: matches the Rust engine's add-ocr-perception bump (images + scanned-PDF
  * OCR). PARITY: OCR is Rust-only — the dev twin has no ML runtime, so image
  * files stay name-match-only here — but the version moves in lockstep (v6 rule).
+ * v8: matches the Rust engine's docx bump (footnotes/endnotes/headers/footers,
+ * mc:Fallback dedup, dead-rels-target fallback). PARITY: this engine reads
+ * docx via mammoth, which already validates the main part and reads notes —
+ * the version moves in lockstep (v6 rule) and re-extracts docx files the Rust
+ * engine cached as (near-)empty.
  */
-const CACHE_VERSION = 7;
+const CACHE_VERSION = 8;
 
 interface CacheRecord {
   v: number;

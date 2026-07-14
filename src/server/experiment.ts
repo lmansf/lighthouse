@@ -2,8 +2,9 @@
  * A/B experiment variant assignment (desktop side).
  *
  * Two independent experiments, each resolved ONCE per install and persisted to
- * `.rag-vault/experiments.json` (the same readJson/writeJson + stateDir pattern
- * as identity/profile). Assignment is either a hard-coded pilot-user override
+ * `experiments.json` in the install-global app state dir (per-install
+ * semantics — a vault switch must not re-roll buckets; see config.appStateDir).
+ * Assignment is either a hard-coded pilot-user override
  * (by email) or a deterministic hash of the stable contact id, so a user's
  * bucket is stable across launches and the two experiments randomize
  * independently (each has its own salt).
@@ -13,10 +14,12 @@
  */
 import crypto from "node:crypto";
 import path from "node:path";
-import { stateDir, readJson, writeJson, profilePath } from "./config";
+import { appStateDir, readJson, writeJson, profilePath } from "./config";
 import { getContactId, callFn } from "./license";
 
-const identityPath = () => path.join(stateDir(), "identity.json");
+// Same file license.ts's identity ops write — must resolve identically.
+// Install-global (appStateDir): a vault switch must not re-roll buckets.
+const identityPath = () => path.join(appStateDir(), "identity.json");
 
 /**
  * The user's email, read straight from the stored profile / identity files.
@@ -85,7 +88,7 @@ const FIRST_USERS: Record<string, Variants> = {
   "user4@example.com": { onboarding: "key_first", default_inclusion: "opt_in" },
 };
 
-const experimentsPath = () => path.join(stateDir(), "experiments.json");
+const experimentsPath = () => path.join(appStateDir(), "experiments.json");
 
 /** Deterministic hash of a string to the unit interval [0, 1). */
 export function hashToUnit(s: string): number {

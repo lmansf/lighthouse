@@ -60,6 +60,9 @@ const MAX_PART_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_MAIN_XML_BYTES: u64 = 64 * 1024 * 1024;
 /// A deck with more parts than this is not a presentation, it's an attack.
 const MAX_PPTX_PARTS: usize = 2048;
+/// Word writes up to ~6 header/footer parts per section plus one footnotes +
+/// one endnotes part; hundreds means a hostile package, not a document.
+const MAX_DOCX_AUX_PARTS: usize = 512;
 
 /// Byte-cap (not char-cap) so multi-byte text can't slip past the budget.
 fn clamp(text: &str) -> String {
@@ -311,8 +314,12 @@ const OLE_MAGIC: &[u8] = &[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
 ///   - a legacy binary .doc renamed to .docx is an OLE container, not a zip —
 ///     route it to the .doc salvage instead of erroring;
 ///   - the main part is resolved from _rels/.rels (some generators write
-///     word/document2.xml), falling back to any word/document*.xml;
+///     word/document2.xml) and VERIFIED to exist, falling back to any
+///     word/document*.xml — a dead rels target must not zero the document;
+///   - footnotes/endnotes/headers/footers are read too (a footnote-heavy doc
+///     used to extract as its near-empty body, which then got cached);
 ///   - `<w:tab/>`/`<w:br/>`/`<w:cr/>` arrive as EMPTY events, not Start;
+///   - `mc:Fallback` duplicates of text boxes are skipped, not double-read;
 ///   - non-UTF-8 XML decodes lossily instead of failing the whole file.
 fn extract_docx(buf: &[u8]) -> anyhow::Result<String> {
     if buf.starts_with(OLE_MAGIC) {
@@ -329,23 +336,88 @@ fn extract_docx(buf: &[u8]) -> anyhow::Result<String> {
         .take(MAX_MAIN_XML_BYTES)
         .read_to_end(&mut raw)?;
     let xml = String::from_utf8_lossy(&raw);
+    let mut blocks = docx_runs(&xml)?;
 
-    let mut reader = quick_xml::Reader::from_str(&xml);
+    // Substance often lives OUTSIDE the main body: footnotes/endnotes (where
+    // an academic or legal doc keeps the actual content), headers/footers.
+    // A body that is just "Ouch." with ten pages of footnotes extracted empty
+    // before — and that empty WAS cached (0.10 field report class). Read the
+    // auxiliary parts too, body first so previews stay sane; a malformed aux
+    // member degrades to skipped instead of failing the whole document.
+    let mut aux: Vec<String> = archive
+        .file_names()
+        .filter(|n| {
+            n.starts_with("word/footnotes") && n.ends_with(".xml")
+                || n.starts_with("word/endnotes") && n.ends_with(".xml")
+                || n.starts_with("word/header") && n.ends_with(".xml")
+                || n.starts_with("word/footer") && n.ends_with(".xml")
+        })
+        .map(String::from)
+        .collect();
+    let rank = |n: &str| -> u8 {
+        if n.starts_with("word/footnotes") {
+            0
+        } else if n.starts_with("word/endnotes") {
+            1
+        } else if n.starts_with("word/header") {
+            2
+        } else {
+            3
+        }
+    };
+    aux.sort_by(|a, b| {
+        rank(a)
+            .cmp(&rank(b))
+            .then(part_number(a).cmp(&part_number(b)))
+    });
+    aux.truncate(MAX_DOCX_AUX_PARTS);
+    // Stop once the output budget is met (the final clamp cuts at
+    // MAX_EXTRACT_BYTES anyway) — bounds work on absurd or hostile files.
+    let mut total: usize = blocks.iter().map(|b| b.len()).sum();
+    for name in &aux {
+        if total >= MAX_EXTRACT_BYTES {
+            break;
+        }
+        if let Some(xml) = read_member(&mut archive, name, MAX_PART_BYTES) {
+            for p in docx_runs(&xml).unwrap_or_default() {
+                total += p.len();
+                blocks.push(p);
+            }
+        }
+    }
+    Ok(blocks.join("\n\n"))
+}
+
+/// Collect the text of every `<w:t>` run in a WordprocessingML part, breaking
+/// paragraphs on `</w:p>` and preserving explicit tabs/breaks. Content inside
+/// `<mc:Fallback>` is skipped: AlternateContent carries the SAME text twice
+/// (a modern `mc:Choice` drawing and a `v:textbox` fallback), so reading both
+/// double-counted every text box.
+fn docx_runs(xml: &str) -> anyhow::Result<Vec<String>> {
+    let mut reader = quick_xml::Reader::from_str(xml);
     let mut paragraphs: Vec<String> = Vec::new();
     let mut current = String::new();
     let mut in_text = false;
+    let mut fallback_depth = 0usize;
     loop {
         match reader.read_event() {
             Ok(quick_xml::events::Event::Start(e)) => {
                 let name = e.name();
                 let local = name.local_name();
-                if local.as_ref() == b"t" {
+                if local.as_ref() == b"Fallback" {
+                    fallback_depth += 1;
+                } else if fallback_depth > 0 {
+                    // swallow everything inside the duplicate branch
+                } else if local.as_ref() == b"t" {
                     in_text = true;
                 } else if local.as_ref() == b"tab" {
                     current.push('\t');
                 }
             }
             Ok(quick_xml::events::Event::Empty(e)) => {
+                if fallback_depth > 0 {
+                    continue;
+                }
                 // Self-closing run content: real Word files write tabs and
                 // line breaks this way, so only handling Start lost them.
                 match e.name().local_name().as_ref() {
@@ -357,14 +429,21 @@ fn extract_docx(buf: &[u8]) -> anyhow::Result<String> {
             Ok(quick_xml::events::Event::End(e)) => {
                 let name = e.name();
                 let local = name.local_name();
-                if local.as_ref() == b"t" {
+                if local.as_ref() == b"Fallback" {
+                    fallback_depth = fallback_depth.saturating_sub(1);
+                } else if fallback_depth > 0 {
+                    // still inside the duplicate branch
+                } else if local.as_ref() == b"t" {
                     in_text = false;
                 } else if local.as_ref() == b"p" {
-                    paragraphs.push(std::mem::take(&mut current));
+                    let p = std::mem::take(&mut current);
+                    if !p.trim().is_empty() {
+                        paragraphs.push(p);
+                    }
                 }
             }
             Ok(quick_xml::events::Event::Text(t)) => {
-                if in_text {
+                if in_text && fallback_depth == 0 {
                     current.push_str(&t.unescape().unwrap_or_default());
                 }
             }
@@ -373,16 +452,16 @@ fn extract_docx(buf: &[u8]) -> anyhow::Result<String> {
             _ => {}
         }
     }
-    if !current.is_empty() {
+    if !current.trim().is_empty() {
         paragraphs.push(current);
     }
-    Ok(paragraphs.join("\n\n"))
+    Ok(paragraphs)
 }
 
 /// The package's main document part: resolved from `_rels/.rels` when present
 /// (the officeDocument relationship — some generators target
-/// word/document2.xml), else `word/document.xml`, else the first
-/// `word/document*.xml` member.
+/// word/document2.xml) and only trusted when the target actually exists,
+/// else `word/document.xml`, else the first `word/document*.xml` member.
 fn docx_main_part<R: std::io::Read + std::io::Seek>(archive: &mut zip::ZipArchive<R>) -> String {
     let mut rels = String::new();
     let read_ok = archive
@@ -408,8 +487,17 @@ fn docx_main_part<R: std::io::Read + std::io::Seek>(archive: &mut zip::ZipArchiv
                             }
                         }
                         if is_doc {
+                            // Trust the rels target ONLY if it actually exists
+                            // in the archive: a stale/oddly-encoded target used
+                            // to hard-fail the whole document at by_name (the
+                            // "text-heavy docx extracts empty" class) — fall
+                            // through to the name-based fallbacks instead.
                             if let Some(t) = target {
-                                return t.trim_start_matches('/').to_string();
+                                let t = t.trim_start_matches('/').to_string();
+                                if archive.by_name(&t).is_ok() {
+                                    return t;
+                                }
+                                break;
                             }
                         }
                     }
@@ -1175,7 +1263,11 @@ fn extract_by_ext(abs: &Path, ext: &str) -> anyhow::Result<String> {
 /// v7: images extract via OCR and scanned PDFs get an OCR fallback. The bump
 ///     also re-extracts every pre-0.10 image-only PDF that was legitimately
 ///     cached as empty, curing them without user action.
-const CACHE_VERSION: u32 = 7;
+/// v8: docx reads footnotes/endnotes/headers/footers, dedups mc:Fallback text
+///     boxes, and survives a dead rels main-part target. The bump re-extracts
+///     footnote/notes-heavy docx files that v7 legitimately cached as (near-)
+///     empty, curing them without user action.
+const CACHE_VERSION: u32 = 8;
 
 #[derive(Serialize, Deserialize)]
 struct CacheRecord {
@@ -1435,6 +1527,102 @@ mod docx_tests {
     #[test]
     fn garbage_bytes_error_instead_of_passing_as_empty() {
         assert!(extract_docx(b"this is not a word file at all").is_err());
+    }
+
+    /// A footnote-heavy document (near-empty body, substance in
+    /// word/footnotes.xml) used to extract as just the body — and that
+    /// near-empty WAS cached. The 0.10 field report class.
+    #[test]
+    fn footnote_and_endnote_text_is_extracted() {
+        let body = r#"<?xml version="1.0"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+ <w:body><w:p><w:r><w:t>See notes.</w:t></w:r></w:p></w:body>
+</w:document>"#;
+        let notes = r#"<?xml version="1.0"?>
+<w:footnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+ <w:footnote><w:p><w:r><w:t>The retention window is 90 days per policy.</w:t></w:r></w:p></w:footnote>
+</w:footnotes>"#;
+        let ends = r#"<?xml version="1.0"?>
+<w:endnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+ <w:endnote><w:p><w:r><w:t>Escalate to the on-call director.</w:t></w:r></w:p></w:endnote>
+</w:endnotes>"#;
+        let buf = zip_of(&[
+            ("word/document.xml", body),
+            ("word/footnotes.xml", notes),
+            ("word/endnotes.xml", ends),
+        ]);
+        let text = extract_docx(&buf).unwrap();
+        assert!(text.contains("See notes."), "{text:?}");
+        assert!(text.contains("retention window is 90 days"), "{text:?}");
+        assert!(
+            text.contains("Escalate to the on-call director"),
+            "{text:?}"
+        );
+        // Body first, notes after — previews stay anchored on the body.
+        assert!(
+            text.find("See notes.").unwrap() < text.find("retention window").unwrap(),
+            "{text:?}"
+        );
+    }
+
+    #[test]
+    fn header_and_footer_text_is_extracted() {
+        let body = r#"<?xml version="1.0"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+ <w:body><w:p><w:r><w:t>Body line.</w:t></w:r></w:p></w:body>
+</w:document>"#;
+        let header = r#"<?xml version="1.0"?>
+<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+ <w:p><w:r><w:t>ACME Incident Response SOP</w:t></w:r></w:p>
+</w:hdr>"#;
+        let footer = r#"<?xml version="1.0"?>
+<w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+ <w:p><w:r><w:t>Confidential — internal use only</w:t></w:r></w:p>
+</w:ftr>"#;
+        let buf = zip_of(&[
+            ("word/document.xml", body),
+            ("word/header1.xml", header),
+            ("word/footer1.xml", footer),
+        ]);
+        let text = extract_docx(&buf).unwrap();
+        assert!(text.contains("ACME Incident Response SOP"), "{text:?}");
+        assert!(
+            text.contains("Confidential — internal use only"),
+            "{text:?}"
+        );
+    }
+
+    /// A rels officeDocument Target that doesn't exist in the archive used to
+    /// hard-fail the WHOLE document at by_name — the "text-heavy docx says it
+    /// can't be read" class. The resolver must fall back to the real part.
+    #[test]
+    fn a_dead_rels_target_falls_back_to_the_real_main_part() {
+        let rels = r#"<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+ <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="/word/document9.xml"/>
+</Relationships>"#;
+        let buf = zip_of(&[("_rels/.rels", rels), ("word/document.xml", DOC_XML)]);
+        let text = extract_docx(&buf).unwrap();
+        assert!(text.contains("open the importer"), "{text:?}");
+    }
+
+    /// mc:AlternateContent carries a text box TWICE (modern mc:Choice drawing
+    /// + legacy v:textbox mc:Fallback). Reading both double-counted it.
+    #[test]
+    fn alternate_content_text_boxes_are_not_read_twice() {
+        let body = r#"<?xml version="1.0"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006">
+ <w:body>
+  <w:p><mc:AlternateContent>
+   <mc:Choice Requires="wps"><w:r><w:t>Datum plane</w:t></w:r></mc:Choice>
+   <mc:Fallback><w:r><w:t>Datum plane</w:t></w:r></mc:Fallback>
+  </mc:AlternateContent></w:p>
+ </w:body>
+</w:document>"#;
+        let buf = zip_of(&[("word/document.xml", body)]);
+        let text = extract_docx(&buf).unwrap();
+        assert_eq!(text.matches("Datum plane").count(), 1, "{text:?}");
     }
 }
 

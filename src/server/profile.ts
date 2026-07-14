@@ -1,14 +1,17 @@
 /**
- * Local profile + onboarding state, persisted to `.rag-vault/profile.json`.
+ * Local profile + onboarding state, persisted to `profile.json`.
  *
  * RAG Vault is a single-user standalone app, so "auth" is just a locally-stored
- * profile plus the chosen model provider/key. The API key never leaves the
- * machine and is never returned to the client (only `hasApiKey` is exposed).
+ * profile plus the chosen model provider/key. Provider API keys are persisted
+ * separately in the encrypted install-global secrets store (./secrets) — they
+ * survive sign-out and vault switches, never leave the machine, and are never
+ * returned to the client (only `hasApiKey` / `keyedProviders`).
  */
 import type { OnboardingState, User } from "@/contracts";
 import { profilePath, readJson, writeJson } from "./config";
 import { getVariant } from "./experiment";
 import { REMOTE_PROVIDERS, remoteProvider } from "./llm";
+import { getProviderKey, setProviderKey } from "./secrets";
 
 /** Local model provider (key-less, runs on-device) used by the play_first flow. */
 const LOCAL_PROVIDER_ID = "local";
@@ -16,15 +19,16 @@ const LOCAL_MODEL_ID = "lighthouse-local";
 
 interface StoredProfile extends OnboardingState {
   /**
-   * Legacy single key slot from builds that offered one keyed provider
-   * (Anthropic). Kept in sync with `apiKeys["anthropic"]` so a downgrade to an
-   * older build still finds its key. Server-side only.
+   * LEGACY, read-only: single plaintext key slot from the one-provider
+   * (Anthropic) era. Migrated into the encrypted secrets store on load and
+   * stripped from disk; never written non-empty again.
    */
   apiKey?: string;
   /**
-   * One stored key per keyed provider, so switching providers never hands one
-   * vendor's key to another. Server-side only; surfaced to the client solely
-   * as `hasApiKey` + `keyedProviders` (never the keys themselves).
+   * LEGACY, read-only: the pre-0.11 plaintext per-provider key map. Migrated
+   * into the encrypted install-global secrets store (./secrets) on load and
+   * stripped from disk. Keys are surfaced to the client solely as `hasApiKey`
+   * + `keyedProviders`, never raw.
    */
   apiKeys?: Record<string, string>;
   /** Whether the user has ever explicitly saved a model choice (server-only).
@@ -85,6 +89,19 @@ function load(): StoredProfile {
       p = { ...p, apiKeys: { anthropic: p.apiKey } };
       dirty = true;
     }
+  }
+  // One-time migration: plaintext keys move out of profile.json into the
+  // encrypted install-global secrets store (./secrets) and the plaintext
+  // copies are stripped from disk. Existing sealed values win so an old
+  // profile restored from backup can't clobber newer keys. After this,
+  // profile.json never carries a raw key again (and sign-out — which resets
+  // the profile — no longer discards them).
+  if (p.apiKeys && Object.keys(p.apiKeys).length > 0) {
+    for (const [id, k] of Object.entries(p.apiKeys)) {
+      if (k && !getProviderKey(id)) setProviderKey(id, k);
+    }
+    p = { ...p, apiKeys: undefined, apiKey: undefined };
+    dirty = true;
   }
   if (p.providerId && !KNOWN_PROVIDER_IDS.has(p.providerId)) {
     p = { ...p, providerId: LOCAL_PROVIDER_ID, modelId: LOCAL_MODEL_ID };
@@ -197,18 +214,19 @@ export function selectModel(
   const key = apiKey.trim();
   const initial = !p.modelEverSelected;
   const changed = p.providerId !== providerId || p.modelId !== modelId;
-  // A pasted key is stored under the provider it was pasted FOR; an empty
-  // field keeps that provider's existing key (switch model w/o re-pasting).
-  const apiKeys = { ...(p.apiKeys ?? {}) };
-  if (key && providerId !== LOCAL_PROVIDER_ID) apiKeys[providerId] = key;
+  // A pasted key is stored under the provider it was pasted FOR — sealed in
+  // the install-global secrets store (./secrets), never in this file. An
+  // empty field keeps that provider's existing key (switch model w/o
+  // re-pasting).
+  if (key && providerId !== LOCAL_PROVIDER_ID) setProviderKey(providerId, key);
   save({
     ...p,
     providerId,
     modelId,
-    apiKeys,
-    // Legacy slot mirrors the anthropic key so a downgraded build still
-    // answers with it (older builds read only this field).
-    apiKey: apiKeys["anthropic"] || p.apiKey,
+    // Raw keys no longer live in profile.json (see load()'s migration); the
+    // legacy fields stay declared read-only for old files.
+    apiKeys: undefined,
+    apiKey: undefined,
     hasApiKey: Boolean(key) || p.hasApiKey,
     step: "done",
     modelEverSelected: true,
@@ -228,6 +246,10 @@ export function completeOnboarding(): void {
 }
 
 export function signOut(): void {
+  // Resets identity/onboarding only. Provider API keys live in the
+  // install-global secrets store and deliberately SURVIVE sign-out — they are
+  // app credentials, not identity (pre-0.11 they sat in this file and were
+  // silently discarded here, forcing a re-paste after every sign-out).
   save({ ...EMPTY });
 }
 
@@ -268,6 +290,11 @@ function resolveKey(providerId: string, p: StoredProfile): string | null {
     const k = envVarKey("GOOGLE_API_KEY");
     if (k) return k;
   }
+  // The persisted home: the encrypted install-global secrets store.
+  const sealed = getProviderKey(providerId);
+  if (sealed) return sealed;
+  // Transient safety net for a profile object read before load()'s migration
+  // stripped its plaintext fields (normally both are empty).
   const stored = p.apiKeys?.[providerId];
   if (stored) return stored;
   if (providerId === "anthropic" && p.apiKey) return p.apiKey;
