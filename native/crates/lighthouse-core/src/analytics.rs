@@ -925,6 +925,15 @@ const CHART_MAX_SERIES: usize = 3;
 /// (dates / YYYY-MM / years): area for a single metric, line for several;
 /// bar otherwise. None = "not a chart" — answers degrade to the table alone,
 /// never to a wrong drawing.
+///
+/// Kinds are deliberately limited to bar / line / area. Stacked bar and
+/// scatter are NOT emitted: stacking implies a part-of-whole SUM relationship
+/// the engine can't safely infer from an arbitrary GROUP BY (stacking
+/// independent metrics would state a falsehood), and scatter needs a numeric
+/// x-axis, but this pipeline's x is always a categorical/temporal label. Both
+/// would trade the "never draw a claim the data doesn't make" guarantee for a
+/// visual — so grouped bar covers the multi-series case and the table carries
+/// the rest.
 pub fn chart_spec_from_batches(batches: &[RecordBatch]) -> Option<String> {
     let first = batches.iter().find(|b| b.num_columns() > 0)?;
     let schema = first.schema();
