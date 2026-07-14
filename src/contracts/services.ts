@@ -16,6 +16,8 @@ import type {
   Pin,
   PolicySnapshot,
   EgressSnapshot,
+  AuditSnapshot,
+  AuditVerdict,
   RagReference,
   RestoreToken,
   User,
@@ -146,6 +148,24 @@ export interface RagService {
    * local" / "N requests to <host>") and its detail panel.
    */
   egress(): Promise<EgressSnapshot>;
+  /**
+   * Recent audit records (openspec: add-audit-log) plus the enabled + chain-
+   * intact verdict, newest first. `limit` caps how many records come back
+   * (default 100). Backs the audit-log viewer under Settings.
+   */
+  audit(limit?: number): Promise<AuditSnapshot>;
+  /**
+   * Explicitly verify the audit chain — `intact` plus the first broken index
+   * when tampered. The viewer calls this behind its "Verify integrity" action;
+   * the TS twin has no chain and always reports intact (PARITY).
+   */
+  auditVerify(): Promise<AuditVerdict>;
+  /**
+   * Export the current audit log to a CSV file inside the vault (via the same
+   * sanitized artifact-write path as chat export), returning the new file's id
+   * and name, or an `error` string on failure.
+   */
+  auditExport(): Promise<{ savedId?: string; savedName?: string; error?: string }>;
 }
 
 /** Registration / sign-in. Mocked now; swap for a real identity provider later. */

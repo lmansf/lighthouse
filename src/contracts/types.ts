@@ -87,6 +87,47 @@ export interface EgressSnapshot {
   }[];
 }
 
+/**
+ * One durable audit record (openspec: add-audit-log) — what the AI read, what
+ * left the machine, and when, for a single answered question. Shape mirrors the
+ * engines (audit.rs / src/server/audit.ts). The verbatim `question` is present
+ * ONLY when the maintainer opted into it; otherwise just the sha256. `egress`
+ * is `["none"]` for a fully local answer, else the hosts this question dialed.
+ * The HMAC chain fields the Rust engine writes are engine-internal and omitted
+ * here — the UI never renders them (the twin doesn't write them: PARITY).
+ */
+export interface AuditRecord {
+  ts: number;
+  questionSha256: string;
+  question?: string;
+  fileIds: string[];
+  provider: string;
+  egress: string[];
+  artifacts: string[];
+}
+
+/**
+ * The audit viewer's payload: whether logging is on, whether the chain still
+ * verifies (`intact` is always true on the no-HMAC TS twin — PARITY), and the
+ * most recent records newest-first.
+ */
+export interface AuditSnapshot {
+  enabled: boolean;
+  intact: boolean;
+  records: AuditRecord[];
+}
+
+/**
+ * Result of an explicit chain verification: `intact` plus, when broken, the
+ * 0-based index of the first record that fails (`breakAt: -1` when intact).
+ * `count` is the number of records checked before the break (or in total).
+ */
+export interface AuditVerdict {
+  intact: boolean;
+  breakAt: number;
+  count: number;
+}
+
 /** A model provider the user can pick during onboarding. */
 export interface ModelProvider {
   id: string;

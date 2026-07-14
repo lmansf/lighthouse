@@ -18,6 +18,7 @@ import { isSameOrigin } from "@/server/http";
 import { isDesktopApp } from "@/server/config";
 import { policySnapshot } from "@/server/policy";
 import { egressSnapshot } from "@/server/egress";
+import { recentAudit, verifyActiveAudit, exportCsvAudit } from "@/server/audit";
 import { writeArtifact } from "@/server/vault";
 import { addPin, listPins, removePin } from "@/server/pins";
 
@@ -235,6 +236,32 @@ export async function POST(req: Request) {
     // Session egress snapshot (S3); the header shield renders "All local" / "N to <host>".
     case "egress":
       return NextResponse.json(egressSnapshot());
+
+    // Local audit log (openspec: add-audit-log). List/verify are read-only;
+    // export writes a CSV into the vault via the same writeArtifact helper as
+    // exportChat. The twin has no HMAC chain, so verify always reports intact.
+    case "auditList": {
+      const limit = typeof body.limit === "number" ? body.limit : 100;
+      return NextResponse.json(recentAudit(limit));
+    }
+
+    case "auditVerify":
+      return NextResponse.json(verifyActiveAudit());
+
+    case "auditExport":
+      try {
+        const { id, name } = writeArtifact(
+          "Lighthouse Notes",
+          "Audit Log",
+          "csv",
+          Buffer.from(exportCsvAudit(), "utf8"),
+        );
+        return NextResponse.json({ savedId: id, savedName: name });
+      } catch (err) {
+        return NextResponse.json({
+          error: err instanceof Error ? err.message : "could not write the audit log",
+        });
+      }
 
     default:
       return NextResponse.json({ error: "unknown op" }, { status: 400 });

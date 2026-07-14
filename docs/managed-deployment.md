@@ -47,7 +47,7 @@ the UI shows a managed-configuration error.
 | `widgetHotkeys` | `"off"` | The Whisper keyboard hook and the summon shortcut are **never installed** (relevant to EDR posture — see docs/edr-whitelisting.md). |
 | `ocr` | `"off"` | Image/scan text extraction is disabled (returns empty, uncached — flipping policy later re-reads with no cache surgery). |
 | `notifications` | `"off"` | The app emits no OS notifications. |
-| `auditLog` | `"on"` | Forces the local audit log on and locks the preference (see add-audit-log). |
+| `auditLog` | `"on"` | Forces the local audit log on and locks the preference. One local, 0600, HMAC-chained JSONL record per answered question — files read, provider, and the hosts that question dialed — written under the app-state `audit/` dir and never uploaded; editing/deleting a record breaks verification from that point. Record shape + tamper model: docs/data-flows.md §9 and `openspec/changes/add-audit-log/design.md`. |
 | `vaultRoots` | list of absolute path prefixes | The vault folder and linked files/folders must live under one of these prefixes (symlinks resolved; prefix matches only at path-component boundaries — `/srv/vaults` does not admit `/srv/vaults-evil`). A stored vault outside the roots is not applied at boot; the app falls back to an allowed location, files untouched. |
 
 Unknown keys are ignored (forward compatibility). Unknown `v` values fail

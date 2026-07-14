@@ -6,6 +6,8 @@ import type {
   Pin,
   PolicySnapshot,
   EgressSnapshot,
+  AuditSnapshot,
+  AuditVerdict,
   RagReference,
   RestoreToken,
 } from "../types";
@@ -271,6 +273,19 @@ class MockRagService implements RagService {
   async egress(): Promise<EgressSnapshot> {
     // The mock never dials out — always "All local".
     return { total: 0, destinations: [] };
+  }
+
+  async audit(_limit?: number): Promise<AuditSnapshot> {
+    // The mock never writes an audit log — disabled and empty.
+    return { enabled: false, intact: true, records: [] };
+  }
+
+  async auditVerify(): Promise<AuditVerdict> {
+    return { intact: true, breakAt: -1, count: 0 };
+  }
+
+  async auditExport(): Promise<{ savedId?: string; savedName?: string; error?: string }> {
+    return { error: "audit log is disabled" };
   }
 
   /** A node plus all of its descendants (so toggling a folder cascades). */

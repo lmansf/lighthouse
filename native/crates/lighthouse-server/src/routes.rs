@@ -269,6 +269,39 @@ pub async fn rag_post(headers: HeaderMap, body: Option<Json<Value>>) -> Response
         // Session egress snapshot (S3) — what has left this machine this
         // session; the header shield renders "All local" / "N to <host>".
         Some("egress") => Json(lighthouse_core::egress::snapshot()).into_response(),
+        // Local audit log (openspec: add-audit-log) — the durable record the
+        // session egress panel is a live window onto. List/verify are read-only;
+        // export writes a CSV into the vault via the same sanitized helper as
+        // exportChat, returning its id.
+        Some("auditList") => {
+            let limit = body["limit"].as_u64().unwrap_or(100) as usize;
+            return Json(lighthouse_core::audit::recent(limit)).into_response();
+        }
+        Some("auditVerify") => {
+            return Json(lighthouse_core::audit::verify_active()).into_response();
+        }
+        Some("auditExport") => {
+            let csv = tokio::task::spawn_blocking(lighthouse_core::audit::export_csv)
+                .await
+                .unwrap_or_default();
+            let written = tokio::task::spawn_blocking(move || {
+                lighthouse_core::vault::write_artifact(
+                    "Lighthouse Notes",
+                    "Audit Log",
+                    "csv",
+                    csv.as_bytes(),
+                )
+            })
+            .await
+            .map_err(|e| e.to_string())
+            .and_then(|r| r.map_err(|e| e.to_string()));
+            return match written {
+                Ok((id, name)) => {
+                    Json(json!({ "savedId": id, "savedName": name })).into_response()
+                }
+                Err(e) => Json(json!({ "error": e })).into_response(),
+            };
+        }
         _ => bad_request("unknown op"),
     }
 }
@@ -945,6 +978,7 @@ pub async fn settings_get() -> Response {
         "semanticSearch": s.semantic_search != Some(false), // default on
         "backgroundConserve": s.background_conserve != Some(false), // default on
         "ocrEnabled": s.ocr_enabled != Some(false), // default on
+        "auditEnabled": s.audit_enabled == Some(true), // opt-in, default off
     }))
     .into_response()
 }

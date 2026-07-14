@@ -263,6 +263,52 @@ pub fn recent(limit: usize) -> serde_json::Value {
     })
 }
 
+/// Verify the active (current-month) file. `{ intact, breakAt, count }` where
+/// `breakAt` is -1 when intact — backs the viewer's tamper badge and a
+/// dedicated `auditVerify` op (the private path stays encapsulated here).
+pub fn verify_active() -> serde_json::Value {
+    let path = audit_path();
+    match verify(&path) {
+        Ok(n) => serde_json::json!({ "intact": true, "breakAt": -1, "count": n }),
+        Err(i) => serde_json::json!({ "intact": false, "breakAt": i as i64, "count": i }),
+    }
+}
+
+/// The full active-month log as CSV, for the security director's records.
+/// Only the reporting fields — the HMAC chain columns verify integrity, they
+/// aren't data to hand out. Verbatim question is emitted only where stored.
+pub fn export_csv() -> String {
+    let path = audit_path();
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut out = String::from("ts,provider,fileIds,egress,artifacts,question\n");
+    for line in text.lines() {
+        let Ok(rec) = serde_json::from_str::<AuditRecord>(line) else {
+            continue;
+        };
+        let row = [
+            rec.ts.to_string(),
+            csv_field(&rec.provider),
+            csv_field(&rec.file_ids.join(";")),
+            csv_field(&rec.egress.join(";")),
+            csv_field(&rec.artifacts.join(";")),
+            csv_field(rec.question.as_deref().unwrap_or("")),
+        ];
+        out.push_str(&row.join(","));
+        out.push('\n');
+    }
+    out
+}
+
+/// Minimal RFC-4180 field escaping: quote when the value holds a comma, quote,
+/// CR, or LF, doubling any inner quote.
+fn csv_field(s: &str) -> String {
+    if s.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -363,5 +409,48 @@ mod tests {
         let snap = recent(10);
         let stored = snap["records"][0]["question"].as_str();
         assert_eq!(stored, Some("secret question text"), "verbatim stored when opted in");
+    }
+
+    #[test]
+    fn answer_audit_records_only_hosts_dialed_during_the_answer() {
+        let _c = setup(true);
+        // Start capturing, dial a sentinel host mid-answer, then finish. We assert
+        // membership of OUR sentinel (never recorded by any other test), so the
+        // shared process-global egress registry can't make this flaky.
+        let a = AnswerAudit::start("cloud question");
+        crate::egress::record("https://audit-sentinel.example/v1", crate::egress::PURPOSE_AI_PROVIDER);
+        a.finish("openai", vec!["budget.md".into()], vec![]);
+
+        let snap = recent(1);
+        let hosts: Vec<&str> = snap["records"][0]["egress"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(
+            hosts.contains(&"audit-sentinel.example"),
+            "the host dialed during the answer is recorded: {hosts:?}"
+        );
+        assert_eq!(snap["records"][0]["provider"], "openai");
+    }
+
+    #[test]
+    fn policy_forces_on_with_pref_off() {
+        // The pref is OFF (setup(false) seeds auditEnabled absent)…
+        let c = setup(false);
+        assert!(!enabled(), "off by default when neither pref nor policy enables it");
+        // …but a managed policy that forces the log on flips enabled().
+        let pol = c._dir.path().join("policy.json");
+        std::fs::write(&pol, r#"{"auditLog":"on"}"#).unwrap();
+        std::env::set_var("LIGHTHOUSE_POLICY_FILE", &pol);
+        crate::policy::reset_for_tests();
+
+        assert!(enabled(), "policy auditLog:on forces the log on even with the pref off");
+        append(input("forced by policy", "local", vec![]));
+        assert_eq!(verify(&c.file), Ok(1), "a record is written under the forcing policy");
+
+        std::env::remove_var("LIGHTHOUSE_POLICY_FILE");
+        crate::policy::reset_for_tests();
     }
 }

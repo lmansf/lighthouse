@@ -7,6 +7,8 @@ import type {
   Pin,
   PolicySnapshot,
   EgressSnapshot,
+  AuditSnapshot,
+  AuditVerdict,
   RagReference,
   RestoreToken,
 } from "../types";
@@ -170,6 +172,22 @@ class RealRagService implements RagService {
 
   async egress(): Promise<EgressSnapshot> {
     return (await post({ op: "egress" })) as unknown as EgressSnapshot;
+  }
+
+  async audit(limit?: number): Promise<AuditSnapshot> {
+    return (await post({ op: "auditList", limit })) as unknown as AuditSnapshot;
+  }
+
+  async auditVerify(): Promise<AuditVerdict> {
+    return (await post({ op: "auditVerify" })) as unknown as AuditVerdict;
+  }
+
+  async auditExport(): Promise<{ savedId?: string; savedName?: string; error?: string }> {
+    return (await post({ op: "auditExport" })) as unknown as {
+      savedId?: string;
+      savedName?: string;
+      error?: string;
+    };
   }
 }
 

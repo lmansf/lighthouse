@@ -291,6 +291,37 @@ pub async fn rag_op(app: AppHandle, body: Value) -> Result<Value, String> {
         // Session egress snapshot (S3) — what has left this machine this
         // session; the header shield renders "All local" / "N to <host>".
         Some("egress") => Ok(lighthouse_core::egress::snapshot()),
+        // Local audit log (openspec: add-audit-log) — durable record behind the
+        // session egress panel. List/verify read-only; export writes a CSV into
+        // the vault via the same sanitized helper as exportChat.
+        Some("auditList") => {
+            let limit = body["limit"].as_u64().unwrap_or(100) as usize;
+            Ok(lighthouse_core::audit::recent(limit))
+        }
+        Some("auditVerify") => Ok(lighthouse_core::audit::verify_active()),
+        Some("auditExport") => {
+            let csv = tokio::task::spawn_blocking(lighthouse_core::audit::export_csv)
+                .await
+                .unwrap_or_default();
+            let written = tokio::task::spawn_blocking(move || {
+                lighthouse_core::vault::write_artifact(
+                    "Lighthouse Notes",
+                    "Audit Log",
+                    "csv",
+                    csv.as_bytes(),
+                )
+            })
+            .await
+            .map_err(|e| e.to_string())
+            .and_then(|r| r.map_err(|e| e.to_string()));
+            Ok(match written {
+                Ok((id, name)) => {
+                    let _ = app.emit("vault-changed", ());
+                    json!({ "savedId": id, "savedName": name })
+                }
+                Err(e) => json!({ "error": e }),
+            })
+        }
         _ => Err("unknown op".into()),
     }
 }
@@ -710,6 +741,7 @@ pub fn settings_get(app: AppHandle) -> Value {
         "semanticSearch": s.semantic_search != Some(false), // default on (B2)
         "backgroundConserve": s.background_conserve != Some(false), // default on
         "ocrEnabled": s.ocr_enabled != Some(false), // default on (add-ocr-perception)
+        "auditEnabled": s.audit_enabled == Some(true), // opt-in, default off (add-audit-log)
     })
 }
 

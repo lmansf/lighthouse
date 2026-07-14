@@ -67,6 +67,31 @@ export function egressSnapshot(): {
   return { total: rows.reduce((n, r) => n + r.count, 0), destinations: rows };
 }
 
+/** Per-host total request counts (host → count). The audit log snapshots this
+ *  before an answer and diffs after, so a host whose count rose is an egress for
+ *  that specific question. PARITY: host_counts() in egress.rs. */
+export function hostCounts(): Map<string, number> {
+  const out = new Map<string, number>();
+  for (const [key, e] of registry.entries()) {
+    const host = key.slice(0, key.indexOf("\n"));
+    out.set(host, (out.get(host) ?? 0) + e.count);
+  }
+  return out;
+}
+
+/** Hosts whose request count rose between `before` and now — the egress
+ *  attributable to one question. Sorted for a stable record. PARITY:
+ *  hosts_since() in egress.rs. */
+export function hostsSince(before: Map<string, number>): string[] {
+  const now = hostCounts();
+  const hosts: string[] = [];
+  for (const [host, count] of now.entries()) {
+    if (count > (before.get(host) ?? 0)) hosts.push(host);
+  }
+  hosts.sort();
+  return hosts;
+}
+
 /** Test seam: clear the session registry. */
 export function resetEgressForTests(): void {
   registry.clear();

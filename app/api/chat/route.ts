@@ -6,6 +6,7 @@ import type { ChatChunk, ChatTurn } from "@/contracts";
 import { answerPipeline } from "@/server/synth";
 import { modelConfig } from "@/server/profile";
 import { isSameOrigin } from "@/server/http";
+import { beginAudit, finishAudit } from "@/server/audit";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -43,8 +44,16 @@ export async function POST(req: Request) {
   const encoder = new TextEncoder();
   const line = (c: ChatChunk) => encoder.encode(JSON.stringify(c) + "\n");
 
+  // Audit choke point (openspec: add-audit-log): snapshot the egress baseline
+  // before the answer, then record what this question read + which hosts it
+  // dialed once the final chunk lands. PARITY: chat_post in routes.rs.
+  const egressBefore = beginAudit();
+  const provider = cfg.providerId ?? "none";
+
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
+      let finalFiles: string[] = [];
+      let artifacts: string[] = [];
       try {
         for await (const chunk of answerPipeline(
           question,
@@ -53,8 +62,14 @@ export async function POST(req: Request) {
           history,
           cfg,
         )) {
+          if (chunk.done) {
+            if (chunk.references) finalFiles = chunk.references.map((r) => r.fileId);
+            if (chunk.analytics?.fileIds) artifacts = chunk.analytics.fileIds;
+          }
           controller.enqueue(line(chunk));
         }
+        // Best-effort, after the user has the answer; no-op when logging is off.
+        finishAudit(egressBefore, { question, provider, fileIds: finalFiles, artifacts });
       } catch (err) {
         controller.enqueue(
           line({ delta: `\n\n_(error: ${err instanceof Error ? err.message : "unknown"})_`, done: false }),

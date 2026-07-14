@@ -240,6 +240,7 @@ async function route(
             backgroundConserve:
               typeof body.backgroundConserve === "boolean" ? body.backgroundConserve : null,
             ocrEnabled: typeof body.ocrEnabled === "boolean" ? body.ocrEnabled : null,
+            auditEnabled: typeof body.auditEnabled === "boolean" ? body.auditEnabled : null,
           });
     default:
       return json({ error: "unknown route" }, 404);

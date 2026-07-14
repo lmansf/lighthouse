@@ -113,6 +113,14 @@ export function historyAllowed(): boolean {
   return !(s.kind === "active" && s.policy.chatHistory === "off");
 }
 
+/** True when an org policy forces the local audit log on (`auditLog: "on"`).
+ *  Only an ACTIVE policy forces it — a malformed/absent policy does not (PARITY:
+ *  audit_forced_on() in policy.rs). */
+export function auditForcedOn(): boolean {
+  const s = state();
+  return s.kind === "active" && s.policy.auditLog === "on";
+}
+
 /** The {op:"policy"} payload — byte-shape mirror of policy.rs snapshot(). */
 export function policySnapshot(): unknown {
   const s = state();
