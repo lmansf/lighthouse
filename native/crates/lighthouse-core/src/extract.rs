@@ -22,10 +22,20 @@ use crate::config::state_dir;
 // are likewise Rust-only for now: the shipping desktop engine reads them; the
 // TS twin has no zip/rtf parser without new npm deps, so it leaves them
 // name-match-only. Adding these was purely additive — none was ever in
-// TEXT_EXT, so no previously-indexed file changes behavior.
+// TEXT_EXT, so no previously-indexed file changes behavior. The image formats
+// (add-ocr-perception) are likewise Rust-only: their text comes from the
+// bundled OCR models, which the TS twin doesn't carry.
 const RICH_EXT: &[&str] = &[
     ".pdf", ".doc", ".docx", ".xlsx", ".xlsm", ".xls", ".parquet", ".pptx", ".odt", ".odp", ".rtf",
+    ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff",
 ];
+
+/// Raster formats whose text comes from OCR (subset of RICH_EXT).
+const OCR_IMAGE_EXT: &[&str] = &[".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"];
+
+fn is_ocr_image_ext(ext: &str) -> bool {
+    OCR_IMAGE_EXT.contains(&ext)
+}
 
 pub fn is_rich_file(name: &str) -> bool {
     let ext = match name.rsplit_once('.') {
@@ -70,6 +80,208 @@ fn extract_pdf(buf: &[u8]) -> anyhow::Result<String> {
         Ok(Err(e)) => Err(anyhow::anyhow!(e.to_string())),
         Err(_) => Err(anyhow::anyhow!("pdf parser panicked")),
     }
+}
+
+/// Image files: decode and OCR (add-ocr-perception). `OcrUnavailable` (toggle
+/// off, models missing) propagates so extract_rich_text skips caching and the
+/// file self-heals on a later scan.
+fn extract_image(abs: &Path) -> anyhow::Result<String> {
+    if !crate::ocr::available() {
+        // Before decoding: while OCR is off, scans shouldn't pay decode cost.
+        return Err(anyhow::Error::new(crate::ocr::OcrUnavailable));
+    }
+    let img = image::load_from_memory(&fs::read(abs)?)?;
+    crate::ocr::recognize_image(&img)
+}
+
+/// The average yield below which a PDF's text layer counts as "no real text":
+/// a scanned page contributes ~0 chars, a text page hundreds.
+fn pdf_text_is_trivial(chars: usize, pages: usize) -> bool {
+    chars < 32 * pages.max(1)
+}
+
+/// The largest raster XObject on each page (metadata pass — nothing decoded),
+/// in page order, capped at the OCR page budget. Scanner output is one
+/// full-page image per page, so "largest per page" is the page.
+fn pdf_page_rasters(doc: &lopdf::Document) -> Vec<lopdf::ObjectId> {
+    let mut out = Vec::new();
+    for (_no, page_id) in doc
+        .get_pages()
+        .into_iter()
+        .take(crate::ocr::MAX_OCR_PAGES_PER_PDF)
+    {
+        let mut best: Option<(i64, lopdf::ObjectId)> = None;
+        let Ok((direct, referenced)) = doc.get_page_resources(page_id) else {
+            continue; // malformed page: no resources to scan
+        };
+        let mut resource_dicts: Vec<&lopdf::Dictionary> = Vec::new();
+        if let Some(d) = direct {
+            resource_dicts.push(d);
+        }
+        for id in referenced {
+            if let Ok(d) = doc.get_dictionary(id) {
+                resource_dicts.push(d);
+            }
+        }
+        for res in resource_dicts {
+            let xdict = match res.get(b"XObject") {
+                Ok(lopdf::Object::Dictionary(d)) => d,
+                Ok(lopdf::Object::Reference(id)) => match doc.get_dictionary(*id) {
+                    Ok(d) => d,
+                    Err(_) => continue,
+                },
+                _ => continue,
+            };
+            for (_name, val) in xdict.iter() {
+                let lopdf::Object::Reference(sid) = val else {
+                    continue;
+                };
+                let Ok(lopdf::Object::Stream(s)) = doc.get_object(*sid) else {
+                    continue;
+                };
+                let is_image =
+                    matches!(s.dict.get(b"Subtype"), Ok(lopdf::Object::Name(n)) if n == b"Image");
+                if !is_image {
+                    continue;
+                }
+                let w = s.dict.get(b"Width").and_then(|o| o.as_i64()).unwrap_or(0);
+                let h = s.dict.get(b"Height").and_then(|o| o.as_i64()).unwrap_or(0);
+                let area = w.saturating_mul(h);
+                if area > 0 && best.map(|(a, _)| area > a).unwrap_or(true) {
+                    best = Some((area, *sid));
+                }
+            }
+        }
+        if let Some((_, sid)) = best {
+            out.push(sid);
+        }
+    }
+    out
+}
+
+/// Decode one PDF image stream we support in v1: `DCTDecode` (the stream IS a
+/// JPEG — scanner output) and `FlateDecode`/unfiltered 8-bit DeviceRGB/Gray
+/// bitmaps. CCITT/JBIG2/JPX return None and count as skipped.
+fn decode_pdf_image(stream: &lopdf::Stream) -> Option<image::DynamicImage> {
+    let filters: Vec<Vec<u8>> = match stream.dict.get(b"Filter") {
+        Ok(lopdf::Object::Name(n)) => vec![n.clone()],
+        Ok(lopdf::Object::Array(a)) => a
+            .iter()
+            .filter_map(|o| match o {
+                lopdf::Object::Name(n) => Some(n.clone()),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    if filters.iter().any(|f| f == b"DCTDecode") {
+        return image::load_from_memory_with_format(&stream.content, image::ImageFormat::Jpeg).ok();
+    }
+    let flate_only = filters.iter().all(|f| f == b"FlateDecode");
+    if !flate_only {
+        return None; // CCITTFaxDecode / JBIG2Decode / JPXDecode: v1 skips
+    }
+    let bpc = stream
+        .dict
+        .get(b"BitsPerComponent")
+        .and_then(|o| o.as_i64())
+        .unwrap_or(8);
+    if bpc != 8 {
+        return None;
+    }
+    let w = stream
+        .dict
+        .get(b"Width")
+        .and_then(|o| o.as_i64())
+        .unwrap_or(0);
+    let h = stream
+        .dict
+        .get(b"Height")
+        .and_then(|o| o.as_i64())
+        .unwrap_or(0);
+    if w <= 0 || h <= 0 || w > 1 << 16 || h > 1 << 16 {
+        return None;
+    }
+    let (w, h) = (w as u32, h as u32);
+    let data = if filters.is_empty() {
+        stream.content.clone()
+    } else {
+        stream.decompressed_content().ok()?
+    };
+    let colorspace = match stream.dict.get(b"ColorSpace") {
+        Ok(lopdf::Object::Name(n)) => n.clone(),
+        _ => return None, // ICC/Indexed/Separation via refs: v1 skips
+    };
+    match colorspace.as_slice() {
+        b"DeviceRGB" if data.len() >= (w * h * 3) as usize => {
+            image::RgbImage::from_raw(w, h, data[..(w * h * 3) as usize].to_vec())
+                .map(image::DynamicImage::ImageRgb8)
+        }
+        b"DeviceGray" if data.len() >= (w * h) as usize => {
+            image::GrayImage::from_raw(w, h, data[..(w * h) as usize].to_vec())
+                .map(image::DynamicImage::ImageLuma8)
+        }
+        _ => None,
+    }
+}
+
+/// PDF extraction with the scanned-document fallback: keep the text layer for
+/// real text PDFs; when it's trivial AND the pages carry raster images, OCR
+/// the page images in order. `OcrUnavailable` propagates (uncached) only when
+/// there is genuinely something OCR *would* read.
+fn extract_pdf_with_ocr(buf: &[u8]) -> anyhow::Result<String> {
+    let text = extract_pdf(buf)?;
+    pdf_ocr_fallback(text, buf)
+}
+
+/// Testable half of the fallback: decides against the already-extracted text
+/// layer, so tests can drive it with synthetic PDFs without pdf-extract.
+fn pdf_ocr_fallback(text: String, buf: &[u8]) -> anyhow::Result<String> {
+    let Ok(doc) = lopdf::Document::load_mem(buf) else {
+        return Ok(text); // structure unreadable for the fallback: keep the text layer
+    };
+    let pages = doc.get_pages().len();
+    if !pdf_text_is_trivial(text.trim().chars().count(), pages) {
+        return Ok(text);
+    }
+    let rasters = pdf_page_rasters(&doc);
+    if rasters.is_empty() {
+        return Ok(text); // genuinely near-empty text PDF — a real result, cache it
+    }
+    if !crate::ocr::available() {
+        return Err(anyhow::Error::new(crate::ocr::OcrUnavailable));
+    }
+    let mut blocks: Vec<String> = Vec::new();
+    let mut skipped = 0usize;
+    for sid in &rasters {
+        let Ok(lopdf::Object::Stream(s)) = doc.get_object(*sid) else {
+            continue;
+        };
+        match decode_pdf_image(s) {
+            Some(img) => match crate::ocr::recognize_image(&img) {
+                Ok(t) if !t.trim().is_empty() => blocks.push(t),
+                Ok(_) => {}
+                Err(e) if e.downcast_ref::<crate::ocr::OcrUnavailable>().is_some() => {
+                    return Err(e);
+                }
+                Err(_) => skipped += 1,
+            },
+            None => skipped += 1,
+        }
+    }
+    if skipped > 0 {
+        eprintln!(
+            "extract: pdf ocr skipped {skipped}/{} page image(s) (unsupported encoding)",
+            rasters.len()
+        );
+    }
+    if blocks.is_empty() {
+        // All pages unsupported (e.g. CCITT fax scans): a genuine v1 limit —
+        // cache the empty text layer; the cache-version bump that adds support
+        // will re-extract.
+        return Ok(text);
+    }
+    Ok(blocks.join("\n\n"))
 }
 
 /// OLE compound-file magic: legacy binary Office files (.doc) and
@@ -918,7 +1130,7 @@ fn extract_rtf(buf: &[u8]) -> anyhow::Result<String> {
 
 fn extract_by_ext(abs: &Path, ext: &str) -> anyhow::Result<String> {
     match ext {
-        ".pdf" => extract_pdf(&fs::read(abs)?),
+        ".pdf" => extract_pdf_with_ocr(&fs::read(abs)?),
         // extract_docx routes OLE containers (renamed legacy .doc, protected
         // packages) to the salvage path itself, so both extensions share it.
         ".doc" | ".docx" => extract_docx(&fs::read(abs)?),
@@ -930,6 +1142,7 @@ fn extract_by_ext(abs: &Path, ext: &str) -> anyhow::Result<String> {
         // .odt (text) and .odp (presentation) share the ODF content.xml schema.
         ".odt" | ".odp" => extract_odf(&fs::read(abs)?),
         ".rtf" => extract_rtf(&fs::read(abs)?),
+        _ if is_ocr_image_ext(ext) => extract_image(abs),
         _ => Ok(String::new()),
     }
 }
@@ -944,7 +1157,10 @@ fn extract_by_ext(abs: &Path, ext: &str) -> anyhow::Result<String> {
 ///     .xlsm is now extracted as a workbook. Both invalidate v4 entries.
 /// v6: pptx / odt / odp / rtf now extract text (were name-match-only). Only
 ///     adds content for those files; previously cached formats are unchanged.
-const CACHE_VERSION: u32 = 6;
+/// v7: images extract via OCR and scanned PDFs get an OCR fallback. The bump
+///     also re-extracts every pre-0.10 image-only PDF that was legitimately
+///     cached as empty, curing them without user action.
+const CACHE_VERSION: u32 = 7;
 
 #[derive(Serialize, Deserialize)]
 struct CacheRecord {
@@ -1009,6 +1225,12 @@ pub fn extract_rich_text(abs: &Path, ext: &str) -> String {
             .unwrap_or_else(|_| Err(anyhow::anyhow!("parser panicked")));
     let text = match parsed {
         Ok(t) => clamp(t.trim()),
+        // OCR couldn't run (toggle off / models missing): expected, not an
+        // error — no log spam, and crucially NOT cached, so the file
+        // self-heals the moment OCR becomes available.
+        Err(err) if err.downcast_ref::<crate::ocr::OcrUnavailable>().is_some() => {
+            return String::new();
+        }
         Err(err) => {
             // Degrade gracefully but do NOT cache the failure: log it so empty
             // results are diagnosable, and let the next scan retry.
@@ -1476,6 +1698,147 @@ mod doc_format_tests {
         // \'00-\'1f decode to C0 controls — no prose, keep them out.
         let text = extract_rtf(br#"{\rtf1 a\'01\'02b}"#).unwrap();
         assert_eq!(text.trim(), "ab", "control bytes leaked: {text:?}");
+    }
+
+    #[test]
+    fn pdf_ocr_trigger_math() {
+        // A scanned page yields ~0 chars; a text page yields hundreds.
+        assert!(super::pdf_text_is_trivial(0, 1));
+        assert!(super::pdf_text_is_trivial(31, 1));
+        assert!(!super::pdf_text_is_trivial(32, 1));
+        assert!(super::pdf_text_is_trivial(500, 100)); // 5 chars/page: scans
+        assert!(!super::pdf_text_is_trivial(50_000, 100));
+        assert!(super::pdf_text_is_trivial(0, 0)); // degenerate: pages.max(1)
+    }
+
+    fn jpeg_bytes(w: u32, h: u32) -> Vec<u8> {
+        let img = image::RgbImage::from_pixel(w, h, image::Rgb([200, 200, 200]));
+        let mut out = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut out, image::ImageFormat::Jpeg)
+            .unwrap();
+        out.into_inner()
+    }
+
+    /// Minimal one-page PDF carrying one image XObject (the shape a scanner
+    /// writes). `filter=None` builds the page with NO image at all.
+    fn pdf_with_image(filter: Option<(&str, Vec<u8>)>, w: i64, h: i64) -> Vec<u8> {
+        use lopdf::{dictionary, Document, Object, Stream};
+        let mut doc = Document::with_version("1.5");
+        let mut xobjects = lopdf::Dictionary::new();
+        if let Some((filter, content)) = filter {
+            let img = Stream::new(
+                dictionary! {
+                    "Type" => "XObject",
+                    "Subtype" => "Image",
+                    "Width" => w,
+                    "Height" => h,
+                    "ColorSpace" => "DeviceRGB",
+                    "BitsPerComponent" => 8,
+                    "Filter" => filter,
+                },
+                content,
+            );
+            let img_id = doc.add_object(img);
+            xobjects.set("Im0", Object::Reference(img_id));
+        }
+        let content_id = doc.add_object(Stream::new(dictionary! {}, Vec::new()));
+        let pages_id = doc.new_object_id();
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => Object::Reference(pages_id),
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "Contents" => Object::Reference(content_id),
+            "Resources" => dictionary! { "XObject" => xobjects },
+        });
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![Object::Reference(page_id)],
+                "Count" => 1,
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => Object::Reference(pages_id),
+        });
+        doc.trailer.set("Root", catalog_id);
+        let mut buf = Vec::new();
+        doc.save_to(&mut buf).unwrap();
+        buf
+    }
+
+    #[test]
+    fn pdf_raster_enumeration_and_jpeg_decode() {
+        let buf = pdf_with_image(Some(("DCTDecode", jpeg_bytes(120, 90))), 120, 90);
+        let doc = lopdf::Document::load_mem(&buf).unwrap();
+        let rasters = super::pdf_page_rasters(&doc);
+        assert_eq!(rasters.len(), 1, "one page, one raster");
+        let lopdf::Object::Stream(s) = doc.get_object(rasters[0]).unwrap() else {
+            panic!("raster id must be a stream");
+        };
+        let img = super::decode_pdf_image(s).expect("DCTDecode must decode");
+        assert_eq!((img.width(), img.height()), (120, 90));
+    }
+
+    #[test]
+    fn pdf_unsupported_encodings_skip_and_cache_the_text_layer() {
+        // CCITT fax scans are a declared v1 limit: the raster is SEEN (so the
+        // page counts as a scan) but not decodable — the fallback returns the
+        // text layer as a genuine, cacheable result instead of erroring.
+        let buf = pdf_with_image(Some(("CCITTFaxDecode", vec![0u8; 64])), 100, 100);
+        let doc = lopdf::Document::load_mem(&buf).unwrap();
+        let rasters = super::pdf_page_rasters(&doc);
+        assert_eq!(rasters.len(), 1);
+        let lopdf::Object::Stream(s) = doc.get_object(rasters[0]).unwrap() else {
+            panic!("stream expected");
+        };
+        assert!(
+            super::decode_pdf_image(s).is_none(),
+            "CCITT must not decode in v1"
+        );
+        if crate::ocr::available() {
+            eprintln!("models present; skipping gate assertions");
+            return;
+        }
+        // Even with OCR unavailable, an all-unsupported scan resolves to the
+        // (empty) text layer *as an error-free result* once OCR is on; while
+        // OCR is off, rasters present ⇒ OcrUnavailable ⇒ uncached.
+        let err = super::pdf_ocr_fallback(String::new(), &buf).unwrap_err();
+        assert!(
+            err.downcast_ref::<crate::ocr::OcrUnavailable>().is_some(),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn pdf_fallback_gate_decisions() {
+        // Real text layer: never looks at rasters, never errors.
+        let scan = pdf_with_image(Some(("DCTDecode", jpeg_bytes(80, 80))), 80, 80);
+        let real_text = "word ".repeat(50); // 250 chars on 1 page: not trivial
+        assert_eq!(
+            super::pdf_ocr_fallback(real_text.clone(), &scan).unwrap(),
+            real_text
+        );
+
+        // Trivial text but NO rasters: genuine near-empty text PDF — cached.
+        let no_image = pdf_with_image(None, 0, 0);
+        assert_eq!(
+            super::pdf_ocr_fallback(String::new(), &no_image).unwrap(),
+            ""
+        );
+
+        // Trivial text + rasters + OCR unavailable: uncached marker error.
+        if crate::ocr::available() {
+            eprintln!("models present; skipping unavailable-path assertion");
+            return;
+        }
+        let err = super::pdf_ocr_fallback(String::new(), &scan).unwrap_err();
+        assert!(
+            err.downcast_ref::<crate::ocr::OcrUnavailable>().is_some(),
+            "got: {err}"
+        );
     }
 
     #[test]

@@ -30,6 +30,10 @@ quick-xml = { workspace = true }
 rayon = { workspace = true }
 notify = { workspace = true }
 datafusion = { workspace = true }
+ocrs = { workspace = true }
+rten = { workspace = true }
+image = { workspace = true }
+lopdf = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

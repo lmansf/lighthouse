@@ -34,6 +34,13 @@ calamine = { version = "0.26", features = ["dates"] }
 pdf-extract = "0.7"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 quick-xml = "0.36"
+# add-ocr-perception: pure-Rust OCR (no native libs — bundles like the GGUFs).
+ocrs = "0.12"
+rten = "0.24"
+# Decoders for the OCR-able image formats only; lopdf (already pdf-extract's
+# parser) reads embedded page images out of scanned PDFs.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "bmp", "tiff"] }
+lopdf = "0.34"
 axum = { version = "0.7", features = ["multipart"] }
 datafusion = "54"
 tempfile = "3"
