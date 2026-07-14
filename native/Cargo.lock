@@ -3799,7 +3799,7 @@ dependencies = [
 
 [[package]]
 name = "lighthouse-core"
-version = "0.11.0"
+version = "0.11.1"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -3838,7 +3838,7 @@ dependencies = [
 
 [[package]]
 name = "lighthouse-desktop"
-version = "0.11.0"
+version = "0.11.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -3869,7 +3869,7 @@ dependencies = [
 
 [[package]]
 name = "lighthouse-server"
-version = "0.11.0"
+version = "0.11.1"
 dependencies = [
  "anyhow",
  "async-stream",

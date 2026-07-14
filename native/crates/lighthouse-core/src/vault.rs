@@ -653,7 +653,7 @@ pub fn create_folder(parent_id: Option<&str>, name: &str) -> anyhow::Result<Stri
 
 /// Write an uploaded file into the vault (optionally under a folder). Collisions
 /// get a " (n)" suffix. No state entry is created, so an uploaded file follows
-/// the default-inclusion experiment like any external add.
+/// the user's default-inclusion setting like any external add.
 pub fn add_file(name: &str, bytes: &[u8], dest_parent_id: Option<&str>) -> anyhow::Result<String> {
     let safe_name = name
         .rsplit(['/', '\\'])

@@ -115,11 +115,13 @@ export function resolveNodePath(nodeId: string): string {
 
 /**
  * Whether absent inclusion flags default to INCLUDED. Honors the user's explicit
- * onboarding choice first (`include` ⇒ new files are searchable by default, the
- * user opts pieces out; `exclude` ⇒ nothing in until toggled on), falling back
- * to the `default_inclusion` A/B experiment variant when they haven't chosen.
- * Resolved once per walk and threaded into isEffectivelyIncluded so a big tree
- * isn't re-reading the preference per node.
+ * onboarding/Preferences choice (`include` ⇒ new files are searchable by
+ * default, the user opts pieces out; `exclude` ⇒ nothing in until toggled on);
+ * with no explicit choice the default is `exclude` (the conservative,
+ * privacy-preserving original behavior — the A/B variant that used to pick it
+ * was deleted with the experiment machinery). Resolved once per walk and
+ * threaded into isEffectivelyIncluded so a big tree isn't re-reading the
+ * preference per node.
  */
 function defaultIncluded(): boolean {
   return effectiveDefaultInclusion() === "include";
@@ -128,10 +130,10 @@ function defaultIncluded(): boolean {
 /**
  * Effective inclusion. An ancestor folder explicitly excluded always forces a
  * node out (ancestor exclusion wins). For an absent own flag the default is the
- * experiment's: EXCLUDED under `opt_in` (the original behavior), INCLUDED under
- * `opt_out`. Consequences, by design:
- *  - opt_in: anything new (added from the computer, anywhere) defaults out;
- *  - opt_out: anything new defaults in until the user opts it out;
+ * user's setting: EXCLUDED under `exclude` (the original/conservative default),
+ * INCLUDED under `include`. Consequences, by design:
+ *  - exclude: anything new (added from the computer, anywhere) defaults out;
+ *  - include: anything new defaults in until the user opts it out;
  *  - an excluded folder forces every descendant out, even a file moved in
  *    later that carried an included flag (ancestor exclusion wins);
  *  - an internal move preserves the node's own flag (see moveNode), but the
