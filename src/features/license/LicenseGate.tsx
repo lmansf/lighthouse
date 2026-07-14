@@ -1170,7 +1170,6 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
   const policy = useRagStore((s) => s.policy);
   const locks = policy?.locks;
 
-  const [shareUsage, setShareUsage] = useState<boolean | null>(null);
   const [desktop, setDesktop] = useState(false);
   const [runOnStartup, setRunOnStartup] = useState(true);
   // B2 hybrid search: on-device embeddings fused into retrieval. Default on.
@@ -1228,10 +1227,6 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
     let alive = true;
     setSettingsLoad("loading");
     setSaveError(null);
-    void fetch("/api/usage")
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d) => alive && d && setShareUsage(!d.optOut))
-      .catch(() => {});
     void fetch("/api/settings")
       .then((r) => {
         if (!r.ok) throw new Error(`settings ${r.status}`);
@@ -1291,23 +1286,6 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
     }
   }
 
-  function updateUsage(next: boolean) {
-    const prev = shareUsage;
-    setShareUsage(next);
-    setSaveError(null);
-    void fetch("/api/usage", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ op: "consent", optOut: !next }),
-    })
-      .then((r) => {
-        if (!r.ok) throw new Error();
-      })
-      .catch(() => {
-        setShareUsage(prev);
-        setSaveError(SAVE_FAILED);
-      });
-  }
 
   function updateStartup(next: boolean) {
     const prev = runOnStartup;
@@ -1494,16 +1472,6 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
                   excluded keep their setting.
                 </Text>
               </Field>
-
-              <Switch
-                checked={locks?.telemetryOff ? false : (shareUsage ?? false)}
-                disabled={shareUsage === null || locks?.telemetryOff === true}
-                onChange={(_, d) => updateUsage(Boolean(d.checked))}
-                label="Share usage analytics — your account email and which features you use, never your files, their names, or their contents"
-              />
-              {locks?.telemetryOff && (
-                <Text className={styles.prefHint}>Managed by your organization.</Text>
-              )}
 
               <Switch
                 checked={locks?.chatHistoryOff ? false : saveChats}
