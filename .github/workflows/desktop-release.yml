@@ -102,8 +102,14 @@ jobs:
             });
             core.info(`created draft release ${tag} (${data.html_url})`);
 
+  # Pre-tag smoke: the same ref must build, boot, and answer one grounded
+  # zero-network ask on all three OSes (plus the exhaustive settings
+  # round-trip) before any bundle is attached to the release.
+  smoke:
+    uses: ./.github/workflows/release-smoke.yml
+
   bundle:
-    needs: [check, resolve]
+    needs: [check, resolve, smoke]
     strategy:
       fail-fast: false
       matrix:

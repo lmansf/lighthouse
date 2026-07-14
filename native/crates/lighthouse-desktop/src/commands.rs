@@ -991,6 +991,17 @@ pub fn diag_report(payload: String) {
     eprintln!("[diag] {payload}");
 }
 
+/// CI boot smoke (LIGHTHOUSE_SMOKE=1, release-smoke.yml): the in-webview
+/// probe reports its verdict here and the process exits with it — 0 for a
+/// grounded answer, 2 for a failed assertion. Inert outside smoke mode (the
+/// driver JS that invokes it is only ever injected when the env var is set).
+#[tauri::command]
+pub fn smoke_report(app: tauri::AppHandle, payload: String) {
+    eprintln!("SMOKE {payload}");
+    let ok = payload.starts_with("OK");
+    app.exit(if ok { 0 } else { 2 });
+}
+
 // --- Desktop widget (docs/widget-scope.md §7, W1 frozen contract). All are
 // plain app commands so the widget webview needs no extra ACL grants; window
 // mutations happen Rust-side, which also keeps the pin state authoritative

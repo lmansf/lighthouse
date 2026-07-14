@@ -16,11 +16,16 @@ releases.
   and `native/Cargo.lock` (×3 lighthouse crates).
 - Pipeline: bump → PR → squash-merge to main → `desktop-release.yml`
   (workflow_dispatch on main; empty `release_tag` derives v<version> from
-  package.json; runs JS checks, creates the draft release, builds native
-  Tauri bundles, regenerates latest*.yml manifests) →
-  `publish-release.yml` (`release_tag`, `body`; flips draft → public latest).
-  The legacy Electron `release.yml` is deleted; `archive/electron-shell`
-  branch preserves the last Electron-era tree.
+  package.json; runs JS checks + the 3-OS `release-smoke.yml` gate, creates
+  the draft release, builds native Tauri bundles, regenerates latest*.yml
+  manifests) → `publish-release.yml` (`release_tag`, `body`; flips draft →
+  public latest). The legacy Electron `release.yml` is deleted;
+  `archive/electron-shell` preserves the last Electron-era tree.
+- `release-smoke.yml` (also per-PR on native/shell paths): release build of
+  the real binary + wire-protocol grounded-ask test + exhaustive settings
+  round-trip (`settings_test.rs` — no-`..` destructuring makes a new
+  settings field a compile error until covered) + LIGHTHOUSE_SMOKE=1 boot
+  of the built app answering one zero-network ask (exit code = verdict).
 - `CACHE_VERSION` moves in lockstep across `native/.../extract.rs`,
   `src/server/extract.ts`, and the assertion in
   `native/.../tests/extract_test.rs` — bump all three or native CI goes red.

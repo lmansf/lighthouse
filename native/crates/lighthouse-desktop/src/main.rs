@@ -533,10 +533,84 @@ pub fn apply_autostart(app: &AppHandle, enable: bool) {
     };
 }
 
+/// The in-webview end-to-end probe for LIGHTHOUSE_SMOKE=1 (see the driver in
+/// setup): list the vault, include the harness-seeded fixture, ask one
+/// question through the intercepted window.fetch (the exact path a user's ask
+/// takes in IPC mode), and assert the NDJSON stream ends in a done chunk that
+/// cites the fixture and quotes its content. Retries the first fetch while
+/// the transport is still installing. Verdict goes to the `smoke_report`
+/// command, which turns it into the process exit code.
+const SMOKE_DRIVER_JS: &str = r#"
+(function () {
+  var inv = function (p) { window.__TAURI_INTERNALS__.invoke('smoke_report', { payload: p }); };
+  var tries = 0;
+  var step = 'list';
+  function start() {
+    step = 'list';
+    fetch('/api/rag').then(function (r) { return r.json(); }).then(function (j) {
+      var nodes = j.nodes || [];
+      var f = null;
+      for (var i = 0; i < nodes.length; i++) {
+        if (String(nodes[i].id).indexOf('smoke-fixture') >= 0) { f = nodes[i]; break; }
+      }
+      if (!f) { throw new Error('fixture not in vault list (nodes=' + nodes.length + ')'); }
+      step = 'include';
+      return fetch('/api/rag', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ op: 'include', nodeId: f.id, included: true })
+      }).then(function () { return f; });
+    }).then(function (f) {
+      step = 'ask';
+      return fetch('/api/chat', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ question: 'What is the Q3 revenue target?', includedFileIds: [f.id], history: [] })
+      }).then(function (r) { return r.text(); });
+    }).then(function (t) {
+      step = 'assert';
+      var lines = t.trim().split('\n');
+      var last = JSON.parse(lines[lines.length - 1]);
+      var answer = '';
+      for (var i = 0; i < lines.length - 1; i++) {
+        try { answer += (JSON.parse(lines[i]).delta || ''); } catch (e) {}
+      }
+      if (!last.done) { throw new Error('final chunk not done'); }
+      var refs = last.references || [];
+      if (!refs.length) { throw new Error('no references on final chunk'); }
+      var cited = false;
+      for (var i = 0; i < refs.length; i++) {
+        if (String(refs[i].fileId).indexOf('smoke-fixture') >= 0) { cited = true; break; }
+      }
+      if (!cited) { throw new Error('references do not cite the fixture: ' + JSON.stringify(refs).slice(0, 200)); }
+      if (answer.indexOf('42 million') < 0) { throw new Error('answer does not quote fixture content: ' + answer.slice(0, 160)); }
+      inv('OK grounded answer: ' + refs.length + ' reference(s), ' + lines.length + ' stream lines');
+    }).catch(function (e) {
+      if (step === 'list' && ++tries < 30) { setTimeout(start, 1000); return; }
+      inv('FAIL at ' + step + ': ' + String((e && e.message) || e));
+    });
+  }
+  start();
+})();
+"#;
+
+/// CI boot-smoke isolation (release-smoke.yml): when set, all install-scope
+/// state (settings, models, connectors, profile, license, app state) lives
+/// under this directory instead of the OS app-data dir, so a smoke run can
+/// never touch — or be influenced by — a real install on the same machine.
+fn smoke_state_dir() -> Option<PathBuf> {
+    std::env::var("LIGHTHOUSE_SMOKE_STATE")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+}
+
 fn settings_file(app: &AppHandle) -> PathBuf {
-    app.path()
-        .app_data_dir()
-        .unwrap_or_else(|_| std::env::temp_dir())
+    smoke_state_dir()
+        .unwrap_or_else(|| {
+            app.path()
+                .app_data_dir()
+                .unwrap_or_else(|_| std::env::temp_dir())
+        })
         .join("lighthouse-settings.json")
 }
 
@@ -587,7 +661,7 @@ fn bootstrap_env(app: &AppHandle) {
     std::env::set_var("LIGHTHOUSE_DESKTOP", "1");
     std::env::set_var("VAULT_DIR", vault_dir_setting(app));
     std::env::set_var("LIGHTHOUSE_SETTINGS_FILE", settings_file(app));
-    if let Ok(data) = app.path().app_data_dir() {
+    if let Some(data) = smoke_state_dir().or_else(|| app.path().app_data_dir().ok()) {
         let models = data.join("models");
         let connectors = data.join("connectors");
         let _ = fs::create_dir_all(&models);
@@ -983,6 +1057,7 @@ fn main() {
             commands::update_now,
             commands::watch_generation,
             commands::diag_report,
+            commands::smoke_report,
             commands::widget_hide,
             commands::widget_show,
             commands::widget_set_pin,
@@ -1394,9 +1469,18 @@ fn main() {
                 });
             }
 
+            // CI boot smoke (LIGHTHOUSE_SMOKE=1, release-smoke.yml): prove the
+            // shipped binary boots and answers one grounded ask with ZERO
+            // network — so the model supervisor and the update check (the two
+            // legitimate background egress/spawn sources) stay off for the
+            // run, and the verdict is the process exit code.
+            let smoke = std::env::var("LIGHTHOUSE_SMOKE")
+                .map(|v| v == "1")
+                .unwrap_or(false);
+
             // llama-server supervision: start now if a model is installed, and
             // reconcile every 3 s (downloads landing, uninstall handshake).
-            {
+            if !smoke {
                 let handle = handle.clone();
                 tauri::async_runtime::spawn(async move {
                     loop {
@@ -1411,7 +1495,7 @@ fn main() {
             // time, so a boot-only check never noticed releases that shipped
             // mid-run — the banner/tray notice simply never appeared until
             // the next manual restart.
-            {
+            if !smoke {
                 let handle = handle.clone();
                 tauri::async_runtime::spawn(async move {
                     loop {
@@ -1443,6 +1527,34 @@ fn main() {
                             "fetch('/api/rag').then(function(r){return r.json()}).then(function(j){window.__TAURI_INTERNALS__.invoke('diag_report',{payload:'fetch-ok nodes='+(j.nodes?j.nodes.length:'?')+' desktop='+j.desktop})}).catch(function(e){window.__TAURI_INTERNALS__.invoke('diag_report',{payload:'fetch-fail '+String(e)})});",
                         );
                     }
+                });
+            }
+
+            // CI boot smoke driver: once the webview has booted, drive one
+            // real ask through the UI transport (window.fetch →
+            // tauriTransport → IPC → engine) against the harness-seeded
+            // vault, then exit with the verdict — 0 grounded answer with
+            // references, 2 assertion failed, 3 never reported (webview or
+            // transport never came up). This is the same binary a user
+            // installs and the same pipeline a real ask takes; on Linux
+            // runners it runs under Xvfb.
+            if smoke {
+                let handle = handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    match main_window(&handle) {
+                        Some(win) => {
+                            let _ = win.eval(SMOKE_DRIVER_JS);
+                        }
+                        None => {
+                            eprintln!("SMOKE FAIL: no main window");
+                            handle.exit(3);
+                            return;
+                        }
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(120)).await;
+                    eprintln!("SMOKE FAIL: timed out waiting for smoke_report");
+                    handle.exit(3);
                 });
             }
 

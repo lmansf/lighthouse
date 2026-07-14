@@ -1,0 +1,39 @@
+# Fast JS gate on every PR: typecheck + the full node test suite + lint.
+# Until the Electron retirement this gate only existed inside the release
+# pipeline, so TS regressions were caught at release time; now it runs
+# per-PR (its release-time twin is the check job in desktop-release.yml).
+name: check
+
+on:
+  pull_request:
+    paths:
+      - "src/**"
+      - "app/**"
+      - "test/**"
+      - "package.json"
+      - "package-lock.json"
+      - "tsconfig.json"
+      - ".github/workflows/check.yml"
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Typecheck, tests & lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Typecheck + tests
+        run: npm run test
+      - name: Lint
+        run: npm run lint

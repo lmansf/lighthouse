@@ -1,0 +1,109 @@
+# Pre-tag release smoke: on all three OS runners, build the REAL desktop
+# binary (static-export UI + release cargo build), run the release-mode engine
+# tests that drive one grounded ask over the wire protocol plus the exhaustive
+# settings round-trip, then boot the built binary headlessly (Xvfb on Linux)
+# and make it answer one real ask through its own webview transport with zero
+# network (LIGHTHOUSE_SMOKE=1 — the app self-reports and exits with the
+# verdict). desktop-release.yml requires this workflow for the same ref, so
+# the v0.2.5-403 / 0.10.0-ocr_enabled class of regression dies before a tag
+# is cut instead of in a shipped build. Also runs per-PR on native/shell
+# changes — that's where the compile-tripwire (a missed settings call site)
+# fires earliest.
+name: release-smoke
+
+on:
+  workflow_call: {}
+  workflow_dispatch: {}
+  pull_request:
+    paths:
+      - "native/**"
+      - "src/shell/**"
+      - "scripts/build-ui-static.mjs"
+      - ".github/workflows/release-smoke.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+          - os: macos-latest
+          - os: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native
+          # Shared with desktop-release.yml's bundle job so a smoke build
+          # warms the release cache the bundler reuses (and vice versa).
+          shared-key: native-release
+      - name: Linux system deps (webkit + Xvfb)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev patchelf xvfb
+      - name: Install JS deps
+        run: npm ci
+      - name: Static-export the UI (arms IPC mode — no local port in the app)
+        run: node scripts/build-ui-static.mjs
+      - name: Build the real desktop binary (release)
+        working-directory: native
+        run: cargo build --release -p lighthouse-desktop --locked
+      - name: Engine smoke — wire-protocol grounded ask + exhaustive settings round-trip (release mode)
+        working-directory: native
+        run: |
+          cargo test --release -p lighthouse-server --locked
+          cargo test --release -p lighthouse-core --locked --test settings_test
+      - name: Boot smoke — the shipped binary answers one grounded ask, zero network
+        shell: bash
+        run: |
+          STATE="$RUNNER_TEMP/lh-smoke-state"
+          VAULT="$RUNNER_TEMP/lh-smoke-vault"
+          mkdir -p "$STATE" "$VAULT/docs"
+          # Seed the fixture vault + isolated install state (settings pin the
+          # vault, window mode, semantic-search off => pure-lexical retrieval,
+          # no embed server; experiments pin default-excluded inclusion).
+          node -e '
+            const fs = require("fs"), path = require("path");
+            const [state, vault] = process.argv.slice(1);
+            fs.writeFileSync(path.join(vault, "docs", "smoke-fixture.md"), [
+              "# Smoke fixture",
+              "",
+              "The Q3 revenue target for the smoke test is 42 million dollars.",
+              "This document exists so CI can prove a grounded, zero-network answer.",
+              "",
+            ].join("\n"));
+            fs.writeFileSync(path.join(state, "lighthouse-settings.json"), JSON.stringify({
+              vaultDir: vault, uiMode: "window", startupAsked: true,
+              runOnStartup: false, semanticSearch: false,
+            }));
+            fs.writeFileSync(path.join(state, "experiments.json"), JSON.stringify({
+              onboarding: "key_first", default_inclusion: "opt_in", source: "override",
+            }));
+          ' "$STATE" "$VAULT"
+          BIN="native/target/release/lighthouse-desktop"
+          if [ "$RUNNER_OS" = "Windows" ]; then BIN="$BIN.exe"; fi
+          export LIGHTHOUSE_SMOKE=1
+          export LIGHTHOUSE_SMOKE_STATE="$STATE"
+          unset LIGHTHOUSE_API_TOKEN ANTHROPIC_API_KEY OPENAI_API_KEY GOOGLE_API_KEY LICENSE_API_URL 2>/dev/null || true
+          set +e
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            xvfb-run -a "$BIN"
+          else
+            "$BIN"
+          fi
+          code=$?
+          echo "boot smoke exit code: $code (0 = grounded answer with references)"
+          exit $code
