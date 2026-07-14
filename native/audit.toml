@@ -1,0 +1,52 @@
+# Documented triage for the cargo-audit supply-chain gate
+# (.github/workflows/supply-chain.yml). The installed cargo-audit takes ignores
+# on the command line (`--ignore <ID>`), so the workflow passes the IDs below;
+# this file is the human-readable rationale of record. Keep the two in sync.
+#
+# The gate DENIES any advisory not in this list, so a NEW vulnerability still
+# turns CI red and forces triage. Every ignore is a deliberate, documented
+# decision with a remediation path — never a blanket disable. The weekly
+# scheduled run re-checks; drop an ignore the moment an upstream fix reaches our
+# pinned tree.
+#
+# ── Ignored VULNERABILITIES (these would otherwise fail the gate) ────────────
+# All four are denial-of-service on MALFORMED INPUT or a Debug-format edge case
+# — not RCE, not data exposure. Lighthouse is local-first and single-user: the
+# documents parsed are the user's own local files, extraction runs off the UI
+# thread, and per-file failures are caught, so the realistic blast radius is "a
+# hand-crafted file you added fails to extract." Accepted until fixes reach our
+# tree; each has a remediation path, deferred to a dedicated, 3-OS-CI-tested
+# dependency-bump PR (lockfile changes here can't be verified against the
+# Windows/macOS release build from the dev container).
+#
+#   RUSTSEC-2026-0204  crossbeam-epoch  Invalid pointer deref in the fmt::Pointer
+#                                    impl for Atomic/Shared (only when Debug-
+#                                    formatting an already-invalid pointer).
+#                                    Fix: crossbeam-epoch ≥0.9.20 (transitive via
+#                                    DataFusion; a clean `cargo update` exists).
+#   RUSTSEC-2026-0187  lopdf ≤0.34   Stack overflow via deeply nested PDF
+#                                    objects. Fix: lopdf ≥0.42 (major bump of a
+#                                    transitive pin — needs a tested dep PR).
+#   RUSTSEC-2026-0194  quick-xml     Quadratic time on duplicate start-tag attrs.
+#   RUSTSEC-2026-0195  quick-xml     Unbounded namespace allocation in NsReader.
+#                                    Both reached via calamine (xlsx) + the OOXML
+#                                    /ODF extractors. Fix: quick-xml ≥0.41 — our
+#                                    0.41 instance is ALREADY clean; the 0.31 and
+#                                    0.36 instances need their parents bumped.
+#
+# ── NOT ignored, does not fail the gate: unmaintained / unsound / yanked ─────
+# cargo-audit reports these as warnings (non-failing). They are irreducible
+# transitive deps of the Tauri v2 Linux shell (the gtk-rs GTK3 bindings, which
+# upstream deprecated wholesale) and of DataFusion/ring/idna (paste, instant,
+# proc-macro-error, spin, unic-*). No drop-in replacement we control; no known
+# exploit path in our usage. Left visible in CI output on purpose.
+
+[advisories]
+# Mirrors the workflow's --ignore flags. (Retained for tooling that DOES read
+# audit.toml; the pinned cargo-audit passes these on the command line instead.)
+ignore = [
+  "RUSTSEC-2026-0204",
+  "RUSTSEC-2026-0187",
+  "RUSTSEC-2026-0194",
+  "RUSTSEC-2026-0195",
+]
