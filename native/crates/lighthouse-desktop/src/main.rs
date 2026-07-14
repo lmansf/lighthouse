@@ -708,18 +708,12 @@ fn bootstrap_env(app: &AppHandle) {
         }
         std::env::set_var("LIGHTHOUSE_PROFILE_FILE", &profile);
 
-        // License/identity/experiment state follows the same rule (a trial or
-        // purchase belongs to this install, not to a folder): keep it here so
-        // "Choose vault folder…" can't sign the user out (or re-roll A/B
-        // buckets). Same one-time, copy-not-move migration out of the current
-        // vault for existing installs that licensed under the in-vault layout.
-        for name in [
-            "license.json",
-            "identity.json",
-            "contact.json",
-            "launch.json",
-            "experiments.json",
-        ] {
+        // License/identity state follows the same rule (a trial or purchase
+        // belongs to this install, not to a folder): keep it here so "Choose
+        // vault folder…" can't sign the user out. Same one-time, copy-not-move
+        // migration out of the current vault for existing installs that licensed
+        // under the in-vault layout.
+        for name in ["license.json", "identity.json", "contact.json"] {
             let global = data.join(name);
             if !global.exists() {
                 let legacy = vault_dir_setting(app).join(".rag-vault").join(name);
@@ -1072,9 +1066,6 @@ fn main() {
             commands::profile_get,
             commands::profile_op,
             commands::license_op,
-            commands::usage_get,
-            commands::usage_op,
-            commands::event_record,
             commands::connect_op,
             commands::model_status,
             commands::model_download,

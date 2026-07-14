@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 
 use lighthouse_core::config::is_desktop_app;
 use lighthouse_core::contracts::{ChatChunk, ChatTurn};
-use lighthouse_core::{license, llm, local_model, profile, settings, sources, tts, usage, vault};
+use lighthouse_core::{license, llm, local_model, profile, settings, sources, tts, vault};
 
 use crate::auth::is_same_origin;
 
@@ -488,27 +488,6 @@ pub async fn tts_post(headers: HeaderMap, body: Option<Json<Value>>) -> Response
 
 // --- /api/profile -------------------------------------------------------------
 
-/// Emit a `model_selected` event for the initial choice and any later change.
-fn emit_model_selected(sel: Option<profile::ModelSelectionResult>) {
-    let Some(sel) = sel else { return };
-    if (!sel.initial && !sel.changed) || sel.provider.is_empty() || sel.model.is_empty() {
-        return;
-    }
-    tokio::spawn(async move {
-        license::record_event(
-            "model_selected",
-            json!({
-                "provider": sel.provider,
-                "model": sel.model,
-                "initial": sel.initial,
-                "previous_provider": sel.previous_provider,
-                "previous_model": sel.previous_model,
-            }),
-        )
-        .await;
-    });
-}
-
 pub async fn profile_get() -> Response {
     Json(profile::get_state()).into_response()
 }
@@ -528,7 +507,7 @@ pub async fn profile_post(headers: HeaderMap, body: Option<Json<Value>>) -> Resp
                 body["email"].as_str().unwrap_or(""),
             );
         }
-        Some("finishRegistration") => emit_model_selected(profile::finish_registration()),
+        Some("finishRegistration") => profile::finish_registration(),
         Some("selectModel") => {
             let provider_id = body["providerId"].as_str().unwrap_or("");
             // Managed policy: reject a disallowed provider with a real error
@@ -536,11 +515,11 @@ pub async fn profile_post(headers: HeaderMap, body: Option<Json<Value>>) -> Resp
             if !lighthouse_core::policy::provider_allowed(provider_id) {
                 return bad_request("this AI provider is managed off by your organization");
             }
-            emit_model_selected(Some(profile::select_model(
+            profile::select_model(
                 provider_id,
                 body["modelId"].as_str().unwrap_or(""),
                 body["apiKey"].as_str().unwrap_or(""),
-            )))
+            );
         }
         Some("setDefaultInclusion") => {
             let v = body["value"].as_str().unwrap_or("");
@@ -581,6 +560,14 @@ pub async fn license_post(headers: HeaderMap, body: Option<Json<Value>>) -> Resp
     let body = body.map(|Json(v)| v).unwrap_or_else(|| json!({}));
     match body["op"].as_str() {
         Some("config") => Json(json!({ "paidEnabled": license::paid_enabled() })).into_response(),
+        // Headless/web build: no desktop shell.log, so the diagnostics excerpt
+        // is always empty. version + OS mirror what a bug report transmits.
+        Some("diagnostics") => Json(json!({
+            "version": lighthouse_core::config::app_version(),
+            "os": std::env::consts::OS,
+            "log": "",
+        }))
+        .into_response(),
         Some("check") => Json(license::check_license().await).into_response(),
         Some("start") => match license::start_trial(None).await {
             Ok(_) => Json(json!({ "ok": true })).into_response(),
@@ -643,16 +630,8 @@ pub async fn license_post(headers: HeaderMap, body: Option<Json<Value>>) -> Resp
             Json(json!({ "ok": license::submit_notify(email).await })).into_response()
         }
         Some("bug") => {
-            let where_ = body["bug"]["where"]
-                .as_str()
-                .unwrap_or("")
-                .trim()
-                .to_string();
-            let what = body["bug"]["what"]
-                .as_str()
-                .unwrap_or("")
-                .trim()
-                .to_string();
+            let where_ = body["where"].as_str().unwrap_or("").trim().to_string();
+            let what = body["what"].as_str().unwrap_or("").trim().to_string();
             if where_.is_empty() && what.is_empty() {
                 return (
                     StatusCode::BAD_REQUEST,
@@ -660,11 +639,8 @@ pub async fn license_post(headers: HeaderMap, body: Option<Json<Value>>) -> Resp
                 )
                     .into_response();
             }
-            Json(json!({ "ok": license::submit_bug(&where_, &what).await })).into_response()
-        }
-        Some("ping") => {
-            license::ping_launch().await;
-            Json(json!({ "ok": true })).into_response()
+            // Headless server has no shell.log; the diagnostics excerpt is empty.
+            Json(json!({ "ok": license::submit_bug(&where_, &what, "").await })).into_response()
         }
         Some("checkout") => {
             let url = license::checkout_url(body["email"].as_str()).await;
@@ -672,57 +648,6 @@ pub async fn license_post(headers: HeaderMap, body: Option<Json<Value>>) -> Resp
         }
         _ => bad_request("unknown op"),
     }
-}
-
-// --- /api/usage ---------------------------------------------------------------
-
-pub async fn usage_get() -> Response {
-    Json(json!({ "optOut": usage::is_usage_opted_out() })).into_response()
-}
-
-pub async fn usage_post(headers: HeaderMap, body: Option<Json<Value>>) -> Response {
-    if !is_same_origin(&headers) {
-        return forbidden();
-    }
-    let body = body.map(|Json(v)| v).unwrap_or_else(|| json!({}));
-    match body["op"].as_str() {
-        Some("consent") => {
-            let opt_out = body["optOut"].as_bool().unwrap_or(false);
-            usage::set_usage_opt_out(opt_out);
-            Json(json!({ "ok": true, "optOut": opt_out })).into_response()
-        }
-        Some("events") => {
-            let events = body["events"].as_array().cloned().unwrap_or_default();
-            usage::append_usage_events(&events);
-            Json(json!({ "ok": true })).into_response()
-        }
-        Some("publish") => {
-            license::publish_usage_events().await;
-            Json(json!({ "ok": true })).into_response()
-        }
-        _ => bad_request("unknown op"),
-    }
-}
-
-// --- /api/event ---------------------------------------------------------------
-
-pub async fn event_post(headers: HeaderMap, body: Option<Json<Value>>) -> Response {
-    if !is_same_origin(&headers) {
-        return forbidden();
-    }
-    let body = body.map(|Json(v)| v).unwrap_or_else(|| json!({}));
-    let name = body["name"].as_str().unwrap_or("").trim().to_string();
-    if name.is_empty() {
-        return bad_request("name required");
-    }
-    let props = if body["props"].is_object() {
-        body["props"].clone()
-    } else {
-        json!({})
-    };
-    // Fire-and-forget on the server side too; record_event swallows its errors.
-    tokio::spawn(async move { license::record_event(&name, props).await });
-    Json(json!({ "ok": true })).into_response()
 }
 
 // --- /api/connect -------------------------------------------------------------
@@ -985,11 +910,6 @@ pub async fn register_post(headers: HeaderMap, body: Option<Json<Value>>) -> Res
         state: body["state"].as_str().unwrap_or("").trim().to_string(),
     };
     let result = license::start_trial(Some(contact)).await;
-    // start_trial resets usage consent; apply the user's explicit choice
-    // afterwards so it wins — even when the mint fails (offline).
-    if let Some(opt_out) = body["usageLoggingOptOut"].as_bool() {
-        usage::set_usage_opt_out(opt_out);
-    }
     match result {
         Ok(_) => Json(json!({ "ok": true })).into_response(),
         Err(e) => Json(json!({

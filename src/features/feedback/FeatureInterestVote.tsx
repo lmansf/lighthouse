@@ -75,6 +75,10 @@ export function FeatureInterestVote({ onDone }: { onDone: () => void }) {
           />
         ))}
       </div>
+      <Text className={styles.caption}>
+        Sends only which of these you tick — never your account, your files, or their contents.
+        Nothing is sent until you press Send.
+      </Text>
       <div className={styles.actions}>
         <Button
           appearance="primary"

@@ -1,4 +1,5 @@
-/** License endpoint: check, start a trial, activate a key, submit feedback, ping. */
+/** License endpoint: check, start a trial, activate a key, submit feedback,
+ *  report a bug, and read feedback diagnostics. */
 import { NextResponse } from "next/server";
 import {
   checkLicense,
@@ -8,7 +9,7 @@ import {
   submitFeatureInterest,
   submitNotify,
   submitBug,
-  pingLaunch,
+  feedbackDiagnostics,
   checkoutUrl,
   paidEnabled,
   type FeedbackInput,
@@ -87,19 +88,19 @@ export async function POST(req: Request) {
       return NextResponse.json(await submitFeatureInterest(shown, wanted));
     }
 
+    case "diagnostics":
+      // What the feedback dialog discloses before a Send (version, OS, log).
+      return NextResponse.json(feedbackDiagnostics());
+
     case "bug": {
-      const b = (body.bug ?? {}) as { where?: string; what?: string };
-      const where = String(b.where ?? "").trim();
-      const what = String(b.what ?? "").trim();
+      const where = String(body.where ?? "").trim();
+      const what = String(body.what ?? "").trim();
       if (!where && !what) {
         return NextResponse.json({ ok: false, reason: "rejected", detail: "empty report" }, { status: 400 });
       }
-      return NextResponse.json(await submitBug(where, what));
-    }
-
-    case "ping": {
-      await pingLaunch();
-      return NextResponse.json({ ok: true });
+      // Attach the diagnostics excerpt only when the user ticked the box.
+      const log = body.includeLog ? feedbackDiagnostics().log : undefined;
+      return NextResponse.json(await submitBug(where, what, log));
     }
 
     case "checkout": {

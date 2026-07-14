@@ -2,7 +2,6 @@
 import { NextResponse } from "next/server";
 import { isSupabaseConfigured } from "@/server/registration";
 import { startTrial } from "@/server/license";
-import { setUsageOptOut } from "@/server/usage";
 import { isSameOrigin } from "@/server/http";
 
 export const runtime = "nodejs";
@@ -37,12 +36,5 @@ export async function POST(req: Request) {
       { ok: false, reason: "rejected", detail: err instanceof Error ? err.message : "registration failed" },
       { status: 200 },
     );
-  } finally {
-    // startTrial resets usage-logging consent to opted-in; apply the user's
-    // explicit choice afterwards so it wins. In `finally` because onboarding
-    // proceeds even when the mint fails (offline) — an opt-out must still stick.
-    if (typeof b.usageLoggingOptOut === "boolean") {
-      setUsageOptOut(b.usageLoggingOptOut);
-    }
   }
 }

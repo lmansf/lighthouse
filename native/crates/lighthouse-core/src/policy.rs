@@ -33,9 +33,10 @@ pub struct PolicyFile {
     pub v: Option<u32>,
     pub allowed_providers: Option<Vec<String>>,
     pub force_local_only: Option<bool>,
-    /// "off" silences ping/event/events/assign and locks the click-events
-    /// opt-in off. License check/start/activate and explicit user
-    /// submissions (feedback/bug) remain — documented in data-flows.md.
+    /// "off" marks telemetry as managed-off in the UI. All ambient telemetry
+    /// has been removed from the engine, so there is nothing left to silence;
+    /// license check/start/activate and explicit user submissions
+    /// (feedback/bug/notify) are the only egress and are unaffected.
     pub telemetry: Option<String>,
     pub chat_history: Option<String>,
     pub widget_hotkeys: Option<String>,
@@ -186,7 +187,8 @@ fn key_is(state: &PolicyState, get: impl Fn(&PolicyFile) -> &Option<String>, val
     matches!(state, PolicyState::Active(p) if get(p).as_deref() == Some(value))
 }
 
-/// ping/event/events/assign transmission allowed?
+/// Telemetry permitted by policy? No ambient telemetry remains in the engine,
+/// so this now only feeds the managed "telemetry off" lock the UI renders.
 pub fn telemetry_allowed() -> bool {
     match &*policy() {
         PolicyState::Malformed => false,

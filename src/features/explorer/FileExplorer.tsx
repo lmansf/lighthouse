@@ -74,8 +74,6 @@ import type { FileNode } from "@/contracts";
 import { flattenVisible, type FlatRow } from "./flatten";
 import { useRagStore } from "@/stores/useRagStore";
 import { useAuthStore } from "@/stores/useAuthStore";
-import { logEvent } from "@/lib/logEvent";
-import { recordInterest } from "@/lib/comingSoon";
 import { FILE_DRAG_MIME, parseDraggedFiles, serializeDraggedFiles } from "@/shell/dnd";
 import { desktopBridge, isDesktopShell, pathsForFiles } from "@/shell/desktopBridge";
 
@@ -539,12 +537,6 @@ function TreeRowImpl({
     if (node.kind === "folder") onToggleExpand(node.id);
   };
   const toggleVisibility = () => {
-    // Privacy-safe availability telemetry: count THIS toggle (not the folder's
-    // cascade of descendants); the row's current state decides the direction and
-    // `scope` is a coarse kind only - never a name, id, or path.
-    logEvent(node.ragIncluded ? "file_made_unavailable" : "file_made_available", {
-      scope: node.kind === "folder" ? "folder" : "file",
-    });
     onToggle(node.id);
   };
   const eyeLabel = partialVis
@@ -567,12 +559,6 @@ function TreeRowImpl({
         role="button"
         tabIndex={0}
         aria-expanded={node.kind === "folder" ? expanded : undefined}
-        // Usage logging: record only the COARSE kind (folder vs file), never the
-        // node's name. Private document/folder names are PII and must not leave
-        // the machine — the global click-capture ships data-log labels to the
-        // hosted usage endpoint keyed to the user's email/contact id.
-        data-log-type={node.kind === "folder" ? "folder" : "file"}
-        data-log={node.kind === "folder" ? "folder" : "file"}
         onClick={activate}
         // Double-click opens the file in its native app (desktop-only). Folders
         // keep their single-click expand; a stray double-click there is a no-op.
@@ -889,14 +875,10 @@ export function FileExplorer() {
   const desktop = useRagStore((s) => s.desktop);
   const lastError = useRagStore((s) => s.lastError);
   const clearLastError = useRagStore((s) => s.clearLastError);
-  // The user's effective default-inclusion behavior (explicit onboarding choice,
-  // else the assigned A/B variant). "include" carries a prominent "you control
-  // what AI sees" reassurance since files are searchable the moment they're added.
-  const defaultInclusion = useAuthStore(
-    (s) => s.onboarding.defaultInclusion ??
-      (s.onboarding.defaultInclusionVariant === "opt_out" ? "include" : undefined),
-  );
-  const includeByDefault = defaultInclusion === "include";
+  // The user's effective default-inclusion behavior (their explicit onboarding
+  // choice, else the conservative `exclude`). "include" carries a prominent "you
+  // control what AI sees" reassurance since files are searchable once added.
+  const includeByDefault = useAuthStore((s) => s.onboarding.defaultInclusion === "include");
 
   const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
   const isSelected = useCallback((id: string) => selectedSet.has(id), [selectedSet]);
@@ -957,11 +939,9 @@ export function FileExplorer() {
       setJustAdded(new Set());
     }, 3800);
   };
-  // Register interest in a not-yet-shipped feature: log it (telemetry event +
-  // the local tally behind the Experiments leaderboard) and thank the user,
-  // without running any real connector flow.
-  const registerInterest = (id: string, thanks: string) => {
-    recordInterest(id);
+  // Acknowledge interest in a not-yet-shipped feature: thank the user, without
+  // running any real connector flow and without recording anything.
+  const registerInterest = (thanks: string) => {
     setInterestNote(thanks);
     if (interestTimer.current) window.clearTimeout(interestTimer.current);
     interestTimer.current = window.setTimeout(() => setInterestNote(null), 4200);
@@ -1509,7 +1489,6 @@ export function FileExplorer() {
                   icon={<CloudArrowUpRegular />}
                   onClick={() =>
                     registerInterest(
-                      "sharepoint",
                       "Thanks for your interest! We'll let you know the moment SharePoint is ready.",
                     )
                   }

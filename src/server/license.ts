@@ -33,16 +33,8 @@ import crypto from "node:crypto";
 import path from "node:path";
 import { appStateDir, readJson, writeJson } from "./config";
 import { getState as profileState } from "./profile";
-import { getAllVariants, assignBalancedVariants } from "./experiment";
-import { telemetryAllowed } from "./policy";
 import type { Registration } from "./registration";
-import {
-  isUsageOptedOut,
-  readUsageBuffer,
-  purgeUsageBuffer,
-  resetUsageConsent,
-} from "./usage";
-import { recordEgress, PURPOSE_LICENSE, PURPOSE_TELEMETRY, PURPOSE_CHECKOUT } from "./egress";
+import { recordEgress, PURPOSE_LICENSE, PURPOSE_CHECKOUT } from "./egress";
 
 const TRIAL_DAYS = 14; // sign-in days a trial lasts
 const GRACE_DAYS = 14; // paid: grace window after paid_through before locking
@@ -53,7 +45,6 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const licensePath = () => path.join(appStateDir(), "license.json");
 const identityPath = () => path.join(appStateDir(), "identity.json");
 const contactIdPath = () => path.join(appStateDir(), "contact.json");
-const launchPath = () => path.join(appStateDir(), "launch.json");
 
 /**
  * A stable per-user contact id, generated once and kept across trials, locks,
@@ -128,12 +119,9 @@ export async function callFn(op: string, extra: Record<string, unknown>): Promis
   const url = licenseApi();
   if (!url) throw new Error("LICENSE_API_URL not configured");
   const anon = process.env.SUPABASE_ANON_KEY?.trim();
-  // Egress registry: same host, but the telemetry ops are labeled apart
-  // from the licensing ones so the panel shows them distinctly.
-  const purpose = ["ping", "event", "events", "assign"].includes(op)
-    ? PURPOSE_TELEMETRY
-    : PURPOSE_LICENSE;
-  recordEgress(url, purpose);
+  // Egress registry: every op here is a licensing/explicit-purpose call
+  // (check, start, activate, feedback, notify, featureInterest, bug, checkout).
+  recordEgress(url, PURPOSE_LICENSE);
   const res = await fetch(url, {
     method: "POST",
     headers: {
@@ -205,16 +193,6 @@ export function accountEmail(): string | undefined {
 export async function startTrial(contact?: Registration): Promise<{ guid: string }> {
   const useContact = contact ?? loadIdentity() ?? null;
   if (useContact) writeJson(identityPath(), useContact);
-
-  // A fresh trial resets usage-logging consent to its default (opted OUT). The
-  // registration form may then re-apply the user's explicit choice afterwards.
-  resetUsageConsent();
-
-  // Balance this install into the under-represented variant server-side, so a
-  // small pilot splits evenly instead of relying on the ~50/50 hash. Best-effort
-  // and idempotent: offline / unconfigured it keeps the local hash assignment.
-  // Done here at registration - before onboarding branches on the variant.
-  await assignBalancedVariants().catch(() => {});
 
   if (licenseApi()) {
     const r = await callFn("start", { contact: useContact ? contactRow(useContact) : undefined });
@@ -332,7 +310,7 @@ export async function submitFeedback(f: FeedbackInput): Promise<{ ok: boolean }>
   if (!licenseApi()) return { ok: true };
   try {
     const r = await callFn("feedback", {
-      feedback: { ...f, email, doNotContact, contactId: getContactId(), experiments: getAllVariants() },
+      feedback: { ...f, email, doNotContact, contactId: getContactId() },
     });
     return { ok: r.ok !== false };
   } catch {
@@ -342,9 +320,10 @@ export async function submitFeedback(f: FeedbackInput): Promise<{ ok: boolean }>
 
 /**
  * Record a feature-interest vote — which of the shelved features (read-aloud,
- * converse, …) the user would actually use. Linked by the stable contact id and
- * stored in its own `feature_interest` Supabase table (separate from feedback).
- * In local-dev (no hosted function) the vote is accepted but not stored.
+ * converse, …) the user would actually use. Anonymous: the vote carries ONLY
+ * the shown/wanted feature ids, no contact id or other identity. Stored in its
+ * own `feature_interest` Supabase table (separate from feedback). In local-dev
+ * (no hosted function) the vote is accepted but not stored.
  */
 export async function submitFeatureInterest(
   shown: string[],
@@ -353,7 +332,7 @@ export async function submitFeatureInterest(
   if (!licenseApi()) return { ok: true };
   try {
     const r = await callFn("featureInterest", {
-      vote: { shown, wanted, contactId: getContactId() },
+      vote: { shown, wanted },
     });
     return { ok: r.ok !== false };
   } catch {
@@ -434,107 +413,35 @@ export async function checkoutUrl(email?: string): Promise<string | null> {
   }
 }
 
-/** Send an in-app bug report (with the install's guid/email) to Supabase. */
-export async function submitBug(where: string, what: string): Promise<{ ok: boolean }> {
+/**
+ * What the feedback dialog shows as "exactly what a Send transmits": the app
+ * version, a readable OS string, and a diagnostics log excerpt.
+ *
+ * PARITY: the shipped Rust engine returns the real tail of the desktop
+ * `shell.log` here; the TS/web twin has no shell.log, so `log` is always "".
+ */
+export function feedbackDiagnostics(): { version: string; os: string; log: string } {
+  return { version: process.env.npm_package_version ?? "", os: process.platform, log: "" };
+}
+
+/**
+ * Send an in-app bug report. Forwards ONLY what the dialog discloses — the
+ * user's message, the app version, the OS, and (opt-in) a diagnostics excerpt.
+ * No identity: no contact id, guid, or email is attached.
+ */
+export async function submitBug(where: string, what: string, log?: string): Promise<{ ok: boolean }> {
   if (!licenseApi()) return { ok: true };
-  const lic = readJson<LocalLicense | null>(licensePath(), null);
   try {
     const r = await callFn("bug", {
       where,
       what,
-      contactId: getContactId(),
-      guid: lic?.guid,
-      email: accountEmail(),
       version: process.env.npm_package_version,
+      os: process.platform,
+      log,
     });
     return { ok: r.ok !== false };
   } catch {
     return { ok: false };
-  }
-}
-
-/** Log an app launch to the userlogs table (best-effort; hosted mode only). */
-export async function pingLaunch(): Promise<void> {
-  // Managed policy: telemetry "off" silences the launch ping (the license
-  // `check` is separate and remains — documented in data-flows.md).
-  if (!telemetryAllowed()) return;
-  if (!licenseApi()) return;
-  const lic = readJson<LocalLicense | null>(licensePath(), null);
-  try {
-    await callFn("ping", {
-      contactId: getContactId(),
-      guid: lic?.guid,
-      email: accountEmail(),
-      version: process.env.npm_package_version,
-      // Stamp the user's variants so userlogs rows can be sliced by experiment.
-      experiments: getAllVariants(),
-    });
-  } catch {
-    /* logging must never break a launch */
-  }
-  // Derive a `returned` event: any launch on a later calendar day than the
-  // first, at most once per day. Best-effort and never blocks the launch.
-  try {
-    const launch = readJson<{ firstDay?: string; lastReturnedDay?: string }>(launchPath(), {});
-    const today = utcDay();
-    if (!launch.firstDay) {
-      writeJson(launchPath(), { ...launch, firstDay: today });
-    } else if (today !== launch.firstDay && launch.lastReturnedDay !== today) {
-      writeJson(launchPath(), { ...launch, lastReturnedDay: today });
-      const day = Math.round((Date.parse(today) - Date.parse(launch.firstDay)) / DAY_MS);
-      void recordEvent("returned", { day });
-    }
-  } catch {
-    /* returned-event derivation is best-effort */
-  }
-}
-
-/**
- * Record a funnel/telemetry event to the `events` table (best-effort; hosted
- * mode only). Every event carries the user's variant for each active experiment
- * so the dashboard can split any metric by variant. Like pingLaunch, this must
- * never throw into a launch, a query, or onboarding - all errors are swallowed.
- */
-export async function recordEvent(name: string, props: Record<string, unknown> = {}): Promise<void> {
-  if (!licenseApi() || !telemetryAllowed()) return;
-  try {
-    await callFn("event", {
-      contactId: getContactId(),
-      name,
-      experiments: getAllVariants(),
-      props,
-    });
-  } catch {
-    /* telemetry must never break the app */
-  }
-}
-
-/**
- * Publish buffered UI click events to Supabase, then purge what was sent. Called
- * during startup right after `pingLaunch`. Best-effort and non-blocking: opted
- * out, offline, or not hosted ⇒ nothing happens and the buffer is kept for next
- * launch. The buffer is ring-capped (see usage.ts), so a single batch is bounded
- * (~5000 events / ~1MB). Keyed by contactId/guid/email/version like the ping.
- */
-export async function publishUsageEvents(): Promise<void> {
-  if (!licenseApi() || isUsageOptedOut()) return;
-  const { events, lineCount } = readUsageBuffer();
-  if (!events.length) return;
-  const lic = readJson<LocalLicense | null>(licensePath(), null);
-  try {
-    const r = await callFn("events", {
-      contactId: getContactId(),
-      guid: lic?.guid,
-      email: accountEmail(),
-      version: process.env.npm_package_version,
-      events,
-    });
-    if (r.ok === false) return; // keep the buffer; retry next launch
-    // Purge exactly the lines we read (preserving any appended since), so a
-    // dropped/sanitized line is cleared too rather than retried forever.
-    purgeUsageBuffer(lineCount);
-  } catch {
-    /* offline / unreachable — keep the buffer for the next launch */
   }
 }
 

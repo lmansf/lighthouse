@@ -25,12 +25,9 @@ function freshVault() {
   mkdirSync(path.join(vault, ".rag-vault"), { recursive: true });
   process.env.VAULT_DIR = vault;
   delete process.env.LICENSE_API_URL;
-  // Pin the default-inclusion experiment to opt_in (files start EXCLUDED) so
-  // inclusion behavior is deterministic — the exact state of the field report.
-  writeFileSync(
-    path.join(vault, ".rag-vault", "experiments.json"),
-    JSON.stringify({ onboarding: "key_first", default_inclusion: "opt_in", source: "override" }),
-  );
+  // With no explicit default-inclusion choice on the profile, files start
+  // EXCLUDED (the app's conservative default) — deterministic inclusion, the
+  // exact state of the field report.
   return vault;
 }
 

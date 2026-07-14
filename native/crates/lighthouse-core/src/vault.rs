@@ -214,14 +214,14 @@ pub fn invalidate_walk_cache() {
 }
 
 /// Whether absent inclusion flags default to INCLUDED. Honors the user's
-/// explicit onboarding choice first (`include`/`exclude`), falling back to the
-/// `default_inclusion` A/B experiment variant when they haven't chosen.
+/// explicit onboarding choice (`include`/`exclude`), falling back to the fixed
+/// privacy-preserving default (exclude) when they haven't chosen.
 fn default_included() -> bool {
     crate::profile::effective_default_inclusion() == "include"
 }
 
 /// Effective inclusion. An ancestor folder explicitly excluded always forces a
-/// node out. For an absent own flag the default is the experiment's.
+/// node out. For an absent own flag the default is `default_in`.
 fn is_effectively_included(id: &str, state: &VaultState, default_in: bool) -> bool {
     let parts: Vec<&str> = id.split('/').collect();
     let mut prefix = String::new();
@@ -511,66 +511,10 @@ pub fn list_sources() -> Vec<DataSource> {
 }
 
 /// Full-tree listing — the app's regular vault scan (also the hook that catches
-/// files copied in / deleted OUTSIDE the app, via the privacy-safe presence diff).
+/// files copied in / deleted OUTSIDE the app).
 pub fn list_nodes() -> Vec<FileNode> {
     let all = walk(&vault_dir());
-    record_presence_diff(&all);
     (*all).clone()
-}
-
-fn usage_snapshot_path() -> PathBuf {
-    state_dir().join("usage-snapshot.json")
-}
-
-#[derive(Default, Serialize, Deserialize)]
-struct Snapshot {
-    #[serde(default)]
-    ids: HashMap<String, String>,
-}
-
-/// Emit privacy-safe file-presence telemetry by diffing the current tree against
-/// the last snapshot. COUNTS ONLY — at most a coarse `{ kind }`, never a name.
-/// First run seeds silently. Best-effort: never breaks or slows the scan.
-fn record_presence_diff(nodes: &[FileNode]) {
-    let mut current: HashMap<String, String> = HashMap::new();
-    for n in nodes {
-        let kind = match n.kind {
-            NodeKind::File => "file",
-            NodeKind::Folder => "folder",
-        };
-        current.insert(n.id.clone(), kind.to_string());
-    }
-    let snap: Option<Snapshot> = read_json(&usage_snapshot_path(), None);
-    let Some(prev) = snap.map(|s| s.ids) else {
-        write_json(&usage_snapshot_path(), &Snapshot { ids: current });
-        return;
-    };
-    for (id, kind) in &current {
-        if !prev.contains_key(id) {
-            fire_event("file_added", kind);
-        }
-    }
-    for (id, kind) in &prev {
-        if !current.contains_key(id) {
-            fire_event("file_removed", kind);
-        }
-    }
-    // Only rewrite when the set actually changed. The tree poll lands here every
-    // few seconds; rewriting (atomic temp+rename) an identical snapshot each time
-    // was pure idle disk churn — when current == prev the file already holds it.
-    if current != prev {
-        write_json(&usage_snapshot_path(), &Snapshot { ids: current });
-    }
-}
-
-/// Fire-and-forget telemetry (needs a Tokio runtime; silently skipped without one).
-fn fire_event(name: &'static str, kind: &str) {
-    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        let props = serde_json::json!({ "kind": kind });
-        handle.spawn(async move {
-            crate::license::record_event(name, props).await;
-        });
-    }
 }
 
 /// Toggle a node and (for folders) all of its descendants.
@@ -709,7 +653,7 @@ pub fn create_folder(parent_id: Option<&str>, name: &str) -> anyhow::Result<Stri
 
 /// Write an uploaded file into the vault (optionally under a folder). Collisions
 /// get a " (n)" suffix. No state entry is created, so an uploaded file follows
-/// the default-inclusion experiment like any external add.
+/// the user's default-inclusion setting like any external add.
 pub fn add_file(name: &str, bytes: &[u8], dest_parent_id: Option<&str>) -> anyhow::Result<String> {
     let safe_name = name
         .rsplit(['/', '\\'])

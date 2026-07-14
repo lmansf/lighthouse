@@ -3,8 +3,8 @@
 //! — provider `openai`, key sealed — that must still be blocked at the
 //! engine when `forceLocalOnly` arrives, with the ask answered by the
 //! extractive path instead of dying. Plus: selectModel op rejection,
-//! vaultRoots link rejection at the route, telemetry reading locked-off,
-//! and the `{op:"policy"}` snapshot shape.
+//! vaultRoots link rejection at the route, and the `{op:"policy"}` snapshot
+//! shape (including the telemetry lock it reports).
 //!
 //! One combined test: the policy file path + vault env are process-global
 //! (same reasoning as the secrets suite).
@@ -50,21 +50,18 @@ async fn managed_policy_is_enforced_at_the_engine() {
     std::env::remove_var("LIGHTHOUSE_DESKTOP");
     std::env::remove_var("ANTHROPIC_API_KEY");
     std::env::remove_var("OPENAI_API_KEY");
-    let state_dir = vault.path().join(".rag-vault");
-    std::fs::create_dir_all(&state_dir).unwrap();
-    std::fs::write(
-        state_dir.join("experiments.json"),
-        r#"{ "onboarding": "key_first", "default_inclusion": "opt_in", "source": "override" }"#,
-    )
-    .unwrap();
     lighthouse_core::vault::invalidate_walk_cache();
 
     // --- A PRE-POLICY profile: openai selected, key sealed. Written before
     // the policy file exists (select_model would refuse afterwards).
     std::env::remove_var("LIGHTHOUSE_POLICY_FILE");
     lighthouse_core::policy::reset_for_tests();
-    let sel = lighthouse_core::profile::select_model("openai", "gpt-5-mini", "sk-managed-test");
-    assert_eq!(sel.provider, "openai", "pre-policy selection persists");
+    lighthouse_core::profile::select_model("openai", "gpt-5-mini", "sk-managed-test");
+    assert_eq!(
+        lighthouse_core::profile::model_config().provider_id.as_deref(),
+        Some("openai"),
+        "pre-policy selection persists"
+    );
 
     // --- The policy lands.
     let policy_dir = tempfile::tempdir().unwrap();
@@ -174,14 +171,7 @@ async fn managed_policy_is_enforced_at_the_engine() {
     assert!(res.status().is_success(), "in-root link is allowed");
     std::env::remove_var("LIGHTHOUSE_DESKTOP");
 
-    // --- 4. Telemetry reads locked-off even after an explicit opt-in write.
-    lighthouse_core::usage::set_usage_opt_out(false);
-    assert!(
-        lighthouse_core::usage::is_usage_opted_out(),
-        "telemetry: \"off\" pins the opt-out regardless of the user flag"
-    );
-
-    // --- 5. The policy op reports the locks the UI renders.
+    // --- 4. The policy op reports the locks the UI renders.
     let snap: Value = client
         .post(format!("{base}/api/rag"))
         .json(&json!({ "op": "policy" }))

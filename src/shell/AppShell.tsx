@@ -5,7 +5,6 @@ import { makeStyles, tokens } from "@fluentui/react-components";
 import { Sidebar } from "./Sidebar";
 import { useVaultTree } from "./useVaultTree";
 import { StartupPrompt } from "@/features/startup/StartupPrompt";
-import { useUsageCapture } from "@/features/usage/useUsageCapture";
 
 const useStyles = makeStyles({
   root: {
@@ -59,10 +58,6 @@ export function AppShell({ sidebar, main }: AppShellProps) {
       /* storage blocked — the in-session state still works */
     }
   }, [collapsed]);
-
-  // Capture coarse UI interactions for best-effort usage logging (consent-gated
-  // inside the hook). Mounted here so it covers the whole post-onboarding app.
-  useUsageCapture();
 
   // One-time RAG data load + poll/push freshness (shared with the desktop
   // widget window via the hook — see src/shell/useVaultTree.ts).

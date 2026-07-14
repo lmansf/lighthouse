@@ -67,7 +67,8 @@ const server = http.createServer((req, res) => {
       return send({ ok: true });
     }
 
-    if (body.op === "ping") return send({ ok: true });
+    // "ping" (and the other ambient-telemetry ops) no longer exist — the real
+    // function answers "unknown op", and so does this mock via the fallthrough.
 
     if (body.op === "check") {
       const decoded = decrypt(String(body.licenseKey || ""));

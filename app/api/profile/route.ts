@@ -12,26 +12,8 @@ import {
   resolvedKeyFor,
 } from "@/server/profile";
 import { isSameOrigin } from "@/server/http";
-import { recordEvent } from "@/server/license";
 import { providerAllowed } from "@/server/policy";
 import { validateKey } from "@/server/llm";
-import type { ModelSelectionResult } from "@/server/profile";
-
-/**
- * Track which models people use: emit a `model_selected` event for the initial
- * choice and any later change. Skips no-op re-saves and any empty selection.
- * Non-PII app config; follows the same funnel-event path as first_query.
- */
-function emitModelSelected(sel: ModelSelectionResult | null): void {
-  if (!sel || (!sel.initial && !sel.changed) || !sel.provider || !sel.model) return;
-  void recordEvent("model_selected", {
-    provider: sel.provider,
-    model: sel.model,
-    initial: sel.initial,
-    previous_provider: sel.previousProvider,
-    previous_model: sel.previousModel,
-  });
-}
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -53,7 +35,7 @@ export async function POST(req: Request) {
       register(String(body.name ?? ""), String(body.email ?? ""));
       break;
     case "finishRegistration":
-      emitModelSelected(finishRegistration());
+      finishRegistration();
       break;
     case "selectModel": {
       const providerId = String(body.providerId ?? "");
@@ -66,9 +48,7 @@ export async function POST(req: Request) {
           { status: 400 },
         );
       }
-      emitModelSelected(
-        selectModel(providerId, String(body.modelId ?? ""), String(body.apiKey ?? "")),
-      );
+      selectModel(providerId, String(body.modelId ?? ""), String(body.apiKey ?? ""));
       break;
     }
     case "setDefaultInclusion":

@@ -17,15 +17,9 @@ pub fn lock_env(vault: &Path) -> MutexGuard<'static, ()> {
     std::env::remove_var("LICENSE_ENFORCE");
     std::env::remove_var("LIGHTHOUSE_API_TOKEN");
     std::env::remove_var("LIGHTHOUSE_DESKTOP");
-    // Pin the default_inclusion experiment to `opt_in` (default-excluded) so
-    // inclusion tests are deterministic regardless of the random contact id.
-    let state_dir = vault.join(".rag-vault");
-    std::fs::create_dir_all(&state_dir).unwrap();
-    std::fs::write(
-        state_dir.join("experiments.json"),
-        r#"{ "onboarding": "key_first", "default_inclusion": "opt_in", "source": "override" }"#,
-    )
-    .unwrap();
+    // With experiments removed, default inclusion is a fixed privacy-preserving
+    // default (exclude): newly-added files start EXCLUDED until included, so the
+    // inclusion tests below are deterministic without pinning anything.
     lighthouse_core::vault::invalidate_walk_cache();
     guard
 }

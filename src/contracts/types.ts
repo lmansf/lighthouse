@@ -164,25 +164,10 @@ export interface OnboardingState {
    */
   keyedProviders?: string[];
   /**
-   * A/B onboarding variant for this install (`play_first` drops straight into the
-   * workspace on the local model and defers the key prompt; `key_first` is the
-   * classic ask-for-a-key-first flow). Surfaced so the UI can branch copy and
-   * affordances. Optional: absent in the mock / when experiments aren't resolved.
-   */
-  onboardingVariant?: "play_first" | "key_first";
-  /**
-   * A/B default-inclusion variant (`opt_out` includes new files by default with
-   * a prominent control affordance; `opt_in` includes nothing until toggled).
-   * This is the assigned experiment bucket and the *fallback* default when the
-   * user hasn't made an explicit choice.
-   */
-  defaultInclusionVariant?: "opt_in" | "opt_out";
-  /**
    * The user's *effective* default-inclusion behavior for newly-added files:
    * `include` = added files are searchable by default (toggle off what you don't
    * want); `exclude` = nothing is searchable until you include it. Chosen during
-   * onboarding; when the user has made no explicit choice this mirrors
-   * `defaultInclusionVariant` (opt_out → include, opt_in → exclude).
+   * onboarding; absent ⇒ the conservative `exclude` default.
    */
   defaultInclusion?: "include" | "exclude";
 }

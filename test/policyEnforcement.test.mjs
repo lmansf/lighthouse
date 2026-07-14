@@ -1,12 +1,9 @@
 /**
  * Managed-policy ENFORCEMENT in the TS twin — the policy module's verdicts
  * (test/policy.test.mjs) must actually gate the engine paths, mirroring the
- * Rust call sites (profile.rs select_model, usage.rs is_usage_opted_out,
- * llm.rs stream_answer):
- *   - selectModel under forceLocalOnly returns the profile unchanged and
+ * Rust call sites (profile.rs select_model, llm.rs stream_answer):
+ *   - selectModel under forceLocalOnly leaves the profile unchanged and
  *     persists nothing (no provider, no sealed key);
- *   - isUsageOptedOut() reads as permanently opted out under telemetry "off",
- *     even after an explicit opt-in;
  *   - streamAnswer refuses a disallowed keyed cloud provider at call time and
  *     answers with the extractive fallback, without touching the network.
  *
@@ -32,7 +29,6 @@ delete process.env.ANTHROPIC_API_KEY;
 
 const policy = await import("../src/server/policy.ts");
 const { selectModel, getState, resolvedKeyFor } = await import("../src/server/profile.ts");
-const { isUsageOptedOut, setUsageOptOut } = await import("../src/server/usage.ts");
 const { streamAnswer } = await import("../src/server/llm.ts");
 
 /** Point the engine at a throwaway policy file for the duration of `fn`. */
@@ -51,32 +47,15 @@ async function withPolicy(content, fn) {
 
 test("selectModel under forceLocalOnly leaves the profile untouched and seals no key", async () => {
   await withPolicy(JSON.stringify({ forceLocalOnly: true }), () => {
-    const res = selectModel("openai", "gpt-5-mini", "sk-live-blocked");
-    assert.equal(res.changed, false);
-    assert.equal(res.initial, false);
-    assert.equal(res.provider, "", "provider echoes the (empty) stored profile");
+    selectModel("openai", "gpt-5-mini", "sk-live-blocked");
     const state = getState();
-    assert.equal(state.providerId, null, "disallowed provider persisted");
-    assert.equal(state.step, "sign-in", "selectModel advanced the profile anyway");
-    assert.equal(resolvedKeyFor("openai"), null, "key sealed for a disallowed provider");
+    assert.equal(state.providerId, null, "disallowed provider not persisted");
+    assert.equal(state.step, "sign-in", "selectModel did not advance the profile");
+    assert.equal(resolvedKeyFor("openai"), null, "no key sealed for a disallowed provider");
   });
   // Same call without the policy goes through — the gate above was the policy.
-  const res = selectModel("openai", "gpt-5-mini", "sk-live-allowed");
-  assert.equal(res.changed, true);
-  assert.equal(resolvedKeyFor("openai"), "sk-live-allowed");
-});
-
-test("isUsageOptedOut is locked true under telemetry off, even after an explicit opt-in", async () => {
-  setUsageOptOut(false); // the user's own choice: opted in
-  assert.equal(isUsageOptedOut(), false);
-  await withPolicy(JSON.stringify({ telemetry: "off" }), () => {
-    assert.equal(isUsageOptedOut(), true, "managed telemetry-off must override the opt-in");
-    setUsageOptOut(false); // even a fresh opt-in write cannot unlock it
-    assert.equal(isUsageOptedOut(), true);
-  });
-  // Policy gone ⇒ the persisted user choice shows through again.
-  assert.equal(isUsageOptedOut(), false);
-  setUsageOptOut(true); // restore the default for any later test
+  selectModel("openai", "gpt-5-mini", "sk-live-allowed");
+  assert.equal(resolvedKeyFor("openai"), "sk-live-allowed", "an allowed provider's key is sealed");
 });
 
 test("streamAnswer refuses a keyed-but-disallowed provider and falls back extractively", async () => {

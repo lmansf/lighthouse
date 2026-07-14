@@ -246,8 +246,8 @@ fn named_but_excluded_flags_the_file() {
 
     write_file(&vault_dir.path().join("1 Galaxy Servers.xlsx"), "not a real workbook");
     write_file(&vault_dir.path().join("recipes.md"), "chocolate cake");
-    // lock_env pins the default-inclusion experiment to opt_in: files start
-    // EXCLUDED, which is exactly the field-report state.
+    // Default inclusion is the fixed exclude default: files start EXCLUDED,
+    // which is exactly the field-report state.
     let missing = vault::named_but_excluded("how many entries are in 1 Galaxy Servers.xlsx?");
     assert_eq!(missing, vec!["1 Galaxy Servers.xlsx".to_string()]);
 
