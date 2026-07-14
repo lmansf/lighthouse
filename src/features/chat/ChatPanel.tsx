@@ -18,6 +18,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type ComponentProps,
   type KeyboardEvent,
 } from "react";
 import {
@@ -30,6 +31,7 @@ import {
   DialogContent,
   DialogSurface,
   DialogTitle,
+  Divider,
   DrawerBody,
   DrawerHeader,
   DrawerHeaderTitle,
@@ -86,7 +88,12 @@ import { useRagStore } from "@/stores/useRagStore";
 import { useAuthStore } from "@/stores/useAuthStore";
 import { logEvent } from "@/lib/logEvent";
 import { parseChartSpec, tableToCsv } from "@/lib/chartSpec";
+import { sortRows, type SortDir } from "@/lib/sortTable";
+import { pinChartData } from "@/lib/pinChart";
+import { recallRelated, type RecallHit } from "@/lib/recall";
 import { AnalyticsChart } from "@/features/chat/AnalyticsChart";
+import { BriefingsPanel } from "@/features/chat/BriefingsPanel";
+import { PinMiniChart } from "@/features/chat/PinMiniChart";
 import { EgressShield } from "@/features/egress/EgressShield";
 import { useChatStore, type TranscriptMessage } from "@/stores/useChatStore";
 import { modKey } from "@/features/onboarding/ModeChooser";
@@ -371,6 +378,24 @@ const useStyles = makeStyles({
     transitionProperty: "opacity",
     transitionDuration: tokens.durationFaster,
   },
+  // Sortable result tables: the whole header cell is the click target, with a
+  // subtle pointer + hover and a keyboard focus ring. Border/padding/alignment
+  // stay inherited from the surrounding `.answer` `& th` rule, so the table
+  // looks unchanged apart from the caret the active column renders.
+  sortHeader: {
+    cursor: "pointer",
+    userSelect: "none",
+    ":hover": { backgroundColor: tokens.colorNeutralBackground2Hover },
+    ":focus-visible": {
+      outline: `2px solid ${tokens.colorStrokeFocus2}`,
+      outlineOffset: "-2px",
+    },
+  },
+  sortCaret: {
+    marginLeft: tokens.spacingHorizontalXXS,
+    fontSize: "0.75em",
+    color: tokens.colorNeutralForeground3,
+  },
   refs: {
     display: "flex",
     flexDirection: "column",
@@ -435,6 +460,14 @@ const useStyles = makeStyles({
     borderRadius: tokens.borderRadiusMedium,
     backgroundColor: tokens.colorBrandBackground2,
     color: tokens.colorNeutralForeground1,
+  },
+  // One changed pin: its re-ask button with the before→after mini-chart tucked
+  // beneath, so the numbers and the drill-down stay visually paired.
+  pinAlertItem: {
+    display: "inline-flex",
+    flexDirection: "column",
+    alignItems: "flex-start",
+    gap: tokens.spacingVerticalXXS,
   },
   pinDialogSurface: { maxWidth: "640px", width: "92vw" },
   pinList: {
@@ -520,6 +553,19 @@ const useStyles = makeStyles({
   },
   metaLine: { color: tokens.colorNeutralForeground3 },
   empty: { color: tokens.colorNeutralForeground3 },
+
+  // "From earlier chats" recall row above the composer (add-conversation-recall):
+  // a quiet label + tappable chips that reopen a past conversation. Wraps so a
+  // few suggestions never push the composer around.
+  recallBar: {
+    display: "flex",
+    alignItems: "center",
+    flexWrap: "wrap",
+    gap: tokens.spacingHorizontalXS,
+    marginBottom: tokens.spacingVerticalXS,
+  },
+  recallLabel: { color: tokens.colorNeutralForeground3 },
+  recallChip: { maxWidth: "320px" },
 
   // --- Loading signal: a small, subtle Lighthouse beacon that gently pulses.
   //     Compact and unobtrusive — it's gone the moment the answer starts. ---
@@ -831,6 +877,28 @@ function hastTableRows(table: unknown): string[][] {
   return rows;
 }
 
+/** True when every cell of a hast <table> is plain text — no links, citations,
+ *  emphasis, or code. Only then is it safe to render the sortable variant, which
+ *  reads cells as strings; a table with rich in-cell markdown stays the
+ *  passthrough so that content (e.g. a citation link) survives. */
+function hastTableIsPlain(table: unknown): boolean {
+  let plain = true;
+  const walk = (node: unknown) => {
+    if (!plain || typeof node !== "object" || node === null) return;
+    const n = node as { tagName?: string; children?: unknown[] };
+    if (n.tagName === "td" || n.tagName === "th") {
+      const hasElement = (n.children ?? []).some(
+        (c) => typeof c === "object" && c !== null && "tagName" in (c as object),
+      );
+      if (hasElement) plain = false;
+      return;
+    }
+    (n.children ?? []).forEach(walk);
+  };
+  walk(table);
+  return plain;
+}
+
 /** Hover "Copy CSV" button on chat tables; flips to a checkmark briefly. */
 function CopyCsvButton({ rows }: { rows: string[][] }) {
   const styles = useStyles();
@@ -855,6 +923,100 @@ function CopyCsvButton({ rows }: { rows: string[][] }) {
         }}
       />
     </Tooltip>
+  );
+}
+
+/** Per-table sort state: the active column + direction, or null for the
+ *  table's original (unsorted) row order. */
+type TableSort = { col: number; dir: SortDir } | null;
+
+/**
+ * A chat result table the analyst can sort by clicking a column header. The
+ * sort state lives here (per instance, via useState) so every table on screen
+ * sorts independently and the hooks are never called conditionally — the
+ * `table` markdown override renders one of these per data table.
+ *
+ * The table is rendered from the extracted `rows` (header + data as plain
+ * strings — the same shape Copy-CSV already uses) rather than react-markdown's
+ * children, so the displayed order and the exported CSV always agree. Clicking
+ * a header cycles ascending -> descending -> original; the active column shows a
+ * caret and its <th> carries aria-sort. Border/padding/alignment are inherited
+ * from the surrounding `.answer` `& th`/`& td` rules, so it looks identical to a
+ * plain markdown table apart from the caret + pointer cursor.
+ */
+function SortableTable({
+  rows,
+  passthroughProps,
+}: {
+  rows: string[][];
+  passthroughProps: ComponentProps<"table">;
+}) {
+  const styles = useStyles();
+  const [sort, setSort] = useState<TableSort>(null);
+  const header = rows[0];
+  // Only the data rows are reordered; the header stays put. `null` sort shows
+  // the original order untouched (no sortRows call).
+  const view = useMemo(
+    () => (sort ? sortRows(rows, sort.col, sort.dir) : rows),
+    [rows, sort],
+  );
+
+  // Click / Enter / Space on a header cycles that column asc -> desc -> original.
+  // Activating a different column starts it ascending.
+  const cycle = (col: number) =>
+    setSort((cur) => {
+      if (!cur || cur.col !== col) return { col, dir: "asc" };
+      if (cur.dir === "asc") return { col, dir: "desc" };
+      return null;
+    });
+
+  return (
+    <div className={styles.tableWrap}>
+      {/* Exports the CURRENTLY displayed (sorted) order, not the original. */}
+      <CopyCsvButton rows={view} />
+      <table {...passthroughProps}>
+        <thead>
+          <tr>
+            {header.map((cell, col) => {
+              const dir = sort && sort.col === col ? sort.dir : null;
+              const ariaSort: "ascending" | "descending" | "none" =
+                dir === "asc" ? "ascending" : dir === "desc" ? "descending" : "none";
+              return (
+                <th
+                  key={col}
+                  aria-sort={ariaSort}
+                  tabIndex={0}
+                  className={styles.sortHeader}
+                  onClick={() => cycle(col)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      cycle(col);
+                    }
+                  }}
+                >
+                  {cell}
+                  {dir && (
+                    <span aria-hidden="true" className={styles.sortCaret}>
+                      {dir === "asc" ? "▲" : "▼"}
+                    </span>
+                  )}
+                </th>
+              );
+            })}
+          </tr>
+        </thead>
+        <tbody>
+          {view.slice(1).map((row, r) => (
+            <tr key={r}>
+              {row.map((cell, c) => (
+                <td key={c}>{cell}</td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }
 
@@ -1028,12 +1190,19 @@ const AnswerMarkdown = memo(function AnswerMarkdown({
       },
       table: ({ node, children, ...props }) => {
         const rows = hastTableRows(node);
-        return (
-          <div className={styles.tableWrap}>
-            {rows.length > 1 && <CopyCsvButton rows={rows} />}
-            <table {...props}>{children}</table>
-          </div>
-        );
+        // Sort only PLAIN data tables (the analytics result tables). A
+        // header-only/empty table has nothing to sort; a table with rich
+        // in-cell markdown (links, citations, emphasis) keeps the passthrough
+        // so that content survives — the sortable variant renders cells as
+        // strings.
+        if (rows.length <= 1 || !hastTableIsPlain(node)) {
+          return (
+            <div className={styles.tableWrap}>
+              <table {...props}>{children}</table>
+            </div>
+          );
+        }
+        return <SortableTable rows={rows} passthroughProps={props} />;
       },
     }),
     [styles, turnId, onCite],
@@ -2164,6 +2333,16 @@ export function ChatPanel() {
     ];
   }, [includedFiles]);
 
+  // Cross-conversation recall (openspec: add-conversation-recall): prior
+  // exchanges from OTHER chats relevant to the current draft, surfaced passively
+  // (tap to reopen — nothing is injected into the ask). Gated on history
+  // persistence: with nothing stored, there is nothing to recall, so this is
+  // empty whenever "save chats on this device" is off.
+  const recalled = useMemo<RecallHit[]>(() => {
+    if (!historyPersistEnabled) return [];
+    return recallRelated(question, conversations, { currentId });
+  }, [historyPersistEnabled, question, conversations, currentId]);
+
   // Recent conversations for the history drawer: real (non-empty) chats, newest
   // first, filtered by the search box (title match).
   const recentChats = useMemo(() => {
@@ -2352,6 +2531,30 @@ export function ChatPanel() {
           />
         </div>
       )}
+      {recalled.length > 0 && (
+        <div className={styles.recallBar} role="group" aria-label="Related earlier chats">
+          <Text size={200} className={styles.recallLabel}>
+            From earlier chats:
+          </Text>
+          {recalled.map((h) => (
+            <Tooltip
+              key={h.conversationId}
+              content={`In "${h.conversationTitle}" — tap to reopen`}
+              relationship="description"
+            >
+              <Button
+                size="small"
+                appearance="subtle"
+                shape="circular"
+                className={styles.recallChip}
+                onClick={() => openConversation(h.conversationId)}
+              >
+                {h.question.length > 52 ? `${h.question.slice(0, 51)}…` : h.question}
+              </Button>
+            </Tooltip>
+          ))}
+        </div>
+      )}
       {attachmentBar}
       <div className={styles.composer}>
         {attachButton}
@@ -2397,23 +2600,31 @@ export function ChatPanel() {
         <Text size={200} weight="semibold">
           {pinAlerts.length === 1 ? "A pinned answer changed:" : "Pinned answers changed:"}
         </Text>
-        {pinAlerts.map((a) => (
-          <Tooltip
-            key={a.id}
-            content={a.before ? `was: ${a.before} → now: ${a.after}` : `now: ${a.after}`}
-            relationship="description"
-          >
-            <Button
-              size="small"
-              appearance="secondary"
-              shape="circular"
-              disabled={streaming}
-              onClick={() => askPinned(a.question, a.id)}
-            >
-              {a.question.length > 48 ? `${a.question.slice(0, 47)}…` : a.question}
-            </Button>
-          </Tooltip>
-        ))}
+        {pinAlerts.map((a) => {
+          // When the engine's before/after summaries are cleanly numeric, embed
+          // a tiny before→after chart from those verified numbers; otherwise the
+          // tooltip carries the change as text (pinChartData fails closed).
+          const mini = pinChartData(a.before, a.after);
+          return (
+            <div key={a.id} className={styles.pinAlertItem}>
+              <Tooltip
+                content={a.before ? `was: ${a.before} → now: ${a.after}` : `now: ${a.after}`}
+                relationship="description"
+              >
+                <Button
+                  size="small"
+                  appearance="secondary"
+                  shape="circular"
+                  disabled={streaming}
+                  onClick={() => askPinned(a.question, a.id)}
+                >
+                  {a.question.length > 48 ? `${a.question.slice(0, 47)}…` : a.question}
+                </Button>
+              </Tooltip>
+              {mini && <PinMiniChart data={mini} />}
+            </div>
+          );
+        })}
         <span style={{ flex: 1 }} />
         <Button
           size="small"
@@ -2491,6 +2702,9 @@ export function ChatPanel() {
                 ))}
               </div>
             )}
+            <Divider />
+            <Text weight="semibold">Briefings</Text>
+            <BriefingsPanel pins={pinList} />
           </DialogContent>
           <DialogActions>
             <Button appearance="secondary" onClick={() => setPinsOpen(false)}>

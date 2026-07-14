@@ -122,6 +122,12 @@ Piper TTS / Whisper dictation / OCR (in-process or child processes with no
 sockets), and the dev-mode embedded API server. In the shipped bundle the
 UI talks to the engine over **Tauri IPC — no TCP port at all**.
 
+PDF table reconstruction (`pdf_tables.rs`, add-pdf-tables) is likewise
+in-process and offline: it reads a PDF's own text-layer glyph positions and
+rebuilds any confident grid as markdown appended to the extracted text — pure
+geometry, no model, no network. Reconstructed tables ride the same on-device
+extraction/retrieval path as OCR text; nothing about them touches egress.
+
 ## 8. Build/CI-time only — never in the shipped app
 
 `scripts/fetch-local-model.mjs` (build machines): llama.cpp + Piper GitHub

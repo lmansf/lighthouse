@@ -116,8 +116,13 @@ async function extractByExt(abs: string, ext: string): Promise<string> {
  * docx via mammoth, which already validates the main part and reads notes —
  * the version moves in lockstep (v6 rule) and re-extracts docx files the Rust
  * engine cached as (near-)empty.
+ * v9: matches the Rust engine's add-pdf-tables bump. PARITY: table
+ * reconstruction is Rust-only (like OCR and .parquet) — it needs the
+ * positioned-glyph text layer that pdf-extract exposes, which unpdf doesn't, so
+ * this engine keeps linear PDF text here — but the version moves in lockstep
+ * (v6 rule) so the shared cache-schema assertion stays green.
  */
-const CACHE_VERSION = 8;
+const CACHE_VERSION = 9;
 
 interface CacheRecord {
   v: number;

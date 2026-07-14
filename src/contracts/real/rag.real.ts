@@ -1,6 +1,9 @@
 /** Real RagService — talks to the local `/api/rag` route (filesystem-backed). */
 import type { RagService } from "../services";
 import type {
+  Briefing,
+  BriefingReport,
+  Cadence,
   ChangedPin,
   DataSource,
   FileNode,
@@ -122,6 +125,31 @@ class RealRagService implements RagService {
       changed: Array.isArray(res.changed) ? (res.changed as ChangedPin[]) : [],
       pins: Array.isArray(res.pins) ? (res.pins as Pin[]) : [],
     };
+  }
+
+  async listBriefings(): Promise<Briefing[]> {
+    const res = await post({ op: "listBriefings" });
+    return Array.isArray(res.briefings) ? (res.briefings as Briefing[]) : [];
+  }
+
+  async saveBriefing(
+    title: string,
+    pinIds: string[],
+    cadence: Cadence,
+  ): Promise<{ briefing?: Briefing; error?: string }> {
+    return (await post({ op: "saveBriefing", title, pinIds, cadence })) as {
+      briefing?: Briefing;
+      error?: string;
+    };
+  }
+
+  async removeBriefing(id: string): Promise<void> {
+    await post({ op: "removeBriefing", id });
+  }
+
+  async runBriefing(id: string): Promise<BriefingReport | undefined> {
+    const res = await post({ op: "runBriefing", id });
+    return (res.report as BriefingReport | undefined) ?? undefined;
   }
 
   async suggestedAsks(includedFileIds: string[]): Promise<{ label: string; question: string }[]> {

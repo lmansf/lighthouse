@@ -202,8 +202,29 @@ impl Supervisor {
         // reconcile(), which persists llmDisableGpu and relaunches CPU-only.
         let gpu_disabled =
             crate::read_settings(app)["llmDisableGpu"].as_bool() == Some(true);
+        // Layer count is overridable (llmGpuLayers) for low-VRAM machines that
+        // OOM at full offload; unset/negative ⇒ 999 = offload everything (the
+        // fast default). Full offload stays safe on GPU-less machines via the
+        // built-in CPU fallback + the quick-crash guard in reconcile().
+        let ngl = crate::read_settings(app)["llmGpuLayers"]
+            .as_i64()
+            .filter(|n| *n >= 0)
+            .unwrap_or(999);
         if !gpu_disabled {
-            cmd.args(["-ngl", "999"]);
+            cmd.args(["-ngl", &ngl.to_string()]);
+        }
+        // Speculative decoding ("draft-then-verify", roadmap P2.1): when the
+        // maintainer bundles a small draft model, llama-server drafts tokens
+        // with it and the main model verifies a whole batch at once — faster
+        // local generation with identical output. None bundled ⇒ normal
+        // decoding (the default). Offload the draft to the GPU too when in use.
+        if let Some(draft) = lighthouse_core::embed::bundled_draft_model() {
+            cmd.arg("--model-draft")
+                .arg(&draft)
+                .args(["--draft-max", "16", "--draft-min", "4"]);
+            if !gpu_disabled {
+                cmd.args(["-ngld", &ngl.to_string()]);
+            }
         }
         // Log to a file instead of a console window.
         match (

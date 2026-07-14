@@ -252,6 +252,23 @@ fn extract_pdf_with_ocr(buf: &[u8]) -> anyhow::Result<String> {
     pdf_ocr_fallback(text, buf)
 }
 
+/// Append any reconstructed tables to a PDF's extracted text as markdown
+/// (openspec: add-pdf-tables). Fails closed: no confident grid ⇒ the text is
+/// returned unchanged, byte-identical to the pre-tables extraction.
+fn append_pdf_tables(mut text: String, buf: &[u8], abs: &Path) -> String {
+    let tables = crate::pdf_tables::extract_tables(buf);
+    if tables.is_empty() {
+        return text;
+    }
+    let name = abs.file_name().and_then(|n| n.to_str()).unwrap_or("document");
+    if !text.is_empty() {
+        text.push_str("\n\n");
+    }
+    text.push_str(&format!("## Tables detected in {name}\n\n"));
+    text.push_str(&crate::pdf_tables::tables_to_markdown(&tables));
+    text
+}
+
 /// Testable half of the fallback: decides against the already-extracted text
 /// layer, so tests can drive it with synthetic PDFs without pdf-extract.
 fn pdf_ocr_fallback(text: String, buf: &[u8]) -> anyhow::Result<String> {
@@ -1233,7 +1250,15 @@ fn extract_rtf(buf: &[u8]) -> anyhow::Result<String> {
 
 fn extract_by_ext(abs: &Path, ext: &str) -> anyhow::Result<String> {
     match ext {
-        ".pdf" => extract_pdf_with_ocr(&fs::read(abs)?),
+        ".pdf" => {
+            let buf = fs::read(abs)?;
+            let text = extract_pdf_with_ocr(&buf)?;
+            // Reconstruct any confident tables from the (real) text layer and
+            // append them as markdown so the grid flows through retrieval. A
+            // scanned/OCR'd PDF has no text-layer glyphs, so this is a no-op
+            // there — reconstruction never runs on recognized image text.
+            Ok(append_pdf_tables(text, &buf, abs))
+        }
         // extract_docx routes OLE containers (renamed legacy .doc, protected
         // packages) to the salvage path itself, so both extensions share it.
         ".doc" | ".docx" => extract_docx(&fs::read(abs)?),
@@ -1267,7 +1292,10 @@ fn extract_by_ext(abs: &Path, ext: &str) -> anyhow::Result<String> {
 ///     boxes, and survives a dead rels main-part target. The bump re-extracts
 ///     footnote/notes-heavy docx files that v7 legitimately cached as (near-)
 ///     empty, curing them without user action.
-const CACHE_VERSION: u32 = 8;
+/// v9: PDFs reconstruct confident tables from the text layer and append them as
+///     markdown (add-pdf-tables). The bump re-extracts existing text PDFs once
+///     so their tables appear; PDFs with no reconstructable grid are unchanged.
+const CACHE_VERSION: u32 = 9;
 
 #[derive(Serialize, Deserialize)]
 struct CacheRecord {
@@ -2155,5 +2183,95 @@ mod doc_format_tests {
             !text.contains("reviewer gripe"),
             "comment indexed: {text:?}"
         );
+    }
+
+    /// A real (unencrypted) PDF whose page lays out a 3-column grid via absolute
+    /// text-matrix placement and a standard Helvetica font — enough for
+    /// pdf-extract to decode positioned glyphs and the table pass to rebuild it.
+    fn pdf_with_text_grid() -> Vec<u8> {
+        use lopdf::{dictionary, Document, Object, Stream};
+        let mut doc = Document::with_version("1.5");
+        let font_id = doc.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "Helvetica",
+            "Encoding" => "WinAnsiEncoding",
+        });
+        let ops = concat!(
+            "BT\n/F1 10 Tf\n",
+            "1 0 0 1 100 700 Tm (Region) Tj\n",
+            "1 0 0 1 250 700 Tm (Q2) Tj\n",
+            "1 0 0 1 350 700 Tm (Q3) Tj\n",
+            "1 0 0 1 100 680 Tm (NE) Tj\n",
+            "1 0 0 1 250 680 Tm (120) Tj\n",
+            "1 0 0 1 350 680 Tm (150) Tj\n",
+            "1 0 0 1 100 660 Tm (SE) Tj\n",
+            "1 0 0 1 250 660 Tm (300) Tj\n",
+            "1 0 0 1 350 660 Tm (480) Tj\n",
+            "ET",
+        );
+        let content_id = doc.add_object(Stream::new(dictionary! {}, ops.as_bytes().to_vec()));
+        let pages_id = doc.new_object_id();
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => Object::Reference(pages_id),
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "Contents" => Object::Reference(content_id),
+            "Resources" => dictionary! {
+                "Font" => dictionary! { "F1" => Object::Reference(font_id) },
+            },
+        });
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![Object::Reference(page_id)],
+                "Count" => 1,
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => Object::Reference(pages_id),
+        });
+        doc.trailer.set("Root", catalog_id);
+        let mut buf = Vec::new();
+        doc.save_to(&mut buf).unwrap();
+        buf
+    }
+
+    #[test]
+    fn pdf_text_grid_is_reconstructed_end_to_end() {
+        let buf = pdf_with_text_grid();
+        let tables = crate::pdf_tables::extract_tables(&buf);
+        assert_eq!(tables.len(), 1, "one grid on the page");
+        assert_eq!(tables[0].rows[0], vec!["Region", "Q2", "Q3"]);
+        assert!(
+            tables[0].rows.iter().any(|r| r == &["SE", "300", "480"]),
+            "SE row rebuilt with its own cells: {:?}",
+            tables[0].rows
+        );
+
+        // And the grid rides into the extracted text as GFM markdown.
+        let md = super::append_pdf_tables(
+            "prose above".into(),
+            &buf,
+            std::path::Path::new("q3-deck.pdf"),
+        );
+        assert!(md.contains("## Tables detected in q3-deck.pdf"), "{md}");
+        assert!(md.contains("| Region | Q2 | Q3 |"), "{md}");
+        assert!(md.contains("| SE | 300 | 480 |"), "{md}");
+    }
+
+    #[test]
+    fn pdf_without_grid_leaves_text_untouched() {
+        // An unreadable/gridless PDF reconstructs nothing: the text layer is
+        // returned byte-identical (fail closed).
+        assert!(crate::pdf_tables::extract_tables(b"%PDF-not-a-real-doc").is_empty());
+        let unchanged = super::append_pdf_tables(
+            "just prose".into(),
+            b"%PDF-not-a-real-doc",
+            std::path::Path::new("x.pdf"),
+        );
+        assert_eq!(unchanged, "just prose", "no grid ⇒ text unchanged");
     }
 }
