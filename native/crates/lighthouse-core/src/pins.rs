@@ -10,7 +10,7 @@
 //!
 //! The desktop shell owns the recheck scheduler (watch-generation sampling +
 //! quiet debounce); the dev server twin (src/server/pins.ts, KEEP IN SYNC)
-//! implements CRUD only — rechecks need DataFusion, which is desktop-only
+//! implements CRUD only — rechecks need DataFusion, which is Rust-engine-only
 //! (PARITY).
 
 use serde::{Deserialize, Serialize};

@@ -10,8 +10,8 @@
 //! renderer error falls through to the normal pipeline with nothing emitted.
 //!
 //! KEEP IN SYNC with src/server/meta.ts (cue table + WhatsNew/ListFiles
-//! renderers; FindColumn and suggested asks are desktop-only — the catalog
-//! has no TS twin, PARITY).
+//! renderers; FindColumn and suggested asks are Rust-engine-only — the
+//! catalog has no TS twin, PARITY).
 
 use std::collections::HashSet;
 use std::path::PathBuf;

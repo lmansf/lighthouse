@@ -5,8 +5,8 @@
  *
  * KEEP IN SYNC with native/crates/lighthouse-core/src/meta.rs — the cue table
  * and the WhatsNew/ListFiles renderers mirror it. PARITY: FindColumn answers
- * and suggested asks are desktop-only (the column catalog lives in the Rust
- * engine); here the intent is still *recognized* but renders as null, so the
+ * and suggested asks are Rust-engine-only (the column catalog has no TS
+ * twin); here the intent is still *recognized* but renders as null, so the
  * pipeline falls through to normal retrieval exactly like a renderer error.
  */
 
@@ -343,7 +343,7 @@ function listFiles(included: string[], filter: KindFilter | null, nowMs: number)
  * Dispatch an intent to its renderer. `null` = fall through to the normal
  * pipeline (the caller MUST emit nothing on null — no partial meta output).
  * PARITY: findColumn always falls through here — the column catalog is
- * desktop-only, and a wrong "no such column" would be worse than retrieval.
+ * Rust-engine-only, and a wrong "no such column" would be worse than retrieval.
  */
 export function renderMeta(intent: MetaIntent, included: string[], nowMs: number): MetaAnswer | null {
   try {

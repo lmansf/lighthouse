@@ -5,8 +5,9 @@
  * re-pin-replaces semantics.
  *
  * PARITY: rechecks re-run the pinned SQL through DataFusion, which lives in
- * the desktop engine only — the dev server implements CRUD and answers
- * recheck requests with "no changes", leaving summaries as of pin time.
+ * the Rust engine only (desktop app + headless server) — this dev twin
+ * implements CRUD and answers recheck requests with "no changes", leaving
+ * summaries as of pin time.
  */
 
 import fs from "node:fs";
