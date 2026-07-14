@@ -38,6 +38,11 @@ jobs:
       ONNX_SHA256: 5efe09e69902187827af646e1a6e9d269dee769f9877d17b16b1b46eeaaf019f
       JSON_SHA256: efe19c417bed055f2d69908248c6ba650fa135bc868b0e6abb3da181dab690a0
       GGUF_SHA256: 3e24342164b3d94991ba9692fdc0dd08e3fd7362e0aacc396a9a5c54a544c3b7
+      # OCR models (add-ocr-perception) are NOT inside any shipped .deb yet, so
+      # they're mirrored by direct URL from the ocrs S3 bucket + pinned digest.
+      DET_SHA256: f15cfb56bd02c4bf478a20343986504a1f01e1665c2b3a0ad66340f054b1b5ca
+      REC_SHA256: e484866d4cce403175bd8d00b128feb08ab42e208de30e42cd9889d8f1735a6e
+      OCRS_MODELS_URL: https://ocrs-models.s3-accelerate.amazonaws.com
     steps:
       - name: Download the released .deb
         run: |
@@ -61,6 +66,15 @@ jobs:
           cp "$ONNX" out/en_US-lessac-medium.onnx
           cp "$JSON" out/en_US-lessac-medium.onnx.json
           cp "$GGUF" out/nomic-embed-text-v1.5.Q8_0.gguf
+      - name: Fetch + verify the OCR models by direct URL
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          for pair in "text-detection.rten:$DET_SHA256" "text-recognition.rten:$REC_SHA256"; do
+            name="${pair%%:*}"; digest="${pair##*:}"
+            curl -fSL --retry 3 -o "out/$name" "$OCRS_MODELS_URL/$name"
+            echo "$digest  out/$name" | sha256sum -c -
+          done
       - name: Create the mirror release (idempotent) and upload
         run: |
           set -euo pipefail
@@ -74,6 +88,8 @@ jobs:
           gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber \
             out/en_US-lessac-medium.onnx \
             out/en_US-lessac-medium.onnx.json \
-            out/nomic-embed-text-v1.5.Q8_0.gguf
+            out/nomic-embed-text-v1.5.Q8_0.gguf \
+            out/text-detection.rten \
+            out/text-recognition.rten
           gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets \
             --jq '.assets[] | "\(.name) \(.size)"'

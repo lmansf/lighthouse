@@ -51,6 +51,12 @@ pub struct DesktopSettings {
     /// resident, as they were before this setting existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background_conserve: Option<bool>,
+    /// OCR: read printed text in image files and scanned PDFs with the bundled
+    /// on-device models (add-ocr-perception). Default ON (None = on); off makes
+    /// image/scan extraction return empty — and, deliberately, uncached — so
+    /// flipping it back on re-reads them with no rescan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ocr_enabled: Option<bool>,
     /// Keys this struct doesn't model (e.g. the shell's hand-persisted
     /// `widgetPos`) must survive a read-modify-write round trip — without
     /// this flatten, any Preferences toggle would silently delete them.
@@ -76,6 +82,7 @@ pub fn read_desktop_settings() -> DesktopSettings {
 }
 
 /// Merge `patch` into the on-disk settings, preserving keys the shell owns.
+#[allow(clippy::too_many_arguments)]
 pub fn write_desktop_settings(
     run_on_startup: Option<bool>,
     startup_asked: Option<bool>,
@@ -84,6 +91,7 @@ pub fn write_desktop_settings(
     summon_shortcut: Option<String>,
     semantic_search: Option<bool>,
     background_conserve: Option<bool>,
+    ocr_enabled: Option<bool>,
 ) -> DesktopSettings {
     let Some(f) = settings_file() else {
         return DesktopSettings::default();
@@ -112,6 +120,9 @@ pub fn write_desktop_settings(
     }
     if background_conserve.is_some() {
         next.background_conserve = background_conserve;
+    }
+    if ocr_enabled.is_some() {
+        next.ocr_enabled = ocr_enabled;
     }
     write_json(&f, &next); // best-effort: a read-only location just means unsaved
     next

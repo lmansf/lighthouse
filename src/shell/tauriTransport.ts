@@ -239,6 +239,7 @@ async function route(
             semanticSearch: typeof body.semanticSearch === "boolean" ? body.semanticSearch : null,
             backgroundConserve:
               typeof body.backgroundConserve === "boolean" ? body.backgroundConserve : null,
+            ocrEnabled: typeof body.ocrEnabled === "boolean" ? body.ocrEnabled : null,
           });
     default:
       return json({ error: "unknown route" }, 404);

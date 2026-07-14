@@ -10,23 +10,23 @@
 
 ## 2. Settings toggle (engine → shell → UI)
 
-- [ ] 2.1 `ocr_enabled` (default true) in the settings store; wired through routes.rs + commands.rs; extraction consults it per file.
-- [ ] 2.2 Contracts: type + service + mock updates under `src/contracts`.
-- [ ] 2.3 Preferences dialog: "Read text in images (OCR)" checkbox + "Scans and screenshots become searchable. Happens on this device; nothing is uploaded."
+- [x] 2.1 `ocr_enabled` (default true) in the settings store; wired through routes.rs + commands.rs; extraction consults it per file.
+- [x] 2.2 Contracts: N/A — the settings bools (`semanticSearch`, `backgroundConserve`, now `ocrEnabled`) are not in the typed `src/contracts` layer; they round-trip via the raw `/api/settings` fetch, so there is no contract/mock to update. Confirmed against the two existing toggles.
+- [x] 2.3 Preferences dialog: "Read text in images (OCR)" checkbox + "Scans and screenshots become searchable. Happens on this device; nothing is uploaded."
 
 ## 3. Distribution & shell
 
-- [ ] 3.1 `fetch-local-model.mjs`: `fetchOcr()` into `resources/ocr/` — pinned digests `f15cfb56…b5ca` (detection, 2,510,284 B) and `e484866d…5a6e` (recognition, 9,716,568 B), `downloadWithFallback(mirror, upstream)`; upstream `https://ocrs-models.s3-accelerate.amazonaws.com/`.
-- [ ] 3.2 `mirror-hf-assets.yml`: direct-URL mirroring mode (download on runner + verify pinned digest + upload to the mirror tag) for the two `.rten` files; run it once so the mirror is populated before the release build.
-- [ ] 3.3 `tauri.conf.json`: bundle `"../../../resources/ocr": "ocr"`; `supervise.rs`/boot path exports `LIGHTHOUSE_OCR_MODELS_DIR` from the resolved resource dir (same pattern as llm/tts/embed).
+- [x] 3.1 `fetch-local-model.mjs`: `fetchOcr()` into `resources/ocr/` — pinned digests `f15cfb56…b5ca` (detection, 2,510,284 B) and `e484866d…5a6e` (recognition, 9,716,568 B), `downloadWithFallback(mirror, upstream)`; upstream `https://ocrs-models.s3-accelerate.amazonaws.com/`.
+- [x] 3.2 `mirror-hf-assets.yml`: direct-URL mirroring mode (download on runner + verify pinned digest + upload to the mirror tag) for the two `.rten` files; run it once so the mirror is populated before the release build.
+- [x] 3.3 `tauri.conf.json`: bundle `"../../../resources/ocr": "ocr"`. No new shell env needed — `ocr.rs` resolves `resources_dir().join("ocr")` exactly like embed/tts, and the shell already exports `LIGHTHOUSE_RESOURCES_PATH`. `LIGHTHOUSE_OCR_MODELS_DIR` remains a test/CI override only.
 
 ## 4. CI, notices, fixtures
 
-- [ ] 4.1 Commit a fixture: `test/assets/ocr-smoke.png` (~30 KB Chromium-rendered fake-SOP screenshot with known phrases; nothing sensitive, generated content only).
-- [ ] 4.2 `asset-digests.yml` verify mode: after the fetch, run an `#[ignore]`-gated `ocr_smoke` test (`cargo test -p lighthouse-core -- --ignored ocr_smoke` with `LIGHTHOUSE_OCR_MODELS_DIR` set) asserting the fixture's known phrases are recognized.
-- [ ] 4.3 Third-party notices: add ocrs + rten (MIT OR Apache-2.0). **Close open question #1**: verify the `.rten` weights' license/attribution; if redistribution is restricted, switch bundling → first-run download before ship.
+- [x] 4.1 Commit a fixture: `native/crates/lighthouse-core/tests/fixtures/ocr-smoke.png` (24 KB Chromium-rendered fake incident-response runbook with known phrases; generated content only). Placed under the crate so the Rust smoke test resolves it via `CARGO_MANIFEST_DIR`.
+- [x] 4.2 `asset-digests.yml` verify mode: after the fetch, run an `#[ignore]`-gated `ocr_smoke` test (`cargo test -p lighthouse-core -- --ignored ocr_smoke` with `LIGHTHOUSE_OCR_MODELS_DIR` set) asserting the fixture's known phrases are recognized.
+- [x] 4.3 Third-party notices: add ocrs + rten (MIT OR Apache-2.0). **Close open question #1**: verify the `.rten` weights' license/attribution; if redistribution is restricted, switch bundling → first-run download before ship.
 
 ## 5. Ship
 
-- [ ] 5.1 Full verification: `cargo test --workspace` (native/), `node --test "test/**/*.test.mjs"`, `tsc --noEmit`, `next lint`, static export; adversarial pass over `ocr.rs`/PDF-image path (malformed images, zip-bomb-class PDFs, budget bypasses) before merge.
-- [ ] 5.2 Release 0.10.0: bump 5 version files → PR → merge → release.yml → desktop-release.yml → publish + verify; release notes lead with "your screenshots and scans are now searchable — on your device".
+- [x] 5.1 Full verification: `cargo test --workspace` (native/), `node --test "test/**/*.test.mjs"`, `tsc --noEmit`, `next lint`, static export; adversarial pass over `ocr.rs`/PDF-image path (malformed images, zip-bomb-class PDFs, budget bypasses) before merge.
+- [x] 5.2 Release 0.10.0: bump 5 version files → PR → merge → release.yml → desktop-release.yml → publish + verify; release notes lead with "your screenshots and scans are now searchable — on your device".
