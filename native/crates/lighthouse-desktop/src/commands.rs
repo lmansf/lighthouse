@@ -10,7 +10,7 @@ use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager};
 
 use lighthouse_core::contracts::{ChatChunk, ChatTurn};
-use lighthouse_core::{license, local_model, profile, settings, sources, tts, usage, vault};
+use lighthouse_core::{license, local_model, profile, settings, sources, tts, vault};
 
 fn string_array(v: &Value) -> Vec<String> {
     v.as_array()
@@ -443,26 +443,6 @@ pub async fn tts_synthesize(text: String) -> Result<tauri::ipc::Response, String
     }
 }
 
-fn emit_model_selected(sel: Option<profile::ModelSelectionResult>) {
-    let Some(sel) = sel else { return };
-    if (!sel.initial && !sel.changed) || sel.provider.is_empty() || sel.model.is_empty() {
-        return;
-    }
-    tauri::async_runtime::spawn(async move {
-        license::record_event(
-            "model_selected",
-            json!({
-                "provider": sel.provider,
-                "model": sel.model,
-                "initial": sel.initial,
-                "previous_provider": sel.previous_provider,
-                "previous_model": sel.previous_model,
-            }),
-        )
-        .await;
-    });
-}
-
 #[tauri::command]
 pub fn profile_get() -> Value {
     serde_json::to_value(profile::get_state()).unwrap_or_else(|_| json!({}))
@@ -480,7 +460,7 @@ pub async fn profile_op(body: Value) -> Result<Value, String> {
                 body["email"].as_str().unwrap_or(""),
             );
         }
-        Some("finishRegistration") => emit_model_selected(profile::finish_registration()),
+        Some("finishRegistration") => profile::finish_registration(),
         Some("selectModel") => {
             let provider_id = body["providerId"].as_str().unwrap_or("");
             // Managed policy: reject a disallowed provider with a real error
@@ -488,11 +468,11 @@ pub async fn profile_op(body: Value) -> Result<Value, String> {
             if !lighthouse_core::policy::provider_allowed(provider_id) {
                 return Err("this AI provider is managed off by your organization".into());
             }
-            emit_model_selected(Some(profile::select_model(
+            profile::select_model(
                 provider_id,
                 body["modelId"].as_str().unwrap_or(""),
                 body["apiKey"].as_str().unwrap_or(""),
-            )))
+            );
         }
         Some("setDefaultInclusion") => {
             let v = body["value"].as_str().unwrap_or("");
@@ -524,10 +504,44 @@ pub async fn profile_op(body: Value) -> Result<Value, String> {
     Ok(serde_json::to_value(profile::get_state()).unwrap_or_else(|_| json!({})))
 }
 
+/// Best-effort tail of the desktop shell.log (the app-data `shell.log` the
+/// shell writes via `shell_log`). Returns "" on ANY error, and caps the excerpt
+/// to the last ~100 lines / ~16 KB so a bug report stays small. This is the only
+/// diagnostics attached to a report, and only when the user opts in.
+fn shell_log_excerpt(app: &AppHandle) -> String {
+    let Ok(dir) = app.path().app_data_dir() else {
+        return String::new();
+    };
+    let Ok(text) = std::fs::read_to_string(dir.join("shell.log")) else {
+        return String::new();
+    };
+    let lines: Vec<&str> = text.lines().collect();
+    let start = lines.len().saturating_sub(100);
+    let mut excerpt = lines[start..].join("\n");
+    const MAX_BYTES: usize = 16 * 1024;
+    if excerpt.len() > MAX_BYTES {
+        // Keep the newest bytes; advance the cut to a char boundary.
+        let mut cut = excerpt.len() - MAX_BYTES;
+        while cut < excerpt.len() && !excerpt.is_char_boundary(cut) {
+            cut += 1;
+        }
+        excerpt = excerpt[cut..].to_string();
+    }
+    excerpt
+}
+
 #[tauri::command]
-pub async fn license_op(body: Value) -> Result<Value, String> {
+pub async fn license_op(app: AppHandle, body: Value) -> Result<Value, String> {
     match body["op"].as_str() {
         Some("config") => Ok(json!({ "paidEnabled": license::paid_enabled() })),
+        // What a bug report would transmit — shown to the user in the feedback
+        // dialog BEFORE they press Send. version + OS, plus the shell.log tail
+        // the "attach diagnostics" checkbox can include.
+        Some("diagnostics") => Ok(json!({
+            "version": lighthouse_core::config::app_version(),
+            "os": std::env::consts::OS,
+            "log": shell_log_excerpt(&app),
+        })),
         Some("check") => Ok(serde_json::to_value(license::check_license().await)
             .unwrap_or_else(|_| json!({ "status": "none" }))),
         Some("start") => match license::start_trial(None).await {
@@ -578,64 +592,24 @@ pub async fn license_op(body: Value) -> Result<Value, String> {
             Ok(json!({ "ok": license::submit_notify(email).await }))
         }
         Some("bug") => {
-            let where_ = body["bug"]["where"]
-                .as_str()
-                .unwrap_or("")
-                .trim()
-                .to_string();
-            let what = body["bug"]["what"]
-                .as_str()
-                .unwrap_or("")
-                .trim()
-                .to_string();
+            let where_ = body["where"].as_str().unwrap_or("").trim().to_string();
+            let what = body["what"].as_str().unwrap_or("").trim().to_string();
             if where_.is_empty() && what.is_empty() {
                 return Err("empty report".into());
             }
-            Ok(json!({ "ok": license::submit_bug(&where_, &what).await }))
-        }
-        Some("ping") => {
-            license::ping_launch().await;
-            Ok(json!({ "ok": true }))
+            // Attach the diagnostics excerpt only when the user checked the box.
+            let log = if body["includeLog"].as_bool().unwrap_or(false) {
+                shell_log_excerpt(&app)
+            } else {
+                String::new()
+            };
+            Ok(json!({ "ok": license::submit_bug(&where_, &what, &log).await }))
         }
         Some("checkout") => {
             Ok(json!({ "url": license::checkout_url(body["email"].as_str()).await }))
         }
         _ => Err("unknown op".into()),
     }
-}
-
-#[tauri::command]
-pub async fn usage_op(body: Value) -> Result<Value, String> {
-    match body["op"].as_str() {
-        Some("consent") => {
-            let opt_out = body["optOut"].as_bool().unwrap_or(false);
-            usage::set_usage_opt_out(opt_out);
-            Ok(json!({ "ok": true, "optOut": opt_out }))
-        }
-        Some("events") => {
-            usage::append_usage_events(&body["events"].as_array().cloned().unwrap_or_default());
-            Ok(json!({ "ok": true }))
-        }
-        Some("publish") => {
-            license::publish_usage_events().await;
-            Ok(json!({ "ok": true }))
-        }
-        _ => Err("unknown op".into()),
-    }
-}
-
-#[tauri::command]
-pub fn usage_get() -> Value {
-    json!({ "optOut": usage::is_usage_opted_out() })
-}
-
-#[tauri::command]
-pub fn event_record(name: String, props: Value) {
-    if name.trim().is_empty() {
-        return;
-    }
-    let props = if props.is_object() { props } else { json!({}) };
-    tauri::async_runtime::spawn(async move { license::record_event(&name, props).await });
 }
 
 #[tauri::command]
@@ -992,9 +966,7 @@ pub fn register_config() -> Value {
     json!({ "configured": license::is_supabase_configured() })
 }
 
-/// Welcome-registration: mint a trial with the contact info, then apply the
-/// explicit usage-consent choice even when the mint fails (offline) — the
-/// same `finally` semantics as the HTTP route.
+/// Welcome-registration: mint a trial with the contact info.
 #[tauri::command]
 pub async fn register_start(body: Value) -> Result<Value, String> {
     let email = body["email"].as_str().unwrap_or("").trim().to_string();
@@ -1010,9 +982,6 @@ pub async fn register_start(body: Value) -> Result<Value, String> {
         state: body["state"].as_str().unwrap_or("").trim().to_string(),
     };
     let result = license::start_trial(Some(contact)).await;
-    if let Some(opt_out) = body["usageLoggingOptOut"].as_bool() {
-        usage::set_usage_opt_out(opt_out);
-    }
     Ok(match result {
         Ok(_) => json!({ "ok": true }),
         Err(e) => json!({

@@ -18,11 +18,6 @@ pub fn app() -> Router {
             get(routes::profile_get).post(routes::profile_post),
         )
         .route("/api/license", post(routes::license_post))
-        .route(
-            "/api/usage",
-            get(routes::usage_get).post(routes::usage_post),
-        )
-        .route("/api/event", post(routes::event_post))
         .route("/api/connect", post(routes::connect_post))
         .route(
             "/api/model",

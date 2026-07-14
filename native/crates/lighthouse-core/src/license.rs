@@ -1,11 +1,14 @@
-//! Licensing, telemetry, and checkout plumbing — desktop side (port of
-//! `src/server/license.ts`).
+//! Licensing, checkout, and explicit-submission plumbing — desktop side (port
+//! of `src/server/license.ts`).
 //!
 //! The secrets live ONLY in the hosted Supabase Edge Function; the desktop
 //! holds just the function's public URL and anon key. Nothing is ever DELETED:
 //! when a license isn't valid the app locks, files stay on disk. Modes: Hosted
 //! (LICENSE_API_URL), Local (LICENSE_ENFORCE=1, self-contained crypto),
-//! Disabled. All telemetry is best-effort and swallows its own errors.
+//! Disabled. The only bytes that leave the machine here are a license/trial
+//! check and the feedback/bug/notify a user explicitly pressed Send on — all
+//! ambient telemetry has been removed. Network calls are best-effort and
+//! swallow their own errors.
 
 use std::path::PathBuf;
 
@@ -16,10 +19,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::config::{app_state_dir, app_version, now_ms, parse_ms, read_json, utc_day, write_json};
-use crate::experiment::{assign_balanced_variants, get_all_variants};
-use crate::usage::{
-    is_usage_opted_out, purge_usage_buffer, read_usage_buffer, reset_usage_consent,
-};
 
 const TRIAL_DAYS: i64 = 14;
 const GRACE_DAYS: i64 = 14;
@@ -35,9 +34,6 @@ fn identity_path() -> PathBuf {
 }
 fn contact_id_path() -> PathBuf {
     app_state_dir().join("contact.json")
-}
-fn launch_path() -> PathBuf {
-    app_state_dir().join("launch.json")
 }
 
 /// A stable per-user contact id, generated once and kept across trials, locks,
@@ -176,13 +172,10 @@ pub async fn call_fn(op: &str, extra: Value) -> anyhow::Result<Value> {
             .header("apikey", &anon)
             .header("authorization", format!("Bearer {anon}"));
     }
-    // Egress registry: same host, but the telemetry ops are labeled apart
-    // from the licensing ones so the panel shows them distinctly.
-    let purpose = match op {
-        "ping" | "event" | "events" | "assign" => crate::egress::PURPOSE_TELEMETRY,
-        _ => crate::egress::PURPOSE_LICENSE,
-    };
-    crate::egress::record(&url, purpose);
+    // Egress registry: every remaining op is a license check or an explicit
+    // user submission (feedback/bug/notify) — the ambient telemetry ops are
+    // gone — so they all label as licensing egress.
+    crate::egress::record(&url, crate::egress::PURPOSE_LICENSE);
     let res = req.send().await?;
     if !res.status().is_success() {
         let status = res.status().as_u16();
@@ -293,13 +286,6 @@ pub async fn start_trial(contact: Option<Registration>) -> anyhow::Result<String
     if let Some(c) = &use_contact {
         write_json(&identity_path(), c);
     }
-
-    // A fresh trial resets usage-logging consent to its default (opted OUT).
-    reset_usage_consent();
-
-    // Balance this install into the under-represented variant server-side.
-    // Best-effort and idempotent.
-    let _ = assign_balanced_variants().await;
 
     if license_api().is_some() {
         let extra = match &use_contact {
@@ -484,7 +470,6 @@ pub async fn submit_feedback(f: &FeedbackInput) -> bool {
         "email": email,
         "doNotContact": do_not_contact,
         "contactId": get_contact_id(),
-        "experiments": get_all_variants(),
     });
     match call_fn("feedback", json!({ "feedback": feedback })).await {
         Ok(r) => r["ok"] != false,
@@ -608,136 +593,28 @@ pub async fn checkout_url(email: Option<&str>) -> Option<String> {
     data["url"].as_str().map(String::from)
 }
 
-/// Send an in-app bug report (with the install's guid/email) to Supabase.
-pub async fn submit_bug(where_: &str, what: &str) -> bool {
+/// Send an in-app bug report / feedback message the user explicitly pressed
+/// Send on. Carries ONLY what they typed plus the app version/OS and, when they
+/// opted in, a short diagnostics excerpt (`log`). No contact id, guid, or email
+/// is attached — the report is deliberately unlinkable to an install.
+pub async fn submit_bug(where_: &str, what: &str, log: &str) -> bool {
     if license_api().is_none() {
         return true;
     }
-    let lic: Option<LocalLicense> = read_json(&license_path(), None);
     let r = call_fn(
         "bug",
         json!({
             "where": where_,
             "what": what,
-            "contactId": get_contact_id(),
-            "guid": lic.map(|l| l.guid),
-            "email": account_email(),
             "version": app_version(),
+            "os": std::env::consts::OS,
+            "log": log,
         }),
     )
     .await;
     match r {
         Ok(r) => r["ok"] != false,
         Err(_) => false,
-    }
-}
-
-/// Log an app launch to the userlogs table (best-effort; hosted mode only) and
-/// derive a `returned` event (any launch on a later calendar day, once per day).
-pub async fn ping_launch() {
-    // Managed policy: telemetry "off" silences the launch ping (the license
-    // `check` is separate and remains — documented in data-flows.md).
-    if !crate::policy::telemetry_allowed() {
-        return;
-    }
-    if license_api().is_some() {
-        let lic: Option<LocalLicense> = read_json(&license_path(), None);
-        let _ = call_fn(
-            "ping",
-            json!({
-                "contactId": get_contact_id(),
-                "guid": lic.map(|l| l.guid),
-                "email": account_email(),
-                "version": app_version(),
-                "experiments": get_all_variants(),
-            }),
-        )
-        .await;
-    } else {
-        return;
-    }
-
-    #[derive(Default, Serialize, Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct Launch {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        first_day: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        last_returned_day: Option<String>,
-    }
-    let launch: Launch = read_json(&launch_path(), Launch::default());
-    let today = utc_day();
-    if launch.first_day.is_none() {
-        write_json(
-            &launch_path(),
-            &Launch {
-                first_day: Some(today),
-                ..launch
-            },
-        );
-    } else if launch.first_day.as_deref() != Some(&today)
-        && launch.last_returned_day.as_deref() != Some(&today)
-    {
-        let first = launch.first_day.clone();
-        write_json(
-            &launch_path(),
-            &Launch {
-                first_day: first.clone(),
-                last_returned_day: Some(today.clone()),
-            },
-        );
-        let day = match (parse_ms(&today), first.as_deref().and_then(parse_ms)) {
-            (Some(t), Some(f)) => ((t - f) as f64 / DAY_MS as f64).round() as i64,
-            _ => 0,
-        };
-        record_event("returned", json!({ "day": day })).await;
-    }
-}
-
-/// Record a funnel/telemetry event (best-effort; hosted mode only). Must never
-/// throw into a launch, a query, or onboarding — all errors are swallowed.
-pub async fn record_event(name: &str, props: Value) {
-    if license_api().is_none() || !crate::policy::telemetry_allowed() {
-        return;
-    }
-    let _ = call_fn(
-        "event",
-        json!({
-            "contactId": get_contact_id(),
-            "name": name,
-            "experiments": get_all_variants(),
-            "props": props,
-        }),
-    )
-    .await;
-}
-
-/// Publish buffered UI click events, then purge exactly what was sent.
-/// Best-effort: opted out, offline, or not hosted ⇒ buffer kept for next launch.
-pub async fn publish_usage_events() {
-    if license_api().is_none() || is_usage_opted_out() {
-        return;
-    }
-    let (events, line_count) = read_usage_buffer();
-    if events.is_empty() {
-        return;
-    }
-    let lic: Option<LocalLicense> = read_json(&license_path(), None);
-    let r = call_fn(
-        "events",
-        json!({
-            "contactId": get_contact_id(),
-            "guid": lic.map(|l| l.guid),
-            "email": account_email(),
-            "version": app_version(),
-            "events": events,
-        }),
-    )
-    .await;
-    match r {
-        Ok(r) if r["ok"] == false => {} // keep the buffer; retry next launch
-        Ok(_) => purge_usage_buffer(line_count),
-        Err(_) => {} // offline — keep the buffer
     }
 }
 

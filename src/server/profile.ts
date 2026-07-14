@@ -9,7 +9,6 @@
  */
 import type { OnboardingState, User } from "@/contracts";
 import { profilePath, readJson, writeJson } from "./config";
-import { getVariant } from "./experiment";
 import { REMOTE_PROVIDERS, remoteProvider } from "./llm";
 import { providerAllowed } from "./policy";
 import { getProviderKey, setProviderKey } from "./secrets";
@@ -32,28 +31,13 @@ interface StoredProfile extends OnboardingState {
    * + `keyedProviders`, never raw.
    */
   apiKeys?: Record<string, string>;
-  /** Whether the user has ever explicitly saved a model choice (server-only).
-   *  Distinguishes the INITIAL selection from later changes, for analytics. */
-  modelEverSelected?: boolean;
   /**
    * The user's explicit default-inclusion choice, if they made one during
-   * onboarding. Absent ⇒ fall back to the assigned experiment variant. The
+   * onboarding. Absent ⇒ fall back to the conservative default (exclude). The
    * vault engine reads this to decide whether a newly-added file (no explicit
    * flag) is searchable by default. See `effectiveDefaultInclusion`.
    */
   defaultInclusionChoice?: "include" | "exclude";
-}
-
-/** Result of a model selection so the API route can emit a `model_selected`
- *  analytics event (initial choice + any change) — profile.ts must NOT import the
- *  telemetry layer (license.ts imports profile.ts, so that would be a cycle). */
-export interface ModelSelectionResult {
-  initial: boolean;
-  changed: boolean;
-  provider: string;
-  model: string;
-  previousProvider: string | null;
-  previousModel: string | null;
 }
 
 const EMPTY: StoredProfile = {
@@ -117,14 +101,15 @@ function save(p: StoredProfile): void {
 
 /**
  * The user's *effective* default-inclusion behavior: their explicit onboarding
- * choice if they made one, else derived from the assigned experiment variant
- * (opt_out → include, opt_in → exclude). This is the single source of truth the
- * vault engine and the UI both consult.
+ * choice if they made one, else the conservative default of `exclude` (nothing
+ * is searchable until the user includes it — the app's original behavior).
+ * Onboarding always persists an explicit choice, so the fallback only applies
+ * to a profile that never completed registration. This is the single source of
+ * truth the vault engine and the UI both consult.
  */
 export function effectiveDefaultInclusion(): "include" | "exclude" {
   const choice = load().defaultInclusionChoice;
-  if (choice === "include" || choice === "exclude") return choice;
-  return getVariant("default_inclusion") === "opt_out" ? "include" : "exclude";
+  return choice === "include" || choice === "exclude" ? choice : "exclude";
 }
 
 /** Persist the user's explicit include/exclude-by-default choice. */
@@ -135,10 +120,9 @@ export function setDefaultInclusion(value: "include" | "exclude"): void {
 /** Public onboarding state — never includes the raw keys. */
 export function getState(): OnboardingState {
   const p = load();
-  const { apiKey, apiKeys, modelEverSelected, defaultInclusionChoice, ...pub } = p;
+  const { apiKey, apiKeys, defaultInclusionChoice, ...pub } = p;
   void apiKey;
   void apiKeys;
-  void modelEverSelected;
   void defaultInclusionChoice;
   const keyed = keyedProviders(p);
   // "Has a key" is now per-provider: true when the SELECTED provider has one.
@@ -151,10 +135,7 @@ export function getState(): OnboardingState {
     ...pub,
     hasApiKey,
     keyedProviders: keyed,
-    // Surface the A/B variants so the client can branch copy/affordances.
-    onboardingVariant: getVariant("onboarding"),
-    defaultInclusionVariant: getVariant("default_inclusion"),
-    // The effective default (explicit choice or the variant fallback).
+    // The effective default for newly-added files (explicit choice or fallback).
     defaultInclusion: effectiveDefaultInclusion(),
   };
 }
@@ -183,52 +164,20 @@ export function register(name: string, email: string): User {
   return user;
 }
 
-export function finishRegistration(): ModelSelectionResult | null {
-  const p = load();
-  // Onboarding A/B: play_first defers the API-key prompt - drop straight into the
-  // workspace on the bundled, key-less local model so the user reaches a real
-  // first answer before any friction. They can still connect a cloud model later
-  // (the select-model UI stays reachable). key_first keeps the classic flow:
-  // pick a model and paste a key during onboarding.
-  if (getVariant("onboarding") === "play_first") {
-    const providerId = p.providerId ?? LOCAL_PROVIDER_ID;
-    const modelId = p.modelId ?? LOCAL_MODEL_ID;
-    const initial = !p.modelEverSelected;
-    save({ ...p, providerId, modelId, step: "done", modelEverSelected: true });
-    // play_first assigns the local model WITHOUT an explicit user selection, so
-    // report it as the initial model — otherwise these users are invisible in
-    // "which models people use" until they happen to switch to a cloud model.
-    return initial
-      ? { initial: true, changed: false, provider: providerId, model: modelId, previousProvider: p.providerId, previousModel: p.modelId }
-      : null;
-  }
-  save({ ...p, step: "select-model" });
-  return null;
+export function finishRegistration(): void {
+  // After registration the user picks a model and pastes a key on the
+  // select-model slide (the classic onboarding flow).
+  save({ ...load(), step: "select-model" });
 }
 
-export function selectModel(
-  providerId: string,
-  modelId: string,
-  apiKey: string,
-): ModelSelectionResult {
+export function selectModel(providerId: string, modelId: string, apiKey: string): void {
   const p = load();
   // Managed policy: never persist (or seal a key for) a disallowed provider.
   // The op layer rejects with a real error before calling here; this
-  // belt-and-braces returns the profile unchanged for any other caller.
+  // belt-and-braces returns without changing the profile for any other caller.
   // llm.ts additionally refuses at call time.
-  if (!providerAllowed(providerId)) {
-    return {
-      initial: false,
-      changed: false,
-      provider: p.providerId ?? "",
-      model: p.modelId ?? "",
-      previousProvider: p.providerId,
-      previousModel: p.modelId,
-    };
-  }
+  if (!providerAllowed(providerId)) return;
   const key = apiKey.trim();
-  const initial = !p.modelEverSelected;
-  const changed = p.providerId !== providerId || p.modelId !== modelId;
   // A pasted key is stored under the provider it was pasted FOR — sealed in
   // the install-global secrets store (./secrets), never in this file. An
   // empty field keeps that provider's existing key (switch model w/o
@@ -244,16 +193,7 @@ export function selectModel(
     apiKey: undefined,
     hasApiKey: Boolean(key) || p.hasApiKey,
     step: "done",
-    modelEverSelected: true,
   });
-  return {
-    initial,
-    changed,
-    provider: providerId,
-    model: modelId,
-    previousProvider: p.providerId,
-    previousModel: p.modelId,
-  };
 }
 
 export function completeOnboarding(): void {

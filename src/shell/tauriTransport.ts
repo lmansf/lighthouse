@@ -204,13 +204,6 @@ async function route(
       return method === "GET" ? call("profile_get") : call("profile_op", { body });
     case "/api/license":
       return call("license_op", { body });
-    case "/api/usage":
-      return method === "GET" ? call("usage_get") : call("usage_op", { body });
-    case "/api/event":
-      return call("event_record", {
-        name: typeof body.name === "string" ? body.name : "",
-        props: body.props && typeof body.props === "object" ? body.props : {},
-      });
     case "/api/connect":
       return call("connect_op", { body });
     case "/api/model":

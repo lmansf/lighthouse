@@ -36,7 +36,6 @@ import {
 import { useAuthStore } from "@/stores/useAuthStore";
 import { useLicenseStore } from "@/stores/useLicenseStore";
 import { useRagStore } from "@/stores/useRagStore";
-import { logEvent } from "@/lib/logEvent";
 
 const useStyles = makeStyles({
   panel: {
@@ -139,9 +138,6 @@ export function OnboardingPanel() {
   const [city, setCity] = useState("");
   const [stateField, setStateField] = useState("");
   const [doNotContact, setDoNotContact] = useState(false);
-  // Usage logging is opt-IN: unchecked by default. The user must actively check
-  // it to share analytics (which include their account email).
-  const [shareUsage, setShareUsage] = useState(false);
   // Default-inclusion choice: whether newly-added files are searchable by
   // default. Pre-filled from the current effective default; the user can change
   // it. `touched` stops the background-loaded default from overwriting a choice.
@@ -149,7 +145,6 @@ export function OnboardingPanel() {
   const inclusionTouched = useRef(false);
   const [submitting, setSubmitting] = useState(false);
   const emailPrefilled = useRef(false);
-  const startedLogged = useRef(false);
 
   // Sync the radio to the effective default once the profile has loaded, unless
   // the user has already picked.
@@ -158,13 +153,6 @@ export function OnboardingPanel() {
       setInclusionPref(onboarding.defaultInclusion);
     }
   }, [onboarding.defaultInclusion]);
-
-  // The activation funnel begins when onboarding first appears.
-  useEffect(() => {
-    if (startedLogged.current) return;
-    startedLogged.current = true;
-    logEvent("onboarding_started");
-  }, []);
 
   // Prefill the registration email from the signed-in user, once.
   useEffect(() => {
@@ -214,9 +202,6 @@ export function OnboardingPanel() {
           doNotContact,
           city,
           state: stateField,
-          // Honored server-side AFTER the trial is minted (which resets consent
-          // to the opted-out default), so the user's explicit choice here wins.
-          usageLoggingOptOut: !shareUsage,
         }),
       });
       const result = await res.json().catch(() => null);
@@ -235,8 +220,6 @@ export function OnboardingPanel() {
   /** Commit the model choice (shared by the Finish button and Enter-to-submit). */
   function finishSetup() {
     if (providerId !== "local" && !apiKey) return;
-    // Activation guardrail: did they connect a real (cloud) key?
-    if (providerId !== "local" && apiKey) logEvent("api_key_entered");
     void selectModel(providerId, modelId, apiKey);
   }
 
@@ -335,11 +318,6 @@ export function OnboardingPanel() {
           onChange={(_, d) => setDoNotContact(Boolean(d.checked))}
           label="Do not contact me"
         />
-        <Checkbox
-          checked={shareUsage}
-          onChange={(_, d) => setShareUsage(Boolean(d.checked))}
-          label="Help improve Lighthouse by sharing usage analytics — includes your account email and which features you use, never your files, their names, or their contents"
-        />
         <Field label="When you add files, should the AI see them by default?">
           <RadioGroup
             value={inclusionPref}
@@ -378,15 +356,8 @@ export function OnboardingPanel() {
             onClick={() =>
               void (async () => {
                 // Skipping still starts a trial (no contact info) so the user
-                // isn't dropped straight onto the "trial ended" screen. The trial
-                // reset sets consent to the opted-out default, so persist the
-                // user's explicit choice either way (opt-in only if they checked).
+                // isn't dropped straight onto the "trial ended" screen.
                 await startTrial();
-                await fetch("/api/usage", {
-                  method: "POST",
-                  headers: { "content-type": "application/json" },
-                  body: JSON.stringify({ op: "consent", optOut: !shareUsage }),
-                }).catch(() => {});
                 await setDefaultInclusion(inclusionPref).catch(() => {});
                 await finishRegistration();
               })()

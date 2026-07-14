@@ -1,21 +1,9 @@
 /**
  * "Coming soon" features — teasers a user can register interest in before the
- * real thing ships. Registering interest does two things, always together:
- *
- *   1. logs a telemetry event ("coming_soon_interest", { feature }) through the
- *      normal pipeline (POST /api/event → the hosted `events` table), so the
- *      TRUE, cross-user ranking can be computed server-side later; and
- *   2. bumps a LOCAL, per-device tally in localStorage that powers the in-app
- *      Experiments leaderboard.
- *
- * Why the in-app board is local: the desktop app can't read the hosted events
- * table back, so the leaderboard it shows reflects THIS device's clicks — an
- * immediate, personal signal — while the logged events feed the real aggregate.
- * The two never diverge: every click does both. (To build the cross-user board
- * later, query the events table for name = "coming_soon_interest" grouped by
- * props.feature.)
+ * real thing ships. Registering interest bumps a LOCAL, per-device tally in
+ * localStorage that powers the in-app Experiments leaderboard. This is
+ * local-only: the tally never leaves localStorage, and nothing is transmitted.
  */
-import { logEvent } from "@/lib/logEvent";
 
 export interface ComingSoonFeature {
   /** Stable id — the telemetry `feature` prop and the localStorage tally key. */
@@ -38,9 +26,6 @@ export const COMING_SOON_FEATURES: ComingSoonFeature[] = [
     blurb: "Pull in files from Microsoft 365 and search them alongside your vault.",
   },
 ];
-
-/** The telemetry event name every interest click emits. */
-export const INTEREST_EVENT = "coming_soon_interest";
 
 /** localStorage key for the per-device interest tally ({ [featureId]: count }). */
 const COUNTS_KEY = "lighthouse.comingSoon.counts";
@@ -79,13 +64,12 @@ function writeCounts(counts: Record<string, number>): void {
 }
 
 /**
- * Register interest in a coming-soon feature: log the telemetry event (hosted
- * aggregate) and bump the local per-device tally (leaderboard). Returns the new
- * local count. Best-effort by design — never throws, so callers can wire it
+ * Register interest in a coming-soon feature: bump the local per-device tally
+ * (leaderboard) and return the new count. Local-only — nothing leaves the
+ * machine. Best-effort by design — never throws, so callers can wire it
  * straight to an onClick.
  */
 export function recordInterest(id: string): number {
-  logEvent(INTEREST_EVENT, { feature: id });
   const counts = readCounts();
   const next = (counts[id] ?? 0) + 1;
   counts[id] = next;

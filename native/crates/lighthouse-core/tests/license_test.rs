@@ -1,59 +1,9 @@
-//! Local-dev licensing + experiment assignment parity tests (ports the
-//! behaviors of `test/experiment.assign.test.mjs`'s local half and the
-//! local-crypto trial path).
+//! Local-dev licensing parity tests (the local-crypto trial path). The
+//! A/B-experiment assignment tests were removed with the experiment engine.
 
 mod common;
 
-use lighthouse_core::experiment::{get_all_variants, get_variant, hash_to_unit};
 use lighthouse_core::license;
-
-#[test]
-fn hash_to_unit_is_deterministic_and_uniformish() {
-    // Exact values pinned against the TS implementation (sha256 top-48-bits):
-    // crypto.createHash("sha256").update("x").digest().readUIntBE(0,6) / 2**48
-    let a = hash_to_unit("x");
-    let b = hash_to_unit("x");
-    assert_eq!(a, b);
-    assert!((0.0..1.0).contains(&a));
-    assert_ne!(
-        hash_to_unit("contact-a:onboarding:v1"),
-        hash_to_unit("contact-a:default_inclusion:v1")
-    );
-}
-
-#[test]
-fn variants_resolve_once_and_stay_stable() {
-    let vault_dir = tempfile::tempdir().unwrap();
-    let _guard = common::lock_env(vault_dir.path());
-    // Drop the pinned file so resolution actually runs.
-    std::fs::remove_file(vault_dir.path().join(".rag-vault/experiments.json")).unwrap();
-
-    let first = get_all_variants();
-    assert!(["play_first", "key_first"].contains(&first.onboarding.as_str()));
-    assert!(["opt_in", "opt_out"].contains(&first.default_inclusion.as_str()));
-    // Stable across calls (persisted to experiments.json).
-    assert_eq!(get_all_variants(), first);
-    assert_eq!(get_variant("onboarding"), first.onboarding);
-}
-
-#[test]
-fn pilot_email_override_wins_over_stored_hash() {
-    let vault_dir = tempfile::tempdir().unwrap();
-    let _guard = common::lock_env(vault_dir.path());
-    std::fs::remove_file(vault_dir.path().join(".rag-vault/experiments.json")).unwrap();
-
-    let _ = get_all_variants(); // hash assignment persisted
-
-    // Signing in as a pilot user re-pins to the factorial cell.
-    std::fs::write(
-        vault_dir.path().join(".rag-vault/profile.json"),
-        r#"{ "step": "register", "user": { "id": "local", "name": "U", "email": "user3@example.com" } }"#,
-    )
-    .unwrap();
-    let v = get_all_variants();
-    assert_eq!(v.onboarding, "play_first");
-    assert_eq!(v.default_inclusion, "opt_out");
-}
 
 #[tokio::test]
 async fn local_dev_trial_mints_checks_and_counts_days() {

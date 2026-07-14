@@ -1,6 +1,6 @@
 //! The user-facing default-inclusion choice: an explicit onboarding preference
-//! ("include"/"exclude") overrides the A/B experiment variant, and the vault
-//! engine honors it for newly-added files that carry no explicit flag.
+//! ("include"/"exclude") overrides the fixed default, and the vault engine
+//! honors it for newly-added files that carry no explicit flag.
 
 mod common;
 
@@ -12,16 +12,15 @@ fn write(path: &std::path::Path, text: &str) {
 }
 
 #[test]
-fn explicit_choice_overrides_the_experiment_variant() {
+fn explicit_choice_overrides_the_default() {
     let vault_dir = tempfile::tempdir().unwrap();
-    // lock_env pins default_inclusion to opt_in (exclude-by-default).
     let _guard = common::lock_env(vault_dir.path());
 
     // Two files, never toggled — their effective inclusion is the default only.
     write(&vault_dir.path().join("a.md"), "alpha content here");
     write(&vault_dir.path().join("b.md"), "beta content here");
 
-    // Baseline: the pinned experiment variant is opt_in → nothing included.
+    // Baseline: the fixed default is exclude → nothing included.
     assert_eq!(profile::effective_default_inclusion(), "exclude");
     assert!(vault::active_included_file_ids().is_empty());
 
@@ -46,13 +45,11 @@ fn explicit_choice_overrides_the_experiment_variant() {
 }
 
 #[test]
-fn falls_back_to_variant_when_no_explicit_choice() {
+fn falls_back_to_the_fixed_default_when_no_explicit_choice() {
     let vault_dir = tempfile::tempdir().unwrap();
     let _guard = common::lock_env(vault_dir.path());
-    // No set_default_inclusion call → effective value derives from the variant.
-    // lock_env pins opt_in, so the effective default is "exclude".
+    // No set_default_inclusion call → the fixed privacy-preserving default
+    // (exclude) applies (experiments were removed).
     assert_eq!(profile::effective_default_inclusion(), "exclude");
     assert_eq!(profile::get_state().default_inclusion, "exclude");
-    // default_inclusion_variant is still surfaced for analytics/copy.
-    assert_eq!(profile::get_state().default_inclusion_variant, "opt_in");
 }

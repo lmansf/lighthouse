@@ -86,7 +86,6 @@ import type { AnalyticsMeta, ChangedPin, ChatTurn, Pin, RagReference } from "@/c
 import { chatService, MODEL_PROVIDERS, ragService } from "@/contracts";
 import { useRagStore } from "@/stores/useRagStore";
 import { useAuthStore } from "@/stores/useAuthStore";
-import { logEvent } from "@/lib/logEvent";
 import { parseChartSpec, tableToCsv } from "@/lib/chartSpec";
 import { sortRows, type SortDir } from "@/lib/sortTable";
 import { pinChartData } from "@/lib/pinChart";
@@ -916,7 +915,6 @@ function CopyCsvButton({ rows }: { rows: string[][] }) {
             .writeText(tableToCsv(rows))
             .then(() => {
               setCopied(true);
-              logEvent("chat_table_copy_csv");
               window.setTimeout(() => setCopied(false), 1600);
             })
             .catch(() => {});
@@ -1486,7 +1484,6 @@ export function ChatPanel() {
     idSeq.current = msgs.reduce((max, m) => Math.max(max, Number(m.id.slice(1)) || 0), 0);
   }, [currentId]);
   // Fires the activation event only on the first answered question this session.
-  const firstQueryLogged = useRef(false);
 
   // "Pinned" = the user is at (or near) the bottom of the transcript, so it's
   // safe to keep auto-scrolling as tokens stream in. The ref mirrors the state
@@ -1769,7 +1766,6 @@ export function ChatPanel() {
     setPinned(true);
     const controller = new AbortController();
     abortRef.current = controller;
-    let sourceCount = 0;
     let finalContent = "";
     try {
       for await (const chunk of chatService.ask(
@@ -1793,7 +1789,6 @@ export function ChatPanel() {
         }
         if (chunk.references) {
           const refs = chunk.references;
-          sourceCount = refs.length;
           setMessages((m) => m.map((x) => (x.id === asstId ? { ...x, references: refs } : x)));
         }
         if (chunk.analytics) {
@@ -1806,15 +1801,6 @@ export function ChatPanel() {
       }
       if (controller.signal.aborted) {
         markStopped(asstId);
-      } else {
-        // An answer rendered. `source_count` (incl. 0) is the empty-answer signal
-        // for the default-inclusion experiment; the first answer of a session is
-        // the onboarding activation event.
-        logEvent("answer_rendered", { source_count: sourceCount });
-        if (!firstQueryLogged.current) {
-          firstQueryLogged.current = true;
-          logEvent("first_query", { source_count: sourceCount });
-        }
       }
     } catch (err) {
       if (controller.signal.aborted || (err instanceof DOMException && err.name === "AbortError")) {
@@ -1881,7 +1867,6 @@ export function ChatPanel() {
         setSavedNotes((s) => ({ ...s, [asstId]: { error: res.error ?? "save failed" } }));
       } else {
         setSavedNotes((s) => ({ ...s, [asstId]: { id: res.savedId, name: res.savedName } }));
-        logEvent("analytics_save_csv", { rows: res.rows ?? 0 });
       }
     } catch (err) {
       if (!stillHere()) return;
@@ -1922,7 +1907,6 @@ export function ChatPanel() {
         res.error || !res.savedId
           ? { error: res.error ?? "export failed" }
           : { id: res.savedId, name: res.savedName };
-      if (!next.error) logEvent("chat_export_note");
     } catch (err) {
       next = { error: err instanceof Error ? err.message : "export failed" };
     } finally {
@@ -1958,7 +1942,6 @@ export function ChatPanel() {
         setPinNotes((s) => ({ ...s, [asstId]: { error: res.error ?? "could not pin" } }));
       } else {
         setPinNotes((s) => ({ ...s, [asstId]: { ok: true } }));
-        logEvent("analytics_pin");
       }
     } catch (err) {
       if (!stillHere()) return;
@@ -2101,7 +2084,6 @@ export function ChatPanel() {
         if (res.footer) parts.push(res.footer);
         setSqlOutcome({ content: parts.filter(Boolean).join("\n\n") });
       }
-      logEvent("analytics_sql_run", { outcome: res.error ? "error" : "ok" });
     } catch (err) {
       if (seq !== sqlRunSeq.current) return;
       setSqlOutcome({
@@ -2200,7 +2182,6 @@ export function ChatPanel() {
       else next[id] = rating;
       return next;
     });
-    logEvent("answer_feedback", { rating });
   }
 
   /** Commit an inline rename from the recent-chats drawer. */

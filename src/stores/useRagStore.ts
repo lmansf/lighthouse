@@ -2,7 +2,6 @@ import { create } from "zustand";
 import type { DataSource, EgressSnapshot, FileNode, PolicySnapshot, RestoreToken } from "@/contracts";
 import { setManagedLocks } from "./managedLocks";
 import { ragService } from "@/contracts";
-import { logEvent } from "@/lib/logEvent";
 
 /** SharePoint device-code sign-in: dialog visibility + flow phase. */
 export interface SharePointConnect {
@@ -363,11 +362,6 @@ export const useRagStore = create<RagStore>((set, get) => ({
   toggleSourceAvailable: async (sourceId) => {
     const source = get().sources.find((s) => s.id === sourceId);
     if (!source) return;
-    // Privacy-safe availability telemetry at the source/database level: one event
-    // per toggle (not the files it cascades over), coarse scope only.
-    logEvent(source.available ? "file_made_unavailable" : "file_made_available", {
-      scope: "source",
-    });
     await ragService.setSourceAvailable(sourceId, !source.available);
     const [sources, nodes] = await Promise.all([
       ragService.listSources(),

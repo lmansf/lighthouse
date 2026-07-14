@@ -18,7 +18,6 @@ import {
   writeJson,
 } from "./config";
 import { effectiveDefaultInclusion } from "./profile";
-import { recordEvent } from "./license";
 import { isRichFile, extractRichText } from "./extract";
 
 /** An item referenced in place (not copied) — its real absolute path on disk. */
@@ -304,54 +303,10 @@ export function listSources(): DataSource[] {
 
 export function listNodes(parentId?: string | null): FileNode[] {
   const all = walk(vaultDir());
-  // A full-tree listing (no parentId) is the app's regular vault scan - the one
-  // hook that also catches files copied in / deleted OUTSIDE the app. Diff it
-  // against the last snapshot to emit privacy-safe presence counts.
-  if (parentId === undefined) {
-    recordPresenceDiff(all);
-    return all;
-  }
+  // A full-tree listing (no parentId) returns everything; a specific parentId
+  // (including null for roots) filters to that parent's children.
+  if (parentId === undefined) return all;
   return all.filter((n) => n.parentId === parentId);
-}
-
-const usageSnapshotPath = () => path.join(stateDir(), "usage-snapshot.json");
-
-/**
- * Emit privacy-safe file-presence telemetry by diffing the current tree against
- * the last snapshot: one `file_added` per newly-appeared node, one
- * `file_removed` per disappeared one. The payload is COUNTS ONLY - at most a
- * coarse `{ kind }` - never a name, path, extension, or size.
- *
- * First run seeds the snapshot silently (no events), so a pre-loaded demo vault
- * never fires a spurious burst. Best-effort: wrapped so a telemetry failure can
- * never break or slow the scan that produced `nodes`.
- */
-function recordPresenceDiff(nodes: FileNode[]): void {
-  try {
-    const current: Record<string, "file" | "folder"> = {};
-    for (const n of nodes) {
-      if (n.kind === "file" || n.kind === "folder") current[n.id] = n.kind;
-    }
-    const snap = readJson<{ ids?: Record<string, "file" | "folder"> } | null>(
-      usageSnapshotPath(),
-      null,
-    );
-    if (!snap?.ids) {
-      // First run: seed without emitting (don't count existing files as "added").
-      writeJson(usageSnapshotPath(), { ids: current });
-      return;
-    }
-    const prev = snap.ids;
-    for (const id of Object.keys(current)) {
-      if (!(id in prev)) void recordEvent("file_added", { kind: current[id] });
-    }
-    for (const id of Object.keys(prev)) {
-      if (!(id in current)) void recordEvent("file_removed", { kind: prev[id] });
-    }
-    writeJson(usageSnapshotPath(), { ids: current });
-  } catch {
-    /* presence telemetry is best-effort; never break a scan */
-  }
 }
 
 /** Toggle a node and (for folders) all of its descendants. */

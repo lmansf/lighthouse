@@ -40,8 +40,8 @@ const SummonHint = dynamic(
  * Composition root. The shell owns layout; each feature team replaces its own
  * placeholder component below without touching the others.
  *
- * Once onboarded, the license is checked once per launch (and the launch is
- * logged). Nothing is ever deleted: when the license isn't valid the vault is
+ * Once onboarded, the license is checked once per launch. Nothing is ever
+ * deleted: when the license isn't valid the vault is
  * greyed out in the main pane and the left rail shows the lock gate — a feedback
  * form (after a trial) then a subscribe / start-a-trial choice. A lapsed paid
  * subscription still in grace shows a renewal banner.
@@ -61,31 +61,10 @@ export default function Home() {
   const checkLicense = useLicenseStore((s) => s.check);
   const loadConfig = useLicenseStore((s) => s.loadConfig);
 
-  // Log the launch once on mount (best-effort) and load config (paid toggle),
-  // independent of license/onboarding state so the nav reflects it at all times.
-  // After the launch ping, publish any buffered UI usage events and purge them.
+  // Load config (the paid toggle) once on mount, independent of
+  // license/onboarding state so the nav reflects it at all times.
   useEffect(() => {
     void loadConfig();
-    void (async () => {
-      try {
-        await fetch("/api/license", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ op: "ping" }),
-        });
-      } catch {
-        /* best-effort */
-      }
-      try {
-        await fetch("/api/usage", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ op: "publish" }),
-        });
-      } catch {
-        /* best-effort — buffered events stay for the next launch */
-      }
-    })();
   }, [loadConfig]);
 
   useEffect(() => {
