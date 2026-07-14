@@ -10,7 +10,6 @@
 //! models present self-heals.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Condvar, Mutex, OnceLock};
 
 use ocrs::{ImageSource, OcrEngine, OcrEngineParams};
@@ -21,6 +20,16 @@ use rten::Model;
 pub const MAX_OCR_EDGE: u32 = 2048;
 /// Icons/thumbnails below this carry no prose — skipped without inference.
 pub const MIN_IMAGE_EDGE: u32 = 64;
+/// Decompression-bomb guard: an image is DECODED to a full RGB buffer before
+/// the edge downscale, and MAX_SOURCE_BYTES bounds only the *compressed* file
+/// (a solid-color 30000×30000 PNG is a few KB but ~2.7 GB decoded). Reject by
+/// pixel count first — 40 MP clears a 300 dpi A3 scan (~25 MP) with margin.
+pub const MAX_OCR_PIXELS: u64 = 40_000_000;
+
+/// Whether (w, h) exceeds the pixel budget (overflow-safe).
+pub fn too_many_pixels(w: u32, h: u32) -> bool {
+    (w as u64).saturating_mul(h as u64) > MAX_OCR_PIXELS
+}
 /// A 400-page scanned book must not monopolize a scan; the 1 MB extract clamp
 /// would cut it long before this anyway.
 pub const MAX_OCR_PAGES_PER_PDF: usize = 32;
@@ -43,25 +52,23 @@ impl std::fmt::Display for OcrUnavailable {
 
 impl std::error::Error for OcrUnavailable {}
 
-/// The Preferences toggle ("Read text in images"). Settings plumbing calls
-/// `set_enabled` at boot and on change; default on.
-static ENABLED: AtomicBool = AtomicBool::new(true);
-
-pub fn set_enabled(on: bool) {
-    ENABLED.store(on, Ordering::Relaxed);
-}
-
+/// The Preferences toggle ("Read text in images"). Read at extraction time
+/// from the settings store — the single source of truth, same pattern as
+/// `embed::semantic_enabled` — so a flip takes effect on the next scan with no
+/// separate propagation. Default on (absent ⇒ on). A settings file read is
+/// sub-millisecond and dwarfed by the ~250 ms OCR inference it gates.
 pub fn enabled() -> bool {
-    ENABLED.load(Ordering::Relaxed)
+    crate::settings::read_desktop_settings().ocr_enabled != Some(false)
 }
 
-/// Where the two .rten models live. The desktop shell exports the bundled
-/// resources/ocr path at boot; a dev checkout falls back to the repo-relative
-/// dir that `npm run fetch:model` populates.
+/// Where the two .rten models live: the bundled `resources/ocr` dir, resolved
+/// the same way embed/tts resolve theirs (`resources_dir()` honors the shell's
+/// LIGHTHOUSE_RESOURCES_PATH and dev-checkout fallback). `LIGHTHOUSE_OCR_MODELS_DIR`
+/// is a direct override for tests and the CI smoke test.
 fn models_dir() -> PathBuf {
     match std::env::var("LIGHTHOUSE_OCR_MODELS_DIR") {
         Ok(dir) if !dir.trim().is_empty() => PathBuf::from(dir),
-        _ => PathBuf::from("resources/ocr"),
+        _ => crate::config::resources_dir().join("ocr"),
     }
 }
 
@@ -230,9 +237,13 @@ mod tests {
     }
 
     #[test]
-    fn without_models_ocr_reports_unavailable_and_toggle_flips() {
-        // One test owns the global toggle + engine state (parallel-test safe:
-        // nothing else mutates them).
+    fn enabled_defaults_on_without_a_settings_file() {
+        // No settings file in the test env ⇒ ocr_enabled absent ⇒ on.
+        assert!(enabled());
+    }
+
+    #[test]
+    fn without_models_ocr_reports_unavailable() {
         if engine().is_some() {
             eprintln!("models present in this checkout; skipping unavailable-path assertions");
             return;
@@ -241,12 +252,5 @@ mod tests {
         let img = image::DynamicImage::new_rgb8(200, 200);
         let err = recognize_image(&img).unwrap_err();
         assert!(err.downcast_ref::<OcrUnavailable>().is_some(), "got: {err}");
-
-        set_enabled(false);
-        assert!(!enabled());
-        let err = recognize_image(&img).unwrap_err();
-        assert!(err.downcast_ref::<OcrUnavailable>().is_some());
-        set_enabled(true);
-        assert!(enabled());
     }
 }

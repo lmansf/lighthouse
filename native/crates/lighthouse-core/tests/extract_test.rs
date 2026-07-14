@@ -43,7 +43,9 @@ fn pdf_fixture_extracts_text_and_caches() {
         .path();
     let record: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&entry).unwrap()).unwrap();
-    assert_eq!(record["v"], 5, "cache schema version matches the TS engine");
+    // Must track CACHE_VERSION in extract.rs AND src/server/extract.ts (bump all
+    // three together). v5→6 pptx/odt/rtf (0.9.0), v6→7 OCR (add-ocr-perception).
+    assert_eq!(record["v"], 7, "cache schema version matches the TS engine");
     let mut poisoned = record.clone();
     poisoned["text"] = serde_json::Value::String("FROM-CACHE".into());
     std::fs::write(&entry, serde_json::to_string(&poisoned).unwrap()).unwrap();

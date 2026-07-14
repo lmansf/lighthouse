@@ -19,6 +19,12 @@
  *      default arm64 build (Metal) on macOS. See pickAsset().
  *   2. Piper (rhasspy/piper, MIT) + a neural voice (en_US-lessac-medium, ~63 MB,
  *      MIT/CC0) into `resources/tts/`, powering on-device read-aloud TTS.
+ *   3. The nomic embedding GGUF (nomic-ai/nomic-embed-text-v1.5, Apache-2.0)
+ *      into `resources/embed/` for B2 hybrid search.
+ *   4. The ocrs OCR models (robertknight/ocrs-models, ~12 MB) into
+ *      `resources/ocr/`, reading text in images + scanned PDFs on device. The
+ *      ocrs project is MIT/Apache-2.0; its models are trained exclusively on
+ *      openly-licensed data — HierText (CC-BY-SA 4.0) — attributed here.
  *
  * It does NOT fetch the private model weights: Mistral-7B-Instruct-v0.3 is ~4.2 GB,
  * well past NSIS's (and GitHub's) 2 GB limit, so it can't be bundled. The app
@@ -97,6 +103,11 @@ const ASSET_SHA256 = {
   // been failing closed here (TTS quietly missing from Linux bundles). Digest
   // recorded by the first asset-digests run.
   "piper_linux_x86_64.tar.gz": "a50cb45f355b7af1f6d758c1b360717877ba0a398cc8cbe6d2a7a3a26e225992",
+  // OCR (add-ocr-perception): the ocrs detection + recognition models. Not on
+  // a versioned host — pinned by digest, mirror-first (repo release) with the
+  // ocrs S3 bucket as upstream.
+  "text-detection.rten": "f15cfb56bd02c4bf478a20343986504a1f01e1665c2b3a0ad66340f054b1b5ca",
+  "text-recognition.rten": "e484866d4cce403175bd8d00b128feb08ab42e208de30e42cd9889d8f1735a6e",
   "en_US-lessac-medium.onnx": "5efe09e69902187827af646e1a6e9d269dee769f9877d17b16b1b46eeaaf019f",
   "en_US-lessac-medium.onnx.json": "efe19c417bed055f2d69908248c6ba650fa135bc868b0e6abb3da181dab690a0",
   // B2 embedding model (see EMBED_* above) — one GGUF for all three OS builds.
@@ -502,6 +513,27 @@ async function fetchEmbed() {
   console.log(`✓ ${EMBED_FILE}`);
 }
 
+/**
+ * Fetch the bundled OCR models (add-ocr-perception) into resources/ocr/. Two
+ * ~pinned .rten files (detection + recognition); mirror-first (our own release
+ * assets, populated by mirror-hf-assets) with the ocrs S3 bucket as upstream —
+ * both verify the same digest, so the order is purely about availability.
+ */
+async function fetchOcr() {
+  const ocrDest = join(root, "resources", "ocr");
+  mkdirSync(ocrDest, { recursive: true });
+  const upstream = "https://ocrs-models.s3-accelerate.amazonaws.com";
+  for (const name of ["text-detection.rten", "text-recognition.rten"]) {
+    const outPath = join(ocrDest, name);
+    if (!force && existsSync(outPath) && statSync(outPath).size > 1e5) {
+      console.log(`✓ ${name} already present`);
+      continue;
+    }
+    await downloadWithFallback(`${HF_MIRROR_BASE}/${name}`, `${upstream}/${name}`, outPath, "ocr model", name);
+  }
+  console.log(`✓ ocr models`);
+}
+
 async function main() {
   mkdirSync(dest, { recursive: true });
   const serverName = platform === "win32" ? "llama-server.exe" : "llama-server";
@@ -530,6 +562,9 @@ async function main() {
 
   // 3. Bundled embedding model for B2 hybrid search (resources/embed/).
   await fetchEmbed();
+
+  // 4. Bundled OCR models for reading images + scanned PDFs (resources/ocr/).
+  await fetchOcr();
 
   if (RECORD && Object.keys(recorded).length) {
     console.log(`\n--record: paste these into ASSET_SHA256 (scripts/fetch-local-model.mjs), then commit:`);

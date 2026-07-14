@@ -97,3 +97,12 @@ jobs:
           [ -n "$ok" ] || { echo "embedding server never became healthy"; exit 1; }
           cd native
           LIGHTHOUSE_EMBED_URL=http://127.0.0.1:8091 cargo run -p lighthouse-core --example retrieval_eval
+      - name: OCR smoke (real inference over the committed fixture)
+        run: |
+          set -euo pipefail
+          ls -la resources/ocr
+          cd native
+          # The #[ignore] ocr_smoke / ocr_pdf_smoke tests drive the full
+          # extract path (image + scanned-PDF) against the just-fetched models.
+          LIGHTHOUSE_OCR_MODELS_DIR="$GITHUB_WORKSPACE/resources/ocr" \
+            cargo test -p lighthouse-core --lib -- --ignored ocr_smoke ocr_pdf_smoke

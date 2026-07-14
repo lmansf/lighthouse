@@ -901,6 +901,8 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
   // the app sits in the tray or unfocused, bringing them back on return.
   // Default on. Window mode only — widget mode keeps the model warm.
   const [backgroundConserve, setBackgroundConserve] = useState(true);
+  // OCR: read text in images and scanned PDFs with the bundled models. Default on.
+  const [ocrEnabled, setOcrEnabled] = useState(true);
   const [uiMode, setUiMode] = useState<"window" | "widget">("window");
   const [whisperMode, setWhisperMode] = useState(false);
   // macOS Accessibility state for whisper: "pending" = the system prompt is up
@@ -960,6 +962,7 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
         setRunOnStartup(d.runOnStartup !== false);
         setSemanticSearch(d.semanticSearch !== false);
         setBackgroundConserve(d.backgroundConserve !== false);
+        setOcrEnabled(d.ocrEnabled !== false);
         setUiMode(d.uiMode === "widget" ? "widget" : "window");
         setWhisperMode(d.whisperMode === true);
         setWhisperPermission(typeof d.whisperPermission === "string" ? d.whisperPermission : "unknown");
@@ -1043,6 +1046,12 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
     const prev = backgroundConserve;
     setBackgroundConserve(next);
     void postSetting({ backgroundConserve: next }, () => setBackgroundConserve(prev));
+  }
+
+  function updateOcr(next: boolean) {
+    const prev = ocrEnabled;
+    setOcrEnabled(next);
+    void postSetting({ ocrEnabled: next }, () => setOcrEnabled(prev));
   }
 
   function updateUiMode(next: "window" | "widget") {
@@ -1239,6 +1248,14 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
                   checked={semanticSearch}
                   onChange={(_, d) => updateSemantic(Boolean(d.checked))}
                   label="Semantic search — a small bundled model (runs entirely on this computer) helps questions find files by meaning, not just matching words"
+                />
+              )}
+
+              {desktop && (
+                <Switch
+                  checked={ocrEnabled}
+                  onChange={(_, d) => updateOcr(Boolean(d.checked))}
+                  label="Read text in images — bundled models pull the words out of screenshots and scanned PDFs so they're searchable (runs on this computer; nothing is uploaded)"
                 />
               )}
 

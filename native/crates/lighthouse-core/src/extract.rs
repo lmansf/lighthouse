@@ -90,6 +90,15 @@ fn extract_image(abs: &Path) -> anyhow::Result<String> {
         // Before decoding: while OCR is off, scans shouldn't pay decode cost.
         return Err(anyhow::Error::new(crate::ocr::OcrUnavailable));
     }
+    // Read dimensions from the header only (cheap) and bail on a decompression
+    // bomb BEFORE allocating the full RGB buffer. An oversized image is a
+    // genuine skip (Ok("") caches — retrying every scan buys nothing).
+    if let Ok((w, h)) = image::image_dimensions(abs) {
+        if crate::ocr::too_many_pixels(w, h) {
+            eprintln!("extract: image {w}x{h} exceeds the OCR pixel budget — skipped");
+            return Ok(String::new());
+        }
+    }
     let img = image::load_from_memory(&fs::read(abs)?)?;
     crate::ocr::recognize_image(&img)
 }
@@ -163,6 +172,26 @@ fn pdf_page_rasters(doc: &lopdf::Document) -> Vec<lopdf::ObjectId> {
 /// JPEG — scanner output) and `FlateDecode`/unfiltered 8-bit DeviceRGB/Gray
 /// bitmaps. CCITT/JBIG2/JPX return None and count as skipped.
 fn decode_pdf_image(stream: &lopdf::Stream) -> Option<image::DynamicImage> {
+    // Declared dimensions first, so the bomb guard covers BOTH the DCT (JPEG
+    // decode) and Flate (inflate) paths before either allocates.
+    let w = stream
+        .dict
+        .get(b"Width")
+        .and_then(|o| o.as_i64())
+        .unwrap_or(0);
+    let h = stream
+        .dict
+        .get(b"Height")
+        .and_then(|o| o.as_i64())
+        .unwrap_or(0);
+    if w <= 0 || h <= 0 || w > 1 << 16 || h > 1 << 16 {
+        return None;
+    }
+    let (w, h) = (w as u32, h as u32);
+    if crate::ocr::too_many_pixels(w, h) {
+        return None;
+    }
+
     let filters: Vec<Vec<u8>> = match stream.dict.get(b"Filter") {
         Ok(lopdf::Object::Name(n)) => vec![n.clone()],
         Ok(lopdf::Object::Array(a)) => a
@@ -189,20 +218,6 @@ fn decode_pdf_image(stream: &lopdf::Stream) -> Option<image::DynamicImage> {
     if bpc != 8 {
         return None;
     }
-    let w = stream
-        .dict
-        .get(b"Width")
-        .and_then(|o| o.as_i64())
-        .unwrap_or(0);
-    let h = stream
-        .dict
-        .get(b"Height")
-        .and_then(|o| o.as_i64())
-        .unwrap_or(0);
-    if w <= 0 || h <= 0 || w > 1 << 16 || h > 1 << 16 {
-        return None;
-    }
-    let (w, h) = (w as u32, h as u32);
     let data = if filters.is_empty() {
         stream.content.clone()
     } else {
@@ -1700,6 +1715,72 @@ mod doc_format_tests {
         assert_eq!(text.trim(), "ab", "control bytes leaked: {text:?}");
     }
 
+    /// Real-inference smoke test (task 4.2): drives the FULL public path
+    /// (`extract_rich_text` → dispatch → `extract_image` → ocrs/rten) over the
+    /// committed fixture screenshot. Ignored by default — it needs the models,
+    /// which the asset-digests CI job fetches then runs via
+    /// `cargo test -p lighthouse-core -- --ignored ocr_smoke` with
+    /// `LIGHTHOUSE_OCR_MODELS_DIR` set. Locally: point that env at a dir holding
+    /// the two .rten files.
+    #[test]
+    #[ignore = "requires the OCR models (LIGHTHOUSE_OCR_MODELS_DIR); run in CI or locally with models present"]
+    fn ocr_smoke() {
+        assert!(
+            crate::ocr::available(),
+            "OCR models not available — set LIGHTHOUSE_OCR_MODELS_DIR to a dir with text-detection.rten + text-recognition.rten"
+        );
+        let fixture = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ocr-smoke.png");
+        let text = super::extract_rich_text(std::path::Path::new(fixture), ".png");
+        let low = text.to_lowercase();
+        assert!(
+            low.contains("incident response"),
+            "runbook heading missing: {text:?}"
+        );
+        assert!(
+            low.contains("isolate the affected host"),
+            "step 1 missing: {text:?}"
+        );
+        assert!(
+            low.contains("escalate to the security lead"),
+            "step 2 missing: {text:?}"
+        );
+        assert!(low.contains("90 days"), "retention line missing: {text:?}");
+    }
+
+    /// Real-inference smoke for the scanned-PDF path: wraps the fixture as a
+    /// DCTDecode page image (what a scanner writes) and drives
+    /// `pdf_ocr_fallback` → `decode_pdf_image` → ocrs/rten. Ignored like
+    /// `ocr_smoke`; same env gate.
+    #[test]
+    #[ignore = "requires the OCR models (LIGHTHOUSE_OCR_MODELS_DIR)"]
+    fn ocr_pdf_smoke() {
+        assert!(crate::ocr::available(), "OCR models not available");
+        let fixture = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ocr-smoke.png");
+        let png = image::open(fixture).unwrap().to_rgb8();
+        let (w, h) = png.dimensions();
+        let mut jpeg = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(png)
+            .write_to(&mut jpeg, image::ImageFormat::Jpeg)
+            .unwrap();
+        let pdf = pdf_with_image(Some(("DCTDecode", jpeg.into_inner())), w as i64, h as i64);
+        // Empty text layer (scan) ⇒ the fallback OCRs the page image.
+        let text = super::pdf_ocr_fallback(String::new(), &pdf)
+            .unwrap()
+            .to_lowercase();
+        // Assert on phrases that survive the fixture's PNG→JPEG re-compression
+        // (this test double-compresses; native scanner JPEGs don't, so a real
+        // scan recognizes even more cleanly — see the standalone spike).
+        assert!(
+            text.contains("incident response"),
+            "pdf ocr heading: {text:?}"
+        );
+        assert!(
+            text.contains("isolate the affected host"),
+            "pdf ocr step 1: {text:?}"
+        );
+        assert!(text.contains("90 days"), "pdf ocr retention: {text:?}");
+    }
+
     #[test]
     fn pdf_ocr_trigger_math() {
         // A scanned page yields ~0 chars; a text page yields hundreds.
@@ -1780,6 +1861,26 @@ mod doc_format_tests {
         };
         let img = super::decode_pdf_image(s).expect("DCTDecode must decode");
         assert_eq!((img.width(), img.height()), (120, 90));
+    }
+
+    #[test]
+    fn pdf_oversized_image_is_a_decompression_bomb_skip() {
+        // 60000×60000 = 3.6 GP, far past the 40 MP budget: the guard must
+        // return None BEFORE decode, no matter the (tiny) declared content.
+        assert!(crate::ocr::too_many_pixels(60_000, 60_000));
+        assert!(!crate::ocr::too_many_pixels(2500, 3300)); // an A4 300dpi scan
+        let buf = pdf_with_image(Some(("FlateDecode", vec![0u8; 16])), 60_000, 60_000);
+        let doc = lopdf::Document::load_mem(&buf).unwrap();
+        let rasters = super::pdf_page_rasters(&doc);
+        assert_eq!(
+            rasters.len(),
+            1,
+            "enumeration still sees it (metadata only)"
+        );
+        let lopdf::Object::Stream(s) = doc.get_object(rasters[0]).unwrap() else {
+            panic!("stream expected");
+        };
+        assert!(super::decode_pdf_image(s).is_none(), "bomb must not decode");
     }
 
     #[test]

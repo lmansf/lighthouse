@@ -78,7 +78,16 @@ OCR on photos produces confetti ("~ | . iij"). Reuse the `.doc` salvage philosop
 
 No prompt shape changes. OCR text enters the index as ordinary prose chunks (120-word/25-overlap) and competes in normal hybrid ranking; the per-file 1 MB clamp and per-query chunk budget already bound what reaches synthesis. An OCR'd screenshot cited in an answer behaves like any cited document — clicking opens the image via the existing open path.
 
-## Open questions (must close before ship)
+## Open questions
 
-1. **Model-weights license**: crate code is `MIT OR Apache-2.0`; the trained `.rten` weights are distributed by the ocrs project but their license/attribution terms (training data includes HierText) must be verified and recorded in third-party notices before bundling. If redistribution turns out restricted, fallback plan: first-run download (like the chat model path) instead of bundling.
-2. **rten thread tuning**: whether to cap rten's internal parallelism explicitly or rely on the semaphore alone — decide from the spike's measured CPU behavior on the CI runner.
+1. **Model-weights license — CLOSED (safe to bundle with attribution).** The ocrs
+   project (robertknight/ocrs, `MIT OR Apache-2.0`) states its models are
+   "trained exclusively on datasets which are a) open and b) have
+   non-restrictive licenses" — currently HierText (CC-BY-SA 4.0). We bundle and
+   attribute ocrs + HierText (CC-BY-SA 4.0) in the fetch-script header, the
+   canonical attribution location for every bundled model (llama.cpp, Piper,
+   nomic). The first-run-download fallback is therefore NOT needed.
+2. **rten thread tuning — CLOSED.** The measured spike showed ~245 ms/image on
+   CI-runner-class CPU with rten's defaults; the semaphore(2) bound is
+   sufficient. No explicit rten thread cap in v1; revisit only if a field
+   report shows OCR starving foreground work.

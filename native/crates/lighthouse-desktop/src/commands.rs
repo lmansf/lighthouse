@@ -676,10 +676,12 @@ pub fn settings_get(app: AppHandle) -> Value {
         "summonHotkeyOk": hotkey_ok,
         "semanticSearch": s.semantic_search != Some(false), // default on (B2)
         "backgroundConserve": s.background_conserve != Some(false), // default on
+        "ocrEnabled": s.ocr_enabled != Some(false), // default on (add-ocr-perception)
     })
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub fn settings_set(
     app: AppHandle,
     run_on_startup: Option<bool>,
@@ -689,6 +691,7 @@ pub fn settings_set(
     summon_shortcut: Option<String>,
     semantic_search: Option<bool>,
     background_conserve: Option<bool>,
+    ocr_enabled: Option<bool>,
 ) -> Value {
     // A new summon shortcut must PARSE before anything persists — saving an
     // unregistrable string would strand the user with no hotkey at all.
@@ -724,6 +727,7 @@ pub fn settings_set(
         summon_shortcut,
         semantic_search,
         background_conserve,
+        ocr_enabled,
     );
     if shortcut_changed && !crate::register_summon_shortcut(&app) {
         // The new chord didn't register — restore the previous one so the
