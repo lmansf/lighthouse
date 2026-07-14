@@ -57,6 +57,11 @@ pub struct DesktopSettings {
     /// flipping it back on re-reads them with no rescan.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ocr_enabled: Option<bool>,
+    /// Local audit log (add-audit-log): keep a tamper-evident record of each
+    /// answered question. Default OFF (None = off); the managed policy key
+    /// `auditLog: "on"` forces it on regardless.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit_enabled: Option<bool>,
     /// Keys this struct doesn't model (e.g. the shell's hand-persisted
     /// `widgetPos`) must survive a read-modify-write round trip — without
     /// this flatten, any Preferences toggle would silently delete them.
@@ -92,6 +97,7 @@ pub fn write_desktop_settings(
     semantic_search: Option<bool>,
     background_conserve: Option<bool>,
     ocr_enabled: Option<bool>,
+    audit_enabled: Option<bool>,
 ) -> DesktopSettings {
     let Some(f) = settings_file() else {
         return DesktopSettings::default();
@@ -123,6 +129,9 @@ pub fn write_desktop_settings(
     }
     if ocr_enabled.is_some() {
         next.ocr_enabled = ocr_enabled;
+    }
+    if audit_enabled.is_some() {
+        next.audit_enabled = audit_enabled;
     }
     write_json(&f, &next); // best-effort: a read-only location just means unsaved
     next

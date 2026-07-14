@@ -1,0 +1,98 @@
+# Supply-chain gate: dependency vulnerability audits + CycloneDX SBOMs for both
+# engines. Runs per-PR (when deps change), on push to main, and weekly so a new
+# advisory against an UNCHANGED dependency still turns CI red.
+#
+# Audits are gates (a High/Critical advisory fails the job). SBOMs are uploaded
+# as build artifacts; attaching them to GitHub releases is a follow-on in
+# publish-release.yml (the CycloneDX JSON here is the source).
+#
+# Triaging a finding:
+#   - npm: raise the floor with `--audit-level=critical`, or update the dep.
+#   - cargo: add an ignore with a rationale in native/.cargo/audit.toml
+#     ([advisories] ignore = ["RUSTSEC-YYYY-NNNN"]) — never a blanket disable.
+name: supply-chain
+
+on:
+  pull_request:
+    paths:
+      - "package.json"
+      - "package-lock.json"
+      - "native/**/Cargo.toml"
+      - "native/**/Cargo.lock"
+      - ".github/workflows/supply-chain.yml"
+  push:
+    branches: [main]
+  schedule:
+    # Mondays 07:00 UTC — catch advisories filed against pinned deps.
+    - cron: "0 7 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  npm:
+    name: npm audit + SBOM
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      # Gate: fail on High/Critical advisories in SHIPPED (non-dev) deps. Dev-only
+      # advisories don't reach users, so they don't block — update them normally.
+      - name: Audit (production deps, high+)
+        run: npm audit --omit=dev --audit-level=high
+      - name: Generate CycloneDX SBOM
+        if: always()
+        run: npx --yes @cyclonedx/cyclonedx-npm@latest --omit dev --output-format JSON --output-file sbom.npm.cdx.json
+      - name: Upload SBOM
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-npm
+          path: sbom.npm.cdx.json
+          if-no-files-found: warn
+
+  cargo:
+    name: cargo audit + SBOM
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: native
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native
+      # cargo-audit reads Cargo.lock (no build); cargo-cyclonedx runs
+      # `cargo metadata` (no build) — neither needs the webkit/gtk system deps.
+      - name: Install cargo-audit + cargo-cyclonedx
+        run: cargo install cargo-audit cargo-cyclonedx --locked
+      # Gate: fail on any RUSTSEC vulnerability against the locked graph. The
+      # four --ignore IDs are triaged, DoS-on-local-input advisories with no
+      # semver-compatible fix in the pinned tree — full rationale + remediation
+      # path in native/audit.toml. Anything NOT listed there still fails the
+      # gate. Unmaintained/unsound/yanked warnings are reported (non-failing).
+      - name: Audit
+        run: >
+          cargo audit
+          --ignore RUSTSEC-2026-0204
+          --ignore RUSTSEC-2026-0187
+          --ignore RUSTSEC-2026-0194
+          --ignore RUSTSEC-2026-0195
+      - name: Generate CycloneDX SBOM
+        if: always()
+        run: cargo cyclonedx --format json --all
+      - name: Upload SBOMs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-cargo
+          path: native/**/*.cdx.json
+          if-no-files-found: warn

@@ -46,6 +46,88 @@ export interface FileNode {
  */
 export type RestoreToken = Record<string, unknown>;
 
+/**
+ * Read-only snapshot of the machine-scope managed policy (org deployments):
+ * which settings an IT-deployed policy.json locks, so the UI can disable the
+ * matching controls and label them "Managed by your organization". Shape
+ * mirrors the engines' snapshot (policy.rs / src/server/policy.ts) exactly.
+ * `present` false ⇒ unmanaged install; `error` true ⇒ a malformed policy file
+ * failed closed (local-only providers, telemetry + history off).
+ */
+export interface PolicySnapshot {
+  present: boolean;
+  error: boolean;
+  locks: {
+    /** Permitted provider ids, or null when providers are unrestricted. */
+    allowedProviders: string[] | null;
+    telemetryOff: boolean;
+    chatHistoryOff: boolean;
+    widgetHotkeysOff: boolean;
+    ocrOff: boolean;
+    notificationsOff: boolean;
+    auditLogOn: boolean;
+    /** Directories the vault may live under, or null when unrestricted. */
+    vaultRoots: string[] | null;
+  };
+}
+
+/**
+ * Session egress snapshot (S3) — what has left this machine this session.
+ * `total: 0` renders the header shield as "All local". Host + purpose +
+ * count + last time only; never content or full URLs.
+ */
+export interface EgressSnapshot {
+  total: number;
+  destinations: {
+    host: string;
+    purpose: string;
+    count: number;
+    /** Epoch ms of the most recent request to this host+purpose. */
+    lastAt: number;
+  }[];
+}
+
+/**
+ * One durable audit record (openspec: add-audit-log) — what the AI read, what
+ * left the machine, and when, for a single answered question. Shape mirrors the
+ * engines (audit.rs / src/server/audit.ts). The verbatim `question` is present
+ * ONLY when the maintainer opted into it; otherwise just the sha256. `egress`
+ * is `["none"]` for a fully local answer, else the hosts this question dialed.
+ * The HMAC chain fields the Rust engine writes are engine-internal and omitted
+ * here — the UI never renders them (the twin doesn't write them: PARITY).
+ */
+export interface AuditRecord {
+  ts: number;
+  questionSha256: string;
+  question?: string;
+  fileIds: string[];
+  provider: string;
+  egress: string[];
+  artifacts: string[];
+}
+
+/**
+ * The audit viewer's payload: whether logging is on, whether the chain still
+ * verifies (`intact` is always true on the no-HMAC TS twin — PARITY), and the
+ * most recent records newest-first.
+ */
+export interface AuditSnapshot {
+  enabled: boolean;
+  intact: boolean;
+  records: AuditRecord[];
+}
+
+/**
+ * Result of an explicit chain verification: `intact` plus, when broken, the
+ * 0-based index of the first record that fails (`breakAt: -1` when intact).
+ * `count` is the number of records checked before the break (or in total).
+ */
+export interface AuditVerdict {
+  intact: boolean;
+  breakAt: number;
+  count: number;
+}
+
 /** A model provider the user can pick during onboarding. */
 export interface ModelProvider {
   id: string;

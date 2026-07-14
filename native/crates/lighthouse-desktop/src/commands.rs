@@ -285,6 +285,43 @@ pub async fn rag_op(app: AppHandle, body: Value) -> Result<Value, String> {
                     .unwrap_or_default();
             Ok(json!({ "asks": asks }))
         }
+        // Managed policy snapshot (openspec: add-managed-policy) — read-only;
+        // the UI renders the reported locks as "Managed by your organization".
+        Some("policy") => Ok(lighthouse_core::policy::snapshot()),
+        // Session egress snapshot (S3) — what has left this machine this
+        // session; the header shield renders "All local" / "N to <host>".
+        Some("egress") => Ok(lighthouse_core::egress::snapshot()),
+        // Local audit log (openspec: add-audit-log) — durable record behind the
+        // session egress panel. List/verify read-only; export writes a CSV into
+        // the vault via the same sanitized helper as exportChat.
+        Some("auditList") => {
+            let limit = body["limit"].as_u64().unwrap_or(100) as usize;
+            Ok(lighthouse_core::audit::recent(limit))
+        }
+        Some("auditVerify") => Ok(lighthouse_core::audit::verify_active()),
+        Some("auditExport") => {
+            let csv = tokio::task::spawn_blocking(lighthouse_core::audit::export_csv)
+                .await
+                .unwrap_or_default();
+            let written = tokio::task::spawn_blocking(move || {
+                lighthouse_core::vault::write_artifact(
+                    "Lighthouse Notes",
+                    "Audit Log",
+                    "csv",
+                    csv.as_bytes(),
+                )
+            })
+            .await
+            .map_err(|e| e.to_string())
+            .and_then(|r| r.map_err(|e| e.to_string()));
+            Ok(match written {
+                Ok((id, name)) => {
+                    let _ = app.emit("vault-changed", ());
+                    json!({ "savedId": id, "savedName": name })
+                }
+                Err(e) => json!({ "error": e }),
+            })
+        }
         _ => Err("unknown op".into()),
     }
 }
@@ -323,6 +360,14 @@ pub async fn chat_ask(
     // pre-answer progress chunks (docs/multi-doc-synthesis.md) — lives in the
     // engine pipeline, shared with the axum route (retrieval-query blending
     // included).
+    // Audit log (add-audit-log): capture the question + egress baseline before
+    // the answer, record once the final chunk's references are known. Covers
+    // the widget AND the main window (both invoke this command).
+    let audit = lighthouse_core::audit::AnswerAudit::start(&question);
+    let provider = cfg
+        .provider_id
+        .clone()
+        .unwrap_or_else(|| "none".to_string());
     let mut chunks = lighthouse_core::synth::answer_pipeline(
         question,
         included_file_ids,
@@ -330,9 +375,20 @@ pub async fn chat_ask(
         history,
         cfg,
     );
+    let mut final_files: Vec<String> = Vec::new();
+    let mut artifacts: Vec<String> = Vec::new();
     while let Some(c) = chunks.next().await {
+        if c.done {
+            if let Some(refs) = &c.references {
+                final_files = refs.iter().map(|r| r.file_id.clone()).collect();
+            }
+            if let Some(a) = &c.analytics {
+                artifacts.extend(a.file_ids.iter().cloned());
+            }
+        }
         let _ = on_chunk.send(c);
     }
+    audit.finish(&provider, final_files, artifacts);
     Ok(())
 }
 
@@ -395,11 +451,19 @@ pub async fn profile_op(body: Value) -> Result<Value, String> {
             );
         }
         Some("finishRegistration") => emit_model_selected(profile::finish_registration()),
-        Some("selectModel") => emit_model_selected(Some(profile::select_model(
-            body["providerId"].as_str().unwrap_or(""),
-            body["modelId"].as_str().unwrap_or(""),
-            body["apiKey"].as_str().unwrap_or(""),
-        ))),
+        Some("selectModel") => {
+            let provider_id = body["providerId"].as_str().unwrap_or("");
+            // Managed policy: reject a disallowed provider with a real error
+            // (select_model itself also refuses to persist, belt-and-braces).
+            if !lighthouse_core::policy::provider_allowed(provider_id) {
+                return Err("this AI provider is managed off by your organization".into());
+            }
+            emit_model_selected(Some(profile::select_model(
+                provider_id,
+                body["modelId"].as_str().unwrap_or(""),
+                body["apiKey"].as_str().unwrap_or(""),
+            )))
+        }
         Some("setDefaultInclusion") => {
             let v = body["value"].as_str().unwrap_or("");
             if v != "include" && v != "exclude" {
@@ -677,6 +741,7 @@ pub fn settings_get(app: AppHandle) -> Value {
         "semanticSearch": s.semantic_search != Some(false), // default on (B2)
         "backgroundConserve": s.background_conserve != Some(false), // default on
         "ocrEnabled": s.ocr_enabled != Some(false), // default on (add-ocr-perception)
+        "auditEnabled": s.audit_enabled == Some(true), // opt-in, default off (add-audit-log)
     })
 }
 
@@ -692,6 +757,7 @@ pub fn settings_set(
     semantic_search: Option<bool>,
     background_conserve: Option<bool>,
     ocr_enabled: Option<bool>,
+    audit_enabled: Option<bool>,
 ) -> Value {
     // A new summon shortcut must PARSE before anything persists — saving an
     // unregistrable string would strand the user with no hotkey at all.
@@ -728,6 +794,7 @@ pub fn settings_set(
         semantic_search,
         background_conserve,
         ocr_enabled,
+        audit_enabled,
     );
     if shortcut_changed && !crate::register_summon_shortcut(&app) {
         // The new chord didn't register — restore the previous one so the
@@ -740,6 +807,7 @@ pub fn settings_set(
             None,
             None,
             Some(prev_shortcut.clone().unwrap_or_default()),
+            None,
             None,
             None,
             None,
@@ -789,8 +857,12 @@ pub fn settings_set(
         });
     }
     // Whisper mode (W3) starts/stops its keyboard hook live — no relaunch.
+    // Managed policy widgetHotkeys "off": turning it ON is refused here (the
+    // hook must never install); turning it OFF is always honored.
     if let Some(on) = whisper_mode {
-        crate::whisper::set_enabled(&app, on);
+        if !on || lighthouse_core::policy::hotkeys_allowed() {
+            crate::whisper::set_enabled(&app, on);
+        }
     }
     // Semantic search (B2) applies live too: the supervisor's 3 s reconcile
     // starts or stops the embedding server to match the new setting, and its

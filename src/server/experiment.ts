@@ -16,6 +16,7 @@ import crypto from "node:crypto";
 import path from "node:path";
 import { appStateDir, readJson, writeJson, profilePath } from "./config";
 import { getContactId, callFn } from "./license";
+import { telemetryAllowed } from "./policy";
 
 // Same file license.ts's identity ops write — must resolve identically.
 // Install-global (appStateDir): a vault switch must not re-roll buckets.
@@ -149,6 +150,9 @@ function resolve(): Variants {
  * Best-effort: any failure (offline / unconfigured) leaves the hash in place.
  */
 export async function assignBalancedVariants(): Promise<Variants> {
+  // Managed policy: telemetry "off" means no `assign` call — the local,
+  // deterministic hash bucketing applies (nothing is transmitted).
+  if (!telemetryAllowed()) return resolve();
   const email = currentEmail()?.toLowerCase();
   const override = email ? FIRST_USERS[email] : undefined;
   if (override) {

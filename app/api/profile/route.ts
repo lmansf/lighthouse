@@ -13,6 +13,7 @@ import {
 } from "@/server/profile";
 import { isSameOrigin } from "@/server/http";
 import { recordEvent } from "@/server/license";
+import { providerAllowed } from "@/server/policy";
 import { validateKey } from "@/server/llm";
 import type { ModelSelectionResult } from "@/server/profile";
 
@@ -54,15 +55,22 @@ export async function POST(req: Request) {
     case "finishRegistration":
       emitModelSelected(finishRegistration());
       break;
-    case "selectModel":
+    case "selectModel": {
+      const providerId = String(body.providerId ?? "");
+      // Managed policy: reject a disallowed provider with a real error
+      // (selectModel itself also refuses to persist, belt-and-braces —
+      // mirrors routes.rs/commands.rs).
+      if (!providerAllowed(providerId)) {
+        return NextResponse.json(
+          { error: "this AI provider is managed off by your organization" },
+          { status: 400 },
+        );
+      }
       emitModelSelected(
-        selectModel(
-          String(body.providerId ?? ""),
-          String(body.modelId ?? ""),
-          String(body.apiKey ?? ""),
-        ),
+        selectModel(providerId, String(body.modelId ?? ""), String(body.apiKey ?? "")),
       );
       break;
+    }
     case "setDefaultInclusion":
       if (body.value !== "include" && body.value !== "exclude") {
         return NextResponse.json({ error: "value must be include or exclude" }, { status: 400 });

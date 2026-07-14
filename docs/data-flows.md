@@ -61,16 +61,17 @@ content, file names, or questions — ever — on this host.**
 | `feedback`, `featureInterest`, `notify`, `bug` | you submitting the respective form | what the form shows, + contactId/version |
 
 **Honest defaults, stated plainly:** in a hosted (normal) build, `check` +
-`ping` — and funnel `event`s — fire on every launch, and there is **no
-user-facing switch** for them today; the opt-in toggle covers only the
-click-event batch (`events`, default **off**, buffered locally in
-`usage-events.jsonl` until opted in). The build-level off switch is unsetting
-`LICENSE_API_URL` (every op then no-ops, checked per-call). Air-gapped
-deployments: see the offline-activation work (Phase 1) and
-`docs/managed-deployment.md` once landed — the managed policy `telemetry:
-"off"` is specified to silence everything except the license `check`.
-Failure posture: license checks **fail closed to a lock, never a wipe** —
-your files are untouched.
+`ping` — and funnel `event`s — fire on every launch. There is no per-user
+switch for them; the opt-in toggle covers only the click-event batch
+(`events`, default **off**, buffered locally in `usage-events.jsonl` until
+opted in). **Organizations can silence all of it**: the managed policy key
+`telemetry: "off"` (docs/managed-deployment.md) stops `ping`, `event`,
+`events`, and `assign` at the engine — only the license `check` and
+explicit user submissions (feedback/bug forms) remain. The build-level off
+switch is unsetting `LICENSE_API_URL` (every op no-ops, checked per-call);
+the offline-activation work (Phase 1) removes even the `check` for
+air-gapped deployments. Failure posture: license checks **fail closed to a
+lock, never a wipe** — your files are untouched.
 
 ## 3. Checkout — Supabase + Stripe
 
@@ -128,6 +129,22 @@ releases, HF-hosted voice/embedding models and the ocrs S3 bucket — all via
 the repo's own mirror first (`github.com/lmansf/lighthouse` release
 `hf-assets-1`), version-pinned and SHA-256-verified fail-closed.
 
+## 9. Local audit log — written locally, NOT egress
+
+With the audit log on (`auditEnabled`, off by default, or managed policy
+`auditLog: "on"`), the engine appends one JSONL record per answered question
+under the app-state directory (`audit/audit-<YYYY-MM>.jsonl`, 0600) — the same
+place the index and settings live. The record holds what the answer read (file
+ids), which provider answered, and **which hosts that question dialed** (the
+egress panel's per-question delta), plus a SHA-256 of the question (the verbatim
+text only if `auditVerbatim` is also set). Each record chains an HMAC-SHA256 to
+the previous one, so deleting or editing any record breaks verification from
+that point (a detective control, not anti-root DRM — see the threat model in
+`openspec/changes/add-audit-log/design.md`). The log itself **never leaves the
+machine**: it is written and read locally, and the only way it moves is the
+user's own "Export CSV" into the vault. The TS dev twin mirrors the record shape
+but omits the HMAC chain (PARITY — it is not a security surface).
+
 ## Redirect / effective hosts (for allowlisting)
 
 `github.com` + `api.github.com` → `objects.githubusercontent.com` /
@@ -139,9 +156,9 @@ huggingface.co` / `cas-bridge.xethub.hf.co`; ocrs models →
 
 | Egress | Lever |
 |---|---|
-| Cloud AI (the only content path) | choose Local/no provider; don't store a key |
-| License check + launch ping + funnel events | unset `LICENSE_API_URL` (build-level) — no runtime toggle yet; policy layer planned |
-| Click telemetry | opt-in toggle, default **off** |
+| Cloud AI (the only content path) | choose Local/no provider; don't store a key — or managed policy `allowedProviders`/`forceLocalOnly` (org-wide, engine-enforced) |
+| Launch ping + funnel events + experiment assign | managed policy `telemetry: "off"`; or unset `LICENSE_API_URL` (build-level, also silences the license check) |
+| Click telemetry | opt-in toggle, default **off**; pinned off by `telemetry: "off"` |
 | Update check | no toggle (GET, no payload); notify-only |
 | Update download | never without your click + a verifiable signature |
 | Model weights download | never without your click |
@@ -149,5 +166,6 @@ huggingface.co` / `cas-bridge.xethub.hf.co`; ocrs models →
 | Checkout | hidden unless `PAID_ENABLED=1` |
 
 *Related: `README.md` §Network & privacy · `docs/signing.md` ·
-`docs/ts-twin.md` · the roadmap's Phase 1 adds an in-app egress panel, a
-local audit log, an org policy layer, and offline activation.*
+`docs/ts-twin.md` · `docs/managed-deployment.md`. Phase 1 ships the in-app
+egress panel (§the header shield) and the local audit log (§9) alongside the
+org policy layer; offline activation follows.*

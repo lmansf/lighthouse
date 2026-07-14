@@ -451,6 +451,11 @@ fn launched_by_autostart() -> bool {
 /// a chord some other app already owns).
 pub fn register_summon_shortcut(app: &AppHandle) -> bool {
     use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+    // Managed policy: widgetHotkeys "off" means the shortcut is never
+    // registered — covering boot AND every Preferences re-record path.
+    if !lighthouse_core::policy::hotkeys_allowed() {
+        return false;
+    }
     let gs = app.global_shortcut();
     let _ = gs.unregister_all(); // ours is the only registration in this app
     let accel = read_settings(app)["summonShortcut"]
@@ -639,17 +644,34 @@ fn write_settings(app: &AppHandle, patch: Value) {
 }
 
 /// The local vault directory (persisted; defaults under the user's Documents).
+/// Managed policy: a stored vaultDir that violates `vaultRoots` (a policy
+/// that arrived AFTER the vault was chosen) is not applied — the app falls
+/// back to an allowed location instead of silently indexing a forbidden
+/// path at boot. Non-destructive: the old folder's files are untouched.
 pub fn vault_dir_setting(app: &AppHandle) -> PathBuf {
-    let from_settings = read_settings(app)["vaultDir"].as_str().map(PathBuf::from);
+    let from_settings = read_settings(app)["vaultDir"]
+        .as_str()
+        .map(PathBuf::from)
+        .filter(|d| lighthouse_core::policy::vault_path_allowed(d));
     let dir = from_settings.unwrap_or_else(|| {
-        app.path()
+        let default = app
+            .path()
             .document_dir()
             .unwrap_or_else(|_| {
                 app.path()
                     .app_data_dir()
                     .unwrap_or_else(|_| std::env::temp_dir())
             })
-            .join("Lighthouse Vault")
+            .join("Lighthouse Vault");
+        if lighthouse_core::policy::vault_path_allowed(&default) {
+            default
+        } else {
+            // Even the OS default is outside the allowlist: root the vault
+            // under the first allowed prefix.
+            lighthouse_core::policy::first_vault_root()
+                .map(|r| r.join("Lighthouse Vault"))
+                .unwrap_or(default)
+        }
     });
     let _ = fs::create_dir_all(&dir);
     dir
@@ -958,6 +980,19 @@ fn handle_menu(app: &AppHandle, id: &str) {
                 .set_title("Choose your vault folder")
                 .pick_folder(move |path| {
                     if let Some(dir) = path.and_then(|f| f.into_path().ok()) {
+                        // Managed policy: reject-and-keep — an out-of-root
+                        // pick is refused, nothing is written, and the
+                        // previous vault stays active.
+                        if !lighthouse_core::policy::vault_path_allowed(&dir) {
+                            let _ = handle.dialog()
+                                .message(
+                                    "That folder is outside the locations your \
+                                     organization allows for vaults.",
+                                )
+                                .title("Managed by your organization")
+                                .blocking_show();
+                            return;
+                        }
                         write_settings(
                             &handle,
                             serde_json::json!({ "vaultDir": dir.to_string_lossy() }),
@@ -1404,7 +1439,10 @@ fn main() {
             // active when the user enabled it in Preferences (whisper.rs).
             // Safe mode leaves the keyboard hook out — a global input hook is
             // precisely what to rule out while diagnosing a frozen machine.
+            // Managed policy widgetHotkeys "off": the hook is NEVER installed
+            // (not installed-then-disabled), regardless of the user setting.
             if !boot_guard::safe_mode()
+                && lighthouse_core::policy::hotkeys_allowed()
                 && read_settings(&handle)["whisperMode"].as_bool() == Some(true)
             {
                 whisper::set_enabled(&handle, true);

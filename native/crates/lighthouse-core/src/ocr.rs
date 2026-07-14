@@ -106,9 +106,11 @@ fn engine() -> Option<&'static OcrEngine> {
     ENGINE.get_or_init(build_engine).as_ref()
 }
 
-/// True when OCR can actually run right now (toggle on AND models loaded).
+/// True when OCR can actually run right now (user toggle on AND managed
+/// policy allows it AND models loaded). Policy sits before engine() so a
+/// managed-off never even loads the models.
 pub fn available() -> bool {
-    enabled() && engine().is_some()
+    enabled() && crate::policy::ocr_allowed() && engine().is_some()
 }
 
 /// Tiny counting semaphore (std has none): bounds concurrent inferences.

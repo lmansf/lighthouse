@@ -21,6 +21,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { stateDir, readJson, writeJson } from "./config";
+import { telemetryAllowed } from "./policy";
 
 /** Coarse bucket for a captured interaction. Mirrors the renderer's capture hook. */
 export type UsageEventType = "folder" | "file" | "toggle" | "button" | "link" | "nav" | "other";
@@ -57,8 +58,11 @@ interface UsageConsent {
 }
 
 /** Whether the user has opted OUT of usage logging. Default is opted OUT:
- *  capture stays off until the user explicitly opts in (optOut === false). */
+ *  capture stays off until the user explicitly opts in (optOut === false).
+ *  A managed `telemetry: "off"` policy reads as permanently opted out —
+ *  this one gate locks capture (append), publish, and the UI toggle state. */
 export function isUsageOptedOut(): boolean {
+  if (!telemetryAllowed()) return true;
   return readJson<UsageConsent>(consentPath(), {}).optOut !== false;
 }
 

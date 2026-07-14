@@ -14,6 +14,10 @@ import type {
   FileNode,
   OnboardingState,
   Pin,
+  PolicySnapshot,
+  EgressSnapshot,
+  AuditSnapshot,
+  AuditVerdict,
   RagReference,
   RestoreToken,
   User,
@@ -131,6 +135,37 @@ export interface RagService {
    * UI can hide affordances the server would refuse.
    */
   capabilities(): Promise<{ desktop: boolean }>;
+  /**
+   * Read-only snapshot of the machine-scope managed policy: which settings an
+   * org-deployed policy.json locks. The UI disables the matching controls and
+   * labels them "Managed by your organization"; an unmanaged install reports
+   * `present: false` with all-permissive locks.
+   */
+  policy(): Promise<PolicySnapshot>;
+  /**
+   * Session egress snapshot (S3): what has left this machine this session,
+   * grouped by destination host + purpose. Drives the header shield ("All
+   * local" / "N requests to <host>") and its detail panel.
+   */
+  egress(): Promise<EgressSnapshot>;
+  /**
+   * Recent audit records (openspec: add-audit-log) plus the enabled + chain-
+   * intact verdict, newest first. `limit` caps how many records come back
+   * (default 100). Backs the audit-log viewer under Settings.
+   */
+  audit(limit?: number): Promise<AuditSnapshot>;
+  /**
+   * Explicitly verify the audit chain — `intact` plus the first broken index
+   * when tampered. The viewer calls this behind its "Verify integrity" action;
+   * the TS twin has no chain and always reports intact (PARITY).
+   */
+  auditVerify(): Promise<AuditVerdict>;
+  /**
+   * Export the current audit log to a CSV file inside the vault (via the same
+   * sanitized artifact-write path as chat export), returning the new file's id
+   * and name, or an `error` string on failure.
+   */
+  auditExport(): Promise<{ savedId?: string; savedName?: string; error?: string }>;
 }
 
 /** Registration / sign-in. Mocked now; swap for a real identity provider later. */

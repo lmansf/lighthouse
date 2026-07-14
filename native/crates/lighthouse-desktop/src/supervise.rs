@@ -643,6 +643,10 @@ pub async fn check_for_updates(app: AppHandle) {
         Ok(c) => c,
         Err(_) => return,
     };
+    lighthouse_core::egress::record(
+        "https://api.github.com/repos/lmansf/lighthouse/releases/latest",
+        lighthouse_core::egress::PURPOSE_UPDATE_CHECK,
+    );
     let Ok(res) = client
         .get("https://api.github.com/repos/lmansf/lighthouse/releases/latest")
         .send()
@@ -742,12 +746,14 @@ pub async fn update_now(app: AppHandle) -> serde_json::Value {
             .build()?;
         // Stream to disk: installers carry the bundled models now (hundreds
         // of MB) — buffering the whole body would spike memory for nothing.
+        lighthouse_core::egress::record(&url, lighthouse_core::egress::PURPOSE_UPDATE_DOWNLOAD);
         let mut res = client.get(&url).send().await?.error_for_status()?;
         let mut file = fs::File::create(&dest)?;
         while let Some(chunk) = res.chunk().await? {
             file.write_all(&chunk)?;
         }
         file.flush()?;
+        lighthouse_core::egress::record(&sig_url, lighthouse_core::egress::PURPOSE_UPDATE_DOWNLOAD);
         let sig = client
             .get(&sig_url)
             .send()

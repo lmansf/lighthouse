@@ -3,6 +3,7 @@
 import { useEffect, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import {
   Avatar,
+  Badge,
   Button,
   Checkbox,
   Dialog,
@@ -40,6 +41,7 @@ import {
 import {
   BeakerRegular,
   BrainCircuitRegular,
+  HistoryRegular,
   KeyRegular,
   MailRegular,
   OpenRegular,
@@ -47,10 +49,12 @@ import {
   PinRegular,
   QuestionCircleRegular,
   SettingsRegular,
+  ShieldTaskRegular,
   SignOutRegular,
   StarRegular,
+  WarningRegular,
 } from "@fluentui/react-icons";
-import { MODEL_PROVIDERS } from "@/contracts";
+import { MODEL_PROVIDERS, ragService, type AuditSnapshot } from "@/contracts";
 import { LocalModelOption, LocalModelInstallPanel } from "@/features/localModel/LocalModelOption";
 import { QuickStartDialog } from "@/features/help/QuickStart";
 import { ExperimentsDialog } from "@/features/experiments/ExperimentsDialog";
@@ -59,6 +63,7 @@ import { useLicenseStore, type FeedbackInput, type LicenseStatus } from "@/store
 import { useAuthStore } from "@/stores/useAuthStore";
 import { useThemeStore } from "@/stores/useThemeStore";
 import { useChatStore } from "@/stores/useChatStore";
+import { useRagStore } from "@/stores/useRagStore";
 
 const LH_REPO = "https://github.com/lmansf/lighthouse";
 
@@ -212,6 +217,55 @@ const useStyles = makeStyles({
   menuItemRow: { display: "flex", width: "100%", alignItems: "center" },
   // Right-aligned keyboard-shortcut hint inside a menu item.
   menuShortcut: { marginLeft: "auto", paddingLeft: tokens.spacingHorizontalM, color: tokens.colorNeutralForeground3, fontFamily: tokens.fontFamilyMonospace, fontSize: tokens.fontSizeBase200 },
+  // Audit log viewer: the on/off + integrity summary sits above the table.
+  auditHeader: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: tokens.spacingHorizontalM,
+    flexWrap: "wrap",
+    marginBottom: tokens.spacingVerticalM,
+  },
+  // Scroll the records inside the dialog so 200 rows never grow it unbounded.
+  auditScroll: {
+    maxHeight: "46vh",
+    overflowY: "auto",
+    overflowX: "auto",
+    ...shorthands.border("1px", "solid", tokens.colorNeutralStroke2),
+    borderRadius: tokens.borderRadiusMedium,
+  },
+  auditTable: { display: "flex", flexDirection: "column", minWidth: "440px" },
+  // Four-column record row: Time | Provider | Files | Left machine.
+  auditRow: {
+    display: "grid",
+    gridTemplateColumns: "1.5fr 0.9fr 0.7fr 1.4fr",
+    gap: tokens.spacingHorizontalM,
+    alignItems: "baseline",
+    ...shorthands.padding(tokens.spacingVerticalXS, tokens.spacingHorizontalM),
+    borderBottom: `1px solid ${tokens.colorNeutralStroke2}`,
+  },
+  // Sticky header row so column labels stay visible while the body scrolls.
+  auditHeadRow: {
+    position: "sticky",
+    top: 0,
+    zIndex: 1,
+    backgroundColor: tokens.colorNeutralBackground1,
+    fontWeight: tokens.fontWeightSemibold,
+    color: tokens.colorNeutralForeground3,
+    fontSize: tokens.fontSizeBase200,
+  },
+  // Truncate long cell values; the full value lives in a title tooltip.
+  auditCell: {
+    minWidth: 0,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+    fontSize: tokens.fontSizeBase200,
+  },
+  // The security-relevant column: emphasize a real host that left the machine.
+  auditEgressOut: { fontWeight: tokens.fontWeightSemibold, color: tokens.colorPaletteRedForeground1 },
+  // Friendly empty state when nothing has been recorded yet.
+  auditEmpty: { color: tokens.colorNeutralForeground3, ...shorthands.padding(tokens.spacingVerticalL, 0) },
 });
 
 /** 0–5 rating as a compact segmented row. */
@@ -666,6 +720,10 @@ function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean
   const onboarding = useAuthStore((s) => s.onboarding);
   const selectModel = useAuthStore((s) => s.selectModel);
   const validateKey = useAuthStore((s) => s.validateKey);
+  // Managed policy (add-managed-policy): null = unrestricted; a list means
+  // only those providers may be selected (rows render disabled — the engine
+  // rejects server-side regardless).
+  const allowedProviders = useRagStore((s) => s.policy?.locks.allowedProviders ?? null);
 
   const [providerId, setProviderId] = useState(onboarding.providerId ?? MODEL_PROVIDERS[0].id);
   const [modelId, setModelId] = useState(onboarding.modelId ?? firstModelFor(providerId));
@@ -743,11 +801,21 @@ function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean
                   }}
                 >
                   {MODEL_PROVIDERS.map((p) => (
-                    <Option key={p.id} value={p.id} text={p.label}>
+                    <Option
+                      key={p.id}
+                      value={p.id}
+                      text={p.label}
+                      disabled={allowedProviders ? !allowedProviders.includes(p.id) : false}
+                    >
                       {p.id === "local" ? <LocalModelOption label={p.label} /> : p.label}
                     </Option>
                   ))}
                 </Dropdown>
+                {allowedProviders && (
+                  <Text className={styles.prefHint}>
+                    Provider choice is managed by your organization.
+                  </Text>
+                )}
               </Field>
               <Field label="Model">
                 <Dropdown
@@ -835,6 +903,212 @@ function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean
 }
 
 /**
+ * Local audit-log viewer (openspec: add-audit-log). Reads the recent records +
+ * enabled/intact verdict via ragService.audit on open, renders them as a compact
+ * table, and can verify the chain and export a CSV into the vault. Everything it
+ * shows is on-device — the log is never uploaded. The verbatim `question` is
+ * usually absent (opt-in), so this only ever shows the metadata, never the sha256
+ * dressed up as the question.
+ */
+function AuditLogDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean) => void }) {
+  const styles = useStyles();
+  const [snapshot, setSnapshot] = useState<AuditSnapshot | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [exporting, setExporting] = useState(false);
+  // Transient inline result of an Export CSV — the saved file's name or an error.
+  const [exportNote, setExportNote] = useState<{ name?: string; error?: string } | null>(null);
+  const [verifying, setVerifying] = useState(false);
+
+  // Load the recent records on the open transition (mirrors AiModelsDialog's
+  // reset-on-open idiom). `alive` guards against a resolve after close/reopen.
+  useEffect(() => {
+    if (!open) return;
+    let alive = true;
+    setLoading(true);
+    setError(null);
+    setExportNote(null);
+    setSnapshot(null);
+    ragService
+      .audit(200)
+      .then((snap) => {
+        if (alive) setSnapshot(snap);
+      })
+      .catch(() => {
+        if (alive) setError("Couldn't load the audit log. Please try again.");
+      })
+      .finally(() => {
+        if (alive) setLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [open]);
+
+  async function exportCsv() {
+    setExporting(true);
+    setExportNote(null);
+    try {
+      const res = await ragService.auditExport();
+      if (res.error || !res.savedId) {
+        setExportNote({ error: res.error ?? "Couldn't export the audit log." });
+      } else {
+        setExportNote({ name: res.savedName });
+      }
+    } catch {
+      setExportNote({ error: "Couldn't export the audit log. Please try again." });
+    } finally {
+      setExporting(false);
+    }
+  }
+
+  // Explicit chain check — fold its verdict into the badge without reloading.
+  async function verify() {
+    setVerifying(true);
+    try {
+      const verdict = await ragService.auditVerify();
+      setSnapshot((s) => (s ? { ...s, intact: verdict.intact } : s));
+    } catch {
+      // Leave the badge as-is if the check can't run.
+    } finally {
+      setVerifying(false);
+    }
+  }
+
+  const records = snapshot?.records ?? [];
+  const enabled = snapshot?.enabled ?? false;
+  const intact = snapshot?.intact ?? true;
+  const hasRecords = records.length > 0;
+
+  return (
+    <Dialog open={open} onOpenChange={(_, d) => setOpen(d.open)}>
+      <DialogSurface>
+        <DialogBody>
+          <DialogTitle>Audit log</DialogTitle>
+          <DialogContent>
+            {loading && (
+              <div className={styles.prefLoadingRow}>
+                <Spinner size="tiny" />
+                <Text size={200} className={styles.prefHint}>
+                  Loading the audit log…
+                </Text>
+              </div>
+            )}
+            {!loading && error && <Text className={styles.error}>{error}</Text>}
+            {!loading && !error && snapshot && (
+              <>
+                <div className={styles.auditHeader}>
+                  <Text size={200} className={styles.muted}>
+                    Logging is {enabled ? "on" : "off"}
+                  </Text>
+                  {intact ? (
+                    <Badge appearance="tint" color="success" icon={<ShieldTaskRegular />}>
+                      Chain verified
+                    </Badge>
+                  ) : (
+                    <Badge appearance="tint" color="danger" icon={<WarningRegular />}>
+                      Tampering detected
+                    </Badge>
+                  )}
+                </div>
+                {!intact && (
+                  <Text className={styles.error}>
+                    Tampering detected — the log was edited or truncated.
+                  </Text>
+                )}
+                {!hasRecords ? (
+                  <Text className={styles.auditEmpty}>
+                    {enabled
+                      ? "No questions have been recorded yet."
+                      : "The audit log is off. Turn on “Keep a local audit log” in Preferences to start recording."}
+                  </Text>
+                ) : (
+                  <div className={styles.auditScroll}>
+                    <div className={styles.auditTable} role="table" aria-label="Audit log records">
+                      <div
+                        className={mergeClasses(styles.auditRow, styles.auditHeadRow)}
+                        role="row"
+                      >
+                        <span role="columnheader">Time</span>
+                        <span role="columnheader">Provider</span>
+                        <span role="columnheader">Files</span>
+                        <span role="columnheader">Left machine</span>
+                      </div>
+                      {records.map((r, i) => {
+                        const local = r.egress.length === 1 && r.egress[0] === "none";
+                        const fileCount = `${r.fileIds.length} file${r.fileIds.length === 1 ? "" : "s"}`;
+                        const hosts = r.egress.join(", ");
+                        return (
+                          <div key={`${r.ts}-${i}`} className={styles.auditRow} role="row">
+                            <span className={styles.auditCell} role="cell">
+                              {new Date(r.ts).toLocaleString()}
+                            </span>
+                            <span className={styles.auditCell} role="cell">
+                              {r.provider}
+                            </span>
+                            <span
+                              className={styles.auditCell}
+                              role="cell"
+                              title={r.fileIds.length ? r.fileIds.join(", ") : undefined}
+                            >
+                              {fileCount}
+                            </span>
+                            {local ? (
+                              <span className={styles.auditCell} role="cell">
+                                None (local)
+                              </span>
+                            ) : (
+                              <span
+                                className={mergeClasses(styles.auditCell, styles.auditEgressOut)}
+                                role="cell"
+                                title={hosts}
+                              >
+                                {hosts}
+                              </span>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+                {exportNote?.name && (
+                  <Text className={styles.savedNote}>Saved {exportNote.name} to your vault.</Text>
+                )}
+                {exportNote?.error && <Text className={styles.error}>{exportNote.error}</Text>}
+              </>
+            )}
+          </DialogContent>
+          <DialogActions>
+            <DialogTrigger disableButtonEnhancement>
+              <Button appearance="secondary">Close</Button>
+            </DialogTrigger>
+            {hasRecords && (
+              <Button
+                appearance="secondary"
+                disabled={verifying}
+                icon={verifying ? <Spinner size="tiny" /> : undefined}
+                onClick={() => void verify()}
+              >
+                {verifying ? "Verifying…" : "Verify integrity"}
+              </Button>
+            )}
+            <Button
+              appearance="primary"
+              disabled={exporting || !hasRecords}
+              icon={exporting ? <Spinner size="tiny" /> : undefined}
+              onClick={() => void exportCsv()}
+            >
+              {exporting ? "Exporting…" : "Export CSV"}
+            </Button>
+          </DialogActions>
+        </DialogBody>
+      </DialogSurface>
+    </Dialog>
+  );
+}
+
+/**
  * Map a keydown's main (non-modifier) key to a tauri accelerator token, or null
  * when the event carries only modifiers (so the recorder keeps listening).
  * Letters → `Key<Upper>`, digits → `Digit<n>`, space → "Space", named keys pass
@@ -891,6 +1165,11 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
   // not a server setting) — it lives in the chat store, off by default.
   const saveChats = useChatStore((s) => s.persistEnabled);
   const setSaveChats = useChatStore((s) => s.setPersistEnabled);
+  // Managed policy (add-managed-policy): the engine enforces every lock
+  // server-side; these render the affected controls disabled with the
+  // "Managed by your organization" indication.
+  const policy = useRagStore((s) => s.policy);
+  const locks = policy?.locks;
 
   const [shareUsage, setShareUsage] = useState<boolean | null>(null);
   const [desktop, setDesktop] = useState(false);
@@ -903,6 +1182,9 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
   const [backgroundConserve, setBackgroundConserve] = useState(true);
   // OCR: read text in images and scanned PDFs with the bundled models. Default on.
   const [ocrEnabled, setOcrEnabled] = useState(true);
+  // Local audit log (openspec: add-audit-log): record what was read / which
+  // provider answered / what left the machine, per question. Default OFF.
+  const [auditEnabled, setAuditEnabled] = useState(false);
   const [uiMode, setUiMode] = useState<"window" | "widget">("window");
   const [whisperMode, setWhisperMode] = useState(false);
   // macOS Accessibility state for whisper: "pending" = the system prompt is up
@@ -963,6 +1245,7 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
         setSemanticSearch(d.semanticSearch !== false);
         setBackgroundConserve(d.backgroundConserve !== false);
         setOcrEnabled(d.ocrEnabled !== false);
+        setAuditEnabled(d.auditEnabled === true);
         setUiMode(d.uiMode === "widget" ? "widget" : "window");
         setWhisperMode(d.whisperMode === true);
         setWhisperPermission(typeof d.whisperPermission === "string" ? d.whisperPermission : "unknown");
@@ -1052,6 +1335,12 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
     const prev = ocrEnabled;
     setOcrEnabled(next);
     void postSetting({ ocrEnabled: next }, () => setOcrEnabled(prev));
+  }
+
+  function updateAudit(next: boolean) {
+    const prev = auditEnabled;
+    setAuditEnabled(next);
+    void postSetting({ auditEnabled: next }, () => setAuditEnabled(prev));
   }
 
   function updateUiMode(next: "window" | "widget") {
@@ -1158,6 +1447,17 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
           <DialogTitle>Preferences</DialogTitle>
           <DialogContent>
             <div className={styles.prefFields}>
+              {policy?.error && (
+                <Text className={styles.prefWarn}>
+                  Managed configuration error — some settings are locked to safe
+                  defaults. Contact your administrator.
+                </Text>
+              )}
+              {policy?.present && !policy.error && (
+                <Text className={styles.prefHint}>
+                  Some settings are managed by your organization.
+                </Text>
+              )}
               {/* First: appearance is the most-reached-for preference. Applies
                   instantly via the theme store — no save step. */}
               <Field label="Appearance">
@@ -1197,17 +1497,24 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
               </Field>
 
               <Switch
-                checked={shareUsage ?? false}
-                disabled={shareUsage === null}
+                checked={locks?.telemetryOff ? false : (shareUsage ?? false)}
+                disabled={shareUsage === null || locks?.telemetryOff === true}
                 onChange={(_, d) => updateUsage(Boolean(d.checked))}
                 label="Share usage analytics — your account email and which features you use, never your files, their names, or their contents"
               />
+              {locks?.telemetryOff && (
+                <Text className={styles.prefHint}>Managed by your organization.</Text>
+              )}
 
               <Switch
-                checked={saveChats}
+                checked={locks?.chatHistoryOff ? false : saveChats}
+                disabled={locks?.chatHistoryOff === true}
                 onChange={(_, d) => setSaveChats(Boolean(d.checked))}
                 label="Save chats on this device — kept locally and cleared automatically after two weeks (off by default; delete any chat from the history panel)"
               />
+              {locks?.chatHistoryOff && (
+                <Text className={styles.prefHint}>Managed by your organization.</Text>
+              )}
 
               {/* Desktop settings hydrate here. Show a spinner while loading and
                   a retry on failure, so a transient error never masquerades as
@@ -1252,11 +1559,31 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
               )}
 
               {desktop && (
-                <Switch
-                  checked={ocrEnabled}
-                  onChange={(_, d) => updateOcr(Boolean(d.checked))}
-                  label="Read text in images — bundled models pull the words out of screenshots and scanned PDFs so they're searchable (runs on this computer; nothing is uploaded)"
-                />
+                <>
+                  <Switch
+                    checked={locks?.ocrOff ? false : ocrEnabled}
+                    disabled={locks?.ocrOff === true}
+                    onChange={(_, d) => updateOcr(Boolean(d.checked))}
+                    label="Read text in images — bundled models pull the words out of screenshots and scanned PDFs so they're searchable (runs on this computer; nothing is uploaded)"
+                  />
+                  {locks?.ocrOff && (
+                    <Text className={styles.prefHint}>Managed by your organization.</Text>
+                  )}
+                </>
+              )}
+
+              {desktop && (
+                <>
+                  <Switch
+                    checked={locks?.auditLogOn ? true : auditEnabled}
+                    disabled={locks?.auditLogOn === true}
+                    onChange={(_, d) => updateAudit(Boolean(d.checked))}
+                    label="Keep a local audit log — record what the assistant read, which provider answered, and what left this computer, for each question. Stored only on this computer; never uploaded."
+                  />
+                  {locks?.auditLogOn && (
+                    <Text className={styles.prefHint}>Managed by your organization.</Text>
+                  )}
+                </>
               )}
 
               {desktop && uiMode !== "widget" && (
@@ -1287,9 +1614,18 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
                 </Field>
               )}
 
+              {/* Managed policy: with hotkeys locked, the recorder is replaced
+                  by the managed note — the shell never registers the chord. */}
+              {desktop && locks?.widgetHotkeysOff && (
+                <Field label="Summon shortcut">
+                  <Text className={styles.prefHint}>
+                    Summon shortcuts are managed off by your organization.
+                  </Text>
+                </Field>
+              )}
               {/* Only when a keyed shortcut can actually register — hidden on
                   Wayland (summonHotkeyOk === false), where no global hotkey works. */}
-              {desktop && hotkeyOk && (
+              {desktop && hotkeyOk && !locks?.widgetHotkeysOff && (
                 <Field label="Summon shortcut">
                   {recording ? (
                     <div className={styles.shortcutRow}>
@@ -1332,7 +1668,7 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
                 </Field>
               )}
 
-              {desktop && whisperCapable && (
+              {desktop && whisperCapable && !locks?.widgetHotkeysOff && (
                 <Field label="Whisper summon (experimental)">
                   <Switch
                     checked={whisperMode}
@@ -1411,6 +1747,7 @@ export function SettingsMenu() {
   const [prefDlg, setPrefDlg] = useState(false);
   const [quickStartDlg, setQuickStartDlg] = useState(false);
   const [experimentsDlg, setExperimentsDlg] = useState(false);
+  const [auditDlg, setAuditDlg] = useState(false);
 
   // Other features (chat empty states, explorer hints, …) deep-link into these
   // dialogs by dispatching window CustomEvents — the menu owns the dialogs, so
@@ -1481,6 +1818,9 @@ export function SettingsMenu() {
             <MenuItem icon={<BeakerRegular />} onClick={() => setExperimentsDlg(true)}>
               Experiments
             </MenuItem>
+            <MenuItem icon={<HistoryRegular />} onClick={() => setAuditDlg(true)}>
+              Audit log
+            </MenuItem>
             <MenuDivider />
             <MenuItem
               className={styles.highlightItem}
@@ -1507,6 +1847,7 @@ export function SettingsMenu() {
       <PreferencesDialog open={prefDlg} setOpen={setPrefDlg} />
       <QuickStartDialog open={quickStartDlg} setOpen={setQuickStartDlg} />
       <ExperimentsDialog open={experimentsDlg} setOpen={setExperimentsDlg} />
+      <AuditLogDialog open={auditDlg} setOpen={setAuditDlg} />
     </>
   );
 }

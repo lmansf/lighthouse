@@ -9,6 +9,7 @@
 import fs from "node:fs";
 import { SHAREPOINT_SOURCE_ID } from "../../config";
 import { getAccessToken, type SpNode } from "./auth";
+import { recordEgress, PURPOSE_SHAREPOINT } from "../../egress";
 
 const GRAPH = "https://graph.microsoft.com/v1.0";
 /** Safety bounds on the placeholder listing. */
@@ -39,6 +40,7 @@ async function graphGet(pathOrUrl: string): Promise<Record<string, unknown>> {
   if (!isGraphHost(url)) {
     throw new Error(`refusing to send Graph token to non-Graph host: ${new URL(url).host}`);
   }
+  recordEgress(url, PURPOSE_SHAREPOINT);
   const res = await fetch(url, { headers: { authorization: `Bearer ${token}` } });
   if (!res.ok) {
     const body = await res.text().catch(() => "");
@@ -185,6 +187,7 @@ export async function downloadItem(
   maxBytes = MAX_MIRROR_BYTES,
 ): Promise<boolean> {
   const token = await getAccessToken();
+  recordEgress(GRAPH, PURPOSE_SHAREPOINT);
   const res = await fetch(`${GRAPH}/drives/${driveId}/items/${itemId}/content`, {
     headers: { authorization: `Bearer ${token}` },
     redirect: "follow",

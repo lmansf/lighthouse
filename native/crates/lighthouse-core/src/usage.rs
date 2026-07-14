@@ -49,7 +49,12 @@ impl UsageConsent {
 }
 
 /// Whether the user has opted OUT of usage logging. Default is opted OUT.
+/// A managed `telemetry: "off"` policy reads as permanently opted out —
+/// this one gate locks capture (append), publish, and the UI toggle state.
 pub fn is_usage_opted_out() -> bool {
+    if !crate::policy::telemetry_allowed() {
+        return true;
+    }
     read_json(&consent_path(), UsageConsent::default()).value() != Some(false)
 }
 

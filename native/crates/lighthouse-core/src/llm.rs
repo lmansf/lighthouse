@@ -255,7 +255,13 @@ pub fn stream_answer(
         }
 
         let key = cfg.api_key.clone().unwrap_or_default();
-        let can_claude = cfg.provider_id.as_deref() == Some("anthropic") && !key.is_empty();
+        // Managed policy: a disallowed cloud provider is refused HERE, not
+        // just at selection time — a profile stored before the policy landed
+        // must still be blocked. Both cloud gates AND in the policy check so
+        // the existing extractive fallthrough answers instead.
+        let can_claude = cfg.provider_id.as_deref() == Some("anthropic")
+            && !key.is_empty()
+            && crate::policy::provider_allowed("anthropic");
         if can_claude {
             let model = cfg.model_id.clone().unwrap_or_else(|| "claude-haiku-4-5".to_string());
             let mut emitted = false;
@@ -298,6 +304,7 @@ pub fn stream_answer(
         let compat = cfg
             .provider_id
             .as_deref()
+            .filter(|id| crate::policy::provider_allowed(id))
             .and_then(remote_provider)
             .filter(|_| !key.is_empty());
         if let Some(p) = compat {
@@ -375,6 +382,7 @@ async fn stream_openai_compat(
     let api_key = api_key.to_string();
     Box::pin(async_stream::stream! {
         let client = http_client();
+        crate::egress::record(provider.chat_url, crate::egress::PURPOSE_AI_PROVIDER);
         let res = match client
             .post(provider.chat_url)
             .header("content-type", "application/json")
@@ -418,11 +426,13 @@ pub async fn validate_key(provider_id: &str, api_key: &str) -> Result<(), String
     }
     let client = http_client();
     let req = if provider_id == "anthropic" {
+        crate::egress::record(ANTHROPIC_MODELS_URL, crate::egress::PURPOSE_AI_PROVIDER);
         client
             .get(ANTHROPIC_MODELS_URL)
             .header("x-api-key", api_key)
             .header("anthropic-version", ANTHROPIC_VERSION)
     } else if let Some(p) = remote_provider(provider_id) {
+        crate::egress::record(p.models_url, crate::egress::PURPOSE_AI_PROVIDER);
         client
             .get(p.models_url)
             .header("authorization", format!("Bearer {api_key}"))
@@ -507,6 +517,7 @@ async fn stream_claude(
     let api_key = api_key.to_string();
     Box::pin(async_stream::stream! {
         let client = http_client();
+        crate::egress::record(ANTHROPIC_URL, crate::egress::PURPOSE_AI_PROVIDER);
         let res = match client
             .post(ANTHROPIC_URL)
             .header("content-type", "application/json")
