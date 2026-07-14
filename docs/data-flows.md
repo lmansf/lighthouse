@@ -61,16 +61,17 @@ content, file names, or questions — ever — on this host.**
 | `feedback`, `featureInterest`, `notify`, `bug` | you submitting the respective form | what the form shows, + contactId/version |
 
 **Honest defaults, stated plainly:** in a hosted (normal) build, `check` +
-`ping` — and funnel `event`s — fire on every launch, and there is **no
-user-facing switch** for them today; the opt-in toggle covers only the
-click-event batch (`events`, default **off**, buffered locally in
-`usage-events.jsonl` until opted in). The build-level off switch is unsetting
-`LICENSE_API_URL` (every op then no-ops, checked per-call). Air-gapped
-deployments: see the offline-activation work (Phase 1) and
-`docs/managed-deployment.md` once landed — the managed policy `telemetry:
-"off"` is specified to silence everything except the license `check`.
-Failure posture: license checks **fail closed to a lock, never a wipe** —
-your files are untouched.
+`ping` — and funnel `event`s — fire on every launch. There is no per-user
+switch for them; the opt-in toggle covers only the click-event batch
+(`events`, default **off**, buffered locally in `usage-events.jsonl` until
+opted in). **Organizations can silence all of it**: the managed policy key
+`telemetry: "off"` (docs/managed-deployment.md) stops `ping`, `event`,
+`events`, and `assign` at the engine — only the license `check` and
+explicit user submissions (feedback/bug forms) remain. The build-level off
+switch is unsetting `LICENSE_API_URL` (every op no-ops, checked per-call);
+the offline-activation work (Phase 1) removes even the `check` for
+air-gapped deployments. Failure posture: license checks **fail closed to a
+lock, never a wipe** — your files are untouched.
 
 ## 3. Checkout — Supabase + Stripe
 
@@ -139,9 +140,9 @@ huggingface.co` / `cas-bridge.xethub.hf.co`; ocrs models →
 
 | Egress | Lever |
 |---|---|
-| Cloud AI (the only content path) | choose Local/no provider; don't store a key |
-| License check + launch ping + funnel events | unset `LICENSE_API_URL` (build-level) — no runtime toggle yet; policy layer planned |
-| Click telemetry | opt-in toggle, default **off** |
+| Cloud AI (the only content path) | choose Local/no provider; don't store a key — or managed policy `allowedProviders`/`forceLocalOnly` (org-wide, engine-enforced) |
+| Launch ping + funnel events + experiment assign | managed policy `telemetry: "off"`; or unset `LICENSE_API_URL` (build-level, also silences the license check) |
+| Click telemetry | opt-in toggle, default **off**; pinned off by `telemetry: "off"` |
 | Update check | no toggle (GET, no payload); notify-only |
 | Update download | never without your click + a verifiable signature |
 | Model weights download | never without your click |

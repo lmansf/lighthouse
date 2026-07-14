@@ -59,6 +59,7 @@ import { useLicenseStore, type FeedbackInput, type LicenseStatus } from "@/store
 import { useAuthStore } from "@/stores/useAuthStore";
 import { useThemeStore } from "@/stores/useThemeStore";
 import { useChatStore } from "@/stores/useChatStore";
+import { useRagStore } from "@/stores/useRagStore";
 
 const LH_REPO = "https://github.com/lmansf/lighthouse";
 
@@ -666,6 +667,10 @@ function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean
   const onboarding = useAuthStore((s) => s.onboarding);
   const selectModel = useAuthStore((s) => s.selectModel);
   const validateKey = useAuthStore((s) => s.validateKey);
+  // Managed policy (add-managed-policy): null = unrestricted; a list means
+  // only those providers may be selected (rows render disabled — the engine
+  // rejects server-side regardless).
+  const allowedProviders = useRagStore((s) => s.policy?.locks.allowedProviders ?? null);
 
   const [providerId, setProviderId] = useState(onboarding.providerId ?? MODEL_PROVIDERS[0].id);
   const [modelId, setModelId] = useState(onboarding.modelId ?? firstModelFor(providerId));
@@ -743,11 +748,21 @@ function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean
                   }}
                 >
                   {MODEL_PROVIDERS.map((p) => (
-                    <Option key={p.id} value={p.id} text={p.label}>
+                    <Option
+                      key={p.id}
+                      value={p.id}
+                      text={p.label}
+                      disabled={allowedProviders ? !allowedProviders.includes(p.id) : false}
+                    >
                       {p.id === "local" ? <LocalModelOption label={p.label} /> : p.label}
                     </Option>
                   ))}
                 </Dropdown>
+                {allowedProviders && (
+                  <Text className={styles.prefHint}>
+                    Provider choice is managed by your organization.
+                  </Text>
+                )}
               </Field>
               <Field label="Model">
                 <Dropdown
@@ -891,6 +906,11 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
   // not a server setting) — it lives in the chat store, off by default.
   const saveChats = useChatStore((s) => s.persistEnabled);
   const setSaveChats = useChatStore((s) => s.setPersistEnabled);
+  // Managed policy (add-managed-policy): the engine enforces every lock
+  // server-side; these render the affected controls disabled with the
+  // "Managed by your organization" indication.
+  const policy = useRagStore((s) => s.policy);
+  const locks = policy?.locks;
 
   const [shareUsage, setShareUsage] = useState<boolean | null>(null);
   const [desktop, setDesktop] = useState(false);
@@ -1158,6 +1178,17 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
           <DialogTitle>Preferences</DialogTitle>
           <DialogContent>
             <div className={styles.prefFields}>
+              {policy?.error && (
+                <Text className={styles.prefWarn}>
+                  Managed configuration error — some settings are locked to safe
+                  defaults. Contact your administrator.
+                </Text>
+              )}
+              {policy?.present && !policy.error && (
+                <Text className={styles.prefHint}>
+                  Some settings are managed by your organization.
+                </Text>
+              )}
               {/* First: appearance is the most-reached-for preference. Applies
                   instantly via the theme store — no save step. */}
               <Field label="Appearance">
@@ -1197,17 +1228,24 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
               </Field>
 
               <Switch
-                checked={shareUsage ?? false}
-                disabled={shareUsage === null}
+                checked={locks?.telemetryOff ? false : (shareUsage ?? false)}
+                disabled={shareUsage === null || locks?.telemetryOff === true}
                 onChange={(_, d) => updateUsage(Boolean(d.checked))}
                 label="Share usage analytics — your account email and which features you use, never your files, their names, or their contents"
               />
+              {locks?.telemetryOff && (
+                <Text className={styles.prefHint}>Managed by your organization.</Text>
+              )}
 
               <Switch
-                checked={saveChats}
+                checked={locks?.chatHistoryOff ? false : saveChats}
+                disabled={locks?.chatHistoryOff === true}
                 onChange={(_, d) => setSaveChats(Boolean(d.checked))}
                 label="Save chats on this device — kept locally and cleared automatically after two weeks (off by default; delete any chat from the history panel)"
               />
+              {locks?.chatHistoryOff && (
+                <Text className={styles.prefHint}>Managed by your organization.</Text>
+              )}
 
               {/* Desktop settings hydrate here. Show a spinner while loading and
                   a retry on failure, so a transient error never masquerades as
@@ -1252,11 +1290,17 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
               )}
 
               {desktop && (
-                <Switch
-                  checked={ocrEnabled}
-                  onChange={(_, d) => updateOcr(Boolean(d.checked))}
-                  label="Read text in images — bundled models pull the words out of screenshots and scanned PDFs so they're searchable (runs on this computer; nothing is uploaded)"
-                />
+                <>
+                  <Switch
+                    checked={locks?.ocrOff ? false : ocrEnabled}
+                    disabled={locks?.ocrOff === true}
+                    onChange={(_, d) => updateOcr(Boolean(d.checked))}
+                    label="Read text in images — bundled models pull the words out of screenshots and scanned PDFs so they're searchable (runs on this computer; nothing is uploaded)"
+                  />
+                  {locks?.ocrOff && (
+                    <Text className={styles.prefHint}>Managed by your organization.</Text>
+                  )}
+                </>
               )}
 
               {desktop && uiMode !== "widget" && (
@@ -1287,9 +1331,18 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
                 </Field>
               )}
 
+              {/* Managed policy: with hotkeys locked, the recorder is replaced
+                  by the managed note — the shell never registers the chord. */}
+              {desktop && locks?.widgetHotkeysOff && (
+                <Field label="Summon shortcut">
+                  <Text className={styles.prefHint}>
+                    Summon shortcuts are managed off by your organization.
+                  </Text>
+                </Field>
+              )}
               {/* Only when a keyed shortcut can actually register — hidden on
                   Wayland (summonHotkeyOk === false), where no global hotkey works. */}
-              {desktop && hotkeyOk && (
+              {desktop && hotkeyOk && !locks?.widgetHotkeysOff && (
                 <Field label="Summon shortcut">
                   {recording ? (
                     <div className={styles.shortcutRow}>
@@ -1332,7 +1385,7 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
                 </Field>
               )}
 
-              {desktop && whisperCapable && (
+              {desktop && whisperCapable && !locks?.widgetHotkeysOff && (
                 <Field label="Whisper summon (experimental)">
                   <Switch
                     checked={whisperMode}

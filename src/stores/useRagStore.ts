@@ -1,5 +1,6 @@
 import { create } from "zustand";
-import type { DataSource, FileNode, RestoreToken } from "@/contracts";
+import type { DataSource, FileNode, PolicySnapshot, RestoreToken } from "@/contracts";
+import { setManagedLocks } from "./managedLocks";
 import { ragService } from "@/contracts";
 import { logEvent } from "@/lib/logEvent";
 
@@ -45,6 +46,13 @@ interface RagStore {
    * hide affordances the server would refuse.
    */
   desktop: boolean;
+  /**
+   * The managed-policy snapshot (openspec: add-managed-policy), fetched once
+   * per session. null until the first load; components render locked
+   * ("Managed by your organization") controls from `policy.locks`, and the
+   * chat store consults it before persisting history.
+   */
+  policy: PolicySnapshot | null;
   /**
    * Selection mode: clicking a row picks it (multi-select) instead of its
    * navigation action, so the user can select several files and then apply one
@@ -210,6 +218,7 @@ export const useRagStore = create<RagStore>((set, get) => ({
   mutationEpoch: 0,
   pendingWrites: 0,
   desktop: false,
+  policy: null,
   selectionMode: false,
   selectedIds: [],
   processing: null,
@@ -218,11 +227,22 @@ export const useRagStore = create<RagStore>((set, get) => ({
 
   load: async () => {
     const epoch = get().mutationEpoch;
-    const [sources, nodes, caps] = await Promise.all([
+    // Managed policy changes only across restarts — fetch once, not on
+    // every background poll. Every lock surface (Preferences, AI models,
+    // chat-history store) reads this one cached snapshot.
+    const wantPolicy = get().policy === null;
+    const [sources, nodes, caps, policy] = await Promise.all([
       ragService.listSources(),
       ragService.listNodes(),
       ragService.capabilities(),
+      wantPolicy ? ragService.policy().catch(() => null) : Promise.resolve(get().policy),
     ]);
+    if (wantPolicy && policy) {
+      set({ policy });
+      // Publish to the dependency-free signal the chat store reads (see
+      // managedLocks.ts).
+      setManagedLocks({ chatHistoryOff: policy.locks.chatHistoryOff });
+    }
     // A visibility flip landed while this snapshot was in flight (epoch moved),
     // or one is still being written (pendingWrites) — either way the snapshot
     // is stale or mixed, and applying it would undo the optimistic state.

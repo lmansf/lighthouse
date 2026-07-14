@@ -35,6 +35,7 @@ import {
 } from "@/features/localModel/LocalModelOption";
 import { useAuthStore } from "@/stores/useAuthStore";
 import { useLicenseStore } from "@/stores/useLicenseStore";
+import { useRagStore } from "@/stores/useRagStore";
 import { logEvent } from "@/lib/logEvent";
 
 const useStyles = makeStyles({
@@ -115,6 +116,9 @@ export function OnboardingPanel() {
   const selectModel = useAuthStore((s) => s.selectModel);
   const setDefaultInclusion = useAuthStore((s) => s.setDefaultInclusion);
   const signOut = useAuthStore((s) => s.signOut);
+  // Managed policy (add-managed-policy): null = unrestricted; a list means
+  // only those providers may be selected (the engine rejects server-side).
+  const allowedProviders = useRagStore((s) => s.policy?.locks.allowedProviders ?? null);
   const setStep = useAuthStore((s) => s.setStep);
   const startTrial = useLicenseStore((s) => s.startTrial);
 
@@ -427,7 +431,14 @@ export function OnboardingPanel() {
             }}
           >
             {MODEL_PROVIDERS.map((p) => (
-              <Option key={p.id} value={p.id} text={p.label}>
+              <Option
+                key={p.id}
+                value={p.id}
+                text={p.label}
+                // Managed policy: disallowed providers render disabled (the
+                // engine rejects server-side regardless).
+                disabled={allowedProviders ? !allowedProviders.includes(p.id) : false}
+              >
                 {p.id === "local" ? <LocalModelOption label={p.label} /> : p.label}
               </Option>
             ))}
