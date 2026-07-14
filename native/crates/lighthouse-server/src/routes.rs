@@ -27,6 +27,16 @@ fn bad_request(msg: &str) -> Response {
     (StatusCode::BAD_REQUEST, Json(json!({ "error": msg }))).into_response()
 }
 
+/// Wire cadence string → engine enum (unknown/absent = manual).
+fn parse_cadence(s: Option<&str>) -> lighthouse_core::briefings::Cadence {
+    use lighthouse_core::briefings::Cadence;
+    match s {
+        Some("daily") => Cadence::Daily,
+        Some("weekly") => Cadence::Weekly,
+        _ => Cadence::Manual,
+    }
+}
+
 fn err_message(err: &anyhow::Error, fallback: &str) -> String {
     let m = err.to_string();
     if m.is_empty() {
@@ -238,6 +248,36 @@ pub async fn rag_post(headers: HeaderMap, body: Option<Json<Value>>) -> Response
                 "pins": lighthouse_core::pins::list(),
             }))
             .into_response();
+        }
+        Some("listBriefings") => {
+            return Json(json!({ "briefings": lighthouse_core::briefings::list() }))
+                .into_response();
+        }
+        Some("saveBriefing") => {
+            let title = body["title"].as_str().unwrap_or("").to_string();
+            let pin_ids: Vec<String> = body["pinIds"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            let cadence = parse_cadence(body["cadence"].as_str());
+            return match lighthouse_core::briefings::add(&title, &pin_ids, cadence) {
+                Ok(briefing) => Json(json!({ "briefing": briefing })).into_response(),
+                Err(e) => Json(json!({ "error": e })).into_response(),
+            };
+        }
+        Some("removeBriefing") => {
+            let Some(id) = body["id"].as_str().filter(|s| !s.is_empty()) else {
+                return bad_request("id required");
+            };
+            lighthouse_core::briefings::remove(id);
+            return Json(json!({ "ok": true })).into_response();
+        }
+        Some("runBriefing") => {
+            let Some(id) = body["id"].as_str().filter(|s| !s.is_empty()) else {
+                return bad_request("id required");
+            };
+            let report = lighthouse_core::briefings::run(id).await;
+            return Json(json!({ "report": report })).into_response();
         }
         // Catalog-derived example questions for the chat empty state — every
         // one names real columns of a real included file, so the analytics

@@ -7,6 +7,7 @@
 //! different it is called out with a `PARITY:` comment.
 
 pub mod analytics;
+pub mod briefings;
 pub mod catalog;
 pub mod config;
 pub mod contracts;

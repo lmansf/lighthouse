@@ -7,6 +7,9 @@
  */
 
 import type {
+  Briefing,
+  BriefingReport,
+  Cadence,
   ChangedPin,
   ChatChunk,
   ChatTurn,
@@ -91,6 +94,26 @@ export interface RagService {
    * execute SQL, so it reports no changes and returns the list unchanged.
    */
   recheckPins(): Promise<{ changed: ChangedPin[]; pins: Pin[] }>;
+  /** All briefings, oldest first (add-briefings). */
+  listBriefings(): Promise<Briefing[]>;
+  /**
+   * Create or replace a briefing: a titled, ordered set of pins run together
+   * into one report. Re-saving the same title replaces it; past the cap the
+   * error explains the limit.
+   */
+  saveBriefing(
+    title: string,
+    pinIds: string[],
+    cadence: Cadence,
+  ): Promise<{ briefing?: Briefing; error?: string }>;
+  /** Remove a briefing (idempotent). */
+  removeBriefing(id: string): Promise<void>;
+  /**
+   * Run a briefing now: re-execute each pin's SQL and compose the report.
+   * PARITY: the web dev twin can't execute SQL, so it composes from each pin's
+   * last known summary. `undefined` when the id is unknown.
+   */
+  runBriefing(id: string): Promise<BriefingReport | undefined>;
   /**
    * Engine-derived example questions for the chat empty state: each names real
    * columns of a real included tabular file, so the analytics path can answer

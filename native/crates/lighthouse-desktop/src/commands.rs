@@ -271,6 +271,36 @@ pub async fn rag_op(app: AppHandle, body: Value) -> Result<Value, String> {
                 "pins": lighthouse_core::pins::list(),
             }))
         }
+        Some("listBriefings") => Ok(json!({ "briefings": lighthouse_core::briefings::list() })),
+        Some("saveBriefing") => {
+            let title = body["title"].as_str().unwrap_or("").to_string();
+            let pin_ids: Vec<String> = body["pinIds"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            let cadence = match body["cadence"].as_str() {
+                Some("daily") => lighthouse_core::briefings::Cadence::Daily,
+                Some("weekly") => lighthouse_core::briefings::Cadence::Weekly,
+                _ => lighthouse_core::briefings::Cadence::Manual,
+            };
+            Ok(match lighthouse_core::briefings::add(&title, &pin_ids, cadence) {
+                Ok(briefing) => json!({ "briefing": briefing }),
+                Err(e) => json!({ "error": e }),
+            })
+        }
+        Some("removeBriefing") => {
+            let Some(id) = body["id"].as_str().filter(|s| !s.is_empty()) else {
+                return Err("id required".into());
+            };
+            lighthouse_core::briefings::remove(id);
+            Ok(json!({ "ok": true }))
+        }
+        Some("runBriefing") => {
+            let Some(id) = body["id"].as_str().filter(|s| !s.is_empty()) else {
+                return Err("id required".into());
+            };
+            Ok(json!({ "report": lighthouse_core::briefings::run(id).await }))
+        }
         // Catalog-derived example questions for the chat empty state — every
         // one names real columns of a real included file, so the analytics
         // path can answer it. Empty when nothing tabular is included.

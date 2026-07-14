@@ -21,6 +21,8 @@ import { egressSnapshot } from "@/server/egress";
 import { recentAudit, verifyActiveAudit, exportCsvAudit } from "@/server/audit";
 import { writeArtifact } from "@/server/vault";
 import { addPin, listPins, removePin } from "@/server/pins";
+import { addBriefing, listBriefings, removeBriefing, runBriefing } from "@/server/briefings";
+import type { Cadence } from "@/contracts";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -209,6 +211,38 @@ export async function POST(req: Request) {
 
     case "recheckPins":
       return NextResponse.json({ changed: [], pins: listPins() });
+
+    case "listBriefings":
+      return NextResponse.json({ briefings: listBriefings() });
+
+    case "saveBriefing": {
+      const title = typeof body.title === "string" ? body.title : "";
+      const pinIds = Array.isArray(body.pinIds)
+        ? body.pinIds.filter((x: unknown): x is string => typeof x === "string")
+        : [];
+      const cadence: Cadence =
+        body.cadence === "daily" || body.cadence === "weekly" ? body.cadence : "manual";
+      try {
+        return NextResponse.json({ briefing: addBriefing(title, pinIds, cadence) });
+      } catch (err) {
+        return NextResponse.json({
+          error: err instanceof Error ? err.message : "could not save briefing",
+        });
+      }
+    }
+
+    case "removeBriefing":
+      if (typeof body.id !== "string" || !body.id) {
+        return NextResponse.json({ error: "id required" }, { status: 400 });
+      }
+      removeBriefing(body.id);
+      return NextResponse.json({ ok: true });
+
+    case "runBriefing":
+      if (typeof body.id !== "string" || !body.id) {
+        return NextResponse.json({ error: "id required" }, { status: 400 });
+      }
+      return NextResponse.json({ report: runBriefing(body.id) ?? undefined });
 
     case "exportChat": {
       // Write the client-rendered transcript as a markdown note into
