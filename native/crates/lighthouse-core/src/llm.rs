@@ -560,6 +560,47 @@ const LOCAL_CTX_TOTAL_MAX_CHARS: usize = 11_000;
 /// Prior-turn history kept for the local prompt, chars (newest turns win).
 const LOCAL_HISTORY_MAX_CHARS: usize = 6_000;
 
+// --- Single-document focus budgets (synth doc-focus, 0.11) -----------------------
+//
+// How much of ONE document can ride in a prompt, in chars (~4 chars/token —
+// same arithmetic as the local clamp above). KEEP IN SYNC with
+// src/server/llm.ts. Providers:
+//   - local: the fixed 6144-token window leaves LOCAL_CTX_TOTAL_MAX_CHARS for
+//     contexts — full-doc inclusion simply fills that; a sweep SEGMENT must
+//     fit in ONE block, so it stays under LOCAL_CTX_BLOCK_MAX_CHARS.
+//   - anthropic: 200k-token window → half for the document, generous headroom.
+//   - openai-compat: the smallest advertised window in the default set is
+//     ~128k tokens (mistral/deepseek) → a shared conservative ~60k tokens.
+
+/// Whole-document inclusion threshold: a doc at or under this rides complete.
+pub fn full_doc_char_budget(cfg: &ModelCfg) -> usize {
+    match cfg.provider_id.as_deref() {
+        Some("anthropic") => 400_000,
+        Some(id) if remote_provider(id).is_some() => 240_000,
+        _ => LOCAL_CTX_TOTAL_MAX_CHARS,
+    }
+}
+
+/// Per-segment budget for the sweep fallback (each segment is one map call).
+pub fn doc_segment_char_budget(cfg: &ModelCfg) -> usize {
+    match cfg.provider_id.as_deref() {
+        Some("anthropic") => 400_000,
+        Some(id) if remote_provider(id).is_some() => 240_000,
+        // Under the single-block clip (6,000) so no segment text is lost.
+        _ => 5_500,
+    }
+}
+
+/// Latency guard: at most this many map calls per swept document; longer
+/// documents are sampled evenly with an honesty note.
+pub fn max_doc_segments(cfg: &ModelCfg) -> usize {
+    match cfg.provider_id.as_deref() {
+        Some("anthropic") => 16,
+        Some(id) if remote_provider(id).is_some() => 16,
+        _ => 8,
+    }
+}
+
 /// Clamp contexts to the local budget: each block clipped, then whole blocks
 /// dropped lowest-score-first until the total fits. Order is preserved (the
 /// numbered citations must keep matching what the answer refers to).

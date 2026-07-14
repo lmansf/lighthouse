@@ -106,6 +106,57 @@ export const remoteProvider = (id: string | null): RemoteProvider | undefined =>
  */
 const REMOTE_MAX_TOKENS = 4096;
 
+// --- Single-document focus budgets (synth doc-focus, 0.11) -----------------------
+//
+// How much of ONE document can ride in a prompt, in chars (~4 chars/token).
+// KEEP IN SYNC with native/crates/lighthouse-core/src/llm.rs. Providers:
+//   - local: the local server runs a fixed 6144-token window. PARITY: the TS
+//     local path has no context clamp (the Rust one clips contexts to
+//     LOCAL_CTX_TOTAL_MAX_CHARS=11_000 total / 6_000 per block as a last line
+//     of defense), but these budgets mirror those constants — full-doc
+//     inclusion fills the total; a sweep SEGMENT must fit in ONE block — so
+//     both engines feed the model the same amount of document.
+//   - anthropic: 200k-token window → half for the document, generous headroom.
+//   - openai-compat: the smallest advertised window in the default set is
+//     ~128k tokens (mistral/deepseek) → a shared conservative ~60k tokens.
+
+/** Whole-document inclusion threshold: a doc at or under this rides complete. */
+export function fullDocCharBudget(cfg: {
+  providerId: string | null;
+  modelId: string | null;
+  apiKey: string | null;
+}): number {
+  if (cfg.providerId === "anthropic") return 400_000;
+  if (remoteProvider(cfg.providerId)) return 240_000;
+  return 11_000; // LOCAL_CTX_TOTAL_MAX_CHARS in llm.rs
+}
+
+/** Per-segment budget for the sweep fallback (each segment is one map call). */
+export function docSegmentCharBudget(cfg: {
+  providerId: string | null;
+  modelId: string | null;
+  apiKey: string | null;
+}): number {
+  if (cfg.providerId === "anthropic") return 400_000;
+  if (remoteProvider(cfg.providerId)) return 240_000;
+  // Under the Rust single-block clip (6,000) so no segment text is lost.
+  return 5_500;
+}
+
+/**
+ * Latency guard: at most this many map calls per swept document; longer
+ * documents are sampled evenly with an honesty note.
+ */
+export function maxDocSegments(cfg: {
+  providerId: string | null;
+  modelId: string | null;
+  apiKey: string | null;
+}): number {
+  if (cfg.providerId === "anthropic") return 16;
+  if (remoteProvider(cfg.providerId)) return 16;
+  return 8;
+}
+
 // Where the bundled/local inference server listens. Override with
 // LIGHTHOUSE_LOCAL_LLM_URL to point at an existing Ollama/LM Studio instance.
 // The endpoint must be OpenAI chat-completions compatible.
