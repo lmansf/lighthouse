@@ -1,35 +1,109 @@
-# Native (Tauri/Rust) desktop installers, attached to a GitHub release.
+# The release pipeline's build stage: native (Tauri/Rust) desktop installers,
+# attached to a draft GitHub release.
 #
-# Builds the static-export UI, fetches the pinned llama-server + Piper voice,
-# bundles the Tauri app per OS (NSIS / DMG / AppImage+deb), and uploads the
-# results to the release named by `release_tag` (draft or published). The
-# Windows installer is uploaded as `Lighthouse-Setup.exe` so the lhvault.app
-# download button keeps auto-detecting it. With `replace_electron`, the old
-# Electron installers are removed from that release afterwards, making it a
-# native release; the electron-updater manifests (latest*.yml) are kept so
-# 0.2.x installs still see the new version in their notify-only update check.
+# This workflow is self-sufficient (the legacy Electron `release.yml` is
+# retired): it gates on the JS checks, resolves the release tag from
+# package.json (or the `release_tag` input), creates the draft release if it
+# doesn't exist yet, builds the static-export UI, fetches the pinned
+# llama-server + Piper voice, bundles the Tauri app per OS (NSIS / DMG /
+# AppImage+deb), regenerates the electron-updater manifests (latest*.yml — so
+# pre-0.3.0 Electron installs still see new versions in their notify-only
+# update check, now pointing at the real uploaded artifacts), and uploads
+# everything to the draft. Publishing (draft → public latest) stays a separate
+# explicit step: publish-release.yml.
 #
-# Unsigned until CSC/notarization secrets are wired (same posture as
-# release.yml); the in-app updater stays notify-only accordingly.
+# The Windows installer is uploaded as `Lighthouse-Setup.exe` so the
+# lhvault.app download button keeps auto-detecting it.
+#
+# Unsigned until the signing secrets are provisioned (see docs/signing.md);
+# the in-app updater stays notify-only accordingly.
 name: desktop-release
 
 on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "Release tag to attach the native bundles to"
-        required: true
-        default: "v0.3.0"
-      replace_electron:
-        description: "Remove the Electron installers from that release after upload"
-        type: boolean
-        default: true
+        description: "Release tag (empty = v<package.json version> of this ref)"
+        required: false
+        default: ""
 
 permissions:
   contents: write
 
 jobs:
+  # Gate: types, tests, and lint must pass before anything is built or a draft
+  # is created. Carried over from the retired release.yml, upgraded from
+  # test:extract to the full `npm run test` (tsc + all node suites).
+  check:
+    name: Typecheck, tests & lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          # Node 22: `node --test` glob patterns require >=21.
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Typecheck + tests
+        run: npm run test
+      - name: Lint
+        run: npm run lint
+
+  # Resolve the tag and make sure a release (draft or published) exists for it.
+  # The draft carries the tag name but no git tag — publish-release.yml creates
+  # the tag when it flips the draft public, pointing at target_commitish (this
+  # workflow's SHA).
+  resolve:
+    name: Resolve tag & ensure draft release
+    runs-on: ubuntu-latest
+    outputs:
+      release_tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Derive tag from package.json and check consistency
+        id: tag
+        env:
+          INPUT_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          PKG_TAG="v$(node -p "require('./package.json').version")"
+          TAG="${INPUT_TAG:-$PKG_TAG}"
+          if [ "$TAG" != "$PKG_TAG" ]; then
+            echo "::error::release_tag '$TAG' does not match package.json '$PKG_TAG' on this ref — run the workflow from the matching ref"
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "resolved release tag: $TAG"
+      - name: Create draft release if absent
+        uses: actions/github-script@v7
+        env:
+          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
+        with:
+          script: |
+            const tag = process.env.RELEASE_TAG;
+            // List (not getByTag) so a still-draft release is found too.
+            const releases = await github.paginate(github.rest.repos.listReleases,
+              { owner: context.repo.owner, repo: context.repo.repo, per_page: 100 });
+            let rel = releases.find(r => r.tag_name === tag);
+            if (rel) {
+              core.info(`release ${tag} already exists (draft=${rel.draft}) — reusing`);
+              return;
+            }
+            const { data } = await github.rest.repos.createRelease({
+              owner: context.repo.owner, repo: context.repo.repo,
+              tag_name: tag,
+              target_commitish: context.sha,
+              name: tag,
+              body: 'Draft — bundles attached by desktop-release.yml; publish via publish-release.yml.',
+              draft: true,
+              prerelease: false,
+            });
+            core.info(`created draft release ${tag} (${data.html_url})`);
+
   bundle:
+    needs: [check, resolve]
     strategy:
       fail-fast: false
       matrix:
@@ -106,10 +180,48 @@ jobs:
               ;;
           esac
           ls -la dist-assets
-      - name: Upload to release ${{ inputs.release_tag }}
+      - name: Generate legacy update manifest (latest*.yml)
+        # electron-builder used to emit these; pre-0.3.0 Electron installs poll
+        # them (notify-only — the manifest is read for its `version`, nothing
+        # is downloaded). Regenerated here so the hashes/names always match the
+        # artifacts actually uploaded. Linux never had an Electron build → no
+        # manifest.
+        if: runner.os != 'Linux'
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.resolve.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          node - <<'EOF'
+          const fs = require('fs'), path = require('path'), crypto = require('crypto');
+          const version = process.env.RELEASE_TAG.replace(/^v/, '');
+          const isWin = process.platform === 'win32';
+          const name = isWin
+            ? 'Lighthouse-Setup.exe'
+            : fs.readdirSync('dist-assets').find(f => f.endsWith('.dmg'));
+          if (!name) throw new Error('no installer found in dist-assets');
+          const file = path.join('dist-assets', name);
+          const buf = fs.readFileSync(file);
+          const sha512 = crypto.createHash('sha512').update(buf).digest('base64');
+          const manifest = [
+            `version: ${version}`,
+            'files:',
+            `  - url: ${name}`,
+            `    sha512: ${sha512}`,
+            `    size: ${buf.length}`,
+            `path: ${name}`,
+            `sha512: ${sha512}`,
+            `releaseDate: '${new Date().toISOString()}'`,
+            '',
+          ].join('\n');
+          const out = path.join('dist-assets', isWin ? 'latest.yml' : 'latest-mac.yml');
+          fs.writeFileSync(out, manifest);
+          console.log(`${out}:\n${manifest}`);
+          EOF
+      - name: Upload to release ${{ needs.resolve.outputs.release_tag }}
         uses: actions/github-script@v7
         env:
-          RELEASE_TAG: ${{ inputs.release_tag }}
+          RELEASE_TAG: ${{ needs.resolve.outputs.release_tag }}
         with:
           script: |
             const fs = require('fs');
@@ -140,40 +252,4 @@ jobs:
                 },
               });
               core.info(`uploaded ${name}`);
-            }
-
-  finalize:
-    needs: bundle
-    if: ${{ inputs.replace_electron }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Remove Electron installers from the release
-        uses: actions/github-script@v7
-        env:
-          RELEASE_TAG: ${{ inputs.release_tag }}
-        with:
-          script: |
-            const tag = process.env.RELEASE_TAG;
-            const version = tag.replace(/^v/, '');
-            const releases = await github.paginate(github.rest.repos.listReleases,
-              { owner: context.repo.owner, repo: context.repo.repo, per_page: 100 });
-            const rel = releases.find(r => r.tag_name === tag);
-            if (!rel) return core.setFailed(`no release with tag ${tag}`);
-            const assets = await github.paginate(github.rest.repos.listReleaseAssets,
-              { owner: context.repo.owner, repo: context.repo.repo, release_id: rel.id, per_page: 100 });
-            // electron-builder outputs; the tauri bundles use different names
-            // (and the tauri NSIS was uploaded over Lighthouse-Setup.exe).
-            // latest*.yml stay so 0.2.x notify-only update checks keep working.
-            const electron = [
-              `Lighthouse-${version}-arm64.dmg`,
-              `Lighthouse-${version}-arm64.dmg.blockmap`,
-              'Lighthouse-Setup.exe.blockmap',
-            ];
-            for (const name of electron) {
-              const a = assets.find(x => x.name === name);
-              if (a) {
-                await github.rest.repos.deleteReleaseAsset(
-                  { owner: context.repo.owner, repo: context.repo.repo, asset_id: a.id });
-                core.info(`removed ${name}`);
-              }
             }

@@ -9,7 +9,7 @@
  * installs the `window.lighthouseDesktop` bridge (real paths for OS drops,
  * the native link picker) that the Electron preload used to provide.
  *
- * Outside Tauri (web deploy, `next dev`, Electron) this is a no-op.
+ * Outside Tauri (web deploy, `next dev`) this is a no-op.
  */
 
 type TauriCore = typeof import("@tauri-apps/api/core");

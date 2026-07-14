@@ -1,10 +1,10 @@
 /**
  * Fetch the bundled offline model assets into `resources/llm/` so the packaged
  * desktop app ships a private, on-device LLM with ZERO end-user setup (issue #24,
- * "Local model"). electron-builder copies `resources/llm/` into the installer via
- * the `extraResources` entry in package.json; at runtime `electron/main.js`'s
- * `startLocalLlm()` spawns `llama-server` on 127.0.0.1:8080 and `src/server/llm.ts`
- * streams from it. Nothing here ships in git — the files are large and licensed
+ * "Local model"). The Tauri bundler copies `resources/llm/` into the installer
+ * via the `bundle.resources` entry in tauri.conf.json; at runtime the desktop
+ * shell spawns `llama-server` against it and the engine streams from it.
+ * Nothing here ships in git — the files are large and licensed
  * separately, so they're fetched at build time on the machine that runs
  * `npm run dist`.
  *

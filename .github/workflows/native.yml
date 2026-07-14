@@ -1,6 +1,6 @@
 # CI for the native (Rust) engine + desktop shell in native/.
-# Kept separate from release.yml: the JS app's pipeline is untouched by the
-# rewrite until the shell swap ships.
+# Fast ubuntu-only debug build + full test suite; the 3-OS release-build smoke
+# lives in release-smoke.yml (also required by desktop-release.yml).
 name: native
 
 on:

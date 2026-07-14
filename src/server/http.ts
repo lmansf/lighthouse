@@ -14,7 +14,7 @@
  *      "localhost" even when the renderer reached the server via "127.0.0.1" — an
  *      exact match wrongly 403s the app's own same-origin requests. Loopback host +
  *      matching port still blocks cross-site POSTs (their Origin is not loopback).
- *   3. Origin absent → a non-browser caller (the Electron main process, curl, or
+ *   3. Origin absent → a non-browser caller (the desktop shell, curl, or
  *      another local process). Require the per-launch shared secret the desktop
  *      shell injects via LIGHTHOUSE_API_TOKEN.
  *   4. No token configured (plain `next dev`/`next start` outside the desktop

@@ -4,8 +4,7 @@
  * Uses the OAuth 2.0 **device code flow**: the user is shown a short code and a
  * URL, signs in on any browser, and the app polls for the token. This needs no
  * redirect URI and no client secret — it's a public client (PKCE-class) — so it
- * works inside the Electron window (which has no IPC bridge) and in the plain
- * web build alike.
+ * works inside the desktop webview and in the plain web build alike.
  *
  * Tokens live in `connectors/microsoft.json` under the vault state dir — the
  * user's own credential on their own machine, never shipped in the app bundle,

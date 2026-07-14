@@ -1,10 +1,10 @@
 /**
- * Desktop app settings shared between the Electron main process and the Next
- * server. The main process owns the file (it lives under Electron's userData
- * dir, holds the vault location, etc.) and passes its path to the server via the
+ * Desktop app settings shared between the desktop shell and the Next server.
+ * The shell owns the file (it lives under the app-data dir, holds the vault
+ * location, etc.) and passes its path to the server via the
  * LIGHTHOUSE_SETTINGS_FILE env var. The server reads/merges it so the in-app UI
- * can change desktop-only preferences (e.g. launch-at-login), which the main
- * process then reads on its next launch.
+ * can change desktop-only preferences (e.g. launch-at-login), which the shell
+ * then reads on its next launch.
  *
  * On the plain web build there is no settings file, so every read returns empty
  * and writes are no-ops.
@@ -13,7 +13,7 @@ import fs from "node:fs";
 import { writeJson } from "./config";
 
 export interface DesktopSettings {
-  /** The local vault directory (owned by the Electron main process). */
+  /** The local vault directory (owned by the desktop shell). */
   vaultDir?: string;
   /** Launch Lighthouse when the user signs in to their computer. Default true. */
   runOnStartup?: boolean;

@@ -8,17 +8,19 @@ Stay on the **0.11.x** line: every release is a PATCH bump — 0.11.1, 0.11.2,
 moves the minor version (0.12.0). Do not bump minor for ordinary feature
 releases.
 
-## Release mechanics (as of 0.11.0)
+## Release mechanics (post-0.11.0 — Electron retired)
 
 - Version stamps live in FIVE files and must move together:
   `package.json`, `package-lock.json` (×2 stamps), `native/Cargo.toml`
   (workspace version), `native/crates/lighthouse-desktop/tauri.conf.json`,
   and `native/Cargo.lock` (×3 lighthouse crates).
-- Pipeline: bump → PR → squash-merge to main → `release.yml`
-  (workflow_dispatch on main; derives v<version> from package.json; drafts
-  the release + latest*.yml) → `desktop-release.yml`
-  (`release_tag`, `replace_electron: true`; native Tauri bundles) →
+- Pipeline: bump → PR → squash-merge to main → `desktop-release.yml`
+  (workflow_dispatch on main; empty `release_tag` derives v<version> from
+  package.json; runs JS checks, creates the draft release, builds native
+  Tauri bundles, regenerates latest*.yml manifests) →
   `publish-release.yml` (`release_tag`, `body`; flips draft → public latest).
+  The legacy Electron `release.yml` is deleted; `archive/electron-shell`
+  branch preserves the last Electron-era tree.
 - `CACHE_VERSION` moves in lockstep across `native/.../extract.rs`,
   `src/server/extract.ts`, and the assertion in
   `native/.../tests/extract_test.rs` — bump all three or native CI goes red.

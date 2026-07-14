@@ -108,7 +108,7 @@ export function connectorsDir(): string {
 }
 
 /**
- * True only when running inside the packaged desktop app (Electron sets this).
+ * True only when running inside the packaged desktop app (the shell sets this).
  * Linking files in place reads arbitrary absolute paths, so it is gated to the
  * desktop build and never exposed by a plain web deployment.
  */
@@ -118,7 +118,7 @@ export function isDesktopApp(): boolean {
 
 /**
  * Root of the bundled offline resources (the local model, the local TTS voice).
- * electron/main.js sets LIGHTHOUSE_RESOURCES_PATH to Electron's `resourcesPath`
+ * The desktop shell sets LIGHTHOUSE_RESOURCES_PATH to its bundled resources dir
  * in the packaged app; otherwise we fall back to `./resources` in the repo so it
  * works under `npm run dev`/tests too.
  */

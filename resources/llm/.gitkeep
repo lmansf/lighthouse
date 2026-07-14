@@ -1,3 +1,4 @@
-# Keeps resources/llm/ present so electron-builder extraResources always has a
-# source dir, even on a clean checkout. npm run fetch:model fills it with the
-# llama-server binary + .gguf weights (both gitignored).
+# Keeps resources/llm/ present so the desktop bundler (tauri.conf.json
+# bundle.resources) always has a source dir, even on a clean checkout.
+# npm run fetch:model fills it with the llama-server binary + .gguf weights
+# (both gitignored).

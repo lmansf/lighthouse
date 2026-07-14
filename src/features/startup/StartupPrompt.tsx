@@ -3,7 +3,7 @@
 /**
  * One-time "run Lighthouse at startup?" prompt (issue #29). We ask a desktop
  * user whether to launch at login (default on) and record the answer so it
- * never asks again. The Electron main process reads the resulting preference
+ * never asks again. The desktop shell reads the resulting preference
  * on its next launch. No-op on the web build.
  *
  * The ask is DEFERRED: interrupting someone's very first seconds in the app
