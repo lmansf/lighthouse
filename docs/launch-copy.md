@@ -54,4 +54,6 @@ keystroke it shouldn't.
 Free trial. Windows, macOS, and Linux. Download at **lhvault.app**.
 
 *(Unsigned builds today — SmartScreen/Gatekeeper may warn on first launch;
-signing is on the roadmap. Updates are one click from inside the app.)*
+the signing pipeline is wired and awaits certificates — docs/signing.md.
+Once signed, in-app updates are one click and cryptographically verified;
+until then the update notice links to the releases page.)*

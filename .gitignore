@@ -54,6 +54,11 @@ next-env.d.ts
 /resources/embed/*
 !/resources/embed/.gitkeep
 
+# Bundled OCR models (ocrs detection + recognition, add-ocr-perception) —
+# fetched at build time by `npm run fetch:model`.
+/resources/ocr/*
+!/resources/ocr/.gitkeep
+
 # Lavish review artifacts (local tooling)
 .lavish/
 

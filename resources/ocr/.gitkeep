@@ -1,0 +1,6 @@
+# Keeps resources/ocr/ present so the desktop bundler (tauri.conf.json
+# bundle.resources) always has a source dir, even on a clean checkout —
+# tauri-build hard-errors on a missing resource path, which broke every
+# fresh-checkout desktop build between 0.10.0 and this fix.
+# npm run fetch:model fills it with the OCR detection/recognition models
+# (gitignored).
