@@ -28,6 +28,7 @@ import {
 import { join } from "node:path";
 import https from "node:https";
 import { resourcesDir } from "./config";
+import { recordEgress, PURPOSE_MODEL_DOWNLOAD } from "./egress";
 
 /** Hugging Face GGUF for the bundled private model (overridable for self-hosters). */
 const MODEL_URL =
@@ -226,6 +227,7 @@ function get(url: string, redirects = 5): Promise<import("node:http").IncomingMe
 async function download(): Promise<void> {
   const dest = join(modelsDir(), MODEL_FILE);
   const tmp = `${dest}.part`;
+  recordEgress(MODEL_URL, PURPOSE_MODEL_DOWNLOAD);
   const res = await get(MODEL_URL);
   const total = Number(res.headers["content-length"] || 0);
   if (!total) {

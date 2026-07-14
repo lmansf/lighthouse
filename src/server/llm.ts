@@ -14,6 +14,7 @@
  */
 import type { ChatTurn } from "@/contracts";
 import { providerAllowed } from "./policy";
+import { recordEgress, PURPOSE_AI_PROVIDER } from "./egress";
 
 const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_MODELS_URL = "https://api.anthropic.com/v1/models";
@@ -335,6 +336,7 @@ async function* streamOpenAICompat(
     (t) => typeof t.content === "string" && t.content.trim() !== "",
   );
   while (priorTurns.length > 0 && priorTurns[0].role !== "user") priorTurns.shift();
+  recordEgress(provider.chatUrl, PURPOSE_AI_PROVIDER);
   const res = await fetch(provider.chatUrl, {
     method: "POST",
     headers: {
@@ -406,6 +408,7 @@ export async function validateKey(
   }
   let res: Response;
   try {
+    recordEgress(url, PURPOSE_AI_PROVIDER);
     res = await fetch(url, { headers, signal: AbortSignal.timeout(10_000) });
   } catch (err) {
     const reason = err instanceof Error ? err.message : "network error";
@@ -437,6 +440,7 @@ async function* streamClaude(
     ...priorTurns.map((t) => ({ role: t.role, content: t.content })),
     { role: "user" as const, content: buildPrompt(question, contexts) },
   ];
+  recordEgress(ANTHROPIC_URL, PURPOSE_AI_PROVIDER);
   const res = await fetch(ANTHROPIC_URL, {
     method: "POST",
     headers: {

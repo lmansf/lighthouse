@@ -19,6 +19,7 @@ import {
   readJson,
   writeJson,
 } from "../../config";
+import { recordEgress, PURPOSE_SHAREPOINT } from "../../egress";
 
 // Device-code endpoints hang off the v2.0 path under the configured authority
 // base (e.g. https://login.microsoftonline.com/common + /oauth2/v2.0).
@@ -69,6 +70,7 @@ export function isConnected(): boolean {
 }
 
 async function postForm(url: string, fields: Record<string, string>): Promise<Response> {
+  recordEgress(url, PURPOSE_SHAREPOINT);
   return fetch(url, {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
@@ -203,6 +205,7 @@ export async function getAccessToken(): Promise<string> {
 
 async function fetchAccount(accessToken: string): Promise<{ name: string; email: string } | null> {
   try {
+    recordEgress("https://graph.microsoft.com/v1.0/me", PURPOSE_SHAREPOINT);
     const res = await fetch("https://graph.microsoft.com/v1.0/me", {
       headers: { authorization: `Bearer ${accessToken}` },
     });

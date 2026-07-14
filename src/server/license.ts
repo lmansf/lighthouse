@@ -42,6 +42,7 @@ import {
   purgeUsageBuffer,
   resetUsageConsent,
 } from "./usage";
+import { recordEgress, PURPOSE_LICENSE, PURPOSE_TELEMETRY, PURPOSE_CHECKOUT } from "./egress";
 
 const TRIAL_DAYS = 14; // sign-in days a trial lasts
 const GRACE_DAYS = 14; // paid: grace window after paid_through before locking
@@ -127,6 +128,12 @@ export async function callFn(op: string, extra: Record<string, unknown>): Promis
   const url = licenseApi();
   if (!url) throw new Error("LICENSE_API_URL not configured");
   const anon = process.env.SUPABASE_ANON_KEY?.trim();
+  // Egress registry: same host, but the telemetry ops are labeled apart
+  // from the licensing ones so the panel shows them distinctly.
+  const purpose = ["ping", "event", "events", "assign"].includes(op)
+    ? PURPOSE_TELEMETRY
+    : PURPOSE_LICENSE;
+  recordEgress(url, purpose);
   const res = await fetch(url, {
     method: "POST",
     headers: {
@@ -410,6 +417,7 @@ export async function checkoutUrl(email?: string): Promise<string | null> {
   }
   const anon = process.env.SUPABASE_ANON_KEY?.trim();
   try {
+    recordEgress(api, PURPOSE_CHECKOUT);
     const res = await fetch(api, {
       method: "POST",
       headers: {
