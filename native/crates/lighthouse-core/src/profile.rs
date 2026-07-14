@@ -292,6 +292,20 @@ pub fn finish_registration() -> Option<ModelSelectionResult> {
 
 pub fn select_model(provider_id: &str, model_id: &str, api_key: &str) -> ModelSelectionResult {
     let p = load();
+    // Managed policy: never persist (or seal a key for) a disallowed
+    // provider. The op layers reject with a proper error before calling
+    // here; this belt-and-braces returns the profile unchanged for any
+    // other caller. llm.rs additionally refuses at call time.
+    if !crate::policy::provider_allowed(provider_id) {
+        return ModelSelectionResult {
+            initial: false,
+            changed: false,
+            provider: p.provider_id.clone().unwrap_or_default(),
+            model: p.model_id.clone().unwrap_or_default(),
+            previous_provider: p.provider_id,
+            previous_model: p.model_id,
+        };
+    }
     let key = api_key.trim().to_string();
     let initial = !p.model_ever_selected.unwrap_or(false);
     let changed =

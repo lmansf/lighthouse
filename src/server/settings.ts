@@ -41,6 +41,20 @@ export interface DesktopSettings {
    * preference for the UI.
    */
   semanticSearch?: boolean;
+  /**
+   * Keep a local, tamper-evident audit log of answered questions (openspec:
+   * add-audit-log). Default OFF (unset = off). The managed policy key
+   * `auditLog: "on"` forces it on regardless. PARITY: audit_enabled in
+   * settings.rs.
+   */
+  auditEnabled?: boolean;
+  /**
+   * Store the verbatim question text in each audit record (default OFF — only
+   * the sha256 is kept). Opt-in because it turns the log into a record of what
+   * was asked, not just that something was asked. PARITY: read from `extra` in
+   * the Rust engine.
+   */
+  auditVerbatim?: boolean;
 }
 
 function settingsFile(): string | null {

@@ -11,6 +11,7 @@ import type { OnboardingState, User } from "@/contracts";
 import { profilePath, readJson, writeJson } from "./config";
 import { getVariant } from "./experiment";
 import { REMOTE_PROVIDERS, remoteProvider } from "./llm";
+import { providerAllowed } from "./policy";
 import { getProviderKey, setProviderKey } from "./secrets";
 
 /** Local model provider (key-less, runs on-device) used by the play_first flow. */
@@ -211,6 +212,20 @@ export function selectModel(
   apiKey: string,
 ): ModelSelectionResult {
   const p = load();
+  // Managed policy: never persist (or seal a key for) a disallowed provider.
+  // The op layer rejects with a real error before calling here; this
+  // belt-and-braces returns the profile unchanged for any other caller.
+  // llm.ts additionally refuses at call time.
+  if (!providerAllowed(providerId)) {
+    return {
+      initial: false,
+      changed: false,
+      provider: p.providerId ?? "",
+      model: p.modelId ?? "",
+      previousProvider: p.providerId,
+      previousModel: p.modelId,
+    };
+  }
   const key = apiKey.trim();
   const initial = !p.modelEverSelected;
   const changed = p.providerId !== providerId || p.modelId !== modelId;

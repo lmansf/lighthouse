@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import type { AnalyticsMeta, ChatMessage } from "@/contracts";
+import { chatHistoryLocked } from "./managedLocks";
 
 /**
  * Multi-conversation chat history — OFF by default, opt-in per device.
@@ -95,9 +96,21 @@ function deriveTitle(messages: TranscriptMessage[]): string {
   return t.length > 60 ? `${t.slice(0, 59).trimEnd()}…` : t;
 }
 
+/**
+ * Managed policy `chatHistory: "off"` (openspec: add-managed-policy): history
+ * has no engine-side write path — this store IS the write path — so the lock
+ * is enforced here, from the signal the rag store publishes when the policy
+ * snapshot loads (see managedLocks.ts for why it's not a store import).
+ * Existing saved chats stay readable (lock-not-wipe); only writes refuse.
+ */
+function historyLocked(): boolean {
+  return chatHistoryLocked();
+}
+
 /** Whether the user has opted into saving chats on this device (default off). */
 function persistEnabled(): boolean {
   if (typeof window === "undefined") return false;
+  if (historyLocked()) return false;
   try {
     return window.localStorage.getItem(PERSIST_KEY) === "1";
   } catch {
@@ -272,6 +285,9 @@ export const useChatStore = create<ChatStore>((set) => {
 
     setPersistEnabled: (on) =>
       set((s) => {
+        // Managed policy: turning saving ON is refused while locked (the
+        // toggle renders disabled too — this guards non-UI callers).
+        if (on && historyLocked()) return s;
         try {
           // Set the flag first so save()'s persistEnabled() check sees the new value.
           window.localStorage.setItem(PERSIST_KEY, on ? "1" : "0");

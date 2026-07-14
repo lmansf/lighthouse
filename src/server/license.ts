@@ -34,6 +34,7 @@ import path from "node:path";
 import { appStateDir, readJson, writeJson } from "./config";
 import { getState as profileState } from "./profile";
 import { getAllVariants, assignBalancedVariants } from "./experiment";
+import { telemetryAllowed } from "./policy";
 import type { Registration } from "./registration";
 import {
   isUsageOptedOut,
@@ -41,6 +42,7 @@ import {
   purgeUsageBuffer,
   resetUsageConsent,
 } from "./usage";
+import { recordEgress, PURPOSE_LICENSE, PURPOSE_TELEMETRY, PURPOSE_CHECKOUT } from "./egress";
 
 const TRIAL_DAYS = 14; // sign-in days a trial lasts
 const GRACE_DAYS = 14; // paid: grace window after paid_through before locking
@@ -126,6 +128,12 @@ export async function callFn(op: string, extra: Record<string, unknown>): Promis
   const url = licenseApi();
   if (!url) throw new Error("LICENSE_API_URL not configured");
   const anon = process.env.SUPABASE_ANON_KEY?.trim();
+  // Egress registry: same host, but the telemetry ops are labeled apart
+  // from the licensing ones so the panel shows them distinctly.
+  const purpose = ["ping", "event", "events", "assign"].includes(op)
+    ? PURPOSE_TELEMETRY
+    : PURPOSE_LICENSE;
+  recordEgress(url, purpose);
   const res = await fetch(url, {
     method: "POST",
     headers: {
@@ -409,6 +417,7 @@ export async function checkoutUrl(email?: string): Promise<string | null> {
   }
   const anon = process.env.SUPABASE_ANON_KEY?.trim();
   try {
+    recordEgress(api, PURPOSE_CHECKOUT);
     const res = await fetch(api, {
       method: "POST",
       headers: {
@@ -446,6 +455,9 @@ export async function submitBug(where: string, what: string): Promise<{ ok: bool
 
 /** Log an app launch to the userlogs table (best-effort; hosted mode only). */
 export async function pingLaunch(): Promise<void> {
+  // Managed policy: telemetry "off" silences the launch ping (the license
+  // `check` is separate and remains — documented in data-flows.md).
+  if (!telemetryAllowed()) return;
   if (!licenseApi()) return;
   const lic = readJson<LocalLicense | null>(licensePath(), null);
   try {
@@ -484,7 +496,7 @@ export async function pingLaunch(): Promise<void> {
  * never throw into a launch, a query, or onboarding - all errors are swallowed.
  */
 export async function recordEvent(name: string, props: Record<string, unknown> = {}): Promise<void> {
-  if (!licenseApi()) return;
+  if (!licenseApi() || !telemetryAllowed()) return;
   try {
     await callFn("event", {
       contactId: getContactId(),
@@ -548,6 +560,12 @@ function paidStatusFrom(end: string | undefined, graceUntil: string | undefined)
  */
 export async function checkLicense(): Promise<LicenseResult> {
   if (!licensingEnabled()) return { status: "disabled" };
+
+  // PARITY: the Rust engine checks a minisign-signed offline machine license
+  // here first (openspec: add-offline-activation), the top authority for air-
+  // gapped/managed installs. The dev twin does NOT verify it — offline
+  // activation is a shipped-engine feature (no minisign runtime here), like the
+  // audit-log HMAC chain and OCR. See native license.rs offline_license_status.
 
   const lic = readJson<LocalLicense | null>(licensePath(), null);
   if (!lic?.guid || !lic.licenseKey) return { status: "none" };

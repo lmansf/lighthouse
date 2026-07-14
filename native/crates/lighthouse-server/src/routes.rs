@@ -263,6 +263,45 @@ pub async fn rag_post(headers: HeaderMap, body: Option<Json<Value>>) -> Response
                 Err(e) => bad_request(&err_message(&e, "restore failed")),
             }
         }
+        // Managed policy snapshot (openspec: add-managed-policy) — read-only;
+        // the UI renders the reported locks as "Managed by your organization".
+        Some("policy") => Json(lighthouse_core::policy::snapshot()).into_response(),
+        // Session egress snapshot (S3) — what has left this machine this
+        // session; the header shield renders "All local" / "N to <host>".
+        Some("egress") => Json(lighthouse_core::egress::snapshot()).into_response(),
+        // Local audit log (openspec: add-audit-log) — the durable record the
+        // session egress panel is a live window onto. List/verify are read-only;
+        // export writes a CSV into the vault via the same sanitized helper as
+        // exportChat, returning its id.
+        Some("auditList") => {
+            let limit = body["limit"].as_u64().unwrap_or(100) as usize;
+            return Json(lighthouse_core::audit::recent(limit)).into_response();
+        }
+        Some("auditVerify") => {
+            return Json(lighthouse_core::audit::verify_active()).into_response();
+        }
+        Some("auditExport") => {
+            let csv = tokio::task::spawn_blocking(lighthouse_core::audit::export_csv)
+                .await
+                .unwrap_or_default();
+            let written = tokio::task::spawn_blocking(move || {
+                lighthouse_core::vault::write_artifact(
+                    "Lighthouse Notes",
+                    "Audit Log",
+                    "csv",
+                    csv.as_bytes(),
+                )
+            })
+            .await
+            .map_err(|e| e.to_string())
+            .and_then(|r| r.map_err(|e| e.to_string()));
+            return match written {
+                Ok((id, name)) => {
+                    Json(json!({ "savedId": id, "savedName": name })).into_response()
+                }
+                Err(e) => Json(json!({ "error": e })).into_response(),
+            };
+        }
         _ => bad_request("unknown op"),
     }
 }
@@ -326,6 +365,14 @@ pub async fn chat_post(headers: HeaderMap, body: Option<Json<Value>>) -> Respons
     // pre-answer progress chunks (docs/multi-doc-synthesis.md) — lives in the
     // engine pipeline, so this route and the desktop IPC command behave
     // identically (retrieval-query blending included).
+    // Audit log (add-audit-log): the transport choke point — capture the
+    // question + egress baseline before the answer, record when the final
+    // chunk's references land.
+    let audit = lighthouse_core::audit::AnswerAudit::start(&question);
+    let provider = cfg
+        .provider_id
+        .clone()
+        .unwrap_or_else(|| "none".to_string());
     let stream = async_stream::stream! {
         let mut chunks = lighthouse_core::synth::answer_pipeline(
             question,
@@ -334,9 +381,20 @@ pub async fn chat_post(headers: HeaderMap, body: Option<Json<Value>>) -> Respons
             history,
             cfg,
         );
+        let mut final_files: Vec<String> = Vec::new();
+        let mut artifacts: Vec<String> = Vec::new();
         while let Some(c) = chunks.next().await {
+            if c.done {
+                if let Some(refs) = &c.references {
+                    final_files = refs.iter().map(|r| r.file_id.clone()).collect();
+                }
+                if let Some(a) = &c.analytics {
+                    artifacts.extend(a.file_ids.iter().cloned());
+                }
+            }
             yield Ok::<bytes::Bytes, std::convert::Infallible>(line(&c));
         }
+        audit.finish(&provider, final_files, artifacts);
     };
 
     Response::builder()
@@ -431,11 +489,19 @@ pub async fn profile_post(headers: HeaderMap, body: Option<Json<Value>>) -> Resp
             );
         }
         Some("finishRegistration") => emit_model_selected(profile::finish_registration()),
-        Some("selectModel") => emit_model_selected(Some(profile::select_model(
-            body["providerId"].as_str().unwrap_or(""),
-            body["modelId"].as_str().unwrap_or(""),
-            body["apiKey"].as_str().unwrap_or(""),
-        ))),
+        Some("selectModel") => {
+            let provider_id = body["providerId"].as_str().unwrap_or("");
+            // Managed policy: reject a disallowed provider with a real error
+            // (select_model itself also refuses to persist, belt-and-braces).
+            if !lighthouse_core::policy::provider_allowed(provider_id) {
+                return bad_request("this AI provider is managed off by your organization");
+            }
+            emit_model_selected(Some(profile::select_model(
+                provider_id,
+                body["modelId"].as_str().unwrap_or(""),
+                body["apiKey"].as_str().unwrap_or(""),
+            )))
+        }
         Some("setDefaultInclusion") => {
             let v = body["value"].as_str().unwrap_or("");
             if v != "include" && v != "exclude" {
@@ -912,6 +978,7 @@ pub async fn settings_get() -> Response {
         "semanticSearch": s.semantic_search != Some(false), // default on
         "backgroundConserve": s.background_conserve != Some(false), // default on
         "ocrEnabled": s.ocr_enabled != Some(false), // default on
+        "auditEnabled": s.audit_enabled == Some(true), // opt-in, default off
     }))
     .into_response()
 }
@@ -937,6 +1004,7 @@ pub async fn settings_post(headers: HeaderMap, body: Option<Json<Value>>) -> Res
         body["semanticSearch"].as_bool(),
         body["backgroundConserve"].as_bool(),
         body["ocrEnabled"].as_bool(),
+        body["auditEnabled"].as_bool(),
     );
     Json(json!({
         "ok": true,

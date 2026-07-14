@@ -87,6 +87,7 @@ import { useAuthStore } from "@/stores/useAuthStore";
 import { logEvent } from "@/lib/logEvent";
 import { parseChartSpec, tableToCsv } from "@/lib/chartSpec";
 import { AnalyticsChart } from "@/features/chat/AnalyticsChart";
+import { EgressShield } from "@/features/egress/EgressShield";
 import { useChatStore, type TranscriptMessage } from "@/stores/useChatStore";
 import { modKey } from "@/features/onboarding/ModeChooser";
 import { ACCENTS } from "@/shell/theme";
@@ -2793,6 +2794,7 @@ export function ChatPanel() {
           <Title3>Ask</Title3>
           <div className={styles.headerMeta}>
             <Badge appearance="tint">{visibleBadgeText}</Badge>
+            <EgressShield />
             {historyButton}
             <Tooltip content="Save this chat as a note in your vault" relationship="label">
               <Button

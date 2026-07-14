@@ -189,6 +189,11 @@ fn resolve() -> Variants {
 /// bucket this install into the under-represented variant. Stable + idempotent;
 /// best-effort — any failure leaves the hash assignment in place.
 pub async fn assign_balanced_variants() -> Variants {
+    // Managed policy: telemetry "off" means no `assign` call — the local,
+    // deterministic hash bucketing applies (nothing is transmitted).
+    if !crate::policy::telemetry_allowed() {
+        return resolve();
+    }
     let email = current_email().map(|e| e.to_lowercase());
     if let Some(ov) = email.as_deref().and_then(first_user_override) {
         write_json(

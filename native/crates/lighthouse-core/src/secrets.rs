@@ -11,11 +11,19 @@
 //! created 0600 on first use). Same iv|tag|ct sealed layout as the license
 //! module so both engines stay token-compatible.
 //!
-//! Threat model, honestly: the sealing secret sits beside the ciphertext, so
-//! this protects against casual disk/backup/cloud-sync inspection — not
-//! against malware running as the user. That matches the app's posture for
-//! connector OAuth tokens; an OS-keychain upgrade can slot in behind this API
-//! later without changing callers.
+//! Threat model, honestly: by default the sealing secret sits beside the
+//! ciphertext (a 0600 `secret.key`), so this protects against casual disk/
+//! backup/cloud-sync inspection — not against malware running as the user. That
+//! matches the app's posture for connector OAuth tokens.
+//!
+//! OS-keychain upgrade (P1.4): build with `--features keychain` and the sealing
+//! secret moves into the platform keychain (macOS Keychain / Windows Credential
+//! Manager / Linux Secret Service) instead of the file — so it is no longer
+//! stored next to the ciphertext it seals. The file path stays as a fail-closed
+//! fallback for environments with no keychain (headless servers, CI, the TS dev
+//! twin, Linux without a Secret Service). Off by default because it can't be
+//! verified from the dev container; the maintainer enables it after testing on
+//! real targets (see docs and the `keychain` feature in Cargo.toml).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -44,19 +52,83 @@ struct SecretsFile {
     keys: HashMap<String, String>,
 }
 
-/// The per-install sealing secret: 32 random bytes, base64 on disk, created
-/// once. `write_json` gives the 0600 + atomic-rename treatment for free (the
-/// base64 string is stored as a JSON string).
+/// Derive a purpose-scoped 32-byte key from the per-install machine secret,
+/// domain-separated by `label` (SHA-256 over `label | secret`). Lets other
+/// subsystems (the audit-log HMAC chain) key off the same install secret
+/// without ever sharing the sealing key. Stable across launches.
+pub fn derived_key(label: &str) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(label.as_bytes());
+    h.update(b"|");
+    h.update(machine_secret().as_bytes());
+    h.finalize().into()
+}
+
+/// Keychain coordinates for the sealing secret (only used with the `keychain`
+/// feature). Versioned so a future key-rotation can migrate cleanly.
+#[cfg(feature = "keychain")]
+const KEYCHAIN_SERVICE: &str = "com.lighthouse.app";
+#[cfg(feature = "keychain")]
+const KEYCHAIN_ACCOUNT: &str = "sealing-key-v1";
+
+/// Best-effort read of the sealing secret from the OS keychain. `None` on any
+/// error, when absent, or when the `keychain` feature is off — the caller then
+/// falls back to the on-disk secret.
+#[cfg(feature = "keychain")]
+fn keychain_get() -> Option<String> {
+    let entry = keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT).ok()?;
+    match entry.get_password() {
+        Ok(s) if !s.is_empty() => Some(s),
+        _ => None,
+    }
+}
+#[cfg(not(feature = "keychain"))]
+fn keychain_get() -> Option<String> {
+    None
+}
+
+/// Best-effort store of the sealing secret in the OS keychain. Returns whether
+/// it stuck (false when the feature is off or no keychain is available).
+#[cfg(feature = "keychain")]
+fn keychain_set(secret: &str) -> bool {
+    keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)
+        .and_then(|e| e.set_password(secret))
+        .is_ok()
+}
+#[cfg(not(feature = "keychain"))]
+fn keychain_set(_secret: &str) -> bool {
+    false
+}
+
+/// The per-install sealing secret: 32 random bytes, base64, created once.
+/// Resolution order: OS keychain (when built with `--features keychain`) →
+/// legacy 0600 `secret.key` → freshly generated. With the keychain available a
+/// fresh secret lives ONLY in the keychain (not beside the ciphertext); without
+/// it, `write_json` gives the 0600 + atomic-rename fallback for free.
 fn machine_secret() -> String {
-    let f = secret_file();
-    if let Some(s) = read_json::<Option<String>>(&f, None).filter(|s| !s.is_empty()) {
+    // 1. Prefer the OS keychain — the secret then lives outside the app-state
+    //    dir, not next to the ciphertext it seals.
+    if let Some(s) = keychain_get() {
         return s;
     }
+    let f = secret_file();
+    // 2. Legacy / fallback: the on-disk secret. If present, best-effort promote
+    //    it into the keychain (the file stays for the dev twin + keychain-less
+    //    environments, and so existing sealed keys keep decrypting).
+    if let Some(s) = read_json::<Option<String>>(&f, None).filter(|s| !s.is_empty()) {
+        keychain_set(&s);
+        return s;
+    }
+    // 3. Fresh install: generate once. Keychain-only when available; else the
+    //    0600 file so keys can still be sealed.
     let mut raw = [0u8; 32];
     use rand::RngCore;
     rand::thread_rng().fill_bytes(&mut raw);
     let s = base64::engine::general_purpose::STANDARD.encode(raw);
-    write_json(&f, &s);
+    if !keychain_set(&s) {
+        write_json(&f, &s);
+    }
     s
 }
 

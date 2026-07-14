@@ -51,6 +51,7 @@ import dynamic from "next/dynamic";
 import type { ChatTurn, FileNode, RagReference } from "@/contracts";
 import { chatService, ragService } from "@/contracts";
 import { useRagStore } from "@/stores/useRagStore";
+import { egressPillSummary } from "@/features/egress/EgressShield";
 import { useLicenseStore, isLocked } from "@/stores/useLicenseStore";
 import { isDesktopShell } from "@/shell/desktopBridge";
 import { useVaultTree } from "@/shell/useVaultTree";
@@ -235,6 +236,14 @@ const useStyles = makeStyles({
     color: tokens.colorNeutralForeground2,
   },
   lockText: { flexGrow: 1, minWidth: 0 },
+  // Egress transparency footer (S3): a quiet one-liner at the bottom of the
+  // expanded dropdown.
+  egressFooter: {
+    ...shorthands.borderTop("1px", "solid", tokens.colorNeutralStroke2),
+    ...shorthands.padding(tokens.spacingVerticalXS, tokens.spacingHorizontalS),
+    color: tokens.colorNeutralForeground3,
+    textAlign: "center",
+  },
   // The inline answer: a compact chat turn living under the pill — the answer
   // "freezes" on the desktop (the shell holds blur-hide while it's open).
   answer: {
@@ -311,6 +320,7 @@ export function WidgetBar() {
   const nodes = useRagStore((s) => s.nodes);
   const toggleIncluded = useRagStore((s) => s.toggleIncluded);
   const desktop = useRagStore((s) => s.desktop);
+  const egressSummary = egressPillSummary(useRagStore((s) => s.egress));
   // Look up a result's live node (for its current AI-visibility state).
   const nodesById = useMemo(() => new Map(nodes.map((n) => [n.id, n])), [nodes]);
 
@@ -903,6 +913,14 @@ export function WidgetBar() {
               <Button size="small" appearance="primary" onClick={openLighthouse}>
                 Open Lighthouse
               </Button>
+            </div>
+          )}
+          {/* Egress transparency (S3): the one-line "what left this machine"
+              summary. The collapsed pill is a fixed-height window with no
+              room, so it lives in the footer of the expanded dropdown. */}
+          {egressSummary && (
+            <div className={styles.egressFooter}>
+              <Text size={100}>{egressSummary}</Text>
             </div>
           )}
         </div>
