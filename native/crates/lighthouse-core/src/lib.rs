@@ -12,6 +12,7 @@ pub mod config;
 pub mod contracts;
 pub mod embed;
 pub mod experiment;
+pub mod egress;
 pub mod extract;
 pub mod index;
 pub mod license;
