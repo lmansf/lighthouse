@@ -36,6 +36,25 @@ image = { workspace = true }
 lopdf = { workspace = true }
 minisign-verify = "0.2"
 hmac = "0.12"
+# Optional OS-keychain backend for the secrets sealing key (P1.4). Off by
+# default — enabling stores the per-install sealing secret in the platform
+# keychain instead of the 0600 file beside the ciphertext. Gated behind a
+# feature because it can't be verified from the dev container (no Secret
+# Service); the maintainer turns it on after testing on real macOS / Windows /
+# Linux-desktop. `crypto-rust` keeps the Linux Secret Service backend
+# pure-Rust (no OpenSSL system dep).
+keyring = { version = "3", default-features = false, features = [
+    "apple-native",
+    "windows-native",
+    "sync-secret-service",
+    "crypto-rust",
+], optional = true }
+
+[features]
+# Store the per-install sealing secret in the OS keychain rather than the
+# secret.key file. The file path stays as a fail-closed fallback when no
+# keychain is available. See src/secrets.rs.
+keychain = ["dep:keyring"]
 
 [dev-dependencies]
 minisign = "0.7"

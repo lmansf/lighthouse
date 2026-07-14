@@ -81,7 +81,11 @@ These are invariants, enforced in both engines and covered by tests:
 - **Encrypted key storage.** Provider API keys are sealed with AES-256-GCM under
   a per-install secret, stored in the app-state dir (not in `profile.json`, not
   in vault backups). Threat model: this defeats casual disk/backup/cloud-sync
-  inspection, **not** malware running as your user (`native/.../secrets.rs`).
+  inspection, **not** malware running as your user (`native/.../secrets.rs`). An
+  optional OS-keychain backend (build with `--features keychain`) moves the
+  sealing secret out of the app-state dir into the platform keychain (macOS
+  Keychain / Windows Credential Manager / Linux Secret Service); off by default
+  pending per-platform verification, with the 0600-file path as fallback.
 - **Managed policy fails closed.** A malformed machine policy restricts to
   local-only providers with telemetry and history off, rather than failing open
   (`docs/managed-deployment.md`).
