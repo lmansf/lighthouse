@@ -742,6 +742,7 @@ pub fn settings_set(
             Some(prev_shortcut.clone().unwrap_or_default()),
             None,
             None,
+            None,
         );
         crate::register_summon_shortcut(&app);
         return json!({
