@@ -39,7 +39,7 @@ import {
   tokens,
 } from "@fluentui/react-components";
 import {
-  BeakerRegular,
+  ChatHelpRegular,
   BrainCircuitRegular,
   HistoryRegular,
   KeyRegular,
@@ -57,7 +57,6 @@ import {
 import { MODEL_PROVIDERS, ragService, type AuditSnapshot } from "@/contracts";
 import { LocalModelOption, LocalModelInstallPanel } from "@/features/localModel/LocalModelOption";
 import { QuickStartDialog } from "@/features/help/QuickStart";
-import { ExperimentsDialog } from "@/features/experiments/ExperimentsDialog";
 import { showWidget, summonHotkey, prettyShortcut, modKey } from "@/features/onboarding/ModeChooser";
 import { useLicenseStore, type FeedbackInput, type LicenseStatus } from "@/stores/useLicenseStore";
 import { useAuthStore } from "@/stores/useAuthStore";
@@ -1746,7 +1745,6 @@ export function SettingsMenu() {
   const [aiDlg, setAiDlg] = useState(false);
   const [prefDlg, setPrefDlg] = useState(false);
   const [quickStartDlg, setQuickStartDlg] = useState(false);
-  const [experimentsDlg, setExperimentsDlg] = useState(false);
   const [auditDlg, setAuditDlg] = useState(false);
 
   // Other features (chat empty states, explorer hints, …) deep-link into these
@@ -1815,8 +1813,11 @@ export function SettingsMenu() {
             >
               Pinned questions
             </MenuItem>
-            <MenuItem icon={<BeakerRegular />} onClick={() => setExperimentsDlg(true)}>
-              Experiments
+            <MenuItem
+              icon={<ChatHelpRegular />}
+              onClick={() => window.dispatchEvent(new Event("lighthouse:open-feedback"))}
+            >
+              Send feedback
             </MenuItem>
             <MenuItem icon={<HistoryRegular />} onClick={() => setAuditDlg(true)}>
               Audit log
@@ -1846,7 +1847,6 @@ export function SettingsMenu() {
       <AiModelsDialog open={aiDlg} setOpen={setAiDlg} />
       <PreferencesDialog open={prefDlg} setOpen={setPrefDlg} />
       <QuickStartDialog open={quickStartDlg} setOpen={setQuickStartDlg} />
-      <ExperimentsDialog open={experimentsDlg} setOpen={setExperimentsDlg} />
       <AuditLogDialog open={auditDlg} setOpen={setAuditDlg} />
     </>
   );
