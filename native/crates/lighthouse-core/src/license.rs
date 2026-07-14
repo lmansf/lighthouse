@@ -627,6 +627,11 @@ pub async fn submit_bug(where_: &str, what: &str) -> bool {
 /// Log an app launch to the userlogs table (best-effort; hosted mode only) and
 /// derive a `returned` event (any launch on a later calendar day, once per day).
 pub async fn ping_launch() {
+    // Managed policy: telemetry "off" silences the launch ping (the license
+    // `check` is separate and remains — documented in data-flows.md).
+    if !crate::policy::telemetry_allowed() {
+        return;
+    }
     if license_api().is_some() {
         let lic: Option<LocalLicense> = read_json(&license_path(), None);
         let _ = call_fn(
@@ -684,7 +689,7 @@ pub async fn ping_launch() {
 /// Record a funnel/telemetry event (best-effort; hosted mode only). Must never
 /// throw into a launch, a query, or onboarding — all errors are swallowed.
 pub async fn record_event(name: &str, props: Value) {
-    if license_api().is_none() {
+    if license_api().is_none() || !crate::policy::telemetry_allowed() {
         return;
     }
     let _ = call_fn(

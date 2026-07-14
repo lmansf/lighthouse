@@ -251,6 +251,19 @@ pub fn vault_path_allowed(path: &Path) -> bool {
     }
 }
 
+/// The first configured vault root, if any — the shell's fallback base when
+/// even the OS-default vault location is outside the allowlist.
+pub fn first_vault_root() -> Option<PathBuf> {
+    match &*policy() {
+        PolicyState::Active(p) => p
+            .vault_roots
+            .as_ref()
+            .and_then(|r| r.first())
+            .map(PathBuf::from),
+        _ => None,
+    }
+}
+
 /// The `{op:"policy"}` payload: presence, error state, and per-control locks
 /// the UI renders as "Managed by your organization".
 pub fn snapshot() -> serde_json::Value {

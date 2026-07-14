@@ -285,6 +285,9 @@ pub async fn rag_op(app: AppHandle, body: Value) -> Result<Value, String> {
                     .unwrap_or_default();
             Ok(json!({ "asks": asks }))
         }
+        // Managed policy snapshot (openspec: add-managed-policy) — read-only;
+        // the UI renders the reported locks as "Managed by your organization".
+        Some("policy") => Ok(lighthouse_core::policy::snapshot()),
         _ => Err("unknown op".into()),
     }
 }
@@ -395,11 +398,19 @@ pub async fn profile_op(body: Value) -> Result<Value, String> {
             );
         }
         Some("finishRegistration") => emit_model_selected(profile::finish_registration()),
-        Some("selectModel") => emit_model_selected(Some(profile::select_model(
-            body["providerId"].as_str().unwrap_or(""),
-            body["modelId"].as_str().unwrap_or(""),
-            body["apiKey"].as_str().unwrap_or(""),
-        ))),
+        Some("selectModel") => {
+            let provider_id = body["providerId"].as_str().unwrap_or("");
+            // Managed policy: reject a disallowed provider with a real error
+            // (select_model itself also refuses to persist, belt-and-braces).
+            if !lighthouse_core::policy::provider_allowed(provider_id) {
+                return Err("this AI provider is managed off by your organization".into());
+            }
+            emit_model_selected(Some(profile::select_model(
+                provider_id,
+                body["modelId"].as_str().unwrap_or(""),
+                body["apiKey"].as_str().unwrap_or(""),
+            )))
+        }
         Some("setDefaultInclusion") => {
             let v = body["value"].as_str().unwrap_or("");
             if v != "include" && v != "exclude" {
@@ -789,8 +800,12 @@ pub fn settings_set(
         });
     }
     // Whisper mode (W3) starts/stops its keyboard hook live — no relaunch.
+    // Managed policy widgetHotkeys "off": turning it ON is refused here (the
+    // hook must never install); turning it OFF is always honored.
     if let Some(on) = whisper_mode {
-        crate::whisper::set_enabled(&app, on);
+        if !on || lighthouse_core::policy::hotkeys_allowed() {
+            crate::whisper::set_enabled(&app, on);
+        }
     }
     // Semantic search (B2) applies live too: the supervisor's 3 s reconcile
     // starts or stops the embedding server to match the new setting, and its

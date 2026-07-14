@@ -263,6 +263,9 @@ pub async fn rag_post(headers: HeaderMap, body: Option<Json<Value>>) -> Response
                 Err(e) => bad_request(&err_message(&e, "restore failed")),
             }
         }
+        // Managed policy snapshot (openspec: add-managed-policy) — read-only;
+        // the UI renders the reported locks as "Managed by your organization".
+        Some("policy") => Json(lighthouse_core::policy::snapshot()).into_response(),
         _ => bad_request("unknown op"),
     }
 }
@@ -431,11 +434,19 @@ pub async fn profile_post(headers: HeaderMap, body: Option<Json<Value>>) -> Resp
             );
         }
         Some("finishRegistration") => emit_model_selected(profile::finish_registration()),
-        Some("selectModel") => emit_model_selected(Some(profile::select_model(
-            body["providerId"].as_str().unwrap_or(""),
-            body["modelId"].as_str().unwrap_or(""),
-            body["apiKey"].as_str().unwrap_or(""),
-        ))),
+        Some("selectModel") => {
+            let provider_id = body["providerId"].as_str().unwrap_or("");
+            // Managed policy: reject a disallowed provider with a real error
+            // (select_model itself also refuses to persist, belt-and-braces).
+            if !lighthouse_core::policy::provider_allowed(provider_id) {
+                return bad_request("this AI provider is managed off by your organization");
+            }
+            emit_model_selected(Some(profile::select_model(
+                provider_id,
+                body["modelId"].as_str().unwrap_or(""),
+                body["apiKey"].as_str().unwrap_or(""),
+            )))
+        }
         Some("setDefaultInclusion") => {
             let v = body["value"].as_str().unwrap_or("");
             if v != "include" && v != "exclude" {

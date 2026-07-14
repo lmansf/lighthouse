@@ -803,6 +803,12 @@ fn ext_of_preserving_case(name: &str) -> String {
 /// existing reference (or the vault) is rejected so content is never indexed twice.
 pub fn add_reference(input_path: &str) -> anyhow::Result<(String, String)> {
     let abs = resolve_path(input_path);
+    // Managed policy: linking is how arbitrary disk paths enter the corpus —
+    // the vaultRoots allowlist is enforced here, at the single funnel every
+    // caller (route op, desktop drop, native picker) goes through.
+    if !crate::policy::vault_path_allowed(&abs) {
+        anyhow::bail!("outside a location your organization allows");
+    }
     let meta = fs::metadata(&abs).map_err(|_| anyhow::anyhow!("path not found"))?;
     let kind = if meta.is_dir() { "folder" } else { "file" };
     let mut state = load_state();

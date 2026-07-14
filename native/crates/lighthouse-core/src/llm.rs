@@ -255,7 +255,13 @@ pub fn stream_answer(
         }
 
         let key = cfg.api_key.clone().unwrap_or_default();
-        let can_claude = cfg.provider_id.as_deref() == Some("anthropic") && !key.is_empty();
+        // Managed policy: a disallowed cloud provider is refused HERE, not
+        // just at selection time — a profile stored before the policy landed
+        // must still be blocked. Both cloud gates AND in the policy check so
+        // the existing extractive fallthrough answers instead.
+        let can_claude = cfg.provider_id.as_deref() == Some("anthropic")
+            && !key.is_empty()
+            && crate::policy::provider_allowed("anthropic");
         if can_claude {
             let model = cfg.model_id.clone().unwrap_or_else(|| "claude-haiku-4-5".to_string());
             let mut emitted = false;
@@ -298,6 +304,7 @@ pub fn stream_answer(
         let compat = cfg
             .provider_id
             .as_deref()
+            .filter(|id| crate::policy::provider_allowed(id))
             .and_then(remote_provider)
             .filter(|_| !key.is_empty());
         if let Some(p) = compat {
