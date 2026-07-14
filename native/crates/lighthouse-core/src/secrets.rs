@@ -44,6 +44,19 @@ struct SecretsFile {
     keys: HashMap<String, String>,
 }
 
+/// Derive a purpose-scoped 32-byte key from the per-install machine secret,
+/// domain-separated by `label` (SHA-256 over `label | secret`). Lets other
+/// subsystems (the audit-log HMAC chain) key off the same install secret
+/// without ever sharing the sealing key. Stable across launches.
+pub fn derived_key(label: &str) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(label.as_bytes());
+    h.update(b"|");
+    h.update(machine_secret().as_bytes());
+    h.finalize().into()
+}
+
 /// The per-install sealing secret: 32 random bytes, base64 on disk, created
 /// once. `write_json` gives the 0600 + atomic-rename treatment for free (the
 /// base64 string is stored as a JSON string).

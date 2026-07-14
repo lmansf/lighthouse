@@ -90,6 +90,31 @@ pub fn snapshot() -> serde_json::Value {
     })
 }
 
+/// Per-host total request counts (host → count). The audit log snapshots
+/// this before an answer and diffs after, so a host whose count rose is an
+/// egress for that specific question.
+pub fn host_counts() -> HashMap<String, u64> {
+    let reg = registry().lock().unwrap_or_else(|p| p.into_inner());
+    let mut out: HashMap<String, u64> = HashMap::new();
+    for ((host, _purpose), e) in reg.iter() {
+        *out.entry(host.clone()).or_insert(0) += e.count;
+    }
+    out
+}
+
+/// Hosts whose request count rose between `before` and now — the egress
+/// attributable to one question. Sorted for a stable record.
+pub fn hosts_since(before: &HashMap<String, u64>) -> Vec<String> {
+    let now = host_counts();
+    let mut hosts: Vec<String> = now
+        .iter()
+        .filter(|(h, &c)| c > before.get(*h).copied().unwrap_or(0))
+        .map(|(h, _)| h.clone())
+        .collect();
+    hosts.sort();
+    hosts
+}
+
 /// Test seam: clear the session registry.
 #[cfg(debug_assertions)]
 pub fn reset_for_tests() {

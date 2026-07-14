@@ -3739,6 +3739,7 @@ dependencies = [
  "datafusion",
  "futures",
  "hex",
+ "hmac",
  "image",
  "lopdf",
  "minisign",

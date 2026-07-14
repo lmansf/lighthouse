@@ -329,6 +329,14 @@ pub async fn chat_ask(
     // pre-answer progress chunks (docs/multi-doc-synthesis.md) — lives in the
     // engine pipeline, shared with the axum route (retrieval-query blending
     // included).
+    // Audit log (add-audit-log): capture the question + egress baseline before
+    // the answer, record once the final chunk's references are known. Covers
+    // the widget AND the main window (both invoke this command).
+    let audit = lighthouse_core::audit::AnswerAudit::start(&question);
+    let provider = cfg
+        .provider_id
+        .clone()
+        .unwrap_or_else(|| "none".to_string());
     let mut chunks = lighthouse_core::synth::answer_pipeline(
         question,
         included_file_ids,
@@ -336,9 +344,20 @@ pub async fn chat_ask(
         history,
         cfg,
     );
+    let mut final_files: Vec<String> = Vec::new();
+    let mut artifacts: Vec<String> = Vec::new();
     while let Some(c) = chunks.next().await {
+        if c.done {
+            if let Some(refs) = &c.references {
+                final_files = refs.iter().map(|r| r.file_id.clone()).collect();
+            }
+            if let Some(a) = &c.analytics {
+                artifacts.extend(a.file_ids.iter().cloned());
+            }
+        }
         let _ = on_chunk.send(c);
     }
+    audit.finish(&provider, final_files, artifacts);
     Ok(())
 }
 
@@ -706,6 +725,7 @@ pub fn settings_set(
     semantic_search: Option<bool>,
     background_conserve: Option<bool>,
     ocr_enabled: Option<bool>,
+    audit_enabled: Option<bool>,
 ) -> Value {
     // A new summon shortcut must PARSE before anything persists — saving an
     // unregistrable string would strand the user with no hotkey at all.
@@ -742,6 +762,7 @@ pub fn settings_set(
         semantic_search,
         background_conserve,
         ocr_enabled,
+        audit_enabled,
     );
     if shortcut_changed && !crate::register_summon_shortcut(&app) {
         // The new chord didn't register — restore the previous one so the
@@ -754,6 +775,7 @@ pub fn settings_set(
             None,
             None,
             Some(prev_shortcut.clone().unwrap_or_default()),
+            None,
             None,
             None,
             None,

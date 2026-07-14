@@ -332,6 +332,14 @@ pub async fn chat_post(headers: HeaderMap, body: Option<Json<Value>>) -> Respons
     // pre-answer progress chunks (docs/multi-doc-synthesis.md) — lives in the
     // engine pipeline, so this route and the desktop IPC command behave
     // identically (retrieval-query blending included).
+    // Audit log (add-audit-log): the transport choke point — capture the
+    // question + egress baseline before the answer, record when the final
+    // chunk's references land.
+    let audit = lighthouse_core::audit::AnswerAudit::start(&question);
+    let provider = cfg
+        .provider_id
+        .clone()
+        .unwrap_or_else(|| "none".to_string());
     let stream = async_stream::stream! {
         let mut chunks = lighthouse_core::synth::answer_pipeline(
             question,
@@ -340,9 +348,20 @@ pub async fn chat_post(headers: HeaderMap, body: Option<Json<Value>>) -> Respons
             history,
             cfg,
         );
+        let mut final_files: Vec<String> = Vec::new();
+        let mut artifacts: Vec<String> = Vec::new();
         while let Some(c) = chunks.next().await {
+            if c.done {
+                if let Some(refs) = &c.references {
+                    final_files = refs.iter().map(|r| r.file_id.clone()).collect();
+                }
+                if let Some(a) = &c.analytics {
+                    artifacts.extend(a.file_ids.iter().cloned());
+                }
+            }
             yield Ok::<bytes::Bytes, std::convert::Infallible>(line(&c));
         }
+        audit.finish(&provider, final_files, artifacts);
     };
 
     Response::builder()
@@ -951,6 +970,7 @@ pub async fn settings_post(headers: HeaderMap, body: Option<Json<Value>>) -> Res
         body["semanticSearch"].as_bool(),
         body["backgroundConserve"].as_bool(),
         body["ocrEnabled"].as_bool(),
+        body["auditEnabled"].as_bool(),
     );
     Json(json!({
         "ok": true,

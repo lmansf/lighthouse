@@ -35,6 +35,7 @@ rten = { workspace = true }
 image = { workspace = true }
 lopdf = { workspace = true }
 minisign-verify = "0.2"
+hmac = "0.12"
 
 [dev-dependencies]
 minisign = "0.7"
