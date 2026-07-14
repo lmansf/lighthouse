@@ -34,7 +34,10 @@ jobs:
           - os: macos-latest
           - os: ubuntu-latest
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    # Cold-cache reality on windows runners: the release binary alone is
+    # ~30 min (thin-LTO + codegen-units=1 over DataFusion); warm runs are
+    # far faster. 75 gives cold runs headroom without masking a hang.
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -61,11 +64,16 @@ jobs:
       - name: Build the real desktop binary (release)
         working-directory: native
         run: cargo build --release -p lighthouse-desktop --locked
-      - name: Engine smoke — wire-protocol grounded ask + exhaustive settings round-trip (release mode)
+      - name: Engine smoke — wire-protocol grounded ask + exhaustive settings round-trip
+        # Debug profile on purpose: these validate engine BEHAVIOR (incl.
+        # per-OS path handling) — the release-codegen guarantees come from
+        # the release binary build above + the boot smoke below. Release-
+        # profile test compiles (thin-LTO per test binary) blew the windows
+        # leg past 60 minutes for no added coverage.
         working-directory: native
         run: |
-          cargo test --release -p lighthouse-server --locked
-          cargo test --release -p lighthouse-core --locked --test settings_test
+          cargo test -p lighthouse-server --locked
+          cargo test -p lighthouse-core --locked --test settings_test
       - name: Boot smoke — the shipped binary answers one grounded ask, zero network
         shell: bash
         run: |
