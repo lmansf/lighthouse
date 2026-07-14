@@ -3,7 +3,7 @@
  *
  * GET    → current state: { status: ready|absent|downloading|uninstalling|error, received, total }
  * POST   → start the one-time download (no-op if already present or in flight).
- * DELETE → uninstall: drop a marker electron/main.js acts on (stop the server,
+ * DELETE → uninstall: drop a marker the desktop shell acts on (stop the server,
  *          delete the weights), freeing the ~4.2 GB / allowing a fresh re-test.
  *
  * The model is fetched from Hugging Face into the user's data dir (src/server/

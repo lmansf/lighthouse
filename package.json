@@ -2,10 +2,9 @@
   "name": "rag-vault",
   "version": "0.11.0",
   "private": true,
-  "description": "Lighthouse — a local-first RAG vault for your documents.",
+  "description": "Lighthouse \u2014 a local-first RAG vault for your documents.",
   "author": "Lighthouse",
-  "main": "electron/main.js",
-  "//browserslist": "The UI only ever runs in the bundled Tauri webviews (WebView2 / WKWebView / WebKitGTK) and modern desktop browsers for dev — all evergreen. Declaring modern targets stops Next/SWC from emitting the ~110 KB core-js legacy-polyfill bundle (Symbol/URL/Reflect/Promise/fetch are all native here).",
+  "//browserslist": "The UI only ever runs in the bundled Tauri webviews (WebView2 / WKWebView / WebKitGTK) and modern desktop browsers for dev \u2014 all evergreen. Declaring modern targets stops Next/SWC from emitting the ~110 KB core-js legacy-polyfill bundle (Symbol/URL/Reflect/Promise/fetch are all native here).",
   "browserslist": [
     "last 2 Chrome versions",
     "last 2 Edge versions",
@@ -19,109 +18,15 @@
     "test": "tsc --noEmit && node --test \"test/**/*.test.mjs\"",
     "typecheck": "tsc --noEmit",
     "icons": "npm install --no-save sharp@^0.33.5 png-to-ico@^2.1.8 && node scripts/gen-icons.mjs",
-    "installer:art": "npm install --no-save sharp@^0.33.5 && node scripts/gen-installer-art.mjs",
-    "electron": "electron .",
     "fetch:model": "node scripts/fetch-local-model.mjs",
-    "dist": "next build && node scripts/fetch-local-model.mjs && electron-builder",
-    "dist:nomodel": "next build && electron-builder",
-    "release": "next build && node scripts/fetch-local-model.mjs && electron-builder --publish always",
     "test:extract": "node --test \"test/**/*.test.mjs\"",
     "build:ui-static": "node scripts/build-ui-static.mjs",
     "desktop:build": "node scripts/build-ui-static.mjs && cd native && cargo build --release -p lighthouse-desktop"
-  },
-  "build": {
-    "appId": "com.lighthouse.app",
-    "productName": "Lighthouse",
-    "executableName": "Lighthouse",
-    "icon": "build/icon.png",
-    "asar": false,
-    "files": [
-      "**/*",
-      "!**/.next/cache/**/*",
-      "!**/release/**/*",
-      "!**/*.map",
-      "!**/Lighthouse.cmd",
-      "!**/Lighthouse.command",
-      "!**/install.sh",
-      "!**/.env",
-      "!**/.env.local",
-      "!**/.env.*.local",
-      "!supabase/**/*",
-      "!resources/llm/**/*",
-      "!resources/tts/**/*",
-      "!**/.rag-vault/**",
-      "!**/connectors/**"
-    ],
-    "extraResources": [
-      {
-        "from": "resources/llm",
-        "to": "llm",
-        "filter": [
-          "**/*",
-          "!**/*.gguf"
-        ]
-      },
-      {
-        "from": "resources/tts",
-        "to": "tts",
-        "filter": [
-          "**/*"
-        ]
-      }
-    ],
-    "extraMetadata": {
-      "main": "electron/main.js"
-    },
-    "directories": {
-      "output": "release"
-    },
-    "afterSign": "build/notarize.cjs",
-    "publish": [
-      {
-        "provider": "github",
-        "owner": "lmansf",
-        "repo": "lighthouse",
-        "releaseType": "draft"
-      }
-    ],
-    "win": {
-      "target": "nsis"
-    },
-    "mac": {
-      "target": "dmg",
-      "category": "public.app-category.productivity",
-      "hardenedRuntime": true,
-      "gatekeeperAssess": false,
-      "entitlements": "build/entitlements.mac.plist",
-      "entitlementsInherit": "build/entitlements.mac.plist"
-    },
-    "linux": {
-      "target": "AppImage",
-      "category": "Utility"
-    },
-    "nsis": {
-      "artifactName": "Lighthouse-Setup.${ext}",
-      "oneClick": false,
-      "perMachine": false,
-      "allowToChangeInstallationDirectory": true,
-      "createDesktopShortcut": true,
-      "createStartMenuShortcut": true,
-      "shortcutName": "Lighthouse",
-      "runAfterFinish": true,
-      "installerIcon": "build/icon.ico",
-      "uninstallerIcon": "build/icon.ico",
-      "installerHeaderIcon": "build/icon.ico",
-      "installerSidebar": "build/installerSidebar.bmp",
-      "uninstallerSidebar": "build/uninstallerSidebar.bmp",
-      "uninstallDisplayName": "Lighthouse",
-      "include": "build/installer.nsh"
-    }
   },
   "dependencies": {
     "@fluentui/react-components": "^9.54.0",
     "@fluentui/react-icons": "^2.0.245",
     "@tauri-apps/api": "^2.11.1",
-    "electron-updater": "^6.8.9",
     "mammoth": "^1.12.0",
     "next": "^15.5.19",
     "react": "19.0.0",
@@ -136,8 +41,6 @@
     "@types/node": "22.10.7",
     "@types/react": "19.0.7",
     "@types/react-dom": "19.0.3",
-    "electron": "^33.2.0",
-    "electron-builder": "^25.1.8",
     "eslint": "^8.57.1",
     "eslint-config-next": "^15.5.19",
     "typescript": "5.7.3"

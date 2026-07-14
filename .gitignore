@@ -8,18 +8,13 @@
 /out/
 
 # production
-# build/ is electron-builder's resources dir — ignore its contents but keep the
-# committed icon sources the desktop build needs.
+# build/ holds the committed brand-art sources (SVG + rasterized icons used by
+# `npm run icons`); ignore anything generated beside them.
 /build/*
 !/build/icon.svg
 !/build/icon.png
 !/build/icon.ico
 !/build/tray.svg
-!/build/installer.nsh
-!/build/installerSidebar.bmp
-!/build/uninstallerSidebar.bmp
-!/build/entitlements.mac.plist
-!/build/notarize.cjs
 
 # misc
 .DS_Store
@@ -44,9 +39,6 @@ vault/.rag-vault/
 *.tsbuildinfo
 next-env.d.ts
 
-# electron-builder output (packaged app + installer) — large build artifacts.
-/release/
-
 # Bundled local model assets (llama-server binary + .gguf weights) — large and
 # licensed separately; fetched at build time by `npm run fetch:model`.
 /resources/llm/*
@@ -61,6 +53,11 @@ next-env.d.ts
 # build time by `npm run fetch:model`.
 /resources/embed/*
 !/resources/embed/.gitkeep
+
+# Bundled OCR models (ocrs detection + recognition, add-ocr-perception) —
+# fetched at build time by `npm run fetch:model`.
+/resources/ocr/*
+!/resources/ocr/.gitkeep
 
 # Lavish review artifacts (local tooling)
 .lavish/

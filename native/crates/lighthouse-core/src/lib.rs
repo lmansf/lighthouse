@@ -22,6 +22,7 @@ pub mod ocr;
 pub mod pins;
 pub mod profile;
 pub mod secrets;
+pub mod updates;
 pub mod settings;
 pub mod sources;
 pub mod synth;

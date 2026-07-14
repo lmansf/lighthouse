@@ -1,5 +1,6 @@
 /**
- * Typed accessor for the desktop (Electron preload) file bridge. Lives in
+ * Typed accessor for the desktop file bridge (installed by the Tauri shell —
+ * see src/shell/tauriTransport.ts). Lives in
  * `shell` so both the explorer and chat can use it without importing each
  * other. Returns null outside the desktop app (plain web/dev in a browser),
  * where callers fall back to byte upload.

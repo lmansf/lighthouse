@@ -49,9 +49,15 @@
       "../../../resources/ocr": "ocr"
     },
     "windows": {
+      "digestAlgorithm": "sha256",
+      "timestampUrl": "http://timestamp.digicert.com",
       "nsis": {
         "installerHooks": "./installer-hooks.nsh"
       }
+    },
+    "macOS": {
+      "entitlements": "./entitlements.plist",
+      "minimumSystemVersion": "10.15"
     }
   }
 }

@@ -1,5 +1,12 @@
 # Lighthouse desktop app
 
+> **Electron-era document.** The Electron shell described here was retired
+> after the 0.3.0 native cutover (tree preserved on `archive/electron-shell`).
+> The shipping desktop app is the **Tauri 2 shell** in
+> `native/crates/lighthouse-desktop` — see `native/README.md` and the root
+> README's Architecture section. Kept for history; the double-click
+> launchers and installer flow below no longer exist in this tree.
+
 Lighthouse runs as a persistent Electron desktop app that wraps the same
 Next.js + local-filesystem backend used in the browser. Your documents live in
 a real folder on your computer — nothing is uploaded to a cloud database.

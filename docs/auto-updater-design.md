@@ -1,11 +1,21 @@
 # Auto-updater design — launch-time, splash-integrated
 
-Status: **Phase A implemented** (notify-only). Ships in `electron/updater.js`,
-`electron/preload.js`, and the `main.js`/`splash.html` wiring described below;
-`electron-updater` is a runtime dependency. **Phase B (auto-download +
-install-on-quit) remains gated** behind `UPDATER_CAN_AUTO_INSTALL = false` in
-`electron/updater.js` until code signing + notarization are live. Target:
-`electron/main.js` (v0.2.4), tray-resident app, builds currently **unsigned**.
+> **2026-07 status (Tauri era).** This document is the original **Electron**
+> design; the Electron shell is retired (`archive/electron-shell`). The
+> principles carried over — §2's threat model (signature > manifest hash;
+> unverified auto-apply = RCE hand-off) and §8's first-signed-release
+> transition still govern. Current implementation lives in the Tauri shell:
+> `native/crates/lighthouse-desktop/src/supervise.rs` polls the GitHub
+> releases API (notify), and **Phase B is implemented** as download +
+> minisign-verify + install-on-consent, active only in builds that bake the
+> updater public key (`LIGHTHOUSE_UPDATER_PUBKEY`) against releases carrying
+> `.sig` artifacts; otherwise strictly notify-only (the unverified-download
+> path was removed). Verification: `lighthouse-core::updates`. CI/secrets:
+> `desktop-release.yml` + `docs/signing.md`.
+
+Status (historical): **Phase A implemented** (notify-only) in the Electron
+shell; **Phase B gated** behind `UPDATER_CAN_AUTO_INSTALL = false` until code
+signing + notarization are live. Builds at the time: **unsigned**.
 Produced from a multi-lens design pass plus an adversarial review; the corrections
 from that review are folded in and flagged inline.
 

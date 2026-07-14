@@ -8,9 +8,9 @@
  * Face, into their data directory. Only public model weights are fetched - no
  * user data ever leaves the machine, preserving the local-first promise.
  *
- * electron/main.js watches the models directory and starts `llama-server`
- * against the file as soon as it lands, so the private model becomes usable
- * without a restart.
+ * The desktop shell (native/crates/lighthouse-desktop) watches the models
+ * directory and starts `llama-server` against the file as soon as it lands,
+ * so the private model becomes usable without a restart.
  */
 import {
   closeSync,
@@ -37,11 +37,11 @@ const MODEL_FILE = process.env.LIGHTHOUSE_LOCAL_MODEL_FILE?.trim() || "Mistral-7
 /** A real model is hundreds of MB; guards against counting a stub/partial as ready. */
 const MIN_BYTES = 1e8;
 
-/** Marker file electron/main.js watches to perform an uninstall (see requestUninstall). */
+/** Marker file the desktop shell watches to perform an uninstall (see requestUninstall). */
 const UNINSTALL_MARKER = ".uninstall";
 
 /**
- * Where NEW downloads are written. In the packaged app electron/main.js sets
+ * Where NEW downloads are written. In the packaged app the desktop shell sets
  * LIGHTHOUSE_MODELS_DIR to `<userData>/models` (writable, survives updates); in
  * dev we fall back to `resources/llm` so a locally fetched model still works.
  */
@@ -54,7 +54,7 @@ export function modelsDir(): string {
 /**
  * Every directory a usable model might sit in - the download target plus the
  * bundled `resources/llm` (where an older Lighthouse could have left one). This
- * MUST match electron/main.js `findModel()` so the picker's "installed" state
+ * MUST match the shell's model discovery (supervise.rs) so the picker's "installed" state
  * agrees with what llama-server actually runs; otherwise a leftover model looks
  * uninstalled (a dead "＋") even though the local model works.
  */
@@ -153,8 +153,8 @@ export function modelStatus(): Progress {
 
 /**
  * Request removal of the installed model. The `.gguf` is likely memory-mapped
- * (locked) by a running llama-server, which only electron/main.js can stop - so
- * we drop a marker it watches: main stops the server, deletes the weights, and
+ * (locked) by a running llama-server, which only the desktop shell can stop - so
+ * we drop a marker it watches: the shell stops the server, deletes the weights, and
  * clears the marker. Lets the user free the ~4.2 GB or re-test a fresh install.
  */
 export function requestUninstall(): Progress {

@@ -5,7 +5,7 @@
  *
  * The bug this guards: older Lighthouse builds bundled the `.gguf` in
  * resources/llm. After an update that leftover is STILL found (and run) by
- * electron/main.js findModel(), which searches BOTH the download dir and
+ * the desktop shell's model discovery, which searches BOTH the download dir and
  * resources/llm - but the picker's status check only looked at the download dir,
  * so it showed a dead "＋ install" that appeared to do nothing. installedModel()
  * now searches the SAME dirs, so the picker's "installed" state matches what
@@ -15,8 +15,8 @@
  *   1. leftover in resources/llm, empty download dir -> "ready" ("Installed",
  *      NOT a dead "＋"). This is the core fix.
  *   2. requestUninstall() -> "uninstalling" ("Removing…" + spinner) and drops the
- *      `.uninstall` marker electron/main.js acts on (only main owns the running
- *      llama-server that mmap-locks the weights).
+ *      `.uninstall` marker the desktop shell acts on (only the shell owns the
+ *      running llama-server that mmap-locks the weights).
  *   3. status stays "uninstalling" while the marker is present, even though the
  *      weights are still on disk (they are deleted by main after it stops the
  *      server) - so the picker never flickers back to "Installed" mid-removal.
@@ -87,7 +87,7 @@ test("local model: leftover in resources/llm reads Installed, then uninstalls cl
   assert.equal(
     existsSync(path.join(downloadDir, UNINSTALL_MARKER)),
     true,
-    "a .uninstall marker is dropped for electron/main.js to act on",
+    "a .uninstall marker is dropped for the desktop shell to act on",
   );
   assert.equal(modelStatus().status, "uninstalling", "status reflects the pending uninstall");
   log("2. requestUninstall() -> status =", modelStatus().status, "(picker shows 'Removing…'); marker dropped for main.js");

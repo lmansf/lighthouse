@@ -34,6 +34,8 @@ ocrs = { workspace = true }
 rten = { workspace = true }
 image = { workspace = true }
 lopdf = { workspace = true }
+minisign-verify = "0.2"
 
 [dev-dependencies]
+minisign = "0.7"
 tempfile = { workspace = true }

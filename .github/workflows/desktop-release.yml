@@ -1,35 +1,128 @@
-# Native (Tauri/Rust) desktop installers, attached to a GitHub release.
+# The release pipeline's build stage: native (Tauri/Rust) desktop installers,
+# attached to a draft GitHub release.
 #
-# Builds the static-export UI, fetches the pinned llama-server + Piper voice,
-# bundles the Tauri app per OS (NSIS / DMG / AppImage+deb), and uploads the
-# results to the release named by `release_tag` (draft or published). The
-# Windows installer is uploaded as `Lighthouse-Setup.exe` so the lhvault.app
-# download button keeps auto-detecting it. With `replace_electron`, the old
-# Electron installers are removed from that release afterwards, making it a
-# native release; the electron-updater manifests (latest*.yml) are kept so
-# 0.2.x installs still see the new version in their notify-only update check.
+# This workflow is self-sufficient (the legacy Electron `release.yml` is
+# retired): it gates on the JS checks, resolves the release tag from
+# package.json (or the `release_tag` input), creates the draft release if it
+# doesn't exist yet, builds the static-export UI, fetches the pinned
+# llama-server + Piper voice, bundles the Tauri app per OS (NSIS / DMG /
+# AppImage+deb), regenerates the electron-updater manifests (latest*.yml — so
+# pre-0.3.0 Electron installs still see new versions in their notify-only
+# update check, now pointing at the real uploaded artifacts), and uploads
+# everything to the draft. Publishing (draft → public latest) stays a separate
+# explicit step: publish-release.yml.
 #
-# Unsigned until CSC/notarization secrets are wired (same posture as
-# release.yml); the in-app updater stays notify-only accordingly.
+# The Windows installer is uploaded as `Lighthouse-Setup.exe` so the
+# lhvault.app download button keeps auto-detecting it.
+#
+# Signing is SECRETS-GATED (see docs/signing.md for the provisioning
+# checklist): absent secrets → a cleanly unsigned build and a notify-only
+# in-app updater; present secrets → Windows Authenticode, macOS Developer-ID
+# + notarization, minisign-signed update artifacts (`.sig` beside each
+# installer), a baked-in verification key, and a tauri-updater `latest.json`
+# manifest. Never half-signed: each leg is gated independently and fails
+# loudly on partial configuration.
 name: desktop-release
 
 on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "Release tag to attach the native bundles to"
-        required: true
-        default: "v0.3.0"
-      replace_electron:
-        description: "Remove the Electron installers from that release after upload"
-        type: boolean
-        default: true
+        description: "Release tag (empty = v<package.json version> of this ref)"
+        required: false
+        default: ""
 
 permissions:
   contents: write
 
 jobs:
+  # Gate: types, tests, and lint must pass before anything is built or a draft
+  # is created. Carried over from the retired release.yml, upgraded from
+  # test:extract to the full `npm run test` (tsc + all node suites).
+  check:
+    name: Typecheck, tests & lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          # Node 22: `node --test` glob patterns require >=21.
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Typecheck + tests
+        run: npm run test
+      - name: Lint
+        run: npm run lint
+
+  # Resolve the tag and make sure a release (draft or published) exists for it.
+  # The draft carries the tag name but no git tag — publish-release.yml creates
+  # the tag when it flips the draft public, pointing at target_commitish (this
+  # workflow's SHA).
+  resolve:
+    name: Resolve tag & ensure draft release
+    runs-on: ubuntu-latest
+    outputs:
+      release_tag: ${{ steps.tag.outputs.tag }}
+      # Job-level `if:` can't read secrets — surface the updater-signing
+      # switch as an output for the manifest fan-in job.
+      sign_updater: ${{ steps.gates.outputs.sign_updater }}
+    steps:
+      - name: Signing gates
+        id: gates
+        env:
+          HAS_UPDATER_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
+        run: echo "sign_updater=$HAS_UPDATER_KEY" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+      - name: Derive tag from package.json and check consistency
+        id: tag
+        env:
+          INPUT_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          PKG_TAG="v$(node -p "require('./package.json').version")"
+          TAG="${INPUT_TAG:-$PKG_TAG}"
+          if [ "$TAG" != "$PKG_TAG" ]; then
+            echo "::error::release_tag '$TAG' does not match package.json '$PKG_TAG' on this ref — run the workflow from the matching ref"
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "resolved release tag: $TAG"
+      - name: Create draft release if absent
+        uses: actions/github-script@v7
+        env:
+          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
+        with:
+          script: |
+            const tag = process.env.RELEASE_TAG;
+            // List (not getByTag) so a still-draft release is found too.
+            const releases = await github.paginate(github.rest.repos.listReleases,
+              { owner: context.repo.owner, repo: context.repo.repo, per_page: 100 });
+            let rel = releases.find(r => r.tag_name === tag);
+            if (rel) {
+              core.info(`release ${tag} already exists (draft=${rel.draft}) — reusing`);
+              return;
+            }
+            const { data } = await github.rest.repos.createRelease({
+              owner: context.repo.owner, repo: context.repo.repo,
+              tag_name: tag,
+              target_commitish: context.sha,
+              name: tag,
+              body: 'Draft — bundles attached by desktop-release.yml; publish via publish-release.yml.',
+              draft: true,
+              prerelease: false,
+            });
+            core.info(`created draft release ${tag} (${data.html_url})`);
+
+  # Pre-tag smoke: the same ref must build, boot, and answer one grounded
+  # zero-network ask on all three OSes (plus the exhaustive settings
+  # round-trip) before any bundle is attached to the release.
+  smoke:
+    uses: ./.github/workflows/release-smoke.yml
+
   bundle:
+    needs: [check, resolve, smoke]
     strategy:
       fail-fast: false
       matrix:
@@ -38,6 +131,12 @@ jobs:
           - os: macos-latest
           - os: ubuntu-latest
     runs-on: ${{ matrix.os }}
+    env:
+      # Secrets-gated signing switches (job env may reference secrets; step
+      # `if:` reads these). Absent secrets → all false → cleanly unsigned.
+      HAS_APPLE_CERT: ${{ secrets.APPLE_CERTIFICATE != '' }}
+      HAS_WIN_CERT: ${{ secrets.WINDOWS_CERTIFICATE != '' }}
+      HAS_UPDATER_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -65,6 +164,57 @@ jobs:
         run: node scripts/fetch-local-model.mjs
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # ---- Signing configuration (each leg independently secrets-gated; a
+      # skipped step leaves the build cleanly unsigned — never set signing
+      # env from empty secrets, or the bundler tries to use "").
+      - name: Configure macOS signing + notarization
+        if: runner.os == 'macOS' && env.HAS_APPLE_CERT == 'true'
+        shell: bash
+        run: |
+          # Tauri v2 reads these directly: imports the cert into a temp
+          # keychain, signs with the identity, then notarizes + staples when
+          # the APPLE_ID trio is present. docs/signing.md documents each.
+          {
+            echo "APPLE_CERTIFICATE=${{ secrets.APPLE_CERTIFICATE }}"
+            echo "APPLE_CERTIFICATE_PASSWORD=${{ secrets.APPLE_CERTIFICATE_PASSWORD }}"
+            echo "APPLE_SIGNING_IDENTITY=${{ secrets.APPLE_SIGNING_IDENTITY }}"
+            echo "APPLE_ID=${{ secrets.APPLE_ID }}"
+            echo "APPLE_PASSWORD=${{ secrets.APPLE_PASSWORD }}"
+            echo "APPLE_TEAM_ID=${{ secrets.APPLE_TEAM_ID }}"
+          } >> "$GITHUB_ENV"
+      - name: Configure Windows Authenticode signing
+        if: runner.os == 'Windows' && env.HAS_WIN_CERT == 'true'
+        shell: pwsh
+        run: |
+          # Import the base64 .pfx into the runner's user store and hand its
+          # thumbprint to the bundler via --config (below). Prefer replacing
+          # this with Azure Trusted Signing / a KMS signCommand once
+          # provisioned — see docs/signing.md §Windows.
+          $pfx = [System.Convert]::FromBase64String("${{ secrets.WINDOWS_CERTIFICATE }}")
+          $pfxPath = Join-Path $env:RUNNER_TEMP "signing.pfx"
+          [System.IO.File]::WriteAllBytes($pfxPath, $pfx)
+          $pwd = ConvertTo-SecureString -String "${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}" -AsPlainText -Force
+          $cert = Import-PfxCertificate -FilePath $pfxPath -CertStoreLocation Cert:\CurrentUser\My -Password $pwd
+          Remove-Item $pfxPath
+          "WIN_CERT_THUMBPRINT=$($cert.Thumbprint)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Configure update-artifact signing (minisign)
+        if: env.HAS_UPDATER_KEY == 'true'
+        shell: bash
+        env:
+          UPDATER_PUBKEY_VAR: ${{ vars.LIGHTHOUSE_UPDATER_PUBKEY }}
+        run: |
+          # Fail closed on partial configuration: signing update artifacts
+          # without baking the verification key would ship builds that can
+          # never verify what CI signs.
+          if [ -z "$UPDATER_PUBKEY_VAR" ]; then
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY secret is set but the LIGHTHOUSE_UPDATER_PUBKEY repo variable is not — set both (docs/signing.md)"
+            exit 1
+          fi
+          {
+            echo "TAURI_SIGNING_PRIVATE_KEY=${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}"
+            echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}"
+            echo "LIGHTHOUSE_UPDATER_PUBKEY=$UPDATER_PUBKEY_VAR"
+          } >> "$GITHUB_ENV"
       - name: Build Tauri bundles
         working-directory: native/crates/lighthouse-desktop
         shell: bash
@@ -86,7 +236,26 @@ jobs:
             # covers the runtime loader.
             export LD_LIBRARY_PATH="$GITHUB_WORKSPACE/resources/tts${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
           fi
-          npx --yes @tauri-apps/cli@^2 build --verbose
+          # Secrets-gated config overlay: updater artifacts only when the
+          # signing key exists (tauri build FAILS if they're requested
+          # without one — that failure mode is the gate working), Windows
+          # certificate thumbprint only when the cert was imported.
+          EXTRA_CONFIG=$(node -e '
+            const cfg = {};
+            if (process.env.HAS_UPDATER_KEY === "true") {
+              cfg.bundle = { ...cfg.bundle, createUpdaterArtifacts: true };
+            }
+            if (process.env.WIN_CERT_THUMBPRINT) {
+              cfg.bundle = { ...cfg.bundle, windows: { certificateThumbprint: process.env.WIN_CERT_THUMBPRINT } };
+            }
+            console.log(Object.keys(cfg).length ? JSON.stringify(cfg) : "");
+          ')
+          if [ -n "$EXTRA_CONFIG" ]; then
+            echo "building with config overlay: $EXTRA_CONFIG"
+            npx --yes @tauri-apps/cli@^2 build --verbose --config "$EXTRA_CONFIG"
+          else
+            npx --yes @tauri-apps/cli@^2 build --verbose
+          fi
       - name: Collect assets
         shell: bash
         run: |
@@ -96,20 +265,72 @@ jobs:
             Windows)
               # Stable name the website's download button auto-detects.
               cp native/target/release/bundle/nsis/*-setup.exe dist-assets/Lighthouse-Setup.exe
+              if [ "$HAS_UPDATER_KEY" = "true" ]; then
+                # The minisign signature covers the file bytes, so it stays
+                # valid across the rename above.
+                cp native/target/release/bundle/nsis/*-setup.exe.sig dist-assets/Lighthouse-Setup.exe.sig
+              fi
               ;;
             macOS)
               cp native/target/release/bundle/dmg/*.dmg dist-assets/
+              if [ "$HAS_UPDATER_KEY" = "true" ]; then
+                # The Tauri updater consumes the .app.tar.gz on macOS; the
+                # .dmg stays the first-install download.
+                cp native/target/release/bundle/macos/*.app.tar.gz dist-assets/
+                cp native/target/release/bundle/macos/*.app.tar.gz.sig dist-assets/
+              fi
               ;;
             Linux)
               cp native/target/release/bundle/appimage/*.AppImage dist-assets/ || true
               cp native/target/release/bundle/deb/*.deb dist-assets/ || true
+              if [ "$HAS_UPDATER_KEY" = "true" ]; then
+                cp native/target/release/bundle/appimage/*.AppImage.sig dist-assets/ || true
+              fi
               ;;
           esac
           ls -la dist-assets
-      - name: Upload to release ${{ inputs.release_tag }}
+      - name: Generate legacy update manifest (latest*.yml)
+        # electron-builder used to emit these; pre-0.3.0 Electron installs poll
+        # them (notify-only — the manifest is read for its `version`, nothing
+        # is downloaded). Regenerated here so the hashes/names always match the
+        # artifacts actually uploaded. Linux never had an Electron build → no
+        # manifest.
+        if: runner.os != 'Linux'
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.resolve.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          node - <<'EOF'
+          const fs = require('fs'), path = require('path'), crypto = require('crypto');
+          const version = process.env.RELEASE_TAG.replace(/^v/, '');
+          const isWin = process.platform === 'win32';
+          const name = isWin
+            ? 'Lighthouse-Setup.exe'
+            : fs.readdirSync('dist-assets').find(f => f.endsWith('.dmg'));
+          if (!name) throw new Error('no installer found in dist-assets');
+          const file = path.join('dist-assets', name);
+          const buf = fs.readFileSync(file);
+          const sha512 = crypto.createHash('sha512').update(buf).digest('base64');
+          const manifest = [
+            `version: ${version}`,
+            'files:',
+            `  - url: ${name}`,
+            `    sha512: ${sha512}`,
+            `    size: ${buf.length}`,
+            `path: ${name}`,
+            `sha512: ${sha512}`,
+            `releaseDate: '${new Date().toISOString()}'`,
+            '',
+          ].join('\n');
+          const out = path.join('dist-assets', isWin ? 'latest.yml' : 'latest-mac.yml');
+          fs.writeFileSync(out, manifest);
+          console.log(`${out}:\n${manifest}`);
+          EOF
+      - name: Upload to release ${{ needs.resolve.outputs.release_tag }}
         uses: actions/github-script@v7
         env:
-          RELEASE_TAG: ${{ inputs.release_tag }}
+          RELEASE_TAG: ${{ needs.resolve.outputs.release_tag }}
         with:
           script: |
             const fs = require('fs');
@@ -142,38 +363,74 @@ jobs:
               core.info(`uploaded ${name}`);
             }
 
-  finalize:
-    needs: bundle
-    if: ${{ inputs.replace_electron }}
+  # Fan-in: aggregate the per-platform update artifacts + signatures into the
+  # tauri-plugin-updater manifest (latest.json). Only runs when update-artifact
+  # signing is configured — an unsigned release carries no manifest, and
+  # clients stay notify-only.
+  updater-manifest:
+    needs: [resolve, bundle]
+    if: needs.resolve.outputs.sign_updater == 'true'
     runs-on: ubuntu-latest
     steps:
-      - name: Remove Electron installers from the release
+      - name: Build and upload latest.json
         uses: actions/github-script@v7
         env:
-          RELEASE_TAG: ${{ inputs.release_tag }}
+          RELEASE_TAG: ${{ needs.resolve.outputs.release_tag }}
         with:
           script: |
             const tag = process.env.RELEASE_TAG;
-            const version = tag.replace(/^v/, '');
             const releases = await github.paginate(github.rest.repos.listReleases,
               { owner: context.repo.owner, repo: context.repo.repo, per_page: 100 });
             const rel = releases.find(r => r.tag_name === tag);
             if (!rel) return core.setFailed(`no release with tag ${tag}`);
             const assets = await github.paginate(github.rest.repos.listReleaseAssets,
               { owner: context.repo.owner, repo: context.repo.repo, release_id: rel.id, per_page: 100 });
-            // electron-builder outputs; the tauri bundles use different names
-            // (and the tauri NSIS was uploaded over Lighthouse-Setup.exe).
-            // latest*.yml stay so 0.2.x notify-only update checks keep working.
-            const electron = [
-              `Lighthouse-${version}-arm64.dmg`,
-              `Lighthouse-${version}-arm64.dmg.blockmap`,
-              'Lighthouse-Setup.exe.blockmap',
-            ];
-            for (const name of electron) {
-              const a = assets.find(x => x.name === name);
-              if (a) {
-                await github.rest.repos.deleteReleaseAsset(
-                  { owner: context.repo.owner, repo: context.repo.repo, asset_id: a.id });
-                core.info(`removed ${name}`);
-              }
+            // Draft-release assets can't be fetched via browser_download_url;
+            // pull .sig content through the API asset endpoint instead.
+            const sigContent = async (asset) => {
+              const res = await github.request(
+                'GET /repos/{owner}/{repo}/releases/assets/{asset_id}',
+                { owner: context.repo.owner, repo: context.repo.repo,
+                  asset_id: asset.id, headers: { accept: 'application/octet-stream' } });
+              return Buffer.from(res.data).toString('utf8').trim();
+            };
+            const entry = async (installerName) => {
+              const inst = assets.find(a => a.name === installerName);
+              const sig = assets.find(a => a.name === `${installerName}.sig`);
+              if (!inst || !sig) return null;
+              return { signature: await sigContent(sig), url: inst.browser_download_url };
+            };
+            const appTar = assets.find(a => a.name.endsWith('.app.tar.gz'));
+            const appImage = assets.find(a => a.name.endsWith('.AppImage'));
+            const platforms = {};
+            const win = await entry('Lighthouse-Setup.exe');
+            if (win) platforms['windows-x86_64'] = win;
+            if (appTar) {
+              const mac = await entry(appTar.name);
+              if (mac) platforms['darwin-aarch64'] = mac;
             }
+            if (appImage) {
+              const linux = await entry(appImage.name);
+              if (linux) platforms['linux-x86_64'] = linux;
+            }
+            if (!Object.keys(platforms).length)
+              return core.setFailed('updater signing is on but no signed platform artifacts were found');
+            const manifest = {
+              version: tag.replace(/^v/, ''),
+              notes: `https://github.com/${context.repo.owner}/${context.repo.repo}/releases/tag/${tag}`,
+              pub_date: new Date().toISOString(),
+              platforms,
+            };
+            const body = JSON.stringify(manifest, null, 2);
+            const existing = assets.find(a => a.name === 'latest.json');
+            if (existing) {
+              await github.rest.repos.deleteReleaseAsset(
+                { owner: context.repo.owner, repo: context.repo.repo, asset_id: existing.id });
+            }
+            await github.rest.repos.uploadReleaseAsset({
+              owner: context.repo.owner, repo: context.repo.repo,
+              release_id: rel.id, name: 'latest.json',
+              data: body,
+              headers: { 'content-type': 'application/json', 'content-length': body.length },
+            });
+            core.info(`uploaded latest.json:\n${body}`);

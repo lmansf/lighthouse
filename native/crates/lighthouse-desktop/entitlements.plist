@@ -2,7 +2,10 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
   <dict>
-    <!-- Electron/V8 JIT needs executable memory under the hardened runtime. -->
+    <!-- Hardened-runtime entitlements for the Developer-ID-signed Tauri bundle
+         (wired via tauri.conf.json bundle.macOS.entitlements; inert while
+         builds are unsigned). JIT/executable memory: the WKWebview JS engine
+         and llama.cpp's runtime codegen both want it. -->
     <key>com.apple.security.cs.allow-jit</key>
     <true/>
     <key>com.apple.security.cs.allow-unsigned-executable-memory</key>

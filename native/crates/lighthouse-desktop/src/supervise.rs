@@ -559,15 +559,33 @@ impl Supervisor {
     }
 }
 
-/// Latest-release info surfaced to the tray + splash ("notify-only Phase A").
-#[derive(Default)]
+/// Updater "Phase B" gate: the minisign public key whose private half signs
+/// release artifacts in CI (`tauri signer generate`; see docs/signing.md).
+/// Baked at compile time from the LIGHTHOUSE_UPDATER_PUBKEY env (a repo
+/// Actions *variable* — the public key is not a secret). When absent the
+/// updater is strictly notify-only: click-to-update opens the releases page
+/// and the app NEVER downloads-and-executes an artifact it cannot verify
+/// (docs/auto-updater-design.md §2 — an unverified auto-apply is an RCE
+/// hand-off, so unsigned builds fail closed).
+const UPDATER_PUBKEY: Option<&str> = option_env!("LIGHTHOUSE_UPDATER_PUBKEY");
+
+/// The baked-in updater public key, if this build carries one.
+pub fn updater_pubkey() -> Option<&'static str> {
+    UPDATER_PUBKEY.map(str::trim).filter(|k| !k.is_empty())
+}
+
 /// A newer release, when one is known: version plus (when the release carries
-/// an installer asset for this platform) what to download for click-to-update.
+/// an installer asset for this platform) what to download for click-to-update,
+/// and the detached minisign signature that gates actually running it.
 #[derive(Clone)]
 pub struct UpdateInfo {
     pub version: String,
     pub asset_url: Option<String>,
     pub asset_name: Option<String>,
+    /// `<asset_name>.sig` from the same release (base64 minisign signature,
+    /// produced by CI when the signing key is configured). Verification is
+    /// mandatory before install — no sig ⇒ notify-only for that release.
+    pub sig_url: Option<String>,
 }
 
 pub struct UpdateState(pub Mutex<Option<UpdateInfo>>);
@@ -643,11 +661,26 @@ pub async fn check_for_updates(app: AppHandle) {
     );
     if newer {
         let asset = platform_asset(&body["assets"]);
+        // The detached signature for this platform's asset, uploaded by CI
+        // beside it when release signing is configured.
+        let sig_url = asset.as_ref().and_then(|(name, _)| {
+            let want = format!("{}.sig", name.to_ascii_lowercase());
+            body["assets"].as_array()?.iter().find_map(|a| {
+                let n = a["name"].as_str()?;
+                (n.to_ascii_lowercase() == want)
+                    .then(|| a["browser_download_url"].as_str().map(String::from))
+                    .flatten()
+            })
+        });
+        // In-app install requires an asset AND a verifiable signature AND a
+        // baked-in key to verify against — anything less is notify-only.
+        let can_install = asset.is_some() && sig_url.is_some() && updater_pubkey().is_some();
         if let Some(state) = app.try_state::<UpdateState>() {
             *state.0.lock().unwrap_or_else(|p| p.into_inner()) = Some(UpdateInfo {
                 version: latest.trim_start_matches('v').to_string(),
                 asset_url: asset.as_ref().map(|(_, u)| u.clone()),
                 asset_name: asset.as_ref().map(|(n, _)| n.clone()),
+                sig_url,
             });
         }
         let _ = app.emit(
@@ -656,7 +689,7 @@ pub async fn check_for_updates(app: AppHandle) {
                 "phase": "available",
                 "version": latest.trim_start_matches('v'), // match update_state's shape
                 "url": RELEASE_PAGE_URL,
-                "canInstall": asset.is_some(),
+                "canInstall": can_install,
             }),
         );
         crate::rebuild_tray_menu(&app);
@@ -665,10 +698,15 @@ pub async fn check_for_updates(app: AppHandle) {
     }
 }
 
-/// Click-to-update. Windows: download the installer beside our app data and
-/// launch it, then exit so it can replace files (NSIS drives the rest).
-/// macOS: download + open the dmg (drag-to-Applications stays manual —
-/// unsigned builds can't self-replace). Linux/no-asset: the releases page.
+/// Click-to-update — updater Phase B (download + VERIFY + install-on-consent).
+/// Requires a baked-in updater public key and a `.sig` beside the release
+/// asset: the installer is downloaded, minisign-verified, and only then run
+/// (Windows: launch NSIS + exit so it can replace files; macOS: open the
+/// verified dmg — drag-to-Applications stays manual until builds are signed;
+/// Linux: chmod + open the AppImage). Without a key or signature this is
+/// strictly notify-only and opens the releases page — the previous behavior
+/// of executing an unverifiable download is deliberately removed
+/// (docs/auto-updater-design.md §2).
 pub async fn update_now(app: AppHandle) -> serde_json::Value {
     let info = app
         .try_state::<UpdateState>()
@@ -676,7 +714,14 @@ pub async fn update_now(app: AppHandle) -> serde_json::Value {
     let Some(info) = info else {
         return serde_json::json!({ "ok": false, "reason": "no update known" });
     };
-    let (Some(url), Some(name)) = (info.asset_url.clone(), info.asset_name.clone()) else {
+    let (Some(pubkey), Some(url), Some(name), Some(sig_url)) = (
+        updater_pubkey(),
+        info.asset_url.clone(),
+        info.asset_name.clone(),
+        info.sig_url.clone(),
+    ) else {
+        // Notify-only: no key baked into this build, or the release carries
+        // no verifiable signature for this platform's asset.
         crate::open_with_os(std::path::Path::new(RELEASE_PAGE_URL));
         return serde_json::json!({ "ok": true, "action": "page" });
     };
@@ -703,13 +748,38 @@ pub async fn update_now(app: AppHandle) -> serde_json::Value {
             file.write_all(&chunk)?;
         }
         file.flush()?;
-        Ok::<_, anyhow::Error>(())
+        let sig = client
+            .get(&sig_url)
+            .send()
+            .await?
+            .error_for_status()?
+            .text()
+            .await?;
+        Ok::<_, anyhow::Error>(sig)
     };
-    if let Err(e) = download.await {
-        eprintln!("update download failed: {e}");
+    let sig = match download.await {
+        Ok(sig) => sig,
+        Err(e) => {
+            eprintln!("update download failed: {e}");
+            let _ = fs::remove_file(&dest);
+            crate::open_with_os(std::path::Path::new(RELEASE_PAGE_URL));
+            return serde_json::json!({ "ok": false, "reason": "download failed", "action": "page" });
+        }
+    };
+
+    // Verify BEFORE anything can execute the artifact. Failure deletes the
+    // download and falls back to the releases page — never a silent retry.
+    let verify = || -> anyhow::Result<()> {
+        let data = fs::read(&dest)?;
+        lighthouse_core::updates::verify_update_signature(&data, &sig, pubkey)
+    };
+    if let Err(e) = verify() {
+        eprintln!("update REJECTED — signature verification failed: {e}");
+        let _ = fs::remove_file(&dest);
         crate::open_with_os(std::path::Path::new(RELEASE_PAGE_URL));
-        return serde_json::json!({ "ok": false, "reason": "download failed", "action": "page" });
+        return serde_json::json!({ "ok": false, "reason": "signature verification failed", "action": "page" });
     }
+    eprintln!("update artifact signature verified ({name})");
 
     #[cfg(all(unix, not(target_os = "macos")))]
     {

@@ -1,235 +1,205 @@
-# Lighthouse Vault
+# Lighthouse
 
-Curate which of your files and data sources your AI can see.
-Browse files in a calm, sandy-beach File-Explorer-style UI (red used sparingly as the beacon accent), toggle items **in** or **out** of the RAG index, and ask a Google-style chat that answers only from what you've included. Local-first: your documents stay in a folder on your own machine.
+Curate which of your files and data sources your AI can see — then ask.
+Lighthouse is a **local-first** desktop app: a vault of your documents on your
+own disk, an explorer to toggle exactly which of them the AI may read, and a
+grounded chat (with citations) that answers only from what you included. The
+engine, the search index, the embeddings, OCR, text-to-speech, and — if you
+choose the private model — the AI itself all run **on your machine**.
 
-**Download:** installers for Windows, macOS, and Linux at **[lhvault.app](https://lhvault.app)** — or straight from the [latest release](https://github.com/lmansf/lighthouse/releases/latest).
+Built for two people in particular: the **data analyst** who wants trustworthy,
+engine-verified answers over their own spreadsheets and reports, and the **IT
+security director** who needs to approve all of it.
 
-> The npm package is still named `rag-vault`; the product and repo are **Lighthouse**.
+**Download:** installers for Windows, macOS, and Linux at
+**[lhvault.app](https://lhvault.app)** — or straight from the
+[latest release](https://github.com/lmansf/lighthouse/releases/latest).
+
+> The npm package is still named `rag-vault`; the product and repo are
+> **Lighthouse**. The UI is the Forerunner theme — steel blues with a beacon
+> accent — in light and dark.
+
+## What it does (as of 0.11)
+
+- **Curated inclusion.** Files default to *excluded*; a document is readable
+  by the AI only when its own toggle is on and no ancestor folder is excluded.
+  Adds are link-in-place on desktop (nothing copied), removal is
+  non-destructive (recoverable trash), and the tree stays live via a
+  filesystem watcher.
+- **Grounded chat with citations.** Answers stream with `[n]` references and
+  clickable Related-files cards. Ask about one document and Lighthouse reads
+  **all of it** (whole-document answers; very long files are read section by
+  section with an honest note). Multi-document questions get map-reduce
+  synthesis.
+- **Genie analytics.** Questions over CSV/TSV/Parquet/Excel become **one
+  read-only SQL SELECT**, executed by an embedded engine (DataFusion) — the
+  model narrates the *verified* result and the SQL is shown verbatim, with a
+  freshness footer. Refinement chips, Edit-SQL re-runs (no model), multi-step
+  analytics, union tables + join hints, charts in chat, save-as-CSV/PNG/note,
+  and **pinned questions** that re-run deterministically and alert on change.
+- **Hybrid retrieval.** Lexical search fused with on-device semantic
+  embeddings (bundled nomic-embed model — no cloud, no download at query
+  time), plus name/path matching and structure-aware chunking that keeps
+  table headers on every chunk.
+- **Reads your real corpus.** PDF, Word (+ legacy `.doc` salvage), Excel,
+  PowerPoint, OpenDocument, RTF, Markdown, text — and **on-device OCR** for
+  images and scanned PDFs.
+- **Desktop widget + Whisper summon.** A floating ask-bar summonable with a
+  keyboard chord (opt-in — it installs an OS keyboard hook only if you turn
+  it on; see `docs/edr-whitelisting.md` once Phase 1 lands), with inline
+  answers and dictation.
+- **Your choice of model.** On-device private model (bundled `llama-server`
+  engine + opt-in ~4.2 GB Mistral-7B download, GPU-offloaded where available)
+  — or bring a key for Anthropic Claude, OpenAI, Google Gemini, xAI Grok,
+  Mistral, or DeepSeek. Keys are stored **encrypted at rest** on your device
+  and survive restarts and sign-outs. No model at all still works: a
+  zero-network extractive fallback answers with citations.
+- **Read-aloud** via a bundled neural voice (Piper) — the answer text never
+  leaves the machine.
 
 ## Run it
 
-### Desktop app (recommended)
+### Desktop app (what users get)
 
-Lighthouse runs as a persistent desktop app (system tray, opt-out
-launch-at-login, native file/vault dialogs). You don't need a terminal:
+Install from [lhvault.app](https://lhvault.app) or the
+[releases page](https://github.com/lmansf/lighthouse/releases/latest). The app
+is a native shell (Tauri 2) around a Rust engine: system tray, opt-out
+launch-at-login, native dialogs, **no local TCP port** — the UI talks to the
+engine over IPC.
 
-- **Just run it** — extract the repo and double-click **`Lighthouse.cmd`**
-  (Windows) or **`Lighthouse.command`** (macOS/Linux). The first launch installs
-  and builds; every launch after that opens the app. Needs [Node.js](https://nodejs.org).
-- **Make a shareable installer** — double-click **`Build-Installer.cmd`** on
-  Windows to produce a standalone `.exe` in `release/` that end users install
-  with no Node.js, build, or terminal.
+### From source
 
-See **[docs/desktop.md](docs/desktop.md)** for details, the one-line terminal
-installer, and packaging notes.
-
-### Web / development
+Web dev flow (TypeScript twin engine, fastest UI iteration — no Rust needed):
 
 ```bash
 npm install
 npm run dev      # http://localhost:3000
-npm run build && npm run start   # production server
-npm run electron                 # desktop app (after build)
+```
+
+Desktop build (Rust toolchain + platform webview deps required; see
+`.github/workflows/desktop-release.yml` for the exact Linux packages):
+
+```bash
+npm install
+npm run desktop:build      # static-export UI + cargo build --release
+# binary: native/target/release/lighthouse-desktop
+npm run fetch:model        # optional: bundled engines (llama-server, Piper, embeddings, OCR)
 ```
 
 ## Architecture
 
-This repo is structured so independent agent teams can each own one feature in its own git worktree and converge cleanly.
-Everything decouples through `src/contracts/` (typed interfaces + swappable implementations, real or mock) and two Zustand stores.
+Two engines, one contract:
 
-- **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** - the design, the contract seam, and the rules of the road.
-- **docs/agents/** - one brief per feature team: [shell](docs/agents/shell.md), [onboarding](docs/agents/onboarding.md), [explorer](docs/agents/explorer.md), [chat](docs/agents/chat.md).
+- **`native/` — the shipping product.** `lighthouse-core` (Rust) owns the
+  vault, retrieval index, extraction, OCR, embeddings, analytics, licensing,
+  and synthesis; `lighthouse-desktop` is the Tauri 2 shell (window/tray/
+  widget/supervision/updater); `lighthouse-server` is the same engine behind
+  a loopback HTTP API for tests and headless use.
+- **`src/server/` + `app/api/` — the TypeScript twin.** The web-dev flow and
+  parity oracle. It is deliberately not the product; see
+  **[docs/ts-twin.md](docs/ts-twin.md)** for the parity rules and the
+  canonical list of Rust-only capabilities.
 
-The feature components in `app/page.tsx` are working placeholders today - each team replaces its own.
+The UI (Next.js static-export + Fluent UI) decouples through
+`src/contracts/`; inside the desktop shell every `fetch("/api/…")` is carried
+over Tauri IPC (`src/shell/tauriTransport.ts`).
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) has the original design notes
+(pre-rewrite; see its header).
 
-## Backend (local-first, standalone)
+Releases: `desktop-release.yml` (gated on a 3-OS build/boot/ask smoke —
+`release-smoke.yml`) builds the installers and update manifests;
+`publish-release.yml` flips the draft public. Code signing is wired and
+awaits certificates — **[docs/signing.md](docs/signing.md)**.
 
-The mocks are now backed by a real **local-first** implementation behind the same
-contracts — no cloud database required:
+## Network & privacy
 
-- **Files** live in a real directory (`./vault`, or set `VAULT_DIR` to any path).
-  The explorer lists them; inclusion flags persist to `vault/.rag-vault/state.json`.
-  Inclusion defaults to **excluded**: a node is retrievable only if its own flag
-  is explicitly on *and* no ancestor folder is excluded, so anything newly added
-  from disk stays out until you opt it in and an excluded folder forces every
-  descendant out. The explorer keeps the tree live — it re-scans the vault in the
-  background (and on a toolbar **Refresh**), so files copied into the vault folder
-  outside an in-app upload appear on their own. Files can also be moved within the vault (`op:move`), which
-  carries their inclusion flags to the new location. Whole folders upload with
-  their structure. On the **desktop** adds are **link-first**: dropped or picked
-  files/folders are **linked** in place (`op:addReference` / `op:removeReference`)
-  — indexed from their real location on disk with nothing copied, so whole
-  folders register instantly — and copying into the vault is the explicit
-  secondary option. Items can be **removed from
-  the vault** non-destructively (`op:remove`): a vault file/folder moves to a
-  recoverable trash (`.rag-vault/trash/<date>/`) and a linked item only unlinks,
-  leaving your real files in place.
-- **Retrieval** is real TF-IDF cosine over the text of the *included* files,
-  combined with a file name/path match so a file is findable by what it's *called*
-  as well as what it contains (a file named `creditcard.csv` answers "any credit
-  cards?" even when its rows are anonymized numbers). Plain-text files are read
-  directly; **PDF, Word (`.docx`), and Excel (`.xlsx`/`.xls`)** documents have
-  their text extracted by parsers loaded lazily on first use and cached on disk
-  (keyed by the file's mtime+size, so each document is parsed once — a failed
-  parse is logged and *not* cached, so a transient error is retried on the next
-  scan rather than pinned to empty), and an unreadable or corrupt document
-  degrades gracefully to empty text yet stays findable by name
-  (`src/server/extract.ts`). Catalog-style queries
-  ("show me all files", "list my datasets", "how many PDFs") skip ranking and
-  instead **enumerate** the included set, narrowing to a file kind (datasets,
-  documents, PDFs, spreadsheets) or a named file type (`csv`, `pdf`, `md`, …) when
-  the query names one. Large files are read up to a
-  1 MB prefix and total chunks are capped, so a huge dataset can't stall a query
-  (`src/server/vault.ts`) — local, no embeddings download.
-- **Chat** is a running conversation that streams a grounded answer (`/api/chat`):
-  a hosted model when an API key is configured — Anthropic Claude, OpenAI GPT,
-  Google Gemini, xAI Grok, Mistral, or DeepSeek, set in onboarding or later from
-  the settings gear's **AI models** dialog (keys are stored per provider and can
-  be live-tested there; `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`,
-  `XAI_API_KEY`, `MISTRAL_API_KEY`, and `DEEPSEEK_API_KEY` each override their
-  provider's stored key) — an on-device **local model** when the "Local model
-  (private)" provider is selected (see **[Local model](#local-model)**), otherwise
-  a local extractive fallback that needs no network. Answers render as Markdown
-  (headings, lists, tables, code, bold, and links that open externally). Each
-  question and answer is kept in a transcript so you can ask follow-ups about the
-  documents that came back
-  (prior turns — capped to the last few — are threaded to the model, and a bare
-  follow-up blends in the previous question to anchor retrieval); **New chat**
-  starts fresh. **Attach files to a question** by dragging one from the explorer
-  onto the chat panel, or dropping files from your OS onto it (on the desktop
-  those **link** into the vault in place — no copy — otherwise they upload into
-  the vault first); attachments show as removable pills and scope the question
-  (and its follow-ups) to just those files — even ones you haven't included
-  globally — until you clear them or start a **New chat**. The answer's
-  **Related files** cards
-  are clickable on the desktop build — `/api/open` opens the cited file in its
-  native app (web deployments report no such capability and the cards stay inert).
-  Answers can be **read aloud** on-device: a **Read aloud** switch in the chat
-  header (remembered across sessions) auto-speaks each finished answer, and every
-  answer has a play/stop button. Speech is synthesized by a **bundled local
-  neural voice** (Piper) served from `/api/tts` - realistic and entirely on your
-  machine, so the answer text never leaves it. When no local voice is bundled (a
-  plain web deploy or `npm run dev`) it falls back to the OS's installed voices
-  via the browser's Web Speech API; the controls are hidden only when the runtime
-  has no speech support at all.
-- **Profile/key** are stored locally in `vault/.rag-vault/profile.json` (gitignored).
-
-Swap back to the in-memory mocks by pointing the three exports in
-`src/contracts/index.ts` at `./mocks/*`. A cloud/Vercel deployment would add an
-adapter behind the same `RagService`/`ChatService`/`AuthService` interfaces
-(serverless hosts can't persist to a local directory — local storage means
-running on your own machine).
+The complete egress inventory — every host the app *can* contact, when, with
+what payload, and how to turn each off — lives in
+**[docs/data-flows.md](docs/data-flows.md)** (written for a security review).
+The short version: with the private model selected, answering a question
+makes **zero network calls**; cloud calls happen only to the provider you
+configured; telemetry is **opt-in** and coarse; chat history is **opt-in**
+and local; API keys are sealed (AES-256-GCM) on disk; state writes are 0600
+and atomic.
 
 ## Pricing & trial
 
-Start a **free 14-day trial** — no payment, no key to copy, and repeatable. When
-a trial ends you can start another, or skip it and **subscribe for $14.99 a
-month** for unlimited use.
+Start a **free 14-day trial** — no payment, no key to copy, and repeatable.
+When a trial ends you can start another, or skip it and **subscribe for
+$14.99 a month** for unlimited use.
 
-Your files are always yours. A lapsed trial or subscription only **locks** the
-app — your vault is greyed out, never deleted — until you start a new trial or
-subscribe. Subscribing is one click: checkout opens in your browser and the app
-unlocks itself the moment payment goes through, with no license key to paste.
-Each subscription is tied to an email, so a team can buy several under one card.
+Your files are always yours. A lapsed trial or subscription only **locks**
+the app — your vault is greyed out, never deleted — until you start a new
+trial or subscribe.
 
 > **Paid subscriptions aren't open yet.** The shipped build defaults to
-> `PAID_ENABLED=0`, so the Subscribe affordances stay hidden and the app shows
-> **"Get notified when purchasing opens"** instead — only the free trial is
-> live. Flip `PAID_ENABLED=1` (see [Configuration](#configuration)) to surface
-> the $14.99/mo checkout described above.
+> `PAID_ENABLED=0`, so the Subscribe affordances stay hidden and the app
+> shows **"Get notified when purchasing opens"** instead — only the free
+> trial is live.
 
 Self-hosting setup (Supabase tables + Edge Functions + Stripe) is in
 **[docs/registration.md](docs/registration.md)**.
 
 ## Configuration
 
-Copy `.env.local.example` → `.env.local` (gitignored). All vars are optional:
+All optional (`.env.local`, gitignored; the desktop app manages its own state):
 
-- `VAULT_DIR` — where your documents live (default `./vault`; the desktop app
-  manages this for you).
-- `ANTHROPIC_API_KEY` — live Claude chat; without it, a local extractive
-  fallback answers with no network.
-- `LIGHTHOUSE_LOCAL_LLM_URL` — OpenAI chat-completions endpoint for the "Local
-  model (private)" provider (default `http://127.0.0.1:8080/v1/chat/completions`;
-  for Ollama use `http://127.0.0.1:11434/v1/chat/completions`). See
-  **[Local model](#local-model)**.
-- `LIGHTHOUSE_LOCAL_LLM_MODEL` — model name sent to that server; required for
-  Ollama / LM Studio (e.g. `llama3.2`), ignored by `llama-server`.
-- `LICENSE_API_URL` / `SUPABASE_ANON_KEY` — public hosted-license config (the
-  Edge Function URL + anon key). Shipped in the committed `.env.production`;
-  override in `.env.local` to point a dev build at the same function.
-- `CHECKOUT_API_URL` — public `create-checkout` Edge Function URL for the
-  $14.99/mo plan. Shipped in `.env.production`; the Stripe secret, price ID, and
-  webhook secret live only in the Edge Functions, never here. See
-  **[docs/registration.md](docs/registration.md)**.
-- `PAID_ENABLED` — set to `1` (then restart) to surface the Subscribe
-  affordances (left-nav button, registration screen, lock gate); default `0`
-  shows "Get notified when purchasing opens" instead. Public; shipped in
-  `.env.production`.
-- `LICENSE_ENFORCE` / `LICENSE_SECRET` — local-dev trial only: set
-  `LICENSE_ENFORCE=1` (with no `LICENSE_API_URL`) for a self-contained trial
-  using local crypto, with `LICENSE_SECRET` encrypting the local key. The
-  service-role key and the production `LICENSE_SECRET` live in the Edge Function,
-  never here. See **[docs/registration.md](docs/registration.md)**.
+- `VAULT_DIR` — where your documents live (default `./vault` in dev; the
+  desktop app manages this).
+- Provider keys — normally entered in-app (sealed at rest); env overrides:
+  `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY` (or
+  `GOOGLE_API_KEY`), `XAI_API_KEY`, `MISTRAL_API_KEY`, `DEEPSEEK_API_KEY`.
+- `LIGHTHOUSE_LOCAL_LLM_URL` — OpenAI-compatible endpoint for the private
+  provider (default `http://127.0.0.1:8080/v1/chat/completions`; Ollama:
+  `http://127.0.0.1:11434/v1/chat/completions`).
+  `LIGHTHOUSE_LOCAL_LLM_MODEL` — model name for servers that need one
+  (Ollama/LM Studio); ignored by the bundled `llama-server`.
+- `LICENSE_API_URL` / `SUPABASE_ANON_KEY` — hosted-license config (shipped in
+  `.env.production`). `LICENSE_ENFORCE`/`LICENSE_SECRET` — local-dev trial.
+- `PAID_ENABLED` — `1` surfaces the Subscribe affordances; default `0`.
+- `CHECKOUT_API_URL` — the `create-checkout` Edge Function URL.
 
 ## Local model
 
-Pick **"Local model (private)"** as your provider — in onboarding, or later from
-the settings gear's **AI models** dialog — to answer
-entirely on-device — no API key, no network, nothing leaves your machine.
-This is the privacy-first option for governance-conscious teams.
+Pick **"Local model (private)"** — in onboarding or the settings gear's **AI
+models** dialog — to answer entirely on-device: no API key, no network,
+nothing leaves your machine.
 
-Lighthouse talks to a local **OpenAI chat-completions compatible** server. Two
-ways to provide one:
+- **Bundled engine + opt-in weights:** the installer ships `llama-server`
+  (llama.cpp, MIT) but not the ~4.2 GB Mistral-7B-Instruct-v0.3 weights
+  (past the 2 GB installer/asset caps) — click **＋** next to the private
+  model to download them once (Apache-2.0, from Hugging Face with a
+  hash-verified fallback mirror). The shell then runs the model
+  automatically, offloading layers to a supported GPU (Vulkan/Metal) and
+  falling back to CPU cleanly.
+- **Bring your own:** point `LIGHTHOUSE_LOCAL_LLM_URL` at Ollama or
+  LM Studio.
 
-- **Bundled engine + opt-in model:** the installer ships the `llama-server`
-  binary (llama.cpp, MIT) under `resources/llm/`, but **not** the model weights —
-  Mistral-7B-Instruct-v0.3 Q4_K_M is ~4.2 GB, past NSIS's (and GitHub's) 2 GB
-  limit, so it can't go in the installer. Instead the private model is a one-time,
-  opt-in download: pick **"Local model (private)"** and click the **＋** next to it
-  to fetch the weights (Apache-2.0, from Hugging Face) into your user data dir,
-  with a progress indicator. Once present the entry reads **"Installed"** with a
-  trash button that uninstalls the model (freeing the ~4.2 GB or letting you
-  re-test the download). The desktop app then launches `llama-server` on
-  `127.0.0.1:8080` against it automatically (and on every later launch), shutting
-  it down on quit. It's a CPU-only build, so it trades speed for quality: expect
-  roughly a minute per answer on a typical laptop and ~6-8 GB of free RAM. Build
-  the app with `npm run dist`, which runs `next build` and `npm run fetch:model`
-  (the binary + the Piper TTS assets only — the model is fetched at runtime).
-- **Bring your own:** run [Ollama](https://ollama.com) or
-  [LM Studio](https://lmstudio.ai) yourself and point Lighthouse at it with
-  `LIGHTHOUSE_LOCAL_LLM_URL` (default `http://127.0.0.1:8080/v1/chat/completions`;
-  for Ollama use `http://127.0.0.1:11434/v1/chat/completions`). Servers that
-  require a named model (Ollama, LM Studio) need `LIGHTHOUSE_LOCAL_LLM_MODEL` set
-  to the model you pulled (e.g. `llama3.2`); `llama-server` ignores it.
-
-If the local server isn't reachable, Lighthouse falls back to streaming the most
-relevant passages so you still get a grounded, cited answer.
+If the local server isn't reachable, Lighthouse falls back to streaming the
+most relevant passages, so you still get a grounded, cited answer.
 
 ### Third-party components
 
-Bundled in the installer under their own licenses:
+Bundled in the installer under their own permissive licenses:
 
 - **llama.cpp** `llama-server` — MIT © the ggml.ai / llama.cpp authors.
-- **Piper** TTS engine — MIT © Michael Hansen / the Piper authors — and the
-  `en_US-lessac-medium` voice (see its model card on the
-  [rhasspy/piper-voices](https://huggingface.co/rhasspy/piper-voices) repo for
-  the voice's own license and dataset attribution).
+- **Piper** TTS — MIT © Michael Hansen / the Piper authors — with the
+  `en_US-lessac-medium` voice (MIT/CC0; see
+  [rhasspy/piper-voices](https://huggingface.co/rhasspy/piper-voices)).
+- **nomic-embed-text-v1.5** embeddings — Apache-2.0 © Nomic AI.
+- **ocrs** OCR models — the ocrs project is MIT/Apache-2.0; its models are
+  trained on openly-licensed data (HierText, CC-BY-SA 4.0), attributed here.
 
-Downloaded on demand (not bundled), used under its own license:
-
-- **Mistral-7B-Instruct-v0.3** weights — Apache-2.0 © Mistral AI; no usage
-  restrictions. Fetched from Hugging Face into the user's data dir when they opt
-  in to the private model.
-
-All are permissive, commercial-use licenses, so they impose no restriction on
-selling Lighthouse; their notices are retained here to satisfy attribution.
+Downloaded on demand (not bundled): **Mistral-7B-Instruct-v0.3** weights —
+Apache-2.0 © Mistral AI.
 
 ## Status
 
-Working local-first vertical slice: real file tree, real retrieval (including
-text extraction from PDF, Word, and Excel documents), real streamed chat, plus a
-persistent **desktop app** (Electron) with a double-click launcher, a packaged
-installer, and branded app/tray/installer icons. Next: optional vector
-embeddings behind `RagService.search`.
+Shipping: the native desktop app described above, at **0.11.x**, with the
+release pipeline (build → 3-OS smoke → draft → publish) run from this repo.
+In flight on the current roadmap (`docs/roadmap-personas-2026-07.md`):
+code-signing certificates, an org-deployable managed-policy layer, a local
+audit log + egress transparency panel, offline activation, PDF table
+extraction, scheduled briefings, and richer charts. Installers are currently
+**unsigned** (SmartScreen/Gatekeeper warn on first launch); the signing
+pipeline is wired and documented in [docs/signing.md](docs/signing.md).

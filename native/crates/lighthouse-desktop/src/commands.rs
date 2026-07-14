@@ -963,7 +963,12 @@ pub fn update_state(app: AppHandle) -> Value {
             "phase": "available",
             "version": info.version,
             "url": crate::supervise::RELEASE_PAGE_URL,
-            "canInstall": info.asset_url.is_some(),
+            // In-app install = asset + detached signature + a baked-in key to
+            // verify with (updater Phase B); otherwise the button says
+            // "Get it" and opens the releases page.
+            "canInstall": info.asset_url.is_some()
+                && info.sig_url.is_some()
+                && crate::supervise::updater_pubkey().is_some(),
         }),
         None => json!({ "phase": "none" }),
     }
@@ -989,6 +994,17 @@ pub fn watch_generation() -> u64 {
 #[tauri::command]
 pub fn diag_report(payload: String) {
     eprintln!("[diag] {payload}");
+}
+
+/// CI boot smoke (LIGHTHOUSE_SMOKE=1, release-smoke.yml): the in-webview
+/// probe reports its verdict here and the process exits with it — 0 for a
+/// grounded answer, 2 for a failed assertion. Inert outside smoke mode (the
+/// driver JS that invokes it is only ever injected when the env var is set).
+#[tauri::command]
+pub fn smoke_report(app: tauri::AppHandle, payload: String) {
+    eprintln!("SMOKE {payload}");
+    let ok = payload.starts_with("OK");
+    app.exit(if ok { 0 } else { 2 });
 }
 
 // --- Desktop widget (docs/widget-scope.md §7, W1 frozen contract). All are

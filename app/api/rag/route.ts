@@ -161,21 +161,22 @@ export async function POST(req: Request) {
     }
 
     case "analyticsSql":
-      // PARITY: the SQL engine (DataFusion) lives in the desktop engine only;
-      // the dev server never takes the analytics branch, so there is nothing
-      // to re-execute here. The UI surfaces this as the dialog's error state.
+      // PARITY: the SQL engine (DataFusion) lives in the Rust engine only
+      // (desktop app + headless lighthouse-server); this dev twin never takes
+      // the analytics branch, so there is nothing to re-execute here. The UI
+      // surfaces this as the dialog's error state.
       return NextResponse.json({
-        error: "analytics queries run in the desktop engine — this dev server can't execute SQL",
+        error: "analytics queries run in the Rust engine — this dev server can't execute SQL",
       });
 
     case "suggestedAsks":
       // PARITY: suggestions derive from the column catalog, which lives in
-      // the desktop engine only. Empty means the chat keeps its static
+      // the Rust engine only. Empty means the chat keeps its static
       // empty-state hint — exactly the no-tabular-files behavior.
       return NextResponse.json({ asks: [] });
 
     // --- Pinned questions (openspec: add-pinned-questions). PARITY: rechecks
-    //     re-run SQL through DataFusion (desktop engine only) — this dev
+    //     re-run SQL through DataFusion (Rust engine only) — this dev
     //     server does CRUD and reports "no changes" on recheck, so pinned
     //     summaries simply stay as of pin time.
     case "pinAsk": {

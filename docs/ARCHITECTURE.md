@@ -1,5 +1,13 @@
 # RAG Vault - Architecture
 
+> **Founding-era document (pre-rewrite).** The contract seam
+> (`src/contracts/`) and store design below still govern the UI, but the
+> product has moved on from what this file describes: the engine is Rust
+> (`native/` — see `native/README.md` and `docs/ts-twin.md`), the shell is
+> Tauri (not Electron), and the theme is Forerunner steel/blue (the
+> sandy-beach theme described below shipped Jun 28 and was replaced Jun 30).
+> Kept for the seams and the history.
+
 RAG Vault lets a user curate which of their files and data sources are exposed to a RAG (retrieval-augmented generation) system.
 Browse files in an organic, sandy-beach light-themed File-Explorer-like tree, then toggle items as **included** or **excluded** from retrieval.
 Anything included is searchable by the AI; anything excluded is invisible to it.

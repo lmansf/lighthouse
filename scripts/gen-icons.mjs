@@ -1,8 +1,10 @@
 /**
  * Rasterize the Lighthouse SVG sources into the PNGs the desktop build needs.
  *
- *   build/icon.svg  -> build/icon.png   (1024² — electron-builder derives the
- *                                         Windows .ico / macOS .icns from it)
+ *   build/icon.svg  -> build/icon.png   (1024² brand-art master; the Tauri
+ *                                         icon set under native/crates/
+ *                                         lighthouse-desktop/icons/ was
+ *                                         derived from it)
  *   build/tray.svg  -> assets/tray.png  (transparent tray/menubar icon)
  *
  * Run: `npm run icons` (installs sharp / png-to-ico on demand via --no-save).
@@ -29,8 +31,8 @@ async function render(svg, out, size) {
   console.log(`  ✓ ${out} (${size}×${size})`);
 }
 
-await render("build/icon.svg", "build/icon.png", 1024); // electron-builder source
-await render("build/icon.svg", "assets/icon.png", 512);  // runtime BrowserWindow icon
+await render("build/icon.svg", "build/icon.png", 1024); // brand-art master
+await render("build/icon.svg", "assets/icon.png", 512);  // window icon (legacy)
 await render("build/tray.svg", "assets/tray.png", 256);  // tray / menubar
 
 // Windows multi-resolution .ico for the app + NSIS installer.
