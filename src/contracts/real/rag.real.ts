@@ -6,6 +6,7 @@ import type {
   FileNode,
   Pin,
   PolicySnapshot,
+  EgressSnapshot,
   RagReference,
   RestoreToken,
 } from "../types";
@@ -165,6 +166,10 @@ class RealRagService implements RagService {
 
   async policy(): Promise<PolicySnapshot> {
     return (await post({ op: "policy" })) as unknown as PolicySnapshot;
+  }
+
+  async egress(): Promise<EgressSnapshot> {
+    return (await post({ op: "egress" })) as unknown as EgressSnapshot;
   }
 }
 

@@ -176,6 +176,13 @@ pub async fn call_fn(op: &str, extra: Value) -> anyhow::Result<Value> {
             .header("apikey", &anon)
             .header("authorization", format!("Bearer {anon}"));
     }
+    // Egress registry: same host, but the telemetry ops are labeled apart
+    // from the licensing ones so the panel shows them distinctly.
+    let purpose = match op {
+        "ping" | "event" | "events" | "assign" => crate::egress::PURPOSE_TELEMETRY,
+        _ => crate::egress::PURPOSE_LICENSE,
+    };
+    crate::egress::record(&url, purpose);
     let res = req.send().await?;
     if !res.status().is_success() {
         let status = res.status().as_u16();
@@ -592,6 +599,7 @@ pub async fn checkout_url(email: Option<&str>) -> Option<String> {
             .header("apikey", &anon)
             .header("authorization", format!("Bearer {anon}"));
     }
+    crate::egress::record(&api, crate::egress::PURPOSE_CHECKOUT);
     let res = req.send().await.ok()?;
     if !res.status().is_success() {
         return None;

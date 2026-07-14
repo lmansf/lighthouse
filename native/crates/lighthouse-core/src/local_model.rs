@@ -297,6 +297,7 @@ async fn download() -> anyhow::Result<()> {
         .user_agent("lighthouse-app")
         .connect_timeout(std::time::Duration::from_secs(30))
         .build()?;
+    crate::egress::record(&model_url(), crate::egress::PURPOSE_MODEL_DOWNLOAD);
     let res = client.get(model_url()).send().await?;
     if !res.status().is_success() {
         anyhow::bail!("GET {} → {}", model_url(), res.status().as_u16());

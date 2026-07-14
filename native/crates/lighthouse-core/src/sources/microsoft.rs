@@ -122,6 +122,7 @@ pub fn is_connected() -> bool {
 
 async fn post_form(url: &str, fields: &[(&str, &str)]) -> anyhow::Result<(u16, Value)> {
     let client = reqwest::Client::new();
+    crate::egress::record(url, crate::egress::PURPOSE_SHAREPOINT);
     let res = client.post(url).form(fields).send().await?;
     let status = res.status().as_u16();
     let data: Value = res.json().await.unwrap_or(Value::Null);
@@ -301,6 +302,7 @@ pub async fn get_access_token() -> anyhow::Result<String> {
 
 async fn fetch_account(access_token: &str) -> Option<Account> {
     let client = reqwest::Client::new();
+    crate::egress::record(GRAPH, crate::egress::PURPOSE_SHAREPOINT);
     let res = client
         .get(format!("{GRAPH}/me"))
         .header("authorization", format!("Bearer {access_token}"))
@@ -364,6 +366,7 @@ async fn graph_get(path_or_url: &str) -> anyhow::Result<Value> {
         anyhow::bail!("refusing to send Graph token to non-Graph host");
     }
     let client = reqwest::Client::new();
+    crate::egress::record(&url, crate::egress::PURPOSE_SHAREPOINT);
     let res = client
         .get(&url)
         .header("authorization", format!("Bearer {token}"))
@@ -524,6 +527,7 @@ pub async fn download_item(
 ) -> anyhow::Result<bool> {
     let token = get_access_token().await?;
     let client = reqwest::Client::new();
+    crate::egress::record(GRAPH, crate::egress::PURPOSE_SHAREPOINT);
     let res = client
         .get(format!("{GRAPH}/drives/{drive_id}/items/{item_id}/content"))
         .header("authorization", format!("Bearer {token}"))

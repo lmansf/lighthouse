@@ -288,6 +288,9 @@ pub async fn rag_op(app: AppHandle, body: Value) -> Result<Value, String> {
         // Managed policy snapshot (openspec: add-managed-policy) — read-only;
         // the UI renders the reported locks as "Managed by your organization".
         Some("policy") => Ok(lighthouse_core::policy::snapshot()),
+        // Session egress snapshot (S3) — what has left this machine this
+        // session; the header shield renders "All local" / "N to <host>".
+        Some("egress") => Ok(lighthouse_core::egress::snapshot()),
         _ => Err("unknown op".into()),
     }
 }

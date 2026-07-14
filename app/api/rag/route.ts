@@ -17,6 +17,7 @@ import {
 import { isSameOrigin } from "@/server/http";
 import { isDesktopApp } from "@/server/config";
 import { policySnapshot } from "@/server/policy";
+import { egressSnapshot } from "@/server/egress";
 import { writeArtifact } from "@/server/vault";
 import { addPin, listPins, removePin } from "@/server/pins";
 
@@ -230,6 +231,10 @@ export async function POST(req: Request) {
     // Read-only managed-policy snapshot; the UI renders its locks as "Managed by your organization".
     case "policy":
       return NextResponse.json(policySnapshot());
+
+    // Session egress snapshot (S3); the header shield renders "All local" / "N to <host>".
+    case "egress":
+      return NextResponse.json(egressSnapshot());
 
     default:
       return NextResponse.json({ error: "unknown op" }, { status: 400 });

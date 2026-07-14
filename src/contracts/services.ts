@@ -15,6 +15,7 @@ import type {
   OnboardingState,
   Pin,
   PolicySnapshot,
+  EgressSnapshot,
   RagReference,
   RestoreToken,
   User,
@@ -139,6 +140,12 @@ export interface RagService {
    * `present: false` with all-permissive locks.
    */
   policy(): Promise<PolicySnapshot>;
+  /**
+   * Session egress snapshot (S3): what has left this machine this session,
+   * grouped by destination host + purpose. Drives the header shield ("All
+   * local" / "N requests to <host>") and its detail panel.
+   */
+  egress(): Promise<EgressSnapshot>;
 }
 
 /** Registration / sign-in. Mocked now; swap for a real identity provider later. */

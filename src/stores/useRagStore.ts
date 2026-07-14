@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { DataSource, FileNode, PolicySnapshot, RestoreToken } from "@/contracts";
+import type { DataSource, EgressSnapshot, FileNode, PolicySnapshot, RestoreToken } from "@/contracts";
 import { setManagedLocks } from "./managedLocks";
 import { ragService } from "@/contracts";
 import { logEvent } from "@/lib/logEvent";
@@ -53,6 +53,12 @@ interface RagStore {
    * chat store consults it before persisting history.
    */
   policy: PolicySnapshot | null;
+  /**
+   * Session egress snapshot (S3), refreshed every poll: what has left this
+   * machine this session. `null` until first load; the header shield renders
+   * "All local" (total 0) or "N requests to <host>" from it.
+   */
+  egress: EgressSnapshot | null;
   /**
    * Selection mode: clicking a row picks it (multi-select) instead of its
    * navigation action, so the user can select several files and then apply one
@@ -219,6 +225,7 @@ export const useRagStore = create<RagStore>((set, get) => ({
   pendingWrites: 0,
   desktop: false,
   policy: null,
+  egress: null,
   selectionMode: false,
   selectedIds: [],
   processing: null,
@@ -231,11 +238,14 @@ export const useRagStore = create<RagStore>((set, get) => ({
     // every background poll. Every lock surface (Preferences, AI models,
     // chat-history store) reads this one cached snapshot.
     const wantPolicy = get().policy === null;
-    const [sources, nodes, caps, policy] = await Promise.all([
+    // Egress, unlike policy, changes intra-session — fetch it every tick so
+    // the header shield stays live off the poll both windows already share.
+    const [sources, nodes, caps, policy, egress] = await Promise.all([
       ragService.listSources(),
       ragService.listNodes(),
       ragService.capabilities(),
       wantPolicy ? ragService.policy().catch(() => null) : Promise.resolve(get().policy),
+      ragService.egress().catch(() => null),
     ]);
     if (wantPolicy && policy) {
       set({ policy });
@@ -255,11 +265,14 @@ export const useRagStore = create<RagStore>((set, get) => ({
     // Only the fields that actually changed get a new reference, so a poll that
     // finds nothing to do costs nothing downstream.
     const cur = get();
-    const patch: Partial<Pick<RagStore, "sources" | "nodes" | "desktop">> = {};
+    const patch: Partial<Pick<RagStore, "sources" | "nodes" | "desktop" | "egress">> = {};
     if (!sourcesEqual(cur.sources, sources)) patch.sources = sources;
     if (!nodesEqual(cur.nodes, nodes)) patch.nodes = nodes;
     if (cur.desktop !== caps.desktop) patch.desktop = caps.desktop;
-    if (patch.sources || patch.nodes || patch.desktop !== undefined) set(patch);
+    // Only re-set egress when its total moved — a same-count poll must not
+    // re-render the shield (the perf-poll no-op-diff discipline).
+    if (egress && egress.total !== (cur.egress?.total ?? -1)) patch.egress = egress;
+    if (patch.sources || patch.nodes || patch.desktop !== undefined || patch.egress) set(patch);
   },
 
   // Leaving selection mode clears the pending picks so they don't linger.

@@ -266,6 +266,9 @@ pub async fn rag_post(headers: HeaderMap, body: Option<Json<Value>>) -> Response
         // Managed policy snapshot (openspec: add-managed-policy) — read-only;
         // the UI renders the reported locks as "Managed by your organization".
         Some("policy") => Json(lighthouse_core::policy::snapshot()).into_response(),
+        // Session egress snapshot (S3) — what has left this machine this
+        // session; the header shield renders "All local" / "N to <host>".
+        Some("egress") => Json(lighthouse_core::egress::snapshot()).into_response(),
         _ => bad_request("unknown op"),
     }
 }

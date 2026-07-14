@@ -5,6 +5,7 @@ import type {
   FileNode,
   Pin,
   PolicySnapshot,
+  EgressSnapshot,
   RagReference,
   RestoreToken,
 } from "../types";
@@ -265,6 +266,11 @@ class MockRagService implements RagService {
         vaultRoots: null,
       },
     };
+  }
+
+  async egress(): Promise<EgressSnapshot> {
+    // The mock never dials out — always "All local".
+    return { total: 0, destinations: [] };
   }
 
   /** A node plus all of its descendants (so toggling a folder cascades). */

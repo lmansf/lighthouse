@@ -382,6 +382,7 @@ async fn stream_openai_compat(
     let api_key = api_key.to_string();
     Box::pin(async_stream::stream! {
         let client = http_client();
+        crate::egress::record(provider.chat_url, crate::egress::PURPOSE_AI_PROVIDER);
         let res = match client
             .post(provider.chat_url)
             .header("content-type", "application/json")
@@ -425,11 +426,13 @@ pub async fn validate_key(provider_id: &str, api_key: &str) -> Result<(), String
     }
     let client = http_client();
     let req = if provider_id == "anthropic" {
+        crate::egress::record(ANTHROPIC_MODELS_URL, crate::egress::PURPOSE_AI_PROVIDER);
         client
             .get(ANTHROPIC_MODELS_URL)
             .header("x-api-key", api_key)
             .header("anthropic-version", ANTHROPIC_VERSION)
     } else if let Some(p) = remote_provider(provider_id) {
+        crate::egress::record(p.models_url, crate::egress::PURPOSE_AI_PROVIDER);
         client
             .get(p.models_url)
             .header("authorization", format!("Bearer {api_key}"))
@@ -514,6 +517,7 @@ async fn stream_claude(
     let api_key = api_key.to_string();
     Box::pin(async_stream::stream! {
         let client = http_client();
+        crate::egress::record(ANTHROPIC_URL, crate::egress::PURPOSE_AI_PROVIDER);
         let res = match client
             .post(ANTHROPIC_URL)
             .header("content-type", "application/json")

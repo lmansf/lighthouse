@@ -71,6 +71,22 @@ export interface PolicySnapshot {
   };
 }
 
+/**
+ * Session egress snapshot (S3) — what has left this machine this session.
+ * `total: 0` renders the header shield as "All local". Host + purpose +
+ * count + last time only; never content or full URLs.
+ */
+export interface EgressSnapshot {
+  total: number;
+  destinations: {
+    host: string;
+    purpose: string;
+    count: number;
+    /** Epoch ms of the most recent request to this host+purpose. */
+    lastAt: number;
+  }[];
+}
+
 /** A model provider the user can pick during onboarding. */
 export interface ModelProvider {
   id: string;
