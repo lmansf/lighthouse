@@ -84,6 +84,38 @@ pub fn bundled_embed_model() -> Option<PathBuf> {
     None
 }
 
+/// The bundled DRAFT model for speculative decoding ("draft-then-verify",
+/// roadmap P2.1): a small chat GGUF under `resources/llm-draft/`. When present,
+/// the shell hands it to llama-server via `--model-draft` so the fast draft
+/// model proposes tokens the main model verifies in one batch — faster local
+/// generation with identical output. Its OWN directory (like `resources/embed`)
+/// so the chat-model discovery never mistakes it for the installed main model.
+/// Returns `None` when the maintainer hasn't bundled one — the default, in which
+/// case decoding is unchanged. The directory need not exist (read_dir → None).
+pub fn bundled_draft_model() -> Option<PathBuf> {
+    let dir = resources_dir().join("llm-draft");
+    for e in std::fs::read_dir(&dir).ok()?.flatten() {
+        let p = e.path();
+        if !p
+            .file_name()
+            .map(|n| n.to_string_lossy().to_lowercase().ends_with(".gguf"))
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        let big_enough = std::fs::metadata(&p).map(|m| m.len() > 1_000_000).unwrap_or(false);
+        let mut magic = [0u8; 4];
+        let is_gguf = std::fs::File::open(&p)
+            .and_then(|mut f| f.read_exact(&mut magic))
+            .map(|_| &magic == b"GGUF")
+            .unwrap_or(false);
+        if big_enough && is_gguf {
+            return Some(p);
+        }
+    }
+    None
+}
+
 // --- Quantized vectors -------------------------------------------------------------
 
 /// A unit-normalized embedding quantized to i8 with one f32 scale — 769 bytes
@@ -550,6 +582,29 @@ mod tests {
         // Self-similarity stays ~1.
         let self_sim = cosine_qf(&ua, &quantize(&ua));
         assert!((self_sim - 1.0).abs() < 0.01, "{self_sim}");
+    }
+
+    #[test]
+    fn bundled_draft_model_is_opt_in_and_gguf_gated() {
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("LIGHTHOUSE_RESOURCES_PATH", dir.path());
+
+        // No llm-draft dir at all → None (the default; decoding is unchanged).
+        assert!(bundled_draft_model().is_none(), "no draft dir ⇒ None");
+
+        let draft = dir.path().join("llm-draft");
+        std::fs::create_dir_all(&draft).unwrap();
+        // A non-GGUF file is ignored.
+        std::fs::write(draft.join("notes.txt"), vec![0u8; 2_000_000]).unwrap();
+        assert!(bundled_draft_model().is_none(), "non-GGUF ignored");
+
+        // A real (magic + big-enough) GGUF is picked up.
+        let mut bytes = b"GGUF".to_vec();
+        bytes.extend(std::iter::repeat(0u8).take(1_100_000));
+        std::fs::write(draft.join("draft.gguf"), bytes).unwrap();
+        assert!(bundled_draft_model().is_some(), "bundled draft GGUF is found");
+
+        std::env::remove_var("LIGHTHOUSE_RESOURCES_PATH");
     }
 
     #[test]
