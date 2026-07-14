@@ -31,6 +31,7 @@ import {
   DialogContent,
   DialogSurface,
   DialogTitle,
+  Divider,
   DrawerBody,
   DrawerHeader,
   DrawerHeaderTitle,
@@ -90,6 +91,7 @@ import { parseChartSpec, tableToCsv } from "@/lib/chartSpec";
 import { sortRows, type SortDir } from "@/lib/sortTable";
 import { pinChartData } from "@/lib/pinChart";
 import { AnalyticsChart } from "@/features/chat/AnalyticsChart";
+import { BriefingsPanel } from "@/features/chat/BriefingsPanel";
 import { PinMiniChart } from "@/features/chat/PinMiniChart";
 import { EgressShield } from "@/features/egress/EgressShield";
 import { useChatStore, type TranscriptMessage } from "@/stores/useChatStore";
@@ -2652,6 +2654,9 @@ export function ChatPanel() {
                 ))}
               </div>
             )}
+            <Divider />
+            <Text weight="semibold">Briefings</Text>
+            <BriefingsPanel pins={pinList} />
           </DialogContent>
           <DialogActions>
             <Button appearance="secondary" onClick={() => setPinsOpen(false)}>

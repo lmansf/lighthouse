@@ -22,9 +22,11 @@
 - [x] 3.4 `test/briefings.test.mjs` (CRUD, due, PARITY compose — 4 tests).
 
 ## 4. UI
-- [ ] 4.1 Briefings section in the pins dialog (`ChatPanel.tsx`): create
-      (title + pick pins + cadence), list, run→report, remove.
+- [x] 4.1 Briefings section in the pins dialog (`ChatPanel.tsx` + new
+      `BriefingsPanel.tsx`): create (title + pick pins + cadence), list,
+      run→inline report (GFM markdown), remove.
 
 ## 5. Gates
-- [ ] 5.1 `cargo test -p lighthouse-core` + `cargo check -p lighthouse-server` green.
-- [ ] 5.2 `npm test` + `npm run lint` + static export green.
+- [x] 5.1 `cargo test -p lighthouse-core` (134 lib + 5 briefings) +
+      `cargo check -p lighthouse-server` green.
+- [x] 5.2 `npm test` (102) + `npm run lint` (clean) + static export green.
