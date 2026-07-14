@@ -68,8 +68,75 @@ channel works:
 - **Linux:** configuration management of `/etc/lighthouse/policy.json`
   (root-owned, 644).
 
-Silent/fleet installation flags for the Windows installer are documented in
-this file's §Silent install once the offline-activation work lands.
+Silent/fleet installation flags are documented below in §Silent / fleet
+installation.
+
+## Offline activation (air-gapped / managed licensing)
+
+Deployments with no outbound network — or that don't want per-machine license
+calls — can activate paid mode from a **signed license file** the engine
+verifies locally. No hosted license function is contacted.
+
+**How it works.** The engine reads a minisign-signed license next to the machine
+policy (`license.lic`), verifies it against a **pinned license public key** baked
+into the build, and if the signature is valid and the license is unexpired,
+grants paid status. It is the top authority in `checkLicense` — but strictly
+additive: an absent, malformed, expired, or unverifiable file grants nothing and
+**never locks** a user (the app falls back to its normal hosted/trial/local
+flow). Enforced in the shipping Rust engine (`native/.../license.rs
+offline_license_status`); the dev twin does not verify it (PARITY).
+
+**File format** (`license.lic`, JSON):
+
+```json
+{
+  "payload": "{\"paidThrough\":\"2027-01-01T00:00:00.000Z\"}",
+  "signature": "<minisign signature string over the exact payload bytes>"
+}
+```
+
+`payload` is the verbatim claims string that was signed (verified as-is — no
+canonicalization gap). Claims: `paidThrough` (RFC3339; omit for open-ended) and
+optional `graceUntil`. Deploy it through the same channel as the policy:
+`%ProgramData%\Lighthouse\license.lic` / `/Library/Application
+Support/Lighthouse/license.lic` / `/etc/lighthouse/license.lic`, or point the
+engine at any path with `LICENSE_OFFLINE_FILE`.
+
+**What the maintainer must provision (fail-closed until then):**
+
+1. **Generate a dedicated license signing keypair** with minisign (`minisign -G
+   -p license.pub -s license.key`) — separate from the updater key so licensing
+   and updates rotate independently. Keep `license.key` offline.
+2. **Bake the public key into the build** as `LICENSE_OFFLINE_PUBKEY` (the bare
+   base64 from `license.pub`). Unset/empty ⇒ offline activation is **disabled**
+   (every file is rejected) — this is the default, so the feature ships inert.
+3. **Sign each license** by writing the claims JSON and signing those exact bytes
+   (`minisign -S -s license.key -m payload.json`), then assembling the
+   `{payload, signature}` file.
+4. **Do not enable paid distribution until installers are signed** (docs/
+   signing.md). Offline activation grants paid, so it must not open a paid path
+   on unsigned builds — provision the license key only alongside signed releases.
+
+## Silent / fleet installation
+
+Flags depend on which bundle the release ships (set in the Tauri config):
+
+- **Windows — NSIS (`Lighthouse_<ver>_x64-setup.exe`):** `"...setup.exe" /S`
+  for a silent install; append `/D=C:\Program Files\Lighthouse` (unquoted, must
+  be the **last** argument) to override the directory. `/S` also drives silent
+  uninstall via the registered uninstaller.
+- **Windows — MSI (`Lighthouse_<ver>_x64_en-US.msi`), if built:**
+  `msiexec /i Lighthouse_<ver>_x64_en-US.msi /qn /norestart`
+  (`/qn` fully silent; add `ALLUSERS=1` for a per-machine install where the
+  bundle allows it).
+- **macOS:** distribute the `.app` inside the signed/notarized `.dmg` (or a
+  `.pkg`) and copy it in via your MDM's app-install payload — no interactive
+  installer.
+- **Linux:** the AppImage is a single executable (no install step); the `.deb`
+  installs headless with `apt-get install -y ./Lighthouse_<ver>_amd64.deb`.
+
+Pair a silent install with the machine `policy.json` and (optionally)
+`license.lic` above so a fleet machine comes up already managed and activated.
 
 ## Threat model, stated plainly
 
@@ -89,5 +156,6 @@ matrix describes exactly which network calls remain.
 
 ## Follow-ons (not in v1)
 
-Signed policy files (Ed25519 — reusing the offline-activation verifier),
-remote policy URLs, per-key "default but changeable" semantics.
+Signed **policy** files (Ed25519 — reusing the offline-activation verifier that
+now ships for `license.lic`), remote policy URLs, per-key "default but
+changeable" semantics.

@@ -784,11 +784,89 @@ fn paid_status_from(end: Option<&str>, grace_until: Option<&str>) -> LicenseResu
     }
 }
 
+// --- Offline activation (openspec: add-offline-activation) --------------------
+//
+// An admin deploys a minisign-signed license file next to the machine policy;
+// the engine verifies it locally against a pinned license public key. Reuses the
+// updater's minisign primitive (updates::verify_update_signature) — no new
+// crypto, and the maintainer signs with the same tooling (docs/signing.md).
+// Fail-closed: no pinned key (the default), no file, a bad signature, or an
+// expired license all grant nothing. The pinned key is provisioned separately
+// from paid enablement, so this ships INERT until the maintainer opts in (and,
+// per the signing rule, must stay inert until installers are signed).
+
+#[derive(Deserialize)]
+struct OfflineLicenseFile {
+    /// The exact bytes that were signed (verbatim JSON claims). Verified as-is,
+    /// so there's no canonicalization gap — sign then verify the same string.
+    payload: String,
+    /// The minisign signature string over `payload`.
+    signature: String,
+}
+
+#[derive(Deserialize)]
+struct OfflineClaims {
+    #[serde(rename = "paidThrough")]
+    paid_through: Option<String>,
+    #[serde(rename = "graceUntil")]
+    grace_until: Option<String>,
+}
+
+/// The pinned license-signing public key (minisign), provisioned at build via
+/// `LICENSE_OFFLINE_PUBKEY`. Empty/unset ⇒ offline activation disabled (fail
+/// closed). Kept separate from the updater key so licensing and updates rotate
+/// independently.
+fn offline_pubkey() -> Option<String> {
+    let s = std::env::var("LICENSE_OFFLINE_PUBKEY")
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    (!s.is_empty()).then_some(s)
+}
+
+/// The machine-scoped offline license file: `LICENSE_OFFLINE_FILE` override,
+/// else `license.lic` beside the managed policy (same MDM/GPO channel).
+fn offline_license_path() -> PathBuf {
+    if let Ok(p) = std::env::var("LICENSE_OFFLINE_FILE") {
+        let p = p.trim().to_string();
+        if !p.is_empty() {
+            return PathBuf::from(p);
+        }
+    }
+    crate::policy::policy_dir().join("license.lic")
+}
+
+/// Verify + read the offline license. `Some(valid|grace)` only when a correctly
+/// signed, unexpired license is present; `None` otherwise (fail closed — a bad
+/// or expired license never grants and never locks).
+fn offline_license_status() -> Option<LicenseResult> {
+    let pubkey = offline_pubkey()?; // no pinned key ⇒ disabled
+    let text = std::fs::read_to_string(offline_license_path()).ok()?;
+    let file: OfflineLicenseFile = serde_json::from_str(&text).ok()?;
+    // Reject on any signature failure (bad key, tampered payload, wrong format).
+    crate::updates::verify_update_signature(file.payload.as_bytes(), &file.signature, &pubkey)
+        .ok()?;
+    let claims: OfflineClaims = serde_json::from_str(&file.payload).ok()?;
+    let r = paid_status_from(claims.paid_through.as_deref(), claims.grace_until.as_deref());
+    // Only a live (valid or in-grace) license is honored; an expired one falls
+    // through to the normal flow rather than locking.
+    matches!(r.status.as_str(), "valid" | "grace").then_some(r)
+}
+
 /// Check the stored license once per launch. Authoritative in hosted mode; an
 /// unreachable function is treated leniently (never locks a trial offline).
 pub async fn check_license() -> LicenseResult {
     if !licensing_enabled() {
         return LicenseResult::status("disabled");
+    }
+
+    // Offline activation (openspec: add-offline-activation) — managed / air-
+    // gapped: a minisign-signed machine license file, verified locally against
+    // the pinned license public key, is the top authority (no network). Absent,
+    // invalid, expired, or unconfigured ⇒ None: it never grants and never locks,
+    // so we simply fall through to the hosted/stored flow.
+    if let Some(r) = offline_license_status() {
+        return r;
     }
 
     let lic: Option<LocalLicense> = read_json(&license_path(), None);
@@ -897,5 +975,82 @@ pub async fn check_license() -> LicenseResult {
             remaining_days: Some(remaining_days),
             ..Default::default()
         }
+    }
+}
+
+#[cfg(test)]
+mod offline_tests {
+    use super::*;
+
+    fn sign(payload: &str, kp: &minisign::KeyPair) -> String {
+        minisign::sign(Some(&kp.pk), &kp.sk, payload.as_bytes(), None, None)
+            .unwrap()
+            .into_string()
+    }
+
+    // Env is process-global; this test owns LICENSE_OFFLINE_{PUBKEY,FILE} and
+    // cleans them up. It exercises offline_license_status() directly.
+    #[test]
+    fn offline_license_accept_tamper_expired_and_failclosed() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("license.lic");
+        std::env::set_var("LICENSE_OFFLINE_FILE", &file);
+        let write_lic = |payload: &str, signature: &str| {
+            std::fs::write(
+                &file,
+                serde_json::json!({ "payload": payload, "signature": signature }).to_string(),
+            )
+            .unwrap();
+        };
+
+        let kp = minisign::KeyPair::generate_unencrypted_keypair().unwrap();
+        let pubkey = kp.pk.to_base64();
+
+        // A far-future paidThrough → a live paid license.
+        let payload = r#"{"paidThrough":"2999-01-01T00:00:00.000Z"}"#;
+        let sig = sign(payload, &kp);
+        write_lic(payload, &sig);
+
+        // Fail closed: with no pinned key, a valid file grants nothing.
+        std::env::remove_var("LICENSE_OFFLINE_PUBKEY");
+        assert!(
+            offline_license_status().is_none(),
+            "no pinned key ⇒ offline activation disabled"
+        );
+
+        // With the pinned key, the signed license grants paid/valid.
+        std::env::set_var("LICENSE_OFFLINE_PUBKEY", &pubkey);
+        let r = offline_license_status().expect("a valid signed license grants");
+        assert_eq!(r.status, "valid");
+        assert_eq!(r.license_type.as_deref(), Some("paid"));
+
+        // Tampered payload (claims changed, signature stale) ⇒ rejected.
+        write_lic(r#"{"paidThrough":"2999-12-31T00:00:00.000Z"}"#, &sig);
+        assert!(
+            offline_license_status().is_none(),
+            "a payload that doesn't match the signature is rejected"
+        );
+
+        // Expired license (past its grace) grants nothing — but doesn't lock;
+        // offline_license_status returns None so the normal flow takes over.
+        let past = r#"{"paidThrough":"2000-01-01T00:00:00.000Z"}"#;
+        let past_sig = sign(past, &kp);
+        write_lic(past, &past_sig);
+        assert!(
+            offline_license_status().is_none(),
+            "an expired offline license grants nothing"
+        );
+
+        // A wrong pinned key rejects an otherwise-valid license.
+        write_lic(payload, &sig);
+        let other = minisign::KeyPair::generate_unencrypted_keypair().unwrap();
+        std::env::set_var("LICENSE_OFFLINE_PUBKEY", other.pk.to_base64());
+        assert!(
+            offline_license_status().is_none(),
+            "a license signed by a different key is rejected"
+        );
+
+        std::env::remove_var("LICENSE_OFFLINE_PUBKEY");
+        std::env::remove_var("LICENSE_OFFLINE_FILE");
     }
 }

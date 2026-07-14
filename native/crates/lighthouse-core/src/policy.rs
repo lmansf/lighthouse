@@ -90,6 +90,16 @@ fn policy_path() -> PathBuf {
     machine_policy_path()
 }
 
+/// The directory the machine policy lives in — the offline license file
+/// (openspec: add-offline-activation) is deployed alongside it, so admins ship
+/// policy + license through the same MDM/GPO channel.
+pub(crate) fn policy_dir() -> PathBuf {
+    policy_path()
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
 fn load() -> PolicyState {
     let path = policy_path();
     let Ok(text) = std::fs::read_to_string(&path) else {

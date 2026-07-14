@@ -561,6 +561,12 @@ function paidStatusFrom(end: string | undefined, graceUntil: string | undefined)
 export async function checkLicense(): Promise<LicenseResult> {
   if (!licensingEnabled()) return { status: "disabled" };
 
+  // PARITY: the Rust engine checks a minisign-signed offline machine license
+  // here first (openspec: add-offline-activation), the top authority for air-
+  // gapped/managed installs. The dev twin does NOT verify it — offline
+  // activation is a shipped-engine feature (no minisign runtime here), like the
+  // audit-log HMAC chain and OCR. See native license.rs offline_license_status.
+
   const lic = readJson<LocalLicense | null>(licensePath(), null);
   if (!lic?.guid || !lic.licenseKey) return { status: "none" };
 
