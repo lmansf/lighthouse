@@ -34,6 +34,7 @@ import path from "node:path";
 import { appStateDir, readJson, writeJson } from "./config";
 import { getState as profileState } from "./profile";
 import { getAllVariants, assignBalancedVariants } from "./experiment";
+import { telemetryAllowed } from "./policy";
 import type { Registration } from "./registration";
 import {
   isUsageOptedOut,
@@ -446,6 +447,9 @@ export async function submitBug(where: string, what: string): Promise<{ ok: bool
 
 /** Log an app launch to the userlogs table (best-effort; hosted mode only). */
 export async function pingLaunch(): Promise<void> {
+  // Managed policy: telemetry "off" silences the launch ping (the license
+  // `check` is separate and remains — documented in data-flows.md).
+  if (!telemetryAllowed()) return;
   if (!licenseApi()) return;
   const lic = readJson<LocalLicense | null>(licensePath(), null);
   try {
@@ -484,7 +488,7 @@ export async function pingLaunch(): Promise<void> {
  * never throw into a launch, a query, or onboarding - all errors are swallowed.
  */
 export async function recordEvent(name: string, props: Record<string, unknown> = {}): Promise<void> {
-  if (!licenseApi()) return;
+  if (!licenseApi() || !telemetryAllowed()) return;
   try {
     await callFn("event", {
       contactId: getContactId(),

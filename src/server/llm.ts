@@ -13,6 +13,7 @@
  *   passages, so the app is useful with zero configuration and zero network.
  */
 import type { ChatTurn } from "@/contracts";
+import { providerAllowed } from "./policy";
 
 const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_MODELS_URL = "https://api.anthropic.com/v1/models";
@@ -256,7 +257,12 @@ export async function* streamAnswer(
     }
   }
 
-  const canClaude = cfg.providerId === "anthropic" && cfg.apiKey;
+  // Managed policy: a disallowed cloud provider is refused HERE, not just at
+  // selection time — a profile stored before the policy landed must still be
+  // blocked. Both cloud gates AND in the policy check so the existing
+  // extractive fallthrough answers instead.
+  const canClaude =
+    cfg.providerId === "anthropic" && cfg.apiKey && providerAllowed("anthropic");
   if (canClaude) {
     let emitted = false;
     try {
@@ -281,7 +287,10 @@ export async function* streamAnswer(
   }
 
   // Any other keyed provider speaks the OpenAI chat-completions protocol.
-  const compat = cfg.apiKey ? remoteProvider(cfg.providerId) : undefined;
+  const compat =
+    cfg.apiKey && providerAllowed(cfg.providerId ?? "")
+      ? remoteProvider(cfg.providerId)
+      : undefined;
   if (compat) {
     let emitted = false;
     try {

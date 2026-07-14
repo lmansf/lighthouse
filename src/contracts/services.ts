@@ -14,6 +14,7 @@ import type {
   FileNode,
   OnboardingState,
   Pin,
+  PolicySnapshot,
   RagReference,
   RestoreToken,
   User,
@@ -131,6 +132,13 @@ export interface RagService {
    * UI can hide affordances the server would refuse.
    */
   capabilities(): Promise<{ desktop: boolean }>;
+  /**
+   * Read-only snapshot of the machine-scope managed policy: which settings an
+   * org-deployed policy.json locks. The UI disables the matching controls and
+   * labels them "Managed by your organization"; an unmanaged install reports
+   * `present: false` with all-permissive locks.
+   */
+  policy(): Promise<PolicySnapshot>;
 }
 
 /** Registration / sign-in. Mocked now; swap for a real identity provider later. */

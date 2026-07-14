@@ -4,6 +4,7 @@ import type {
   DataSource,
   FileNode,
   Pin,
+  PolicySnapshot,
   RagReference,
   RestoreToken,
 } from "../types";
@@ -245,6 +246,25 @@ class MockRagService implements RagService {
 
   async capabilities(): Promise<{ desktop: boolean }> {
     return { desktop: false };
+  }
+
+  async policy(): Promise<PolicySnapshot> {
+    // The mock is never managed: all-permissive locks so the settings UI
+    // renders every control editable (no "Managed by your organization").
+    return {
+      present: false,
+      error: false,
+      locks: {
+        allowedProviders: null,
+        telemetryOff: false,
+        chatHistoryOff: false,
+        widgetHotkeysOff: false,
+        ocrOff: false,
+        notificationsOff: false,
+        auditLogOn: false,
+        vaultRoots: null,
+      },
+    };
   }
 
   /** A node plus all of its descendants (so toggling a folder cascades). */

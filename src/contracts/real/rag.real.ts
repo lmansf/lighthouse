@@ -5,6 +5,7 @@ import type {
   DataSource,
   FileNode,
   Pin,
+  PolicySnapshot,
   RagReference,
   RestoreToken,
 } from "../types";
@@ -160,6 +161,10 @@ class RealRagService implements RagService {
 
   async capabilities(): Promise<{ desktop: boolean }> {
     return { desktop: (await getTree()).desktop };
+  }
+
+  async policy(): Promise<PolicySnapshot> {
+    return (await post({ op: "policy" })) as unknown as PolicySnapshot;
   }
 }
 

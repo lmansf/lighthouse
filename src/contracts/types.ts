@@ -46,6 +46,31 @@ export interface FileNode {
  */
 export type RestoreToken = Record<string, unknown>;
 
+/**
+ * Read-only snapshot of the machine-scope managed policy (org deployments):
+ * which settings an IT-deployed policy.json locks, so the UI can disable the
+ * matching controls and label them "Managed by your organization". Shape
+ * mirrors the engines' snapshot (policy.rs / src/server/policy.ts) exactly.
+ * `present` false ⇒ unmanaged install; `error` true ⇒ a malformed policy file
+ * failed closed (local-only providers, telemetry + history off).
+ */
+export interface PolicySnapshot {
+  present: boolean;
+  error: boolean;
+  locks: {
+    /** Permitted provider ids, or null when providers are unrestricted. */
+    allowedProviders: string[] | null;
+    telemetryOff: boolean;
+    chatHistoryOff: boolean;
+    widgetHotkeysOff: boolean;
+    ocrOff: boolean;
+    notificationsOff: boolean;
+    auditLogOn: boolean;
+    /** Directories the vault may live under, or null when unrestricted. */
+    vaultRoots: string[] | null;
+  };
+}
+
 /** A model provider the user can pick during onboarding. */
 export interface ModelProvider {
   id: string;
