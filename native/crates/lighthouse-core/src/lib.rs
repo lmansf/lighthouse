@@ -18,6 +18,7 @@ pub mod license;
 pub mod llm;
 pub mod local_model;
 pub mod meta;
+pub mod ocr;
 pub mod pins;
 pub mod profile;
 pub mod settings;

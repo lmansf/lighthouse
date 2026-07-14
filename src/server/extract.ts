@@ -108,8 +108,11 @@ async function extractByExt(abs: string, ext: string): Promise<string> {
  * doesn't read those formats (they stay name-match-only here), but the version
  * must move in lockstep or the two engines endlessly invalidate each other's
  * shared cache entries.
+ * v7: matches the Rust engine's add-ocr-perception bump (images + scanned-PDF
+ * OCR). PARITY: OCR is Rust-only — the dev twin has no ML runtime, so image
+ * files stay name-match-only here — but the version moves in lockstep (v6 rule).
  */
-const CACHE_VERSION = 6;
+const CACHE_VERSION = 7;
 
 interface CacheRecord {
   v: number;
