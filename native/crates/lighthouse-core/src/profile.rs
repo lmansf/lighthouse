@@ -1,7 +1,10 @@
-//! Local profile + onboarding state, persisted to `.rag-vault/profile.json`
-//! (port of `src/server/profile.ts`). Single-user standalone: "auth" is a
-//! locally-stored profile plus the chosen model provider/key. The API key never
-//! leaves the machine and is never returned to the client (only `hasApiKey`).
+//! Local profile + onboarding state, persisted to `profile.json` (port of
+//! `src/server/profile.ts`). Single-user standalone: "auth" is a
+//! locally-stored profile plus the chosen model provider/key. Provider API
+//! keys are persisted separately in the encrypted install-global secrets
+//! store (crate::secrets) — they survive sign-out and vault switches, never
+//! leave the machine, and are never returned to the client (only `hasApiKey`
+//! / `keyedProviders`).
 
 use std::collections::HashMap;
 
@@ -28,14 +31,15 @@ struct StoredProfile {
     model_id: Option<String>,
     #[serde(default)]
     has_api_key: bool,
-    /// Legacy single key slot from builds that offered one keyed provider
-    /// (Anthropic). Kept in sync with `api_keys["anthropic"]` so a downgrade
-    /// to an older build still finds its key. Server-side only.
+    /// LEGACY, read-only: single plaintext key slot from the one-provider
+    /// (Anthropic) era. Migrated into the encrypted secrets store on load and
+    /// stripped from disk; never written non-empty again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     api_key: Option<String>,
-    /// One stored key per keyed provider, so switching providers never hands
-    /// one vendor's key to another. Server-side only; surfaced to the client
-    /// solely as `hasApiKey` + `keyedProviders` (never the keys themselves).
+    /// LEGACY, read-only: the pre-0.11 plaintext per-provider key map.
+    /// Migrated into the encrypted install-global secrets store
+    /// (crate::secrets) on load and stripped from disk. Keys are surfaced to
+    /// the client solely as `hasApiKey` + `keyedProviders`, never raw.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     api_keys: HashMap<String, String>,
     /// Whether the user has ever explicitly saved a model choice (server-only).
@@ -90,6 +94,22 @@ fn load() -> StoredProfile {
             p.api_keys.insert("anthropic".to_string(), k);
             dirty = true;
         }
+    }
+    // One-time migration: plaintext keys move out of profile.json into the
+    // encrypted install-global secrets store (crate::secrets) and the
+    // plaintext copies are stripped from disk. Existing sealed values win so
+    // an old profile restored from backup can't clobber newer keys. After
+    // this, profile.json never carries a raw key again (and sign-out — which
+    // resets the profile — no longer discards them).
+    if !p.api_keys.is_empty() {
+        for (id, k) in p.api_keys.iter().filter(|(_, k)| !k.is_empty()) {
+            if crate::secrets::get_provider_key(id).is_none() {
+                crate::secrets::set_provider_key(id, k);
+            }
+        }
+        p.api_keys.clear();
+        p.api_key = None;
+        dirty = true;
     }
     if let Some(id) = p.provider_id.as_deref() {
         if !is_known_provider(id) {
@@ -276,20 +296,21 @@ pub fn select_model(provider_id: &str, model_id: &str, api_key: &str) -> ModelSe
     let initial = !p.model_ever_selected.unwrap_or(false);
     let changed =
         p.provider_id.as_deref() != Some(provider_id) || p.model_id.as_deref() != Some(model_id);
-    // A pasted key is stored under the provider it was pasted FOR; an empty
-    // field keeps that provider's existing key (switch model w/o re-pasting).
-    let mut api_keys = p.api_keys.clone();
+    // A pasted key is stored under the provider it was pasted FOR — sealed in
+    // the install-global secrets store (crate::secrets), never in this file.
+    // An empty field keeps that provider's existing key (switch model w/o
+    // re-pasting).
     if !key.is_empty() && provider_id != LOCAL_PROVIDER_ID {
-        api_keys.insert(provider_id.to_string(), key.clone());
+        crate::secrets::set_provider_key(provider_id, &key);
     }
     let next = StoredProfile {
         provider_id: Some(provider_id.to_string()),
         model_id: Some(model_id.to_string()),
-        // Legacy slot mirrors the anthropic key so a downgraded build still
-        // answers with it (older builds read only this field).
-        api_key: api_keys.get("anthropic").cloned().or(p.api_key.clone()),
+        // Raw keys no longer live in profile.json (see load()'s migration);
+        // the legacy fields stay declared read-only for old files.
+        api_key: None,
         has_api_key: !key.is_empty() || p.has_api_key,
-        api_keys,
+        api_keys: HashMap::new(),
         step: "done".to_string(),
         model_ever_selected: Some(true),
         ..p.clone()
@@ -312,6 +333,10 @@ pub fn complete_onboarding() {
 }
 
 pub fn sign_out() {
+    // Resets identity/onboarding only. Provider API keys live in the
+    // install-global secrets store and deliberately SURVIVE sign-out — they
+    // are app credentials, not identity (pre-0.11 they sat in this file and
+    // were silently discarded here, forcing a re-paste after every sign-out).
     save(&StoredProfile::default());
 }
 
@@ -359,6 +384,12 @@ fn resolve_key(provider_id: &str, p: &StoredProfile) -> Option<String> {
             return Some(k);
         }
     }
+    // The persisted home: the encrypted install-global secrets store.
+    if let Some(k) = crate::secrets::get_provider_key(provider_id) {
+        return Some(k);
+    }
+    // Transient safety net for a profile struct read before load()'s
+    // migration stripped its plaintext fields (normally both are empty).
     if let Some(k) = p.api_keys.get(provider_id).filter(|k| !k.is_empty()) {
         return Some(k.clone());
     }

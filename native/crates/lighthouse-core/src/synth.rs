@@ -23,6 +23,12 @@ const MAP_EXTRACT_CHARS: usize = 1800;
 const PREVIEW_CHARS: usize = 1600;
 const SNIPPET_CHARS: usize = 240;
 const ASSUMED_DOC_SCORE: f64 = 0.75;
+/// Single-document focus (0.11, field report "partial answers"): a question
+/// that clearly targets ONE document is answered from ALL of it — full
+/// inclusion when the doc fits the provider budget, else a segment sweep over
+/// every chunk — instead of the top-k sample. Dominance = this many of the
+/// initial k=5 context blocks from one file.
+const DOC_FOCUS_DOMINANCE: usize = 4;
 
 // --- Trigger -------------------------------------------------------------------
 
@@ -94,6 +100,82 @@ pub fn rank_docs_from_hits(refs: &[RagReference], max: usize) -> Vec<DocCandidat
         d.score = (d.score / top).min(1.0);
     }
     by_file
+}
+
+// --- Single-document focus (doc-focus) ---------------------------------------------
+
+/// The one file that dominates the initial hits: at least
+/// DOC_FOCUS_DOMINANCE of the context blocks come from a single file.
+/// Contexts don't carry file ids, so names are counted and mapped back
+/// through the (per-file-deduped) references; a display name shared by two
+/// referenced files is ambiguous and returns None. Pure; mirrors
+/// src/server/synth.ts::dominantDoc.
+pub fn dominant_doc(ctx_names: &[String], refs: &[RagReference]) -> Option<(String, String)> {
+    if ctx_names.len() < DOC_FOCUS_DOMINANCE {
+        return None;
+    }
+    let mut counts: Vec<(&str, usize)> = Vec::new();
+    for n in ctx_names {
+        match counts.iter_mut().find(|(name, _)| *name == n.as_str()) {
+            Some((_, c)) => *c += 1,
+            None => counts.push((n.as_str(), 1)),
+        }
+    }
+    let (name, c) = counts.into_iter().max_by_key(|(_, c)| *c)?;
+    if c < DOC_FOCUS_DOMINANCE {
+        return None;
+    }
+    let matching: Vec<&RagReference> = refs.iter().filter(|r| r.name == name).collect();
+    match matching.as_slice() {
+        [one] => Some((one.file_id.clone(), one.name.clone())),
+        _ => None,
+    }
+}
+
+/// Partition ORDERED chunks into contiguous `\n\n`-joined segments of at most
+/// `seg_budget` chars (a single over-budget chunk still gets its own
+/// segment; order is preserved). Pure; mirrors synth.ts::partitionSegments.
+pub fn partition_segments(chunks: &[String], seg_budget: usize) -> Vec<String> {
+    let mut segs: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut cur_chars = 0usize;
+    for ch in chunks {
+        let n = ch.chars().count();
+        if cur_chars > 0 && cur_chars + 2 + n > seg_budget {
+            segs.push(std::mem::take(&mut cur));
+            cur_chars = 0;
+        }
+        if cur_chars > 0 {
+            cur.push_str("\n\n");
+            cur_chars += 2;
+        }
+        cur.push_str(ch);
+        cur_chars += n;
+    }
+    if cur_chars > 0 {
+        segs.push(cur);
+    }
+    segs
+}
+
+/// Evenly-spaced sample of at most `max` segments (all of them when they
+/// fit), plus the pre-sample total for the honesty note. First and last
+/// segments are always kept. Pure; mirrors synth.ts::sampleSegments.
+pub fn sample_segments(segs: Vec<String>, max: usize) -> (Vec<String>, usize) {
+    let total = segs.len();
+    if total <= max || max == 0 {
+        return (segs, total);
+    }
+    let mut out: Vec<String> = Vec::with_capacity(max);
+    for i in 0..max {
+        let idx = if max == 1 {
+            0
+        } else {
+            i * (total - 1) / (max - 1)
+        };
+        out.push(segs[idx].clone());
+    }
+    (out, total)
 }
 
 // --- Map step --------------------------------------------------------------------
@@ -746,6 +828,149 @@ pub fn answer_pipeline(
             // Fewer than two documents had anything to say — fall through.
         }
 
+        // --- Single-document focus (0.11, field report "partial answers"):
+        //     a question that clearly targets ONE document — a single
+        //     attachment, a named file, or one file dominating the initial
+        //     hits — is answered from ALL of it, not a top-k sample. Full
+        //     inclusion when the doc fits the provider budget; otherwise a
+        //     map sweep over every chunk (the multi-doc machinery, applied
+        //     per segment). Multi-doc asks never reach here (returned above
+        //     or guarded by the cue); tabular files stay on the
+        //     analytics/table-profile paths. ---
+        if has_real_model(&cfg) && attachment_file_ids.len() <= 1 && !cross_doc_cue(&question) {
+            let target: Option<(String, String)> = if attachment_file_ids.len() == 1 {
+                Some((attachment_file_ids[0].clone(), String::new()))
+            } else {
+                let named = tokio::task::spawn_blocking({
+                    let q = question.clone();
+                    let ids = included_file_ids.clone();
+                    move || vault::named_file_target(&q, &ids)
+                })
+                .await
+                .unwrap_or_default();
+                named.or_else(|| {
+                    let names: Vec<String> =
+                        initial.contexts.iter().map(|c| c.name.clone()).collect();
+                    dominant_doc(&names, &initial.references)
+                })
+            };
+            let doc: Option<(String, String, Vec<String>)> = match target {
+                Some((doc_id, _)) => {
+                    let id = doc_id.clone();
+                    tokio::task::spawn_blocking(move || vault::doc_chunks(&id))
+                        .await
+                        .unwrap_or_default()
+                        .map(|(name, chunks)| (doc_id, name, chunks))
+                }
+                None => None,
+            };
+            if let Some((doc_id, name, chunks)) =
+                doc.filter(|(_, n, c)| !is_profileable(n) && !c.is_empty())
+            {
+                let reference = RagReference {
+                    file_id: doc_id,
+                    name: name.clone(),
+                    snippet: take_chars(&chunks[0], SNIPPET_CHARS),
+                    score: 1.0,
+                };
+                let total_chars: usize = chunks.iter().map(|c| c.chars().count()).sum::<usize>()
+                    + 2 * chunks.len().saturating_sub(1);
+                if total_chars <= llm::full_doc_char_budget(&cfg) {
+                    // The whole document rides in one prompt.
+                    yield progress(format!("Reading all of {name}…"), 1, 2);
+                    let n = chunks.len();
+                    let ctxs: Vec<Ctx> = chunks
+                        .iter()
+                        .enumerate()
+                        .map(|(i, t)| Ctx {
+                            name: if n == 1 {
+                                name.clone()
+                            } else {
+                                format!("{name} — part {}/{n}", i + 1)
+                            },
+                            text: t.clone(),
+                            // Descending scores make the local clamp's
+                            // lowest-score-first drop a deterministic tail
+                            // truncation (never mid-document holes).
+                            score: 1.0 - i as f64 * 1e-4,
+                        })
+                        .collect();
+                    let mut answer =
+                        llm::stream_answer(question.clone(), ctxs, cfg.clone(), history.clone());
+                    while let Some(d) = answer.next().await {
+                        yield delta(d);
+                    }
+                    yield final_chunk(vec![reference]);
+                    return;
+                }
+                // Too big for one prompt: sweep EVERY chunk in ordered
+                // segments, extract per segment, then synthesize.
+                let segs =
+                    partition_segments(&chunks, llm::doc_segment_char_budget(&cfg));
+                let (segs, total_segs) = sample_segments(segs, llm::max_doc_segments(&cfg));
+                let read = segs.len();
+                if read < total_segs {
+                    yield delta(format!(
+                        "_(Long document: read {read} of {total_segs} sections of “{name}”, evenly spread.)_\n\n"
+                    ));
+                }
+                let steps = read + 1;
+                let mut extracts: Vec<(usize, String)> = Vec::new();
+                for (i, seg) in segs.iter().enumerate() {
+                    yield progress(
+                        format!("Reading {name} (part {}/{read})…", i + 1),
+                        i + 1,
+                        steps,
+                    );
+                    let ctxs = vec![Ctx {
+                        name: format!("{name} — part {}/{read}", i + 1),
+                        text: seg.clone(),
+                        score: 1.0,
+                    }];
+                    let raw = collect(llm::stream_answer(
+                        map_question(&question),
+                        ctxs,
+                        cfg.clone(),
+                        Vec::new(),
+                    ))
+                    .await;
+                    let extract = take_chars(strip_markers(&raw).trim(), MAP_EXTRACT_CHARS);
+                    // Same failure-note filter as the multi-doc map step.
+                    if extract.is_empty()
+                        || extract.starts_with("NO_RELEVANT_CONTENT")
+                        || extract.contains("model unavailable —")
+                    {
+                        continue;
+                    }
+                    extracts.push((i + 1, extract));
+                }
+                if !extracts.is_empty() {
+                    yield progress(format!("Synthesizing {name}…"), steps, steps);
+                    let reduce_ctxs: Vec<Ctx> = extracts
+                        .iter()
+                        .map(|(i, t)| Ctx {
+                            name: format!("{name} — part {i}/{read}"),
+                            text: t.clone(),
+                            score: 1.0,
+                        })
+                        .collect();
+                    let mut answer = llm::stream_answer(
+                        question.clone(),
+                        reduce_ctxs,
+                        cfg.clone(),
+                        history.clone(),
+                    );
+                    while let Some(d) = answer.next().await {
+                        yield delta(d);
+                    }
+                    yield final_chunk(vec![reference]);
+                    return;
+                }
+                // Every segment came back empty/failed — fall through to the
+                // ordinary single-shot path below.
+            }
+        }
+
         // --- Single-shot path + exact table stats for CSV hits ---
         let mut contexts: Vec<Ctx> = initial
             .contexts
@@ -834,5 +1059,70 @@ mod tests {
         assert_eq!(strip_markers("Total was 42 [1] exactly[2]."), "Total was 42 exactly.");
         assert_eq!(strip_markers("keep [1234] big"), "keep [1234] big");
         assert_eq!(strip_markers("[not] brackets"), "[not] brackets");
+    }
+
+    // --- doc-focus (mirrors test/docFocus.test.mjs) ---
+
+    fn names(ns: &[&str]) -> Vec<String> {
+        ns.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn dominance_requires_four_of_five_from_one_referenced_file() {
+        let refs = vec![r("a", "sop.docx", 0.9), r("b", "other.md", 0.5)];
+        // 4/5 from one file → dominant.
+        let ctx = names(&["sop.docx", "sop.docx", "sop.docx", "sop.docx", "other.md"]);
+        assert_eq!(
+            dominant_doc(&ctx, &refs),
+            Some(("a".to_string(), "sop.docx".to_string()))
+        );
+        // 3/5 → not dominant.
+        let ctx = names(&["sop.docx", "sop.docx", "sop.docx", "other.md", "other.md"]);
+        assert_eq!(dominant_doc(&ctx, &refs), None);
+        // Too few hits overall → never dominant.
+        let ctx = names(&["sop.docx", "sop.docx", "sop.docx"]);
+        assert_eq!(dominant_doc(&ctx, &refs), None);
+        // A display name shared by TWO referenced files is ambiguous.
+        let dup = vec![r("a", "sop.docx", 0.9), r("z", "sop.docx", 0.8)];
+        let ctx = names(&["sop.docx", "sop.docx", "sop.docx", "sop.docx", "sop.docx"]);
+        assert_eq!(dominant_doc(&ctx, &dup), None);
+    }
+
+    #[test]
+    fn segments_partition_in_order_within_budget() {
+        let chunks: Vec<String> = (0..10).map(|i| format!("{i}{}", "x".repeat(99))).collect();
+        // 100-char chunks, 350 budget → 3 per segment (300 + 2×2 sep = 304).
+        let segs = partition_segments(&chunks, 350);
+        assert_eq!(
+            segs.len(),
+            4,
+            "{:?}",
+            segs.iter().map(|s| s.len()).collect::<Vec<_>>()
+        );
+        assert!(segs.iter().all(|s| s.chars().count() <= 350));
+        // Order preserved: first segment starts with chunk 0, last ends with 9.
+        assert!(segs[0].starts_with('0'));
+        assert!(segs[3].contains('9'));
+        // A single over-budget chunk still lands in its own segment.
+        let big = vec!["y".repeat(500)];
+        assert_eq!(partition_segments(&big, 350).len(), 1);
+        // Empty in, empty out.
+        assert!(partition_segments(&[], 350).is_empty());
+    }
+
+    #[test]
+    fn sampling_keeps_ends_and_reports_total() {
+        let segs: Vec<String> = (0..23).map(|i| i.to_string()).collect();
+        let (kept, total) = sample_segments(segs.clone(), 8);
+        assert_eq!(total, 23);
+        assert_eq!(kept.len(), 8);
+        assert_eq!(kept.first().unwrap(), "0");
+        assert_eq!(kept.last().unwrap(), "22");
+        // Strictly increasing (no duplicates).
+        let idxs: Vec<usize> = kept.iter().map(|s| s.parse().unwrap()).collect();
+        assert!(idxs.windows(2).all(|w| w[0] < w[1]), "{idxs:?}");
+        // Fits already → untouched.
+        let (all, total) = sample_segments(segs.clone(), 23);
+        assert_eq!((all.len(), total), (23, 23));
     }
 }

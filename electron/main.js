@@ -290,6 +290,14 @@ function startServer() {
       // Keep OAuth connector tokens in the app's private data dir, NOT inside the
       // vault (which defaults to the cloud-synced Documents folder).
       LIGHTHOUSE_CONNECTORS_DIR: path.join(app.getPath("userData"), "connectors"),
+      // Same rule for the signed-in profile and the install-global state
+      // (license/identity/experiments + the encrypted provider-key store):
+      // they belong to this install, not to whichever folder is the vault —
+      // otherwise a vault switch signs the user out and strands their keys.
+      // (The Tauri shell has set both since it took over as the shipping
+      // shell; this keeps the legacy Electron path consistent.)
+      LIGHTHOUSE_PROFILE_FILE: path.join(app.getPath("userData"), "profile.json"),
+      LIGHTHOUSE_APP_STATE_DIR: app.getPath("userData"),
       VAULT_DIR: vaultDir(),
       // Let the in-app UI read/change desktop settings (e.g. launch-at-login);
       // the main process re-reads this file on its next launch.

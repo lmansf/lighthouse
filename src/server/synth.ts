@@ -10,8 +10,22 @@
  */
 import type { ChatChunk, ChatTurn, RagReference } from "@/contracts";
 import { retrieve as registryRetrieve } from "./sources/registry";
-import { retrieve as vaultRetrieve, docText, activeIncludedFileIds, namedButExcluded } from "./vault";
-import { remoteProvider, streamAnswer, type Ctx } from "./llm";
+import {
+  retrieve as vaultRetrieve,
+  docText,
+  docChunks,
+  activeIncludedFileIds,
+  namedButExcluded,
+  namedFileTarget,
+} from "./vault";
+import {
+  remoteProvider,
+  streamAnswer,
+  fullDocCharBudget,
+  docSegmentCharBudget,
+  maxDocSegments,
+  type Ctx,
+} from "./llm";
 import { metaIntent, renderMeta } from "./meta";
 import { isProfileable, tableProfile } from "./tableProfile";
 
@@ -25,6 +39,14 @@ const PREVIEW_CHARS = 1600;
 const SNIPPET_CHARS = 240;
 /** Fallback relevance for docs chosen by attachment/inclusion, not retrieval. */
 const ASSUMED_DOC_SCORE = 0.75;
+/**
+ * Single-document focus (0.11, field report "partial answers"): a question
+ * that clearly targets ONE document is answered from ALL of it — full
+ * inclusion when the doc fits the provider budget, else a segment sweep over
+ * every chunk — instead of the top-k sample. Dominance = this many of the
+ * initial k=5 context blocks from one file.
+ */
+const DOC_FOCUS_DOMINANCE = 4;
 
 export interface ModelCfg {
   providerId: string | null;
@@ -81,6 +103,67 @@ export function rankDocsFromHits(refs: RagReference[], max: number): DocCandidat
   const ranked = [...byFile.values()].sort((a, b) => b.score - a.score).slice(0, max);
   const top = ranked[0]?.score || 1;
   return ranked.map((d) => ({ ...d, score: Math.min(1, d.score / top) }));
+}
+
+// --- Single-document focus (doc-focus) ---------------------------------------------
+
+/**
+ * The one file that dominates the initial hits: at least DOC_FOCUS_DOMINANCE
+ * of the context blocks come from a single file. Contexts don't carry file
+ * ids, so names are counted and mapped back through the (per-file-deduped)
+ * references; a display name shared by two referenced files is ambiguous and
+ * returns null. Pure; KEEP IN SYNC with synth.rs::dominant_doc.
+ */
+export function dominantDoc(ctxNames: string[], refs: RagReference[]): [string, string] | null {
+  if (ctxNames.length < DOC_FOCUS_DOMINANCE) return null;
+  const counts = new Map<string, number>();
+  for (const n of ctxNames) counts.set(n, (counts.get(n) ?? 0) + 1);
+  let name = "";
+  let c = 0;
+  for (const [n, k] of counts) {
+    // >= so a tie keeps the LAST name, matching the Rust max_by_key.
+    if (k >= c) {
+      name = n;
+      c = k;
+    }
+  }
+  if (c < DOC_FOCUS_DOMINANCE) return null;
+  const matching = refs.filter((r) => r.name === name);
+  return matching.length === 1 ? [matching[0].fileId, matching[0].name] : null;
+}
+
+/**
+ * Partition ORDERED chunks into contiguous `\n\n`-joined segments of at most
+ * `segBudget` chars (a single over-budget chunk still gets its own segment;
+ * order is preserved). Pure; KEEP IN SYNC with synth.rs::partition_segments.
+ */
+export function partitionSegments(chunks: string[], segBudget: number): string[] {
+  const segs: string[] = [];
+  let cur = "";
+  for (const ch of chunks) {
+    if (cur.length > 0 && cur.length + 2 + ch.length > segBudget) {
+      segs.push(cur);
+      cur = "";
+    }
+    cur = cur.length > 0 ? `${cur}\n\n${ch}` : ch;
+  }
+  if (cur.length > 0) segs.push(cur);
+  return segs;
+}
+
+/**
+ * Evenly-spaced sample of at most `max` segments (all of them when they fit),
+ * plus the pre-sample total for the honesty note. First and last segments are
+ * always kept. Pure; KEEP IN SYNC with synth.rs::sample_segments.
+ */
+export function sampleSegments(segs: string[], max: number): [string[], number] {
+  const total = segs.length;
+  if (total <= max || max === 0) return [segs, total];
+  const out: string[] = [];
+  for (let i = 0; i < max; i += 1) {
+    out.push(segs[max === 1 ? 0 : Math.floor((i * (total - 1)) / (max - 1))]);
+  }
+  return [out, total];
 }
 
 // --- Map step --------------------------------------------------------------------
@@ -293,6 +376,101 @@ export async function* answerPipeline(
     }
     // Fewer than two documents had anything to say — fall through to the
     // ordinary single-shot answer over the initial retrieval.
+  }
+
+  // --- Single-document focus (0.11, field report "partial answers"): a
+  //     question that clearly targets ONE document — a single attachment, a
+  //     named file, or one file dominating the initial hits — is answered
+  //     from ALL of it, not a top-k sample. Full inclusion when the doc fits
+  //     the provider budget; otherwise a map sweep over every chunk (the
+  //     multi-doc machinery, applied per segment). Multi-doc asks never reach
+  //     here (returned above or guarded by the cue); tabular files stay on
+  //     the table-profile path (analytics is desktop-only). KEEP IN SYNC with
+  //     synth.rs. ---
+  if (hasRealModel(cfg) && attachmentFileIds.length <= 1 && !crossDocCue(question)) {
+    const target: [string, string] | null =
+      attachmentFileIds.length === 1
+        ? [attachmentFileIds[0], ""]
+        : namedFileTarget(question, includedFileIds) ??
+          dominantDoc(initial.contexts.map((c) => c.name), initial.references);
+    const doc = target ? await docChunks(target[0]) : null;
+    if (target && doc && !isProfileable(doc[0]) && doc[1].length > 0) {
+      const [name, chunks] = doc;
+      const reference: RagReference = {
+        fileId: target[0],
+        name,
+        snippet: chunks[0].slice(0, SNIPPET_CHARS),
+        score: 1,
+      };
+      const totalChars =
+        chunks.reduce((sum, c) => sum + c.length, 0) + 2 * Math.max(0, chunks.length - 1);
+      if (totalChars <= fullDocCharBudget(cfg)) {
+        // The whole document rides in one prompt.
+        yield progress(`Reading all of ${name}…`, 1, 2);
+        const n = chunks.length;
+        const ctxs: Ctx[] = chunks.map((t, i) => ({
+          name: n === 1 ? name : `${name} — part ${i + 1}/${n}`,
+          text: t,
+          // Descending scores make the Rust local clamp's lowest-score-first
+          // drop a deterministic tail truncation (never mid-document holes);
+          // the TS local path never clamps, so they only carry the order.
+          score: 1 - i * 1e-4,
+        }));
+        for await (const delta of streamAnswer(question, ctxs, cfg, history)) {
+          yield { delta, done: false };
+        }
+        yield { delta: "", references: [reference], done: true };
+        return;
+      }
+      // Too big for one prompt: sweep EVERY chunk in ordered segments,
+      // extract per segment, then synthesize.
+      const parts = partitionSegments(chunks, docSegmentCharBudget(cfg));
+      const [segs, totalSegs] = sampleSegments(parts, maxDocSegments(cfg));
+      const read = segs.length;
+      if (read < totalSegs) {
+        yield {
+          delta: `_(Long document: read ${read} of ${totalSegs} sections of “${name}”, evenly spread.)_\n\n`,
+          done: false,
+        };
+      }
+      const steps = read + 1;
+      const extracts: [number, string][] = [];
+      for (let i = 0; i < segs.length; i += 1) {
+        yield progress(`Reading ${name} (part ${i + 1}/${read})…`, i + 1, steps);
+        const ctxs: Ctx[] = [{ name: `${name} — part ${i + 1}/${read}`, text: segs[i], score: 1 }];
+        let extract = "";
+        try {
+          extract = await collect(streamAnswer(mapQuestion(question), ctxs, cfg, []));
+        } catch {
+          continue; // one bad map call must not sink the whole answer
+        }
+        extract = stripMarkers(extract).trim().slice(0, MAP_EXTRACT_CHARS);
+        // Same failure-note filter as the multi-doc map step above.
+        if (
+          !extract ||
+          extract.startsWith("NO_RELEVANT_CONTENT") ||
+          extract.includes("model unavailable —")
+        ) {
+          continue;
+        }
+        extracts.push([i + 1, extract]);
+      }
+      if (extracts.length > 0) {
+        yield progress(`Synthesizing ${name}…`, steps, steps);
+        const reduceCtxs: Ctx[] = extracts.map(([i, t]) => ({
+          name: `${name} — part ${i}/${read}`,
+          text: t,
+          score: 1,
+        }));
+        for await (const delta of streamAnswer(question, reduceCtxs, cfg, history)) {
+          yield { delta, done: false };
+        }
+        yield { delta: "", references: [reference], done: true };
+        return;
+      }
+      // Every segment came back empty/failed — fall through to the ordinary
+      // single-shot path below.
+    }
   }
 
   // --- Single-shot path (today's behavior) + exact table stats for CSV hits ---

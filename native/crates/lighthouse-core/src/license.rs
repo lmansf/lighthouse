@@ -15,7 +15,7 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::config::{app_version, now_ms, parse_ms, read_json, state_dir, utc_day, write_json};
+use crate::config::{app_state_dir, app_version, now_ms, parse_ms, read_json, utc_day, write_json};
 use crate::experiment::{assign_balanced_variants, get_all_variants};
 use crate::usage::{
     is_usage_opted_out, purge_usage_buffer, read_usage_buffer, reset_usage_consent,
@@ -25,17 +25,19 @@ const TRIAL_DAYS: i64 = 14;
 const GRACE_DAYS: i64 = 14;
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 
+// License state is install-global (app_state_dir), NOT per-vault: switching
+// vaults must not sign the user out. See config::app_state_dir.
 fn license_path() -> PathBuf {
-    state_dir().join("license.json")
+    app_state_dir().join("license.json")
 }
 fn identity_path() -> PathBuf {
-    state_dir().join("identity.json")
+    app_state_dir().join("identity.json")
 }
 fn contact_id_path() -> PathBuf {
-    state_dir().join("contact.json")
+    app_state_dir().join("contact.json")
 }
 fn launch_path() -> PathBuf {
-    state_dir().join("launch.json")
+    app_state_dir().join("launch.json")
 }
 
 /// A stable per-user contact id, generated once and kept across trials, locks,

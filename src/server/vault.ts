@@ -1283,3 +1283,38 @@ export async function docText(
   if (!text.trim()) return null;
   return { name: node.name, text: previewChars ? text.slice(0, previewChars) : text };
 }
+
+/**
+ * The single INCLUDED vault file the question NAMES, if any — the synth
+ * pipeline's single-document-focus detector. Same conservative matcher as the
+ * in-retrieve named pin (ambiguity ⇒ null), over the same `nameTokensOf`
+ * tokens. KEEP IN SYNC with vault.rs::named_file_target.
+ */
+export function namedFileTarget(
+  question: string,
+  includedFileIds: string[],
+): [string, string] | null {
+  const qtokens = tokenize(question);
+  if (qtokens.length === 0) return null;
+  const included = new Set(includedFileIds);
+  const files = walk(vaultDir())
+    .filter((n) => n.kind === "file" && included.has(n.id))
+    .map((n) => ({ id: n.id, name: n.name, toks: nameTokensOf(n.id, n.name) }));
+  const id = pinnedNamedFile(qtokens, files);
+  const hit = files.find((f) => f.id === id);
+  return hit ? [hit.id, hit.name] : null;
+}
+
+/**
+ * A document's display name + ORDERED chunk texts — the same byte-identical
+ * chunker the index uses — for whole-document coverage in the synth pipeline
+ * (doc-focus). Null when the file is missing or extracts empty. KEEP IN SYNC
+ * with vault.rs::doc_chunks.
+ */
+export async function docChunks(fileId: string): Promise<[string, string[]] | null> {
+  const doc = await docText(fileId);
+  if (!doc) return null;
+  const chunks = chunkTextsNamed(doc.name, doc.text);
+  if (chunks.length === 0) return null;
+  return [doc.name, chunks];
+}

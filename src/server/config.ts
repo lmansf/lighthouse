@@ -38,6 +38,25 @@ export function profilePath(): string {
   return path.join(stateDir(), PROFILE_FILE);
 }
 
+/**
+ * Install-global state (license, identity, contact, launch telemetry) that
+ * must persist across vault switches. A trial/subscription belongs to the
+ * user's install, not to whichever folder happens to be the vault — storing it
+ * in-vault meant "Choose vault folder…" re-pointed the engine at a folder with
+ * no license and silently signed the user out. Same rule the profile and
+ * connector credentials already follow (see connectorsDir). The desktop shell
+ * sets LIGHTHOUSE_APP_STATE_DIR to its private data dir; plain web/dev falls
+ * back to the in-vault state dir for parity.
+ */
+export function appStateDir(): string {
+  const override = process.env.LIGHTHOUSE_APP_STATE_DIR?.trim();
+  if (override) {
+    fs.mkdirSync(override, { recursive: true });
+    return override;
+  }
+  return stateDir();
+}
+
 /** The single logical source id for the local vault folder. */
 export const VAULT_SOURCE_ID = "vault";
 

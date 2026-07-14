@@ -1,7 +1,9 @@
 //! A/B experiment variant assignment (port of `src/server/experiment.ts`).
 //!
-//! Two independent experiments, each resolved ONCE per install and persisted to
-//! `.rag-vault/experiments.json`. Assignment: pilot-email override → server-
+//! Two independent experiments, each resolved ONCE per install and persisted
+//! to `experiments.json` in the install-global app state dir (per-install
+//! semantics — a vault switch must not re-roll buckets; see
+//! config::app_state_dir). Assignment: pilot-email override → server-
 //! balanced (license fn `assign`) → deterministic SHA-256 hash of the stable
 //! contact id. Best-effort; must never throw into a launch or a query.
 
@@ -10,11 +12,12 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::config::{profile_path, read_json, state_dir, write_json};
+use crate::config::{app_state_dir, profile_path, read_json, write_json};
 use crate::license::{call_fn, get_contact_id};
 
+// Same file license.rs's identity ops write — must resolve identically.
 fn identity_path() -> PathBuf {
-    state_dir().join("identity.json")
+    app_state_dir().join("identity.json")
 }
 
 /// The user's email, read straight from the stored profile / identity files.
@@ -106,7 +109,7 @@ fn first_user_override(email: &str) -> Option<Variants> {
 }
 
 fn experiments_path() -> PathBuf {
-    state_dir().join("experiments.json")
+    app_state_dir().join("experiments.json")
 }
 
 /// Deterministic hash of a string to the unit interval [0, 1) — the top 48 bits

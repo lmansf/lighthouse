@@ -2078,6 +2078,48 @@ pub fn doc_text(file_id: &str, preview_chars: Option<usize>) -> Option<(String, 
     Some((node.name, text))
 }
 
+/// The single INCLUDED vault file the question NAMES, if any — the synth
+/// pipeline's single-document-focus detector. Same conservative matcher as
+/// the in-retrieve named pin (ambiguity ⇒ None), over the same
+/// `name_tokens_of` tokens. Mirrors src/server/vault.ts::namedFileTarget.
+pub fn named_file_target(
+    question: &str,
+    included_file_ids: &[String],
+) -> Option<(String, String)> {
+    let qtokens = tokenize(question);
+    if qtokens.is_empty() {
+        return None;
+    }
+    let included: HashSet<&String> = included_file_ids.iter().collect();
+    let nodes = walk(&vault_dir());
+    let files: Vec<(String, String, Vec<String>)> = nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::File && included.contains(&n.id))
+        .map(|n| (n.id.clone(), n.name.clone(), name_tokens_of(&n.id, &n.name)))
+        .collect();
+    let id = pinned_named_file(
+        &qtokens,
+        files.iter().map(|(id, _, t)| (id.as_str(), t.as_slice())),
+    )?;
+    files
+        .iter()
+        .find(|(fid, _, _)| fid == id)
+        .map(|(fid, name, _)| (fid.clone(), name.clone()))
+}
+
+/// A document's display name + ORDERED chunk texts — the same byte-identical
+/// chunker the index uses — for whole-document coverage in the synth
+/// pipeline (doc-focus). None when the file is missing or extracts empty.
+/// Mirrors src/server/vault.ts::docChunks.
+pub fn doc_chunks(file_id: &str) -> Option<(String, Vec<String>)> {
+    let (name, text) = doc_text(file_id, None)?;
+    let chunks = chunk_texts_named(&name, &text);
+    if chunks.is_empty() {
+        return None;
+    }
+    Some((name, chunks))
+}
+
 /// Extension-ish tokens that don't count as "naming" a file in a question.
 const EXT_TOKENS: &[&str] = &[
     "xlsx", "xlsm", "xls", "csv", "tsv", "pdf", "docx", "doc", "md", "txt", "parquet",
