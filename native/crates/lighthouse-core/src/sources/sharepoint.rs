@@ -5,6 +5,13 @@
 //! mirrors just its bytes into a local mirror dir where the normal retrieval
 //! pipeline reads it like any vault file. Node ids are namespaced
 //! `sharepoint::<driveId>::<itemId>`.
+//!
+//! DORMANT BY DECISION (2026-07-15): this connector is intentionally RETAINED as
+//! plumbing — it is not surfaced in the shipping UI, but the connector code, its
+//! `SourceConnector` seam wiring (`sources/mod.rs`), and the `SHAREPOINT_*` env
+//! surface (`config.rs`) are kept on purpose. Do NOT remove them in a cleanup
+//! pass; a future release may re-surface the connector. PARITY: same note on the
+//! TS twin `src/server/sources/sharepoint.ts`.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
