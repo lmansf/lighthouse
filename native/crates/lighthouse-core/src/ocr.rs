@@ -62,7 +62,7 @@ pub fn enabled() -> bool {
 }
 
 /// Where the two .rten models live: the bundled `resources/ocr` dir, resolved
-/// the same way embed/tts resolve theirs (`resources_dir()` honors the shell's
+/// the same way embed resolves theirs (`resources_dir()` honors the shell's
 /// LIGHTHOUSE_RESOURCES_PATH and dev-checkout fallback). `LIGHTHOUSE_OCR_MODELS_DIR`
 /// is a direct override for tests and the CI smoke test.
 fn models_dir() -> PathBuf {

@@ -17,11 +17,9 @@
  *      the VULKAN build on Windows/Linux (GPU offload with a dynamic CPU
  *      fallback in the same archive — runs fine on GPU-less machines), the
  *      default arm64 build (Metal) on macOS. See pickAsset().
- *   2. Piper (rhasspy/piper, MIT) + a neural voice (en_US-lessac-medium, ~63 MB,
- *      MIT/CC0) into `resources/tts/`, powering on-device read-aloud TTS.
- *   3. The nomic embedding GGUF (nomic-ai/nomic-embed-text-v1.5, Apache-2.0)
+ *   2. The nomic embedding GGUF (nomic-ai/nomic-embed-text-v1.5, Apache-2.0)
  *      into `resources/embed/` for B2 hybrid search.
- *   4. The ocrs OCR models (robertknight/ocrs-models, ~12 MB) into
+ *   3. The ocrs OCR models (robertknight/ocrs-models, ~12 MB) into
  *      `resources/ocr/`, reading text in images + scanned PDFs on device. The
  *      ocrs project is MIT/Apache-2.0; its models are trained exclusively on
  *      openly-licensed data — HierText (CC-BY-SA 4.0) — attributed here.
@@ -40,7 +38,6 @@
  *
  * Overridable via env (all optional):
  *   LLAMACPP_VERSION   override the pinned llama.cpp release tag
- *   PIPER_VERSION      override the pinned piper release tag
  *   GITHUB_TOKEN       lifts the unauthenticated GitHub API rate limit
  */
 import { createWriteStream, existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
@@ -60,15 +57,13 @@ const LLAMACPP_API = "https://api.github.com/repos/ggml-org/llama.cpp/releases";
 // --- Pinned, integrity-verified build assets --------------------------------
 // Each default asset is pinned to a specific version/revision AND a SHA-256.
 // Bump the version + digest together: GitHub release digests come from the
-// release API's asset `digest` field, the HF voice digest from its LFS oid, and
-// anything else from `--record`. Keys are the asset filenames the pickers resolve
-// for the platforms the release pipeline builds (Windows x64, macOS arm64).
+// release API's asset `digest` field, and anything else from `--record`. Keys
+// are the asset filenames the pickers resolve for the platforms the release
+// pipeline builds (Windows x64, macOS arm64).
 const LLAMACPP_VERSION = "b9859"; // ggml-org/llama.cpp release tag
-const PIPER_VERSION = "2023.11.14-2"; // rhasspy/piper release tag
-const VOICE_REVISION = "e21c7de8d4eab79b902f0d61e662b3f21664b8d2"; // rhasspy/piper-voices commit
 // Our own mirror of every HF-hosted asset (release tag in THIS repo,
-// populated by the mirror-hf-assets workflow): the Piper voice pair and the
-// embedding GGUF. Tried before HF, whose CDN 403-stormed for hours on
+// populated by the mirror-hf-assets workflow): the embedding GGUF. Tried
+// before HF, whose CDN 403-stormed for hours on
 // 2026-07-13 and blocked four consecutive release builds. The same pinned
 // SHA-256 verifies both sources, so the mirror is tamper-evident and the
 // fallback order is purely about availability. In --record mode upstream is
@@ -97,19 +92,11 @@ const ASSET_SHA256 = {
   "llama-b9859-bin-win-cpu-x64.zip": "c9aa80f233a7d1749341860f11723b912d4cfd6eec19434c3d00bba0abc9f85c",
   "llama-b9859-bin-ubuntu-x64.tar.gz": "7a434a404669534ee67f2e53363109053a54c3ee13f487cbc17a3455ac5930f4",
   "llama-b9859-bin-macos-arm64.tar.gz": "21e720ac103d28d7585a52b8023fb86fc0736c90ad92c1e75053207630e90df6",
-  "piper_windows_amd64.zip": "f3c58906402b24f3a96d92145f58acba6d86c9b5db896d207f78dc80811efcea",
-  "piper_macos_aarch64.tar.gz": "6b1eb03b3735946cb35216e063e7eebcc33a6bbf5dd96ec0217959bf1cdcb0cc",
-  // Linux piper was never pinned — the fetch step on Linux release runners had
-  // been failing closed here (TTS quietly missing from Linux bundles). Digest
-  // recorded by the first asset-digests run.
-  "piper_linux_x86_64.tar.gz": "a50cb45f355b7af1f6d758c1b360717877ba0a398cc8cbe6d2a7a3a26e225992",
   // OCR (add-ocr-perception): the ocrs detection + recognition models. Not on
   // a versioned host — pinned by digest, mirror-first (repo release) with the
   // ocrs S3 bucket as upstream.
   "text-detection.rten": "f15cfb56bd02c4bf478a20343986504a1f01e1665c2b3a0ad66340f054b1b5ca",
   "text-recognition.rten": "e484866d4cce403175bd8d00b128feb08ab42e208de30e42cd9889d8f1735a6e",
-  "en_US-lessac-medium.onnx": "5efe09e69902187827af646e1a6e9d269dee769f9877d17b16b1b46eeaaf019f",
-  "en_US-lessac-medium.onnx.json": "efe19c417bed055f2d69908248c6ba650fa135bc868b0e6abb3da181dab690a0",
   // B2 embedding model (see EMBED_* above) — one GGUF for all three OS builds.
   "nomic-embed-text-v1.5.Q8_0.gguf": "3e24342164b3d94991ba9692fdc0dd08e3fd7362e0aacc396a9a5c54a544c3b7",
 };
@@ -337,147 +324,6 @@ function flatten(dir) {
   }
 }
 
-/** Pick the Piper release asset matching this OS/arch (zip on Windows, tar.gz else). */
-function pickPiperAsset(assets) {
-  const os = platform === "win32" ? "windows" : platform === "darwin" ? "macos" : "linux";
-  // Piper asset arch tags: windows→amd64, linux→x86_64/aarch64, macos→x64/aarch64.
-  const arch =
-    process.arch === "arm64"
-      ? "aarch64"
-      : os === "windows"
-        ? "amd64"
-        : os === "macos"
-          ? "x64"
-          : "x86_64";
-  const names = assets
-    .map((a) => a.name)
-    .filter((n) => /\.(zip|tar\.gz|tgz)$/i.test(n) && n.toLowerCase().includes(os));
-  const byArch = names.filter((n) => n.toLowerCase().includes(arch));
-  const name = (byArch[0] || names[0]);
-  if (!name) throw new Error(`no piper asset for ${os}/${arch} in this release`);
-  return assets.find((a) => a.name === name);
-}
-
-/** Move everything from `srcDir` up into `dir`, then remove the empty `srcDir`. */
-function moveUp(srcDir, dir) {
-  for (const f of readdirSync(srcDir, { withFileTypes: true })) {
-    renameSync(join(srcDir, f.name), join(dir, f.name));
-  }
-  rmSync(srcDir, { recursive: true, force: true });
-}
-
-/** True when `p` exists AND is a regular file (a directory doesn't count). */
-function isFileAt(p) {
-  return statSync(p, { throwIfNoEntry: false })?.isFile() ?? false;
-}
-
-/**
- * Flatten Piper's archive (it unpacks into a `piper/` subfolder) into `dir`.
- *
- * Two traps, both hit in production before this shape:
- * - The extracted FOLDER is named exactly like the BINARY ("piper/piper"), so
- *   an existsSync() "already flat?" probe matches the folder and skips the
- *   flatten entirely — piper then lives nested forever (the v0.6.0 Linux
- *   AppImage failure: linuxdeploy found the nested unpatched libs). Probe with
- *   isFile instead.
- * - Moving the folder's contents up would rename the `piper` FILE onto the
- *   `piper` FOLDER path itself (EISDIR). Park the folder under a temp name
- *   first so the move-up can never collide.
- */
-function flattenPiper(dir, piperName) {
-  if (isFileAt(join(dir, piperName))) return; // already at top level
-  const srcDir = findDirWith(dir, piperName);
-  if (!srcDir || srcDir === dir) return;
-  const tmp = join(dir, ".piper-extract-tmp");
-  rmSync(tmp, { recursive: true, force: true });
-  renameSync(srcDir, tmp);
-  moveUp(tmp, dir);
-}
-
-/**
- * Linux only: stamp `$ORIGIN` as the RUNPATH on piper's binary and libraries.
- * The 2023 piper release only gives the *binary* an rpath — the bundled
- * libraries have none, so libpiper_phonemize's NEEDED libespeak-ng.so.1
- * resolves neither for linuxdeploy (AppImage bundling hard-fails with
- * "Could not find dependency: libespeak-ng.so.1") nor reliably for the
- * runtime loader. patchelf ships in the release workflow's system deps;
- * elsewhere this is best-effort with a warning.
- */
-function patchPiperRpath(dir) {
-  if (platform !== "linux") return;
-  const probe = spawnSync("patchelf", ["--version"], { stdio: "ignore" });
-  if (probe.status !== 0) {
-    console.warn("  patchelf not found — skipping piper RUNPATH fix (AppImage bundling may fail)");
-    return;
-  }
-  const elves = readdirSync(dir).filter((f) => f === "piper" || /\.so(\.|$)/.test(f));
-  for (const f of elves) {
-    const r = spawnSync("patchelf", ["--set-rpath", "$ORIGIN", join(dir, f)], { stdio: "inherit" });
-    if (r.status !== 0) throw new Error(`patchelf failed on ${f}`);
-  }
-  console.log(`  RUNPATH=$ORIGIN stamped on ${elves.length} piper ELF file(s)`);
-}
-
-/**
- * Fetch Piper + a neural voice into resources/tts/ for on-device read-aloud TTS.
- * Mirrors the llama-server flow: resolve the per-OS release asset, extract, and
- * flatten so `piper(.exe)` and its libraries sit directly in resources/tts/.
- */
-async function fetchTts() {
-  const ttsDest = join(root, "resources", "tts");
-  mkdirSync(ttsDest, { recursive: true });
-  const piperName = platform === "win32" ? "piper.exe" : "piper";
-  const piperPath = join(ttsDest, piperName);
-
-  // 1. Piper binary (+ libraries, espeak-ng-data)
-  if (!force && isFileAt(piperPath)) {
-    console.log(`✓ ${piperName} already present`);
-  } else {
-    const piperTag = process.env.PIPER_VERSION?.trim() || PIPER_VERSION;
-    console.log(`Resolving piper ${piperTag} release…`);
-    const release = await getJson(`https://api.github.com/repos/rhasspy/piper/releases/tags/${piperTag}`);
-    const asset = pickPiperAsset(release.assets || []);
-    console.log(`Downloading ${asset.name} (${release.tag_name})`);
-    const archivePath = join(ttsDest, asset.name);
-    await download(asset.browser_download_url, archivePath, "piper", asset.name);
-    extract(archivePath, ttsDest);
-    rmSync(archivePath, { force: true });
-    flattenPiper(ttsDest, piperName);
-    if (!isFileAt(piperPath)) throw new Error(`extracted, but ${piperName} not found in ${ttsDest}`);
-    console.log(`✓ ${piperName}`);
-  }
-  // Outside the else: a piper left by an older fetch gets its RUNPATH fixed
-  // too (patchelf --set-rpath is idempotent).
-  patchPiperRpath(ttsDest);
-
-  // 2. Voice model (.onnx) + its config (.onnx.json) — a clear, natural US voice.
-  // Mirror first (GitHub→builder is the dependable path), HF upstream second;
-  // both verify the same pinned SHA-256.
-  const voiceBase =
-    `https://huggingface.co/rhasspy/piper-voices/resolve/${VOICE_REVISION}/en/en_US/lessac/medium/en_US-lessac-medium`;
-  const onnxPath = join(ttsDest, "en_US-lessac-medium.onnx");
-  const jsonPath = join(ttsDest, "en_US-lessac-medium.onnx.json");
-  if (!force && existsSync(onnxPath) && statSync(onnxPath).size > 1e6) {
-    console.log(`✓ voice already present`);
-  } else {
-    await downloadWithFallback(
-      `${HF_MIRROR_BASE}/en_US-lessac-medium.onnx`,
-      `${voiceBase}.onnx`,
-      onnxPath,
-      "voice",
-      "en_US-lessac-medium.onnx",
-    );
-    await downloadWithFallback(
-      `${HF_MIRROR_BASE}/en_US-lessac-medium.onnx.json`,
-      `${voiceBase}.onnx.json`,
-      jsonPath,
-      "voice-config",
-      "en_US-lessac-medium.onnx.json",
-    );
-    console.log(`✓ voice en_US-lessac-medium`);
-  }
-}
-
 /**
  * Fetch the bundled embedding model (B2 hybrid search) into resources/embed/.
  * Platform-independent (one GGUF for all three OS builds), pinned to a repo
@@ -557,13 +403,10 @@ async function main() {
     console.log(`✓ ${serverName}`);
   }
 
-  // 2. Local neural TTS (Piper + voice) for on-device read-aloud.
-  await fetchTts();
-
-  // 3. Bundled embedding model for B2 hybrid search (resources/embed/).
+  // 2. Bundled embedding model for B2 hybrid search (resources/embed/).
   await fetchEmbed();
 
-  // 4. Bundled OCR models for reading images + scanned PDFs (resources/ocr/).
+  // 3. Bundled OCR models for reading images + scanned PDFs (resources/ocr/).
   await fetchOcr();
 
   if (RECORD && Object.keys(recorded).length) {
@@ -571,7 +414,7 @@ async function main() {
     for (const [k, v] of Object.entries(recorded)) console.log(`  ${JSON.stringify(k)}: ${JSON.stringify(v)},`);
   }
 
-  console.log(`\nBundled llama-server + TTS ready in resources/. The private model is`);
+  console.log(`\nBundled llama-server ready in resources/. The private model is`);
   console.log(`downloaded on demand at runtime (not bundled). Run \`npm run dist\` to package.`);
 }
 

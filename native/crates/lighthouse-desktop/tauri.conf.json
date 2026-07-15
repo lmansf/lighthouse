@@ -44,7 +44,6 @@
     "shortDescription": "Curate which of your files and data sources your AI can see.",
     "resources": {
       "../../../resources/llm": "llm",
-      "../../../resources/tts": "tts",
       "../../../resources/embed": "embed",
       "../../../resources/ocr": "ocr"
     },

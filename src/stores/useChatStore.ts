@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { AnalyticsMeta, ChatMessage } from "@/contracts";
+import type { AnalyticsMeta, ChatChunk, ChatMessage } from "@/contracts";
 import { chatHistoryLocked } from "./managedLocks";
 
 /**
@@ -40,8 +40,7 @@ const MAX_CONVERSATIONS = 200;
 export interface TranscriptMessage extends ChatMessage {
   /**
    * Plain-language reason this turn failed (network / HTTP error). A failed
-   * turn renders an inline banner with Retry instead of an answer, and is never
-   * read aloud.
+   * turn renders an inline banner with Retry instead of an answer.
    */
   error?: string;
   /** True when the user pressed Stop mid-stream; the partial answer is kept. */
@@ -57,6 +56,13 @@ export interface TranscriptMessage extends ChatMessage {
    * powers refinement chips and Edit SQL on this turn. Desktop engine only.
    */
   analytics?: AnalyticsMeta;
+  /**
+   * Engine-emitted provenance stamp from the final chunk: where the answer was
+   * computed ("device" or the cloud provider id) and how much was sent. Never
+   * derived from model text — rendered verbatim as the "Answered on this
+   * device / via <vendor>" footer under the answer.
+   */
+  meta?: ChatChunk["meta"];
 }
 
 /** One saved conversation: its turns plus list metadata (title, timestamps). */

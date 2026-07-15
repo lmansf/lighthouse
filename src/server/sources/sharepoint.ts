@@ -7,6 +7,13 @@
  * PDF/Word/Excel extractor — reads it like any vault file. Disabling removes the
  * mirror. Node ids are namespaced `sharepoint::<driveId>::<itemId>` so the
  * registry routes ops here.
+ *
+ * DORMANT BY DECISION (2026-07-15): this connector is intentionally RETAINED as
+ * plumbing — it is not surfaced in the shipping UI, but the connector code, its
+ * SourceConnector seam wiring (sources/registry.ts + sources/types.ts), and the
+ * SHAREPOINT_* env surface (config.ts) are kept on purpose. Do NOT remove them
+ * in a cleanup pass; a future release may re-surface the connector. PARITY: same
+ * note on the native twin native/crates/lighthouse-core/src/sources/sharepoint.rs.
  */
 import fs from "node:fs";
 import path from "node:path";

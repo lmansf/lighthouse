@@ -4,7 +4,7 @@ Curate which of your files and data sources your AI can see — then ask.
 Lighthouse is a **local-first** desktop app: a vault of your documents on your
 own disk, an explorer to toggle exactly which of them the AI may read, and a
 grounded chat (with citations) that answers only from what you included. The
-engine, the search index, the embeddings, OCR, text-to-speech, and — if you
+engine, the search index, the embeddings, OCR, and — if you
 choose the private model — the AI itself all run **on your machine**.
 
 Built for two people in particular: the **data analyst** who wants trustworthy,
@@ -55,8 +55,6 @@ security director** who needs to approve all of it.
   Mistral, or DeepSeek. Keys are stored **encrypted at rest** on your device
   and survive restarts and sign-outs. No model at all still works: a
   zero-network extractive fallback answers with citations.
-- **Read-aloud** via a bundled neural voice (Piper) — the answer text never
-  leaves the machine.
 
 ## Run it
 
@@ -84,7 +82,7 @@ Desktop build (Rust toolchain + platform webview deps required; see
 npm install
 npm run desktop:build      # static-export UI + cargo build --release
 # binary: native/target/release/lighthouse-desktop
-npm run fetch:model        # optional: bundled engines (llama-server, Piper, embeddings, OCR)
+npm run fetch:model        # optional: bundled engines (llama-server, embeddings, OCR)
 ```
 
 ## Architecture
@@ -177,9 +175,6 @@ most relevant passages, so you still get a grounded, cited answer.
 Bundled in the installer under their own permissive licenses:
 
 - **llama.cpp** `llama-server` — MIT © the ggml.ai / llama.cpp authors.
-- **Piper** TTS — MIT © Michael Hansen / the Piper authors — with the
-  `en_US-lessac-medium` voice (MIT/CC0; see
-  [rhasspy/piper-voices](https://huggingface.co/rhasspy/piper-voices)).
 - **nomic-embed-text-v1.5** embeddings — Apache-2.0 © Nomic AI.
 - **ocrs** OCR models — the ocrs project is MIT/Apache-2.0; its models are
   trained on openly-licensed data (HierText, CC-BY-SA 4.0), attributed here.

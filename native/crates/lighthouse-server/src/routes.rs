@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 
 use lighthouse_core::config::is_desktop_app;
 use lighthouse_core::contracts::{ChatChunk, ChatTurn};
-use lighthouse_core::{llm, local_model, profile, settings, sources, tts, vault};
+use lighthouse_core::{llm, local_model, profile, settings, sources, vault};
 
 use crate::auth::is_same_origin;
 
@@ -69,6 +69,17 @@ pub async fn rag_post(headers: HeaderMap, body: Option<Json<Value>>) -> Response
             sources::set_included(node_id, included).await;
             Json(json!({ "ok": true })).into_response()
         }
+        // "Private — this device only": a per-node mark the engine enforces by
+        // withholding the node from anything a cloud provider would receive.
+        Some("localOnly") => {
+            let (Some(node_id), Some(local_only)) =
+                (body["nodeId"].as_str(), body["localOnly"].as_bool())
+            else {
+                return bad_request("nodeId and localOnly required");
+            };
+            sources::set_local_only(node_id, local_only).await;
+            Json(json!({ "ok": true })).into_response()
+        }
         Some("source") => {
             let Some(available) = body["available"].as_bool() else {
                 return bad_request("available required");
@@ -79,8 +90,21 @@ pub async fn rag_post(headers: HeaderMap, body: Option<Json<Value>>) -> Response
         Some("search") => {
             let query = body["query"].as_str().unwrap_or("");
             let ids: Vec<String> = string_array(&body["includedFileIds"]);
-            let retrieved = sources::retrieve(query, &ids, &[], 5).await;
+            // Explorer search is a LOCAL preview (never sent to a provider), so
+            // it runs the device path — local-only files stay searchable here.
+            let retrieved = sources::retrieve(query, &ids, &[], 5, false).await;
             Json(json!({ "references": retrieved.references })).into_response()
+        }
+        // Read-only per-file inspector ("What the AI sees", openspec:
+        // add-file-inspector): what the engine extracted/chunked/catalogued/
+        // indexed for one file, plus an optional file-scoped test-search. PURE
+        // READ — no setter is reachable from this op.
+        Some("inspect") => {
+            let Some(file_id) = body["fileId"].as_str().filter(|s| !s.is_empty()) else {
+                return bad_request("fileId required");
+            };
+            let inspection = sources::inspect(file_id, body["query"].as_str()).await;
+            Json(inspection).into_response()
         }
         Some("move") => {
             let Some(from) = body["from"].as_str() else {
@@ -366,10 +390,17 @@ pub async fn rag_post(headers: HeaderMap, body: Option<Json<Value>>) -> Response
                 .as_array()
                 .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
                 .unwrap_or_default();
-            let asks =
-                tokio::task::spawn_blocking(move || lighthouse_core::meta::suggested_asks(&ids))
-                    .await
-                    .unwrap_or_default();
+            // Suggested-ask chips name real columns of real included files. Under
+            // a cloud provider, resolve against the shareable set so a marked
+            // file's columns never surface as a chip. Cloud-ness = the same
+            // provider identity the chat pipeline uses.
+            let is_cloud =
+                lighthouse_core::synth::is_cloud_provider(&lighthouse_core::profile::model_config());
+            let asks = tokio::task::spawn_blocking(move || {
+                lighthouse_core::meta::suggested_asks(&ids, is_cloud)
+            })
+            .await
+            .unwrap_or_default();
             return Json(json!({ "asks": asks })).into_response();
         }
         Some("restore") => {
@@ -521,48 +552,6 @@ pub async fn chat_post(headers: HeaderMap, body: Option<Json<Value>>) -> Respons
         .header("cache-control", "no-store")
         .body(Body::from_stream(stream))
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
-}
-
-// --- /api/tts -----------------------------------------------------------------
-
-/// Cap synthesized text so a runaway request can't tie up Piper for minutes.
-const TTS_MAX_CHARS: usize = 8000;
-
-pub async fn tts_post(headers: HeaderMap, body: Option<Json<Value>>) -> Response {
-    if !is_same_origin(&headers) {
-        return forbidden();
-    }
-    if !tts::is_local_tts_available() {
-        // Not an error — the caller treats this as "use the browser voice instead".
-        return (
-            StatusCode::NOT_IMPLEMENTED,
-            Json(json!({ "error": "local TTS unavailable" })),
-        )
-            .into_response();
-    }
-    let body = body.map(|Json(v)| v).unwrap_or_else(|| json!({}));
-    let text: String = body["text"]
-        .as_str()
-        .unwrap_or("")
-        .trim()
-        .chars()
-        .take(TTS_MAX_CHARS)
-        .collect();
-    if text.is_empty() {
-        return bad_request("text required");
-    }
-    match tts::synthesize(&text).await {
-        Ok(wav) => Response::builder()
-            .header("content-type", "audio/wav")
-            .header("cache-control", "no-store")
-            .body(Body::from(wav))
-            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
-        Err(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": "synthesis failed" })),
-        )
-            .into_response(),
-    }
 }
 
 // --- /api/profile -------------------------------------------------------------

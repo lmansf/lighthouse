@@ -15,6 +15,9 @@ import {
   docText,
   docChunks,
   activeIncludedFileIds,
+  shareableFileIds,
+  shareableSubset,
+  localOnlySubset,
   namedButExcluded,
   namedFileTarget,
   sourceKindOf,
@@ -223,6 +226,61 @@ const progress = (label: string, step: number, total: number): ChatChunk => ({
 });
 
 /**
+ * The provenance origin for this answer's stamp: `"device"` for the local model
+ * or the model-free/extractive fallback (no provider configured), else the cloud
+ * provider id. Agrees with the audit record's `provider` (which the choke point
+ * derives as `cfg.providerId` or `"none"`) under the device⇔local/none mapping.
+ * KEEP IN SYNC with lighthouse-core/src/synth.rs::origin_of.
+ */
+function originOf(cfg: ModelCfg): string {
+  return !cfg.providerId || cfg.providerId === "local" ? "device" : cfg.providerId;
+}
+
+/**
+ * Whether a CLOUD provider is active — the single predicate that arms local-only
+ * enforcement. A keyed remote vendor is cloud; the on-device model and the
+ * model-free/extractive fallback are not (`origin === "device"`). Keyed on
+ * provider IDENTITY, not on whether a key is present, so a selected-but-keyless
+ * cloud provider still counts as cloud (local-only fails CLOSED toward privacy).
+ * KEEP IN SYNC with synth.rs::is_cloud_provider.
+ */
+export function isCloudProvider(cfg: ModelCfg): boolean {
+  return originOf(cfg) !== "device";
+}
+
+/**
+ * The honest skip note appended to a CLOUD answer that dropped `n ≥ 1` files
+ * solely because they are marked local-only. Engine-emitted, never model-
+ * generated; BYTE-IDENTICAL to synth.rs::local_only_skip_note (docs/ts-twin.md
+ * rule 2). Mirrors the shape of the named-but-excluded note.
+ */
+export function localOnlySkipNote(n: number): string {
+  const [files, them] = n === 1 ? ["file", "it"] : ["files", "them"];
+  return `_(${n} ${files} skipped — marked private (this device only), so the AI can't send ${them} to a cloud model. Switch to the private model to include ${them}.)_\n\n`;
+}
+
+/**
+ * The terminating chunk, stamped with the engine-computed provenance
+ * (privacy-legibility). `excerptCount` is the number of context blocks the
+ * branch that ran actually handed to the model; `sourceFileCount` is derived
+ * here from the references so it can never drift from what's cited (nor from the
+ * audit record's `fileIds`, which are those same refs' ids). KEEP IN SYNC with
+ * lighthouse-core/src/synth.rs::final_chunk.
+ */
+function finalChunk(
+  references: RagReference[],
+  excerptCount: number,
+  origin: string,
+): ChatChunk {
+  return {
+    delta: "",
+    references,
+    meta: { origin, excerptCount, sourceFileCount: references.length },
+    done: true,
+  };
+}
+
+/**
  * The full ask path: single-shot RAG (with table profiles for CSV hits), or —
  * when the question spans documents — per-document extraction then a streamed
  * synthesis with document-level citations.
@@ -234,13 +292,22 @@ export async function* answerPipeline(
   history: ChatTurn[],
   cfg: ModelCfg,
 ): AsyncGenerator<ChatChunk> {
+  // Provenance origin for this answer's stamp — resolved once from the active
+  // provider (agrees with the audit record's `provider`). Every branch's final
+  // chunk carries it; it is never derived from model text.
+  const origin = originOf(cfg);
+  // Local-only enforcement is armed only for a CLOUD provider. On the device
+  // path this is false everywhere below, so the shareable gate is a no-op and
+  // on-device answers are byte-identical to today.
+  const isCloud = isCloudProvider(cfg);
+
   // A bare follow-up retrieves poorly on its own: blend in the previous user
   // turn to anchor retrieval to the topic (moved here from the callers so all
   // three surfaces stay identical).
   const lastUserTurn = [...history].reverse().find((t) => t.role === "user");
   const retrievalQuery = lastUserTurn ? `${lastUserTurn.content}\n${question}` : question;
 
-  const initial = await registryRetrieve(retrievalQuery, includedFileIds, attachmentFileIds, 5);
+  const initial = await registryRetrieve(retrievalQuery, includedFileIds, attachmentFileIds, 5, isCloud);
 
   // Instant acknowledgment: local models take seconds to a first token, but
   // retrieval lands in milliseconds — naming the sources NOW makes the answer
@@ -273,6 +340,20 @@ export async function* answerPipeline(
     }
   }
 
+  // Honesty note (deterministic, engine text): a CLOUD answer is about to drop
+  // one or more files SOLELY because they are marked local-only — say so plainly
+  // instead of silently omitting them. Attachment-scoped asks count the dropped
+  // attachments; otherwise the effectively-local-only members of the active-
+  // included set. Inert on the device path (isCloud false ⇒ 0). KEEP IN SYNC
+  // with the Rust pipeline (synth.rs).
+  if (isCloud) {
+    const scope = attachmentFileIds.length === 0 ? activeIncludedFileIds() : attachmentFileIds;
+    const dropped = localOnlySubset(scope, true).length;
+    if (dropped > 0) {
+      yield { delta: localOnlySkipNote(dropped), done: false };
+    }
+  }
+
   // --- Vault meta-answers (openspec: add-vault-meta-answers): anchored
   //     questions ABOUT the vault (recency, inventory) answer instantly from
   //     walk metadata — no model call, real references. A null render (incl.
@@ -281,10 +362,12 @@ export async function* answerPipeline(
   if (attachmentFileIds.length === 0) {
     const intent = metaIntent(question);
     if (intent) {
-      const ans = renderMeta(intent, includedFileIds, Date.now());
+      const ans = renderMeta(intent, includedFileIds, Date.now(), isCloud);
       if (ans) {
         yield { delta: ans.markdown, done: false };
-        yield { delta: "", references: ans.references, done: true };
+        // Model-free deterministic answer: zero excerpts handed to a model,
+        // files behind it are the cited references.
+        yield finalChunk(ans.references, 0, origin);
         return;
       }
     }
@@ -319,8 +402,10 @@ export async function* answerPipeline(
   let docs: DocCandidate[] = [];
   if (hasRealModel(cfg)) {
     if (attachmentFileIds.length >= MIN_MAP_DOCS) {
-      // Explicit multi-attach IS the cross-document gesture.
-      docs = attachmentFileIds.slice(0, MAX_MAP_DOCS).map((id) => ({
+      // Explicit multi-attach IS the cross-document gesture — but a marked
+      // attachment can't ride to a cloud model. Filter this bypasser at its own
+      // choke point before any docText read below.
+      docs = shareableSubset(attachmentFileIds, isCloud).slice(0, MAX_MAP_DOCS).map((id) => ({
         id,
         name: "",
         score: ASSUMED_DOC_SCORE,
@@ -328,9 +413,9 @@ export async function* answerPipeline(
     } else if (attachmentFileIds.length === 0 && crossDocCue(question)) {
       // Rank documents by a wide retrieval pass; when few files are included,
       // make sure each of them gets a seat even if the query's tokens miss it.
-      const wide = await registryRetrieve(retrievalQuery, includedFileIds, [], WIDE_K);
+      const wide = await registryRetrieve(retrievalQuery, includedFileIds, [], WIDE_K, isCloud);
       docs = rankDocsFromHits(wide.references, MAX_MAP_DOCS);
-      const active = new Set(activeIncludedFileIds());
+      const active = new Set(shareableFileIds(isCloud));
       const inScope = includedFileIds.filter((id) => active.has(id));
       if (inScope.length <= MAX_MAP_DOCS) {
         const seen = new Set(docs.map((d) => d.id));
@@ -357,8 +442,9 @@ export async function* answerPipeline(
       if (!preview) continue; // unreadable/deleted file — skip its seat
 
       // This document's best chunks, via the attachment-scoping retrieval path
-      // (one file id = retrieval constrained to exactly this file).
-      const perDoc = await vaultRetrieve(retrievalQuery, [], PER_DOC_CHUNKS, [], [doc.id]);
+      // (one file id = retrieval constrained to exactly this file). doc.id is
+      // already shareable (filtered above), so isCloud only re-affirms it.
+      const perDoc = await vaultRetrieve(retrievalQuery, [], PER_DOC_CHUNKS, [], [doc.id], isCloud);
       const ctxs: Ctx[] =
         perDoc.contexts.length > 0
           ? perDoc.contexts.map((c) => ({ name: ctxLabel(c), text: c.text, score: c.score }))
@@ -410,7 +496,7 @@ export async function* answerPipeline(
       for await (const delta of streamAnswer(question, reduceCtxs, cfg, history)) {
         yield { delta, done: false };
       }
-      yield { delta: "", references: extracts.map((e) => e.ref), done: true };
+      yield finalChunk(extracts.map((e) => e.ref), reduceCtxs.length, origin);
       return;
     }
     // Fewer than two documents had anything to say — fall through to the
@@ -427,10 +513,17 @@ export async function* answerPipeline(
   //     the table-profile path (analytics is desktop-only). KEEP IN SYNC with
   //     synth.rs. ---
   if (hasRealModel(cfg) && attachmentFileIds.length <= 1 && !crossDocCue(question)) {
+    // Doc-focus reads the WHOLE target file into the prompt, so both of its
+    // bypasser entrypoints are filtered here at their own choke point: a lone
+    // local-only attachment is dropped, and named-file lookup runs over the
+    // shareable set only. dominantDoc is safe already — initial.references are
+    // shareable.
     const target: [string, string] | null =
       attachmentFileIds.length === 1
-        ? [attachmentFileIds[0], ""]
-        : namedFileTarget(question, includedFileIds) ??
+        ? (shareableSubset(attachmentFileIds, isCloud)[0] !== undefined
+            ? [attachmentFileIds[0], ""]
+            : null)
+        : namedFileTarget(question, shareableSubset(includedFileIds, isCloud)) ??
           dominantDoc(initial.contexts.map((c) => c.name), initial.references);
     const doc = target ? await docChunks(target[0]) : null;
     if (target && doc && !isProfileable(doc[0]) && doc[1].length > 0) {
@@ -459,7 +552,7 @@ export async function* answerPipeline(
         for await (const delta of streamAnswer(question, ctxs, cfg, history)) {
           yield { delta, done: false };
         }
-        yield { delta: "", references: [reference], done: true };
+        yield finalChunk([reference], ctxs.length, origin);
         return;
       }
       // Too big for one prompt: sweep EVERY chunk in ordered segments,
@@ -505,7 +598,7 @@ export async function* answerPipeline(
         for await (const delta of streamAnswer(question, reduceCtxs, cfg, history)) {
           yield { delta, done: false };
         }
-        yield { delta: "", references: [reference], done: true };
+        yield finalChunk([reference], reduceCtxs.length, origin);
         return;
       }
       // Every segment came back empty/failed — fall through to the ordinary
@@ -536,5 +629,5 @@ export async function* answerPipeline(
   for await (const delta of streamAnswer(question, contexts, cfg, history)) {
     yield { delta, done: false };
   }
-  yield { delta: "", references: initial.references, done: true };
+  yield finalChunk(initial.references, contexts.length, origin);
 }

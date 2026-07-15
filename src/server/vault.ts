@@ -33,6 +33,15 @@ interface VaultState {
   /** Explicit inclusion overrides keyed by node id; absent ⇒ excluded. */
   included: Record<string, boolean>;
   /**
+   * Explicit "Private — this device only" marks keyed by node id; absent ⇒ not
+   * local-only. Ancestor-wins (see isEffectivelyLocalOnly). Like `included`, the
+   * `raw.localOnly ?? {}` read below makes this additively migration-safe: an
+   * old state.json with no localOnly key loads as an empty map. state.json is
+   * intentionally UN-versioned — that tolerance IS the migration story.
+   * KEEP IN SYNC with vault.rs.
+   */
+  localOnly: Record<string, boolean>;
+  /**
    * External references keyed by a synthetic node-id prefix (e.g. "ext0"). Their
    * content lives at `path` on disk and is read in place — no copy is made.
    */
@@ -46,6 +55,7 @@ function loadState(): VaultState {
   return {
     sourceAvailable: raw.sourceAvailable ?? true,
     included: { ...(raw.included ?? {}) },
+    localOnly: { ...(raw.localOnly ?? {}) },
     references: { ...(raw.references ?? {}) },
   };
 }
@@ -152,6 +162,25 @@ function isEffectivelyIncluded(id: string, state: VaultState, defaultIn = defaul
 }
 
 /**
+ * Effective "Private — this device only" state. ANCESTOR-WINS: a node is
+ * local-only when it OR any ancestor carries an explicit `true`. Absence means
+ * not local-only (the safe default for the extractive/local path, where the
+ * mark is inert). Mirrors the ancestor walk in isEffectivelyIncluded, but with
+ * no default flip — a `true` anywhere up the chain wins, and a child's own
+ * `false` cannot override a marked ancestor (the safe, privacy-preserving
+ * direction). KEEP IN SYNC with vault.rs::is_effectively_local_only.
+ */
+function isEffectivelyLocalOnly(id: string, state: VaultState): boolean {
+  const parts = id.split("/");
+  let prefix = "";
+  for (let i = 0; i < parts.length - 1; i++) {
+    prefix = prefix ? `${prefix}/${parts[i]}` : parts[i];
+    if (state.localOnly[prefix] === true) return true; // an ancestor is marked
+  }
+  return state.localOnly[id] === true;
+}
+
+/**
  * Extensions read directly as UTF-8 text. Rich binary formats (pdf/docx/xlsx)
  * are decoded via parsers in ./extract and are *not* listed here.
  */
@@ -193,6 +222,9 @@ function walkUncached(root: string): FileNode[] {
   const state = loadState();
   const defaultIn = defaultIncluded(); // resolve the variant once for this walk
   const included = (id: string) => isEffectivelyIncluded(id, state, defaultIn);
+  // Effective local-only (ancestor-wins), carried on each node so the explorer
+  // can render the lock without re-resolving.
+  const localOnly = (id: string) => isEffectivelyLocalOnly(id, state);
 
   const recurse = (absDir: string, parentId: string | null) => {
     let entries: fs.Dirent[];
@@ -208,7 +240,7 @@ function walkUncached(root: string): FileNode[] {
       if (e.isDirectory()) {
         out.push({
           id, parentId, sourceId: VAULT_SOURCE_ID, name: e.name,
-          kind: "folder", ragIncluded: included(id),
+          kind: "folder", ragIncluded: included(id), localOnly: localOnly(id),
         });
         recurse(abs, id);
       } else if (e.isFile()) {
@@ -221,7 +253,7 @@ function walkUncached(root: string): FileNode[] {
         out.push({
           id, parentId, sourceId: VAULT_SOURCE_ID, name: e.name,
           kind: "file", mimeType: mimeOf(e.name), size,
-          ragIncluded: included(id),
+          ragIncluded: included(id), localOnly: localOnly(id),
         });
       }
     }
@@ -246,13 +278,13 @@ function walkUncached(root: string): FileNode[] {
       out.push({
         id: refId, parentId: null, sourceId: VAULT_SOURCE_ID, name: ref.name,
         kind: "file", mimeType: mimeOf(ref.name), size,
-        ragIncluded: included(refId), external: true,
+        ragIncluded: included(refId), localOnly: localOnly(refId), external: true,
       });
       continue;
     }
     out.push({
       id: refId, parentId: null, sourceId: VAULT_SOURCE_ID, name: ref.name,
-      kind: "folder", ragIncluded: included(refId), external: true,
+      kind: "folder", ragIncluded: included(refId), localOnly: localOnly(refId), external: true,
     });
     if (!exists) continue;
 
@@ -271,7 +303,7 @@ function walkUncached(root: string): FileNode[] {
         if (e.isDirectory()) {
           out.push({
             id, parentId, sourceId: VAULT_SOURCE_ID, name: e.name,
-            kind: "folder", ragIncluded: included(id), external: true,
+            kind: "folder", ragIncluded: included(id), localOnly: localOnly(id), external: true,
           });
           recurseExt(abs, id);
         } else if (e.isFile()) {
@@ -284,7 +316,7 @@ function walkUncached(root: string): FileNode[] {
           out.push({
             id, parentId, sourceId: VAULT_SOURCE_ID, name: e.name,
             kind: "file", mimeType: mimeOf(e.name), size,
-            ragIncluded: included(id), external: true,
+            ragIncluded: included(id), localOnly: localOnly(id), external: true,
           });
         }
       }
@@ -331,6 +363,19 @@ export function setIncluded(nodeId: string, value: boolean): void {
   saveState(state);
 }
 
+/**
+ * Mark/unmark a node "Private — this device only". Writes ONLY the target's own
+ * flag — NO descendant cascade (contrast setIncluded above): isEffectivelyLocalOnly's
+ * ancestor-walk already privatizes the whole subtree by resolution. Setting a
+ * child `false` beneath a marked ancestor is inert (ancestor wins).
+ * KEEP IN SYNC with vault.rs::set_local_only.
+ */
+export function setLocalOnly(nodeId: string, value: boolean): void {
+  const state = loadState();
+  state.localOnly[nodeId] = value;
+  saveState(state);
+}
+
 export function setSourceAvailable(available: boolean): void {
   const state = loadState();
   state.sourceAvailable = available;
@@ -367,17 +412,33 @@ export function moveNode(fromId: string, toParentId: string | null): { newId: st
   fs.mkdirSync(path.dirname(toAbs), { recursive: true });
   fs.renameSync(fromAbs, toAbs);
 
-  // Remap the node and every descendant's inclusion flag onto the new prefix.
+  // Remap the node and every descendant's inclusion + local-only flags onto the
+  // new prefix (both maps move together — see renameNode).
   const state = loadState();
-  const next: Record<string, boolean> = {};
-  for (const [k, v] of Object.entries(state.included)) {
-    if (k === fromId) next[newId] = v;
-    else if (k.startsWith(`${fromId}/`)) next[newId + k.slice(fromId.length)] = v;
-    else next[k] = v;
-  }
-  state.included = next;
+  state.included = remapPrefix(state.included, fromId, newId);
+  state.localOnly = remapPrefix(state.localOnly, fromId, newId);
   saveState(state);
   return { newId };
+}
+
+/**
+ * Remap a per-node flag map onto a new id prefix (the node itself and every
+ * `${old}/…` descendant), leaving unrelated keys untouched. Shared by move and
+ * rename so the `included` and `localOnly` maps stay migrated in lockstep.
+ * KEEP IN SYNC with vault.rs::remap_prefix.
+ */
+function remapPrefix(
+  map: Record<string, boolean>,
+  oldId: string,
+  newId: string,
+): Record<string, boolean> {
+  const next: Record<string, boolean> = {};
+  for (const [k, v] of Object.entries(map)) {
+    if (k === oldId) next[newId] = v;
+    else if (k.startsWith(`${oldId}/`)) next[newId + k.slice(oldId.length)] = v;
+    else next[k] = v;
+  }
+  return next;
 }
 
 /**
@@ -399,15 +460,11 @@ export function renameNode(id: string, newName: string): { newId: string } {
   const toAbs = safeAbs(newId);
   if (fs.existsSync(toAbs)) throw new Error("destination already exists");
   fs.renameSync(fromAbs, toAbs);
-  // Remap the node and every descendant's inclusion flag onto the new prefix.
+  // Remap the node and every descendant's inclusion + local-only flags onto the
+  // new prefix (same as moveNode).
   const state = loadState();
-  const next: Record<string, boolean> = {};
-  for (const [k, v] of Object.entries(state.included)) {
-    if (k === id) next[newId] = v;
-    else if (k.startsWith(`${id}/`)) next[newId + k.slice(id.length)] = v;
-    else next[k] = v;
-  }
-  state.included = next;
+  state.included = remapPrefix(state.included, id, newId);
+  state.localOnly = remapPrefix(state.localOnly, id, newId);
   saveState(state);
   return { newId };
 }
@@ -688,23 +745,26 @@ export function addReference(inputPath: string): { id: string; kind: "file" | "f
  * (and its subtree's) are dropped. The trash lives under the hidden state dir,
  * so it never reappears in the tree, and can be restored by hand.
  */
-/** A token returned by removeFromVault; pass to restoreFromVault to undo. */
+/** A token returned by removeFromVault; pass to restoreFromVault to undo. Both
+ *  the inclusion and local-only flags round-trip. `localOnly` is optional so an
+ *  older token (from before this change) still restores its inclusion. */
 export type RestoreDescriptor =
-  | { kind: "unlink"; root: string; path: string; included: Record<string, boolean> }
-  | { kind: "flags"; included: Record<string, boolean> }
-  | { kind: "trash"; id: string; trashPath: string; included: Record<string, boolean> };
+  | { kind: "unlink"; root: string; path: string; included: Record<string, boolean>; localOnly?: Record<string, boolean> }
+  | { kind: "flags"; included: Record<string, boolean>; localOnly?: Record<string, boolean> }
+  | { kind: "trash"; id: string; trashPath: string; included: Record<string, boolean>; localOnly?: Record<string, boolean> };
 
-/** Collect + drop the inclusion flags for a node and its subtree, returning the
- *  removed (id → included) pairs so a restore can put them back exactly. */
-function takeIncludedSubtree(
-  state: ReturnType<typeof loadState>,
+/** Collect + drop a per-node flag map's entries for a node and its subtree,
+ *  returning the removed (id → bool) pairs so a restore can put them back
+ *  exactly. Used for BOTH `included` and `localOnly`. */
+function takeFlagSubtree(
+  map: Record<string, boolean>,
   nodeId: string,
 ): Record<string, boolean> {
   const taken: Record<string, boolean> = {};
-  for (const k of Object.keys(state.included)) {
+  for (const k of Object.keys(map)) {
     if (k === nodeId || k.startsWith(`${nodeId}/`)) {
-      taken[k] = state.included[k];
-      delete state.included[k];
+      taken[k] = map[k];
+      delete map[k];
     }
   }
   return taken;
@@ -717,23 +777,26 @@ export function removeFromVault(nodeId: string): RestoreDescriptor {
   // real external files. Restore re-links the same real path.
   if (refId === nodeId) {
     const realPath = state.references[nodeId]?.path ?? "";
-    const included = takeIncludedSubtree(state, nodeId);
+    const included = takeFlagSubtree(state.included, nodeId);
+    const localOnly = takeFlagSubtree(state.localOnly, nodeId);
     delete state.references[nodeId];
     saveState(state);
-    return { kind: "unlink", root: nodeId, path: realPath, included };
+    return { kind: "unlink", root: nodeId, path: realPath, included, localOnly };
   }
   // A node *inside* a linked folder: unlinking the whole reference here would
   // drop every sibling too, and we must never touch the user's real external
   // files. Scope the removal to just this node's subtree by dropping its
-  // inclusion flags; the link itself stays intact.
+  // inclusion + local-only flags; the link itself stays intact.
   if (refId) {
-    const included = takeIncludedSubtree(state, nodeId);
+    const included = takeFlagSubtree(state.included, nodeId);
+    const localOnly = takeFlagSubtree(state.localOnly, nodeId);
     saveState(state);
-    return { kind: "flags", included };
+    return { kind: "flags", included, localOnly };
   }
   const abs = safeAbs(nodeId); // refuses to escape the vault
   if (abs === vaultDir()) throw new Error("cannot remove the vault root");
-  const included = takeIncludedSubtree(state, nodeId);
+  const included = takeFlagSubtree(state.included, nodeId);
+  const localOnly = takeFlagSubtree(state.localOnly, nodeId);
   if (fs.existsSync(abs)) {
     const day = new Date().toISOString().slice(0, 10);
     const trashDir = path.join(stateDir(), "trash", day);
@@ -744,10 +807,10 @@ export function removeFromVault(nodeId: string): RestoreDescriptor {
     for (let i = 1; fs.existsSync(dest); i++) dest = `${base} (${i})${ext}`;
     fs.renameSync(abs, dest);
     saveState(state);
-    return { kind: "trash", id: nodeId, trashPath: dest, included };
+    return { kind: "trash", id: nodeId, trashPath: dest, included, localOnly };
   }
   saveState(state);
-  return { kind: "flags", included };
+  return { kind: "flags", included, localOnly };
 }
 
 /**
@@ -760,21 +823,23 @@ export function restoreFromVault(desc: RestoreDescriptor): { id?: string; ok?: b
     if (!desc.path) throw new Error("nothing to restore");
     const { id: newRoot } = addReference(desc.path); // may get a fresh extN id
     const state = loadState();
-    for (const [k, v] of Object.entries(desc.included)) {
-      const newKey =
-        k === desc.root
-          ? newRoot
-          : k.startsWith(`${desc.root}/`)
-            ? `${newRoot}/${k.slice(desc.root.length + 1)}`
-            : k;
-      state.included[newKey] = v;
-    }
+    // Older descriptors carry no localOnly key — absent ⇒ nothing to restore,
+    // the same serde-default tolerance state.json itself relies on.
+    const remap = (k: string): string =>
+      k === desc.root
+        ? newRoot
+        : k.startsWith(`${desc.root}/`)
+          ? `${newRoot}/${k.slice(desc.root.length + 1)}`
+          : k;
+    for (const [k, v] of Object.entries(desc.included)) state.included[remap(k)] = v;
+    for (const [k, v] of Object.entries(desc.localOnly ?? {})) state.localOnly[remap(k)] = v;
     saveState(state);
     return { id: newRoot };
   }
   if (desc.kind === "flags") {
     const state = loadState();
     for (const [k, v] of Object.entries(desc.included)) state.included[k] = v;
+    for (const [k, v] of Object.entries(desc.localOnly ?? {})) state.localOnly[k] = v;
     saveState(state);
     return { ok: true };
   }
@@ -785,6 +850,7 @@ export function restoreFromVault(desc: RestoreDescriptor): { id?: string; ok?: b
   fs.renameSync(desc.trashPath, abs);
   const state = loadState();
   for (const [k, v] of Object.entries(desc.included)) state.included[k] = v;
+  for (const [k, v] of Object.entries(desc.localOnly ?? {})) state.localOnly[k] = v;
   saveState(state);
   return { id: desc.id };
 }
@@ -796,6 +862,9 @@ export function removeReference(refId: string): void {
   delete state.references[refId];
   for (const k of Object.keys(state.included)) {
     if (k === refId || k.startsWith(`${refId}/`)) delete state.included[k];
+  }
+  for (const k of Object.keys(state.localOnly)) {
+    if (k === refId || k.startsWith(`${refId}/`)) delete state.localOnly[k];
   }
   saveState(state);
 }
@@ -813,6 +882,44 @@ export function activeIncludedFileIds(): string[] {
   return walk(vaultDir())
     .filter((n) => n.kind === "file" && isEffectivelyIncluded(n.id, state, defaultIn))
     .map((n) => n.id);
+}
+
+/**
+ * The SHAREABLE set — the master gate for anything a provider could receive. On
+ * the local/extractive path (`isCloud` false) it equals activeIncludedFileIds():
+ * local-only marks are INERT, so on-device answers are byte-identical to today.
+ * When a CLOUD provider is active it is the active-included set MINUS every
+ * effectively-local-only id. Retrieval, doc-focus, cross-doc, and meta/catalog
+ * answers all start here. KEEP IN SYNC with vault.rs::shareable_file_ids.
+ */
+export function shareableFileIds(isCloud: boolean): string[] {
+  const ids = activeIncludedFileIds();
+  if (!isCloud) return ids;
+  const state = loadState();
+  return ids.filter((id) => !isEffectivelyLocalOnly(id, state));
+}
+
+/**
+ * Drop effectively-local-only ids from `ids` when a cloud provider is active;
+ * pass `ids` through unchanged on the device path. The reusable filter the two
+ * gate-BYPASSERS (attachments, doc-focus) apply at their own choke points.
+ * KEEP IN SYNC with vault.rs::shareable_subset.
+ */
+export function shareableSubset(ids: string[], isCloud: boolean): string[] {
+  if (!isCloud) return ids.slice();
+  const state = loadState();
+  return ids.filter((id) => !isEffectivelyLocalOnly(id, state));
+}
+
+/**
+ * The effectively-local-only ids among `ids` — the files a cloud answer must
+ * DROP solely for being marked private. Empty on the device path. Drives the
+ * honest skip note. KEEP IN SYNC with vault.rs::local_only_subset.
+ */
+export function localOnlySubset(ids: string[], isCloud: boolean): string[] {
+  if (!isCloud) return [];
+  const state = loadState();
+  return ids.filter((id) => isEffectivelyLocalOnly(id, state));
 }
 
 /**
@@ -1222,6 +1329,7 @@ export async function retrieve(
   k = 5,
   external: { id: string; name: string; abs: string }[] = [],
   attachmentIds: string[] = [],
+  isCloud = false,
 ): Promise<Retrieved> {
   // Explicit per-question attachments: the user dragged/attached these specific
   // files to *this* question, so honor them directly and scope retrieval to only
@@ -1234,12 +1342,24 @@ export async function retrieve(
   // hiding the source) removes it from the very next answer — a stale client
   // cannot leak an excluded file into retrieval. (Cloud items arrive pre-filtered
   // in `external`, already scoped to enabled, mirrored files by the registry.)
+  //
+  // When a CLOUD provider is active (`isCloud`), both branches are narrowed to
+  // the SHAREABLE set so an effectively-local-only file's content never reaches
+  // the vendor: attachments filter at this bypasser's own choke point, and the
+  // authoritative gate becomes shareableFileIds (which also blocks a stale
+  // client from resurrecting an excluded OR a local-only file).
   let idset: Set<string>;
   if (attachmentIds.length > 0) {
-    idset = new Set(attachmentIds);
+    idset = new Set(shareableSubset(attachmentIds, isCloud));
   } else {
-    const authoritative = new Set(activeIncludedFileIds());
+    const authoritative = new Set(shareableFileIds(isCloud));
     idset = new Set(includedFileIds.filter((id) => authoritative.has(id)));
+  }
+  // Mirrored cloud-connector items bypass the vault gate — drop any that are
+  // effectively-local-only when cloud is active, at this choke point.
+  if (isCloud && external.length > 0) {
+    const state = loadState();
+    external = external.filter((e) => !isEffectivelyLocalOnly(e.id, state));
   }
   const nodes = walk(vaultDir()).filter((n) => n.kind === "file" && idset.has(n.id));
   if (nodes.length === 0 && external.length === 0) return { references: [], contexts: [] };

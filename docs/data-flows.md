@@ -105,8 +105,8 @@ completion) — this is a **completeness check, not a signature check**; the
 runtime weights fetch is **not** hash-verified in-app. (The SHA-256 pinning
 described in §7 covers the **build-time** bundled-asset fetch, not this
 runtime download.) Never fires unless you click install; override the URL
-with `LIGHTHOUSE_LOCAL_MODEL_URL`. The embedding/OCR/TTS models and the
-llama-server/Piper binaries are **bundled in the installer** — nothing is
+with `LIGHTHOUSE_LOCAL_MODEL_URL`. The embedding/OCR models and the
+llama-server binary are **bundled in the installer** — nothing is
 fetched for them at runtime.
 
 ## 4. Feedback & bug reports — zero-backend handoff (NOT app egress)
@@ -164,7 +164,7 @@ code knows why it is inert — it is neither a live egress nor deleted.
 
 For completeness, the on-device services (127.0.0.1 only, no external
 sockets): the chat llama-server (`:8080`), the embedding server (`:8091`),
-Piper TTS / Whisper dictation / OCR (in-process or child processes with no
+Whisper dictation / OCR (in-process or child processes with no
 sockets), and the dev-mode embedded API server. In the shipped bundle the
 UI talks to the engine over **Tauri IPC — no TCP port at all**.
 
@@ -176,8 +176,8 @@ extraction/retrieval path as OCR text; nothing about them touches egress.
 
 ## 7. Build/CI-time only — never in the shipped app
 
-`scripts/fetch-local-model.mjs` (build machines): llama.cpp + Piper GitHub
-releases, HF-hosted voice/embedding models and the ocrs S3 bucket — all via
+`scripts/fetch-local-model.mjs` (build machines): llama.cpp GitHub
+releases, the HF-hosted embedding model and the ocrs S3 bucket — all via
 the repo's own mirror first (`github.com/lmansf/lighthouse` release
 `hf-assets-1`), version-pinned and SHA-256-verified fail-closed. This is the
 only place a SHA-256 is pinned; it protects the **bundled** assets baked into

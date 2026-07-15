@@ -73,7 +73,7 @@ in `lighthouse-core`, so even the headless Rust server lacks them:
 | Whisper dictation (STT) + summon hotkey hooks | `whisper.rs` + per-platform hook modules |
 | Widget / tray / update check | `main.rs`, `supervise.rs` |
 
-**Mirrored in both engines** (do not let these drift): TTS (Piper), local
+**Mirrored in both engines** (do not let these drift): local
 model download/uninstall marker, SharePoint/OneDrive connectors, licensing,
 experiments, table profiles, structure-aware chunking, meta answers
 (whatsNew/listFiles), profile + sealed secrets store, doc-focus

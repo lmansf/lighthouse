@@ -5,7 +5,7 @@
 # retired): it gates on the JS checks, resolves the release tag from
 # package.json (or the `release_tag` input), creates the draft release if it
 # doesn't exist yet, builds the static-export UI, fetches the pinned
-# llama-server + Piper voice, bundles the Tauri app per OS (NSIS / DMG /
+# llama-server and bundled models, bundles the Tauri app per OS (NSIS / DMG /
 # AppImage+deb), regenerates the electron-updater manifests (latest*.yml — so
 # pre-0.3.0 Electron installs still see new versions in their notify-only
 # update check, now pointing at the real uploaded artifacts), and uploads
@@ -157,9 +157,9 @@ jobs:
         run: npm ci
       - name: Static-export the UI (arms IPC mode — no local port in the app)
         run: node scripts/build-ui-static.mjs
-      - name: Fetch bundled engines (llama-server + Piper voice)
+      - name: Fetch bundled engines (llama-server + embed/OCR models)
         # Best-effort: a registry hiccup shouldn't kill the build — the app
-        # degrades to BYO local model / Web Speech without bundled engines.
+        # degrades to BYO local model without bundled engines.
         continue-on-error: true
         run: node scripts/fetch-local-model.mjs
         env:
@@ -220,22 +220,13 @@ jobs:
         shell: bash
         env:
           # linuxdeploy strips every ELF it finds in the AppDir. The prebuilt
-          # piper/onnxruntime/espeak libraries (bundled for on-device TTS since
-          # the Linux digest fix) make strip fail, which surfaces only as
-          # "failed to run linuxdeploy". Skip stripping — these prebuilt libs
-          # ship unstripped on every other OS anyway, and our own release
-          # binary is small. Harmless on Windows/macOS (env is unused there).
+          # llama-server shared libraries (bundled beside the binary for GPU/CPU
+          # inference) make strip fail, which surfaces only as "failed to run
+          # linuxdeploy". Skip stripping — these prebuilt libs ship unstripped on
+          # every other OS anyway, and our own release binary is small. Harmless
+          # on Windows/macOS (env is unused there).
           NO_STRIP: "true"
         run: |
-          if [ "$RUNNER_OS" = "Linux" ]; then
-            # linuxdeploy resolves the NEEDED entries of ELFs it finds in the
-            # AppDir against the system loader paths only — it ignores the
-            # RUNPATH those files carry. Piper's neighbor libraries
-            # (libespeak-ng & co.) live beside the binary, so point the
-            # resolver at them; the $ORIGIN RUNPATH stamped at fetch time
-            # covers the runtime loader.
-            export LD_LIBRARY_PATH="$GITHUB_WORKSPACE/resources/tts${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-          fi
           # Secrets-gated config overlay: updater artifacts only when the
           # signing key exists (tauri build FAILS if they're requested
           # without one — that failure mode is the gate working), Windows

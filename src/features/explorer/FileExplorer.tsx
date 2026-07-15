@@ -65,13 +65,17 @@ import {
   FolderAddRegular,
   FolderOpenRegular,
   LinkRegular,
+  LockClosedRegular,
+  LockOpenRegular,
   OpenRegular,
   RenameRegular,
   ShieldKeyholeRegular,
   SparkleFilled,
+  SparkleRegular,
 } from "@fluentui/react-icons";
 import type { FileNode } from "@/contracts";
 import { flattenVisible, type FlatRow } from "./flatten";
+import { FileInspector } from "./FileInspector";
 import { useRagStore } from "@/stores/useRagStore";
 import { useAuthStore } from "@/stores/useAuthStore";
 import { FILE_DRAG_MIME, parseDraggedFiles, serializeDraggedFiles } from "@/shell/dnd";
@@ -341,6 +345,9 @@ const useStyles = makeStyles({
   eyeOn: { color: tokens.colorBrandForeground1 },
   // A folder that's only partly visible to AI — distinct from a solid on/off.
   eyePartial: { color: tokens.colorBrandForeground2 },
+  // The lock (local-only) axis: a warm "danger" hue when engaged, deliberately
+  // NOT the brand color of the eye so the two controls never read as the same.
+  lockOn: { color: tokens.colorPaletteRedForeground1 },
   size: {
     color: tokens.colorNeutralForeground3,
     flexShrink: 0,
@@ -430,6 +437,9 @@ interface TreeRowProps {
   selectionMode: boolean;
   isSelected: (id: string) => boolean;
   onToggle: (id: string) => void;
+  /** Flip a node's "Private — this device only" mark (the lock, distinct from
+   *  the visibility eye). */
+  onToggleLocalOnly: (id: string) => void;
   onSelect: (id: string) => void;
   /** Begin a selection from a hover checkbox (enters selection mode + picks). */
   onStartSelect: (id: string) => void;
@@ -441,6 +451,8 @@ interface TreeRowProps {
   onOpen: (id: string) => void;
   /** Reveal a node in the OS file manager (selecting it in its folder). */
   onReveal: (id: string) => void;
+  /** Open the read-only "What the AI sees" inspector for a file. */
+  onInspect: (id: string, name: string) => void;
   /** Reparent a node under a folder (or the vault root, null). */
   onMove: (fromId: string, toParentId: string | null) => void;
   /** Open the rename dialog for a node (local vault nodes only). */
@@ -477,6 +489,7 @@ function TreeRowImpl({
   selectionMode,
   isSelected,
   onToggle,
+  onToggleLocalOnly,
   onSelect,
   onStartSelect,
   onUnlink,
@@ -484,6 +497,7 @@ function TreeRowImpl({
   desktop,
   onOpen,
   onReveal,
+  onInspect,
   onMove,
   onRename,
   onNewFolderInside,
@@ -544,6 +558,16 @@ function TreeRowImpl({
     : eyeShown
       ? "Visible to AI — click to hide"
       : "Hidden from AI — click to show";
+  // The lock is the SECOND axis, distinct from the eye: effective local-only
+  // (ancestor-wins) is carried on the node from the walk. A locked node stays
+  // on-device only — the private model reads it, no cloud provider ever does.
+  const isLocalOnly = node.localOnly === true;
+  const lockLabel = isLocalOnly
+    ? "Private — this device only; click to allow cloud models"
+    : "Shareable with cloud models — click to keep on this device only";
+  const toggleLocalOnly = () => {
+    onToggleLocalOnly(node.id);
+  };
 
   return (
     <div>
@@ -685,6 +709,20 @@ function TreeRowImpl({
             {formatSize(node.size)}
           </Text>
         )}
+        <Tooltip content={lockLabel} relationship="label">
+          <Button
+            appearance="subtle"
+            size="small"
+            className={isLocalOnly ? styles.lockOn : undefined}
+            icon={isLocalOnly ? <LockClosedRegular /> : <LockOpenRegular />}
+            aria-label={lockLabel}
+            aria-pressed={isLocalOnly}
+            onClick={(e) => {
+              e.stopPropagation();
+              toggleLocalOnly();
+            }}
+          />
+        </Tooltip>
         <Tooltip content={eyeLabel} relationship="label">
           <Button
             appearance="subtle"
@@ -744,11 +782,22 @@ function TreeRowImpl({
               </MenuItem>
             )}
             {(openable || revealable || movable || editable) && <MenuDivider />}
+            {node.kind === "file" && (
+              <MenuItem icon={<SparkleRegular />} onClick={() => onInspect(node.id, node.name)}>
+                What the AI sees
+              </MenuItem>
+            )}
             <MenuItem
               icon={node.ragIncluded ? <EyeOffRegular /> : <EyeRegular />}
               onClick={toggleVisibility}
             >
               {node.ragIncluded ? "Hide from AI" : "Visible to AI"}
+            </MenuItem>
+            <MenuItem
+              icon={isLocalOnly ? <LockOpenRegular /> : <LockClosedRegular />}
+              onClick={toggleLocalOnly}
+            >
+              {isLocalOnly ? "Allow cloud models" : "Keep private (this device only)"}
             </MenuItem>
             {node.external && node.parentId === null && (
               <MenuItem icon={<DismissRegular />} onClick={() => onUnlink(node.id)}>
@@ -861,7 +910,9 @@ export function FileExplorer() {
   const selectAll = useRagStore((s) => s.selectAll);
   const clearSelection = useRagStore((s) => s.clearSelection);
   const applySelection = useRagStore((s) => s.applySelection);
+  const applyLocalOnly = useRagStore((s) => s.applyLocalOnly);
   const toggleIncluded = useRagStore((s) => s.toggleIncluded);
+  const toggleLocalOnly = useRagStore((s) => s.toggleLocalOnly);
   const removeReference = useRagStore((s) => s.removeReference);
   const removeFromVault = useRagStore((s) => s.removeFromVault);
   const restoreLast = useRagStore((s) => s.restoreLast);
@@ -886,6 +937,9 @@ export function FileExplorer() {
   // The visibility switch reflects (and sets) the whole selection at once.
   const allSelectedVisible =
     selectedIds.length > 0 && selectedIds.every((id) => nodeById.get(id)?.ragIncluded);
+  // The lock switch does the same for the local-only (this-device-only) axis.
+  const allSelectedLocalOnly =
+    selectedIds.length > 0 && selectedIds.every((id) => nodeById.get(id)?.localOnly);
 
   // Ids queued for a "Remove from vault" confirmation (single via right-click, or
   // the whole selection via the bulk action).
@@ -1189,10 +1243,19 @@ export function FileExplorer() {
     setNameError(null);
   }, []);
 
+  // The read-only "What the AI sees" inspector: which file it's open for (null =
+  // closed). Opening it is a pure navigation gesture — it mutates nothing.
+  const [inspectNode, setInspectNode] = useState<{ id: string; name: string } | null>(null);
+  const openInspect = useCallback((id: string, name: string) => setInspectNode({ id, name }), []);
+
   // Stable per-row callbacks (forwarding to the store's stable actions), so the
   // memoized TreeRow isn't re-rendered by every explorer render just because
   // these props changed identity.
   const handleToggle = useCallback((id: string) => void toggleIncluded(id), [toggleIncluded]);
+  const handleToggleLocalOnly = useCallback(
+    (id: string) => void toggleLocalOnly(id),
+    [toggleLocalOnly],
+  );
   const handleSelect = useCallback((id: string) => toggleSelected(id), [toggleSelected]);
   const handleStartSelect = useCallback(
     (id: string) => {
@@ -1330,7 +1393,7 @@ export function FileExplorer() {
     fileInputRef.current?.click();
   };
   // Latest-closure ref so the mount-once window listener below never goes
-  // stale (same pattern as chat's readAloudRef).
+  // stale.
   const browseRef = useRef(browseForFiles);
   browseRef.current = browseForFiles;
   useEffect(() => {
@@ -1683,6 +1746,12 @@ export function FileExplorer() {
             onChange={(_, d) => void applySelection(d.checked)}
             label="Visible to AI"
           />
+          <Switch
+            checked={Boolean(allSelectedLocalOnly)}
+            disabled={selectedIds.length === 0}
+            onChange={(_, d) => void applyLocalOnly(d.checked)}
+            label="Private (this device)"
+          />
           <Button
             icon={<DeleteRegular />}
             size="small"
@@ -1819,6 +1888,7 @@ export function FileExplorer() {
                           selectionMode={selectionMode}
                           isSelected={isSelected}
                           onToggle={handleToggle}
+                          onToggleLocalOnly={handleToggleLocalOnly}
                           onSelect={handleSelect}
                           onStartSelect={handleStartSelect}
                           onUnlink={handleUnlink}
@@ -1826,6 +1896,7 @@ export function FileExplorer() {
                           desktop={desktop}
                           onOpen={openNode}
                           onReveal={revealNode}
+                          onInspect={openInspect}
                           onMove={handleMove}
                           onRename={openRename}
                           onNewFolderInside={openNewFolder}
@@ -1940,6 +2011,14 @@ export function FileExplorer() {
           </DialogBody>
         </DialogSurface>
       </Dialog>
+
+      {/* Read-only "What the AI sees" inspector (openspec: add-file-inspector). */}
+      <FileInspector
+        fileId={inspectNode?.id ?? null}
+        fileName={inspectNode?.name ?? ""}
+        desktop={desktop}
+        onClose={() => setInspectNode(null)}
+      />
     </section>
   );
 }

@@ -847,7 +847,7 @@ pub async fn update_now(app: AppHandle) -> serde_json::Value {
         let _ = fs::set_permissions(&dest, fs::Permissions::from_mode(0o755)); // AppImage
     }
     if cfg!(windows) {
-        // The installer overwrites llm\/embed\/tts\ inside the install dir,
+        // The installer overwrites llm\/embed\ inside the install dir,
         // and our llama-server children keep those DLLs loaded — on Windows a
         // loaded DLL is an unwritable file ("Error opening file for writing",
         // the 0.6.x update failure). Stop the children AND the reconcile tick

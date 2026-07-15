@@ -319,6 +319,36 @@ fn pdf_ocr_fallback(text: String, buf: &[u8]) -> anyhow::Result<String> {
     Ok(blocks.join("\n\n"))
 }
 
+/// Read-only: does the extracted text for this file come from OCR? True for
+/// raster image formats (their text is, by definition, OCR output) and for a
+/// scanned PDF that took the OCR fallback (a trivial text layer over pages that
+/// carry raster images — the exact trigger `pdf_ocr_fallback` uses). Serves the
+/// file inspector's `fromOcr` flag. Never mutates or caches; a read failure is
+/// reported as "not OCR" rather than surfaced. The PDF branch re-reads and
+/// parses the one file's text layer, so gate the call on there actually being
+/// extracted text to flag.
+pub fn text_is_ocr_derived(abs: &Path, ext: &str) -> bool {
+    if is_ocr_image_ext(ext) {
+        return true;
+    }
+    if ext != ".pdf" {
+        return false;
+    }
+    let Ok(buf) = fs::read(abs) else {
+        return false;
+    };
+    // The text layer as pdf-extract reads it: if it is trivial AND the pages
+    // carry rasters, the cached doc text was produced by the OCR fallback.
+    let Ok(layer) = extract_pdf(&buf) else {
+        return false;
+    };
+    let Ok(doc) = lopdf::Document::load_mem(&buf) else {
+        return false;
+    };
+    let pages = doc.get_pages().len();
+    pdf_text_is_trivial(layer.trim().chars().count(), pages) && !pdf_page_rasters(&doc).is_empty()
+}
+
 /// OLE compound-file magic: legacy binary Office files (.doc) and
 /// IRM/password-protected OOXML packages — everything that is Word but NOT a
 /// zip starts with this.

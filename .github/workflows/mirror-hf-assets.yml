@@ -1,12 +1,11 @@
-# Mirror the HuggingFace-hosted bundled assets into our own release assets.
+# Mirror the HuggingFace-hosted bundled asset into our own release assets.
 #
-# Why: exactly three bundled files are fetched from HF — the Piper TTS voice
-# (.onnx + .onnx.json) and the nomic embedding GGUF. On 2026-07-13 HF's xet
-# CDN 403-stormed for hours, failing four consecutive release builds, first at
-# the voice and then at the embed model (llama-server and piper come from
-# GitHub releases and were unaffected). The exact bytes we need are already
-# inside our own shipped installers — digest-verified when they were built —
-# so this workflow extracts all three from a released .deb, re-verifies the
+# Why: the nomic embedding GGUF is fetched from HF at build time. On 2026-07-13
+# HF's xet CDN 403-stormed for hours, failing four consecutive release builds at
+# the embed model (llama-server comes from GitHub releases and was unaffected).
+# The exact bytes we need are already inside our own shipped installers —
+# digest-verified when they were built — so this workflow extracts the GGUF from
+# a released .deb (plus the OCR models, fetched by direct URL), re-verifies the
 # pinned SHA-256s, and uploads them to a dedicated non-latest prerelease tag
 # that fetch-local-model.mjs tries FIRST (HF stays as fallback). GitHub→runner
 # downloads are the reliable path, and the digest pins make the mirror
@@ -35,8 +34,6 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       # Must match ASSET_SHA256 in scripts/fetch-local-model.mjs.
-      ONNX_SHA256: 5efe09e69902187827af646e1a6e9d269dee769f9877d17b16b1b46eeaaf019f
-      JSON_SHA256: efe19c417bed055f2d69908248c6ba650fa135bc868b0e6abb3da181dab690a0
       GGUF_SHA256: 3e24342164b3d94991ba9692fdc0dd08e3fd7362e0aacc396a9a5c54a544c3b7
       # OCR models (add-ocr-perception) are NOT inside any shipped .deb yet, so
       # they're mirrored by direct URL from the ocrs S3 bucket + pinned digest.
@@ -50,21 +47,15 @@ jobs:
           gh release download "${{ inputs.source_tag }}" \
             --repo "$GITHUB_REPOSITORY" --pattern '*_amd64.deb' --dir deb
           ls -la deb/
-      - name: Extract the assets and verify the pinned digests
+      - name: Extract the asset and verify the pinned digest
         run: |
           set -euo pipefail
           dpkg-deb -x deb/*.deb unpacked
-          ONNX=$(find unpacked -name 'en_US-lessac-medium.onnx' | head -1)
-          JSON=$(find unpacked -name 'en_US-lessac-medium.onnx.json' | head -1)
           GGUF=$(find unpacked -name 'nomic-embed-text-v1.5.Q8_0.gguf' | head -1)
-          [ -n "$ONNX" ] && [ -n "$JSON" ] && [ -n "$GGUF" ] || {
-            echo "expected assets not all found in .deb"; find unpacked -maxdepth 4 -type d; exit 1; }
-          echo "$ONNX_SHA256  $ONNX" | sha256sum -c -
-          echo "$JSON_SHA256  $JSON" | sha256sum -c -
+          [ -n "$GGUF" ] || {
+            echo "expected asset not found in .deb"; find unpacked -maxdepth 4 -type d; exit 1; }
           echo "$GGUF_SHA256  $GGUF" | sha256sum -c -
           mkdir -p out
-          cp "$ONNX" out/en_US-lessac-medium.onnx
-          cp "$JSON" out/en_US-lessac-medium.onnx.json
           cp "$GGUF" out/nomic-embed-text-v1.5.Q8_0.gguf
       - name: Fetch + verify the OCR models by direct URL
         run: |
@@ -83,11 +74,9 @@ jobs:
             gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
               --prerelease --latest=false \
               --title "HF asset mirror (build assets)" \
-              --notes "Mirror of the HuggingFace-hosted bundled assets used by CI builds: the pinned Piper voice (en_US-lessac-medium, rhasspy/piper-voices) and the nomic embedding GGUF (nomic-ai/nomic-embed-text-v1.5-GGUF). Extracted from our own digest-verified installer; scripts/fetch-local-model.mjs verifies the same pinned SHA-256 on every download. Not an app release."
+              --notes "Mirror of the HuggingFace-hosted bundled asset used by CI builds: the nomic embedding GGUF (nomic-ai/nomic-embed-text-v1.5-GGUF). Extracted from our own digest-verified installer; scripts/fetch-local-model.mjs verifies the same pinned SHA-256 on every download. Not an app release."
           fi
           gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber \
-            out/en_US-lessac-medium.onnx \
-            out/en_US-lessac-medium.onnx.json \
             out/nomic-embed-text-v1.5.Q8_0.gguf \
             out/text-detection.rten \
             out/text-recognition.rten

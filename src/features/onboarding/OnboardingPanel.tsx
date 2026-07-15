@@ -35,7 +35,6 @@ import {
 } from "@fluentui/react-components";
 import { MODEL_PROVIDERS } from "@/contracts";
 import {
-  LocalModelOption,
   LocalModelInstallPanel,
   useLocalModel,
 } from "@/features/localModel/LocalModelOption";
@@ -235,6 +234,15 @@ export function OnboardingPanel() {
 
   // --- Step 2: select a model ------------------------------------------------
   if (onboarding.step === "select-model") {
+    // Private-first framing: the on-device model is the hero (first, default);
+    // the cloud vendors are grouped honestly, one click away. Local vs cloud is
+    // just `id === "local"`.
+    const isLocal = providerId === "local";
+    const cloudProviders = MODEL_PROVIDERS.filter((p) => p.id !== "local");
+    const isAllowed = (id: string) => (allowedProviders ? allowedProviders.includes(id) : true);
+    const firstAllowedCloud = cloudProviders.find((p) => isAllowed(p.id)) ?? cloudProviders[0];
+    const localModelId = MODEL_PROVIDERS.find((p) => p.id === "local")!.models[0];
+
     return (
       <form
         className={styles.panel}
@@ -248,69 +256,99 @@ export function OnboardingPanel() {
         </Text>
         <Title3>Choose your model</Title3>
         <Text className={styles.hint}>
-          {providerId === "local"
-            ? "The local model runs entirely on your machine — no API key, nothing leaves your computer."
-            : // The privacy tradeoff of a cloud model must be stated where the
-              // choice is made, not buried in docs: retrieved excerpts of
-              // AI-visible files leave the machine with every question.
-              `Pick your primary model and add its API key. To answer questions, excerpts of the files you make visible are sent to ${provider.label}.`}
+          Private by default — your files stay on this device unless you choose a cloud model.
         </Text>
-        <Field label="Provider">
-          <Dropdown
-            value={provider.label}
-            selectedOptions={[providerId]}
-            onOptionSelect={(_, d) => {
-              const p = MODEL_PROVIDERS.find((x) => x.id === d.optionValue)!;
-              setProviderId(p.id);
-              setModelId(p.models[0]);
-            }}
-          >
-            {MODEL_PROVIDERS.map((p) => (
-              <Option
-                key={p.id}
-                value={p.id}
-                text={p.label}
-                // Managed policy: disallowed providers render disabled (the
-                // engine rejects server-side regardless).
-                disabled={allowedProviders ? !allowedProviders.includes(p.id) : false}
-              >
-                {p.id === "local" ? <LocalModelOption label={p.label} /> : p.label}
-              </Option>
-            ))}
-          </Dropdown>
-        </Field>
-        <Field label="Model">
-          <Dropdown
-            value={modelId}
-            selectedOptions={[modelId]}
-            onOptionSelect={(_, d) => setModelId(d.optionValue!)}
-          >
-            {provider.models.map((m) => (
-              <Option key={m} value={m}>
-                {m}
-              </Option>
-            ))}
-          </Dropdown>
-        </Field>
-        {providerId === "local" && <LocalModelInstallPanel />}
-        {providerId !== "local" && (
-          <Field
-            label="API key"
-            hint={
-              <Link href={provider.apiKeyUrl} target="_blank" rel="noreferrer">
-                Get your {provider.label} key →
-              </Link>
+
+        {/* Hero: the on-device private model comes first. Cloud is the honest
+            alternative right beneath it — no dark pattern, one click away. */}
+        <RadioGroup
+          value={isLocal ? "local" : "cloud"}
+          onChange={(_, d) => {
+            if (d.value === "local") {
+              setProviderId("local");
+              setModelId(localModelId);
+            } else {
+              setProviderId(firstAllowedCloud.id);
+              setModelId(firstAllowedCloud.models[0]);
             }
-          >
-            <Input
-              value={apiKey}
-              onChange={(_, d) => setApiKey(d.value)}
-              type="password"
-              placeholder="Paste your API key"
-            />
-          </Field>
+          }}
+        >
+          <Radio
+            value="local"
+            disabled={!isAllowed("local")}
+            label="Private — runs on this device. No API key; nothing leaves your computer. (Recommended)"
+          />
+          <Radio
+            value="cloud"
+            disabled={!cloudProviders.some((p) => isAllowed(p.id))}
+            label="Cloud model — sends excerpts of your included files to a provider you choose, to answer."
+          />
+        </RadioGroup>
+
+        {isLocal ? (
+          <LocalModelInstallPanel />
+        ) : (
+          <>
+            {/* Honest cloud heading, naming the selected vendor. */}
+            <Text weight="semibold">Cloud models</Text>
+            <Text className={styles.hint}>
+              Sends excerpts of your included files to {provider.label} to answer.
+            </Text>
+            <Field label="Provider">
+              <Dropdown
+                value={provider.label}
+                selectedOptions={[providerId]}
+                onOptionSelect={(_, d) => {
+                  const p = MODEL_PROVIDERS.find((x) => x.id === d.optionValue)!;
+                  setProviderId(p.id);
+                  setModelId(p.models[0]);
+                }}
+              >
+                {cloudProviders.map((p) => (
+                  <Option
+                    key={p.id}
+                    value={p.id}
+                    text={p.label}
+                    // Managed policy: disallowed providers render disabled (the
+                    // engine rejects server-side regardless).
+                    disabled={!isAllowed(p.id)}
+                  >
+                    {p.label}
+                  </Option>
+                ))}
+              </Dropdown>
+            </Field>
+            <Field label="Model">
+              <Dropdown
+                value={modelId}
+                selectedOptions={[modelId]}
+                onOptionSelect={(_, d) => setModelId(d.optionValue!)}
+              >
+                {provider.models.map((m) => (
+                  <Option key={m} value={m}>
+                    {m}
+                  </Option>
+                ))}
+              </Dropdown>
+            </Field>
+            <Field
+              label="API key"
+              hint={
+                <Link href={provider.apiKeyUrl} target="_blank" rel="noreferrer">
+                  Get your {provider.label} key →
+                </Link>
+              }
+            >
+              <Input
+                value={apiKey}
+                onChange={(_, d) => setApiKey(d.value)}
+                type="password"
+                placeholder="Paste your API key"
+              />
+            </Field>
+          </>
         )}
-        <ContinueSetupButton providerId={providerId} disabled={providerId !== "local" && !apiKey} />
+        <ContinueSetupButton providerId={providerId} disabled={!isLocal && !apiKey} />
         <Button appearance="subtle" type="button" onClick={() => setStep("vault")}>
           Back
         </Button>

@@ -42,7 +42,7 @@ install (both SHA-256- or signature-verified).
 | `lighthouse` (main) | The app + its embedded engine | Loopback UI only; cloud only if you pick a cloud AI provider |
 | `llama-server` (chat) | Local LLM answers | Binds `127.0.0.1:8080`, loopback only |
 | `llama-server` (embeddings) | Semantic search over your files | Binds `127.0.0.1` on the embed port, loopback only |
-| Piper (TTS) / Whisper (dictation) / ocrs (OCR) | Read-aloud, voice input, image/scanned-PDF text | In-process or child process, **no sockets** |
+| Whisper (dictation) / ocrs (OCR) | Voice input, image/scanned-PDF text | In-process or child process, **no sockets** |
 
 The two `llama-server` instances are supervised (restarted if they crash, with
 quick-exit backoff) and are the same upstream `llama.cpp` server binary many
@@ -76,7 +76,7 @@ allowance. They **only** bind loopback — no external listener is ever opened.
 
 1. The signing identity (once signed builds ship — see status above), or the
    per-release SHA-256 hashes from `asset-digests.yml` in the meantime.
-2. The install directory (bundled `llama-server`, Piper, Whisper, ocrs
+2. The install directory (bundled `llama-server`, Whisper, ocrs
    binaries) — allow child-process execution from it.
 3. Loopback binds on `127.0.0.1:8080` and the embed port.
 4. Outbound HTTPS to the hosts in `docs/data-flows.md` §"Redirect / effective

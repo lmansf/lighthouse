@@ -4,8 +4,10 @@ import {
   listSources,
   listNodes,
   setIncluded,
+  setLocalOnly,
   setSourceAvailable,
   retrieve,
+  inspect,
   moveNode,
   renameNode,
   createFolder,
@@ -56,6 +58,15 @@ export async function POST(req: Request) {
       await setIncluded(body.nodeId, body.included);
       return NextResponse.json({ ok: true });
 
+    // "Private — this device only": a per-node mark the engine enforces by
+    // withholding the node from anything a cloud provider would receive.
+    case "localOnly":
+      if (typeof body.nodeId !== "string" || typeof body.localOnly !== "boolean") {
+        return NextResponse.json({ error: "nodeId and localOnly required" }, { status: 400 });
+      }
+      await setLocalOnly(body.nodeId, body.localOnly);
+      return NextResponse.json({ ok: true });
+
     case "source":
       if (typeof body.available !== "boolean") {
         return NextResponse.json({ error: "available required" }, { status: 400 });
@@ -70,6 +81,17 @@ export async function POST(req: Request) {
       const query = typeof body.query === "string" ? body.query : "";
       const ids = Array.isArray(body.includedFileIds) ? body.includedFileIds : [];
       return NextResponse.json({ references: (await retrieve(query, ids)).references });
+    }
+
+    // Read-only per-file inspector ("What the AI sees", openspec:
+    // add-file-inspector): what the engine extracted/chunked/indexed for one
+    // file, plus an optional file-scoped test-search. PURE READ — no setter.
+    // PARITY: the twin's payload omits the Rust-engine-only fields.
+    case "inspect": {
+      const fileId = typeof body.fileId === "string" ? body.fileId : "";
+      if (!fileId) return NextResponse.json({ error: "fileId required" }, { status: 400 });
+      const query = typeof body.query === "string" ? body.query : undefined;
+      return NextResponse.json(await inspect(fileId, query));
     }
 
     case "move": {

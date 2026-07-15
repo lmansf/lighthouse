@@ -11,7 +11,7 @@ configuration fails the build loudly.*
 
 | Leg | Mechanism | Gate |
 |---|---|---|
-| macOS Developer-ID signing + notarization + stapling | Tauri v2 native (`APPLE_*` env) + `bundle.macOS.entitlements` (`entitlements.plist` — JIT + unsigned-dylib loading for llama/piper) | `APPLE_CERTIFICATE` secret non-empty |
+| macOS Developer-ID signing + notarization + stapling | Tauri v2 native (`APPLE_*` env) + `bundle.macOS.entitlements` (`entitlements.plist` — JIT + unsigned-dylib loading for llama) | `APPLE_CERTIFICATE` secret non-empty |
 | Windows Authenticode | `.pfx` imported to the runner store, thumbprint passed via `--config bundle.windows.certificateThumbprint`; sha256 digest + DigiCert timestamp preconfigured in `tauri.conf.json` | `WINDOWS_CERTIFICATE` secret non-empty |
 | Update-artifact signing | `createUpdaterArtifacts` → minisign `.sig` beside each installer, uploaded to the release; fan-in job aggregates `latest.json` (tauri-updater manifest) | `TAURI_SIGNING_PRIVATE_KEY` secret non-empty (+ `LIGHTHOUSE_UPDATER_PUBKEY` variable, else the build fails on purpose) |
 | Updater Phase B (download + verify + install-on-consent) | Shell downloads installer + `.sig`, verifies with the compile-time-baked pubkey (`lighthouse-core::updates::verify_update_signature`), only then hands off to the OS/NSIS | pubkey baked at build (`LIGHTHOUSE_UPDATER_PUBKEY`) AND the release carries a `.sig` |

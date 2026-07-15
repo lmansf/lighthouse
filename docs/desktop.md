@@ -120,7 +120,7 @@ which clears Electron's insecure-CSP warning and removes that attack surface.
 `'unsafe-inline'` stays because Next's bootstrap inline script and Fluent UI's
 (Griffel) runtime `<style>` injection rely on it, and `connect-src` allows
 `localhost`/`127.0.0.1` for the local-model server. `media-src` allows `blob:`
-(and `data:`) so read-aloud can play the synthesized WAV via an object URL. This
+(and `data:`) so the app can play media served via an object URL. This
 is desktop-only; the web build leaves CSP to its own hosting.
 
 ## Building a distributable installer
@@ -153,10 +153,8 @@ target OS. The branded icons are already committed (see [Icons](#icons) below).
 (bundled into the installer so the packaged app's `next start` needs no Node.js
 toolchain on the user's machine), then `npm run fetch:model`
 (`scripts/fetch-local-model.mjs`), which downloads the `llama-server` binary
-(llama.cpp, MIT) into `resources/llm/` **plus** the Piper TTS binary
-(rhasspy/piper, MIT) and a neural voice (`en_US-lessac-medium`, ~63 MB, MIT/CC0)
-into `resources/tts/` for on-device read-aloud, and finally `electron-builder`
-copies both folders into the installer via its `extraResources` entries - though
+(llama.cpp, MIT) into `resources/llm/`, and finally `electron-builder`
+copies the folder into the installer via its `extraResources` entries - though
 the `llm` entry carries a `!**/*.gguf` filter, so a stray or dev-only model left
 in `resources/llm` (the runtime fallback `modelsDir()` reads in `npm run dev`) can
 never be packaged. The
@@ -167,8 +165,7 @@ when the user opts into the private model (the **＋** in the model picker →
 quality (~a minute per answer, ~6-8 GB RAM). The bundled assets are gitignored
 and fetched on the build machine. Use `npm run dist:nomodel`
 to skip the fetch (it still runs `next build`) for a lean build that relies on a
-bring-your-own server instead (and falls back to the OS's Web Speech voices for
-read-aloud). The fetch script takes env overrides (pinned `llama.cpp` version,
+bring-your-own server instead. The fetch script takes env overrides (pinned `llama.cpp` version,
 alternate model URL, expected checksums) documented in its header comment.
 
 The app ships **unpacked** (`asar: false`) because it runs a local Next.js
@@ -239,9 +236,8 @@ external OpenAI-compatible server (see the README's
 > Supabase backend, and no Stripe checkout — the code was deleted, not disabled
 > (see `docs/data-flows.md`). The old `registration.md` flow is retired with it.
 
-A `dist` build bundles a `llama-server` binary under `resources/llm/`, plus the
-Piper TTS binary and a neural voice under `resources/tts/` for on-device
-read-aloud (see [Building a distributable installer](#building-a-distributable-installer)
+A `dist` build bundles a `llama-server` binary under `resources/llm/` (see
+[Building a distributable installer](#building-a-distributable-installer)
 above). The private model weights are not bundled; when the user opts in, the
 Next server downloads them (`app/api/model` → `src/server/localModel.ts`) into
 `<userData>/models`, and the desktop app auto-launches the local inference server
@@ -254,5 +250,4 @@ an uninstall) - stopping it on quit. Main sets
 (`npm run dev` / tests). Until the model is installed, the "Local model (private)"
 provider falls back to passage streaming; a `dist:nomodel` build also skips the
 bundled binaries, so the provider targets an external server via
-`LIGHTHOUSE_LOCAL_LLM_URL` and read-aloud falls back to the OS's Web Speech
-voices.
+`LIGHTHOUSE_LOCAL_LLM_URL`.

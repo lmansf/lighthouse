@@ -14,6 +14,7 @@ import type {
   ChatChunk,
   ChatTurn,
   DataSource,
+  FileInspection,
   FileNode,
   OnboardingState,
   Pin,
@@ -33,10 +34,28 @@ export interface RagService {
   listNodes(parentId?: string | null): Promise<FileNode[]>;
   /** Include or exclude a node (and, for folders/sources, its descendants). */
   setIncluded(nodeId: string, included: boolean): Promise<void>;
+  /**
+   * Mark or unmark a node "Private — this device only" (ancestor-wins). A marked
+   * node participates in on-device answers but is withheld from anything a cloud
+   * provider would receive. Writes only the target's own flag (no descendant
+   * cascade); resolution covers the subtree.
+   */
+  setLocalOnly(nodeId: string, localOnly: boolean): Promise<void>;
   /** Toggle whether a whole source is available. */
   setSourceAvailable(sourceId: string, available: boolean): Promise<void>;
   /** Retrieve references relevant to a query from the currently-included set. */
   search(query: string, includedFileIds: string[]): Promise<RagReference[]>;
+  /**
+   * Read-only inspection of a single file ("What the AI sees", openspec:
+   * add-file-inspector): what the engine extracted, chunked, catalogued, and
+   * indexed for it, plus its effective inclusion + local-only state — and, when
+   * `query` is given, a bounded, file-scoped test-search (the file's top chunks
+   * with scores, via the existing retrieval scorer). PURE READ — it surfaces the
+   * inclusion + local-only toggles, never mutates. PARITY: the web dev twin omits
+   * the Rust-engine-only fields (OCR flag, persisted chunk count, column catalog,
+   * last-indexed key) rather than faking them; the UI renders those "desktop only".
+   */
+  inspect(fileId: string, query?: string): Promise<FileInspection>;
   /**
    * Re-run an analytics answer's SQL over exactly the files it read — the
    * guarded, model-free path behind Edit SQL. Returns the (capped) result

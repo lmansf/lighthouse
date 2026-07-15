@@ -297,7 +297,7 @@ So field-installed unsigned clients get signature protection only from their
 web download button / manual install, and message existing users to re-download
 (there is no auto-update today anyway).
 
-## 9. Interaction with bundled model / TTS
+## 9. Interaction with bundled model
 
 The current layout is already correct; the updater must preserve it:
 
@@ -307,8 +307,8 @@ The current layout is already correct; the updater must preserve it:
   `reconcileModel()`. NSIS `perMachine:false` installs elsewhere and won't touch
   `userData`. Do **not** move the model under the app dir. (Worth a release test
   asserting `LIGHTHOUSE_MODELS_DIR` resolves under `userData` in the packaged app.)
-- **`resources/llm` (llama-server) and `resources/tts` (Piper + ~63 MB voice) ARE
-  bundled** and *do* get replaced on update — correct and desirable. These are now
+- **`resources/llm` (llama-server) IS bundled** and *does* get replaced on update
+  — correct and desirable. It is now
   **pinned + SHA-256-verified at build time** (`scripts/fetch-local-model.mjs`
   `ASSET_SHA256`, fail-closed), so the binaries shipped inside each installer are
   reproducible and tamper-evident. Preserve that when bumping versions (use

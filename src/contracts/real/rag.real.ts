@@ -6,6 +6,7 @@ import type {
   Cadence,
   ChangedPin,
   DataSource,
+  FileInspection,
   FileNode,
   Pin,
   PolicySnapshot,
@@ -47,6 +48,10 @@ class RealRagService implements RagService {
     await post({ op: "include", nodeId, included });
   }
 
+  async setLocalOnly(nodeId: string, localOnly: boolean): Promise<void> {
+    await post({ op: "localOnly", nodeId, localOnly });
+  }
+
   async setSourceAvailable(sourceId: string, available: boolean): Promise<void> {
     // sourceId MUST ride along: the route routes the toggle by it, defaulting
     // to the local vault when absent — dropping it toggled the wrong source
@@ -57,6 +62,14 @@ class RealRagService implements RagService {
   async search(query: string, includedFileIds: string[]): Promise<RagReference[]> {
     const res = await post({ op: "search", query, includedFileIds });
     return (res.references as RagReference[]) ?? [];
+  }
+
+  async inspect(fileId: string, query?: string): Promise<FileInspection> {
+    return (await post({
+      op: "inspect",
+      fileId,
+      ...(query ? { query } : {}),
+    })) as unknown as FileInspection;
   }
 
   async analyticsSql(

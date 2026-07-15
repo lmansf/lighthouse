@@ -354,6 +354,44 @@ pub fn snapshot_chunks() -> Vec<(String, String, Vec<String>)> {
         .collect()
 }
 
+/// What the read-only file inspector needs from the persistent index: the
+/// stored freshness key (`mtimeMs:size`), how many chunks the index holds for
+/// the file, and whether that key still matches the file on disk right now.
+pub struct IndexPeek {
+    pub key: String,
+    pub chunk_count: usize,
+    pub fresh: bool,
+}
+
+/// Read-only inspector peek at the PERSISTED entry for `id`, WITHOUT
+/// revalidating or rebuilding it — so a stale entry stays observably stale
+/// (that staleness is the point the inspector reports). Loads the on-disk index
+/// into memory if nothing is loaded yet (a read), but never builds a missing
+/// entry, marks the index dirty, or persists. `abs` is the file's current path,
+/// used only to compute the on-disk key for the freshness compare. None when
+/// the index holds no entry for this id yet (e.g. never included/warmed).
+pub fn peek_entry(id: &str, abs: Option<&Path>) -> Option<IndexPeek> {
+    let sd = state_dir();
+    let mut guard = STATE.lock().unwrap_or_else(|p| p.into_inner());
+    let state = match guard.as_mut() {
+        Some(s) if s.state_dir == sd => s,
+        _ => {
+            *guard = Some(IndexState {
+                state_dir: sd.clone(),
+                files: load_from_disk(&sd),
+            });
+            guard.as_mut().unwrap()
+        }
+    };
+    let entry = state.files.get(id)?;
+    let fresh = abs.and_then(key_of).as_deref() == Some(entry.key.as_str());
+    Some(IndexPeek {
+        key: entry.key.clone(),
+        chunk_count: entry.chunks.len(),
+        fresh,
+    })
+}
+
 /// Drop entries for changed node ids (watcher nicety — correctness comes from
 /// the per-query key check, so a missed invalidation is never wrong, only warm).
 pub fn invalidate_ids(ids: &[String]) {

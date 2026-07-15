@@ -123,7 +123,7 @@ pub fn is_desktop_app() -> bool {
         .unwrap_or(false)
 }
 
-/// Root of the bundled offline resources (local model binary, TTS voice).
+/// Root of the bundled offline resources (local model binary).
 pub fn resources_dir() -> PathBuf {
     match env_trimmed("LIGHTHOUSE_RESOURCES_PATH") {
         Some(v) => PathBuf::from(v),

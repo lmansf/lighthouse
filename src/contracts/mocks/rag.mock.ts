@@ -5,6 +5,7 @@ import type {
   Cadence,
   ChangedPin,
   DataSource,
+  FileInspection,
   FileNode,
   Pin,
   PolicySnapshot,
@@ -42,6 +43,16 @@ class MockRagService implements RagService {
     );
   }
 
+  async setLocalOnly(nodeId: string, localOnly: boolean): Promise<void> {
+    // Ancestor-wins: marking a folder privatizes its subtree, so paint the
+    // target + descendants' EFFECTIVE flag for display (the engine stores only
+    // the target's own flag; resolution covers the rest).
+    const ids = this.descendantIds(nodeId);
+    this.nodes = this.nodes.map((n) =>
+      ids.has(n.id) ? { ...n, localOnly } : n,
+    );
+  }
+
   async setSourceAvailable(sourceId: string, available: boolean): Promise<void> {
     this.sources = this.sources.map((s) =>
       s.id === sourceId ? { ...s, available } : s,
@@ -71,6 +82,31 @@ class MockRagService implements RagService {
       })
       .sort((a, b) => b.score - a.score)
       .slice(0, 4);
+  }
+
+  async inspect(fileId: string, query?: string): Promise<FileInspection> {
+    const node = this.nodes.find((n) => n.kind === "file" && n.id === fileId);
+    if (!node) return {};
+    const tabular = /\.(csv|tsv|xlsx?|xlsm|parquet)$/i.test(node.name);
+    // PARITY: the mock mirrors the web twin — shared fields only, Rust-engine-only
+    // fields (fromOcr, chunkCount, columns, indexedAt, fresh) omitted, not faked.
+    const out: FileInspection = {
+      name: node.name,
+      included: node.ragIncluded,
+      localOnly: node.localOnly === true,
+      chunkMode: tabular ? "tabular" : "prose",
+      extractPreview: `…extracted text preview for ${node.name}…`,
+    };
+    const q = query?.trim();
+    if (q) {
+      const terms = q.toLowerCase().split(/\s+/).filter(Boolean);
+      const hay = node.name.toLowerCase();
+      const overlap = terms.filter((t) => hay.includes(t)).length;
+      out.testSearch = [
+        { text: `…relevant passage from ${node.name}…`, score: Math.min(1, 0.4 + overlap * 0.2) },
+      ];
+    }
+    return out;
   }
 
   async analyticsSql(

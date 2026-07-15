@@ -10,7 +10,7 @@ use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager};
 
 use lighthouse_core::contracts::{ChatChunk, ChatTurn};
-use lighthouse_core::{local_model, profile, settings, sources, tts, vault};
+use lighthouse_core::{local_model, profile, settings, sources, vault};
 
 fn string_array(v: &Value) -> Vec<String> {
     v.as_array()
@@ -74,6 +74,19 @@ pub async fn rag_op(app: AppHandle, body: Value) -> Result<Value, String> {
             let _ = app.emit("vault-changed", ());
             Ok(json!({ "ok": true }))
         }
+        // "Private — this device only" mark (openspec: add-local-only-marks).
+        Some("localOnly") => {
+            let (Some(node_id), Some(local_only)) =
+                (body["nodeId"].as_str(), body["localOnly"].as_bool())
+            else {
+                return Err("nodeId and localOnly required".into());
+            };
+            sources::set_local_only(node_id, local_only).await;
+            // Like a visibility flip, a mark doesn't touch vault files — broadcast
+            // so other windows re-render the lock immediately.
+            let _ = app.emit("vault-changed", ());
+            Ok(json!({ "ok": true }))
+        }
         Some("source") => {
             let Some(available) = body["available"].as_bool() else {
                 return Err("available required".into());
@@ -85,8 +98,20 @@ pub async fn rag_op(app: AppHandle, body: Value) -> Result<Value, String> {
         Some("search") => {
             let query = body["query"].as_str().unwrap_or("");
             let ids = string_array(&body["includedFileIds"]);
-            let retrieved = sources::retrieve(query, &ids, &[], 5).await;
+            // Local search preview — device path, so local-only stays searchable.
+            let retrieved = sources::retrieve(query, &ids, &[], 5, false).await;
             Ok(json!({ "references": retrieved.references }))
+        }
+        // Read-only per-file inspector ("What the AI sees", openspec:
+        // add-file-inspector): what the engine extracted/chunked/catalogued/
+        // indexed for one file, plus an optional file-scoped test-search. PURE
+        // READ — surfaces state, never a setter; no vault-changed broadcast.
+        Some("inspect") => {
+            let Some(file_id) = body["fileId"].as_str().filter(|s| !s.is_empty()) else {
+                return Err("fileId required".into());
+            };
+            let inspection = sources::inspect(file_id, body["query"].as_str()).await;
+            Ok(serde_json::to_value(inspection).unwrap_or_else(|_| json!({})))
         }
         Some("move") => {
             let Some(from) = body["from"].as_str() else {
@@ -398,10 +423,15 @@ pub async fn rag_op(app: AppHandle, body: Value) -> Result<Value, String> {
                 .as_array()
                 .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
                 .unwrap_or_default();
-            let asks =
-                tokio::task::spawn_blocking(move || lighthouse_core::meta::suggested_asks(&ids))
-                    .await
-                    .unwrap_or_default();
+            // Under a cloud provider, resolve chips against the shareable set so
+            // a marked file's columns never surface as a suggestion.
+            let is_cloud =
+                lighthouse_core::synth::is_cloud_provider(&lighthouse_core::profile::model_config());
+            let asks = tokio::task::spawn_blocking(move || {
+                lighthouse_core::meta::suggested_asks(&ids, is_cloud)
+            })
+            .await
+            .unwrap_or_default();
             Ok(json!({ "asks": asks }))
         }
         // Managed policy snapshot (openspec: add-managed-policy) — read-only;
@@ -509,27 +539,6 @@ pub async fn chat_ask(
     }
     audit.finish(&provider, final_files, artifacts);
     Ok(())
-}
-
-#[tauri::command]
-pub fn tts_available() -> bool {
-    tts::is_local_tts_available()
-}
-
-/// WAV bytes as a raw IPC response (no JSON array encoding).
-#[tauri::command]
-pub async fn tts_synthesize(text: String) -> Result<tauri::ipc::Response, String> {
-    let text: String = text.trim().chars().take(8000).collect();
-    if text.is_empty() {
-        return Err("text required".into());
-    }
-    if !tts::is_local_tts_available() {
-        return Err("local TTS unavailable".into());
-    }
-    match tts::synthesize(&text).await {
-        Ok(wav) => Ok(tauri::ipc::Response::new(wav)),
-        Err(_) => Err("synthesis failed".into()),
-    }
 }
 
 #[tauri::command]

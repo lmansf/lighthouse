@@ -334,7 +334,28 @@ fn unique_table_name(base: &str, used: &[String]) -> String {
 pub async fn register_tables(
     ctx: &SessionContext,
     files: &[(String, String, PathBuf)], // (file_id, name, abs)
+    is_cloud: bool,
 ) -> Vec<TableReg> {
+    // Belt-and-suspenders (openspec: add-local-only-marks) at the highest-
+    // leakage path: schema cards carry column names, types, and three sample
+    // rows straight into a cloud prompt. The analytics candidate gather already
+    // passes only shareable ids, but re-drop any effectively-local-only file
+    // HERE so a private table's columns/samples can never reach a vendor even if
+    // a future caller forgets the gate. No-op on the device path (is_cloud
+    // false) and for the model-free direct-SQL path, which sets it false.
+    let filtered: Vec<(String, String, PathBuf)>;
+    let files: &[(String, String, PathBuf)] = if is_cloud {
+        let keep: std::collections::HashSet<String> = crate::vault::shareable_subset(
+            &files.iter().map(|(id, _, _)| id.clone()).collect::<Vec<_>>(),
+            true,
+        )
+        .into_iter()
+        .collect();
+        filtered = files.iter().filter(|(id, _, _)| keep.contains(id)).cloned().collect();
+        &filtered
+    } else {
+        files
+    };
     // A cold catalog pass parses headers+samples for up to CANDIDATE_SCAN
     // workbooks — blocking work that must not stall the runtime thread.
     let files_owned = files.to_vec();
@@ -2398,7 +2419,7 @@ mod tests {
         files.push(("lk".into(), "regions.csv".into(), lookup));
 
         let ctx = SessionContext::new();
-        let regs = register_tables(&ctx, &files).await;
+        let regs = register_tables(&ctx, &files, false).await;
         let union = regs
             .iter()
             .find(|r| r.group.is_some())
@@ -2456,7 +2477,7 @@ mod tests {
             ("f1".to_string(), "sales.csv".to_string(), csv.clone()),
             ("f2".to_string(), "regions.csv".to_string(), regions.clone()),
         ];
-        let regs = register_tables(&ctx, &files).await;
+        let regs = register_tables(&ctx, &files, false).await;
         assert_eq!(regs.len(), 2);
         assert!(regs[0].card.contains("rows"));
         // Freshly written fixtures stamp as read-just-now.
@@ -2777,7 +2798,10 @@ async fn direct_tables(
         return Err("none of the answer's files are available anymore".to_string());
     }
     let ctx = SessionContext::new();
-    let regs = register_tables(&ctx, &files).await;
+    // Direct SQL re-execution is model-free (no cloud egress of columns/rows),
+    // so local-only is inert here — exclusion already bound via the active set
+    // above. Pass is_cloud=false to keep the belt-and-suspenders filter off.
+    let regs = register_tables(&ctx, &files, false).await;
     if regs.is_empty() {
         return Err("the files couldn't be registered as tables".to_string());
     }

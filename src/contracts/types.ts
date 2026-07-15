@@ -31,6 +31,13 @@ export interface FileNode {
   /** Whether this node is currently included in the RAG index. */
   ragIncluded: boolean;
   /**
+   * Effective "Private — this device only" state (ancestor-wins): the node
+   * participates in on-device answers but is withheld from anything a cloud
+   * provider would receive. Drives the explorer's lock control. Optional so
+   * older snapshots / connectors that omit it read as unmarked.
+   */
+  localOnly?: boolean;
+  /**
    * True for items *referenced* in their real location on disk rather than
    * copied into the vault (added via "Link…"). The subtree root carries it; the
    * whole referenced tree is read in place, so no copies are made.
@@ -192,6 +199,45 @@ export interface RagReference {
   kind?: "file" | "conversation";
 }
 
+/**
+ * "What the AI sees" — a read-only, per-file inspection (openspec:
+ * add-file-inspector). Every field is optional: the Rust engine fills them all
+ * in; the TS twin OMITS the ones it cannot compute (never a fake value). KEEP
+ * IN SYNC with the shared fields of `FileInspection` in lighthouse-core
+ * inspect.rs. PARITY: the twin omits `fromOcr`, `chunkCount`, `columns`, and
+ * `indexedAt`/`fresh` (OCR, the persistent index, and the column catalog are
+ * Rust-engine-only — see docs/ts-twin.md); the UI renders those as "desktop
+ * only" rather than blank.
+ */
+export interface FileInspection {
+  name?: string;
+  /** Effective AI-visibility (included in retrieval). */
+  included?: boolean;
+  /** Effective "Private — this device only" (ancestor-wins). */
+  localOnly?: boolean;
+  /** A bounded slice of the extracted text the model would read. Absent when the
+   *  file has no extractable text (it stays findable by name only). */
+  extractPreview?: string;
+  /** Rust-only: the preview text came from OCR (image / scanned PDF). The twin
+   *  has no OCR and omits this. */
+  fromOcr?: boolean;
+  /** How the file is chunked: row-windows (tabular) vs word-windows (prose). */
+  chunkMode?: "tabular" | "prose";
+  /** Rust-only: chunk count from the persistent index. The twin re-chunks per
+   *  query and persists no count, so it omits this. */
+  chunkCount?: number;
+  /** Rust-only: detected columns + kinds (column catalog) for a tabular file. */
+  columns?: { name: string; kind: "numeric" | "date" | "text" }[];
+  /** Rust-only: the index freshness key (`mtimeMs:size`). */
+  indexedAt?: string;
+  /** Rust-only: whether `indexedAt` still matches the file on disk right now. */
+  fresh?: boolean;
+  /** The file's top chunks for a test-search query, scored by the existing
+   *  retrieval scorer and scoped to this one file. Present only when a query was
+   *  supplied. */
+  testSearch?: { text: string; score: number }[];
+}
+
 export type ChatRole = "user" | "assistant";
 
 /** A prior turn sent back to the model so follow-up questions have context. */
@@ -241,6 +287,19 @@ export interface ChatChunk {
    * ChatChunk.draft.
    */
   draft?: boolean;
+  /**
+   * Engine-emitted provenance stamp (final chunk only): where this answer was
+   * computed and how much was sent. NEVER derived from model text — the engine
+   * sets it where the prompt is assembled, so it counts what was actually
+   * handed to the model. `origin` is `"device"` for the local model or the
+   * model-free/extractive fallback, else the cloud provider id (e.g.
+   * `"anthropic"`) — it agrees with the audit record's `provider`
+   * (device⇔local/none) and the egress registry. `excerptCount` is how many
+   * context blocks the model received in the branch that ran; `sourceFileCount`
+   * is the number of distinct source files behind them (the final chunk's
+   * `references` length). KEEP IN SYNC with the Rust ChunkMeta in contracts.rs.
+   */
+  meta?: { origin: string; excerptCount: number; sourceFileCount: number };
   /** True on the last chunk of a response. */
   done: boolean;
 }

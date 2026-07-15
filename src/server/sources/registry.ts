@@ -6,13 +6,15 @@
  * `${sourceId}::`, and the registry routes each curation op to the owning source
  * and aggregates listings across all of them.
  */
-import type { DataSource, FileNode } from "@/contracts";
+import type { DataSource, FileInspection, FileNode } from "@/contracts";
 import {
   retrieve as vaultRetrieve,
   restoreFromVault as vaultRestoreFromVault,
+  setLocalOnly as vaultSetLocalOnly,
   type Retrieved,
   type RestoreDescriptor,
 } from "../vault";
+import { inspect as vaultInspect } from "../inspect";
 import { localVault } from "./local";
 import { sharepoint } from "./sharepoint";
 import type { SourceConnector } from "./types";
@@ -50,6 +52,17 @@ export async function listNodes(): Promise<FileNode[]> {
 
 export async function setIncluded(nodeId: string, included: boolean): Promise<void> {
   await connectorFor(nodeId).setIncluded(nodeId, included);
+}
+
+/**
+ * Mark/unmark a node "Private — this device only". Unlike inclusion, local-only
+ * is a pure gate flag with no content-mirroring side effect, and its marks live
+ * in the vault state keyed by node id for ANY source — so this routes straight
+ * to the vault engine regardless of which source owns the id. KEEP IN SYNC with
+ * lighthouse-core sources::set_local_only.
+ */
+export async function setLocalOnly(nodeId: string, value: boolean): Promise<void> {
+  vaultSetLocalOnly(nodeId, value);
 }
 
 export async function setSourceAvailable(
@@ -121,6 +134,7 @@ export async function retrieve(
   includedFileIds: string[],
   attachmentIds: string[] = [],
   k = 5,
+  isCloud = false,
 ): Promise<Retrieved> {
   // When the question is scoped to explicit attachments, retrieve only from those
   // vault files and skip cloud mirroring (attachments are vault files here).
@@ -133,5 +147,17 @@ export async function retrieve(
           connectors.filter((c) => c.retrievalItems).map((c) => c.retrievalItems!(includedFileIds)),
         )
       ).flat();
-  return vaultRetrieve(query, includedFileIds, k, external, attachmentIds);
+  // `isCloud` narrows the candidate + external sets to the shareable ones inside
+  // vaultRetrieve, so a marked file's content never reaches the vendor.
+  return vaultRetrieve(query, includedFileIds, k, external, attachmentIds, isCloud);
+}
+
+/**
+ * Read-only per-file inspection ("What the AI sees", openspec:
+ * add-file-inspector). Like local-only marks it is keyed by node id and served
+ * by the vault/inspect engine regardless of the owning source. KEEP IN SYNC
+ * with lighthouse-core sources::inspect.
+ */
+export async function inspect(fileId: string, query?: string): Promise<FileInspection> {
+  return vaultInspect(fileId, query);
 }

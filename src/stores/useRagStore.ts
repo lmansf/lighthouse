@@ -85,7 +85,16 @@ interface RagStore {
    * is kept so a stateful "Visible to AI" toggle reflects the result.
    */
   applySelection: (include: boolean) => Promise<void>;
+  /** Apply local-only (true) / shareable (false) to every selected node. */
+  applyLocalOnly: (localOnly: boolean) => Promise<void>;
   toggleIncluded: (nodeId: string) => Promise<void>;
+  /**
+   * Flip a node's "Private — this device only" mark. Optimistic and ancestor-
+   * aware for display (a folder paints its subtree), reconciled against the
+   * engine on settle. Independent of visibility — a node can be both included
+   * and local-only (visible to the private model, withheld from the cloud).
+   */
+  toggleLocalOnly: (nodeId: string) => Promise<void>;
   toggleSourceAvailable: (sourceId: string) => Promise<void>;
   /**
    * Upload files into the vault; they land excluded by default. Returns the new
@@ -324,6 +333,34 @@ export const useRagStore = create<RagStore>((set, get) => ({
     }
   },
 
+  applyLocalOnly: async (localOnly) => {
+    const ids = get().selectedIds;
+    if (ids.length === 0) return;
+    // Optimistic + ancestor-aware, mirroring applySelection: paint the whole
+    // selection (and each folder's subtree) before the POSTs.
+    const affected = withDescendants(get().nodes, ids);
+    set((s) => ({
+      mutationEpoch: s.mutationEpoch + 1,
+      pendingWrites: s.pendingWrites + 1,
+      nodes: s.nodes.map((n) => (affected.has(n.id) ? { ...n, localOnly } : n)),
+    }));
+    try {
+      for (const id of ids) await ragService.setLocalOnly(id, localOnly);
+    } catch (err) {
+      set({
+        lastError: `Could not change privacy: ${
+          err instanceof Error && err.message ? err.message : "request failed"
+        }`,
+      });
+    } finally {
+      set((s) => ({
+        pendingWrites: s.pendingWrites - 1,
+        mutationEpoch: s.mutationEpoch + 1,
+      }));
+      if (get().pendingWrites === 0) await get().load().catch(() => {});
+    }
+  },
+
   toggleIncluded: async (nodeId) => {
     const node = get().nodes.find((n) => n.id === nodeId);
     if (!node) return;
@@ -351,6 +388,40 @@ export const useRagStore = create<RagStore>((set, get) => ({
       // Reconcile with the server's truth on success AND failure (see
       // applySelection) — and only when the last in-flight write settles, so
       // rapid toggles don't fetch a mixed snapshot mid-batch.
+      set((s) => ({
+        pendingWrites: s.pendingWrites - 1,
+        mutationEpoch: s.mutationEpoch + 1,
+      }));
+      if (get().pendingWrites === 0) await get().load().catch(() => {});
+    }
+  },
+
+  toggleLocalOnly: async (nodeId) => {
+    const node = get().nodes.find((n) => n.id === nodeId);
+    if (!node) return;
+    const localOnly = !node.localOnly;
+    // Optimistic + ancestor-aware: a folder paints its whole subtree (mirroring
+    // the engine's ancestor-wins resolution) so the lock feels instant even when
+    // the vault is slow; reconcile against the engine on settle.
+    const affected = withDescendants(get().nodes, [nodeId]);
+    set((s) => ({
+      mutationEpoch: s.mutationEpoch + 1,
+      pendingWrites: s.pendingWrites + 1,
+      nodes: s.nodes.map((n) =>
+        affected.has(n.id) ? { ...n, localOnly } : n,
+      ),
+    }));
+    try {
+      await ragService.setLocalOnly(nodeId, localOnly);
+    } catch (err) {
+      set({
+        lastError: `Could not change privacy: ${
+          err instanceof Error && err.message ? err.message : "request failed"
+        }`,
+      });
+    } finally {
+      // Reconcile with the engine's truth on success AND failure — a child's own
+      // mark beneath a now-unmarked ancestor only resolves correctly server-side.
       set((s) => ({
         pendingWrites: s.pendingWrites - 1,
         mutationEpoch: s.mutationEpoch + 1,

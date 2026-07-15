@@ -13,7 +13,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { RagReference } from "@/contracts";
-import { activeIncludedFileIds, resolveNodePath } from "./vault";
+import { shareableFileIds, resolveNodePath } from "./vault";
 
 /** Most files a WhatsNew answer lists. */
 const WHATS_NEW_MAX = 15;
@@ -222,8 +222,11 @@ interface WalkedFile {
 
 /** Included **and available** files with mtimes, newest first — the inclusion
  *  set intersected with the engine's active walk, like the analytics branch. */
-function includedFilesWithMtime(included: string[]): WalkedFile[] {
-  const active = new Set(activeIncludedFileIds());
+function includedFilesWithMtime(included: string[], isCloud: boolean): WalkedFile[] {
+  // On the cloud path this is the SHAREABLE set (active-included minus
+  // effectively-local-only), so a marked file never surfaces in a catalog/
+  // metadata answer; on the device path it is unchanged.
+  const active = new Set(shareableFileIds(isCloud));
   const out: WalkedFile[] = [];
   for (const id of included) {
     if (!active.has(id)) continue;
@@ -263,8 +266,8 @@ function reference(f: WalkedFile, snippet: string, rank: number): RagReference {
   return { fileId: f.id, name: f.name, snippet, score: Math.max(0.5, 1.0 - rank * 0.02) };
 }
 
-function whatsNew(included: string[], windowMs: number | null, nowMs: number): MetaAnswer | null {
-  const files = includedFilesWithMtime(included);
+function whatsNew(included: string[], windowMs: number | null, nowMs: number, isCloud: boolean): MetaAnswer | null {
+  const files = includedFilesWithMtime(included, isCloud);
   if (files.length === 0) return null; // fall through — no included files
   const scoped = windowMs === null ? files : files.filter((f) => f.ms >= nowMs - windowMs);
   const windowLabel =
@@ -313,8 +316,8 @@ function countLine(files: WalkedFile[]): string {
     .join(", ");
 }
 
-function listFiles(included: string[], filter: KindFilter | null, nowMs: number): MetaAnswer | null {
-  const files = includedFilesWithMtime(included);
+function listFiles(included: string[], filter: KindFilter | null, nowMs: number, isCloud: boolean): MetaAnswer | null {
+  const files = includedFilesWithMtime(included, isCloud);
   if (files.length === 0) return null; // fall through — no included files
   const scoped = filter === null ? files : files.filter((f) => matchesFilter(f.name, filter));
   const noun =
@@ -345,14 +348,19 @@ function listFiles(included: string[], filter: KindFilter | null, nowMs: number)
  * PARITY: findColumn always falls through here — the column catalog is
  * Rust-engine-only, and a wrong "no such column" would be worse than retrieval.
  */
-export function renderMeta(intent: MetaIntent, included: string[], nowMs: number): MetaAnswer | null {
+export function renderMeta(intent: MetaIntent, included: string[], nowMs: number, isCloud: boolean): MetaAnswer | null {
   try {
     switch (intent.kind) {
       case "whatsNew":
-        return whatsNew(included, intent.windowMs, nowMs);
+        return whatsNew(included, intent.windowMs, nowMs, isCloud);
       case "listFiles":
-        return listFiles(included, intent.filter, nowMs);
+        return listFiles(included, intent.filter, nowMs, isCloud);
       case "findColumn":
+        // PARITY: the column catalog (find-column, suggested-asks) is Rust-
+        // engine-only, so this always falls through to retrieval here. The
+        // Rust twin routes find_column through the SHAREABLE set to keep a
+        // marked table's column names off a cloud prompt; there is no TS
+        // catalog to gate, so nothing local-only leaks on this side.
         return null;
     }
   } catch {

@@ -260,15 +260,6 @@ async fn wire_protocol_end_to_end() {
         .unwrap();
     assert_eq!(model["status"], "absent");
 
-    // --- /api/tts without a bundled voice → 501 (Web Speech fallback contract) ---
-    let res = client
-        .post(format!("{base}/api/tts"))
-        .json(&json!({ "text": "hello" }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(res.status().as_u16(), 501);
-
     // --- /api/open is desktop-gated ----------------------------------------------
     let res = client
         .post(format!("{base}/api/open"))

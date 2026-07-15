@@ -751,13 +751,13 @@ fn bootstrap_env(app: &AppHandle) {
         }
         std::env::set_var("LIGHTHOUSE_APP_STATE_DIR", &data);
     }
-    // Bundled offline assets (llama-server, Piper voice). Packaged builds have
+    // Bundled offline assets (llama-server). Packaged builds have
     // them under the resource dir; dev runs fall back to the repo's resources/.
     let resource_root = app
         .path()
         .resource_dir()
         .ok()
-        .filter(|d| d.join("llm").exists() || d.join("tts").exists());
+        .filter(|d| d.join("llm").exists());
     let dev_root = std::env::current_dir()
         .ok()
         .map(|d| d.join("../../../resources"))
@@ -1089,8 +1089,6 @@ fn main() {
             commands::rag_list,
             commands::rag_op,
             commands::chat_ask,
-            commands::tts_available,
-            commands::tts_synthesize,
             commands::profile_get,
             commands::profile_op,
             commands::connect_op,

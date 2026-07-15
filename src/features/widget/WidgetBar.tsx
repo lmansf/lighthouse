@@ -48,8 +48,8 @@ import {
   SquareRegular,
 } from "@fluentui/react-icons";
 import dynamic from "next/dynamic";
-import type { ChatTurn, FileNode, RagReference } from "@/contracts";
-import { chatService, ragService } from "@/contracts";
+import type { ChatChunk, ChatTurn, FileNode, RagReference } from "@/contracts";
+import { chatService, MODEL_PROVIDERS, ragService } from "@/contracts";
 import { useRagStore } from "@/stores/useRagStore";
 import { egressPillSummary } from "@/features/egress/EgressShield";
 import { isDesktopShell } from "@/shell/desktopBridge";
@@ -294,7 +294,22 @@ const useStyles = makeStyles({
     flexWrap: "wrap",
     gap: tokens.spacingHorizontalXS,
   },
+  // Compact provenance footer under the inline answer ("on device / via
+  // <vendor>"), matching the egress footer's quiet muted style.
+  provenance: {
+    color: tokens.colorNeutralForeground3,
+  },
 });
+
+/**
+ * Compact provenance for the pill's inline answer, read straight off the final
+ * chunk's engine-emitted meta (never model text): "on device" when nothing left
+ * the machine, else "via <vendor>" naming the cloud provider that answered.
+ */
+function widgetProvenance(meta: NonNullable<ChatChunk["meta"]>): string {
+  if (meta.origin === "device") return "on device";
+  return `via ${MODEL_PROVIDERS.find((p) => p.id === meta.origin)?.label ?? meta.origin}`;
+}
 
 /**
  * File-type icon for a result row — the file half of FileExplorer's fileIcon
@@ -345,6 +360,9 @@ export function WidgetBar() {
     error: string | null;
     /** Engine stage note ("Reading q3.csv (2/5)…") shown until tokens arrive. */
     progress?: string | null;
+    /** Engine-emitted provenance stamp (final chunk) — the compact "on device /
+     *  via <vendor>" footer. */
+    meta?: ChatChunk["meta"];
   };
   const [answer, setAnswer] = useState<InlineAnswer | null>(null);
   const answerRef = useRef<InlineAnswer | null>(null);
@@ -630,6 +648,7 @@ export function WidgetBar() {
     void (async () => {
       let content = "";
       let refs: RagReference[] = [];
+      let meta: ChatChunk["meta"];
       try {
         for await (const chunk of chatService.ask(
           q,
@@ -649,8 +668,9 @@ export function WidgetBar() {
             setAnswer((a) => (a ? { ...a, content: soFar, progress: null } : a));
           }
           if (chunk.references) refs = chunk.references;
+          if (chunk.meta) meta = chunk.meta;
         }
-        setAnswer((a) => (a ? { ...a, refs, streaming: false } : a));
+        setAnswer((a) => (a ? { ...a, refs, meta, streaming: false } : a));
         if (content) {
           const turns: ChatTurn[] = [
             { role: "user", content: q },
@@ -995,6 +1015,13 @@ export function WidgetBar() {
                 </Button>
               ))}
             </div>
+          )}
+          {/* Engine-emitted provenance stamp (final chunk), compact for the pill.
+              Truthful by construction — read only from meta, never model text. */}
+          {answer.meta && !answer.streaming && (
+            <Text size={100} className={styles.provenance}>
+              {widgetProvenance(answer.meta)}
+            </Text>
           )}
         </div>
       )}
