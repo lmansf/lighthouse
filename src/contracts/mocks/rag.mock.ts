@@ -336,6 +336,13 @@ class MockRagService implements RagService {
     return { error: "audit log is disabled" };
   }
 
+  async refreshBriefingNote(): Promise<{ savedId?: string; savedName?: string; error?: string }> {
+    return {
+      savedId: "Lighthouse Notes/Lighthouse Briefing.md",
+      savedName: "Lighthouse Briefing.md",
+    };
+  }
+
   /** A node plus all of its descendants (so toggling a folder cascades). */
   private descendantIds(rootId: string): Set<string> {
     const out = new Set<string>([rootId]);

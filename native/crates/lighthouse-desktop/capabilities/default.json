@@ -15,6 +15,7 @@
     "dialog:default",
     "autostart:default",
     "opener:default",
-    "window-state:default"
+    "window-state:default",
+    "notification:default"
   ]
 }

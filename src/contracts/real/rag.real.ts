@@ -217,6 +217,14 @@ class RealRagService implements RagService {
       error?: string;
     };
   }
+
+  async refreshBriefingNote(): Promise<{ savedId?: string; savedName?: string; error?: string }> {
+    return (await post({ op: "refreshBriefingNote" })) as unknown as {
+      savedId?: string;
+      savedName?: string;
+      error?: string;
+    };
+  }
 }
 
 export const ragService: RagService = new RealRagService();

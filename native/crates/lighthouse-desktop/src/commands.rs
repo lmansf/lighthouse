@@ -233,6 +233,51 @@ pub async fn rag_op(app: AppHandle, body: Value) -> Result<Value, String> {
                 Err(e) => json!({ "error": e }),
             })
         }
+        // --- Briefing note refresh (G5): recheck each pin for a REAL before→
+        //     after, compose the deterministic note, and overwrite Lighthouse
+        //     Notes/Lighthouse Briefing.md in place. No OS notification here —
+        //     the user is in the dialog; the result is confirmed inline. ---
+        Some("refreshBriefingNote") => {
+            // Recheck to freshen each pin's summary, then compose from a SNAPSHOT
+            // of every pin that has a summary (matching the web twin) — NOT just
+            // what changed on this recheck. A manual refresh regenerates the whole
+            // briefing, so it never clobbers a meaningful note with the empty-set
+            // message just because nothing changed since the last check. No OS
+            // notification (the user is in the dialog) and NO daily-gate stamp: the
+            // on-demand snapshot and the scheduled daily delta are independent.
+            let _ = lighthouse_core::pins::recheck_all().await;
+            let now = lighthouse_core::config::now_ms();
+            let entries: Vec<lighthouse_core::pins::ChangedPin> = lighthouse_core::pins::list()
+                .into_iter()
+                .filter_map(|p| {
+                    p.last_summary.clone().map(|s| lighthouse_core::pins::ChangedPin {
+                        id: p.id.clone(),
+                        question: p.question.clone(),
+                        before: None,
+                        after: s,
+                    })
+                })
+                .collect();
+            let md = lighthouse_core::briefings::compose_briefing_note(&entries, now);
+            let written = tokio::task::spawn_blocking(move || {
+                lighthouse_core::vault::refresh_artifact(
+                    "Lighthouse Notes",
+                    "Lighthouse Briefing",
+                    "md",
+                    md.as_bytes(),
+                )
+            })
+            .await
+            .map_err(|e| e.to_string())
+            .and_then(|r| r.map_err(|e| e.to_string()));
+            Ok(match written {
+                Ok((id, name)) => {
+                    let _ = app.emit("vault-changed", ());
+                    json!({ "savedId": id, "savedName": name })
+                }
+                Err(e) => json!({ "error": e }),
+            })
+        }
         // --- Pinned questions (openspec: add-pinned-questions): persist an
         //     analytics answer's question + SQL + files; rechecks are guarded
         //     and model-free. The background scheduler lives in main.rs. ---
@@ -761,6 +806,8 @@ pub fn settings_get(app: AppHandle) -> Value {
         "ocrEnabled": s.ocr_enabled != Some(false), // default on (add-ocr-perception)
         "auditEnabled": s.audit_enabled == Some(true), // opt-in, default off (add-audit-log)
         "draftAnswers": s.draft_answers != Some(false), // default on (G2)
+        "briefingNotify": s.briefing_notify != Some(false), // default on (G5)
+        "briefingNoteHour": s.briefing_note_hour.unwrap_or(9), // default 9am (G5)
     })
 }
 
@@ -778,6 +825,8 @@ pub fn settings_set(
     ocr_enabled: Option<bool>,
     audit_enabled: Option<bool>,
     draft_answers: Option<bool>,
+    briefing_notify: Option<bool>,
+    briefing_note_hour: Option<i64>,
 ) -> Value {
     // A new summon shortcut must PARSE before anything persists — saving an
     // unregistrable string would strand the user with no hotkey at all.
@@ -816,6 +865,8 @@ pub fn settings_set(
         ocr_enabled,
         audit_enabled,
         draft_answers,
+        briefing_notify,
+        briefing_note_hour,
     );
     if shortcut_changed && !crate::register_summon_shortcut(&app) {
         // The new chord didn't register — restore the previous one so the
@@ -828,6 +879,8 @@ pub fn settings_set(
             None,
             None,
             Some(prev_shortcut.clone().unwrap_or_default()),
+            None,
+            None,
             None,
             None,
             None,
@@ -911,6 +964,8 @@ pub fn settings_set(
         "semanticSearch": s.semantic_search != Some(false),
         "backgroundConserve": s.background_conserve != Some(false),
         "draftAnswers": s.draft_answers != Some(false),
+        "briefingNotify": s.briefing_notify != Some(false),
+        "briefingNoteHour": s.briefing_note_hour.unwrap_or(9),
     })
 }
 

@@ -1460,6 +1460,8 @@ export function ChatPanel() {
   const [pinsOpen, setPinsOpen] = useState(false);
   const [pinList, setPinList] = useState<Pin[]>([]);
   const [pinsBusy, setPinsBusy] = useState(false);
+  // G5: transient "Saved to Lighthouse Notes" note after a manual refresh.
+  const [briefingSaved, setBriefingSaved] = useState<string | null>(null);
   // Saved/pinned notes AND thumbs ratings are keyed by message id, and ids
   // RESTART per conversation — clear them on a conversation switch so a new
   // chat's "a2" never inherits another chat's "Saved…"/"Pinned…"/👍.
@@ -2084,6 +2086,21 @@ export function ChatPanel() {
       }
     } catch {
       /* the list simply stays as-is */
+    } finally {
+      setPinsBusy(false);
+    }
+  }
+
+  /** G5: refresh the "Lighthouse Briefing" note on demand and confirm inline. */
+  async function refreshBriefingNoteNow() {
+    if (pinsBusy) return;
+    setPinsBusy(true);
+    setBriefingSaved(null);
+    try {
+      const res = await ragService.refreshBriefingNote();
+      setBriefingSaved(res.error ? `Couldn't save: ${res.error}` : "Saved to Lighthouse Notes");
+    } catch {
+      setBriefingSaved("Couldn't save the briefing note");
     } finally {
       setPinsBusy(false);
     }
@@ -2766,8 +2783,20 @@ export function ChatPanel() {
             <BriefingsPanel pins={pinList} />
           </DialogContent>
           <DialogActions>
+            {briefingSaved && (
+              <Text size={200} className={styles.quietNote}>
+                {briefingSaved}
+              </Text>
+            )}
             <Button appearance="secondary" onClick={() => setPinsOpen(false)}>
               Close
+            </Button>
+            <Button
+              appearance="secondary"
+              disabled={pinsBusy || pinList.length === 0}
+              onClick={() => void refreshBriefingNoteNow()}
+            >
+              Refresh briefing note
             </Button>
             <Button
               appearance="primary"

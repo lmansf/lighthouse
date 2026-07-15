@@ -62,6 +62,14 @@ export interface DesktopSettings {
    * in settings.rs.
    */
   draftAnswers?: boolean;
+  /**
+   * G5 briefing note: fire an OS notification when the scheduled note refreshes.
+   * Default ON. PARITY: the note + scheduler are desktop-Rust-only; the TS twin
+   * just round-trips this pref for the UI (like semanticSearch).
+   */
+  briefingNotify?: boolean;
+  /** G5 briefing note: local hour (0–23) the scheduled note may refresh at. Default 9. */
+  briefingNoteHour?: number;
 }
 
 function settingsFile(): string | null {

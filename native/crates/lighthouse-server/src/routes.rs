@@ -249,6 +249,46 @@ pub async fn rag_post(headers: HeaderMap, body: Option<Json<Value>>) -> Response
             }))
             .into_response();
         }
+        // G5 briefing note: recheck to freshen each pin's summary, then compose
+        // the deterministic (model-free) note from a SNAPSHOT of every pin that
+        // has a summary (matching the web twin) and overwrite Lighthouse
+        // Notes/Lighthouse Briefing.md in place — so a manual refresh never blanks
+        // the note just because nothing changed. No OS notification and NO daily-
+        // gate stamp on this explicit, in-dialog path. (PARITY: the desktop shell's
+        // scheduled daily-delta write lives in main.rs.)
+        Some("refreshBriefingNote") => {
+            let _ = lighthouse_core::pins::recheck_all().await;
+            let now = lighthouse_core::config::now_ms();
+            let entries: Vec<lighthouse_core::pins::ChangedPin> = lighthouse_core::pins::list()
+                .into_iter()
+                .filter_map(|p| {
+                    p.last_summary.clone().map(|s| lighthouse_core::pins::ChangedPin {
+                        id: p.id.clone(),
+                        question: p.question.clone(),
+                        before: None,
+                        after: s,
+                    })
+                })
+                .collect();
+            let md = lighthouse_core::briefings::compose_briefing_note(&entries, now);
+            let written = tokio::task::spawn_blocking(move || {
+                lighthouse_core::vault::refresh_artifact(
+                    "Lighthouse Notes",
+                    "Lighthouse Briefing",
+                    "md",
+                    md.as_bytes(),
+                )
+            })
+            .await
+            .map_err(|e| e.to_string())
+            .and_then(|r| r.map_err(|e| e.to_string()));
+            return match written {
+                Ok((id, name)) => {
+                    Json(json!({ "savedId": id, "savedName": name })).into_response()
+                }
+                Err(e) => Json(json!({ "error": e })).into_response(),
+            };
+        }
         Some("listBriefings") => {
             return Json(json!({ "briefings": lighthouse_core::briefings::list() }))
                 .into_response();
@@ -944,6 +984,8 @@ pub async fn settings_get() -> Response {
         "ocrEnabled": s.ocr_enabled != Some(false), // default on
         "auditEnabled": s.audit_enabled == Some(true), // opt-in, default off
         "draftAnswers": s.draft_answers != Some(false), // default on
+        "briefingNotify": s.briefing_notify != Some(false), // default on (G5)
+        "briefingNoteHour": s.briefing_note_hour.unwrap_or(9), // default 9am (G5)
     }))
     .into_response()
 }
@@ -971,6 +1013,8 @@ pub async fn settings_post(headers: HeaderMap, body: Option<Json<Value>>) -> Res
         body["ocrEnabled"].as_bool(),
         body["auditEnabled"].as_bool(),
         body["draftAnswers"].as_bool(),
+        body["briefingNotify"].as_bool(),
+        body["briefingNoteHour"].as_i64(),
     );
     Json(json!({
         "ok": true,
@@ -986,6 +1030,8 @@ pub async fn settings_post(headers: HeaderMap, body: Option<Json<Value>>) -> Res
         "backgroundConserve": s.background_conserve != Some(false),
         "ocrEnabled": s.ocr_enabled != Some(false),
         "draftAnswers": s.draft_answers != Some(false),
+        "briefingNotify": s.briefing_notify != Some(false),
+        "briefingNoteHour": s.briefing_note_hour.unwrap_or(9),
     }))
     .into_response()
 }

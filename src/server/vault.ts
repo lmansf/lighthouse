@@ -484,6 +484,38 @@ export function writeArtifact(
 }
 
 /**
+ * Write/OVERWRITE a fixed-name artifact in a named vault folder (the G5
+ * briefing-note refresh). Same hint sanitization as `writeArtifact` but NO
+ * collision suffix — the file is replaced in place. `safeAbs`-guarded against
+ * vault escape; invalidates the walk cache. KEEP IN SYNC with
+ * lighthouse-core::vault::refresh_artifact.
+ */
+export function refreshArtifact(
+  subdir: string,
+  nameHint: string,
+  ext: string,
+  bytes: Buffer,
+): { id: string; name: string } {
+  let clean = [...nameHint]
+    .slice(0, 80)
+    .map((c) => {
+      const code = c.charCodeAt(0);
+      return c === "/" || c === "\\" || code < 32 || (code >= 127 && code <= 159) ? "-" : c;
+    })
+    .join("")
+    .trim()
+    .replace(/^\.+/, "")
+    .trim();
+  if (!clean) clean = "result";
+  const id = `${subdir}/${clean}.${ext}`;
+  const abs = safeAbs(id); // rejects any vault escape
+  fs.mkdirSync(path.dirname(abs), { recursive: true });
+  fs.writeFileSync(abs, bytes); // truncating overwrite — replaces in place
+  invalidateWalkCache();
+  return { id, name: id.split("/").pop() ?? id };
+}
+
+/**
  * Register a file or folder *in place* (a reference / link) instead of copying
  * it into the vault — this is how the app adds existing files without making a
  * second copy. The path must be an existing absolute path. Re-linking the same

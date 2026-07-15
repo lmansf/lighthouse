@@ -19,9 +19,15 @@ import { isDesktopApp } from "@/server/config";
 import { policySnapshot } from "@/server/policy";
 import { egressSnapshot } from "@/server/egress";
 import { recentAudit, verifyActiveAudit, exportCsvAudit } from "@/server/audit";
-import { writeArtifact } from "@/server/vault";
+import { writeArtifact, refreshArtifact } from "@/server/vault";
 import { addPin, listPins, removePin } from "@/server/pins";
-import { addBriefing, listBriefings, removeBriefing, runBriefing } from "@/server/briefings";
+import {
+  addBriefing,
+  listBriefings,
+  removeBriefing,
+  runBriefing,
+  composeBriefingNote,
+} from "@/server/briefings";
 import type { Cadence } from "@/contracts";
 
 export const runtime = "nodejs";
@@ -259,6 +265,30 @@ export async function POST(req: Request) {
       } catch (err) {
         return NextResponse.json({
           error: err instanceof Error ? err.message : "could not write the note",
+        });
+      }
+    }
+
+    // G5: refresh the briefing note on demand. PARITY: the desktop engine
+    // rechecks each pin's SQL for a real before→after; the web dev twin can't
+    // run DataFusion, so it composes from each pin's last known summary (no
+    // `before`). The composer + refreshArtifact writer are byte-identical.
+    case "refreshBriefingNote": {
+      try {
+        const changed = listPins()
+          .filter((p) => p.lastSummary)
+          .map((p) => ({ question: p.question, after: p.lastSummary as string }));
+        const md = composeBriefingNote(changed, Date.now());
+        const { id, name } = refreshArtifact(
+          "Lighthouse Notes",
+          "Lighthouse Briefing",
+          "md",
+          Buffer.from(md, "utf8"),
+        );
+        return NextResponse.json({ savedId: id, savedName: name });
+      } catch (err) {
+        return NextResponse.json({
+          error: err instanceof Error ? err.message : "could not write the briefing note",
         });
       }
     }

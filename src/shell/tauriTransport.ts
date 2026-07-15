@@ -235,6 +235,8 @@ async function route(
             ocrEnabled: typeof body.ocrEnabled === "boolean" ? body.ocrEnabled : null,
             auditEnabled: typeof body.auditEnabled === "boolean" ? body.auditEnabled : null,
             draftAnswers: typeof body.draftAnswers === "boolean" ? body.draftAnswers : null,
+            briefingNotify: typeof body.briefingNotify === "boolean" ? body.briefingNotify : null,
+            briefingNoteHour: typeof body.briefingNoteHour === "number" ? body.briefingNoteHour : null,
           });
     default:
       return json({ error: "unknown route" }, 404);

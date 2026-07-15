@@ -734,6 +734,41 @@ pub fn write_artifact(
     Ok((id, name))
 }
 
+/// Write/OVERWRITE a fixed-name artifact in a named vault folder (the G5
+/// briefing-note refresh). Same hint sanitization as `write_artifact`, but NO
+/// collision suffix — the file is replaced in place, so "Lighthouse Briefing.md"
+/// stays a single, refreshed file instead of accreting " (1)", " (2)", … . The
+/// target is `safe_abs`-guarded against vault escape and the walk cache is
+/// invalidated (a file changed that no state write announced). Returns
+/// (node_id, file_name). KEEP IN SYNC with src/server/vault.ts::refreshArtifact.
+pub fn refresh_artifact(
+    subdir: &str,
+    name_hint: &str,
+    ext: &str,
+    bytes: &[u8],
+) -> anyhow::Result<(String, String)> {
+    let mut clean: String = name_hint
+        .chars()
+        .map(|c| if c == '/' || c == '\\' || c.is_control() { '-' } else { c })
+        .take(80)
+        .collect();
+    let is_trim = |c: char| c.is_whitespace() || c == '\u{FEFF}';
+    clean = clean.trim_matches(is_trim).trim_start_matches('.').trim_matches(is_trim).to_string();
+    if clean.is_empty() {
+        clean = "result".to_string();
+    }
+    // The node id is the vault-relative path; safe_abs rejects any escape.
+    let id = format!("{subdir}/{clean}.{ext}");
+    let abs = safe_abs(&id)?;
+    if let Some(parent) = abs.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&abs, bytes)?; // truncating overwrite — replaces in place
+    invalidate_walk_cache();
+    let name = id.rsplit('/').next().unwrap_or(&id).to_string();
+    Ok((id, name))
+}
+
 /// Like Node's `path.extname`: extension including the dot, original case.
 fn ext_of_preserving_case(name: &str) -> String {
     match name.rsplit_once('.') {

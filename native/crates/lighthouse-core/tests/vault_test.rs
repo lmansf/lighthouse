@@ -283,3 +283,34 @@ fn resolve_node_path_refuses_escapes() {
     let err = vault::resolve_node_path("../outside.md").expect_err("escape");
     assert_eq!(err.to_string(), "path escapes the vault");
 }
+
+#[test]
+fn refresh_artifact_overwrites_in_place_and_guards_escape() {
+    let vault_dir = tempfile::tempdir().unwrap();
+    let _guard = common::lock_env(vault_dir.path());
+
+    // First write creates Lighthouse Notes/Lighthouse Briefing.md.
+    let (id1, name) =
+        vault::refresh_artifact("Lighthouse Notes", "Lighthouse Briefing", "md", b"first").unwrap();
+    assert_eq!(name, "Lighthouse Briefing.md");
+    assert_eq!(id1, "Lighthouse Notes/Lighthouse Briefing.md");
+    let path = vault_dir.path().join("Lighthouse Notes").join("Lighthouse Briefing.md");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "first");
+
+    // Second write REPLACES in place — same id, no " (1)" suffix, new content.
+    let (id2, _) =
+        vault::refresh_artifact("Lighthouse Notes", "Lighthouse Briefing", "md", b"second").unwrap();
+    assert_eq!(id2, id1, "same id — overwritten, not suffixed");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "second");
+    assert!(
+        !vault_dir.path().join("Lighthouse Notes").join("Lighthouse Briefing (1).md").exists(),
+        "must not accrete a suffixed sibling",
+    );
+
+    // A vault-escaping name hint is neutralized: path SEPARATORS become dashes,
+    // so it stays inside the subdir and never traverses out of the vault.
+    let (id3, _) = vault::refresh_artifact("Lighthouse Notes", "../../etc/passwd", "md", b"x").unwrap();
+    assert!(id3.starts_with("Lighthouse Notes/"), "stays in the subdir: {id3}");
+    assert!(!id3.contains('/') || id3.matches('/').count() == 1, "no traversal separators: {id3}");
+    assert!(vault_dir.path().join(&id3).exists());
+}

@@ -189,6 +189,14 @@ export interface RagService {
    * and name, or an `error` string on failure.
    */
   auditExport(): Promise<{ savedId?: string; savedName?: string; error?: string }>;
+
+  /**
+   * G5: refresh the "Lighthouse Briefing" note (Lighthouse Notes/) from the pins
+   * that changed, on demand. Returns the written file's id and name, or an
+   * `error`. Desktop rechecks each pin's SQL for a real before→after; the web
+   * dev twin composes from each pin's last known summary (no before).
+   */
+  refreshBriefingNote(): Promise<{ savedId?: string; savedName?: string; error?: string }>;
 }
 
 /** Registration / sign-in. Mocked now; swap for a real identity provider later. */
