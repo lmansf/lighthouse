@@ -278,16 +278,31 @@ export async function POST(req: Request) {
       return NextResponse.json({ report: runBriefing(body.id) ?? undefined });
 
     case "exportChat": {
-      // Write the client-rendered transcript as a markdown note into
-      // Lighthouse Notes/ (openspec: add-answer-artifacts). Implemented in
-      // BOTH engines — writing a vault file needs no desktop machinery.
+      // Write a client-composed artifact into the vault (openspec:
+      // add-answer-artifacts). Default: the chat transcript as a markdown
+      // note into Lighthouse Notes/. Optional subdir/ext route the analytics
+      // evidence pack (self-contained HTML into Lighthouse Results/) through
+      // the SAME sanitized writeArtifact path — STRICT allowlist, the client
+      // never names arbitrary folders or extensions. Implemented in BOTH
+      // engines (PARITY: routes.rs / commands.rs "exportChat").
       const title = typeof body.title === "string" && body.title.trim() ? body.title : "Chat";
       const markdown = typeof body.markdown === "string" ? body.markdown : "";
       if (!markdown.trim()) {
         return NextResponse.json({ error: "markdown required" }, { status: 400 });
       }
+      const subdir = body.subdir === undefined ? "Lighthouse Notes" : body.subdir;
+      if (subdir !== "Lighthouse Notes" && subdir !== "Lighthouse Results") {
+        return NextResponse.json(
+          { error: 'subdir must be "Lighthouse Notes" or "Lighthouse Results"' },
+          { status: 400 },
+        );
+      }
+      const ext = body.ext === undefined ? "md" : body.ext;
+      if (ext !== "md" && ext !== "html") {
+        return NextResponse.json({ error: 'ext must be "md" or "html"' }, { status: 400 });
+      }
       try {
-        const { id, name } = writeArtifact("Lighthouse Notes", title, "md", Buffer.from(markdown, "utf8"));
+        const { id, name } = writeArtifact(subdir, title, ext, Buffer.from(markdown, "utf8"));
         return NextResponse.json({ savedId: id, savedName: name });
       } catch (err) {
         return NextResponse.json({

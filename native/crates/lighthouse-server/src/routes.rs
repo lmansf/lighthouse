@@ -204,22 +204,42 @@ pub async fn rag_post(headers: HeaderMap, body: Option<Json<Value>>) -> Response
                 Err(e) => Json(json!({ "error": e })).into_response(),
             };
         }
-        // Write the client-rendered transcript as a markdown note into
-        // Lighthouse Notes/ (openspec: add-answer-artifacts). Ordinary vault
-        // file: walked, watched, inclusion-ruled.
+        // Write a client-composed artifact into the vault (openspec:
+        // add-answer-artifacts). Default: the chat transcript as a markdown
+        // note into Lighthouse Notes/. Optional subdir/ext route the analytics
+        // evidence pack (self-contained HTML into Lighthouse Results/) through
+        // the SAME sanitized write_artifact path — STRICT allowlist, the
+        // client never names arbitrary folders or extensions. Ordinary vault
+        // file: walked, watched, inclusion-ruled. PARITY: commands.rs and the
+        // TS twin (app/api/rag/route.ts) mirror this op exactly.
         Some("exportChat") => {
             let title = body["title"].as_str().unwrap_or("Chat").to_string();
             let markdown = body["markdown"].as_str().unwrap_or("").to_string();
             if markdown.trim().is_empty() {
                 return bad_request("markdown required");
             }
+            // Absent field = the original default; anything present must
+            // match the allowlist EXACTLY (a null/number rejects too).
+            let subdir = match body.get("subdir").map(|v| v.as_str()) {
+                None => "Lighthouse Notes",
+                Some(Some("Lighthouse Notes")) => "Lighthouse Notes",
+                Some(Some("Lighthouse Results")) => "Lighthouse Results",
+                Some(_) => {
+                    return bad_request(
+                        "subdir must be \"Lighthouse Notes\" or \"Lighthouse Results\"",
+                    )
+                }
+            }
+            .to_string();
+            let ext = match body.get("ext").map(|v| v.as_str()) {
+                None => "md",
+                Some(Some("md")) => "md",
+                Some(Some("html")) => "html",
+                Some(_) => return bad_request("ext must be \"md\" or \"html\""),
+            }
+            .to_string();
             let written = tokio::task::spawn_blocking(move || {
-                lighthouse_core::vault::write_artifact(
-                    "Lighthouse Notes",
-                    &title,
-                    "md",
-                    markdown.as_bytes(),
-                )
+                lighthouse_core::vault::write_artifact(&subdir, &title, &ext, markdown.as_bytes())
             })
             .await
             .map_err(|e| e.to_string())
