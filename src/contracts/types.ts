@@ -241,6 +241,19 @@ export interface ChatChunk {
    * ChatChunk.draft.
    */
   draft?: boolean;
+  /**
+   * Engine-emitted provenance stamp (final chunk only): where this answer was
+   * computed and how much was sent. NEVER derived from model text — the engine
+   * sets it where the prompt is assembled, so it counts what was actually
+   * handed to the model. `origin` is `"device"` for the local model or the
+   * model-free/extractive fallback, else the cloud provider id (e.g.
+   * `"anthropic"`) — it agrees with the audit record's `provider`
+   * (device⇔local/none) and the egress registry. `excerptCount` is how many
+   * context blocks the model received in the branch that ran; `sourceFileCount`
+   * is the number of distinct source files behind them (the final chunk's
+   * `references` length). KEEP IN SYNC with the Rust ChunkMeta in contracts.rs.
+   */
+  meta?: { origin: string; excerptCount: number; sourceFileCount: number };
   /** True on the last chunk of a response. */
   done: boolean;
 }

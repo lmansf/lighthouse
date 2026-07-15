@@ -99,7 +99,29 @@ pub struct ChatChunk {
     /// twin (user-visible text).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub draft: Option<bool>,
+    /// Engine-emitted provenance stamp on the FINAL chunk (privacy-legibility):
+    /// where the answer was computed and how much was sent. NEVER model text —
+    /// the engine sets it where the prompt is assembled, so it counts what was
+    /// actually handed to the model. PARITY: mirrored in the TS twin.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub meta: Option<ChunkMeta>,
     pub done: bool,
+}
+
+/// Provenance of a single answer, stamped on its final chunk. `origin` is
+/// `"device"` for the local model or the model-free/extractive fallback, else
+/// the cloud provider id (e.g. `"anthropic"`) — it agrees with the audit
+/// record's `provider` (device⇔local/none) and with the egress registry.
+/// `excerpt_count` is how many context blocks were handed to the model in the
+/// branch that ran; `source_file_count` is the number of distinct source files
+/// behind them (the final chunk's `references` length). KEEP IN SYNC with the
+/// ChatChunk["meta"] shape in src/contracts/types.ts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChunkMeta {
+    pub origin: String,
+    pub excerpt_count: usize,
+    pub source_file_count: usize,
 }
 
 /// The exact executed SQL of an analytics answer and the vault files it read.

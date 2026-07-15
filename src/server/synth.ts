@@ -223,6 +223,38 @@ const progress = (label: string, step: number, total: number): ChatChunk => ({
 });
 
 /**
+ * The provenance origin for this answer's stamp: `"device"` for the local model
+ * or the model-free/extractive fallback (no provider configured), else the cloud
+ * provider id. Agrees with the audit record's `provider` (which the choke point
+ * derives as `cfg.providerId` or `"none"`) under the device⇔local/none mapping.
+ * KEEP IN SYNC with lighthouse-core/src/synth.rs::origin_of.
+ */
+function originOf(cfg: ModelCfg): string {
+  return !cfg.providerId || cfg.providerId === "local" ? "device" : cfg.providerId;
+}
+
+/**
+ * The terminating chunk, stamped with the engine-computed provenance
+ * (privacy-legibility). `excerptCount` is the number of context blocks the
+ * branch that ran actually handed to the model; `sourceFileCount` is derived
+ * here from the references so it can never drift from what's cited (nor from the
+ * audit record's `fileIds`, which are those same refs' ids). KEEP IN SYNC with
+ * lighthouse-core/src/synth.rs::final_chunk.
+ */
+function finalChunk(
+  references: RagReference[],
+  excerptCount: number,
+  origin: string,
+): ChatChunk {
+  return {
+    delta: "",
+    references,
+    meta: { origin, excerptCount, sourceFileCount: references.length },
+    done: true,
+  };
+}
+
+/**
  * The full ask path: single-shot RAG (with table profiles for CSV hits), or —
  * when the question spans documents — per-document extraction then a streamed
  * synthesis with document-level citations.
@@ -234,6 +266,11 @@ export async function* answerPipeline(
   history: ChatTurn[],
   cfg: ModelCfg,
 ): AsyncGenerator<ChatChunk> {
+  // Provenance origin for this answer's stamp — resolved once from the active
+  // provider (agrees with the audit record's `provider`). Every branch's final
+  // chunk carries it; it is never derived from model text.
+  const origin = originOf(cfg);
+
   // A bare follow-up retrieves poorly on its own: blend in the previous user
   // turn to anchor retrieval to the topic (moved here from the callers so all
   // three surfaces stay identical).
@@ -284,7 +321,9 @@ export async function* answerPipeline(
       const ans = renderMeta(intent, includedFileIds, Date.now());
       if (ans) {
         yield { delta: ans.markdown, done: false };
-        yield { delta: "", references: ans.references, done: true };
+        // Model-free deterministic answer: zero excerpts handed to a model,
+        // files behind it are the cited references.
+        yield finalChunk(ans.references, 0, origin);
         return;
       }
     }
@@ -410,7 +449,7 @@ export async function* answerPipeline(
       for await (const delta of streamAnswer(question, reduceCtxs, cfg, history)) {
         yield { delta, done: false };
       }
-      yield { delta: "", references: extracts.map((e) => e.ref), done: true };
+      yield finalChunk(extracts.map((e) => e.ref), reduceCtxs.length, origin);
       return;
     }
     // Fewer than two documents had anything to say — fall through to the
@@ -459,7 +498,7 @@ export async function* answerPipeline(
         for await (const delta of streamAnswer(question, ctxs, cfg, history)) {
           yield { delta, done: false };
         }
-        yield { delta: "", references: [reference], done: true };
+        yield finalChunk([reference], ctxs.length, origin);
         return;
       }
       // Too big for one prompt: sweep EVERY chunk in ordered segments,
@@ -505,7 +544,7 @@ export async function* answerPipeline(
         for await (const delta of streamAnswer(question, reduceCtxs, cfg, history)) {
           yield { delta, done: false };
         }
-        yield { delta: "", references: [reference], done: true };
+        yield finalChunk([reference], reduceCtxs.length, origin);
         return;
       }
       // Every segment came back empty/failed — fall through to the ordinary
@@ -536,5 +575,5 @@ export async function* answerPipeline(
   for await (const delta of streamAnswer(question, contexts, cfg, history)) {
     yield { delta, done: false };
   }
-  yield { delta: "", references: initial.references, done: true };
+  yield finalChunk(initial.references, contexts.length, origin);
 }

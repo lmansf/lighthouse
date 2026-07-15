@@ -68,6 +68,7 @@ import {
   DocumentRegular,
   EditRegular,
   ErrorCircleRegular,
+  GlobeRegular,
   HistoryRegular,
   OpenRegular,
   PinRegular,
@@ -75,6 +76,7 @@ import {
   SaveRegular,
   SendRegular,
   SettingsRegular,
+  ShieldCheckmarkRegular,
   SquareRegular,
   ThumbDislikeRegular,
   ThumbLikeRegular,
@@ -83,7 +85,7 @@ import {
 import dynamic from "next/dynamic";
 import { type Components } from "react-markdown";
 import type { DragEvent } from "react";
-import type { AnalyticsMeta, ChangedPin, ChatTurn, Pin, RagReference } from "@/contracts";
+import type { AnalyticsMeta, ChangedPin, ChatChunk, ChatTurn, Pin, RagReference } from "@/contracts";
 import { chatService, MODEL_PROVIDERS, ragService } from "@/contracts";
 import { useRagStore } from "@/stores/useRagStore";
 import { useAuthStore } from "@/stores/useAuthStore";
@@ -508,6 +510,15 @@ const useStyles = makeStyles({
   },
   // Quiet one-liners: the "(stopped)" note and the zero-references honesty note.
   quietNote: { color: tokens.colorNeutralForeground3 },
+  // Engine-emitted provenance stamp under an answer ("Answered on this device /
+  // via <vendor>") — a quiet icon+text row echoing the egress shield's style.
+  provenanceStamp: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: tokens.spacingHorizontalXS,
+    marginTop: tokens.spacingVerticalXXS,
+    color: tokens.colorNeutralForeground3,
+  },
   // G4: the truncation disclosure bound to a sortable result table's <caption>,
   // so it stays with the table through sorting.
   tableCaption: {
@@ -853,6 +864,26 @@ function stripCitations(content: string): string {
     .replace(/\s*\[\d{1,3}\]/g, "")
     .replace(/[ \t]{2,}/g, " ")
     .replace(/[ \t]+([.,;:!?])/g, "$1");
+}
+
+/** Map a provider id to its vendor label for the provenance stamp; falls back
+ *  to the id itself when the provider isn't in the picker table. */
+function vendorLabelFor(id: string): string {
+  return MODEL_PROVIDERS.find((p) => p.id === id)?.label ?? id;
+}
+
+/**
+ * The engine-emitted provenance stamp rendered under a finished answer. Reads
+ * ONLY the final chunk's `meta` (never the model's text), so it is always
+ * truthful: "Answered on this device" when nothing left the machine, else
+ * "Answered via <vendor> — N excerpts from M files sent", naming the vendor and
+ * the exact counts the engine computed where the prompt was assembled.
+ */
+function provenanceStampText(meta: NonNullable<ChatChunk["meta"]>): string {
+  if (meta.origin === "device") return "Answered on this device";
+  const excerpts = `${meta.excerptCount} excerpt${meta.excerptCount === 1 ? "" : "s"}`;
+  const files = `${meta.sourceFileCount} file${meta.sourceFileCount === 1 ? "" : "s"}`;
+  return `Answered via ${vendorLabelFor(meta.origin)} — ${excerpts} from ${files} sent`;
 }
 
 /** Compact "how long ago" for the recent-chats list (e.g. "3m", "2h", "Apr 5"). */
@@ -1874,6 +1905,13 @@ export function ChatPanel() {
           // chips and Edit SQL. Desktop engine only — absent elsewhere.
           const meta = chunk.analytics;
           setMessages((m) => m.map((x) => (x.id === asstId ? { ...x, analytics: meta } : x)));
+        }
+        if (chunk.meta) {
+          // Engine-emitted provenance stamp (final chunk): where the answer was
+          // computed + how much was sent. Stored on the turn for the truthful
+          // "Answered on this device / via <vendor>" footer.
+          const provenance = chunk.meta;
+          setMessages((m) => m.map((x) => (x.id === asstId ? { ...x, meta: provenance } : x)));
         }
       }
       if (controller.signal.aborted) {
@@ -3428,6 +3466,19 @@ export function ChatPanel() {
                             No matching passages were found in your files for this answer.
                           </Text>
                         )}
+                      {/* Engine-emitted provenance stamp: where this answer was
+                          computed and how much left the machine. Rendered only
+                          from the final chunk's meta — always truthful. */}
+                      {m.meta && !m.error && !(streaming && m.id === lastId) && (
+                        <Text size={200} className={styles.provenanceStamp}>
+                          {m.meta.origin === "device" ? (
+                            <ShieldCheckmarkRegular fontSize={14} />
+                          ) : (
+                            <GlobeRegular fontSize={14} />
+                          )}
+                          {provenanceStampText(m.meta)}
+                        </Text>
+                      )}
                     </>
                   )}
                 </div>

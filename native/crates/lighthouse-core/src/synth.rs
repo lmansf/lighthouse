@@ -9,7 +9,7 @@ use std::pin::Pin;
 
 use futures::{Stream, StreamExt};
 
-use crate::contracts::{AnalyticsMeta, ChatChunk, ChatProgress, ChatTurn, RagReference};
+use crate::contracts::{AnalyticsMeta, ChatChunk, ChatProgress, ChunkMeta, ChatTurn, RagReference};
 use crate::llm::{self, Ctx, ModelCfg};
 use crate::table_profile::{is_profileable, table_profile};
 use crate::{sources, vault};
@@ -284,6 +284,18 @@ fn has_real_model(cfg: &ModelCfg) -> bool {
     }
 }
 
+/// The provenance origin for this answer's stamp: `"device"` for the local
+/// model or the model-free/extractive fallback (no provider configured), else
+/// the cloud provider id. Agrees with the audit record's `provider` (which the
+/// choke point derives as `cfg.provider_id` or `"none"`) under the
+/// device⇔local/none mapping. KEEP IN SYNC with src/server/synth.ts::originOf.
+fn origin_of(cfg: &ModelCfg) -> String {
+    match cfg.provider_id.as_deref() {
+        Some("local") | None => "device".to_string(),
+        Some(id) => id.to_string(),
+    }
+}
+
 fn progress(label: String, step: usize, total: usize) -> ChatChunk {
     ChatChunk {
         delta: String::new(),
@@ -291,6 +303,7 @@ fn progress(label: String, step: usize, total: usize) -> ChatChunk {
         progress: Some(ChatProgress { label, step, total }),
         analytics: None,
         draft: None,
+        meta: None,
         done: false,
     }
 }
@@ -302,6 +315,7 @@ fn delta(d: String) -> ChatChunk {
         progress: None,
         analytics: None,
         draft: None,
+        meta: None,
         done: false,
     }
 }
@@ -316,17 +330,30 @@ fn draft_chunk(d: String) -> ChatChunk {
         progress: None,
         analytics: None,
         draft: Some(true),
+        meta: None,
         done: false,
     }
 }
 
-fn final_chunk(references: Vec<RagReference>) -> ChatChunk {
+/// The terminating chunk, stamped with the engine-computed provenance
+/// (privacy-legibility). `excerpt_count` is the number of context blocks the
+/// branch that ran actually handed to the model; `source_file_count` is derived
+/// here from the references so it can never drift from what's cited (and from
+/// the audit record's `fileIds`, which are those same refs' ids). KEEP IN SYNC
+/// with src/server/synth.ts::finalChunk.
+fn final_chunk(references: Vec<RagReference>, excerpt_count: usize, origin: &str) -> ChatChunk {
+    let source_file_count = references.len();
     ChatChunk {
         delta: String::new(),
         references: Some(references),
         progress: None,
         analytics: None,
         draft: None,
+        meta: Some(ChunkMeta {
+            origin: origin.to_string(),
+            excerpt_count,
+            source_file_count,
+        }),
         done: true,
     }
 }
@@ -404,6 +431,11 @@ pub fn answer_pipeline(
     cfg: ModelCfg,
 ) -> Pin<Box<dyn Stream<Item = ChatChunk> + Send>> {
     Box::pin(async_stream::stream! {
+        // Provenance origin for this answer's stamp — resolved once from the
+        // active provider (agrees with the audit record's `provider`). Every
+        // branch's final chunk carries it; it is never derived from model text.
+        let origin = origin_of(&cfg);
+
         // Blend the previous user turn into retrieval so bare follow-ups anchor
         // to the topic (identical to the TS pipeline).
         let last_user_turn = history.iter().rev().find(|t| t.role == "user");
@@ -474,7 +506,9 @@ pub fn answer_pipeline(
                 .and_then(|r| r.ok());
                 if let Some(ans) = rendered {
                     yield delta(ans.markdown);
-                    yield final_chunk(ans.references);
+                    // Model-free deterministic answer: zero excerpts handed to a
+                    // model, files behind it are the cited references.
+                    yield final_chunk(ans.references, 0, &origin);
                     return;
                 }
             }
@@ -619,6 +653,7 @@ pub fn answer_pipeline(
                                 text: r.card.clone(),
                                 score: 0.0,
                             }));
+                            let excerpt_count = ctxs.len();
                             let mut answer = llm::stream_answer(
                                 question.clone(),
                                 ctxs,
@@ -666,7 +701,7 @@ pub fn answer_pipeline(
                             }
                             // Chips act on the LAST query; the footer shows all.
                             let (refs, meta_ids) = analytics_refs(&regs);
-                            let mut done = final_chunk(refs);
+                            let mut done = final_chunk(refs, excerpt_count, &origin);
                             done.analytics = Some(AnalyticsMeta {
                                 sql: steps.last().map(|s| s.sql.clone()).unwrap_or_default(),
                                 file_ids: meta_ids,
@@ -735,6 +770,7 @@ pub fn answer_pipeline(
                             text: r.card.clone(),
                             score: 0.0,
                         }));
+                        let excerpt_count = ctxs.len();
                         let mut answer =
                             llm::stream_answer(question.clone(), ctxs, cfg.clone(), history.clone());
                         while let Some(d) = answer.next().await {
@@ -785,7 +821,7 @@ pub fn answer_pipeline(
                         }
                         // Citations + structured provenance (chips/save/pins).
                         let (refs, meta_ids) = analytics_refs(&regs);
-                        let mut done = final_chunk(refs);
+                        let mut done = final_chunk(refs, excerpt_count, &origin);
                         done.analytics = Some(AnalyticsMeta { sql, file_ids: meta_ids });
                         yield done;
                         return;
@@ -953,12 +989,17 @@ pub fn answer_pipeline(
                     .iter()
                     .map(|(r, t)| Ctx { name: r.name.clone(), text: t.clone(), score: r.score })
                     .collect();
+                let excerpt_count = reduce_ctxs.len();
                 let mut answer =
                     llm::stream_answer(question.clone(), reduce_ctxs, cfg.clone(), history.clone());
                 while let Some(d) = answer.next().await {
                     yield delta(d);
                 }
-                yield final_chunk(extracts.into_iter().map(|(r, _)| r).collect());
+                yield final_chunk(
+                    extracts.into_iter().map(|(r, _)| r).collect(),
+                    excerpt_count,
+                    &origin,
+                );
                 return;
             }
             // Fewer than two documents had anything to say — fall through.
@@ -1033,12 +1074,13 @@ pub fn answer_pipeline(
                             score: 1.0 - i as f64 * 1e-4,
                         })
                         .collect();
+                    let excerpt_count = ctxs.len();
                     let mut answer =
                         llm::stream_answer(question.clone(), ctxs, cfg.clone(), history.clone());
                     while let Some(d) = answer.next().await {
                         yield delta(d);
                     }
-                    yield final_chunk(vec![reference]);
+                    yield final_chunk(vec![reference], excerpt_count, &origin);
                     return;
                 }
                 // Too big for one prompt: sweep EVERY chunk in ordered
@@ -1092,6 +1134,7 @@ pub fn answer_pipeline(
                             score: 1.0,
                         })
                         .collect();
+                    let excerpt_count = reduce_ctxs.len();
                     let mut answer = llm::stream_answer(
                         question.clone(),
                         reduce_ctxs,
@@ -1101,7 +1144,7 @@ pub fn answer_pipeline(
                     while let Some(d) = answer.next().await {
                         yield delta(d);
                     }
-                    yield final_chunk(vec![reference]);
+                    yield final_chunk(vec![reference], excerpt_count, &origin);
                     return;
                 }
                 // Every segment came back empty/failed — fall through to the
@@ -1137,11 +1180,12 @@ pub fn answer_pipeline(
             }
         }
 
+        let excerpt_count = contexts.len();
         let mut answer = llm::stream_answer(question, contexts, cfg, history);
         while let Some(d) = answer.next().await {
             yield delta(d);
         }
-        yield final_chunk(initial.references);
+        yield final_chunk(initial.references, excerpt_count, &origin);
     })
 }
 

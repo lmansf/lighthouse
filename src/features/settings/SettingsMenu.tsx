@@ -44,7 +44,7 @@ import {
   WarningRegular,
 } from "@fluentui/react-icons";
 import { MODEL_PROVIDERS, ragService, type AuditSnapshot } from "@/contracts";
-import { LocalModelOption, LocalModelInstallPanel } from "@/features/localModel/LocalModelOption";
+import { LocalModelInstallPanel } from "@/features/localModel/LocalModelOption";
 import { START_TOUR_EVENT } from "@/features/help/FirstRunTour";
 import { showWidget, summonHotkey, prettyShortcut, modKey } from "@/features/onboarding/ModeChooser";
 import { useAuthStore } from "@/stores/useAuthStore";
@@ -191,6 +191,15 @@ function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean
     onboarding.keyedProviders?.includes(providerId) ??
     (providerId === onboarding.providerId && onboarding.hasApiKey);
 
+  // Private-first framing (matches onboarding): the on-device model is the hero;
+  // cloud vendors are the honest, one-click alternative grouped below. Local vs
+  // cloud is just `id === "local"`.
+  const isLocal = providerId === "local";
+  const cloudProviders = MODEL_PROVIDERS.filter((p) => p.id !== "local");
+  const isAllowed = (id: string) => (allowedProviders ? allowedProviders.includes(id) : true);
+  const firstAllowedCloud = cloudProviders.find((p) => isAllowed(p.id)) ?? cloudProviders[0];
+  const localModelId = MODEL_PROVIDERS.find((p) => p.id === "local")!.models[0];
+
   async function testKey() {
     setTesting(true);
     setTestResult(null);
@@ -225,99 +234,132 @@ function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean
           <DialogTitle>AI models</DialogTitle>
           <DialogContent>
             <div className={styles.modelFields}>
-              <Field label="Provider">
-                <Dropdown
-                  value={provider.label}
-                  selectedOptions={[providerId]}
-                  onOptionSelect={(_, d) => {
-                    const p = MODEL_PROVIDERS.find((x) => x.id === d.optionValue)!;
-                    setProviderId(p.id);
-                    setModelId(p.models[0]);
-                    // Keys are per-provider: never carry a half-typed key (or a
-                    // stale test verdict) from one vendor to another.
-                    setApiKey("");
-                    setTestResult(null);
-                  }}
-                >
-                  {MODEL_PROVIDERS.map((p) => (
-                    <Option
-                      key={p.id}
-                      value={p.id}
-                      text={p.label}
-                      disabled={allowedProviders ? !allowedProviders.includes(p.id) : false}
-                    >
-                      {p.id === "local" ? <LocalModelOption label={p.label} /> : p.label}
-                    </Option>
-                  ))}
-                </Dropdown>
-                {allowedProviders && (
-                  <Text className={styles.prefHint}>
-                    Provider choice is managed by your organization.
-                  </Text>
-                )}
-              </Field>
-              <Field label="Model">
-                <Dropdown
-                  value={modelId}
-                  selectedOptions={[modelId]}
-                  onOptionSelect={(_, d) => {
-                    setModelId(d.optionValue!);
-                  }}
-                >
-                  {provider.models.map((m) => (
-                    <Option key={m} value={m}>
-                      {m}
-                    </Option>
-                  ))}
-                </Dropdown>
-              </Field>
-              {provider.id === "local" && <LocalModelInstallPanel />}
-              {provider.id !== "local" && (
-                <Field
-                  label="API key"
-                  hint={
-                    <Link href={provider.apiKeyUrl} target="_blank" rel="noreferrer">
-                      Get your {provider.label} key →
-                    </Link>
+              {/* Private-first: the on-device model is the hero; cloud vendors
+                  are the honest, one-click alternative grouped below. */}
+              <RadioGroup
+                value={isLocal ? "local" : "cloud"}
+                onChange={(_, d) => {
+                  if (d.value === "local") {
+                    setProviderId("local");
+                    setModelId(localModelId);
+                  } else {
+                    setProviderId(firstAllowedCloud.id);
+                    setModelId(firstAllowedCloud.models[0]);
                   }
-                >
-                  <Input
-                    type="password"
-                    value={apiKey}
-                    onChange={(_, d) => {
-                      setApiKey(d.value);
-                      setTestResult(null);
-                    }}
-                    placeholder={
-                      providerHasSavedKey
-                        ? "•••••••• saved — leave blank to keep"
-                        : "Paste your API key"
-                    }
-                  />
-                </Field>
+                  // Keys are per-provider: never carry a half-typed key (or a
+                  // stale test verdict) across a switch.
+                  setApiKey("");
+                  setTestResult(null);
+                }}
+              >
+                <Radio
+                  value="local"
+                  disabled={!isAllowed("local")}
+                  label="Private — runs on this device. No API key; nothing leaves your computer. (Recommended)"
+                />
+                <Radio
+                  value="cloud"
+                  disabled={!cloudProviders.some((p) => isAllowed(p.id))}
+                  label="Cloud model — sends excerpts of your included files to a provider you choose, to answer."
+                />
+              </RadioGroup>
+              {allowedProviders && (
+                <Text className={styles.prefHint}>
+                  Provider choice is managed by your organization.
+                </Text>
               )}
-              {provider.id !== "local" && (apiKey || providerHasSavedKey) && (
-                <div className={styles.testKeyRow}>
-                  <Button
-                    size="small"
-                    appearance="secondary"
-                    disabled={testing}
-                    icon={testing ? <Spinner size="tiny" /> : undefined}
-                    onClick={() => void testKey()}
+
+              {isLocal ? (
+                <LocalModelInstallPanel />
+              ) : (
+                <>
+                  {/* Honest cloud heading, naming the selected vendor. */}
+                  <Text weight="semibold">Cloud models</Text>
+                  <Text className={styles.prefHint}>
+                    Sends excerpts of your included files to {provider.label} to answer.
+                  </Text>
+                  <Field label="Provider">
+                    <Dropdown
+                      value={provider.label}
+                      selectedOptions={[providerId]}
+                      onOptionSelect={(_, d) => {
+                        const p = MODEL_PROVIDERS.find((x) => x.id === d.optionValue)!;
+                        setProviderId(p.id);
+                        setModelId(p.models[0]);
+                        // Keys are per-provider: never carry a half-typed key (or
+                        // a stale test verdict) from one vendor to another.
+                        setApiKey("");
+                        setTestResult(null);
+                      }}
+                    >
+                      {cloudProviders.map((p) => (
+                        <Option key={p.id} value={p.id} text={p.label} disabled={!isAllowed(p.id)}>
+                          {p.label}
+                        </Option>
+                      ))}
+                    </Dropdown>
+                  </Field>
+                  <Field label="Model">
+                    <Dropdown
+                      value={modelId}
+                      selectedOptions={[modelId]}
+                      onOptionSelect={(_, d) => {
+                        setModelId(d.optionValue!);
+                      }}
+                    >
+                      {provider.models.map((m) => (
+                        <Option key={m} value={m}>
+                          {m}
+                        </Option>
+                      ))}
+                    </Dropdown>
+                  </Field>
+                  <Field
+                    label="API key"
+                    hint={
+                      <Link href={provider.apiKeyUrl} target="_blank" rel="noreferrer">
+                        Get your {provider.label} key →
+                      </Link>
+                    }
                   >
-                    {testing ? "Testing…" : apiKey ? "Test key" : "Test saved key"}
-                  </Button>
-                  {testResult &&
-                    (testResult.ok ? (
-                      <Text size={200} className={styles.testKeyOk}>
-                        ✓ Key works
-                      </Text>
-                    ) : (
-                      <Text size={200} className={styles.error}>
-                        ✗ {testResult.error ?? "the key didn't work"}
-                      </Text>
-                    ))}
-                </div>
+                    <Input
+                      type="password"
+                      value={apiKey}
+                      onChange={(_, d) => {
+                        setApiKey(d.value);
+                        setTestResult(null);
+                      }}
+                      placeholder={
+                        providerHasSavedKey
+                          ? "•••••••• saved — leave blank to keep"
+                          : "Paste your API key"
+                      }
+                    />
+                  </Field>
+                  {(apiKey || providerHasSavedKey) && (
+                    <div className={styles.testKeyRow}>
+                      <Button
+                        size="small"
+                        appearance="secondary"
+                        disabled={testing}
+                        icon={testing ? <Spinner size="tiny" /> : undefined}
+                        onClick={() => void testKey()}
+                      >
+                        {testing ? "Testing…" : apiKey ? "Test key" : "Test saved key"}
+                      </Button>
+                      {testResult &&
+                        (testResult.ok ? (
+                          <Text size={200} className={styles.testKeyOk}>
+                            ✓ Key works
+                          </Text>
+                        ) : (
+                          <Text size={200} className={styles.error}>
+                            ✗ {testResult.error ?? "the key didn't work"}
+                          </Text>
+                        ))}
+                    </div>
+                  )}
+                </>
               )}
               {error && <Text className={styles.error}>{error}</Text>}
             </div>

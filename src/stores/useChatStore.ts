@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { AnalyticsMeta, ChatMessage } from "@/contracts";
+import type { AnalyticsMeta, ChatChunk, ChatMessage } from "@/contracts";
 import { chatHistoryLocked } from "./managedLocks";
 
 /**
@@ -56,6 +56,13 @@ export interface TranscriptMessage extends ChatMessage {
    * powers refinement chips and Edit SQL on this turn. Desktop engine only.
    */
   analytics?: AnalyticsMeta;
+  /**
+   * Engine-emitted provenance stamp from the final chunk: where the answer was
+   * computed ("device" or the cloud provider id) and how much was sent. Never
+   * derived from model text — rendered verbatim as the "Answered on this
+   * device / via <vendor>" footer under the answer.
+   */
+  meta?: ChatChunk["meta"];
 }
 
 /** One saved conversation: its turns plus list metadata (title, timestamps). */
