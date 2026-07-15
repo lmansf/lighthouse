@@ -233,6 +233,95 @@ pub async fn rag_op(app: AppHandle, body: Value) -> Result<Value, String> {
                 Err(e) => json!({ "error": e }),
             })
         }
+        // --- G6 cross-conversation recall: auto-export a chat as an indexed
+        //     vault note under Lighthouse Notes/Chats/, OVERWRITTEN in place per
+        //     conversation id (one current note per chat). Client-gated on "Save
+        //     chats on this device". ---
+        Some("exportConversationNote") => {
+            let conversation_id = body["conversationId"].as_str().unwrap_or("").to_string();
+            let title = body["title"].as_str().unwrap_or("Conversation").to_string();
+            let markdown = body["markdown"].as_str().unwrap_or("").to_string();
+            if conversation_id.trim().is_empty() || markdown.trim().is_empty() {
+                return Err("conversationId and markdown required".into());
+            }
+            let written = tokio::task::spawn_blocking(move || {
+                lighthouse_core::vault::write_conversation_note(
+                    &conversation_id,
+                    &title,
+                    markdown.as_bytes(),
+                )
+            })
+            .await
+            .map_err(|e| e.to_string())
+            .and_then(|r| r.map_err(|e| e.to_string()));
+            Ok(match written {
+                Ok((id, name)) => {
+                    let _ = app.emit("vault-changed", ());
+                    json!({ "savedId": id, "savedName": name })
+                }
+                Err(e) => json!({ "error": e }),
+            })
+        }
+        // G6 fail-closed opt-out: delete every auto-exported chat note.
+        Some("purgeConversationNotes") => {
+            let purged =
+                tokio::task::spawn_blocking(lighthouse_core::vault::purge_conversation_notes)
+                    .await
+                    .map_err(|e| e.to_string())
+                    .and_then(|r| r.map_err(|e| e.to_string()));
+            Ok(match purged {
+                Ok(()) => {
+                    let _ = app.emit("vault-changed", ());
+                    json!({ "ok": true })
+                }
+                Err(e) => json!({ "error": e }),
+            })
+        }
+        // --- Briefing note refresh (G5): recheck each pin for a REAL before→
+        //     after, compose the deterministic note, and overwrite Lighthouse
+        //     Notes/Lighthouse Briefing.md in place. No OS notification here —
+        //     the user is in the dialog; the result is confirmed inline. ---
+        Some("refreshBriefingNote") => {
+            // Recheck to freshen each pin's summary, then compose from a SNAPSHOT
+            // of every pin that has a summary (matching the web twin) — NOT just
+            // what changed on this recheck. A manual refresh regenerates the whole
+            // briefing, so it never clobbers a meaningful note with the empty-set
+            // message just because nothing changed since the last check. No OS
+            // notification (the user is in the dialog) and NO daily-gate stamp: the
+            // on-demand snapshot and the scheduled daily delta are independent.
+            let _ = lighthouse_core::pins::recheck_all().await;
+            let now = lighthouse_core::config::now_ms();
+            let entries: Vec<lighthouse_core::pins::ChangedPin> = lighthouse_core::pins::list()
+                .into_iter()
+                .filter_map(|p| {
+                    p.last_summary.clone().map(|s| lighthouse_core::pins::ChangedPin {
+                        id: p.id.clone(),
+                        question: p.question.clone(),
+                        before: None,
+                        after: s,
+                    })
+                })
+                .collect();
+            let md = lighthouse_core::briefings::compose_briefing_note(&entries, now);
+            let written = tokio::task::spawn_blocking(move || {
+                lighthouse_core::vault::refresh_artifact(
+                    "Lighthouse Notes",
+                    "Lighthouse Briefing",
+                    "md",
+                    md.as_bytes(),
+                )
+            })
+            .await
+            .map_err(|e| e.to_string())
+            .and_then(|r| r.map_err(|e| e.to_string()));
+            Ok(match written {
+                Ok((id, name)) => {
+                    let _ = app.emit("vault-changed", ());
+                    json!({ "savedId": id, "savedName": name })
+                }
+                Err(e) => json!({ "error": e }),
+            })
+        }
         // --- Pinned questions (openspec: add-pinned-questions): persist an
         //     analytics answer's question + SQL + files; rechecks are guarded
         //     and model-free. The background scheduler lives in main.rs. ---
@@ -670,8 +759,22 @@ pub async fn connect_op(body: Value) -> Result<Value, String> {
 // sync commands run on the main thread, where a panic exits the whole app
 // (which is exactly how the Install click used to crash the desktop build).
 #[tauri::command]
-pub async fn model_status() -> Value {
-    serde_json::to_value(local_model::model_status()).unwrap_or_else(|_| json!({}))
+pub async fn model_status(app: AppHandle) -> Value {
+    let mut v = serde_json::to_value(local_model::model_status()).unwrap_or_else(|_| json!({}));
+    // Merge the shell's REAL llama-server GPU launch state (G2) so the AI-models
+    // dialog shows "GPU acceleration: on (N layers)" / "off — CPU" instead of a
+    // guess. Absent until a chat server has run this session (gpu_status None) —
+    // the UI treats missing fields as "unknown → render nothing".
+    if let (Some(obj), Some(g)) = (
+        v.as_object_mut(),
+        app.try_state::<crate::supervise::Supervisor>()
+            .and_then(|s| s.gpu_status()),
+    ) {
+        obj.insert("gpuOn".into(), json!(g.gpu));
+        obj.insert("gpuLayers".into(), json!(g.layers));
+        obj.insert("gpuRunning".into(), json!(g.running));
+    }
+    v
 }
 
 #[tauri::command]
@@ -746,6 +849,9 @@ pub fn settings_get(app: AppHandle) -> Value {
         "backgroundConserve": s.background_conserve != Some(false), // default on
         "ocrEnabled": s.ocr_enabled != Some(false), // default on (add-ocr-perception)
         "auditEnabled": s.audit_enabled == Some(true), // opt-in, default off (add-audit-log)
+        "draftAnswers": s.draft_answers != Some(false), // default on (G2)
+        "briefingNotify": s.briefing_notify != Some(false), // default on (G5)
+        "briefingNoteHour": s.briefing_note_hour.unwrap_or(9), // default 9am (G5)
     })
 }
 
@@ -762,6 +868,9 @@ pub fn settings_set(
     background_conserve: Option<bool>,
     ocr_enabled: Option<bool>,
     audit_enabled: Option<bool>,
+    draft_answers: Option<bool>,
+    briefing_notify: Option<bool>,
+    briefing_note_hour: Option<i64>,
 ) -> Value {
     // A new summon shortcut must PARSE before anything persists — saving an
     // unregistrable string would strand the user with no hotkey at all.
@@ -799,6 +908,9 @@ pub fn settings_set(
         background_conserve,
         ocr_enabled,
         audit_enabled,
+        draft_answers,
+        briefing_notify,
+        briefing_note_hour,
     );
     if shortcut_changed && !crate::register_summon_shortcut(&app) {
         // The new chord didn't register — restore the previous one so the
@@ -811,6 +923,9 @@ pub fn settings_set(
             None,
             None,
             Some(prev_shortcut.clone().unwrap_or_default()),
+            None,
+            None,
+            None,
             None,
             None,
             None,
@@ -892,6 +1007,9 @@ pub fn settings_set(
         "summonHotkeyOk": hotkey_ok,
         "semanticSearch": s.semantic_search != Some(false),
         "backgroundConserve": s.background_conserve != Some(false),
+        "draftAnswers": s.draft_answers != Some(false),
+        "briefingNotify": s.briefing_notify != Some(false),
+        "briefingNoteHour": s.briefing_note_hour.unwrap_or(9),
     })
 }
 

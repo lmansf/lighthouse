@@ -55,6 +55,21 @@ export interface DesktopSettings {
    * the Rust engine.
    */
   auditVerbatim?: boolean;
+  /**
+   * G2 draft-then-verify: while the local model composes a grounded answer,
+   * stream an instant extractive draft from retrieval snippets, replaced in
+   * place by the verified answer. Default ON (unset = on). PARITY: draft_answers
+   * in settings.rs.
+   */
+  draftAnswers?: boolean;
+  /**
+   * G5 briefing note: fire an OS notification when the scheduled note refreshes.
+   * Default ON. PARITY: the note + scheduler are desktop-Rust-only; the TS twin
+   * just round-trips this pref for the UI (like semanticSearch).
+   */
+  briefingNotify?: boolean;
+  /** G5 briefing note: local hour (0–23) the scheduled note may refresh at. Default 9. */
+  briefingNoteHour?: number;
 }
 
 function settingsFile(): string | null {

@@ -37,6 +37,13 @@ interface ModelState {
   removable?: boolean;
   /** Why the last install attempt failed (status "error"). */
   error?: string;
+  /** G2 GPU status — the shell's actual llama-server launch state. Present only
+   *  on the desktop build (the web/dev server has no supervisor, so these are
+   *  undefined and render as nothing). `gpuOn`: launched with GPU offload;
+   *  `gpuLayers`: the `-ngl` layer count; `gpuRunning`: a chat server is live. */
+  gpuOn?: boolean;
+  gpuLayers?: number;
+  gpuRunning?: boolean;
 }
 
 /** Poll the local-model status, exposing it plus `install()` / `uninstall()`. */
@@ -196,8 +203,18 @@ function humanEta(sec: number): string {
  */
 export function LocalModelInstallPanel() {
   const styles = useStyles();
-  const { status, received, total, removable, error, install, uninstall } = useLocalModel();
+  const { status, received, total, removable, error, gpuOn, gpuLayers, gpuRunning, install, uninstall } =
+    useLocalModel();
   const pct = total ? Math.min(100, Math.floor((received / total) * 100)) : 0;
+  // G2 GPU status: the shell reports the real llama-server launch state. Show it
+  // only once the model is installed AND the shell has spoken (gpuOn defined —
+  // absent on the web/dev build, which has no supervisor).
+  const gpuLine =
+    status === "ready" && typeof gpuOn === "boolean"
+      ? gpuOn
+        ? `GPU acceleration: on${gpuLayers ? ` (${gpuLayers} layers)` : ""}${gpuRunning ? "" : " — starts with your next question"}`
+        : "GPU acceleration: off — running on CPU"
+      : null;
 
   // Derive transfer speed + ETA from successive progress samples (the state
   // itself only reports received/total). Smoothed with an EMA so the readout
@@ -280,9 +297,12 @@ export function LocalModelInstallPanel() {
       ) : status === "uninstalling" ? (
         <Text className={styles.panelHint}>Removing the private model…</Text>
       ) : status === "ready" ? (
-        <Text className={styles.panelHint}>
-          Answers are generated entirely on your machine — no API key, nothing leaves your computer.
-        </Text>
+        <>
+          <Text className={styles.panelHint}>
+            Answers are generated entirely on your machine — no API key, nothing leaves your computer.
+          </Text>
+          {gpuLine && <Text className={styles.panelHint}>{gpuLine}</Text>}
+        </>
       ) : status === "error" ? (
         <Text className={styles.errorText}>
           {error || "The download failed."} — check your connection and click Retry install.

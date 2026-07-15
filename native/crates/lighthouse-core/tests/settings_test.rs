@@ -33,6 +33,9 @@ fn every_settings_field_round_trips() {
         background_conserve: Some(false),
         ocr_enabled: Some(false),
         audit_enabled: Some(true),
+        draft_answers: Some(false),
+        briefing_notify: Some(false),
+        briefing_note_hour: Some(7),
         extra,
     };
 
@@ -51,6 +54,9 @@ fn every_settings_field_round_trips() {
         background_conserve,
         ocr_enabled,
         audit_enabled,
+        draft_answers,
+        briefing_notify,
+        briefing_note_hour,
         extra,
     } = back;
 
@@ -64,6 +70,9 @@ fn every_settings_field_round_trips() {
     assert_eq!(background_conserve, Some(false));
     assert_eq!(ocr_enabled, Some(false));
     assert_eq!(audit_enabled, Some(true));
+    assert_eq!(draft_answers, Some(false));
+    assert_eq!(briefing_notify, Some(false));
+    assert_eq!(briefing_note_hour, Some(7));
     assert_eq!(extra.get("widgetPos"), Some(&serde_json::json!([12, 34])));
 
     // Wire keys are camelCase (serde rename drift check — the TS twin and the
@@ -79,6 +88,9 @@ fn every_settings_field_round_trips() {
         "backgroundConserve",
         "ocrEnabled",
         "auditEnabled",
+        "draftAnswers",
+        "briefingNotify",
+        "briefingNoteHour",
         "widgetPos",
     ] {
         assert!(
@@ -113,6 +125,9 @@ fn writer_persists_every_toggle_and_preserves_shell_keys() {
         Some(false),                    // background_conserve
         Some(false),                    // ocr_enabled
         Some(true),                     // audit_enabled
+        Some(false),                    // draft_answers
+        Some(false),                    // briefing_notify
+        Some(7),                        // briefing_note_hour
     );
     let s = read_desktop_settings();
     std::env::remove_var("LIGHTHOUSE_SETTINGS_FILE");
@@ -126,6 +141,9 @@ fn writer_persists_every_toggle_and_preserves_shell_keys() {
     assert_eq!(s.background_conserve, Some(false));
     assert_eq!(s.ocr_enabled, Some(false));
     assert_eq!(s.audit_enabled, Some(true));
+    assert_eq!(s.draft_answers, Some(false));
+    assert_eq!(s.briefing_notify, Some(false));
+    assert_eq!(s.briefing_note_hour, Some(7));
     assert_eq!(
         s.vault_dir.as_deref(),
         Some("/somewhere/vault"),

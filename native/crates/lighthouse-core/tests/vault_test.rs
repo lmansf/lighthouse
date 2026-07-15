@@ -283,3 +283,75 @@ fn resolve_node_path_refuses_escapes() {
     let err = vault::resolve_node_path("../outside.md").expect_err("escape");
     assert_eq!(err.to_string(), "path escapes the vault");
 }
+
+#[test]
+fn refresh_artifact_overwrites_in_place_and_guards_escape() {
+    let vault_dir = tempfile::tempdir().unwrap();
+    let _guard = common::lock_env(vault_dir.path());
+
+    // First write creates Lighthouse Notes/Lighthouse Briefing.md.
+    let (id1, name) =
+        vault::refresh_artifact("Lighthouse Notes", "Lighthouse Briefing", "md", b"first").unwrap();
+    assert_eq!(name, "Lighthouse Briefing.md");
+    assert_eq!(id1, "Lighthouse Notes/Lighthouse Briefing.md");
+    let path = vault_dir.path().join("Lighthouse Notes").join("Lighthouse Briefing.md");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "first");
+
+    // Second write REPLACES in place — same id, no " (1)" suffix, new content.
+    let (id2, _) =
+        vault::refresh_artifact("Lighthouse Notes", "Lighthouse Briefing", "md", b"second").unwrap();
+    assert_eq!(id2, id1, "same id — overwritten, not suffixed");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "second");
+    assert!(
+        !vault_dir.path().join("Lighthouse Notes").join("Lighthouse Briefing (1).md").exists(),
+        "must not accrete a suffixed sibling",
+    );
+
+    // A vault-escaping name hint is neutralized: path SEPARATORS become dashes,
+    // so it stays inside the subdir and never traverses out of the vault.
+    let (id3, _) = vault::refresh_artifact("Lighthouse Notes", "../../etc/passwd", "md", b"x").unwrap();
+    assert!(id3.starts_with("Lighthouse Notes/"), "stays in the subdir: {id3}");
+    assert!(!id3.contains('/') || id3.matches('/').count() == 1, "no traversal separators: {id3}");
+    assert!(vault_dir.path().join(&id3).exists());
+}
+
+#[test]
+fn conversation_note_upserts_one_current_note_per_chat() {
+    let vault_dir = tempfile::tempdir().unwrap();
+    let _guard = common::lock_env(vault_dir.path());
+    let chats = vault_dir.path().join("Lighthouse Notes").join("Chats");
+    let count = |dir: &std::path::Path| std::fs::read_dir(dir).map(|r| r.count()).unwrap_or(0);
+
+    // First write lands under Chats/ with a stable, human-scannable name.
+    let (id1, name1) = vault::write_conversation_note("conv-1", "Revenue chat", b"# a").unwrap();
+    assert!(id1.starts_with("Lighthouse Notes/Chats/"), "under Chats/: {id1}");
+    assert!(name1.ends_with(".md"));
+    assert_eq!(count(&chats), 1);
+
+    // Same conversation + title → OVERWRITE in place (same id, one file, new bytes).
+    let (id2, _) = vault::write_conversation_note("conv-1", "Revenue chat", b"# b").unwrap();
+    assert_eq!(id2, id1, "same conversation + title → same node id");
+    assert_eq!(count(&chats), 1);
+    assert_eq!(std::fs::read_to_string(vault_dir.path().join(&id2)).unwrap(), "# b");
+
+    // A title change replaces the old note — no orphan left behind.
+    let (id3, _) = vault::write_conversation_note("conv-1", "Renamed chat", b"# c").unwrap();
+    assert_ne!(id3, id1, "new title → new filename");
+    assert_eq!(count(&chats), 1, "old-title note removed; still exactly one");
+
+    // A different conversation is its own note.
+    let (id4, _) = vault::write_conversation_note("conv-2", "Other chat", b"# d").unwrap();
+    assert_ne!(id4, id3);
+    assert_eq!(count(&chats), 2);
+
+    // A crafted title with separators is neutralized — stays inside Chats/.
+    let (id5, _) = vault::write_conversation_note("conv-3", "../../etc/passwd", b"# e").unwrap();
+    assert!(id5.starts_with("Lighthouse Notes/Chats/"), "stays under Chats/: {id5}");
+    assert!(vault_dir.path().join(&id5).exists());
+
+    // Fail-closed opt-out removes every note.
+    vault::purge_conversation_notes().unwrap();
+    assert!(!chats.exists() || count(&chats) == 0, "purge clears Chats/");
+    // Purge is idempotent.
+    vault::purge_conversation_notes().unwrap();
+}

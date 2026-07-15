@@ -246,6 +246,13 @@ export async function* streamAnswer(
         emitted = true;
         yield delta;
       }
+      // A clean completion that yielded ZERO tokens produced no answer. Fall
+      // back to the extractive passages so the local path always emits a real
+      // (non-draft) answer — otherwise a G2 draft-then-verify draft would be
+      // left standing as the final text. KEEP IN SYNC with llm.rs.
+      if (!emitted) {
+        yield* extractive(question, contexts, false);
+      }
       return;
     } catch (err) {
       const note = `\n\n_(Local model unavailable — ${
@@ -569,15 +576,30 @@ async function* streamLocal(
 }
 
 /** Local, no-network answer: stream the top passages with citations. */
+/**
+ * The instant extractive draft (G2 draft-then-verify): the top-passage
+ * rendering shared with the keyless `extractive` fallback, WITHOUT its head or
+ * footer — shown under "Draft — verifying…" while the local model composes the
+ * grounded answer, then replaced in place. Pure and network-free, so the draft
+ * is instant. `question` is unused today but kept in the signature for parity
+ * with the Rust twin. KEEP BYTE-IDENTICAL with lighthouse-core llm.rs::draft_answer.
+ */
+export function draftAnswer(question: string, contexts: Ctx[]): string {
+  void question;
+  return contexts
+    .slice(0, 3)
+    .map((c, i) => `[${i + 1}] **${c.name}** — ${c.text.slice(0, 300).trim()}…`)
+    .join("\n\n");
+}
+
 async function* extractive(question: string, contexts: Ctx[], noKey: boolean): AsyncGenerator<string> {
   const head = noKey
     ? `Based on the included files, the most relevant passages for "${question}":\n\n`
     : "";
+  // The passage body is exactly the G2 draft rendering; the keyless fallback
+  // wraps it with a head + a "connect a model" footer.
   const body =
-    contexts
-      .slice(0, 3)
-      .map((c, i) => `[${i + 1}] **${c.name}** — ${c.text.slice(0, 300).trim()}…`)
-      .join("\n\n") +
+    draftAnswer(question, contexts) +
     // Only nudge about a key when there genuinely isn't one — not when we fell
     // back after a transient model error despite a configured key.
     (noKey

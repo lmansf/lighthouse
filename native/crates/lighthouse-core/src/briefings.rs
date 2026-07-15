@@ -258,6 +258,101 @@ pub fn render_markdown(report: &BriefingReport) -> String {
     out
 }
 
+// --- Briefing NOTE (G5, openspec: add-briefing-note) -------------------------
+//
+// A single, refreshed-in-place markdown note ("Lighthouse Briefing.md" under
+// "Lighthouse Notes/") composed from the pins that changed since the last note.
+// The composer is deterministic and model-free — every value is a pin's VERIFIED
+// before/after summary. The desktop shell writes it on pin change at most once
+// per user-set daily hour; the pins dialog can refresh it on demand.
+
+/// Escape a cell for a GFM table row (only the pipe can break a row).
+fn esc_cell(s: &str) -> String {
+    s.replace('|', "\\|")
+}
+
+/// Render the "Lighthouse Briefing" note from the pins that changed since the
+/// last note: one before→after table per pin, a freshness footer. Deterministic,
+/// NO model call. `now_ms` stamps the footer (UTC, so it is TZ-independent and
+/// byte-reproducible). KEEP BYTE-IDENTICAL with src/server/briefings.ts::
+/// composeBriefingNote.
+pub fn compose_briefing_note(changed: &[crate::pins::ChangedPin], now_ms: i64) -> String {
+    let mut out = String::from("# Lighthouse Briefing\n");
+    if changed.is_empty() {
+        out.push_str("\n_No pinned questions changed since the last check._\n");
+    } else {
+        for c in changed {
+            let before = c.before.as_deref().unwrap_or("—");
+            out.push_str(&format!(
+                "\n## {}\n\n|        | Value |\n| ------ | ----- |\n| Before | {} |\n| Now | {} |\n",
+                esc_cell(&c.question),
+                esc_cell(before),
+                esc_cell(&c.after),
+            ));
+        }
+    }
+    let stamp = chrono::DateTime::from_timestamp_millis(now_ms)
+        .map(|d| d.format("%Y-%m-%d %H:%M UTC").to_string())
+        .unwrap_or_default();
+    out.push_str(&format!(
+        "\n*As of {stamp}. Every value is computed directly from your files — no AI.*\n"
+    ));
+    out
+}
+
+/// True when a scheduled note may be written now: the LOCAL hour is at or past
+/// `hour` AND the note hasn't been written yet today (never written, or last
+/// written on an earlier local day). `chrono::Local`, so "9" means the user's
+/// 9am. Pure — the desktop timer polls it; testable without a real clock.
+pub fn note_due(last_note_ms: Option<i64>, now_ms: i64, hour: u32) -> bool {
+    use chrono::{Datelike, Local, TimeZone, Timelike};
+    let Some(now) = Local.timestamp_millis_opt(now_ms).single() else {
+        return false;
+    };
+    if now.hour() < hour {
+        return false;
+    }
+    match last_note_ms.and_then(|m| Local.timestamp_millis_opt(m).single()) {
+        None => true, // never written, and it's past the hour today
+        Some(last) => (last.year(), last.ordinal()) < (now.year(), now.ordinal()),
+    }
+}
+
+fn note_state_path() -> PathBuf {
+    state_dir().join("briefing-note.json")
+}
+
+#[derive(Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct NoteState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_note_ms: Option<i64>,
+}
+
+/// When the scheduled briefing note was last written (state/briefing-note.json).
+/// Kept engine-side (not in settings) so the daily gate is in-container testable.
+pub fn last_note_ms() -> Option<i64> {
+    std::fs::read_to_string(note_state_path())
+        .ok()
+        .and_then(|s| serde_json::from_str::<NoteState>(&s).ok())
+        .and_then(|s| s.last_note_ms)
+}
+
+/// Persist the note's last-written time (atomic temp+rename, like the store).
+pub fn mark_note_run(now_ms: i64) {
+    let _guard = store_lock();
+    let path = note_state_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(json) = serde_json::to_string_pretty(&NoteState { last_note_ms: Some(now_ms) }) {
+        let tmp = path.with_extension("json.tmp");
+        if std::fs::write(&tmp, json).is_ok() {
+            let _ = std::fs::rename(&tmp, &path);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -380,5 +475,81 @@ mod tests {
         assert!(md.contains("## Revenue by region"));
         assert!(md.contains("| NE | 1 |"));
         assert!(md.contains("_this pinned question was removed_"));
+    }
+
+    // --- G5 briefing note ---------------------------------------------------
+
+    fn changed(id: &str, q: &str, before: Option<&str>, after: &str) -> crate::pins::ChangedPin {
+        crate::pins::ChangedPin {
+            id: id.into(),
+            question: q.into(),
+            before: before.map(String::from),
+            after: after.into(),
+        }
+    }
+
+    #[test]
+    fn compose_note_renders_before_after_tables_and_footer() {
+        // now_ms = 2026-07-15 09:03:00 UTC (1_784_106_180_000).
+        let now = 1_784_106_180_000i64;
+        let md = compose_briefing_note(
+            &[
+                changed("p1", "Revenue by region", Some("NE 120 · SE 300"), "NE 150 · SE 480"),
+                changed("p2", "New signups", None, "42"),
+            ],
+            now,
+        );
+        assert!(md.starts_with("# Lighthouse Briefing\n"));
+        assert!(md.contains("## Revenue by region"));
+        assert!(md.contains("| Before | NE 120 · SE 300 |"));
+        assert!(md.contains("| Now | NE 150 · SE 480 |"));
+        // A pin with no prior summary renders "—" for Before.
+        assert!(md.contains("## New signups"));
+        assert!(md.contains("| Before | — |"));
+        assert!(md.contains("| Now | 42 |"));
+        // Deterministic UTC footer + the "no AI" honesty line.
+        assert!(md.contains("*As of 2026-07-15 09:03 UTC."));
+        assert!(md.contains("no AI"));
+    }
+
+    #[test]
+    fn compose_note_empty_set_is_coherent() {
+        let md = compose_briefing_note(&[], 1_784_106_180_000);
+        assert!(md.starts_with("# Lighthouse Briefing\n"));
+        assert!(md.contains("_No pinned questions changed since the last check._"));
+        assert!(md.contains("no AI"));
+    }
+
+    #[test]
+    fn note_due_gates_on_hour_and_day() {
+        use chrono::{Local, TimeZone};
+        // Build local timestamps so the assertions are TZ-independent.
+        let at = |y, mo, d, h, mi| {
+            Local
+                .with_ymd_and_hms(y, mo, d, h, mi, 0)
+                .single()
+                .unwrap()
+                .timestamp_millis()
+        };
+        let hour = 9u32;
+        // Before the hour: not due, even if never written.
+        assert!(!note_due(None, at(2026, 7, 15, 8, 0), hour));
+        // At/after the hour, never written: due.
+        assert!(note_due(None, at(2026, 7, 15, 9, 30), hour));
+        // Written earlier the SAME day: not due again.
+        let today_9 = at(2026, 7, 15, 9, 5);
+        assert!(!note_due(Some(today_9), at(2026, 7, 15, 15, 0), hour));
+        // Written yesterday: due again today after the hour.
+        let yesterday = at(2026, 7, 14, 9, 5);
+        assert!(note_due(Some(yesterday), at(2026, 7, 15, 9, 5), hour));
+    }
+
+    #[test]
+    fn note_state_round_trips() {
+        with_temp_vault(|| {
+            assert_eq!(last_note_ms(), None);
+            mark_note_run(1_784_106_180_000);
+            assert_eq!(last_note_ms(), Some(1_784_106_180_000));
+        });
     }
 }

@@ -179,6 +179,12 @@ export interface RagReference {
   snippet: string;
   /** Relevance score in [0, 1]. */
   score: number;
+  /**
+   * G6: `"conversation"` when the cite is a past-chat note (under `Lighthouse
+   * Notes/Chats/`), else `"file"`. Optional so older payloads deserialize as a
+   * file. KEEP IN SYNC with the Rust `SourceKind` enum in contracts.rs.
+   */
+  kind?: "file" | "conversation";
 }
 
 export type ChatRole = "user" | "assistant";
@@ -222,6 +228,14 @@ export interface ChatChunk {
    * takes the analytics branch, so it never sets this.
    */
   analytics?: AnalyticsMeta;
+  /**
+   * Marks a provisional extractive DRAFT (G2 draft-then-verify): the UI shows it
+   * under "Draft — verifying…" and REPLACES it in place with the first
+   * authoritative (non-draft) delta. Only the local-model path sets this; it
+   * never enters any prompt and costs zero tokens. KEEP IN SYNC with the Rust
+   * ChatChunk.draft.
+   */
+  draft?: boolean;
   /** True on the last chunk of a response. */
   done: boolean;
 }

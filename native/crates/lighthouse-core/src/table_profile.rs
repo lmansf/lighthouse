@@ -394,4 +394,16 @@ mod tests {
         let p = table_profile("ids.csv", &rows.join("\n")).unwrap();
         assert!(!p.contains("by Id"));
     }
+
+    #[test]
+    fn fmt_num_rounds_negatives_symmetrically() {
+        // Round half AWAY FROM ZERO — the TS twin now matches this (it used
+        // Math.round, which rounds half toward +∞ and diverged on negatives).
+        // Only exactly-representable halves (k/8) give a deterministic .5 here;
+        // -0.015 etc. aren't exact in f64, so the divergence hides on them.
+        assert_eq!(fmt_num(-0.125), "-0.13"); // Math.round would give -0.12
+        assert_eq!(fmt_num(-0.375), "-0.38"); // Math.round would give -0.37
+        assert_eq!(fmt_num(0.125), "0.13");
+        assert_eq!(fmt_num(-300.0), "-300");
+    }
 }

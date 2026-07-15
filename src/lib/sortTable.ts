@@ -91,3 +91,26 @@ export function sortRows(rows: string[][], colIndex: number, dir: SortDir): stri
   });
   return [header.slice(), ...decorated.map((d) => d.row.slice())];
 }
+
+/**
+ * Match the G1 truncation footer (`analytics::truncation_footer`) in an answer's
+ * markdown and return its inner text (without the surrounding emphasis), or null
+ * when the result wasn't truncated. The footer appears ONLY on truncated results
+ * — which never carry a chart — so its presence means the table below shows just
+ * the first N of M rows, and any client-side sort covers that subset alone.
+ */
+export function truncationNoteFrom(content: string): string | null {
+  const m = /_(Showing the first [\d,]+(?: of [\d,]+)? rows\.)_/.exec(content);
+  return m ? m[1] : null;
+}
+
+/**
+ * The caption a truncated table shows WHILE SORTED. The deterministic "first N
+ * of M rows" disclosure always stays in the answer body (never stripped); this
+ * caption fires only when a sort is active, to flag that the sort reordered only
+ * the SHOWN rows — a descending top row is the maximum of the shown page, not of
+ * all matched rows. Returns null when no sort is active (nothing to add).
+ */
+export function truncationCaption(note: string, sortActive: boolean): string | null {
+  return sortActive ? `${note} — sorted view of the shown rows only.` : null;
+}

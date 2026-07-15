@@ -73,6 +73,19 @@ export interface RagService {
     markdown: string,
   ): Promise<{ savedId?: string; savedName?: string; error?: string }>;
   /**
+   * G6: auto-export a conversation as an indexed vault note under
+   * `Lighthouse Notes/Chats/`, OVERWRITTEN in place per conversation id so the
+   * vault keeps one current note per chat. Client-gated on "Save chats on this
+   * device". Fire-and-forget on turn settle.
+   */
+  exportConversationNote(
+    conversationId: string,
+    title: string,
+    markdown: string,
+  ): Promise<{ savedId?: string; savedName?: string; error?: string }>;
+  /** G6 fail-closed opt-out: delete every auto-exported chat note. */
+  purgeConversationNotes(): Promise<{ ok?: boolean; error?: string }>;
+  /**
    * Pin an analytics answer (question + its exact SQL + files read) so the
    * engine watches it: vault changes re-run the SQL (guarded, model-free) and
    * alert when the computed result changes. Re-pinning the same SQL replaces
@@ -189,6 +202,14 @@ export interface RagService {
    * and name, or an `error` string on failure.
    */
   auditExport(): Promise<{ savedId?: string; savedName?: string; error?: string }>;
+
+  /**
+   * G5: refresh the "Lighthouse Briefing" note (Lighthouse Notes/) from the pins
+   * that changed, on demand. Returns the written file's id and name, or an
+   * `error`. Desktop rechecks each pin's SQL for a real before→after; the web
+   * dev twin composes from each pin's last known summary (no before).
+   */
+  refreshBriefingNote(): Promise<{ savedId?: string; savedName?: string; error?: string }>;
 }
 
 /** Registration / sign-in. Mocked now; swap for a real identity provider later. */

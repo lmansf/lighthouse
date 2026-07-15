@@ -128,6 +128,8 @@ const useStyles = makeStyles({
   // Preferences dialog: sections separated by a little vertical air.
   prefFields: { display: "flex", flexDirection: "column", gap: tokens.spacingVerticalL },
   prefHint: { color: tokens.colorNeutralForeground3, fontSize: tokens.fontSizeBase200 },
+  // G5: the briefing-note hour picker row (label + dropdown, inline).
+  prefRow: { display: "flex", alignItems: "center", gap: tokens.spacingHorizontalS },
   // Hydration placeholder / load-failure row for the desktop-only settings, so
   // "still loading" and "load failed" don't both look like "unsupported".
   prefLoadingRow: { display: "flex", alignItems: "center", gap: tokens.spacingHorizontalS, color: tokens.colorNeutralForeground3 },
@@ -1180,6 +1182,13 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
   const [backgroundConserve, setBackgroundConserve] = useState(true);
   // OCR: read text in images and scanned PDFs with the bundled models. Default on.
   const [ocrEnabled, setOcrEnabled] = useState(true);
+  // G2 draft-then-verify: show an instant extractive draft while the private
+  // model composes the verified answer, replaced in place. Default on.
+  const [draftAnswers, setDraftAnswers] = useState(true);
+  // G5 briefing note: notify when the scheduled note refreshes (default on),
+  // and the local hour it may refresh at (default 9am).
+  const [briefingNotify, setBriefingNotify] = useState(true);
+  const [briefingNoteHour, setBriefingNoteHour] = useState(9);
   // Local audit log (openspec: add-audit-log): record what was read / which
   // provider answered / what left the machine, per question. Default OFF.
   const [auditEnabled, setAuditEnabled] = useState(false);
@@ -1239,6 +1248,9 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
         setSemanticSearch(d.semanticSearch !== false);
         setBackgroundConserve(d.backgroundConserve !== false);
         setOcrEnabled(d.ocrEnabled !== false);
+        setDraftAnswers(d.draftAnswers !== false);
+        setBriefingNotify(d.briefingNotify !== false);
+        setBriefingNoteHour(typeof d.briefingNoteHour === "number" ? d.briefingNoteHour : 9);
         setAuditEnabled(d.auditEnabled === true);
         setUiMode(d.uiMode === "widget" ? "widget" : "window");
         setWhisperMode(d.whisperMode === true);
@@ -1312,6 +1324,24 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
     const prev = ocrEnabled;
     setOcrEnabled(next);
     void postSetting({ ocrEnabled: next }, () => setOcrEnabled(prev));
+  }
+
+  function updateDraftAnswers(next: boolean) {
+    const prev = draftAnswers;
+    setDraftAnswers(next);
+    void postSetting({ draftAnswers: next }, () => setDraftAnswers(prev));
+  }
+
+  function updateBriefingNotify(next: boolean) {
+    const prev = briefingNotify;
+    setBriefingNotify(next);
+    void postSetting({ briefingNotify: next }, () => setBriefingNotify(prev));
+  }
+
+  function updateBriefingHour(next: number) {
+    const prev = briefingNoteHour;
+    setBriefingNoteHour(next);
+    void postSetting({ briefingNoteHour: next }, () => setBriefingNoteHour(prev));
   }
 
   function updateAudit(next: boolean) {
@@ -1476,7 +1506,14 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
               <Switch
                 checked={locks?.chatHistoryOff ? false : saveChats}
                 disabled={locks?.chatHistoryOff === true}
-                onChange={(_, d) => setSaveChats(Boolean(d.checked))}
+                onChange={(_, d) => {
+                  const on = Boolean(d.checked);
+                  setSaveChats(on);
+                  // G6 fail-closed: opting out also deletes every auto-exported
+                  // chat note (Lighthouse Notes/Chats/), so nothing of the user's
+                  // conversations survives on disk.
+                  if (!on) void ragService.purgeConversationNotes().catch(() => {});
+                }}
                 label="Save chats on this device — kept locally and cleared automatically after two weeks (off by default; delete any chat from the history panel)"
               />
               {locks?.chatHistoryOff && (
@@ -1523,6 +1560,40 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
                   onChange={(_, d) => updateSemantic(Boolean(d.checked))}
                   label="Semantic search — a small bundled model (runs entirely on this computer) helps questions find files by meaning, not just matching words"
                 />
+              )}
+
+              {desktop && (
+                <Switch
+                  checked={draftAnswers}
+                  onChange={(_, d) => updateDraftAnswers(Boolean(d.checked))}
+                  label="Show an instant draft answer while the private model works — an extractive preview from your files, replaced in place the moment the verified answer is ready"
+                />
+              )}
+
+              {desktop && (
+                <Switch
+                  checked={briefingNotify}
+                  onChange={(_, d) => updateBriefingNotify(Boolean(d.checked))}
+                  label="Notify me when the daily briefing note updates — a Lighthouse Notes file that refreshes when a pinned question's answer changes (the note is always written; this only controls the notification)"
+                />
+              )}
+
+              {desktop && briefingNotify && (
+                <div className={styles.prefRow}>
+                  <Text className={styles.prefHint}>Refresh the briefing note after</Text>
+                  <Dropdown
+                    size="small"
+                    selectedOptions={[String(briefingNoteHour)]}
+                    value={`${briefingNoteHour % 12 === 0 ? 12 : briefingNoteHour % 12} ${briefingNoteHour < 12 ? "AM" : "PM"}`}
+                    onOptionSelect={(_, d) => updateBriefingHour(Number(d.optionValue))}
+                  >
+                    {Array.from({ length: 24 }, (_, h) => (
+                      <Option key={h} value={String(h)}>
+                        {`${h % 12 === 0 ? 12 : h % 12}:00 ${h < 12 ? "AM" : "PM"}`}
+                      </Option>
+                    ))}
+                  </Dropdown>
+                </div>
               )}
 
               {desktop && (

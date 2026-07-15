@@ -222,7 +222,20 @@ pub fn stream_answer(
                 }
             }
             match failed {
-                None => return,
+                // A clean completion that yielded ZERO tokens produced no
+                // answer. Fall back to the extractive passages so the local
+                // path always emits a real (non-draft) answer — otherwise a
+                // G2 draft-then-verify draft would be left standing as the
+                // final text with nothing to replace it. KEEP IN SYNC with llm.ts.
+                None => {
+                    if !emitted {
+                        let mut fb = extractive(&question, &contexts, false);
+                        while let Some(w) = fb.next().await {
+                            yield w;
+                        }
+                    }
+                    return;
+                }
                 Some(msg) => {
                     // An oversized prompt is OUR bug (the budgets above should
                     // make it unreachable) — don't tell the user to check
@@ -752,14 +765,15 @@ fn split_keep_ws(s: &str) -> Vec<String> {
     out
 }
 
-/// Local, no-network answer: stream the top passages with citations.
-fn extractive(question: &str, contexts: &[Ctx], no_key: bool) -> AnswerStream {
-    let head = if no_key {
-        format!("Based on the included files, the most relevant passages for \"{question}\":\n\n")
-    } else {
-        String::new()
-    };
-    let body = contexts
+/// The instant extractive draft (G2 draft-then-verify): the top-passage
+/// rendering shared with the keyless `extractive` fallback, WITHOUT its head or
+/// footer — shown under "Draft — verifying…" while the local model composes the
+/// grounded answer, then replaced in place. Pure and network-free, so the draft
+/// is instant. `_question` is unused today but kept in the signature for parity
+/// with the TS twin and future per-question shaping. KEEP BYTE-IDENTICAL with
+/// src/server/llm.ts::draftAnswer.
+pub fn draft_answer(_question: &str, contexts: &[Ctx]) -> String {
+    contexts
         .iter()
         .take(3)
         .enumerate()
@@ -769,6 +783,18 @@ fn extractive(question: &str, contexts: &[Ctx], no_key: bool) -> AnswerStream {
         })
         .collect::<Vec<_>>()
         .join("\n\n")
+}
+
+/// Local, no-network answer: stream the top passages with citations.
+fn extractive(question: &str, contexts: &[Ctx], no_key: bool) -> AnswerStream {
+    let head = if no_key {
+        format!("Based on the included files, the most relevant passages for \"{question}\":\n\n")
+    } else {
+        String::new()
+    };
+    // The passage body is exactly the G2 draft rendering; the keyless fallback
+    // wraps it with a head + a "connect a model" footer.
+    let body = draft_answer(question, contexts)
         + if no_key {
             "\n\n_Connect an AI model (Settings → AI models) for synthesized answers — the private local model, or an API key from Anthropic, OpenAI, Google, xAI, Mistral, or DeepSeek._"
         } else {
@@ -882,5 +908,29 @@ mod tests {
         assert!(used <= LOCAL_HISTORY_MAX_CHARS, "used {used}");
         assert!(kept.last().unwrap().content.starts_with("9-"), "newest turn kept");
         assert!(kept.iter().all(|t| !t.content.starts_with("0-")), "oldest dropped");
+    }
+
+    // G2 draft-then-verify: the extractive draft renders exactly the top 3
+    // passages as `[n] **name** — snippet…`, clamped to 300 chars and trimmed.
+    // KEEP the shape in sync with src/server/llm.ts::draftAnswer.
+    #[test]
+    fn draft_answer_renders_top_three_trimmed_and_clamped() {
+        let ctxs = vec![
+            Ctx { name: "q3.csv".into(), text: "  north east revenue up  ".into(), score: 3.0 },
+            Ctx { name: "q2.csv".into(), text: "y".repeat(500), score: 2.0 },
+            Ctx { name: "notes.md".into(), text: "third".into(), score: 1.0 },
+            Ctx { name: "extra.md".into(), text: "fourth — dropped".into(), score: 0.5 },
+        ];
+        let out = draft_answer("what changed?", &ctxs);
+        let blocks: Vec<&str> = out.split("\n\n").collect();
+        assert_eq!(blocks.len(), 3, "only the top 3 passages: {out}");
+        assert!(blocks[0].starts_with("[1] **q3.csv** — north east revenue up…"));
+        assert!(blocks[0].contains("north east revenue up…"), "snippet is trimmed");
+        assert!(blocks[1].starts_with("[2] **q2.csv** — "));
+        assert!(blocks[2].starts_with("[3] **notes.md** — third…"));
+        assert!(!out.contains("extra.md"), "the 4th passage is dropped");
+        // 300-char snippet clamp on the long one (+ the trailing ellipsis char).
+        let snippet_len = blocks[1].chars().count() - "[2] **q2.csv** — ".chars().count() - 1;
+        assert_eq!(snippet_len, 300, "snippet clamped to 300 chars");
     }
 }

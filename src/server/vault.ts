@@ -8,6 +8,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import type { DataSource, FileNode, RagReference } from "@/contracts";
 import {
   VAULT_SOURCE_ID,
@@ -481,6 +482,152 @@ export function writeArtifact(
   if (!clean) clean = "result";
   const { newId } = addFile(`${clean}.${ext}`, bytes, subdir);
   return { id: newId, name: newId.split("/").pop() ?? newId };
+}
+
+/**
+ * Write/OVERWRITE a fixed-name artifact in a named vault folder (the G5
+ * briefing-note refresh). Same hint sanitization as `writeArtifact` but NO
+ * collision suffix — the file is replaced in place. `safeAbs`-guarded against
+ * vault escape; invalidates the walk cache. KEEP IN SYNC with
+ * lighthouse-core::vault::refresh_artifact.
+ */
+export function refreshArtifact(
+  subdir: string,
+  nameHint: string,
+  ext: string,
+  bytes: Buffer,
+): { id: string; name: string } {
+  let clean = [...nameHint]
+    .slice(0, 80)
+    .map((c) => {
+      const code = c.charCodeAt(0);
+      return c === "/" || c === "\\" || code < 32 || (code >= 127 && code <= 159) ? "-" : c;
+    })
+    .join("")
+    .trim()
+    .replace(/^\.+/, "")
+    .trim();
+  if (!clean) clean = "result";
+  const id = `${subdir}/${clean}.${ext}`;
+  const abs = safeAbs(id); // rejects any vault escape
+  fs.mkdirSync(path.dirname(abs), { recursive: true });
+  fs.writeFileSync(abs, bytes); // truncating overwrite — replaces in place
+  invalidateWalkCache();
+  return { id, name: id.split("/").pop() ?? id };
+}
+
+// --- G6 cross-conversation recall -------------------------------------------
+
+/** Auto-exported past-chat notes live here. KEEP IN SYNC with vault.rs. */
+export const CHATS_SUBDIR = "Lighthouse Notes/Chats";
+
+/**
+ * Classify a retrieved node id as a past-conversation note or an ordinary file,
+ * purely by its vault-relative path. The trailing slash matters. KEEP IN SYNC
+ * with lighthouse-core::vault::source_kind_of.
+ */
+export function sourceKindOf(fileId: string): "file" | "conversation" {
+  return fileId.startsWith("Lighthouse Notes/Chats/") ? "conversation" : "file";
+}
+
+/**
+ * G6: how much a recall cue lifts past-conversation candidates before ranking.
+ * KEEP IN SYNC with lighthouse-core::synth::CONV_BOOST. (Lives here, not in
+ * synth.ts, so `retrieve` can use it without a synth↔vault import cycle.)
+ */
+export const CONV_BOOST = 1.5;
+
+/** Anchored recall frames. KEEP BYTE-IDENTICAL with the Rust RECALL_FRAMES. */
+const RECALL_FRAMES = [
+  "what did i ask", "what did i conclude", "what did we conclude",
+  "what did i say", "what did i decide", "did i ask", "have i asked",
+  "what did i find", "what have i asked",
+];
+
+/**
+ * G6 recall meta-cue: does the question ask what the USER previously asked,
+ * said, concluded, decided, or found? Anchored frames (not loose keywords) so
+ * ordinary questions never trigger. It BIASES retrieval toward conversation
+ * notes; it never short-circuits to a model-free answer. Pure; normalization
+ * matches `crossDocCue`. KEEP BYTE-IDENTICAL with lighthouse-core::synth::recall_cue.
+ */
+export function recallCue(question: string): boolean {
+  const lower = question.toLowerCase();
+  let norm = "";
+  let lastSpace = true;
+  for (const ch of lower) {
+    if ((ch >= "a" && ch <= "z") || (ch >= "0" && ch <= "9")) {
+      norm += ch;
+      lastSpace = false;
+    } else if (!lastSpace) {
+      norm += " ";
+      lastSpace = true;
+    }
+  }
+  const padded = ` ${norm.trim()} `;
+  return RECALL_FRAMES.some((f) => padded.includes(` ${f} `));
+}
+
+/**
+ * G6: write/OVERWRITE the auto-exported note for ONE conversation under
+ * `CHATS_SUBDIR`. Filename = sanitized title + a short, stable id derived from
+ * the conversation id (`"<title> [<cid8>].md"`), so it is human-scannable yet
+ * keyed by conversation. A prior note for the same conversation under a changed
+ * title is removed first. `safeAbs`-guarded; walk cache invalidated. KEEP IN SYNC
+ * with lighthouse-core::vault::write_conversation_note.
+ */
+export function writeConversationNote(
+  conversationId: string,
+  title: string,
+  bytes: Buffer,
+): { id: string; name: string } {
+  const cid8 = createHash("sha1").update(conversationId).digest("hex").slice(0, 8);
+  let clean = [...title]
+    .slice(0, 80)
+    .map((c) => {
+      const code = c.charCodeAt(0);
+      return c === "/" || c === "\\" || code < 32 || (code >= 127 && code <= 159) ? "-" : c;
+    })
+    .join("")
+    .trim()
+    .replace(/^\.+/, "")
+    .trim();
+  if (!clean) clean = "Conversation";
+  const filename = `${clean} [${cid8}].md`;
+  const id = `${CHATS_SUBDIR}/${filename}`;
+  const abs = safeAbs(id); // rejects any vault escape
+  const dir = path.dirname(abs);
+  fs.mkdirSync(dir, { recursive: true });
+  // Remove a prior note for this same conversation under a different title.
+  const suffix = ` [${cid8}].md`;
+  try {
+    for (const fname of fs.readdirSync(dir)) {
+      if (fname.endsWith(suffix) && fname !== filename) {
+        try {
+          fs.rmSync(path.join(dir, fname));
+        } catch {
+          /* best-effort cleanup */
+        }
+      }
+    }
+  } catch {
+    /* dir may not exist yet */
+  }
+  fs.writeFileSync(abs, bytes); // truncating overwrite — one current note per chat
+  invalidateWalkCache();
+  return { id, name: filename };
+}
+
+/**
+ * G6 fail-closed opt-out: remove the entire auto-exported `Chats/` folder.
+ * Idempotent. KEEP IN SYNC with lighthouse-core::vault::purge_conversation_notes.
+ */
+export function purgeConversationNotes(): void {
+  const abs = safeAbs(CHATS_SUBDIR);
+  if (fs.existsSync(abs)) {
+    fs.rmSync(abs, { recursive: true, force: true });
+    invalidateWalkCache();
+  }
 }
 
 /**
@@ -984,6 +1131,7 @@ function buildListing(nodes: FileNode[], intent: Listing): Retrieved {
     name: f.name,
     snippet: "",
     score: 1,
+    kind: sourceKindOf(f.id),
   }));
   return { references, contexts: [{ name: `Included ${intent.label}`, text: list, score: 1 }] };
 }
@@ -1056,7 +1204,7 @@ function chunkTextsProse(text: string): string[] {
 
 export interface Retrieved {
   references: RagReference[];
-  contexts: { name: string; text: string; score: number }[];
+  contexts: { name: string; text: string; score: number; kind?: "file" | "conversation" }[];
 }
 
 /** Bound total chunks scored per query so many/large files can't stall it. */
@@ -1184,6 +1332,14 @@ export async function retrieve(
     });
   }
 
+  // G6 recall cue: "what did I ask/conclude about X" biases toward past-
+  // conversation notes so synthesis draws on them. Deterministic — only scales
+  // existing conversation-kind cands before the sort. KEEP IN SYNC with vault.rs.
+  if (recallCue(query)) {
+    for (const c of cands) {
+      if (sourceKindOf(c.fileId) === "conversation") c.score *= CONV_BOOST;
+    }
+  }
   const sorted = cands.sort((a, b) => b.score - a.score);
   const top = sorted.slice(0, k);
   // Named-file guarantee: a question that strongly names a file MUST surface
@@ -1215,12 +1371,14 @@ export async function retrieve(
       name: c.name,
       snippet: c.text.slice(0, 240).trim() + (c.text.length > 240 ? "…" : ""),
       score: Math.min(1, c.score / max),
+      kind: sourceKindOf(c.fileId),
     });
   }
   const contexts = top.map((c) => ({
     name: c.name,
     text: c.text,
     score: Math.min(1, c.score / max),
+    kind: sourceKindOf(c.fileId),
   }));
   return { references, contexts };
 }

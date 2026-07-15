@@ -112,6 +112,23 @@ class MockRagService implements RagService {
     return { savedId: `Lighthouse Notes/${name}`, savedName: name };
   }
 
+  async exportConversationNote(
+    conversationId: string,
+    title: string,
+    markdown: string,
+  ): Promise<{ savedId?: string; savedName?: string; error?: string }> {
+    await new Promise((r) => setTimeout(r, 50));
+    if (!conversationId.trim() || !markdown.trim()) {
+      return { error: "conversationId and markdown required" };
+    }
+    const name = `${title.trim() || "Conversation"} [mock].md`;
+    return { savedId: `Lighthouse Notes/Chats/${name}`, savedName: name };
+  }
+
+  async purgeConversationNotes(): Promise<{ ok?: boolean; error?: string }> {
+    return { ok: true };
+  }
+
   // In-memory pins so the pin chip, dialog, and banner are exercisable
   // offline. The mock "primes" a canned summary; rechecks report no changes.
   private pins: Pin[] = [];
@@ -334,6 +351,13 @@ class MockRagService implements RagService {
 
   async auditExport(): Promise<{ savedId?: string; savedName?: string; error?: string }> {
     return { error: "audit log is disabled" };
+  }
+
+  async refreshBriefingNote(): Promise<{ savedId?: string; savedName?: string; error?: string }> {
+    return {
+      savedId: "Lighthouse Notes/Lighthouse Briefing.md",
+      savedName: "Lighthouse Briefing.md",
+    };
   }
 
   /** A node plus all of its descendants (so toggling a folder cascades). */

@@ -161,3 +161,44 @@ export function runBriefing(id: string): BriefingReport | null {
   markRun(id);
   return { id: briefing.id, title: briefing.title, generatedMs: Date.now(), sections };
 }
+
+// --- Briefing NOTE (G5) ------------------------------------------------------
+
+/** One changed pin's before→after payload for the note composer. */
+export interface NoteChange {
+  question: string;
+  before?: string;
+  after: string;
+}
+
+/** Escape a cell for a GFM table row (only the pipe can break a row). */
+function escNoteCell(s: string): string {
+  return s.replace(/\|/g, "\\|");
+}
+
+/**
+ * Render the "Lighthouse Briefing" note from the pins that changed since the
+ * last note: one before→after table per pin + a freshness footer. Deterministic,
+ * NO model call. `nowMs` stamps the footer in UTC (TZ-independent). KEEP
+ * BYTE-IDENTICAL with lighthouse-core::briefings::compose_briefing_note.
+ */
+export function composeBriefingNote(changed: NoteChange[], nowMs: number): string {
+  let out = "# Lighthouse Briefing\n";
+  if (changed.length === 0) {
+    out += "\n_No pinned questions changed since the last check._\n";
+  } else {
+    for (const c of changed) {
+      const before = c.before ?? "—";
+      out += `\n## ${escNoteCell(c.question)}\n\n|        | Value |\n| ------ | ----- |\n| Before | ${escNoteCell(
+        before,
+      )} |\n| Now | ${escNoteCell(c.after)} |\n`;
+    }
+  }
+  const d = new Date(nowMs);
+  const p = (n: number) => String(n).padStart(2, "0");
+  const stamp = `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())} ${p(
+    d.getUTCHours(),
+  )}:${p(d.getUTCMinutes())} UTC`;
+  out += `\n*As of ${stamp}. Every value is computed directly from your files — no AI.*\n`;
+  return out;
+}

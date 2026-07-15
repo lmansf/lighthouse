@@ -207,6 +207,45 @@ pub async fn rag_post(headers: HeaderMap, body: Option<Json<Value>>) -> Response
                 Err(e) => Json(json!({ "error": e })).into_response(),
             };
         }
+        // --- G6 cross-conversation recall: auto-export a chat as an indexed
+        //     vault note (`Lighthouse Notes/Chats/`), OVERWRITTEN in place per
+        //     conversation id so the vault keeps one current note per chat. The
+        //     client gates this on "Save chats on this device". ---
+        Some("exportConversationNote") => {
+            let conversation_id = body["conversationId"].as_str().unwrap_or("").to_string();
+            let title = body["title"].as_str().unwrap_or("Conversation").to_string();
+            let markdown = body["markdown"].as_str().unwrap_or("").to_string();
+            if conversation_id.trim().is_empty() || markdown.trim().is_empty() {
+                return bad_request("conversationId and markdown required");
+            }
+            let written = tokio::task::spawn_blocking(move || {
+                lighthouse_core::vault::write_conversation_note(
+                    &conversation_id,
+                    &title,
+                    markdown.as_bytes(),
+                )
+            })
+            .await
+            .map_err(|e| e.to_string())
+            .and_then(|r| r.map_err(|e| e.to_string()));
+            return match written {
+                Ok((id, name)) => {
+                    Json(json!({ "savedId": id, "savedName": name })).into_response()
+                }
+                Err(e) => Json(json!({ "error": e })).into_response(),
+            };
+        }
+        // G6 fail-closed opt-out: delete every auto-exported chat note.
+        Some("purgeConversationNotes") => {
+            let purged = tokio::task::spawn_blocking(lighthouse_core::vault::purge_conversation_notes)
+                .await
+                .map_err(|e| e.to_string())
+                .and_then(|r| r.map_err(|e| e.to_string()));
+            return match purged {
+                Ok(()) => Json(json!({ "ok": true })).into_response(),
+                Err(e) => Json(json!({ "error": e })).into_response(),
+            };
+        }
         // --- Pinned questions (openspec: add-pinned-questions): persist an
         //     analytics answer's question + SQL + files; rechecks are guarded
         //     and model-free. The dev twin mirrors these ops (PARITY: no
@@ -248,6 +287,46 @@ pub async fn rag_post(headers: HeaderMap, body: Option<Json<Value>>) -> Response
                 "pins": lighthouse_core::pins::list(),
             }))
             .into_response();
+        }
+        // G5 briefing note: recheck to freshen each pin's summary, then compose
+        // the deterministic (model-free) note from a SNAPSHOT of every pin that
+        // has a summary (matching the web twin) and overwrite Lighthouse
+        // Notes/Lighthouse Briefing.md in place — so a manual refresh never blanks
+        // the note just because nothing changed. No OS notification and NO daily-
+        // gate stamp on this explicit, in-dialog path. (PARITY: the desktop shell's
+        // scheduled daily-delta write lives in main.rs.)
+        Some("refreshBriefingNote") => {
+            let _ = lighthouse_core::pins::recheck_all().await;
+            let now = lighthouse_core::config::now_ms();
+            let entries: Vec<lighthouse_core::pins::ChangedPin> = lighthouse_core::pins::list()
+                .into_iter()
+                .filter_map(|p| {
+                    p.last_summary.clone().map(|s| lighthouse_core::pins::ChangedPin {
+                        id: p.id.clone(),
+                        question: p.question.clone(),
+                        before: None,
+                        after: s,
+                    })
+                })
+                .collect();
+            let md = lighthouse_core::briefings::compose_briefing_note(&entries, now);
+            let written = tokio::task::spawn_blocking(move || {
+                lighthouse_core::vault::refresh_artifact(
+                    "Lighthouse Notes",
+                    "Lighthouse Briefing",
+                    "md",
+                    md.as_bytes(),
+                )
+            })
+            .await
+            .map_err(|e| e.to_string())
+            .and_then(|r| r.map_err(|e| e.to_string()));
+            return match written {
+                Ok((id, name)) => {
+                    Json(json!({ "savedId": id, "savedName": name })).into_response()
+                }
+                Err(e) => Json(json!({ "error": e })).into_response(),
+            };
         }
         Some("listBriefings") => {
             return Json(json!({ "briefings": lighthouse_core::briefings::list() }))
@@ -718,6 +797,10 @@ pub async fn connect_post(headers: HeaderMap, body: Option<Json<Value>>) -> Resp
 
 // --- /api/model ---------------------------------------------------------------
 
+// PARITY divergence (G2 GPU status): the desktop `model_status` command merges
+// the shell's real llama-server GPU launch state (gpuOn/gpuLayers/gpuRunning)
+// from the Supervisor. The web/dev server has no supervisor, so those fields are
+// absent here — the UI treats a missing `gpuOn` as "unknown" and renders nothing.
 pub async fn model_get() -> Response {
     Json(local_model::model_status()).into_response()
 }
@@ -939,6 +1022,9 @@ pub async fn settings_get() -> Response {
         "backgroundConserve": s.background_conserve != Some(false), // default on
         "ocrEnabled": s.ocr_enabled != Some(false), // default on
         "auditEnabled": s.audit_enabled == Some(true), // opt-in, default off
+        "draftAnswers": s.draft_answers != Some(false), // default on
+        "briefingNotify": s.briefing_notify != Some(false), // default on (G5)
+        "briefingNoteHour": s.briefing_note_hour.unwrap_or(9), // default 9am (G5)
     }))
     .into_response()
 }
@@ -965,6 +1051,9 @@ pub async fn settings_post(headers: HeaderMap, body: Option<Json<Value>>) -> Res
         body["backgroundConserve"].as_bool(),
         body["ocrEnabled"].as_bool(),
         body["auditEnabled"].as_bool(),
+        body["draftAnswers"].as_bool(),
+        body["briefingNotify"].as_bool(),
+        body["briefingNoteHour"].as_i64(),
     );
     Json(json!({
         "ok": true,
@@ -979,6 +1068,9 @@ pub async fn settings_post(headers: HeaderMap, body: Option<Json<Value>>) -> Res
         "semanticSearch": s.semantic_search != Some(false),
         "backgroundConserve": s.background_conserve != Some(false),
         "ocrEnabled": s.ocr_enabled != Some(false),
+        "draftAnswers": s.draft_answers != Some(false),
+        "briefingNotify": s.briefing_notify != Some(false),
+        "briefingNoteHour": s.briefing_note_hour.unwrap_or(9),
     }))
     .into_response()
 }

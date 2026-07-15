@@ -291,6 +291,7 @@ fn reference(id: &str, name: &str, snippet: String, rank: usize) -> RagReference
         snippet,
         // Descending with list order so any score-sorted rendering preserves it.
         score: (1.0 - rank as f64 * 0.02).max(0.5),
+        kind: crate::vault::source_kind_of(id),
     }
 }
 

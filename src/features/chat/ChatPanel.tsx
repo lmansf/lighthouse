@@ -62,6 +62,7 @@ import {
   CodeRegular,
   CopyRegular,
   DeleteRegular,
+  ChatRegular,
   DismissRegular,
   DocumentAddRegular,
   DocumentRegular,
@@ -87,7 +88,12 @@ import { chatService, MODEL_PROVIDERS, ragService } from "@/contracts";
 import { useRagStore } from "@/stores/useRagStore";
 import { useAuthStore } from "@/stores/useAuthStore";
 import { parseChartSpec, tableToCsv } from "@/lib/chartSpec";
-import { sortRows, type SortDir } from "@/lib/sortTable";
+import {
+  sortRows,
+  truncationCaption,
+  truncationNoteFrom,
+  type SortDir,
+} from "@/lib/sortTable";
 import { pinChartData } from "@/lib/pinChart";
 import { recallRelated, type RecallHit } from "@/lib/recall";
 import { AnalyticsChart } from "@/features/chat/AnalyticsChart";
@@ -95,6 +101,7 @@ import { BriefingsPanel } from "@/features/chat/BriefingsPanel";
 import { PinMiniChart } from "@/features/chat/PinMiniChart";
 import { EgressShield } from "@/features/egress/EgressShield";
 import { useChatStore, type TranscriptMessage } from "@/stores/useChatStore";
+import { chatHistoryLocked } from "@/stores/managedLocks";
 import { modKey } from "@/features/onboarding/ModeChooser";
 import { ACCENTS } from "@/shell/theme";
 import { FILE_DRAG_MIME, parseDraggedFiles, type DraggedFile } from "@/shell/dnd";
@@ -501,6 +508,24 @@ const useStyles = makeStyles({
   },
   // Quiet one-liners: the "(stopped)" note and the zero-references honesty note.
   quietNote: { color: tokens.colorNeutralForeground3 },
+  // G4: the truncation disclosure bound to a sortable result table's <caption>,
+  // so it stays with the table through sorting.
+  tableCaption: {
+    captionSide: "bottom",
+    textAlign: "left",
+    color: tokens.colorNeutralForeground3,
+    fontSize: tokens.fontSizeBase200,
+    fontStyle: "italic",
+    paddingTop: tokens.spacingVerticalXXS,
+  },
+  // G2 draft-then-verify: the muted "verifying…" badge shown under the
+  // provisional extractive draft while the private model composes the answer.
+  draftBadge: {
+    color: tokens.colorNeutralForeground3,
+    fontStyle: "italic",
+    display: "block",
+    marginTop: tokens.spacingVerticalXS,
+  },
   refCard: {
     display: "flex",
     alignItems: "center",
@@ -945,9 +970,13 @@ type TableSort = { col: number; dir: SortDir } | null;
 function SortableTable({
   rows,
   passthroughProps,
+  truncationNote,
 }: {
   rows: string[][];
   passthroughProps: ComponentProps<"table">;
+  /** G4: the G1 "first N of M rows" disclosure, bound to the table so it stays
+   *  visible through sorting and marks a sort as covering the shown subset. */
+  truncationNote?: string;
 }) {
   const styles = useStyles();
   const [sort, setSort] = useState<TableSort>(null);
@@ -973,6 +1002,11 @@ function SortableTable({
       {/* Exports the CURRENTLY displayed (sorted) order, not the original. */}
       <CopyCsvButton rows={view} />
       <table {...passthroughProps}>
+        {truncationNote && sort !== null && (
+          <caption className={styles.tableCaption}>
+            {truncationCaption(truncationNote, true)}
+          </caption>
+        )}
         <thead>
           <tr>
             {header.map((cell, col) => {
@@ -1146,6 +1180,13 @@ const AnswerMarkdown = memo(function AnswerMarkdown({
   onCite: (turnId: string, n: number) => void;
 }) {
   const styles = useStyles();
+  // G4: a truncated analytics result carries the G1 "first N of M rows" footer.
+  // The footer ALWAYS stays in the body (a deterministic, never-model-generated
+  // disclosure — never stripped, so it shows even when the answer narrates in
+  // prose with no result table). When a result table IS rendered and the user
+  // sorts it, a caption additionally flags that the sort covers only the shown
+  // rows (see SortableTable).
+  const truncationNote = useMemo(() => truncationNoteFrom(content), [content]);
   const components = useMemo<Components>(
     () => ({
       a: ({ node, href, children, ...props }) => {
@@ -1200,10 +1241,12 @@ const AnswerMarkdown = memo(function AnswerMarkdown({
             </div>
           );
         }
-        return <SortableTable rows={rows} passthroughProps={props} />;
+        return (
+          <SortableTable rows={rows} passthroughProps={props} truncationNote={truncationNote ?? undefined} />
+        );
       },
     }),
-    [styles, turnId, onCite],
+    [styles, turnId, onCite, truncationNote],
   );
   return (
     <MarkdownView content={content} components={components} remarkPlugins={[remarkCitations]} />
@@ -1273,7 +1316,8 @@ const References = memo(function References({
             ? {
                 role: "button",
                 tabIndex: 0,
-                title: `Open ${r.name}`,
+                title:
+                  r.kind === "conversation" ? "Open past conversation note" : `Open ${r.name}`,
                 onClick: () => void onOpen(r.fileId),
                 onKeyDown: (e: KeyboardEvent) =>
                   (e.key === "Enter" || e.key === " ") && void onOpen(r.fileId),
@@ -1284,7 +1328,12 @@ const References = memo(function References({
           <Badge appearance="tint" shape="circular" size="small">
             {i + 1}
           </Badge>
-          <DocumentRegular fontSize={24} />
+          {/* G6: a past-conversation note gets a chat glyph; files keep the doc. */}
+          {r.kind === "conversation" ? (
+            <ChatRegular fontSize={24} />
+          ) : (
+            <DocumentRegular fontSize={24} />
+          )}
           <div className={styles.refMeta}>
             <Text weight="semibold" truncate>
               {r.name}
@@ -1367,6 +1416,14 @@ export function ChatPanel() {
   // Pre-answer stage note from the engine ("Reading q3.csv (2/5)…") — shown in
   // the loader while multi-document synthesis works; cleared on the first token.
   const [progressLabel, setProgressLabel] = useState<string | null>(null);
+  // G2 draft-then-verify: while the streaming answer is still the provisional
+  // extractive draft, show a "verifying…" badge. `draftRef` mirrors it
+  // synchronously so the `for await` loop can test it without a stale closure.
+  const [draftActive, setDraftActive] = useState(false);
+  const draftRef = useRef(false);
+  // G6: guards the auto-export-note write so overlapping turn-settles don't
+  // race two writes for the same conversation.
+  const exportNoteRef = useRef(false);
 
   // Recent-chats drawer + its inline rename/delete affordances.
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -1414,6 +1471,8 @@ export function ChatPanel() {
   const [pinsOpen, setPinsOpen] = useState(false);
   const [pinList, setPinList] = useState<Pin[]>([]);
   const [pinsBusy, setPinsBusy] = useState(false);
+  // G5: transient "Saved to Lighthouse Notes" note after a manual refresh.
+  const [briefingSaved, setBriefingSaved] = useState<string | null>(null);
   // Saved/pinned notes AND thumbs ratings are keyed by message id, and ids
   // RESTART per conversation — clear them on a conversation switch so a new
   // chat's "a2" never inherits another chat's "Saved…"/"Pinned…"/👍.
@@ -1766,6 +1825,8 @@ export function ChatPanel() {
     setPinned(true);
     const controller = new AbortController();
     abortRef.current = controller;
+    draftRef.current = false;
+    setDraftActive(false);
     let finalContent = "";
     try {
       for await (const chunk of chatService.ask(
@@ -1782,7 +1843,23 @@ export function ChatPanel() {
         if (chunk.progress) setProgressLabel(chunk.progress.label);
         if (chunk.delta) {
           setProgressLabel(null); // the answer is starting — stage notes are done
-          finalContent += chunk.delta;
+          if (chunk.draft) {
+            // Provisional extractive draft (G2): show it immediately, flagged.
+            if (!draftRef.current) {
+              draftRef.current = true;
+              setDraftActive(true);
+            }
+            finalContent += chunk.delta;
+          } else {
+            // First authoritative token: wipe the draft and stream the verified
+            // answer in its place (one clean replacement, no interleaving).
+            if (draftRef.current) {
+              draftRef.current = false;
+              setDraftActive(false);
+              finalContent = "";
+            }
+            finalContent += chunk.delta;
+          }
           // Buffer the growing answer and flush on the next frame instead of
           // writing the store per token (see scheduleStreamFlush).
           scheduleStreamFlush(asstId, finalContent);
@@ -1814,6 +1891,18 @@ export function ChatPanel() {
         );
       }
     } finally {
+      // Trust guard (G2): if the stream ended while STILL showing only the
+      // provisional draft (Stop or an error mid-draft, before any verified
+      // token), the draft must not settle as the answer — an unverified
+      // extractive preview would then be indistinguishable from a grounded
+      // answer once the "Draft" badge (gated on `streaming`) disappears. Blank
+      // it so nothing false persists. (A clean local completion always emits a
+      // real answer that already replaced the draft, so this only bites the
+      // interrupted paths.)
+      if (draftRef.current) {
+        finalContent = "";
+        scheduleStreamFlush(asstId, "");
+      }
       // Land every buffered token into the store before the turn settles, so the
       // finished transcript (and what we persist) holds the complete answer even
       // if the last frame's flush hadn't fired yet.
@@ -1821,8 +1910,17 @@ export function ChatPanel() {
       abortRef.current = null;
       setStreaming(false);
       setProgressLabel(null);
+      draftRef.current = false;
+      setDraftActive(false);
       // Save the settled turn for this session (cheap: once per turn, not per token).
       persistMessages();
+      // G6: with "Save chats on this device" ON, also export the settled
+      // conversation as an indexed vault note so it becomes retrievable content.
+      // Fail-closed: honor the LIVE managed-policy lock too, not just the
+      // opt-in field — `persistMessages()` re-checks `chatHistoryLocked()` the
+      // same way, so a policy applied AFTER bootstrap (when the store field was
+      // already true) must not let a note slip through. Fire-and-forget.
+      if (historyPersistEnabled && !chatHistoryLocked()) void exportConversationNoteNow();
       // Hand focus back for the follow-up — but only if the user hasn't moved
       // focus elsewhere (e.g. the explorer's search box) while it streamed.
       const active = document.activeElement;
@@ -1891,6 +1989,46 @@ export function ChatPanel() {
       }
     }
     return lines.join("\n");
+  }
+
+  /**
+   * G6: auto-export the settled conversation as an indexed vault note (YAML
+   * frontmatter + the same transcript markdown), overwritten in place per
+   * conversation so past chats become retrievable content. Fire-and-forget;
+   * the CALLER gates on "Save chats on this device". Failures are swallowed —
+   * this is a background convenience, never a blocker.
+   */
+  async function exportConversationNoteNow() {
+    if (exportNoteRef.current) return; // a write is already in flight
+    const state = useChatStore.getState();
+    const msgs = state.messages;
+    const convo = state.currentId;
+    // Worth a note only once there's a real answer to recall.
+    if (!convo || !msgs.some((m) => m.role === "assistant" && m.content && !m.error)) return;
+    const title =
+      state.conversations.find((c) => c.id === convo)?.title.trim() || "Lighthouse chat";
+    const citedFileIds = Array.from(
+      new Set(msgs.flatMap((m) => m.references?.map((r) => r.fileId) ?? [])),
+    );
+    // Double-quote every scalar so a title/path with a colon or quote stays valid YAML.
+    const yaml = (v: string) => `"${v.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+    const frontmatter = [
+      "---",
+      `date: ${new Date().toISOString()}`,
+      `title: ${yaml(title)}`,
+      `provider: ${yaml(providerLabel)}`,
+      `citedFileIds: [${citedFileIds.map(yaml).join(", ")}]`,
+      "---",
+      "",
+    ].join("\n");
+    exportNoteRef.current = true;
+    try {
+      await ragService.exportConversationNote(convo, title, frontmatter + transcriptMarkdown(msgs, title));
+    } catch {
+      /* background best-effort — never surface */
+    } finally {
+      exportNoteRef.current = false;
+    }
   }
 
   /** Export the conversation as a markdown note into Lighthouse Notes/. */
@@ -2006,6 +2144,21 @@ export function ChatPanel() {
       }
     } catch {
       /* the list simply stays as-is */
+    } finally {
+      setPinsBusy(false);
+    }
+  }
+
+  /** G5: refresh the "Lighthouse Briefing" note on demand and confirm inline. */
+  async function refreshBriefingNoteNow() {
+    if (pinsBusy) return;
+    setPinsBusy(true);
+    setBriefingSaved(null);
+    try {
+      const res = await ragService.refreshBriefingNote();
+      setBriefingSaved(res.error ? `Couldn't save: ${res.error}` : "Saved to Lighthouse Notes");
+    } catch {
+      setBriefingSaved("Couldn't save the briefing note");
     } finally {
       setPinsBusy(false);
     }
@@ -2688,8 +2841,20 @@ export function ChatPanel() {
             <BriefingsPanel pins={pinList} />
           </DialogContent>
           <DialogActions>
+            {briefingSaved && (
+              <Text size={200} className={styles.quietNote}>
+                {briefingSaved}
+              </Text>
+            )}
             <Button appearance="secondary" onClick={() => setPinsOpen(false)}>
               Close
+            </Button>
+            <Button
+              appearance="secondary"
+              disabled={pinsBusy || pinList.length === 0}
+              onClick={() => void refreshBriefingNoteNow()}
+            >
+              Refresh briefing note
             </Button>
             <Button
               appearance="primary"
@@ -3091,6 +3256,11 @@ export function ChatPanel() {
                           )}
                           {streaming && m.id === lastId && <span className={styles.beaconInline} />}
                         </div>
+                      )}
+                      {streaming && m.id === lastId && draftActive && (
+                        <Text size={200} className={styles.draftBadge}>
+                          Draft — verifying with the private model…
+                        </Text>
                       )}
                       {m.stopped && (
                         <Text size={200} className={styles.quietNote}>

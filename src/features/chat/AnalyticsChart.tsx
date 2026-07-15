@@ -3,7 +3,14 @@
 import { useRef, useState } from "react";
 import { Button, Text, Tooltip, makeStyles, tokens } from "@fluentui/react-components";
 import { ArrowDownloadRegular, CheckmarkRegular } from "@fluentui/react-icons";
-import { formatTick, niceTicks, scaleLinear, type ChartSpec } from "@/lib/chartSpec";
+import {
+  detectGranularity,
+  formatTick,
+  formatXTick,
+  niceTicks,
+  scaleLinear,
+  type ChartSpec,
+} from "@/lib/chartSpec";
 
 /**
  * Theme-aware SVG chart for analytics answers (Phase C). The spec arrives in a
@@ -130,22 +137,42 @@ export function AnalyticsChart({ spec }: { spec: ChartSpec }) {
   const [exported, setExported] = useState(false);
   const inner = { w: W - MARGIN.left - MARGIN.right, h: H - MARGIN.top - MARGIN.bottom };
 
+  const isStacked = spec.kind === "bar" && spec.stacked === true;
+  const isScatter = spec.kind === "scatter";
   const all = spec.series.flatMap((s) => s.values).filter((v): v is number => v !== null);
-  const ticks = niceTicks(Math.min(0, ...all), Math.max(0, ...all), 4);
-  const y = scaleLinear(
-    ticks[0],
-    ticks[ticks.length - 1],
-    MARGIN.top + inner.h,
-    MARGIN.top,
-  );
+  // Per-category stack sums (only meaningful when stacked; parts are ≥0 by the
+  // engine's is_stackable proof, so the sum is the true top of the bar).
+  const stackSums = isStacked
+    ? spec.x.map((_, i) => spec.series.reduce((acc, s) => acc + (s.values[i] ?? 0), 0))
+    : [];
+  // Y domain is KIND-AWARE: stacked → [0, max stack]; bar/area keep the forced-
+  // zero baseline; line/scatter fit the data (a scatter near 50k shouldn't
+  // waste the axis on an unused zero).
+  const [yMin, yMax] = isStacked
+    ? [0, Math.max(0, ...stackSums)]
+    : spec.kind === "line" || isScatter
+      ? [Math.min(...all), Math.max(...all)]
+      : [Math.min(0, ...all), Math.max(0, ...all)];
+  const ticks = niceTicks(yMin, yMax, 4);
+  const y = scaleLinear(ticks[0], ticks[ticks.length - 1], MARGIN.top + inner.h, MARGIN.top);
   const n = spec.x.length;
   const band = inner.w / n;
   const xCenter = (i: number) => MARGIN.left + band * i + band / 2;
   // Crowded axes: label every k-th category so text never overlaps.
   const labelEvery = n > 16 ? 3 : n > 8 ? 2 : 1;
+  // Temporal labels get granularity-aware formatting (e.g. "2024-07" → "Jul").
+  const granularity = isScatter ? "numeric" : detectGranularity(spec.x);
+
+  // Scatter uses a NUMERIC x-scale over its own niced domain + bottom ticks.
+  const xv = spec.xValues ?? [];
+  const finiteXv = xv.filter((v) => Number.isFinite(v));
+  const xTicks = isScatter ? niceTicks(Math.min(...finiteXv), Math.max(...finiteXv), 4) : [];
+  const xScale = isScatter
+    ? scaleLinear(xTicks[0], xTicks[xTicks.length - 1], MARGIN.left, W - MARGIN.right)
+    : null;
 
   const aria = `${spec.kind} chart of ${spec.series.map((s) => s.name).join(", ")} across ${n} ${
-    spec.kind === "bar" ? "categories" : "points"
+    isScatter ? "points" : spec.kind === "bar" ? "categories" : "points"
   }`;
 
   return (
@@ -195,48 +222,110 @@ export function AnalyticsChart({ spec }: { spec: ChartSpec }) {
             </text>
           </g>
         ))}
-        {/* x labels */}
-        {spec.x.map((label, i) =>
-          i % labelEvery === 0 ? (
-            <text
-              key={`x${i}`}
-              x={xCenter(i)}
-              y={H - MARGIN.bottom + 16}
-              textAnchor="middle"
-              fontSize="10"
-              fill={tokens.colorNeutralForeground3}
-            >
-              <title>{label}</title>
-              {truncateLabel(label)}
-            </text>
-          ) : null,
-        )}
+        {/* x labels: numeric ticks for scatter, else per-category (temporal-formatted) */}
+        {isScatter && xScale
+          ? xTicks.map((t) => (
+              <text
+                key={`xt${t}`}
+                x={xScale(t)}
+                y={H - MARGIN.bottom + 16}
+                textAnchor="middle"
+                fontSize="10"
+                fill={tokens.colorNeutralForeground3}
+              >
+                {formatTick(t)}
+              </text>
+            ))
+          : spec.x.map((label, i) =>
+              i % labelEvery === 0 ? (
+                <text
+                  key={`x${i}`}
+                  x={xCenter(i)}
+                  y={H - MARGIN.bottom + 16}
+                  textAnchor="middle"
+                  fontSize="10"
+                  fill={tokens.colorNeutralForeground3}
+                >
+                  <title>{label}</title>
+                  {truncateLabel(formatXTick(label, granularity))}
+                </text>
+              ) : null,
+            )}
         {/* marks */}
-        {spec.kind === "bar"
-          ? spec.series.map((s, si) => {
-              const group = band * 0.72;
-              const bw = group / spec.series.length;
-              return s.values.map((v, i) => {
-                if (v === null) return null;
-                const x0 = MARGIN.left + band * i + (band - group) / 2 + bw * si;
-                const y0 = Math.min(y(0), y(v));
-                const h = Math.abs(y(v) - y(0));
-                return (
-                  <rect
-                    key={`b${si}-${i}`}
-                    x={x0}
-                    y={y0}
-                    width={Math.max(1, bw - 2)}
-                    height={Math.max(1, h)}
-                    rx={1.5}
-                    fill={SERIES_FILLS[si % SERIES_FILLS.length]}
-                  >
-                    <title>{`${spec.x[i]} — ${s.name}: ${v}`}</title>
-                  </rect>
-                );
-              });
+        {isScatter && xScale
+          ? // Scatter: (x, y) circles, no connecting line.
+            spec.series[0].values.map((v, i) => {
+              const xvi = xv[i];
+              if (v === null || !Number.isFinite(xvi)) return null;
+              return (
+                <circle
+                  key={`s${i}`}
+                  cx={xScale(xvi)}
+                  cy={y(v)}
+                  r={3}
+                  fill={SERIES_FILLS[0]}
+                  fillOpacity={0.85}
+                >
+                  <title>{`${spec.series[0].name}: (${spec.x[i]}, ${v})`}</title>
+                </circle>
+              );
             })
-          : spec.series.map((s, si) => {
+          : isStacked
+            ? // Stacked bar: one full-width bar per category, segments from the
+              // baseline up. NO total label — the renderer never states the sum.
+              spec.x.map((_, i) => {
+                const bw = band * 0.72;
+                const x0 = MARGIN.left + band * i + (band - bw) / 2;
+                let running = 0;
+                return (
+                  <g key={`sb${i}`}>
+                    {spec.series.map((s, si) => {
+                      const v = s.values[i];
+                      if (v === null) return null;
+                      const yBot = y(running);
+                      running += v;
+                      const yTop = y(running);
+                      return (
+                        <rect
+                          key={`sb${i}-${si}`}
+                          x={x0}
+                          y={yTop}
+                          width={Math.max(1, bw)}
+                          height={Math.max(1, Math.abs(yBot - yTop))}
+                          fill={SERIES_FILLS[si % SERIES_FILLS.length]}
+                        >
+                          <title>{`${spec.x[i]} — ${s.name}: ${v}`}</title>
+                        </rect>
+                      );
+                    })}
+                  </g>
+                );
+              })
+            : spec.kind === "bar"
+              ? spec.series.map((s, si) => {
+                  const group = band * 0.72;
+                  const bw = group / spec.series.length;
+                  return s.values.map((v, i) => {
+                    if (v === null) return null;
+                    const x0 = MARGIN.left + band * i + (band - group) / 2 + bw * si;
+                    const y0 = Math.min(y(0), y(v));
+                    const h = Math.abs(y(v) - y(0));
+                    return (
+                      <rect
+                        key={`b${si}-${i}`}
+                        x={x0}
+                        y={y0}
+                        width={Math.max(1, bw - 2)}
+                        height={Math.max(1, h)}
+                        rx={1.5}
+                        fill={SERIES_FILLS[si % SERIES_FILLS.length]}
+                      >
+                        <title>{`${spec.x[i]} — ${s.name}: ${v}`}</title>
+                      </rect>
+                    );
+                  });
+                })
+              : spec.series.map((s, si) => {
               const pts = s.values
                 .map((v, i) => (v === null ? null : `${xCenter(i)},${y(v)}`))
                 .filter((p): p is string => p !== null);

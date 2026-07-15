@@ -626,6 +626,27 @@ fn read_settings(app: &AppHandle) -> Value {
         .unwrap_or_else(|| serde_json::json!({}))
 }
 
+/// G5: fire the briefing-note OS notification, gated. Off when `briefingNotify`
+/// is false (the note is still written), and — the "never wake from hidden"
+/// rule — suppressed while the app is suspended (hidden to tray or idle-
+/// suspended under background-conserve). The note write itself is unaffected.
+fn maybe_notify(app: &AppHandle, n: usize) {
+    use tauri_plugin_notification::NotificationExt;
+    if read_settings(app)["briefingNotify"].as_bool() == Some(false) {
+        return;
+    }
+    if app.try_state::<Supervisor>().map(|s| s.is_suspended()).unwrap_or(false) {
+        return;
+    }
+    let body = format!("{n} pinned question{} changed.", if n == 1 { "" } else { "s" });
+    let _ = app
+        .notification()
+        .builder()
+        .title("Lighthouse Briefing updated")
+        .body(body)
+        .show();
+}
+
 fn write_settings(app: &AppHandle, patch: Value) {
     let mut s = read_settings(app);
     if let (Some(obj), Some(p)) = (s.as_object_mut(), patch.as_object()) {
@@ -1048,6 +1069,7 @@ fn main() {
                 .build(),
         )
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(tauri_plugin_notification::init()) // G5 briefing-note alerts
         .manage(Supervisor::default())
         .manage(UpdateState::default())
         .manage(WidgetPin::default())
@@ -1268,6 +1290,14 @@ fn main() {
                     // digests persist BEFORE the emit, so without this buffer
                     // a failed emit would silently swallow the change.
                     let mut pending: Vec<lighthouse_core::pins::ChangedPin> = Vec::new();
+                    // G5 briefing note: pins changed since the LAST note, keyed by
+                    // id so a pin that changes twice before a note reads
+                    // before=oldest, now=newest. Independent of `pending` (which
+                    // clears on each emit); this clears only when a note is written.
+                    let mut note_changes: std::collections::HashMap<
+                        String,
+                        lighthouse_core::pins::ChangedPin,
+                    > = std::collections::HashMap::new();
                     loop {
                         tokio::time::sleep(std::time::Duration::from_secs(30)).await;
                         let g = lighthouse_core::watch::generation();
@@ -1289,24 +1319,79 @@ fn main() {
                             continue;
                         }
                         let changed = lighthouse_core::pins::recheck_all().await;
+                        // Accumulate for the briefing note (keep earliest `before`,
+                        // update `after`) BEFORE `changed` is moved into `pending`.
+                        for c in &changed {
+                            note_changes
+                                .entry(c.id.clone())
+                                .and_modify(|e| e.after = c.after.clone())
+                                .or_insert_with(|| c.clone());
+                        }
                         // Newest state wins per pin id; undelivered older
                         // alerts for other pins ride along.
                         let fresh: std::collections::HashSet<String> =
                             changed.iter().map(|c| c.id.clone()).collect();
                         pending.retain(|p| !fresh.contains(&p.id));
                         pending.extend(changed);
-                        if pending.is_empty() {
-                            continue;
+                        // Fire the change toast when there's something fresh — but
+                        // do NOT early-continue on an empty `pending`, or a note
+                        // that has come due this pass (from changes accumulated on
+                        // an EARLIER pass) would be skipped whenever the current
+                        // pass produced no fresh pin change — e.g. the watcher
+                        // generation bumped on an unrelated vault edit.
+                        if !pending.is_empty() {
+                            match handle
+                                .emit("pins-changed", serde_json::json!({ "changed": pending }))
+                            {
+                                Ok(()) => pending.clear(),
+                                Err(e) => {
+                                    shell_log(
+                                        &handle,
+                                        &format!("pins: emit failed (will retry next pass): {e}"),
+                                    );
+                                }
+                            }
                         }
-                        match handle
-                            .emit("pins-changed", serde_json::json!({ "changed": pending }))
+                        // G5: at most once per user-set daily hour, refresh the
+                        // briefing note from everything changed since the last
+                        // note, then notify (gated). The note is written even
+                        // when the notification is suppressed. Only stamp the daily
+                        // gate + clear the accumulator once the write SUCCEEDS, so a
+                        // failed write retries next pass instead of silently
+                        // recording the day's note as done and dropping the changes.
+                        let hour = read_settings(&handle)["briefingNoteHour"]
+                            .as_u64()
+                            .unwrap_or(9) as u32;
+                        let now = lighthouse_core::config::now_ms();
+                        if !note_changes.is_empty()
+                            && lighthouse_core::briefings::note_due(
+                                lighthouse_core::briefings::last_note_ms(),
+                                now,
+                                hour,
+                            )
                         {
-                            Ok(()) => pending.clear(),
-                            Err(e) => {
-                                shell_log(
+                            let mut changed_vec: Vec<_> = note_changes.values().cloned().collect();
+                            changed_vec.sort_by(|a, b| a.id.cmp(&b.id)); // deterministic order
+                            let md = lighthouse_core::briefings::compose_briefing_note(
+                                &changed_vec,
+                                now,
+                            );
+                            match lighthouse_core::vault::refresh_artifact(
+                                "Lighthouse Notes",
+                                "Lighthouse Briefing",
+                                "md",
+                                md.as_bytes(),
+                            ) {
+                                Ok(_) => {
+                                    lighthouse_core::briefings::mark_note_run(now);
+                                    let _ = handle.emit("vault-changed", ());
+                                    maybe_notify(&handle, changed_vec.len());
+                                    note_changes.clear();
+                                }
+                                Err(e) => shell_log(
                                     &handle,
-                                    &format!("pins: emit failed (will retry next pass): {e}"),
-                                );
+                                    &format!("briefing note write failed (will retry): {e}"),
+                                ),
                             }
                         }
                     }

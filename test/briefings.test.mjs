@@ -19,6 +19,7 @@ const {
   removeBriefing,
   dueBriefings,
   runBriefing,
+  composeBriefingNote,
   MAX_BRIEFINGS,
 } = await import("../src/server/briefings.ts");
 
@@ -86,4 +87,34 @@ test("runBriefing composes sections from pins (PARITY: summaries, not live SQL)"
   assert.ok(report.sections[1].error, "removed pin → error section");
 
   assert.equal(runBriefing("brief-nope"), null, "unknown id → null");
+});
+
+// --- G5 briefing note: byte-parity with the Rust composer -------------------
+
+test("composeBriefingNote matches the Rust golden output byte-for-byte", () => {
+  // Same input + now_ms (2026-07-15 09:03 UTC = 1784106180000) as the Rust
+  // test briefings::tests::compose_note_renders_before_after_tables_and_footer.
+  const now = 1784106180000;
+  const md = composeBriefingNote(
+    [
+      { question: "Revenue by region", before: "NE 120 · SE 300", after: "NE 150 · SE 480" },
+      { question: "New signups", after: "42" },
+    ],
+    now,
+  );
+  const expected =
+    "# Lighthouse Briefing\n" +
+    "\n## Revenue by region\n\n" +
+    "|        | Value |\n| ------ | ----- |\n| Before | NE 120 · SE 300 |\n| Now | NE 150 · SE 480 |\n" +
+    "\n## New signups\n\n" +
+    "|        | Value |\n| ------ | ----- |\n| Before | — |\n| Now | 42 |\n" +
+    "\n*As of 2026-07-15 09:03 UTC. Every value is computed directly from your files — no AI.*\n";
+  assert.equal(md, expected);
+});
+
+test("composeBriefingNote empty set is a coherent note", () => {
+  const md = composeBriefingNote([], 1784106180000);
+  assert.ok(md.startsWith("# Lighthouse Briefing\n"));
+  assert.ok(md.includes("_No pinned questions changed since the last check._"));
+  assert.ok(md.includes("no AI"));
 });

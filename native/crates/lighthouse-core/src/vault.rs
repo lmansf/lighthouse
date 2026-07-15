@@ -702,6 +702,24 @@ pub fn add_file(name: &str, bytes: &[u8], dest_parent_id: Option<&str>) -> anyho
     Ok(final_id)
 }
 
+/// G6: auto-exported past-chat notes live here (under "Lighthouse Notes").
+/// A node id is its POSIX vault-relative path, so a path-prefix test is an
+/// exact, deterministic source-kind classifier. KEEP IN SYNC with
+/// src/server/vault.ts (CHATS_SUBDIR / sourceKindOf).
+pub const CHATS_SUBDIR: &str = "Lighthouse Notes/Chats";
+
+/// Classify a retrieved node id as a past-conversation note or an ordinary
+/// file — purely by its vault-relative path. The trailing slash matters:
+/// `Lighthouse Notes/Chats/x.md` is a conversation, `Lighthouse Notes/Chatsz`
+/// is not. KEEP IN SYNC with src/server/vault.ts::sourceKindOf.
+pub fn source_kind_of(file_id: &str) -> crate::contracts::SourceKind {
+    if file_id.starts_with("Lighthouse Notes/Chats/") {
+        crate::contracts::SourceKind::Conversation
+    } else {
+        crate::contracts::SourceKind::File
+    }
+}
+
 /// Write an artifact into a named vault folder ("Lighthouse Results",
 /// "Lighthouse Notes") — openspec: add-answer-artifacts. The name hint is
 /// REPAIRED, never rejected (separators and control chars become dashes,
@@ -732,6 +750,103 @@ pub fn write_artifact(
     let id = add_file(&format!("{clean}.{ext}"), bytes, Some(subdir))?;
     let name = id.rsplit('/').next().unwrap_or(&id).to_string();
     Ok((id, name))
+}
+
+/// Write/OVERWRITE a fixed-name artifact in a named vault folder (the G5
+/// briefing-note refresh). Same hint sanitization as `write_artifact`, but NO
+/// collision suffix — the file is replaced in place, so "Lighthouse Briefing.md"
+/// stays a single, refreshed file instead of accreting " (1)", " (2)", … . The
+/// target is `safe_abs`-guarded against vault escape and the walk cache is
+/// invalidated (a file changed that no state write announced). Returns
+/// (node_id, file_name). KEEP IN SYNC with src/server/vault.ts::refreshArtifact.
+pub fn refresh_artifact(
+    subdir: &str,
+    name_hint: &str,
+    ext: &str,
+    bytes: &[u8],
+) -> anyhow::Result<(String, String)> {
+    let mut clean: String = name_hint
+        .chars()
+        .map(|c| if c == '/' || c == '\\' || c.is_control() { '-' } else { c })
+        .take(80)
+        .collect();
+    let is_trim = |c: char| c.is_whitespace() || c == '\u{FEFF}';
+    clean = clean.trim_matches(is_trim).trim_start_matches('.').trim_matches(is_trim).to_string();
+    if clean.is_empty() {
+        clean = "result".to_string();
+    }
+    // The node id is the vault-relative path; safe_abs rejects any escape.
+    let id = format!("{subdir}/{clean}.{ext}");
+    let abs = safe_abs(&id)?;
+    if let Some(parent) = abs.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&abs, bytes)?; // truncating overwrite — replaces in place
+    invalidate_walk_cache();
+    let name = id.rsplit('/').next().unwrap_or(&id).to_string();
+    Ok((id, name))
+}
+
+/// G6: write (overwrite) the auto-exported note for ONE conversation under
+/// `CHATS_SUBDIR`. The filename is the sanitized title plus a short, stable id
+/// derived from the conversation id — `"<title> [<cid8>].md"` — so the note is
+/// human-scannable in the explorer yet keyed by conversation, not title. Any
+/// earlier note for the SAME conversation whose title (hence filename) has since
+/// changed is removed first, so one chat never leaves two notes behind.
+/// `safe_abs`-guarded; walk cache invalidated. Returns (node_id, file_name).
+/// KEEP IN SYNC with src/server/vault.ts::writeConversationNote.
+pub fn write_conversation_note(
+    conversation_id: &str,
+    title: &str,
+    bytes: &[u8],
+) -> anyhow::Result<(String, String)> {
+    use sha1::{Digest, Sha1};
+    // 8 hex chars of SHA-1(conversation_id): collision-resistant, stable, and
+    // independent of the (mutable) title — the dedup key in brackets.
+    let digest = Sha1::digest(conversation_id.as_bytes());
+    let cid8: String = digest.iter().take(4).map(|b| format!("{b:02x}")).collect();
+    let mut clean: String = title
+        .chars()
+        .map(|c| if c == '/' || c == '\\' || c.is_control() { '-' } else { c })
+        .take(80)
+        .collect();
+    let is_trim = |c: char| c.is_whitespace() || c == '\u{FEFF}';
+    clean = clean.trim_matches(is_trim).trim_start_matches('.').trim_matches(is_trim).to_string();
+    if clean.is_empty() {
+        clean = "Conversation".to_string();
+    }
+    let filename = format!("{clean} [{cid8}].md");
+    let id = format!("{CHATS_SUBDIR}/{filename}");
+    let abs = safe_abs(&id)?;
+    if let Some(parent) = abs.parent() {
+        fs::create_dir_all(parent)?;
+        // Remove a prior note for this same conversation under a different title.
+        let suffix = format!(" [{cid8}].md");
+        if let Ok(rd) = fs::read_dir(parent) {
+            for e in rd.flatten() {
+                let fname = e.file_name().to_string_lossy().to_string();
+                if fname.ends_with(&suffix) && fname != filename {
+                    let _ = fs::remove_file(e.path());
+                }
+            }
+        }
+    }
+    fs::write(&abs, bytes)?; // truncating overwrite — one current note per chat
+    invalidate_walk_cache();
+    Ok((id, filename))
+}
+
+/// G6 fail-closed opt-out: remove the entire auto-exported `Chats/` folder, so
+/// turning "Save chats on this device" off leaves none of the user's
+/// conversations on disk. Idempotent — a missing folder is success. `safe_abs`-
+/// guarded. KEEP IN SYNC with src/server/vault.ts::purgeConversationNotes.
+pub fn purge_conversation_notes() -> anyhow::Result<()> {
+    let abs = safe_abs(CHATS_SUBDIR)?;
+    if abs.exists() {
+        fs::remove_dir_all(&abs)?;
+        invalidate_walk_cache();
+    }
+    Ok(())
 }
 
 /// Like Node's `path.extname`: extension including the dot, original case.
@@ -1484,6 +1599,7 @@ fn build_listing(nodes: &[FileNode], intent: &Listing) -> Retrieved {
                 name: format!("Included {}", intent.label),
                 text: format!("No included {} found.", intent.label),
                 score: 1.0,
+                kind: crate::contracts::SourceKind::File,
             }],
         };
     }
@@ -1509,6 +1625,7 @@ fn build_listing(nodes: &[FileNode], intent: &Listing) -> Retrieved {
             name: f.name.clone(),
             snippet: String::new(),
             score: 1.0,
+            kind: source_kind_of(&f.id),
         })
         .collect();
     Retrieved {
@@ -1517,6 +1634,7 @@ fn build_listing(nodes: &[FileNode], intent: &Listing) -> Retrieved {
             name: format!("Included {}", intent.label),
             text: list,
             score: 1.0,
+            kind: crate::contracts::SourceKind::File,
         }],
     }
 }
@@ -1588,10 +1706,15 @@ fn chunk_tabular(name: &str, text: &str) -> Vec<String> {
     let mut chunks: Vec<String> = Vec::new();
     // Blank-line-separated blocks (one per sheet for workbooks).
     for block in text.split("\n\n") {
+        // Trim trailing whitespace INCLUDING U+FEFF (BOM/ZWNBSP): JS `\s` and
+        // `String.trim` strip it but Rust's `char::is_whitespace` does not, so a
+        // tabular line ending in a mid-file BOM would chunk differently across
+        // the twins. Match JS so the chunkers stay byte-identical (parity).
+        let ws = |c: char| c.is_whitespace() || c == '\u{feff}';
         let lines: Vec<&str> = block
             .split('\n')
-            .map(str::trim_end)
-            .filter(|l| !l.trim().is_empty())
+            .map(|l| l.trim_end_matches(ws))
+            .filter(|l| !l.trim_matches(ws).is_empty())
             .collect();
         if lines.is_empty() {
             continue;
@@ -1644,6 +1767,10 @@ pub struct Context {
     pub name: String,
     pub text: String,
     pub score: f64,
+    /// G6: `Conversation` for a past-chat note, else `File`. Internal to synth
+    /// (drives the prompt label); not serialized to the client. Defaults to File.
+    #[serde(default)]
+    pub kind: crate::contracts::SourceKind,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1930,6 +2057,18 @@ pub fn retrieve(
         });
     }
 
+    // G6 recall cue: a "what did I ask/conclude about X" question biases toward
+    // past-conversation notes so synthesis draws on them. Deterministic — it only
+    // scales existing conversation-kind candidates before the sort, never invents
+    // a cand and never asks the model to rank. Runs on every retrieve pass (both
+    // the initial k and the wide pass) since it's inside `retrieve`.
+    if crate::synth::recall_cue(query) {
+        for c in &mut cands {
+            if source_kind_of(&c.file_id) == crate::contracts::SourceKind::Conversation {
+                c.score *= crate::synth::CONV_BOOST;
+            }
+        }
+    }
     cands.sort_by(|a, b| {
         b.score
             .partial_cmp(&a.score)
@@ -1989,6 +2128,7 @@ pub fn retrieve(
             name: c.name.clone(),
             snippet: format!("{}{}", snippet.trim(), if truncated { "…" } else { "" }),
             score: (c.score / max).min(1.0),
+            kind: source_kind_of(&c.file_id),
         });
     }
     let contexts: Vec<Context> = top
@@ -1997,6 +2137,7 @@ pub fn retrieve(
             name: c.name.clone(),
             text: c.text.clone(),
             score: (c.score / max).min(1.0),
+            kind: source_kind_of(&c.file_id),
         })
         .collect();
     Retrieved {
@@ -2215,5 +2356,16 @@ mod chunk_tests {
         let chunks = chunk_texts_named("notes.md", &text);
         assert_eq!(chunks.len(), 3); // 120-word windows, 95-word step
         assert!(chunks[0].starts_with("w1 ") && chunks[0].ends_with("w120"));
+    }
+
+    #[test]
+    fn tabular_line_trailing_bom_is_trimmed_for_parity() {
+        // A mid-file U+FEFF (BOM/ZWNBSP) at a line end: Rust's char::is_whitespace
+        // doesn't strip it but JS `\s`/trim do, which would drift the twins. Both
+        // now trim it, so the chunk equals the BOM-free version byte-for-byte.
+        let with_bom = "region,amount\nNE,1\u{feff}\nNW,2\n";
+        let plain = "region,amount\nNE,1\nNW,2\n";
+        assert_eq!(chunk_texts_named("t.csv", with_bom), chunk_texts_named("t.csv", plain));
+        assert!(!chunk_texts_named("t.csv", with_bom)[0].contains('\u{feff}'));
     }
 }
