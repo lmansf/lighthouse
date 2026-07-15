@@ -50,6 +50,7 @@ import {
 import dynamic from "next/dynamic";
 import type { ChatChunk, ChatTurn, FileNode, RagReference } from "@/contracts";
 import { chatService, MODEL_PROVIDERS, ragService } from "@/contracts";
+import { citationQuery, INSPECT_FILE_SHELL_EVENT } from "@/lib/citePreview";
 import { useRagStore } from "@/stores/useRagStore";
 import { egressPillSummary } from "@/features/egress/EgressShield";
 import { isDesktopShell } from "@/shell/desktopBridge";
@@ -692,6 +693,36 @@ export function WidgetBar() {
     })();
   };
 
+  /**
+   * Citation → preview hand-off (time-savers feature 4): a citation button on
+   * the inline answer raises the MAIN window and lands it on the file
+   * inspector AT the cited chunk — the same DOM event the chat's citations
+   * dispatch, carried cross-window as a Tauri event (mirroring "ask-question")
+   * and re-broadcast by the main window's transport into its
+   * FileInspectorHost. "Open in app" stays one click away inside the preview.
+   * The bar itself behaves exactly as it did for opening a file: held open
+   * FIRST so the focus steal doesn't dismiss the frozen answer. Outside the
+   * shell there is no main window to hand off to — keep the old direct open.
+   */
+  const previewCitation = (r: RagReference) => {
+    if (!isDesktopShell()) {
+      openNode(r.fileId);
+      return;
+    }
+    setOpenHold(true);
+    const question = answerRef.current?.question ?? "";
+    void invokeShell("show_main");
+    void import("@tauri-apps/api/event")
+      .then((ev) =>
+        ev.emitTo("main", INSPECT_FILE_SHELL_EVENT, {
+          fileId: r.fileId,
+          name: r.name,
+          query: citationQuery(r.snippet, question),
+        }),
+      )
+      .catch(() => {});
+  };
+
   /** Clear the frozen answer (the ✕ / first Esc). Stops a live stream. */
   const clearAnswer = () => {
     abortRef.current?.abort();
@@ -1018,7 +1049,7 @@ export function WidgetBar() {
                   size="small"
                   appearance="outline"
                   title={r.snippet}
-                  onClick={() => openNode(r.fileId)}
+                  onClick={() => previewCitation(r)}
                 >
                   {r.name}
                 </Button>

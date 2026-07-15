@@ -98,6 +98,7 @@ import {
   type SortDir,
 } from "@/lib/sortTable";
 import { pinChartData } from "@/lib/pinChart";
+import { citationQuery, requestFileInspect } from "@/lib/citePreview";
 import { composeEvidencePack, provenanceStampText } from "@/lib/evidencePack";
 import { recallRelated, type RecallHit } from "@/lib/recall";
 import { askSuggestions, lastAsk, type AskHistoryItem } from "@/lib/askTypeahead";
@@ -558,6 +559,8 @@ const useStyles = makeStyles({
     cursor: "pointer",
     ":hover": { backgroundColor: tokens.colorNeutralBackground2Hover },
     ":hover .open-affordance": { opacity: 1 },
+    // Keyboard path: reveal the secondary open-in-app button on focus too.
+    ":focus-within .open-affordance": { opacity: 1 },
   },
   // Brief highlight when a citation chip jumps to this card (class is toggled
   // for ~1.2s): a brand-tinted background that fades back out.
@@ -1401,12 +1404,17 @@ const References = memo(function References({
   desktop,
   flashCite,
   onOpen,
+  onPreview,
 }: {
   turnId: string;
   references: RagReference[];
   desktop: boolean;
   flashCite: string | null;
+  /** Secondary action (desktop only): hand the file to its OS app. */
   onOpen: (fileId: string) => void;
+  /** Primary action: open the in-app preview ON the cited chunk (time-savers
+   *  feature 4) — works on the web twin too, so cards are always interactive. */
+  onPreview: (turnId: string, r: RagReference) => void;
 }) {
   const styles = useStyles();
   return (
@@ -1421,21 +1429,27 @@ const References = memo(function References({
           id={citeCardId(turnId, i + 1)}
           className={mergeClasses(
             styles.refCard,
-            desktop && styles.refCardInteractive,
+            styles.refCardInteractive,
             flashCite === `${turnId}:${i + 1}` && styles.refCardFlash,
           )}
           appearance="filled-alternative"
-          {...(desktop
-            ? {
-                role: "button",
-                tabIndex: 0,
-                title:
-                  r.kind === "conversation" ? "Open past conversation note" : `Open ${r.name}`,
-                onClick: () => void onOpen(r.fileId),
-                onKeyDown: (e: KeyboardEvent) =>
-                  (e.key === "Enter" || e.key === " ") && void onOpen(r.fileId),
-              }
-            : {})}
+          role="button"
+          tabIndex={0}
+          title={
+            r.kind === "conversation"
+              ? "Preview the cited passage from this past conversation"
+              : `Preview the cited passage from ${r.name}`
+          }
+          onClick={() => onPreview(turnId, r)}
+          onKeyDown={(e: KeyboardEvent) => {
+            // Card-level keys only: Enter on the inner open-in-app button must
+            // not ALSO fire the preview.
+            if (e.target !== e.currentTarget) return;
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              onPreview(turnId, r);
+            }
+          }}
         >
           {/* Number matches the [n] markers in the answer text. */}
           <Badge appearance="tint" shape="circular" size="small">
@@ -1455,7 +1469,25 @@ const References = memo(function References({
               {r.snippet}
             </Text>
           </div>
-          {desktop && <OpenRegular className={`${styles.openIcon} open-affordance`} fontSize={18} />}
+          {/* "Open in app" stays as the SECONDARY action on the card. */}
+          {desktop && (
+            <Button
+              size="small"
+              appearance="subtle"
+              className={`${styles.openIcon} open-affordance`}
+              icon={<OpenRegular fontSize={18} />}
+              aria-label={
+                r.kind === "conversation"
+                  ? "Open the conversation note in its app"
+                  : `Open ${r.name} in its app`
+              }
+              title="Open in app"
+              onClick={(e) => {
+                e.stopPropagation();
+                void onOpen(r.fileId);
+              }}
+            />
+          )}
           <Badge appearance="outline">{Math.round(r.score * 100)}%</Badge>
         </Card>
       ))}
@@ -2597,18 +2629,46 @@ export function ChatPanel() {
     copyTimer.current = window.setTimeout(() => setCopiedId(null), 1500);
   }
 
-  // Clicking a [n] chip scrolls that turn's nth reference card into view and
-  // flashes it briefly so the eye lands on the right card.
-  const handleCitationClick = useCallback((turnId: string, n: number) => {
-    const card = document.getElementById(citeCardId(turnId, n));
-    if (!card) return; // marker without a matching reference — nothing to jump to
-    card.scrollIntoView({ behavior: "smooth", block: "nearest" });
-    setFlashCite(`${turnId}:${n}`);
-    if (flashTimer.current !== null) window.clearTimeout(flashTimer.current);
-    flashTimer.current = window.setTimeout(() => setFlashCite(null), 1200);
+  // Citation → preview (time-savers feature 4): open the file inspector ON the
+  // cited chunk. References carry no chunk id — the inspector's file-scoped
+  // test-search relocates the chunk from the citation's snippet (or, when the
+  // snippet has nothing scorable, the turn's question). Stable identity so the
+  // hoisted, memoized <References> keeps a stable onPreview.
+  const openPreview = useCallback((turnId: string, r: RagReference) => {
+    // The user question that produced this turn — the fallback locator query.
+    const msgs = useChatStore.getState().messages;
+    const idx = msgs.findIndex((x) => x.id === turnId);
+    const prev = idx > 0 ? msgs[idx - 1] : undefined;
+    const question = prev?.role === "user" ? prev.content : "";
+    requestFileInspect({
+      fileId: r.fileId,
+      name: r.name,
+      query: citationQuery(r.snippet, question),
+    });
   }, []);
 
+  // Clicking a [n] chip scrolls that turn's nth reference card into view,
+  // flashes it briefly so the eye lands on the right card — and opens the
+  // in-app preview on the passage that citation drew on.
+  const handleCitationClick = useCallback(
+    (turnId: string, n: number) => {
+      const card = document.getElementById(citeCardId(turnId, n));
+      if (card) {
+        card.scrollIntoView({ behavior: "smooth", block: "nearest" });
+        setFlashCite(`${turnId}:${n}`);
+        if (flashTimer.current !== null) window.clearTimeout(flashTimer.current);
+        flashTimer.current = window.setTimeout(() => setFlashCite(null), 1200);
+      }
+      // Marker without a matching reference (e.g. the SQL editor's transient
+      // answers) — nothing to preview.
+      const ref = useChatStore.getState().messages.find((x) => x.id === turnId)?.references?.[n - 1];
+      if (ref) openPreview(turnId, ref);
+    },
+    [openPreview],
+  );
+
   // Open a cited file in its native app (desktop only; the route no-ops on web).
+  // Now the SECONDARY action — the card body opens the in-app preview instead.
   // useCallback so the hoisted, memoized <References> keeps a stable onOpen and
   // its cards don't re-render as the panel does.
   const openFile = useCallback(async (fileId: string) => {
@@ -3796,6 +3856,7 @@ export function ChatPanel() {
                           desktop={desktop}
                           flashCite={flashCite}
                           onOpen={openFile}
+                          onPreview={openPreview}
                         />
                       )}
                       {/* Honesty note: files were visible, yet nothing matched. */}

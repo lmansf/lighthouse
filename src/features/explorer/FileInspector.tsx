@@ -14,8 +14,14 @@
  * fills every field; the web dev twin omits the Rust-engine-only ones (OCR flag,
  * chunk count, column catalog, index freshness), which this panel renders as a
  * muted "desktop app only" rather than a blank (honest degradation).
+ *
+ * Citation → preview (time-savers, feature 4): the panel doubles as the in-app
+ * preview a chat citation opens. `initialQuery` prefills the test-search and
+ * runs it in the same round trip; `highlightTop` lands the selection on the
+ * cited chunk (scrolled + highlighted), and ‹ › / ← → step through the scored
+ * chunk list. "Open in app" stays available as the secondary action.
  */
-import { useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import {
   Badge,
   Button,
@@ -29,17 +35,27 @@ import {
   Spinner,
   Text,
   makeStyles,
+  mergeClasses,
   shorthands,
   tokens,
 } from "@fluentui/react-components";
 import {
+  ChevronLeftRegular,
+  ChevronRightRegular,
   EyeOffRegular,
   EyeRegular,
   LockClosedRegular,
   LockOpenRegular,
+  OpenRegular,
   SearchRegular,
 } from "@fluentui/react-icons";
 import { ragService, type FileInspection } from "@/contracts";
+import { useRagStore } from "@/stores/useRagStore";
+import {
+  citedChunkIndex,
+  INSPECT_FILE_EVENT,
+  type InspectFileDetail,
+} from "@/lib/citePreview";
 
 const useStyles = makeStyles({
   body: { display: "flex", flexDirection: "column", ...shorthands.gap("14px"), minWidth: "min(560px, 80vw)" },
@@ -63,6 +79,14 @@ const useStyles = makeStyles({
   ocr: { color: tokens.colorPaletteDarkOrangeForeground1 },
   cols: { display: "flex", flexWrap: "wrap", ...shorthands.gap("6px") },
   searchRow: { display: "flex", ...shorthands.gap("8px") },
+  // Chunk navigation header: "Chunk k of n" + the ‹ › steppers.
+  navRow: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    ...shorthands.gap("8px"),
+  },
+  navBtns: { display: "flex", alignItems: "center", ...shorthands.gap("2px") },
   hit: {
     display: "flex",
     flexDirection: "column",
@@ -70,6 +94,13 @@ const useStyles = makeStyles({
     ...shorthands.padding("6px", "8px"),
     ...shorthands.borderRadius(tokens.borderRadiusMedium),
     backgroundColor: tokens.colorNeutralBackground2,
+  },
+  // The selected (cited / stepped-to) chunk: brand tint + inset ring — an
+  // inset shadow rather than a border so selection never shifts layout, and
+  // theme tokens so it reads in both light and dark.
+  hitActive: {
+    backgroundColor: tokens.colorBrandBackground2,
+    boxShadow: `inset 0 0 0 2px ${tokens.colorBrandStroke1}`,
   },
   hitText: { whiteSpace: "pre-wrap", wordBreak: "break-word", fontSize: tokens.fontSizeBase200 },
   bar: {
@@ -118,6 +149,8 @@ export function FileInspector({
   fileName,
   desktop,
   onClose,
+  initialQuery,
+  highlightTop,
 }: {
   /** The file to inspect; null closes the panel. */
   fileId: string | null;
@@ -126,6 +159,12 @@ export function FileInspector({
   /** True in the packaged desktop app — the web dev twin omits Rust-only fields. */
   desktop: boolean;
   onClose: () => void;
+  /** Citation → preview: prefill the test-search with this query and run it in
+   *  the same round trip as the inspection (absent/empty ⇒ plain inspector). */
+  initialQuery?: string;
+  /** With `initialQuery`: select, scroll to, and highlight the cited chunk —
+   *  the best-scored hit still containing the query (see citedChunkIndex). */
+  highlightTop?: boolean;
 }) {
   const styles = useStyles();
   const [data, setData] = useState<FileInspection | null>(null);
@@ -134,20 +173,39 @@ export function FileInspector({
   const [query, setQuery] = useState("");
   const [searching, setSearching] = useState(false);
   const [hits, setHits] = useState<FileInspection["testSearch"] | null>(null);
+  // The selected chunk (rank index into `hits`): the cited chunk on a
+  // citation open, then wherever ‹ › / ← → step. null = nothing selected.
+  const [active, setActive] = useState<number | null>(null);
+  const hitsRef = useRef<FileInspection["testSearch"] | null>(null);
+  hitsRef.current = hits;
+  const hitEls = useRef<(HTMLDivElement | null)[]>([]);
 
-  // Fetch the (metadata-only) inspection whenever a new file is opened.
+  // Fetch the inspection whenever a new file is opened. A citation preview
+  // (initialQuery) folds the chunk-locating test-search into the SAME round
+  // trip and — with highlightTop — lands selected on the cited chunk.
   useEffect(() => {
     if (!fileId) return;
     let live = true;
+    const q = initialQuery?.trim() ?? "";
     setData(null);
     setError(null);
     setHits(null);
-    setQuery("");
+    setActive(null);
+    setQuery(q);
     setLoading(true);
     ragService
-      .inspect(fileId)
+      .inspect(fileId, q || undefined)
       .then((res) => {
-        if (live) setData(res);
+        if (!live) return;
+        setData(res);
+        if (q) {
+          const hs = res.testSearch ?? [];
+          setHits(hs);
+          if (highlightTop) {
+            const cited = citedChunkIndex(hs, q);
+            if (cited >= 0) setActive(cited);
+          }
+        }
       })
       .catch(() => {
         if (live) setError("Couldn't inspect this file.");
@@ -158,17 +216,61 @@ export function FileInspector({
     return () => {
       live = false;
     };
-  }, [fileId]);
+  }, [fileId, initialQuery, highlightTop]);
 
   const runSearch = () => {
     const q = query.trim();
     if (!fileId || !q) return;
     setSearching(true);
+    setActive(null); // a fresh manual search starts unselected
     ragService
       .inspect(fileId, q)
       .then((res) => setHits(res.testSearch ?? []))
       .catch(() => setHits([]))
       .finally(() => setSearching(false));
+  };
+
+  /** Step the selection through the scored chunk list (buttons and ← →). */
+  const stepChunk = useCallback((delta: number) => {
+    setActive((a) => {
+      const n = hitsRef.current?.length ?? 0;
+      if (n === 0) return a;
+      if (a === null) return 0; // first step from "nothing selected" selects the top hit
+      return Math.min(n - 1, Math.max(0, a + delta));
+    });
+  }, []);
+
+  // ← / → step through the chunks while the dialog is open — except while
+  // typing in a field, where the arrows must keep moving the caret.
+  useEffect(() => {
+    if (!fileId) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+      if ((hitsRef.current?.length ?? 0) === 0) return;
+      e.preventDefault();
+      stepChunk(e.key === "ArrowRight" ? 1 : -1);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [fileId, stepChunk]);
+
+  // Bring the selected chunk into view (citation opens land scrolled to it).
+  useEffect(() => {
+    if (active === null || !hits || hits.length === 0) return;
+    hitEls.current[active]?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, [active, hits]);
+
+  /** Secondary action: hand the file to its OS app (desktop only; same route
+   *  as the chat reference cards — the web twin's route no-ops). */
+  const openInApp = () => {
+    if (!fileId) return;
+    void fetch("/api/open", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ nodeId: fileId }),
+    }).catch(() => {});
   };
 
   const name = data?.name ?? fileName;
@@ -313,8 +415,42 @@ export function FileInspector({
                       </Text>
                     ) : (
                       <div className={styles.section}>
+                        {/* Prev/next chunk navigation over the scored list. */}
+                        <div className={styles.navRow}>
+                          <Text size={200} className={styles.label} aria-live="polite">
+                            {active !== null
+                              ? `Chunk ${active + 1} of ${hits.length}`
+                              : `${hits.length} matching chunk${hits.length === 1 ? "" : "s"}`}
+                          </Text>
+                          <span className={styles.navBtns}>
+                            <Button
+                              size="small"
+                              appearance="subtle"
+                              icon={<ChevronLeftRegular />}
+                              aria-label="Previous chunk (left arrow)"
+                              title="Previous chunk (←)"
+                              disabled={active === null || active === 0}
+                              onClick={() => stepChunk(-1)}
+                            />
+                            <Button
+                              size="small"
+                              appearance="subtle"
+                              icon={<ChevronRightRegular />}
+                              aria-label="Next chunk (right arrow)"
+                              title="Next chunk (→)"
+                              disabled={active !== null && active >= hits.length - 1}
+                              onClick={() => stepChunk(1)}
+                            />
+                          </span>
+                        </div>
                         {hits.map((h, i) => (
-                          <div key={i} className={styles.hit}>
+                          <div
+                            key={i}
+                            ref={(el) => {
+                              hitEls.current[i] = el;
+                            }}
+                            className={mergeClasses(styles.hit, i === active && styles.hitActive)}
+                          >
                             <div className={styles.hitMeta}>
                               <Text size={200} className={styles.label}>
                                 chunk {i + 1}
@@ -330,6 +466,12 @@ export function FileInspector({
                             <Text className={styles.hitText}>{h.text}</Text>
                           </div>
                         ))}
+                        {highlightTop && (initialQuery?.trim() ?? "") !== "" && active !== null && (
+                          <Text size={200} className={styles.footNote}>
+                            Opened from a citation — the highlighted chunk is the passage the
+                            answer drew on; ‹ › (or ← →) steps through the other matches.
+                          </Text>
+                        )}
                       </div>
                     )
                   )}
@@ -342,6 +484,12 @@ export function FileInspector({
             )}
           </DialogContent>
           <DialogActions>
+            {/* Secondary action: the old cold-open, one click away. */}
+            {desktop && (
+              <Button appearance="secondary" icon={<OpenRegular />} onClick={openInApp}>
+                Open in app
+              </Button>
+            )}
             <Button appearance="secondary" onClick={onClose}>
               Close
             </Button>
@@ -349,5 +497,43 @@ export function FileInspector({
         </DialogBody>
       </DialogSurface>
     </Dialog>
+  );
+}
+
+/**
+ * App-wide preview host (citation → preview, time-savers feature 4): ONE
+ * FileInspector driven by the INSPECT_FILE_EVENT DOM event — dispatched by the
+ * chat's citation chips and reference cards (requestFileInspect), and
+ * re-broadcast by the desktop transport for the widget's cross-window handoff.
+ * Mounted once in app/page.tsx like the other overlays; the explorer keeps its
+ * own context-menu-driven FileInspector instance, unchanged.
+ */
+export function FileInspectorHost() {
+  const desktop = useRagStore((s) => s.desktop);
+  const [req, setReq] = useState<InspectFileDetail | null>(null);
+
+  useEffect(() => {
+    const onInspect = (e: Event) => {
+      const d = (e as CustomEvent<Partial<InspectFileDetail>>).detail;
+      if (!d || typeof d.fileId !== "string" || !d.fileId) return;
+      setReq({
+        fileId: d.fileId,
+        name: typeof d.name === "string" ? d.name : "",
+        query: typeof d.query === "string" && d.query.trim() ? d.query : undefined,
+      });
+    };
+    window.addEventListener(INSPECT_FILE_EVENT, onInspect);
+    return () => window.removeEventListener(INSPECT_FILE_EVENT, onInspect);
+  }, []);
+
+  return (
+    <FileInspector
+      fileId={req?.fileId ?? null}
+      fileName={req?.name ?? ""}
+      desktop={desktop}
+      initialQuery={req?.query}
+      highlightTop
+      onClose={() => setReq(null)}
+    />
   );
 }
