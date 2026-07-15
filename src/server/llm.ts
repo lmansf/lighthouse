@@ -213,6 +213,10 @@ const SYSTEM_PROMPT = [
   "- When it helps the user get oriented — for a broad question, or when several files back your answer — briefly summarize the makeup of the sources you drew on: how many of each file type, with a handful of concrete example names. Infer the type from each source's filename extension (.xlsx/.csv → spreadsheet, .pdf → PDF, .docx → document, .md/.txt → note).",
   "- Count and name ONLY the files present in the numbered context blocks; never estimate the size of the whole vault or invent files you weren't given.",
   "- For example: \"I pulled this from 6 sources — 4 spreadsheets (Sales_Q1.csv, Sales_Q2.csv, Budget.xlsx, Forecast.xlsx) and 2 PDFs (Annual_Report.pdf, Board_Notes.pdf).\" or \"All three matches are Word documents: Contract_A.docx, Contract_B.docx, and NDA.docx.\"",
+  "",
+  "Charts:",
+  "- When the user asks for a total, breakdown, or trend over their spreadsheets and tables, the app runs a query and automatically draws a chart from the verified result whenever its shape fits — a category or time column alongside one to three numeric columns. The app renders the chart; you never write chart markup or describe a chart the data does not support.",
+  "- So you CAN chart the user's data. If asked whether you can graph or chart something, say yes and point them to a concrete breakdown or trend (for example \"revenue by region\" or \"monthly signups\"); the app draws the chart beside the numbers. Never tell the user you are unable to make charts or graphs.",
 ].join("\n");
 
 function buildPrompt(question: string, contexts: Ctx[]): string {
