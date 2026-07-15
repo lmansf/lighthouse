@@ -2690,7 +2690,7 @@ export function ChatPanel() {
         </div>
       )}
       {attachmentBar}
-      <div className={styles.composer}>
+      <div className={styles.composer} data-tour="chat">
         {attachButton}
         <Textarea
           ref={composerRef}
@@ -2717,7 +2717,7 @@ export function ChatPanel() {
           Enter to send · Shift+Enter for a new line
           {messages.length > 0 ? " · ↑ to edit your last question" : ""}
         </Text>
-        <Text size={200} className={styles.metaLine}>
+        <Text size={200} className={styles.metaLine} data-tour="models">
           {provenance}
         </Text>
       </div>
@@ -3078,7 +3078,7 @@ export function ChatPanel() {
         {recentChats.length > 0 && <div className={styles.heroHistory}>{historyButton}</div>}
         <div className={styles.hero}>
           <span className={styles.beacon} />
-          <Title3>Ask Lighthouse</Title3>
+          <Title3 data-tour="beam">Ask Lighthouse</Title3>
           <Text className={styles.heroHint}>
             I&apos;ll answer using only the files visible to AI. Drag a file from the
             explorer (or drop one here) to ask about just that file.
@@ -3177,7 +3177,7 @@ export function ChatPanel() {
           </div>
         </div>
 
-        <div className={styles.bodyWrap}>
+        <div className={styles.bodyWrap} data-tour="beam">
           <div className={styles.body} ref={bodyRef} onScroll={handleBodyScroll}>
             {messages.map((m) =>
               m.role === "user" ? (

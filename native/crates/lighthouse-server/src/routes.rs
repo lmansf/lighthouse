@@ -887,6 +887,7 @@ pub async fn settings_get() -> Response {
         "draftAnswers": s.draft_answers != Some(false), // default on
         "briefingNotify": s.briefing_notify != Some(false), // default on (G5)
         "briefingNoteHour": s.briefing_note_hour.unwrap_or(9), // default 9am (G5)
+        "tourShown": s.tour_shown == Some(true), // first-run tour, once per install
     }))
     .into_response()
 }
@@ -916,6 +917,7 @@ pub async fn settings_post(headers: HeaderMap, body: Option<Json<Value>>) -> Res
         body["draftAnswers"].as_bool(),
         body["briefingNotify"].as_bool(),
         body["briefingNoteHour"].as_i64(),
+        body["tourShown"].as_bool(),
     );
     Json(json!({
         "ok": true,
@@ -933,6 +935,7 @@ pub async fn settings_post(headers: HeaderMap, body: Option<Json<Value>>) -> Res
         "draftAnswers": s.draft_answers != Some(false),
         "briefingNotify": s.briefing_notify != Some(false),
         "briefingNoteHour": s.briefing_note_hour.unwrap_or(9),
+        "tourShown": s.tour_shown == Some(true),
     }))
     .into_response()
 }

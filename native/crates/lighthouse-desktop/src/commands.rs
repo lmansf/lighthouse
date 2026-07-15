@@ -774,6 +774,7 @@ pub fn settings_get(app: AppHandle) -> Value {
         "draftAnswers": s.draft_answers != Some(false), // default on (G2)
         "briefingNotify": s.briefing_notify != Some(false), // default on (G5)
         "briefingNoteHour": s.briefing_note_hour.unwrap_or(9), // default 9am (G5)
+        "tourShown": s.tour_shown == Some(true), // first-run tour, once per install
     })
 }
 
@@ -793,6 +794,7 @@ pub fn settings_set(
     draft_answers: Option<bool>,
     briefing_notify: Option<bool>,
     briefing_note_hour: Option<i64>,
+    tour_shown: Option<bool>,
 ) -> Value {
     // A new summon shortcut must PARSE before anything persists — saving an
     // unregistrable string would strand the user with no hotkey at all.
@@ -833,6 +835,7 @@ pub fn settings_set(
         draft_answers,
         briefing_notify,
         briefing_note_hour,
+        tour_shown,
     );
     if shortcut_changed && !crate::register_summon_shortcut(&app) {
         // The new chord didn't register — restore the previous one so the
@@ -845,6 +848,7 @@ pub fn settings_set(
             None,
             None,
             Some(prev_shortcut.clone().unwrap_or_default()),
+            None,
             None,
             None,
             None,

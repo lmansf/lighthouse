@@ -6,14 +6,15 @@ import { AppShell } from "@/shell/AppShell";
 import { OnboardingPanel } from "@/features/onboarding/OnboardingPanel";
 import { FileExplorer } from "@/features/explorer/FileExplorer";
 import { ChatPanel } from "@/features/chat/ChatPanel";
-import { QuickStartAuto } from "@/features/help/QuickStart";
 import { VersionBadge } from "@/shell/VersionBadge";
 
 // These are pure overlays never on screen at first paint, and — unlike the
-// mode-chooser/quick-start surfaces, whose modules are already pulled into the
-// first-paint graph by the sidebar (SettingsMenu) and the chat/sidebar `modKey`
-// imports — nothing else statically imports them, so deferring them here
-// genuinely keeps their code out of the first-paint chunk.
+// mode-chooser surface, whose module is already pulled into the first-paint
+// graph by the sidebar (SettingsMenu) and the chat/sidebar `modKey` imports —
+// nothing else statically imports them, so deferring them here genuinely keeps
+// their code out of the first-paint chunk. The first-run tour lives here too:
+// it self-gates on the `tourShown` setting and only ever mounts in this MAIN
+// window, so the widget (/widget) and explorer (/explorer) windows never run it.
 const BugReport = dynamic(
   () => import("@/features/feedback/BugReport").then((m) => m.BugReport),
   { ssr: false },
@@ -24,6 +25,10 @@ const FeedbackNudge = dynamic(
 );
 const SummonHint = dynamic(
   () => import("@/features/widget/SummonHint").then((m) => m.SummonHint),
+  { ssr: false },
+);
+const FirstRunTour = dynamic(
+  () => import("@/features/help/FirstRunTour").then((m) => m.FirstRunTour),
   { ssr: false },
 );
 
@@ -68,7 +73,10 @@ export default function Home() {
           it. */}
       {onboarded && (
         <>
-          <QuickStartAuto />
+          {/* First-run orientation tour: self-gated on `tourShown` (shown once
+              per install), main window only, and re-runnable from the settings
+              gear's "Take the tour". */}
+          <FirstRunTour />
           {/* First-run summon hint (desktop only, self-gated once-shown). */}
           <SummonHint />
         </>

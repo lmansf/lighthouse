@@ -88,9 +88,11 @@ export function FeedbackNudge() {
     const timer = setInterval(() => {
       const live = since.current != null ? Date.now() - since.current : 0;
       if (activeMs.current + live >= NUDGE_AFTER_MS) {
-        // Another modal is up (quick-start tour, feedback dialog, a dialog) —
-        // don't pile a second interruption on top; retry next tick.
-        if (document.querySelector(".fui-DialogSurface")) return;
+        // Another modal is up (the first-run tour, feedback dialog, a dialog) —
+        // don't pile a second interruption on top; retry next tick. The tour's
+        // anchored TeachingPopover isn't a DialogSurface, so also honor its
+        // body marker.
+        if (document.querySelector(".fui-DialogSurface") || document.body.dataset.tourActive) return;
         clearInterval(timer);
         document.removeEventListener("visibilitychange", onVisibility);
         // Nothing is persisted at surface time — only the user's response

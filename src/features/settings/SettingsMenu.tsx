@@ -45,7 +45,7 @@ import {
 } from "@fluentui/react-icons";
 import { MODEL_PROVIDERS, ragService, type AuditSnapshot } from "@/contracts";
 import { LocalModelOption, LocalModelInstallPanel } from "@/features/localModel/LocalModelOption";
-import { QuickStartDialog } from "@/features/help/QuickStart";
+import { START_TOUR_EVENT } from "@/features/help/FirstRunTour";
 import { showWidget, summonHotkey, prettyShortcut, modKey } from "@/features/onboarding/ModeChooser";
 import { useAuthStore } from "@/stores/useAuthStore";
 import { useThemeStore } from "@/stores/useThemeStore";
@@ -1196,7 +1196,6 @@ export function SettingsMenu() {
   const styles = useStyles();
   const [aiDlg, setAiDlg] = useState(false);
   const [prefDlg, setPrefDlg] = useState(false);
-  const [quickStartDlg, setQuickStartDlg] = useState(false);
   const [auditDlg, setAuditDlg] = useState(false);
 
   // Other features (chat empty states, explorer hints, …) deep-link into these
@@ -1217,7 +1216,13 @@ export function SettingsMenu() {
     <>
       <Menu>
         <MenuTrigger disableButtonEnhancement>
-          <Button appearance="subtle" size="small" icon={<SettingsRegular />} aria-label="Settings" />
+          <Button
+            appearance="subtle"
+            size="small"
+            icon={<SettingsRegular />}
+            aria-label="Settings"
+            data-tour="settings"
+          />
         </MenuTrigger>
         <MenuPopover>
           <MenuList>
@@ -1249,8 +1254,11 @@ export function SettingsMenu() {
             <MenuItem icon={<HistoryRegular />} onClick={() => setAuditDlg(true)}>
               Audit log
             </MenuItem>
-            <MenuItem icon={<QuestionCircleRegular />} onClick={() => setQuickStartDlg(true)}>
-              Quick start
+            <MenuItem
+              icon={<QuestionCircleRegular />}
+              onClick={() => window.dispatchEvent(new Event(START_TOUR_EVENT))}
+            >
+              Take the tour
             </MenuItem>
             <MenuItem
               icon={<OpenRegular />}
@@ -1263,7 +1271,6 @@ export function SettingsMenu() {
       </Menu>
       <AiModelsDialog open={aiDlg} setOpen={setAiDlg} />
       <PreferencesDialog open={prefDlg} setOpen={setPrefDlg} />
-      <QuickStartDialog open={quickStartDlg} setOpen={setQuickStartDlg} />
       <AuditLogDialog open={auditDlg} setOpen={setAuditDlg} />
     </>
   );
