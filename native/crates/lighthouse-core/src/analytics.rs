@@ -1384,14 +1384,20 @@ const CHART_MAX_SERIES: usize = 3;
 /// bar otherwise. None = "not a chart" — answers degrade to the table alone,
 /// never to a wrong drawing.
 ///
-/// Kinds are deliberately limited to bar / line / area. Stacked bar and
-/// scatter are NOT emitted: stacking implies a part-of-whole SUM relationship
-/// the engine can't safely infer from an arbitrary GROUP BY (stacking
-/// independent metrics would state a falsehood), and scatter needs a numeric
-/// x-axis, but this pipeline's x is always a categorical/temporal label. Both
-/// would trade the "never draw a claim the data doesn't make" guarantee for a
-/// visual — so grouped bar covers the multi-series case and the table carries
-/// the rest.
+/// Kinds: bar / line / area, plus (G4) scatter and stacked bar under STRICT,
+/// self-provable conditions that keep the "never draw a claim the data doesn't
+/// make" guarantee:
+///   - SCATTER only when the first column is genuinely CONTINUOUS (a floating-
+///     point column) and its labels do not read as time — a real (x, y)
+///     relationship. Integer keys (ratings, codes) stay bars; temporal labels
+///     (bare years) still route to area/line, byte-for-byte as before.
+///   - STACKED bar only when, for every category, the cross-series values sum to
+///     the SAME constant whole within epsilon (≈100 or ≈1.0) — a part-of-whole
+///     relationship the batches themselves prove. Otherwise grouped. The renderer
+///     never prints a stack total, so even a mis-hinted stack states no number.
+/// Every default bar/line/area output stays byte-identical (the new keys are
+/// emitted only on the new paths). None = "not a chart" — answers degrade to the
+/// table alone, never to a wrong drawing.
 pub fn chart_spec_from_batches(batches: &[RecordBatch]) -> Option<String> {
     let first = batches.iter().find(|b| b.num_columns() > 0)?;
     let schema = first.schema();
@@ -1446,10 +1452,52 @@ pub fn chart_spec_from_batches(batches: &[RecordBatch]) -> Option<String> {
         }
     }
 
+    let temporal = x.iter().all(|l| looks_temporal(l));
+
+    // Scatter (G4): a genuinely CONTINUOUS first column is a real (x, y)
+    // relationship, not a category axis. Gated to a FLOATING-POINT first column
+    // (not merely numeric): small-integer keys — star ratings 1–5, status codes,
+    // enum ids — are usually categorical and read wrong as a continuous scatter,
+    // so integer-keyed group-bys stay bars. Temporal labels (bare years) fall
+    // through to area/line, byte-for-byte as before.
+    let x_continuous = matches!(
+        schema.field(0).data_type(),
+        DataType::Float16 | DataType::Float32 | DataType::Float64
+    );
+    if ncols == 2 && x_continuous && !temporal {
+        let mut x_values: Vec<Option<f64>> = Vec::with_capacity(rows);
+        for b in batches {
+            let col = b.column(0);
+            for row in 0..b.num_rows() {
+                if col.is_null(row) {
+                    x_values.push(None);
+                } else {
+                    let raw = array_value_to_string(col, row).unwrap_or_default();
+                    match raw.trim().parse::<f64>() {
+                        Ok(v) if v.is_finite() => x_values.push(Some(v)),
+                        _ => return None, // a non-numeric x render ⇒ don't chart
+                    }
+                }
+            }
+        }
+        // Need ≥2 points where BOTH x and y are finite, else the scatter is
+        // too sparse to read — degrade to the table.
+        let ys = &series[0].1;
+        if x_values.iter().zip(ys).filter(|(xv, yv)| xv.is_some() && yv.is_some()).count() < 2 {
+            return None;
+        }
+        let spec = serde_json::json!({
+            "kind": "scatter",
+            "x": x,
+            "xValues": x_values,
+            "series": [serde_json::json!({ "name": series[0].0, "values": ys })],
+        });
+        return Some(spec.to_string());
+    }
+
     // Time-series read best as a filled area when there's a single metric;
     // multiple series stay a line (overlapping fills would muddy them);
-    // categorical stays a bar. Renderer accepts all three (chartSpec.ts).
-    let temporal = x.iter().all(|l| looks_temporal(l));
+    // categorical stays a bar. Renderer accepts all four (chartSpec.ts).
     let kind = if temporal {
         if series.len() == 1 {
             "area"
@@ -1459,15 +1507,72 @@ pub fn chart_spec_from_batches(batches: &[RecordBatch]) -> Option<String> {
     } else {
         "bar"
     };
+    let series_json = series
+        .iter()
+        .map(|(name, vals)| serde_json::json!({ "name": name, "values": vals }))
+        .collect::<Vec<_>>();
+    // Stacked bar (G4): only when the batches PROVE part-of-whole — every
+    // category's series values sum to the same constant whole. Otherwise the
+    // object is byte-identical to before (no `stacked` key → grouped).
+    if kind == "bar" && is_stackable(&series) {
+        let spec = serde_json::json!({
+            "kind": "bar",
+            "x": x,
+            "series": series_json,
+            "stacked": true,
+        });
+        return Some(spec.to_string());
+    }
     let spec = serde_json::json!({
         "kind": kind,
         "x": x,
-        "series": series
-            .iter()
-            .map(|(name, vals)| serde_json::json!({ "name": name, "values": vals }))
-            .collect::<Vec<_>>(),
+        "series": series_json,
     });
     Some(spec.to_string())
+}
+
+/// Largest cross-series epsilon (absolute) for the ~100 whole, and the relative
+/// epsilon for the ~1.0 whole — a stack is only drawn when every category's
+/// parts sum to the SAME whole this tightly.
+const STACK_EPS_ABS: f64 = 0.5;
+const STACK_EPS_REL: f64 = 0.01;
+
+/// True when the series are a provable part-of-whole decomposition: ≥2 series,
+/// every value present (a null breaks a stack) and non-negative, and every
+/// category's cross-series sum equals the same constant whole (≈100 or ≈1.0)
+/// within epsilon. This is the ONLY stacking relationship provable from the
+/// batches alone — it never asserts a sum the data doesn't already make.
+fn is_stackable(series: &[(String, Vec<Option<f64>>)]) -> bool {
+    if series.len() < 2 {
+        return false;
+    }
+    let rows = series[0].1.len();
+    if rows == 0 {
+        return false;
+    }
+    let mut sums = Vec::with_capacity(rows);
+    for i in 0..rows {
+        let mut s = 0.0;
+        for (_, vals) in series {
+            match vals.get(i) {
+                Some(Some(v)) if *v >= 0.0 => s += v,
+                _ => return false, // a null/negative part can't stack honestly
+            }
+        }
+        sums.push(s);
+    }
+    let whole = sums[0];
+    // Reject a degenerate all-zero "whole" and pick the tolerance by scale.
+    if whole <= f64::EPSILON {
+        return false;
+    }
+    let is_hundred = (whole - 100.0).abs() <= STACK_EPS_ABS;
+    let is_one = (whole - 1.0).abs() <= STACK_EPS_REL;
+    if !is_hundred && !is_one {
+        return false; // only the two canonical wholes read as "share of total"
+    }
+    let tol = if is_hundred { STACK_EPS_ABS } else { STACK_EPS_REL };
+    sums.iter().all(|s| (s - whole).abs() <= tol)
 }
 
 /// Date-ish labels: 2024, 2024-07, 2024-07-08 (optional time tail), Q3 2024.
@@ -1932,6 +2037,148 @@ mod tests {
         )
         .unwrap();
         assert!(chart_spec_from_batches(&[two_text]).is_none());
+    }
+
+    // G4: the categorical-bar and temporal-area default outputs must stay
+    // byte-identical — the wire fixtures the smoke test and the renderer pin.
+    #[test]
+    fn default_chart_outputs_are_byte_locked() {
+        let bar = chart_spec_from_batches(&[batch(&["NE", "NW"], &[150.0, 200.0])]).unwrap();
+        assert_eq!(
+            bar,
+            r#"{"kind":"bar","series":[{"name":"total","values":[150.0,200.0]}],"x":["NE","NW"]}"#
+        );
+        let area =
+            chart_spec_from_batches(&[batch(&["2024-01", "2024-02"], &[1.0, 2.0])]).unwrap();
+        assert_eq!(
+            area,
+            r#"{"kind":"area","series":[{"name":"total","values":[1.0,2.0]}],"x":["2024-01","2024-02"]}"#
+        );
+    }
+
+    fn num_batch(xs: &[f64], ys: &[f64]) -> RecordBatch {
+        RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("weight", DataType::Float64, false),
+                Field::new("price", DataType::Float64, true),
+            ])),
+            vec![
+                Arc::new(Float64Array::from(xs.to_vec())),
+                Arc::new(Float64Array::from(ys.to_vec())),
+            ],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn scatter_is_emitted_for_numeric_nontemporal_x() {
+        // A numeric first column that isn't a year → scatter with aligned xValues.
+        let spec = chart_spec_from_batches(&[num_batch(&[10.5, 22.0, 30.0], &[1.0, 4.0, 9.0])])
+            .expect("chartable");
+        let v: serde_json::Value = serde_json::from_str(&spec).unwrap();
+        assert_eq!(v["kind"], "scatter");
+        assert_eq!(v["xValues"].as_array().unwrap().len(), 3);
+        assert_eq!(v["xValues"][1], 22.0);
+        assert_eq!(v["series"].as_array().unwrap().len(), 1, "scatter is single-series");
+        assert_eq!(v["series"][0]["values"][2], 9.0);
+    }
+
+    #[test]
+    fn integer_keyed_group_by_stays_a_bar_not_scatter() {
+        // "count by star-rating (1..5)" — an Int key is categorical, not a
+        // continuous x; it must stay a bar, not become a scatter.
+        let ratings = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("rating", DataType::Int64, false),
+                Field::new("count", DataType::Float64, true),
+            ])),
+            vec![
+                Arc::new(datafusion::arrow::array::Int64Array::from(vec![1, 2, 3, 4, 5])),
+                Arc::new(Float64Array::from(vec![3.0, 8.0, 20.0, 40.0, 12.0])),
+            ],
+        )
+        .unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&chart_spec_from_batches(&[ratings]).unwrap()).unwrap();
+        assert_eq!(v["kind"], "bar", "an integer key is categorical, not a scatter x");
+        assert!(v.get("xValues").is_none());
+    }
+
+    #[test]
+    fn bare_year_x_stays_area_not_scatter() {
+        // Numeric but temporal (years) → still area, byte-compatible with before.
+        let years = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("yr", DataType::Int32, false),
+                Field::new("total", DataType::Float64, true),
+            ])),
+            vec![
+                Arc::new(datafusion::arrow::array::Int32Array::from(vec![2019, 2020, 2021])),
+                Arc::new(Float64Array::from(vec![5.0, 6.0, 7.0])),
+            ],
+        )
+        .unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&chart_spec_from_batches(&[years]).unwrap()).unwrap();
+        assert_eq!(v["kind"], "area", "bare years read as time, not a scatter x");
+        assert!(v.get("xValues").is_none());
+    }
+
+    fn share_batch(a: &[f64], b: &[f64]) -> RecordBatch {
+        RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("region", DataType::Utf8, false),
+                Field::new("share_a", DataType::Float64, true),
+                Field::new("share_b", DataType::Float64, true),
+            ])),
+            vec![
+                Arc::new(StringArray::from(vec!["NE", "NW", "SE"])),
+                Arc::new(Float64Array::from(a.to_vec())),
+                Arc::new(Float64Array::from(b.to_vec())),
+            ],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn stacked_only_when_parts_sum_to_a_constant_whole() {
+        // Every category's two shares sum to 100 → provable part-of-whole → stacked.
+        let v: serde_json::Value = serde_json::from_str(
+            &chart_spec_from_batches(&[share_batch(&[60.0, 40.0, 55.0], &[40.0, 60.0, 45.0])])
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(v["kind"], "bar");
+        assert_eq!(v["stacked"], true);
+
+        // Independent metrics that don't sum to a constant → grouped (no key).
+        let v: serde_json::Value = serde_json::from_str(
+            &chart_spec_from_batches(&[share_batch(&[10.0, 200.0, 3.0], &[7.0, 1.0, 90.0])])
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(v["kind"], "bar");
+        assert!(v.get("stacked").is_none(), "unproven whole must not stack");
+
+        // A null part disqualifies stacking even where the rest would sum. Uses
+        // 3 rows so series b keeps ≥2 finite values (the chart gate) while one
+        // category has a hole in the stack.
+        let with_null = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("region", DataType::Utf8, false),
+                Field::new("a", DataType::Float64, true),
+                Field::new("b", DataType::Float64, true),
+            ])),
+            vec![
+                Arc::new(StringArray::from(vec!["NE", "NW", "SE"])),
+                Arc::new(Float64Array::from(vec![60.0, 40.0, 55.0])),
+                Arc::new(Float64Array::from(vec![Some(40.0), None, Some(45.0)])),
+            ],
+        )
+        .unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&chart_spec_from_batches(&[with_null]).unwrap()).unwrap();
+        assert!(v.get("stacked").is_none(), "a null part can't stack honestly");
     }
 
     #[test]

@@ -87,7 +87,12 @@ import { chatService, MODEL_PROVIDERS, ragService } from "@/contracts";
 import { useRagStore } from "@/stores/useRagStore";
 import { useAuthStore } from "@/stores/useAuthStore";
 import { parseChartSpec, tableToCsv } from "@/lib/chartSpec";
-import { sortRows, type SortDir } from "@/lib/sortTable";
+import {
+  sortRows,
+  truncationCaption,
+  truncationNoteFrom,
+  type SortDir,
+} from "@/lib/sortTable";
 import { pinChartData } from "@/lib/pinChart";
 import { recallRelated, type RecallHit } from "@/lib/recall";
 import { AnalyticsChart } from "@/features/chat/AnalyticsChart";
@@ -501,6 +506,16 @@ const useStyles = makeStyles({
   },
   // Quiet one-liners: the "(stopped)" note and the zero-references honesty note.
   quietNote: { color: tokens.colorNeutralForeground3 },
+  // G4: the truncation disclosure bound to a sortable result table's <caption>,
+  // so it stays with the table through sorting.
+  tableCaption: {
+    captionSide: "bottom",
+    textAlign: "left",
+    color: tokens.colorNeutralForeground3,
+    fontSize: tokens.fontSizeBase200,
+    fontStyle: "italic",
+    paddingTop: tokens.spacingVerticalXXS,
+  },
   // G2 draft-then-verify: the muted "verifying…" badge shown under the
   // provisional extractive draft while the private model composes the answer.
   draftBadge: {
@@ -953,9 +968,13 @@ type TableSort = { col: number; dir: SortDir } | null;
 function SortableTable({
   rows,
   passthroughProps,
+  truncationNote,
 }: {
   rows: string[][];
   passthroughProps: ComponentProps<"table">;
+  /** G4: the G1 "first N of M rows" disclosure, bound to the table so it stays
+   *  visible through sorting and marks a sort as covering the shown subset. */
+  truncationNote?: string;
 }) {
   const styles = useStyles();
   const [sort, setSort] = useState<TableSort>(null);
@@ -981,6 +1000,11 @@ function SortableTable({
       {/* Exports the CURRENTLY displayed (sorted) order, not the original. */}
       <CopyCsvButton rows={view} />
       <table {...passthroughProps}>
+        {truncationNote && sort !== null && (
+          <caption className={styles.tableCaption}>
+            {truncationCaption(truncationNote, true)}
+          </caption>
+        )}
         <thead>
           <tr>
             {header.map((cell, col) => {
@@ -1154,6 +1178,13 @@ const AnswerMarkdown = memo(function AnswerMarkdown({
   onCite: (turnId: string, n: number) => void;
 }) {
   const styles = useStyles();
+  // G4: a truncated analytics result carries the G1 "first N of M rows" footer.
+  // The footer ALWAYS stays in the body (a deterministic, never-model-generated
+  // disclosure — never stripped, so it shows even when the answer narrates in
+  // prose with no result table). When a result table IS rendered and the user
+  // sorts it, a caption additionally flags that the sort covers only the shown
+  // rows (see SortableTable).
+  const truncationNote = useMemo(() => truncationNoteFrom(content), [content]);
   const components = useMemo<Components>(
     () => ({
       a: ({ node, href, children, ...props }) => {
@@ -1208,10 +1239,12 @@ const AnswerMarkdown = memo(function AnswerMarkdown({
             </div>
           );
         }
-        return <SortableTable rows={rows} passthroughProps={props} />;
+        return (
+          <SortableTable rows={rows} passthroughProps={props} truncationNote={truncationNote ?? undefined} />
+        );
       },
     }),
-    [styles, turnId, onCite],
+    [styles, turnId, onCite, truncationNote],
   );
   return (
     <MarkdownView content={content} components={components} remarkPlugins={[remarkCitations]} />

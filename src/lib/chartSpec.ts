@@ -14,10 +14,16 @@ export interface ChartSeries {
   values: (number | null)[];
 }
 
+export type ChartKind = "bar" | "line" | "area" | "scatter";
+
 export interface ChartSpec {
-  kind: "bar" | "line" | "area";
+  kind: ChartKind;
   x: string[];
   series: ChartSeries[];
+  /** bar only, present ONLY when true: draw stacked (proven part-of-whole) vs grouped. */
+  stacked?: boolean;
+  /** scatter only: numeric x position per point, aligned index-for-index with series[0].values. */
+  xValues?: number[];
 }
 
 /** Bounds the renderer trusts; anything outside is rejected as "not a chart". */
@@ -38,10 +44,13 @@ export function parseChartSpec(raw: string): ChartSpec | null {
   }
   if (typeof parsed !== "object" || parsed === null) return null;
   const o = parsed as Record<string, unknown>;
-  if (o.kind !== "bar" && o.kind !== "line" && o.kind !== "area") return null;
+  if (o.kind !== "bar" && o.kind !== "line" && o.kind !== "area" && o.kind !== "scatter")
+    return null;
   if (!Array.isArray(o.x) || o.x.length < 2 || o.x.length > MAX_POINTS) return null;
   if (!o.x.every((l) => typeof l === "string")) return null;
   if (!Array.isArray(o.series) || o.series.length < 1 || o.series.length > MAX_SERIES) return null;
+  // Scatter is a single (x, y) relationship, never multi-series.
+  if (o.kind === "scatter" && o.series.length !== 1) return null;
   const x = o.x as string[];
   const series: ChartSeries[] = [];
   for (const s of o.series) {
@@ -64,7 +73,81 @@ export function parseChartSpec(raw: string): ChartSpec | null {
     if (finite < 2) return null; // a chart of one real point explains nothing
     series.push({ name: so.name, values });
   }
-  return { kind: o.kind, x, series };
+  const spec: ChartSpec = { kind: o.kind, x, series };
+  // Stacked is a bar-only hint; reject it anywhere else to keep the union tight.
+  if (o.stacked !== undefined) {
+    if (typeof o.stacked !== "boolean") return null;
+    if (o.stacked && o.kind !== "bar") return null;
+    if (o.stacked) spec.stacked = true;
+  }
+  if (o.kind === "scatter") {
+    // xValues MUST be finite, aligned to x, with ≥2 index positions carrying
+    // both a finite x and a finite y — else the scatter is too sparse to read.
+    if (!Array.isArray(o.xValues) || o.xValues.length !== x.length) return null;
+    const xv: number[] = [];
+    for (const v of o.xValues) {
+      if (typeof v !== "number" || !Number.isFinite(v)) return null;
+      xv.push(v);
+    }
+    const paired = xv.filter((v, i) => Number.isFinite(v) && series[0].values[i] !== null).length;
+    if (paired < 2) return null;
+    spec.xValues = xv;
+  } else if (o.xValues !== undefined) {
+    return null; // xValues is meaningless off a scatter
+  }
+  return spec;
+}
+
+/** Thousands-grouped exact value ("1200" → "1,200", "0.25" → "0.25"), for
+ *  tooltips and small-integer axes. PARITY: matches lighthouse-core `commafy`. */
+export function formatGrouped(v: number): string {
+  if (!Number.isFinite(v)) return "";
+  const neg = v < 0;
+  const abs = Math.abs(v);
+  const [intPart, fracPart] = trimNum(abs).split(".");
+  const grouped = intPart.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  return `${neg ? "-" : ""}${grouped}${fracPart ? `.${fracPart}` : ""}`;
+}
+
+export type Granularity = "year" | "month" | "quarter" | "day" | "category" | "numeric";
+
+/**
+ * Soft parity with lighthouse-core `looks_temporal`: read a granularity from the
+ * x labels so the renderer can thin/format date ticks. This is RENDERER-side
+ * (not on the wire), so the label conventions must match the Rust emitter's, but
+ * it is deliberately not a schema field. Not a hard byte-parity.
+ */
+export function detectGranularity(labels: string[]): Granularity {
+  if (labels.length === 0) return "category";
+  const every = (re: RegExp) => labels.every((l) => re.test(l.trim()));
+  if (every(/^\d{4}-\d{2}-\d{2}/)) return "day";
+  if (every(/^\d{4}-\d{2}$/)) return "month";
+  if (every(/^[Qq][1-4]\s+\d{4}$/)) return "quarter";
+  if (every(/^\d{4}$/)) return "year";
+  if (every(/^-?\d+(\.\d+)?$/)) return "numeric";
+  return "category";
+}
+
+/** Format one x-axis tick for its detected granularity (e.g. "2024-07" → "Jul"). */
+export function formatXTick(label: string, granularity: Granularity): string {
+  const l = label.trim();
+  if (granularity === "month") {
+    const m = /^\d{4}-(\d{2})$/.exec(l);
+    if (m) {
+      const months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+      const idx = Number(m[1]) - 1;
+      if (idx >= 0 && idx < 12) return months[idx];
+    }
+  }
+  if (granularity === "day") {
+    const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(l);
+    if (m) return `${m[2]}-${m[3]}`;
+  }
+  if (granularity === "numeric") {
+    const n = Number(l);
+    if (Number.isFinite(n)) return formatTick(n);
+  }
+  return l;
 }
 
 /**

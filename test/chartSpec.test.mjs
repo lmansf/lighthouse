@@ -7,9 +7,16 @@ import { register } from "node:module";
 
 register("./_ts-extensionless-hook.mjs", import.meta.url);
 
-const { parseChartSpec, niceTicks, scaleLinear, formatTick, tableToCsv } = await import(
-  "../src/lib/chartSpec.ts"
-);
+const {
+  parseChartSpec,
+  niceTicks,
+  scaleLinear,
+  formatTick,
+  formatGrouped,
+  detectGranularity,
+  formatXTick,
+  tableToCsv,
+} = await import("../src/lib/chartSpec.ts");
 
 const good = JSON.stringify({
   kind: "bar",
@@ -108,4 +115,103 @@ test("tableToCsv quotes exactly what needs quoting", () => {
     ["SE", "300", "plain"],
   ]);
   assert.equal(csv, 'region,amount,note\nNE,"1,200","said ""hi"""\nSE,300,plain');
+});
+
+// --- G4: scatter + stacked parsing --------------------------------------------
+
+test("parseChartSpec accepts a scatter with aligned xValues", () => {
+  const spec = parseChartSpec(
+    JSON.stringify({
+      kind: "scatter",
+      x: ["10", "22", "30"],
+      xValues: [10, 22, 30],
+      series: [{ name: "price", values: [1, 4, 9] }],
+    }),
+  );
+  assert.ok(spec);
+  assert.equal(spec.kind, "scatter");
+  assert.deepEqual(spec.xValues, [10, 22, 30]);
+});
+
+test("parseChartSpec rejects malformed scatter", () => {
+  const base = { kind: "scatter", x: ["1", "2"], series: [{ name: "y", values: [3, 4] }] };
+  // missing xValues
+  assert.equal(parseChartSpec(JSON.stringify(base)), null);
+  // xValues length mismatch
+  assert.equal(parseChartSpec(JSON.stringify({ ...base, xValues: [1] })), null);
+  // scatter with >1 series
+  assert.equal(
+    parseChartSpec(
+      JSON.stringify({
+        kind: "scatter",
+        x: ["1", "2"],
+        xValues: [1, 2],
+        series: [
+          { name: "a", values: [1, 2] },
+          { name: "b", values: [3, 4] },
+        ],
+      }),
+    ),
+    null,
+  );
+  // xValues on a non-scatter is rejected
+  assert.equal(
+    parseChartSpec(
+      JSON.stringify({ kind: "bar", x: ["a", "b"], xValues: [1, 2], series: [{ name: "v", values: [1, 2] }] }),
+    ),
+    null,
+  );
+});
+
+test("parseChartSpec accepts stacked bar, rejects stacked non-bar", () => {
+  const stacked = parseChartSpec(
+    JSON.stringify({
+      kind: "bar",
+      x: ["NE", "NW"],
+      stacked: true,
+      series: [
+        { name: "a", values: [60, 40] },
+        { name: "b", values: [40, 60] },
+      ],
+    }),
+  );
+  assert.ok(stacked);
+  assert.equal(stacked.stacked, true);
+  // stacked on a line is a shape violation
+  assert.equal(
+    parseChartSpec(
+      JSON.stringify({ kind: "line", x: ["1", "2"], stacked: true, series: [{ name: "v", values: [1, 2] }] }),
+    ),
+    null,
+  );
+  // a bar WITHOUT stacked parses with no stacked field (grouped)
+  const grouped = parseChartSpec(good);
+  assert.ok(grouped);
+  assert.equal(grouped.stacked, undefined);
+});
+
+// --- G4: axis-formatting helpers ----------------------------------------------
+
+test("formatGrouped inserts thousands separators (parity with commafy)", () => {
+  assert.equal(formatGrouped(1200), "1,200");
+  assert.equal(formatGrouped(1234567), "1,234,567");
+  assert.equal(formatGrouped(300), "300");
+  assert.equal(formatGrouped(-1500), "-1,500");
+  assert.equal(formatGrouped(12.5), "12.5");
+});
+
+test("detectGranularity reads the label convention", () => {
+  assert.equal(detectGranularity(["2024-01", "2024-02"]), "month");
+  assert.equal(detectGranularity(["2024-07-08", "2024-07-09"]), "day");
+  assert.equal(detectGranularity(["2019", "2020", "2021"]), "year");
+  assert.equal(detectGranularity(["Q1 2024", "Q2 2024"]), "quarter");
+  assert.equal(detectGranularity(["10", "22.5", "30"]), "numeric");
+  assert.equal(detectGranularity(["NE", "NW"]), "category");
+});
+
+test("formatXTick abbreviates by granularity", () => {
+  assert.equal(formatXTick("2024-07", "month"), "Jul");
+  assert.equal(formatXTick("2024-07-08", "day"), "07-08");
+  assert.equal(formatXTick("4500", "numeric"), "4.5k");
+  assert.equal(formatXTick("NE", "category"), "NE");
 });

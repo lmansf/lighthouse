@@ -8,7 +8,8 @@ import { register } from "node:module";
 
 register("./_ts-extensionless-hook.mjs", import.meta.url);
 
-const { sortRows, compareCells, parseNumericCell } = await import("../src/lib/sortTable.ts");
+const { sortRows, compareCells, parseNumericCell, truncationNoteFrom, truncationCaption } =
+  await import("../src/lib/sortTable.ts");
 
 const labels = (rows) => rows.map((r) => r[0]);
 
@@ -108,4 +109,21 @@ test("header-only and empty tables come back as safe, unmutated copies", () => {
   assert.deepEqual(out, [["a", "b"]]);
   assert.notEqual(out, headerOnly); // new array, not the same reference
   assert.deepEqual(sortRows([], 0, "asc"), []);
+});
+
+test("truncationNoteFrom matches the G1 footer, else null", () => {
+  assert.equal(
+    truncationNoteFrom("Answer text\n\n_Showing the first 200 of 12,431 rows._\n"),
+    "Showing the first 200 of 12,431 rows.",
+  );
+  assert.equal(truncationNoteFrom("_Showing the first 200 rows._"), "Showing the first 200 rows.");
+  assert.equal(truncationNoteFrom("no footer here"), null);
+});
+
+test("truncationCaption only annotates while sorted (else null)", () => {
+  const note = "Showing the first 200 of 12,431 rows.";
+  // Not sorted: null — the deterministic footer already carries the disclosure.
+  assert.equal(truncationCaption(note, false), null);
+  // Sorted: flags that the sort covers only the shown rows.
+  assert.equal(truncationCaption(note, true), `${note} — sorted view of the shown rows only.`);
 });
