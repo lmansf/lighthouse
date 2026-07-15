@@ -89,7 +89,7 @@ import type { AnalyticsMeta, ChangedPin, ChatTurn, Pin, RagReference } from "@/c
 import { chatService, MODEL_PROVIDERS, ragService } from "@/contracts";
 import { useRagStore } from "@/stores/useRagStore";
 import { useAuthStore } from "@/stores/useAuthStore";
-import { parseChartSpec, tableToCsv } from "@/lib/chartSpec";
+import { parseChartSpec, stripChartRequestFences, tableToCsv } from "@/lib/chartSpec";
 import {
   sortRows,
   truncationCaption,
@@ -1215,13 +1215,18 @@ const AnswerMarkdown = memo(function AnswerMarkdown({
   onCite: (turnId: string, n: number) => void;
 }) {
   const styles = useStyles();
+  // Belt-and-braces (chart-directive): the engine already withholds
+  // lighthouse-chart-request fences from streamed deltas; displayed prose
+  // strips any residue too. ```lighthouse-chart fences are NOT stripped here —
+  // they render as charts below.
+  const cleaned = useMemo(() => stripChartRequestFences(content), [content]);
   // G4: a truncated analytics result carries the G1 "first N of M rows" footer.
   // The footer ALWAYS stays in the body (a deterministic, never-model-generated
   // disclosure — never stripped, so it shows even when the answer narrates in
   // prose with no result table). When a result table IS rendered and the user
   // sorts it, a caption additionally flags that the sort covers only the shown
   // rows (see SortableTable).
-  const truncationNote = useMemo(() => truncationNoteFrom(content), [content]);
+  const truncationNote = useMemo(() => truncationNoteFrom(cleaned), [cleaned]);
   const components = useMemo<Components>(
     () => ({
       a: ({ node, href, children, ...props }) => {
@@ -1284,7 +1289,7 @@ const AnswerMarkdown = memo(function AnswerMarkdown({
     [styles, turnId, onCite, truncationNote],
   );
   return (
-    <MarkdownView content={content} components={components} remarkPlugins={[remarkCitations]} />
+    <MarkdownView content={cleaned} components={components} remarkPlugins={[remarkCitations]} />
   );
 });
 
@@ -1305,7 +1310,9 @@ const StreamingAnswer = memo(function StreamingAnswer({
   content: string;
   className: string;
 }) {
-  return <div className={className}>{content}</div>;
+  // Same belt-and-braces strip as AnswerMarkdown — a chart-request fence
+  // (even a still-open one, via the regex's `$` arm) never shows mid-stream.
+  return <div className={className}>{stripChartRequestFences(content)}</div>;
 });
 
 /**

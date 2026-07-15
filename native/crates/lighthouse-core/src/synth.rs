@@ -705,6 +705,11 @@ pub fn answer_pipeline(
                                 score: 0.0,
                             }));
                             let excerpt_count = ctxs.len();
+                            // No chart card rides multi-step (its chart is the
+                            // last step's heuristic), but the fence scrub still
+                            // applies: a stray chart request must never reach
+                            // displayed prose, and an explicit "none" is honored.
+                            let mut scrub = crate::analytics::DirectiveScrubber::new();
                             let mut answer = llm::stream_answer(
                                 question.clone(),
                                 ctxs,
@@ -712,7 +717,14 @@ pub fn answer_pipeline(
                                 history.clone(),
                             );
                             while let Some(d) = answer.next().await {
-                                yield delta(d);
+                                let safe = scrub.push(&d);
+                                if !safe.is_empty() {
+                                    yield delta(safe);
+                                }
+                            }
+                            let tail = scrub.finish();
+                            if !tail.is_empty() {
+                                yield delta(tail);
                             }
                             // Deterministic transparency: EVERY executed
                             // query in order, then ONE freshness stamp over
@@ -753,7 +765,16 @@ pub fn answer_pipeline(
                             if let Some(cap) = crate::analytics::row_cap_footer(&regs) {
                                 yield delta(cap);
                             }
-                            if let Some(chart) = &last_chart {
+                            // An explicit "none" directive suppresses the
+                            // step chart; a materializing directive can't run
+                            // here (steps carry markdown, not batches), so
+                            // anything else keeps the heuristic — the same
+                            // fallback contract as the single-query path.
+                            let suppressed = matches!(
+                                crate::analytics::parse_chart_directive(scrub.full_text()),
+                                Some(d) if d.kind == crate::analytics::ChartDirectiveKind::None
+                            );
+                            if let (false, Some(chart)) = (suppressed, &last_chart) {
                                 yield delta(format!("\n```lighthouse-chart\n{chart}\n```\n"));
                             }
                             // Chips act on the LAST query; the footer shows all.
@@ -827,11 +848,37 @@ pub fn answer_pipeline(
                             text: r.card.clone(),
                             score: 0.0,
                         }));
+                        // Chart card (openspec: add-chart-directive): the same
+                        // mechanism as join hints — one low-score Ctx — added
+                        // ONLY when the result is untruncated and its shape
+                        // could chart, so the ~200 tokens are never spent on a
+                        // doomed directive. Truncated results never chart.
+                        if !res.truncated {
+                            if let Some(card) = crate::analytics::chart_card(&res.batches) {
+                                ctxs.push(Ctx {
+                                    name: "chart options".to_string(),
+                                    text: card,
+                                    score: 0.0,
+                                });
+                            }
+                        }
                         let excerpt_count = ctxs.len();
+                        // The narration streams through the directive scrubber:
+                        // prose forwards as it arrives, chart-request fence
+                        // bytes never do (the UI strip is a second net, not
+                        // the mechanism).
+                        let mut scrub = crate::analytics::DirectiveScrubber::new();
                         let mut answer =
                             llm::stream_answer(question.clone(), ctxs, cfg.clone(), history.clone());
                         while let Some(d) = answer.next().await {
-                            yield delta(d);
+                            let safe = scrub.push(&d);
+                            if !safe.is_empty() {
+                                yield delta(safe);
+                            }
+                        }
+                        let tail = scrub.finish();
+                        if !tail.is_empty() {
+                            yield delta(tail);
                         }
                         // Deterministic transparency — never model-generated.
                         yield delta(format!("\n\n*Query used:*\n```sql\n{sql}\n```\n"));
@@ -878,9 +925,19 @@ pub fn answer_pipeline(
                             yield delta(cap);
                         }
                         // Chartable result → engine-built spec the chat renders
-                        // as SVG (Phase C). Data comes straight from the query
-                        // batches; the model never sees or writes this block.
-                        if let Some(chart) = &res.chart {
+                        // as SVG (Phase C), now directive-aware (openspec:
+                        // add-chart-directive): a valid chart request steers
+                        // which columns/kind, "none" suppresses, anything else
+                        // lands on the unchanged heuristic. Data comes straight
+                        // from the query batches in every case; the model's
+                        // text never supplies a number. Truncated results
+                        // still never chart.
+                        let chart = if res.truncated {
+                            None
+                        } else {
+                            crate::analytics::decide_chart(&res.batches, scrub.full_text())
+                        };
+                        if let Some(chart) = &chart {
                             yield delta(format!("\n```lighthouse-chart\n{chart}\n```\n"));
                         }
                         // Citations + structured provenance (chips/save/pins).

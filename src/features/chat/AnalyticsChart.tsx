@@ -57,6 +57,14 @@ const useStyles = makeStyles({
     fontSize: tokens.fontSizeBase200,
   },
   swatch: { width: "10px", height: "10px", borderRadius: "2px", display: "inline-block" },
+  // Directed-chart heading (chart-directive): small, quiet, above the plot.
+  title: {
+    display: "block",
+    color: tokens.colorNeutralForeground2,
+    fontSize: tokens.fontSizeBase200,
+    fontWeight: tokens.fontWeightSemibold,
+    marginBottom: tokens.spacingVerticalXXS,
+  },
 });
 
 /** Series palette from the theme; cycles if the engine ever sends more. */
@@ -209,6 +217,12 @@ export function AnalyticsChart({ spec }: { spec: ChartSpec }) {
 
   return (
     <figure className={styles.frame} aria-label={aria}>
+      {/* Engine-capped display copy from a chart directive — never data. */}
+      {spec.title && (
+        <Text as="span" className={styles.title}>
+          {spec.title}
+        </Text>
+      )}
       <Tooltip content="Download chart as PNG" relationship="label">
         <Button
           size="small"

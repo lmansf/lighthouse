@@ -24,11 +24,19 @@ export interface ChartSpec {
   stacked?: boolean;
   /** scatter only: numeric x position per point, aligned index-for-index with series[0].values. */
   xValues?: number[];
+  /**
+   * Optional heading, present ONLY on a directed chart (chart-directive): the
+   * one model-chosen string the engine lets through — display copy, capped and
+   * sanitized engine-side, never data.
+   */
+  title?: string;
 }
 
 /** Bounds the renderer trusts; anything outside is rejected as "not a chart". */
 export const MAX_POINTS = 24;
 export const MAX_SERIES = 3;
+/** PARITY: lighthouse-core analytics.rs CHART_TITLE_MAX_CHARS. */
+export const MAX_TITLE_CHARS = 80;
 
 /**
  * Parse + validate the fenced JSON. Returns null on ANY shape violation —
@@ -95,7 +103,114 @@ export function parseChartSpec(raw: string): ChartSpec | null {
   } else if (o.xValues !== undefined) {
     return null; // xValues is meaningless off a scatter
   }
+  // Directed-chart title: engine-capped display copy. Anything outside the
+  // emitter's own bounds (non-string, empty, over-length) is a shape violation.
+  if (o.title !== undefined) {
+    if (typeof o.title !== "string") return null;
+    const t = o.title;
+    if (t.length === 0 || [...t].length > MAX_TITLE_CHARS) return null;
+    spec.title = t;
+  }
   return spec;
+}
+
+// --- Chart directive (chart-directive) -----------------------------------------------
+//
+// PARITY: the grammar and validation rules below mirror lighthouse-core
+// analytics.rs (parse_chart_directive / validate_directive) byte-for-byte —
+// same fence, same five fields, same rejection rules and messages — and are
+// pinned against the same fixtures in test/chartSpec.test.mjs. The narrating
+// model may emit ONE such fenced block; the ENGINE materializes the chart from
+// its own result batches, so a directive can steer a chart but never supply a
+// value. This module only parses/validates; nothing here reads data.
+
+export type ChartDirectiveKind = "bar" | "line" | "area" | "none";
+
+export interface ChartDirective {
+  kind: ChartDirectiveKind;
+  /** Must name a real result column (exact, case-sensitive). Empty for "none". */
+  labelColumn: string;
+  /** 1..=3 names; each must exist and be numeric in the result. */
+  seriesColumns: string[];
+  /** Optional display title — capped/sanitized by the engine, never data. */
+  title?: string;
+  sort?: "asc" | "desc";
+}
+
+/** PARITY: lighthouse-core analytics.rs CHART_DIRECTIVE_FENCE. */
+export const CHART_DIRECTIVE_FENCE = "```lighthouse-chart-request";
+
+/**
+ * Parse the FIRST lighthouse-chart-request fence out of a narration (later
+ * ones are ignored). Returns null for no fence, an unterminated fence, or any
+ * grammar violation — callers fall back to the heuristic chart, exactly like
+ * the engine. Only the five directive fields are read; extra keys (fabricated
+ * x/values/anything) are ignored wholesale.
+ */
+export function parseChartDirective(text: string): ChartDirective | null {
+  const start = text.indexOf(CHART_DIRECTIVE_FENCE);
+  if (start < 0) return null;
+  const after = text.slice(start + CHART_DIRECTIVE_FENCE.length);
+  const end = after.indexOf("```");
+  if (end < 0) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(after.slice(0, end).trim());
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const o = parsed as Record<string, unknown>;
+  if (o.kind === "none") return { kind: "none", labelColumn: "", seriesColumns: [] };
+  if (o.kind !== "bar" && o.kind !== "line" && o.kind !== "area") return null;
+  if (typeof o.label_column !== "string") return null;
+  if (!Array.isArray(o.series_columns) || !o.series_columns.every((s) => typeof s === "string"))
+    return null;
+  const d: ChartDirective = {
+    kind: o.kind,
+    labelColumn: o.label_column,
+    seriesColumns: o.series_columns as string[],
+  };
+  if (o.title !== undefined) {
+    if (typeof o.title !== "string") return null;
+    d.title = o.title;
+  }
+  if (o.sort !== undefined) {
+    if (o.sort !== "asc" && o.sort !== "desc") return null;
+    d.sort = o.sort;
+  }
+  return d;
+}
+
+/**
+ * Validate a directive against the actual result columns. Returns null when
+ * valid, else the SAME reason string the Rust validator produces (shared test
+ * fixtures keep the two from drifting).
+ */
+export function validateDirective(
+  d: ChartDirective,
+  columns: { name: string; numeric: boolean }[],
+): string | null {
+  if (d.kind === "none") return null;
+  if (!columns.some((c) => c.name === d.labelColumn))
+    return `unknown label_column ${JSON.stringify(d.labelColumn)}`;
+  if (d.seriesColumns.length < 1 || d.seriesColumns.length > MAX_SERIES)
+    return `series_columns must name 1-${MAX_SERIES} columns`;
+  for (const s of d.seriesColumns) {
+    const col = columns.find((c) => c.name === s);
+    if (!col) return `unknown series column ${JSON.stringify(s)}`;
+    if (!col.numeric) return `series column ${JSON.stringify(s)} is not numeric`;
+  }
+  return null;
+}
+
+/**
+ * Belt-and-braces UI strip: the engine already withholds chart-request fences
+ * from streamed deltas (analytics.rs DirectiveScrubber); displayed prose
+ * strips any residue too, unterminated tails included.
+ */
+export function stripChartRequestFences(text: string): string {
+  return text.replace(/```lighthouse-chart-request[\s\S]*?(```|$)/g, "");
 }
 
 /** Thousands-grouped exact value ("1200" → "1,200", "0.25" → "0.25"), for
