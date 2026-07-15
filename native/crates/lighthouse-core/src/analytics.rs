@@ -195,6 +195,13 @@ pub struct TableReg {
     /// Present when this table unions a file family; file_id/file_name then
     /// describe the family (first member id, pattern-style label).
     pub group: Option<GroupMeta>,
+    /// Rows actually registered when the source sheet holds MORE than the
+    /// engine's row cap (materialized xlsx/xls sheets only — path-registered
+    /// CSV/TSV/Parquet stream in full and never cap). None = full coverage.
+    /// Drives the leading card note and the deterministic answer footer.
+    /// Union-family omissions are whole-member drops disclosed via `group`
+    /// (card note + coverage footer), so a grouped reg never sets this.
+    pub capped_rows: Option<usize>,
 }
 
 /// A same-shaped file family destined for one unioned table.
@@ -399,11 +406,15 @@ pub async fn register_tables(
         let base = unique_table_name(&sanitize_table_name(&name), &used);
         let modified_ms = file_mtime_ms(&abs);
         let path = abs.to_string_lossy().to_string();
-        let registered: Vec<String> = if lower.ends_with(".csv") || lower.ends_with(".tsv") {
+        // (table name, rows registered when the sheet was row-capped). Only
+        // materialized workbook sheets can cap; the streamed formats never do.
+        let registered: Vec<(String, Option<usize>)> = if lower.ends_with(".csv")
+            || lower.ends_with(".tsv")
+        {
             let delim = if lower.ends_with(".tsv") { b'\t' } else { b',' };
             let opts = CsvReadOptions::new().delimiter(delim);
             match ctx.register_csv(&base, &path, opts).await {
-                Ok(()) => vec![base.clone()],
+                Ok(()) => vec![(base.clone(), None)],
                 Err(_) => vec![],
             }
         } else if lower.ends_with(".parquet") {
@@ -411,20 +422,35 @@ pub async fn register_tables(
                 .register_parquet(&base, &path, ParquetReadOptions::default())
                 .await
             {
-                Ok(()) => vec![base.clone()],
+                Ok(()) => vec![(base.clone(), None)],
                 Err(_) => vec![],
             }
         } else if is_pdf(&lower) {
-            register_pdf(ctx, &base, &abs).await
+            register_pdf(ctx, &base, &abs)
+                .await
+                .into_iter()
+                .map(|t| (t, None))
+                .collect()
         } else {
             register_workbook(ctx, &base, &abs)
         };
         let mut any = false;
-        for table in registered {
+        for (table, capped_rows) in registered {
             if regs.len() >= MAX_TABLES_TOTAL {
                 break;
             }
             if let Some((card, columns)) = table_card(ctx, &table).await {
+                // A row-capped sheet must never read as the whole file: lead
+                // the card with the cap (same survives-clipping rationale as
+                // the union provenance line) so the model can't claim
+                // full-file totals over a truncated registration.
+                let card = match capped_rows {
+                    Some(n) => format!(
+                        "{table} — row cap: only the first {} rows of {name} are included\n{card}",
+                        commafy(n)
+                    ),
+                    None => card,
+                };
                 used.push(base.clone());
                 any = true;
                 regs.push(TableReg {
@@ -435,6 +461,7 @@ pub async fn register_tables(
                     modified_ms,
                     columns,
                     group: None,
+                    capped_rows,
                 });
             }
         }
@@ -566,6 +593,9 @@ async fn register_group(
             file_names: names,
             newest_ms,
         }),
+        // Union row-cap omissions drop whole members and are disclosed above
+        // (card note) + by the coverage footer — never via `capped_rows`.
+        capped_rows: None,
     })
 }
 
@@ -767,8 +797,15 @@ fn register_grid(ctx: &SessionContext, tname: &str, grid: &crate::pdf_tables::Ta
 }
 
 /// calamine → Arrow MemTable per sheet (detected header; ≥80% numeric column →
-/// Float64 with nulls, else Utf8). Returns the registered table names.
-fn register_workbook(ctx: &SessionContext, base: &str, abs: &PathBuf) -> Vec<String> {
+/// Float64 with nulls, else Utf8). Returns the registered table names, each
+/// with `Some(rows_registered)` when the sheet held more data rows than
+/// MAX_XLSX_ROWS — the caller turns that into the card note + answer footer,
+/// so the cap is never silent.
+fn register_workbook(
+    ctx: &SessionContext,
+    base: &str,
+    abs: &PathBuf,
+) -> Vec<(String, Option<usize>)> {
     use calamine::Reader;
     let Ok(mut wb) = calamine::open_workbook_auto(abs) else {
         return vec![];
@@ -780,6 +817,9 @@ fn register_workbook(ctx: &SessionContext, base: &str, abs: &PathBuf) -> Vec<Str
         let Ok(range) = wb.worksheet_range(&sheet) else {
             continue;
         };
+        // The sheet's full used-range row count — compared against what the
+        // bounded reads below actually kept, to detect a row-capped sheet.
+        let sheet_rows = range.height();
         // Stringify once; real workbooks put titles/blank rows above the
         // header, so the header is detected, not assumed (row 0 fallback).
         let all: Vec<Vec<String>> = range
@@ -819,6 +859,10 @@ fn register_workbook(ctx: &SessionContext, base: &str, abs: &PathBuf) -> Vec<Str
         if data.len() < 2 {
             continue;
         }
+        // Row-capped iff the sheet holds more data rows (past the detected
+        // header) than were registered — whether dropped by the `.take` above
+        // or by the bounded scan itself. Recorded, never silent.
+        let capped_rows = (sheet_rows.saturating_sub(h + 1) > data.len()).then_some(data.len());
         let Some((schema, batch)) = table_from_matrix(&headers, &data) else {
             continue;
         };
@@ -831,7 +875,7 @@ fn register_workbook(ctx: &SessionContext, base: &str, abs: &PathBuf) -> Vec<Str
             base.to_string()
         };
         if ctx.register_table(&tname, Arc::new(mem)).is_ok() {
-            out.push(tname);
+            out.push((tname, capped_rows));
         }
     }
     out
@@ -1774,6 +1818,7 @@ mod tests {
             modified_ms: ms,
             columns: vec![],
             group: None,
+            capped_rows: None,
         };
         let regs = vec![
             reg("tickets", "f1", "Tickets.xlsx", Some(now - 2 * 3_600_000)),
@@ -2387,6 +2432,7 @@ mod tests {
             modified_ms: None,
             columns: cols.iter().map(|s| s.to_string()).collect(),
             group: None,
+            capped_rows: None,
         };
         let regs = vec![
             reg("tickets", &["id", "region", "priority"]),
@@ -2847,6 +2893,37 @@ pub fn truncation_footer(shown: usize, truncated: bool, total: Option<usize>) ->
     })
 }
 
+/// Deterministic disclosure when a single workbook registered only its
+/// leading rows (`TableReg::capped_rows`): the answer must say the analysis
+/// reads the first N rows, never the whole file. One line per capped file
+/// (deduped — a multi-sheet book can cap several sheets), engine text only.
+/// Union-family omissions never fire here: they drop whole members and are
+/// disclosed via the group card note + the coverage footer instead. `None`
+/// when nothing was capped — the untruncated path stays byte-identical.
+pub fn row_cap_footer(regs: &[TableReg]) -> Option<String> {
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut out = String::new();
+    for r in regs {
+        if r.group.is_some() {
+            continue; // group drops are disclosed by the coverage footer
+        }
+        let Some(n) = r.capped_rows else { continue };
+        if !seen.insert(r.file_id.as_str()) {
+            continue;
+        }
+        out.push_str(&format!(
+            "_“{}” analyzed to its first {} rows (workbook row cap)._\n",
+            r.file_name,
+            commafy(n)
+        ));
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
 fn direct_footer(sql: &str, regs: &[TableReg], skipped: usize, res: &QueryResult) -> String {
     let mut footer = format!("*Query used:*\n```sql\n{sql}\n```\n");
     if let Some(fresh) = freshness_line(regs, sql, crate::config::now_ms()) {
@@ -2854,6 +2931,11 @@ fn direct_footer(sql: &str, regs: &[TableReg], skipped: usize, res: &QueryResult
     }
     if let Some(trunc) = truncation_footer(res.shown, res.truncated, res.total) {
         footer.push_str(&trunc);
+    }
+    // The same row-cap honesty as the ask path: a re-executed query over a
+    // capped workbook must not read as covering the whole file.
+    if let Some(cap) = row_cap_footer(regs) {
+        footer.push_str(&cap);
     }
     if skipped > 0 {
         footer.push_str(&format!(
@@ -3014,6 +3096,7 @@ mod g1_regression {
             modified_ms: None,
             columns: cols.iter().map(|s| s.to_string()).collect(),
             group: None,
+            capped_rows: None,
         }
     }
 
@@ -3386,5 +3469,200 @@ mod g3_pdf_queryable {
     fn prose_bytes_yield_no_queryable_table() {
         let tables = crate::pdf_tables::queryable_tables(b"not a pdf, just prose bytes");
         assert!(tables.is_empty(), "no grid from non-tabular bytes");
+    }
+}
+
+// Registration-caps audit (docs/beam-caps-audit.md): the two fixture pairs the
+// audit demanded. Path-registered formats (CSV/TSV/Parquet) STREAM — the
+// workbook row cap must never touch them, and their aggregates cover every
+// row with no cap wording anywhere. Materialized workbooks (xlsx/xls) DO cap
+// at MAX_XLSX_ROWS — kept for memory, but never silently: the registration
+// records it, the schema card leads with it, and `row_cap_footer` names the
+// file in engine text.
+#[cfg(test)]
+mod row_cap_disclosure {
+    use super::*;
+    use std::io::Write as _;
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("lh-rowcap-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Minimal single-sheet .xlsx (the same zip-of-OOXML-parts pattern the
+    /// extraction tests use for .docx): header `id,amount` + `data_rows`
+    /// numeric rows with amount = 1 each.
+    fn write_xlsx(path: &std::path::Path, data_rows: usize) {
+        let mut sheet = String::with_capacity(64 * (data_rows + 2));
+        sheet.push_str(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>"#,
+        );
+        sheet.push_str(
+            r#"<row r="1"><c r="A1" t="inlineStr"><is><t>id</t></is></c><c r="B1" t="inlineStr"><is><t>amount</t></is></c></row>"#,
+        );
+        for i in 0..data_rows {
+            let r = i + 2;
+            sheet.push_str(&format!(
+                r#"<row r="{r}"><c r="A{r}"><v>{}</v></c><c r="B{r}"><v>1</v></c></row>"#,
+                i + 1
+            ));
+        }
+        sheet.push_str("</sheetData></worksheet>");
+
+        let parts: &[(&str, String)] = &[
+            (
+                "[Content_Types].xml",
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>"#
+                    .to_string(),
+            ),
+            (
+                "_rels/.rels",
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#
+                    .to_string(),
+            ),
+            (
+                "xl/workbook.xml",
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>"#
+                    .to_string(),
+            ),
+            (
+                "xl/_rels/workbook.xml.rels",
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#
+                    .to_string(),
+            ),
+            ("xl/worksheets/sheet1.xml", sheet),
+        ];
+        let file = std::fs::File::create(path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        for (name, body) in parts {
+            zip.start_file::<_, ()>(*name, Default::default()).unwrap();
+            zip.write_all(body.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap();
+    }
+
+    // Fixture A — guards streaming: a CSV bigger than the workbook row cap
+    // registers by path, DataFusion streams it, and the aggregate covers ALL
+    // rows exactly (sum 1..=120000 — a silently capped read cannot produce
+    // this number). No truncation/cap wording anywhere: not on the card, not
+    // in the result markdown, and neither honesty footer fires.
+    #[tokio::test]
+    async fn big_csv_streams_every_row_with_no_cap_note() {
+        let dir = temp_dir("csv");
+        let n = 120_000usize; // comfortably past MAX_XLSX_ROWS
+        let mut csv = String::with_capacity(16 * (n + 1));
+        csv.push_str("id,amount\n");
+        for i in 1..=n {
+            csv.push_str(&format!("{i},{i}\n"));
+        }
+        let path = dir.join("ledger.csv");
+        std::fs::write(&path, csv).unwrap();
+
+        let ctx = SessionContext::new();
+        let files = vec![("f1".to_string(), "ledger.csv".to_string(), path)];
+        let regs = register_tables(&ctx, &files, false).await;
+        assert_eq!(regs.len(), 1);
+        assert!(
+            regs[0].capped_rows.is_none(),
+            "a path-registered CSV must never row-cap"
+        );
+        assert!(!regs[0].card.contains("row cap"), "{}", regs[0].card);
+
+        let res = run_query(
+            &ctx,
+            "SELECT SUM(amount) AS total, COUNT(*) AS n FROM ledger",
+        )
+        .await
+        .unwrap();
+        assert!(
+            res.markdown.contains("7200060000"),
+            "sum must cover all 120k rows: {}",
+            res.markdown
+        );
+        assert!(res.markdown.contains("120000"), "{}", res.markdown);
+        assert!(!res.truncated);
+        assert!(truncation_footer(res.shown, res.truncated, res.total).is_none());
+        assert!(
+            row_cap_footer(&regs).is_none(),
+            "no workbook-cap footer for a streamed format"
+        );
+        assert!(
+            !res.markdown.to_lowercase().contains("cap"),
+            "{}",
+            res.markdown
+        );
+        assert_eq!(unregistered_count(&files, &regs), 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Fixture B — the audit's one real gap, now closed: a single workbook
+    // with more data rows than MAX_XLSX_ROWS registers capped AND discloses
+    // it — `capped_rows` recorded, the schema card LEADS with the row-cap
+    // note (model-facing, survives clipping), and `row_cap_footer` names the
+    // file deterministically (user-facing). Before this change the same
+    // registration truncated silently.
+    #[tokio::test]
+    async fn oversize_workbook_caps_with_card_note_and_footer() {
+        let dir = temp_dir("xlsx");
+        let path = dir.join("big.xlsx");
+        write_xlsx(&path, MAX_XLSX_ROWS + 1);
+
+        let ctx = SessionContext::new();
+        let files = vec![("f1".to_string(), "big.xlsx".to_string(), path)];
+        let regs = register_tables(&ctx, &files, false).await;
+        assert_eq!(regs.len(), 1);
+        let reg = &regs[0];
+        assert_eq!(
+            reg.capped_rows,
+            Some(MAX_XLSX_ROWS),
+            "registration must record the cap"
+        );
+        // Model-facing: the cap leads the card, so clipping can't hide it and
+        // the model can't claim full-file totals.
+        assert!(
+            reg.card
+                .starts_with("big — row cap: only the first 100,000 rows of big.xlsx are included"),
+            "{}",
+            reg.card
+        );
+        // The registered table holds exactly the cap.
+        let res = run_query(&ctx, "SELECT COUNT(*) AS n FROM big").await.unwrap();
+        assert!(res.markdown.contains("100000"), "{}", res.markdown);
+        // User-facing: deterministic engine footer naming the file.
+        assert_eq!(
+            row_cap_footer(&regs).as_deref(),
+            Some("_“big.xlsx” analyzed to its first 100,000 rows (workbook row cap)._\n")
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // A union family's row-cap omissions drop WHOLE members and are disclosed
+    // via the group card note + the coverage footer — the per-file row-cap
+    // footer must never double-fire for them.
+    #[test]
+    fn union_drops_never_fire_the_row_cap_footer() {
+        let grouped = TableReg {
+            table: "sales_all".into(),
+            file_id: "a".into(),
+            file_name: "sales*.xlsx".into(),
+            card: "sales_all unions 2 files (a.xlsx, b.xlsx) — row cap: 1 older file(s) NOT included\n…".into(),
+            modified_ms: None,
+            columns: vec![],
+            group: Some(GroupMeta {
+                file_ids: vec!["a".into(), "b".into()],
+                file_names: vec!["a.xlsx".into(), "b.xlsx".into()],
+                newest_ms: 0,
+            }),
+            capped_rows: None,
+        };
+        assert!(row_cap_footer(&[grouped]).is_none());
     }
 }

@@ -747,6 +747,12 @@ pub fn answer_pipeline(
                             ) {
                                 yield delta(fresh);
                             }
+                            // Same row-cap honesty as the single-query path:
+                            // the steps read the same registrations, so a
+                            // capped workbook must disclose here too.
+                            if let Some(cap) = crate::analytics::row_cap_footer(&regs) {
+                                yield delta(cap);
+                            }
                             if let Some(chart) = &last_chart {
                                 yield delta(format!("\n```lighthouse-chart\n{chart}\n```\n"));
                             }
@@ -863,6 +869,13 @@ pub fn answer_pipeline(
                                 tabular_total.saturating_sub(dropped),
                                 tabular_total,
                             ));
+                        }
+                        // Row-cap honesty: a single workbook registered to its
+                        // leading rows must never read as the whole file.
+                        // Engine text, deterministic; union-family omissions
+                        // are covered by the coverage line above, never here.
+                        if let Some(cap) = crate::analytics::row_cap_footer(&regs) {
+                            yield delta(cap);
                         }
                         // Chartable result → engine-built spec the chat renders
                         // as SVG (Phase C). Data comes straight from the query
