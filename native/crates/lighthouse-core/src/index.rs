@@ -207,7 +207,10 @@ fn tf_of(text: &str) -> HashMap<String, f64> {
 }
 
 /// The freshness key for a file right now, or None if it is unreadable.
-fn key_of(abs: &Path) -> Option<String> {
+/// `pub(crate)`: the answer cache's candidate digest pairs each shareable id
+/// with this same key (vault::shareable_freshness_keys), so cache invalidation
+/// and index staleness can never disagree about what "changed" means.
+pub(crate) fn key_of(abs: &Path) -> Option<String> {
     let meta = std::fs::metadata(abs).ok()?;
     let ms = meta
         .modified()

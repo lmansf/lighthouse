@@ -265,6 +265,22 @@ export interface AuthService {
   signOut(): Promise<void>;
 }
 
+/**
+ * Per-ask answer-cache controls (openspec: add-answer-cache), computed by the
+ * CLIENT per request and carried on the wire. `bypassCache` is the Re-run /
+ * Regenerate gesture: skip the cache lookup, run live, refresh the entry.
+ * `persistAllowed` is the chat-history verdict — `persistEnabled() &&
+ * !chatHistoryLocked()` at the moment of the ask — which gates the engine's
+ * DISK cache mirror (history opt-in is client-only state by design, so the
+ * engines only ever learn a per-request verdict). Both default false: an
+ * absent field fails toward privacy (in-memory cache only, disk mirror
+ * deleted).
+ */
+export interface AskOptions {
+  bypassCache?: boolean;
+  persistAllowed?: boolean;
+}
+
 /** Streams an assistant answer plus its references for a user question. */
 export interface ChatService {
   /**
@@ -276,7 +292,8 @@ export interface ChatService {
    * this question), regardless of the global included set. An aborted `signal`
    * cancels the in-flight request (the chat UI's Stop button); implementations
    * should surface the abort by throwing (an `AbortError` DOMException) so the
-   * caller can keep the partial answer and settle its state.
+   * caller can keep the partial answer and settle its state. `opts` carries the
+   * per-ask answer-cache controls (see AskOptions).
    */
   ask(
     question: string,
@@ -284,5 +301,6 @@ export interface ChatService {
     history?: ChatTurn[],
     attachmentFileIds?: string[],
     signal?: AbortSignal,
+    opts?: AskOptions,
   ): AsyncIterable<ChatChunk>;
 }

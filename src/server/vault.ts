@@ -900,6 +900,30 @@ export function shareableFileIds(isCloud: boolean): string[] {
 }
 
 /**
+ * The shareable candidate set with each file's CURRENT freshness key
+ * (`mtimeMs:size`), in one walk + one state load: the answer cache's
+ * candidate-digest input (openspec: add-answer-cache). Inherits every gate the
+ * answer respects via `shareableFileIds`; an unreadable file participates with
+ * an empty key (readable⇄unreadable is itself an answer-changing event).
+ * KEEP IN SYNC with vault.rs::shareable_freshness_keys — same SHAPE, but the
+ * twin stats mtime+size itself (PARITY: no persistent index here), so the
+ * VALUES are twin-local and the twins never share a cache file.
+ */
+export function shareableFreshnessKeys(isCloud: boolean): [string, string][] {
+  const state = loadState();
+  return shareableFileIds(isCloud).map((id) => {
+    let key = "";
+    try {
+      const st = fs.statSync(resolveAbs(id, state));
+      key = `${st.mtimeMs}:${st.size}`;
+    } catch {
+      /* unreadable — the empty key still participates in the digest */
+    }
+    return [id, key];
+  });
+}
+
+/**
  * Drop effectively-local-only ids from `ids` when a cloud provider is active;
  * pass `ids` through unchanged on the device path. The reusable filter the two
  * gate-BYPASSERS (attachments, doc-focus) apply at their own choke points.

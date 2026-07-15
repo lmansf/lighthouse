@@ -1215,6 +1215,28 @@ pub fn shareable_file_ids(is_cloud: bool) -> Vec<String> {
         .collect()
 }
 
+/// The shareable candidate set with each file's CURRENT freshness key
+/// (`mtimeMs:size` — the index's own key shape, index::key_of), in one walk +
+/// one state load: the answer cache's candidate-digest input (openspec:
+/// add-answer-cache). Inherits every gate the answer respects via
+/// `shareable_file_ids`; an unreadable file participates with an empty key
+/// (readable⇄unreadable is itself an answer-changing event). KEEP IN SYNC with
+/// vault.ts::shareableFreshnessKeys (whose keys are its own stat values —
+/// same shape, twin-local values; the twins never share a cache file).
+pub fn shareable_freshness_keys(is_cloud: bool) -> Vec<(String, String)> {
+    let state = load_state();
+    shareable_file_ids(is_cloud)
+        .into_iter()
+        .map(|id| {
+            let key = resolve_abs(&id, &state)
+                .ok()
+                .and_then(|abs| crate::index::key_of(&abs))
+                .unwrap_or_default();
+            (id, key)
+        })
+        .collect()
+}
+
 /// Drop effectively-local-only ids from `ids` when a cloud provider is active;
 /// pass `ids` through unchanged on the device path. The reusable filter the two
 /// gate-BYPASSERS (attachments, doc-focus) apply at their own choke points, and

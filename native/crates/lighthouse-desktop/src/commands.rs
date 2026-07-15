@@ -503,6 +503,11 @@ pub async fn chat_ask(
     included_file_ids: Vec<String>,
     history: Vec<Value>,
     attachment_file_ids: Vec<String>,
+    // Answer cache controls (openspec: add-answer-cache). `Option` so an older
+    // caller that omits them still invokes cleanly; absent means false — the
+    // privacy-safe default (memory-only cache, no disk mirror).
+    bypass_cache: Option<bool>,
+    persist_allowed: Option<bool>,
     on_chunk: Channel<ChatChunk>,
 ) -> Result<(), String> {
     let history: Vec<ChatTurn> = {
@@ -543,6 +548,10 @@ pub async fn chat_ask(
         attachment_file_ids,
         history,
         cfg,
+        lighthouse_core::answer_cache::CacheCtl {
+            bypass_cache: bypass_cache.unwrap_or(false),
+            persist_allowed: persist_allowed.unwrap_or(false),
+        },
     );
     let mut final_files: Vec<String> = Vec::new();
     let mut artifacts: Vec<String> = Vec::new();

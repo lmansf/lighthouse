@@ -297,9 +297,14 @@ export interface ChatChunk {
    * (device⇔local/none) and the egress registry. `excerptCount` is how many
    * context blocks the model received in the branch that ran; `sourceFileCount`
    * is the number of distinct source files behind them (the final chunk's
-   * `references` length). KEEP IN SYNC with the Rust ChunkMeta in contracts.rs.
+   * `references` length). `cachedAt` (openspec: add-answer-cache) is present
+   * ONLY when this final chunk replays a cached answer: the epoch ms of the
+   * ORIGINAL answer's completion — the UI renders its "From cache · same data
+   * as HH:MM · Re-run" line from this field alone, never from prose; origin
+   * and the counts stay the original answer's. KEEP IN SYNC with the Rust
+   * ChunkMeta in contracts.rs.
    */
-  meta?: { origin: string; excerptCount: number; sourceFileCount: number };
+  meta?: { origin: string; excerptCount: number; sourceFileCount: number; cachedAt?: number };
   /** True on the last chunk of a response. */
   done: boolean;
 }

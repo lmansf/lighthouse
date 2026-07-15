@@ -37,6 +37,7 @@ async fn final_chunk_for(cfg: ModelCfg) -> ChatChunk {
         vec![],
         vec![],
         cfg,
+        Default::default(),
     );
     let mut last_done: Option<ChatChunk> = None;
     while let Some(c) = stream.next().await {

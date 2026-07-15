@@ -127,6 +127,13 @@ pub struct ChunkMeta {
     pub origin: String,
     pub excerpt_count: usize,
     pub source_file_count: usize,
+    /// Answer-cache replay stamp (openspec: add-answer-cache): epoch ms of the
+    /// ORIGINAL answer's completion, present ONLY when this final chunk replays
+    /// a cached answer. Engine-emitted, never model text — the UI renders its
+    /// "From cache · same data as HH:MM · Re-run" line from this field alone.
+    /// `origin`/counts stay the original answer's (the replay computed nothing).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub cached_at: Option<i64>,
 }
 
 /// The exact executed SQL of an analytics answer and the vault files it read.

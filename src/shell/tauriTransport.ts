@@ -139,6 +139,10 @@ function handleChat(
           includedFileIds: Array.isArray(body.includedFileIds) ? body.includedFileIds : [],
           history: Array.isArray(body.history) ? body.history : [],
           attachmentFileIds: Array.isArray(body.attachmentFileIds) ? body.attachmentFileIds : [],
+          // Answer-cache controls (openspec: add-answer-cache) ride the IPC
+          // verbatim; absent fields fail toward privacy (false).
+          bypassCache: body.bypassCache === true,
+          persistAllowed: body.persistAllowed === true,
           onChunk: channel,
         })
         .catch((err) => {

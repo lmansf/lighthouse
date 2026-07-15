@@ -171,7 +171,8 @@ fn parity_retrieval_candidate_ids_under_a_cloud_provider() {
 // --- End-to-end ------------------------------------------------------------------
 
 async fn collect_pipeline(question: &str, ids: Vec<String>, cfg: ModelCfg) -> (String, Vec<String>) {
-    let mut stream = answer_pipeline(question.to_string(), ids, vec![], vec![], cfg);
+    let mut stream =
+        answer_pipeline(question.to_string(), ids, vec![], vec![], cfg, Default::default());
     let mut text = String::new();
     let mut final_files: Vec<String> = Vec::new();
     while let Some(c) = stream.next().await {

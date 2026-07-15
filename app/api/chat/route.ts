@@ -27,6 +27,11 @@ export async function POST(req: Request) {
   const attachmentFileIds: string[] = Array.isArray(body.attachmentFileIds)
     ? body.attachmentFileIds.filter((id: unknown): id is string => typeof id === "string")
     : [];
+  // Answer cache controls (openspec: add-answer-cache): Re-run's lookup
+  // bypass, and the client's per-request persistence verdict. Both default
+  // false — an absent field fails toward privacy (memory-only cache).
+  const bypassCache = body.bypassCache === true;
+  const persistAllowed = body.persistAllowed === true;
   // Prior turns (sanitized) so follow-ups have conversational context.
   const history: ChatTurn[] = Array.isArray(body.history)
     ? body.history
@@ -61,6 +66,7 @@ export async function POST(req: Request) {
           attachmentFileIds,
           history,
           cfg,
+          { bypassCache, persistAllowed },
         )) {
           if (chunk.done) {
             if (chunk.references) finalFiles = chunk.references.map((r) => r.fileId);

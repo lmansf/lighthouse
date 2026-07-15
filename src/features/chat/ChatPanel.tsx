@@ -36,6 +36,7 @@ import {
   DrawerHeader,
   DrawerHeaderTitle,
   Input,
+  Link,
   OverlayDrawer,
   Popover,
   PopoverSurface,
@@ -520,6 +521,14 @@ const useStyles = makeStyles({
     marginTop: tokens.spacingVerticalXXS,
     color: tokens.colorNeutralForeground3,
   },
+  // Answer-cache line under a replayed answer ("From cache · same data as
+  // HH:MM · Re-run") — same quiet register as the provenance stamp; rendered
+  // only from the final chunk's engine-emitted `meta.cachedAt`.
+  cacheLine: {
+    display: "block",
+    marginTop: tokens.spacingVerticalXXS,
+    color: tokens.colorNeutralForeground3,
+  },
   // G4: the truncation disclosure bound to a sortable result table's <caption>,
   // so it stays with the table through sorting.
   tableCaption: {
@@ -871,6 +880,25 @@ function stripCitations(content: string): string {
 // via <vendor> — …") is rendered via `provenanceStampText` from
 // @/lib/evidencePack — one source of truth shared with the evidence-pack
 // export, so the pack's stamp line is byte-identical to the on-screen one.
+
+/**
+ * The freshness stamp on a replayed answer's cache line (openspec:
+ * add-answer-cache): "HH:MM" for a same-day answer, date + time once it
+ * crosses midnight (the disk cache survives restarts) — the honest "same data
+ * as" moment must never read as today when it isn't. Rendered ONLY from the
+ * final chunk's engine-emitted `meta.cachedAt`, never from prose.
+ */
+function cachedAtLabel(ms: number): string {
+  const d = new Date(ms);
+  const now = new Date();
+  const time = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const sameDay =
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate();
+  if (sameDay) return time;
+  return `${d.toLocaleDateString([], { month: "short", day: "numeric" })} ${time}`;
+}
 
 /** Compact "how long ago" for the recent-chats list (e.g. "3m", "2h", "Apr 5"). */
 function formatRelativeTime(ts: number): string {
@@ -1841,11 +1869,18 @@ export function ChatPanel() {
     setMessages((m) => m.map((x) => (x.id === asstId ? { ...x, stopped: true } : x)));
   }
 
-  async function sendQuestion(q: string) {
+  async function sendQuestion(q: string, opts?: { bypassCache?: boolean }) {
     if (!q || streaming) return;
     // Warm the split markdown chunk now, while the answer streams as plain text,
     // so it's ready the instant the turn settles into a full markdown render.
     warmMarkdown();
+    // Answer cache (openspec: add-answer-cache): the client's per-ask
+    // persistence verdict. Chat-history opt-in is client-only state by design
+    // (useChatStore + localStorage), so the engine only ever learns this
+    // per-request boolean — read LIVE from the store plus the managed-policy
+    // lock (same fail-closed pairing as the conversation-note export below),
+    // so a policy applied after mount can't let a disk write slip through.
+    const persistAllowed = useChatStore.getState().persistEnabled && !chatHistoryLocked();
     // The conversation so far (completed turns only — failed turns are excluded)
     // becomes the model's history. Read from the store, not the render closure,
     // so a retry that just removed its failed turn builds the right history.
@@ -1882,6 +1917,7 @@ export function ChatPanel() {
         history,
         attachmentIds,
         controller.signal,
+        { bypassCache: opts?.bypassCache === true, persistAllowed },
       )) {
         // Stop pressed: some transports (the Tauri fetch interceptor) don't
         // honor AbortSignal, so also bail out of the loop explicitly and keep
@@ -2435,7 +2471,12 @@ export function ChatPanel() {
     setMessages((m) => m.slice(0, idx));
     void sendQuestion(next);
   }
-  /** Regenerate an answer: drop the question+answer pair (and after) and re-ask. */
+  /**
+   * Regenerate an answer: drop the question+answer pair (and after) and re-ask
+   * LIVE. Always bypasses the answer cache — regenerating into an identical
+   * cached replay would be a no-op — and the fresh completion refreshes the
+   * entry. The "Re-run" affordance on a cached answer is this same path.
+   */
   function regenerate(asstId: string) {
     if (streaming) return;
     const msgs = useChatStore.getState().messages;
@@ -2443,7 +2484,7 @@ export function ChatPanel() {
     const prev = idx > 0 ? msgs[idx - 1] : undefined;
     if (!prev || prev.role !== "user") return;
     setMessages((m) => m.slice(0, idx - 1));
-    void sendQuestion(prev.content);
+    void sendQuestion(prev.content, { bypassCache: true });
   }
 
   /** Record a 👍/👎 on an answer (a quality signal); clicking again clears it. */
@@ -3590,6 +3631,21 @@ export function ChatPanel() {
                           {provenanceStampText(m.meta)}
                         </Text>
                       )}
+                      {/* Answer-cache honesty line (openspec: add-answer-cache):
+                          a replayed answer is visibly marked with the ORIGINAL
+                          answer time, from the engine-emitted meta.cachedAt
+                          only — never model text. Re-run re-asks the same
+                          question live (bypassCache) and refreshes the entry. */}
+                      {m.meta?.cachedAt !== undefined &&
+                        !m.error &&
+                        !(streaming && m.id === lastId) && (
+                          <Text size={200} className={styles.cacheLine}>
+                            From cache · same data as {cachedAtLabel(m.meta.cachedAt)} ·{" "}
+                            <Link inline disabled={streaming} onClick={() => regenerate(m.id)}>
+                              Re-run
+                            </Link>
+                          </Text>
+                        )}
                     </>
                   )}
                 </div>

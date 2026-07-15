@@ -497,6 +497,13 @@ pub async fn chat_post(headers: HeaderMap, body: Option<Json<Value>>) -> Respons
     let included_file_ids = string_array(&body["includedFileIds"]);
     // Files the user explicitly attached to this question.
     let attachment_ids = string_array(&body["attachmentFileIds"]);
+    // Answer cache controls (openspec: add-answer-cache): Re-run's lookup
+    // bypass, and the client's per-request persistence verdict. Both default
+    // false — an absent field fails toward privacy (memory-only cache).
+    let cache = lighthouse_core::answer_cache::CacheCtl {
+        bypass_cache: body["bypassCache"].as_bool().unwrap_or(false),
+        persist_allowed: body["persistAllowed"].as_bool().unwrap_or(false),
+    };
     // Prior turns (sanitized) so follow-ups have conversational context; capped
     // to the last few to bound token cost.
     let history: Vec<ChatTurn> = body["history"]
@@ -550,6 +557,7 @@ pub async fn chat_post(headers: HeaderMap, body: Option<Json<Value>>) -> Respons
             attachment_ids,
             history,
             cfg,
+            cache,
         );
         let mut final_files: Vec<String> = Vec::new();
         let mut artifacts: Vec<String> = Vec::new();
