@@ -14,6 +14,7 @@ import type {
   ChatChunk,
   ChatTurn,
   DataSource,
+  FileInspection,
   FileNode,
   OnboardingState,
   Pin,
@@ -44,6 +45,17 @@ export interface RagService {
   setSourceAvailable(sourceId: string, available: boolean): Promise<void>;
   /** Retrieve references relevant to a query from the currently-included set. */
   search(query: string, includedFileIds: string[]): Promise<RagReference[]>;
+  /**
+   * Read-only inspection of a single file ("What the AI sees", openspec:
+   * add-file-inspector): what the engine extracted, chunked, catalogued, and
+   * indexed for it, plus its effective inclusion + local-only state — and, when
+   * `query` is given, a bounded, file-scoped test-search (the file's top chunks
+   * with scores, via the existing retrieval scorer). PURE READ — it surfaces the
+   * inclusion + local-only toggles, never mutates. PARITY: the web dev twin omits
+   * the Rust-engine-only fields (OCR flag, persisted chunk count, column catalog,
+   * last-indexed key) rather than faking them; the UI renders those "desktop only".
+   */
+  inspect(fileId: string, query?: string): Promise<FileInspection>;
   /**
    * Re-run an analytics answer's SQL over exactly the files it read — the
    * guarded, model-free path behind Edit SQL. Returns the (capped) result

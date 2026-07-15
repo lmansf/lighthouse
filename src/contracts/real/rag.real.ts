@@ -6,6 +6,7 @@ import type {
   Cadence,
   ChangedPin,
   DataSource,
+  FileInspection,
   FileNode,
   Pin,
   PolicySnapshot,
@@ -61,6 +62,14 @@ class RealRagService implements RagService {
   async search(query: string, includedFileIds: string[]): Promise<RagReference[]> {
     const res = await post({ op: "search", query, includedFileIds });
     return (res.references as RagReference[]) ?? [];
+  }
+
+  async inspect(fileId: string, query?: string): Promise<FileInspection> {
+    return (await post({
+      op: "inspect",
+      fileId,
+      ...(query ? { query } : {}),
+    })) as unknown as FileInspection;
   }
 
   async analyticsSql(

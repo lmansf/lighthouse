@@ -7,6 +7,7 @@ import {
   setLocalOnly,
   setSourceAvailable,
   retrieve,
+  inspect,
   moveNode,
   renameNode,
   createFolder,
@@ -80,6 +81,17 @@ export async function POST(req: Request) {
       const query = typeof body.query === "string" ? body.query : "";
       const ids = Array.isArray(body.includedFileIds) ? body.includedFileIds : [];
       return NextResponse.json({ references: (await retrieve(query, ids)).references });
+    }
+
+    // Read-only per-file inspector ("What the AI sees", openspec:
+    // add-file-inspector): what the engine extracted/chunked/indexed for one
+    // file, plus an optional file-scoped test-search. PURE READ — no setter.
+    // PARITY: the twin's payload omits the Rust-engine-only fields.
+    case "inspect": {
+      const fileId = typeof body.fileId === "string" ? body.fileId : "";
+      if (!fileId) return NextResponse.json({ error: "fileId required" }, { status: 400 });
+      const query = typeof body.query === "string" ? body.query : undefined;
+      return NextResponse.json(await inspect(fileId, query));
     }
 
     case "move": {

@@ -102,6 +102,17 @@ pub async fn rag_op(app: AppHandle, body: Value) -> Result<Value, String> {
             let retrieved = sources::retrieve(query, &ids, &[], 5, false).await;
             Ok(json!({ "references": retrieved.references }))
         }
+        // Read-only per-file inspector ("What the AI sees", openspec:
+        // add-file-inspector): what the engine extracted/chunked/catalogued/
+        // indexed for one file, plus an optional file-scoped test-search. PURE
+        // READ — surfaces state, never a setter; no vault-changed broadcast.
+        Some("inspect") => {
+            let Some(file_id) = body["fileId"].as_str().filter(|s| !s.is_empty()) else {
+                return Err("fileId required".into());
+            };
+            let inspection = sources::inspect(file_id, body["query"].as_str()).await;
+            Ok(serde_json::to_value(inspection).unwrap_or_else(|_| json!({})))
+        }
         Some("move") => {
             let Some(from) = body["from"].as_str() else {
                 return Err("from required".into());

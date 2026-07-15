@@ -199,6 +199,45 @@ export interface RagReference {
   kind?: "file" | "conversation";
 }
 
+/**
+ * "What the AI sees" — a read-only, per-file inspection (openspec:
+ * add-file-inspector). Every field is optional: the Rust engine fills them all
+ * in; the TS twin OMITS the ones it cannot compute (never a fake value). KEEP
+ * IN SYNC with the shared fields of `FileInspection` in lighthouse-core
+ * inspect.rs. PARITY: the twin omits `fromOcr`, `chunkCount`, `columns`, and
+ * `indexedAt`/`fresh` (OCR, the persistent index, and the column catalog are
+ * Rust-engine-only — see docs/ts-twin.md); the UI renders those as "desktop
+ * only" rather than blank.
+ */
+export interface FileInspection {
+  name?: string;
+  /** Effective AI-visibility (included in retrieval). */
+  included?: boolean;
+  /** Effective "Private — this device only" (ancestor-wins). */
+  localOnly?: boolean;
+  /** A bounded slice of the extracted text the model would read. Absent when the
+   *  file has no extractable text (it stays findable by name only). */
+  extractPreview?: string;
+  /** Rust-only: the preview text came from OCR (image / scanned PDF). The twin
+   *  has no OCR and omits this. */
+  fromOcr?: boolean;
+  /** How the file is chunked: row-windows (tabular) vs word-windows (prose). */
+  chunkMode?: "tabular" | "prose";
+  /** Rust-only: chunk count from the persistent index. The twin re-chunks per
+   *  query and persists no count, so it omits this. */
+  chunkCount?: number;
+  /** Rust-only: detected columns + kinds (column catalog) for a tabular file. */
+  columns?: { name: string; kind: "numeric" | "date" | "text" }[];
+  /** Rust-only: the index freshness key (`mtimeMs:size`). */
+  indexedAt?: string;
+  /** Rust-only: whether `indexedAt` still matches the file on disk right now. */
+  fresh?: boolean;
+  /** The file's top chunks for a test-search query, scored by the existing
+   *  retrieval scorer and scoped to this one file. Present only when a query was
+   *  supplied. */
+  testSearch?: { text: string; score: number }[];
+}
+
 export type ChatRole = "user" | "assistant";
 
 /** A prior turn sent back to the model so follow-up questions have context. */

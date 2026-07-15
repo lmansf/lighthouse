@@ -95,6 +95,17 @@ pub async fn rag_post(headers: HeaderMap, body: Option<Json<Value>>) -> Response
             let retrieved = sources::retrieve(query, &ids, &[], 5, false).await;
             Json(json!({ "references": retrieved.references })).into_response()
         }
+        // Read-only per-file inspector ("What the AI sees", openspec:
+        // add-file-inspector): what the engine extracted/chunked/catalogued/
+        // indexed for one file, plus an optional file-scoped test-search. PURE
+        // READ — no setter is reachable from this op.
+        Some("inspect") => {
+            let Some(file_id) = body["fileId"].as_str().filter(|s| !s.is_empty()) else {
+                return bad_request("fileId required");
+            };
+            let inspection = sources::inspect(file_id, body["query"].as_str()).await;
+            Json(inspection).into_response()
+        }
         Some("move") => {
             let Some(from) = body["from"].as_str() else {
                 return bad_request("from required");

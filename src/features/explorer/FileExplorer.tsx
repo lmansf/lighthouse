@@ -71,9 +71,11 @@ import {
   RenameRegular,
   ShieldKeyholeRegular,
   SparkleFilled,
+  SparkleRegular,
 } from "@fluentui/react-icons";
 import type { FileNode } from "@/contracts";
 import { flattenVisible, type FlatRow } from "./flatten";
+import { FileInspector } from "./FileInspector";
 import { useRagStore } from "@/stores/useRagStore";
 import { useAuthStore } from "@/stores/useAuthStore";
 import { FILE_DRAG_MIME, parseDraggedFiles, serializeDraggedFiles } from "@/shell/dnd";
@@ -449,6 +451,8 @@ interface TreeRowProps {
   onOpen: (id: string) => void;
   /** Reveal a node in the OS file manager (selecting it in its folder). */
   onReveal: (id: string) => void;
+  /** Open the read-only "What the AI sees" inspector for a file. */
+  onInspect: (id: string, name: string) => void;
   /** Reparent a node under a folder (or the vault root, null). */
   onMove: (fromId: string, toParentId: string | null) => void;
   /** Open the rename dialog for a node (local vault nodes only). */
@@ -493,6 +497,7 @@ function TreeRowImpl({
   desktop,
   onOpen,
   onReveal,
+  onInspect,
   onMove,
   onRename,
   onNewFolderInside,
@@ -777,6 +782,11 @@ function TreeRowImpl({
               </MenuItem>
             )}
             {(openable || revealable || movable || editable) && <MenuDivider />}
+            {node.kind === "file" && (
+              <MenuItem icon={<SparkleRegular />} onClick={() => onInspect(node.id, node.name)}>
+                What the AI sees
+              </MenuItem>
+            )}
             <MenuItem
               icon={node.ragIncluded ? <EyeOffRegular /> : <EyeRegular />}
               onClick={toggleVisibility}
@@ -1232,6 +1242,11 @@ export function FileExplorer() {
     setNameValue("");
     setNameError(null);
   }, []);
+
+  // The read-only "What the AI sees" inspector: which file it's open for (null =
+  // closed). Opening it is a pure navigation gesture — it mutates nothing.
+  const [inspectNode, setInspectNode] = useState<{ id: string; name: string } | null>(null);
+  const openInspect = useCallback((id: string, name: string) => setInspectNode({ id, name }), []);
 
   // Stable per-row callbacks (forwarding to the store's stable actions), so the
   // memoized TreeRow isn't re-rendered by every explorer render just because
@@ -1881,6 +1896,7 @@ export function FileExplorer() {
                           desktop={desktop}
                           onOpen={openNode}
                           onReveal={revealNode}
+                          onInspect={openInspect}
                           onMove={handleMove}
                           onRename={openRename}
                           onNewFolderInside={openNewFolder}
@@ -1995,6 +2011,14 @@ export function FileExplorer() {
           </DialogBody>
         </DialogSurface>
       </Dialog>
+
+      {/* Read-only "What the AI sees" inspector (openspec: add-file-inspector). */}
+      <FileInspector
+        fileId={inspectNode?.id ?? null}
+        fileName={inspectNode?.name ?? ""}
+        desktop={desktop}
+        onClose={() => setInspectNode(null)}
+      />
     </section>
   );
 }

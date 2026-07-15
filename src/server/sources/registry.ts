@@ -6,7 +6,7 @@
  * `${sourceId}::`, and the registry routes each curation op to the owning source
  * and aggregates listings across all of them.
  */
-import type { DataSource, FileNode } from "@/contracts";
+import type { DataSource, FileInspection, FileNode } from "@/contracts";
 import {
   retrieve as vaultRetrieve,
   restoreFromVault as vaultRestoreFromVault,
@@ -14,6 +14,7 @@ import {
   type Retrieved,
   type RestoreDescriptor,
 } from "../vault";
+import { inspect as vaultInspect } from "../inspect";
 import { localVault } from "./local";
 import { sharepoint } from "./sharepoint";
 import type { SourceConnector } from "./types";
@@ -149,4 +150,14 @@ export async function retrieve(
   // `isCloud` narrows the candidate + external sets to the shareable ones inside
   // vaultRetrieve, so a marked file's content never reaches the vendor.
   return vaultRetrieve(query, includedFileIds, k, external, attachmentIds, isCloud);
+}
+
+/**
+ * Read-only per-file inspection ("What the AI sees", openspec:
+ * add-file-inspector). Like local-only marks it is keyed by node id and served
+ * by the vault/inspect engine regardless of the owning source. KEEP IN SYNC
+ * with lighthouse-core sources::inspect.
+ */
+export async function inspect(fileId: string, query?: string): Promise<FileInspection> {
+  return vaultInspect(fileId, query);
 }

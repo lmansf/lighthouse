@@ -132,3 +132,17 @@ pub async fn retrieve(
             contexts: vec![],
         })
 }
+
+/// Read-only inspection of a single file ("What the AI sees"): what the engine
+/// has extracted, chunked, catalogued, and indexed for it, plus an optional
+/// bounded, file-scoped test-search. Like local-only marks, this is keyed by
+/// node id and served by the vault/inspect engine regardless of the owning
+/// source. Runs on a blocking thread — it is synchronous CPU+disk work (the same
+/// reason `retrieve` above spawns_blocking). PURE READ: no setter is reachable.
+pub async fn inspect(file_id: &str, query: Option<&str>) -> crate::inspect::FileInspection {
+    let file_id = file_id.to_string();
+    let query = query.map(str::to_string);
+    tokio::task::spawn_blocking(move || crate::inspect::inspect(&file_id, query.as_deref()))
+        .await
+        .unwrap_or_default()
+}
