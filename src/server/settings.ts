@@ -70,6 +70,17 @@ export interface DesktopSettings {
   briefingNotify?: boolean;
   /** G5 briefing note: local hour (0–23) the scheduled note may refresh at. Default 9. */
   briefingNoteHour?: number;
+  /**
+   * Whether the once-per-install first-run orientation tour has been shown.
+   * Written true the moment the tour first appears (so completing AND skipping
+   * both mark it done); only a wiped app-state dir re-shows it. PARITY:
+   * tour_shown in settings.rs. It lives in these install-global settings (not
+   * the vault, not localStorage) so it survives vault switches — the desktop
+   * shell points LIGHTHOUSE_SETTINGS_FILE at its private app-state dir; the web
+   * twin has no settings file, so the flag simply doesn't persist there (the
+   * tour would re-greet on a plain web reload — desktop is the shipping target).
+   */
+  tourShown?: boolean;
 }
 
 function settingsFile(): string | null {

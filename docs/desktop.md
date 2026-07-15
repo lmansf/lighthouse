@@ -114,8 +114,8 @@ loads. The Electron main process installs it via
 `session.defaultSession.webRequest.onHeadersReceived` before the window is
 created, so the first document is covered too. The policy keeps the page locked
 to its own local Next server (`http://localhost:PORT`); API routes proxy out to
-Anthropic/Supabase server-side, so the renderer itself only talks to that same
-origin. Notably it **omits `'unsafe-eval'`** — production Next doesn't need it —
+the configured AI provider server-side, so the renderer itself only talks to
+that same origin. Notably it **omits `'unsafe-eval'`** — production Next doesn't need it —
 which clears Electron's insecure-CSP warning and removes that attack surface.
 `'unsafe-inline'` stays because Next's bootstrap inline script and Fluent UI's
 (Griffel) runtime `<style>` injection rely on it, and `connect-src` allows
@@ -174,10 +174,15 @@ alternate model URL, expected checksums) documented in its header comment.
 The app ships **unpacked** (`asar: false`) because it runs a local Next.js
 server (`next start`) as a child process, which must be a real file on disk
 rather than packed into an asar archive. Only production dependencies are
-bundled; `.next/cache`, the dev toolchain, and the `supabase/` Edge Function
-sources are excluded. So are `.env` / `.env.local` (dev files that may hold
-secrets) — only the public `.env.production` (license + checkout function URLs,
-anon key, and the `PAID_ENABLED` flag) ships.
+bundled; `.next/cache` and the dev toolchain are excluded, along with `.env` /
+`.env.local` (dev files that may hold secrets).
+
+> **Electron-era note (no longer applies).** This build step once also shipped a
+> public `.env.production` carrying license/checkout Edge-Function URLs, a
+> Supabase anon key, and a `PAID_ENABLED` flag, and excluded a `supabase/`
+> Edge-Function source tree. **The shipping Tauri app has none of that** — no
+> licensing, no checkout, no Supabase backend — so those variables and sources
+> no longer exist to ship or exclude (see `docs/data-flows.md`).
 
 ### Icons
 
@@ -209,7 +214,9 @@ images, regenerated from the theme palette with `npm run installer:art`
 
 Uninstalling removes the app and asks once whether to **also delete your
 Lighthouse data** — the app settings/logs (`%APPDATA%\rag-vault`, Electron's
-userData folder, named after the package name) and the
+userData folder, named after the package name — **this path is Electron-era
+history; the shipping Tauri app instead uses an OS app-data directory derived
+from the identifier `com.lighthouse.app`, not from `rag-vault`**) and the
 default vault (`Documents\Lighthouse Vault`) along with the files in it. The
 default answer (and a silent `/S` uninstall) is **No**, so your documents and
 settings are never deleted by accident and a reinstall picks up where you left
@@ -218,14 +225,19 @@ off; a vault you pointed elsewhere is always left alone.
 ## Configuration
 
 Environment variables (set in `.env.local` or the shell that launches the app)
-still apply — `ANTHROPIC_API_KEY` for live chat, `LIGHTHOUSE_LOCAL_LLM_URL` /
+still apply — `ANTHROPIC_API_KEY` for live chat, and `LIGHTHOUSE_LOCAL_LLM_URL` /
 `LIGHTHOUSE_LOCAL_LLM_MODEL` to point the "Local model (private)" provider at an
 external OpenAI-compatible server (see the README's
-[Local model](../README.md#local-model) section), and the licensing/checkout
-config (`LICENSE_API_URL` + `SUPABASE_ANON_KEY` + `CHECKOUT_API_URL`, plus the
-`PAID_ENABLED` flag, shipped in `.env.production`) from
-[registration.md](./registration.md) for the welcome form and subscriptions.
+[Local model](../README.md#local-model) section).
 `VAULT_DIR` is set automatically by the desktop app from your chosen folder.
+
+> **Removed since the native cutover.** Earlier Electron builds also read a
+> licensing/checkout block (`LICENSE_API_URL`, `SUPABASE_ANON_KEY`,
+> `CHECKOUT_API_URL`, and a `PAID_ENABLED` flag) from `.env.production` to drive
+> a welcome/registration form and paid subscriptions. **None of that exists in
+> the shipping app:** there are no accounts, no license or trial check, no
+> Supabase backend, and no Stripe checkout — the code was deleted, not disabled
+> (see `docs/data-flows.md`). The old `registration.md` flow is retired with it.
 
 A `dist` build bundles a `llama-server` binary under `resources/llm/`, plus the
 Piper TTS binary and a neural voice under `resources/tts/` for on-device

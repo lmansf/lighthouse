@@ -13,8 +13,6 @@ pub fn lock_env(vault: &Path) -> MutexGuard<'static, ()> {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     std::env::set_var("VAULT_DIR", vault);
-    std::env::remove_var("LICENSE_API_URL");
-    std::env::remove_var("LICENSE_ENFORCE");
     std::env::remove_var("LIGHTHOUSE_API_TOKEN");
     std::env::remove_var("LIGHTHOUSE_DESKTOP");
     // With experiments removed, default inclusion is a fixed privacy-preserving

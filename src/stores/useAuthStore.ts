@@ -16,9 +16,8 @@ interface AuthStore {
    * re-advances it.
    */
   setStep: (step: OnboardingState["step"]) => void;
-  signIn: (email: string, password: string) => Promise<void>;
-  register: (name: string, email: string, password: string) => Promise<void>;
-  finishRegistration: () => Promise<void>;
+  finishVault: () => Promise<void>;
+  finishMode: () => Promise<void>;
   selectModel: (providerId: string, modelId: string, apiKey: string) => Promise<void>;
   /** Live-test a key (empty string tests the stored one). Never persists. */
   validateKey: (
@@ -42,18 +41,13 @@ export const useAuthStore = create<AuthStore>((set) => {
 
   setStep: (step) => set((s) => ({ onboarding: { ...s.onboarding, step } })),
 
-  signIn: async (email, password) => {
-    await authService.signIn(email, password);
+  finishVault: async () => {
+    await authService.finishVault();
     set({ onboarding: authService.getState() });
   },
 
-  register: async (name, email, password) => {
-    await authService.register(name, email, password);
-    set({ onboarding: authService.getState() });
-  },
-
-  finishRegistration: async () => {
-    await authService.finishRegistration();
+  finishMode: async () => {
+    await authService.finishMode();
     set({ onboarding: authService.getState() });
   },
 

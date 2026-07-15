@@ -7,7 +7,7 @@
  * survive sign-out and vault switches, never leave the machine, and are never
  * returned to the client (only `hasApiKey` / `keyedProviders`).
  */
-import type { OnboardingState, User } from "@/contracts";
+import type { OnboardingState } from "@/contracts";
 import { profilePath, readJson, writeJson } from "./config";
 import { REMOTE_PROVIDERS, remoteProvider } from "./llm";
 import { providerAllowed } from "./policy";
@@ -41,7 +41,7 @@ interface StoredProfile extends OnboardingState {
 }
 
 const EMPTY: StoredProfile = {
-  step: "sign-in",
+  step: "vault",
   user: null,
   providerId: null,
   modelId: null,
@@ -150,23 +150,17 @@ function keyedProviders(p: StoredProfile): string[] {
   );
 }
 
-export function signIn(email: string): User {
-  const p = load();
-  const user: User = { id: "local", name: email.split("@")[0] || "User", email };
-  save({ ...p, user, step: "register" });
-  return user;
+export function finishVault(): void {
+  // First run starts at the vault step (where the user's documents live).
+  // Once acknowledged, advance to the interface-mode chooser (window vs
+  // widget). The chooser is desktop-only; on the web twin the client
+  // auto-advances past the mode step. PARITY: mirrors profile.rs finish_vault.
+  save({ ...load(), step: "mode" });
 }
 
-export function register(name: string, email: string): User {
-  const p = load();
-  const user: User = { id: "local", name, email };
-  save({ ...p, user, step: "register" });
-  return user;
-}
-
-export function finishRegistration(): void {
-  // After registration the user picks a model and pastes a key on the
-  // select-model slide (the classic onboarding flow).
+export function finishMode(): void {
+  // The window/widget interface choice has been made (or auto-skipped on the
+  // web twin); continue to the model picker. PARITY: profile.rs finish_mode.
   save({ ...load(), step: "select-model" });
 }
 
@@ -192,7 +186,9 @@ export function selectModel(providerId: string, modelId: string, apiKey: string)
     apiKeys: undefined,
     apiKey: undefined,
     hasApiKey: Boolean(key) || p.hasApiKey,
-    step: "done",
+    // The user picks their default-inclusion preference next (the final step);
+    // completeOnboarding() lands on "done". PARITY: profile.rs select_model.
+    step: "inclusion",
   });
 }
 

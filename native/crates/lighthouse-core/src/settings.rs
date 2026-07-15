@@ -77,6 +77,13 @@ pub struct DesktopSettings {
     /// note may refresh, at most once per day. None = the default (9am).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub briefing_note_hour: Option<i64>,
+    /// Whether the once-per-install first-run orientation tour has been shown.
+    /// Written true the moment the tour first appears (so completing AND
+    /// skipping both mark it done); only a wiped app-state dir re-shows it.
+    /// Lives here (install-global settings) rather than the vault or
+    /// localStorage so it survives vault switches. Default false (None = false).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tour_shown: Option<bool>,
     /// Keys this struct doesn't model (e.g. the shell's hand-persisted
     /// `widgetPos`) must survive a read-modify-write round trip — without
     /// this flatten, any Preferences toggle would silently delete them.
@@ -116,6 +123,7 @@ pub fn write_desktop_settings(
     draft_answers: Option<bool>,
     briefing_notify: Option<bool>,
     briefing_note_hour: Option<i64>,
+    tour_shown: Option<bool>,
 ) -> DesktopSettings {
     let Some(f) = settings_file() else {
         return DesktopSettings::default();
@@ -162,6 +170,9 @@ pub fn write_desktop_settings(
         if (0..=23).contains(&h) {
             next.briefing_note_hour = Some(h);
         }
+    }
+    if tour_shown.is_some() {
+        next.tour_shown = tour_shown;
     }
     write_json(&f, &next); // best-effort: a read-only location just means unsaved
     next

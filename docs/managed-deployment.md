@@ -42,7 +42,7 @@ the UI shows a managed-configuration error.
 |---|---|---|
 | `allowedProviders` | subset of `local`, `anthropic`, `openai`, `google`, `xai`, `mistral`, `deepseek` | Only listed providers can be selected or called. A pre-existing profile naming a blocked provider still answers — via the on-device extractive path, never the cloud. |
 | `forceLocalOnly` | `true` | Shorthand for `allowedProviders: ["local"]`. If both keys are set, the intersection applies (a contradictory policy is restrictive). |
-| `telemetry` | `"off"` | Retained for config compatibility, but it now has nothing left to silence: the launch ping, funnel events, click-event batches, and experiment assignment were **deleted from the product** (both engines). The license `check` and explicit user submissions (feedback / bug report, always click-gated) are the only calls on that host — see docs/data-flows.md §2. |
+| `telemetry` | `"off"` | Retained for config compatibility, but it now has nothing left to silence: the launch ping, funnel events, click-event batches, and experiment assignment were **deleted from the product** (both engines), and accounts/licensing were removed. The app makes no ambient network calls — see docs/data-flows.md. |
 | `chatHistory` | `"off"` | Conversations are never persisted; the toggle locks. Existing saved chats are not deleted (lock-not-wipe). |
 | `widgetHotkeys` | `"off"` | The Whisper keyboard hook and the summon shortcut are **never installed** (relevant to EDR posture — see docs/edr-whitelisting.md). |
 | `ocr` | `"off"` | Image/scan text extraction is disabled (returns empty, uncached — flipping policy later re-reads with no cache surgery). |
@@ -72,6 +72,13 @@ Silent/fleet installation flags are documented below in §Silent / fleet
 installation.
 
 ## Offline activation (air-gapped / managed licensing)
+
+> **Removed.** Offline activation was deleted with the accounts/licensing
+> teardown — Lighthouse is now **always unlocked**, so there is no license to
+> activate and none of the mechanism below is wired in the shipping engine. It
+> is retained only as a design reference: if a paid tier ever returns it will
+> use offline signed license files + a Stripe payment link (no accounts, no
+> Supabase). See the decision record in **[docs/data-flows.md](data-flows.md)**.
 
 Deployments with no outbound network — or that don't want per-machine license
 calls — can activate paid mode from a **signed license file** the engine

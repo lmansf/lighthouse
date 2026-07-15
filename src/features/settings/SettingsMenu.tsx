@@ -2,10 +2,8 @@
 
 import { useEffect, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import {
-  Avatar,
   Badge,
   Button,
-  Checkbox,
   Dialog,
   DialogActions,
   DialogBody,
@@ -13,13 +11,11 @@ import {
   DialogSurface,
   DialogTitle,
   DialogTrigger,
-  Divider,
   Dropdown,
   Field,
   Input,
   Link,
   Menu,
-  MenuDivider,
   MenuItem,
   MenuList,
   MenuPopover,
@@ -30,9 +26,6 @@ import {
   Spinner,
   Switch,
   Text,
-  Textarea,
-  Title3,
-  Tooltip,
   makeStyles,
   mergeClasses,
   shorthands,
@@ -42,23 +35,18 @@ import {
   ChatHelpRegular,
   BrainCircuitRegular,
   HistoryRegular,
-  KeyRegular,
-  MailRegular,
   OpenRegular,
   OptionsRegular,
   PinRegular,
   QuestionCircleRegular,
   SettingsRegular,
   ShieldTaskRegular,
-  SignOutRegular,
-  StarRegular,
   WarningRegular,
 } from "@fluentui/react-icons";
 import { MODEL_PROVIDERS, ragService, type AuditSnapshot } from "@/contracts";
 import { LocalModelOption, LocalModelInstallPanel } from "@/features/localModel/LocalModelOption";
-import { QuickStartDialog } from "@/features/help/QuickStart";
+import { START_TOUR_EVENT } from "@/features/help/FirstRunTour";
 import { showWidget, summonHotkey, prettyShortcut, modKey } from "@/features/onboarding/ModeChooser";
-import { useLicenseStore, type FeedbackInput, type LicenseStatus } from "@/stores/useLicenseStore";
 import { useAuthStore } from "@/stores/useAuthStore";
 import { useThemeStore } from "@/stores/useThemeStore";
 import { useChatStore } from "@/stores/useChatStore";
@@ -67,60 +55,9 @@ import { useRagStore } from "@/stores/useRagStore";
 const LH_REPO = "https://github.com/lmansf/lighthouse";
 
 const useStyles = makeStyles({
-  rail: {
-    display: "flex",
-    flexDirection: "column",
-    gap: tokens.spacingVerticalL,
-    ...shorthands.padding(tokens.spacingVerticalXL, tokens.spacingHorizontalL),
-    height: "100%",
-    width: "100%",
-    maxWidth: "440px",
-    marginLeft: "auto",
-    marginRight: "auto",
-    boxSizing: "border-box",
-    overflowY: "auto",
-  },
-  beaconRow: { display: "flex", alignItems: "center", gap: tokens.spacingHorizontalS },
-  beacon: {
-    width: "12px",
-    height: "12px",
-    borderRadius: "50%",
-    backgroundColor: tokens.colorBrandBackground,
-    boxShadow: `0 0 10px 2px ${tokens.colorBrandBackground}`,
-  },
-  body: { color: tokens.colorNeutralForeground2 },
   full: { width: "100%" },
-  scores: { display: "flex", gap: tokens.spacingHorizontalXS },
-  scoreBtn: { minWidth: "36px" },
-  // The prominent slot — Subscribe (paid on) or "Get notified" (paid off).
-  cta: { height: "52px", fontSize: tokens.fontSizeBase400 },
-  price: { fontWeight: tokens.fontWeightSemibold },
-  // Trial: greyed but comes alive on hover — only when paid mode is on (then the
-  // subscribe CTA is the headline). When paid is off, the trial is the real CTA.
-  trialGhost: {
-    opacity: 0.5,
-    filter: "grayscale(0.7)",
-    transition: "opacity 120ms ease, filter 120ms ease",
-    ":hover": { opacity: 1, filter: "grayscale(0)" },
-    ":focus-within": { opacity: 1, filter: "grayscale(0)" },
-  },
-  activate: { display: "flex", flexDirection: "column", gap: tokens.spacingVerticalS, width: "100%" },
-  row: { display: "flex", gap: tokens.spacingHorizontalS, width: "100%" },
   error: { color: tokens.colorPaletteRedForeground1 },
   muted: { color: tokens.colorNeutralForeground3, fontSize: tokens.fontSizeBase200 },
-  highlightItem: {
-    color: tokens.colorBrandForeground1,
-    fontWeight: tokens.fontWeightSemibold,
-    backgroundColor: tokens.colorBrandBackground2,
-  },
-  profileHeader: {
-    display: "flex",
-    alignItems: "center",
-    gap: tokens.spacingHorizontalS,
-    ...shorthands.padding(tokens.spacingVerticalS, tokens.spacingHorizontalM),
-    maxWidth: "280px",
-  },
-  profileText: { display: "flex", flexDirection: "column", minWidth: 0 },
   modelFields: { display: "flex", flexDirection: "column", gap: tokens.spacingVerticalM },
   testKeyRow: { display: "flex", alignItems: "center", gap: tokens.spacingHorizontalS },
   testKeyOk: { color: tokens.colorPaletteGreenForeground1 },
@@ -151,69 +88,6 @@ const useStyles = makeStyles({
     fontFamily: tokens.fontFamilyMonospace,
     fontSize: tokens.fontSizeBase200,
   },
-  // Opt-in feedback entry under the registration choice — deliberately quiet so
-  // the choice stays the headline (the old flow gated it behind the survey).
-  feedbackLink: { alignSelf: "center", fontSize: tokens.fontSizeBase200 },
-  // Trial countdown pill in the sidebar footer. Neutral so it informs without
-  // shouting; flips to warning colors when the trial is nearly over.
-  trialPill: {
-    height: "24px",
-    minWidth: "auto",
-    ...shorthands.padding(0, tokens.spacingHorizontalS),
-    fontSize: tokens.fontSizeBase200,
-    fontWeight: tokens.fontWeightRegular,
-    whiteSpace: "nowrap",
-    backgroundColor: tokens.colorNeutralBackground3,
-    color: tokens.colorNeutralForeground2,
-    ":hover": {
-      backgroundColor: tokens.colorNeutralBackground3Hover,
-      color: tokens.colorNeutralForeground2,
-    },
-  },
-  trialPillUrgent: {
-    backgroundColor: tokens.colorStatusWarningBackground2,
-    color: tokens.colorStatusWarningForeground2,
-    ":hover": {
-      backgroundColor: tokens.colorStatusWarningBackground2,
-      color: tokens.colorStatusWarningForeground2,
-    },
-  },
-  // Collapsed-rail trial dot: a small circular day-count that fits the thin rail.
-  trialDot: {
-    minWidth: "28px",
-    width: "28px",
-    height: "28px",
-    ...shorthands.padding(0),
-    fontSize: tokens.fontSizeBase200,
-    backgroundColor: tokens.colorNeutralBackground3,
-    color: tokens.colorNeutralForeground2,
-    ":hover": {
-      backgroundColor: tokens.colorNeutralBackground3Hover,
-      color: tokens.colorNeutralForeground2,
-    },
-  },
-  // Plan/status line in the Settings menu profile header (Tier D).
-  planLine: { color: tokens.colorNeutralForeground3, fontSize: tokens.fontSizeBase200 },
-  // Global purchase-in-progress / error banner, floating bottom-center so it
-  // covers every subscribe entry point (trial badge, settings, grace), not just
-  // the lock gate.
-  purchaseBar: {
-    position: "fixed",
-    left: "50%",
-    bottom: tokens.spacingVerticalXL,
-    transform: "translateX(-50%)",
-    zIndex: 2000,
-    display: "flex",
-    alignItems: "center",
-    gap: tokens.spacingHorizontalM,
-    maxWidth: "min(560px, calc(100vw - 32px))",
-    ...shorthands.padding(tokens.spacingVerticalS, tokens.spacingHorizontalL),
-    ...shorthands.border("1px", "solid", tokens.colorNeutralStroke1),
-    borderRadius: tokens.borderRadiusLarge,
-    backgroundColor: tokens.colorNeutralBackground1,
-    boxShadow: tokens.shadow16,
-  },
-  purchaseBarText: { flex: 1, minWidth: 0 },
   // A menu item laid out as a row so a shortcut hint can sit at the right edge.
   menuItemRow: { display: "flex", width: "100%", alignItems: "center" },
   // Right-aligned keyboard-shortcut hint inside a menu item.
@@ -269,442 +143,6 @@ const useStyles = makeStyles({
   auditEmpty: { color: tokens.colorNeutralForeground3, ...shorthands.padding(tokens.spacingVerticalL, 0) },
 });
 
-/** 0–5 rating as a compact segmented row. */
-function Score({ value, onChange, label }: { value: number; onChange: (n: number) => void; label: string }) {
-  const styles = useStyles();
-  return (
-    <Field label={label}>
-      <div className={styles.scores}>
-        {[0, 1, 2, 3, 4, 5].map((n) => (
-          <Button
-            key={n}
-            className={styles.scoreBtn}
-            size="small"
-            appearance={value === n ? "primary" : "outline"}
-            onClick={() => onChange(n)}
-          >
-            {n}
-          </Button>
-        ))}
-      </div>
-    </Field>
-  );
-}
-
-/** Inline "I have a license key" activation, used as a fallback under the choices. */
-export function ActivateKey() {
-  const styles = useStyles();
-  const [key, setKey] = useState("");
-  const activate = useLicenseStore((s) => s.activate);
-  const activating = useLicenseStore((s) => s.activating);
-  const activateError = useLicenseStore((s) => s.activateError);
-
-  return (
-    <div className={styles.activate}>
-      <Text className={styles.muted}>Already have a license key?</Text>
-      <div className={styles.row}>
-        <Input
-          className={styles.full}
-          value={key}
-          placeholder="Paste your license key"
-          contentBefore={<KeyRegular />}
-          onChange={(_, d) => setKey(d.value)}
-        />
-        <Button
-          disabled={activating || !key.trim()}
-          icon={activating ? <Spinner size="tiny" /> : undefined}
-          onClick={() => void activate(key.trim())}
-        >
-          {activating ? "Checking…" : "Activate"}
-        </Button>
-      </div>
-      {activateError && <Text className={styles.error}>{activateError}</Text>}
-    </div>
-  );
-}
-
-/**
- * The email-capture dialog behind the prominent "buy" slot. When paid mode is on
- * it starts Stripe checkout; when off it records "notify me when purchasing
- * opens" — same slot, so the location is consistent at launch.
- */
-function PurchaseDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean) => void }) {
-  const styles = useStyles();
-  const paidEnabled = useLicenseStore((s) => s.paidEnabled);
-  const subscribe = useLicenseStore((s) => s.subscribe);
-  const purchasing = useLicenseStore((s) => s.purchasing);
-  const submitNotify = useLicenseStore((s) => s.submitNotify);
-  const [email, setEmail] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [done, setDone] = useState(false);
-  const emailOk = /.+@.+\..+/.test(email.trim());
-
-  async function act() {
-    if (paidEnabled) {
-      void subscribe(email.trim());
-      setOpen(false);
-    } else {
-      setBusy(true);
-      const ok = await submitNotify(email.trim());
-      setBusy(false);
-      if (ok) setDone(true);
-    }
-  }
-
-  return (
-    <Dialog
-      open={open}
-      onOpenChange={(_, d) => {
-        setOpen(d.open);
-        if (!d.open) setDone(false);
-      }}
-    >
-      <DialogSurface>
-        <DialogBody>
-          <DialogTitle>
-            {done ? "Thank you!" : paidEnabled ? "Subscribe — $14.99/month" : "Get notified"}
-          </DialogTitle>
-          <DialogContent>
-            {done ? (
-              <Text className={styles.body}>
-                Thanks — we&apos;ll email you the moment purchasing opens.
-              </Text>
-            ) : (
-              <>
-                <Text className={styles.body}>
-                  {paidEnabled
-                    ? "Unlimited use of Lighthouse. The license is tied to this email — buying for a teammate? Use their address (several can go on one card)."
-                    : "Purchasing isn't open yet. Leave your email and we'll let you know the moment it is."}
-                </Text>
-                <div style={{ marginTop: 12 }}>
-                  <Field label="Email">
-                    <Input
-                      type="email"
-                      value={email}
-                      placeholder="name@company.com"
-                      onChange={(_, d) => setEmail(d.value)}
-                    />
-                  </Field>
-                </div>
-              </>
-            )}
-          </DialogContent>
-          <DialogActions>
-            {done ? (
-              <Button appearance="primary" onClick={() => setOpen(false)}>
-                Close
-              </Button>
-            ) : (
-              <>
-                <DialogTrigger disableButtonEnhancement>
-                  <Button appearance="secondary">Cancel</Button>
-                </DialogTrigger>
-                <Button
-                  appearance="primary"
-                  disabled={busy || purchasing || !emailOk}
-                  icon={busy || purchasing ? <Spinner size="tiny" /> : undefined}
-                  onClick={() => void act()}
-                >
-                  {paidEnabled ? "Continue to checkout" : busy ? "Submitting…" : "Notify me"}
-                </Button>
-              </>
-            )}
-          </DialogActions>
-        </DialogBody>
-      </DialogSurface>
-    </Dialog>
-  );
-}
-
-/** Registration choice: the buy/notify slot, plus start-a-trial and activate. */
-function RegistrationChoice({ status }: { status: LicenseStatus }) {
-  const styles = useStyles();
-  const paidEnabled = useLicenseStore((s) => s.paidEnabled);
-  const startTrial = useLicenseStore((s) => s.startTrial);
-  const starting = useLicenseStore((s) => s.starting);
-  const startError = useLicenseStore((s) => s.startError);
-  const [dlg, setDlg] = useState(false);
-
-  // A user who has never had a trial (status "none") shouldn't be told to start
-  // "another" one — branch the copy so first-run reads right.
-  const firstTime = status === "none";
-  const trialLabel = firstTime ? "Start your free 14-day trial" : "Start another 14-day trial";
-
-  return (
-    <>
-      <div className={styles.beaconRow}>
-        <span className={styles.beacon} />
-        <Title3>{firstTime ? "Start using Lighthouse" : "Keep using Lighthouse"}</Title3>
-      </div>
-      <Text className={styles.body}>
-        {paidEnabled
-          ? `Subscribe for unlimited use, or ${
-              firstTime ? "start your free 14-day trial" : "start another 14-day trial"
-            } — no card needed. Either way your vault stays exactly as it is.`
-          : `${trialLabel} — no card needed; your vault stays exactly as it is. Want to buy when it's ready?`}
-      </Text>
-
-      {/* Prominent slot: Subscribe (paid on) or Get-notified (paid off). */}
-      <Button
-        className={mergeClasses(styles.full, styles.cta)}
-        appearance="primary"
-        icon={paidEnabled ? <StarRegular /> : <MailRegular />}
-        onClick={() => setDlg(true)}
-      >
-        {paidEnabled ? (
-          <span>
-            Subscribe — <span className={styles.price}>$14.99/month</span>
-          </span>
-        ) : (
-          "Get notified when purchasing opens"
-        )}
-      </Button>
-      {/* Purchase-in-progress feedback is now shown globally by PurchaseProgress. */}
-
-      <Button
-        className={mergeClasses(styles.full, paidEnabled ? styles.trialGhost : "")}
-        appearance={paidEnabled ? "secondary" : "primary"}
-        disabled={starting}
-        icon={starting ? <Spinner size="tiny" /> : undefined}
-        onClick={() => void startTrial()}
-      >
-        {starting ? "Starting…" : trialLabel}
-      </Button>
-      {startError && <Text className={styles.error}>{startError}</Text>}
-
-      <Divider />
-      <ActivateKey />
-      <PurchaseDialog open={dlg} setOpen={setDlg} />
-    </>
-  );
-}
-
-/**
- * Feedback form. "post-purchase" runs after a subscription (no notify line);
- * "trial-end" runs when a trial ends while paid is off, and includes the
- * "email me when purchasing opens" checkbox; "mid-session" is the optional
- * nudge that surfaces after a while of use (issue: feedback nudge) — same form,
- * gentler copy. The `mode` only changes copy, so adding modes is safe.
- */
-export function FeedbackForm({
-  mode,
-  onDone,
-}: {
-  mode: "trial-end" | "post-purchase" | "mid-session";
-  onDone: () => void;
-}) {
-  const styles = useStyles();
-  const submitFeedback = useLicenseStore((s) => s.submitFeedback);
-  const paidEnabled = useLicenseStore((s) => s.paidEnabled);
-  const [f, setF] = useState<FeedbackInput>({
-    firstName: "",
-    lastName: "",
-    easeOfUse: 5,
-    overallValue: 5,
-    liked: "",
-    changeOrAdd: "",
-    notifyWhenAvailable: false,
-  });
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-  const set = (patch: Partial<FeedbackInput>) => setF((p) => ({ ...p, ...patch }));
-  const showNotify = mode === "trial-end" && !paidEnabled;
-
-  async function submit() {
-    setBusy(true);
-    setErr(null);
-    const ok = await submitFeedback(f);
-    setBusy(false);
-    if (ok) onDone();
-    else setErr("Couldn't send your feedback. Please check your connection and try again.");
-  }
-
-  return (
-    <>
-      <div className={styles.beaconRow}>
-        <span className={styles.beacon} />
-        <Title3>
-          {mode === "post-purchase"
-            ? "Thanks for subscribing!"
-            : mode === "mid-session"
-              ? "What do you think so far?"
-              : "Your trial has ended"}
-        </Title3>
-      </div>
-      <Text className={styles.body}>
-        {mode === "post-purchase"
-          ? "A couple of quick questions before you dive back in — your files are right where you left them."
-          : mode === "mid-session"
-            ? "You've been at it a little while — mind sharing a quick first impression? It really helps."
-            : "Share a little feedback. Your files are safe and untouched."}
-      </Text>
-
-      <Field label="First name">
-        <Input value={f.firstName} onChange={(_, d) => set({ firstName: d.value })} />
-      </Field>
-      <Field label="Last name">
-        <Input value={f.lastName} onChange={(_, d) => set({ lastName: d.value })} />
-      </Field>
-      <Score label="Ease of use (0–5)" value={f.easeOfUse} onChange={(n) => set({ easeOfUse: n })} />
-      <Score label="Overall value (0–5)" value={f.overallValue} onChange={(n) => set({ overallValue: n })} />
-      <Field label="What's one feature you liked?">
-        <Textarea value={f.liked} onChange={(_, d) => set({ liked: d.value })} />
-      </Field>
-      <Field label="What's one feature you would change or add?">
-        <Textarea value={f.changeOrAdd} onChange={(_, d) => set({ changeOrAdd: d.value })} />
-      </Field>
-      {showNotify && (
-        <Checkbox
-          checked={Boolean(f.notifyWhenAvailable)}
-          onChange={(_, d) => set({ notifyWhenAvailable: Boolean(d.checked) })}
-          label="Email me when Lighthouse is available to purchase"
-        />
-      )}
-      {err && <Text className={styles.error}>{err}</Text>}
-      <Button
-        className={styles.full}
-        appearance="primary"
-        disabled={busy}
-        icon={busy ? <Spinner size="tiny" /> : undefined}
-        onClick={() => void submit()}
-      >
-        {busy ? "Sending…" : mode === "post-purchase" ? "Submit & continue" : "Submit feedback"}
-      </Button>
-    </>
-  );
-}
-
-/** Post-purchase survey shown in the rail after checkout, before chat reopens. */
-export function PostPurchaseFeedback() {
-  const styles = useStyles();
-  const dismiss = useLicenseStore((s) => s.dismissFeedback);
-  return (
-    <div className={styles.rail}>
-      <FeedbackForm mode="post-purchase" onDone={dismiss} />
-      <Button appearance="subtle" onClick={dismiss}>
-        Skip
-      </Button>
-    </div>
-  );
-}
-
-/**
- * Lock gate shown in the LEFT RAIL while the vault (greyed in the main pane) is
- * locked. It lands directly on the registration choice — getting back in is the
- * user's goal, so the survey never blocks the door. An ended trial offers a
- * quiet opt-in "Share quick feedback" link under the choice instead, which runs
- * the trial-end form and returns to the choice via the thank-you step.
- */
-export function LicenseGate({ status }: { status: LicenseStatus }) {
-  const styles = useStyles();
-  // null until the user navigates; the entry step is always the choice so
-  // feedback stays opt-in (it used to gate an expired trial).
-  const [step, setStep] = useState<"feedback" | "thanks" | "choose" | null>(null);
-  const resolvedStep = step ?? "choose";
-
-  return (
-    <div className={styles.rail}>
-      {resolvedStep === "feedback" && (
-        <>
-          <FeedbackForm mode="trial-end" onDone={() => setStep("thanks")} />
-          <Button appearance="subtle" onClick={() => setStep("choose")}>
-            Back
-          </Button>
-        </>
-      )}
-      {resolvedStep === "thanks" && (
-        <>
-          <div className={styles.beaconRow}>
-            <span className={styles.beacon} />
-            <Title3>Thank you!</Title3>
-          </div>
-          <Text className={styles.body}>
-            Thanks for using Lighthouse and sharing your feedback — it genuinely
-            helps. You can keep going below.
-          </Text>
-          <Button className={styles.full} appearance="primary" onClick={() => setStep("choose")}>
-            Continue
-          </Button>
-        </>
-      )}
-      {resolvedStep === "choose" && (
-        <>
-          <RegistrationChoice status={status} />
-          {/* Only a genuinely ended trial earns the trial-end feedback ask. */}
-          {status === "expired" && (
-            <Link appearance="subtle" className={styles.feedbackLink} onClick={() => setStep("feedback")}>
-              Share quick feedback
-            </Link>
-          )}
-        </>
-      )}
-    </div>
-  );
-}
-
-/**
- * Compact trial countdown for the sidebar footer: "Trial · N days left".
- * Renders only for a running trial with a known remaining-days count — every
- * other license state renders nothing, so it can be mounted unconditionally.
- * Clicking it opens the purchase dialog (subscribe / get-notified), making the
- * countdown itself the path to acting on it.
- */
-export function TrialBadge({ collapsed }: { collapsed?: boolean }) {
-  const styles = useStyles();
-  const status = useLicenseStore((s) => s.status);
-  const licenseType = useLicenseStore((s) => s.licenseType);
-  const remainingDays = useLicenseStore((s) => s.remainingDays);
-  const [dlg, setDlg] = useState(false);
-
-  if (licenseType !== "trial" || status !== "valid" || remainingDays == null) return null;
-
-  // The last few days warrant the warning tint — before that, stay neutral.
-  const urgent = remainingDays <= 3;
-  const label = `Trial · ${remainingDays} day${remainingDays === 1 ? "" : "s"} left`;
-
-  // Collapsed rail: a compact day-count dot the user can still click, rather
-  // than the countdown vanishing entirely when the sidebar is thin.
-  if (collapsed) {
-    return (
-      <>
-        <Tooltip content={label} relationship="label">
-          <Button
-            className={mergeClasses(styles.trialDot, urgent && styles.trialPillUrgent)}
-            appearance="subtle"
-            size="small"
-            shape="circular"
-            aria-label={label}
-            onClick={() => setDlg(true)}
-          >
-            {remainingDays}
-          </Button>
-        </Tooltip>
-        <PurchaseDialog open={dlg} setOpen={setDlg} />
-      </>
-    );
-  }
-
-  return (
-    <>
-      <Button
-        className={mergeClasses(styles.trialPill, urgent && styles.trialPillUrgent)}
-        appearance="subtle"
-        size="small"
-        shape="circular"
-        onClick={() => setDlg(true)}
-      >
-        {label}
-      </Button>
-      <PurchaseDialog open={dlg} setOpen={setDlg} />
-    </>
-  );
-}
-
-/**
- * Settings menu for the left nav (a gear button). Surfaces a **highlighted**
- * item in the buy slot — "Subscribe" when paid is on, "Get notified when
- * purchasing opens" while it's off — plus a couple of basic items.
- */
 /** First model of a provider id, falling back to the first known provider. */
 function firstModelFor(pid: string): string {
   return (MODEL_PROVIDERS.find((p) => p.id === pid) ?? MODEL_PROVIDERS[0]).models[0];
@@ -1754,36 +1192,10 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
   );
 }
 
-/** One-line plan/trial summary for the Settings menu — answers "what am I on?"
- *  where a user looks for it. Null when the license isn't enforced. */
-function planSummary(
-  status: LicenseStatus,
-  licenseType: "trial" | "paid" | null,
-  remainingDays: number | null,
-): string | null {
-  if (licenseType === "paid" && status === "valid") return "Subscribed";
-  if (status === "grace") return "Subscription ended · renewal due";
-  if (licenseType === "trial" && status === "valid" && remainingDays != null) {
-    return `Trial · ${remainingDays} day${remainingDays === 1 ? "" : "s"} left`;
-  }
-  if (status === "expired") return "Trial ended";
-  if (status === "locked") return "Subscription ended";
-  return null; // "disabled"/"unknown" — nothing meaningful to show
-}
-
 export function SettingsMenu() {
   const styles = useStyles();
-  const paidEnabled = useLicenseStore((s) => s.paidEnabled);
-  const status = useLicenseStore((s) => s.status);
-  const licenseType = useLicenseStore((s) => s.licenseType);
-  const remainingDays = useLicenseStore((s) => s.remainingDays);
-  const user = useAuthStore((s) => s.onboarding.user);
-  const signOut = useAuthStore((s) => s.signOut);
-  const plan = planSummary(status, licenseType, remainingDays);
-  const [dlg, setDlg] = useState(false);
   const [aiDlg, setAiDlg] = useState(false);
   const [prefDlg, setPrefDlg] = useState(false);
-  const [quickStartDlg, setQuickStartDlg] = useState(false);
   const [auditDlg, setAuditDlg] = useState(false);
 
   // Other features (chat empty states, explorer hints, …) deep-link into these
@@ -1804,35 +1216,16 @@ export function SettingsMenu() {
     <>
       <Menu>
         <MenuTrigger disableButtonEnhancement>
-          <Button appearance="subtle" size="small" icon={<SettingsRegular />} aria-label="Settings" />
+          <Button
+            appearance="subtle"
+            size="small"
+            icon={<SettingsRegular />}
+            aria-label="Settings"
+            data-tour="settings"
+          />
         </MenuTrigger>
         <MenuPopover>
           <MenuList>
-            {user && (
-              <>
-                <div className={styles.profileHeader}>
-                  <Avatar name={user.name} color="brand" size={32} />
-                  <div className={styles.profileText}>
-                    <Text weight="semibold" truncate>
-                      {user.name}
-                    </Text>
-                    <Text size={200} className={styles.muted} truncate>
-                      {user.email}
-                    </Text>
-                    {/* Plan/trial status, answered right where the account lives. */}
-                    {plan && (
-                      <Text size={200} className={styles.planLine} truncate>
-                        {plan}
-                      </Text>
-                    )}
-                  </div>
-                </div>
-                <MenuItem icon={<SignOutRegular />} onClick={() => void signOut()}>
-                  Sign out
-                </MenuItem>
-                <MenuDivider />
-              </>
-            )}
             <MenuItem icon={<OptionsRegular />} onClick={() => setPrefDlg(true)}>
               <span className={styles.menuItemRow}>
                 Preferences
@@ -1861,17 +1254,11 @@ export function SettingsMenu() {
             <MenuItem icon={<HistoryRegular />} onClick={() => setAuditDlg(true)}>
               Audit log
             </MenuItem>
-            <MenuDivider />
             <MenuItem
-              className={styles.highlightItem}
-              icon={paidEnabled ? <StarRegular /> : <MailRegular />}
-              onClick={() => setDlg(true)}
+              icon={<QuestionCircleRegular />}
+              onClick={() => window.dispatchEvent(new Event(START_TOUR_EVENT))}
             >
-              {paidEnabled ? "Subscribe — $14.99/month" : "Get notified when purchasing opens"}
-            </MenuItem>
-            <MenuDivider />
-            <MenuItem icon={<QuestionCircleRegular />} onClick={() => setQuickStartDlg(true)}>
-              Quick start
+              Take the tour
             </MenuItem>
             <MenuItem
               icon={<OpenRegular />}
@@ -1882,106 +1269,9 @@ export function SettingsMenu() {
           </MenuList>
         </MenuPopover>
       </Menu>
-      <PurchaseDialog open={dlg} setOpen={setDlg} />
       <AiModelsDialog open={aiDlg} setOpen={setAiDlg} />
       <PreferencesDialog open={prefDlg} setOpen={setPrefDlg} />
-      <QuickStartDialog open={quickStartDlg} setOpen={setQuickStartDlg} />
       <AuditLogDialog open={auditDlg} setOpen={setAuditDlg} />
     </>
-  );
-}
-
-/**
- * Global purchase feedback: while a checkout is in flight it explains that the
- * purchase completes in the browser (with a Cancel), and if checkout can't start
- * or the poll times out it shows why. Mounted once at the app root so it covers
- * every entry point — the trial badge, the Settings menu, the grace banner — not
- * only the lock gate where the inline note used to live.
- */
-export function PurchaseProgress() {
-  const styles = useStyles();
-  const purchasing = useLicenseStore((s) => s.purchasing);
-  const subscribeError = useLicenseStore((s) => s.subscribeError);
-  const cancelSubscribe = useLicenseStore((s) => s.cancelSubscribe);
-  const dismissSubscribeError = useLicenseStore((s) => s.dismissSubscribeError);
-
-  if (!purchasing && !subscribeError) return null;
-
-  return (
-    <div className={styles.purchaseBar} role="status">
-      {purchasing ? (
-        <>
-          <Spinner size="tiny" />
-          <Text size={200} className={styles.purchaseBarText}>
-            Complete your purchase in the browser — Lighthouse unlocks itself once payment goes
-            through.
-          </Text>
-          <Button size="small" appearance="subtle" onClick={() => cancelSubscribe()}>
-            Cancel
-          </Button>
-        </>
-      ) : (
-        <>
-          <Text size={200} className={mergeClasses(styles.purchaseBarText, styles.error)}>
-            {subscribeError}
-          </Text>
-          <Button size="small" appearance="subtle" onClick={() => dismissSubscribeError()}>
-            Dismiss
-          </Button>
-        </>
-      )}
-    </div>
-  );
-}
-
-/** Grace banner for a lapsed PAID subscription that's still usable. */
-export function GraceBanner({ graceUntil }: { graceUntil: string | null }) {
-  const subscribe = useLicenseStore((s) => s.subscribe);
-  const cancelSubscribe = useLicenseStore((s) => s.cancelSubscribe);
-  const purchasing = useLicenseStore((s) => s.purchasing);
-  const paidEnabled = useLicenseStore((s) => s.paidEnabled);
-  const days = graceUntil
-    ? Math.max(0, Math.ceil((Date.parse(graceUntil) - Date.now()) / (24 * 60 * 60 * 1000)))
-    : null;
-
-  return (
-    <div
-      style={{
-        display: "flex",
-        flexWrap: "wrap",
-        alignItems: "center",
-        gap: 16,
-        padding: "10px 20px",
-        backgroundColor: tokens.colorStatusWarningBackground2,
-        color: tokens.colorStatusWarningForeground2,
-        borderBottom: `1px solid ${tokens.colorStatusWarningBorder1}`,
-      }}
-    >
-      <Text weight="semibold">
-        Your subscription has ended.
-        {days === null
-          ? " Renew to keep access before your vault is locked."
-          : days === 0
-            ? " Renew today to keep access before your vault is locked."
-            : ` You have ${days} day${days === 1 ? "" : "s"} to renew before your vault is locked.`}
-      </Text>
-      {paidEnabled && (
-        <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
-          <Button appearance="primary" size="small" disabled={purchasing} onClick={() => void subscribe("")}>
-            {purchasing ? "Waiting…" : "Renew — $14.99/mo"}
-          </Button>
-          {purchasing && (
-            <Button appearance="subtle" size="small" onClick={() => cancelSubscribe()}>
-              Cancel
-            </Button>
-          )}
-        </div>
-      )}
-      {!paidEnabled && (
-        <div style={{ marginLeft: "auto", minWidth: 280 }}>
-          <ActivateKey />
-        </div>
-      )}
-    </div>
   );
 }

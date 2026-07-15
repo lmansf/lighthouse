@@ -19,8 +19,9 @@ import { prettyShortcut } from "@/features/onboarding/ModeChooser";
 
 /** localStorage key — set on dismiss so the hint never returns. */
 const SHOWN_KEY = "lighthouse.summonhint.shown";
-/** The Quick Start tour's own once-flag — we wait for it to be set so the two
- *  first-run surfaces never stack (the hint would lose behind the tour modal). */
+/** The first-run tour's once-flag (written by FirstRunTour when it first
+ *  appears) — we wait for it to be set so the two first-run surfaces never
+ *  stack (the hint would lose behind the tour). */
 const QUICKSTART_SHOWN_KEY = "lighthouse.quickstart.shown";
 
 const useStyles = makeStyles({
@@ -63,13 +64,13 @@ export function SummonHint() {
   const styles = useStyles();
   // The current accelerator to show — non-null only once we've decided to show.
   const [shortcut, setShortcut] = useState<string | null>(null);
-  // Whether the Quick Start tour had ALREADY been shown when this component
+  // Whether the first-run tour had ALREADY been shown when this component
   // first rendered. Captured in a useState initializer (render phase) rather
-  // than in the effect, because QuickStartAuto — a sibling mounted in the same
-  // commit — sets its "shown" flag inside its OWN effect, which runs BEFORE
-  // this component's effect (sibling effect order). Reading the flag in the
-  // effect would therefore always see it already set and fire the hint on the
-  // same first run, behind the tour modal. The render-phase read sees the
+  // than in the effect, because FirstRunTour — a sibling mounted in the same
+  // commit — writes its "shown" flag from its OWN effect (inside an async
+  // settings fetch, so even later than this component's effect). Reading the
+  // flag in the effect could therefore see it already set and fire the hint on
+  // the same first run, behind the tour. The render-phase read sees the
   // pre-this-commit value: unset on first run (defer), set on a later launch
   // (show, with no tour to occlude it).
   const [tourAlreadyShown] = useState(() => {

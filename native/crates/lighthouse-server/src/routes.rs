@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 
 use lighthouse_core::config::is_desktop_app;
 use lighthouse_core::contracts::{ChatChunk, ChatTurn};
-use lighthouse_core::{license, llm, local_model, profile, settings, sources, tts, vault};
+use lighthouse_core::{llm, local_model, profile, settings, sources, tts, vault};
 
 use crate::auth::is_same_origin;
 
@@ -577,16 +577,8 @@ pub async fn profile_post(headers: HeaderMap, body: Option<Json<Value>>) -> Resp
     }
     let body = body.map(|Json(v)| v).unwrap_or_else(|| json!({}));
     match body["op"].as_str() {
-        Some("signIn") => {
-            profile::sign_in(body["email"].as_str().unwrap_or(""));
-        }
-        Some("register") => {
-            profile::register(
-                body["name"].as_str().unwrap_or(""),
-                body["email"].as_str().unwrap_or(""),
-            );
-        }
-        Some("finishRegistration") => profile::finish_registration(),
+        Some("finishVault") => profile::finish_vault(),
+        Some("finishMode") => profile::finish_mode(),
         Some("selectModel") => {
             let provider_id = body["providerId"].as_str().unwrap_or("");
             // Managed policy: reject a disallowed provider with a real error
@@ -630,103 +622,18 @@ pub async fn profile_post(headers: HeaderMap, body: Option<Json<Value>>) -> Resp
     Json(profile::get_state()).into_response()
 }
 
-// --- /api/license -------------------------------------------------------------
+// --- /api/diagnostics ---------------------------------------------------------
 
-pub async fn license_post(headers: HeaderMap, body: Option<Json<Value>>) -> Response {
-    if !is_same_origin(&headers) {
-        return forbidden();
-    }
-    let body = body.map(|Json(v)| v).unwrap_or_else(|| json!({}));
-    match body["op"].as_str() {
-        Some("config") => Json(json!({ "paidEnabled": license::paid_enabled() })).into_response(),
-        // Headless/web build: no desktop shell.log, so the diagnostics excerpt
-        // is always empty. version + OS mirror what a bug report transmits.
-        Some("diagnostics") => Json(json!({
-            "version": lighthouse_core::config::app_version(),
-            "os": std::env::consts::OS,
-            "log": "",
-        }))
-        .into_response(),
-        Some("check") => Json(license::check_license().await).into_response(),
-        Some("start") => match license::start_trial(None).await {
-            Ok(_) => Json(json!({ "ok": true })).into_response(),
-            Err(e) => Json(json!({
-                "ok": false,
-                "reason": "rejected",
-                "detail": err_message(&e, "start failed"),
-            }))
-            .into_response(),
-        },
-        Some("activate") => {
-            let key = body["licenseKey"].as_str().unwrap_or("");
-            let result = license::activate_license(key).await;
-            let ok = result.status == "valid" || result.status == "grace";
-            let mut payload = serde_json::to_value(&result).unwrap_or_else(|_| json!({}));
-            payload["ok"] = json!(ok);
-            Json(payload).into_response()
-        }
-        Some("feedback") => {
-            let Some(f) = body.get("feedback").filter(|f| f.is_object()) else {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(
-                        json!({ "ok": false, "reason": "rejected", "detail": "feedback required" }),
-                    ),
-                )
-                    .into_response();
-            };
-            let input = license::FeedbackInput {
-                first_name: f["firstName"].as_str().unwrap_or("").trim().to_string(),
-                last_name: f["lastName"].as_str().unwrap_or("").trim().to_string(),
-                ease_of_use: f["easeOfUse"].as_f64().unwrap_or(0.0),
-                overall_value: f["overallValue"].as_f64().unwrap_or(0.0),
-                liked: f["liked"].as_str().unwrap_or("").trim().to_string(),
-                change_or_add: f["changeOrAdd"].as_str().unwrap_or("").trim().to_string(),
-                notify_when_available: f["notifyWhenAvailable"].as_bool().unwrap_or(false),
-            };
-            Json(json!({ "ok": license::submit_feedback(&input).await })).into_response()
-        }
-        Some("featureInterest") => {
-            let to_ids = |v: &serde_json::Value| -> Vec<String> {
-                v.as_array()
-                    .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
-                    .unwrap_or_default()
-            };
-            let shown = to_ids(&body["shown"]);
-            let wanted = to_ids(&body["wanted"]);
-            Json(json!({ "ok": license::submit_feature_interest(&shown, &wanted).await }))
-                .into_response()
-        }
-        Some("notify") => {
-            let email = body["email"].as_str().unwrap_or("");
-            if email.trim().is_empty() {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({ "ok": false, "reason": "rejected", "detail": "email required" })),
-                )
-                    .into_response();
-            }
-            Json(json!({ "ok": license::submit_notify(email).await })).into_response()
-        }
-        Some("bug") => {
-            let where_ = body["where"].as_str().unwrap_or("").trim().to_string();
-            let what = body["what"].as_str().unwrap_or("").trim().to_string();
-            if where_.is_empty() && what.is_empty() {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({ "ok": false, "reason": "rejected", "detail": "empty report" })),
-                )
-                    .into_response();
-            }
-            // Headless server has no shell.log; the diagnostics excerpt is empty.
-            Json(json!({ "ok": license::submit_bug(&where_, &what, "").await })).into_response()
-        }
-        Some("checkout") => {
-            let url = license::checkout_url(body["email"].as_str()).await;
-            Json(json!({ "url": url })).into_response()
-        }
-        _ => bad_request("unknown op"),
-    }
+/// Diagnostics for the "Send feedback" dialog. The headless/web build has no
+/// desktop shell.log, so the excerpt is always empty; version + OS mirror what
+/// the dialog shows. Read-only — the app transmits nothing of its own.
+pub async fn diagnostics_get() -> Response {
+    Json(json!({
+        "version": lighthouse_core::config::app_version(),
+        "os": std::env::consts::OS,
+        "log": "",
+    }))
+    .into_response()
 }
 
 // --- /api/connect -------------------------------------------------------------
@@ -959,51 +866,6 @@ pub async fn upload_post(
     Json(json!({ "added": added, "skipped": skipped })).into_response()
 }
 
-// --- /api/register ----------------------------------------------------------------
-
-pub async fn register_get() -> Response {
-    Json(json!({ "configured": license::is_supabase_configured() })).into_response()
-}
-
-pub async fn register_post(headers: HeaderMap, body: Option<Json<Value>>) -> Response {
-    if !is_same_origin(&headers) {
-        return forbidden();
-    }
-    let Some(body) = body.map(|Json(v)| v).filter(|b| b.is_object()) else {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "ok": false, "reason": "rejected", "detail": "email required" })),
-        )
-            .into_response();
-    };
-    let email = body["email"].as_str().unwrap_or("").trim().to_string();
-    if email.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "ok": false, "reason": "rejected", "detail": "email required" })),
-        )
-            .into_response();
-    }
-    let contact = license::Registration {
-        first_name: body["firstName"].as_str().unwrap_or("").trim().to_string(),
-        last_name: body["lastName"].as_str().unwrap_or("").trim().to_string(),
-        email,
-        do_not_contact: body["doNotContact"].as_bool().unwrap_or(false),
-        city: body["city"].as_str().unwrap_or("").trim().to_string(),
-        state: body["state"].as_str().unwrap_or("").trim().to_string(),
-    };
-    let result = license::start_trial(Some(contact)).await;
-    match result {
-        Ok(_) => Json(json!({ "ok": true })).into_response(),
-        Err(e) => Json(json!({
-            "ok": false,
-            "reason": "rejected",
-            "detail": err_message(&e, "registration failed"),
-        }))
-        .into_response(),
-    }
-}
-
 // --- /api/settings ----------------------------------------------------------------
 
 pub async fn settings_get() -> Response {
@@ -1025,6 +887,7 @@ pub async fn settings_get() -> Response {
         "draftAnswers": s.draft_answers != Some(false), // default on
         "briefingNotify": s.briefing_notify != Some(false), // default on (G5)
         "briefingNoteHour": s.briefing_note_hour.unwrap_or(9), // default 9am (G5)
+        "tourShown": s.tour_shown == Some(true), // first-run tour, once per install
     }))
     .into_response()
 }
@@ -1054,6 +917,7 @@ pub async fn settings_post(headers: HeaderMap, body: Option<Json<Value>>) -> Res
         body["draftAnswers"].as_bool(),
         body["briefingNotify"].as_bool(),
         body["briefingNoteHour"].as_i64(),
+        body["tourShown"].as_bool(),
     );
     Json(json!({
         "ok": true,
@@ -1071,6 +935,7 @@ pub async fn settings_post(headers: HeaderMap, body: Option<Json<Value>>) -> Res
         "draftAnswers": s.draft_answers != Some(false),
         "briefingNotify": s.briefing_notify != Some(false),
         "briefingNoteHour": s.briefing_note_hour.unwrap_or(9),
+        "tourShown": s.tour_shown == Some(true),
     }))
     .into_response()
 }

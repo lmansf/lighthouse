@@ -74,6 +74,6 @@ test("legacy plaintext profile keys migrate into the store and are stripped", ()
 test("signOut resets the profile but provider keys survive", () => {
   selectModel("openai", "gpt-4o-mini", "sk-live-survivor");
   signOut();
-  assert.equal(getState().step, "sign-in", "profile reset");
+  assert.equal(getState().step, "vault", "profile reset");
   assert.equal(resolvedKeyFor("openai"), "sk-live-survivor", "key lost on sign-out");
 });

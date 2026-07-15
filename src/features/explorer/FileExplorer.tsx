@@ -1384,6 +1384,7 @@ export function FileExplorer() {
   return (
     <section
       ref={sectionRef}
+      data-tour="explorer"
       className={`${styles.panel}${dragging ? ` ${styles.panelDragging}` : ""}`}
       onDragEnter={(e) => {
         // Only react to OS file drops — ignore internal drags (e.g. dragging a

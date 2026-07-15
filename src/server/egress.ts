@@ -9,9 +9,6 @@
  */
 
 export const PURPOSE_AI_PROVIDER = "AI provider";
-export const PURPOSE_LICENSE = "License & trial";
-export const PURPOSE_TELEMETRY = "Telemetry";
-export const PURPOSE_CHECKOUT = "Checkout";
 export const PURPOSE_UPDATE_CHECK = "Update check";
 export const PURPOSE_UPDATE_DOWNLOAD = "Update download";
 export const PURPOSE_MODEL_DOWNLOAD = "Model download";

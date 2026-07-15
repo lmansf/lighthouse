@@ -17,7 +17,6 @@ pub fn app() -> Router {
             "/api/profile",
             get(routes::profile_get).post(routes::profile_post),
         )
-        .route("/api/license", post(routes::license_post))
         .route("/api/connect", post(routes::connect_post))
         .route(
             "/api/model",
@@ -34,12 +33,9 @@ pub fn app() -> Router {
                 .layer(DefaultBodyLimit::max(210 * 1024 * 1024)),
         )
         .route(
-            "/api/register",
-            get(routes::register_get).post(routes::register_post),
-        )
-        .route(
             "/api/settings",
             get(routes::settings_get).post(routes::settings_post),
         )
+        .route("/api/diagnostics", get(routes::diagnostics_get))
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024))
 }

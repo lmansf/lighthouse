@@ -22,8 +22,6 @@ fn lock_env() -> MutexGuard<'static, ()> {
 async fn spawn_server() -> (String, tempfile::TempDir) {
     let vault_dir = tempfile::tempdir().unwrap();
     std::env::set_var("VAULT_DIR", vault_dir.path());
-    std::env::remove_var("LICENSE_API_URL");
-    std::env::remove_var("LICENSE_ENFORCE");
     std::env::remove_var("LIGHTHOUSE_API_TOKEN");
     std::env::remove_var("LIGHTHOUSE_DESKTOP");
     std::env::remove_var("ANTHROPIC_API_KEY");
@@ -219,7 +217,7 @@ async fn wire_protocol_end_to_end() {
         .json()
         .await
         .unwrap();
-    assert_eq!(p["step"], "sign-in");
+    assert_eq!(p["step"], "vault");
     assert_eq!(p["hasApiKey"], false);
     let p: Value = client
         .post(format!("{base}/api/profile"))
@@ -230,7 +228,9 @@ async fn wire_protocol_end_to_end() {
         .json()
         .await
         .unwrap();
-    assert_eq!(p["step"], "done");
+    // selectModel now advances to the final default-inclusion step (the client
+    // then persists the choice and calls completeOnboarding → "done").
+    assert_eq!(p["step"], "inclusion");
     assert_eq!(p["hasApiKey"], true, "key presence surfaces, never the key");
     // 0.11: keys persist SEALED in the install-global secrets store, never as
     // plaintext in profile.json (and so survive sign-out / vault switches).
@@ -248,27 +248,6 @@ async fn wire_protocol_end_to_end() {
         !serde_json::to_string(&p).unwrap().contains("sk-test"),
         "key never in a response"
     );
-
-    // --- /api/license disabled mode + /api/register unconfigured ----------------
-    let lic: Value = client
-        .post(format!("{base}/api/license"))
-        .json(&json!({ "op": "check" }))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(lic["status"], "disabled");
-    let reg: Value = client
-        .get(format!("{base}/api/register"))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(reg["configured"], false);
 
     // --- /api/model status (no model in this environment) ------------------------
     let model: Value = client

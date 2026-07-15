@@ -59,7 +59,7 @@ struct StoredProfile {
 }
 
 fn default_step() -> String {
-    "sign-in".to_string()
+    "vault".to_string()
 }
 
 impl Default for StoredProfile {
@@ -202,41 +202,19 @@ fn keyed_providers(p: &StoredProfile) -> Vec<String> {
         .collect()
 }
 
-pub fn sign_in(email: &str) -> User {
+pub fn finish_vault() {
+    // First run starts at the vault step (where the user's documents live).
+    // Once acknowledged, advance to the interface-mode chooser (window vs
+    // widget). The chooser is desktop-only; on the web twin the client
+    // auto-advances past the mode step. PARITY: mirrors profile.ts finishVault.
     let mut p = load();
-    let name = email.split('@').next().unwrap_or("").to_string();
-    let user = User {
-        id: "local".to_string(),
-        name: if name.is_empty() {
-            "User".to_string()
-        } else {
-            name
-        },
-        email: email.to_string(),
-    };
-    p.user = Some(user.clone());
-    p.step = "register".to_string();
+    p.step = "mode".to_string();
     save(&p);
-    user
 }
 
-pub fn register(name: &str, email: &str) -> User {
-    let mut p = load();
-    let user = User {
-        id: "local".to_string(),
-        name: name.to_string(),
-        email: email.to_string(),
-    };
-    p.user = Some(user.clone());
-    p.step = "register".to_string();
-    save(&p);
-    user
-}
-
-pub fn finish_registration() {
-    // The onboarding A/B experiment (play_first vs key_first) was removed with
-    // all ambient data collection; registration now always continues to the
-    // classic select-model step. The local model stays reachable from there.
+pub fn finish_mode() {
+    // The window/widget interface choice has been made (or auto-skipped on the
+    // web twin); continue to the model picker. PARITY: profile.ts finishMode.
     let mut p = load();
     p.step = "select-model".to_string();
     save(&p);
@@ -267,7 +245,10 @@ pub fn select_model(provider_id: &str, model_id: &str, api_key: &str) {
         api_key: None,
         has_api_key: !key.is_empty() || p.has_api_key,
         api_keys: HashMap::new(),
-        step: "done".to_string(),
+        // The user picks their default-inclusion preference next (the final
+        // step); complete_onboarding() lands on "done". PARITY: profile.ts
+        // select_model.
+        step: "inclusion".to_string(),
         model_ever_selected: Some(true),
         ..p.clone()
     };

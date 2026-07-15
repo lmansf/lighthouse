@@ -1,5 +1,13 @@
 # Maintainer provisioning & decisions — persona roadmap (Phases 0–2)
 
+> **Historical (superseded).** The accounts, licensing, trial, and paid-
+> subscription decisions in "Product decisions" below were **removed** —
+> Lighthouse now has no accounts, is always unlocked, and the Supabase backend
+> is gone. Kept as roadmap history; the provisioning items (code signing, the
+> OS-keychain sealing key, cargo-audit triage) remain accurate. If a paid tier
+> ever returns it will use offline signed license files + a Stripe payment link
+> — no accounts, no Supabase; see **[docs/data-flows.md](data-flows.md)**.
+
 This is the one place that answers: *"What must I, the maintainer, decide or
 provision before the security-director and data-analyst features are fully
 live?"* Everything below is **fail-closed today** — the app builds, runs, and
@@ -16,44 +24,49 @@ report is the map, not a second copy.
 - **Phase 1 (security director) has four provisioning items**, all optional and
   fail-closed: code signing, offline activation, the keychain feature, and the
   cargo-audit triage.
-- **Three product decisions** are yours: trial length, whether paid is offered
-  (`PAID_ENABLED`), and the seat/volume model for organizations.
+- **The product-model decisions are settled** (below): no accounts, no trial,
+  always unlocked. If a paid tier ever returns it is offline signed license
+  files + a payment link — no accounts, no Supabase. The single thing left to
+  provision for that path is the license-file signing key.
 
 ---
 
-## Product decisions
+## Product decisions — settled
 
-### 1. Trial policy
-The trial is **14 sign-in days** (`TRIAL_DAYS` in `src/server/license.ts` and
-`native/crates/lighthouse-core/src/license.rs`, kept in sync). A "sign-in day"
-is a distinct UTC day the user opened the app, not 14 calendar days — so an
-occasional user gets a fair trial. **Decide** whether 14 is right for these
-personas (an enterprise evaluator may want 30). Changing it is a one-line edit
-in both engines.
+These were open questions during the persona roadmap; they are now **resolved**.
+The code that implemented the old answers (accounts, trial counting, the hosted
+license function, checkout) is **removed from the shipping tree and archived**
+on `archive/licensing-supabase`, so it can be revived without being rewritten.
+Recorded here so the reasoning isn't lost.
 
-### 2. Whether paid is offered — `PAID_ENABLED`
-Off by default: with `PAID_ENABLED` unset, the app is **trial-only and the
-subscribe UI stays hidden** (`paid_enabled()` / `paidEnabled()`). To sell
-subscriptions you must both flip `PAID_ENABLED=1` **and** stand up the licensing
-backend — the hosted license function (`LICENSE_API_URL`), checkout
-(`CHECKOUT_API_URL`), and their `SUPABASE_ANON_KEY` / `LICENSE_SECRET`. Until
-then the money path is intentionally inert. See `docs/registration.md`.
+### 1. Accounts and trial — none; the app is always unlocked
+There is no account, no sign-in, no trial clock, and no license check. The app
+unlocks on first run and stays unlocked; switching vaults never re-locks it.
+Nothing about entitlement ever leaves the machine. (The former 14-sign-in-day
+trial and its per-day counter are gone. To take the hosted backend down without
+locking older clients still in the field, follow
+[`docs/server-decommission.md`](server-decommission.md) — a dead endpoint
+degrades to at worst a locked UI, never a data wipe.)
 
-> **Invariant:** paid must not open on unsigned installers. Provision code
-> signing (below) *before* enabling paid, or paid activation on an unsigned
-> build is correctly refused.
+### 2. Paid, if it ever returns — offline signed license files + a payment link
+No accounts and no Supabase, then or ever. The mechanism is already designed and
+**archived, not discarded**: the maintainer holds an Ed25519 keypair and mints a
+signed license file per machine (openspec `add-offline-activation`,
+`docs/managed-deployment.md`; the verifying engine code lives on
+`archive/licensing-supabase`). A future "buy" link would point at a plain
+payment page (e.g. a Stripe payment link) that emails the signed file — the app
+itself still phones nowhere. **The one open item is standing up the signing**
+(provisioning the keypair + a mint step); everything else is ready to revive.
 
-### 3. Seat / volume model for organizations (security-director persona)
-There is **no multi-seat or volume-licensing product yet** — the license model
-is per-user (a stable contact id, one trial/subscription). The enterprise-ready
-path already built is **offline activation** (P1.5): the maintainer holds an
-Ed25519 keypair and mints a signed license file per machine, so managed fleets
-activate with **no phone-home**. **Decide** the seat story:
-- **(a) Offline license files per seat** — use the offline-activation mechanism
-  below; you mint one signed file per device/seat. Works today once the pubkey
-  is provisioned.
-- **(b) Hosted volume licensing** — not built; would extend the license function
-  with seat counts. A larger piece of work, flagged here, not started.
+> **Invariant (still holds if paid returns):** paid must not open on unsigned
+> installers. Provision code signing (below) *before* re-enabling paid, or
+> activation on an unsigned build is correctly refused.
+
+### 3. Organizations / seats
+Per-machine signed license files (option above) cover managed fleets with **no
+phone-home** — mint one file per device/seat. A hosted volume-licensing product
+was never built and would reintroduce a backend; it stays explicitly out of
+scope.
 
 ---
 
@@ -68,14 +81,16 @@ in `docs/signing.md` to ship signed installers and a working auto-updater.
 **Blocks:** signed distribution, the updater, and (by the invariant above) the
 paid path.
 
-### B. Offline activation pubkey — `docs/managed-deployment.md`,
+### B. Offline activation — `docs/managed-deployment.md`,
 `openspec/changes/add-offline-activation/`
-Set `LICENSE_OFFLINE_PUBKEY` to the base64 Ed25519 **public** key whose private
-key you hold; the engine then verifies license files signed with it. **Empty or
-unset ⇒ offline activation is disabled (fail-closed)** — the verify path is inert
-until you provision the key, so nothing can be spoofed in the meantime. Once set,
-mint per-machine files as documented. This is the mechanism behind seat option
-(a) above.
+The design and deployment steps stay in-tree, but the **engine verify code was
+removed with the rest of licensing** and is preserved on
+`archive/licensing-supabase`; restore it from there before this is live. Once
+restored, set `LICENSE_OFFLINE_PUBKEY` to the base64 Ed25519 **public** key
+whose private key you hold and the engine verifies license files signed with it.
+**Empty or unset ⇒ disabled (fail-closed)** — the verify path is inert until you
+provision the key, so nothing can be spoofed in the meantime. This is the paid /
+managed-fleet mechanism referenced under Product decisions (§2–§3).
 
 ### C. OS-keychain sealing key — `native/crates/lighthouse-core/src/secrets.rs`
 The vault's sealing key defaults to a file under app state. An optional,

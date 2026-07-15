@@ -69,9 +69,10 @@ export function StartupPrompt() {
     const timer = setInterval(() => {
       const live = since.current != null ? Date.now() - since.current : 0;
       if (activeMs.current + live < PROMPT_AFTER_MS) return;
-      // Another modal is up (quick-start tour, feedback, a dialog) — don't
-      // stack a second one; retry next tick.
-      if (document.querySelector(".fui-DialogSurface")) return;
+      // Another modal is up (the first-run tour, feedback, a dialog) — don't
+      // stack a second one; retry next tick. The tour's anchored TeachingPopover
+      // isn't a DialogSurface, so also honor its body marker.
+      if (document.querySelector(".fui-DialogSurface") || document.body.dataset.tourActive) return;
       clearInterval(timer);
       document.removeEventListener("visibilitychange", onVisibility);
       // Fetch at ask time (not mount) so the switch reflects the freshest

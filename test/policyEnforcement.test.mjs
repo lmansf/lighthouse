@@ -50,7 +50,7 @@ test("selectModel under forceLocalOnly leaves the profile untouched and seals no
     selectModel("openai", "gpt-5-mini", "sk-live-blocked");
     const state = getState();
     assert.equal(state.providerId, null, "disallowed provider not persisted");
-    assert.equal(state.step, "sign-in", "selectModel did not advance the profile");
+    assert.equal(state.step, "vault", "selectModel did not advance the profile");
     assert.equal(resolvedKeyFor("openai"), null, "no key sealed for a disallowed provider");
   });
   // Same call without the policy goes through — the gate above was the policy.

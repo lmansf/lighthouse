@@ -38,9 +38,6 @@ function errorResponse(path: string, message: string): Response {
   if (path === "/api/connect") {
     return json({ error: message }, message === "not connected" ? 400 : 500);
   }
-  if (path === "/api/license" || path === "/api/register") {
-    return json({ ok: false, reason: "rejected", detail: message }, 400);
-  }
   return json({ error: message }, 400);
 }
 
@@ -202,8 +199,8 @@ async function route(
     }
     case "/api/profile":
       return method === "GET" ? call("profile_get") : call("profile_op", { body });
-    case "/api/license":
-      return call("license_op", { body });
+    case "/api/diagnostics":
+      return call("diagnostics");
     case "/api/connect":
       return call("connect_op", { body });
     case "/api/model":
@@ -218,8 +215,6 @@ async function route(
       return call("reveal_node", { nodeId: typeof body.nodeId === "string" ? body.nodeId : "" });
     case "/api/upload":
       return handleUpload(core, init);
-    case "/api/register":
-      return method === "GET" ? call("register_config") : call("register_start", { body });
     case "/api/settings":
       return method === "GET"
         ? call("settings_get")
@@ -237,6 +232,7 @@ async function route(
             draftAnswers: typeof body.draftAnswers === "boolean" ? body.draftAnswers : null,
             briefingNotify: typeof body.briefingNotify === "boolean" ? body.briefingNotify : null,
             briefingNoteHour: typeof body.briefingNoteHour === "number" ? body.briefingNoteHour : null,
+            tourShown: typeof body.tourShown === "boolean" ? body.tourShown : null,
           });
     default:
       return json({ error: "unknown route" }, 404);

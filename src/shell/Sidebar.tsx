@@ -12,7 +12,7 @@ import {
 import { PanelLeftContractRegular, PanelLeftExpandRegular } from "@fluentui/react-icons";
 import { LAYOUT, ACCENTS } from "./theme";
 import { SidebarWater } from "./SidebarWater";
-import { SettingsMenu, TrialBadge } from "@/features/license/LicenseGate";
+import { SettingsMenu } from "@/features/settings/SettingsMenu";
 import { UpdateNotice } from "@/features/update/UpdateNotice";
 import { modKey } from "@/features/onboarding/ModeChooser";
 
@@ -47,17 +47,6 @@ const useStyles = makeStyles({
     "@media (prefers-reduced-motion: reduce)": { transitionDuration: "0.01ms" },
   },
   waterWrapHidden: { opacity: 0 },
-  // Compact affordances for the collapsed rail (update + trial dots), stacked
-  // and centered above the settings gear.
-  railAffordances: {
-    position: "relative",
-    zIndex: 1,
-    display: "flex",
-    flexDirection: "column",
-    alignItems: "center",
-    gap: tokens.spacingVerticalXS,
-    marginBottom: tokens.spacingVerticalXS,
-  },
   header: {
     position: "relative",
     zIndex: 1,
@@ -112,8 +101,6 @@ const useStyles = makeStyles({
   },
   footerCollapsed: { justifyContent: "center", ...shorthands.padding(tokens.spacingVerticalS, 0) },
   footerLabel: { color: tokens.colorNeutralForeground3 },
-  // Pushes the trial countdown to the footer's right edge, away from the gear.
-  footerTrial: { marginLeft: "auto", minWidth: 0, display: "inline-flex" },
 });
 
 interface SidebarProps {
@@ -125,8 +112,8 @@ interface SidebarProps {
 
 /**
  * Collapsible left sidebar: brand + collapse toggle on
- * top, the file explorer in the middle, and the settings gear (plus the trial
- * countdown, when a trial is running) pinned bottom-left.
+ * top, the file explorer in the middle, and the settings gear pinned
+ * bottom-left.
  * Collapsed, it shrinks to a thin icon rail that still exposes expand + settings.
  */
 export function Sidebar({ collapsed, onToggleCollapsed, children }: SidebarProps) {
@@ -169,28 +156,16 @@ export function Sidebar({ collapsed, onToggleCollapsed, children }: SidebarProps
         )}
       </div>
       <div className={mergeClasses(styles.body, collapsed && styles.bodyHidden)}>{children}</div>
-      {/* Above Settings: the one-line "new version" nudge (desktop only). In the
-          collapsed rail the update and trial countdown each become a compact dot
-          so neither is hidden just because the sidebar is thin. */}
-      {collapsed ? (
-        <div className={styles.railAffordances}>
-          <UpdateNotice collapsed />
-          <TrialBadge collapsed />
-        </div>
-      ) : (
-        <UpdateNotice />
-      )}
+      {/* Above Settings: the one-line "new version" nudge (desktop only), a
+          compact dot in the collapsed rail so it isn't hidden just because the
+          sidebar is thin. */}
+      {collapsed ? <UpdateNotice collapsed /> : <UpdateNotice />}
       <div className={mergeClasses(styles.footer, collapsed && styles.footerCollapsed)}>
         <SettingsMenu />
         {!collapsed && (
-          <>
-            <Text size={200} className={styles.footerLabel}>
-              Settings
-            </Text>
-            <span className={styles.footerTrial}>
-              <TrialBadge />
-            </span>
-          </>
+          <Text size={200} className={styles.footerLabel}>
+            Settings
+          </Text>
         )}
       </div>
     </div>

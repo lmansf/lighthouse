@@ -4,10 +4,10 @@
  * that every mutating call refreshes from the server response. A background
  * fetch on load hydrates it for returning users. */
 import type { AuthService } from "../services";
-import type { OnboardingState, User } from "../types";
+import type { OnboardingState } from "../types";
 
 let cached: OnboardingState = {
-  step: "sign-in",
+  step: "vault",
   user: null,
   providerId: null,
   modelId: null,
@@ -72,14 +72,11 @@ class RealAuthService implements AuthService {
   getState(): OnboardingState {
     return { ...cached };
   }
-  async signIn(email: string): Promise<User> {
-    return (await post("signIn", { email })).user!;
+  async finishVault(): Promise<void> {
+    await post("finishVault");
   }
-  async register(name: string, email: string): Promise<User> {
-    return (await post("register", { name, email })).user!;
-  }
-  async finishRegistration(): Promise<void> {
-    await post("finishRegistration");
+  async finishMode(): Promise<void> {
+    await post("finishMode");
   }
   async selectModel(providerId: string, modelId: string, apiKey: string): Promise<void> {
     await post("selectModel", { providerId, modelId, apiKey });

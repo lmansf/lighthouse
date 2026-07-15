@@ -598,9 +598,9 @@ const SMOKE_DRIVER_JS: &str = r#"
 "#;
 
 /// CI boot-smoke isolation (release-smoke.yml): when set, all install-scope
-/// state (settings, models, connectors, profile, license, app state) lives
-/// under this directory instead of the OS app-data dir, so a smoke run can
-/// never touch — or be influenced by — a real install on the same machine.
+/// state (settings, models, connectors, profile, app state) lives under this
+/// directory instead of the OS app-data dir, so a smoke run can never touch —
+/// or be influenced by — a real install on the same machine.
 fn smoke_state_dir() -> Option<PathBuf> {
     std::env::var("LIGHTHOUSE_SMOKE_STATE")
         .ok()
@@ -729,19 +729,25 @@ fn bootstrap_env(app: &AppHandle) {
         }
         std::env::set_var("LIGHTHOUSE_PROFILE_FILE", &profile);
 
-        // License/identity state follows the same rule (a trial or purchase
-        // belongs to this install, not to a folder): keep it here so "Choose
-        // vault folder…" can't sign the user out. Same one-time, copy-not-move
-        // migration out of the current vault for existing installs that licensed
-        // under the in-vault layout.
-        for name in ["license.json", "identity.json", "contact.json"] {
-            let global = data.join(name);
-            if !global.exists() {
-                let legacy = vault_dir_setting(app).join(".rag-vault").join(name);
-                if legacy.exists() {
-                    let _ = fs::copy(&legacy, &global);
-                }
-            }
+        // Always-unlocked build: the licensing / accounts / registration system
+        // is gone. Earlier builds migrated license, identity, and contact state
+        // INTO this app-state dir (and kept trial/usage bookkeeping here); flip
+        // that migrate-in to a best-effort CLEAN-UP so a machine upgrading to
+        // this build doesn't leave stale unlock/telemetry files behind. Errors
+        // are ignored (a missing file is the normal case). profile.json and
+        // secrets.json are deliberately NOT removed — they hold the signed-in
+        // profile and the sealed API keys the app still needs.
+        for name in [
+            "license.json",
+            "identity.json",
+            "contact.json",
+            "launch.json",
+            "usage.json",
+            "usage-snapshot.json",
+            "experiments.json",
+            "activation.json",
+        ] {
+            let _ = fs::remove_file(data.join(name));
         }
         std::env::set_var("LIGHTHOUSE_APP_STATE_DIR", &data);
     }
@@ -1087,7 +1093,6 @@ fn main() {
             commands::tts_synthesize,
             commands::profile_get,
             commands::profile_op,
-            commands::license_op,
             commands::connect_op,
             commands::model_status,
             commands::model_download,
@@ -1096,10 +1101,9 @@ fn main() {
             commands::reveal_node,
             commands::settings_get,
             commands::settings_set,
+            commands::diagnostics,
             commands::add_paths,
             commands::pick_link_paths,
-            commands::register_config,
-            commands::register_start,
             commands::upload_file,
             commands::update_state,
             commands::update_now,

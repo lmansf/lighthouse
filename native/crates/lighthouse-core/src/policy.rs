@@ -35,8 +35,8 @@ pub struct PolicyFile {
     pub force_local_only: Option<bool>,
     /// "off" marks telemetry as managed-off in the UI. All ambient telemetry
     /// has been removed from the engine, so there is nothing left to silence;
-    /// license check/start/activate and explicit user submissions
-    /// (feedback/bug/notify) are the only egress and are unaffected.
+    /// the only egress is the AI provider the user chose (plus opt-in update
+    /// and connector traffic), and that is unaffected.
     pub telemetry: Option<String>,
     pub chat_history: Option<String>,
     pub widget_hotkeys: Option<String>,
@@ -89,16 +89,6 @@ fn policy_path() -> PathBuf {
         }
     }
     machine_policy_path()
-}
-
-/// The directory the machine policy lives in — the offline license file
-/// (openspec: add-offline-activation) is deployed alongside it, so admins ship
-/// policy + license through the same MDM/GPO channel.
-pub(crate) fn policy_dir() -> PathBuf {
-    policy_path()
-        .parent()
-        .map(std::path::Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 fn load() -> PolicyState {

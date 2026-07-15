@@ -75,11 +75,11 @@ pub fn profile_path() -> PathBuf {
     state_dir().join("profile.json")
 }
 
-/// Install-global state (license, identity, contact, launch telemetry) that
-/// must persist across vault switches. A trial/subscription belongs to the
-/// user's install, not to whichever folder happens to be the vault — storing
-/// it in-vault meant "Choose vault folder…" re-pointed the engine at a folder
-/// with no license and silently signed the user out. Same rule the profile
+/// Install-global state (signed-in profile, sealed secrets, settings) that
+/// must persist across vault switches. This state belongs to the user's
+/// install, not to whichever folder happens to be the vault — storing it
+/// in-vault meant "Choose vault folder…" re-pointed the engine at a folder
+/// with none of it and silently signed the user out. Same rule the profile
 /// and connector credentials already follow (see profile_path/connectors_dir):
 /// the desktop shell sets LIGHTHOUSE_APP_STATE_DIR to its private data dir;
 /// web/dev falls back to the in-vault state dir for parity.

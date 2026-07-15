@@ -22,9 +22,6 @@ use crate::config::now_ms;
 
 /// Purpose labels (user-visible in the panel; byte-identical in the twin).
 pub const PURPOSE_AI_PROVIDER: &str = "AI provider";
-pub const PURPOSE_LICENSE: &str = "License & trial";
-pub const PURPOSE_TELEMETRY: &str = "Telemetry";
-pub const PURPOSE_CHECKOUT: &str = "Checkout";
 pub const PURPOSE_UPDATE_CHECK: &str = "Update check";
 pub const PURPOSE_UPDATE_DOWNLOAD: &str = "Update download";
 pub const PURPOSE_MODEL_DOWNLOAD: &str = "Model download";

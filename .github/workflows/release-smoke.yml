@@ -97,15 +97,12 @@ jobs:
               vaultDir: vault, uiMode: "window", startupAsked: true,
               runOnStartup: false, semanticSearch: false,
             }));
-            fs.writeFileSync(path.join(state, "experiments.json"), JSON.stringify({
-              onboarding: "key_first", default_inclusion: "opt_in", source: "override",
-            }));
           ' "$STATE" "$VAULT"
           BIN="native/target/release/lighthouse-desktop"
           if [ "$RUNNER_OS" = "Windows" ]; then BIN="$BIN.exe"; fi
           export LIGHTHOUSE_SMOKE=1
           export LIGHTHOUSE_SMOKE_STATE="$STATE"
-          unset LIGHTHOUSE_API_TOKEN ANTHROPIC_API_KEY OPENAI_API_KEY GOOGLE_API_KEY LICENSE_API_URL 2>/dev/null || true
+          unset LIGHTHOUSE_API_TOKEN ANTHROPIC_API_KEY OPENAI_API_KEY GOOGLE_API_KEY 2>/dev/null || true
           set +e
           if [ "$RUNNER_OS" = "Linux" ]; then
             xvfb-run -a "$BIN"
