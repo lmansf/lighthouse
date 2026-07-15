@@ -1684,7 +1684,7 @@ fn js_split_ws(text: &str) -> Vec<&str> {
     out
 }
 
-/// Structure-aware chunking (docs/analytics-genie.md, B1): tabular extracts
+/// Structure-aware chunking (docs/analytics-beam.md, B1): tabular extracts
 /// chunk by ROWS with the header line(s) prepended to every chunk, so a chunk
 /// holding row 400 still carries its column names; prose keeps the word
 /// windows below. KEEP BYTE-IDENTICAL with the TS chunker (vault.ts chunksOf).

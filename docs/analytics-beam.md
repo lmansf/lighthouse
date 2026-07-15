@@ -1,7 +1,7 @@
-# Ask-your-data analytics ("Genie") — scope & design
+# Ask-your-data analytics ("Beam") — scope & design
 
-**Goal:** "analyze my sales data" should behave like Databricks Genie, on your
-own machine: the model reads the *schema* of your tabular files, writes SQL, a
+**Goal:** "analyze my sales data" should just work, entirely on your own
+machine: the model reads the *schema* of your tabular files, writes SQL, a
 real query engine executes it, and the model narrates the **verified result** —
 with the query shown for trust. Privacy is architectural (everything
 in-process, no network paths), and accuracy comes from execution: the model

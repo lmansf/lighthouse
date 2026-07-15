@@ -1,4 +1,4 @@
-//! Local embeddings + hybrid retrieval (docs/analytics-genie.md, B2).
+//! Local embeddings + hybrid retrieval (docs/analytics-beam.md, B2).
 //!
 //! TF-IDF is blind to meaning ("Q3 revenue" ≠ "third-quarter sales"). A small
 //! embedding model (nomic-embed-text v1.5, bundled with the installer) runs

@@ -1,4 +1,4 @@
-# Pinned questions: the genie taps you on the shoulder
+# Pinned questions: Beam taps you on the shoulder
 
 ## Why
 

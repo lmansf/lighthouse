@@ -33,7 +33,7 @@ security director** who needs to approve all of it.
   **all of it** (whole-document answers; very long files are read section by
   section with an honest note). Multi-document questions get map-reduce
   synthesis.
-- **Genie analytics.** Questions over CSV/TSV/Parquet/Excel become **one
+- **Beam analytics.** Questions over CSV/TSV/Parquet/Excel become **one
   read-only SQL SELECT**, executed by an embedded engine (DataFusion) — the
   model narrates the *verified* result and the SQL is shown verbatim, with a
   freshness footer. Refinement chips, Edit-SQL re-runs (no model), multi-step

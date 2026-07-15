@@ -124,7 +124,7 @@ interface SidebarProps {
 }
 
 /**
- * Collapsible left sidebar (Databricks/Genie style): brand + collapse toggle on
+ * Collapsible left sidebar: brand + collapse toggle on
  * top, the file explorer in the middle, and the settings gear (plus the trial
  * countdown, when a trial is running) pinned bottom-left.
  * Collapsed, it shrinks to a thin icon rail that still exposes expand + settings.

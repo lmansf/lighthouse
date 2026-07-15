@@ -2,7 +2,7 @@ schema: spec-driven
 
 context: |
   Lighthouse: local-first AI file vault (desktop app). Users curate which files
-  an AI can see, then chat with grounded, cited answers; "Genie" analytics turns
+  an AI can see, then chat with grounded, cited answers; "Beam" analytics turns
   aggregate questions over tabular files into engine-executed SQL with charts.
 
   Tech stack & architecture:

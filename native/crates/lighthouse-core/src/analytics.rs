@@ -1,4 +1,4 @@
-//! Ask-your-data analytics (docs/analytics-genie.md, Phase A).
+//! Ask-your-data analytics (docs/analytics-beam.md, Phase A).
 //!
 //! The model writes SQL; DataFusion executes it; the model narrates the
 //! verified result. The model never sees file contents here — only schemas and
@@ -2955,7 +2955,7 @@ pub async fn run_direct_save(
     ))
 }
 
-/// Regression tests for the Genie v3 correctness audit (openspec:
+/// Regression tests for the Beam v3 correctness audit (openspec:
 /// add-analytics-eval-floor). Each asserts a fix that fails without it.
 #[cfg(test)]
 mod g1_regression {
