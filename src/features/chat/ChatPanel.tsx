@@ -1916,6 +1916,28 @@ export function ChatPanel() {
     return () => window.removeEventListener("lighthouse:new-chat", onNewChat);
   }, []);
 
+  // Quick-open's Ctrl/Cmd+Enter attaches a file to the conversation through
+  // this window event, the same decoupling as new-chat above. It rides the
+  // exact append path the explorer-drag/OS-drop use (addAttachments dedupes by
+  // id) and then focuses the composer so the follow-up question can be typed
+  // immediately — rAF so the focus lands after the palette dialog's own
+  // close-time focus restore. Latest-closure ref pattern.
+  const attachFileRef = useRef<(f: DraggedFile) => void>(() => {});
+  attachFileRef.current = (f) => {
+    addAttachments([f]);
+    requestAnimationFrame(() => composerRef.current?.focus());
+  };
+  useEffect(() => {
+    const onAttachFile = (e: Event) => {
+      const d = (e as CustomEvent<{ id?: string; name?: string }>).detail;
+      if (d && typeof d.id === "string" && typeof d.name === "string") {
+        attachFileRef.current({ id: d.id, name: d.name });
+      }
+    };
+    window.addEventListener("lighthouse:attach-file", onAttachFile);
+    return () => window.removeEventListener("lighthouse:attach-file", onAttachFile);
+  }, []);
+
   // The desktop widget's "Ask Lighthouse →" hand-off: Rust `show_main` emits
   // `ask-question` to this window and the transport re-broadcasts it as this
   // DOM event (docs/widget-scope.md, W1 contract). Send it through the same

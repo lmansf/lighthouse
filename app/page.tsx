@@ -34,6 +34,10 @@ const FirstRunTour = dynamic(
   () => import("@/features/help/FirstRunTour").then((m) => m.FirstRunTour),
   { ssr: false },
 );
+const QuickOpen = dynamic(
+  () => import("@/features/quickopen/QuickOpen").then((m) => m.QuickOpen),
+  { ssr: false },
+);
 
 /**
  * Composition root. The shell owns layout; each feature team replaces its own
@@ -85,6 +89,10 @@ export default function Home() {
           {/* Citation → preview host: opens the file inspector on the cited
               chunk for chat citations and the widget's cross-window handoff. */}
           <FileInspectorHost />
+          {/* Ctrl/Cmd+P quick-open palette (time-savers): fuzzy-find a vault
+              file, then reveal it in the explorer or attach it to the chat.
+              Main window only — AppShell owns the shortcut. */}
+          <QuickOpen />
         </>
       )}
     </>
