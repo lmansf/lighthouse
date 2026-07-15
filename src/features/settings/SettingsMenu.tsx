@@ -34,6 +34,7 @@ import {
 import {
   ChatHelpRegular,
   BrainCircuitRegular,
+  DeleteRegular,
   HistoryRegular,
   OpenRegular,
   OptionsRegular,
@@ -45,6 +46,7 @@ import {
 } from "@fluentui/react-icons";
 import { MODEL_PROVIDERS, ragService, type AuditSnapshot } from "@/contracts";
 import { LocalModelInstallPanel } from "@/features/localModel/LocalModelOption";
+import { RULE_ACTION_LABEL } from "@/features/explorer/FolderRulesDialog";
 import { START_TOUR_EVENT } from "@/features/help/FirstRunTour";
 import { showWidget, summonHotkey, prettyShortcut, modKey } from "@/features/onboarding/ModeChooser";
 import { useAuthStore } from "@/stores/useAuthStore";
@@ -73,6 +75,21 @@ const useStyles = makeStyles({
   // Waiting-on-permission note under the whisper switch — warning tint so it
   // reads as "action needed" without the alarm of a hard error red.
   prefWarn: { color: tokens.colorStatusWarningForeground1, fontSize: tokens.fontSizeBase200 },
+  // Curation rules (openspec: add-curation-rules): the Preferences list —
+  // name | action | scope | remove, one compact row per rule.
+  ruleList: { display: "flex", flexDirection: "column", gap: tokens.spacingVerticalXS },
+  ruleRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: tokens.spacingHorizontalS,
+    ...shorthands.padding(tokens.spacingVerticalXXS, tokens.spacingHorizontalS),
+    backgroundColor: tokens.colorNeutralBackground2,
+    borderRadius: tokens.borderRadiusMedium,
+  },
+  ruleName: { flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+  // An orphaned scope (folder gone — the rule matches nothing) is struck
+  // through, the promised "kept for cleanup" cue.
+  ruleOrphan: { textDecorationLine: "line-through" },
   // Summon-shortcut recorder: the chord chip, Change, and Reset on one line.
   shortcutRow: {
     display: "flex",
@@ -651,6 +668,11 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
   // "Managed by your organization" indication.
   const policy = useRagStore((s) => s.policy);
   const locks = policy?.locks;
+  // Curation rules (openspec: add-curation-rules): the complete rule list,
+  // scope-named and removable; orphaned scopes render struck-through.
+  const rules = useRagStore((s) => s.rules);
+  const loadRules = useRagStore((s) => s.loadRules);
+  const removeRule = useRagStore((s) => s.removeRule);
 
   const [desktop, setDesktop] = useState(false);
   const [runOnStartup, setRunOnStartup] = useState(true);
@@ -707,6 +729,12 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
   const whisperCapable = whisperPermission !== "unsupported";
   // The modifier tap-chord, spelled per platform (whisper is modifier-only).
   const whisperChord = isMac ? "Control + ⌘ + Shift" : "Ctrl + Win + Shift";
+
+  // Refresh the curation-rule list whenever the dialog opens (rules are also
+  // created from the explorer's folder menus, so the list can be stale).
+  useEffect(() => {
+    if (open) void loadRules();
+  }, [open, loadRules]);
 
   // Load the file-backed prefs (usage consent, launch-at-login, …) when opened
   // or when Retry bumps reloadKey. The settings fetch drives settingsLoad so a
@@ -981,6 +1009,59 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
                   Only affects files you add from now on; files you&apos;ve already included or
                   excluded keep their setting.
                 </Text>
+              </Field>
+
+              {/* Bulk curation rules (openspec: add-curation-rules): every rule
+                  across every folder, scope-named and removable. Creation lives
+                  on the folder itself (right-click → Rules for this folder…). */}
+              <Field label="Curation rules">
+                {rules.length === 0 ? (
+                  <Text className={styles.prefHint}>
+                    No rules yet. Right-click a folder in Files and choose &ldquo;Rules for this
+                    folder…&rdquo; to decide matching files — present and future — in one move.
+                  </Text>
+                ) : (
+                  <div className={styles.ruleList}>
+                    {rules.map((r) => (
+                      <div key={r.id} className={styles.ruleRow}>
+                        <Text size={200} className={styles.ruleName} title={r.name}>
+                          {r.name}
+                        </Text>
+                        <Badge size="small" appearance="tint" color="brand">
+                          {RULE_ACTION_LABEL[r.action] ?? r.action}
+                        </Badge>
+                        <Text
+                          size={200}
+                          className={
+                            r.orphaned
+                              ? mergeClasses(styles.prefHint, styles.ruleOrphan)
+                              : styles.prefHint
+                          }
+                          title={
+                            r.orphaned
+                              ? "This folder no longer exists — the rule matches nothing until it returns"
+                              : undefined
+                          }
+                        >
+                          {r.scopeLabel}
+                        </Text>
+                        <Button
+                          size="small"
+                          appearance="subtle"
+                          icon={<DeleteRegular />}
+                          aria-label={`Remove rule ${r.name}`}
+                          onClick={() => void removeRule(r.id)}
+                        />
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {rules.length > 0 && (
+                  <Text className={styles.prefHint}>
+                    Rules decide matching files where you haven&apos;t set one yourself; removing a
+                    rule only undoes what it decided.
+                  </Text>
+                )}
               </Field>
 
               <Switch

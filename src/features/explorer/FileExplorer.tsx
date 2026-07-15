@@ -60,6 +60,7 @@ import {
   DocumentPdfRegular,
   EyeOffRegular,
   EyeRegular,
+  FilterRegular,
   FolderArrowRightRegular,
   FolderRegular,
   FolderAddRegular,
@@ -76,6 +77,7 @@ import {
 import type { FileNode } from "@/contracts";
 import { flattenVisible, type FlatRow } from "./flatten";
 import { FileInspector } from "./FileInspector";
+import { FolderRulesDialog } from "./FolderRulesDialog";
 import { useRagStore } from "@/stores/useRagStore";
 import { useAuthStore } from "@/stores/useAuthStore";
 import { FILE_DRAG_MIME, parseDraggedFiles, serializeDraggedFiles } from "@/shell/dnd";
@@ -453,6 +455,9 @@ interface TreeRowProps {
   onReveal: (id: string) => void;
   /** Open the read-only "What the AI sees" inspector for a file. */
   onInspect: (id: string, name: string) => void;
+  /** Open the curation-rules dialog scoped to a folder (openspec:
+   *  add-curation-rules). */
+  onFolderRules: (id: string, name: string) => void;
   /** Reparent a node under a folder (or the vault root, null). */
   onMove: (fromId: string, toParentId: string | null) => void;
   /** Open the rename dialog for a node (local vault nodes only). */
@@ -498,6 +503,7 @@ function TreeRowImpl({
   onOpen,
   onReveal,
   onInspect,
+  onFolderRules,
   onMove,
   onRename,
   onNewFolderInside,
@@ -785,6 +791,14 @@ function TreeRowImpl({
             {node.kind === "file" && (
               <MenuItem icon={<SparkleRegular />} onClick={() => onInspect(node.id, node.name)}>
                 What the AI sees
+              </MenuItem>
+            )}
+            {/* Bulk curation rules (openspec: add-curation-rules): manage the
+                predicate rules scoped to this folder. Local + linked folders
+                only — cloud nodes resolve connector-side. */}
+            {node.kind === "folder" && !isRemote && (
+              <MenuItem icon={<FilterRegular />} onClick={() => onFolderRules(node.id, node.name)}>
+                Rules for this folder…
               </MenuItem>
             )}
             <MenuItem
@@ -1247,6 +1261,11 @@ export function FileExplorer() {
   // closed). Opening it is a pure navigation gesture — it mutates nothing.
   const [inspectNode, setInspectNode] = useState<{ id: string; name: string } | null>(null);
   const openInspect = useCallback((id: string, name: string) => setInspectNode({ id, name }), []);
+
+  // "Rules for this folder…" (openspec: add-curation-rules): which folder the
+  // rules dialog is open for (null = closed).
+  const [rulesFolder, setRulesFolder] = useState<{ id: string; name: string } | null>(null);
+  const openFolderRules = useCallback((id: string, name: string) => setRulesFolder({ id, name }), []);
 
   // Stable per-row callbacks (forwarding to the store's stable actions), so the
   // memoized TreeRow isn't re-rendered by every explorer render just because
@@ -1897,6 +1916,7 @@ export function FileExplorer() {
                           onOpen={openNode}
                           onReveal={revealNode}
                           onInspect={openInspect}
+                          onFolderRules={openFolderRules}
                           onMove={handleMove}
                           onRename={openRename}
                           onNewFolderInside={openNewFolder}
@@ -2018,6 +2038,13 @@ export function FileExplorer() {
         fileName={inspectNode?.name ?? ""}
         desktop={desktop}
         onClose={() => setInspectNode(null)}
+      />
+
+      {/* Per-folder curation rules (openspec: add-curation-rules). */}
+      <FolderRulesDialog
+        scope={rulesFolder?.id ?? null}
+        scopeName={rulesFolder?.name ?? ""}
+        onClose={() => setRulesFolder(null)}
       />
     </section>
   );

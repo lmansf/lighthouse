@@ -27,6 +27,39 @@ pub struct Reference {
     pub kind: String, // "file" | "folder"
 }
 
+/// A bulk curation rule (openspec: add-curation-rules): `{scope folder, ONE
+/// predicate, action}`, evaluated LIVE inside the effective-state resolvers as
+/// a layer between explicit per-node flags and the global default. A rule
+/// never writes `included`/`local_only` — future arrivals are covered by
+/// construction, and deleting a rule reverts exactly the nodes it was
+/// deciding. Every field is `serde(default)`-tolerant: a hand-edited rule
+/// with a missing/unknown predicate or action simply matches nothing (the
+/// layer falls through) rather than breaking the walk. KEEP IN SYNC with
+/// vault.ts::CurationRule — state.json is shared byte-compatibly.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CurationRule {
+    #[serde(default)]
+    pub id: String,
+    /// Scope folder node id. `""` is the vault root — it covers vault-resident
+    /// files only; a linked root (`extN`) is its own folder scope (its content
+    /// lives outside the vault directory).
+    #[serde(default)]
+    pub scope: String,
+    /// Predicate (exactly one of `kind`/`ext`/`glob`, add-time validated):
+    /// file kind from the extraction/catalog classification.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>, // "tabular" | "document" | "image"
+    /// Lowercase extension list, stored dot-less (e.g. ["xlsx","csv"]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ext: Option<Vec<String>>,
+    /// Glob over the path RELATIVE to the scope — `*`, `**`, `?` only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub glob: Option<String>,
+    #[serde(default)]
+    pub action: String, // "include" | "exclude" | "local-only" | "clear"
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VaultState {
@@ -46,6 +79,13 @@ pub struct VaultState {
     /// External references keyed by a synthetic node-id prefix (e.g. "ext0").
     #[serde(default)]
     pub references: HashMap<String, Reference>,
+    /// Bulk curation rules (openspec: add-curation-rules) — a RESOLUTION
+    /// layer, never per-node writes. Definition order matters (within one
+    /// scope the last-defined rule wins). `#[serde(default)]`: an old
+    /// state.json with no `rules` key loads rule-less — the established
+    /// un-versioned migration story. KEEP IN SYNC with vault.ts.
+    #[serde(default)]
+    pub rules: Vec<CurationRule>,
 }
 
 fn default_true() -> bool {
@@ -59,6 +99,7 @@ impl Default for VaultState {
             included: HashMap::new(),
             local_only: HashMap::new(),
             references: HashMap::new(),
+            rules: Vec::new(),
         }
     }
 }
@@ -229,9 +270,220 @@ fn default_included() -> bool {
     crate::profile::effective_default_inclusion() == "include"
 }
 
-/// Effective inclusion. An ancestor folder explicitly excluded always forces a
-/// node out. For an absent own flag the default is `default_in`.
-fn is_effectively_included(id: &str, state: &VaultState, default_in: bool) -> bool {
+// --- curation rules: evaluation (openspec: add-curation-rules) -----------------
+//
+// Rules are a resolution layer for FILES: explicit flags (own, then the
+// existing ancestor semantics) always win; rules decide only where today's
+// code fell through to the default. Folders never take the rule layer — a
+// rule "applies to every matching file under its scope", and folder eyes in
+// the explorer derive from their descendants anyway.
+
+/// Rule actions / kinds the engine accepts (add-time whitelist).
+const RULE_ACTIONS: &[&str] = &["include", "exclude", "local-only", "clear"];
+const RULE_KINDS: &[&str] = &["tabular", "document", "image"];
+
+/// `kind:"image"` — the OCR raster set. KEEP IN SYNC with
+/// extract.rs::OCR_IMAGE_EXT (their text is an extraction capability, which is
+/// what the kind classification reports). PARITY: the TS twin has no OCR, so
+/// images are name-match-only there and `kind:"image"` matches nothing.
+const RULE_IMAGE_EXT: &[&str] = &["png", "jpg", "jpeg", "webp", "bmp", "tif", "tiff"];
+
+/// `kind:"document"` — prose document formats this engine extracts or reads
+/// (extract.rs RICH_EXT minus tabular/image, plus the prose documents of
+/// TEXT_EXT). `kind:"tabular"` is `analytics::is_tabular` — the catalog gate —
+/// so a kind rule and the catalog never disagree about what a spreadsheet is.
+/// PARITY: the TS twin's document set is the subset IT can extract (.doc,
+/// .pptx, .odt, .odp, .rtf are Rust-only extraction — name-match-only there,
+/// so kind rules deliberately don't match them; ext/glob rules are
+/// full-fidelity both sides).
+const RULE_DOCUMENT_EXT: &[&str] = &[
+    "pdf", "doc", "docx", "pptx", "odt", "odp", "rtf", "md", "markdown", "txt", "text", "rst",
+    "html", "htm",
+];
+
+/// Validate a rule glob: `/`-separated, wildcards `*`/`**`/`?` only, no empty
+/// segments, `**` only as a whole segment, no backslashes. Returns the
+/// segments. KEEP IN SYNC with vault.ts::parseRuleGlob.
+fn parse_rule_glob(glob: &str) -> Result<Vec<String>, String> {
+    if glob.trim().is_empty() {
+        return Err("glob must not be empty".to_string());
+    }
+    if glob.contains('\\') {
+        return Err("glob uses / as its separator".to_string());
+    }
+    if glob.starts_with('/') || glob.ends_with('/') || glob.contains("//") {
+        return Err("glob must not have empty segments".to_string());
+    }
+    let segs: Vec<String> = glob.split('/').map(String::from).collect();
+    for s in &segs {
+        if s.contains("**") && s != "**" {
+            return Err("** must stand alone between slashes".to_string());
+        }
+    }
+    Ok(segs)
+}
+
+/// `*` / `?` within ONE path segment (never crosses `/`). Linear two-pointer
+/// backtracking, so a pathological pattern can't go exponential. KEEP
+/// BYTE-IDENTICAL in behavior with vault.ts::globSegmentMatches.
+fn glob_segment_matches(pat: &[char], seg: &[char]) -> bool {
+    let (mut p, mut s) = (0usize, 0usize);
+    let (mut star, mut mark) = (usize::MAX, 0usize);
+    while s < seg.len() {
+        if p < pat.len() && (pat[p] == '?' || pat[p] == seg[s]) {
+            p += 1;
+            s += 1;
+        } else if p < pat.len() && pat[p] == '*' {
+            star = p;
+            mark = s;
+            p += 1;
+        } else if star != usize::MAX {
+            p = star + 1;
+            mark += 1;
+            s = mark;
+        } else {
+            return false;
+        }
+    }
+    while p < pat.len() && pat[p] == '*' {
+        p += 1;
+    }
+    p == pat.len()
+}
+
+/// Segment-wise glob match; `**` spans zero or more whole segments. KEEP IN
+/// SYNC with vault.ts::globSegmentsMatch.
+fn glob_segments_match(pat: &[String], path: &[&str]) -> bool {
+    if pat.is_empty() {
+        return path.is_empty();
+    }
+    if pat[0] == "**" {
+        if glob_segments_match(&pat[1..], path) {
+            return true; // ** matches zero segments
+        }
+        return !path.is_empty() && glob_segments_match(pat, &path[1..]);
+    }
+    if path.is_empty() {
+        return false;
+    }
+    let p: Vec<char> = pat[0].chars().collect();
+    let s: Vec<char> = path[0].chars().collect();
+    glob_segment_matches(&p, &s) && glob_segments_match(&pat[1..], &path[1..])
+}
+
+/// The path of `id` RELATIVE to `scope` when the scope contains it, else None.
+/// Scope `""` (the vault root) contains every vault-resident id but NOT linked
+/// (`extN…`) subtrees — a linked root is its own folder scope. The scope
+/// folder itself is never "under" its own scope (rules decide files under the
+/// folder). KEEP IN SYNC with vault.ts::scopeRel.
+fn scope_rel<'a>(scope: &str, id: &'a str, state: &VaultState) -> Option<&'a str> {
+    if scope.is_empty() {
+        return if ref_id_of(id, &state.references).is_none() {
+            Some(id)
+        } else {
+            None
+        };
+    }
+    id.strip_prefix(scope)?.strip_prefix('/')
+}
+
+/// Scope depth for deepest-scope-wins ordering (`""` = 0).
+fn scope_depth(scope: &str) -> usize {
+    if scope.is_empty() {
+        0
+    } else {
+        scope.split('/').count()
+    }
+}
+
+/// Does the rule's predicate match a FILE at `rel` (path relative to the
+/// rule's scope)? A stored rule that fails to evaluate — missing/unknown
+/// predicate, unparseable glob — matches nothing (the layer falls through)
+/// rather than breaking the walk. KEEP IN SYNC with vault.ts::rulePredicateMatches.
+fn rule_predicate_matches(rule: &CurationRule, rel: &str) -> bool {
+    let name = rel.rsplit('/').next().unwrap_or(rel);
+    if let Some(kind) = &rule.kind {
+        let e = ext_of(name); // ".xlsx" | "", lowercased
+        let bare = e.strip_prefix('.').unwrap_or("");
+        return match kind.as_str() {
+            "tabular" => crate::analytics::is_tabular(name),
+            "document" => RULE_DOCUMENT_EXT.contains(&bare),
+            "image" => RULE_IMAGE_EXT.contains(&bare),
+            _ => false,
+        };
+    }
+    if let Some(exts) = &rule.ext {
+        let e = ext_of(name);
+        let bare = e.strip_prefix('.').unwrap_or("");
+        return !bare.is_empty() && exts.iter().any(|x| x == bare);
+    }
+    if let Some(glob) = &rule.glob {
+        let Ok(pat) = parse_rule_glob(glob) else {
+            return false;
+        };
+        let segs: Vec<&str> = rel.split('/').collect();
+        return glob_segments_match(&pat, &segs);
+    }
+    false
+}
+
+/// The two independent axes a rule can decide.
+#[derive(Clone, Copy, PartialEq)]
+enum RuleAxis {
+    Inclusion,
+    LocalOnly,
+}
+
+/// Whether an action participates in an axis. `clear` is first-class on BOTH:
+/// a scoped return-to-default that masks broader rules (inclusion → the global
+/// default; local-only → unmarked).
+fn axis_action(axis: RuleAxis, action: &str) -> bool {
+    match axis {
+        RuleAxis::Inclusion => matches!(action, "include" | "exclude" | "clear"),
+        RuleAxis::LocalOnly => matches!(action, "local-only" | "clear"),
+    }
+}
+
+/// The matching rule that DECIDES a file on one axis: deepest scope wins;
+/// within one scope the last-defined (highest index) wins. None ⇒ the rule
+/// layer falls through to the default. KEEP IN SYNC with vault.ts::winningRule.
+fn winning_rule<'a>(id: &str, state: &'a VaultState, axis: RuleAxis) -> Option<&'a CurationRule> {
+    let mut best: Option<(usize, usize, &CurationRule)> = None;
+    for (idx, rule) in state.rules.iter().enumerate() {
+        if !axis_action(axis, &rule.action) {
+            continue;
+        }
+        let Some(rel) = scope_rel(&rule.scope, id, state) else {
+            continue;
+        };
+        if !rule_predicate_matches(rule, rel) {
+            continue;
+        }
+        let key = (scope_depth(&rule.scope), idx);
+        if best.map_or(true, |(d, i, _)| key > (d, i)) {
+            best = Some((key.0, key.1, rule));
+        }
+    }
+    best.map(|(_, _, r)| r)
+}
+
+/// Which layer decided a flag. The boolean resolvers AND the inspector's
+/// attribution both read this one decision, so "what resolved" and "why" can
+/// never disagree. KEEP IN SYNC with vault.ts (inclusionDecision /
+/// localOnlyDecision).
+enum FlagDecision<'a> {
+    /// An ancestor's explicit flag decided (exclusion / local-only mark) —
+    /// the existing ancestor-wins semantics, never overridden by any rule.
+    Ancestor,
+    /// The node's own explicit flag — always beats rules.
+    Explicit(bool),
+    /// A curation rule decided (deepest scope, then last-defined).
+    Rule(&'a CurationRule),
+    /// No layer claimed it — the global default / unmarked.
+    Default,
+}
+
+fn inclusion_decision<'a>(id: &str, state: &'a VaultState, is_file: bool) -> FlagDecision<'a> {
     let parts: Vec<&str> = id.split('/').collect();
     let mut prefix = String::new();
     for part in &parts[..parts.len().saturating_sub(1)] {
@@ -241,24 +493,21 @@ fn is_effectively_included(id: &str, state: &VaultState, default_in: bool) -> bo
             prefix = format!("{prefix}/{part}");
         }
         if state.included.get(&prefix) == Some(&false) {
-            return false; // an ancestor folder is excluded
+            return FlagDecision::Ancestor; // an ancestor folder is excluded
         }
     }
-    if default_in {
-        state.included.get(id) != Some(&false)
-    } else {
-        state.included.get(id) == Some(&true)
+    if let Some(v) = state.included.get(id) {
+        return FlagDecision::Explicit(*v);
     }
+    if is_file {
+        if let Some(rule) = winning_rule(id, state, RuleAxis::Inclusion) {
+            return FlagDecision::Rule(rule);
+        }
+    }
+    FlagDecision::Default
 }
 
-/// Effective "Private — this device only" state. ANCESTOR-WINS: a node is
-/// local-only when it OR any ancestor carries an explicit `true`. Absence means
-/// not local-only (the safe default for the extractive/local path, where the
-/// mark is inert). Mirrors the ancestor walk in `is_effectively_included`, but
-/// there is no default flip — a `true` anywhere up the chain wins, and a child's
-/// own `false` cannot override a marked ancestor (the safe, privacy-preserving
-/// direction). KEEP IN SYNC with vault.ts::isEffectivelyLocalOnly.
-pub fn is_effectively_local_only(id: &str, state: &VaultState) -> bool {
+fn local_only_decision<'a>(id: &str, state: &'a VaultState, is_file: bool) -> FlagDecision<'a> {
     let parts: Vec<&str> = id.split('/').collect();
     let mut prefix = String::new();
     for part in &parts[..parts.len().saturating_sub(1)] {
@@ -268,10 +517,104 @@ pub fn is_effectively_local_only(id: &str, state: &VaultState) -> bool {
             prefix = format!("{prefix}/{part}");
         }
         if state.local_only.get(&prefix) == Some(&true) {
-            return true; // an ancestor folder is marked local-only
+            return FlagDecision::Ancestor; // an ancestor folder is marked
         }
     }
-    state.local_only.get(id) == Some(&true)
+    if let Some(v) = state.local_only.get(id) {
+        return FlagDecision::Explicit(*v);
+    }
+    if is_file {
+        if let Some(rule) = winning_rule(id, state, RuleAxis::LocalOnly) {
+            return FlagDecision::Rule(rule);
+        }
+    }
+    FlagDecision::Default
+}
+
+/// Effective inclusion. Precedence (spec-pinned, openspec add-curation-rules):
+/// explicit ancestor exclusion (the existing ancestor-wins semantics — a rule
+/// can never resurrect an excluded subtree) → explicit own flag → matching
+/// rules (FILES only: deepest scope, then last-defined; `clear` yields the
+/// default and masks shallower rules) → the global default `default_in`.
+/// KEEP IN SYNC with vault.ts::isEffectivelyIncluded.
+pub fn is_effectively_included(id: &str, state: &VaultState, default_in: bool, is_file: bool) -> bool {
+    match inclusion_decision(id, state, is_file) {
+        FlagDecision::Ancestor => false,
+        FlagDecision::Explicit(v) => v,
+        FlagDecision::Rule(rule) => match rule.action.as_str() {
+            "include" => true,
+            "exclude" => false,
+            _ => default_in, // "clear": a scoped return-to-default
+        },
+        FlagDecision::Default => default_in,
+    }
+}
+
+/// Effective "Private — this device only" state. ANCESTOR-WINS: a node is
+/// local-only when it OR any ancestor carries an explicit `true`; a child's
+/// own `false` cannot override a marked ancestor (the safe direction). An
+/// explicit OWN flag — either way — beats rules ("explicit user state always
+/// beats rules": a rule can only ADD privacy where the user hasn't spoken,
+/// and never removes an explicit mark). With no explicit state, matching
+/// `local-only` rules mark the file (`clear` masks them back to unmarked);
+/// absence means not local-only. KEEP IN SYNC with vault.ts::isEffectivelyLocalOnly.
+pub fn is_effectively_local_only(id: &str, state: &VaultState, is_file: bool) -> bool {
+    match local_only_decision(id, state, is_file) {
+        FlagDecision::Ancestor => true,
+        FlagDecision::Explicit(v) => v,
+        FlagDecision::Rule(rule) => rule.action == "local-only", // "clear" → unmarked
+        FlagDecision::Default => false,
+    }
+}
+
+/// Wire attribution for the inspector ("why is this flag what it is"):
+/// which layer decided. `rule_name` is the generated display name so the
+/// panel can say `included by rule "spreadsheets in /reports"`. KEEP IN SYNC
+/// with the FileInspection shape in src/contracts/types.ts.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FlagAttribution {
+    pub source: String, // "explicit" | "ancestor" | "rule" | "default"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rule_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rule_name: Option<String>,
+}
+
+fn attribution_of(decision: FlagDecision) -> FlagAttribution {
+    match decision {
+        FlagDecision::Ancestor => FlagAttribution {
+            source: "ancestor".to_string(),
+            rule_id: None,
+            rule_name: None,
+        },
+        FlagDecision::Explicit(_) => FlagAttribution {
+            source: "explicit".to_string(),
+            rule_id: None,
+            rule_name: None,
+        },
+        FlagDecision::Rule(rule) => FlagAttribution {
+            source: "rule".to_string(),
+            rule_id: Some(rule.id.clone()),
+            rule_name: Some(rule_display_name(rule)),
+        },
+        FlagDecision::Default => FlagAttribution {
+            source: "default".to_string(),
+            rule_id: None,
+            rule_name: None,
+        },
+    }
+}
+
+/// Attribution sibling of `is_effectively_included` for ONE file — computed on
+/// demand (the inspector's single file), never stored.
+pub fn inclusion_attribution(file_id: &str) -> FlagAttribution {
+    attribution_of(inclusion_decision(file_id, &load_state(), true))
+}
+
+/// Attribution sibling of `is_effectively_local_only` for ONE file.
+pub fn local_only_attribution(file_id: &str) -> FlagAttribution {
+    attribution_of(local_only_decision(file_id, &load_state(), true))
 }
 
 /// Extensions read directly as UTF-8 text (rich binary formats go via extract).
@@ -416,8 +759,8 @@ fn walk_uncached(root: &Path) -> Vec<FileNode> {
                     kind: NodeKind::Folder,
                     mime_type: None,
                     size: None,
-                    rag_included: is_effectively_included(&id, state, default_in),
-                    local_only: is_effectively_local_only(&id, state),
+                    rag_included: is_effectively_included(&id, state, default_in, false),
+                    local_only: is_effectively_local_only(&id, state, false),
                     external: None,
                 });
                 recurse(out, state, default_in, root, &abs, Some(&id));
@@ -431,8 +774,8 @@ fn walk_uncached(root: &Path) -> Vec<FileNode> {
                     kind: NodeKind::File,
                     mime_type: mime_of(&name),
                     size,
-                    rag_included: is_effectively_included(&id, state, default_in),
-                    local_only: is_effectively_local_only(&id, state),
+                    rag_included: is_effectively_included(&id, state, default_in, true),
+                    local_only: is_effectively_local_only(&id, state, true),
                     external: None,
                 });
             }
@@ -457,8 +800,8 @@ fn walk_uncached(root: &Path) -> Vec<FileNode> {
                 kind: NodeKind::File,
                 mime_type: mime_of(&reference.name),
                 size,
-                rag_included: is_effectively_included(ref_id, &state, default_in),
-                local_only: is_effectively_local_only(ref_id, &state),
+                rag_included: is_effectively_included(ref_id, &state, default_in, true),
+                local_only: is_effectively_local_only(ref_id, &state, true),
                 external: Some(true),
             });
             continue;
@@ -471,8 +814,8 @@ fn walk_uncached(root: &Path) -> Vec<FileNode> {
             kind: NodeKind::Folder,
             mime_type: None,
             size: None,
-            rag_included: is_effectively_included(ref_id, &state, default_in),
-            local_only: is_effectively_local_only(ref_id, &state),
+            rag_included: is_effectively_included(ref_id, &state, default_in, false),
+            local_only: is_effectively_local_only(ref_id, &state, false),
             external: Some(true),
         });
         if !exists {
@@ -509,8 +852,8 @@ fn walk_uncached(root: &Path) -> Vec<FileNode> {
                         kind: NodeKind::Folder,
                         mime_type: None,
                         size: None,
-                        rag_included: is_effectively_included(&id, state, default_in),
-                        local_only: is_effectively_local_only(&id, state),
+                        rag_included: is_effectively_included(&id, state, default_in, false),
+                        local_only: is_effectively_local_only(&id, state, false),
                         external: Some(true),
                     });
                     recurse_ext(out, state, default_in, ref_root, ref_id, &abs, &id);
@@ -524,8 +867,8 @@ fn walk_uncached(root: &Path) -> Vec<FileNode> {
                         kind: NodeKind::File,
                         mime_type: mime_of(&name),
                         size,
-                        rag_included: is_effectively_included(&id, state, default_in),
-                        local_only: is_effectively_local_only(&id, state),
+                        rag_included: is_effectively_included(&id, state, default_in, true),
+                        local_only: is_effectively_local_only(&id, state, true),
                         external: Some(true),
                     });
                 }
@@ -597,6 +940,211 @@ pub fn set_source_available(available: bool) {
     save_state(&state);
 }
 
+// --- curation rules: CRUD + display (openspec: add-curation-rules) --------------
+
+/// Generated display name from predicate + scope — e.g. "spreadsheets in
+/// /reports". Derived on demand (never stored, so it can't go stale). KEEP
+/// BYTE-IDENTICAL with vault.ts::ruleDisplayName — the inspector's
+/// attribution line renders it on both engines.
+pub fn rule_display_name(rule: &CurationRule) -> String {
+    let predicate = if let Some(kind) = &rule.kind {
+        match kind.as_str() {
+            "tabular" => "spreadsheets".to_string(),
+            "document" => "documents".to_string(),
+            "image" => "images".to_string(),
+            other => format!("{other} files"),
+        }
+    } else if let Some(exts) = &rule.ext {
+        let dotted: Vec<String> = exts.iter().map(|e| format!(".{e}")).collect();
+        format!("{} files", dotted.join("/"))
+    } else if let Some(glob) = &rule.glob {
+        format!("files matching {glob}")
+    } else {
+        "files".to_string() // degenerate stored rule — matches nothing anyway
+    };
+    let place = if rule.scope.is_empty() {
+        "the vault".to_string()
+    } else {
+        format!("/{}", rule.scope)
+    };
+    format!("{predicate} in {place}")
+}
+
+/// Mint a short random rule id ("r" + 8 hex chars), re-rolled on the unlikely
+/// collision. Dependency-free: SHA-1 over wall-clock nanos + a salt.
+fn mint_rule_id(existing: &[CurationRule]) -> String {
+    use sha1::{Digest, Sha1};
+    let mut salt = 0u64;
+    loop {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let digest = Sha1::digest(format!("{nanos}:{salt}:{}", existing.len()).as_bytes());
+        let id = format!(
+            "r{}",
+            digest.iter().take(4).map(|b| format!("{b:02x}")).collect::<String>()
+        );
+        if !existing.iter().any(|r| r.id == id) {
+            return id;
+        }
+        salt += 1;
+    }
+}
+
+/// All stored rules, definition order.
+pub fn list_rules() -> Vec<CurationRule> {
+    load_state().rules
+}
+
+/// Validate + add a rule; the id is minted engine-side. Exactly ONE predicate
+/// (kind | ext | glob) must be given; kinds/actions are whitelisted; the glob
+/// must parse; extensions normalize to lowercase dot-less. Rejection is an
+/// Err with the human-readable reason (the routes surface it as a 400).
+/// Saving goes through `save_state`, so a rule write invalidates the walk
+/// cache exactly like a flag write. KEEP IN SYNC with vault.ts::addRule.
+pub fn add_rule(
+    scope: &str,
+    kind: Option<&str>,
+    ext: Option<&[String]>,
+    glob: Option<&str>,
+    action: &str,
+) -> anyhow::Result<CurationRule> {
+    if !RULE_ACTIONS.contains(&action) {
+        anyhow::bail!("action must be include, exclude, local-only, or clear");
+    }
+    if scope.contains('\\') || scope.starts_with('/') || scope.ends_with('/') || scope.contains("//") {
+        anyhow::bail!("invalid scope");
+    }
+    let picked = usize::from(kind.is_some()) + usize::from(ext.is_some()) + usize::from(glob.is_some());
+    if picked != 1 {
+        anyhow::bail!("exactly one of kind, ext, or glob is required");
+    }
+    if let Some(k) = kind {
+        if !RULE_KINDS.contains(&k) {
+            anyhow::bail!("kind must be tabular, document, or image");
+        }
+    }
+    let ext_norm: Option<Vec<String>> = match ext {
+        None => None,
+        Some(list) => {
+            let norm: Vec<String> = list
+                .iter()
+                .map(|e| e.trim().trim_start_matches('.').to_lowercase())
+                .filter(|e| !e.is_empty())
+                .collect();
+            if norm.is_empty() {
+                anyhow::bail!("ext needs at least one extension");
+            }
+            if let Some(bad) = norm
+                .iter()
+                .find(|e| !e.chars().all(|c| c.is_ascii_alphanumeric()))
+            {
+                anyhow::bail!("invalid extension {bad:?}");
+            }
+            Some(norm)
+        }
+    };
+    if let Some(g) = glob {
+        if let Err(reason) = parse_rule_glob(g) {
+            anyhow::bail!("invalid glob: {reason}");
+        }
+    }
+    let mut state = load_state();
+    let rule = CurationRule {
+        id: mint_rule_id(&state.rules),
+        scope: scope.to_string(),
+        kind: kind.map(String::from),
+        ext: ext_norm,
+        glob: glob.map(String::from),
+        action: action.to_string(),
+    };
+    state.rules.push(rule.clone());
+    save_state(&state); // invalidates the walk cache like a flag write
+    Ok(rule)
+}
+
+/// Remove a rule by id (idempotent). Only the rule's own layer disappears:
+/// every node it was deciding reverts to the next layer down — explicit flags
+/// are untouched by construction (rules never wrote any).
+pub fn remove_rule(id: &str) {
+    let mut state = load_state();
+    let before = state.rules.len();
+    state.rules.retain(|r| r.id != id);
+    if state.rules.len() != before {
+        save_state(&state);
+    }
+}
+
+/// A rule enriched for the UI: generated display name, a human scope label,
+/// and whether the scope folder currently exists (an orphaned rule matches
+/// nothing but is kept for cleanup — the folder may return, e.g. an unplugged
+/// linked root). KEEP IN SYNC with vault.ts::rulesListing.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuleListing {
+    #[serde(flatten)]
+    pub rule: CurationRule,
+    pub name: String,
+    pub scope_label: String,
+    pub orphaned: bool,
+}
+
+/// Human label for a rule scope: "" → "Vault"; a linked subtree renders under
+/// its link's display name instead of the synthetic `extN`.
+fn scope_label_of(scope: &str, state: &VaultState) -> String {
+    if scope.is_empty() {
+        return "Vault".to_string();
+    }
+    if let Some(ref_id) = ref_id_of(scope, &state.references) {
+        let name = &state.references[ref_id].name;
+        let rest = scope[ref_id.len()..].trim_start_matches('/');
+        return if rest.is_empty() {
+            name.clone()
+        } else {
+            format!("{name}/{rest}")
+        };
+    }
+    scope.to_string()
+}
+
+/// Enrich one rule for the wire (the `add` response and each `list` row).
+pub fn enrich_rule(rule: CurationRule) -> RuleListing {
+    let state = load_state();
+    let folder_ids: HashSet<String> = list_nodes()
+        .into_iter()
+        .filter(|n| n.kind == NodeKind::Folder)
+        .map(|n| n.id)
+        .collect();
+    enrich_with(rule, &state, &folder_ids)
+}
+
+fn enrich_with(rule: CurationRule, state: &VaultState, folder_ids: &HashSet<String>) -> RuleListing {
+    let orphaned = !rule.scope.is_empty() && !folder_ids.contains(&rule.scope);
+    RuleListing {
+        name: rule_display_name(&rule),
+        scope_label: scope_label_of(&rule.scope, state),
+        orphaned,
+        rule,
+    }
+}
+
+/// Every rule enriched for the UI (Preferences list + folder dialogs).
+pub fn rules_listing() -> Vec<RuleListing> {
+    let state = load_state();
+    let folder_ids: HashSet<String> = list_nodes()
+        .into_iter()
+        .filter(|n| n.kind == NodeKind::Folder)
+        .map(|n| n.id)
+        .collect();
+    state
+        .rules
+        .clone()
+        .into_iter()
+        .map(|r| enrich_with(r, &state, &folder_ids))
+        .collect()
+}
+
 /// Move a file/folder within the vault (an *internal* move), preserving its
 /// inclusion setting and that of its subtree.
 pub fn move_node(from_id: &str, to_parent_id: Option<&str>) -> anyhow::Result<String> {
@@ -622,12 +1170,30 @@ pub fn move_node(from_id: &str, to_parent_id: Option<&str>) -> anyhow::Result<St
     fs::rename(&from_abs, &to_abs)?;
 
     // Remap the node and every descendant's inclusion + local-only flags onto
-    // the new prefix (both maps move together — see rename_node).
+    // the new prefix (both maps move together — see rename_node). Rule SCOPES
+    // remap too: a rule follows its folder like the flags do, instead of
+    // silently orphaning on an in-app move (orphaning is for deletion).
     let mut state = load_state();
     state.included = remap_prefix(&state.included, from_id, &new_id);
     state.local_only = remap_prefix(&state.local_only, from_id, &new_id);
+    remap_rule_scopes(&mut state.rules, from_id, &new_id);
     save_state(&state);
     Ok(new_id)
+}
+
+/// Remap rule scopes onto a moved/renamed folder's new id (the scope itself
+/// and any scope beneath it) — the rules analog of `remap_prefix`, so a rule
+/// travels with its folder exactly like the per-node flags do. Scope-relative
+/// globs survive untouched by construction. KEEP IN SYNC with
+/// vault.ts::remapRuleScopes.
+fn remap_rule_scopes(rules: &mut [CurationRule], old_id: &str, new_id: &str) {
+    for r in rules.iter_mut() {
+        if r.scope == old_id {
+            r.scope = new_id.to_string();
+        } else if let Some(rest) = r.scope.strip_prefix(&format!("{old_id}/")) {
+            r.scope = format!("{new_id}/{rest}");
+        }
+    }
 }
 
 /// Remap a per-node flag map onto a new id prefix (the node itself and every
@@ -675,10 +1241,11 @@ pub fn rename_node(id: &str, new_name: &str) -> anyhow::Result<String> {
     }
     fs::rename(&from_abs, &to_abs)?;
     // Remap the node and every descendant's inclusion + local-only flags (same
-    // as move_node).
+    // as move_node), plus any rule scopes anchored at or beneath it.
     let mut state = load_state();
     state.included = remap_prefix(&state.included, id, &new_id);
     state.local_only = remap_prefix(&state.local_only, id, &new_id);
+    remap_rule_scopes(&mut state.rules, id, &new_id);
     save_state(&state);
     Ok(new_id)
 }
@@ -1190,7 +1757,9 @@ pub fn active_included_file_ids() -> Vec<String> {
     let default_in = default_included();
     walk(&vault_dir())
         .iter()
-        .filter(|n| n.kind == NodeKind::File && is_effectively_included(&n.id, &state, default_in))
+        .filter(|n| {
+            n.kind == NodeKind::File && is_effectively_included(&n.id, &state, default_in, true)
+        })
         .map(|n| n.id.clone())
         .collect()
 }
@@ -1211,7 +1780,7 @@ pub fn shareable_file_ids(is_cloud: bool) -> Vec<String> {
     }
     let state = load_state();
     ids.into_iter()
-        .filter(|id| !is_effectively_local_only(id, &state))
+        .filter(|id| !is_effectively_local_only(id, &state, true))
         .collect()
 }
 
@@ -1248,7 +1817,7 @@ pub fn shareable_subset(ids: &[String], is_cloud: bool) -> Vec<String> {
     }
     let state = load_state();
     ids.iter()
-        .filter(|id| !is_effectively_local_only(id, &state))
+        .filter(|id| !is_effectively_local_only(id, &state, true))
         .cloned()
         .collect()
 }
@@ -1263,7 +1832,7 @@ pub fn local_only_subset(ids: &[String], is_cloud: bool) -> Vec<String> {
     }
     let state = load_state();
     ids.iter()
-        .filter(|id| is_effectively_local_only(id, &state))
+        .filter(|id| is_effectively_local_only(id, &state, true))
         .cloned()
         .collect()
 }
@@ -1271,9 +1840,10 @@ pub fn local_only_subset(ids: &[String], is_cloud: bool) -> Vec<String> {
 /// Single-id `is_effectively_local_only` that loads state itself — for callers
 /// outside vault.rs that don't hold a `VaultState` (the sharepoint connector's
 /// node list, the analytics belt-and-suspenders). Local-only marks live in the
-/// vault state keyed by node id regardless of the owning source.
+/// vault state keyed by node id regardless of the owning source. Callers pass
+/// FILE ids (retrieval candidates), so the rule layer applies.
 pub fn node_is_local_only(id: &str) -> bool {
-    is_effectively_local_only(id, &load_state())
+    is_effectively_local_only(id, &load_state(), true)
 }
 
 // --- text reading ---------------------------------------------------------------
@@ -2024,7 +2594,7 @@ pub fn retrieve(
     let external: &[ExternalItem] = if is_cloud {
         external_owned = external
             .iter()
-            .filter(|e| !is_effectively_local_only(&e.id, &state))
+            .filter(|e| !is_effectively_local_only(&e.id, &state, true))
             .cloned()
             .collect();
         &external_owned
@@ -2548,5 +3118,82 @@ mod chunk_tests {
         let plain = "region,amount\nNE,1\nNW,2\n";
         assert_eq!(chunk_texts_named("t.csv", with_bom), chunk_texts_named("t.csv", plain));
         assert!(!chunk_texts_named("t.csv", with_bom)[0].contains('\u{feff}'));
+    }
+}
+
+#[cfg(test)]
+mod rule_glob_tests {
+    use super::{parse_rule_glob, rule_display_name, CurationRule};
+
+    /// PARITY FIXTURE — mirrored in test/curationRules.test.mjs
+    /// ("glob matcher parity table"): identical verdicts in both engines.
+    fn matches(glob: &str, rel: &str) -> bool {
+        let pat = parse_rule_glob(glob).expect("valid glob");
+        let segs: Vec<&str> = rel.split('/').collect();
+        super::glob_segments_match(&pat, &segs)
+    }
+
+    #[test]
+    fn glob_matcher_table() {
+        // Single-segment wildcards never cross `/`.
+        assert!(matches("*.xlsx", "q1.xlsx"));
+        assert!(!matches("*.xlsx", "2024/q1.xlsx"));
+        assert!(matches("q?.csv", "q1.csv"));
+        assert!(!matches("q?.csv", "q10.csv"));
+        // `**` spans zero or more whole segments.
+        assert!(matches("**/*.xlsx", "q1.xlsx"));
+        assert!(matches("**/*.xlsx", "2024/deep/q1.xlsx"));
+        assert!(matches("**", "anything/at/all.txt"));
+        assert!(matches("2024/**/final.md", "2024/final.md"));
+        assert!(matches("2024/**/final.md", "2024/a/b/final.md"));
+        assert!(!matches("2024/**/final.md", "2023/final.md"));
+        // Literal segments are exact (case-sensitive).
+        assert!(matches("drafts/*", "drafts/x.md"));
+        assert!(!matches("drafts/*", "Drafts/x.md"));
+        // A backtracking-hostile pattern stays linear and correct.
+        assert!(matches("*a*a*a*a", "aaaaaaaa"));
+        assert!(!matches("*a*a*a*a", "bbbbbbbb"));
+    }
+
+    #[test]
+    fn glob_validation_rejects_malformed_patterns() {
+        assert!(parse_rule_glob("").is_err(), "empty");
+        assert!(parse_rule_glob("  ").is_err(), "blank");
+        assert!(parse_rule_glob("a\\b").is_err(), "backslash");
+        assert!(parse_rule_glob("/lead").is_err(), "leading slash");
+        assert!(parse_rule_glob("trail/").is_err(), "trailing slash");
+        assert!(parse_rule_glob("a//b").is_err(), "empty segment");
+        assert!(parse_rule_glob("a**b").is_err(), "** inside a segment");
+        assert!(parse_rule_glob("**.xlsx").is_err(), "** glued to a suffix");
+        assert!(parse_rule_glob("**/*.xlsx").is_ok(), "** alone is fine");
+    }
+
+    /// PARITY: byte-identical with vault.ts::ruleDisplayName (the node twin
+    /// asserts the same strings).
+    #[test]
+    fn display_names_derive_from_predicate_and_scope() {
+        let base = CurationRule {
+            id: "r1".into(),
+            scope: "reports".into(),
+            kind: Some("tabular".into()),
+            ext: None,
+            glob: None,
+            action: "include".into(),
+        };
+        assert_eq!(rule_display_name(&base), "spreadsheets in /reports");
+        let ext = CurationRule {
+            kind: None,
+            ext: Some(vec!["xlsx".into(), "csv".into()]),
+            scope: String::new(),
+            ..base.clone()
+        };
+        assert_eq!(rule_display_name(&ext), ".xlsx/.csv files in the vault");
+        let glob = CurationRule {
+            kind: None,
+            glob: Some("**/*.png".into()),
+            scope: "design/assets".into(),
+            ..base.clone()
+        };
+        assert_eq!(rule_display_name(&glob), "files matching **/*.png in /design/assets");
     }
 }

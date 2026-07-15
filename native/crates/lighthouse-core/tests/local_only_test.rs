@@ -33,20 +33,26 @@ fn resolver_is_ancestor_wins() {
     st.local_only.insert("docs".to_string(), true);
     // The folder and everything beneath it resolve local-only, even without an
     // own mark; a sibling subtree does not.
-    assert!(vault::is_effectively_local_only("docs", &st));
-    assert!(vault::is_effectively_local_only("docs/a.md", &st));
-    assert!(vault::is_effectively_local_only("docs/deep/b.md", &st));
-    assert!(!vault::is_effectively_local_only("other/c.md", &st));
+    assert!(vault::is_effectively_local_only("docs", &st, false));
+    assert!(vault::is_effectively_local_only("docs/a.md", &st, true));
+    assert!(vault::is_effectively_local_only("docs/deep/b.md", &st, true));
+    assert!(!vault::is_effectively_local_only("other/c.md", &st, true));
 
     // A child's own `false` cannot override a marked ancestor (safe direction).
     st.local_only.insert("docs/a.md".to_string(), false);
-    assert!(vault::is_effectively_local_only("docs/a.md", &st), "ancestor wins over child false");
+    assert!(
+        vault::is_effectively_local_only("docs/a.md", &st, true),
+        "ancestor wins over child false"
+    );
 
     // An independently-marked child with no marked ancestor is local-only.
     let mut st2 = VaultState::default();
     st2.local_only.insert("loose/child.md".to_string(), true);
-    assert!(vault::is_effectively_local_only("loose/child.md", &st2));
-    assert!(!vault::is_effectively_local_only("loose", &st2), "parent isn't marked by a child");
+    assert!(vault::is_effectively_local_only("loose/child.md", &st2, true));
+    assert!(
+        !vault::is_effectively_local_only("loose", &st2, false),
+        "parent isn't marked by a child"
+    );
 }
 
 #[test]
@@ -59,7 +65,8 @@ fn old_state_json_loads_as_unmarked() {
     assert!(st.local_only.is_empty(), "no localOnly ⇒ empty map");
     assert_eq!(st.included.get("a.md"), Some(&true), "inclusion preserved");
     assert_eq!(st.included.get("docs/b.md"), Some(&false));
-    assert!(!vault::is_effectively_local_only("a.md", &st));
+    assert!(!vault::is_effectively_local_only("a.md", &st, true));
+    assert!(st.rules.is_empty(), "no rules key ⇒ rule-less (add-curation-rules tolerance)");
 }
 
 // --- Shareable gate (through the public API) -------------------------------------

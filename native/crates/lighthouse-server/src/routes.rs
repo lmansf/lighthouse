@@ -80,6 +80,44 @@ pub async fn rag_post(headers: HeaderMap, body: Option<Json<Value>>) -> Response
             sources::set_local_only(node_id, local_only).await;
             Json(json!({ "ok": true })).into_response()
         }
+        // Bulk curation rules (openspec: add-curation-rules): a per-folder
+        // predicate layer resolved live at walk time — never per-node writes.
+        // `add` validates (predicate/action whitelists, glob parse) → 400 with
+        // the reason; ids are minted engine-side. PARITY: commands.rs and the
+        // TS twin (app/api/rag/route.ts) mirror this op exactly.
+        Some("rules") => match body["action"].as_str() {
+            Some("list") => {
+                Json(json!({ "rules": sources::rules_listing().await })).into_response()
+            }
+            Some("add") => {
+                let r = &body["rule"];
+                let ext: Option<Vec<String>> = r["ext"].as_array().map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                });
+                match sources::add_rule(
+                    r["scope"].as_str().unwrap_or(""),
+                    r["kind"].as_str(),
+                    ext.as_deref(),
+                    r["glob"].as_str(),
+                    r["action"].as_str().unwrap_or(""),
+                )
+                .await
+                {
+                    Ok(rule) => Json(json!({ "rule": rule })).into_response(),
+                    Err(e) => bad_request(&err_message(&e, "could not add the rule")),
+                }
+            }
+            Some("remove") => {
+                let Some(id) = body["id"].as_str().filter(|s| !s.is_empty()) else {
+                    return bad_request("id required");
+                };
+                sources::remove_rule(id).await;
+                Json(json!({ "ok": true })).into_response()
+            }
+            _ => bad_request("rules action must be list, add, or remove"),
+        },
         Some("source") => {
             let Some(available) = body["available"].as_bool() else {
                 return bad_request("available required");

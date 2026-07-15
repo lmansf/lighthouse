@@ -4,6 +4,8 @@ import type {
   BriefingReport,
   Cadence,
   ChangedPin,
+  CurationRule,
+  CurationRuleInput,
   DataSource,
   FileInspection,
   FileNode,
@@ -51,6 +53,58 @@ class MockRagService implements RagService {
     this.nodes = this.nodes.map((n) =>
       ids.has(n.id) ? { ...n, localOnly } : n,
     );
+  }
+
+  // In-memory curation rules (openspec: add-curation-rules) so the folder
+  // dialog and the Preferences list are exercisable offline. The mock stores
+  // and lists; it does NOT re-resolve the seed tree (the engines own
+  // resolution semantics — the mock's nodes keep their seeded flags).
+  private rules: CurationRule[] = [];
+
+  async listRules(): Promise<CurationRule[]> {
+    return this.rules.map((r) => ({ ...r }));
+  }
+
+  async addRule(rule: CurationRuleInput): Promise<{ rule?: CurationRule; error?: string }> {
+    // Mirror the engines' add-time validation so a bad caller fails offline too.
+    if (!["include", "exclude", "local-only", "clear"].includes(rule.action)) {
+      return { error: "action must be include, exclude, local-only, or clear" };
+    }
+    const picked =
+      Number(rule.kind !== undefined) + Number(rule.ext !== undefined) + Number(rule.glob !== undefined);
+    if (picked !== 1) return { error: "exactly one of kind, ext, or glob is required" };
+    if (rule.kind !== undefined && !["tabular", "document", "image"].includes(rule.kind)) {
+      return { error: "kind must be tabular, document, or image" };
+    }
+    const ext = rule.ext
+      ?.map((e) => e.trim().replace(/^\.+/, "").toLowerCase())
+      .filter(Boolean);
+    if (ext !== undefined && ext.length === 0) return { error: "ext needs at least one extension" };
+    // Display name derivation mirrors the engines' ruleDisplayName.
+    const predicate =
+      rule.kind === "tabular"
+        ? "spreadsheets"
+        : rule.kind === "document"
+          ? "documents"
+          : rule.kind === "image"
+            ? "images"
+            : ext !== undefined
+              ? `${ext.map((e) => `.${e}`).join("/")} files`
+              : `files matching ${rule.glob}`;
+    const created: CurationRule = {
+      ...rule,
+      ...(ext !== undefined ? { ext } : {}),
+      id: `r${(this.rules.length + 1).toString(16).padStart(8, "0")}`,
+      name: `${predicate} in ${rule.scope === "" ? "the vault" : `/${rule.scope}`}`,
+      scopeLabel: rule.scope === "" ? "Vault" : rule.scope,
+      orphaned: rule.scope !== "" && !this.nodes.some((n) => n.id === rule.scope && n.kind === "folder"),
+    };
+    this.rules.push(created);
+    return { rule: { ...created } };
+  }
+
+  async removeRule(id: string): Promise<void> {
+    this.rules = this.rules.filter((r) => r.id !== id);
   }
 
   async setSourceAvailable(sourceId: string, available: boolean): Promise<void> {

@@ -87,6 +87,41 @@ pub async fn rag_op(app: AppHandle, body: Value) -> Result<Value, String> {
             let _ = app.emit("vault-changed", ());
             Ok(json!({ "ok": true }))
         }
+        // Bulk curation rules (openspec: add-curation-rules) — mirrors the
+        // routes.rs op exactly. Rule writes change effective visibility
+        // without touching vault files, so add/remove broadcast like a flag
+        // flip; `list` is a pure read.
+        Some("rules") => match body["action"].as_str() {
+            Some("list") => Ok(json!({ "rules": sources::rules_listing().await })),
+            Some("add") => {
+                let r = &body["rule"];
+                let ext: Option<Vec<String>> = r["ext"].as_array().map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                });
+                let rule = sources::add_rule(
+                    r["scope"].as_str().unwrap_or(""),
+                    r["kind"].as_str(),
+                    ext.as_deref(),
+                    r["glob"].as_str(),
+                    r["action"].as_str().unwrap_or(""),
+                )
+                .await
+                .map_err(|e| err_string(e, "could not add the rule"))?;
+                let _ = app.emit("vault-changed", ());
+                Ok(json!({ "rule": rule }))
+            }
+            Some("remove") => {
+                let Some(id) = body["id"].as_str().filter(|s| !s.is_empty()) else {
+                    return Err("id required".into());
+                };
+                sources::remove_rule(id).await;
+                let _ = app.emit("vault-changed", ());
+                Ok(json!({ "ok": true }))
+            }
+            _ => Err("rules action must be list, add, or remove".into()),
+        },
         Some("source") => {
             let Some(available) = body["available"].as_bool() else {
                 return Err("available required".into());

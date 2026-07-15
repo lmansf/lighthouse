@@ -200,6 +200,19 @@ export function FileInspector({
                       <Text>{localOnly ? "Private — this device only" : "Shareable with cloud models"}</Text>
                     </span>
                   </div>
+                  {/* Attribution (openspec: add-curation-rules): when a RULE set
+                      an effective flag, say so by name — the legibility line.
+                      Explicit/ancestor/default states keep the plain pills. */}
+                  {data.includedBy?.source === "rule" && data.includedBy.ruleName && (
+                    <Text size={200} className={styles.footNote}>
+                      {included ? "Included" : "Hidden"} by rule &ldquo;{data.includedBy.ruleName}&rdquo;.
+                    </Text>
+                  )}
+                  {data.localOnlyBy?.source === "rule" && data.localOnlyBy.ruleName && localOnly && (
+                    <Text size={200} className={styles.footNote}>
+                      Kept on this device by rule &ldquo;{data.localOnlyBy.ruleName}&rdquo;.
+                    </Text>
+                  )}
                 </div>
 
                 {/* Extracted text preview — what the model would actually read. */}

@@ -5,6 +5,8 @@ import type {
   BriefingReport,
   Cadence,
   ChangedPin,
+  CurationRule,
+  CurationRuleInput,
   DataSource,
   FileInspection,
   FileNode,
@@ -50,6 +52,28 @@ class RealRagService implements RagService {
 
   async setLocalOnly(nodeId: string, localOnly: boolean): Promise<void> {
     await post({ op: "localOnly", nodeId, localOnly });
+  }
+
+  async listRules(): Promise<CurationRule[]> {
+    const res = await post({ op: "rules", action: "list" });
+    return Array.isArray(res.rules) ? (res.rules as CurationRule[]) : [];
+  }
+
+  async addRule(rule: CurationRuleInput): Promise<{ rule?: CurationRule; error?: string }> {
+    // Add-time validation failures come back as 400 + {error}; read the body
+    // instead of throwing so the create form can show the engine's reason.
+    const r = await fetch("/api/rag", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ op: "rules", action: "add", rule }),
+    });
+    const data = (await r.json().catch(() => ({}))) as { rule?: CurationRule; error?: string };
+    if (!r.ok) return { error: data.error ?? `POST /api/rag ${r.status}` };
+    return data;
+  }
+
+  async removeRule(id: string): Promise<void> {
+    await post({ op: "rules", action: "remove", id });
   }
 
   async setSourceAvailable(sourceId: string, available: boolean): Promise<void> {

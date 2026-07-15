@@ -13,6 +13,8 @@ import type {
   ChangedPin,
   ChatChunk,
   ChatTurn,
+  CurationRule,
+  CurationRuleInput,
   DataSource,
   FileInspection,
   FileNode,
@@ -41,6 +43,27 @@ export interface RagService {
    * cascade); resolution covers the subtree.
    */
   setLocalOnly(nodeId: string, localOnly: boolean): Promise<void>;
+  /**
+   * Bulk curation rules (openspec: add-curation-rules): every stored rule,
+   * enriched with its generated display name, human scope label, and orphaned
+   * flag (scope folder gone — matches nothing, kept for cleanup). Rules are a
+   * RESOLUTION layer: they decide matching files — present and future — where
+   * no explicit per-node flag speaks, and never write per-node state.
+   */
+  listRules(): Promise<CurationRule[]>;
+  /**
+   * Create a rule (the engine mints the id and validates: action/kind
+   * whitelists, exactly one predicate, glob parse). A validation rejection
+   * comes back as `error` with the engine's reason rather than a throw, so
+   * the create form can surface it inline.
+   */
+  addRule(rule: CurationRuleInput): Promise<{ rule?: CurationRule; error?: string }>;
+  /**
+   * Remove a rule (idempotent). Only the rule's layer disappears: every file
+   * it was deciding reverts to the next layer down; explicit per-node flags
+   * are untouched by construction.
+   */
+  removeRule(id: string): Promise<void>;
   /** Toggle whether a whole source is available. */
   setSourceAvailable(sourceId: string, available: boolean): Promise<void>;
   /** Retrieve references relevant to a query from the currently-included set. */
