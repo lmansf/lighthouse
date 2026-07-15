@@ -3,10 +3,21 @@
 //! Face into the user's data dir; the desktop shell watches the directory and
 //! runs `llama-server` against it. Uninstall is a marker-file handshake with
 //! the shell (which owns the process whose mmap locks the weights).
+//!
+//! Downloads are RESUMABLE: the stream lands in a `<model>.part` file which is
+//! KEPT when the transfer is interrupted, fails, or is paused (a DELETE /
+//! `model_uninstall` while a download is in flight = pause). The next install
+//! sends `Range: bytes=<size>-` and appends the remainder (HTTP 206); servers
+//! that ignore Range (HTTP 200) restart from zero. Integrity stays strict —
+//! there is no upstream digest, so the checks are: a `.part` prefix must carry
+//! the GGUF magic to be resumed at all, and the completed file must match the
+//! advertised byte count and the magic exactly, or it is deleted rather than
+//! ever renamed into place as a "ready" model.
 
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use futures::StreamExt;
@@ -162,6 +173,11 @@ pub struct Progress {
     pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub removable: Option<bool>,
+    /// Bytes of a kept-for-resume `.part` on disk (status "absent"/"error"
+    /// after an interrupted, failed, or paused download) — lets the UI offer
+    /// "Resume download" instead of a from-scratch "Install".
+    #[serde(skip_serializing_if = "Option::is_none", rename = "partialBytes")]
+    pub partial_bytes: Option<u64>,
 }
 
 impl Progress {
@@ -172,6 +188,7 @@ impl Progress {
             total: 0,
             error: None,
             removable: None,
+            partial_bytes: None,
         }
     }
 }
@@ -179,6 +196,64 @@ impl Progress {
 // One download at a time, tracked in module state so GET /api/model can report
 // progress while POST /api/model runs it in the background.
 static PROGRESS: Mutex<Option<Progress>> = Mutex::new(None);
+// Pause/resume seams: `request_uninstall()` during a download flags a pause —
+// the streaming loop notices at the next chunk and stops WITHOUT deleting the
+// `.part` (it survives for a Range resume). GENERATION fences a paused task's
+// writes and state reports off a NEWER download that superseded it (pause →
+// quick resume), so the two can never interleave on the `.part` or PROGRESS.
+static PAUSE: AtomicBool = AtomicBool::new(false);
+static GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// Sentinel error: the in-flight download was paused (or superseded) — the
+/// `.part` is kept and the task must not report an "error" state.
+#[derive(Debug)]
+struct DownloadPaused;
+
+impl std::fmt::Display for DownloadPaused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("download paused")
+    }
+}
+
+impl std::error::Error for DownloadPaused {}
+
+/// The on-disk resume artifact: downloads stream into `<model file>.part` —
+/// appended to the FULL file name, matching the TS twin's `${dest}.part`.
+fn part_path() -> PathBuf {
+    let mut s = models_dir().join(model_file()).into_os_string();
+    s.push(".part");
+    PathBuf::from(s)
+}
+
+/// Size of the `.part` on disk (None when absent/empty) — a cheap stat, for
+/// status calls.
+fn partial_size() -> Option<u64> {
+    fs::metadata(part_path()).ok().map(|m| m.len()).filter(|s| *s > 0)
+}
+
+/// Bytes safe to resume from. A `.part` is only trusted when its prefix
+/// carries the GGUF magic — anything else (junk, a sub-magic stub) is
+/// discarded here so a corrupt partial can never poison the resumed file. This
+/// is the cheap first gate; the completed file is size- and magic-checked
+/// AGAIN before the rename.
+fn resumable_bytes(tmp: &Path) -> u64 {
+    let size = fs::metadata(tmp).map(|m| m.len()).unwrap_or(0);
+    if size >= 4 && is_gguf_file(tmp) {
+        return size;
+    }
+    if size > 0 {
+        let _ = fs::remove_file(tmp);
+    }
+    0
+}
+
+/// True when the running download (of generation `gen`) must stop writing: the
+/// user paused it, or a newer download superseded it (pause → quick resume
+/// before this task noticed). Checked before every chunk is written, so a
+/// stale task never interleaves with its successor on the `.part`.
+fn paused_or_stale(gen: u64) -> bool {
+    PAUSE.load(Ordering::SeqCst) || GENERATION.load(Ordering::SeqCst) != gen
+}
 
 fn current_progress() -> Progress {
     PROGRESS
@@ -204,25 +279,59 @@ pub fn model_status() -> Progress {
     if installed_model().is_some() {
         return Progress::simple("ready");
     }
+    // No usable model. A leftover `.gguf` is surfaced as removable; a kept
+    // `.part` from an interrupted/paused download is surfaced too
+    // (partial_bytes), so the UI can offer to RESUME instead of starting over.
     let removable = has_model_file();
+    let partial_bytes = partial_size();
     if progress.status == "error" {
         return Progress {
             removable: Some(removable),
+            partial_bytes,
             ..progress
         };
     }
     Progress {
         removable: Some(removable),
+        partial_bytes,
         ..Progress::simple("absent")
     }
 }
 
 /// Request removal of the installed model by dropping the marker the desktop
 /// shell watches (it stops llama-server, deletes the weights, clears the marker).
+///
+/// While a download is IN FLIGHT this doubles as "pause": there are no weights
+/// to remove yet, so the transfer is torn down and the `.part` is KEPT — the
+/// next install resumes it via an HTTP Range request (the UI labels the
+/// affordance "Pause" in that state). A paused `.part` is cleared only by a
+/// REAL uninstall (alongside the weights/marker), never by a repeated DELETE
+/// on its own — a rapid second click must not silently discard gigabytes of
+/// resumable progress.
 pub fn request_uninstall() -> Progress {
-    if !has_model_file() && !uninstall_pending() {
-        return Progress::simple("absent");
+    {
+        let mut guard = PROGRESS.lock().unwrap();
+        let downloading = guard
+            .as_ref()
+            .map(|p| p.status == "downloading")
+            .unwrap_or(false);
+        if downloading {
+            PAUSE.store(true, Ordering::SeqCst);
+            *guard = Some(Progress::simple("absent"));
+            let mut paused = Progress::simple("absent");
+            paused.partial_bytes = partial_size();
+            return paused;
+        }
     }
+    if !has_model_file() && !uninstall_pending() {
+        let mut absent = Progress::simple("absent");
+        absent.partial_bytes = partial_size();
+        return absent;
+    }
+    // A real uninstall clears a stray/paused `.part` too. Unlike the weights
+    // it is never mmap'd by llama-server, so it can be removed directly here —
+    // no shell handshake needed.
+    let _ = fs::remove_file(part_path());
     let _ = fs::write(
         models_dir().join(UNINSTALL_MARKER),
         format!("{}", crate::config::now_ms()),
@@ -240,6 +349,7 @@ pub fn request_uninstall() -> Progress {
 /// and since sync Tauri commands execute on the main thread, that panic took
 /// the whole app down the moment the user clicked Install.
 pub fn start_download() -> Progress {
+    let gen;
     {
         // Check-and-mark under one lock so two rapid calls can't both spawn.
         let mut guard = PROGRESS.lock().unwrap();
@@ -251,11 +361,28 @@ pub fn start_download() -> Progress {
         if installed_model().is_some() {
             return Progress::simple("ready");
         }
+        // New generation: clears a pending pause and fences a paused
+        // predecessor's callbacks off the module state (it stops at its next
+        // chunk via `paused_or_stale`).
+        PAUSE.store(false, Ordering::SeqCst);
+        gen = GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
         *guard = Some(Progress::simple("downloading"));
     }
-    let task = async {
-        match download().await {
+    let task = async move {
+        let result = download(gen).await;
+        if GENERATION.load(Ordering::SeqCst) != gen {
+            return; // superseded by a newer download — not ours to report
+        }
+        match result {
             Ok(()) => set_progress(Progress::simple("ready")),
+            Err(e) if e.downcast_ref::<DownloadPaused>().is_some() => {
+                // Not a failure: the user paused. The `.part` stays for a
+                // Range resume.
+                PAUSE.store(false, Ordering::SeqCst);
+                let mut paused = Progress::simple("absent");
+                paused.partial_bytes = partial_size();
+                set_progress(paused);
+            }
             Err(e) => {
                 let prev = current_progress();
                 set_progress(Progress {
@@ -264,6 +391,7 @@ pub fn start_download() -> Progress {
                     total: prev.total,
                     error: Some(e.to_string()),
                     removable: None,
+                    partial_bytes: None,
                 });
             }
         }
@@ -280,6 +408,7 @@ pub fn start_download() -> Progress {
                     total: 0,
                     error: Some(format!("could not start the download runtime: {e}")),
                     removable: None,
+                    partial_bytes: None,
                 }),
             }
         });
@@ -287,67 +416,163 @@ pub fn start_download() -> Progress {
     current_progress()
 }
 
+/// One "downloading" progress frame (received/total).
+fn progress_downloading(received: u64, total: u64) -> Progress {
+    Progress {
+        status: "downloading".into(),
+        received,
+        total,
+        error: None,
+        removable: None,
+        partial_bytes: None,
+    }
+}
+
+/// GET the model, resuming from `offset` via `Range: bytes=<offset>-` when > 0.
+/// reqwest follows the HF `resolve` → CDN redirect itself, carrying the header.
+async fn send_get(client: &reqwest::Client, offset: u64) -> reqwest::Result<reqwest::Response> {
+    let mut req = client.get(model_url());
+    if offset > 0 {
+        req = req.header(reqwest::header::RANGE, format!("bytes={offset}-"));
+    }
+    req.send().await
+}
+
 /// Stream the model to a `.part` temp file, updating progress, and rename into
 /// place only once the full byte count arrives.
-async fn download() -> anyhow::Result<()> {
+///
+/// Resume protocol: an existing GGUF-prefixed `.part` is continued with
+/// `Range: bytes=<size>-`. HTTP 206 appends from that offset (progress
+/// reflects the resumed offset immediately); HTTP 200 means the server ignored
+/// the Range, so the `.part` is truncated and the transfer restarts from zero;
+/// HTTP 416 means the `.part` is at/past the asset's size (or the asset
+/// changed) — it is discarded and a fresh request made. On failure the `.part`
+/// is KEPT for a later resume; it is deleted only when integrity is in doubt
+/// (junk prefix, 416, overshoot, or a completed file that is not a valid GGUF
+/// model).
+async fn download(gen: u64) -> anyhow::Result<()> {
     let dest = models_dir().join(model_file());
-    let tmp = dest.with_extension("gguf.part");
+    let tmp = part_path();
+    let mut offset = resumable_bytes(&tmp);
+    if offset > 0 {
+        // Reflect the resumed offset immediately — before the first byte
+        // arrives — so a resumed download never appears to restart at zero.
+        set_progress(progress_downloading(offset, 0));
+    }
 
     let client = reqwest::Client::builder()
         .user_agent("lighthouse-app")
         .connect_timeout(std::time::Duration::from_secs(30))
         .build()?;
     crate::egress::record(&model_url(), crate::egress::PURPOSE_MODEL_DOWNLOAD);
-    let res = client.get(model_url()).send().await?;
+    let mut res = send_get(&client, offset).await?;
+    if res.status() == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
+        // Range not satisfiable: the .part is at/past the asset's size, or the
+        // asset changed underneath us. Either way it can't be trusted —
+        // discard it and fetch from zero.
+        let _ = fs::remove_file(&tmp);
+        offset = 0;
+        res = send_get(&client, 0).await?;
+    }
     if !res.status().is_success() {
         anyhow::bail!("GET {} → {}", model_url(), res.status().as_u16());
     }
-    let total = res.content_length().unwrap_or(0);
+    if paused_or_stale(gen) {
+        // Paused while connecting (nothing streamed yet): stop before writing.
+        return Err(DownloadPaused.into());
+    }
+
+    let append = res.status() == reqwest::StatusCode::PARTIAL_CONTENT;
+    let total: u64 = if append {
+        // The server honored the Range: strictly verify it resumed at OUR
+        // offset (appending a mismatched slice would corrupt the file), and
+        // take the full size from Content-Range ("bytes <start>-<end>/<total>").
+        let content_range = res
+            .headers()
+            .get(reqwest::header::CONTENT_RANGE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        if offset == 0 || !content_range.starts_with(&format!("bytes {offset}-")) {
+            anyhow::bail!(
+                "resume failed: server returned a mismatched range ({})",
+                if content_range.is_empty() {
+                    "no content-range"
+                } else {
+                    content_range.as_str()
+                }
+            );
+        }
+        content_range
+            .rsplit('/')
+            .next()
+            .and_then(|t| t.trim().parse::<u64>().ok())
+            .or_else(|| res.content_length().map(|l| offset + l))
+            .unwrap_or(0)
+    } else {
+        // 200: the full body — no .part, or the server ignored the Range (some
+        // hosts do). Restart from zero (the create below truncates) so resumed
+        // bytes are never appended twice.
+        offset = 0;
+        res.content_length().unwrap_or(0)
+    };
     if total == 0 {
         anyhow::bail!("download unverifiable: server did not report a Content-Length");
     }
-    set_progress(Progress {
-        status: "downloading".into(),
-        received: 0,
-        total,
-        error: None,
-        removable: None,
-    });
+    set_progress(progress_downloading(offset, total));
 
-    let result: anyhow::Result<u64> = async {
-        let mut out = tokio::fs::File::create(&tmp).await?;
+    let streamed: anyhow::Result<()> = async {
         use tokio::io::AsyncWriteExt;
-        let mut received: u64 = 0;
+        let mut out = if append {
+            tokio::fs::OpenOptions::new().append(true).open(&tmp).await?
+        } else {
+            tokio::fs::File::create(&tmp).await?
+        };
+        let mut received = offset;
         let mut stream = res.bytes_stream();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
-            received += chunk.len() as u64;
-            set_progress(Progress {
-                status: "downloading".into(),
-                received,
-                total,
-                error: None,
-                removable: None,
-            });
-            out.write_all(&chunk).await?;
-        }
-        out.flush().await?;
-        Ok(received)
-    }
-    .await;
-
-    match result {
-        Ok(received) if received == total => {
-            fs::rename(&tmp, &dest)?;
+        let piped: anyhow::Result<()> = async {
+            while let Some(chunk) = stream.next().await {
+                // Pause/supersede check BEFORE the write: a paused (or
+                // replaced) task must stop touching the .part the moment it
+                // can, so it never interleaves with a successor's writes.
+                if paused_or_stale(gen) {
+                    return Err(DownloadPaused.into());
+                }
+                let chunk = chunk?;
+                received += chunk.len() as u64;
+                set_progress(progress_downloading(received, total));
+                out.write_all(&chunk).await?;
+            }
             Ok(())
         }
-        Ok(received) => {
-            let _ = fs::remove_file(&tmp);
-            anyhow::bail!("incomplete download ({received}/{total} bytes)")
-        }
-        Err(e) => {
-            let _ = fs::remove_file(&tmp);
-            Err(e)
-        }
+        .await;
+        // Quiesce the .part on EVERY exit (success, pause, failure) so a later
+        // resume stats the true on-disk byte count.
+        let _ = out.flush().await;
+        piped
     }
+    .await;
+    streamed?;
+
+    // Integrity is size- and magic-based (there is no upstream digest). Too
+    // SHORT is an interruption — keep the `.part` so the next install resumes.
+    // Anything else wrong (overshoot, not a GGUF) is corruption — a corrupt
+    // part must never become a ready model, so delete it and start fresh next
+    // time.
+    let size = fs::metadata(&tmp).map(|m| m.len()).unwrap_or(0);
+    if size < total {
+        anyhow::bail!("incomplete download ({size}/{total} bytes)");
+    }
+    if size > total {
+        let _ = fs::remove_file(&tmp);
+        anyhow::bail!("download corrupted ({size}/{total} bytes) — removed; installing again starts fresh");
+    }
+    if !is_gguf_file(&tmp) {
+        let _ = fs::remove_file(&tmp);
+        anyhow::bail!(
+            "download corrupted (not a valid GGUF model file) — removed; installing again starts fresh"
+        );
+    }
+    fs::rename(&tmp, &dest)?;
+    Ok(())
 }

@@ -12,6 +12,11 @@
  *                     `ModeChooserAuto`, which auto-advances on the web twin.
  *   2. select-model — pick a provider/model and paste a key (soft, never
  *                     blocking, gate when the local model isn't installed yet).
+ *                     When the private model is selected but absent, the panel
+ *                     offers to START the ~4.2 GB download right away — it is
+ *                     fire-and-forget on the server, so it keeps downloading
+ *                     in the background through the rest of onboarding (and
+ *                     the first-run tour) with no waiting at the end.
  *   3. inclusion    — whether newly-added files are searchable by default.
  *
  * then `completeOnboarding()` lands on "done" and the app shell takes over.
@@ -82,7 +87,7 @@ const useStyles = makeStyles({
  */
 function ContinueSetupButton({ providerId, disabled }: { providerId: string; disabled: boolean }) {
   const styles = useStyles();
-  const { status, received, total } = useLocalModel();
+  const { status, received, total, partialBytes } = useLocalModel();
   const localNotReady = providerId === "local" && status !== "ready";
   // Percent only when the total is known — early in a download it isn't yet.
   const pct = total ? ` — ${Math.min(100, Math.floor((received / total) * 100))}%` : "";
@@ -92,8 +97,10 @@ function ContinueSetupButton({ providerId, disabled }: { providerId: string; dis
       {localNotReady && (
         <Text size={200} className={styles.warningText}>
           {status === "downloading"
-            ? `The private model is still downloading${pct}. You can continue now and check on it later in Settings → AI models.`
-            : "The private model isn't installed yet — install it above, or continue now and add it later in Settings → AI models."}
+            ? `The private model is still downloading${pct}. You can continue now — it keeps downloading in the background (check on it later in Settings → AI models).`
+            : partialBytes
+              ? "The private model download is paused — resume it above, or continue now and finish it later in Settings → AI models."
+              : "The private model isn't installed yet — install it above, or continue now and add it later in Settings → AI models."}
         </Text>
       )}
       {/* type=submit so the enclosing form's onSubmit (Enter or click) continues. */}
@@ -286,7 +293,11 @@ export function OnboardingPanel() {
         </RadioGroup>
 
         {isLocal ? (
-          <LocalModelInstallPanel />
+          /* onboarding copy: the panel's download button doubles as the
+             "start it now, keep setting up" offer — starting NEVER blocks
+             Continue (the soft gate below stays soft) because the download is
+             fire-and-forget on the server and survives leaving this step. */
+          <LocalModelInstallPanel onboarding />
         ) : (
           <>
             {/* Honest cloud heading, naming the selected vendor. */}
