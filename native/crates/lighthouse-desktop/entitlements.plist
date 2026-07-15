@@ -10,8 +10,8 @@
     <true/>
     <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
     <true/>
-    <!-- The app spawns bundled third-party binaries (llama-server, piper) and
-         loads their dylibs, which are not signed by our identity; allow that. -->
+    <!-- The app spawns a bundled third-party binary (llama-server) and
+         loads its dylibs, which are not signed by our identity; allow that. -->
     <key>com.apple.security.cs.disable-library-validation</key>
     <true/>
     <key>com.apple.security.cs.allow-dyld-environment-variables</key>

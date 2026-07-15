@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 
 use lighthouse_core::config::is_desktop_app;
 use lighthouse_core::contracts::{ChatChunk, ChatTurn};
-use lighthouse_core::{llm, local_model, profile, settings, sources, tts, vault};
+use lighthouse_core::{llm, local_model, profile, settings, sources, vault};
 
 use crate::auth::is_same_origin;
 
@@ -521,48 +521,6 @@ pub async fn chat_post(headers: HeaderMap, body: Option<Json<Value>>) -> Respons
         .header("cache-control", "no-store")
         .body(Body::from_stream(stream))
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
-}
-
-// --- /api/tts -----------------------------------------------------------------
-
-/// Cap synthesized text so a runaway request can't tie up Piper for minutes.
-const TTS_MAX_CHARS: usize = 8000;
-
-pub async fn tts_post(headers: HeaderMap, body: Option<Json<Value>>) -> Response {
-    if !is_same_origin(&headers) {
-        return forbidden();
-    }
-    if !tts::is_local_tts_available() {
-        // Not an error — the caller treats this as "use the browser voice instead".
-        return (
-            StatusCode::NOT_IMPLEMENTED,
-            Json(json!({ "error": "local TTS unavailable" })),
-        )
-            .into_response();
-    }
-    let body = body.map(|Json(v)| v).unwrap_or_else(|| json!({}));
-    let text: String = body["text"]
-        .as_str()
-        .unwrap_or("")
-        .trim()
-        .chars()
-        .take(TTS_MAX_CHARS)
-        .collect();
-    if text.is_empty() {
-        return bad_request("text required");
-    }
-    match tts::synthesize(&text).await {
-        Ok(wav) => Response::builder()
-            .header("content-type", "audio/wav")
-            .header("cache-control", "no-store")
-            .body(Body::from(wav))
-            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
-        Err(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": "synthesis failed" })),
-        )
-            .into_response(),
-    }
 }
 
 // --- /api/profile -------------------------------------------------------------

@@ -12,7 +12,6 @@ pub fn app() -> Router {
     Router::new()
         .route("/api/rag", get(routes::rag_get).post(routes::rag_post))
         .route("/api/chat", post(routes::chat_post))
-        .route("/api/tts", post(routes::tts_post))
         .route(
             "/api/profile",
             get(routes::profile_get).post(routes::profile_post),

@@ -10,7 +10,7 @@ use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager};
 
 use lighthouse_core::contracts::{ChatChunk, ChatTurn};
-use lighthouse_core::{local_model, profile, settings, sources, tts, vault};
+use lighthouse_core::{local_model, profile, settings, sources, vault};
 
 fn string_array(v: &Value) -> Vec<String> {
     v.as_array()
@@ -509,27 +509,6 @@ pub async fn chat_ask(
     }
     audit.finish(&provider, final_files, artifacts);
     Ok(())
-}
-
-#[tauri::command]
-pub fn tts_available() -> bool {
-    tts::is_local_tts_available()
-}
-
-/// WAV bytes as a raw IPC response (no JSON array encoding).
-#[tauri::command]
-pub async fn tts_synthesize(text: String) -> Result<tauri::ipc::Response, String> {
-    let text: String = text.trim().chars().take(8000).collect();
-    if text.is_empty() {
-        return Err("text required".into());
-    }
-    if !tts::is_local_tts_available() {
-        return Err("local TTS unavailable".into());
-    }
-    match tts::synthesize(&text).await {
-        Ok(wav) => Ok(tauri::ipc::Response::new(wav)),
-        Err(_) => Err("synthesis failed".into()),
-    }
 }
 
 #[tauri::command]

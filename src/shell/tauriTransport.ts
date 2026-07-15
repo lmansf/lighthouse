@@ -28,10 +28,6 @@ const json = (value: unknown, status = 200): Response =>
 
 /** Map a command error to the HTTP status the route would have used. */
 function errorResponse(path: string, message: string): Response {
-  if (path === "/api/tts") {
-    const status = message.includes("unavailable") ? 501 : message === "text required" ? 400 : 500;
-    return json({ error: message }, status);
-  }
   if ((path === "/api/open" || path === "/api/reveal") && message === "file no longer exists") {
     return json({ error: message }, 404);
   }
@@ -184,19 +180,6 @@ async function route(
       return method === "GET" ? call("rag_list") : call("rag_op", { body });
     case "/api/chat":
       return handleChat(core, body, init?.signal);
-    case "/api/tts": {
-      try {
-        const wav = await core.invoke<ArrayBuffer>("tts_synthesize", {
-          text: typeof body.text === "string" ? body.text : "",
-        });
-        return new Response(wav, {
-          status: 200,
-          headers: { "content-type": "audio/wav", "cache-control": "no-store" },
-        });
-      } catch (err) {
-        return errorResponse(path, String(err));
-      }
-    }
     case "/api/profile":
       return method === "GET" ? call("profile_get") : call("profile_op", { body });
     case "/api/diagnostics":

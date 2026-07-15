@@ -1,7 +1,7 @@
 //! Pins the bundle-config wiring that keeps Windows upgrades installable.
 //!
 //! The NSIS pre-install/pre-uninstall hooks taskkill the bundled helper
-//! processes (llama-server.exe, piper.exe); without them a running or
+//! processes (llama-server.exe); without them a running or
 //! orphaned helper keeps DLLs under the install dir loaded and extraction
 //! fails with "Error opening file for writing: …\llm\ggml-base.dll"
 //! (0.6.x field reports). These tests fail if the hook file, its config
@@ -25,7 +25,7 @@ fn nsis_installer_hooks_are_wired() {
     }
     // Every bundled helper that loads DLLs from the install dir must be
     // stopped before files are touched. Grows with any new sidecar process.
-    for exe in ["llama-server.exe", "piper.exe"] {
+    for exe in ["llama-server.exe"] {
         assert!(src.contains(exe), "{exe} is not covered by the installer hooks");
     }
     // Update kills must not flag the next boot as crashed (sticky safe mode):
@@ -37,7 +37,7 @@ fn nsis_installer_hooks_are_wired() {
 }
 
 /// The hook kills processes by image name, so the names it uses must stay
-/// the names the app actually spawns (supervise.rs / tts.rs).
+/// the names the app actually spawns (supervise.rs).
 #[test]
 fn hook_process_names_match_the_supervisor() {
     let hooks = include_str!("../installer-hooks.nsh");
@@ -46,6 +46,4 @@ fn hook_process_names_match_the_supervisor() {
         supervise.contains("llama-server.exe") && hooks.contains("llama-server.exe"),
         "chat/embed server binary name drifted between supervise.rs and the hooks"
     );
-    // Piper's Windows name lives in lighthouse-core (tts.rs: piper.exe).
-    assert!(hooks.contains("piper.exe"), "piper.exe missing from the hooks");
 }

@@ -32,5 +32,5 @@ was to register interest.
 - **Teaser:** restore `ConversePlaceholder.tsx` and render it in the chat header;
   the click pipeline still exists.
 - **Real feature:** design against `chatService` + the persistent conversation
-  store; keep answers grounded (cite `[n]`), and decide the voice story (see the
-  read-aloud blueprint for the TTS half and any future speech-to-text).
+  store; keep answers grounded (cite `[n]`), and decide the voice story (TTS and
+  any future speech-to-text).

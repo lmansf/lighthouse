@@ -40,8 +40,7 @@ const MAX_CONVERSATIONS = 200;
 export interface TranscriptMessage extends ChatMessage {
   /**
    * Plain-language reason this turn failed (network / HTTP error). A failed
-   * turn renders an inline banner with Retry instead of an answer, and is never
-   * read aloud.
+   * turn renders an inline banner with Retry instead of an answer.
    */
   error?: string;
   /** True when the user pressed Stop mid-stream; the partial answer is kept. */

@@ -408,7 +408,7 @@ const useStyles = makeStyles({
     gap: tokens.spacingVerticalS,
     marginTop: tokens.spacingVerticalM,
   },
-  // Per-answer actions (read aloud, copy) in one quiet row under the answer.
+  // Per-answer actions (copy) in one quiet row under the answer.
   answerActions: {
     display: "flex",
     alignItems: "center",
@@ -3292,7 +3292,7 @@ export function ChatPanel() {
                           </Button>
                         </div>
                       )}
-                      {/* Failed turns get no actions (Retry is the action) and are never spoken. */}
+                      {/* Failed turns get no actions (Retry is the action). */}
                       {!m.error && m.content && !(streaming && m.id === lastId) && (
                         <div className={styles.answerActions}>
                           <Tooltip

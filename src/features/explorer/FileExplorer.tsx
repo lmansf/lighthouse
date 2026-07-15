@@ -1330,7 +1330,7 @@ export function FileExplorer() {
     fileInputRef.current?.click();
   };
   // Latest-closure ref so the mount-once window listener below never goes
-  // stale (same pattern as chat's readAloudRef).
+  // stale.
   const browseRef = useRef(browseForFiles);
   browseRef.current = browseForFiles;
   useEffect(() => {

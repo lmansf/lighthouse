@@ -30,6 +30,5 @@ pub mod settings;
 pub mod sources;
 pub mod synth;
 pub mod table_profile;
-pub mod tts;
 pub mod vault;
 pub mod watch;

@@ -117,7 +117,7 @@ export function isDesktopApp(): boolean {
 }
 
 /**
- * Root of the bundled offline resources (the local model, the local TTS voice).
+ * Root of the bundled offline resources (the local model).
  * The desktop shell sets LIGHTHOUSE_RESOURCES_PATH to its bundled resources dir
  * in the packaged app; otherwise we fall back to `./resources` in the repo so it
  * works under `npm run dev`/tests too.
