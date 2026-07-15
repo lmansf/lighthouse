@@ -7,22 +7,39 @@ code — file references are given throughout. Scope: the shipping Rust engine
 (`native/`); the TypeScript twin (`src/server/`, dev-only — see
 `docs/ts-twin.md`) mirrors the same hosts but does not ship.*
 
-**The baseline claim, stated precisely:** Lighthouse contains **no automatic
-data collection**. There is no usage telemetry, no click capture, no launch
-ping, no funnel events, and no A/B experiment machinery — the code for all of
-it has been deleted, not merely disabled. The only bytes that ever leave the
-machine on Lighthouse's behalf are: **(1)** a request to the cloud AI
-provider you configured (§1 — the only path that can carry document
-content), **(2)** the license/trial check (§2), **(3)** the update check
-(§4), **(4)** pinned, hash-verified asset downloads you click (§4–5), and
-**(5)** a feedback/bug report you explicitly pressed **Send** on (§2). Two
-further strictly-user-initiated flows exist: Subscribe checkout (§3, hidden
-by default) and the Microsoft 365 connector (§6, only if you connect it).
-That is the whole list.
+**The baseline claim, stated precisely:** Lighthouse has **no accounts, no
+licensing, no backend of its own, and no telemetry**. There is no usage
+telemetry, no click capture, no launch ping, no funnel events, no
+license/trial check, and no A/B experiment machinery — and there is no
+Supabase host, no `LICENSE_API_URL`, and no license/checkout module in
+either engine. All of it is **deleted from the code, not merely disabled**;
+a reviewer will find no code path that emits any of it.
 
-With the **local model** selected (or no model configured), answering a
-question makes **zero network calls** — retrieval, embeddings, OCR, TTS, and
-generation are all on-device (loopback or in-process; §7).
+The only bytes that ever leave the machine on Lighthouse's **own** behalf
+fall into **exactly three kinds, every one of them user-initiated**:
+
+1. **The cloud AI provider you configured** (§1) — the only path that can
+   carry document content. With the **local model** selected (or no provider
+   configured), answering a question makes **zero** network calls.
+2. **An update check** (§2) — an unauthenticated GET to the GitHub releases
+   API that carries **no payload**.
+3. **Pinned asset downloads you click** (§3) — an app update (signature-
+   verified before it runs) or the private-model weights. Nothing here fires
+   without your click.
+
+There are **two further user-initiated flows that are not app egress at
+all** (§4): the **Send feedback** dialog composes a report locally and hands
+it to **your own mail client** (a `mailto:`) or **your own browser** (a
+prefilled, public GitHub issue). Lighthouse opens no socket for either — the
+bytes travel only if *you* press Send in the app your OS opens for you.
+
+One capability is **present in code but not reachable from the shipping UI**
+(§5): the Microsoft 365 / SharePoint connector. The file explorer shows
+SharePoint as **"Coming soon"** and never calls its backend, so it is **not
+a live egress today**. It is documented here for completeness, not counted
+among the three.
+
+That is the whole list.
 
 ---
 
@@ -50,86 +67,100 @@ without a stored key for the selected provider. Organizations can enforce
 this: the managed policy layer's `allowedProviders`/`forceLocalOnly`
 (docs/managed-deployment.md) pins the choice engine-side.
 
-## 2. License, trial & explicit feedback — Supabase Edge Function
+## 2. Update check — GitHub releases API (notify-only)
 
-All ops go to **one host**, baked into shipped builds via `.env.production`:
-`https://yyiqwpcqpohzyrzwyxqk.supabase.co/functions/v1/license`
-(`native/crates/lighthouse-core/src/license.rs`, hub `call_fn`). **No
-document content, file names, or questions — ever — on this host.**
+`GET https://api.github.com/repos/lmansf/lighthouse/releases/latest` at boot
+and every 6 h (`native/crates/lighthouse-desktop/src/supervise.rs`
+`check_for_updates`, scheduled from `main.rs` on a `6 * 60 * 60`-second
+loop). Unauthenticated; user-agent `lighthouse-app`; **no query, no body, no
+payload** — a plain GET. The response's `tag_name` is compared to the
+running version; a newer tag only **arms a banner/tray notice**. There is no
+toggle because there is nothing to carry and nothing is downloaded here — it
+is notify-only. Recorded in the in-app egress ledger as `Update check`
+(`lighthouse-core::egress`).
 
-The retired ops, named so a reviewer can grep for their absence: `ping`
-(launch ping), `event` (funnel events), `events` (click-capture batches),
-and `assign` (A/B bucketing) **no longer exist in either engine** — there is
-no code path that emits them.
+## 3. Pinned asset downloads you click — updates & model weights
 
-What remains, exhaustively:
+Both members are **click-gated**: neither is fetched at launch or in the
+background.
 
-| op | When it fires | Payload |
-|---|---|---|
-| `check` | **every launch**; activating a key | `{licenseKey}` (an opaque install id — the one automatic call on this host) |
-| `start` | you starting the 14-day trial | the contact form fields you typed |
-| `bug` | you pressing **Send** on the feedback form | `{where, what, version, os, log?}` — exactly what the dialog showed you; the `log` (a shell.log excerpt) only with its off-by-default checkbox ticked, rendered in the dialog first. **No account id, email, or license id.** |
-| `feedback` | you pressing **Send** on the trial survey | the survey fields you typed, plus the account email and contact id (it is a contact-linked survey) |
-| `featureInterest` | you pressing **Send** on the shelved-features vote | `{shown, wanted}` — the feature ids shown and the ones you ticked, nothing else |
-| `notify` | you asking to be emailed when purchasing opens | the email you typed + contact id (that's the point of the form) |
+**3a. App update download — GitHub (signature-verified).** Only on your
+click, and only in builds carrying the updater public key against a release
+carrying a minisign `.sig`. The installer and its signature download from
+`github.com/lmansf/lighthouse/releases/download/…` (302 →
+`*.githubusercontent.com`), and the artifact is **verified against the
+signature before anything executes** (`lighthouse-core::updates`, driven
+from `supervise.rs`). Payload: none (GETs). An unsigned build or release: the
+button opens the releases page in your browser instead — **the app never
+installs what it cannot verify.**
 
-Identity semantics for the rows above: `contactId` is a **random persistent
-UUID** minted locally; `email`/name leave the machine **only** where the
-table says so — always inside a form you filled in and submitted.
+**3b. Private-model weights — Hugging Face (opt-in, one-time).** Clicking
+**＋** on "Local model (private)" downloads Mistral-7B-Instruct-v0.3 Q4_K_M
+(~4.2 GB) from a **pinned** URL on `huggingface.co` (302 → HF CDN), streamed
+to your user-data dir (`native/crates/lighthouse-core/src/local_model.rs`).
+Payload: none (GET, UA `lighthouse-app`). **Integrity, stated honestly:** the
+URL is pinned to a specific repo/file/quant, and the stream is accepted only
+when the full `Content-Length` arrives (written to a `.part`, renamed on
+completion) — this is a **completeness check, not a signature check**; the
+runtime weights fetch is **not** hash-verified in-app. (The SHA-256 pinning
+described in §7 covers the **build-time** bundled-asset fetch, not this
+runtime download.) Never fires unless you click install; override the URL
+with `LIGHTHOUSE_LOCAL_MODEL_URL`. The embedding/OCR/TTS models and the
+llama-server/Piper binaries are **bundled in the installer** — nothing is
+fetched for them at runtime.
 
-**Defaults, stated plainly:** in a hosted (normal) build, the license
-`check` is the **only** call that fires without a click. Everything else in
-the table requires you to press Send on a form that shows its payload. The
-managed-policy key `telemetry: "off"` is retained for config compatibility
-but now has nothing left to silence. The build-level off switch is unsetting
-`LICENSE_API_URL` (every op no-ops, checked per-call); **offline activation**
-(shipped — `LICENSE_OFFLINE_PUBKEY` + a signed license file,
-docs/managed-deployment.md) removes even the `check` for air-gapped
-deployments. Failure posture: license checks **fail closed to a lock, never
-a wipe** — your files are untouched.
+## 4. Feedback & bug reports — zero-backend handoff (NOT app egress)
 
-## 3. Checkout — Supabase + Stripe
+The **Send feedback** dialog makes **no network request of its own**. It
+composes a report **locally** and offers two hand-offs you complete in
+another app (`src/features/feedback/BugReport.tsx`; the URL builders live in
+`src/lib/feedbackLinks.ts` and are unit-pinned in
+`test/feedbackLinks.test.mjs`):
 
-`POST …/functions/v1/create-checkout` with `{guid, email}` returns a Stripe
-Checkout URL opened in your browser. Fires **only** on clicking Subscribe,
-which is hidden unless `PAID_ENABLED=1` (shipped default `0`). Stripe is
-contacted by the Edge Function server-side and by your browser — never by
-the app directly.
+- **Email us** → a `mailto:lmansf96@gmail.com` opened in **your** mail
+  client with subject + body prefilled (`buildFeedbackMailto`).
+- **Open a GitHub issue** → `https://github.com/lmansf/lighthouse/issues/new`
+  `?title=…&body=…&labels=feedback` opened in **your** browser
+  (`buildFeedbackIssueUrl`). The dialog states, **before** you click, that
+  **GitHub issues are public.**
 
-## 4. Update check & verified update download — GitHub
+What the body can contain, exhaustively: the message you typed, an optional
+"where in the app?" note, the app version, and a coarse OS label
+(`Windows`/`macOS`/`Linux`). **Never** an account id, email, file, file
+name, or file content — there are no accounts, and nothing reads the vault.
+Optionally, if you tick the **off-by-default** checkbox, a **shell.log
+excerpt** is appended: the dialog **renders the full excerpt for you to read
+first**, and the URL builders embed only a bounded tail
+(`LOG_URL_CAP = 3000`) so the hand-off can never produce a pathological URL
+(you can paste the rest yourself). That excerpt is fetched lazily from a
+**read-only** `GET /api/diagnostics` (`app/api/diagnostics/route.ts`) which
+returns `{version, os, log}` and **makes no network request**; on the web
+build there is no shell.log and it returns `log: ""`.
 
-`native/crates/lighthouse-desktop/src/supervise.rs`:
+Because the app transmits nothing here, there is **no host to allowlist and
+no switch to flip** — declining is simply not pressing Email/Open, or not
+opening the dialog.
 
-- **Check:** `GET api.github.com/repos/lmansf/lighthouse/releases/latest` at
-  boot and every 6 h. Payload: none (a GET with UA `lighthouse-app`).
-  Notify-only: a newer version arms a banner/tray notice.
-- **Download:** only on your click, and only in builds carrying the updater
-  public key against a release carrying a minisign `.sig` — the installer
-  and signature download from `github.com/lmansf/lighthouse/releases/download/…`
-  (302 → `*.githubusercontent.com`) and the artifact is **verified before
-  anything executes** (`lighthouse-core::updates`). Unsigned builds/releases:
-  the button opens the releases page in your browser instead; the app never
-  downloads what it can't verify.
+## 5. Microsoft 365 / SharePoint connector — present in code, NOT reachable in the UI
 
-## 5. Private-model weights — Hugging Face (opt-in, one-time)
+A device-code OAuth + Microsoft Graph connector still exists in the tree
+(`native/crates/lighthouse-core/src/sources/`, route `POST /api/connect`,
+store action `connectSharePoint`), but **the shipping UI does not expose
+it.** In the file explorer the SharePoint entry is a **"Coming soon"** badge
+whose click runs `registerInterest(...)` — a local green thank-you note on a
+timer, explicitly *"without running any real connector flow and without
+recording anything"* (`src/features/explorer/FileExplorer.tsx`). It **never
+calls `/api/connect`**, mints no token, and dials no Microsoft host.
 
-Clicking **＋** on "Local model (private)" downloads
-Mistral-7B-Instruct-v0.3 (~4.2 GB) from `huggingface.co` (302 → HF CDN),
-streamed to your user-data dir (`local_model.rs`). Payload: none (GET).
-Never fires unless you click install. The embedding/OCR/TTS models are
-**bundled in the installer** — nothing is fetched for them at runtime.
+So today it is a **dormant capability, not a live egress** — present in
+code, disabled in UI. (Were it ever wired up, its direction is inbound-only:
+it lists and downloads *your* files into a local mirror and uploads no vault
+content; the bearer token is sent only to Graph hosts, guarded in code, and
+disconnect drops the tokens and mirror.) It is described here so a reviewer
+who greps `graph.microsoft.com` / `login.microsoftonline.com` and finds the
+code knows why it is inert — it is neither a live egress nor deleted.
 
-## 6. SharePoint / OneDrive connector — Microsoft (opt-in)
-
-Only if you connect it (default: disconnected, zero calls).
-`sources/microsoft.rs`: device-code OAuth against
-`login.microsoftonline.com` (public client, no secret), then Microsoft
-Graph (`graph.microsoft.com`) to list and download **your** files into the
-local mirror. Direction is inbound — no vault content is uploaded. Tokens
-are stored outside the vault; the bearer token is sent only to Graph hosts
-(guarded in code). Disconnect drops tokens and the mirror.
-
-## 7. Loopback & in-process — NOT egress
+## 6. Loopback & in-process — NOT egress
 
 For completeness, the on-device services (127.0.0.1 only, no external
 sockets): the chat llama-server (`:8080`), the embedding server (`:8091`),
@@ -143,14 +174,16 @@ rebuilds any confident grid as markdown appended to the extracted text — pure
 geometry, no model, no network. Reconstructed tables ride the same on-device
 extraction/retrieval path as OCR text; nothing about them touches egress.
 
-## 8. Build/CI-time only — never in the shipped app
+## 7. Build/CI-time only — never in the shipped app
 
 `scripts/fetch-local-model.mjs` (build machines): llama.cpp + Piper GitHub
 releases, HF-hosted voice/embedding models and the ocrs S3 bucket — all via
 the repo's own mirror first (`github.com/lmansf/lighthouse` release
-`hf-assets-1`), version-pinned and SHA-256-verified fail-closed.
+`hf-assets-1`), version-pinned and SHA-256-verified fail-closed. This is the
+only place a SHA-256 is pinned; it protects the **bundled** assets baked into
+the installer, not the runtime weights download of §3b.
 
-## 9. Local audit log — written locally, NOT egress
+## 8. Local audit log — written locally, NOT egress
 
 With the audit log on (`auditEnabled`, off by default, or managed policy
 `auditLog: "on"`), the engine appends one JSONL record per answered question
@@ -178,19 +211,47 @@ huggingface.co` / `cas-bridge.xethub.hf.co`; ocrs models →
 | Egress | Lever |
 |---|---|
 | Cloud AI (the only content path) | choose Local/no provider; don't store a key — or managed policy `allowedProviders`/`forceLocalOnly` (org-wide, engine-enforced) |
-| License `check` | unset `LICENSE_API_URL` (build-level), or offline activation (`LICENSE_OFFLINE_PUBKEY` + signed license file) for air-gapped deployments |
-| Feedback / bug / vote / notify | never without your click on **Send**; the form shows the payload first |
 | Update check | no toggle (GET, no payload); notify-only |
-| Update download | never without your click + a verifiable signature |
-| Model weights download | never without your click |
-| Microsoft connector | never unless connected |
-| Checkout | hidden unless `PAID_ENABLED=1`; fires only on your click |
+| Update download | never without your click **and** a verifiable signature |
+| Model-weights download | never without your click (pinned URL; override via `LIGHTHOUSE_LOCAL_MODEL_URL`) |
+| Feedback / bug report | **not app egress** — the app sends nothing; you hand off via your own mail client or browser, and the dialog shows the full payload first |
+| Microsoft 365 / SharePoint connector | **not reachable** in the shipping UI ("Coming soon"); backend present but never invoked |
 
-There is no telemetry row because there is no telemetry: nothing ambient is
-left to disable. The in-app **egress panel** (the header shield) and the
-**local audit log** (§9) let you verify this live — the panel shows every
-host each answer dialed, and the audit record keeps the per-question delta.
+There is no telemetry row and no license/checkout row because there is no
+telemetry, no license check, and no checkout: nothing ambient is left to
+disable, and the code that once did these was removed, not toggled off. The
+in-app **egress panel** (the header shield) and the **local audit log** (§8)
+let you verify this live — the panel shows every host each answer dialed, and
+the audit record keeps the per-question delta.
+
+## Decision record — if paid ever returns
+
+If a paid tier ever comes back, it returns as **offline, signed license
+files plus a Stripe payment link** — **no accounts, no Supabase, no
+telemetry, and no backend of our own.** Activation would verify a signed
+license file **locally** (a signature check over a file the user drops in,
+nothing dialed out), and payment would be a hosted **Stripe link the user
+opens in their own browser** — never a checkout the app calls server-side.
+This is a deliberate constraint, recorded so that any future change reaching
+for a hosted license, checkout, or telemetry backend is recognized as a
+**reversal of policy**, not an implementation detail that slipped in.
+
+## Naming debt (so a reviewer isn't misled)
+
+Two identifiers still read `rag-vault`, kept for **upgrade safety**, not
+because any "rag-vault" service exists anywhere:
+
+- the **npm package name** (`package.json` → `"name": "rag-vault"`), and
+- the **per-vault state directory** (`.rag-vault/`, which holds the index,
+  settings, and trash beside your files).
+
+Renaming either would strand the state of existing installs, so the names
+stay. Note that the shipping desktop app's **app-data directory is derived
+from the Tauri identifier `com.lighthouse.app`** (see
+`native/crates/lighthouse-desktop/tauri.conf.json`), **not** from
+`rag-vault` — the `rag-vault` string is a historical package/dir name, not a
+network endpoint or an account namespace.
 
 *Related: `README.md` §Network & privacy · `docs/signing.md` ·
-`docs/ts-twin.md` · `docs/managed-deployment.md` (managed policy + offline
-activation) · `docs/edr-whitelisting.md`.*
+`docs/ts-twin.md` · `docs/managed-deployment.md` (managed policy) ·
+`docs/edr-whitelisting.md`.*

@@ -92,8 +92,8 @@ npm run fetch:model        # optional: bundled engines (llama-server, Piper, emb
 Two engines, one contract:
 
 - **`native/` — the shipping product.** `lighthouse-core` (Rust) owns the
-  vault, retrieval index, extraction, OCR, embeddings, analytics, licensing,
-  and synthesis; `lighthouse-desktop` is the Tauri 2 shell (window/tray/
+  vault, retrieval index, extraction, OCR, embeddings, analytics, and
+  synthesis; `lighthouse-desktop` is the Tauri 2 shell (window/tray/
   widget/supervision/updater); `lighthouse-server` is the same engine behind
   a loopback HTTP API for tests and headless use.
 - **`src/server/` + `app/api/` — the TypeScript twin.** The web-dev flow and
@@ -116,43 +116,24 @@ awaits certificates — **[docs/signing.md](docs/signing.md)**.
 
 **Lighthouse collects no analytics and phones nothing home on its own.**
 There is no usage telemetry, no click tracking, no launch ping, no A/B
-experiment machinery — none of it exists in the code. The only bytes that
-ever leave your machine on Lighthouse's behalf are:
+experiment machinery, and no accounts or licensing — none of it exists in the
+code. The app makes only **three** kinds of outbound request, and every one is
+something you asked for:
 
 1. a request to the **cloud AI provider you configured** (the only path that
    can carry document content — pick the local model and it's zero calls);
-2. the **license/trial check**;
-3. a **version check** against GitHub releases (a GET, no payload);
-4. **pinned, hash-verified asset downloads you click** (model weights,
-   updates);
-5. a **feedback or bug report you explicitly press Send on** — and the form
-   shows you exactly what it sends before you do.
+2. a **version check** against GitHub releases (a GET, no payload);
+3. **pinned asset downloads you click** — the private-model weights (from a
+   fixed URL) and app updates (which are signature-verified before they run).
 
-Two further strictly-you-initiated flows exist and are documented: Subscribe
-checkout (hidden by default) and the Microsoft 365 connector (only if you
-connect it, inbound-only). The complete egress inventory — every host, when
-it fires, what it carries, how to turn it off — is
+Feedback never leaves via the app itself: the **Send-feedback** form composes
+your report locally — shown in full first — and hands it to **your own mail
+client** (a `mailto:`) or **browser** (a prefilled, public GitHub issue). You
+send it; Lighthouse makes no request of its own. The complete egress inventory
+— every host, when it fires, what it carries, how to turn it off — is
 **[docs/data-flows.md](docs/data-flows.md)**, written for a security review.
 Chat history is **opt-in** and local; API keys are sealed (AES-256-GCM) on
 disk; state writes are 0600 and atomic.
-
-## Pricing & trial
-
-Start a **free 14-day trial** — no payment, no key to copy, and repeatable.
-When a trial ends you can start another, or skip it and **subscribe for
-$14.99 a month** for unlimited use.
-
-Your files are always yours. A lapsed trial or subscription only **locks**
-the app — your vault is greyed out, never deleted — until you start a new
-trial or subscribe.
-
-> **Paid subscriptions aren't open yet.** The shipped build defaults to
-> `PAID_ENABLED=0`, so the Subscribe affordances stay hidden and the app
-> shows **"Get notified when purchasing opens"** instead — only the free
-> trial is live.
-
-Self-hosting setup (Supabase tables + Edge Functions + Stripe) is in
-**[docs/registration.md](docs/registration.md)**.
 
 ## Configuration
 
@@ -168,10 +149,9 @@ All optional (`.env.local`, gitignored; the desktop app manages its own state):
   `http://127.0.0.1:11434/v1/chat/completions`).
   `LIGHTHOUSE_LOCAL_LLM_MODEL` — model name for servers that need one
   (Ollama/LM Studio); ignored by the bundled `llama-server`.
-- `LICENSE_API_URL` / `SUPABASE_ANON_KEY` — hosted-license config (shipped in
-  `.env.production`). `LICENSE_ENFORCE`/`LICENSE_SECRET` — local-dev trial.
-- `PAID_ENABLED` — `1` surfaces the Subscribe affordances; default `0`.
-- `CHECKOUT_API_URL` — the `create-checkout` Edge Function URL.
+
+Lighthouse has no accounts, licensing, or payment configuration — there is
+nothing to set up and no backend to run.
 
 ## Local model
 
@@ -212,10 +192,11 @@ Apache-2.0 © Mistral AI.
 Shipping: the native desktop app described above, at **0.11.x**, with the
 release pipeline (build → 3-OS smoke → draft → publish) run from this repo.
 Landed from the persona roadmap: the org-deployable managed-policy layer,
-the local audit log + egress transparency panel, offline activation, PDF
-table extraction, briefings, richer charts — and the removal of **all**
-automatic data collection (see §Network & privacy; the only feedback channel
-is the explicit Send-feedback form). Still open: code-signing certificates —
+the local audit log + egress transparency panel, PDF table extraction,
+briefings, richer charts — and the removal of **all** automatic data
+collection *and* the accounts/licensing/Supabase backend (see §Network &
+privacy; the only feedback channel is the explicit Send-feedback form, which
+hands off to your own mail client or browser). Still open: code-signing certificates —
 installers are currently **unsigned** (SmartScreen/Gatekeeper warn on first
 launch); the signing pipeline is wired and documented in
 [docs/signing.md](docs/signing.md).

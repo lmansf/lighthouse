@@ -1,5 +1,13 @@
 # Maintainer provisioning & decisions — persona roadmap (Phases 0–2)
 
+> **Historical (superseded).** The accounts, licensing, trial, and paid-
+> subscription decisions in "Product decisions" below were **removed** —
+> Lighthouse now has no accounts, is always unlocked, and the Supabase backend
+> is gone. Kept as roadmap history; the provisioning items (code signing, the
+> OS-keychain sealing key, cargo-audit triage) remain accurate. If a paid tier
+> ever returns it will use offline signed license files + a Stripe payment link
+> — no accounts, no Supabase; see **[docs/data-flows.md](data-flows.md)**.
+
 This is the one place that answers: *"What must I, the maintainer, decide or
 provision before the security-director and data-analyst features are fully
 live?"* Everything below is **fail-closed today** — the app builds, runs, and
