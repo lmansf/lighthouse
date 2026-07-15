@@ -100,6 +100,7 @@ import {
 import { pinChartData } from "@/lib/pinChart";
 import { composeEvidencePack, provenanceStampText } from "@/lib/evidencePack";
 import { recallRelated, type RecallHit } from "@/lib/recall";
+import { askSuggestions, lastAsk, type AskHistoryItem } from "@/lib/askTypeahead";
 import { AnalyticsChart, standaloneChartSvg } from "@/features/chat/AnalyticsChart";
 import { BriefingsPanel } from "@/features/chat/BriefingsPanel";
 import { PinMiniChart } from "@/features/chat/PinMiniChart";
@@ -785,6 +786,48 @@ const useStyles = makeStyles({
   },
   attachItemName: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 },
   attachEmpty: { color: tokens.colorNeutralForeground3, ...shorthands.padding(tokens.spacingVerticalM, tokens.spacingHorizontalS) },
+
+  // --- Ask type-ahead (time-savers): past asks + pinned questions matched
+  //     against the draft, in a compact flyout anchored to the composer. It
+  //     opens UPWARD (the composer sits at the panel's bottom edge) and is
+  //     absolutely positioned so it never shoves the layout around. Rows
+  //     follow attachItem; the surface uses the flyout tokens (both themes). ---
+  composerWrap: { position: "relative" },
+  askSuggestPop: {
+    position: "absolute",
+    bottom: "calc(100% + 4px)",
+    left: "0",
+    right: "0",
+    zIndex: 10,
+    display: "flex",
+    flexDirection: "column",
+    gap: "1px",
+    maxHeight: "240px",
+    overflowY: "auto",
+    ...shorthands.padding(tokens.spacingVerticalXS),
+    ...shorthands.border("1px", "solid", tokens.colorNeutralStroke2),
+    borderRadius: tokens.borderRadiusMedium,
+    backgroundColor: tokens.colorNeutralBackground1,
+    boxShadow: tokens.shadow16,
+  },
+  askSuggestItem: {
+    display: "flex",
+    alignItems: "center",
+    gap: tokens.spacingHorizontalS,
+    ...shorthands.padding(tokens.spacingVerticalXS, tokens.spacingHorizontalS),
+    borderRadius: tokens.borderRadiusMedium,
+    cursor: "pointer",
+    ":hover": { backgroundColor: tokens.colorNeutralBackground2Hover },
+  },
+  askSuggestItemActive: { backgroundColor: tokens.colorNeutralBackground1Selected },
+  askSuggestIcon: { color: tokens.colorNeutralForeground3, flexShrink: 0 },
+  askSuggestText: {
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+    flexGrow: 1,
+    minWidth: 0,
+  },
 });
 
 /** DOM id for a turn's nth reference card ([n] chips scroll to these). */
@@ -1510,6 +1553,11 @@ export function ChatPanel() {
   // Attach-picker popover (quick search over the vault's own files) + its query.
   const [attachOpen, setAttachOpen] = useState(false);
   const [attachSearch, setAttachSearch] = useState("");
+  // Ask type-ahead (time-savers): open only tracks TYPED input (Esc/accept/blur
+  // close it; programmatic fills never open it); index is the highlighted row,
+  // -1 = none — so a plain Enter still sends (see handleComposerKeyDown).
+  const [suggestOpen, setSuggestOpen] = useState(false);
+  const [suggestIndex, setSuggestIndex] = useState(-1);
   // Per-answer 👍/👎, remembered for the session so the choice reads as "set".
   const [ratings, setRatings] = useState<Record<string, "up" | "down">>({});
   // --- Edit SQL dialog (analytics refinement): the answer meta being edited
@@ -2284,6 +2332,24 @@ export function ChatPanel() {
     };
   }, [pinsOpen]);
 
+  // …and once at mount, so pinned questions feed the ask type-ahead before the
+  // dialog is ever opened. Same local engine list the dialog reads — on
+  // failure the type-ahead simply has no pins.
+  useEffect(() => {
+    let cancelled = false;
+    ragService
+      .listPins()
+      .then((pins) => {
+        if (!cancelled && pins.length > 0) setPinList(pins);
+      })
+      .catch(() => {
+        /* history-only suggestions */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   /** Manual re-check from the dialog; changed pins also feed the banner. */
   async function recheckPinsNow() {
     if (pinsBusy) return;
@@ -2449,7 +2515,7 @@ export function ChatPanel() {
     setEditingId(null);
   }
 
-  /** Begin editing a past question in place (pencil affordance / ArrowUp). */
+  /** Begin editing a past question in place (pencil affordance). */
   function startEdit(userId: string, current: string) {
     if (streaming) return;
     setEditingId(userId);
@@ -2553,7 +2619,76 @@ export function ChatPanel() {
     }).catch(() => {});
   }, []);
 
+  // --- Ask type-ahead (time-savers): local autocomplete over past asks. ---
+  // Every past user ask, stamped with its conversation's updatedAt (messages
+  // carry no per-turn clock). The live transcript stands in for the current
+  // conversation — its copy in `conversations` lags until persist(). With
+  // "save chats" off the store only holds this session anyway, so history-off
+  // = session asks by construction. Zero network: it all ranks in memory.
+  const askHistoryItems = useMemo<AskHistoryItem[]>(() => {
+    const items: AskHistoryItem[] = [];
+    const currentTs = conversations.find((c) => c.id === currentId)?.updatedAt ?? 0;
+    for (const c of conversations) {
+      if (c.id === currentId) continue;
+      for (const m of c.messages) {
+        if (m.role === "user" && m.content.trim()) items.push({ text: m.content, ts: c.updatedAt });
+      }
+    }
+    for (const m of messages) {
+      if (m.role === "user" && m.content.trim()) items.push({ text: m.content, ts: currentTs });
+    }
+    return items;
+  }, [conversations, currentId, messages]);
+  const pinQuestions = useMemo(() => pinList.map((p) => p.question), [pinList]);
+  const askSuggests = useMemo(
+    () => askSuggestions(question, { history: askHistoryItems, pins: pinQuestions }),
+    [question, askHistoryItems, pinQuestions],
+  );
+  const suggestsShown = suggestOpen && askSuggests.length > 0;
+  // Clamp the highlight when the list shrinks under it (a turn settling can
+  // re-rank mid-hover): out of range reads as "nothing highlighted".
+  const suggestSel = suggestIndex < askSuggests.length ? suggestIndex : -1;
+  // Shell-style ↑-recall target: this conversation's last ask (index as the
+  // tiebreak clock — later turn wins), else the most recent ask anywhere.
+  const lastAskText = useMemo(() => {
+    const session = messages
+      .filter((m) => m.role === "user")
+      .map((m, i) => ({ text: m.content, ts: i }));
+    return lastAsk({ history: session }) ?? lastAsk({ history: askHistoryItems });
+  }, [messages, askHistoryItems]);
+
   function handleComposerKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
+    // Type-ahead first: while the popover is open it owns Down/Up/Esc — and
+    // Enter/Tab only when a row is highlighted (suggestSel >= 0), so a plain
+    // Enter still sends and Shift+Enter still makes a newline.
+    if (suggestsShown) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setSuggestIndex((suggestSel + 1) % askSuggests.length);
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setSuggestIndex(suggestSel <= 0 ? askSuggests.length - 1 : suggestSel - 1);
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setSuggestOpen(false); // dismiss only — the draft is untouched
+        return;
+      }
+      if (e.key === "Tab" && !e.shiftKey) {
+        // Shell-style completion: Tab takes the highlighted row (or the top one).
+        e.preventDefault();
+        acceptSuggestion(askSuggests[Math.max(suggestSel, 0)].text);
+        return;
+      }
+      if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && suggestSel >= 0) {
+        e.preventDefault();
+        acceptSuggestion(askSuggests[suggestSel].text);
+        return;
+      }
+    }
     // Enter sends; Shift+Enter inserts a newline. `isComposing` guards IME
     // composition (e.g. Japanese input), where Enter commits the composition
     // rather than the message.
@@ -2562,23 +2697,32 @@ export function ChatPanel() {
       ask();
       return;
     }
-    // ArrowUp on an empty composer edits your last question — the familiar
-    // chat convention for "fix what I just asked".
-    if (e.key === "ArrowUp" && !question && !streaming && messages.length > 0) {
-      for (let i = messages.length - 1; i >= 0; i -= 1) {
-        if (messages[i].role === "user") {
-          e.preventDefault();
-          startEdit(messages[i].id, messages[i].content);
-          break;
-        }
-      }
+    // ArrowUp on an EMPTY composer recalls your last ask into the box,
+    // shell-style — edit or resend without retyping (the pencil on a past turn
+    // still edits in place). A fill, not a search: the popover stays closed.
+    if (e.key === "ArrowUp" && !question && lastAskText) {
+      e.preventDefault();
+      applySuggestion(lastAskText);
     }
   }
 
-  /** Fill the composer with a suggested prompt (never auto-send) and focus it. */
+  /** Accept a type-ahead row: fill the composer (never auto-send) and close. */
+  function acceptSuggestion(text: string) {
+    applySuggestion(text);
+    setSuggestOpen(false);
+    setSuggestIndex(-1);
+  }
+
+  /** Fill the composer with a suggested prompt (never auto-send), focus it,
+   *  and land the caret at the end so typing continues the fill. */
   function applySuggestion(fill: string) {
     setQuestion(fill);
-    composerRef.current?.focus();
+    requestAnimationFrame(() => {
+      const el = composerRef.current;
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(el.value.length, el.value.length);
+    });
   }
 
   // Engine-derived example questions for the empty state — each names real
@@ -2850,32 +2994,79 @@ export function ChatPanel() {
         </div>
       )}
       {attachmentBar}
-      <div className={styles.composer} data-tour="chat">
-        {attachButton}
-        <Textarea
-          ref={composerRef}
-          className={styles.composerField}
-          resize="none"
-          rows={1}
-          value={question}
-          placeholder={attachments.length > 0 ? "Ask about the attached files…" : placeholder}
-          onChange={(_, d) => setQuestion(d.value)}
-          onKeyDown={handleComposerKeyDown}
-        />
-        {streaming ? (
-          <Button appearance="secondary" icon={<SquareRegular />} onClick={stopStreaming}>
-            Stop
-          </Button>
-        ) : (
-          <Button appearance="primary" icon={<SendRegular />} onClick={() => ask()}>
-            Ask
-          </Button>
+      <div className={styles.composerWrap}>
+        {suggestsShown && (
+          <div
+            role="listbox"
+            id="ask-typeahead-listbox"
+            aria-label="Suggestions from your past questions"
+            className={styles.askSuggestPop}
+          >
+            {askSuggests.map((s, i) => (
+              <div
+                key={`${s.source}:${s.text}`}
+                id={`ask-suggest-${i}`}
+                role="option"
+                aria-selected={i === suggestSel}
+                title={s.source === "pin" ? "Pinned question" : "You asked this before"}
+                className={mergeClasses(
+                  styles.askSuggestItem,
+                  i === suggestSel && styles.askSuggestItemActive,
+                )}
+                // The highlight is KEYBOARD-driven only (hover keeps its CSS
+                // affordance): a mouse resting over the popover must never
+                // flip Enter from "send" to "accept".
+                // Keep keyboard focus in the composer while clicking rows.
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => acceptSuggestion(s.text)}
+              >
+                {s.source === "pin" ? (
+                  <PinRegular fontSize={14} className={styles.askSuggestIcon} />
+                ) : (
+                  <HistoryRegular fontSize={14} className={styles.askSuggestIcon} />
+                )}
+                <span className={styles.askSuggestText}>{s.text}</span>
+              </div>
+            ))}
+          </div>
         )}
+        <div className={styles.composer} data-tour="chat">
+          {attachButton}
+          <Textarea
+            ref={composerRef}
+            className={styles.composerField}
+            resize="none"
+            rows={1}
+            value={question}
+            placeholder={attachments.length > 0 ? "Ask about the attached files…" : placeholder}
+            aria-activedescendant={
+              suggestsShown && suggestSel >= 0 ? `ask-suggest-${suggestSel}` : undefined
+            }
+            onChange={(_, d) => {
+              setQuestion(d.value);
+              // Typing (re)filters and reopens; the highlight restarts unset so
+              // Enter keeps sending until the user arrows into the list.
+              setSuggestIndex(-1);
+              setSuggestOpen(d.value.trim().length > 0);
+            }}
+            onBlur={() => setSuggestOpen(false)}
+            onKeyDown={handleComposerKeyDown}
+          />
+          {streaming ? (
+            <Button appearance="secondary" icon={<SquareRegular />} onClick={stopStreaming}>
+              Stop
+            </Button>
+          ) : (
+            <Button appearance="primary" icon={<SendRegular />} onClick={() => ask()}>
+              Ask
+            </Button>
+          )}
+        </div>
       </div>
       <div className={styles.composerMeta}>
         <Text size={200} className={styles.metaLine}>
           Enter to send · Shift+Enter for a new line
-          {messages.length > 0 ? " · ↑ to edit your last question" : ""}
+          {lastAskText ? " · ↑ to recall your last question" : ""}
         </Text>
         <Text size={200} className={styles.metaLine} data-tour="models">
           {provenance}

@@ -524,6 +524,9 @@ export function WidgetBar() {
     };
   }, [query, includedFileIds, locked]);
 
+  // Ask type-ahead (src/lib/askTypeahead.ts) is main-window-only by decision:
+  // suggestion rows would complicate the pill's merged results list + resize
+  // contract (and this window doesn't carry the chat store) for little gain.
   // The flat list: name rows, then content rows (minus files already named),
   // then the Ask hand-off — which never renders locked (asking is disabled).
   const rows = useMemo<WidgetRow[]>(() => {
