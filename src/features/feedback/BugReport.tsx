@@ -12,7 +12,6 @@ import {
   DialogTitle,
   DialogTrigger,
   Field,
-  Spinner,
   Text,
   Textarea,
   Tooltip,
@@ -20,19 +19,21 @@ import {
   shorthands,
   tokens,
 } from "@fluentui/react-components";
-import { ChatHelpRegular } from "@fluentui/react-icons";
+import { ChatHelpRegular, MailRegular, OpenRegular } from "@fluentui/react-icons";
+import { buildFeedbackMailto, buildFeedbackIssueUrl } from "@/lib/feedbackLinks";
 
 /**
- * The single explicit feedback channel. A quiet affordance in the corner (and a
- * "Send feedback" item in the settings menu, which dispatches
- * `lighthouse:open-feedback`) opens this form.
+ * The single "Send feedback" flow. A quiet FAB in the corner (and a "Send
+ * feedback" item in the settings menu, which dispatches `lighthouse:open-feedback`)
+ * opens this dialog.
  *
- * PRIVACY CONTRACT: nothing leaves the machine until the user presses Send, and
- * the form shows EXACTLY what a Send will transmit — the message they typed,
- * plus the app version and OS — before they press it. An off-by-default
- * checkbox can attach a short diagnostics excerpt (the desktop shell.log),
- * rendered inline first so the user reads it before choosing to include it. No
- * account id, email, file, file name, or file content is ever attached.
+ * PRIVACY CONTRACT — the app transmits NOTHING. The dialog composes the report
+ * locally (your message, the app version, the OS, and — only if you tick the
+ * box — a shell.log excerpt you review in full) and hands it off two ways you
+ * complete yourself: "Email us" opens your mail client (mailto:), "Open a GitHub
+ * issue" opens your browser with the report prefilled. No account id, email,
+ * file, file name, or file content is ever attached, and Lighthouse makes no
+ * network request of its own.
  */
 
 const useStyles = makeStyles({
@@ -51,9 +52,7 @@ const useStyles = makeStyles({
     ":hover": { color: tokens.colorNeutralForeground1 },
   },
   fields: { display: "flex", flexDirection: "column", gap: tokens.spacingVerticalM },
-  thanks: { color: tokens.colorNeutralForeground2 },
-  error: { color: tokens.colorPaletteRedForeground1 },
-  // The "here's exactly what will be sent" disclosure panel.
+  // The "here's exactly what will be handed off" disclosure panel.
   disclose: {
     display: "flex",
     flexDirection: "column",
@@ -76,12 +75,23 @@ const useStyles = makeStyles({
     whiteSpace: "pre-wrap",
     wordBreak: "break-word",
   },
+  handoffs: { display: "flex", gap: tokens.spacingHorizontalS },
 });
 
-interface Diagnostics {
-  version: string;
-  os: string;
-  log: string;
+/** Coarse OS label from the user agent — no API needed. */
+function detectOs(): string {
+  if (typeof navigator === "undefined") return "";
+  const ua = navigator.userAgent;
+  if (/Windows/i.test(ua)) return "Windows";
+  if (/Mac OS X|Macintosh/i.test(ua)) return "macOS";
+  if (/Linux|X11|CrOS/i.test(ua)) return "Linux";
+  return "";
+}
+
+/** Open an external target (mail client / browser) — the same escape the
+ *  settings-menu GitHub link uses, so the webview never navigates itself. */
+function openExternal(url: string) {
+  window.open(url, "_blank", "noopener,noreferrer");
 }
 
 export function BugReport() {
@@ -90,10 +100,13 @@ export function BugReport() {
   const [where, setWhere] = useState("");
   const [what, setWhat] = useState("");
   const [includeLog, setIncludeLog] = useState(false);
-  const [diag, setDiag] = useState<Diagnostics | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [done, setDone] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
+  const [log, setLog] = useState("");
+  const [logLoaded, setLogLoaded] = useState(false);
+
+  // Version is injected at build time; OS is read client-side. Neither needs a
+  // server round-trip — only the optional shell.log excerpt does (desktop only).
+  const version = process.env.NEXT_PUBLIC_APP_VERSION || "";
+  const os = detectOs();
 
   // Openable from the settings menu ("Send feedback") without prop-drilling.
   useEffect(() => {
@@ -106,61 +119,41 @@ export function BugReport() {
     setWhere("");
     setWhat("");
     setIncludeLog(false);
-    setBusy(false);
-    setDone(false);
-    setErr(null);
+    setLog("");
+    setLogLoaded(false);
   }
 
-  // Fetch what-will-be-sent (version, OS, and the diagnostics excerpt) when the
-  // dialog opens, so the disclosure shows the truth before any Send.
-  async function loadDiagnostics() {
+  // Fetch the shell.log excerpt lazily — only if the user asks to include it.
+  // Read-only; the web build has no shell.log so this returns "".
+  async function loadLog() {
+    if (logLoaded) return;
     try {
-      const r = await fetch("/api/license", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ op: "diagnostics" }),
-      });
-      const d = (await r.json().catch(() => ({}))) as Partial<Diagnostics>;
-      setDiag({
-        version: typeof d.version === "string" ? d.version : "",
-        os: typeof d.os === "string" ? d.os : "",
-        log: typeof d.log === "string" ? d.log : "",
-      });
+      const r = await fetch("/api/diagnostics");
+      const d = (await r.json().catch(() => ({}))) as { log?: string };
+      setLog(typeof d.log === "string" ? d.log : "");
     } catch {
-      setDiag({ version: "", os: "", log: "" });
-    }
-  }
-
-  async function submit() {
-    setBusy(true);
-    setErr(null);
-    try {
-      const r = await fetch("/api/license", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ op: "bug", where, what, includeLog }),
-      });
-      const data = await r.json().catch(() => ({}));
-      if (data.ok) setDone(true);
-      else setErr("Couldn't send. Please try again.");
-    } catch {
-      setErr("Couldn't reach the server. Please try again.");
+      setLog("");
     } finally {
-      setBusy(false);
+      setLogLoaded(true);
     }
   }
 
-  const hasLog = Boolean(diag?.log && diag.log.trim());
+  const report = {
+    where,
+    what,
+    version,
+    os,
+    log: includeLog && log.trim() ? log : undefined,
+  };
+  const canSend = Boolean(what.trim());
+  const hasLog = includeLog && logLoaded && Boolean(log.trim());
 
   return (
     <Dialog
       open={open}
       onOpenChange={(_, d) => {
         setOpen(d.open);
-        if (d.open) {
-          reset();
-          void loadDiagnostics();
-        }
+        if (d.open) reset();
       }}
     >
       <DialogTrigger disableButtonEnhancement>
@@ -175,76 +168,71 @@ export function BugReport() {
       </DialogTrigger>
       <DialogSurface>
         <DialogBody>
-          <DialogTitle>{done ? "Thank you!" : "Send feedback"}</DialogTitle>
+          <DialogTitle>Send feedback</DialogTitle>
           <DialogContent>
-            {done ? (
-              <Text className={styles.thanks}>
-                Thanks for taking the time — it helps make Lighthouse better.
-              </Text>
-            ) : (
-              <div className={styles.fields}>
-                <Field label="Where in the app? (optional)">
-                  <Textarea value={where} onChange={(_, d) => setWhere(d.value)} />
-                </Field>
-                <Field label="What happened, or what would you change?" required>
-                  <Textarea value={what} onChange={(_, d) => setWhat(d.value)} />
-                </Field>
+            <div className={styles.fields}>
+              <Field label="Where in the app? (optional)">
+                <Textarea value={where} onChange={(_, d) => setWhere(d.value)} />
+              </Field>
+              <Field label="What happened, or what would you change?" required>
+                <Textarea value={what} onChange={(_, d) => setWhat(d.value)} />
+              </Field>
 
-                {/* Exactly what a Send transmits — shown before the button. */}
-                <div className={styles.disclose}>
-                  <Text className={styles.discloseHead}>What gets sent</Text>
-                  <Text className={styles.meta}>
-                    Your message above, plus Lighthouse {diag?.version || "(version)"} on{" "}
-                    {diag?.os || "(your OS)"}. Never your account, files, their names, or their
-                    contents.
-                  </Text>
-                  <Checkbox
-                    checked={includeLog}
-                    onChange={(_, d) => setIncludeLog(Boolean(d.checked))}
-                    label="Attach a recent diagnostics excerpt (shell.log) to help debugging"
-                  />
-                  {includeLog &&
-                    (hasLog ? (
-                      <pre className={styles.logBox} aria-label="Diagnostics excerpt to be sent">
-                        {diag?.log}
-                      </pre>
-                    ) : (
-                      <Text className={styles.meta}>
-                        No diagnostics are available on this platform — nothing extra will be
-                        attached.
-                      </Text>
-                    ))}
-                </div>
-
-                {err && <Text className={styles.error}>{err}</Text>}
+              {/* Exactly what a handoff carries — shown before either button. */}
+              <div className={styles.disclose}>
+                <Text className={styles.discloseHead}>What gets handed off</Text>
+                <Text className={styles.meta}>
+                  Your message above, plus Lighthouse {version || "(version)"} on {os || "(your OS)"}.
+                  Never your account, files, their names, or their contents. Lighthouse sends nothing
+                  itself — the buttons below open your mail app or browser for you to send.
+                </Text>
+                <Checkbox
+                  checked={includeLog}
+                  onChange={(_, d) => {
+                    const on = Boolean(d.checked);
+                    setIncludeLog(on);
+                    if (on) void loadLog();
+                  }}
+                  label="Attach a recent diagnostics excerpt (shell.log) to help debugging"
+                />
+                {includeLog &&
+                  (hasLog ? (
+                    <pre className={styles.logBox} aria-label="Diagnostics excerpt to be included">
+                      {log}
+                    </pre>
+                  ) : (
+                    <Text className={styles.meta}>
+                      {logLoaded
+                        ? "No diagnostics are available on this platform — nothing extra will be attached."
+                        : "Loading diagnostics…"}
+                    </Text>
+                  ))}
+                <Text className={styles.meta}>Note: GitHub issues are public.</Text>
               </div>
-            )}
+            </div>
           </DialogContent>
           <DialogActions>
-            {done ? (
-              <>
-                <Button appearance="secondary" onClick={reset}>
-                  Send another
-                </Button>
-                <Button appearance="primary" onClick={() => setOpen(false)}>
-                  Close
-                </Button>
-              </>
-            ) : (
-              <>
-                <DialogTrigger disableButtonEnhancement>
-                  <Button appearance="secondary">Cancel</Button>
-                </DialogTrigger>
-                <Button
-                  appearance="primary"
-                  disabled={busy || !what.trim()}
-                  icon={busy ? <Spinner size="tiny" /> : undefined}
-                  onClick={() => void submit()}
-                >
-                  {busy ? "Sending…" : "Send"}
-                </Button>
-              </>
-            )}
+            <DialogTrigger disableButtonEnhancement>
+              <Button appearance="secondary">Close</Button>
+            </DialogTrigger>
+            <div className={styles.handoffs}>
+              <Button
+                appearance="secondary"
+                icon={<OpenRegular />}
+                disabled={!canSend}
+                onClick={() => openExternal(buildFeedbackIssueUrl(report))}
+              >
+                Open a GitHub issue
+              </Button>
+              <Button
+                appearance="primary"
+                icon={<MailRegular />}
+                disabled={!canSend}
+                onClick={() => openExternal(buildFeedbackMailto(report))}
+              >
+                Email us
+              </Button>
+            </div>
           </DialogActions>
         </DialogBody>
       </DialogSurface>

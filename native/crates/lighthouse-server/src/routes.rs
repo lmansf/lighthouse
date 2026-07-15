@@ -632,6 +632,18 @@ pub async fn profile_post(headers: HeaderMap, body: Option<Json<Value>>) -> Resp
 
 // --- /api/license -------------------------------------------------------------
 
+/// Diagnostics for the "Send feedback" dialog. The headless/web build has no
+/// desktop shell.log, so the excerpt is always empty; version + OS mirror what
+/// the dialog shows. Read-only — the app transmits nothing of its own.
+pub async fn diagnostics_get() -> Response {
+    Json(json!({
+        "version": lighthouse_core::config::app_version(),
+        "os": std::env::consts::OS,
+        "log": "",
+    }))
+    .into_response()
+}
+
 pub async fn license_post(headers: HeaderMap, body: Option<Json<Value>>) -> Response {
     if !is_same_origin(&headers) {
         return forbidden();

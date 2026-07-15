@@ -202,6 +202,8 @@ async function route(
     }
     case "/api/profile":
       return method === "GET" ? call("profile_get") : call("profile_op", { body });
+    case "/api/diagnostics":
+      return call("diagnostics");
     case "/api/license":
       return call("license_op", { body });
     case "/api/connect":

@@ -41,5 +41,6 @@ pub fn app() -> Router {
             "/api/settings",
             get(routes::settings_get).post(routes::settings_post),
         )
+        .route("/api/diagnostics", get(routes::diagnostics_get))
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024))
 }

@@ -1096,6 +1096,7 @@ fn main() {
             commands::reveal_node,
             commands::settings_get,
             commands::settings_set,
+            commands::diagnostics,
             commands::add_paths,
             commands::pick_link_paths,
             commands::register_config,

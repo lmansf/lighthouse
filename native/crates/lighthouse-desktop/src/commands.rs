@@ -701,6 +701,18 @@ pub async fn license_op(app: AppHandle, body: Value) -> Result<Value, String> {
     }
 }
 
+/// Diagnostics for the "Send feedback" dialog: app version, OS, and — only when
+/// the user opts in — a shell.log excerpt. Read-only; the app transmits none of
+/// it. The dialog composes a mailto:/GitHub-issue the user sends themselves.
+#[tauri::command]
+pub async fn diagnostics(app: AppHandle) -> Result<Value, String> {
+    Ok(json!({
+        "version": lighthouse_core::config::app_version(),
+        "os": std::env::consts::OS,
+        "log": shell_log_excerpt(&app),
+    }))
+}
+
 #[tauri::command]
 pub async fn connect_op(body: Value) -> Result<Value, String> {
     let status_payload = || {
