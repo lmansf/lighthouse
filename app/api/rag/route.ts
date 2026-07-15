@@ -4,6 +4,7 @@ import {
   listSources,
   listNodes,
   setIncluded,
+  setLocalOnly,
   setSourceAvailable,
   retrieve,
   moveNode,
@@ -54,6 +55,15 @@ export async function POST(req: Request) {
         return NextResponse.json({ error: "nodeId and included required" }, { status: 400 });
       }
       await setIncluded(body.nodeId, body.included);
+      return NextResponse.json({ ok: true });
+
+    // "Private — this device only": a per-node mark the engine enforces by
+    // withholding the node from anything a cloud provider would receive.
+    case "localOnly":
+      if (typeof body.nodeId !== "string" || typeof body.localOnly !== "boolean") {
+        return NextResponse.json({ error: "nodeId and localOnly required" }, { status: 400 });
+      }
+      await setLocalOnly(body.nodeId, body.localOnly);
       return NextResponse.json({ ok: true });
 
     case "source":

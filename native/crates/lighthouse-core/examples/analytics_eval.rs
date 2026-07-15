@@ -164,7 +164,7 @@ async fn main() {
             "  (no LIGHTHOUSE_EVAL_PROVIDER set — model-free floor above is authoritative)"
         ),
         Some(cfg) => {
-            let regs = register_tables(&ctx, &files).await;
+            let regs = register_tables(&ctx, &files, false).await;
             let sql_ctxs: Vec<Ctx> = regs
                 .iter()
                 .map(|r| Ctx {

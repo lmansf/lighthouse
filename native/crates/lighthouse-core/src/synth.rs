@@ -296,6 +296,28 @@ fn origin_of(cfg: &ModelCfg) -> String {
     }
 }
 
+/// Whether a CLOUD provider is active — the single predicate that arms
+/// local-only enforcement. A keyed remote vendor is cloud; the on-device model
+/// and the model-free/extractive fallback are not (`origin == "device"`). Note
+/// this is keyed on provider IDENTITY, not on whether a key is present: a
+/// selected-but-keyless cloud provider still counts as cloud, so local-only
+/// marks fail CLOSED toward privacy even before a key is entered. Reused by the
+/// pipeline and the `suggestedAsks` op. KEEP IN SYNC with synth.ts::isCloudProvider.
+pub fn is_cloud_provider(cfg: &ModelCfg) -> bool {
+    origin_of(cfg) != "device"
+}
+
+/// The honest skip note appended to a CLOUD answer that dropped `n ≥ 1` files
+/// solely because they are marked local-only. Engine-emitted, never model-
+/// generated; byte-identical to synth.ts::localOnlySkipNote (per docs/ts-twin.md
+/// rule 2). Mirrors the shape of the named-but-excluded note.
+pub fn local_only_skip_note(n: usize) -> String {
+    let (files, them) = if n == 1 { ("file", "it") } else { ("files", "them") };
+    format!(
+        "_({n} {files} skipped — marked private (this device only), so the AI can't send {them} to a cloud model. Switch to the private model to include {them}.)_\n\n"
+    )
+}
+
 fn progress(label: String, step: usize, total: usize) -> ChatChunk {
     ChatChunk {
         delta: String::new(),
@@ -435,6 +457,10 @@ pub fn answer_pipeline(
         // active provider (agrees with the audit record's `provider`). Every
         // branch's final chunk carries it; it is never derived from model text.
         let origin = origin_of(&cfg);
+        // Local-only enforcement is armed only for a CLOUD provider. On the
+        // device path this is false everywhere below, so the shareable gate is a
+        // no-op and on-device answers are byte-identical to today.
+        let is_cloud = is_cloud_provider(&cfg);
 
         // Blend the previous user turn into retrieval so bare follow-ups anchor
         // to the topic (identical to the TS pipeline).
@@ -445,7 +471,7 @@ pub fn answer_pipeline(
         };
 
         let initial =
-            sources::retrieve(&retrieval_query, &included_file_ids, &attachment_file_ids, 5).await;
+            sources::retrieve(&retrieval_query, &included_file_ids, &attachment_file_ids, 5, is_cloud).await;
 
         // Instant acknowledgment: local models take seconds to a first token,
         // but retrieval lands in milliseconds — naming the sources NOW makes
@@ -489,6 +515,28 @@ pub fn answer_pipeline(
             }
         }
 
+        // Honesty note (deterministic, engine text): a CLOUD answer is about to
+        // drop one or more files SOLELY because they are marked local-only —
+        // say so plainly instead of silently omitting them. Counts the files a
+        // cloud model can't be shown: attachment-scoped asks count the dropped
+        // attachments; otherwise the effectively-local-only members of the
+        // active-included set. Inert on the device path (`is_cloud` false ⇒ 0).
+        if is_cloud {
+            let scope: Vec<String> = if attachment_file_ids.is_empty() {
+                vault::active_included_file_ids()
+            } else {
+                attachment_file_ids.clone()
+            };
+            let dropped = tokio::task::spawn_blocking(move || {
+                vault::local_only_subset(&scope, true).len()
+            })
+            .await
+            .unwrap_or_default();
+            if dropped > 0 {
+                yield delta(local_only_skip_note(dropped));
+            }
+        }
+
         // --- Vault meta-answers (openspec: add-vault-meta-answers): anchored
         //     questions ABOUT the vault (recency, inventory, column
         //     membership) answer instantly from walk metadata + the column
@@ -499,7 +547,7 @@ pub fn answer_pipeline(
             if let Some(intent) = crate::meta::meta_intent(&question) {
                 let ids = included_file_ids.clone();
                 let rendered = tokio::task::spawn_blocking(move || {
-                    crate::meta::render_meta(&intent, &ids, crate::config::now_ms())
+                    crate::meta::render_meta(&intent, &ids, crate::config::now_ms(), is_cloud)
                 })
                 .await
                 .ok()
@@ -519,11 +567,14 @@ pub fn answer_pipeline(
         //     narrates the verified result. Any failure falls through silently
         //     to the paths below — analytics can only add capability. ---
         if has_real_model(&cfg) && crate::analytics::analytics_cue(&question) {
+            // Shareable candidate gather: on the cloud path both branches drop
+            // effectively-local-only ids, so a private table's schema card
+            // (column names + sample rows) is never built for a vendor prompt.
             let candidate_ids: Vec<String> = if !attachment_file_ids.is_empty() {
-                attachment_file_ids.clone()
+                vault::shareable_subset(&attachment_file_ids, is_cloud)
             } else {
                 let active: std::collections::HashSet<String> =
-                    vault::active_included_file_ids().into_iter().collect();
+                    vault::shareable_file_ids(is_cloud).into_iter().collect();
                 included_file_ids
                     .iter()
                     .filter(|id| active.contains(*id))
@@ -549,7 +600,7 @@ pub fn answer_pipeline(
             if !files.is_empty() {
                 yield progress("Reading table schemas…".to_string(), 1, 4);
                 let ctx = datafusion::prelude::SessionContext::new();
-                let regs = crate::analytics::register_tables(&ctx, &files).await;
+                let regs = crate::analytics::register_tables(&ctx, &files, is_cloud).await;
                 if !regs.is_empty() {
                     let mut sql_ctxs: Vec<Ctx> = regs
                         .iter()
@@ -858,17 +909,20 @@ pub fn answer_pipeline(
         let mut docs: Vec<DocCandidate> = Vec::new();
         if has_real_model(&cfg) {
             if attachment_file_ids.len() >= MIN_MAP_DOCS {
-                docs = attachment_file_ids
+                // Multi-attach IS the cross-document gesture — but a marked
+                // attachment can't ride to a cloud model. Filter this bypasser
+                // at its own choke point before any doc_text read below.
+                docs = vault::shareable_subset(&attachment_file_ids, is_cloud)
                     .iter()
                     .take(MAX_MAP_DOCS)
                     .map(|id| DocCandidate { id: id.clone(), name: String::new(), score: ASSUMED_DOC_SCORE })
                     .collect();
             } else if attachment_file_ids.is_empty() && cross_doc_cue(&question) {
                 let wide =
-                    sources::retrieve(&retrieval_query, &included_file_ids, &[], WIDE_K).await;
+                    sources::retrieve(&retrieval_query, &included_file_ids, &[], WIDE_K, is_cloud).await;
                 docs = rank_docs_from_hits(&wide.references, MAX_MAP_DOCS);
                 let active: std::collections::HashSet<String> =
-                    vault::active_included_file_ids().into_iter().collect();
+                    vault::shareable_file_ids(is_cloud).into_iter().collect();
                 let in_scope: Vec<&String> =
                     included_file_ids.iter().filter(|id| active.contains(*id)).collect();
                 if in_scope.len() <= MAX_MAP_DOCS {
@@ -907,12 +961,15 @@ pub fn answer_pipeline(
                 let Some((_, preview_text)) = preview else { continue };
 
                 // This document's best chunks via the attachment-scoping path.
+                // doc.id is already shareable (filtered above), so is_cloud here
+                // only re-affirms the guarantee.
                 let per_doc = vault::retrieve(
                     &retrieval_query,
                     &[],
                     PER_DOC_CHUNKS,
                     &[],
                     std::slice::from_ref(&doc.id),
+                    is_cloud,
                 );
                 let mut ctxs: Vec<Ctx> = if per_doc.contexts.is_empty() {
                     vec![Ctx { name: name.clone(), text: preview_text.clone(), score: 1.0 }]
@@ -1015,12 +1072,21 @@ pub fn answer_pipeline(
         //     or guarded by the cue); tabular files stay on the
         //     analytics/table-profile paths. ---
         if has_real_model(&cfg) && attachment_file_ids.len() <= 1 && !cross_doc_cue(&question) {
+            // Doc-focus reads the WHOLE target file into the prompt, so both of
+            // its bypasser entrypoints are filtered here at their own choke
+            // point: a lone local-only attachment is dropped, and named-file
+            // lookup runs over the shareable set only (a marked file can't be
+            // "named" into a cloud prompt). dominant_doc is safe already —
+            // initial.references are shareable.
             let target: Option<(String, String)> = if attachment_file_ids.len() == 1 {
-                Some((attachment_file_ids[0].clone(), String::new()))
+                vault::shareable_subset(&attachment_file_ids, is_cloud)
+                    .into_iter()
+                    .next()
+                    .map(|id| (id, String::new()))
             } else {
                 let named = tokio::task::spawn_blocking({
                     let q = question.clone();
-                    let ids = included_file_ids.clone();
+                    let ids = vault::shareable_subset(&included_file_ids, is_cloud);
                     move || vault::named_file_target(&q, &ids)
                 })
                 .await

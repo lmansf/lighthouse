@@ -45,6 +45,11 @@ pub struct FileNode {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub size: Option<u64>,
     pub rag_included: bool,
+    /// Effective "Private — this device only" state (ancestor-wins), so the
+    /// explorer can render the lock without re-resolving. Default false keeps
+    /// old snapshots / cloud connectors that omit it unmarked.
+    #[serde(default)]
+    pub local_only: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub external: Option<bool>,
 }

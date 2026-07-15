@@ -130,7 +130,7 @@ impl Agg {
 
 /// 1-based rank of the expected file among the returned references.
 fn rank_of(query: &str, ids: &[String], expect: &str) -> Option<usize> {
-    let r = vault::retrieve(query, ids, K, &[], &[]);
+    let r = vault::retrieve(query, ids, K, &[], &[], false);
     r.references
         .iter()
         .position(|reference| reference.name == expect)

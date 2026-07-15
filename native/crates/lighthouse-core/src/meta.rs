@@ -244,8 +244,11 @@ pub struct MetaAnswer {
 /// Included **and available** files with mtimes, newest first. The inclusion
 /// set is intersected with the engine's active walk exactly like the
 /// analytics branch, so a stale client id can't resurrect an excluded file.
-fn included_files_with_mtime(included: &[String]) -> Vec<(String, String, PathBuf, i64)> {
-    let active: HashSet<String> = vault::active_included_file_ids().into_iter().collect();
+fn included_files_with_mtime(included: &[String], is_cloud: bool) -> Vec<(String, String, PathBuf, i64)> {
+    // On the cloud path this is the SHAREABLE set (active-included minus
+    // effectively-local-only), so a marked file's name/columns never surface in
+    // a catalog/metadata answer; on the device path it is unchanged.
+    let active: HashSet<String> = vault::shareable_file_ids(is_cloud).into_iter().collect();
     let mut out: Vec<(String, String, PathBuf, i64)> = Vec::new();
     for id in included {
         if !active.contains(id) {
@@ -295,8 +298,8 @@ fn reference(id: &str, name: &str, snippet: String, rank: usize) -> RagReference
     }
 }
 
-fn whats_new(included: &[String], window_ms: Option<i64>, now_ms: i64) -> Result<MetaAnswer, String> {
-    let files = included_files_with_mtime(included);
+fn whats_new(included: &[String], window_ms: Option<i64>, now_ms: i64, is_cloud: bool) -> Result<MetaAnswer, String> {
+    let files = included_files_with_mtime(included, is_cloud);
     if files.is_empty() {
         return Err("no included files".into());
     }
@@ -344,8 +347,8 @@ fn whats_new(included: &[String], window_ms: Option<i64>, now_ms: i64) -> Result
     Ok(MetaAnswer { markdown: lines.join("\n"), references })
 }
 
-fn list_files(included: &[String], kind: Option<KindFilter>, now_ms: i64) -> Result<MetaAnswer, String> {
-    let files = included_files_with_mtime(included);
+fn list_files(included: &[String], kind: Option<KindFilter>, now_ms: i64, is_cloud: bool) -> Result<MetaAnswer, String> {
+    let files = included_files_with_mtime(included, is_cloud);
     if files.is_empty() {
         return Err("no included files".into());
     }
@@ -421,12 +424,12 @@ fn count_line(files: &[(String, String, PathBuf, i64)]) -> String {
         .join(", ")
 }
 
-fn find_column(included: &[String], raw_name: &str) -> Result<MetaAnswer, String> {
+fn find_column(included: &[String], raw_name: &str, is_cloud: bool) -> Result<MetaAnswer, String> {
     let want = sanitize_table_name(raw_name);
     if want.is_empty() || want == "table" {
         return Err("unusable column name".into());
     }
-    let tabular: Vec<(String, String, PathBuf)> = included_files_with_mtime(included)
+    let tabular: Vec<(String, String, PathBuf)> = included_files_with_mtime(included, is_cloud)
         .into_iter()
         .filter(|(_, name, _, _)| is_tabular(name))
         .map(|(id, name, abs, _)| (id, name, abs))
@@ -485,11 +488,11 @@ fn find_column(included: &[String], raw_name: &str) -> Result<MetaAnswer, String
 
 /// Dispatch an intent to its renderer. `Err` = fall through to the normal
 /// pipeline (the caller MUST emit nothing on Err — no partial meta output).
-pub fn render_meta(intent: &MetaIntent, included: &[String], now_ms: i64) -> Result<MetaAnswer, String> {
+pub fn render_meta(intent: &MetaIntent, included: &[String], now_ms: i64, is_cloud: bool) -> Result<MetaAnswer, String> {
     match intent {
-        MetaIntent::WhatsNew { window_ms } => whats_new(included, *window_ms, now_ms),
-        MetaIntent::ListFiles { kind } => list_files(included, *kind, now_ms),
-        MetaIntent::FindColumn { name } => find_column(included, name),
+        MetaIntent::WhatsNew { window_ms } => whats_new(included, *window_ms, now_ms, is_cloud),
+        MetaIntent::ListFiles { kind } => list_files(included, *kind, now_ms, is_cloud),
+        MetaIntent::FindColumn { name } => find_column(included, name, is_cloud),
     }
 }
 
@@ -508,8 +511,8 @@ pub struct SuggestedAsk {
 /// suggestion names real columns of a real included file, phrased like the
 /// analytics few-shot idioms. Empty when nothing tabular is included — the
 /// chat keeps its static empty-state hint.
-pub fn suggested_asks(included: &[String]) -> Vec<SuggestedAsk> {
-    let recent: Vec<(String, String, PathBuf)> = included_files_with_mtime(included)
+pub fn suggested_asks(included: &[String], is_cloud: bool) -> Vec<SuggestedAsk> {
+    let recent: Vec<(String, String, PathBuf)> = included_files_with_mtime(included, is_cloud)
         .into_iter()
         .filter(|(_, name, _, _)| is_tabular(name))
         .take(SUGGEST_FILES)
@@ -640,9 +643,9 @@ mod tests {
         // The synth stage treats Err as "not a meta answer" and emits nothing;
         // an empty inclusion set must therefore be an Err, not a sad answer.
         let now = 1_700_000_000_000;
-        assert!(whats_new(&[], None, now).is_err());
-        assert!(list_files(&[], None, now).is_err());
+        assert!(whats_new(&[], None, now, false).is_err());
+        assert!(list_files(&[], None, now, false).is_err());
         // FindColumn with an unusable (sanitizes-to-nothing) name also errs.
-        assert!(find_column(&[], "??").is_err());
+        assert!(find_column(&[], "??", false).is_err());
     }
 }

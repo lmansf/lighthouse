@@ -35,6 +35,14 @@ pub struct VaultState {
     /// Explicit inclusion overrides keyed by node id; absent ⇒ default.
     #[serde(default)]
     pub included: HashMap<String, bool>,
+    /// Explicit "Private — this device only" marks keyed by node id; absent ⇒
+    /// not local-only. Ancestor-wins (see `is_effectively_local_only`). Like
+    /// `included`, `#[serde(default)]` makes this additively migration-safe: an
+    /// old `state.json` with no `localOnly` key loads as an empty map (nothing
+    /// marked). state.json is intentionally UN-versioned — the serde-default
+    /// tolerance IS the migration story. KEEP IN SYNC with vault.ts.
+    #[serde(default)]
+    pub local_only: HashMap<String, bool>,
     /// External references keyed by a synthetic node-id prefix (e.g. "ext0").
     #[serde(default)]
     pub references: HashMap<String, Reference>,
@@ -49,6 +57,7 @@ impl Default for VaultState {
         VaultState {
             source_available: true,
             included: HashMap::new(),
+            local_only: HashMap::new(),
             references: HashMap::new(),
         }
     }
@@ -242,6 +251,29 @@ fn is_effectively_included(id: &str, state: &VaultState, default_in: bool) -> bo
     }
 }
 
+/// Effective "Private — this device only" state. ANCESTOR-WINS: a node is
+/// local-only when it OR any ancestor carries an explicit `true`. Absence means
+/// not local-only (the safe default for the extractive/local path, where the
+/// mark is inert). Mirrors the ancestor walk in `is_effectively_included`, but
+/// there is no default flip — a `true` anywhere up the chain wins, and a child's
+/// own `false` cannot override a marked ancestor (the safe, privacy-preserving
+/// direction). KEEP IN SYNC with vault.ts::isEffectivelyLocalOnly.
+pub fn is_effectively_local_only(id: &str, state: &VaultState) -> bool {
+    let parts: Vec<&str> = id.split('/').collect();
+    let mut prefix = String::new();
+    for part in &parts[..parts.len().saturating_sub(1)] {
+        if prefix.is_empty() {
+            prefix = (*part).to_string();
+        } else {
+            prefix = format!("{prefix}/{part}");
+        }
+        if state.local_only.get(&prefix) == Some(&true) {
+            return true; // an ancestor folder is marked local-only
+        }
+    }
+    state.local_only.get(id) == Some(&true)
+}
+
 /// Extensions read directly as UTF-8 text (rich binary formats go via extract).
 const TEXT_EXT: &[&str] = &[
     ".md",
@@ -385,6 +417,7 @@ fn walk_uncached(root: &Path) -> Vec<FileNode> {
                     mime_type: None,
                     size: None,
                     rag_included: is_effectively_included(&id, state, default_in),
+                    local_only: is_effectively_local_only(&id, state),
                     external: None,
                 });
                 recurse(out, state, default_in, root, &abs, Some(&id));
@@ -399,6 +432,7 @@ fn walk_uncached(root: &Path) -> Vec<FileNode> {
                     mime_type: mime_of(&name),
                     size,
                     rag_included: is_effectively_included(&id, state, default_in),
+                    local_only: is_effectively_local_only(&id, state),
                     external: None,
                 });
             }
@@ -424,6 +458,7 @@ fn walk_uncached(root: &Path) -> Vec<FileNode> {
                 mime_type: mime_of(&reference.name),
                 size,
                 rag_included: is_effectively_included(ref_id, &state, default_in),
+                local_only: is_effectively_local_only(ref_id, &state),
                 external: Some(true),
             });
             continue;
@@ -437,6 +472,7 @@ fn walk_uncached(root: &Path) -> Vec<FileNode> {
             mime_type: None,
             size: None,
             rag_included: is_effectively_included(ref_id, &state, default_in),
+            local_only: is_effectively_local_only(ref_id, &state),
             external: Some(true),
         });
         if !exists {
@@ -474,6 +510,7 @@ fn walk_uncached(root: &Path) -> Vec<FileNode> {
                         mime_type: None,
                         size: None,
                         rag_included: is_effectively_included(&id, state, default_in),
+                        local_only: is_effectively_local_only(&id, state),
                         external: Some(true),
                     });
                     recurse_ext(out, state, default_in, ref_root, ref_id, &abs, &id);
@@ -488,6 +525,7 @@ fn walk_uncached(root: &Path) -> Vec<FileNode> {
                         mime_type: mime_of(&name),
                         size,
                         rag_included: is_effectively_included(&id, state, default_in),
+                        local_only: is_effectively_local_only(&id, state),
                         external: Some(true),
                     });
                 }
@@ -540,6 +578,19 @@ pub fn set_included(node_id: &str, value: bool) {
     save_state(&state);
 }
 
+/// Mark/unmark a node "Private — this device only". Writes ONLY the target's
+/// own flag — NO descendant cascade (contrast `set_included` above, which does
+/// cascade): `is_effectively_local_only`'s ancestor-walk already privatizes the
+/// whole subtree by resolution, so cascading writes would be redundant and would
+/// wrongly stamp children that should stay independently unmarked. Setting a
+/// child `false` beneath a marked ancestor is inert (ancestor wins).
+/// KEEP IN SYNC with vault.ts::setLocalOnly.
+pub fn set_local_only(node_id: &str, value: bool) {
+    let mut state = load_state();
+    state.local_only.insert(node_id.to_string(), value);
+    save_state(&state);
+}
+
 pub fn set_source_available(available: bool) {
     let mut state = load_state();
     state.source_available = available;
@@ -570,21 +621,30 @@ pub fn move_node(from_id: &str, to_parent_id: Option<&str>) -> anyhow::Result<St
     }
     fs::rename(&from_abs, &to_abs)?;
 
-    // Remap the node and every descendant's inclusion flag onto the new prefix.
+    // Remap the node and every descendant's inclusion + local-only flags onto
+    // the new prefix (both maps move together — see rename_node).
     let mut state = load_state();
+    state.included = remap_prefix(&state.included, from_id, &new_id);
+    state.local_only = remap_prefix(&state.local_only, from_id, &new_id);
+    save_state(&state);
+    Ok(new_id)
+}
+
+/// Remap a per-node flag map onto a new id prefix (the node itself and every
+/// `{old}/…` descendant), leaving unrelated keys untouched. Shared by move and
+/// rename so the `included` and `local_only` maps stay migrated in lockstep.
+fn remap_prefix(map: &HashMap<String, bool>, old_id: &str, new_id: &str) -> HashMap<String, bool> {
     let mut next: HashMap<String, bool> = HashMap::new();
-    for (k, v) in &state.included {
-        if k == from_id {
-            next.insert(new_id.clone(), *v);
-        } else if k.starts_with(&format!("{from_id}/")) {
-            next.insert(format!("{new_id}{}", &k[from_id.len()..]), *v);
+    for (k, v) in map {
+        if k == old_id {
+            next.insert(new_id.to_string(), *v);
+        } else if k.starts_with(&format!("{old_id}/")) {
+            next.insert(format!("{new_id}{}", &k[old_id.len()..]), *v);
         } else {
             next.insert(k.clone(), *v);
         }
     }
-    state.included = next;
-    save_state(&state);
-    Ok(new_id)
+    next
 }
 
 /// Rename a node in place (same parent, new basename), carrying its inclusion
@@ -614,19 +674,11 @@ pub fn rename_node(id: &str, new_name: &str) -> anyhow::Result<String> {
         anyhow::bail!("destination already exists");
     }
     fs::rename(&from_abs, &to_abs)?;
-    // Remap the node and every descendant's inclusion flag (same as move_node).
+    // Remap the node and every descendant's inclusion + local-only flags (same
+    // as move_node).
     let mut state = load_state();
-    let mut next: HashMap<String, bool> = HashMap::new();
-    for (k, v) in &state.included {
-        if k == id {
-            next.insert(new_id.clone(), *v);
-        } else if k.starts_with(&format!("{id}/")) {
-            next.insert(format!("{new_id}{}", &k[id.len()..]), *v);
-        } else {
-            next.insert(k.clone(), *v);
-        }
-    }
-    state.included = next;
+    state.included = remap_prefix(&state.included, id, &new_id);
+    state.local_only = remap_prefix(&state.local_only, id, &new_id);
     save_state(&state);
     Ok(new_id)
 }
@@ -930,15 +982,17 @@ pub fn add_reference(input_path: &str) -> anyhow::Result<(String, String)> {
     Ok((id, kind.to_string()))
 }
 
-/// Collect + drop the inclusion flags for a node and its subtree, returning the
-/// removed (id → included) pairs so a later restore can put them back exactly.
-fn take_included_subtree(
-    state: &mut VaultState,
+/// Collect + drop a per-node flag map's entries for a node and its subtree,
+/// returning the removed (id → bool) pairs so a later restore can put them back
+/// exactly. Used for BOTH `included` and `local_only` so a removal round-trips
+/// every per-node flag, not just inclusion.
+fn take_flag_subtree(
+    map: &mut HashMap<String, bool>,
     node_id: &str,
 ) -> serde_json::Map<String, serde_json::Value> {
     let prefix = format!("{node_id}/");
     let mut taken = serde_json::Map::new();
-    state.included.retain(|k, v| {
+    map.retain(|k, v| {
         if k.as_str() == node_id || k.starts_with(prefix.as_str()) {
             taken.insert(k.clone(), serde_json::Value::Bool(*v));
             false
@@ -949,11 +1003,11 @@ fn take_included_subtree(
     taken
 }
 
-/// Re-apply an (id → included) map captured by `take_included_subtree`.
-fn restore_included(state: &mut VaultState, included: &serde_json::Map<String, serde_json::Value>) {
-    for (k, v) in included {
+/// Re-apply an (id → bool) map captured by `take_flag_subtree`.
+fn restore_flags(map: &mut HashMap<String, bool>, flags: &serde_json::Map<String, serde_json::Value>) {
+    for (k, v) in flags {
         if let Some(b) = v.as_bool() {
-            state.included.insert(k.clone(), b);
+            map.insert(k.clone(), b);
         }
     }
 }
@@ -973,25 +1027,29 @@ pub fn remove_from_vault(node_id: &str) -> anyhow::Result<serde_json::Value> {
             .get(node_id)
             .map(|r| r.path.clone())
             .unwrap_or_default();
-        let included = take_included_subtree(&mut state, node_id);
+        let included = take_flag_subtree(&mut state.included, node_id);
+        let local_only = take_flag_subtree(&mut state.local_only, node_id);
         state.references.remove(node_id);
         save_state(&state);
         return Ok(
-            serde_json::json!({ "kind": "unlink", "root": node_id, "path": path, "included": included }),
+            serde_json::json!({ "kind": "unlink", "root": node_id, "path": path, "included": included, "localOnly": local_only }),
         );
     }
     // A node *inside* a linked folder: scope the removal to just this node's
-    // subtree by dropping its inclusion flags; the link itself stays intact.
+    // subtree by dropping its inclusion + local-only flags; the link itself
+    // stays intact.
     if ref_id.is_some() {
-        let included = take_included_subtree(&mut state, node_id);
+        let included = take_flag_subtree(&mut state.included, node_id);
+        let local_only = take_flag_subtree(&mut state.local_only, node_id);
         save_state(&state);
-        return Ok(serde_json::json!({ "kind": "flags", "included": included }));
+        return Ok(serde_json::json!({ "kind": "flags", "included": included, "localOnly": local_only }));
     }
     let abs = safe_abs(node_id)?; // refuses to escape the vault
     if abs == vault_dir() {
         anyhow::bail!("cannot remove the vault root");
     }
-    let included = take_included_subtree(&mut state, node_id);
+    let included = take_flag_subtree(&mut state.included, node_id);
+    let local_only = take_flag_subtree(&mut state.local_only, node_id);
     if fs::metadata(&abs).is_ok() {
         let trash_dir = state_dir().join("trash").join(utc_day());
         fs::create_dir_all(&trash_dir)?;
@@ -1012,11 +1070,12 @@ pub fn remove_from_vault(node_id: &str) -> anyhow::Result<serde_json::Value> {
             "id": node_id,
             "trashPath": dest.to_string_lossy(),
             "included": included,
+            "localOnly": local_only,
         }));
     }
     // Nothing on disk to move (already gone) — only flags were dropped.
     save_state(&state);
-    Ok(serde_json::json!({ "kind": "flags", "included": included }))
+    Ok(serde_json::json!({ "kind": "flags", "included": included, "localOnly": local_only }))
 }
 
 /// Reverse a `remove_from_vault` using the descriptor it returned. Non-
@@ -1029,6 +1088,14 @@ pub fn restore_from_vault(desc: &serde_json::Value) -> anyhow::Result<serde_json
         .and_then(|v| v.as_object())
         .cloned()
         .unwrap_or_default();
+    // Older descriptors (removed before this change) carry no localOnly key —
+    // absent ⇒ nothing to restore, the same serde-default tolerance state.json
+    // itself relies on.
+    let local_only = desc
+        .get("localOnly")
+        .and_then(|v| v.as_object())
+        .cloned()
+        .unwrap_or_default();
     match desc.get("kind").and_then(|v| v.as_str()) {
         Some("unlink") => {
             let path = desc.get("path").and_then(|v| v.as_str()).unwrap_or_default();
@@ -1036,20 +1103,28 @@ pub fn restore_from_vault(desc: &serde_json::Value) -> anyhow::Result<serde_json
                 anyhow::bail!("nothing to restore");
             }
             // Re-link the same real path; it may receive a fresh extN id, so
-            // remap the saved flags from the old root prefix onto the new one.
+            // remap the saved flags (both maps) from the old root prefix onto
+            // the new one.
             let old_root = desc.get("root").and_then(|v| v.as_str()).unwrap_or_default();
             let (new_root, _kind) = add_reference(path)?;
             let mut state = load_state();
+            let remap = |k: &str| -> String {
+                if k == old_root {
+                    new_root.clone()
+                } else if let Some(rest) = k.strip_prefix(&format!("{old_root}/")) {
+                    format!("{new_root}/{rest}")
+                } else {
+                    k.to_string()
+                }
+            };
             for (k, v) in &included {
                 if let Some(b) = v.as_bool() {
-                    let new_key = if k.as_str() == old_root {
-                        new_root.clone()
-                    } else if let Some(rest) = k.strip_prefix(&format!("{old_root}/")) {
-                        format!("{new_root}/{rest}")
-                    } else {
-                        k.clone()
-                    };
-                    state.included.insert(new_key, b);
+                    state.included.insert(remap(k), b);
+                }
+            }
+            for (k, v) in &local_only {
+                if let Some(b) = v.as_bool() {
+                    state.local_only.insert(remap(k), b);
                 }
             }
             save_state(&state);
@@ -1057,7 +1132,8 @@ pub fn restore_from_vault(desc: &serde_json::Value) -> anyhow::Result<serde_json
         }
         Some("flags") => {
             let mut state = load_state();
-            restore_included(&mut state, &included);
+            restore_flags(&mut state.included, &included);
+            restore_flags(&mut state.local_only, &local_only);
             save_state(&state);
             Ok(serde_json::json!({ "ok": true }))
         }
@@ -1079,7 +1155,8 @@ pub fn restore_from_vault(desc: &serde_json::Value) -> anyhow::Result<serde_json
             }
             fs::rename(trash_path, &abs)?;
             let mut state = load_state();
-            restore_included(&mut state, &included);
+            restore_flags(&mut state.included, &included);
+            restore_flags(&mut state.local_only, &local_only);
             save_state(&state);
             Ok(serde_json::json!({ "id": id }))
         }
@@ -1093,9 +1170,13 @@ pub fn remove_reference(ref_id: &str) {
     if state.references.remove(ref_id).is_none() {
         return;
     }
+    let prefix = format!("{ref_id}/");
     state
         .included
-        .retain(|k, _| k != ref_id && !k.starts_with(&format!("{ref_id}/")));
+        .retain(|k, _| k != ref_id && !k.starts_with(&prefix));
+    state
+        .local_only
+        .retain(|k, _| k != ref_id && !k.starts_with(&prefix));
     save_state(&state);
 }
 
@@ -1112,6 +1193,65 @@ pub fn active_included_file_ids() -> Vec<String> {
         .filter(|n| n.kind == NodeKind::File && is_effectively_included(&n.id, &state, default_in))
         .map(|n| n.id.clone())
         .collect()
+}
+
+/// The SHAREABLE set — the master gate for anything a provider could receive.
+/// On the local/extractive path (`is_cloud == false`) it equals
+/// `active_included_file_ids()`: local-only marks are INERT, so on-device
+/// answers are byte-identical to today. When a CLOUD provider is active it is
+/// the active-included set MINUS every effectively-local-only id. Retrieval,
+/// the analytics candidate gather, doc-focus, cross-doc, and meta/catalog
+/// answers all start here, so routing them through this one function keeps a
+/// marked file's content off the cloud path in a single move.
+/// KEEP IN SYNC with vault.ts::shareableFileIds.
+pub fn shareable_file_ids(is_cloud: bool) -> Vec<String> {
+    let ids = active_included_file_ids();
+    if !is_cloud {
+        return ids;
+    }
+    let state = load_state();
+    ids.into_iter()
+        .filter(|id| !is_effectively_local_only(id, &state))
+        .collect()
+}
+
+/// Drop effectively-local-only ids from `ids` when a cloud provider is active;
+/// pass `ids` through unchanged on the device path. The reusable filter the two
+/// gate-BYPASSERS (attachments, doc-focus) apply at their own choke points, and
+/// the belt-and-suspenders analytics filter reuses. KEEP IN SYNC with
+/// vault.ts::shareableSubset.
+pub fn shareable_subset(ids: &[String], is_cloud: bool) -> Vec<String> {
+    if !is_cloud {
+        return ids.to_vec();
+    }
+    let state = load_state();
+    ids.iter()
+        .filter(|id| !is_effectively_local_only(id, &state))
+        .cloned()
+        .collect()
+}
+
+/// The effectively-local-only ids among `ids` — i.e. the files a cloud answer
+/// must DROP solely for being marked private. Empty on the device path (the
+/// mark is inert). Drives the honest skip note. KEEP IN SYNC with
+/// vault.ts::localOnlySubset.
+pub fn local_only_subset(ids: &[String], is_cloud: bool) -> Vec<String> {
+    if !is_cloud {
+        return Vec::new();
+    }
+    let state = load_state();
+    ids.iter()
+        .filter(|id| is_effectively_local_only(id, &state))
+        .cloned()
+        .collect()
+}
+
+/// Single-id `is_effectively_local_only` that loads state itself — for callers
+/// outside vault.rs that don't hold a `VaultState` (the sharepoint connector's
+/// node list, the analytics belt-and-suspenders). Local-only marks live in the
+/// vault state keyed by node id regardless of the owning source.
+pub fn node_is_local_only(id: &str) -> bool {
+    is_effectively_local_only(id, &load_state())
 }
 
 // --- text reading ---------------------------------------------------------------
@@ -1780,6 +1920,7 @@ pub struct Retrieved {
 }
 
 /// An externally-mirrored item (cloud connector) ranked alongside vault files.
+#[derive(Clone)]
 pub struct ExternalItem {
     pub id: String,
     pub name: String,
@@ -1833,24 +1974,42 @@ pub fn retrieve(
     k: usize,
     external: &[ExternalItem],
     attachment_ids: &[String],
+    is_cloud: bool,
 ) -> Retrieved {
-    // Explicit per-question attachments scope retrieval to only them (the attach
-    // gesture is the consent); otherwise server-authoritative inclusion.
-    let idset: HashSet<&str> = if !attachment_ids.is_empty() {
-        attachment_ids.iter().map(String::as_str).collect()
+    let state = load_state();
+    // The candidate id set. When a cloud provider is active, both branches are
+    // narrowed to the SHAREABLE set so an effectively-local-only file's content
+    // never reaches the vendor:
+    //  - attachments are their own consent scope, but a marked attachment still
+    //    can't ride to the cloud — filter it at this bypasser's own choke point;
+    //  - otherwise, intersect the caller's ids with the shareable gate (the
+    //    active-included set minus local-only), which also blocks a stale client
+    //    from resurrecting an excluded OR a local-only file.
+    let idset: HashSet<String> = if !attachment_ids.is_empty() {
+        shareable_subset(attachment_ids, is_cloud).into_iter().collect()
     } else {
-        let authoritative = active_included_file_ids();
-        let auth: HashSet<&str> = authoritative.iter().map(String::as_str).collect();
+        let auth: HashSet<String> = shareable_file_ids(is_cloud).into_iter().collect();
         included_file_ids
             .iter()
-            .map(String::as_str)
             .filter(|id| auth.contains(*id))
+            .cloned()
             .collect()
     };
-    let owned_ids: Vec<String> = idset.iter().map(|s| s.to_string()).collect();
-    let idset: HashSet<String> = owned_ids.into_iter().collect();
 
-    let state = load_state();
+    // Mirrored cloud-connector items bypass the vault gate — drop any that are
+    // effectively-local-only when cloud is active, at this choke point.
+    let external_owned: Vec<ExternalItem>;
+    let external: &[ExternalItem] = if is_cloud {
+        external_owned = external
+            .iter()
+            .filter(|e| !is_effectively_local_only(&e.id, &state))
+            .cloned()
+            .collect();
+        &external_owned
+    } else {
+        external
+    };
+
     let nodes: Vec<FileNode> = walk(&vault_dir())
         .iter()
         .filter(|n| n.kind == NodeKind::File && idset.contains(&n.id))

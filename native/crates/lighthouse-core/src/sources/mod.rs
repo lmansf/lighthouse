@@ -42,6 +42,14 @@ pub async fn set_included(node_id: &str, included: bool) {
     }
 }
 
+/// Mark/unmark a node "Private — this device only". Unlike inclusion, local-only
+/// is a pure gate flag with no content-mirroring side effect, and its marks live
+/// in the vault state keyed by node id for ANY source — so this routes straight
+/// to the vault engine regardless of which source owns the id.
+pub async fn set_local_only(node_id: &str, value: bool) {
+    vault::set_local_only(node_id, value);
+}
+
 pub async fn set_source_available(available: bool, source_id: Option<&str>) {
     if source_id == Some(crate::config::SHAREPOINT_SOURCE_ID) {
         sharepoint::set_available(available);
@@ -103,6 +111,7 @@ pub async fn retrieve(
     included_file_ids: &[String],
     attachment_ids: &[String],
     k: usize,
+    is_cloud: bool,
 ) -> Retrieved {
     let external = if attachment_ids.is_empty() {
         sharepoint::retrieval_items(included_file_ids)
@@ -114,8 +123,9 @@ pub async fn retrieve(
     let attachments = attachment_ids.to_vec();
     // The ranking engine is synchronous CPU+disk work; keep it off the async
     // reactor so a big corpus can't stall other requests (the TS engine blocks
-    // Node's event loop here — this is the structural fix).
-    tokio::task::spawn_blocking(move || vault::retrieve(&query, &ids, k, &external, &attachments))
+    // Node's event loop here — this is the structural fix). `is_cloud` narrows
+    // the candidate set to the shareable one inside `vault::retrieve`.
+    tokio::task::spawn_blocking(move || vault::retrieve(&query, &ids, k, &external, &attachments, is_cloud))
         .await
         .unwrap_or(Retrieved {
             references: vec![],

@@ -69,6 +69,17 @@ pub async fn rag_post(headers: HeaderMap, body: Option<Json<Value>>) -> Response
             sources::set_included(node_id, included).await;
             Json(json!({ "ok": true })).into_response()
         }
+        // "Private — this device only": a per-node mark the engine enforces by
+        // withholding the node from anything a cloud provider would receive.
+        Some("localOnly") => {
+            let (Some(node_id), Some(local_only)) =
+                (body["nodeId"].as_str(), body["localOnly"].as_bool())
+            else {
+                return bad_request("nodeId and localOnly required");
+            };
+            sources::set_local_only(node_id, local_only).await;
+            Json(json!({ "ok": true })).into_response()
+        }
         Some("source") => {
             let Some(available) = body["available"].as_bool() else {
                 return bad_request("available required");
@@ -79,7 +90,9 @@ pub async fn rag_post(headers: HeaderMap, body: Option<Json<Value>>) -> Response
         Some("search") => {
             let query = body["query"].as_str().unwrap_or("");
             let ids: Vec<String> = string_array(&body["includedFileIds"]);
-            let retrieved = sources::retrieve(query, &ids, &[], 5).await;
+            // Explorer search is a LOCAL preview (never sent to a provider), so
+            // it runs the device path — local-only files stay searchable here.
+            let retrieved = sources::retrieve(query, &ids, &[], 5, false).await;
             Json(json!({ "references": retrieved.references })).into_response()
         }
         Some("move") => {
@@ -366,10 +379,17 @@ pub async fn rag_post(headers: HeaderMap, body: Option<Json<Value>>) -> Response
                 .as_array()
                 .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
                 .unwrap_or_default();
-            let asks =
-                tokio::task::spawn_blocking(move || lighthouse_core::meta::suggested_asks(&ids))
-                    .await
-                    .unwrap_or_default();
+            // Suggested-ask chips name real columns of real included files. Under
+            // a cloud provider, resolve against the shareable set so a marked
+            // file's columns never surface as a chip. Cloud-ness = the same
+            // provider identity the chat pipeline uses.
+            let is_cloud =
+                lighthouse_core::synth::is_cloud_provider(&lighthouse_core::profile::model_config());
+            let asks = tokio::task::spawn_blocking(move || {
+                lighthouse_core::meta::suggested_asks(&ids, is_cloud)
+            })
+            .await
+            .unwrap_or_default();
             return Json(json!({ "asks": asks })).into_response();
         }
         Some("restore") => {

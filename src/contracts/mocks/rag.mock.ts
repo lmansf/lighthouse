@@ -42,6 +42,16 @@ class MockRagService implements RagService {
     );
   }
 
+  async setLocalOnly(nodeId: string, localOnly: boolean): Promise<void> {
+    // Ancestor-wins: marking a folder privatizes its subtree, so paint the
+    // target + descendants' EFFECTIVE flag for display (the engine stores only
+    // the target's own flag; resolution covers the rest).
+    const ids = this.descendantIds(nodeId);
+    this.nodes = this.nodes.map((n) =>
+      ids.has(n.id) ? { ...n, localOnly } : n,
+    );
+  }
+
   async setSourceAvailable(sourceId: string, available: boolean): Promise<void> {
     this.sources = this.sources.map((s) =>
       s.id === sourceId ? { ...s, available } : s,

@@ -173,6 +173,9 @@ pub fn list_nodes() -> Vec<FileNode> {
             mime_type: n.mime_type.clone(),
             size: n.size,
             rag_included: effectively_included(&n.id, &s, &by_id),
+            // Local-only marks live in the vault state, keyed by node id for any
+            // source — so a marked SharePoint file's lock renders here too.
+            local_only: crate::vault::node_is_local_only(&n.id),
             external: Some(true), // content lives remotely until mirrored
         })
         .collect()

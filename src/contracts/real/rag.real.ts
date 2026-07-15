@@ -47,6 +47,10 @@ class RealRagService implements RagService {
     await post({ op: "include", nodeId, included });
   }
 
+  async setLocalOnly(nodeId: string, localOnly: boolean): Promise<void> {
+    await post({ op: "localOnly", nodeId, localOnly });
+  }
+
   async setSourceAvailable(sourceId: string, available: boolean): Promise<void> {
     // sourceId MUST ride along: the route routes the toggle by it, defaulting
     // to the local vault when absent — dropping it toggled the wrong source

@@ -33,6 +33,13 @@ export interface RagService {
   listNodes(parentId?: string | null): Promise<FileNode[]>;
   /** Include or exclude a node (and, for folders/sources, its descendants). */
   setIncluded(nodeId: string, included: boolean): Promise<void>;
+  /**
+   * Mark or unmark a node "Private — this device only" (ancestor-wins). A marked
+   * node participates in on-device answers but is withheld from anything a cloud
+   * provider would receive. Writes only the target's own flag (no descendant
+   * cascade); resolution covers the subtree.
+   */
+  setLocalOnly(nodeId: string, localOnly: boolean): Promise<void>;
   /** Toggle whether a whole source is available. */
   setSourceAvailable(sourceId: string, available: boolean): Promise<void>;
   /** Retrieve references relevant to a query from the currently-included set. */

@@ -31,6 +31,13 @@ export interface FileNode {
   /** Whether this node is currently included in the RAG index. */
   ragIncluded: boolean;
   /**
+   * Effective "Private — this device only" state (ancestor-wins): the node
+   * participates in on-device answers but is withheld from anything a cloud
+   * provider would receive. Drives the explorer's lock control. Optional so
+   * older snapshots / connectors that omit it read as unmarked.
+   */
+  localOnly?: boolean;
+  /**
    * True for items *referenced* in their real location on disk rather than
    * copied into the vault (added via "Link…"). The subtree root carries it; the
    * whole referenced tree is read in place, so no copies are made.

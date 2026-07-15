@@ -47,6 +47,7 @@ fn content_ranking_finds_the_relevant_file_first() {
         5,
         &[],
         &[],
+        false,
     );
     assert!(!r.references.is_empty());
     assert_eq!(r.references[0].file_id, "budget.md");
@@ -70,7 +71,7 @@ fn file_findable_by_name_even_without_content_match() {
     );
     let ids = include_all(&["creditcard.csv", "notes.md"]);
 
-    let r = vault::retrieve("do I have any credit cards?", &ids, 5, &[], &[]);
+    let r = vault::retrieve("do I have any credit cards?", &ids, 5, &[], &[], false);
     assert!(!r.references.is_empty(), "name match must surface the file");
     assert_eq!(r.references[0].file_id, "creditcard.csv");
     // Name-only candidates score in the 0.5..0.9 band before normalization.
@@ -88,7 +89,7 @@ fn listing_intent_enumerates_instead_of_ranking() {
     let ids = include_all(&["a.csv", "b.pdf", "c.md"]);
 
     // "show me all files" → enumerate everything.
-    let all = vault::retrieve("show me all files", &ids, 5, &[], &[]);
+    let all = vault::retrieve("show me all files", &ids, 5, &[], &[], false);
     assert_eq!(all.contexts.len(), 1);
     assert!(
         all.contexts[0].text.starts_with("3 included files:"),
@@ -98,7 +99,7 @@ fn listing_intent_enumerates_instead_of_ranking() {
     assert_eq!(all.references.len(), 3);
 
     // "how many pdfs" → narrowed by kind.
-    let pdfs = vault::retrieve("how many pdfs do I have?", &ids, 5, &[], &[]);
+    let pdfs = vault::retrieve("how many pdfs do I have?", &ids, 5, &[], &[], false);
     assert!(
         pdfs.contexts[0].text.starts_with("1 included PDFs:"),
         "got: {}",
@@ -106,12 +107,12 @@ fn listing_intent_enumerates_instead_of_ranking() {
     );
 
     // A named type qualifier narrows to exactly those extensions.
-    let csvs = vault::retrieve("list my csv files", &ids, 5, &[], &[]);
+    let csvs = vault::retrieve("list my csv files", &ids, 5, &[], &[], false);
     assert!(csvs.contexts[0].text.contains("a.csv"));
     assert!(!csvs.contexts[0].text.contains("c.md"));
 
     // A content question with a residual token must NOT enumerate.
-    let content = vault::retrieve("which documents mention the lawsuit", &ids, 5, &[], &[]);
+    let content = vault::retrieve("which documents mention the lawsuit", &ids, 5, &[], &[], false);
     assert!(
         content
             .contexts
@@ -139,7 +140,7 @@ fn attachments_scope_and_inclusion_is_server_authoritative() {
 
     // A stale client claiming an excluded file cannot leak it into retrieval.
     let claimed: Vec<String> = vec!["in.md".into(), "out.md".into()];
-    let r = vault::retrieve("zebra", &claimed, 5, &[], &[]);
+    let r = vault::retrieve("zebra", &claimed, 5, &[], &[], false);
     assert!(
         r.references.iter().all(|refr| refr.file_id == "in.md"),
         "excluded file must not leak"
@@ -147,7 +148,7 @@ fn attachments_scope_and_inclusion_is_server_authoritative() {
 
     // An explicit attachment bypasses the global included set (the attach
     // gesture is the consent) — even for a file not globally included.
-    let attached = vault::retrieve("zebra", &[], 5, &[], &["out.md".to_string()]);
+    let attached = vault::retrieve("zebra", &[], 5, &[], &["out.md".to_string()], false);
     assert_eq!(attached.references.len(), 1);
     assert_eq!(attached.references[0].file_id, "out.md");
 }
@@ -160,13 +161,13 @@ fn unavailable_source_empties_retrieval() {
     write(&vault_dir.path().join("x.md"), "searchable content here");
     let ids = include_all(&["x.md"]);
     vault::set_source_available(false);
-    let r = vault::retrieve("searchable content", &ids, 5, &[], &[]);
+    let r = vault::retrieve("searchable content", &ids, 5, &[], &[], false);
     assert!(
         r.references.is_empty(),
         "hiding the source drops it from the very next answer"
     );
     vault::set_source_available(true);
-    let r = vault::retrieve("searchable content", &ids, 5, &[], &[]);
+    let r = vault::retrieve("searchable content", &ids, 5, &[], &[], false);
     assert!(!r.references.is_empty());
 }
 
@@ -190,12 +191,12 @@ fn indexed_files_are_searchable_past_the_legacy_1mb_cap() {
     write(&vault_dir.path().join("big.txt"), &big);
     let ids = include_all(&["big.txt"]);
 
-    let early = vault::retrieve("findable prefix token", &ids, 5, &[], &[]);
+    let early = vault::retrieve("findable prefix token", &ids, 5, &[], &[], false);
     assert!(
         !early.references.is_empty(),
         "prefix content is retrievable"
     );
-    let late = vault::retrieve("hidden suffix needle", &ids, 5, &[], &[]);
+    let late = vault::retrieve("hidden suffix needle", &ids, 5, &[], &[], false);
     assert!(
         !late.references.is_empty(),
         "content past the legacy 1MB cap is now indexed and retrievable"
@@ -205,7 +206,7 @@ fn indexed_files_are_searchable_past_the_legacy_1mb_cap() {
     std::env::set_var("LIGHTHOUSE_INDEX_MAX_FILE_BYTES", "1000000");
     std::thread::sleep(std::time::Duration::from_millis(20));
     write(&vault_dir.path().join("big.txt"), &big); // new mtime ⇒ entry rebuilds
-    let capped = vault::retrieve("hidden suffix needle", &ids, 5, &[], &[]);
+    let capped = vault::retrieve("hidden suffix needle", &ids, 5, &[], &[], false);
     std::env::remove_var("LIGHTHOUSE_INDEX_MAX_FILE_BYTES");
     assert!(
         capped.references.is_empty(),

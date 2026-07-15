@@ -121,7 +121,7 @@ fn hybrid_retrieval_finds_by_meaning_and_honors_the_kill_switch() {
 
     // Pass 1 — vectors are cold, so retrieval is lexical and finds nothing
     // (this also kicks the index build + the async vector warm pass).
-    let cold = vault::retrieve(query, &ids, 5, &[], &[]);
+    let cold = vault::retrieve(query, &ids, 5, &[], &[], false);
     assert!(
         cold.references.is_empty(),
         "lexical-only retrieval must find nothing for a semantic query, got {:?}",
@@ -135,7 +135,7 @@ fn hybrid_retrieval_finds_by_meaning_and_honors_the_kill_switch() {
     for _ in 0..100 {
         std::thread::sleep(std::time::Duration::from_millis(150));
         lighthouse_core::embed::nudge_warm();
-        let r = vault::retrieve(query, &ids, 5, &[], &[]);
+        let r = vault::retrieve(query, &ids, 5, &[], &[], false);
         if !r.references.is_empty() {
             hybrid = Some(r);
             break;
@@ -163,7 +163,7 @@ fn hybrid_retrieval_finds_by_meaning_and_honors_the_kill_switch() {
 
     // Kill switch: Preferences off ⇒ instantly lexical again (no restart).
     std::fs::write(&settings, r#"{ "semanticSearch": false }"#).unwrap();
-    let off = vault::retrieve(query, &ids, 5, &[], &[]);
+    let off = vault::retrieve(query, &ids, 5, &[], &[], false);
     assert!(
         off.references.is_empty(),
         "semanticSearch=false must drop retrieval back to pure lexical"
@@ -213,11 +213,11 @@ fn named_file_survives_hybrid_crowding() {
     let query = "what is inside 1 Galaxy Servers";
     // Warm the vectors (first retrieve kicks the pass; poll until hybrid is
     // active — the distractors' fused scores only exist once coverage ≥ 80%).
-    let _ = vault::retrieve(query, &ids, 5, &[], &[]);
+    let _ = vault::retrieve(query, &ids, 5, &[], &[], false);
     let mut result = None;
     for _ in 0..100 {
         std::thread::sleep(std::time::Duration::from_millis(150));
-        let r = vault::retrieve(query, &ids, 5, &[], &[]);
+        let r = vault::retrieve(query, &ids, 5, &[], &[], false);
         // Hybrid is live once fused display scores appear (>0.45 for the
         // top distractor is only possible post-fusion; lexical cosines on
         // this corpus stay far lower).
