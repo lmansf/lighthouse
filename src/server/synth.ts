@@ -21,11 +21,13 @@ import {
 import {
   remoteProvider,
   streamAnswer,
+  draftAnswer,
   fullDocCharBudget,
   docSegmentCharBudget,
   maxDocSegments,
   type Ctx,
 } from "./llm";
+import { readDesktopSettings } from "./settings";
 import { metaIntent, renderMeta } from "./meta";
 import { isProfileable, tableProfile } from "./tableProfile";
 
@@ -273,6 +275,31 @@ export async function* answerPipeline(
         yield { delta: "", references: ans.references, done: true };
         return;
       }
+    }
+  }
+
+  // --- Answer-level draft-then-verify (G2): on the PRIVATE path, stream an
+  //     instant extractive draft from the retrieval snippets already in hand,
+  //     replaced IN PLACE by the local model's grounded answer below. Gated to
+  //     the LOCAL provider + the draftAnswers preference (default on) + non-empty
+  //     contexts. Meta answered/returned above, so this only ever precedes a real
+  //     local-model grounded answer. The draft is a separate chunk that never
+  //     enters any prompt — zero tokens against the local window. KEEP IN SYNC
+  //     with synth.rs (whose position differs only by the Rust-only analytics
+  //     branch, which has no TS twin).
+  if (
+    cfg.providerId === "local" &&
+    readDesktopSettings().draftAnswers !== false &&
+    initial.contexts.length > 0
+  ) {
+    const ctxs: Ctx[] = initial.contexts.map((c) => ({
+      name: c.name,
+      text: c.text,
+      score: c.score,
+    }));
+    const text = draftAnswer(question, ctxs);
+    if (text.trim() !== "") {
+      yield { delta: text, draft: true, done: false };
     }
   }
 

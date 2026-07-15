@@ -501,6 +501,14 @@ const useStyles = makeStyles({
   },
   // Quiet one-liners: the "(stopped)" note and the zero-references honesty note.
   quietNote: { color: tokens.colorNeutralForeground3 },
+  // G2 draft-then-verify: the muted "verifying…" badge shown under the
+  // provisional extractive draft while the private model composes the answer.
+  draftBadge: {
+    color: tokens.colorNeutralForeground3,
+    fontStyle: "italic",
+    display: "block",
+    marginTop: tokens.spacingVerticalXS,
+  },
   refCard: {
     display: "flex",
     alignItems: "center",
@@ -1367,6 +1375,11 @@ export function ChatPanel() {
   // Pre-answer stage note from the engine ("Reading q3.csv (2/5)…") — shown in
   // the loader while multi-document synthesis works; cleared on the first token.
   const [progressLabel, setProgressLabel] = useState<string | null>(null);
+  // G2 draft-then-verify: while the streaming answer is still the provisional
+  // extractive draft, show a "verifying…" badge. `draftRef` mirrors it
+  // synchronously so the `for await` loop can test it without a stale closure.
+  const [draftActive, setDraftActive] = useState(false);
+  const draftRef = useRef(false);
 
   // Recent-chats drawer + its inline rename/delete affordances.
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -1766,6 +1779,8 @@ export function ChatPanel() {
     setPinned(true);
     const controller = new AbortController();
     abortRef.current = controller;
+    draftRef.current = false;
+    setDraftActive(false);
     let finalContent = "";
     try {
       for await (const chunk of chatService.ask(
@@ -1782,7 +1797,23 @@ export function ChatPanel() {
         if (chunk.progress) setProgressLabel(chunk.progress.label);
         if (chunk.delta) {
           setProgressLabel(null); // the answer is starting — stage notes are done
-          finalContent += chunk.delta;
+          if (chunk.draft) {
+            // Provisional extractive draft (G2): show it immediately, flagged.
+            if (!draftRef.current) {
+              draftRef.current = true;
+              setDraftActive(true);
+            }
+            finalContent += chunk.delta;
+          } else {
+            // First authoritative token: wipe the draft and stream the verified
+            // answer in its place (one clean replacement, no interleaving).
+            if (draftRef.current) {
+              draftRef.current = false;
+              setDraftActive(false);
+              finalContent = "";
+            }
+            finalContent += chunk.delta;
+          }
           // Buffer the growing answer and flush on the next frame instead of
           // writing the store per token (see scheduleStreamFlush).
           scheduleStreamFlush(asstId, finalContent);
@@ -1814,6 +1845,18 @@ export function ChatPanel() {
         );
       }
     } finally {
+      // Trust guard (G2): if the stream ended while STILL showing only the
+      // provisional draft (Stop or an error mid-draft, before any verified
+      // token), the draft must not settle as the answer — an unverified
+      // extractive preview would then be indistinguishable from a grounded
+      // answer once the "Draft" badge (gated on `streaming`) disappears. Blank
+      // it so nothing false persists. (A clean local completion always emits a
+      // real answer that already replaced the draft, so this only bites the
+      // interrupted paths.)
+      if (draftRef.current) {
+        finalContent = "";
+        scheduleStreamFlush(asstId, "");
+      }
       // Land every buffered token into the store before the turn settles, so the
       // finished transcript (and what we persist) holds the complete answer even
       // if the last frame's flush hadn't fired yet.
@@ -1821,6 +1864,8 @@ export function ChatPanel() {
       abortRef.current = null;
       setStreaming(false);
       setProgressLabel(null);
+      draftRef.current = false;
+      setDraftActive(false);
       // Save the settled turn for this session (cheap: once per turn, not per token).
       persistMessages();
       // Hand focus back for the follow-up — but only if the user hasn't moved
@@ -3091,6 +3136,11 @@ export function ChatPanel() {
                           )}
                           {streaming && m.id === lastId && <span className={styles.beaconInline} />}
                         </div>
+                      )}
+                      {streaming && m.id === lastId && draftActive && (
+                        <Text size={200} className={styles.draftBadge}>
+                          Draft — verifying with the private model…
+                        </Text>
                       )}
                       {m.stopped && (
                         <Text size={200} className={styles.quietNote}>

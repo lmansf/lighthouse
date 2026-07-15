@@ -20,12 +20,27 @@ use tauri::{AppHandle, Emitter, Manager};
 
 pub const RELEASE_PAGE_URL: &str = "https://github.com/lmansf/lighthouse/releases/latest";
 
+/// The chat llama-server's actual launch state (G2 GPU status): whether it was
+/// spawned with GPU offload, the `-ngl` layer count, and whether a chat child is
+/// currently live. Surfaced read-only in the AI-models dialog via `model_status`
+/// so the user sees the real acceleration state, not a guess.
+#[derive(Clone, Copy, Default)]
+pub struct GpuLaunchState {
+    pub gpu: bool,
+    pub layers: i64,
+    pub running: bool,
+}
+
 #[derive(Default)]
 pub struct Supervisor {
     llm: Mutex<Option<Child>>,
     uninstalling: Mutex<bool>,
     /// When the current llama-server was spawned — feeds the GPU crash guard.
     spawned_at: Mutex<Option<std::time::Instant>>,
+    /// The chat llama-server's last known GPU launch state (G2). Set on a
+    /// successful spawn, `running` cleared on every teardown path. `None` until
+    /// the first chat server starts.
+    gpu_state: Mutex<Option<GpuLaunchState>>,
     /// Consecutive fast exits (died < 20 s after spawn). Two in a row with GPU
     /// offload enabled reads as "the Vulkan driver can't do this" — we persist
     /// llmDisableGpu and relaunch CPU-only rather than crash-looping.
@@ -249,6 +264,9 @@ impl Supervisor {
                 *guard = Some(child);
                 *self.spawned_at.lock().unwrap_or_else(|p| p.into_inner()) =
                     Some(std::time::Instant::now());
+                // Record the real launch state for the AI-models dialog (G2).
+                *self.gpu_state.lock().unwrap_or_else(|p| p.into_inner()) =
+                    Some(GpuLaunchState { gpu: !gpu_disabled, layers: ngl, running: true });
                 // Warm the model in the background: wait until /health says the
                 // weights are loaded, then run a 1-token completion that pages
                 // the mmap'd GGUF in off disk and pre-fills the system prompt's
@@ -518,6 +536,21 @@ impl Supervisor {
             let _ = fs::remove_file(uninstall_marker_path());
         }
         *self.uninstalling.lock().unwrap_or_else(|p| p.into_inner()) = false;
+    }
+
+    /// The chat llama-server's GPU launch state for the AI-models dialog (G2).
+    /// `gpu`/`layers` are the durable launch config recorded on the last spawn;
+    /// `running` is computed live from whether a chat child is currently held,
+    /// so every teardown path reflects immediately without extra bookkeeping.
+    /// `None` until the first chat server has been started this session.
+    pub fn gpu_status(&self) -> Option<GpuLaunchState> {
+        // Read + release the gpu_state lock FIRST (this statement's temporary
+        // guard drops at the `;`), THEN take the llm lock. start_local_llm holds
+        // llm while it sets gpu_state, so acquiring them in the opposite order
+        // here without overlapping avoids a lock-order inversion.
+        let mut s = (*self.gpu_state.lock().unwrap_or_else(|p| p.into_inner()))?;
+        s.running = self.llm.lock().unwrap_or_else(|p| p.into_inner()).is_some();
+        Some(s)
     }
 
     pub fn shutdown(&self) {

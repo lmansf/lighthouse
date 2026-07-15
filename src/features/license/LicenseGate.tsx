@@ -1180,6 +1180,9 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
   const [backgroundConserve, setBackgroundConserve] = useState(true);
   // OCR: read text in images and scanned PDFs with the bundled models. Default on.
   const [ocrEnabled, setOcrEnabled] = useState(true);
+  // G2 draft-then-verify: show an instant extractive draft while the private
+  // model composes the verified answer, replaced in place. Default on.
+  const [draftAnswers, setDraftAnswers] = useState(true);
   // Local audit log (openspec: add-audit-log): record what was read / which
   // provider answered / what left the machine, per question. Default OFF.
   const [auditEnabled, setAuditEnabled] = useState(false);
@@ -1239,6 +1242,7 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
         setSemanticSearch(d.semanticSearch !== false);
         setBackgroundConserve(d.backgroundConserve !== false);
         setOcrEnabled(d.ocrEnabled !== false);
+        setDraftAnswers(d.draftAnswers !== false);
         setAuditEnabled(d.auditEnabled === true);
         setUiMode(d.uiMode === "widget" ? "widget" : "window");
         setWhisperMode(d.whisperMode === true);
@@ -1312,6 +1316,12 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
     const prev = ocrEnabled;
     setOcrEnabled(next);
     void postSetting({ ocrEnabled: next }, () => setOcrEnabled(prev));
+  }
+
+  function updateDraftAnswers(next: boolean) {
+    const prev = draftAnswers;
+    setDraftAnswers(next);
+    void postSetting({ draftAnswers: next }, () => setDraftAnswers(prev));
   }
 
   function updateAudit(next: boolean) {
@@ -1522,6 +1532,14 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
                   checked={semanticSearch}
                   onChange={(_, d) => updateSemantic(Boolean(d.checked))}
                   label="Semantic search — a small bundled model (runs entirely on this computer) helps questions find files by meaning, not just matching words"
+                />
+              )}
+
+              {desktop && (
+                <Switch
+                  checked={draftAnswers}
+                  onChange={(_, d) => updateDraftAnswers(Boolean(d.checked))}
+                  label="Show an instant draft answer while the private model works — an extractive preview from your files, replaced in place the moment the verified answer is ready"
                 />
               )}
 

@@ -670,8 +670,22 @@ pub async fn connect_op(body: Value) -> Result<Value, String> {
 // sync commands run on the main thread, where a panic exits the whole app
 // (which is exactly how the Install click used to crash the desktop build).
 #[tauri::command]
-pub async fn model_status() -> Value {
-    serde_json::to_value(local_model::model_status()).unwrap_or_else(|_| json!({}))
+pub async fn model_status(app: AppHandle) -> Value {
+    let mut v = serde_json::to_value(local_model::model_status()).unwrap_or_else(|_| json!({}));
+    // Merge the shell's REAL llama-server GPU launch state (G2) so the AI-models
+    // dialog shows "GPU acceleration: on (N layers)" / "off — CPU" instead of a
+    // guess. Absent until a chat server has run this session (gpu_status None) —
+    // the UI treats missing fields as "unknown → render nothing".
+    if let (Some(obj), Some(g)) = (
+        v.as_object_mut(),
+        app.try_state::<crate::supervise::Supervisor>()
+            .and_then(|s| s.gpu_status()),
+    ) {
+        obj.insert("gpuOn".into(), json!(g.gpu));
+        obj.insert("gpuLayers".into(), json!(g.layers));
+        obj.insert("gpuRunning".into(), json!(g.running));
+    }
+    v
 }
 
 #[tauri::command]
@@ -746,6 +760,7 @@ pub fn settings_get(app: AppHandle) -> Value {
         "backgroundConserve": s.background_conserve != Some(false), // default on
         "ocrEnabled": s.ocr_enabled != Some(false), // default on (add-ocr-perception)
         "auditEnabled": s.audit_enabled == Some(true), // opt-in, default off (add-audit-log)
+        "draftAnswers": s.draft_answers != Some(false), // default on (G2)
     })
 }
 
@@ -762,6 +777,7 @@ pub fn settings_set(
     background_conserve: Option<bool>,
     ocr_enabled: Option<bool>,
     audit_enabled: Option<bool>,
+    draft_answers: Option<bool>,
 ) -> Value {
     // A new summon shortcut must PARSE before anything persists — saving an
     // unregistrable string would strand the user with no hotkey at all.
@@ -799,6 +815,7 @@ pub fn settings_set(
         background_conserve,
         ocr_enabled,
         audit_enabled,
+        draft_answers,
     );
     if shortcut_changed && !crate::register_summon_shortcut(&app) {
         // The new chord didn't register — restore the previous one so the
@@ -811,6 +828,7 @@ pub fn settings_set(
             None,
             None,
             Some(prev_shortcut.clone().unwrap_or_default()),
+            None,
             None,
             None,
             None,
@@ -892,6 +910,7 @@ pub fn settings_set(
         "summonHotkeyOk": hotkey_ok,
         "semanticSearch": s.semantic_search != Some(false),
         "backgroundConserve": s.background_conserve != Some(false),
+        "draftAnswers": s.draft_answers != Some(false),
     })
 }
 

@@ -718,6 +718,10 @@ pub async fn connect_post(headers: HeaderMap, body: Option<Json<Value>>) -> Resp
 
 // --- /api/model ---------------------------------------------------------------
 
+// PARITY divergence (G2 GPU status): the desktop `model_status` command merges
+// the shell's real llama-server GPU launch state (gpuOn/gpuLayers/gpuRunning)
+// from the Supervisor. The web/dev server has no supervisor, so those fields are
+// absent here — the UI treats a missing `gpuOn` as "unknown" and renders nothing.
 pub async fn model_get() -> Response {
     Json(local_model::model_status()).into_response()
 }
@@ -939,6 +943,7 @@ pub async fn settings_get() -> Response {
         "backgroundConserve": s.background_conserve != Some(false), // default on
         "ocrEnabled": s.ocr_enabled != Some(false), // default on
         "auditEnabled": s.audit_enabled == Some(true), // opt-in, default off
+        "draftAnswers": s.draft_answers != Some(false), // default on
     }))
     .into_response()
 }
@@ -965,6 +970,7 @@ pub async fn settings_post(headers: HeaderMap, body: Option<Json<Value>>) -> Res
         body["backgroundConserve"].as_bool(),
         body["ocrEnabled"].as_bool(),
         body["auditEnabled"].as_bool(),
+        body["draftAnswers"].as_bool(),
     );
     Json(json!({
         "ok": true,
@@ -979,6 +985,7 @@ pub async fn settings_post(headers: HeaderMap, body: Option<Json<Value>>) -> Res
         "semanticSearch": s.semantic_search != Some(false),
         "backgroundConserve": s.background_conserve != Some(false),
         "ocrEnabled": s.ocr_enabled != Some(false),
+        "draftAnswers": s.draft_answers != Some(false),
     }))
     .into_response()
 }

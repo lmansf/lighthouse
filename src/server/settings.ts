@@ -55,6 +55,13 @@ export interface DesktopSettings {
    * the Rust engine.
    */
   auditVerbatim?: boolean;
+  /**
+   * G2 draft-then-verify: while the local model composes a grounded answer,
+   * stream an instant extractive draft from retrieval snippets, replaced in
+   * place by the verified answer. Default ON (unset = on). PARITY: draft_answers
+   * in settings.rs.
+   */
+  draftAnswers?: boolean;
 }
 
 function settingsFile(): string | null {

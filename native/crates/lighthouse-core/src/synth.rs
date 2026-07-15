@@ -241,12 +241,34 @@ fn progress(label: String, step: usize, total: usize) -> ChatChunk {
         references: None,
         progress: Some(ChatProgress { label, step, total }),
         analytics: None,
+        draft: None,
         done: false,
     }
 }
 
 fn delta(d: String) -> ChatChunk {
-    ChatChunk { delta: d, references: None, progress: None, analytics: None, done: false }
+    ChatChunk {
+        delta: d,
+        references: None,
+        progress: None,
+        analytics: None,
+        draft: None,
+        done: false,
+    }
+}
+
+/// One provisional extractive draft chunk (G2): instant, already-in-hand text
+/// emitted as a single chunk (no per-word streaming) that the UI replaces in
+/// place with the first authoritative delta. PARITY: mirrored in src/server/synth.ts.
+fn draft_chunk(d: String) -> ChatChunk {
+    ChatChunk {
+        delta: d,
+        references: None,
+        progress: None,
+        analytics: None,
+        draft: Some(true),
+        done: false,
+    }
 }
 
 fn final_chunk(references: Vec<RagReference>) -> ChatChunk {
@@ -255,6 +277,7 @@ fn final_chunk(references: Vec<RagReference>) -> ChatChunk {
         references: Some(references),
         progress: None,
         analytics: None,
+        draft: None,
         done: true,
     }
 }
@@ -717,6 +740,30 @@ pub fn answer_pipeline(
                         return;
                     }
                 }
+            }
+        }
+
+        // --- Answer-level draft-then-verify (G2): on the PRIVATE path, stream an
+        //     instant extractive draft from the retrieval snippets already in
+        //     hand, replaced IN PLACE by the local model's grounded answer below.
+        //     Gated to the LOCAL provider + the draftAnswers preference (default
+        //     on) + non-empty contexts. Meta and analytics answered/returned
+        //     above, so this only ever precedes a real local-model grounded
+        //     answer, never a deterministic one. The draft is a separate chunk
+        //     that never enters any prompt — zero tokens against the local
+        //     window. KEEP IN SYNC with src/server/synth.ts.
+        if cfg.provider_id.as_deref() == Some("local")
+            && crate::settings::read_desktop_settings().draft_answers != Some(false)
+            && !initial.contexts.is_empty()
+        {
+            let ctxs: Vec<Ctx> = initial
+                .contexts
+                .iter()
+                .map(|c| Ctx { name: c.name.clone(), text: c.text.clone(), score: c.score })
+                .collect();
+            let text = llm::draft_answer(&question, &ctxs);
+            if !text.trim().is_empty() {
+                yield draft_chunk(text);
             }
         }
 

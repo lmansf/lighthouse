@@ -75,6 +75,13 @@ pub struct ChatChunk {
     /// so it never sets this.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub analytics: Option<AnalyticsMeta>,
+    /// Marks a provisional extractive DRAFT (G2 draft-then-verify): the UI shows
+    /// it under "Draft — verifying…" and REPLACES it in place with the first
+    /// authoritative (non-draft) delta. Only the local-model path sets this; it
+    /// never enters any prompt and costs zero tokens. PARITY: mirrored in the TS
+    /// twin (user-visible text).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub draft: Option<bool>,
     pub done: bool,
 }
 
