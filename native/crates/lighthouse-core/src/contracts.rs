@@ -19,6 +19,19 @@ pub enum NodeKind {
     Folder,
 }
 
+/// Where a retrieved chunk/reference came from. A `Conversation` chunk is an
+/// auto-exported past-chat note under `Lighthouse Notes/Chats/` (G6); everything
+/// else is an ordinary vault `File`. Defaults to `File` so older payloads /
+/// persisted transcripts without the field deserialize correctly. KEEP IN SYNC
+/// with the `RagReference["kind"]` union in src/contracts/types.ts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SourceKind {
+    #[default]
+    File,
+    Conversation,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FileNode {
@@ -43,6 +56,10 @@ pub struct RagReference {
     pub name: String,
     pub snippet: String,
     pub score: f64,
+    /// G6: `Conversation` when this cite is a past-chat note, else `File`.
+    /// `#[serde(default)]` keeps older wire payloads (no field) valid.
+    #[serde(default)]
+    pub kind: SourceKind,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

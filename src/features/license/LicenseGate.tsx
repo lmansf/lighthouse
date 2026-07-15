@@ -1506,7 +1506,14 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
               <Switch
                 checked={locks?.chatHistoryOff ? false : saveChats}
                 disabled={locks?.chatHistoryOff === true}
-                onChange={(_, d) => setSaveChats(Boolean(d.checked))}
+                onChange={(_, d) => {
+                  const on = Boolean(d.checked);
+                  setSaveChats(on);
+                  // G6 fail-closed: opting out also deletes every auto-exported
+                  // chat note (Lighthouse Notes/Chats/), so nothing of the user's
+                  // conversations survives on disk.
+                  if (!on) void ragService.purgeConversationNotes().catch(() => {});
+                }}
                 label="Save chats on this device — kept locally and cleared automatically after two weeks (off by default; delete any chat from the history panel)"
               />
               {locks?.chatHistoryOff && (

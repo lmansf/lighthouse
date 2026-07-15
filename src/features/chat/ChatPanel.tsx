@@ -62,6 +62,7 @@ import {
   CodeRegular,
   CopyRegular,
   DeleteRegular,
+  ChatRegular,
   DismissRegular,
   DocumentAddRegular,
   DocumentRegular,
@@ -100,6 +101,7 @@ import { BriefingsPanel } from "@/features/chat/BriefingsPanel";
 import { PinMiniChart } from "@/features/chat/PinMiniChart";
 import { EgressShield } from "@/features/egress/EgressShield";
 import { useChatStore, type TranscriptMessage } from "@/stores/useChatStore";
+import { chatHistoryLocked } from "@/stores/managedLocks";
 import { modKey } from "@/features/onboarding/ModeChooser";
 import { ACCENTS } from "@/shell/theme";
 import { FILE_DRAG_MIME, parseDraggedFiles, type DraggedFile } from "@/shell/dnd";
@@ -1314,7 +1316,8 @@ const References = memo(function References({
             ? {
                 role: "button",
                 tabIndex: 0,
-                title: `Open ${r.name}`,
+                title:
+                  r.kind === "conversation" ? "Open past conversation note" : `Open ${r.name}`,
                 onClick: () => void onOpen(r.fileId),
                 onKeyDown: (e: KeyboardEvent) =>
                   (e.key === "Enter" || e.key === " ") && void onOpen(r.fileId),
@@ -1325,7 +1328,12 @@ const References = memo(function References({
           <Badge appearance="tint" shape="circular" size="small">
             {i + 1}
           </Badge>
-          <DocumentRegular fontSize={24} />
+          {/* G6: a past-conversation note gets a chat glyph; files keep the doc. */}
+          {r.kind === "conversation" ? (
+            <ChatRegular fontSize={24} />
+          ) : (
+            <DocumentRegular fontSize={24} />
+          )}
           <div className={styles.refMeta}>
             <Text weight="semibold" truncate>
               {r.name}
@@ -1413,6 +1421,9 @@ export function ChatPanel() {
   // synchronously so the `for await` loop can test it without a stale closure.
   const [draftActive, setDraftActive] = useState(false);
   const draftRef = useRef(false);
+  // G6: guards the auto-export-note write so overlapping turn-settles don't
+  // race two writes for the same conversation.
+  const exportNoteRef = useRef(false);
 
   // Recent-chats drawer + its inline rename/delete affordances.
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -1903,6 +1914,13 @@ export function ChatPanel() {
       setDraftActive(false);
       // Save the settled turn for this session (cheap: once per turn, not per token).
       persistMessages();
+      // G6: with "Save chats on this device" ON, also export the settled
+      // conversation as an indexed vault note so it becomes retrievable content.
+      // Fail-closed: honor the LIVE managed-policy lock too, not just the
+      // opt-in field — `persistMessages()` re-checks `chatHistoryLocked()` the
+      // same way, so a policy applied AFTER bootstrap (when the store field was
+      // already true) must not let a note slip through. Fire-and-forget.
+      if (historyPersistEnabled && !chatHistoryLocked()) void exportConversationNoteNow();
       // Hand focus back for the follow-up — but only if the user hasn't moved
       // focus elsewhere (e.g. the explorer's search box) while it streamed.
       const active = document.activeElement;
@@ -1971,6 +1989,46 @@ export function ChatPanel() {
       }
     }
     return lines.join("\n");
+  }
+
+  /**
+   * G6: auto-export the settled conversation as an indexed vault note (YAML
+   * frontmatter + the same transcript markdown), overwritten in place per
+   * conversation so past chats become retrievable content. Fire-and-forget;
+   * the CALLER gates on "Save chats on this device". Failures are swallowed —
+   * this is a background convenience, never a blocker.
+   */
+  async function exportConversationNoteNow() {
+    if (exportNoteRef.current) return; // a write is already in flight
+    const state = useChatStore.getState();
+    const msgs = state.messages;
+    const convo = state.currentId;
+    // Worth a note only once there's a real answer to recall.
+    if (!convo || !msgs.some((m) => m.role === "assistant" && m.content && !m.error)) return;
+    const title =
+      state.conversations.find((c) => c.id === convo)?.title.trim() || "Lighthouse chat";
+    const citedFileIds = Array.from(
+      new Set(msgs.flatMap((m) => m.references?.map((r) => r.fileId) ?? [])),
+    );
+    // Double-quote every scalar so a title/path with a colon or quote stays valid YAML.
+    const yaml = (v: string) => `"${v.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+    const frontmatter = [
+      "---",
+      `date: ${new Date().toISOString()}`,
+      `title: ${yaml(title)}`,
+      `provider: ${yaml(providerLabel)}`,
+      `citedFileIds: [${citedFileIds.map(yaml).join(", ")}]`,
+      "---",
+      "",
+    ].join("\n");
+    exportNoteRef.current = true;
+    try {
+      await ragService.exportConversationNote(convo, title, frontmatter + transcriptMarkdown(msgs, title));
+    } catch {
+      /* background best-effort — never surface */
+    } finally {
+      exportNoteRef.current = false;
+    }
   }
 
   /** Export the conversation as a markdown note into Lighthouse Notes/. */

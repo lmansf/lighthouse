@@ -233,6 +233,50 @@ pub async fn rag_op(app: AppHandle, body: Value) -> Result<Value, String> {
                 Err(e) => json!({ "error": e }),
             })
         }
+        // --- G6 cross-conversation recall: auto-export a chat as an indexed
+        //     vault note under Lighthouse Notes/Chats/, OVERWRITTEN in place per
+        //     conversation id (one current note per chat). Client-gated on "Save
+        //     chats on this device". ---
+        Some("exportConversationNote") => {
+            let conversation_id = body["conversationId"].as_str().unwrap_or("").to_string();
+            let title = body["title"].as_str().unwrap_or("Conversation").to_string();
+            let markdown = body["markdown"].as_str().unwrap_or("").to_string();
+            if conversation_id.trim().is_empty() || markdown.trim().is_empty() {
+                return Err("conversationId and markdown required".into());
+            }
+            let written = tokio::task::spawn_blocking(move || {
+                lighthouse_core::vault::write_conversation_note(
+                    &conversation_id,
+                    &title,
+                    markdown.as_bytes(),
+                )
+            })
+            .await
+            .map_err(|e| e.to_string())
+            .and_then(|r| r.map_err(|e| e.to_string()));
+            Ok(match written {
+                Ok((id, name)) => {
+                    let _ = app.emit("vault-changed", ());
+                    json!({ "savedId": id, "savedName": name })
+                }
+                Err(e) => json!({ "error": e }),
+            })
+        }
+        // G6 fail-closed opt-out: delete every auto-exported chat note.
+        Some("purgeConversationNotes") => {
+            let purged =
+                tokio::task::spawn_blocking(lighthouse_core::vault::purge_conversation_notes)
+                    .await
+                    .map_err(|e| e.to_string())
+                    .and_then(|r| r.map_err(|e| e.to_string()));
+            Ok(match purged {
+                Ok(()) => {
+                    let _ = app.emit("vault-changed", ());
+                    json!({ "ok": true })
+                }
+                Err(e) => json!({ "error": e }),
+            })
+        }
         // --- Briefing note refresh (G5): recheck each pin for a REAL before→
         //     after, compose the deterministic note, and overwrite Lighthouse
         //     Notes/Lighthouse Briefing.md in place. No OS notification here —

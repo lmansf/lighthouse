@@ -99,6 +99,26 @@ class RealRagService implements RagService {
     };
   }
 
+  async exportConversationNote(
+    conversationId: string,
+    title: string,
+    markdown: string,
+  ): Promise<{ savedId?: string; savedName?: string; error?: string }> {
+    return (await post({
+      op: "exportConversationNote",
+      conversationId,
+      title,
+      markdown,
+    })) as { savedId?: string; savedName?: string; error?: string };
+  }
+
+  async purgeConversationNotes(): Promise<{ ok?: boolean; error?: string }> {
+    return (await post({ op: "purgeConversationNotes" })) as {
+      ok?: boolean;
+      error?: string;
+    };
+  }
+
   async pinAsk(
     question: string,
     sql: string,

@@ -19,7 +19,12 @@ import { isDesktopApp } from "@/server/config";
 import { policySnapshot } from "@/server/policy";
 import { egressSnapshot } from "@/server/egress";
 import { recentAudit, verifyActiveAudit, exportCsvAudit } from "@/server/audit";
-import { writeArtifact, refreshArtifact } from "@/server/vault";
+import {
+  writeArtifact,
+  refreshArtifact,
+  writeConversationNote,
+  purgeConversationNotes,
+} from "@/server/vault";
 import { addPin, listPins, removePin } from "@/server/pins";
 import {
   addBriefing,
@@ -268,6 +273,46 @@ export async function POST(req: Request) {
         });
       }
     }
+
+    // G6: auto-export a chat as an indexed vault note, OVERWRITTEN in place per
+    // conversation id (one current note per chat). Client-gated on "Save chats
+    // on this device". KEEP IN SYNC with the desktop/server ops.
+    case "exportConversationNote": {
+      const conversationId =
+        typeof body.conversationId === "string" ? body.conversationId : "";
+      const title =
+        typeof body.title === "string" && body.title.trim() ? body.title : "Conversation";
+      const markdown = typeof body.markdown === "string" ? body.markdown : "";
+      if (!conversationId.trim() || !markdown.trim()) {
+        return NextResponse.json(
+          { error: "conversationId and markdown required" },
+          { status: 400 },
+        );
+      }
+      try {
+        const { id, name } = writeConversationNote(
+          conversationId,
+          title,
+          Buffer.from(markdown, "utf8"),
+        );
+        return NextResponse.json({ savedId: id, savedName: name });
+      } catch (err) {
+        return NextResponse.json({
+          error: err instanceof Error ? err.message : "could not write the conversation note",
+        });
+      }
+    }
+
+    // G6 fail-closed opt-out: delete every auto-exported chat note.
+    case "purgeConversationNotes":
+      try {
+        purgeConversationNotes();
+        return NextResponse.json({ ok: true });
+      } catch (err) {
+        return NextResponse.json({
+          error: err instanceof Error ? err.message : "could not purge conversation notes",
+        });
+      }
 
     // G5: refresh the briefing note on demand. PARITY: the desktop engine
     // rechecks each pin's SQL for a real before→after; the web dev twin can't

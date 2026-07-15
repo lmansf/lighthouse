@@ -70,6 +70,55 @@ pub fn cross_doc_cue(question: &str) -> bool {
     norm.split(' ').any(|t| CUE_WORDS.contains(&t))
 }
 
+/// G6: how much a recall cue lifts past-conversation candidates before ranking
+/// (applied in `vault::retrieve`). Keep identical in the TS twin.
+pub const CONV_BOOST: f64 = 1.5;
+
+/// Anchored recall frames — a "what did I …" self-reference, not loose keywords.
+/// KEEP BYTE-IDENTICAL with the TS twin.
+const RECALL_FRAMES: &[&str] = &[
+    "what did i ask", "what did i conclude", "what did we conclude",
+    "what did i say", "what did i decide", "did i ask", "have i asked",
+    "what did i find", "what have i asked",
+];
+
+/// G6 recall meta-cue: does the question ask what the USER previously asked,
+/// said, concluded, decided, or found? Anchored frames (not loose keywords) so
+/// ordinary questions never trigger. It BIASES retrieval toward past-conversation
+/// notes; unlike the meta cues it never short-circuits to a model-free answer —
+/// full synthesis still runs. Pure; normalization matches `cross_doc_cue`.
+/// KEEP BYTE-IDENTICAL with the TS twin (src/server/vault.ts::recallCue).
+pub fn recall_cue(question: &str) -> bool {
+    let lower = question.to_lowercase();
+    let mut norm = String::with_capacity(lower.len());
+    let mut last_space = true;
+    for ch in lower.chars() {
+        if ch.is_ascii_lowercase() || ch.is_ascii_digit() {
+            norm.push(ch);
+            last_space = false;
+        } else if !last_space {
+            norm.push(' ');
+            last_space = true;
+        }
+    }
+    let padded = format!(" {} ", norm.trim());
+    RECALL_FRAMES.iter().any(|f| padded.contains(&format!(" {f} ")))
+}
+
+/// G6: the synthesis prompt label for a retrieved context. A past-conversation
+/// note is announced as such so the model knows the block is the user's OWN
+/// earlier chat (not a source document); ordinary files keep their name. This is
+/// the text the model reads via `build_prompt`'s `[{n}] {name}` header. KEEP
+/// BYTE-IDENTICAL with the TS twin string in src/server/synth.ts.
+fn ctx_label(c: &vault::Context) -> String {
+    match c.kind {
+        crate::contracts::SourceKind::Conversation => {
+            "from your past Lighthouse conversation".to_string()
+        }
+        crate::contracts::SourceKind::File => c.name.clone(),
+    }
+}
+
 // --- Document candidates ---------------------------------------------------------
 
 #[derive(Debug, Clone)]
@@ -316,6 +365,7 @@ fn analytics_refs(regs: &[crate::analytics::TableReg]) -> (Vec<RagReference>, Ve
                             name: name.clone(),
                             snippet: snippet.clone(),
                             score: 0.9,
+                            kind: crate::vault::source_kind_of(id),
                         });
                     }
                 }
@@ -332,6 +382,7 @@ fn analytics_refs(regs: &[crate::analytics::TableReg]) -> (Vec<RagReference>, Ve
                         name: r.file_name.clone(),
                         snippet,
                         score: 0.9,
+                        kind: crate::vault::source_kind_of(&r.file_id),
                     });
                 }
                 if meta_seen.insert(r.file_id.clone()) {
@@ -759,7 +810,7 @@ pub fn answer_pipeline(
             let ctxs: Vec<Ctx> = initial
                 .contexts
                 .iter()
-                .map(|c| Ctx { name: c.name.clone(), text: c.text.clone(), score: c.score })
+                .map(|c| Ctx { name: ctx_label(c), text: c.text.clone(), score: c.score })
                 .collect();
             let text = llm::draft_answer(&question, &ctxs);
             if !text.trim().is_empty() {
@@ -833,7 +884,7 @@ pub fn answer_pipeline(
                     per_doc
                         .contexts
                         .iter()
-                        .map(|c| Ctx { name: c.name.clone(), text: c.text.clone(), score: c.score })
+                        .map(|c| Ctx { name: ctx_label(c), text: c.text.clone(), score: c.score })
                         .collect()
                 };
 
@@ -881,7 +932,13 @@ pub fn answer_pipeline(
                     None => extract,
                 };
                 extracts.push((
-                    RagReference { file_id: doc.id.clone(), name, snippet, score: doc.score },
+                    RagReference {
+                        file_id: doc.id.clone(),
+                        name,
+                        snippet,
+                        score: doc.score,
+                        kind: crate::vault::source_kind_of(&doc.id),
+                    },
                     block,
                 ));
             }
@@ -946,11 +1003,13 @@ pub fn answer_pipeline(
             if let Some((doc_id, name, chunks)) =
                 doc.filter(|(_, n, c)| !is_profileable(n) && !c.is_empty())
             {
+                let kind = crate::vault::source_kind_of(&doc_id);
                 let reference = RagReference {
                     file_id: doc_id,
                     name: name.clone(),
                     snippet: take_chars(&chunks[0], SNIPPET_CHARS),
                     score: 1.0,
+                    kind,
                 };
                 let total_chars: usize = chunks.iter().map(|c| c.chars().count()).sum::<usize>()
                     + 2 * chunks.len().saturating_sub(1);
@@ -1054,7 +1113,7 @@ pub fn answer_pipeline(
         let mut contexts: Vec<Ctx> = initial
             .contexts
             .iter()
-            .map(|c| Ctx { name: c.name.clone(), text: c.text.clone(), score: c.score })
+            .map(|c| Ctx { name: ctx_label(c), text: c.text.clone(), score: c.score })
             .collect();
         let mut profiled = 0;
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -1096,6 +1155,7 @@ mod tests {
             name: name.into(),
             snippet: String::new(),
             score,
+            kind: crate::contracts::SourceKind::File,
         }
     }
 
@@ -1116,6 +1176,54 @@ mod tests {
         assert!(!cross_doc_cue("when is the invoice due?"));
         assert!(!cross_doc_cue("what is on the canvas layer?"));
         assert!(!cross_doc_cue("list all caps words in the readme"));
+    }
+
+    #[test]
+    fn recall_cue_triggers_on_self_reference_only() {
+        // Mirrors test/recallCue.test.mjs (byte-parity with recallCue).
+        assert!(recall_cue("what did I conclude about churn?"));
+        assert!(recall_cue("What did we conclude on pricing"));
+        assert!(recall_cue("did I ask about Q3 revenue?"));
+        assert!(recall_cue("have I asked about the refund policy"));
+        assert!(recall_cue("what did I decide regarding vendors"));
+        assert!(recall_cue("what did I find in the audit"));
+        // Ordinary questions must NOT trigger.
+        assert!(!recall_cue("what is churn?"));
+        assert!(!recall_cue("conclude the report"));
+        assert!(!recall_cue("what did the memo say?"));
+        assert!(!recall_cue("summarize my invoices"));
+        assert!(!recall_cue("what were 2017 sales?"));
+    }
+
+    #[test]
+    fn source_kind_is_path_based_and_exact() {
+        use crate::contracts::SourceKind;
+        use crate::vault::source_kind_of;
+        assert_eq!(source_kind_of("Lighthouse Notes/Chats/My chat [ab12cd34].md"), SourceKind::Conversation);
+        assert_eq!(source_kind_of("Lighthouse Notes/x.md"), SourceKind::File);
+        assert_eq!(source_kind_of("a/b.md"), SourceKind::File);
+        assert_eq!(source_kind_of(""), SourceKind::File);
+        // The trailing slash is required — a sibling folder is NOT a conversation.
+        assert_eq!(source_kind_of("Lighthouse Notes/Chatsz/x.md"), SourceKind::File);
+    }
+
+    #[test]
+    fn ctx_label_announces_conversations_only() {
+        use crate::contracts::SourceKind;
+        let conv = crate::vault::Context {
+            name: "My chat [ab12cd34].md".into(),
+            text: String::new(),
+            score: 1.0,
+            kind: SourceKind::Conversation,
+        };
+        let file = crate::vault::Context {
+            name: "q3.csv".into(),
+            text: String::new(),
+            score: 1.0,
+            kind: SourceKind::File,
+        };
+        assert_eq!(ctx_label(&conv), "from your past Lighthouse conversation");
+        assert_eq!(ctx_label(&file), "q3.csv");
     }
 
     #[test]

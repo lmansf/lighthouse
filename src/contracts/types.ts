@@ -179,6 +179,12 @@ export interface RagReference {
   snippet: string;
   /** Relevance score in [0, 1]. */
   score: number;
+  /**
+   * G6: `"conversation"` when the cite is a past-chat note (under `Lighthouse
+   * Notes/Chats/`), else `"file"`. Optional so older payloads deserialize as a
+   * file. KEEP IN SYNC with the Rust `SourceKind` enum in contracts.rs.
+   */
+  kind?: "file" | "conversation";
 }
 
 export type ChatRole = "user" | "assistant";

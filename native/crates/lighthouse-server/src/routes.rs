@@ -207,6 +207,45 @@ pub async fn rag_post(headers: HeaderMap, body: Option<Json<Value>>) -> Response
                 Err(e) => Json(json!({ "error": e })).into_response(),
             };
         }
+        // --- G6 cross-conversation recall: auto-export a chat as an indexed
+        //     vault note (`Lighthouse Notes/Chats/`), OVERWRITTEN in place per
+        //     conversation id so the vault keeps one current note per chat. The
+        //     client gates this on "Save chats on this device". ---
+        Some("exportConversationNote") => {
+            let conversation_id = body["conversationId"].as_str().unwrap_or("").to_string();
+            let title = body["title"].as_str().unwrap_or("Conversation").to_string();
+            let markdown = body["markdown"].as_str().unwrap_or("").to_string();
+            if conversation_id.trim().is_empty() || markdown.trim().is_empty() {
+                return bad_request("conversationId and markdown required");
+            }
+            let written = tokio::task::spawn_blocking(move || {
+                lighthouse_core::vault::write_conversation_note(
+                    &conversation_id,
+                    &title,
+                    markdown.as_bytes(),
+                )
+            })
+            .await
+            .map_err(|e| e.to_string())
+            .and_then(|r| r.map_err(|e| e.to_string()));
+            return match written {
+                Ok((id, name)) => {
+                    Json(json!({ "savedId": id, "savedName": name })).into_response()
+                }
+                Err(e) => Json(json!({ "error": e })).into_response(),
+            };
+        }
+        // G6 fail-closed opt-out: delete every auto-exported chat note.
+        Some("purgeConversationNotes") => {
+            let purged = tokio::task::spawn_blocking(lighthouse_core::vault::purge_conversation_notes)
+                .await
+                .map_err(|e| e.to_string())
+                .and_then(|r| r.map_err(|e| e.to_string()));
+            return match purged {
+                Ok(()) => Json(json!({ "ok": true })).into_response(),
+                Err(e) => Json(json!({ "error": e })).into_response(),
+            };
+        }
         // --- Pinned questions (openspec: add-pinned-questions): persist an
         //     analytics answer's question + SQL + files; rechecks are guarded
         //     and model-free. The dev twin mirrors these ops (PARITY: no

@@ -17,6 +17,7 @@ import {
   activeIncludedFileIds,
   namedButExcluded,
   namedFileTarget,
+  sourceKindOf,
 } from "./vault";
 import {
   remoteProvider,
@@ -83,6 +84,17 @@ export function crossDocCue(question: string): boolean {
   const padded = ` ${norm} `;
   for (const p of CUE_PHRASES) if (padded.includes(` ${p} `)) return true;
   return norm.split(" ").some((t) => CUE_WORDS.has(t));
+}
+
+/**
+ * G6: the synthesis prompt label for a retrieved context. A past-conversation
+ * note is announced as such so the model knows the block is the user's OWN
+ * earlier chat (not a source document); ordinary files keep their name. This is
+ * the text the model reads via `buildPrompt`'s `[n] {name}` header. KEEP
+ * BYTE-IDENTICAL with lighthouse-core::synth::ctx_label.
+ */
+function ctxLabel(c: { name: string; kind?: "file" | "conversation" }): string {
+  return c.kind === "conversation" ? "from your past Lighthouse conversation" : c.name;
 }
 
 // --- Document candidates ---------------------------------------------------------
@@ -293,7 +305,7 @@ export async function* answerPipeline(
     initial.contexts.length > 0
   ) {
     const ctxs: Ctx[] = initial.contexts.map((c) => ({
-      name: c.name,
+      name: ctxLabel(c),
       text: c.text,
       score: c.score,
     }));
@@ -349,7 +361,7 @@ export async function* answerPipeline(
       const perDoc = await vaultRetrieve(retrievalQuery, [], PER_DOC_CHUNKS, [], [doc.id]);
       const ctxs: Ctx[] =
         perDoc.contexts.length > 0
-          ? perDoc.contexts.map((c) => ({ name: c.name, text: c.text, score: c.score }))
+          ? perDoc.contexts.map((c) => ({ name: ctxLabel(c), text: c.text, score: c.score }))
           : [{ name, text: preview.text, score: 1 }];
 
       // Exact numbers for tables: profile the full file, not the preview slice.
@@ -379,7 +391,7 @@ export async function* answerPipeline(
       // Exact stats ride along into the reduce so the final answer can quote them.
       const block = profile ? `${extract}\n\n${profile}` : extract;
       extracts.push({
-        ref: { fileId: doc.id, name, snippet, score: doc.score },
+        ref: { fileId: doc.id, name, snippet, score: doc.score, kind: sourceKindOf(doc.id) },
         text: block,
       });
     }
@@ -428,6 +440,7 @@ export async function* answerPipeline(
         name,
         snippet: chunks[0].slice(0, SNIPPET_CHARS),
         score: 1,
+        kind: sourceKindOf(target[0]),
       };
       const totalChars =
         chunks.reduce((sum, c) => sum + c.length, 0) + 2 * Math.max(0, chunks.length - 1);
@@ -502,7 +515,7 @@ export async function* answerPipeline(
 
   // --- Single-shot path (today's behavior) + exact table stats for CSV hits ---
   const contexts: Ctx[] = initial.contexts.map((c) => ({
-    name: c.name,
+    name: ctxLabel(c),
     text: c.text,
     score: c.score,
   }));
