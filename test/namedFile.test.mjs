@@ -24,7 +24,6 @@ function freshVault() {
   const vault = path.join(home, "vault");
   mkdirSync(path.join(vault, ".rag-vault"), { recursive: true });
   process.env.VAULT_DIR = vault;
-  delete process.env.LICENSE_API_URL;
   // With no explicit default-inclusion choice on the profile, files start
   // EXCLUDED (the app's conservative default) — deterministic inclusion, the
   // exact state of the field report.

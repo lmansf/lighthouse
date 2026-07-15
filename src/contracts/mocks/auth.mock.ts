@@ -1,14 +1,14 @@
 import type { AuthService } from "../services";
-import type { OnboardingState, User } from "../types";
+import type { OnboardingState } from "../types";
 
 /**
- * In-memory AuthService. No real identity provider; everything resolves
- * locally so the onboarding flow is fully exercisable. Swap for NextAuth /
- * Entra behind this surface later.
+ * In-memory AuthService. No real identity provider; first run collects no
+ * identity at all — it just walks vault → mode → model → inclusion → done so
+ * the onboarding flow is fully exercisable.
  */
 class MockAuthService implements AuthService {
   private state: OnboardingState = {
-    step: "sign-in",
+    step: "vault",
     user: null,
     providerId: null,
     modelId: null,
@@ -19,19 +19,11 @@ class MockAuthService implements AuthService {
     return { ...this.state };
   }
 
-  async signIn(email: string): Promise<User> {
-    const user: User = { id: "u-1", name: email.split("@")[0] || "User", email };
-    this.state = { ...this.state, user, step: "register" };
-    return user;
+  async finishVault(): Promise<void> {
+    this.state = { ...this.state, step: "mode" };
   }
 
-  async register(name: string, email: string): Promise<User> {
-    const user: User = { id: "u-1", name, email };
-    this.state = { ...this.state, user, step: "register" };
-    return user;
-  }
-
-  async finishRegistration(): Promise<void> {
+  async finishMode(): Promise<void> {
     this.state = { ...this.state, step: "select-model" };
   }
 
@@ -44,7 +36,7 @@ class MockAuthService implements AuthService {
       modelId,
       hasApiKey: keyed.has(providerId),
       keyedProviders: [...keyed],
-      step: "done",
+      step: "inclusion",
     };
   }
 
@@ -70,7 +62,7 @@ class MockAuthService implements AuthService {
 
   async signOut(): Promise<void> {
     this.state = {
-      step: "sign-in",
+      step: "vault",
       user: null,
       providerId: null,
       modelId: null,

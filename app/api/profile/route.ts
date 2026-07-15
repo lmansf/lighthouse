@@ -2,9 +2,8 @@
 import { NextResponse } from "next/server";
 import {
   getState,
-  signIn,
-  register,
-  finishRegistration,
+  finishVault,
+  finishMode,
   selectModel,
   setDefaultInclusion,
   completeOnboarding,
@@ -28,14 +27,11 @@ export async function POST(req: Request) {
   }
   const body = await req.json().catch(() => ({}));
   switch (body.op) {
-    case "signIn":
-      signIn(String(body.email ?? ""));
+    case "finishVault":
+      finishVault();
       break;
-    case "register":
-      register(String(body.name ?? ""), String(body.email ?? ""));
-      break;
-    case "finishRegistration":
-      finishRegistration();
+    case "finishMode":
+      finishMode();
       break;
     case "selectModel": {
       const providerId = String(body.providerId ?? "");

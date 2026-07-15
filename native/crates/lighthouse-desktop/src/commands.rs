@@ -10,7 +10,7 @@ use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager};
 
 use lighthouse_core::contracts::{ChatChunk, ChatTurn};
-use lighthouse_core::{license, local_model, profile, settings, sources, tts, vault};
+use lighthouse_core::{local_model, profile, settings, sources, tts, vault};
 
 fn string_array(v: &Value) -> Vec<String> {
     v.as_array()
@@ -540,16 +540,8 @@ pub fn profile_get() -> Value {
 #[tauri::command]
 pub async fn profile_op(body: Value) -> Result<Value, String> {
     match body["op"].as_str() {
-        Some("signIn") => {
-            profile::sign_in(body["email"].as_str().unwrap_or(""));
-        }
-        Some("register") => {
-            profile::register(
-                body["name"].as_str().unwrap_or(""),
-                body["email"].as_str().unwrap_or(""),
-            );
-        }
-        Some("finishRegistration") => profile::finish_registration(),
+        Some("finishVault") => profile::finish_vault(),
+        Some("finishMode") => profile::finish_mode(),
         Some("selectModel") => {
             let provider_id = body["providerId"].as_str().unwrap_or("");
             // Managed policy: reject a disallowed provider with a real error
@@ -617,88 +609,6 @@ fn shell_log_excerpt(app: &AppHandle) -> String {
         excerpt = excerpt[cut..].to_string();
     }
     excerpt
-}
-
-#[tauri::command]
-pub async fn license_op(app: AppHandle, body: Value) -> Result<Value, String> {
-    match body["op"].as_str() {
-        Some("config") => Ok(json!({ "paidEnabled": license::paid_enabled() })),
-        // What a bug report would transmit — shown to the user in the feedback
-        // dialog BEFORE they press Send. version + OS, plus the shell.log tail
-        // the "attach diagnostics" checkbox can include.
-        Some("diagnostics") => Ok(json!({
-            "version": lighthouse_core::config::app_version(),
-            "os": std::env::consts::OS,
-            "log": shell_log_excerpt(&app),
-        })),
-        Some("check") => Ok(serde_json::to_value(license::check_license().await)
-            .unwrap_or_else(|_| json!({ "status": "none" }))),
-        Some("start") => match license::start_trial(None).await {
-            Ok(_) => Ok(json!({ "ok": true })),
-            Err(e) => Ok(json!({
-                "ok": false, "reason": "rejected",
-                "detail": err_string(e, "start failed"),
-            })),
-        },
-        Some("activate") => {
-            let result = license::activate_license(body["licenseKey"].as_str().unwrap_or("")).await;
-            let ok = result.status == "valid" || result.status == "grace";
-            let mut payload = serde_json::to_value(&result).unwrap_or_else(|_| json!({}));
-            payload["ok"] = json!(ok);
-            Ok(payload)
-        }
-        Some("feedback") => {
-            let f = &body["feedback"];
-            if !f.is_object() {
-                return Err("feedback required".into());
-            }
-            let input = license::FeedbackInput {
-                first_name: f["firstName"].as_str().unwrap_or("").trim().to_string(),
-                last_name: f["lastName"].as_str().unwrap_or("").trim().to_string(),
-                ease_of_use: f["easeOfUse"].as_f64().unwrap_or(0.0),
-                overall_value: f["overallValue"].as_f64().unwrap_or(0.0),
-                liked: f["liked"].as_str().unwrap_or("").trim().to_string(),
-                change_or_add: f["changeOrAdd"].as_str().unwrap_or("").trim().to_string(),
-                notify_when_available: f["notifyWhenAvailable"].as_bool().unwrap_or(false),
-            };
-            Ok(json!({ "ok": license::submit_feedback(&input).await }))
-        }
-        Some("featureInterest") => {
-            let to_ids = |v: &serde_json::Value| -> Vec<String> {
-                v.as_array()
-                    .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
-                    .unwrap_or_default()
-            };
-            let shown = to_ids(&body["shown"]);
-            let wanted = to_ids(&body["wanted"]);
-            Ok(json!({ "ok": license::submit_feature_interest(&shown, &wanted).await }))
-        }
-        Some("notify") => {
-            let email = body["email"].as_str().unwrap_or("");
-            if email.trim().is_empty() {
-                return Err("email required".into());
-            }
-            Ok(json!({ "ok": license::submit_notify(email).await }))
-        }
-        Some("bug") => {
-            let where_ = body["where"].as_str().unwrap_or("").trim().to_string();
-            let what = body["what"].as_str().unwrap_or("").trim().to_string();
-            if where_.is_empty() && what.is_empty() {
-                return Err("empty report".into());
-            }
-            // Attach the diagnostics excerpt only when the user checked the box.
-            let log = if body["includeLog"].as_bool().unwrap_or(false) {
-                shell_log_excerpt(&app)
-            } else {
-                String::new()
-            };
-            Ok(json!({ "ok": license::submit_bug(&where_, &what, &log).await }))
-        }
-        Some("checkout") => {
-            Ok(json!({ "url": license::checkout_url(body["email"].as_str()).await }))
-        }
-        _ => Err("unknown op".into()),
-    }
 }
 
 /// Diagnostics for the "Send feedback" dialog: app version, OS, and — only when
@@ -1089,36 +999,6 @@ pub async fn pick_link_paths(app: AppHandle, directory: bool) -> Vec<String> {
         });
     }
     rx.await.unwrap_or_default()
-}
-
-#[tauri::command]
-pub fn register_config() -> Value {
-    json!({ "configured": license::is_supabase_configured() })
-}
-
-/// Welcome-registration: mint a trial with the contact info.
-#[tauri::command]
-pub async fn register_start(body: Value) -> Result<Value, String> {
-    let email = body["email"].as_str().unwrap_or("").trim().to_string();
-    if email.is_empty() {
-        return Err("email required".into());
-    }
-    let contact = license::Registration {
-        first_name: body["firstName"].as_str().unwrap_or("").trim().to_string(),
-        last_name: body["lastName"].as_str().unwrap_or("").trim().to_string(),
-        email,
-        do_not_contact: body["doNotContact"].as_bool().unwrap_or(false),
-        city: body["city"].as_str().unwrap_or("").trim().to_string(),
-        state: body["state"].as_str().unwrap_or("").trim().to_string(),
-    };
-    let result = license::start_trial(Some(contact)).await;
-    Ok(match result {
-        Ok(_) => json!({ "ok": true }),
-        Err(e) => json!({
-            "ok": false, "reason": "rejected",
-            "detail": err_string(e, "registration failed"),
-        }),
-    })
 }
 
 /// One uploaded file as a raw-bytes IPC request (filename/dir in headers) —

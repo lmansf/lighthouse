@@ -43,8 +43,6 @@ test("link-first adds: covered chat-drop resolves to its node, overlaps rejected
   const vault = path.join(home, "vault");
   mkdirSync(vault, { recursive: true });
   process.env.VAULT_DIR = vault;
-  // Keep telemetry/experiment code fully offline + deterministic for the test.
-  delete process.env.LICENSE_API_URL;
 
   // A real external tree the user will link in place (NOT copied into the vault).
   const extFolder = path.join(home, "Desktop", "project");

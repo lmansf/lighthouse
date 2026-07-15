@@ -17,7 +17,6 @@ pub fn app() -> Router {
             "/api/profile",
             get(routes::profile_get).post(routes::profile_post),
         )
-        .route("/api/license", post(routes::license_post))
         .route("/api/connect", post(routes::connect_post))
         .route(
             "/api/model",
@@ -32,10 +31,6 @@ pub fn app() -> Router {
                 // The upload route enforces its own 25 MB/file + 200 MB/request
                 // caps; the transport limit just needs to sit above them.
                 .layer(DefaultBodyLimit::max(210 * 1024 * 1024)),
-        )
-        .route(
-            "/api/register",
-            get(routes::register_get).post(routes::register_post),
         )
         .route(
             "/api/settings",

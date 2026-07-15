@@ -147,8 +147,13 @@ export interface User {
 
 /** Onboarding progress, persisted in the auth store. */
 export interface OnboardingState {
-  /** Which step the onboarding flow is currently on. */
-  step: "sign-in" | "register" | "select-model" | "done";
+  /**
+   * Which step the onboarding flow is currently on. First run walks
+   * vault → mode → select-model → inclusion → done. The `mode` step (window vs
+   * widget) is desktop-only; the web twin auto-advances past it. `user` is
+   * always null now that first-run collects no identity (no email/register).
+   */
+  step: "vault" | "mode" | "select-model" | "inclusion" | "done";
   user: User | null;
   /** Chosen provider id, set during the select-model step. */
   providerId: string | null;

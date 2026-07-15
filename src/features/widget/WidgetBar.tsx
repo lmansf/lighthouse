@@ -52,7 +52,6 @@ import type { ChatTurn, FileNode, RagReference } from "@/contracts";
 import { chatService, ragService } from "@/contracts";
 import { useRagStore } from "@/stores/useRagStore";
 import { egressPillSummary } from "@/features/egress/EgressShield";
-import { useLicenseStore, isLocked } from "@/stores/useLicenseStore";
 import { isDesktopShell } from "@/shell/desktopBridge";
 import { useVaultTree } from "@/shell/useVaultTree";
 import { ACCENTS } from "@/shell/theme";
@@ -324,18 +323,9 @@ export function WidgetBar() {
   // Look up a result's live node (for its current AI-visibility state).
   const nodesById = useMemo(() => new Map(nodes.map((n) => [n.id, n])), [nodes]);
 
-  // License: the widget reads the lock state itself — mounting search bare
-  // would silently bypass the trial gate (widget-scope §2.4). Re-check on
-  // every summon (window focus): the trial can expire while the bar idles.
-  const status = useLicenseStore((s) => s.status);
-  const check = useLicenseStore((s) => s.check);
-  useEffect(() => {
-    void check();
-    const onFocus = () => void check();
-    window.addEventListener("focus", onFocus);
-    return () => window.removeEventListener("focus", onFocus);
-  }, [check]);
-  const locked = isLocked(status);
+  // Lighthouse has no accounts or licensing — the vault is always available, so
+  // the widget never locks. Kept as a const the guards below still read.
+  const locked = false;
 
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState(0);

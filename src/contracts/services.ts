@@ -23,7 +23,6 @@ import type {
   AuditVerdict,
   RagReference,
   RestoreToken,
-  User,
 } from "./types";
 
 /** Curates which files/sources are exposed to retrieval, and runs retrieval. */
@@ -212,13 +211,17 @@ export interface RagService {
   refreshBriefingNote(): Promise<{ savedId?: string; savedName?: string; error?: string }>;
 }
 
-/** Registration / sign-in. Mocked now; swap for a real identity provider later. */
+/**
+ * Local single-user onboarding progression. First run collects no identity
+ * (no email/registration, no licensing); it just walks the user through
+ * vault → mode → model → default-inclusion and unlocks the app.
+ */
 export interface AuthService {
   getState(): OnboardingState;
-  signIn(email: string, password: string): Promise<User>;
-  register(name: string, email: string, password: string): Promise<User>;
-  /** Advance past the welcome/registration step (whether submitted or skipped). */
-  finishRegistration(): Promise<void>;
+  /** Advance past the vault (welcome) step to the interface-mode chooser. */
+  finishVault(): Promise<void>;
+  /** Advance past the window/widget mode step (auto-skipped on the web twin). */
+  finishMode(): Promise<void>;
   selectModel(providerId: string, modelId: string, apiKey: string): Promise<void>;
   /**
    * Live-test an API key against its provider (a cheap authenticated model-list

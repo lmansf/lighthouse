@@ -44,8 +44,6 @@ async fn managed_policy_is_enforced_at_the_engine() {
     .unwrap();
 
     std::env::set_var("VAULT_DIR", vault.path());
-    std::env::remove_var("LICENSE_API_URL");
-    std::env::remove_var("LICENSE_ENFORCE");
     std::env::remove_var("LIGHTHOUSE_API_TOKEN");
     std::env::remove_var("LIGHTHOUSE_DESKTOP");
     std::env::remove_var("ANTHROPIC_API_KEY");

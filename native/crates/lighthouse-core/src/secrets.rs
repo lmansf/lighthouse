@@ -8,8 +8,9 @@
 //! `secrets.json` in the install-global app state dir (see
 //! `config::app_state_dir` — survives vault switches and sign-out), each key
 //! sealed with AES-256-GCM under a per-install random secret (`secret.key`,
-//! created 0600 on first use). Same iv|tag|ct sealed layout as the license
-//! module so both engines stay token-compatible.
+//! created 0600 on first use). Both engines (Rust + the TS twin) use the same
+//! iv|tag|ct sealed layout so a `secrets.json` stays token-compatible across
+//! them.
 //!
 //! Threat model, honestly: by default the sealing secret sits beside the
 //! ciphertext (a 0600 `secret.key`), so this protects against casual disk/
@@ -135,7 +136,7 @@ fn machine_secret() -> String {
 fn sealing_key() -> [u8; 32] {
     let secret = machine_secret();
     let mut key = [0u8; 32];
-    // Node's scryptSync defaults, same as the license module: N=16384, r=8, p=1.
+    // Node's scryptSync defaults (matched by the TS twin): N=16384, r=8, p=1.
     let params = scrypt::Params::new(14, 8, 1, 32).expect("static scrypt params");
     scrypt::scrypt(
         secret.as_bytes(),

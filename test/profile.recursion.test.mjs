@@ -1,14 +1,16 @@
 /**
- * Smoke test for /api/profile's getState() / signIn().
+ * Smoke test for /api/profile's getState() + the first onboarding step action.
  *
  * PR #55 once made profile.getState() resolve A/B variants via experiment
- * getVariant(), and experiment.resolve() read the user's email through
- * license.accountEmail() — which itself calls profile.getState(). That cycle
+ * getVariant(), and experiment.resolve() read the user's email through the
+ * (now-deleted) license module — which itself called profile.getState(). That
+ * cycle
  *   getState -> getVariant -> resolve -> accountEmail -> getState -> ...
- * recursed until the stack overflowed, 500-ing every /api/profile call. The
- * experiments layer (and that variant resolution) has since been removed, so the
- * cycle is gone by construction; this still guards that getState()/signIn() —
- * exactly what the endpoint's GET/POST run — resolve without throwing.
+ * recursed until the stack overflowed, 500-ing every /api/profile call. Both
+ * the experiments and the licensing layers have since been removed, so the
+ * cycle is gone by construction; this still guards that getState() and the
+ * first step action — exactly what the endpoint's GET/POST run on first
+ * launch — resolve without throwing.
  *
  * Run: `npm run test:extract`
  */
@@ -39,27 +41,17 @@ test("GET /api/profile path: getState() resolves without recursing (no stack ove
   // Before the fix this threw RangeError: Maximum call stack size exceeded.
   const state = getState();
 
-  assert.equal(state.step, "sign-in", "an untouched profile starts at the sign-in step");
+  assert.equal(state.step, "vault", "an untouched profile starts at the vault step");
 });
 
-test("POST signIn path: signIn() + getState() returns the signed-in user, still no recursion", async () => {
+test("POST finishVault path: finishVault() + getState() advances the step, still no recursion", async () => {
   freshVault();
-  const { getState, signIn } = await import("../src/server/profile.ts");
+  const { getState, finishVault } = await import("../src/server/profile.ts");
 
-  // The cycle ran through accountEmail() reading the profile email, so a
-  // signed-in user (email present) is exactly the state that used to recurse.
-  signIn("alice@example.com");
+  // finishVault() is the first onboarding action the endpoint runs; it must
+  // resolve without throwing and move the flow forward.
+  finishVault();
   const state = getState();
 
-  assert.equal(state.user?.email, "alice@example.com", "the signed-in email round-trips");
-  assert.equal(state.step, "register", "signIn advances onboarding to the register step");
-});
-
-test("accountEmail() still reads the signed-in profile email (its own path is unchanged)", async () => {
-  freshVault();
-  const { signIn } = await import("../src/server/profile.ts");
-  const { accountEmail } = await import("../src/server/license.ts");
-
-  signIn("user1@example.com");
-  assert.equal(accountEmail(), "user1@example.com", "accountEmail reads the profile email");
+  assert.equal(state.step, "mode", "finishVault advances onboarding to the mode step");
 });

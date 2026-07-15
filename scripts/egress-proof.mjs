@@ -7,11 +7,11 @@
  * machine except the egress documented in docs/data-flows.md.
  *
  * In this test configuration nothing that legitimately egresses is triggered:
- * no cloud model is configured (the ask uses the local/extractive path), no
- * license backend is set (LICENSE_API_URL unset), no update check is forced,
- * no assets are installed, and the user presses no Send button. So the correct
- * result is ZERO cross-origin requests and, in particular, ZERO requests to the
- * retired ambient endpoints `/api/event` and `/api/usage`.
+ * no cloud model is configured (the ask uses the local/extractive path),
+ * licensing and accounts have been removed entirely, no update check is forced,
+ * no assets are installed, and the user opens no feedback handoff. So the
+ * correct result is ZERO cross-origin requests and, in particular, ZERO
+ * requests to the retired ambient/account endpoints below.
  *
  * Usage: EGRESS_BASE=http://localhost:3000 node scripts/egress-proof.mjs
  * Exits 0 when clean, 1 (printing offenders) when any forbidden request fired.
@@ -27,8 +27,9 @@ function isSameOrigin(url) {
   return url.startsWith(BASE) || url.startsWith("data:") || url.startsWith("blob:");
 }
 
-// Endpoints that must NEVER be hit again — the deleted ambient telemetry.
-const FORBIDDEN_PATHS = ["/api/event", "/api/usage"];
+// Endpoints that must NEVER be hit again — the deleted ambient telemetry and
+// the deleted licensing/accounts surface.
+const FORBIDDEN_PATHS = ["/api/event", "/api/usage", "/api/license", "/api/register"];
 
 const requests = [];
 
