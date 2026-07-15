@@ -5,8 +5,8 @@ image post (4:5 portrait, 1080×1350, exported at 2× — 2160×2700 PNG).
 
 | Audience | Source | Export |
 | --- | --- | --- |
-| Data analysts | `lighthouse-flyer-data-analyst.html` | `out/lighthouse-flyer-data-analyst.png` |
-| Financial analysts | `lighthouse-flyer-financial-analyst.html` | `out/lighthouse-flyer-financial-analyst.png` |
+| Data analysts | `lighthouse-flyer-data-analyst.html` | `exports/lighthouse-flyer-data-analyst.png` |
+| Financial analysts | `lighthouse-flyer-financial-analyst.html` | `exports/lighthouse-flyer-financial-analyst.png` |
 
 Every product claim on the flyers is taken from the README/docs as of 0.11
 (read-only SQL analytics, [n] citations, pinned-question alerts, local-first

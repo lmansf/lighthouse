@@ -45,7 +45,8 @@ try {
       return c.scrollHeight - c.clientHeight;
     });
     if (overflow > 0) console.warn(`⚠ ${name}: content overflows the 1350px canvas by ${overflow}px`);
-    const out = join(here, "out", `${name}.png`);
+    // "exports/", not "out/" — the repo-wide gitignore swallows any out/ dir.
+    const out = join(here, "exports", `${name}.png`);
     await page.screenshot({ path: out, clip: { x: 0, y: 0, width: 1080, height: 1350 } });
     console.log("wrote", out);
     await page.close();
