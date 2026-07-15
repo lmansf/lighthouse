@@ -2,7 +2,7 @@
 
 ## Why
 
-Questions ABOUT the vault — "what's new this week?", "what spreadsheets do I have?", "which files have an employee-id column?" — need no model at all, yet today they run the full retrieval pipeline and often answer poorly. And a new user staring at an empty chat has no idea what the genie can do with the files they just included.
+Questions ABOUT the vault — "what's new this week?", "what spreadsheets do I have?", "which files have an employee-id column?" — need no model at all, yet today they run the full retrieval pipeline and often answer poorly. And a new user staring at an empty chat has no idea what Beam can do with the files they just included.
 
 ## What Changes
 

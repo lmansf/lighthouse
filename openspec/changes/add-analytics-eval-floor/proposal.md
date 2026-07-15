@@ -4,7 +4,7 @@
 
 The analytics branch is the one place where a wrong number reads as an
 authoritative one: the answer says "computed exactly by Lighthouse" and shows
-the SQL for trust. Every previous Genie phase added *capability* (unions, joins,
+the SQL for trust. Every previous Beam phase added *capability* (unions, joins,
 charts, multi-step); none added a **standing correctness floor**. A regression
 that makes `substr(date,1,7)` mis-bucket a month, or an Excel serial slip into a
 summed column, or a 12,431-row result get narrated as "200 rows total", would

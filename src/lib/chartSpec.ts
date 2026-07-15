@@ -1,5 +1,5 @@
 /**
- * Chart specs for analytics answers (docs/analytics-genie.md, Phase C).
+ * Chart specs for analytics answers (docs/analytics-beam.md, Phase C).
  *
  * The Rust engine renders a ```lighthouse-chart fenced block containing a small
  * JSON spec built from the VERIFIED query result (the model never touches it);

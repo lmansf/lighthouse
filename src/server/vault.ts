@@ -1148,7 +1148,7 @@ function chunksOf(text: string, fileId: string, name: string): Chunk[] {
 }
 
 /**
- * Structure-aware chunking (docs/analytics-genie.md, B1): tabular extracts
+ * Structure-aware chunking (docs/analytics-beam.md, B1): tabular extracts
  * chunk by ROWS with the header line(s) prepended to every chunk, so a chunk
  * holding row 400 still carries its column names; prose keeps the 120-word
  * windows. KEEP BYTE-IDENTICAL with the Rust twin (vault.rs chunk_texts_named).

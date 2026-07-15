@@ -480,7 +480,7 @@ pub fn answer_pipeline(
             }
         }
 
-        // --- Analytics branch (docs/analytics-genie.md): aggregate ask over
+        // --- Analytics branch (docs/analytics-beam.md): aggregate ask over
         //     tabular files → model writes SQL, DataFusion executes, the model
         //     narrates the verified result. Any failure falls through silently
         //     to the paths below — analytics can only add capability. ---

@@ -621,7 +621,7 @@ fn extract_doc(buf: &[u8]) -> anyhow::Result<String> {
 }
 
 /// Render a Parquet file's schema + head rows as CSV-shaped text so its
-/// content is searchable (it was name-match-only before; docs/analytics-genie.md).
+/// content is searchable (it was name-match-only before; docs/analytics-beam.md).
 /// The analytics engine queries the file directly — this is only for retrieval.
 fn extract_parquet(abs: &Path) -> anyhow::Result<String> {
     use datafusion::arrow::util::display::array_value_to_string;
