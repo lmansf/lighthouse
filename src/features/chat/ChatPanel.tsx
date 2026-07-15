@@ -85,11 +85,11 @@ import {
 import dynamic from "next/dynamic";
 import { type Components } from "react-markdown";
 import type { DragEvent } from "react";
-import type { AnalyticsMeta, ChangedPin, ChatChunk, ChatTurn, Pin, RagReference } from "@/contracts";
+import type { AnalyticsMeta, ChangedPin, ChatTurn, Pin, RagReference } from "@/contracts";
 import { chatService, MODEL_PROVIDERS, ragService } from "@/contracts";
 import { useRagStore } from "@/stores/useRagStore";
 import { useAuthStore } from "@/stores/useAuthStore";
-import { parseChartSpec, tableToCsv } from "@/lib/chartSpec";
+import { parseChartSpec, stripChartRequestFences, tableToCsv } from "@/lib/chartSpec";
 import {
   sortRows,
   truncationCaption,
@@ -97,8 +97,9 @@ import {
   type SortDir,
 } from "@/lib/sortTable";
 import { pinChartData } from "@/lib/pinChart";
+import { composeEvidencePack, provenanceStampText } from "@/lib/evidencePack";
 import { recallRelated, type RecallHit } from "@/lib/recall";
-import { AnalyticsChart } from "@/features/chat/AnalyticsChart";
+import { AnalyticsChart, standaloneChartSvg } from "@/features/chat/AnalyticsChart";
 import { BriefingsPanel } from "@/features/chat/BriefingsPanel";
 import { PinMiniChart } from "@/features/chat/PinMiniChart";
 import { EgressShield } from "@/features/egress/EgressShield";
@@ -866,25 +867,10 @@ function stripCitations(content: string): string {
     .replace(/[ \t]+([.,;:!?])/g, "$1");
 }
 
-/** Map a provider id to its vendor label for the provenance stamp; falls back
- *  to the id itself when the provider isn't in the picker table. */
-function vendorLabelFor(id: string): string {
-  return MODEL_PROVIDERS.find((p) => p.id === id)?.label ?? id;
-}
-
-/**
- * The engine-emitted provenance stamp rendered under a finished answer. Reads
- * ONLY the final chunk's `meta` (never the model's text), so it is always
- * truthful: "Answered on this device" when nothing left the machine, else
- * "Answered via <vendor> — N excerpts from M files sent", naming the vendor and
- * the exact counts the engine computed where the prompt was assembled.
- */
-function provenanceStampText(meta: NonNullable<ChatChunk["meta"]>): string {
-  if (meta.origin === "device") return "Answered on this device";
-  const excerpts = `${meta.excerptCount} excerpt${meta.excerptCount === 1 ? "" : "s"}`;
-  const files = `${meta.sourceFileCount} file${meta.sourceFileCount === 1 ? "" : "s"}`;
-  return `Answered via ${vendorLabelFor(meta.origin)} — ${excerpts} from ${files} sent`;
-}
+// The engine-emitted provenance stamp ("Answered on this device" / "Answered
+// via <vendor> — …") is rendered via `provenanceStampText` from
+// @/lib/evidencePack — one source of truth shared with the evidence-pack
+// export, so the pack's stamp line is byte-identical to the on-screen one.
 
 /** Compact "how long ago" for the recent-chats list (e.g. "3m", "2h", "Apr 5"). */
 function formatRelativeTime(ts: number): string {
@@ -1112,6 +1098,8 @@ function RefineChips({
   onEditSql,
   onSave,
   savePending,
+  onEvidencePack,
+  packPending,
   onPin,
   pinPending,
 }: {
@@ -1123,6 +1111,10 @@ function RefineChips({
   /** Save-as-CSV (desktop engine only — omitted on the web dev twin). */
   onSave?: (meta: AnalyticsMeta) => void;
   savePending?: boolean;
+  /** Evidence pack: one self-contained HTML file of this answer (question,
+   *  narrative, table, chart, SQL, provenance) — desktop-gated like onSave. */
+  onEvidencePack?: (meta: AnalyticsMeta) => void;
+  packPending?: boolean;
   /** Pin this answer so vault changes recheck it (desktop rechecks live). */
   onPin?: (meta: AnalyticsMeta) => void;
   pinPending?: boolean;
@@ -1163,6 +1155,18 @@ function RefineChips({
           onClick={() => onSave(meta)}
         >
           {savePending ? "Saving…" : "Save as CSV"}
+        </Button>
+      )}
+      {onEvidencePack && (
+        <Button
+          appearance="secondary"
+          size="small"
+          shape="circular"
+          icon={<DocumentRegular />}
+          disabled={disabled || packPending}
+          onClick={() => onEvidencePack(meta)}
+        >
+          {packPending ? "Saving…" : "Evidence pack"}
         </Button>
       )}
       {onPin && (
@@ -1211,13 +1215,18 @@ const AnswerMarkdown = memo(function AnswerMarkdown({
   onCite: (turnId: string, n: number) => void;
 }) {
   const styles = useStyles();
+  // Belt-and-braces (chart-directive): the engine already withholds
+  // lighthouse-chart-request fences from streamed deltas; displayed prose
+  // strips any residue too. ```lighthouse-chart fences are NOT stripped here —
+  // they render as charts below.
+  const cleaned = useMemo(() => stripChartRequestFences(content), [content]);
   // G4: a truncated analytics result carries the G1 "first N of M rows" footer.
   // The footer ALWAYS stays in the body (a deterministic, never-model-generated
   // disclosure — never stripped, so it shows even when the answer narrates in
   // prose with no result table). When a result table IS rendered and the user
   // sorts it, a caption additionally flags that the sort covers only the shown
   // rows (see SortableTable).
-  const truncationNote = useMemo(() => truncationNoteFrom(content), [content]);
+  const truncationNote = useMemo(() => truncationNoteFrom(cleaned), [cleaned]);
   const components = useMemo<Components>(
     () => ({
       a: ({ node, href, children, ...props }) => {
@@ -1280,7 +1289,7 @@ const AnswerMarkdown = memo(function AnswerMarkdown({
     [styles, turnId, onCite, truncationNote],
   );
   return (
-    <MarkdownView content={content} components={components} remarkPlugins={[remarkCitations]} />
+    <MarkdownView content={cleaned} components={components} remarkPlugins={[remarkCitations]} />
   );
 });
 
@@ -1301,7 +1310,9 @@ const StreamingAnswer = memo(function StreamingAnswer({
   content: string;
   className: string;
 }) {
-  return <div className={className}>{content}</div>;
+  // Same belt-and-braces strip as AnswerMarkdown — a chart-request fence
+  // (even a still-open one, via the regex's `$` arm) never shows mid-stream.
+  return <div className={className}>{stripChartRequestFences(content)}</div>;
 });
 
 /**
@@ -1487,6 +1498,10 @@ export function ChatPanel() {
   const [savedNotes, setSavedNotes] = useState<
     Record<string, { pending?: boolean; id?: string; name?: string; error?: string }>
   >({});
+  // Per-turn evidence-pack outcome — the pack chip's twin of savedNotes.
+  const [packNotes, setPackNotes] = useState<
+    Record<string, { pending?: boolean; id?: string; name?: string; error?: string }>
+  >({});
   const [exportNote, setExportNote] = useState<{ id?: string; name?: string; error?: string } | null>(
     null,
   );
@@ -1509,6 +1524,7 @@ export function ChatPanel() {
   // chat's "a2" never inherits another chat's "Saved…"/"Pinned…"/👍.
   useEffect(() => {
     setSavedNotes({});
+    setPackNotes({});
     setPinNotes({});
     setRatings({});
   }, [currentId]);
@@ -2007,6 +2023,71 @@ export function ChatPanel() {
     } catch (err) {
       if (!stillHere()) return;
       setSavedNotes((s) => ({
+        ...s,
+        [asstId]: { error: err instanceof Error ? err.message : "save failed" },
+      }));
+    }
+  }
+
+  /**
+   * Evidence pack (Beam §2): compose ONE self-contained HTML file from this
+   * analytics answer — question, narrative + result table (honesty footers
+   * verbatim), the rendered chart as inline SVG, the exact SQL, and file
+   * provenance/freshness — and write it into `Lighthouse Results/` through
+   * the same sanitized artifact op the chat export uses. Everything is
+   * composed CLIENT-SIDE from what's already on the turn: no re-query, no
+   * model, no network beyond the local write op.
+   */
+  async function saveEvidencePack(asstId: string, meta: AnalyticsMeta) {
+    const msgs = useChatStore.getState().messages;
+    const idx = msgs.findIndex((x) => x.id === asstId);
+    const msg = idx >= 0 ? msgs[idx] : undefined;
+    if (!msg || !msg.content) return;
+    const prev = idx > 0 ? msgs[idx - 1] : undefined;
+    const question =
+      (prev?.role === "user" ? prev.content : "").trim().replace(/\s+/g, " ") ||
+      "Analytics answer";
+    const hint = question.slice(0, 60) || "Evidence pack";
+    // Serialize the ALREADY-RENDERED chart SVG for this turn (theme colors
+    // baked in). Absent or unparsable chart ⇒ the pack omits the section.
+    let chartSvg: string | undefined;
+    const svgEl = document.querySelector<SVGSVGElement>(
+      `[data-lh-turn="${asstId}"] figure svg[role="img"]`,
+    );
+    if (svgEl) {
+      try {
+        chartSvg = standaloneChartSvg(svgEl);
+      } catch {
+        /* chart capture is best-effort — the pack stands without it */
+      }
+    }
+    const html = composeEvidencePack({
+      question,
+      contentMarkdown: msg.content,
+      chartSvg,
+      meta: msg.meta,
+      analytics: meta,
+      references: msg.references ?? [],
+      generatedAt: Date.now(),
+    });
+    // Same per-conversation guard as saveResultCsv: ids restart per chat.
+    const convo = useChatStore.getState().currentId;
+    const stillHere = () => useChatStore.getState().currentId === convo;
+    setPackNotes((s) => ({ ...s, [asstId]: { pending: true } }));
+    try {
+      const res = await ragService.exportChat(hint, html, {
+        subdir: "Lighthouse Results",
+        ext: "html",
+      });
+      if (!stillHere()) return;
+      if (res.error || !res.savedId) {
+        setPackNotes((s) => ({ ...s, [asstId]: { error: res.error ?? "save failed" } }));
+      } else {
+        setPackNotes((s) => ({ ...s, [asstId]: { id: res.savedId, name: res.savedName } }));
+      }
+    } catch (err) {
+      if (!stillHere()) return;
+      setPackNotes((s) => ({
         ...s,
         [asstId]: { error: err instanceof Error ? err.message : "save failed" },
       }));
@@ -3270,7 +3351,9 @@ export function ChatPanel() {
                   )}
                 </div>
               ) : (
-                <div key={m.id} className={styles.turn}>
+                // data-lh-turn: DOM anchor for the evidence-pack chart capture
+                // (the handler serializes this turn's rendered chart SVG).
+                <div key={m.id} className={styles.turn} data-lh-turn={m.id}>
                   {streaming && !m.content && m.id === lastId ? (
                     <LighthouseLoader
                       className={styles.loader}
@@ -3397,6 +3480,10 @@ export function ChatPanel() {
                               desktop ? (meta) => void saveResultCsv(m.id, meta) : undefined
                             }
                             savePending={savedNotes[m.id]?.pending}
+                            onEvidencePack={
+                              desktop ? (meta) => void saveEvidencePack(m.id, meta) : undefined
+                            }
+                            packPending={packNotes[m.id]?.pending}
                             onPin={(meta) => void pinAnswer(m.id, meta)}
                             pinPending={pinNotes[m.id]?.pending}
                           />
@@ -3442,6 +3529,30 @@ export function ChatPanel() {
                             <div className={styles.savedNote}>
                               <ErrorCircleRegular fontSize={14} />
                               <Text size={200}>Couldn&apos;t save — {savedNotes[m.id].error}</Text>
+                            </div>
+                          )}
+                          {packNotes[m.id]?.name && (
+                            <div className={styles.savedNote}>
+                              <CheckmarkRegular fontSize={14} />
+                              <Text size={200}>
+                                Saved “{packNotes[m.id].name}” to Lighthouse Results — a
+                                self-contained evidence pack you can share.
+                              </Text>
+                              <Button
+                                size="small"
+                                appearance="subtle"
+                                onClick={() => revealSaved(packNotes[m.id].id ?? "")}
+                              >
+                                Reveal
+                              </Button>
+                            </div>
+                          )}
+                          {packNotes[m.id]?.error && (
+                            <div className={styles.savedNote}>
+                              <ErrorCircleRegular fontSize={14} />
+                              <Text size={200}>
+                                Couldn&apos;t save the evidence pack — {packNotes[m.id].error}
+                              </Text>
                             </div>
                           )}
                         </>

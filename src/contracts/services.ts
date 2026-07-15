@@ -82,13 +82,23 @@ export interface RagService {
     rows?: number;
   }>;
   /**
-   * Write a chat transcript (client-rendered markdown) as a note into
-   * `Lighthouse Notes/` in the vault. Implemented in BOTH engines. Returns the
-   * new file's id + final name (collision-suffixed, never overwrites).
+   * Write a client-composed artifact into the vault. Implemented in BOTH
+   * engines. Default (no options): a chat-transcript markdown note into
+   * `Lighthouse Notes/` — the original exportChat behavior, unchanged. With
+   * `options`, the SAME sanitized write op routes other client-composed
+   * artifacts — today the analytics evidence pack (a self-contained HTML file
+   * into `Lighthouse Results/`). `subdir`/`ext` are a STRICT engine-side
+   * allowlist ("Lighthouse Notes"|"Lighthouse Results"; "md"|"html") — the
+   * client can never name arbitrary folders or extensions. Returns the new
+   * file's id + final name (collision-suffixed, never overwrites).
    */
   exportChat(
     title: string,
     markdown: string,
+    options?: {
+      subdir?: "Lighthouse Notes" | "Lighthouse Results";
+      ext?: "md" | "html";
+    },
   ): Promise<{ savedId?: string; savedName?: string; error?: string }>;
   /**
    * G6: auto-export a conversation as an indexed vault note under

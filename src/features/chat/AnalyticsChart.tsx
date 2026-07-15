@@ -57,6 +57,14 @@ const useStyles = makeStyles({
     fontSize: tokens.fontSizeBase200,
   },
   swatch: { width: "10px", height: "10px", borderRadius: "2px", display: "inline-block" },
+  // Directed-chart heading (chart-directive): small, quiet, above the plot.
+  title: {
+    display: "block",
+    color: tokens.colorNeutralForeground2,
+    fontSize: tokens.fontSizeBase200,
+    fontWeight: tokens.fontWeightSemibold,
+    marginBottom: tokens.spacingVerticalXXS,
+  },
 });
 
 /** Series palette from the theme; cycles if the engine ever sends more. */
@@ -71,14 +79,13 @@ function truncateLabel(l: string): string {
 }
 
 /**
- * Rasterize the rendered SVG to a 2× PNG and trigger a download
- * (openspec: add-answer-artifacts). Two theme requirements: the chart's
- * colors are Fluent CSS variables that a standalone SVG document can't
- * resolve, so each element's computed fill/stroke is baked into the clone;
- * and the canvas is painted with the surface's background first so a
- * dark-mode chart never exports transparent-on-dark. Client-only.
+ * Clone the rendered chart SVG with its theme resolved for standalone use:
+ * the chart's colors are Fluent CSS variables that a detached SVG document
+ * can't resolve, so each element's computed fill/stroke is baked into the
+ * clone, along with explicit dimensions and the app font. Shared by the PNG
+ * download and the evidence pack's inline-SVG capture. Client-only.
  */
-function downloadChartPng(svg: SVGSVGElement): void {
+function bakeStandaloneSvg(svg: SVGSVGElement): SVGSVGElement {
   const clone = svg.cloneNode(true) as SVGSVGElement;
   const orig = svg.querySelectorAll<SVGElement>("*");
   const copies = clone.querySelectorAll<SVGElement>("*");
@@ -91,20 +98,53 @@ function downloadChartPng(svg: SVGSVGElement): void {
     }
     if (el.hasAttribute("stroke")) copy.setAttribute("stroke", cs.stroke);
   });
-  // Nearest opaque ancestor background = the theme surface behind the chart.
-  let bg = "#ffffff";
-  for (let el: Element | null = svg; el; el = el.parentElement) {
-    const c = window.getComputedStyle(el).backgroundColor;
-    if (c && c !== "transparent" && !c.startsWith("rgba(0, 0, 0, 0)")) {
-      bg = c;
-      break;
-    }
-  }
   clone.setAttribute("width", String(W));
   clone.setAttribute("height", String(H));
   // The on-screen labels inherit the app font from CSS the standalone SVG
-  // won't have — bake it in so the PNG doesn't rasterize in the UA serif.
+  // won't have — bake it in so it doesn't render in the UA serif.
   clone.style.fontFamily = window.getComputedStyle(svg).fontFamily;
+  return clone;
+}
+
+/** Nearest opaque ancestor background = the theme surface behind the chart. */
+function surfaceColorBehind(svg: SVGSVGElement): string {
+  for (let el: Element | null = svg; el; el = el.parentElement) {
+    const c = window.getComputedStyle(el).backgroundColor;
+    if (c && c !== "transparent" && !c.startsWith("rgba(0, 0, 0, 0)")) {
+      return c;
+    }
+  }
+  return "#ffffff";
+}
+
+/**
+ * Serialize the rendered chart as a fully self-contained SVG string for the
+ * evidence pack (openspec Beam §2): theme colors + font baked in, plus the
+ * surface background painted as a backing rect — so a chart captured from a
+ * dark-themed app stays legible on the pack's page (mirrors the PNG path's
+ * canvas fill). No external references of any kind ride along.
+ */
+export function standaloneChartSvg(svg: SVGSVGElement): string {
+  const clone = bakeStandaloneSvg(svg);
+  const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+  rect.setAttribute("x", "0");
+  rect.setAttribute("y", "0");
+  rect.setAttribute("width", String(W));
+  rect.setAttribute("height", String(H));
+  rect.setAttribute("fill", surfaceColorBehind(svg));
+  clone.insertBefore(rect, clone.firstChild);
+  return new XMLSerializer().serializeToString(clone);
+}
+
+/**
+ * Rasterize the rendered SVG to a 2× PNG and trigger a download
+ * (openspec: add-answer-artifacts). The clone rides `bakeStandaloneSvg` and
+ * the canvas is painted with the surface's background first so a dark-mode
+ * chart never exports transparent-on-dark. Client-only.
+ */
+function downloadChartPng(svg: SVGSVGElement): void {
+  const clone = bakeStandaloneSvg(svg);
+  const bg = surfaceColorBehind(svg);
   const xml = new XMLSerializer().serializeToString(clone);
   const svgUrl = URL.createObjectURL(new Blob([xml], { type: "image/svg+xml;charset=utf-8" }));
   const img = new Image();
@@ -177,6 +217,12 @@ export function AnalyticsChart({ spec }: { spec: ChartSpec }) {
 
   return (
     <figure className={styles.frame} aria-label={aria}>
+      {/* Engine-capped display copy from a chart directive — never data. */}
+      {spec.title && (
+        <Text as="span" className={styles.title}>
+          {spec.title}
+        </Text>
+      )}
       <Tooltip content="Download chart as PNG" relationship="label">
         <Button
           size="small"

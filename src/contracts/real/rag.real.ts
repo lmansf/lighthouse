@@ -104,8 +104,17 @@ class RealRagService implements RagService {
   async exportChat(
     title: string,
     markdown: string,
+    options?: { subdir?: "Lighthouse Notes" | "Lighthouse Results"; ext?: "md" | "html" },
   ): Promise<{ savedId?: string; savedName?: string; error?: string }> {
-    return (await post({ op: "exportChat", title, markdown })) as {
+    // Absent fields keep the original markdown-note wire shape byte-for-byte;
+    // the evidence pack adds subdir/ext (engine-side strict allowlist).
+    return (await post({
+      op: "exportChat",
+      title,
+      markdown,
+      ...(options?.subdir ? { subdir: options.subdir } : {}),
+      ...(options?.ext ? { ext: options.ext } : {}),
+    })) as {
       savedId?: string;
       savedName?: string;
       error?: string;

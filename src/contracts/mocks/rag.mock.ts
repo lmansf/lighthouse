@@ -141,11 +141,19 @@ class MockRagService implements RagService {
   async exportChat(
     title: string,
     markdown: string,
+    options?: { subdir?: "Lighthouse Notes" | "Lighthouse Results"; ext?: "md" | "html" },
   ): Promise<{ savedId?: string; savedName?: string; error?: string }> {
     await new Promise((r) => setTimeout(r, 150));
     if (!markdown.trim()) return { error: "markdown required" };
-    const name = `${title.trim() || "Chat"}.md`;
-    return { savedId: `Lighthouse Notes/${name}`, savedName: name };
+    // Mirror the engines' strict allowlist so a bad caller fails offline too.
+    const subdir = options?.subdir ?? "Lighthouse Notes";
+    const ext = options?.ext ?? "md";
+    if (subdir !== "Lighthouse Notes" && subdir !== "Lighthouse Results") {
+      return { error: 'subdir must be "Lighthouse Notes" or "Lighthouse Results"' };
+    }
+    if (ext !== "md" && ext !== "html") return { error: 'ext must be "md" or "html"' };
+    const name = `${title.trim() || "Chat"}.${ext}`;
+    return { savedId: `${subdir}/${name}`, savedName: name };
   }
 
   async exportConversationNote(

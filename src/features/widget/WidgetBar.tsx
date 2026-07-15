@@ -987,8 +987,14 @@ export function WidgetBar() {
               // The pill is too small for the analytics charts the engine can
               // append (```lighthouse-chart fences) — strip them here; the
               // numbers are in the prose, and the main window draws the chart.
+              // The (?:-request)? arm also drops any residual chart-DIRECTIVE
+              // fence (chart-directive; the engine withholds these already —
+              // this is the widget's belt-and-braces strip).
               <MarkdownView
-                content={answer.content.replace(/```lighthouse-chart[\s\S]*?(```|$)/g, "")}
+                content={answer.content.replace(
+                  /```lighthouse-chart(?:-request)?[\s\S]*?(```|$)/g,
+                  "",
+                )}
               />
             ) : answer.streaming ? (
               <Text size={200} className={styles.snippet}>

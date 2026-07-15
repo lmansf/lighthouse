@@ -315,6 +315,83 @@ async fn wire_protocol_end_to_end() {
     assert!(vault_dir.path().join(".rag-vault/trash").exists());
 }
 
+/// Beam §2 (evidence packs): the exportChat op's optional subdir/ext routing.
+/// The default wire shape stays byte-compatible (markdown note into
+/// Lighthouse Notes/); the html/Lighthouse Results pair rides the SAME
+/// sanitized write_artifact path (hostile hints repaired, never a vault
+/// escape); anything off the strict allowlist is a 400 that writes nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn export_chat_routes_artifacts_through_the_allowlist() {
+    let _env = lock_env();
+    let (base, vault_dir) = spawn_server().await;
+    let client = reqwest::Client::new();
+    let post = |body: Value| client.post(format!("{base}/api/rag")).json(&body).send();
+
+    // --- Default (no subdir/ext): the original markdown-note behavior. -----
+    let res: Value = post(json!({
+        "op": "exportChat", "title": "Team sync", "markdown": "# hi"
+    }))
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    assert_eq!(res["savedId"], "Lighthouse Notes/Team sync.md");
+    assert_eq!(res["savedName"], "Team sync.md");
+    assert!(vault_dir
+        .path()
+        .join("Lighthouse Notes/Team sync.md")
+        .exists());
+
+    // --- Evidence pack: html into Lighthouse Results/, hostile hint repaired
+    //     by write_artifact (reuse pinned: the file lands INSIDE the vault). --
+    let res: Value = post(json!({
+        "op": "exportChat",
+        "title": "../revenue by region",
+        "markdown": "<!doctype html>\n<html lang=\"en\"></html>",
+        "subdir": "Lighthouse Results",
+        "ext": "html",
+    }))
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    let id = res["savedId"].as_str().unwrap();
+    let name = res["savedName"].as_str().unwrap();
+    assert!(id.starts_with("Lighthouse Results/"), "{id}");
+    assert!(name.ends_with(".html"), "{name}");
+    assert_eq!(id, &format!("Lighthouse Results/{name}"));
+    let abs = vault_dir.path().join(id);
+    assert!(abs.exists(), "written inside the vault: {abs:?}");
+    assert!(
+        !vault_dir
+            .path()
+            .parent()
+            .unwrap()
+            .join("revenue by region.html")
+            .exists(),
+        "the traversal hint must never escape the vault"
+    );
+
+    // --- Off-allowlist values reject with 400 and write nothing. -----------
+    for bad in [
+        json!({ "op": "exportChat", "title": "x", "markdown": "x", "subdir": "Lighthouse Secrets" }),
+        json!({ "op": "exportChat", "title": "x", "markdown": "x", "subdir": ".." }),
+        json!({ "op": "exportChat", "title": "x", "markdown": "x", "ext": "exe" }),
+        json!({ "op": "exportChat", "title": "x", "markdown": "x", "ext": 5 }),
+        json!({ "op": "exportChat", "title": "x", "markdown": "x", "subdir": null }),
+    ] {
+        let res = post(bad.clone()).await.unwrap();
+        assert_eq!(res.status().as_u16(), 400, "must reject: {bad}");
+    }
+    assert!(
+        !vault_dir.path().join("Lighthouse Notes/x.md").exists()
+            && !vault_dir.path().join("Lighthouse Results/x.md").exists(),
+        "a rejected export writes nothing"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn auth_layers_reject_cross_origin_and_bad_tokens() {
     let _env = lock_env();
