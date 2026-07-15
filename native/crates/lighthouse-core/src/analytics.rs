@@ -33,6 +33,9 @@ const MAX_SHEETS_PER_BOOK: usize = 4;
 const MAX_TABLES_TOTAL: usize = 6;
 const MAX_XLSX_ROWS: usize = 100_000;
 const MAX_XLSX_COLS: usize = 64;
+/// A PDF larger than this is not reconstructed for analytics — the text-layer
+/// glyph pass is bounded, but a huge file shouldn't stall an ask.
+const MAX_PDF_BYTES: u64 = 64 * 1024 * 1024;
 const QUERY_TIMEOUT_SECS: u64 = 10;
 const MAX_RESULT_ROWS: usize = 200;
 const MAX_RESULT_COLS: usize = 24;
@@ -120,6 +123,17 @@ pub fn is_tabular(name: &str) -> bool {
     [".csv", ".tsv", ".parquet", ".xlsx", ".xlsm", ".xls"]
         .iter()
         .any(|e| n.ends_with(e))
+}
+
+/// A PDF whose confident text-layer grids can be reconstructed and registered as
+/// tables (openspec: add-queryable-pdf-tables). Deliberately SEPARATE from
+/// `is_tabular`: that gate also drives catalog profiling, union grouping,
+/// spreadsheet meta answers ("which spreadsheets do I have"), and — critically —
+/// tabular CHUNKING (`vault::chunk_texts_named`). A PDF must stay on prose
+/// chunking and out of the spreadsheet story, so it gets a registration-only
+/// gate. PARITY: Rust-only, like the rest of analytics.
+pub fn is_pdf(name: &str) -> bool {
+    name.to_lowercase().ends_with(".pdf")
 }
 
 /// Lowercased stem, non-alphanumerics folded to `_`, digit-safe, deduped by
@@ -379,6 +393,8 @@ pub async fn register_tables(
                 Ok(()) => vec![base.clone()],
                 Err(_) => vec![],
             }
+        } else if is_pdf(&lower) {
+            register_pdf(ctx, &base, &abs).await
         } else {
             register_workbook(ctx, &base, &abs)
         };
@@ -652,6 +668,81 @@ pub(crate) fn detect_header_row(rows: &[Vec<String>]) -> usize {
         }
     }
     best.map(|(_, i)| i).unwrap_or(0)
+}
+
+/// Reconstruct a PDF's confident, header-carrying grids from its text layer and
+/// register each as an Arrow MemTable — the PDF analogue of `register_workbook`
+/// (openspec: add-queryable-pdf-tables). Text-layer only (no OCR/vision); a PDF
+/// with no queryable grid registers nothing, so a prose PDF costs a bounded
+/// parse and no slot. The glyph pass is blocking and panic-guarded inside
+/// `pdf_tables`, so it runs on `spawn_blocking`; the MemTable build stays here so
+/// `ctx` never crosses threads. PARITY: Rust-only.
+async fn register_pdf(ctx: &SessionContext, base: &str, abs: &PathBuf) -> Vec<String> {
+    match std::fs::metadata(abs) {
+        Ok(m) if m.len() <= MAX_PDF_BYTES => {}
+        _ => return vec![],
+    }
+    let path = abs.clone();
+    let grids = tokio::task::spawn_blocking(move || {
+        std::fs::read(&path)
+            .map(|buf| crate::pdf_tables::queryable_tables(&buf))
+            .unwrap_or_default()
+    })
+    .await
+    .unwrap_or_default();
+
+    // Cap the grids per PDF exactly as `register_workbook` caps sheets per book:
+    // a pathological many-page PDF must not materialize dozens of MemTables when
+    // MAX_TABLES_TOTAL only ever cards a handful. Cap before deciding `multi` so
+    // the naming reflects what is actually registered.
+    let grids: Vec<_> = grids.into_iter().take(MAX_SHEETS_PER_BOOK).collect();
+    let multi = grids.len() > 1;
+    let mut out = Vec::new();
+    for (i, grid) in grids.iter().enumerate() {
+        let tname = if multi { format!("{base}__{}", i + 1) } else { base.to_string() };
+        if let Some(name) = register_grid(ctx, &tname, grid) {
+            out.push(name);
+        }
+    }
+    out
+}
+
+/// Build one reconstructed grid into a typed Arrow MemTable and register it —
+/// the header sanitize + `table_from_matrix` typing shared with `register_
+/// workbook`, factored out so the typing path is unit-testable over a synthetic
+/// `Table` without a real PDF (the glyph pass is tested separately). Returns the
+/// registered name, or None when the grid is too thin to type.
+fn register_grid(ctx: &SessionContext, tname: &str, grid: &crate::pdf_tables::Table) -> Option<String> {
+    let header = grid.rows.first()?;
+    // Header sanitize identical to register_workbook so PDF column names line up
+    // with spreadsheet conventions.
+    let headers: Vec<String> = header
+        .iter()
+        .take(MAX_XLSX_COLS)
+        .enumerate()
+        .map(|(j, c)| {
+            let s = sanitize_table_name(c);
+            if s.is_empty() || s == "table" {
+                format!("col_{}", j + 1)
+            } else {
+                s
+            }
+        })
+        .collect();
+    if headers.len() < 2 {
+        return None;
+    }
+    let data: Vec<Vec<String>> = grid.rows[1..]
+        .iter()
+        .map(|r| (0..headers.len()).map(|k| r.get(k).cloned().unwrap_or_default()).collect())
+        .collect();
+    if data.len() < 2 {
+        return None;
+    }
+    let (schema, batch) = table_from_matrix(&headers, &data)?;
+    let mem = MemTable::try_new(schema, vec![vec![batch]]).ok()?;
+    ctx.register_table(tname, Arc::new(mem)).ok()?;
+    Some(tname.to_string())
 }
 
 /// calamine → Arrow MemTable per sheet (detected header; ≥80% numeric column →
@@ -2429,7 +2520,9 @@ async fn direct_tables(
             continue;
         }
         match crate::vault::doc_path(id) {
-            Some((name, abs)) if is_tabular(&name) => files.push((id.clone(), name, abs)),
+            Some((name, abs)) if is_tabular(&name) || is_pdf(&name) => {
+                files.push((id.clone(), name, abs))
+            }
             _ => skipped += 1,
         }
     }
@@ -2940,5 +3033,87 @@ mod g1_regression {
             &["2", "Sue", "off"],
         ]);
         assert_eq!(detect_header_row(&sheet), 0);
+    }
+}
+
+// G3 — a PDF's confident text-layer grid becomes a real queryable table
+// (openspec: add-queryable-pdf-tables). The glyph→grid geometry is proven in
+// `pdf_tables`; here we prove the analytics half: that a reconstructed `Table`
+// types and registers exactly like a spreadsheet sheet, so the model queries it
+// with the same trust invariant (schema-only read, one SELECT, engine math).
+#[cfg(test)]
+mod g3_pdf_queryable {
+    use super::*;
+    use crate::pdf_tables::Table;
+
+    fn grid(header_like: bool, rows: &[&[&str]]) -> Table {
+        Table {
+            header_like,
+            rows: rows.iter().map(|r| r.iter().map(|c| c.to_string()).collect()).collect(),
+        }
+    }
+
+    // A reconstructed grid registers as a typed MemTable and the ENGINE — never
+    // the model — computes the aggregate. Numeric columns type as Float64 so
+    // SUM/AVG are real arithmetic, not string concatenation.
+    #[tokio::test]
+    async fn reconstructed_grid_is_queried_by_the_engine() {
+        let g = grid(
+            true,
+            &[
+                &["region", "q2", "q3"],
+                &["ne", "120", "150"],
+                &["se", "300", "480"],
+                &["nw", "90", "110"],
+            ],
+        );
+        let ctx = SessionContext::new();
+        let name = register_grid(&ctx, "pdf_report", &g).expect("a 3×3 named grid registers");
+        assert_eq!(name, "pdf_report");
+
+        // q3 must be Float64 — otherwise the aggregate below is nonsense.
+        let batches = ctx
+            .sql("SELECT region, q3 FROM pdf_report")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        assert_eq!(
+            batches[0].schema().field_with_name("q3").unwrap().data_type(),
+            &DataType::Float64,
+            "an all-numeric column types as Float64, not text",
+        );
+
+        // The number in the answer is DataFusion's, computed over the grid.
+        let res = run_query(&ctx, "SELECT SUM(q3) AS total FROM pdf_report").await.unwrap();
+        assert!(res.markdown.contains("740"), "150+480+110=740: {}", res.markdown);
+    }
+
+    // The typing path enforces its own floor: a grid with a header but only one
+    // data row (data.len() < 2) registers nothing, even if it slipped past the
+    // upstream gate. Defense in depth against a degenerate reconstruction.
+    #[test]
+    fn a_single_data_row_grid_registers_nothing() {
+        let g = grid(true, &[&["a", "b"], &["1", "2"]]);
+        let ctx = SessionContext::new();
+        assert!(register_grid(&ctx, "thin", &g).is_none());
+    }
+
+    // A one-column grid can't be registered: <2 headers after sanitize.
+    #[test]
+    fn a_single_column_grid_registers_nothing() {
+        let g = grid(true, &[&["only"], &["x"], &["y"], &["z"]]);
+        let ctx = SessionContext::new();
+        assert!(register_grid(&ctx, "narrow", &g).is_none());
+    }
+
+    // End-to-end no-false-positive: prose / non-PDF bytes reconstruct no grid,
+    // so a prose PDF costs a bounded parse and registers no table. This exercises
+    // the real extract path (panic-guarded, lopdf rejects non-PDF input).
+    #[test]
+    fn prose_bytes_yield_no_queryable_table() {
+        let tables = crate::pdf_tables::queryable_tables(b"not a pdf, just prose bytes");
+        assert!(tables.is_empty(), "no grid from non-tabular bytes");
     }
 }

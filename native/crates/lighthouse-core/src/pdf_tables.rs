@@ -426,6 +426,32 @@ pub(crate) fn extract_tables(buf: &[u8]) -> Vec<Table> {
     collect_pages(buf).iter().flat_map(|p| detect_tables(p)).collect()
 }
 
+/// Data rows (excluding the header) a grid needs before it is trusted as a SQL
+/// schema — STRICTER than the markdown gate (which accepts 2×2), because an
+/// aggregate over fewer than three aligned rows is not worth asserting.
+pub(crate) const MIN_QUERYABLE_DATA_ROWS: usize = 3;
+
+/// A reconstructed grid safe to register as a QUERYABLE table: header-carrying
+/// (a named, non-numeric first row), ≥2 columns, and ≥3 aligned data rows. Pure
+/// over an already-reconstructed `Table`, so it is unit-tested with synthetic
+/// grids and never needs a PDF parser — the analytics-layer sibling of
+/// `detect_header_row`. The stricter gate lives HERE, downstream of
+/// `detect_tables`, so the appended-markdown path (and its cache version) is
+/// untouched.
+pub(crate) fn is_queryable_grid(t: &Table) -> bool {
+    // rows.len() - 1 is the data-row count (the first row is the header).
+    t.header_like
+        && t.rows.first().map_or(0, Vec::len) >= MIN_COLS
+        && t.rows.len().saturating_sub(1) >= MIN_QUERYABLE_DATA_ROWS
+}
+
+/// The confident, registerable grids in a PDF buffer — text layer only. Empty
+/// when nothing reconstructs confidently (prose / scanned / ragged / short).
+/// Bounded and panic-guarded via `extract_tables`.
+pub(crate) fn queryable_tables(buf: &[u8]) -> Vec<Table> {
+    extract_tables(buf).into_iter().filter(is_queryable_grid).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -555,5 +581,60 @@ mod tests {
         assert!(md.contains("| --- | --- |"), "has a GFM separator row");
         // Missing cell renders as a padded blank, not a broken row.
         assert!(md.lines().all(|l| l.starts_with("| ") && l.ends_with(" |")));
+    }
+
+    // --- queryable gate (openspec: add-queryable-pdf-tables) ---------------
+
+    fn grid(header_like: bool, rows: &[&[&str]]) -> Table {
+        Table {
+            header_like,
+            rows: rows.iter().map(|r| r.iter().map(|c| c.to_string()).collect()).collect(),
+        }
+    }
+
+    #[test]
+    fn queryable_gate_accepts_a_confident_grid() {
+        // header + 3 data rows, 3 cols — the floor exactly.
+        let t = grid(
+            true,
+            &[
+                &["region", "q2", "q3"],
+                &["ne", "120", "150"],
+                &["se", "300", "480"],
+                &["nw", "90", "110"],
+            ],
+        );
+        assert!(is_queryable_grid(&t), "a named 3×3 grid is worth registering");
+    }
+
+    #[test]
+    fn queryable_gate_rejects_too_few_data_rows() {
+        // Markdown-worthy (2 data rows) but below the aggregate floor (3).
+        let t = grid(true, &[&["region", "q2"], &["ne", "120"], &["se", "300"]]);
+        assert!(
+            !is_queryable_grid(&t),
+            "two aligned data rows are not worth asserting an aggregate over",
+        );
+    }
+
+    #[test]
+    fn queryable_gate_rejects_a_headerless_grid() {
+        // Plenty of rows, but the first row is data (numeric) — no schema names.
+        let t = grid(
+            false,
+            &[
+                &["10", "120", "150"],
+                &["20", "300", "480"],
+                &["30", "90", "110"],
+                &["40", "70", "60"],
+            ],
+        );
+        assert!(!is_queryable_grid(&t), "no header row means no column names to query by");
+    }
+
+    #[test]
+    fn queryable_gate_rejects_a_single_column() {
+        let t = grid(true, &[&["name"], &["ne"], &["se"], &["nw"]]);
+        assert!(!is_queryable_grid(&t), "one column cannot be aggregated across");
     }
 }

@@ -430,7 +430,10 @@ pub fn answer_pipeline(
                     break;
                 }
                 if let Some((name, abs)) = vault::doc_path(&id) {
-                    if crate::analytics::is_tabular(&name) {
+                    // PDFs with a confident text-layer grid register as bonus
+                    // tables (G3); they stay OUT of is_tabular so prose chunking
+                    // and spreadsheet meta answers are unaffected.
+                    if crate::analytics::is_tabular(&name) || crate::analytics::is_pdf(&name) {
                         files.push((id, name, abs));
                     }
                 }
@@ -687,12 +690,17 @@ pub fn answer_pipeline(
                         // Coverage honesty: if the per-ask table caps left some
                         // in-scope tabular files unanalyzed, say so — a partial
                         // analysis must never read as the whole vault's.
+                        // Denominator stays spreadsheet-scoped: unregistered_count
+                        // already counts only is_tabular files, so a bonus-track
+                        // PDF never distorts "in-scope tabular files".
+                        let tabular_total =
+                            files.iter().filter(|(_, n, _)| crate::analytics::is_tabular(n)).count();
                         let dropped = crate::analytics::unregistered_count(&files, &regs);
                         if dropped > 0 {
                             yield delta(format!(
                                 "_Analyzed {} of {} in-scope tabular files (engine table limit)._\n",
-                                files.len().saturating_sub(dropped),
-                                files.len(),
+                                tabular_total.saturating_sub(dropped),
+                                tabular_total,
                             ));
                         }
                         // Chartable result → engine-built spec the chat renders
