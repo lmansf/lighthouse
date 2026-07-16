@@ -123,10 +123,25 @@ function warmMarkdown() {
   void import("@/shell/MarkdownView");
 }
 
-// A user this close to the bottom (px) counts as "pinned": we keep auto-
-// scrolling for them as tokens stream in. Scrolling further up releases the
-// pin so the view is never yanked back down mid-read.
+// A user this close to the bottom (px) counts as "pinned" — near enough that
+// "Jump to latest" would be a no-op, so the pill stays hidden. The band also
+// absorbs touchpad wobble and streaming reflow so the state doesn't flap.
+// Pinned gates ONLY the pill: it drives no automatic scrolling (a streaming
+// answer anchors its own top instead — see the read-from-the-top hold).
 const PIN_THRESHOLD = 80;
+
+// Read-from-the-top hold (openspec: add-investigations §5.1): the scrollTop
+// that puts an anchored message row's first line at the top of the scrollport,
+// just below the container's own top padding, clamped to the scrollable range.
+// `anchorTop` is the row's top in scroll-content coordinates. Pure — the
+// [messages] effect feeds it live geometry on every growth of the answer.
+export function computeAnchorScrollTop(
+  anchorTop: number,
+  paddingTop: number,
+  maxScrollTop: number,
+): number {
+  return Math.max(0, Math.min(anchorTop - paddingTop, Math.max(0, maxScrollTop)));
+}
 
 // Composer auto-grow cap: ~6 lines of fontSizeBase300 (20px line height) plus
 // the Textarea's vertical padding. Beyond this the textarea scrolls internally.
@@ -235,12 +250,18 @@ const useStyles = makeStyles({
     flex: 1,
     minHeight: 0,
     overflowY: "auto",
+    // The read-from-the-top hold is the only scroll compensation this
+    // container wants: native scroll anchoring would fight it, and its
+    // adjustments look like user scrolls and would spuriously cancel the hold.
+    overflowAnchor: "none",
     display: "flex",
     flexDirection: "column",
     gap: tokens.spacingVerticalL,
   },
-  // Floating re-pin affordance shown when the user has scrolled up mid-stream.
-  // A subtle Button needs its own surface + shadow to stay readable over text.
+  // Floating affordance shown mid-stream whenever the viewport is far from the
+  // transcript bottom (an anchored answer outgrowing the viewport, or the user
+  // scrolled away). A subtle Button needs its own surface + shadow to stay
+  // readable over text.
   jumpPill: {
     position: "absolute",
     bottom: tokens.spacingVerticalM,
@@ -2030,11 +2051,27 @@ export function ChatPanel() {
   }, [currentId]);
   // Fires the activation event only on the first answered question this session.
 
-  // "Pinned" = the user is at (or near) the bottom of the transcript, so it's
-  // safe to keep auto-scrolling as tokens stream in. The ref mirrors the state
-  // for use inside the scroll effect without retriggering it.
+  // "Pinned" = the viewport is at (or near) the transcript bottom. It gates
+  // exactly one thing: the "Jump to latest" pill stays hidden while pinned
+  // (jumping would be a no-op). It drives no automatic scrolling. The ref
+  // mirrors the state for use inside scroll handlers without re-binding them.
   const [pinned, setPinned] = useState(true);
   const pinnedRef = useRef(true);
+  // Read-from-the-top hold (openspec: add-investigations §5.1): the in-flight
+  // answer whose message row owns the viewport top.
+  //   "armed"   = question sent, no answer content yet — the transcript may
+  //               still show the bottom (the just-sent question + loader).
+  //   "holding" = the answer is streaming — its row's top is held at the top
+  //               of the viewport, re-asserted as the message grows.
+  //   null      = no hold: nothing in flight, the stream settled, or the user
+  //               scrolled (any manual scroll cancels the hold for that
+  //               answer — the transcript never fights the user).
+  const anchorRef = useRef<{ id: string; phase: "armed" | "holding" } | null>(null);
+  // scrollTop as WE last wrote it (post-clamp). A scroll event reporting
+  // (about) this value is our own write echoing back; any other position is
+  // user intent and releases the hold (see handleBodyScroll). All programmatic
+  // writes go through writeScrollTop so this bookkeeping can't be skipped.
+  const programmaticScrollTopRef = useRef<number | null>(null);
 
   // Copy-answer feedback: which message briefly shows the checkmark.
   const [copiedId, setCopiedId] = useState<string | null>(null);
@@ -2197,30 +2234,113 @@ export function ChatPanel() {
     },
   };
 
-  // Keep the newest turn in view as the transcript grows and tokens stream in —
-  // but only while the user is pinned near the bottom. Scrolling up to re-read
-  // releases the pin (see handleBodyScroll) so the view is never yanked down.
-  useEffect(() => {
-    const el = bodyRef.current;
-    if (el && pinnedRef.current) el.scrollTop = el.scrollHeight;
-  }, [messages]);
+  // Every programmatic scroll is a plain, instant scrollTop assignment — never
+  // a smooth scrollIntoView — so reduced-motion preferences need no special
+  // case. Records the value actually applied (post-clamp) so handleBodyScroll
+  // can tell our own echo from a user scroll.
+  const writeScrollTop = useCallback((el: HTMLElement, top: number) => {
+    el.scrollTop = top;
+    programmaticScrollTopRef.current = el.scrollTop;
+  }, []);
 
-  function handleBodyScroll() {
-    const el = bodyRef.current;
-    if (!el) return;
-    // A small band above the bottom still counts as pinned, so touchpad wobble
-    // or reflow from a streaming token doesn't spuriously release the pin.
+  // Re-derive "pinned" from live geometry. Called from scroll events AND from
+  // the [messages] effect: content growing under a held anchor moves the
+  // bottom without firing any scroll event, and the pill must track that.
+  const derivePinned = useCallback((el: HTMLElement) => {
     const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
     const next = distance < PIN_THRESHOLD;
     pinnedRef.current = next;
     setPinned(next);
+  }, []);
+
+  // Opening a conversation (initial mount, drawer, undo, delete-fallback)
+  // lands at the bottom, exactly as before read-from-the-top: the landing is a
+  // conversation-level event, not part of any answer's hold — so it clears one.
+  useEffect(() => {
+    anchorRef.current = null;
+    const el = bodyRef.current;
+    if (!el) return;
+    writeScrollTop(el, el.scrollHeight);
+    derivePinned(el);
+  }, [currentId, writeScrollTop, derivePinned]);
+
+  // Read-from-the-top (openspec: add-investigations §5.1). While an ask is in
+  // flight this effect owns the scroll position, in two phases:
+  //   armed   → no answer content yet: keep the bottom in view so the
+  //             just-sent question and the loader are visible.
+  //   holding → the answer is streaming: hold the TOP of its message row at
+  //             the top of the viewport, re-asserted on every growth so
+  //             reflow above the row (e.g. the markdown chunk mounting into
+  //             earlier turns) never drifts the first line. Reference cards,
+  //             chips, and the provenance stamp append BELOW the answer and
+  //             never displace the anchored start; the question bubble
+  //             scrolling out above is deliberate — the answer owns the top.
+  // The hold is one-sided: any user scroll clears anchorRef (handleBodyScroll,
+  // wheel/touch) and this effect goes dormant — with no hold active it never
+  // scrolls at all, so a settling stream stops anchoring without jumping.
+  useEffect(() => {
+    const el = bodyRef.current;
+    if (!el) return;
+    const anchor = anchorRef.current;
+    if (anchor) {
+      if (anchor.phase === "armed") {
+        if (messages.some((m) => m.id === anchor.id && m.content !== "")) {
+          anchor.phase = "holding";
+        } else {
+          writeScrollTop(el, el.scrollHeight);
+        }
+      }
+      if (anchor.phase === "holding") {
+        // The turn ROW is the anchor target — it exists from the moment the
+        // ask is appended and data-lh-turn already identifies it. Rect delta
+        // rather than offsetTop: the rows' offsetParent is the positioned
+        // bodyWrap, not the scroll container.
+        const row = el.querySelector<HTMLElement>(`[data-lh-turn="${anchor.id}"]`);
+        if (row) {
+          const anchorTop =
+            row.getBoundingClientRect().top -
+            el.getBoundingClientRect().top -
+            el.clientTop +
+            el.scrollTop;
+          const paddingTop = Number.parseFloat(getComputedStyle(el).paddingTop) || 0;
+          writeScrollTop(
+            el,
+            computeAnchorScrollTop(anchorTop, paddingTop, el.scrollHeight - el.clientHeight),
+          );
+        }
+      }
+    }
+    derivePinned(el);
+  }, [messages, writeScrollTop, derivePinned]);
+
+  function handleBodyScroll() {
+    const el = bodyRef.current;
+    if (!el) return;
+    // A scroll we didn't write ourselves is user intent: release the hold for
+    // the in-flight answer. Our own writes echo back at exactly the recorded
+    // position (sub-pixel slack for zoomed displays); anything else — wheel,
+    // touch, scrollbar, keyboard, a citation-chip scrollIntoView — cancels.
+    const expected = programmaticScrollTopRef.current;
+    if (expected === null || Math.abs(el.scrollTop - expected) > 1) {
+      anchorRef.current = null;
+    }
+    derivePinned(el);
+  }
+
+  // Belt-and-braces for the cancel rule: a wheel tick or touch drag is user
+  // intent even when it cannot move scrollTop (already clamped at an edge),
+  // and it fires before any scroll event it causes.
+  function cancelHoldOnUserInput() {
+    anchorRef.current = null;
   }
 
   function jumpToLatest() {
-    pinnedRef.current = true;
-    setPinned(true);
+    // Explicit user intent: drop any hold and go watch the transcript tail.
+    anchorRef.current = null;
     const el = bodyRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
+    if (!el) return;
+    writeScrollTop(el, el.scrollHeight);
+    derivePinned(el);
   }
 
   // Focus the composer on mount so the user can just start typing.
@@ -2336,9 +2456,11 @@ export function ChatPanel() {
     };
     setMessages((m) => [...m, userMsg, asstMsg]);
     setStreaming(true);
-    // Asking always re-pins: the user wants to watch their new answer arrive.
-    pinnedRef.current = true;
-    setPinned(true);
+    // Read-from-the-top: arm the hold for the answer about to stream. Until
+    // its first content arrives the [messages] effect keeps the bottom in view
+    // (the just-sent question + loader); the first delta then anchors the
+    // answer's top to the viewport top and holds it there.
+    anchorRef.current = { id: asstId, phase: "armed" };
     const controller = new AbortController();
     abortRef.current = controller;
     draftRef.current = false;
@@ -2431,6 +2553,11 @@ export function ChatPanel() {
       // finished transcript (and what we persist) holds the complete answer even
       // if the last frame's flush hadn't fired yet.
       flushStreamNow();
+      // The stream is over: stop anchoring and go nowhere. Cleared before
+      // React flushes the batched settle updates, so the [messages] effect
+      // sees no hold and the settle re-render (markdown swap, actions,
+      // provenance stamp) cannot move the reader.
+      anchorRef.current = null;
       abortRef.current = null;
       setStreaming(false);
       setProgressLabel(null);
@@ -3969,7 +4096,13 @@ export function ChatPanel() {
         </div>
 
         <div className={styles.bodyWrap} data-tour="beam">
-          <div className={styles.body} ref={bodyRef} onScroll={handleBodyScroll}>
+          <div
+            className={styles.body}
+            ref={bodyRef}
+            onScroll={handleBodyScroll}
+            onWheel={cancelHoldOnUserInput}
+            onTouchMove={cancelHoldOnUserInput}
+          >
             {messages.map((m) =>
               m.role === "user" ? (
                 // Each new question opens a document section: hairline above
@@ -4026,7 +4159,9 @@ export function ChatPanel() {
                 </div>
               ) : (
                 // data-lh-turn: DOM anchor for the evidence-pack chart capture
-                // (the handler serializes this turn's rendered chart SVG).
+                // (the handler serializes this turn's rendered chart SVG) and
+                // for the read-from-the-top hold (the streaming answer's row
+                // is looked up by id and its top held at the viewport top).
                 <div key={m.id} className={styles.turn} data-lh-turn={m.id}>
                   {streaming && !m.content && m.id === lastId ? (
                     <LighthouseLoader
