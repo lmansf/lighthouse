@@ -42,7 +42,7 @@
 - [x] 5.7 Tests: manifest carries metadata only (no `Ctx.text` bytes); a cloud ask lists only the shared subset and the skip note states the withheld count; a chunk entry carries its file_id; a replay shows the original manifest (synth.rs `#[cfg(test)]` unit tests + `answer_cache_test` replay over the model-free meta path).
 
 ## 6. Eval floor + verify + parity + gates (§6)
-- [ ] 6.1 Beam goldens in `examples/analytics_eval.rs` — model-free, deterministic step numbers under the budget (max_steps stop, no-progress halt) so removing narration changes no figure.
-- [ ] 6.2 Verify: usage-parse unit tests per dialect (from 1.6); cache-replay-cost test (replay = 0 / $0, from 3.5); approval two-phase E2E (from 4.6); manifest-omits-bytes + gated-subset + replay-manifest tests (from 5.7).
-- [ ] 6.3 Diff the twin literals for the cost-meter labels and manifest kind labels (byte-identical, ts-twin.md rule 2); confirm the Rust-only PARITY comments (§1 usage, §2 loop, §4 plan) on both sides.
-- [ ] 6.4 Full gates: `cd native && cargo test --workspace`; `npm run test`; `tsc`; lint; `release-smoke`; `analytics_eval` floor (Beam goldens green); `node scripts/openspec-validate.mjs --all`.
+- [x] 6.1 Beam goldens in `examples/analytics_eval.rs` — model-free, deterministic step numbers under the budget (max_steps stop, no-progress halt) so removing narration changes no figure.
+- [x] 6.2 Verify: usage-parse unit tests per dialect (from 1.6); cache-replay-cost test (replay = 0 / $0, from 3.5); approval two-phase E2E (from 4.6); manifest-omits-bytes + gated-subset + replay-manifest tests (from 5.7).
+- [x] 6.3 Diff the twin literals for the cost-meter labels and manifest kind labels (byte-identical, ts-twin.md rule 2); confirm the Rust-only PARITY comments (§1 usage, §2 loop, §4 plan) on both sides.
+- [x] 6.4 Full gates: `cd native && cargo test --workspace`; `npm run test`; `tsc`; lint; `release-smoke`; `analytics_eval` floor (Beam goldens green); `node scripts/openspec-validate.mjs --all`.

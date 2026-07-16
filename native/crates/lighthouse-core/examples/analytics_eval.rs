@@ -27,6 +27,7 @@
 use std::fs;
 use std::path::PathBuf;
 use std::process::exit;
+use std::time::{Duration, Instant};
 
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::util::display::array_value_to_string;
@@ -36,6 +37,7 @@ use lighthouse_core::analytics::{
     chart_card, extract_sql, guard_sql, register_tables, run_query, sql_question, QueryResult,
     TableReg,
 };
+use lighthouse_core::beam::{BeamLoop, Budget, StopReason};
 use lighthouse_core::catalog::ColumnKind;
 use lighthouse_core::ledger::assumption_ledger;
 use lighthouse_core::llm::{stream_answer, Ctx, ModelCfg};
@@ -525,6 +527,87 @@ async fn main() {
             Err(e) => {
                 failures += 1;
                 println!("  FAIL  top-movers — {e}");
+            }
+        }
+    }
+
+    // --- Section 1 (cont.): Beam loop budget floor (openspec: add-beam-loop §6.1) ---
+    //
+    // The budgeted multi-step loop (§2) must stop at DETERMINISTIC step counts
+    // that depend only on the `Budget` and the no-progress guard — never on the
+    // model's narration (removing narration must change no figure). Drive the
+    // real `BeamLoop` exactly as synth.rs's generator does — consult
+    // `stop_before_step` before each iteration, `is_repeat_sql` on a planned SQL,
+    // record an advancing step or a non-advance — over scripted outcomes, and
+    // assert the exact steps executed and the stop reason. Model-free and
+    // deterministic (no wall-clock arm exercised), so it gates CI like the goldens
+    // above: a mismatch bumps `failures` and the process exits non-zero.
+    println!("\n== beam loop budget floor (model-free) ==");
+    {
+        let far = Instant::now() + Duration::from_secs(600);
+
+        // max_steps: a budget of 3 executes EXACTLY 3 advancing steps, then the
+        // pre-step gate returns MaxSteps — the 4th step never starts.
+        {
+            let mut beam = BeamLoop::new(Budget::new(3, far, None));
+            let mut steps = 0usize;
+            let reason = loop {
+                if let Some(r) = beam.stop_before_step(steps, None) {
+                    break r;
+                }
+                beam.record_step(format!("SELECT {steps}")); // a fresh, advancing step
+                steps += 1;
+            };
+            if steps == 3 && reason == StopReason::MaxSteps {
+                println!("  PASS  max_steps=3 runs exactly 3 steps then stops (MaxSteps)");
+            } else {
+                failures += 1;
+                println!(
+                    "  FAIL  max_steps: ran {steps} steps, stopped {reason:?} (want 3 / MaxSteps)"
+                );
+            }
+        }
+
+        // no-progress: one advancing step, then two consecutive non-advancing
+        // replies trip the guard — the loop halts after exactly 1 executed step.
+        {
+            let mut beam = BeamLoop::new(Budget::new(5, far, None));
+            beam.record_step("SELECT 1".into()); // step 1 advances
+            let tripped = beam.record_non_advance() || beam.record_non_advance();
+            let reason = beam.stop_before_step(1, None);
+            if tripped && reason == Some(StopReason::NoProgress) {
+                println!("  PASS  two non-advancing replies halt the loop (NoProgress) after 1 step");
+            } else {
+                failures += 1;
+                println!(
+                    "  FAIL  no-progress: tripped={tripped} reason={reason:?} (want true / NoProgress)"
+                );
+            }
+        }
+
+        // repeat-SQL guard: a planned SQL byte-identical to an executed step cannot
+        // advance (re-running recomputes the same result); a fresh SQL is allowed.
+        {
+            let mut beam = BeamLoop::new(Budget::new(5, far, None));
+            let q = "SELECT region, SUM(amount) FROM sales GROUP BY region";
+            beam.record_step(q.into());
+            if beam.is_repeat_sql(q) && !beam.is_repeat_sql("SELECT COUNT(*) FROM sales") {
+                println!("  PASS  repeat-SQL guard flags a byte-identical replan, not a fresh one");
+            } else {
+                failures += 1;
+                println!("  FAIL  repeat-SQL guard misclassified a planned query");
+            }
+        }
+
+        // unreported-usage fallback (§1.4): with no provider usage the token
+        // ceiling cannot bind — the loop still bounds on max_steps.
+        {
+            let beam = BeamLoop::new(Budget::new(2, far, Some(1_000)));
+            if beam.stop_before_step(2, None) == Some(StopReason::MaxSteps) {
+                println!("  PASS  unreported usage never binds the ceiling; max_steps still stops");
+            } else {
+                failures += 1;
+                println!("  FAIL  unreported-usage fallback did not fall back to MaxSteps");
             }
         }
     }
