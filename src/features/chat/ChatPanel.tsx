@@ -72,6 +72,7 @@ import {
   ErrorCircleRegular,
   FilterRegular,
   HistoryRegular,
+  LockClosedRegular,
   OpenRegular,
   PinRegular,
   PlayRegular,
@@ -92,6 +93,12 @@ import { chatService, MODEL_PROVIDERS, ragService } from "@/contracts";
 import { useRagStore } from "@/stores/useRagStore";
 import { useAuthStore } from "@/stores/useAuthStore";
 import { parseChartSpec, stripChartRequestFences, tableToCsv } from "@/lib/chartSpec";
+import {
+  cloudProviderActive,
+  hiddenFromCloudCount,
+  hiddenFromCloudLabel,
+  LOCAL_ONLY_SKIP_NOTE_RE,
+} from "@/lib/privacyState";
 import { chartSpecFromTable, hasEngineChartFence } from "@/lib/chartFromTable";
 import { parseMarkdownTable } from "@/features/boards/boardModel";
 import {
@@ -613,6 +620,29 @@ const useStyles = makeStyles({
     flexWrap: "wrap",
     gap: tokens.spacingHorizontalS,
     marginTop: tokens.spacingVerticalXXS,
+    color: tokens.colorNeutralForeground3,
+  },
+  // The engine's local-only skip note ("(n files skipped — marked private…)",
+  // byte-identical across engines) rendered as a distinct inline callout
+  // instead of plain italics (0.12.1 §2): a hairline box + small lock in the
+  // savedNote/quietChip family, tokens only so both themes read. The string
+  // itself is the engine's — presentation only.
+  skipNoteCallout: {
+    display: "inline-flex",
+    alignItems: "flex-start",
+    gap: tokens.spacingHorizontalXS,
+    ...shorthands.padding("2px", tokens.spacingHorizontalS),
+    ...shorthands.border("1px", "solid", tokens.colorNeutralStroke2),
+    borderRadius: tokens.borderRadiusMedium,
+    color: tokens.colorNeutralForeground2,
+    fontStyle: "normal",
+  },
+  skipNoteIcon: { flexShrink: 0, marginTop: "3px", color: tokens.colorNeutralForeground3 },
+  // "{n} files hidden from cloud models" in the header, beside the egress
+  // shield — a quiet trigger sized like the shield's (subtle, no bulk).
+  hiddenFromCloud: {
+    minWidth: "auto",
+    ...shorthands.padding(0, tokens.spacingHorizontalXS),
     color: tokens.colorNeutralForeground3,
   },
   // --- Pinned questions: the changed-pins alert banner and the dialog. ---
@@ -1778,6 +1808,25 @@ const AnswerMarkdown = memo(function AnswerMarkdown({
           </a>
         );
       },
+      // The engine's local-only skip note streams inline as one emphasis node
+      // ("_({n} files skipped — marked private …)_", byte-identical in both
+      // engines). Render THAT em — detected by its stable prefix over the
+      // node's text — as a small hairline callout with a lock, so "files were
+      // withheld" is visible at a scan instead of hiding in italics. Every
+      // other emphasis stays a plain <em>. Presentation only: the emitted
+      // string is untouched (test/privacyLegibility.test.mjs pins both
+      // engine templates).
+      em: ({ node, children, ...props }) => {
+        if (LOCAL_ONLY_SKIP_NOTE_RE.test(hastText(node))) {
+          return (
+            <span className={styles.skipNoteCallout}>
+              <LockClosedRegular fontSize={14} className={styles.skipNoteIcon} />
+              <span>{children}</span>
+            </span>
+          );
+        }
+        return <em {...props}>{children}</em>;
+      },
       // Unwrap the <pre> around chart fences so the figure isn't inside
       // preformatted text; all other code blocks keep their default <pre>.
       pre: ({ node, children, ...props }) =>
@@ -1993,6 +2042,14 @@ export function ChatPanel() {
   const providerId = useAuthStore((s) => s.onboarding.providerId);
   const providerLabel =
     MODEL_PROVIDERS.find((p) => p.id === providerId)?.label ?? "your AI provider";
+  // Local-only legibility (0.12.1 §2): while a CLOUD provider answers, the
+  // header counts the files actually being withheld right now — marked
+  // "Private — this device only" AND otherwise visible to AI. Same single
+  // rule as the engine's is_cloud_provider (src/lib/privacyState.ts); the
+  // count hides entirely on the private model (nothing is withheld) and at
+  // zero. Clicking filters the explorer to exactly that set.
+  const cloudActive = cloudProviderActive(providerId);
+  const hiddenFromCloud = useMemo(() => hiddenFromCloudCount(nodes), [nodes]);
 
   // --- Investigation context (openspec: add-investigations §4.2). The chat
   //     store owns WHICH investigation is current; the investigations store
@@ -4372,6 +4429,30 @@ export function ChatPanel() {
             {onDeviceBadge}
             <Badge appearance="tint">{visibleBadgeText}</Badge>
             <EgressShield />
+            {/* "{n} files hidden from cloud models" (0.12.1 §2): beside the
+                egress shield — the two "what leaves this machine" surfaces sit
+                together. Cloud provider active + a non-empty withheld set
+                only. Clicking flips the explorer's "Hidden from cloud" filter
+                on (the explorer listens for the event and shows the toggle, so
+                the filter is visible and clearable in place); the detail-less
+                reveal-node ping only un-collapses the sidebar — AppShell
+                listens for the event name alone, and the explorer's own
+                reveal handler ignores it without an id. */}
+            {cloudActive && hiddenFromCloud > 0 && (
+              <Button
+                appearance="subtle"
+                size="small"
+                className={styles.hiddenFromCloud}
+                icon={<LockClosedRegular />}
+                aria-label={`${hiddenFromCloudLabel(hiddenFromCloud)} — show them in the file list`}
+                onClick={() => {
+                  window.dispatchEvent(new CustomEvent("lighthouse:filter-local-only"));
+                  window.dispatchEvent(new CustomEvent("lighthouse:reveal-node"));
+                }}
+              >
+                {hiddenFromCloudLabel(hiddenFromCloud)}
+              </Button>
+            )}
             {historyButton}
             <Tooltip content="Save this chat as a note in your vault" relationship="label">
               <Button

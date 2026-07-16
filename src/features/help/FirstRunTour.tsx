@@ -76,7 +76,7 @@ const STEPS: TourStep[] = [
     anchor: "explorer",
     icon: <DocumentAddRegular />,
     title: "Add files, choose what's visible",
-    body: "Drag files and folders in, or browse to them — they stay on your machine. The eye toggle on each row controls exactly what the AI can see, so nothing is read unless you choose it. The lock toggle marks a file private to this device — the on-device model still reads it, but it's never sent to a cloud model.",
+    body: "Drag files and folders in, or browse to them — they stay on your machine. The eye toggle on each row controls exactly what the AI can see, so nothing is read unless you choose it. The lock toggle keeps a file private to this device — hidden from cloud models, while the private model can always read it.",
     position: "after",
   },
   {
