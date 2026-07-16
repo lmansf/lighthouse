@@ -89,8 +89,8 @@ import {
 import dynamic from "next/dynamic";
 import { type Components } from "react-markdown";
 import type { DragEvent } from "react";
-import type { AnalyticsMeta, ChangedPin, ChatTurn, Pin, RagReference } from "@/contracts";
-import { chatService, MODEL_PROVIDERS, ragService } from "@/contracts";
+import type { AnalyticsMeta, ChangedPin, ChatTurn, Pin, RagReference, RecipeCard } from "@/contracts";
+import { chatService, MODEL_PROVIDERS, ragService, runRecipeQuestion } from "@/contracts";
 import { useRagStore } from "@/stores/useRagStore";
 import { useAuthStore } from "@/stores/useAuthStore";
 import { parseChartSpec, stripChartRequestFences, tableToCsv } from "@/lib/chartSpec";
@@ -1163,6 +1163,27 @@ function isQueryLabel(node: MdNode): boolean {
   );
 }
 
+/** The engine's assumption-ledger label (openspec: add-recipes §1): the
+ *  emphasis-only `*Assumptions:*` paragraph that precedes the bullet list. */
+const ASSUMPTIONS_LABEL_RE = /^Assumptions:?\s*$/;
+
+/** Paragraph consisting solely of the engine's assumption-ledger label — the
+ *  emphasis node, nothing else of substance. Folded, with the list that follows
+ *  it, into its own <details> the same way the SQL footer is. */
+function isAssumptionsLabel(node: MdNode): boolean {
+  const first = node.children?.[0];
+  return (
+    node.type === "paragraph" &&
+    first?.type === "emphasis" &&
+    ASSUMPTIONS_LABEL_RE.test(mdText(first)) &&
+    (node.children ?? [])
+      .slice(1)
+      .map(mdText)
+      .join("")
+      .trim() === ""
+  );
+}
+
 function isSqlFence(node: MdNode): boolean {
   return node.type === "code" && node.lang === "sql";
 }
@@ -1178,6 +1199,7 @@ function isChartFence(node: MdNode): boolean {
 function isFooterish(node: MdNode): boolean {
   return (
     node.type === "lhQueryDetails" ||
+    node.type === "lhAssumptions" ||
     node.type === "list" ||
     (node.type === "paragraph" && node.children?.[0]?.type === "emphasis")
   );
@@ -1192,6 +1214,10 @@ function isFooterish(node: MdNode): boolean {
  *     paragraph followed by its ```sql fence(s) — becomes a collapsed native
  *     <details> disclosure. The label paragraph itself is re-tagged as the
  *     <summary> (via `data.hName`), so the visible label stays byte-identical.
+ *  1b. The engine's assumption ledger — its `*Assumptions:*` label paragraph
+ *     followed by the bullet list (openspec: add-recipes §1) — is folded the
+ *     SAME way into its own <details>, so it reads as a peer disclosure of the
+ *     SQL footer rather than flat card-note text.
  *  2. The verified result table, the quiet footers between, and the
  *     ```lighthouse-chart fence are wrapped into ONE `.lh-answer-card` <div> —
  *     the elevated flagship card (styled in `answer` above), crowned by a
@@ -1239,6 +1265,29 @@ function remarkAnswerCard() {
       };
       children.splice(i, end - i, details);
       break; // the engine writes one transparency footer per answer
+    }
+
+    // 1b) Fold the assumption ledger (openspec: add-recipes §1) — its emphasis
+    //     label paragraph followed by the bullet list — into its own native
+    //     <details>, mirroring the SQL fold above (same summary/hName wiring and
+    //     the same quiet `lh-query-used` disclosure styling; `lh-assumptions` is
+    //     a semantic hook carrying no rules). A label with no list after it is
+    //     left alone.
+    for (let i = 0; i < children.length; i += 1) {
+      if (!isAssumptionsLabel(children[i])) continue;
+      if (i + 1 >= children.length || children[i + 1].type !== "list") continue;
+      const label = children[i];
+      label.data = { ...label.data, hName: "summary" };
+      const details: MdNode = {
+        type: "lhAssumptions",
+        data: {
+          hName: "details",
+          hProperties: { className: ["lh-query-used", "lh-assumptions"] },
+        },
+        children: [label, children[i + 1]],
+      };
+      children.splice(i, 2, details);
+      break; // the engine writes one assumption ledger per answer
     }
 
     // 2) Card range: anchored on the chart fence (the engine appends it last)
@@ -3625,6 +3674,32 @@ export function ChatPanel() {
     };
   }, [emptyState, includedKey]);
 
+  // Applicable recipes for the empty state (openspec: add-recipes §3.1): the
+  // one-tap runnable analyses for the included set, rendered BESIDE the
+  // suggested asks. Same lifecycle as engineAsks — fetched when the empty state
+  // shows and when the included set changes; [] on the web dev twin (recipes
+  // are Rust-engine-only). Tapping one seeds the recipe-cued question through
+  // the SAME sendQuestion seam the suggested-ask chips use.
+  const [recipeChips, setRecipeChips] = useState<RecipeCard[]>([]);
+  useEffect(() => {
+    if (!emptyState || !includedKey) {
+      setRecipeChips([]);
+      return;
+    }
+    let cancelled = false;
+    ragService
+      .applicableRecipes(includedKey.split("\n"))
+      .then((rs) => {
+        if (!cancelled) setRecipeChips(Array.isArray(rs) ? rs.slice(0, 3) : []);
+      })
+      .catch(() => {
+        if (!cancelled) setRecipeChips([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [emptyState, includedKey]);
+
   // Up to 3 starter prompts built from the user's actual included file names.
   const suggestions = useMemo(() => {
     if (includedFiles.length === 0) return [];
@@ -4429,6 +4504,22 @@ export function ChatPanel() {
                         {s.label}
                       </Button>
                     ))}
+                {/* Applicable-recipe chips (openspec: add-recipes §3.1), beside
+                    the suggested asks and styled identically. Each submits its
+                    recipe-cued question immediately — the engine plans it
+                    model-free before the model gate. */}
+                {recipeChips.map((r) => (
+                  <Button
+                    key={`recipe:${r.id}:${r.table}`}
+                    appearance="secondary"
+                    size="small"
+                    shape="circular"
+                    title={r.summary}
+                    onClick={() => void sendQuestion(runRecipeQuestion(r.id, r.table))}
+                  >
+                    {r.name}
+                  </Button>
+                ))}
               </div>
             </>
           )}

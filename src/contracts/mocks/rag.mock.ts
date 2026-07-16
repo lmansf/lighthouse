@@ -20,6 +20,7 @@ import type {
   AuditSnapshot,
   AuditVerdict,
   RagReference,
+  RecipeCard,
   RestoreToken,
   ShapeViewResult,
   View,
@@ -368,6 +369,41 @@ class MockRagService implements RagService {
     return [
       { label: "Total amount by region", question: `Total amount by region in ${sheet.name}` },
       { label: "Monthly trend of amount", question: `Monthly trend of amount in ${sheet.name}` },
+    ];
+  }
+
+  async applicableRecipes(includedFileIds: string[]): Promise<RecipeCard[]> {
+    // The mock has no column catalog; surface a plausible file-derived subset for
+    // the first included tabular file so the gallery + chips are exercisable
+    // offline. The data-quality audit needs nothing, so it always applies; the
+    // others are canned as if the sheet had a date/numeric/group column.
+    // Summaries are byte-identical to the recipes.rs built-ins (rule 2). [] when
+    // nothing tabular is included — the same no-tabular-files behavior as the
+    // engine's file-derived subset.
+    const included = new Set(includedFileIds);
+    const sheet = this.nodes.find(
+      (n) => n.kind === "file" && included.has(n.id) && /\.(csv|tsv|xlsx?|parquet)$/i.test(n.name),
+    );
+    if (!sheet) return [];
+    return [
+      {
+        id: "variance-vs-last-period",
+        name: "Variance vs last period",
+        summary: "How the latest month's total moved versus the prior month.",
+        table: sheet.name,
+      },
+      {
+        id: "cohort-breakdown",
+        name: "Cohort breakdown",
+        summary: "The metric split by group, ranked, with each group's share of the total.",
+        table: sheet.name,
+      },
+      {
+        id: "data-quality-audit",
+        name: "Data-quality audit",
+        summary: "Per-column null counts, distinct/duplicate counts, and numeric IQR outliers.",
+        table: sheet.name,
+      },
     ];
   }
 

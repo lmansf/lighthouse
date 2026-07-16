@@ -749,6 +749,20 @@ pub async fn rag_op(app: AppHandle, body: Value) -> Result<Value, String> {
             let asks = lighthouse_core::meta::suggested_asks_resolved(ids, is_cloud).await;
             Ok(json!({ "asks": asks }))
         }
+        // Recipes applicable to the included set (openspec: add-recipes §2.3) —
+        // the Library gallery / empty-state chips. Same shareable/posture rule as
+        // suggestedAsks. Execution rides the ask path via the `run-recipe:{id} on
+        // {table}` cue, not a JSON op. Mirrors the routes.rs op exactly.
+        Some("applicableRecipes") => {
+            let ids: Vec<String> = body["includedFileIds"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            let is_cloud =
+                lighthouse_core::synth::is_cloud_provider(&lighthouse_core::profile::model_config());
+            let recipes = lighthouse_core::meta::applicable_recipes(ids, is_cloud).await;
+            Ok(json!({ "recipes": recipes }))
+        }
         // Provider sign-in (0.12.1 §3) — mirrors the routes.rs op exactly: a
         // generic RFC 8628 device-authorization client, INERT until a
         // maintainer registers with a vendor and configures all four

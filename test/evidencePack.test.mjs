@@ -174,6 +174,94 @@ test("answerMarkdownToHtml renders the engine's subset deterministically", () =>
   assert.ok(snake.includes("<td>x_1</td>"));
 });
 
+// --- Recipe answers (openspec: add-recipes §3.2) ------------------------------
+//
+// §3.2 FINDING (verified, no new pack section): a recipe answer's
+// `*Queries used (N):*` footer lists EVERY executed query as its own ```sql
+// fence, and the §1 `*Assumptions:*` ledger rides right beside it — BOTH in the
+// answer text (m.content, which the engine caches verbatim). composeEvidencePack
+// renders m.content in section (b) via answerMarkdownToHtml, which turns each
+// ```sql fence into a <pre><code> block. So a recipe pack already carries the
+// whole plan + the ledger with NO dedicated "Plan" section — the verbatim footer
+// is sufficient. These pins prove the spec scenario: "an evidence pack of a
+// recipe answer that ran four queries → the pack lists all four queries and the
+// result, and renders offline."
+
+const RQ1 = "SELECT SUM(amount) AS total FROM sales WHERE month = '2026-06'";
+const RQ2 = "SELECT SUM(amount) AS total FROM sales WHERE month = '2026-05'";
+const RQ3 = "SELECT SUM(amount) - LAG(SUM(amount)) AS delta FROM sales GROUP BY month";
+const RQ4 = "SELECT COUNT(DISTINCT region) AS groups FROM sales";
+// The extractive shape: result tables + the multi-step footer + the §1 ledger,
+// no prose (narration is skippable) — exactly what synth.rs emits on the
+// no-model path, and what the answer_cache stores verbatim.
+const RECIPE_CONTENT = [
+  "**Current period total**",
+  "",
+  "| total |",
+  "| --- |",
+  "| 4120 |",
+  "",
+  "**Prior period total**",
+  "",
+  "| total |",
+  "| --- |",
+  "| 3300 |",
+  "",
+  "*Queries used (4):*",
+  "1.",
+  "```sql",
+  RQ1,
+  "```",
+  "2.",
+  "```sql",
+  RQ2,
+  "```",
+  "3.",
+  "```sql",
+  RQ3,
+  "```",
+  "4.",
+  "```sql",
+  RQ4,
+  "```",
+  "*Computed from:* “sales.csv” (saved 2 hours ago)",
+  "*Assumptions:*",
+  "- Date column: month (period = calendar month)",
+  "- Metric: SUM(amount) — null cells skipped",
+  "- Considered 12,431 rows",
+  "",
+].join("\n");
+
+test("evidence pack of a recipe answer lists ALL four queries + the ledger, offline", () => {
+  const html = composeEvidencePack({
+    question: "run-recipe:variance-vs-last-period on sales.csv",
+    contentMarkdown: RECIPE_CONTENT,
+    // The representative query rides AnalyticsMeta (pin/board keep working); the
+    // FULL plan rides section (b) via the footer, which is what we assert here.
+    analytics: { sql: RQ1, fileIds: ["finance/sales.csv"] },
+    references: [{ fileId: "finance/sales.csv", name: "sales.csv" }],
+    generatedAt: Date.UTC(2026, 6, 15, 9, 30),
+  });
+
+  // The whole plan: every executed query renders as its own <pre><code> block
+  // (section b's verbatim footer — no dedicated Plan section needed).
+  for (const sql of [RQ1, RQ2, RQ3, RQ4]) {
+    assert.ok(html.includes(`<pre><code>${sql}</code></pre>`), `the pack lists ${sql}`);
+  }
+  // The results render (the recipe's result tables).
+  assert.ok(html.includes("<td>4120</td>"));
+  assert.ok(html.includes("<td>3300</td>"));
+  // The §1 assumption ledger rides flat in section (b) — engine-derived facts.
+  assert.ok(html.includes("Date column: month (period = calendar month)"));
+  assert.ok(html.includes("null cells skipped"));
+  assert.ok(html.includes("Considered 12,431 rows"));
+  // Renders offline: no external resource of any kind (the pack invariant).
+  const withoutXmlns = html.replace(/xmlns(:[a-z]+)?="[^"]*"/g, "");
+  assert.equal(withoutXmlns.match(/https?:\/\//), null);
+  assert.ok(!html.includes("<script"));
+  assert.ok(!html.includes("<link"));
+});
+
 // --- Board pack (openspec: add-boards §5.1) -----------------------------------
 //
 // composeBoardPack composes a whole board the same way: title + per-card

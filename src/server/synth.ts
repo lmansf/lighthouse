@@ -514,6 +514,20 @@ async function* answerPipelineLive(
     }
   }
 
+  // PARITY (openspec: add-recipes §1): synth.rs's Rust-only analytics branch
+  //     appends an engine-derived assumption ledger (`ledger::assumption_ledger`)
+  //     to every analytics answer, beside the Query-used/Computed-from footers.
+  //     The twin has no analytics branch (analytics is desktop/Rust-only), so it
+  //     emits no ledger — the same reason it emits none of the analytics
+  //     provenance footers.
+  // PARITY (openspec: add-recipes §2): synth.rs ALSO has a recipe branch BEFORE
+  //     its model gate — a `run-recipe:{id} on {table}` cue runs a deterministic
+  //     bundle of guarded SELECTs (recipes.rs). Recipes are analytics, so they
+  //     are Rust-engine-only: the twin has no recipe branch (a recipe-cued ask
+  //     degrades like any analytics ask, never a fabricated number), surfaces
+  //     recipe VISIBILITY as `applicableRecipes` → [], and answers
+  //     `{available:false}` on op:"recipes".
+
   // --- Decide: synthesis or single-shot ---
   let docs: DocCandidate[] = [];
   if (hasRealModel(cfg)) {

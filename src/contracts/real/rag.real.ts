@@ -21,6 +21,7 @@ import type {
   AuditSnapshot,
   AuditVerdict,
   RagReference,
+  RecipeCard,
   RestoreToken,
   ShapeProposal,
   ShapeViewResult,
@@ -253,6 +254,11 @@ class RealRagService implements RagService {
   async suggestedAsks(includedFileIds: string[]): Promise<{ label: string; question: string }[]> {
     const res = await post({ op: "suggestedAsks", includedFileIds });
     return Array.isArray(res.asks) ? (res.asks as { label: string; question: string }[]) : [];
+  }
+
+  async applicableRecipes(includedFileIds: string[]): Promise<RecipeCard[]> {
+    const res = await post({ op: "applicableRecipes", includedFileIds });
+    return Array.isArray(res.recipes) ? (res.recipes as RecipeCard[]) : [];
   }
 
   async addReference(path: string): Promise<{ id: string; kind: "file" | "folder" }> {

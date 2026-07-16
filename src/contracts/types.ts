@@ -754,3 +754,48 @@ export interface ShapeProposal {
 export type ShapeViewResult =
   | ({ available: true } & ShapeProposal)
   | { available: false; reason: string };
+
+/**
+ * A built-in analysis recipe (openspec: add-recipes §2): a named, deterministic
+ * bundle of guarded SELECT templates that plans model-free and runs on every
+ * provider (cloud, local, extractive). v1 ships five built-ins and NO
+ * user-authored recipes — the descriptor is the extension seam, not a creation
+ * surface. KEEP IN SYNC with the `Recipe` descriptor in lighthouse-core
+ * recipes.rs (id/name/summary).
+ */
+export interface Recipe {
+  /** Wire-stable built-in key the run cue names (`run-recipe:{id} on {table}`). */
+  id: string;
+  name: string;
+  /** One line for the gallery/chip. */
+  summary: string;
+}
+
+/**
+ * An applicable recipe resolved for the Library gallery / empty-state chips: the
+ * built-in plus the table (file display name) or view (name) it runs on. Only
+ * surfaces where the catalog satisfies the recipe's applicability predicate — a
+ * view that is effectively local-only never surfaces on a cloud ask. KEEP IN
+ * SYNC with `RecipeCard` in lighthouse-core meta.rs.
+ */
+export interface RecipeCard extends Recipe {
+  /** The file (display name) or view (name) this recipe runs on. */
+  table: string;
+}
+
+/**
+ * The run-recipe seam (openspec: add-recipes §2.4). LOWER-CHURN CHOICE: a recipe
+ * chip/gallery row runs a recipe by dispatching the EXISTING
+ * `lighthouse:ask-question` event with a recipe-CUED question — no new event and
+ * no new streaming op. The Rust engine's `synth.rs` detects this exact prefix
+ * (`recipes::parse_recipe_cue`) BEFORE the model gate and runs the recipe
+ * deterministically; a plain natural-language question never carries the prefix,
+ * so a recipe never triggers by accident. KEEP the format in sync with
+ * `RECIPE_CUE_PREFIX` in lighthouse-core recipes.rs.
+ */
+export const RECIPE_CUE_PREFIX = "run-recipe:";
+
+/** Build the recipe-cued question a chip/gallery row seeds the chat with. */
+export function runRecipeQuestion(id: string, table: string): string {
+  return `${RECIPE_CUE_PREFIX}${id} on ${table}`;
+}

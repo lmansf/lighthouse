@@ -603,6 +603,239 @@ fn live_pipeline(
         // no-op and on-device answers are byte-identical to today.
         let is_cloud = is_cloud_provider(&cfg);
 
+        // --- Recipe branch (openspec: add-recipes §2.2): an EXPLICIT, chip/
+        //     gallery-originated `run-recipe:{id} on {table}` cue runs a
+        //     DETERMINISTIC bundle of guarded SELECTs. It sits BEFORE the
+        //     has_real_model gate (and before retrieval) so recipes run on cloud,
+        //     local, AND extractive providers, and a structured cue never pays
+        //     for retrieval it won't use. Planning is model-free; narration is
+        //     skippable. A plain NL question never enters — parse_recipe_cue
+        //     matches only the structured prefix naming a known built-in.
+        //     PARITY: Rust-only (analytics); the TS twin has no recipe branch. ---
+        if let Some(cue) = crate::recipes::parse_recipe_cue(&question) {
+            let recipe = crate::recipes::lookup(&cue.id)
+                .expect("parse_recipe_cue only matches a known built-in");
+            yield progress("Reading table schemas…".to_string(), 1, 4);
+
+            // Candidate gather — the SAME shareable-subset rule the analytics
+            // branch uses, so a private table's bytes never reach a cloud model.
+            let candidate_ids: Vec<String> = if !attachment_file_ids.is_empty() {
+                vault::shareable_subset(&attachment_file_ids, is_cloud)
+            } else {
+                let active: std::collections::HashSet<String> =
+                    vault::shareable_file_ids(is_cloud).into_iter().collect();
+                included_file_ids
+                    .iter()
+                    .filter(|id| active.contains(*id))
+                    .cloned()
+                    .collect()
+            };
+            let mut files: Vec<(String, String, std::path::PathBuf)> = Vec::new();
+            for id in candidate_ids {
+                if files.len() >= crate::analytics::CANDIDATE_SCAN {
+                    break;
+                }
+                if let Some((name, abs)) = vault::doc_path(&id) {
+                    if crate::analytics::is_tabular(&name) || crate::analytics::is_pdf(&name) {
+                        files.push((id, name, abs));
+                    }
+                }
+            }
+            // Resolve the target table's TYPED columns the same way
+            // `applicable_recipes` OFFERS it — catalog kinds for a file (a CSV
+            // date reads as Date), the resolved Arrow schema for a view — so
+            // what a recipe is offered on and what it runs on never disagree.
+            // RISK-4: resolution reads the catalog only, never narration output.
+            let catalog = tokio::task::spawn_blocking({
+                let files = files.clone();
+                move || crate::catalog::columns_for(&files)
+            })
+            .await
+            .unwrap_or_default();
+            let ctx = datafusion::prelude::SessionContext::new();
+            let regs = crate::analytics::register_tables(&ctx, &files, is_cloud).await;
+            let view_regs = crate::analytics::register_views(&ctx, &regs, is_cloud).await;
+
+            // Map the cue's table (a file display name or a view name) to the
+            // registered SQL table name + its typed columns.
+            let mut resolved: Option<crate::recipes::ResolvedParams> = None;
+            if let Some(fc) = catalog.iter().find(|fc| fc.name == cue.table) {
+                // A union-family member maps to the family's registered table.
+                let sql_table = regs
+                    .iter()
+                    .find(|r| {
+                        r.file_id == fc.id
+                            || r.group.as_ref().is_some_and(|g| g.file_ids.contains(&fc.id))
+                    })
+                    .map(|r| r.table.clone());
+                if let Some(sql_table) = sql_table {
+                    let cols: Vec<(String, crate::catalog::ColumnKind)> =
+                        fc.columns.iter().map(|c| (c.name.clone(), c.kind)).collect();
+                    resolved = recipe.resolve(&sql_table, &cols);
+                }
+            }
+            if resolved.is_none() {
+                if let Some(name) = view_regs
+                    .iter()
+                    .find(|vr| vr.name == cue.table)
+                    .map(|vr| vr.name.clone())
+                {
+                    let cols = crate::meta::view_typed_columns(&ctx, &name).await;
+                    resolved = recipe.resolve(&name, &cols);
+                }
+            }
+
+            let Some(params) = resolved else {
+                // Stale/unavailable target: an honest, engine-derived degradation
+                // (never a fabricated or partial answer). The cue always resolves
+                // here, so we NEVER fall through to answer the cue string as prose.
+                yield delta(format!(
+                    "The **{}** recipe needs {} in “{}”, which isn't available right now. \
+                     Toggle the file on in the explorer, or pick a table that has it.\n",
+                    recipe.name,
+                    recipe.needs.describe(),
+                    cue.table,
+                ));
+                yield final_chunk(Vec::new(), 0, &origin);
+                return;
+            };
+
+            let plan = (recipe.plan)(&params);
+            // The representative query — plan[0], the recipe's primary result —
+            // rides AnalyticsMeta so pin/board/save/Edit-SQL keep working: the
+            // same single-SQL limitation multi-step has (RISK-2); a structured-
+            // plan pin field is a deferred follow-on.
+            let representative_sql =
+                plan.first().map(|q| q.sql.clone()).unwrap_or_default();
+
+            // Execute each template through the SAME model-free path a single
+            // query uses (run_query = guard + execute + cap + count) into
+            // StepRecords — the multi-step accumulator MINUS the model planning.
+            // A template that errors (e.g. no anomaly beyond the fence → no rows)
+            // drops that step; the rest continue and the footer lists only what ran.
+            let mut steps: Vec<crate::analytics::StepRecord> = Vec::new();
+            let mut labels: Vec<String> = Vec::new();
+            let mut last_rows: Option<crate::ledger::RowFacts> = None;
+            for (i, q) in plan.iter().enumerate() {
+                yield progress(
+                    format!("Running query {} of {}…", i + 1, plan.len()),
+                    2,
+                    4,
+                );
+                if let Ok(res) = crate::analytics::run_query(&ctx, &q.sql).await {
+                    last_rows = Some(crate::ledger::RowFacts::of(&res));
+                    labels.push(q.label.clone());
+                    steps.push(crate::analytics::StepRecord {
+                        sql: q.sql.clone(),
+                        result_markdown: res.markdown,
+                    });
+                }
+            }
+            if steps.is_empty() {
+                yield delta(format!(
+                    "The **{}** recipe couldn't compute a result over “{}” — its queries \
+                     returned nothing.\n",
+                    recipe.name, cue.table,
+                ));
+                yield final_chunk(Vec::new(), 0, &origin);
+                return;
+            }
+
+            // Narration is SKIPPABLE (design step 5). With a model, one collect()
+            // narrates over the step RESULTS (never raw tables) using the recipe's
+            // narration_prompt. Extractive/no-model: nothing here — the
+            // deterministic tables below ARE the answer. The footer + final chunk
+            // NEVER depend on any narration output.
+            if has_real_model(&cfg) {
+                yield progress("Summarizing results…".to_string(), 4, 4);
+                let mut ctxs: Vec<Ctx> = steps
+                    .iter()
+                    .zip(&labels)
+                    .map(|(s, label)| Ctx {
+                        name: format!("{label} — computed exactly by Lighthouse"),
+                        text: format!("SQL:\n{}\n\nResult:\n{}", s.sql, s.result_markdown),
+                        score: 1.0,
+                    })
+                    .collect();
+                ctxs.extend(regs.iter().map(|r| Ctx {
+                    name: format!("{} — schema", r.file_name),
+                    text: r.card.clone(),
+                    score: 0.0,
+                }));
+                let mut scrub = crate::analytics::DirectiveScrubber::new();
+                let mut answer = llm::stream_answer(
+                    recipe.narration_prompt.to_string(),
+                    ctxs,
+                    cfg.clone(),
+                    history.clone(),
+                );
+                while let Some(d) = answer.next().await {
+                    let safe = scrub.push(&d);
+                    if !safe.is_empty() {
+                        yield delta(safe);
+                    }
+                }
+                let tail = scrub.finish();
+                if !tail.is_empty() {
+                    yield delta(tail);
+                }
+            }
+
+            // Deterministic engine output: the result tables (ALWAYS — the whole
+            // answer on the extractive path, evidence beside the narration on the
+            // model path).
+            for (s, label) in steps.iter().zip(&labels) {
+                yield delta(format!("\n**{label}**\n\n{}\n", s.result_markdown));
+            }
+            // Provenance footer: EVERY executed query in order (the multi-step
+            // footer shape), then ONE freshness stamp over the union they read.
+            if steps.len() == 1 {
+                yield delta(format!(
+                    "\n\n*Query used:*\n```sql\n{}\n```\n",
+                    steps[0].sql
+                ));
+            } else {
+                yield delta(format!("\n\n*Queries used ({}):*\n", steps.len()));
+                for (i, s) in steps.iter().enumerate() {
+                    yield delta(format!("{}.\n```sql\n{}\n```\n", i + 1, s.sql));
+                }
+            }
+            let all_sql = steps
+                .iter()
+                .map(|s| s.sql.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            if let Some(fresh) = crate::analytics::freshness_line(
+                &regs,
+                &crate::analytics::expand_views_for_freshness(&all_sql, &view_regs),
+                crate::config::now_ms(),
+            ) {
+                yield delta(fresh);
+            }
+            // The §1 assumption ledger for the LAST executed step (its SQL +
+            // threaded row facts) — engine-derived, never model text; the same
+            // disclosure the single-query and multi-step paths emit.
+            if let Some(last) = steps.last() {
+                if let Some(ledger) =
+                    crate::ledger::assumption_ledger_parts(&last.sql, &regs, last_rows)
+                {
+                    yield delta(format!("\n{ledger}\n"));
+                }
+            }
+            if let Some(cap) = crate::analytics::row_cap_footer(&regs) {
+                yield delta(cap);
+            }
+            // Pin/board/save act on the representative query.
+            let (refs, meta_ids) = analytics_refs(&regs);
+            let mut done = final_chunk(refs, steps.len(), &origin);
+            done.analytics = Some(AnalyticsMeta {
+                sql: representative_sql,
+                file_ids: meta_ids,
+            });
+            yield done;
+            return;
+        }
+
         // Blend the previous user turn into retrieval so bare follow-ups anchor
         // to the topic (identical to the TS pipeline).
         let last_user_turn = history.iter().rev().find(|t| t.role == "user");
@@ -789,6 +1022,12 @@ fn live_pipeline(
                     if remote_keyed && crate::analytics::multi_step_cue(&question) {
                         let mut steps: Vec<crate::analytics::StepRecord> = Vec::new();
                         let mut last_chart: Option<String> = None;
+                        // The last step's row facts for the assumption ledger:
+                        // StepRecord keeps only result_markdown, and `res` is
+                        // consumed into it below, so capture the three scalars
+                        // here (cheap) rather than reparse a row count out of
+                        // the markdown (unreliable). None if no step succeeds.
+                        let mut last_rows: Option<crate::ledger::RowFacts> = None;
                         'steps: while steps.len() < 3 {
                             let n = steps.len() + 1;
                             yield progress(format!("Planning query {n} (of up to 3)…"), n, 4);
@@ -809,6 +1048,11 @@ fn live_pipeline(
                                 match crate::analytics::run_query(&ctx, &attempt).await {
                                     Ok(res) => {
                                         last_chart = res.chart.clone();
+                                        last_rows = Some(crate::ledger::RowFacts {
+                                            shown: res.shown,
+                                            truncated: res.truncated,
+                                            total: res.total,
+                                        });
                                         steps.push(crate::analytics::StepRecord {
                                             sql: attempt.clone(),
                                             result_markdown: res.markdown,
@@ -926,6 +1170,18 @@ fn live_pipeline(
                                 crate::config::now_ms(),
                             ) {
                                 yield delta(fresh);
+                            }
+                            // Assumption ledger (openspec: add-recipes §1) for
+                            // the LAST executed step: derived from its SQL +
+                            // `regs`, with the threaded row facts (`last_rows`).
+                            // Same disclosure the single-query path emits; the
+                            // multi-step footer still lists every query above.
+                            if let Some(last) = steps.last() {
+                                if let Some(ledger) = crate::ledger::assumption_ledger_parts(
+                                    &last.sql, &regs, last_rows,
+                                ) {
+                                    yield delta(format!("\n{ledger}\n"));
+                                }
                             }
                             // Same row-cap honesty as the single-query path:
                             // the steps read the same registrations, so a
@@ -1059,6 +1315,18 @@ fn live_pipeline(
                             crate::config::now_ms(),
                         ) {
                             yield delta(fresh);
+                        }
+                        // Assumption ledger (openspec: add-recipes §1): an
+                        // engine-derived "Assumptions" disclosure read entirely
+                        // from the executed SQL + this result's row facts, never
+                        // model text. Placed after Query-used + Computed-from so
+                        // the card's disclosure order is Query used → Computed
+                        // from → Assumptions. Rides in the answer text, so the
+                        // answer cache stores it for free.
+                        if let Some(ledger) =
+                            crate::ledger::assumption_ledger(&sql, &regs, &res)
+                        {
+                            yield delta(format!("\n{ledger}\n"));
                         }
                         // Truncation honesty: a capped result states its true
                         // total deterministically (matches the model-free
