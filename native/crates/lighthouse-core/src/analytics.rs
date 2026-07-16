@@ -1558,6 +1558,31 @@ fn set_expr_is_read_only(body: &datafusion::sql::sqlparser::ast::SetExpr) -> Res
     }
 }
 
+/// Placeholder projection alias for a synthesized metric definition. The guard
+/// and the `reads` walk don't depend on the alias, so a fixed identifier keeps
+/// `guard_metric_expression` a pure `(expression, entity)` function; §4's
+/// re-run rebuilds the SELECT with the metric's real name.
+const METRIC_ALIAS: &str = "metric_value";
+
+/// Guard a semantic-layer metric definition (openspec: add-semantic-layer
+/// §1.3). Synthesize the canonical single statement
+/// `SELECT <expression> AS metric_value FROM <entity>`, run the SAME read-only
+/// [`guard_sql`] every executed query passes (so a saved metric is always a
+/// re-runnable read-only SELECT — what §4 leans on), and return the table
+/// names the definition references via the `views::collect_table_names` AST
+/// walk (the SAME parser, so the guard and the reads derivation can never
+/// disagree). `Err` with a human-readable reason for an expression that does
+/// not parse or is not read-only; nothing is persisted by this pure function.
+/// The caller (`semantic::create_metric`) resolves the returned names to a
+/// metric's `reads`, refusing an unknown entity. PARITY: the TS twin
+/// (semantic.ts) guards textually via `views.ts::guardViewSql` and scans
+/// FROM/JOIN via `collectTableNames` — analytics/DataFusion is Rust-only.
+pub fn guard_metric_expression(expression: &str, entity: &str) -> Result<Vec<String>, String> {
+    let sql = format!("SELECT {expression} AS {METRIC_ALIAS} FROM {entity}");
+    guard_sql(&sql)?;
+    crate::views::collect_table_names(&sql)
+}
+
 // --- Execution + rendering -------------------------------------------------------
 
 /// A verified query result, ready for the narration prompt and the chat.

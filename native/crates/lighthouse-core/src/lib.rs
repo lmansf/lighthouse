@@ -33,6 +33,7 @@ pub mod provider_auth;
 pub mod recipes;
 pub mod policy;
 pub mod secrets;
+pub mod semantic;
 pub mod updates;
 pub mod settings;
 pub mod sources;
