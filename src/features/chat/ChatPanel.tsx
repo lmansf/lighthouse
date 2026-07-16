@@ -110,7 +110,7 @@ import { ProviderSwitch } from "@/features/chat/ProviderSwitch";
 import { useChatStore, type TranscriptMessage } from "@/stores/useChatStore";
 import { chatHistoryLocked } from "@/stores/managedLocks";
 import { modKey } from "@/features/onboarding/ModeChooser";
-import { ACCENTS } from "@/shell/theme";
+import { ACCENTS, BEAM_SWEEP } from "@/shell/theme";
 import { FILE_DRAG_MIME, parseDraggedFiles, type DraggedFile } from "@/shell/dnd";
 import { isDesktopShell, pathsForFiles } from "@/shell/desktopBridge";
 
@@ -335,6 +335,8 @@ const useStyles = makeStyles({
       ...shorthands.border("1px", "solid", tokens.colorNeutralStroke2),
       ...shorthands.padding(tokens.spacingVerticalXS, tokens.spacingHorizontalS),
       textAlign: "left",
+      // Result tables are number surfaces: lining digits keep columns scannable.
+      fontVariantNumeric: "tabular-nums",
     },
     "& blockquote": {
       marginLeft: 0,
@@ -523,6 +525,7 @@ const useStyles = makeStyles({
     gap: tokens.spacingHorizontalXS,
     marginTop: tokens.spacingVerticalXXS,
     color: tokens.colorNeutralForeground3,
+    fontVariantNumeric: "tabular-nums",
   },
   // Answer-cache line under a replayed answer ("From cache · same data as
   // HH:MM · Re-run") — same quiet register as the provenance stamp; rendered
@@ -531,6 +534,7 @@ const useStyles = makeStyles({
     display: "block",
     marginTop: tokens.spacingVerticalXXS,
     color: tokens.colorNeutralForeground3,
+    fontVariantNumeric: "tabular-nums",
   },
   // G4: the truncation disclosure bound to a sortable result table's <caption>,
   // so it stays with the table through sorting.
@@ -541,6 +545,7 @@ const useStyles = makeStyles({
     fontSize: tokens.fontSizeBase200,
     fontStyle: "italic",
     paddingTop: tokens.spacingVerticalXXS,
+    fontVariantNumeric: "tabular-nums",
   },
   // G2 draft-then-verify: the muted "verifying…" badge shown under the
   // provisional extractive draft while the private model composes the answer.
@@ -572,6 +577,7 @@ const useStyles = makeStyles({
     },
     animationDuration: "1.2s",
     animationTimingFunction: "ease-out",
+    "@media (prefers-reduced-motion: reduce)": { animationName: "none" },
   },
   openIcon: { opacity: 0, transition: "opacity 120ms ease", color: tokens.colorNeutralForeground3 },
   refMeta: { display: "flex", flexDirection: "column", flex: 1, minWidth: 0 },
@@ -626,15 +632,22 @@ const useStyles = makeStyles({
     ...shorthands.padding(tokens.spacingVerticalS, "0"),
     color: tokens.colorNeutralForeground3,
   },
-  // Static glowing beacon for the centered pre-ask prompt — the lighthouse light.
+  // Static glowing beacon for the centered pre-ask prompt — the lighthouse
+  // light, carrying the Beam signature: the ink→amber sweep (a hero moment —
+  // the empty state — never behind content). providers.tsx stamps
+  // data-theme on <html>; the :global() rule (compiled to
+  // `[data-theme="dark"] .beacon`) picks the sweep variant with the theme.
   beacon: {
     width: "14px",
     height: "14px",
     borderRadius: "50%",
     backgroundColor: tokens.colorBrandBackground,
+    backgroundImage: BEAM_SWEEP.light,
     boxShadow: `0 0 12px 3px ${ACCENTS.beam}`,
+    ':global([data-theme="dark"])': { backgroundImage: BEAM_SWEEP.dark },
   },
-  // Small gently-pulsing dot used by the loader.
+  // Small gently-pulsing dot used by the loader; rests steady (fully lit)
+  // under prefers-reduced-motion.
   loaderDot: {
     width: "10px",
     height: "10px",
@@ -649,6 +662,7 @@ const useStyles = makeStyles({
     animationDuration: "1.2s",
     animationIterationCount: "infinite",
     animationTimingFunction: "ease-in-out",
+    "@media (prefers-reduced-motion: reduce)": { animationName: "none" },
   },
   beaconInline: {
     display: "inline-block",
@@ -666,6 +680,7 @@ const useStyles = makeStyles({
     animationDuration: "1s",
     animationIterationCount: "infinite",
     animationTimingFunction: "ease-in-out",
+    "@media (prefers-reduced-motion: reduce)": { animationName: "none" },
   },
 
   // --- New chat "Undo" bar: a quiet reassurance strip shown briefly after a

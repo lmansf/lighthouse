@@ -150,7 +150,7 @@ const useStyles = makeStyles({
     cursor: "grab",
     ":active": { cursor: "grabbing" },
   },
-  // The beacon: same blue lamp + warm gold glow as the sidebar brand — the
+  // The beacon: same amber lamp + warm halo as the sidebar brand — the
   // one bit of identity on an otherwise chromeless bar.
   beacon: {
     width: "10px",

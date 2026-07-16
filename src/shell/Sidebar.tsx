@@ -11,14 +11,12 @@ import {
 } from "@fluentui/react-components";
 import { PanelLeftContractRegular, PanelLeftExpandRegular } from "@fluentui/react-icons";
 import { LAYOUT, ACCENTS } from "./theme";
-import { SidebarWater } from "./SidebarWater";
 import { SettingsMenu } from "@/features/settings/SettingsMenu";
 import { UpdateNotice } from "@/features/update/UpdateNotice";
 import { modKey } from "@/features/onboarding/ModeChooser";
 
 const useStyles = makeStyles({
   sidebar: {
-    position: "relative", // anchors the water backdrop behind the content
     display: "flex",
     flexDirection: "column",
     height: "100%",
@@ -34,22 +32,7 @@ const useStyles = makeStyles({
     "@media (prefers-reduced-motion: reduce)": { transitionDuration: "0.01ms" },
   },
   collapsed: { width: `${LAYOUT.sidebarCollapsedWidth}px` },
-  // The water backdrop stays mounted and fades with the collapse so it no
-  // longer blinks in/out as the rail toggles.
-  waterWrap: {
-    position: "absolute",
-    inset: 0,
-    zIndex: 0,
-    opacity: 1,
-    transitionProperty: "opacity",
-    transitionDuration: tokens.durationSlow,
-    transitionTimingFunction: tokens.curveEasyEase,
-    "@media (prefers-reduced-motion: reduce)": { transitionDuration: "0.01ms" },
-  },
-  waterWrapHidden: { opacity: 0 },
   header: {
-    position: "relative",
-    zIndex: 1,
     display: "flex",
     alignItems: "center",
     justifyContent: "space-between",
@@ -67,7 +50,7 @@ const useStyles = makeStyles({
     fontWeight: tokens.fontWeightSemibold,
     minWidth: 0,
   },
-  // The beacon: a blue lamp throwing a warm gold glow - the lighthouse light.
+  // The beacon: the amber lamp and its warm halo - the lighthouse light.
   beacon: {
     width: "10px",
     height: "10px",
@@ -80,8 +63,6 @@ const useStyles = makeStyles({
   // cramped against the left border / right scrollbar. Aligns with the header
   // and footer's horizontal padding.
   body: {
-    position: "relative",
-    zIndex: 1,
     flex: 1,
     minHeight: 0,
     overflowY: "auto",
@@ -89,8 +70,6 @@ const useStyles = makeStyles({
   },
   bodyHidden: { display: "none" },
   footer: {
-    position: "relative",
-    zIndex: 1,
     display: "flex",
     alignItems: "center",
     gap: tokens.spacingHorizontalS,
@@ -123,9 +102,6 @@ export function Sidebar({ collapsed, onToggleCollapsed, children }: SidebarProps
 
   return (
     <div className={mergeClasses(styles.sidebar, collapsed && styles.collapsed)}>
-      <div className={mergeClasses(styles.waterWrap, collapsed && styles.waterWrapHidden)} aria-hidden>
-        <SidebarWater />
-      </div>
       <div className={mergeClasses(styles.header, collapsed && styles.headerCollapsed)}>
         {collapsed ? (
           <Tooltip content={`Expand files ${toggleHint}`} relationship="label">

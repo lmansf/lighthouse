@@ -32,7 +32,13 @@ const useStyles = makeStyles({
     ":hover .lh-chart-png": { opacity: 1 },
     ":focus-within .lh-chart-png": { opacity: 1 },
   },
-  svg: { width: "100%", height: "auto", display: "block" },
+  svg: {
+    width: "100%",
+    height: "auto",
+    display: "block",
+    // Axis tick labels are number surfaces: lining digits keep ticks aligned.
+    "& text": { fontVariantNumeric: "tabular-nums" },
+  },
   // Hover-revealed download affordance, mirroring the tables' Copy CSV button.
   pngBtn: {
     position: "absolute",
@@ -40,8 +46,10 @@ const useStyles = makeStyles({
     right: "0px",
     opacity: 0,
     transitionProperty: "opacity",
-    transitionDuration: tokens.durationFaster,
+    transitionDuration: tokens.durationFast, // 150ms ease-out (Beam standard)
+    transitionTimingFunction: tokens.curveDecelerateMid,
     backgroundColor: tokens.colorNeutralBackground1,
+    "@media (prefers-reduced-motion: reduce)": { transitionDuration: "0.01ms" },
   },
   legend: {
     display: "flex",
