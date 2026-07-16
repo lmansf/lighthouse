@@ -30,6 +30,7 @@ import type {
   AuditSnapshot,
   AuditVerdict,
   RagReference,
+  RecipeCard,
   RestoreToken,
   ShapeViewResult,
   View,
@@ -215,6 +216,14 @@ export interface RagService {
    * which case the UI keeps its static empty-state hint.
    */
   suggestedAsks(includedFileIds: string[]): Promise<{ label: string; question: string }[]>;
+  /**
+   * Recipes applicable to the included set (openspec: add-recipes §2), for the
+   * Library gallery and the empty-state recipe chips. Each card names the file
+   * (display name) or view (name) it runs on; tapping it seeds the chat with the
+   * recipe-cued question (see `runRecipeQuestion`). Empty when nothing matches
+   * (or on the web dev twin — recipes are Rust-engine-only, so it returns []).
+   */
+  applicableRecipes(includedFileIds: string[]): Promise<RecipeCard[]>;
   /**
    * Link a file or folder by its real absolute path instead of copying it into
    * the vault (reduces duplication). Returns the new node id. Desktop-only —

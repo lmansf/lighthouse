@@ -586,6 +586,24 @@ export async function POST(req: Request) {
       // empty-state hint — exactly the no-tabular-files behavior.
       return NextResponse.json({ asks: [] });
 
+    // Recipes (openspec: add-recipes §2). PARITY: applicability derives from the
+    // column catalog + DataFusion view resolution, which live in the Rust engine
+    // only, so the twin returns [] (an empty gallery/no chips — the same
+    // no-tabular-files behavior as suggestedAsks).
+    case "applicableRecipes":
+      return NextResponse.json({ recipes: [] });
+
+    // PARITY: recipe EXECUTION runs guarded SELECTs through DataFusion (Rust
+    // engine only) — this dev twin never takes the analytics branch, so a direct
+    // recipes op is honestly unavailable (the shapeView precedent). On the Rust
+    // engine execution rides the ask path via the `run-recipe:{id} on {table}`
+    // cue; the twin's ask path likewise has no recipe branch.
+    case "recipes":
+      return NextResponse.json({
+        available: false,
+        reason: "recipes run in the Rust engine — this dev server can't execute SQL",
+      });
+
     // --- Pinned questions (openspec: add-pinned-questions). PARITY: rechecks
     //     re-run SQL through DataFusion (Rust engine only) — this dev
     //     server does CRUD and reports "no changes" on recheck, so pinned

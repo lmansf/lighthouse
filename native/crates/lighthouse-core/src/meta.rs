@@ -659,8 +659,9 @@ fn view_source_files(
 
 /// A registered view's result columns as `(lowercased name, kind)`, kinds read
 /// from the Arrow schema (no rows collected). Empty when the view isn't
-/// registered.
-async fn view_typed_columns(ctx: &SessionContext, name: &str) -> Vec<(String, ColumnKind)> {
+/// registered. `pub(crate)` so the recipe executor (synth.rs) resolves a view
+/// target's typed columns the SAME way `applicable_recipes` offers it.
+pub(crate) async fn view_typed_columns(ctx: &SessionContext, name: &str) -> Vec<(String, ColumnKind)> {
     let Ok(df) = ctx.table(name).await else {
         return Vec::new();
     };
@@ -724,11 +725,166 @@ fn push_view_suggestions(
     }
 }
 
+// --- Applicable recipes (openspec: add-recipes §2.3) ------------------------------
+
+/// One applicable recipe, resolved for the Library gallery / empty-state chips:
+/// the built-in's identity plus the table (file display name) or view (name) it
+/// runs on. `id` is the wire-stable key the run cue names
+/// (`run-recipe:{id} on {table}`). KEEP IN SYNC with `RecipeCard` in
+/// src/contracts/types.ts.
+#[derive(Debug, Clone, Serialize)]
+pub struct RecipeCard {
+    pub id: String,
+    pub name: String,
+    pub summary: String,
+    pub table: String,
+}
+
+/// Most recipe cards returned across files + views.
+const RECIPE_CARDS_MAX: usize = 24;
+
+/// Recipes applicable to the included set, resolved the SAME way
+/// `suggested_asks_resolved` resolves chips (openspec: add-recipes §2.3): the
+/// cheap, blocking, cache-first FILE path (each recipe's `needs` evaluated
+/// against `columns_for`'s typed columns — a CSV date reads as Date-kind), then
+/// — gated so the zero-view path pays no DataFusion cost — the eligible VIEWS,
+/// typed from their resolved Arrow schema. Posture gating comes free from
+/// reusing the shareable set + `eligible_for_posture`/`register_views`, so a
+/// view that is effectively local-only never surfaces a recipe on a cloud ask.
+/// The data-quality audit needs nothing, so it surfaces on every table.
+pub async fn applicable_recipes(included: Vec<String>, is_cloud: bool) -> Vec<RecipeCard> {
+    // File cards first — the unchanged, cheap path (no DataFusion).
+    let file_included = included.clone();
+    let mut cards = tokio::task::spawn_blocking(move || file_recipe_cards(&file_included, is_cloud))
+        .await
+        .unwrap_or_default();
+    let mut seen: HashSet<(String, String)> =
+        cards.iter().map(|c| (c.id.clone(), c.table.clone())).collect();
+    if cards.len() >= RECIPE_CARDS_MAX {
+        return cards;
+    }
+    // Resolve the eligible views' in-scope source files (blocking store reads).
+    // An empty result skips the whole view branch — the zero-view path never
+    // builds a context, exactly like `suggested_asks_resolved`.
+    let files = tokio::task::spawn_blocking(move || {
+        let eligible = crate::views::eligible_for_posture(is_cloud);
+        if eligible.is_empty() {
+            return Vec::new();
+        }
+        view_source_files(&eligible, &included, is_cloud)
+    })
+    .await
+    .unwrap_or_default();
+    if files.is_empty() {
+        return cards;
+    }
+    let ctx = SessionContext::new();
+    let regs = register_tables(&ctx, &files, is_cloud).await;
+    if regs.is_empty() {
+        return cards;
+    }
+    let view_regs = register_views(&ctx, &regs, is_cloud).await;
+    for vr in &view_regs {
+        if cards.len() >= RECIPE_CARDS_MAX {
+            break;
+        }
+        let cols = view_typed_columns(&ctx, &vr.name).await;
+        push_recipe_cards(&mut cards, &mut seen, &vr.name, &cols);
+    }
+    cards
+}
+
+/// File-derived recipe cards: the most recently modified included tabular files,
+/// typed by the column catalog — mirrors `suggested_asks`' file scan exactly
+/// (same `SUGGEST_FILES` window, same cheap `columns_for`).
+fn file_recipe_cards(included: &[String], is_cloud: bool) -> Vec<RecipeCard> {
+    let recent: Vec<(String, String, PathBuf)> = included_files_with_mtime(included, is_cloud)
+        .into_iter()
+        .filter(|(_, name, _, _)| is_tabular(name))
+        .take(SUGGEST_FILES)
+        .map(|(id, name, abs, _)| (id, name, abs))
+        .collect();
+    if recent.is_empty() {
+        return Vec::new();
+    }
+    let mut cards: Vec<RecipeCard> = Vec::new();
+    let mut seen: HashSet<(String, String)> = HashSet::new();
+    for fc in catalog::columns_for(&recent) {
+        let cols: Vec<(String, ColumnKind)> =
+            fc.columns.iter().map(|c| (c.name.clone(), c.kind)).collect();
+        push_recipe_cards(&mut cards, &mut seen, &fc.name, &cols);
+    }
+    cards
+}
+
+/// Append every built-in applicable to `table`'s typed columns, deduped by
+/// (recipe id, table) and budget-capped. Pure and context-free, so it is
+/// unit-testable without a SessionContext.
+fn push_recipe_cards(
+    cards: &mut Vec<RecipeCard>,
+    seen: &mut HashSet<(String, String)>,
+    table: &str,
+    cols: &[(String, ColumnKind)],
+) {
+    for r in crate::recipes::BUILTINS {
+        if cards.len() >= RECIPE_CARDS_MAX {
+            break;
+        }
+        if !r.applicable(cols) {
+            continue;
+        }
+        if !seen.insert((r.id.to_string(), table.to_string())) {
+            continue;
+        }
+        cards.push(RecipeCard {
+            id: r.id.to_string(),
+            name: r.name.to_string(),
+            summary: r.summary.to_string(),
+            table: table.to_string(),
+        });
+    }
+}
+
 // --- Tests -----------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn applicable_recipes_gate_on_column_kinds() {
+        // A table with a date + numeric + text surfaces the recipes whose needs
+        // it meets; the data-quality audit (needs nothing) always appears.
+        let full = [
+            ("order_date".to_string(), ColumnKind::Date),
+            ("region".to_string(), ColumnKind::Text),
+            ("amount".to_string(), ColumnKind::Numeric),
+        ];
+        let mut cards = Vec::new();
+        let mut seen = HashSet::new();
+        push_recipe_cards(&mut cards, &mut seen, "sales.csv", &full);
+        let ids: Vec<&str> = cards.iter().map(|c| c.id.as_str()).collect();
+        assert!(ids.contains(&"variance-vs-last-period"));
+        assert!(ids.contains(&"cohort-breakdown"));
+        assert!(ids.contains(&"anomaly-scan"));
+        assert!(ids.contains(&"top-movers"));
+        assert!(ids.contains(&"data-quality-audit"));
+        assert!(cards.iter().all(|c| c.table == "sales.csv"));
+
+        // A numeric-only table: only the audit and (numeric-only) recipes that
+        // don't need a date or a group. Variance/anomaly/cohort/top-movers all
+        // demand a date or a text column, so only the audit survives.
+        let numeric_only = [("amount".to_string(), ColumnKind::Numeric)];
+        let mut cards2 = Vec::new();
+        let mut seen2 = HashSet::new();
+        push_recipe_cards(&mut cards2, &mut seen2, "nums.csv", &numeric_only);
+        let ids2: Vec<&str> = cards2.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids2, vec!["data-quality-audit"]);
+
+        // Dedup: a second pass over the same (recipe, table) adds nothing.
+        push_recipe_cards(&mut cards2, &mut seen2, "nums.csv", &numeric_only);
+        assert_eq!(cards2.len(), 1);
+    }
 
     #[test]
     fn cue_table_positives() {

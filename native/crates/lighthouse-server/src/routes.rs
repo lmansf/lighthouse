@@ -776,6 +776,23 @@ pub async fn rag_post(headers: HeaderMap, body: Option<Json<Value>>) -> Response
             let asks = lighthouse_core::meta::suggested_asks_resolved(ids, is_cloud).await;
             return Json(json!({ "asks": asks })).into_response();
         }
+        // Recipes applicable to the included set (openspec: add-recipes §2.3) —
+        // the Library gallery / empty-state chips. Same posture/cloud-ness rule
+        // as suggestedAsks: cards resolve against the shareable set, so a marked
+        // file (or an effectively-local-only view) never surfaces a recipe on a
+        // cloud ask. Execution rides the ask path via the `run-recipe:{id} on
+        // {table}` cue, not a JSON op. PARITY: the TS twin returns [] (no
+        // catalog/DataFusion) and answers {available:false} on op:"recipes".
+        Some("applicableRecipes") => {
+            let ids: Vec<String> = body["includedFileIds"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            let is_cloud =
+                lighthouse_core::synth::is_cloud_provider(&lighthouse_core::profile::model_config());
+            let recipes = lighthouse_core::meta::applicable_recipes(ids, is_cloud).await;
+            return Json(json!({ "recipes": recipes })).into_response();
+        }
         Some("restore") => {
             let token = &body["token"];
             if !token.is_object() {
