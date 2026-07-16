@@ -183,41 +183,44 @@ bundled; `.next/cache` and the dev toolchain are excluded, along with `.env` /
 
 ### Icons
 
-The branded lighthouse icon is committed (`build/icon.png` / `build/icon.ico`
-for the app + installer, `assets/icon.png` for the window, `assets/tray.png` for
-the tray). To re-generate them after editing the SVG sources in `build/`, run
-`npm run icons` (installs `sharp` + `png-to-ico` on demand, so end users never
-pull these heavy native deps).
+The Beam mark — ink field, paper tower, one amber beam — lives as two SVG
+sources in `build/` (`icon.svg`, the 1024² master; `tray.svg`, the monochrome
+template variant), and every raster is derived from them and committed:
+`build/icon.png` / `build/icon.ico`, `assets/icon.png` (legacy window icon),
+and the Tauri bundle set under `native/crates/lighthouse-desktop/icons/`
+(`icon.png`, `icon.ico`, `icon.icns`, plus `tray-template.png` — the
+black+alpha macOS menubar template image compiled into the shell binary).
+To re-generate all of them after editing the SVGs, run `npm run icons`
+(installs `sharp` + `png-to-ico` on demand, so end users never pull these
+heavy native deps; the `.icns` is written by the script itself, so no macOS
+tooling is needed).
 
 ### What the end user gets
 
-The Windows installer (NSIS) installs Lighthouse with a Start-Menu and desktop
-shortcut and lets the user pick the install directory. It is **branded to match
-the app**: the welcome and finish pages carry a cool-steel / sea-sky-blue / brass
-sidebar drawn from the same Forerunner palette as the app shell
-(`src/shell/theme.ts`), and the install step narrates what is happening in the
-app's voice on the status line above electron-builder's progress bar (bundling
-the on-device AI model, registering shortcuts, ready to open). Launching it
-shows the loading splash, starts the bundled server, and swaps in the app once
-it answers — and, unless the user opts out at the one-time
-[launch-at-login](#launch-at-login)
-prompt, Lighthouse adds itself to login items so it stays running in the tray.
+The Windows installer (NSIS) is Tauri's stock chrome — the standard pages and
+progress bar, Start-Menu and desktop shortcuts, the Beam app icon — with one
+custom hook: `native/crates/lighthouse-desktop/installer-hooks.nsh` kills any
+orphaned `llama-server.exe` helpers before install and uninstall (a loaded
+DLL is an unwritable file on Windows, so a leftover helper used to fail the
+extraction) and clears the boot marker so an update's hard kill of the
+running app is not misread as a crash on the next launch. Branded installer
+art in the Beam palette is future work; the branded-installer pipeline this
+section used to describe (`installer.nsh` narration, sidebar BMPs,
+`scripts/gen-installer-art.mjs`) was Electron-era and did not survive the
+native cutover.
 
-The installer branding lives in `build/`: `installer.nsh` (the electron-builder
-NSIS `include` hook holding the `customInstall` narration and the `customUnInstall`
-data prompt below) and the `installerSidebar.bmp` / `uninstallerSidebar.bmp`
-images, regenerated from the theme palette with `npm run installer:art`
-(`scripts/gen-installer-art.mjs`).
+Launching the installed app shows the loading splash, starts the bundled
+server, and swaps in the app once it answers — and, unless the user opts out
+at the one-time [launch-at-login](#launch-at-login) prompt, Lighthouse adds
+itself to login items so it stays running in the tray.
 
-Uninstalling removes the app and asks once whether to **also delete your
-Lighthouse data** — the app settings/logs (`%APPDATA%\rag-vault`, Electron's
-userData folder, named after the package name — **this path is Electron-era
-history; the shipping Tauri app instead uses an OS app-data directory derived
-from the identifier `com.lighthouse.app`, not from `rag-vault`**) and the
-default vault (`Documents\Lighthouse Vault`) along with the files in it. The
-default answer (and a silent `/S` uninstall) is **No**, so your documents and
-settings are never deleted by accident and a reinstall picks up where you left
-off; a vault you pointed elsewhere is always left alone.
+Uninstalling removes the app and leaves your data alone: the settings/logs
+(under the OS app-data directory derived from the identifier
+`com.lighthouse.app` — not the Electron-era `%APPDATA%\rag-vault`) and your
+vault (`Documents\Lighthouse Vault` by default, or wherever you pointed it)
+are never deleted, so a reinstall picks up where you left off. (The
+Electron uninstaller's one-time "also delete your Lighthouse data?" prompt
+went away with the rest of its custom chrome.)
 
 ## Configuration
 

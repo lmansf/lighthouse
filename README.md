@@ -18,8 +18,8 @@ security director** who needs to approve all of it.
 > Naming debt, kept on purpose: the npm package is still named `rag-vault`,
 > and the hidden per-vault state directory is `.rag-vault/` — renaming either
 > would break existing installs' upgrades (orphaned indexes and settings), so
-> neither is renamed. The product and repo are **Lighthouse**. The UI is the
-> Forerunner theme — steel blues with a beacon accent — in light and dark.
+> neither is renamed. The product and repo are **Lighthouse**. The identity is
+> **Beam** — ink and paper with a single amber beam — in light and dark.
 
 ## What it does (as of 0.11)
 
