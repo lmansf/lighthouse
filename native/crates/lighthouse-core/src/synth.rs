@@ -789,6 +789,12 @@ fn live_pipeline(
                     if remote_keyed && crate::analytics::multi_step_cue(&question) {
                         let mut steps: Vec<crate::analytics::StepRecord> = Vec::new();
                         let mut last_chart: Option<String> = None;
+                        // The last step's row facts for the assumption ledger:
+                        // StepRecord keeps only result_markdown, and `res` is
+                        // consumed into it below, so capture the three scalars
+                        // here (cheap) rather than reparse a row count out of
+                        // the markdown (unreliable). None if no step succeeds.
+                        let mut last_rows: Option<crate::ledger::RowFacts> = None;
                         'steps: while steps.len() < 3 {
                             let n = steps.len() + 1;
                             yield progress(format!("Planning query {n} (of up to 3)…"), n, 4);
@@ -809,6 +815,11 @@ fn live_pipeline(
                                 match crate::analytics::run_query(&ctx, &attempt).await {
                                     Ok(res) => {
                                         last_chart = res.chart.clone();
+                                        last_rows = Some(crate::ledger::RowFacts {
+                                            shown: res.shown,
+                                            truncated: res.truncated,
+                                            total: res.total,
+                                        });
                                         steps.push(crate::analytics::StepRecord {
                                             sql: attempt.clone(),
                                             result_markdown: res.markdown,
@@ -926,6 +937,18 @@ fn live_pipeline(
                                 crate::config::now_ms(),
                             ) {
                                 yield delta(fresh);
+                            }
+                            // Assumption ledger (openspec: add-recipes §1) for
+                            // the LAST executed step: derived from its SQL +
+                            // `regs`, with the threaded row facts (`last_rows`).
+                            // Same disclosure the single-query path emits; the
+                            // multi-step footer still lists every query above.
+                            if let Some(last) = steps.last() {
+                                if let Some(ledger) = crate::ledger::assumption_ledger_parts(
+                                    &last.sql, &regs, last_rows,
+                                ) {
+                                    yield delta(format!("\n{ledger}\n"));
+                                }
                             }
                             // Same row-cap honesty as the single-query path:
                             // the steps read the same registrations, so a
@@ -1059,6 +1082,18 @@ fn live_pipeline(
                             crate::config::now_ms(),
                         ) {
                             yield delta(fresh);
+                        }
+                        // Assumption ledger (openspec: add-recipes §1): an
+                        // engine-derived "Assumptions" disclosure read entirely
+                        // from the executed SQL + this result's row facts, never
+                        // model text. Placed after Query-used + Computed-from so
+                        // the card's disclosure order is Query used → Computed
+                        // from → Assumptions. Rides in the answer text, so the
+                        // answer cache stores it for free.
+                        if let Some(ledger) =
+                            crate::ledger::assumption_ledger(&sql, &regs, &res)
+                        {
+                            yield delta(format!("\n{ledger}\n"));
                         }
                         // Truncation honesty: a capped result states its true
                         // total deterministically (matches the model-free

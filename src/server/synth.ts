@@ -514,6 +514,13 @@ async function* answerPipelineLive(
     }
   }
 
+  // PARITY (openspec: add-recipes §1): synth.rs's Rust-only analytics branch
+  //     appends an engine-derived assumption ledger (`ledger::assumption_ledger`)
+  //     to every analytics answer, beside the Query-used/Computed-from footers.
+  //     The twin has no analytics branch (analytics is desktop/Rust-only), so it
+  //     emits no ledger — the same reason it emits none of the analytics
+  //     provenance footers.
+
   // --- Decide: synthesis or single-shot ---
   let docs: DocCandidate[] = [];
   if (hasRealModel(cfg)) {

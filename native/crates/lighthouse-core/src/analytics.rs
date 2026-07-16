@@ -4514,7 +4514,7 @@ async fn direct_tables(
 
 /// A grouped-thousands integer: 12431 → "12,431" — read-out friendly for the
 /// truncation footer.
-fn commafy(n: usize) -> String {
+pub(crate) fn commafy(n: usize) -> String {
     let s = n.to_string();
     let b = s.as_bytes();
     let mut out = String::with_capacity(s.len() + s.len() / 3);
