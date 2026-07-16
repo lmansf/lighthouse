@@ -174,7 +174,9 @@ function firstModelFor(pid: string): string {
 function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean) => void }) {
   const styles = useStyles();
   const onboarding = useAuthStore((s) => s.onboarding);
-  const selectModel = useAuthStore((s) => s.selectModel);
+  // switchModel = selectModel + completeOnboarding in one publish: a post-
+  // onboarding save must never park the shell back on the onboarding step.
+  const switchModel = useAuthStore((s) => s.switchModel);
   const validateKey = useAuthStore((s) => s.validateKey);
   // Managed policy (add-managed-policy): null = unrestricted; a list means
   // only those providers may be selected (rows render disabled — the engine
@@ -235,7 +237,7 @@ function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean
     setError(null);
     try {
       // Empty key ⇒ keep the existing one (selectModel falls back to the stored key).
-      await selectModel(providerId, modelId, apiKey);
+      await switchModel(providerId, modelId, apiKey);
       setOpen(false); // close immediately on success — the close IS the confirmation
     } catch {
       setError("Couldn't save your model settings. Please check your connection and try again.");

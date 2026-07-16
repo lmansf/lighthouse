@@ -106,6 +106,7 @@ import { AnalyticsChart, standaloneChartSvg } from "@/features/chat/AnalyticsCha
 import { BriefingsPanel } from "@/features/chat/BriefingsPanel";
 import { PinMiniChart } from "@/features/chat/PinMiniChart";
 import { EgressShield } from "@/features/egress/EgressShield";
+import { ProviderSwitch } from "@/features/chat/ProviderSwitch";
 import { useChatStore, type TranscriptMessage } from "@/stores/useChatStore";
 import { chatHistoryLocked } from "@/stores/managedLocks";
 import { modKey } from "@/features/onboarding/ModeChooser";
@@ -1614,6 +1615,15 @@ export function ChatPanel() {
     null,
   );
   const exportNoteTimer = useRef<number | null>(null);
+  // Quick provider switch (header menu): its transient confirmation strip,
+  // house-styled like the export/undo bars and auto-dismissed the same way.
+  const [providerNote, setProviderNote] = useState<{ ok: boolean; text: string } | null>(null);
+  const providerNoteTimer = useRef<number | null>(null);
+  const noteProviderSwitch = useCallback((note: { ok: boolean; text: string }) => {
+    setProviderNote(note);
+    if (providerNoteTimer.current !== null) window.clearTimeout(providerNoteTimer.current);
+    providerNoteTimer.current = window.setTimeout(() => setProviderNote(null), 6000);
+  }, []);
   // In-flight guard: a double-click must not write "Chat.md" AND "Chat (1).md".
   const [exportBusy, setExportBusy] = useState(false);
   // --- Pinned questions: per-turn pin outcome, the changed-pins alerts (from
@@ -1717,6 +1727,7 @@ export function ChatPanel() {
       if (flashTimer.current !== null) window.clearTimeout(flashTimer.current);
       if (undoTimer.current !== null) window.clearTimeout(undoTimer.current);
       if (exportNoteTimer.current !== null) window.clearTimeout(exportNoteTimer.current);
+      if (providerNoteTimer.current !== null) window.clearTimeout(providerNoteTimer.current);
       if (streamRafRef.current !== null) cancelAnimationFrame(streamRafRef.current);
     },
     [],
@@ -3038,6 +3049,28 @@ export function ChatPanel() {
           />
         </div>
       )}
+      {providerNote && (
+        <div className={styles.undoBar} role="status">
+          {providerNote.ok ? (
+            <CheckmarkRegular fontSize={16} />
+          ) : (
+            <ErrorCircleRegular fontSize={16} />
+          )}
+          <Text size={200}>{providerNote.text}</Text>
+          <span style={{ flex: 1 }} />
+          <Button
+            size="small"
+            appearance="subtle"
+            icon={<DismissRegular />}
+            aria-label="Dismiss"
+            onClick={() => {
+              if (providerNoteTimer.current !== null)
+                window.clearTimeout(providerNoteTimer.current);
+              setProviderNote(null);
+            }}
+          />
+        </div>
+      )}
       {addNotice && (
         <div className={styles.addNotice}>
           <Text size={200}>{addNotice}</Text>
@@ -3586,6 +3619,10 @@ export function ChatPanel() {
         <div className={styles.header}>
           <Title3>Ask</Title3>
           <div className={styles.headerMeta}>
+            {/* Quick provider switch (time-savers): configured providers only;
+                selection applies from the NEXT ask — provenance + local-only
+                enforcement follow the active provider automatically. */}
+            <ProviderSwitch onSwitched={noteProviderSwitch} />
             <Badge appearance="tint">{visibleBadgeText}</Badge>
             <EgressShield />
             {historyButton}

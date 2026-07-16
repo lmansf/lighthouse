@@ -19,6 +19,16 @@ interface AuthStore {
   finishVault: () => Promise<void>;
   finishMode: () => Promise<void>;
   selectModel: (providerId: string, modelId: string, apiKey: string) => Promise<void>;
+  /**
+   * Post-onboarding quick switch (chat header): re-point the active
+   * provider/model with NO key — an empty key keeps the target provider's
+   * stored one server-side. The shared selectModel op parks the profile on
+   * the onboarding "inclusion" step (its onboarding caller continues from
+   * there), so this immediately re-completes onboarding and publishes ONE
+   * state update: the intermediate step must never reach the shell, which
+   * would swap the running app out for the onboarding panel.
+   */
+  switchModel: (providerId: string, modelId: string, apiKey?: string) => Promise<void>;
   /** Live-test a key (empty string tests the stored one). Never persists. */
   validateKey: (
     providerId: string,
@@ -53,6 +63,16 @@ export const useAuthStore = create<AuthStore>((set) => {
 
   selectModel: async (providerId, modelId, apiKey) => {
     await authService.selectModel(providerId, modelId, apiKey);
+    set({ onboarding: authService.getState() });
+  },
+
+  switchModel: async (providerId, modelId, apiKey = "") => {
+    // selectModel parks the profile step machine on "inclusion" (that IS the
+    // onboarding flow); a post-onboarding switch/save must restore "done"
+    // before publishing ONE state, or app/page briefly swaps the shell for
+    // the onboarding panel. Empty key ⇒ the stored key is kept.
+    await authService.selectModel(providerId, modelId, apiKey);
+    await authService.completeOnboarding();
     set({ onboarding: authService.getState() });
   },
 
