@@ -17,10 +17,10 @@
 - [x] 3.3 ShapeView dialog UI: source picker (tables + views), instruction, proposal review (SQL + before/after tables), Save/Cancel; Beam treatment both themes.
 
 ## 4. Visibility surfaces
-- [ ] 4.1 Catalog + suggested asks include views; inspector opens on a view (definition SQL, labeled summary, sources it reads, freshness); Library nav section (sidebar fragment, InvestigationsNav pattern); local-only badge propagates in UI; twin renders stored state honestly.
+- [x] 4.1 Catalog + suggested asks include views; inspector opens on a view (definition SQL, labeled summary, sources it reads, freshness); Library nav section (sidebar fragment, InvestigationsNav pattern); local-only badge propagates in UI; twin renders stored state honestly.
 
 ## 5. Lifecycle
-- [ ] 5.1 Rename refuses with dependent list (surfaced in UI); delete refuses by default with transitive list, cascade only behind explicit confirmation showing it; delete/cascade never touch sources; twin CRUD parity.
+- [x] 5.1 Rename refuses with dependent list (surfaced in UI); delete refuses by default with transitive list, cascade only behind explicit confirmation showing it; delete/cascade never touch sources; twin CRUD parity.
 
 ## 6. Verify
 - [ ] 6.1 Engine E2E (views_test.rs): messy fixture CSV → shaping proposal path on a canned model reply (real extract/guard/sample) → save → guarded ask via the view returns verified numbers → cascade delete → fixture byte-identical. UI structural tests: chip, dialog, nav, inspector, lifecycle dialogs.
