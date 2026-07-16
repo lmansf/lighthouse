@@ -1,58 +1,31 @@
 <svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <!-- Lighthouse — the Beam mark.
+       Ink field, paper tower, one amber beam. Flat geometry only. The
+       load-bearing shapes (tower, light, beam origin) sit inside the central
+       ~80% (x,y within 102–922) so the mark survives an OS squircle crop;
+       the beam deliberately runs off through the top-right corner, clipped
+       by the tile itself. -->
   <defs>
-    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#FDF7EC"/>
-      <stop offset="1" stop-color="#F2E4C8"/>
+    <linearGradient id="beam" gradientUnits="userSpaceOnUse" x1="396" y1="298" x2="873" y2="81">
+      <stop offset="0" stop-color="#E8A317"/>
+      <stop offset="1" stop-color="#FFC24D"/>
     </linearGradient>
-    <linearGradient id="sand" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#ECD9B0"/>
-      <stop offset="1" stop-color="#E0C794"/>
-    </linearGradient>
-    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
-      <stop offset="0" stop-color="#FFE49B" stop-opacity="0.95"/>
-      <stop offset="1" stop-color="#FFE49B" stop-opacity="0"/>
-    </radialGradient>
-    <clipPath id="tower"><polygon points="392,716 436,346 588,346 632,716"/></clipPath>
+    <clipPath id="tile"><rect x="0" y="0" width="1024" height="1024" rx="224"/></clipPath>
   </defs>
 
-  <!-- app tile -->
-  <rect x="0" y="0" width="1024" height="1024" rx="224" fill="url(#sky)"/>
+  <!-- ink field -->
+  <rect x="0" y="0" width="1024" height="1024" rx="224" fill="#0E0F12"/>
 
-  <!-- beacon glow + light rays -->
-  <circle cx="512" cy="300" r="230" fill="url(#glow)"/>
-  <g fill="#F4C24B" opacity="0.55">
-    <polygon points="512,300 150,232 150,368"/>
-    <polygon points="512,300 874,232 874,368"/>
+  <!-- the beam: a single wedge sweeping up-right from the lantern, out of frame -->
+  <polygon points="396,298 1100,-195 1100,122" fill="url(#beam)" clip-path="url(#tile)"/>
+
+  <!-- the light -->
+  <circle cx="396" cy="298" r="28" fill="#FFC24D"/>
+
+  <!-- paper tower: footing, tapered body, gallery -->
+  <g fill="#F4EFE6">
+    <rect x="288" y="812" width="216" height="26" rx="13"/>
+    <polygon points="318,812 474,812 436,380 356,380"/>
+    <rect x="330" y="344" width="132" height="36" rx="18"/>
   </g>
-
-  <!-- sand mound + horizon -->
-  <path d="M0,724 C220,664 360,700 512,700 C664,700 804,664 1024,724 L1024,1024 L0,1024 Z" fill="url(#sand)"/>
-  <path d="M0,724 C220,664 360,700 512,700 C664,700 804,664 1024,724" fill="none" stroke="#D3B987" stroke-width="6" opacity="0.6"/>
-
-  <!-- tower base -->
-  <polygon points="360,762 664,762 640,716 384,716" fill="#7A1B14"/>
-  <rect x="360" y="754" width="304" height="16" rx="8" fill="#5E140F"/>
-
-  <!-- tower body (white) -->
-  <polygon points="392,716 436,346 588,346 632,716" fill="#FCFBF7"/>
-  <!-- red bands -->
-  <g clip-path="url(#tower)" fill="#C02A20">
-    <rect x="360" y="346" width="304" height="70"/>
-    <rect x="360" y="486" width="304" height="70"/>
-    <rect x="360" y="626" width="304" height="74"/>
-  </g>
-  <polygon points="392,716 436,346 588,346 632,716" fill="none" stroke="#E2CFA9" stroke-width="4"/>
-
-  <!-- gallery platform -->
-  <rect x="404" y="326" width="216" height="26" rx="8" fill="#5E140F"/>
-
-  <!-- lantern room -->
-  <rect x="452" y="248" width="120" height="80" rx="8" fill="#2A2622"/>
-  <rect x="470" y="262" width="84" height="54" rx="6" fill="url(#glow)"/>
-  <circle cx="512" cy="289" r="30" fill="#FFE49B"/>
-  <circle cx="512" cy="289" r="30" fill="none" stroke="#F4C24B" stroke-width="4"/>
-
-  <!-- red dome cap + finial -->
-  <path d="M444,250 Q512,178 580,250 Z" fill="#A4231B"/>
-  <circle cx="512" cy="176" r="13" fill="#7A1B14"/>
 </svg>

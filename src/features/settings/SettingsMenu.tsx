@@ -36,6 +36,7 @@ import {
   BrainCircuitRegular,
   DeleteRegular,
   HistoryRegular,
+  InfoRegular,
   OpenRegular,
   OptionsRegular,
   PinRegular,
@@ -53,6 +54,7 @@ import { useAuthStore } from "@/stores/useAuthStore";
 import { useThemeStore } from "@/stores/useThemeStore";
 import { useChatStore } from "@/stores/useChatStore";
 import { useRagStore } from "@/stores/useRagStore";
+import { BEAM_SWEEP } from "@/shell/theme";
 
 const LH_REPO = "https://github.com/lmansf/lighthouse";
 
@@ -158,6 +160,23 @@ const useStyles = makeStyles({
   auditEgressOut: { fontWeight: tokens.fontWeightSemibold, color: tokens.colorPaletteRedForeground1 },
   // Friendly empty state when nothing has been recorded yet.
   auditEmpty: { color: tokens.colorNeutralForeground3, ...shorthands.padding(tokens.spacingVerticalL, 0) },
+  // About: settings' one hero use of the Beam signature — a slim ink→amber
+  // band crowning the dialog (same pattern as the onboarding/tour headers),
+  // never behind body text. Theme variant via the data-theme stamp on <html>.
+  aboutBand: {
+    height: "3px",
+    flexShrink: 0,
+    borderRadius: tokens.borderRadiusCircular,
+    backgroundImage: BEAM_SWEEP.light,
+    ':global([data-theme="dark"])': { backgroundImage: BEAM_SWEEP.dark },
+  },
+  aboutStack: { display: "flex", flexDirection: "column", gap: tokens.spacingVerticalM },
+  aboutVersion: {
+    color: tokens.colorNeutralForeground3,
+    fontSize: tokens.fontSizeBase200,
+    letterSpacing: "0.02em",
+  },
+  aboutIdentity: { color: tokens.colorNeutralForeground2 },
 });
 
 /** First model of a provider id, falling back to the first known provider. */
@@ -240,7 +259,7 @@ function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean
       await switchModel(providerId, modelId, apiKey);
       setOpen(false); // close immediately on success — the close IS the confirmation
     } catch {
-      setError("Couldn't save your model settings. Please check your connection and try again.");
+      setError("Couldn't save your model settings. Check your connection and try again.");
     } finally {
       setSaving(false);
     }
@@ -435,7 +454,7 @@ function AuditLogDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean
         if (alive) setSnapshot(snap);
       })
       .catch(() => {
-        if (alive) setError("Couldn't load the audit log. Please try again.");
+        if (alive) setError("Couldn't load the audit log. Try again.");
       })
       .finally(() => {
         if (alive) setLoading(false);
@@ -456,7 +475,7 @@ function AuditLogDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean
         setExportNote({ name: res.savedName });
       }
     } catch {
-      setExportNote({ error: "Couldn't export the audit log. Please try again." });
+      setExportNote({ error: "Couldn't export the audit log. Try again." });
     } finally {
       setExporting(false);
     }
@@ -783,7 +802,7 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
 
   const inclusion = defaultInclusion ?? "include";
 
-  const SAVE_FAILED = "That change couldn't be saved — please check your connection and try again.";
+  const SAVE_FAILED = "That change couldn't be saved — check your connection and try again.";
 
   /** POST a settings patch, rolling the optimistic UI back (and noting it) on
    *  failure so a control never shows a change that didn't actually persist.
@@ -934,7 +953,7 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
         if (d && typeof d.summonShortcut === "string") setSummonShortcut(d.summonShortcut);
       }
     } catch {
-      setShortcutError("Couldn't save the shortcut. Please try again.");
+      setShortcutError("Couldn't save the shortcut. Try again.");
     }
   }
 
@@ -1317,11 +1336,67 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
   );
 }
 
+/**
+ * About — the quiet identity card: name and version, the Beam identity line,
+ * what Beam (the built-in analytics engine) is, the three-egress privacy
+ * sentence, and the download site. The version rides the same build-time
+ * NEXT_PUBLIC_APP_VERSION as VersionBadge; when it's absent (plain web dev)
+ * the line shows the name alone.
+ */
+function AboutDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean) => void }) {
+  const styles = useStyles();
+  const version = process.env.NEXT_PUBLIC_APP_VERSION;
+  return (
+    <Dialog open={open} onOpenChange={(_, d) => setOpen(d.open)}>
+      <DialogSurface>
+        <DialogBody>
+          <DialogTitle>About Lighthouse</DialogTitle>
+          <DialogContent>
+            <div className={styles.aboutStack}>
+              <span className={styles.aboutBand} aria-hidden />
+              <Text>
+                <Text as="span" weight="semibold">
+                  Lighthouse
+                </Text>
+                {version && (
+                  <Text as="span" className={styles.aboutVersion}>
+                    {" "}v{version}
+                  </Text>
+                )}
+              </Text>
+              <Text className={styles.aboutIdentity}>Ink, paper, and one amber beam.</Text>
+              <Text>
+                Answers come from your own files, on your own machine. Beam, the
+                built-in analytics engine, computes figures with SQL it runs on this
+                device — and shows the query behind every number.
+              </Text>
+              <Text>
+                Only three kinds of request ever leave this machine: asks to a cloud
+                model you set up, an update check, and downloads you start. No
+                accounts, no telemetry.
+              </Text>
+              <Link href="https://lhvault.app" target="_blank" rel="noreferrer">
+                lhvault.app
+              </Link>
+            </div>
+          </DialogContent>
+          <DialogActions>
+            <DialogTrigger disableButtonEnhancement>
+              <Button appearance="secondary">Close</Button>
+            </DialogTrigger>
+          </DialogActions>
+        </DialogBody>
+      </DialogSurface>
+    </Dialog>
+  );
+}
+
 export function SettingsMenu() {
   const styles = useStyles();
   const [aiDlg, setAiDlg] = useState(false);
   const [prefDlg, setPrefDlg] = useState(false);
   const [auditDlg, setAuditDlg] = useState(false);
+  const [aboutDlg, setAboutDlg] = useState(false);
 
   // Other features (chat empty states, explorer hints, …) deep-link into these
   // dialogs by dispatching window CustomEvents — the menu owns the dialogs, so
@@ -1391,12 +1466,16 @@ export function SettingsMenu() {
             >
               Lighthouse on GitHub
             </MenuItem>
+            <MenuItem icon={<InfoRegular />} onClick={() => setAboutDlg(true)}>
+              About Lighthouse
+            </MenuItem>
           </MenuList>
         </MenuPopover>
       </Menu>
       <AiModelsDialog open={aiDlg} setOpen={setAiDlg} />
       <PreferencesDialog open={prefDlg} setOpen={setPrefDlg} />
       <AuditLogDialog open={auditDlg} setOpen={setAuditDlg} />
+      <AboutDialog open={aboutDlg} setOpen={setAboutDlg} />
     </>
   );
 }

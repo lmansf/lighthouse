@@ -32,7 +32,13 @@ const useStyles = makeStyles({
     ":hover .lh-chart-png": { opacity: 1 },
     ":focus-within .lh-chart-png": { opacity: 1 },
   },
-  svg: { width: "100%", height: "auto", display: "block" },
+  svg: {
+    width: "100%",
+    height: "auto",
+    display: "block",
+    // Axis tick labels are number surfaces: lining digits keep ticks aligned.
+    "& text": { fontVariantNumeric: "tabular-nums" },
+  },
   // Hover-revealed download affordance, mirroring the tables' Copy CSV button.
   pngBtn: {
     position: "absolute",
@@ -40,8 +46,10 @@ const useStyles = makeStyles({
     right: "0px",
     opacity: 0,
     transitionProperty: "opacity",
-    transitionDuration: tokens.durationFaster,
+    transitionDuration: tokens.durationFast, // 150ms ease-out (Beam standard)
+    transitionTimingFunction: tokens.curveDecelerateMid,
     backgroundColor: tokens.colorNeutralBackground1,
+    "@media (prefers-reduced-motion: reduce)": { transitionDuration: "0.01ms" },
   },
   legend: {
     display: "flex",
@@ -67,11 +75,19 @@ const useStyles = makeStyles({
   },
 });
 
-/** Series palette from the theme; cycles if the engine ever sends more. */
+/**
+ * Series palette from the theme — the Beam amber leads; the two companions
+ * are quiet by design (the slate link hue and the secondary ink), so a chart
+ * carries one accent, not three. All ride tokens (auto light/dark) and clear
+ * WCAG 1.4.11's 3:1 non-text bar against the answer-card surface in BOTH
+ * themes: light 3.99 / 5.49 / 6.55, dark 8.84 / 8.85 / 7.55 vs bg1 — gated by
+ * the "chart series" rows in scripts/check-contrast.mjs. Cycles if the engine
+ * ever sends more series.
+ */
 const SERIES_FILLS = [
   tokens.colorBrandForeground1,
-  tokens.colorPaletteBerryForeground2,
-  tokens.colorPaletteMarigoldForeground2,
+  tokens.colorBrandForegroundLink,
+  tokens.colorNeutralForeground2,
 ];
 
 function truncateLabel(l: string): string {

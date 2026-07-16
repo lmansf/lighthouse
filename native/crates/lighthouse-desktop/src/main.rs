@@ -1245,10 +1245,34 @@ fn main() {
             if let Ok(menu) = build_app_menu(&handle) {
                 let _ = app.set_menu(menu);
             }
-            let tray_icon = app.default_window_icon().cloned();
             let mut tray = TrayIconBuilder::with_id("main-tray").tooltip("Lighthouse");
-            if let Some(icon) = tray_icon {
-                tray = tray.icon(icon);
+            // macOS menubar: use the monochrome Beam mark as a *template*
+            // image (black + alpha only — AppKit re-tints it, so the glyph
+            // stays legible on light and dark menubars alike). The
+            // full-color app icon would render as a dark smudge there.
+            // `icon_as_template` is a macOS-only attribute in tauri 2
+            // (`TrayIconBuilder::icon_as_template(mut self, is_template:
+            // bool) -> Self`); other platforms keep the bundled window icon.
+            #[cfg(target_os = "macos")]
+            {
+                match tauri::image::Image::from_bytes(include_bytes!("../icons/tray-template.png"))
+                {
+                    Ok(template) => tray = tray.icon(template).icon_as_template(true),
+                    Err(e) => {
+                        // Only reachable if the compiled-in PNG is broken —
+                        // fall back to the window icon over an empty tray.
+                        shell_log(&handle, &format!("tray: template icon failed to decode: {e}"));
+                        if let Some(icon) = app.default_window_icon().cloned() {
+                            tray = tray.icon(icon);
+                        }
+                    }
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                if let Some(icon) = app.default_window_icon().cloned() {
+                    tray = tray.icon(icon);
+                }
             }
             let tray = tray
                 // Platform convention: LEFT click raises the app; the menu is
