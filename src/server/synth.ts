@@ -314,7 +314,7 @@ export async function* answerPipeline(
   // Key at ask entry. A failing cache degrades to "no cache this ask".
   let key: string | null = null;
   try {
-    key = cacheKey(question, cfg.providerId, cfg.modelId, attachmentFileIds, isCloudProvider(cfg));
+    key = cacheKey(question, cfg.providerId, cfg.modelId, attachmentFileIds, preferredConversationIds, isCloudProvider(cfg));
     // Lookup also enforces the persistence posture (a disallowed ask deletes
     // any disk mirror even when it misses or bypasses).
     const hit = cacheLookup(key, cache);

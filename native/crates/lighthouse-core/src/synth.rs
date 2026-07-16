@@ -487,12 +487,14 @@ pub fn answer_pipeline(
             let provider = cfg.provider_id.clone();
             let model = cfg.model_id.clone();
             let atts = attachment_file_ids.clone();
+            let prefs = preferred_conversation_ids.clone();
             tokio::task::spawn_blocking(move || {
                 crate::answer_cache::cache_key(
                     &q,
                     provider.as_deref(),
                     model.as_deref(),
                     &atts,
+                    &prefs,
                     is_cloud,
                 )
             })

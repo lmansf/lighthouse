@@ -121,6 +121,12 @@ export function candidateDigest(pairs: [string, string][]): string {
 /**
  * The full cache key from pre-computed parts (pure — unit-testable without a
  * vault). Attachments are sorted + deduped: the SET is what was asked.
+ * Preferred conversation ids (openspec: add-investigations — the current
+ * investigation's recall preference) join the key ONLY when non-empty, so
+ * every pre-investigations key — and every ask outside one — is unchanged
+ * and existing cache entries stay valid. Without this, a recall-cued answer
+ * cached in one investigation could replay inside another whose preferences
+ * order the references differently.
  * KEEP IN SYNC with answer_cache.rs::key_from_parts.
  */
 export function keyFromParts(
@@ -128,16 +134,21 @@ export function keyFromParts(
   providerId: string | null,
   modelId: string | null,
   attachmentIds: string[],
+  preferredConversationIds: string[],
   candidateDigestHex: string,
 ): string {
   const atts = [...new Set(attachmentIds)].sort();
-  const material = [
+  let material = [
     `q:${normalizeQuestion(question)}`,
     `c:${candidateDigestHex}`,
     `p:${providerId ?? ""}`,
     `m:${modelId ?? ""}`,
     `a:${atts.join("\u0000")}`,
   ].join("\n");
+  if (preferredConversationIds.length > 0) {
+    const refs = [...new Set(preferredConversationIds)].sort();
+    material += `\nr:${refs.join("\u0000")}`;
+  }
   return sha256Hex(material);
 }
 
@@ -151,10 +162,18 @@ export function cacheKey(
   providerId: string | null,
   modelId: string | null,
   attachmentIds: string[],
+  preferredConversationIds: string[],
   isCloud: boolean,
 ): string {
   const digest = candidateDigest(shareableFreshnessKeys(isCloud));
-  return keyFromParts(question, providerId, modelId, attachmentIds, digest);
+  return keyFromParts(
+    question,
+    providerId,
+    modelId,
+    attachmentIds,
+    preferredConversationIds,
+    digest,
+  );
 }
 
 // --- Store ------------------------------------------------------------------------
