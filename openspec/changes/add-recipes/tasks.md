@@ -13,8 +13,8 @@
 - [x] 2.4 Contracts: Recipe/RecipeCard types + RagService.applicableRecipes (+ real/mock); the run-recipe seam (event or ask cue).
 
 ## 3. Surfaces (UI)
-- [ ] 3.1 RecipesNav.tsx Library gallery (ViewsNav template): applicable recipes listed with "runnable on {table}", row click seeds the recipe ask; mounted in app/page.tsx beside ViewsNav/InvestigationsNav; empty state; Beam tokens both themes. Empty-state recipe chips in ChatPanel beside suggested asks. Twin renders the visible subset honestly.
-- [ ] 3.2 Evidence-pack plan: verify the N-query plan + ledger already ride composeEvidencePack section (b) via the verbatim footer; add a dedicated "Plan" section only if the verbatim footer is insufficient (document the choice).
+- [x] 3.1 RecipesNav.tsx Library gallery (ViewsNav template): applicable recipes listed with "runnable on {table}", row click seeds the recipe ask; mounted in app/page.tsx beside ViewsNav/InvestigationsNav; empty state; Beam tokens both themes. Empty-state recipe chips in ChatPanel beside suggested asks. Twin renders the visible subset honestly.
+- [x] 3.2 Evidence-pack plan: verify the N-query plan + ledger already ride composeEvidencePack section (b) via the verbatim footer; add a dedicated "Plan" section only if the verbatim footer is insufficient (document the choice).
 
 ## 4. Eval floor
 - [ ] 4.1 Per-recipe goldens in examples/analytics_eval.rs Section 1 (model-free, CI-gated): a known-series fixture per recipe → deterministic plan → run_query per template → assert expected variance/cohort/dq-audit/anomaly/top-movers numbers. Ledger snapshot as a sibling check (byte-deterministic).

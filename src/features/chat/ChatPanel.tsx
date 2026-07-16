@@ -89,8 +89,8 @@ import {
 import dynamic from "next/dynamic";
 import { type Components } from "react-markdown";
 import type { DragEvent } from "react";
-import type { AnalyticsMeta, ChangedPin, ChatTurn, Pin, RagReference } from "@/contracts";
-import { chatService, MODEL_PROVIDERS, ragService } from "@/contracts";
+import type { AnalyticsMeta, ChangedPin, ChatTurn, Pin, RagReference, RecipeCard } from "@/contracts";
+import { chatService, MODEL_PROVIDERS, ragService, runRecipeQuestion } from "@/contracts";
 import { useRagStore } from "@/stores/useRagStore";
 import { useAuthStore } from "@/stores/useAuthStore";
 import { parseChartSpec, stripChartRequestFences, tableToCsv } from "@/lib/chartSpec";
@@ -3674,6 +3674,32 @@ export function ChatPanel() {
     };
   }, [emptyState, includedKey]);
 
+  // Applicable recipes for the empty state (openspec: add-recipes §3.1): the
+  // one-tap runnable analyses for the included set, rendered BESIDE the
+  // suggested asks. Same lifecycle as engineAsks — fetched when the empty state
+  // shows and when the included set changes; [] on the web dev twin (recipes
+  // are Rust-engine-only). Tapping one seeds the recipe-cued question through
+  // the SAME sendQuestion seam the suggested-ask chips use.
+  const [recipeChips, setRecipeChips] = useState<RecipeCard[]>([]);
+  useEffect(() => {
+    if (!emptyState || !includedKey) {
+      setRecipeChips([]);
+      return;
+    }
+    let cancelled = false;
+    ragService
+      .applicableRecipes(includedKey.split("\n"))
+      .then((rs) => {
+        if (!cancelled) setRecipeChips(Array.isArray(rs) ? rs.slice(0, 3) : []);
+      })
+      .catch(() => {
+        if (!cancelled) setRecipeChips([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [emptyState, includedKey]);
+
   // Up to 3 starter prompts built from the user's actual included file names.
   const suggestions = useMemo(() => {
     if (includedFiles.length === 0) return [];
@@ -4478,6 +4504,22 @@ export function ChatPanel() {
                         {s.label}
                       </Button>
                     ))}
+                {/* Applicable-recipe chips (openspec: add-recipes §3.1), beside
+                    the suggested asks and styled identically. Each submits its
+                    recipe-cued question immediately — the engine plans it
+                    model-free before the model gate. */}
+                {recipeChips.map((r) => (
+                  <Button
+                    key={`recipe:${r.id}:${r.table}`}
+                    appearance="secondary"
+                    size="small"
+                    shape="circular"
+                    title={r.summary}
+                    onClick={() => void sendQuestion(runRecipeQuestion(r.id, r.table))}
+                  >
+                    {r.name}
+                  </Button>
+                ))}
               </div>
             </>
           )}
