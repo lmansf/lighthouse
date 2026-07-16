@@ -1325,7 +1325,12 @@ fn extract_by_ext(abs: &Path, ext: &str) -> anyhow::Result<String> {
 /// v9: PDFs reconstruct confident tables from the text layer and append them as
 ///     markdown (add-pdf-tables). The bump re-extracts existing text PDFs once
 ///     so their tables appear; PDFs with no reconstructable grid are unchanged.
-const CACHE_VERSION: u32 = 9;
+/// v10: the cost meter (openspec: add-beam-loop §3.3) adds a `cost` field to the
+///     final chunk's `ChunkMeta`, which the answer cache persists — a shared
+///     cached-answer wire-shape change. Extraction output itself is unchanged;
+///     the lockstep bump (ts-twin.md rule 4) keeps the shared cache-schema
+///     assertion green. The one-time re-extraction it triggers is harmless.
+const CACHE_VERSION: u32 = 10;
 
 #[derive(Serialize, Deserialize)]
 struct CacheRecord {

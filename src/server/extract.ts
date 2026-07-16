@@ -121,8 +121,13 @@ async function extractByExt(abs: string, ext: string): Promise<string> {
  * positioned-glyph text layer that pdf-extract exposes, which unpdf doesn't, so
  * this engine keeps linear PDF text here — but the version moves in lockstep
  * (v6 rule) so the shared cache-schema assertion stays green.
+ * v10: matches the Rust engine's add-beam-loop §3.3 bump — the cost meter adds a
+ * `cost` field to the final chunk's ChunkMeta, which the answer cache persists (a
+ * shared cached-answer wire-shape change). PARITY: the cost VALUES are
+ * Rust-shipped (this twin doesn't meter usage), but the version moves in lockstep
+ * (v6 rule) so the shared cache-schema assertion stays green.
  */
-const CACHE_VERSION = 9;
+const CACHE_VERSION = 10;
 
 interface CacheRecord {
   v: number;

@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager};
 
-use lighthouse_core::contracts::{ChatChunk, ChatTurn};
+use lighthouse_core::contracts::{ChatChunk, ChatTurn, CostMeta};
 use lighthouse_core::{local_model, profile, settings, sources, vault};
 
 fn string_array(v: &Value) -> Vec<String> {
@@ -960,6 +960,9 @@ pub async fn chat_ask(
     );
     let mut final_files: Vec<String> = Vec::new();
     let mut artifacts: Vec<String> = Vec::new();
+    // The NEW cost this ask incurred (openspec: add-beam-loop §3.2), read from
+    // the final chunk's meter; a cache replay computes nothing (0 new).
+    let mut answer_cost: Option<CostMeta> = None;
     while let Some(c) = chunks.next().await {
         if c.done {
             if let Some(refs) = &c.references {
@@ -968,10 +971,13 @@ pub async fn chat_ask(
             if let Some(a) = &c.analytics {
                 artifacts.extend(a.file_ids.iter().cloned());
             }
+            if let Some(meta) = &c.meta {
+                answer_cost = lighthouse_core::audit::ask_new_cost(meta);
+            }
         }
         let _ = on_chunk.send(c);
     }
-    audit.finish(&provider, final_files, artifacts);
+    audit.finish(&provider, final_files, artifacts, answer_cost);
     Ok(())
 }
 

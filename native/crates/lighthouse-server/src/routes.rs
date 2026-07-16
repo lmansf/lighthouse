@@ -1032,6 +1032,9 @@ pub async fn chat_post(headers: HeaderMap, body: Option<Json<Value>>) -> Respons
         );
         let mut final_files: Vec<String> = Vec::new();
         let mut artifacts: Vec<String> = Vec::new();
+        // The NEW cost this ask incurred (openspec: add-beam-loop §3.2), read
+        // from the final chunk's meter; a cache replay computes nothing (0 new).
+        let mut answer_cost: Option<lighthouse_core::contracts::CostMeta> = None;
         while let Some(c) = chunks.next().await {
             if c.done {
                 if let Some(refs) = &c.references {
@@ -1040,10 +1043,13 @@ pub async fn chat_post(headers: HeaderMap, body: Option<Json<Value>>) -> Respons
                 if let Some(a) = &c.analytics {
                     artifacts.extend(a.file_ids.iter().cloned());
                 }
+                if let Some(meta) = &c.meta {
+                    answer_cost = lighthouse_core::audit::ask_new_cost(meta);
+                }
             }
             yield Ok::<bytes::Bytes, std::convert::Infallible>(line(&c));
         }
-        audit.finish(&provider, final_files, artifacts);
+        audit.finish(&provider, final_files, artifacts, answer_cost);
     };
 
     Response::builder()

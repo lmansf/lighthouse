@@ -417,10 +417,30 @@ export interface ChatChunk {
    * ONLY when this final chunk replays a cached answer: the epoch ms of the
    * ORIGINAL answer's completion — the UI renders its "From cache · same data
    * as HH:MM · Re-run" line from this field alone, never from prose; origin
-   * and the counts stay the original answer's. KEEP IN SYNC with the Rust
-   * ChunkMeta in contracts.rs.
+   * and the counts stay the original answer's. `cost` (openspec: add-beam-loop
+   * §3) is the answer's cost meter — provider-reported tokens summed across the
+   * ask's model calls, plus a LABELED dollar estimate (the app renders
+   * "estimated at $X/Mtok", NEVER a charge). `reported: false` ⇒ the meter shows
+   * "not reported" (never a chars/4 guess); a local answer reports tokens with
+   * `costEstimateUsd: 0`; an unknown model omits `costEstimateUsd` ("estimate
+   * unavailable"). PARITY: the cost VALUES are Rust-shipped — this dev twin does
+   * not parse provider usage (§1), so its answers report "not reported"; the
+   * shape is mirrored so the same UI renders either engine's meter. KEEP IN SYNC
+   * with the Rust ChunkMeta / CostMeta in contracts.rs.
    */
-  meta?: { origin: string; excerptCount: number; sourceFileCount: number; cachedAt?: number };
+  meta?: {
+    origin: string;
+    excerptCount: number;
+    sourceFileCount: number;
+    cachedAt?: number;
+    cost?: {
+      inputTokens: number;
+      outputTokens: number;
+      totalTokens: number;
+      reported: boolean;
+      costEstimateUsd?: number;
+    };
+  };
   /** True on the last chunk of a response. */
   done: boolean;
 }

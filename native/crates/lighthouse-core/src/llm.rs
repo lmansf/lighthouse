@@ -334,6 +334,71 @@ impl UsageSink {
     }
 }
 
+// --- Cost-estimate pricing (openspec: add-beam-loop §3.1) ---------------------------
+//
+// A SHIPPED, STATIC per-model price table in USD per MILLION tokens (input,
+// output). The cost meter multiplies provider-REPORTED tokens (§1) by these
+// constants and the app renders the result as a LABELED ESTIMATE — never an
+// authoritative charge (constitution §14). Tokens are measured facts; the dollar
+// figure is derived. There is NO network price lookup; the numbers move only
+// when this shipped table is edited. Local/loopback answers are priced at 0 (the
+// on-device model is not egress). An UNKNOWN model yields no dollar figure
+// ("estimate unavailable") while the tokens still show.
+//
+// The Anthropic rows carry the real published $/Mtok for those exact model ids;
+// the other vendors' rows are representative shipped estimates for the models
+// this app offers. KEEP the id set aligned with src/contracts/mocks/providers.ts.
+
+/// (model id, input $/Mtok, output $/Mtok). Exact-id match only — a price is a
+/// per-model fact, never inferred from a family prefix.
+const MODEL_PRICES_USD_PER_MTOK: &[(&str, f64, f64)] = &[
+    // Anthropic (real published rates for these ids).
+    ("claude-opus-4-8", 5.0, 25.0),
+    ("claude-sonnet-5", 3.0, 15.0),
+    ("claude-haiku-4-5", 1.0, 5.0),
+    // OpenAI.
+    ("gpt-5.1", 2.50, 10.0),
+    ("gpt-5", 1.25, 10.0),
+    ("gpt-5-mini", 0.25, 2.0),
+    // Google Gemini.
+    ("gemini-3-pro-preview", 2.0, 12.0),
+    ("gemini-2.5-pro", 1.25, 10.0),
+    ("gemini-2.5-flash", 0.30, 2.50),
+    // xAI Grok.
+    ("grok-4", 3.0, 15.0),
+    ("grok-4-fast-reasoning", 0.20, 0.50),
+    ("grok-3-mini", 0.30, 0.50),
+    // Mistral.
+    ("mistral-large-latest", 2.0, 6.0),
+    ("mistral-medium-latest", 0.40, 2.0),
+    ("mistral-small-latest", 0.10, 0.30),
+    // DeepSeek.
+    ("deepseek-chat", 0.28, 0.42),
+    ("deepseek-reasoner", 0.28, 0.42),
+];
+
+/// The shipped per-Mtok (input, output) price for a model id, or None when it is
+/// not in the table (⇒ "estimate unavailable"; tokens still show).
+fn model_price_per_mtok(model_id: &str) -> Option<(f64, f64)> {
+    MODEL_PRICES_USD_PER_MTOK
+        .iter()
+        .find(|(id, _, _)| *id == model_id)
+        .map(|(_, i, o)| (*i, *o))
+}
+
+/// The LABELED-ESTIMATE dollar cost for an ask's provider-reported `usage`
+/// (openspec: add-beam-loop §3.1). Local/loopback ⇒ `Some(0.0)` (on-device, not
+/// egress). A cloud model in the shipped table ⇒ `tokens × its per-Mtok rate`.
+/// An unknown cloud model ⇒ `None` ("estimate unavailable"). Derived from a
+/// shipped constant, NEVER a charge.
+pub fn cost_estimate_usd(cfg: &ModelCfg, usage: Usage) -> Option<f64> {
+    if cfg.provider_id.as_deref() == Some("local") {
+        return Some(0.0);
+    }
+    let (in_price, out_price) = model_price_per_mtok(cfg.model_id.as_deref()?)?;
+    Some(usage.input as f64 / 1e6 * in_price + usage.output as f64 / 1e6 * out_price)
+}
+
 pub type AnswerStream = Pin<Box<dyn Stream<Item = String> + Send>>;
 
 /// Stream an answer as incremental text deltas.
@@ -1373,5 +1438,44 @@ mod tests {
         assert_eq!(sink.total(), None);
         sink.add_call(&UsageTally::default());
         assert_eq!(sink.total(), None);
+    }
+
+    // --- Cost-estimate pricing (openspec: add-beam-loop §3.1) ----------------------
+
+    fn cfg(provider: Option<&str>, model: Option<&str>) -> ModelCfg {
+        ModelCfg {
+            provider_id: provider.map(str::to_string),
+            model_id: model.map(str::to_string),
+            api_key: None,
+        }
+    }
+
+    #[test]
+    fn cost_estimate_prices_a_known_cloud_model_from_the_shipped_table() {
+        // 1M in + 1M out on claude-sonnet-5 ($3/$15 per Mtok) = $18.
+        let c = cfg(Some("anthropic"), Some("claude-sonnet-5"));
+        let usd = cost_estimate_usd(&c, Usage { input: 1_000_000, output: 1_000_000 }).unwrap();
+        assert!((usd - 18.0).abs() < 1e-9, "got {usd}");
+        // Input and output rates are distinct (output priced higher).
+        let out_only = cost_estimate_usd(&c, Usage { input: 0, output: 1_000_000 }).unwrap();
+        assert!((out_only - 15.0).abs() < 1e-9, "got {out_only}");
+    }
+
+    #[test]
+    fn local_answer_estimates_zero_dollars_even_with_tokens() {
+        // Local/loopback reports tokens but is NOT egress ⇒ $0.00, regardless of
+        // the (unpriced) local model id.
+        let c = cfg(Some("local"), Some("lighthouse-local"));
+        assert_eq!(cost_estimate_usd(&c, Usage { input: 4_000, output: 900 }), Some(0.0));
+    }
+
+    #[test]
+    fn unknown_cloud_model_has_no_dollar_estimate() {
+        // An id absent from the shipped table ⇒ None ("estimate unavailable");
+        // the meter still shows the provider-reported tokens.
+        let c = cfg(Some("openai"), Some("gpt-9-imaginary"));
+        assert_eq!(cost_estimate_usd(&c, Usage { input: 100, output: 50 }), None);
+        // A keyless/model-free cfg (no model id) is likewise unpriced.
+        assert_eq!(cost_estimate_usd(&cfg(None, None), Usage { input: 100, output: 50 }), None);
     }
 }

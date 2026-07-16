@@ -9,7 +9,9 @@ use std::pin::Pin;
 
 use futures::{Stream, StreamExt};
 
-use crate::contracts::{AnalyticsMeta, ChatChunk, ChatProgress, ChunkMeta, ChatTurn, RagReference};
+use crate::contracts::{
+    AnalyticsMeta, ChatChunk, ChatProgress, ChatTurn, ChunkMeta, CostMeta, RagReference,
+};
 use crate::llm::{self, Ctx, ModelCfg};
 use crate::table_profile::{is_profileable, table_profile};
 use crate::{sources, vault};
@@ -388,9 +390,15 @@ fn draft_chunk(d: String) -> ChatChunk {
 /// (privacy-legibility). `excerpt_count` is the number of context blocks the
 /// branch that ran actually handed to the model; `source_file_count` is derived
 /// here from the references so it can never drift from what's cited (and from
-/// the audit record's `fileIds`, which are those same refs' ids). KEEP IN SYNC
-/// with src/server/synth.ts::finalChunk.
-fn final_chunk(references: Vec<RagReference>, excerpt_count: usize, origin: &str) -> ChatChunk {
+/// the audit record's `fileIds`, which are those same refs' ids). `cost` is the
+/// ask's cost meter (openspec: add-beam-loop §3.1), computed from the per-ask
+/// usage sink. KEEP IN SYNC with src/server/synth.ts::finalChunk.
+fn final_chunk(
+    references: Vec<RagReference>,
+    excerpt_count: usize,
+    origin: &str,
+    cost: CostMeta,
+) -> ChatChunk {
     let source_file_count = references.len();
     ChatChunk {
         delta: String::new(),
@@ -405,8 +413,36 @@ fn final_chunk(references: Vec<RagReference>, excerpt_count: usize, origin: &str
             // Live answers never carry the replay stamp; the answer-cache
             // wrapper adds `cached_at` only when it replays a stored entry.
             cached_at: None,
+            cost: Some(cost),
         }),
         done: true,
+    }
+}
+
+/// The ask's cost meter (openspec: add-beam-loop §3.1) built from the per-ask
+/// usage sink's summed total. `total` is `sink.total()`: `Some` when a provider
+/// reported usage across the ask's model calls, `None` when none did (§1.4).
+/// Tokens are provider-reported measured facts; the dollar figure is a LABELED
+/// ESTIMATE from the shipped price table (`$0.00` for local/loopback, absent for
+/// an unknown model). An unreported ask is `reported: false` — the app shows
+/// "not reported", NEVER a `chars/4` guess (constitution §14). KEEP IN SYNC with
+/// the cost shape in src/server/synth.ts.
+fn cost_meta(cfg: &ModelCfg, total: Option<llm::Usage>) -> CostMeta {
+    match total {
+        Some(u) => CostMeta {
+            input_tokens: u.input,
+            output_tokens: u.output,
+            total_tokens: u.total(),
+            reported: true,
+            cost_estimate_usd: llm::cost_estimate_usd(cfg, u),
+        },
+        None => CostMeta {
+            input_tokens: 0,
+            output_tokens: 0,
+            total_tokens: 0,
+            reported: false,
+            cost_estimate_usd: None,
+        },
     }
 }
 
@@ -616,6 +652,12 @@ fn live_pipeline(
         // active provider (agrees with the audit record's `provider`). Every
         // branch's final chunk carries it; it is never derived from model text.
         let origin = origin_of(&cfg);
+        // ONE per-ask usage sink (openspec: add-beam-loop §3.1): threaded into
+        // EVERY `stream_answer` call in EVERY branch below, so a single-shot,
+        // doc-focus, map-reduce, recipe-narration, or multi-step answer all sum
+        // their provider-reported usage here. `cost_meta(&cfg, sink.total())`
+        // reads it for the final chunk's cost meter (None ⇒ "not reported").
+        let sink = llm::UsageSink::new();
         // Local-only enforcement is armed only for a CLOUD provider. On the
         // device path this is false everywhere below, so the shareable gate is a
         // no-op and on-device answers are byte-identical to today.
@@ -714,7 +756,7 @@ fn live_pipeline(
                     recipe.needs.describe(),
                     cue.table,
                 ));
-                yield final_chunk(Vec::new(), 0, &origin);
+                yield final_chunk(Vec::new(), 0, &origin, cost_meta(&cfg, sink.total()));
                 return;
             };
 
@@ -755,7 +797,7 @@ fn live_pipeline(
                      returned nothing.\n",
                     recipe.name, cue.table,
                 ));
-                yield final_chunk(Vec::new(), 0, &origin);
+                yield final_chunk(Vec::new(), 0, &origin, cost_meta(&cfg, sink.total()));
                 return;
             }
 
@@ -786,7 +828,7 @@ fn live_pipeline(
                     ctxs,
                     cfg.clone(),
                     history.clone(),
-                    None,
+                    Some(sink.clone()),
                 );
                 while let Some(d) = answer.next().await {
                     let safe = scrub.push(&d);
@@ -846,7 +888,7 @@ fn live_pipeline(
             }
             // Pin/board/save act on the representative query.
             let (refs, meta_ids) = analytics_refs(&regs);
-            let mut done = final_chunk(refs, steps.len(), &origin);
+            let mut done = final_chunk(refs, steps.len(), &origin, cost_meta(&cfg, sink.total()));
             done.analytics = Some(AnalyticsMeta {
                 sql: representative_sql,
                 file_ids: meta_ids,
@@ -955,8 +997,9 @@ fn live_pipeline(
                 if let Some(ans) = rendered {
                     yield delta(ans.markdown);
                     // Model-free deterministic answer: zero excerpts handed to a
-                    // model, files behind it are the cited references.
-                    yield final_chunk(ans.references, 0, &origin);
+                    // model, files behind it are the cited references, and the
+                    // cost meter is "not reported" (no model call, so no tokens).
+                    yield final_chunk(ans.references, 0, &origin, cost_meta(&cfg, sink.total()));
                     return;
                 }
             }
@@ -1048,12 +1091,12 @@ fn live_pipeline(
                         // the markdown (unreliable). None if no step succeeds.
                         let mut last_rows: Option<crate::ledger::RowFacts> = None;
                         // Per-ask token accounting (openspec: add-beam-loop §1):
-                        // ONE sink shared across this ask's plan calls,
-                        // corrective retries, and the final narration sums their
-                        // provider-reported usage (§1.3). §1 makes the total
-                        // obtainable; §2 reads it through the loop's budget
-                        // (below) and §3 will surface it on the cost meter.
-                        let usage_sink = llm::UsageSink::new();
+                        // the ask-level `sink` (opened at the top of the pipeline)
+                        // is shared across this ask's plan calls, corrective
+                        // retries, and the final narration and sums their
+                        // provider-reported usage (§1.3). §2 reads it through the
+                        // loop's budget (below); §3 reads it for the cost meter on
+                        // the final chunk.
                         // The budgeted Beam loop (openspec: add-beam-loop §2):
                         // the former bare `steps.len() < 3` count is replaced by
                         // an explicit Budget — max_steps (config `beam_max_steps`,
@@ -1075,7 +1118,7 @@ fn live_pipeline(
                             None,
                         ));
                         'steps: while beam
-                            .stop_before_step(steps.len(), usage_sink.total())
+                            .stop_before_step(steps.len(), sink.total())
                             .is_none()
                         {
                             let n = steps.len() + 1;
@@ -1090,7 +1133,7 @@ fn live_pipeline(
                                 sql_ctxs.clone(),
                                 cfg.clone(),
                                 history.clone(),
-                                Some(usage_sink.clone()),
+                                Some(sink.clone()),
                             ))
                             .await;
                             let mut attempt =
@@ -1142,7 +1185,7 @@ fn live_pipeline(
                                             sql_ctxs.clone(),
                                             cfg.clone(),
                                             history.clone(),
-                                            Some(usage_sink.clone()),
+                                            Some(sink.clone()),
                                         ))
                                         .await;
                                         match crate::analytics::parse_step_reply(&strip_markers(
@@ -1208,7 +1251,7 @@ fn live_pipeline(
                                 ctxs,
                                 cfg.clone(),
                                 history.clone(),
-                                Some(usage_sink.clone()),
+                                Some(sink.clone()),
                             );
                             while let Some(d) = answer.next().await {
                                 let safe = scrub.push(&d);
@@ -1286,17 +1329,15 @@ fn live_pipeline(
                             if let Some(chart) = &last_chart {
                                 yield delta(format!("\n```lighthouse-chart\n{chart}\n```\n"));
                             }
-                            // §1 foundation (openspec: add-beam-loop): the ask's
-                            // summed provider-reported usage is now obtainable
-                            // here — Some(total) when a provider reported, or None
-                            // when none did (§1.4, distinct from a real 0). §3
-                            // will attach this to the cost meter on `done`; §1
-                            // leaves it read-only so the plumbing is proven end to
-                            // end without changing what ships on the chunk.
-                            let _ask_usage: Option<llm::Usage> = usage_sink.total();
+                            // Cost meter (openspec: add-beam-loop §3.1): the ask's
+                            // summed provider-reported usage — Some(total) when a
+                            // provider reported, or None when none did (§1.4,
+                            // distinct from a real 0) — becomes the final chunk's
+                            // honest token/dollar meter.
+                            let cost = cost_meta(&cfg, sink.total());
                             // Chips act on the LAST query; the footer shows all.
                             let (refs, meta_ids) = analytics_refs(&regs);
-                            let mut done = final_chunk(refs, excerpt_count, &origin);
+                            let mut done = final_chunk(refs, excerpt_count, &origin, cost);
                             done.analytics = Some(AnalyticsMeta {
                                 sql: steps.last().map(|s| s.sql.clone()).unwrap_or_default(),
                                 file_ids: meta_ids,
@@ -1315,7 +1356,7 @@ fn live_pipeline(
                         sql_ctxs.clone(),
                         cfg.clone(),
                         history.clone(),
-                        None,
+                        Some(sink.clone()),
                     ))
                     .await;
                     let mut attempt = crate::analytics::extract_sql(&strip_markers(&raw));
@@ -1339,7 +1380,7 @@ fn live_pipeline(
                                     sql_ctxs.clone(),
                                     cfg.clone(),
                                     history.clone(),
-                                    None,
+                                    Some(sink.clone()),
                                 ))
                                 .await;
                                 attempt = crate::analytics::extract_sql(&strip_markers(&raw2));
@@ -1392,7 +1433,7 @@ fn live_pipeline(
                             ctxs,
                             cfg.clone(),
                             history.clone(),
-                            None,
+                            Some(sink.clone()),
                         );
                         while let Some(d) = answer.next().await {
                             let safe = scrub.push(&d);
@@ -1483,7 +1524,8 @@ fn live_pipeline(
                         }
                         // Citations + structured provenance (chips/save/pins).
                         let (refs, meta_ids) = analytics_refs(&regs);
-                        let mut done = final_chunk(refs, excerpt_count, &origin);
+                        let mut done =
+                            final_chunk(refs, excerpt_count, &origin, cost_meta(&cfg, sink.total()));
                         done.analytics = Some(AnalyticsMeta { sql, file_ids: meta_ids });
                         yield done;
                         return;
@@ -1620,7 +1662,7 @@ fn live_pipeline(
                     ctxs,
                     cfg.clone(),
                     Vec::new(),
-                    None,
+                    Some(sink.clone()),
                 ))
                 .await;
                 let extract = take_chars(strip_markers(&raw).trim(), MAP_EXTRACT_CHARS);
@@ -1673,7 +1715,7 @@ fn live_pipeline(
                     reduce_ctxs,
                     cfg.clone(),
                     history.clone(),
-                    None,
+                    Some(sink.clone()),
                 );
                 while let Some(d) = answer.next().await {
                     yield delta(d);
@@ -1682,6 +1724,7 @@ fn live_pipeline(
                     extracts.into_iter().map(|(r, _)| r).collect(),
                     excerpt_count,
                     &origin,
+                    cost_meta(&cfg, sink.total()),
                 );
                 return;
             }
@@ -1772,12 +1815,17 @@ fn live_pipeline(
                         ctxs,
                         cfg.clone(),
                         history.clone(),
-                        None,
+                        Some(sink.clone()),
                     );
                     while let Some(d) = answer.next().await {
                         yield delta(d);
                     }
-                    yield final_chunk(vec![reference], excerpt_count, &origin);
+                    yield final_chunk(
+                        vec![reference],
+                        excerpt_count,
+                        &origin,
+                        cost_meta(&cfg, sink.total()),
+                    );
                     return;
                 }
                 // Too big for one prompt: sweep EVERY chunk in ordered
@@ -1809,7 +1857,7 @@ fn live_pipeline(
                         ctxs,
                         cfg.clone(),
                         Vec::new(),
-                        None,
+                        Some(sink.clone()),
                     ))
                     .await;
                     let extract = take_chars(strip_markers(&raw).trim(), MAP_EXTRACT_CHARS);
@@ -1838,12 +1886,17 @@ fn live_pipeline(
                         reduce_ctxs,
                         cfg.clone(),
                         history.clone(),
-                        None,
+                        Some(sink.clone()),
                     );
                     while let Some(d) = answer.next().await {
                         yield delta(d);
                     }
-                    yield final_chunk(vec![reference], excerpt_count, &origin);
+                    yield final_chunk(
+                        vec![reference],
+                        excerpt_count,
+                        &origin,
+                        cost_meta(&cfg, sink.total()),
+                    );
                     return;
                 }
                 // Every segment came back empty/failed — fall through to the
@@ -1880,11 +1933,14 @@ fn live_pipeline(
         }
 
         let excerpt_count = contexts.len();
-        let mut answer = llm::stream_answer(question, contexts, cfg, history, None);
+        // `cfg.clone()` (not a move) keeps `cfg` alive for the cost meter below —
+        // the sink only carries this call's usage once the stream has drained.
+        let mut answer =
+            llm::stream_answer(question, contexts, cfg.clone(), history, Some(sink.clone()));
         while let Some(d) = answer.next().await {
             yield delta(d);
         }
-        yield final_chunk(initial.references, excerpt_count, &origin);
+        yield final_chunk(initial.references, excerpt_count, &origin, cost_meta(&cfg, sink.total()));
     })
 }
 
@@ -1900,6 +1956,36 @@ mod tests {
             score,
             kind: crate::contracts::SourceKind::File,
         }
+    }
+
+    #[test]
+    fn cost_meter_sums_tokens_prices_cloud_zeroes_local_and_flags_unreported() {
+        // openspec: add-beam-loop §3.1/§3.5 — the meter is built from the per-ask
+        // sink's SUMMED total (the sink accumulates across every model call).
+        let cloud = ModelCfg {
+            provider_id: Some("anthropic".into()),
+            model_id: Some("claude-sonnet-5".into()),
+            api_key: None,
+        };
+        // A summed two-call total (100+200 in, 40+60 out) ⇒ the meter shows the
+        // sum, reported, with a labeled dollar estimate.
+        let m = cost_meta(&cloud, Some(llm::Usage { input: 300, output: 100 }));
+        assert!(m.reported);
+        assert_eq!((m.input_tokens, m.output_tokens, m.total_tokens), (300, 100, 400));
+        assert!(m.cost_estimate_usd.unwrap() > 0.0, "a known cloud model is priced");
+
+        // Local reports its tokens with $0.00 (loopback, not egress).
+        let local = ModelCfg { provider_id: Some("local".into()), model_id: None, api_key: None };
+        let ml = cost_meta(&local, Some(llm::Usage { input: 500, output: 20 }));
+        assert!(ml.reported && ml.total_tokens == 520);
+        assert_eq!(ml.cost_estimate_usd, Some(0.0));
+
+        // A silent provider (sink None) is "not reported" — real zeros, no
+        // estimate, never a chars/4 guess (§14).
+        let mu = cost_meta(&cloud, None);
+        assert!(!mu.reported);
+        assert_eq!(mu.total_tokens, 0);
+        assert_eq!(mu.cost_estimate_usd, None);
     }
 
     #[test]

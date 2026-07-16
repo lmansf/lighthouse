@@ -143,6 +143,47 @@ pub struct ChunkMeta {
     /// `origin`/counts stay the original answer's (the replay computed nothing).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub cached_at: Option<i64>,
+    /// Cost meter (openspec: add-beam-loop §3): the ask's provider-reported
+    /// token usage summed across every model call, plus a LABELED dollar
+    /// estimate. Present on every live final chunk; a replay carries the ORIGINAL
+    /// answer's figures as history (the replay itself computed nothing — see
+    /// `cached_at`). `#[serde(default)]` keeps pre-Beam cached entries (no field)
+    /// valid. KEEP IN SYNC with the ChatChunk["meta"]["cost"] shape in
+    /// src/contracts/types.ts.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub cost: Option<CostMeta>,
+}
+
+/// The cost meter for one answer (openspec: add-beam-loop §3.1), stamped on the
+/// final chunk's `ChunkMeta`. Tokens are PROVIDER-REPORTED measured facts (from
+/// §1's `UsageSink`), summed across the ask's plan / retry / narration calls;
+/// the dollar figure is a LABELED ESTIMATE derived from a shipped per-model
+/// price constant — never an authoritative charge (constitution §14). It is
+/// NEVER a `chars/4` guess: when a provider reports no usage, `reported` is
+/// false and the UI shows "not reported". A local/loopback answer reports its
+/// tokens with `cost_estimate_usd = Some(0.0)` (on-device, not egress); an
+/// unknown model leaves `cost_estimate_usd` None ("estimate unavailable") while
+/// still showing the tokens. KEEP IN SYNC with the `cost` shape on
+/// ChatChunk["meta"] in src/contracts/types.ts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CostMeta {
+    /// Provider-reported prompt (input) tokens, summed across the ask's calls.
+    pub input_tokens: u64,
+    /// Provider-reported completion (output) tokens, summed across the ask.
+    pub output_tokens: u64,
+    /// `input_tokens + output_tokens` (the UI shows the split and the total).
+    pub total_tokens: u64,
+    /// Whether ANY provider reported usage this ask. `false` ⇒ the UI shows
+    /// "not reported" and the token counts are a real 0, never a fabricated
+    /// estimate (§1.4 / §14).
+    pub reported: bool,
+    /// The LABELED dollar estimate — provider-reported tokens × a shipped
+    /// per-Mtok price constant, rendered "estimated at $X/Mtok", NEVER a charge.
+    /// `Some(0.0)` for a local/loopback answer; `None` when the estimate is
+    /// unavailable (an unknown model, or unreported tokens).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost_estimate_usd: Option<f64>,
 }
 
 /// The exact executed SQL of an analytics answer and the vault files it read.

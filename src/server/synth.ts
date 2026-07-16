@@ -270,8 +270,14 @@ export function localOnlySkipNote(n: number): string {
  * (privacy-legibility). `excerptCount` is the number of context blocks the
  * branch that ran actually handed to the model; `sourceFileCount` is derived
  * here from the references so it can never drift from what's cited (nor from the
- * audit record's `fileIds`, which are those same refs' ids). KEEP IN SYNC with
- * lighthouse-core/src/synth.rs::final_chunk.
+ * audit record's `fileIds`, which are those same refs' ids). `cost` is the
+ * answer's cost meter (openspec: add-beam-loop §3.1). PARITY: the cost VALUES
+ * are Rust-shipped — this dev twin does not parse provider usage (§1), so every
+ * twin answer honestly reports "not reported" (`reported: false`), never a
+ * fabricated count; the shape is mirrored so the same UI renders either engine's
+ * meter, and the Rust engine's own unreported meter serializes byte-identically
+ * (costEstimateUsd omitted). KEEP IN SYNC with
+ * lighthouse-core/src/synth.rs::final_chunk / cost_meta.
  */
 function finalChunk(
   references: RagReference[],
@@ -281,7 +287,12 @@ function finalChunk(
   return {
     delta: "",
     references,
-    meta: { origin, excerptCount, sourceFileCount: references.length },
+    meta: {
+      origin,
+      excerptCount,
+      sourceFileCount: references.length,
+      cost: { inputTokens: 0, outputTokens: 0, totalTokens: 0, reported: false },
+    },
     done: true,
   };
 }

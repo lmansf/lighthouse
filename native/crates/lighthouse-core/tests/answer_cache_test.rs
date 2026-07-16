@@ -13,7 +13,7 @@ mod common;
 
 use futures::StreamExt;
 use lighthouse_core::answer_cache::{self, CacheCtl, CachedAnswer};
-use lighthouse_core::contracts::{ChatChunk, ChunkMeta};
+use lighthouse_core::contracts::{ChatChunk, ChunkMeta, CostMeta};
 use lighthouse_core::llm::ModelCfg;
 use lighthouse_core::synth::answer_pipeline;
 use lighthouse_core::vault;
@@ -41,6 +41,7 @@ fn entry(text: &str) -> CachedAnswer {
             excerpt_count: 0,
             source_file_count: 0,
             cached_at: None,
+            cost: None,
         },
     }
 }
@@ -199,6 +200,48 @@ fn corrupt_or_version_mismatched_store_is_a_miss_and_self_heals() {
     assert!(answer_cache::lookup("k9", ALLOWED).is_none(), "version mismatch is a miss");
 }
 
+// --- Cost meter persistence + replay (openspec: add-beam-loop §3.3/§3.5) -----------
+
+#[test]
+fn a_cache_replay_reports_zero_new_cost_but_carries_the_original_as_history() {
+    // A stored answer's cost meter is HISTORY; replaying it re-stamps `cachedAt`
+    // (the replay computed nothing) and reports 0 NEW cost, so the running total
+    // never double-counts a replay.
+    let dir = tempfile::tempdir().unwrap();
+    let _guard = common::lock_env(dir.path());
+    std::env::remove_var("LIGHTHOUSE_APP_STATE_DIR");
+    answer_cache::reset_store();
+
+    // A billable cloud answer's stored meter: 100/50 provider-reported tokens
+    // and a labeled estimate of $0.01.
+    let mut e = entry("verified cloud answer");
+    e.meta.origin = "anthropic".into();
+    e.meta.cost = Some(CostMeta {
+        input_tokens: 100,
+        output_tokens: 50,
+        total_tokens: 150,
+        reported: true,
+        cost_estimate_usd: Some(0.01),
+    });
+    answer_cache::insert("k", e, ALLOWED);
+
+    // The original figures survive the store byte-for-byte (persisted history).
+    let hit = answer_cache::lookup("k", ALLOWED).expect("stored");
+    let stored = hit.meta.cost.clone().expect("cost persisted in CachedAnswer");
+    assert_eq!(stored.total_tokens, 150);
+    assert_eq!(stored.cost_estimate_usd, Some(0.01));
+    assert!(stored.reported);
+
+    // The replay stamp the wrapper adds (`cachedAt`) means 0 NEW cost, while the
+    // stored figures ride along as the historical record.
+    let replay_meta = ChunkMeta { cached_at: Some(hit.created_ms), ..hit.meta };
+    assert!(replay_meta.cost.is_some(), "the original figures ride the replay as history");
+    assert!(
+        lighthouse_core::audit::ask_new_cost(&replay_meta).is_none(),
+        "a replay reports 0 new tokens / $0"
+    );
+}
+
 // --- E2E over the model-free meta path ---------------------------------------------
 
 async fn drive(
@@ -246,7 +289,13 @@ async fn unchanged_question_replays_verbatim_and_a_touched_file_runs_live() {
     let (text1, chunks1) = drive(ask(cfg.clone())).await;
     let done1 = chunks1.iter().find(|c| c.done).expect("terminating chunk");
     assert!(!text1.trim().is_empty());
-    assert!(done1.meta.as_ref().unwrap().cached_at.is_none(), "a live answer carries no cachedAt");
+    let meta1 = done1.meta.as_ref().unwrap();
+    assert!(meta1.cached_at.is_none(), "a live answer carries no cachedAt");
+    // The model-free meta path runs no model, so its cost meter is honestly
+    // "not reported" — never a fabricated count (openspec: add-beam-loop §3.1).
+    let cost1 = meta1.cost.as_ref().expect("a live answer carries a cost meter");
+    assert!(!cost1.reported, "no model call ⇒ not reported");
+    assert_eq!(cost1.total_tokens, 0);
 
     // 2nd ask, nothing changed: a verbatim replay — byte-equal text, the same
     // references and stamp, `cachedAt` present, and the whole stream is
@@ -259,6 +308,9 @@ async fn unchanged_question_replays_verbatim_and_a_touched_file_runs_live() {
     assert!(done2.done);
     let meta2 = done2.meta.as_ref().unwrap();
     assert!(meta2.cached_at.is_some(), "replay stamps the original answer time");
+    // The replay carries the original answer's cost meter as history; its 0-new
+    // reading follows from the `cachedAt` stamp above (openspec §3.3).
+    assert!(meta2.cost.is_some(), "the replay carries the stored cost meter");
     let refs = |c: &ChatChunk| -> Vec<String> {
         c.references.iter().flatten().map(|r| r.file_id.clone()).collect()
     };

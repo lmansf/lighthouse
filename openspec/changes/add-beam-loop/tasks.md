@@ -18,11 +18,11 @@
 - [x] 2.7 `DesktopSettings` (settings.rs:19): add the loop budget field(s) (`max_steps`); extend `settings_test.rs` (struct literal + no-`..` destructuring + wire-key list + positional writer) or CI goes red.
 
 ## 3. The cost meter surface (§3)
-- [ ] 3.1 New `CostMeta` riding the `ChunkMeta` seam (contracts.rs:126) on the final chunk: provider-reported input/output/total tokens summed per ask; dollars = tokens × a shipped per-model price constant, LABELLED "estimated at $X/Mtok"; local ⇒ tokens + $0.00; unreported ⇒ "not reported" (never chars/4).
-- [ ] 3.2 Cumulative across-asks total surfaced beside the audit record.
-- [ ] 3.3 Persist `CostMeta` in `CachedAnswer` (answer_cache.rs:61) so a REPLAY reports 0 new tokens / $0 (consistent with `cached_at`), while carrying the original figures as history.
-- [ ] 3.4 Twin PARITY: byte-identical meter labels in `src/server/synth.ts` (ts-twin.md rule 2).
-- [ ] 3.5 Tests: summed-across-calls meter; local $0.00; silent provider "not reported"; cache-replay cost = 0 new / $0.
+- [x] 3.1 New `CostMeta` riding the `ChunkMeta` seam (contracts.rs:126) on the final chunk: provider-reported input/output/total tokens summed per ask; dollars = tokens × a shipped per-model price constant, LABELLED "estimated at $X/Mtok"; local ⇒ tokens + $0.00; unreported ⇒ "not reported" (never chars/4).
+- [x] 3.2 Cumulative across-asks total surfaced beside the audit record.
+- [x] 3.3 Persist `CostMeta` in `CachedAnswer` (answer_cache.rs:61) so a REPLAY reports 0 new tokens / $0 (consistent with `cached_at`), while carrying the original figures as history.
+- [x] 3.4 Twin PARITY: byte-identical meter labels in `src/server/synth.ts` (ts-twin.md rule 2).
+- [x] 3.5 Tests: summed-across-calls meter; local $0.00; silent provider "not reported"; cache-replay cost = 0 new / $0.
 
 ## 4. Two-phase plan approval (§4)
 - [ ] 4.1 Phase 1: `plan_only: Option<bool>` flag on `chat_ask` (commands.rs:900-901, mirroring `bypass_cache`/`persist_allowed`) runs step-1 planning and returns a PLAN chunk — a new optional field on `ChatChunk` (contracts.rs:87, beside `analytics`/`draft`/`meta`) carrying the intended verbatim SQL + the context it would use — then STOPS (no execution, no egress).
