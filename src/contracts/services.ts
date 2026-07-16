@@ -18,6 +18,8 @@ import type {
   DataSource,
   FileInspection,
   FileNode,
+  Investigation,
+  InvestigationCreateInput,
   OnboardingState,
   Pin,
   PolicySnapshot,
@@ -261,6 +263,56 @@ export interface RagService {
    * dev twin composes from each pin's last known summary (no before).
    */
   refreshBriefingNote(): Promise<{ savedId?: string; savedName?: string; error?: string }>;
+  /**
+   * Investigations (openspec: add-investigations): named, durable containers
+   * for analysis. Every record in creation order — the caller filters
+   * archived ones (archive hides, never deletes). `pinRefs`/`noteRefs` come
+   * back derived by the engine at read time (empty until §3/§4 populate
+   * them).
+   */
+  listInvestigations(): Promise<Investigation[]>;
+  /**
+   * Create an investigation. The engine mints the id, stamps creation time,
+   * fixes the sanitized notes folder name, and validates: non-empty name,
+   * unique case-insensitively (archived records count). Empty/absent
+   * `scopeFileIds` = whole vault. A validation rejection comes back as
+   * `error` with the engine's reason (like addRule), so the create form can
+   * surface it inline.
+   */
+  createInvestigation(
+    input: InvestigationCreateInput,
+  ): Promise<{ investigation?: Investigation; error?: string }>;
+  /**
+   * Rename an investigation — same uniqueness rule as create (a case change
+   * of its own name is allowed). The notes `folderName` deliberately does
+   * NOT move: membership = location, and rename moves nothing.
+   */
+  renameInvestigation(
+    id: string,
+    name: string,
+  ): Promise<{ investigation?: Investigation; error?: string }>;
+  /**
+   * Archive or unarchive — a visibility flag only. Nothing cascades or is
+   * deleted: pins, notes, scope, and conversation refs stay untouched, and
+   * unarchiving restores the investigation fully.
+   */
+  setInvestigationArchived(
+    id: string,
+    archived: boolean,
+  ): Promise<{ investigation?: Investigation; error?: string }>;
+  /**
+   * Record a conversation ref (an opaque client Conversation.id — never a
+   * transcript). The engine accepts it only when `persistAllowed` (the
+   * client's history verdict: persistEnabled && !chatHistoryLocked(), the
+   * same value the ask path sends) AND the managed policy allow history;
+   * either false ⇒ a silent no-op — the returned record simply lacks the
+   * ref. Refs dedupe.
+   */
+  addInvestigationConversationRef(
+    id: string,
+    conversationId: string,
+    persistAllowed: boolean,
+  ): Promise<{ investigation?: Investigation; error?: string }>;
 }
 
 /**

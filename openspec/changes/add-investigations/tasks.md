@@ -1,9 +1,9 @@
 # Tasks — investigations
 
 ## 1. Engine store + ops (both engines, PARITY)
-- [ ] 1.1 `investigations.rs` ⇄ `investigations.ts`: envelope {v:1, investigations}, atomic writes, unknown-version bak-on-write; CRUD (create/list/rename/setArchived/addConversationRef) with name uniqueness + sanitized folder name; history-posture gate on ref writes (persistAllowed AND policy history_allowed).
-- [ ] 1.2 `op: "investigations"` across routes.rs / commands.rs / app/api/rag/route.ts; RagService methods + real/mock; contracts types (Investigation, enriched view with derived pinRefs/noteRefs).
-- [ ] 1.3 Store unit tests: round trip, versioning bak, history-off ref rule, name collision, archive flag.
+- [x] 1.1 `investigations.rs` ⇄ `investigations.ts`: envelope {v:1, investigations}, atomic writes, unknown-version bak-on-write; CRUD (create/list/rename/setArchived/addConversationRef) with name uniqueness + sanitized folder name; history-posture gate on ref writes (persistAllowed AND policy history_allowed).
+- [x] 1.2 `op: "investigations"` across routes.rs / commands.rs / app/api/rag/route.ts; RagService methods + real/mock; contracts types (Investigation, enriched view with derived pinRefs/noteRefs).
+- [x] 1.3 Store unit tests: round trip, versioning bak, history-off ref rule, name collision, archive flag.
 
 ## 2. Scoping + provider policy (engine)
 - [ ] 2.1 `resolve_ask_context(investigationId, attachments, cfg)` both engines: scope→attachments (attachments win when present), local-only→cfg swap to local at the model_config resolution point; wire `investigationId` through the three ask entry points.

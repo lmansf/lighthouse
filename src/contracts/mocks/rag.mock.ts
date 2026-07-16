@@ -9,6 +9,8 @@ import type {
   DataSource,
   FileInspection,
   FileNode,
+  Investigation,
+  InvestigationCreateInput,
   Pin,
   PolicySnapshot,
   EgressSnapshot,
@@ -456,6 +458,103 @@ class MockRagService implements RagService {
       savedId: "Lighthouse Notes/Lighthouse Briefing.md",
       savedName: "Lighthouse Briefing.md",
     };
+  }
+
+  // In-memory investigations (openspec: add-investigations) so the nav is
+  // exercisable offline. Mirrors the engines' validation (non-empty name,
+  // case-insensitive uniqueness across archived records, traversal-safe
+  // folder name fixed at creation); ids are mock-simple counters, not the
+  // engines' sha mint. pinRefs/noteRefs are DERIVED fields — empty in §1
+  // (§3/§4 populate them engine-side).
+  private investigations: Investigation[] = [];
+
+  /** Mirror of the engines' sanitizeFolderName (traversal-safe). */
+  private sanitizeFolderName(name: string): string {
+    const collapsed = name
+      .replace(/[/\\]/g, "")
+      .split(/\s+/)
+      .filter(Boolean)
+      .join(" ");
+    if (!collapsed || /^\.+$/.test(collapsed)) return "Investigation";
+    return collapsed;
+  }
+
+  private investigationNameTaken(name: string, excludingId?: string): boolean {
+    const wanted = name.toLowerCase();
+    return this.investigations.some(
+      (i) => i.id !== excludingId && i.name.toLowerCase() === wanted,
+    );
+  }
+
+  async listInvestigations(): Promise<Investigation[]> {
+    return this.investigations.map((i) => ({ ...i }));
+  }
+
+  async createInvestigation(
+    input: InvestigationCreateInput,
+  ): Promise<{ investigation?: Investigation; error?: string }> {
+    const name = input.name.trim();
+    if (!name) return { error: "an investigation needs a name" };
+    if (this.investigationNameTaken(name)) {
+      return { error: `an investigation named "${name}" already exists` };
+    }
+    const investigation: Investigation = {
+      id: `inv-${(this.investigations.length + 1).toString(16).padStart(12, "0")}`,
+      name,
+      createdMs: Date.now(),
+      archived: false,
+      scopeFileIds: (input.scopeFileIds ?? []).filter((s) => s.trim() !== ""),
+      providerPolicy: input.providerPolicy ?? "default",
+      conversationRefs: [],
+      folderName: this.sanitizeFolderName(name),
+      pinRefs: [],
+      noteRefs: [],
+    };
+    this.investigations.push(investigation);
+    return { investigation: { ...investigation } };
+  }
+
+  async renameInvestigation(
+    id: string,
+    name: string,
+  ): Promise<{ investigation?: Investigation; error?: string }> {
+    const trimmed = name.trim();
+    if (!trimmed) return { error: "an investigation needs a name" };
+    if (this.investigationNameTaken(trimmed, id)) {
+      return { error: `an investigation named "${trimmed}" already exists` };
+    }
+    const rec = this.investigations.find((i) => i.id === id);
+    if (!rec) return { error: "investigation not found" };
+    rec.name = trimmed; // folderName deliberately unchanged (rename moves nothing)
+    return { investigation: { ...rec } };
+  }
+
+  async setInvestigationArchived(
+    id: string,
+    archived: boolean,
+  ): Promise<{ investigation?: Investigation; error?: string }> {
+    const rec = this.investigations.find((i) => i.id === id);
+    if (!rec) return { error: "investigation not found" };
+    rec.archived = archived; // a visibility flag only — nothing cascades
+    return { investigation: { ...rec } };
+  }
+
+  async addInvestigationConversationRef(
+    id: string,
+    conversationId: string,
+    persistAllowed: boolean,
+  ): Promise<{ investigation?: Investigation; error?: string }> {
+    const ref = conversationId.trim();
+    if (!ref) return { error: "conversationId required" };
+    const rec = this.investigations.find((i) => i.id === id);
+    if (!rec) return { error: "investigation not found" };
+    // The mock is never managed (policy() reports history unlocked), so the
+    // engines' gate — persistAllowed AND historyAllowed — reduces to the
+    // client's verdict. Either false ⇒ silent no-op; refs dedupe.
+    if (persistAllowed && !rec.conversationRefs.includes(ref)) {
+      rec.conversationRefs.push(ref);
+    }
+    return { investigation: { ...rec } };
   }
 
   /** A node plus all of its descendants (so toggling a folder cascades). */

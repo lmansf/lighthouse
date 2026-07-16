@@ -10,6 +10,8 @@ import type {
   DataSource,
   FileInspection,
   FileNode,
+  Investigation,
+  InvestigationCreateInput,
   Pin,
   PolicySnapshot,
   EgressSnapshot,
@@ -290,6 +292,70 @@ class RealRagService implements RagService {
       savedName?: string;
       error?: string;
     };
+  }
+
+  /**
+   * Mutating investigations sub-ops return validation failures as 400 +
+   * {error} (like addRule); read the body instead of throwing so the UI can
+   * surface the engine's reason inline.
+   */
+  private async investigationsOp(
+    body: Record<string, unknown>,
+  ): Promise<{ investigation?: Investigation; error?: string }> {
+    const r = await fetch("/api/rag", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ op: "investigations", ...body }),
+    });
+    const data = (await r.json().catch(() => ({}))) as {
+      investigation?: Investigation;
+      error?: string;
+    };
+    if (!r.ok) return { error: data.error ?? `POST /api/rag ${r.status}` };
+    return data;
+  }
+
+  async listInvestigations(): Promise<Investigation[]> {
+    const res = await post({ op: "investigations", action: "list" });
+    return Array.isArray(res.investigations) ? (res.investigations as Investigation[]) : [];
+  }
+
+  async createInvestigation(
+    input: InvestigationCreateInput,
+  ): Promise<{ investigation?: Investigation; error?: string }> {
+    return this.investigationsOp({
+      action: "create",
+      name: input.name,
+      scopeFileIds: input.scopeFileIds ?? [],
+      providerPolicy: input.providerPolicy ?? "default",
+    });
+  }
+
+  async renameInvestigation(
+    id: string,
+    name: string,
+  ): Promise<{ investigation?: Investigation; error?: string }> {
+    return this.investigationsOp({ action: "rename", id, name });
+  }
+
+  async setInvestigationArchived(
+    id: string,
+    archived: boolean,
+  ): Promise<{ investigation?: Investigation; error?: string }> {
+    return this.investigationsOp({ action: "setArchived", id, archived });
+  }
+
+  async addInvestigationConversationRef(
+    id: string,
+    conversationId: string,
+    persistAllowed: boolean,
+  ): Promise<{ investigation?: Investigation; error?: string }> {
+    return this.investigationsOp({
+      action: "addConversationRef",
+      id,
+      conversationId,
+      persistAllowed,
+    });
   }
 }
 

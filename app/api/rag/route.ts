@@ -32,6 +32,14 @@ import {
 } from "@/server/vault";
 import { addPin, listPins, removePin } from "@/server/pins";
 import {
+  addInvestigationConversationRef,
+  createInvestigation,
+  investigationView,
+  investigationsListing,
+  renameInvestigation,
+  setInvestigationArchived,
+} from "@/server/investigations";
+import {
   addBriefing,
   listBriefings,
   removeBriefing,
@@ -108,6 +116,110 @@ export async function POST(req: Request) {
       }
       return NextResponse.json(
         { error: "rules action must be list, add, or remove" },
+        { status: 400 },
+      );
+    }
+
+    // Investigations (openspec: add-investigations): named, durable
+    // containers for analysis. CRUD on the vault-scoped STRUCTURE store —
+    // ids are minted engine-side and validation failures → 400 with the
+    // engine's reason, like rules. Conversation-ref writes are gated
+    // engine-side: the client's persistAllowed verdict AND the managed
+    // history policy must both allow (either false ⇒ silent no-op). PARITY:
+    // routes.rs / commands.rs mirror this op exactly.
+    case "investigations": {
+      if (body.action === "list") {
+        return NextResponse.json({ investigations: investigationsListing() });
+      }
+      if (body.action === "create") {
+        const providerPolicy =
+          body.providerPolicy === undefined || body.providerPolicy === null
+            ? "default"
+            : body.providerPolicy;
+        if (providerPolicy !== "default" && providerPolicy !== "local-only") {
+          return NextResponse.json(
+            { error: 'providerPolicy must be "default" or "local-only"' },
+            { status: 400 },
+          );
+        }
+        const scopeFileIds = Array.isArray(body.scopeFileIds)
+          ? body.scopeFileIds.filter((x: unknown): x is string => typeof x === "string")
+          : [];
+        try {
+          const investigation = createInvestigation(
+            typeof body.name === "string" ? body.name : "",
+            scopeFileIds,
+            providerPolicy,
+          );
+          return NextResponse.json({ investigation: investigationView(investigation) });
+        } catch (err) {
+          return NextResponse.json(
+            { error: err instanceof Error ? err.message : "could not create the investigation" },
+            { status: 400 },
+          );
+        }
+      }
+      if (body.action === "rename") {
+        if (typeof body.id !== "string" || !body.id) {
+          return NextResponse.json({ error: "id required" }, { status: 400 });
+        }
+        try {
+          const investigation = renameInvestigation(
+            body.id,
+            typeof body.name === "string" ? body.name : "",
+          );
+          return NextResponse.json({ investigation: investigationView(investigation) });
+        } catch (err) {
+          return NextResponse.json(
+            { error: err instanceof Error ? err.message : "could not rename the investigation" },
+            { status: 400 },
+          );
+        }
+      }
+      if (body.action === "setArchived") {
+        if (typeof body.id !== "string" || !body.id || typeof body.archived !== "boolean") {
+          return NextResponse.json({ error: "id and archived required" }, { status: 400 });
+        }
+        try {
+          const investigation = setInvestigationArchived(body.id, body.archived);
+          return NextResponse.json({ investigation: investigationView(investigation) });
+        } catch (err) {
+          return NextResponse.json(
+            { error: err instanceof Error ? err.message : "could not update the investigation" },
+            { status: 400 },
+          );
+        }
+      }
+      if (body.action === "addConversationRef") {
+        if (
+          typeof body.id !== "string" ||
+          !body.id ||
+          typeof body.conversationId !== "string" ||
+          !body.conversationId
+        ) {
+          return NextResponse.json({ error: "id and conversationId required" }, { status: 400 });
+        }
+        try {
+          // persistAllowed defaults false — an absent field fails toward
+          // privacy, exactly like the ask path's cache controls.
+          const investigation = addInvestigationConversationRef(
+            body.id,
+            body.conversationId,
+            body.persistAllowed === true,
+          );
+          return NextResponse.json({ investigation: investigationView(investigation) });
+        } catch (err) {
+          return NextResponse.json(
+            { error: err instanceof Error ? err.message : "could not record the conversation" },
+            { status: 400 },
+          );
+        }
+      }
+      return NextResponse.json(
+        {
+          error:
+            "investigations action must be list, create, rename, setArchived, or addConversationRef",
+        },
         { status: 400 },
       );
     }

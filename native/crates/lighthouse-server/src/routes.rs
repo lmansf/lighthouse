@@ -118,6 +118,102 @@ pub async fn rag_post(headers: HeaderMap, body: Option<Json<Value>>) -> Response
             }
             _ => bad_request("rules action must be list, add, or remove"),
         },
+        // Investigations (openspec: add-investigations): named, durable
+        // containers for analysis. CRUD on the vault-scoped STRUCTURE store —
+        // ids are minted engine-side and validation failures → 400 with the
+        // engine's reason, like rules. Conversation-ref writes are gated
+        // engine-side: the client's persistAllowed verdict AND the managed
+        // history policy must both allow (either false ⇒ silent no-op).
+        // PARITY: commands.rs and the TS twin (app/api/rag/route.ts) mirror
+        // this op exactly.
+        Some("investigations") => match body["action"].as_str() {
+            Some("list") => Json(json!({
+                "investigations": lighthouse_core::investigations::listing()
+            }))
+            .into_response(),
+            Some("create") => {
+                let provider_policy = if body["providerPolicy"].is_null() {
+                    lighthouse_core::investigations::ProviderPolicy::Default
+                } else {
+                    match body["providerPolicy"].as_str() {
+                        Some("default") => lighthouse_core::investigations::ProviderPolicy::Default,
+                        Some("local-only") => {
+                            lighthouse_core::investigations::ProviderPolicy::LocalOnly
+                        }
+                        _ => {
+                            return bad_request("providerPolicy must be \"default\" or \"local-only\"")
+                        }
+                    }
+                };
+                let scope = string_array(&body["scopeFileIds"]);
+                match lighthouse_core::investigations::create(
+                    body["name"].as_str().unwrap_or(""),
+                    &scope,
+                    provider_policy,
+                ) {
+                    Ok(inv) => Json(json!({
+                        "investigation": lighthouse_core::investigations::view(inv)
+                    }))
+                    .into_response(),
+                    Err(e) => bad_request(&e),
+                }
+            }
+            Some("rename") => {
+                let Some(id) = body["id"].as_str().filter(|s| !s.is_empty()) else {
+                    return bad_request("id required");
+                };
+                match lighthouse_core::investigations::rename(
+                    id,
+                    body["name"].as_str().unwrap_or(""),
+                ) {
+                    Ok(inv) => Json(json!({
+                        "investigation": lighthouse_core::investigations::view(inv)
+                    }))
+                    .into_response(),
+                    Err(e) => bad_request(&e),
+                }
+            }
+            Some("setArchived") => {
+                let (Some(id), Some(archived)) = (
+                    body["id"].as_str().filter(|s| !s.is_empty()),
+                    body["archived"].as_bool(),
+                ) else {
+                    return bad_request("id and archived required");
+                };
+                match lighthouse_core::investigations::set_archived(id, archived) {
+                    Ok(inv) => Json(json!({
+                        "investigation": lighthouse_core::investigations::view(inv)
+                    }))
+                    .into_response(),
+                    Err(e) => bad_request(&e),
+                }
+            }
+            Some("addConversationRef") => {
+                let (Some(id), Some(conversation_id)) = (
+                    body["id"].as_str().filter(|s| !s.is_empty()),
+                    body["conversationId"].as_str().filter(|s| !s.is_empty()),
+                ) else {
+                    return bad_request("id and conversationId required");
+                };
+                // persistAllowed defaults false — an absent field fails
+                // toward privacy, exactly like the ask path's cache controls.
+                let persist_allowed = body["persistAllowed"].as_bool().unwrap_or(false);
+                match lighthouse_core::investigations::add_conversation_ref(
+                    id,
+                    conversation_id,
+                    persist_allowed,
+                ) {
+                    Ok(inv) => Json(json!({
+                        "investigation": lighthouse_core::investigations::view(inv)
+                    }))
+                    .into_response(),
+                    Err(e) => bad_request(&e),
+                }
+            }
+            _ => bad_request(
+                "investigations action must be list, create, rename, setArchived, or addConversationRef",
+            ),
+        },
         Some("source") => {
             let Some(available) = body["available"].as_bool() else {
                 return bad_request("available required");

@@ -122,6 +122,81 @@ pub async fn rag_op(app: AppHandle, body: Value) -> Result<Value, String> {
             }
             _ => Err("rules action must be list, add, or remove".into()),
         },
+        // Investigations (openspec: add-investigations) — mirrors the
+        // routes.rs op exactly: STRUCTURE CRUD, engine-minted ids, validation
+        // failures as the engine's reason. Conversation-ref writes are gated
+        // engine-side (persistAllowed AND managed history policy — either
+        // false ⇒ silent no-op). Investigations never touch vault files or
+        // the tree, so there is NO vault-changed broadcast (unlike rules,
+        // which change effective visibility).
+        Some("investigations") => match body["action"].as_str() {
+            Some("list") => Ok(json!({
+                "investigations": lighthouse_core::investigations::listing()
+            })),
+            Some("create") => {
+                let provider_policy = if body["providerPolicy"].is_null() {
+                    lighthouse_core::investigations::ProviderPolicy::Default
+                } else {
+                    match body["providerPolicy"].as_str() {
+                        Some("default") => lighthouse_core::investigations::ProviderPolicy::Default,
+                        Some("local-only") => {
+                            lighthouse_core::investigations::ProviderPolicy::LocalOnly
+                        }
+                        _ => {
+                            return Err("providerPolicy must be \"default\" or \"local-only\"".into())
+                        }
+                    }
+                };
+                let scope = string_array(&body["scopeFileIds"]);
+                let inv = lighthouse_core::investigations::create(
+                    body["name"].as_str().unwrap_or(""),
+                    &scope,
+                    provider_policy,
+                )?;
+                Ok(json!({ "investigation": lighthouse_core::investigations::view(inv) }))
+            }
+            Some("rename") => {
+                let Some(id) = body["id"].as_str().filter(|s| !s.is_empty()) else {
+                    return Err("id required".into());
+                };
+                let inv = lighthouse_core::investigations::rename(
+                    id,
+                    body["name"].as_str().unwrap_or(""),
+                )?;
+                Ok(json!({ "investigation": lighthouse_core::investigations::view(inv) }))
+            }
+            Some("setArchived") => {
+                let (Some(id), Some(archived)) = (
+                    body["id"].as_str().filter(|s| !s.is_empty()),
+                    body["archived"].as_bool(),
+                ) else {
+                    return Err("id and archived required".into());
+                };
+                let inv = lighthouse_core::investigations::set_archived(id, archived)?;
+                Ok(json!({ "investigation": lighthouse_core::investigations::view(inv) }))
+            }
+            Some("addConversationRef") => {
+                let (Some(id), Some(conversation_id)) = (
+                    body["id"].as_str().filter(|s| !s.is_empty()),
+                    body["conversationId"].as_str().filter(|s| !s.is_empty()),
+                ) else {
+                    return Err("id and conversationId required".into());
+                };
+                // persistAllowed defaults false — an absent field fails
+                // toward privacy, exactly like the ask path's cache controls.
+                let persist_allowed = body["persistAllowed"].as_bool().unwrap_or(false);
+                let inv = lighthouse_core::investigations::add_conversation_ref(
+                    id,
+                    conversation_id,
+                    persist_allowed,
+                )?;
+                Ok(json!({ "investigation": lighthouse_core::investigations::view(inv) }))
+            }
+            _ => Err(
+                "investigations action must be list, create, rename, setArchived, or addConversationRef"
+                    .into(),
+            ),
+        },
         Some("source") => {
             let Some(available) = body["available"].as_bool() else {
                 return Err("available required".into());
