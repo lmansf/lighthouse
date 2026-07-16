@@ -1,9 +1,9 @@
 # Tasks — shaped views
 
 ## 1. View object + store + DAG (both engines, PARITY)
-- [ ] 1.1 `views.rs` ⇄ `views.ts`: envelope {v:1, views}, bak-on-write, CRUD (list/create/rename/delete+cascade); name sanitization (table-name rules, 64 cap, reserved keywords, no collision with current file table names), case-insensitive uniqueness among views.
-- [ ] 1.2 Dependency derivation at save (Rust: sqlparser table-factor walk excluding CTE names; twin: FROM/JOIN scan, PARITY) stored as reads {files:[{fileId,tableName}], views:[id]}; `guard_sql` on the definition (twin: textual single-SELECT check, PARITY); unknown-view reference, cycle, and MAX_VIEW_DEPTH=3 rejection at save.
-- [ ] 1.3 Unit tests both engines: round trip, bak-on-write, guard refusals, name rules, cycle/depth rejection, dependent-refusal + cascade-set computation, sources untouched by every op.
+- [x] 1.1 `views.rs` ⇄ `views.ts`: envelope {v:1, views}, bak-on-write, CRUD (list/create/rename/delete+cascade); name sanitization (table-name rules, 64 cap, reserved keywords, no collision with current file table names), case-insensitive uniqueness among views.
+- [x] 1.2 Dependency derivation at save (Rust: sqlparser table-factor walk excluding CTE names; twin: FROM/JOIN scan, PARITY) stored as reads {files:[{fileId,tableName}], views:[id]}; `guard_sql` on the definition (twin: textual single-SELECT check, PARITY); unknown-view reference, cycle, and MAX_VIEW_DEPTH=3 rejection at save.
+- [x] 1.3 Unit tests both engines: round trip, bak-on-write, guard refusals, name rules, cycle/depth rejection, dependent-refusal + cascade-set computation, sources untouched by every op.
 
 ## 2. Virtual resolution at ask time (Rust engine)
 - [ ] 2.1 Registration wrapper after file registration (ask path + `run_direct`): eligibility = transitive reads.files ⊆ registered ids (composes with scope/policy); creation-order determinism; stored-name alias when ambient naming differs, files-win on collision; re-guard then `ctx.sql` → `register_table(name, df.into_view())`; one table slot per view under existing caps; skip-and-log on any failure.
