@@ -370,6 +370,14 @@ export interface ChatProgress {
   label: string;
   step: number;
   total: number;
+  /**
+   * Beam loop (openspec: add-beam-loop §2.4): a short, stable machine intent for
+   * the current step ("planning" | "running"), so the cost meter (§3), plan
+   * approval (§4), and context manifest (§5) can attach per iteration without
+   * re-parsing the human `label`. PARITY: `intent` in contracts.rs; the Rust-only
+   * analytics loop is the only emitter, so the twin never sets it.
+   */
+  intent?: string;
 }
 
 /** A streamed chunk emitted while the assistant answers. */

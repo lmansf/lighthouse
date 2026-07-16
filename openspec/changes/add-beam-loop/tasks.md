@@ -9,13 +9,13 @@
 - [x] 1.6 Tests: per-dialect usage-parse unit tests (Anthropic default; OpenAI-compat + local with `include_usage`; a silent provider → 0/unreported).
 
 ## 2. The budgeted loop core (beam.rs / analytics.rs — Rust-only; twin unchanged)
-- [ ] 2.1 Lift the multi-step loop (synth.rs:1020-1210) into a small owned struct parameterized by a `Budget { max_steps (config default ~5–6), deadline (wall-clock), no_progress guard (SQL identical to a prior step / two non-advancing replies), token_ceiling (from §1) }`. Continue while under max_steps AND before the deadline AND no-progress hasn't tripped AND (ceiling unset OR tokens under it). Keep `StepReply::Done` early-stop.
-- [ ] 2.2 Keep the SINGLE combined plan+decide model call per iteration (no separate reflection turn — doubles cost, worsens the local window).
-- [ ] 2.3 Kill the hardcoded "3": `step_question` (analytics.rs:4428, "up to 3 SQL queries") reads `max_steps`; the progress label (synth.rs:1033, "of up to 3") reads the budget.
-- [ ] 2.4 Emit a STRUCTURED per-step progress chunk each iteration — extend `ChatProgress` (contracts.rs:79) or add a step variant — so the cost meter/manifest can attach per iteration.
-- [ ] 2.5 Preserve narration-over-results and the deterministic footer/ledger exactly (queries used / freshness / assumption ledger / row-cap).
-- [ ] 2.6 KEEP the `remote_keyed` gate (synth.rs:1020) — do NOT lift onto local; local + extractive keep the single-query path (6144-token window can't carry STEP_RESULT_CAP × N).
-- [ ] 2.7 `DesktopSettings` (settings.rs:19): add the loop budget field(s) (`max_steps`); extend `settings_test.rs` (struct literal + no-`..` destructuring + wire-key list + positional writer) or CI goes red.
+- [x] 2.1 Lift the multi-step loop (synth.rs:1020-1210) into a small owned struct parameterized by a `Budget { max_steps (config default ~5–6), deadline (wall-clock), no_progress guard (SQL identical to a prior step / two non-advancing replies), token_ceiling (from §1) }`. Continue while under max_steps AND before the deadline AND no-progress hasn't tripped AND (ceiling unset OR tokens under it). Keep `StepReply::Done` early-stop.
+- [x] 2.2 Keep the SINGLE combined plan+decide model call per iteration (no separate reflection turn — doubles cost, worsens the local window).
+- [x] 2.3 Kill the hardcoded "3": `step_question` (analytics.rs:4428, "up to 3 SQL queries") reads `max_steps`; the progress label (synth.rs:1033, "of up to 3") reads the budget.
+- [x] 2.4 Emit a STRUCTURED per-step progress chunk each iteration — extend `ChatProgress` (contracts.rs:79) or add a step variant — so the cost meter/manifest can attach per iteration.
+- [x] 2.5 Preserve narration-over-results and the deterministic footer/ledger exactly (queries used / freshness / assumption ledger / row-cap).
+- [x] 2.6 KEEP the `remote_keyed` gate (synth.rs:1020) — do NOT lift onto local; local + extractive keep the single-query path (6144-token window can't carry STEP_RESULT_CAP × N).
+- [x] 2.7 `DesktopSettings` (settings.rs:19): add the loop budget field(s) (`max_steps`); extend `settings_test.rs` (struct literal + no-`..` destructuring + wire-key list + positional writer) or CI goes red.
 
 ## 3. The cost meter surface (§3)
 - [ ] 3.1 New `CostMeta` riding the `ChunkMeta` seam (contracts.rs:126) on the final chunk: provider-reported input/output/total tokens summed per ask; dollars = tokens × a shipped per-model price constant, LABELLED "estimated at $X/Mtok"; local ⇒ tokens + $0.00; unreported ⇒ "not reported" (never chars/4).

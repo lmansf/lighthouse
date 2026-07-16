@@ -81,6 +81,15 @@ pub struct ChatProgress {
     pub label: String,
     pub step: usize,
     pub total: usize,
+    /// Beam loop (openspec: add-beam-loop §2.4): a short, stable machine intent
+    /// for the current step ("planning" | "running"), so the cost meter (§3),
+    /// plan approval (§4), and context manifest (§5) can attach per iteration
+    /// without re-parsing the human `label`. Optional and skipped when None so
+    /// pre-Beam payloads and the TS twin stay wire-valid. PARITY: mirrored as an
+    /// optional field in src/contracts/types.ts; the twin never runs the
+    /// (Rust-only) analytics loop, so it emits None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intent: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

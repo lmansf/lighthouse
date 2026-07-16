@@ -1406,6 +1406,7 @@ pub async fn settings_post(headers: HeaderMap, body: Option<Json<Value>>) -> Res
         body["briefingNotify"].as_bool(),
         body["briefingNoteHour"].as_i64(),
         body["tourShown"].as_bool(),
+        body["beamMaxSteps"].as_i64(),
     );
     Json(json!({
         "ok": true,

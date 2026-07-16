@@ -8,6 +8,7 @@
 
 pub mod analytics;
 pub mod answer_cache;
+pub mod beam;
 pub mod boards;
 pub mod briefings;
 pub mod catalog;

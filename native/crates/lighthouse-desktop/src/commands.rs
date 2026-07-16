@@ -1238,6 +1238,7 @@ pub fn settings_set(
     briefing_notify: Option<bool>,
     briefing_note_hour: Option<i64>,
     tour_shown: Option<bool>,
+    beam_max_steps: Option<i64>,
 ) -> Value {
     // A new summon shortcut must PARSE before anything persists — saving an
     // unregistrable string would strand the user with no hotkey at all.
@@ -1279,6 +1280,7 @@ pub fn settings_set(
         briefing_notify,
         briefing_note_hour,
         tour_shown,
+        beam_max_steps,
     );
     if shortcut_changed && !crate::register_summon_shortcut(&app) {
         // The new chord didn't register — restore the previous one so the
@@ -1291,6 +1293,7 @@ pub fn settings_set(
             None,
             None,
             Some(prev_shortcut.clone().unwrap_or_default()),
+            None,
             None,
             None,
             None,

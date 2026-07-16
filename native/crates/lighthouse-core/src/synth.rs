@@ -331,7 +331,25 @@ fn progress(label: String, step: usize, total: usize) -> ChatChunk {
     ChatChunk {
         delta: String::new(),
         references: None,
-        progress: Some(ChatProgress { label, step, total }),
+        progress: Some(ChatProgress { label, step, total, intent: None }),
+        analytics: None,
+        draft: None,
+        meta: None,
+        done: false,
+    }
+}
+
+/// A per-iteration Beam-loop progress chunk (openspec: add-beam-loop §2.4):
+/// like `progress`, but `step`/`total` carry the query index and the configured
+/// budget (not a fixed phase count), and `intent` stamps a short, stable machine
+/// label for the step so §3/§4/§5 can attach per iteration without re-parsing
+/// the human `label`. PARITY: the analytics loop is Rust-only, so the twin never
+/// emits these.
+fn step_progress(label: String, step: usize, total: usize, intent: &str) -> ChatChunk {
+    ChatChunk {
+        delta: String::new(),
+        references: None,
+        progress: Some(ChatProgress { label, step, total, intent: Some(intent.to_string()) }),
         analytics: None,
         draft: None,
         meta: None,
@@ -1032,15 +1050,43 @@ fn live_pipeline(
                         // Per-ask token accounting (openspec: add-beam-loop §1):
                         // ONE sink shared across this ask's plan calls,
                         // corrective retries, and the final narration sums their
-                        // provider-reported usage (§1.3). §1 only makes the total
-                        // obtainable; §2 will read it as the loop's token ceiling
-                        // and §3 will surface it on the cost meter.
+                        // provider-reported usage (§1.3). §1 makes the total
+                        // obtainable; §2 reads it through the loop's budget
+                        // (below) and §3 will surface it on the cost meter.
                         let usage_sink = llm::UsageSink::new();
-                        'steps: while steps.len() < 3 {
+                        // The budgeted Beam loop (openspec: add-beam-loop §2):
+                        // the former bare `steps.len() < 3` count is replaced by
+                        // an explicit Budget — max_steps (config `beam_max_steps`,
+                        // default 5), a generous whole-loop wall-clock deadline,
+                        // and the §1 token ceiling — plus a no-progress guard. The
+                        // single combined plan+decide model call per iteration
+                        // (§2.2) is unchanged, and every number is still computed
+                        // by the guarded `run_query`. See crate::beam.
+                        let max_steps =
+                            crate::settings::read_desktop_settings().beam_max_steps_effective();
+                        // §2 wires the token ceiling as unset (None ⇒ never
+                        // binding); §3 supplies a real ceiling from the pricing
+                        // constants. With None — and with usage possibly
+                        // unreported (§1.4) — the loop still bounds on
+                        // max_steps/deadline, never unbounded.
+                        let mut beam = crate::beam::BeamLoop::new(crate::beam::Budget::new(
+                            max_steps,
+                            std::time::Instant::now() + crate::beam::DEADLINE,
+                            None,
+                        ));
+                        'steps: while beam
+                            .stop_before_step(steps.len(), usage_sink.total())
+                            .is_none()
+                        {
                             let n = steps.len() + 1;
-                            yield progress(format!("Planning query {n} (of up to 3)…"), n, 4);
+                            yield step_progress(
+                                format!("Planning query {n} (of up to {max_steps})…"),
+                                n,
+                                max_steps,
+                                "planning",
+                            );
                             let raw = collect(llm::stream_answer(
-                                crate::analytics::step_question(&question, &steps),
+                                crate::analytics::step_question(&question, &steps, max_steps),
                                 sql_ctxs.clone(),
                                 cfg.clone(),
                                 history.clone(),
@@ -1052,8 +1098,19 @@ fn live_pipeline(
                                     crate::analytics::StepReply::Done => break 'steps,
                                     crate::analytics::StepReply::Sql(sql) => sql,
                                 };
+                            // No-progress guard rule (a): a planned SQL identical
+                            // to a prior step re-computes a known result — stop
+                            // instead of spending budget on it.
+                            if beam.is_repeat_sql(&attempt) {
+                                break 'steps;
+                            }
                             for round in 0..2 {
-                                yield progress(format!("Running query {n}…"), n, 4);
+                                yield step_progress(
+                                    format!("Running query {n}…"),
+                                    n,
+                                    max_steps,
+                                    "running",
+                                );
                                 match crate::analytics::run_query(&ctx, &attempt).await {
                                     Ok(res) => {
                                         last_chart = res.chart.clone();
@@ -1062,6 +1119,7 @@ fn live_pipeline(
                                             truncated: res.truncated,
                                             total: res.total,
                                         });
+                                        beam.record_step(attempt.clone());
                                         steps.push(crate::analytics::StepRecord {
                                             sql: attempt.clone(),
                                             result_markdown: res.markdown,
@@ -1069,12 +1127,15 @@ fn live_pipeline(
                                         continue 'steps;
                                     }
                                     Err(err) if round == 0 => {
-                                        // One corrective retry with the
-                                        // engine's error — the same pattern
-                                        // as the single-query path.
+                                        // First reply's SQL failed to advance
+                                        // (no-progress guard rule b) — one
+                                        // corrective retry with the engine's
+                                        // error, the same pattern as the
+                                        // single-query path.
+                                        beam.record_non_advance();
                                         let retry_q = format!(
                                             "{}\n\nYour previous SQL failed.\nPrevious SQL: {attempt}\nError: {err}\nReply with NEXT_SQL: and a corrected single SELECT statement.",
-                                            crate::analytics::step_question(&question, &steps)
+                                            crate::analytics::step_question(&question, &steps, max_steps)
                                         );
                                         let raw2 = collect(llm::stream_answer(
                                             retry_q,
@@ -1087,13 +1148,28 @@ fn live_pipeline(
                                         match crate::analytics::parse_step_reply(&strip_markers(
                                             &raw2,
                                         )) {
-                                            crate::analytics::StepReply::Sql(sql) => attempt = sql,
+                                            crate::analytics::StepReply::Sql(sql) => {
+                                                // A retry that just replays a
+                                                // prior step's SQL is no
+                                                // progress either (rule a).
+                                                if beam.is_repeat_sql(&sql) {
+                                                    break 'steps;
+                                                }
+                                                attempt = sql;
+                                            }
                                             crate::analytics::StepReply::Done => break 'steps,
                                         }
                                     }
-                                    // Second failure ends the loop; whatever
-                                    // was collected still narrates below.
-                                    Err(_) => break 'steps,
+                                    // The corrective retry's SQL also failed:
+                                    // two consecutive replies failed to advance
+                                    // (rule b). record_non_advance trips the
+                                    // no-progress guard, so the while-gate ends
+                                    // the loop with no further model call —
+                                    // whatever succeeded still narrates below
+                                    // (preserves today's stop-on-double-failure).
+                                    Err(_) => {
+                                        beam.record_non_advance();
+                                    }
                                 }
                             }
                         }
