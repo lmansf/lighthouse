@@ -54,6 +54,7 @@ import {
   type SigninStatus,
 } from "@/contracts";
 import { LocalModelInstallPanel } from "@/features/localModel/LocalModelOption";
+import { apiKeyBillingNote, signinBillingNote } from "@/lib/billingNotes";
 import { RULE_ACTION_LABEL } from "@/features/explorer/FolderRulesDialog";
 import { START_TOUR_EVENT } from "@/features/help/FirstRunTour";
 import { showWidget, summonHotkey, prettyShortcut, modKey } from "@/features/onboarding/ModeChooser";
@@ -545,6 +546,12 @@ function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean
                             ✓ Signed in
                             {signin.accountHint ? ` as ${signin.accountHint}` : ""}
                           </Text>
+                          {/* Billing clarity (0.12.1 §4): signed-in usage draws
+                              on the vendor account/subscription, not per-key
+                              developer billing. */}
+                          {signinBillingNote(providerId) && (
+                            <Text className={styles.prefHint}>{signinBillingNote(providerId)}</Text>
+                          )}
                           <Button
                             size="small"
                             appearance="secondary"
@@ -620,6 +627,12 @@ function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean
                           }
                         />
                       </Field>
+                      {/* Billing clarity (0.12.1 §4): a chat subscription does
+                          not cover API-key usage — name the vendor's products so
+                          the distinction is unmissable. */}
+                      {apiKeyBillingNote(providerId) && (
+                        <Text className={styles.prefHint}>{apiKeyBillingNote(providerId)}</Text>
+                      )}
                       {(apiKey || providerHasSavedKey) && (
                         <div className={styles.testKeyRow}>
                           <Button

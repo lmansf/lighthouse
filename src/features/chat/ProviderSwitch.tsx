@@ -35,6 +35,7 @@ import { BrainCircuitRegular, SettingsRegular } from "@fluentui/react-icons";
 import { useAuthStore } from "@/stores/useAuthStore";
 import { useRagStore } from "@/stores/useRagStore";
 import { shortProviderLabel, switchArgs, switchChoices } from "@/lib/providerSwitch";
+import { apiKeyBillingNote } from "@/lib/billingNotes";
 
 const useStyles = makeStyles({
   // Compact header trigger, sized like the EgressShield's (subtle, no bulk).
@@ -171,6 +172,14 @@ export function ProviderSwitch({
           {allowedProviders && (
             <Text size={200} className={styles.menuNote}>
               Provider choice is managed by your organization.
+            </Text>
+          )}
+          {/* Billing clarity (0.12.1 §4): the cost basis of the ACTIVE cloud
+              model, always visible when the picker is open. Local = nothing to
+              bill, so no note. */}
+          {apiKeyBillingNote(onboarding.providerId) && (
+            <Text size={200} className={styles.menuNote}>
+              {apiKeyBillingNote(onboarding.providerId)}
             </Text>
           )}
           <MenuDivider />
