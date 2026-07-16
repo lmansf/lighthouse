@@ -39,6 +39,10 @@ const QuickOpen = dynamic(
   () => import("@/features/quickopen/QuickOpen").then((m) => m.QuickOpen),
   { ssr: false },
 );
+const BoardHost = dynamic(
+  () => import("@/features/boards/BoardPanel").then((m) => m.BoardHost),
+  { ssr: false },
+);
 
 /**
  * Composition root. The shell owns layout; each feature team replaces its own
@@ -106,6 +110,11 @@ export default function Home() {
               file, then reveal it in the explorer or attach it to the chat.
               Main window only — AppShell owns the shortcut. */}
           <QuickOpen />
+          {/* The pin board (openspec: add-boards): opened from the settings
+              gear via lighthouse:open-board; mounted here (not lazily on
+              open) so its pins-changed listener retains change badges while
+              the board is closed. */}
+          <BoardHost />
         </>
       )}
     </>

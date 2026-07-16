@@ -32,6 +32,7 @@ import {
   tokens,
 } from "@fluentui/react-components";
 import {
+  BoardRegular,
   ChatHelpRegular,
   BrainCircuitRegular,
   DeleteRegular,
@@ -1444,6 +1445,16 @@ export function SettingsMenu() {
               }
             >
               Pinned questions
+            </MenuItem>
+            <MenuItem
+              icon={<BoardRegular />}
+              onClick={() =>
+                // The board host (app/page.tsx) owns the panel; same seam
+                // as open-pins (openspec: add-boards §2.2).
+                window.dispatchEvent(new CustomEvent("lighthouse:open-board"))
+              }
+            >
+              Board
             </MenuItem>
             <MenuItem
               icon={<ChatHelpRegular />}
