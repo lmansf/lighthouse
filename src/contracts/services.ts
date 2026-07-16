@@ -31,6 +31,9 @@ import type {
   AuditVerdict,
   RagReference,
   RestoreToken,
+  ShapeViewResult,
+  View,
+  ViewCreateInput,
 } from "./types";
 
 /** Curates which files/sources are exposed to retrieval, and runs retrieval. */
@@ -382,6 +385,50 @@ export interface RagService {
    * answer `tombstone: true`.
    */
   refreshBoardCards(pinIds: string[]): Promise<BoardCardRefresh[]>;
+  /**
+   * Shaped views (openspec: add-shaped-views): every saved view, creation
+   * order. Views are named, guarded SELECTs stored as definitions and
+   * resolved virtually at ask time — never materialized rows.
+   */
+  listViews(): Promise<View[]>;
+  /**
+   * Create a view. The ENGINE owns every rule — name sanitization, the
+   * single-read-only-SELECT guard, reads derivation, cycle/depth caps, and
+   * collision checks — and refusals THROW with the engine's human-readable
+   * reason so the dialogs can show it verbatim (the UI never re-validates
+   * beyond trimming). Nothing persists on refusal.
+   */
+  createView(input: ViewCreateInput): Promise<View>;
+  /**
+   * Rename a view — refused (throws, with the dependent names in the
+   * message) while other views read it; otherwise a pure store update that
+   * keeps the id and every stored dependency binding.
+   */
+  renameView(id: string, name: string): Promise<View>;
+  /**
+   * Delete a view. Refused (throws, naming the transitive dependents) while
+   * dependents exist unless `cascade` — sent only after the UI's explicit
+   * confirmation showing that list. Returns the deleted ids. Sources are
+   * never touched by any path.
+   */
+  deleteView(id: string, cascade?: boolean): Promise<string[]>;
+  /**
+   * The views that read `id`: `dependents` directly (what the rename refusal
+   * names), `transitive` the whole downstream set (what the cascade
+   * confirmation must show) — name lists for the dialogs.
+   */
+  viewDependents(id: string): Promise<{ dependents: string[]; transitive: string[] }>;
+  /**
+   * Shaping ask (openspec: add-shaped-views §3): ONE engine-guarded model
+   * completion proposes a transform SELECT over `source` (a registered table
+   * or saved view name), evidenced with engine-rendered before/after sample
+   * rows. Returns the proposal, or `{available:false}` with an honest reason
+   * (extractive/no-model provider; ALWAYS on the web dev twin — PARITY).
+   * Refusals — unknown source, guard rejection, the model's own refusal —
+   * throw with the engine's reason so the dialog shows it; retry is free.
+   * NOTHING persists until `createView` runs on the user's explicit Save.
+   */
+  shapeView(source: string, instruction: string, fileIds: string[]): Promise<ShapeViewResult>;
 }
 
 /**

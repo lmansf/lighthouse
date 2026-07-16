@@ -524,3 +524,50 @@ test("local-only marks propagate to views transitively and gate the cloud postur
   vault.setLocalOnly("private.csv", false);
   assert.equal(views.eligibleForPosture(true).length, 3);
 });
+
+// --- §3: dispatch arms (openspec: add-shaped-views) ----------------------------------
+// The twin's route (app/api/rag/route.ts) can't be invoked under node --test
+// (NextResponse), so its guarantees are asserted structurally against the
+// source — the boardsUi.test.mjs house style: the views CRUD arms round-trip
+// through THIS module's fns, and shapeView answers {available:false} without
+// ever touching the store or a model (PARITY: shaping is Rust-engine-only).
+
+const routeSrc = fs.readFileSync(new URL("../app/api/rag/route.ts", import.meta.url), "utf8");
+
+test("route.ts views arms round-trip through src/server/views.ts", () => {
+  assert.match(routeSrc, /from "@\/server\/views"/, "the arms import this module");
+  assert.match(routeSrc, /case "views": \{/, "the op exists");
+  for (const fn of [
+    "listViews()",
+    "createView(",
+    "renameView(",
+    "deleteView(",
+    "dependentsOf(",
+    "transitiveDependents(",
+  ]) {
+    assert.ok(routeSrc.includes(fn), `${fn} is called by an arm`);
+  }
+  // The wire carries the summary FLATTENED; the arm builds the labeled record
+  // and rejects an out-of-whitelist source with the engines' exact reason.
+  assert.match(routeSrc, /summarySource must be "question" or "model"/);
+  assert.match(routeSrc, /text: typeof body\.summaryText === "string" \? body\.summaryText : ""/);
+  // Delete returns the deleted ids; cascade defaults false (absent = no).
+  assert.match(routeSrc, /deletedIds: deleteView\(body\.id, body\.cascade === true\)/);
+  // Dependents answers the NAME lists the rename/delete dialogs show.
+  assert.match(routeSrc, /dependents: dependentsOf\(body\.id\)\.map\(\(v\) => v\.name\)/);
+  assert.match(routeSrc, /transitive: transitiveDependents\(body\.id\)\.map\(\(v\) => v\.name\)/);
+  // Refusals surface as 400 + the engine's reason (the boards idiom).
+  assert.match(routeSrc, /views action must be list, create, rename, delete, or dependents/);
+});
+
+test("route.ts shapeView arm is the PARITY stub: available:false, nothing persisted", () => {
+  const from = routeSrc.indexOf('case "shapeView"');
+  assert.ok(from !== -1, "the op exists");
+  const body = routeSrc.slice(from, routeSrc.indexOf('case "source"', from));
+  assert.match(body, /available: false/);
+  assert.match(
+    body,
+    /reason: "shaping runs in the Rust engine — this dev server can't execute SQL"/,
+  );
+  assert.doesNotMatch(body, /createView|writeJson|save\(/, "the stub persists nothing");
+});

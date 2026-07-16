@@ -847,3 +847,239 @@ async fn stored_name_bindings_alias_and_files_win_collisions() {
         .expect("query runs");
     assert!(res.markdown.contains("| 5 |"), "aliased to y's rows: {}", res.markdown);
 }
+
+// --- §3: the shaping ask (openspec: add-shaped-views) --------------------------------
+//
+// `shape_view` itself is async + model-dependent, so these tests drive its
+// PURE pieces — the prompt assembly, the reply parser, the local-only seam,
+// the extractive refusal — plus the before/after sampling helper against a
+// real registered ctx: everything but the one network completion.
+
+/// The chart-directive precedent: every few-shot SELECT must pass the
+/// engine's own validator, and survive the fence extraction a real reply
+/// goes through — a prompt edit can't ship an example the guard would refuse.
+#[test]
+fn shape_fewshots_pass_the_guard_and_extraction() {
+    use lighthouse_core::analytics::{extract_sql, guard_sql};
+    assert_eq!(views::SHAPE_FEWSHOTS.len(), 2, "the two messy→clean shapes");
+    for (instruction, sql, summary) in views::SHAPE_FEWSHOTS {
+        guard_sql(sql).unwrap_or_else(|e| panic!("few-shot for {instruction:?} rejected: {e}"));
+        let fenced = format!("```sql\n{sql}\n```");
+        assert_eq!(extract_sql(&fenced).as_deref(), Some(*sql), "{instruction}");
+        assert!(!summary.trim().is_empty(), "every example models a Summary");
+    }
+    // All of them ride the few-shot context block, in the pinned shape.
+    let block = views::shape_fewshot_block();
+    assert!(block.starts_with("Instruction: "), "{block}");
+    for (instruction, sql, summary) in views::SHAPE_FEWSHOTS {
+        assert!(block.contains(&format!("Instruction: {instruction}")), "{block}");
+        assert!(block.contains(&format!("SQL: {sql}")), "{block}");
+        assert!(block.contains(&format!("Summary: {summary}")), "{block}");
+    }
+}
+
+/// The prompt template is a PINNED snapshot: the reply contract (one fenced
+/// SELECT + one Summary line) and the read-only framing are load-bearing for
+/// the parser, so a wording drift must be a conscious edit here.
+#[test]
+fn shape_question_is_a_pinned_snapshot() {
+    let expected = "You are shaping the table \"messy\" into a clean, reusable view with \
+ONE SQL query (DataFusion, PostgreSQL-style syntax). The first context block \
+describes messy: its exact table name, columns with types, row count, and a \
+few sample rows; the second holds examples with a GENERIC schema — adapt \
+their idea to messy's real columns.\n\
+Write a single SELECT statement over messy that applies the instruction \
+below. Reply with ONLY:\n\
+1. the SQL in a ```sql code block\n\
+2. one line starting with \"Summary:\" — a plain-words description of the \
+shaped result\n\
+Use the exact table and column names as given. Read only — never write, and \
+never invent tables.\n\n\
+Instruction: cast amount to a number";
+    assert_eq!(
+        views::shape_question("messy", "cast amount to a number"),
+        expected
+    );
+}
+
+#[test]
+fn parse_shape_reply_recovers_sql_and_summary_or_refuses() {
+    // The contract shape: fenced SELECT + a Summary line.
+    let reply = "Here is the transform.\n```sql\nSELECT * FROM messy WHERE amount IS NOT NULL\n```\nSummary: messy without blank amounts\n";
+    assert_eq!(
+        views::parse_shape_reply(reply).expect("parses"),
+        (
+            "SELECT * FROM messy WHERE amount IS NOT NULL".to_string(),
+            "messy without blank amounts".to_string()
+        )
+    );
+    // A bare SELECT with no Summary line still parses — summary is "" (the
+    // record stores an empty model-labeled summary; the card shows nothing).
+    assert_eq!(
+        views::parse_shape_reply("SELECT a FROM t").expect("parses"),
+        ("SELECT a FROM t".to_string(), String::new())
+    );
+    // A refusal (no SELECT anywhere) errs with the model's own words —
+    // that raw reason is what the dialog shows.
+    let refusal = "I can't shape that: the instruction asks for a column that does not exist.";
+    assert_eq!(views::parse_shape_reply(refusal).unwrap_err(), refusal);
+    // …bounded, so a rambling reply can't flood the dialog.
+    let long = "no ".repeat(400);
+    assert_eq!(views::parse_shape_reply(&long).unwrap_err().chars().count(), 400);
+    // An empty reply gets honest fallback copy instead of an empty error.
+    assert_eq!(
+        views::parse_shape_reply("  ").unwrap_err(),
+        "the model returned no SQL"
+    );
+    // Extraction recovers a SELECT but the guard refuses it: a smuggled
+    // second statement fails the SAME single-read-only-SELECT check every
+    // executed query passes.
+    let multi = "```sql\nSELECT 1; DROP TABLE t\n```";
+    assert_eq!(
+        views::parse_shape_reply(multi).unwrap_err(),
+        "expected exactly one SQL statement"
+    );
+}
+
+/// The evidence helper renders engine-computed before/after samples — first
+/// SAMPLE_ROWS of the source and of the proposed SELECT — via the guarded
+/// `run_query` path, against a real registered ctx and NO model. Any
+/// execution failure is an Err the dialog shows; nothing persists anywhere.
+#[tokio::test]
+async fn shape_samples_render_before_and_after_against_a_real_csv() {
+    let vault = tempfile::tempdir().unwrap();
+    let _guard = common::lock_env(vault.path());
+    // Four rows so the 3-row sample cap is observable.
+    write(
+        &vault.path().join("messy.csv"),
+        "region,amount\nnorth,$3\nsouth,$7\neast,$11\nwest,$2\n",
+    );
+    let source_bytes = std::fs::read(vault.path().join("messy.csv")).unwrap();
+    let ctx = datafusion::prelude::SessionContext::new();
+    let regs = register_tables(&ctx, &[entry(vault.path(), "messy.csv")], false).await;
+    assert_eq!(regs.len(), 1);
+
+    // A canned model reply (with a stray citation marker the real path
+    // strips) drives the SAME parse → guard → sample pieces shape_view runs.
+    let reply = "Sure [1].\n```sql\nSELECT region, CAST(REPLACE(REPLACE(amount, '$', ''), ',', '') AS DOUBLE) AS amount FROM messy\n```\nSummary: messy with amount as a real number\n";
+    let (sql, summary) =
+        views::parse_shape_reply(&lighthouse_core::synth::strip_markers(reply)).expect("parses");
+    assert_eq!(summary, "messy with amount as a real number");
+
+    let (before, after) = views::shape_samples(&ctx, "messy", &sql)
+        .await
+        .expect("samples render");
+    // Row counts: header + separator + exactly 3 sample rows on each side.
+    let rows = |md: &str| md.lines().count().saturating_sub(2);
+    assert_eq!(rows(&before), 3, "before caps at SAMPLE_ROWS: {before}");
+    assert_eq!(rows(&after), 3, "after caps at SAMPLE_ROWS: {after}");
+    // Before shows the messy text; after shows engine-cast numbers.
+    assert!(before.contains("$3"), "{before}");
+    assert!(after.contains("3.0"), "{after}");
+    assert!(!after.contains('$'), "{after}");
+
+    // A proposal that can't execute (unknown column) errs with the engine's
+    // reason — the dialog shows it and nothing was persisted.
+    assert!(views::shape_samples(&ctx, "messy", "SELECT nope FROM messy")
+        .await
+        .is_err());
+    assert!(views::list().is_empty(), "sampling persists nothing");
+    // Requirement 4: the source file's bytes are identical afterward — the
+    // whole evidence flow never opens a file for write.
+    assert_eq!(
+        std::fs::read(vault.path().join("messy.csv")).unwrap(),
+        source_bytes,
+        "source bytes identical after shaping evidence"
+    );
+}
+
+/// The H1 local-only seam: a marked source file — or a saved view that is
+/// transitively local-only — forces the local model path (the cfg swap
+/// `shape_view` applies before any transport exists).
+#[test]
+fn shape_is_local_only_forces_the_local_seam() {
+    let vault = tempfile::tempdir().unwrap();
+    let _guard = common::lock_env(vault.path());
+    write(&vault.path().join("private.csv"), "region,amount\nNE,5\n");
+    write(&vault.path().join("open.csv"), "region,amount\nNW,3\n");
+    lighthouse_core::vault::set_local_only("private.csv", true);
+
+    // A marked file id forces local regardless of the source name.
+    assert!(views::shape_is_local_only(
+        "anything",
+        &["private.csv".to_string(), "open.csv".to_string()]
+    ));
+    assert!(!views::shape_is_local_only("anything", &["open.csv".to_string()]));
+
+    // A source naming a view over the marked file forces local transitively.
+    views::create_with_tables(
+        "private_view",
+        "SELECT * FROM private",
+        summary("q"),
+        &[("private.csv".to_string(), "private.csv".to_string())],
+        &[],
+    )
+    .expect("saves");
+    assert!(views::shape_is_local_only("private_view", &[]));
+    assert!(views::shape_is_local_only("  PRIVATE_VIEW  ", &[]), "trimmed, case-insensitive");
+    assert!(!views::shape_is_local_only("some_other_view", &[]));
+}
+
+/// An extractive/keyless provider can't shape: the EXACT stable string the
+/// dispatch arms match to answer `{available:false}` — and the refusal fires
+/// before any registration or completion work.
+#[tokio::test]
+async fn shape_view_refuses_extractive_and_keyless_cfgs_with_stable_copy() {
+    let vault = tempfile::tempdir().unwrap();
+    let _guard = common::lock_env(vault.path());
+    assert_eq!(
+        views::SHAPE_NEEDS_MODEL,
+        "shaping needs a model; the current provider answers extractively"
+    );
+    // No provider at all (the extractive fallback).
+    let err = views::shape_view("t", "clean it", &[], lighthouse_core::llm::ModelCfg::default())
+        .await
+        .unwrap_err();
+    assert_eq!(err, views::SHAPE_NEEDS_MODEL);
+    // A selected-but-keyless remote is extractive too.
+    let keyless = lighthouse_core::llm::ModelCfg {
+        provider_id: Some("openai".to_string()),
+        model_id: Some("gpt-5-mini".to_string()),
+        api_key: None,
+    };
+    let err = views::shape_view("t", "clean it", &[], keyless).await.unwrap_err();
+    assert_eq!(err, views::SHAPE_NEEDS_MODEL);
+    // Blank inputs refuse before anything else.
+    let local = lighthouse_core::profile::local_model_config();
+    assert_eq!(
+        views::shape_view(" ", "x", &[], local.clone()).await.unwrap_err(),
+        "a source table or view is required"
+    );
+    assert_eq!(
+        views::shape_view("t", "  ", &[], local).await.unwrap_err(),
+        "an instruction is required"
+    );
+}
+
+/// A source that names no registered table or view refuses with clear copy —
+/// resolution happens BEFORE the completion, so no model is consulted.
+#[tokio::test]
+async fn shape_view_refuses_an_unknown_source_before_any_completion() {
+    let vault = tempfile::tempdir().unwrap();
+    let _guard = common::lock_env(vault.path());
+    seed_sales(vault.path());
+    let err = views::shape_view(
+        "nowhere",
+        "clean it",
+        &["sales.csv".to_string()],
+        lighthouse_core::profile::local_model_config(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        err,
+        "\"nowhere\" is not available to shape — pick a table or saved view from the current files"
+    );
+    assert!(views::list().is_empty(), "nothing persisted");
+}
+

@@ -571,3 +571,89 @@ export interface BoardCardRefresh {
   /** Stored state: why the last recheck couldn't run. */
   staleReason?: string;
 }
+
+/**
+ * Where a view's one-line summary came from (openspec: add-shaped-views):
+ * recorded from the asked question ("Save as view" on a Beam answer) or
+ * stated by the model during a shaping ask. The whole whitelist — a view
+ * never carries an unlabeled summary.
+ */
+export type ViewSummarySource = "question" | "model";
+
+/** The provenance-labeled one-line summary a view carries. */
+export interface ViewSummary {
+  text: string;
+  source: ViewSummarySource;
+}
+
+/**
+ * One source-file dependency of a view, with the table-name binding the
+ * definition's SQL uses pinned at save time.
+ */
+export interface ViewFileRead {
+  fileId: string;
+  tableName: string;
+}
+
+/** A view's dependencies — source files and other views — resolved at save. */
+export interface ViewReads {
+  files: ViewFileRead[];
+  views: string[];
+}
+
+/**
+ * A shaped view (openspec: add-shaped-views): a named, guarded SELECT over
+ * vault tables, stored as a DEFINITION and resolved virtually at ask time —
+ * results always reflect the sources' current bytes, and no view operation
+ * ever writes to a source file. Shape mirrors the engines' record
+ * (views.rs ⇄ views.ts) exactly.
+ */
+export interface View {
+  /** Engine-minted, stable across renames. */
+  id: string;
+  /** Sanitized identifier (lowercase [a-z0-9_]), unique among views. */
+  name: string;
+  /** Exactly ONE read-only SELECT — guarded at save AND before execution. */
+  sql: string;
+  reads: ViewReads;
+  summary: ViewSummary;
+  createdMs: number;
+}
+
+/**
+ * What the client sends to create a view. The summary rides FLATTENED on the
+ * wire (summaryText + summarySource); the engine builds the labeled record
+ * and owns every rule — name sanitization, the SQL guard, reads derivation,
+ * cycle/depth checks. The UI never re-validates beyond trimming.
+ */
+export interface ViewCreateInput {
+  name: string;
+  sql: string;
+  summaryText: string;
+  summarySource: ViewSummarySource;
+  fileIds: string[];
+}
+
+/**
+ * A shaping-ask proposal (openspec: add-shaped-views §3): the model's ONE
+ * validated transform SELECT plus engine-rendered evidence — the first
+ * sample rows of the source (`before`) and of the proposed SELECT (`after`)
+ * as markdown tables — and the model's one-line summary ("" when it stated
+ * none). NOTHING is persisted until the user explicitly saves.
+ */
+export interface ShapeProposal {
+  sql: string;
+  before: string;
+  after: string;
+  summary: string;
+}
+
+/**
+ * What `shapeView` answers: the proposal, or `{available:false}` with an
+ * honest reason — the extractive/no-model posture on the desktop engine, and
+ * ALWAYS on the web dev twin (shaping runs the model + DataFusion,
+ * Rust-engine-only — PARITY).
+ */
+export type ShapeViewResult =
+  | ({ available: true } & ShapeProposal)
+  | { available: false; reason: string };

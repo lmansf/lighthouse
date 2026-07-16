@@ -21,6 +21,9 @@ import type {
   AuditVerdict,
   RagReference,
   RestoreToken,
+  ShapeViewResult,
+  View,
+  ViewCreateInput,
 } from "../types";
 import { SEED_NODES, SEED_SOURCES } from "./files";
 
@@ -782,6 +785,146 @@ class MockRagService implements RagService {
         ...(pin.staleReason !== undefined ? { staleReason: pin.staleReason } : {}),
       };
     });
+  }
+
+  // In-memory shaped views (openspec: add-shaped-views) so the Save-as-view
+  // and shaping dialogs are exercisable offline. Mirrors the service surface:
+  // refusals THROW with a human-readable reason (the engines own the full
+  // rules — the mock checks just enough that a bad caller fails offline too),
+  // and shapeView answers a CANNED proposal so UI tests can drive the dialog
+  // through propose → review → save without a model.
+  private views: View[] = [];
+
+  private cloneView(v: View): View {
+    return {
+      ...v,
+      reads: { files: v.reads.files.map((f) => ({ ...f })), views: [...v.reads.views] },
+      summary: { ...v.summary },
+    };
+  }
+
+  /** The engines' name normalization, abridged (lowercase [a-z0-9_]). */
+  private normalizeViewName(raw: string): string {
+    let name = raw
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "_")
+      .replace(/^_+|_+$/g, "");
+    if (/^[0-9]/.test(name)) name = `t_${name}`;
+    return name.slice(0, 64).replace(/_+$/, "");
+  }
+
+  async listViews(): Promise<View[]> {
+    return this.views.map((v) => this.cloneView(v));
+  }
+
+  async createView(input: ViewCreateInput): Promise<View> {
+    const name = this.normalizeViewName(input.name);
+    if (!name) throw new Error("a view needs a name");
+    if (this.views.some((v) => v.name === name)) {
+      throw new Error(`a view named "${name}" already exists`);
+    }
+    if (!input.sql.trim()) throw new Error("only SELECT queries are allowed");
+    const view: View = {
+      id: `view-${(this.views.length + 1).toString(16).padStart(12, "0")}`,
+      name,
+      sql: input.sql,
+      // Reads derivation is engine work (AST walk / textual scan); the mock
+      // pins a naive binding so the record shape round-trips.
+      reads: {
+        files: input.fileIds.map((fileId) => ({ fileId, tableName: fileId })),
+        views: [],
+      },
+      summary: { text: input.summaryText, source: input.summarySource },
+      createdMs: Date.now(),
+    };
+    this.views.push(view);
+    return this.cloneView(view);
+  }
+
+  async renameView(id: string, name: string): Promise<View> {
+    const rec = this.views.find((v) => v.id === id);
+    if (!rec) throw new Error("view not found");
+    const dependents = this.views.filter((v) => v.reads.views.includes(id));
+    if (dependents.length > 0) {
+      throw new Error(
+        `"${rec.name}" can't be renamed while other views read it: ${dependents
+          .map((d) => d.name)
+          .join(", ")}`,
+      );
+    }
+    const normalized = this.normalizeViewName(name);
+    if (!normalized) throw new Error("a view needs a name");
+    if (this.views.some((v) => v.id !== id && v.name === normalized)) {
+      throw new Error(`a view named "${normalized}" already exists`);
+    }
+    rec.name = normalized;
+    return this.cloneView(rec);
+  }
+
+  async deleteView(id: string, cascade?: boolean): Promise<string[]> {
+    const target = this.views.find((v) => v.id === id);
+    if (!target) throw new Error("view not found");
+    // Transitive dependents, grow-until-fixed (the engines' walk).
+    const doomed = new Set<string>([id]);
+    let grew = true;
+    while (grew) {
+      grew = false;
+      for (const v of this.views) {
+        if (!doomed.has(v.id) && v.reads.views.some((p) => doomed.has(p))) {
+          doomed.add(v.id);
+          grew = true;
+        }
+      }
+    }
+    const dependents = this.views.filter((v) => v.id !== id && doomed.has(v.id));
+    if (dependents.length > 0 && !cascade) {
+      throw new Error(
+        `"${target.name}" can't be deleted while other views read it: ${dependents
+          .map((d) => d.name)
+          .join(", ")}`,
+      );
+    }
+    const deleted = this.views.filter((v) => doomed.has(v.id)).map((v) => v.id);
+    this.views = this.views.filter((v) => !doomed.has(v.id));
+    return deleted;
+  }
+
+  async viewDependents(id: string): Promise<{ dependents: string[]; transitive: string[] }> {
+    const direct = this.views.filter((v) => v.reads.views.includes(id)).map((v) => v.name);
+    const doomed = new Set<string>([id]);
+    let grew = true;
+    while (grew) {
+      grew = false;
+      for (const v of this.views) {
+        if (!doomed.has(v.id) && v.reads.views.some((p) => doomed.has(p))) {
+          doomed.add(v.id);
+          grew = true;
+        }
+      }
+    }
+    const transitive = this.views
+      .filter((v) => v.id !== id && doomed.has(v.id))
+      .map((v) => v.name);
+    return { dependents: direct, transitive };
+  }
+
+  async shapeView(
+    source: string,
+    instruction: string,
+    _fileIds: string[],
+  ): Promise<ShapeViewResult> {
+    // A canned proposal in the engine's exact shape (SQL + markdown sample
+    // tables + a model-stated summary) — nothing is persisted here on ANY
+    // implementation; saving goes through createView on the explicit Save.
+    if (!source.trim()) throw new Error("a source table or view is required");
+    if (!instruction.trim()) throw new Error("an instruction is required");
+    return {
+      available: true,
+      sql: `SELECT * FROM ${source} WHERE amount IS NOT NULL`,
+      before: "| region | amount |\n| --- | --- |\n| north | $3 |\n| south | $7 |",
+      after: "| region | amount |\n| --- | --- |\n| north | 3 |\n| south | 7 |",
+      summary: `${source} shaped — ${instruction}`.slice(0, 120),
+    };
   }
 
   /** A node plus all of its descendants (so toggling a folder cascades). */

@@ -56,6 +56,14 @@ import {
   runBriefing,
   composeBriefingNote,
 } from "@/server/briefings";
+import {
+  createView,
+  deleteView,
+  dependentsOf,
+  listViews,
+  renameView,
+  transitiveDependents,
+} from "@/server/views";
 import type { Cadence } from "@/contracts";
 
 export const runtime = "nodejs";
@@ -320,6 +328,105 @@ export async function POST(req: Request) {
         { status: 400 },
       );
     }
+
+    // Shaped views (openspec: add-shaped-views §3): CRUD runs FOR REAL against
+    // the twin store (src/server/views.ts — same envelope, name rules, and
+    // DAG/lifecycle checks as views.rs), plus `dependents`, the name lists the
+    // rename/delete dialogs show. The wire carries the summary FLATTENED
+    // (summaryText + summarySource); the ViewSummary is built here. Validation
+    // failures → 400 with the engine's reason, like boards. PARITY: routes.rs /
+    // commands.rs mirror this op exactly.
+    case "views": {
+      if (body.action === "list") {
+        return NextResponse.json({ views: listViews() });
+      }
+      if (body.action === "create") {
+        const raw = body.summarySource;
+        const summarySource =
+          raw === undefined || raw === null || raw === "question"
+            ? "question"
+            : raw === "model"
+              ? "model"
+              : null;
+        if (summarySource === null) {
+          return NextResponse.json(
+            { error: 'summarySource must be "question" or "model"' },
+            { status: 400 },
+          );
+        }
+        const fileIds = Array.isArray(body.fileIds)
+          ? body.fileIds.filter((x: unknown): x is string => typeof x === "string")
+          : [];
+        try {
+          const view = createView(
+            typeof body.name === "string" ? body.name : "",
+            typeof body.sql === "string" ? body.sql : "",
+            {
+              text: typeof body.summaryText === "string" ? body.summaryText : "",
+              source: summarySource,
+            },
+            fileIds,
+          );
+          return NextResponse.json({ view });
+        } catch (err) {
+          return NextResponse.json(
+            { error: err instanceof Error ? err.message : "could not create the view" },
+            { status: 400 },
+          );
+        }
+      }
+      if (body.action === "rename") {
+        if (typeof body.id !== "string" || !body.id) {
+          return NextResponse.json({ error: "id required" }, { status: 400 });
+        }
+        try {
+          const view = renameView(body.id, typeof body.name === "string" ? body.name : "");
+          return NextResponse.json({ view });
+        } catch (err) {
+          return NextResponse.json(
+            { error: err instanceof Error ? err.message : "could not rename the view" },
+            { status: 400 },
+          );
+        }
+      }
+      if (body.action === "delete") {
+        if (typeof body.id !== "string" || !body.id) {
+          return NextResponse.json({ error: "id required" }, { status: 400 });
+        }
+        try {
+          return NextResponse.json({ deletedIds: deleteView(body.id, body.cascade === true) });
+        } catch (err) {
+          return NextResponse.json(
+            { error: err instanceof Error ? err.message : "could not delete the view" },
+            { status: 400 },
+          );
+        }
+      }
+      if (body.action === "dependents") {
+        if (typeof body.id !== "string" || !body.id) {
+          return NextResponse.json({ error: "id required" }, { status: 400 });
+        }
+        return NextResponse.json({
+          dependents: dependentsOf(body.id).map((v) => v.name),
+          transitive: transitiveDependents(body.id).map((v) => v.name),
+        });
+      }
+      return NextResponse.json(
+        { error: "views action must be list, create, rename, delete, or dependents" },
+        { status: 400 },
+      );
+    }
+
+    // PARITY: the shaping ask runs the model AND DataFusion (one guarded
+    // completion + before/after sampling) — Rust-engine-only, like
+    // analyticsSql. This dev twin reports unavailable with an honest reason;
+    // the dialog explains instead of pretending. NOTHING is ever persisted by
+    // this op on any engine — saving goes through op:"views" create.
+    case "shapeView":
+      return NextResponse.json({
+        available: false,
+        reason: "shaping runs in the Rust engine — this dev server can't execute SQL",
+      });
 
     case "source":
       if (typeof body.available !== "boolean") {

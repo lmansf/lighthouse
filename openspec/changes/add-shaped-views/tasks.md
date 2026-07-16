@@ -12,9 +12,9 @@
 - [x] 2.4 Tests: ask-against-view returns shaped numbers via real DataFusion; source edit flows through with no on-disk rows; slot skipping deterministic; local-only exclusion; cache-key stability (no views) + sensitivity (view registered).
 
 ## 3. Creation flows
-- [ ] 3.1 "Save as view" chip on SQL-bearing answers (chip row slot): name dialog → `views.create`; summary = the asked question, source:"question"; wired through contracts (types/services/real/mock) + dispatch `op:"views"` all three layers.
-- [ ] 3.2 `op:"shapeView"` (desktop): mini-prompt (source `table_card` + few-shots + instruction) → one `collect(stream_answer)` → `extract_sql` + `guard_sql` → before/after SAMPLE_ROWS samples engine-rendered → proposal {sql, before, after, summary(source:"model")}; nothing persists without `views.create`; local-only source forces the local path; extractive provider → {available:false}; few-shots pinned by a guard test; twin returns {available:false} (PARITY).
-- [ ] 3.3 ShapeView dialog UI: source picker (tables + views), instruction, proposal review (SQL + before/after tables), Save/Cancel; Beam treatment both themes.
+- [x] 3.1 "Save as view" chip on SQL-bearing answers (chip row slot): name dialog → `views.create`; summary = the asked question, source:"question"; wired through contracts (types/services/real/mock) + dispatch `op:"views"` all three layers.
+- [x] 3.2 `op:"shapeView"` (desktop): mini-prompt (source `table_card` + few-shots + instruction) → one `collect(stream_answer)` → `extract_sql` + `guard_sql` → before/after SAMPLE_ROWS samples engine-rendered → proposal {sql, before, after, summary(source:"model")}; nothing persists without `views.create`; local-only source forces the local path; extractive provider → {available:false}; few-shots pinned by a guard test; twin returns {available:false} (PARITY).
+- [x] 3.3 ShapeView dialog UI: source picker (tables + views), instruction, proposal review (SQL + before/after tables), Save/Cancel; Beam treatment both themes.
 
 ## 4. Visibility surfaces
 - [ ] 4.1 Catalog + suggested asks include views; inspector opens on a view (definition SQL, labeled summary, sources it reads, freshness); Library nav section (sidebar fragment, InvestigationsNav pattern); local-only badge propagates in UI; twin renders stored state honestly.

@@ -764,6 +764,305 @@ pub fn delete(id: &str, cascade: bool) -> Result<Vec<String>, String> {
     Ok(deleted)
 }
 
+// --- Shaping ask (openspec: add-shaped-views §3) ------------------------------------
+//
+// `shape_view` is the ONE model-consulting path in this module (and the only
+// one this feature adds anywhere): a single `llm::stream_answer` completion
+// proposes a transform SELECT over one registered source; the engine
+// validates it with the SAME guard as every executed query and renders
+// before/after sample evidence. NOTHING persists in this flow, ever — `create`
+// runs only when the user clicks Save, via the separate `op:"views"` arm.
+// Desktop/server engines only; the TS twin always answers `{available:false}`
+// (PARITY — analytics/DataFusion is Rust-engine-only).
+
+/// A shaping proposal: the validated SELECT, engine-rendered before/after
+/// sample tables (markdown), and the model's one-line summary ("" when the
+/// reply carried none — `create` then stores an empty model-labeled summary
+/// and the card simply shows nothing). Held by the UI until Save or Cancel;
+/// never stored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShapeProposal {
+    pub sql: String,
+    pub before: String,
+    pub after: String,
+    pub summary: String,
+}
+
+/// The honest refusal when the effective provider can't complete (no provider
+/// configured, or a keyless remote — the extractive fallback answers without
+/// a model). The dispatch arms match this EXACT string to answer
+/// `{available:false}` (the TS twin's constant posture), so keep it stable.
+pub const SHAPE_NEEDS_MODEL: &str =
+    "shaping needs a model; the current provider answers extractively";
+
+/// First rows rendered as before/after evidence. KEEP IN SYNC with
+/// analytics.rs::SAMPLE_ROWS — the table cards sample the same three.
+const SHAPE_SAMPLE_ROWS: usize = 3;
+
+/// Longest slice of a no-SELECT model reply surfaced as the refusal reason —
+/// enough to read the model's own words, bounded so the dialog stays sane.
+const SHAPE_REFUSAL_MAX_CHARS: usize = 400;
+
+/// Few-shot examples for the shaping prompt — messy→clean transforms in the
+/// two shapes the dialog exists for: casting a '$1,234'-style text column to
+/// numeric, and filtering junk header rows with a WHERE. Deliberately GENERIC
+/// table/column names (the prompt says to adapt them); every SELECT must pass
+/// `guard_sql`, pinned by a test (the SQL_FEWSHOTS/chart-directive precedent
+/// of validating few-shots with the engine's own validator).
+pub const SHAPE_FEWSHOTS: &[(&str, &str, &str)] = &[
+    (
+        "the amount column is text like '$1,234' — make it a real number",
+        "SELECT region, CAST(REPLACE(REPLACE(amount, '$', ''), ',', '') AS DOUBLE) AS amount FROM raw_sales",
+        "raw_sales with amount cast from '$1,234'-style text to a number",
+    ),
+    (
+        "drop the junk rows that repeat the header inside the data",
+        "SELECT * FROM raw_export WHERE region <> 'region' AND amount IS NOT NULL",
+        "raw_export without the repeated-header junk rows",
+    ),
+];
+
+/// The few-shot context block the completion sees beside the source's table
+/// card. Pure — pinned with `shape_question` by the snapshot test.
+pub fn shape_fewshot_block() -> String {
+    SHAPE_FEWSHOTS
+        .iter()
+        .map(|(instruction, sql, summary)| {
+            format!("Instruction: {instruction}\nSQL: {sql}\nSummary: {summary}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// The shaping ask handed to the model (the source's table card and the
+/// few-shot examples ride as context blocks, not in this string). Fixed
+/// template — the reply contract is EXACTLY one SELECT in a ```sql fence,
+/// then one "Summary:" line; the reply is post-processed by `extract_sql` +
+/// `guard_sql`, so stray prose is tolerated. Pure; snapshot-tested.
+pub fn shape_question(source: &str, instruction: &str) -> String {
+    format!(
+        "You are shaping the table \"{source}\" into a clean, reusable view with \
+         ONE SQL query (DataFusion, PostgreSQL-style syntax). The first context \
+         block describes {source}: its exact table name, columns with types, row \
+         count, and a few sample rows; the second holds examples with a GENERIC \
+         schema — adapt their idea to {source}'s real columns.\n\
+         Write a single SELECT statement over {source} that applies the \
+         instruction below. Reply with ONLY:\n\
+         1. the SQL in a ```sql code block\n\
+         2. one line starting with \"Summary:\" — a plain-words description of \
+         the shaped result\n\
+         Use the exact table and column names as given. Read only — never write, \
+         and never invent tables.\n\n\
+         Instruction: {instruction}"
+    )
+}
+
+/// Parse a shaping reply: the fenced (or bare) SELECT via the SAME
+/// `extract_sql` + `guard_sql` pair as the ask path, plus the reply's
+/// "Summary:" line ("" when absent). No usable SELECT ⇒ Err carrying the
+/// model's own words (bounded) — the dialog shows the refusal verbatim and
+/// retry is free (design.md "Failure & degradation").
+pub fn parse_shape_reply(reply: &str) -> Result<(String, String), String> {
+    let Some(sql) = crate::analytics::extract_sql(reply) else {
+        let reason: String = reply.trim().chars().take(SHAPE_REFUSAL_MAX_CHARS).collect();
+        return Err(if reason.is_empty() {
+            "the model returned no SQL".to_string()
+        } else {
+            reason
+        });
+    };
+    crate::analytics::guard_sql(&sql)?;
+    let summary = reply
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("Summary:"))
+        .map(|s| s.trim().to_string())
+        .find(|s| !s.is_empty())
+        .unwrap_or_default();
+    Ok((sql, summary))
+}
+
+/// Engine-rendered before/after evidence: the first `SHAPE_SAMPLE_ROWS` of
+/// the source and of the proposed SELECT (wrapped as a guarded subquery),
+/// both through `run_query` — the guard, the timeout, and the markdown caps
+/// every executed query gets. Any execution failure is the caller's Err (the
+/// proposal dialog shows the reason; nothing was persisted).
+pub async fn shape_samples(
+    ctx: &datafusion::prelude::SessionContext,
+    source: &str,
+    sql: &str,
+) -> Result<(String, String), String> {
+    let before = crate::analytics::run_query(
+        ctx,
+        &format!("SELECT * FROM {source} LIMIT {SHAPE_SAMPLE_ROWS}"),
+    )
+    .await?
+    .markdown;
+    let after = crate::analytics::run_query(
+        ctx,
+        &format!("SELECT * FROM ({sql}) AS shaped LIMIT {SHAPE_SAMPLE_ROWS}"),
+    )
+    .await?
+    .markdown;
+    Ok((before, after))
+}
+
+/// Whether the shaping completion must take the local path: any of the file
+/// ids is effectively local-only (the vault's ancestor-wins resolver via its
+/// stateless single-file accessor), or the source names a saved view that is
+/// transitively local-only. This is the H1 `local_model_config()` seam — the
+/// same swap a local-only investigation applies at the model-config
+/// chokepoint (`investigations::resolve_ask_context`), applied here BEFORE
+/// any transport exists.
+pub fn shape_is_local_only(source: &str, file_ids: &[String]) -> bool {
+    if file_ids
+        .iter()
+        .any(|id| crate::vault::node_is_local_only(id))
+    {
+        return true;
+    }
+    let records = list();
+    records
+        .iter()
+        .find(|v| v.name.eq_ignore_ascii_case(source.trim()))
+        .is_some_and(|v| view_effectively_local_only(v, &records))
+}
+
+/// Whether a config can actually complete. Mirrors synth::has_real_model
+/// (private there): the on-device model always can; a remote provider only
+/// with a key; anything else is the extractive fallback — no model to shape
+/// with.
+fn cfg_has_real_model(cfg: &crate::llm::ModelCfg) -> bool {
+    match cfg.provider_id.as_deref() {
+        Some("local") => true,
+        Some(id) if id == "anthropic" || crate::llm::remote_provider(id).is_some() => {
+            cfg.api_key.as_deref().is_some_and(|k| !k.is_empty())
+        }
+        _ => false,
+    }
+}
+
+/// Drain one completion stream to a string — synth's private `collect`,
+/// replicated (the multi-step idiom at its `collect(llm::stream_answer(…))`
+/// call sites).
+async fn collect(mut s: crate::llm::AnswerStream) -> String {
+    use futures::StreamExt;
+    let mut out = String::new();
+    while let Some(d) = s.next().await {
+        out.push_str(&d);
+    }
+    out
+}
+
+/// The shaping ask (design.md "Shaping ask"): register the files (and
+/// eligible saved views) the direct-execution way, resolve `source` to a
+/// registered table or view, make ONE completion proposing a transform
+/// SELECT, validate it with `guard_sql`, and render before/after sample
+/// evidence. Returns a PROPOSAL — nothing persists here, ever. A local-only
+/// source forces the local model path before any transport exists (the H1
+/// seam), and an extractive/keyless provider refuses with
+/// `SHAPE_NEEDS_MODEL` (the dispatch arms answer `{available:false}`). Files
+/// are never opened for write anywhere in this flow.
+pub async fn shape_view(
+    source: &str,
+    instruction: &str,
+    file_ids: &[String],
+    cfg: crate::llm::ModelCfg,
+) -> Result<ShapeProposal, String> {
+    let source = source.trim();
+    let instruction = instruction.trim();
+    if source.is_empty() {
+        return Err("a source table or view is required".to_string());
+    }
+    if instruction.is_empty() {
+        return Err("an instruction is required".to_string());
+    }
+
+    // Local-only forcing FIRST — the cfg swap must precede the posture and
+    // the model check so a private source can never select a cloud path.
+    let cfg = if shape_is_local_only(source, file_ids) {
+        crate::profile::local_model_config()
+    } else {
+        cfg
+    };
+    if !cfg_has_real_model(&cfg) {
+        return Err(SHAPE_NEEDS_MODEL.to_string());
+    }
+    // Registration posture follows the EFFECTIVE provider: on a cloud path
+    // the belt-and-suspenders registration filters drop local-only files and
+    // views (none should remain — the forcing above already swapped when any
+    // was in play); the forced/local path registers everything.
+    let is_cloud = crate::synth::is_cloud_provider(&cfg);
+
+    // Resolve + register exactly like the direct-execution path
+    // (analytics::direct_tables): active + included ids only, the tabular/PDF
+    // registration gate, then files and eligible views into one fresh ctx.
+    let active: std::collections::HashSet<String> = crate::vault::active_included_file_ids()
+        .into_iter()
+        .collect();
+    let mut files: Vec<(String, String, std::path::PathBuf)> = Vec::new();
+    for id in file_ids {
+        if !active.contains(id) {
+            continue;
+        }
+        if let Some((name, abs)) = crate::vault::doc_path(id) {
+            if crate::analytics::is_tabular(&name) || crate::analytics::is_pdf(&name) {
+                files.push((id.clone(), name, abs));
+            }
+        }
+    }
+    let ctx = datafusion::prelude::SessionContext::new();
+    let regs = crate::analytics::register_tables(&ctx, &files, is_cloud).await;
+    let view_regs = crate::analytics::register_views(&ctx, &regs, is_cloud).await;
+
+    // The source must name a registered table or view — its card is the ONE
+    // schema block the completion sees (bounded like the analytics prompt).
+    let resolved = regs
+        .iter()
+        .find(|r| r.table.eq_ignore_ascii_case(source))
+        .map(|r| (r.table.clone(), r.card.clone()))
+        .or_else(|| {
+            view_regs
+                .iter()
+                .find(|v| v.name.eq_ignore_ascii_case(source))
+                .map(|v| (v.name.clone(), v.card.clone()))
+        });
+    let Some((source, card)) = resolved else {
+        return Err(format!(
+            "\"{source}\" is not available to shape — pick a table or saved view from the current files"
+        ));
+    };
+
+    // ONE completion (the multi-step idiom): the card + the few-shots as
+    // context blocks, the fixed template as the question, empty history.
+    let ctxs = vec![
+        crate::llm::Ctx {
+            name: source.clone(),
+            text: card,
+            score: 1.0,
+        },
+        crate::llm::Ctx {
+            name: "shaping examples".to_string(),
+            text: shape_fewshot_block(),
+            score: 0.0,
+        },
+    ];
+    let raw = collect(crate::llm::stream_answer(
+        shape_question(&source, instruction),
+        ctxs,
+        cfg,
+        Vec::new(),
+    ))
+    .await;
+    let (sql, summary) = parse_shape_reply(&crate::synth::strip_markers(&raw))?;
+    let (before, after) = shape_samples(&ctx, &source, &sql).await?;
+    Ok(ShapeProposal {
+        sql,
+        before,
+        after,
+        summary,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
