@@ -75,11 +75,17 @@ registration:
    footer ("Computed from: …") keeps listing real files with saved times —
    freshness IS the underlying digests; there is nothing else to expire.
 
-**Answer cache.** Registered views join the cache key material as
-`v:<name>\u{0}<sql>\u{0}<source digests>` per view, sorted, appended ONLY
-when at least one view registered — the H1 "r:" precedent, so every
-legacy key stays byte-identical. Redefining is impossible (non-goal) but
-source digests already churn the key when data changes.
+**Answer cache.** The key is computed once at ask entry, BEFORE retrieval
+— so the per-ask registered set is not knowable at key time. Instead the
+key material gains a `v:` component digesting the view REGISTRY as it
+could apply to this ask: every view eligible under the ask's posture
+(cloud asks exclude effectively-local-only views), sorted by name, as
+`name\u{0}sql` pairs — appended ONLY when at least one such view exists
+(the H1 "r:" precedent, so every legacy key stays byte-identical). Source
+DATA freshness is already covered by the existing candidate digest;
+the `v:` component covers the definitions themselves, so creating,
+renaming, or deleting a view invalidates honestly. KEEP IN SYNC across
+answer_cache.rs ⇄ answerCache.ts.
 
 ## Local-only propagation
 
