@@ -962,6 +962,13 @@ pub async fn chat_post(headers: HeaderMap, body: Option<Json<Value>>) -> Respons
         bypass_cache: body["bypassCache"].as_bool().unwrap_or(false),
         persist_allowed: body["persistAllowed"].as_bool().unwrap_or(false),
     };
+    // Two-phase plan approval (openspec: add-beam-loop §4): the Phase-1 preview
+    // flag and the Phase-2 approved SQL, both optional and mirroring the cache
+    // controls above. Absent = an ordinary ask. PARITY: commands.rs chat_ask.
+    let plan = lighthouse_core::beam::PlanCtl {
+        plan_only: body["planOnly"].as_bool().unwrap_or(false),
+        approved_plan: body["approvedPlan"].as_str().map(String::from),
+    };
     // Prior turns (sanitized) so follow-ups have conversational context; capped
     // to the last few to bound token cost.
     let history: Vec<ChatTurn> = body["history"]
@@ -1028,6 +1035,7 @@ pub async fn chat_post(headers: HeaderMap, body: Option<Json<Value>>) -> Respons
             history,
             cfg,
             cache,
+            plan,
             preferred_conversation_ids,
         );
         let mut final_files: Vec<String> = Vec::new();

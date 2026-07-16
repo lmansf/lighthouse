@@ -25,12 +25,12 @@
 - [x] 3.5 Tests: summed-across-calls meter; local $0.00; silent provider "not reported"; cache-replay cost = 0 new / $0.
 
 ## 4. Two-phase plan approval (§4)
-- [ ] 4.1 Phase 1: `plan_only: Option<bool>` flag on `chat_ask` (commands.rs:900-901, mirroring `bypass_cache`/`persist_allowed`) runs step-1 planning and returns a PLAN chunk — a new optional field on `ChatChunk` (contracts.rs:87, beside `analytics`/`draft`/`meta`) carrying the intended verbatim SQL + the context it would use — then STOPS (no execution, no egress).
-- [ ] 4.2 Phase 2: on `approved_plan` echoed back on re-issue, EXECUTE that exact plan and SKIP re-planning step 1 (the plan the user saw is the plan that runs).
-- [ ] 4.3 Cache/keys on the APPROVED ask, not the plan-only op (the plan-only op leaves the cache unchanged).
-- [ ] 4.4 Twin PARITY: plan execution is Rust-only; the twin returns the plan op honestly or degrades, `PARITY:` comment both sides.
-- [ ] 4.5 `DesktopSettings` if an approval toggle is added: extend `settings_test.rs` as in 2.7.
-- [ ] 4.6 Tests: two-phase E2E — plan-only returns SQL+context and executes nothing; decline runs/egresses nothing; approve executes the shown plan without re-planning; only the approved ask is cached.
+- [x] 4.1 Phase 1: `plan_only: Option<bool>` flag on `chat_ask` (commands.rs, mirroring `bypass_cache`/`persist_allowed`) runs step-1 planning and returns a PLAN chunk — `plan: Option<PlanPreview>` on `ChatChunk` (contracts.rs, beside `analytics`/`draft`/`meta`) carrying the verbatim SQL + the tables it would read — then STOPS (no execution; only the plan-generation call egresses). Threaded `commands.rs` + `routes.rs` → `answer_pipeline`/`live_pipeline` via `beam::PlanCtl`.
+- [x] 4.2 Phase 2: on `approved_plan` echoed back on re-issue, EXECUTE that exact SQL as step 1 (seeded via `beam::step_one_plan`) and SKIP re-planning step 1; the guard still runs (`run_query` → `guard_sql`). Applies in both the multi-step loop and the single-query path.
+- [x] 4.3 Cache keys on the APPROVED ask, not the plan-only op: `answer_pipeline` bypasses the whole key/lookup/insert path when `plan_only` (`beam::plan_only_bypasses_cache`), leaving the cache unchanged.
+- [x] 4.4 Twin PARITY: plan execution is Rust-only (analytics); the twin has no analytics branch and degrades honestly. `PARITY:` comments both sides; `PlanPreview`/`plan` shape mirrored in `types.ts` + `synth.ts` (byte-identical field names `sql`/`tables`/`plan`).
+- [x] 4.5 No approval SETTINGS toggle added (both phases are per-ask client params, not a persisted setting) — `settings_test.rs` untouched, as directed.
+- [x] 4.6 Tests: plan-only bypasses the cache (pipeline test over the model-free meta path — `plan_only_neither_reads_nor_writes_the_answer_cache`); unit tests for approved-SQL⇒step-1 + skip-replanning flag + `plan_only`⇒bypass + guard-runs-on-approved-SQL (`beam.rs`). The live plan→approve path needs a model and can't run in the no-network container.
 
 ## 5. The context manifest (§5)
 - [ ] 5.1 Per-entry manifest on the final-chunk seam: for each `Ctx`, `{ name, kind (schema-card|query-result|retrieved-chunk|join-hints|chart-options|conversation-note), chars, file_id?, local_only?, score }` — METADATA ONLY, NEVER `Ctx.text` (that would copy private bytes into `CachedAnswer.text`/G6 notes; text stays behind the device-only inspector, inspect.rs).

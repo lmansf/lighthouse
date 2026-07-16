@@ -160,6 +160,67 @@ impl BeamLoop {
     }
 }
 
+// --- Two-phase plan approval (openspec: add-beam-loop §4) --------------------------
+//
+// The ask transport is one-shot and unidirectional (design.md "headline
+// constraint"): a `chat_ask` takes all input up front and streams chunks out
+// with no handle to receive a mid-flight signal, so there is no way to pause the
+// stream and wait for approval. Approval is therefore TWO-PHASE, driven by two
+// optional per-ask params mirroring `CacheCtl`'s `bypass_cache`/`persist_allowed`.
+// The control DECISIONS both phases turn on are factored here as pure functions so
+// they are unit-testable without a model (the generator hosts the I/O — the
+// planning call, `run_query`, and the `yield`s — exactly as it does the loop).
+
+/// The two-phase plan-approval controls for one ask (openspec: add-beam-loop §4),
+/// carried from the client beside `CacheCtl`. Both default to the inert value, so
+/// an older caller that omits them issues an ordinary ask unchanged.
+#[derive(Debug, Clone, Default)]
+pub struct PlanCtl {
+    /// Phase 1: preview step-1 planning and STOP — emit the PLAN chunk, execute
+    /// nothing. A plan preview is not an answer, so the pipeline leaves the
+    /// answer cache untouched (see `plan_only_bypasses_cache`).
+    pub plan_only: bool,
+    /// Phase 2: the exact SQL the user approved, echoed back on re-issue. When
+    /// present it runs as step 1 with no planning call (see `step_one_plan`); the
+    /// read-only guard is NOT bypassed (the generator still runs it via
+    /// `run_query` — approval gates EXECUTION, not the guard).
+    pub approved_plan: Option<String>,
+}
+
+/// Phase 1 cache decision (openspec: add-beam-loop §4.3). A `plan_only` op is a
+/// PREVIEW, not an answer: it must neither READ nor WRITE the answer cache, so
+/// the pipeline bypasses the cache entirely when this is true. Caching keys on
+/// the APPROVED ask instead — the plan-only op leaves the cache unchanged.
+/// Centralizes the rule so the pipeline and its test agree on one predicate.
+pub fn plan_only_bypasses_cache(plan_only: bool) -> bool {
+    plan_only
+}
+
+/// The outcome of Phase 2 step-1 selection (openspec: add-beam-loop §4.2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StepOnePlan {
+    /// The approved SQL to execute as step 1, or `None` to plan step 1 normally.
+    pub sql: Option<String>,
+    /// True when the step-1 planning model call is SKIPPED because an approved
+    /// plan was supplied — the plan the user saw is the plan that runs (trust,
+    /// and no double plan cost).
+    pub skip_planning: bool,
+}
+
+/// Phase 2 step-1 selection (openspec: add-beam-loop §4.2). Given the client's
+/// echoed `approved_plan`, decide the loop's first SQL and whether to SKIP the
+/// step-1 planning model call. A non-blank approved plan ⇒ execute that exact
+/// SQL as step 1 and skip planning; absent (or blank) ⇒ plan step 1 as usual.
+/// The GUARD IS NOT BYPASSED: the caller still runs `guard_sql`/`run_query` on
+/// the returned SQL, because approval gates execution, not the read-only guard
+/// (constitution §14).
+pub fn step_one_plan(approved_plan: Option<&str>) -> StepOnePlan {
+    match approved_plan.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(sql) => StepOnePlan { sql: Some(sql.to_string()), skip_planning: true },
+        None => StepOnePlan { sql: None, skip_planning: false },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -242,5 +303,55 @@ mod tests {
             std::hint::spin_loop();
         }
         assert_eq!(beam.stop_before_step(0, None), Some(StopReason::Deadline));
+    }
+
+    // --- Two-phase plan approval decisions (openspec: add-beam-loop §4) ------------
+
+    #[test]
+    fn approved_plan_becomes_step_one_and_skips_planning() {
+        // §4.2: a supplied approved plan runs as step 1 with NO planning call —
+        // the plan the user saw is the plan that runs.
+        let approved = step_one_plan(Some("SELECT region, SUM(amount) FROM sales GROUP BY region"));
+        assert_eq!(
+            approved.sql.as_deref(),
+            Some("SELECT region, SUM(amount) FROM sales GROUP BY region")
+        );
+        assert!(approved.skip_planning, "an approved plan skips step-1 planning");
+
+        // Absent ⇒ plan normally (no seed, no skip).
+        let unset = step_one_plan(None);
+        assert_eq!(unset.sql, None);
+        assert!(!unset.skip_planning);
+
+        // A blank/whitespace echo is treated as absent — it can never be a plan,
+        // so the loop plans step 1 as usual rather than "executing" nothing.
+        let blank = step_one_plan(Some("   "));
+        assert_eq!(blank, StepOnePlan { sql: None, skip_planning: false });
+    }
+
+    #[test]
+    fn plan_only_bypasses_the_cache_but_an_ordinary_ask_does_not() {
+        // §4.3: only a plan-only op bypasses the answer cache; an approved (or
+        // ordinary) ask keys and caches normally.
+        assert!(plan_only_bypasses_cache(true));
+        assert!(!plan_only_bypasses_cache(false));
+    }
+
+    #[test]
+    fn the_read_only_guard_still_runs_on_an_approved_plan() {
+        // §4 constraint: approval gates EXECUTION, it does NOT bypass the guard.
+        // The engine runs the approved SQL through the SAME `run_query` →
+        // `guard_sql` path, so a non-SELECT echoed back as "approved" is still
+        // rejected before it can touch the vault, while a plain SELECT passes.
+        let approved = step_one_plan(Some("DELETE FROM sales"));
+        let sql = approved.sql.expect("an approved plan is present");
+        assert!(
+            crate::analytics::guard_sql(&sql).is_err(),
+            "the guard rejects a non-SELECT even when it arrives as an approved plan"
+        );
+        assert!(
+            crate::analytics::guard_sql("SELECT * FROM sales").is_ok(),
+            "a read-only approved SELECT passes the guard"
+        );
     }
 }

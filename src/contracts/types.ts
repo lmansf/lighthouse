@@ -404,6 +404,17 @@ export interface ChatChunk {
    */
   draft?: boolean;
   /**
+   * Two-phase plan approval (openspec: add-beam-loop §4.1): on a `planOnly` ask
+   * the engine returns THIS terminal PLAN chunk — the verbatim proposed step-1
+   * SQL and the tables it would read — and executes nothing. Phase 2 re-issues
+   * the ask with the approved SQL echoed back, which runs without re-planning.
+   * PARITY: plan execution is Rust-only (analytics); this dev twin has no
+   * analytics branch, so it NEVER emits a plan — the shape is mirrored so the
+   * same UI renders the Rust engine's preview. KEEP IN SYNC with the Rust
+   * ChatChunk.plan / PlanPreview in contracts.rs.
+   */
+  plan?: PlanPreview;
+  /**
    * Engine-emitted provenance stamp (final chunk only): where this answer was
    * computed and how much was sent. NEVER derived from model text — the engine
    * sets it where the prompt is assembled, so it counts what was actually
@@ -449,6 +460,20 @@ export interface ChatChunk {
 export interface AnalyticsMeta {
   sql: string;
   fileIds: string[];
+}
+
+/**
+ * A previewed analytics plan (openspec: add-beam-loop §4.1), carried on a
+ * `planOnly` ask's terminal PLAN chunk. `sql` is the VERBATIM proposed step-1
+ * SQL — the exact statement Phase 2 would execute — shown before it ever touches
+ * the vault. `tables` are the names of the registered tables/views it would read
+ * (metadata only, never the context bytes). PARITY: plan execution is Rust-only
+ * (analytics); this dev twin never emits a plan. KEEP IN SYNC with the Rust
+ * PlanPreview in contracts.rs.
+ */
+export interface PlanPreview {
+  sql: string;
+  tables: string[];
 }
 
 /**

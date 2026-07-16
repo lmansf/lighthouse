@@ -38,6 +38,7 @@ async fn final_chunk_for(cfg: ModelCfg) -> ChatChunk {
         vec![],
         cfg,
         Default::default(),
+        Default::default(),
         vec![],
     );
     let mut last_done: Option<ChatChunk> = None;

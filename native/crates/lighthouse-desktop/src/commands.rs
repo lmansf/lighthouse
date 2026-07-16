@@ -899,6 +899,14 @@ pub async fn chat_ask(
     // privacy-safe default (memory-only cache, no disk mirror).
     bypass_cache: Option<bool>,
     persist_allowed: Option<bool>,
+    // Two-phase plan approval (openspec: add-beam-loop §4), mirroring the
+    // optional cache controls above. Phase 1: `plan_only` runs step-1 planning
+    // and returns a PLAN chunk, then STOPS (executes nothing, egresses only the
+    // plan-generation call). Phase 2: `approved_plan` is the approved SQL echoed
+    // back on re-issue — executed as step 1 without re-planning (the guard still
+    // runs). Absent = an ordinary ask, so an older caller invokes unchanged.
+    plan_only: Option<bool>,
+    approved_plan: Option<String>,
     on_chunk: Channel<ChatChunk>,
 ) -> Result<(), String> {
     let history: Vec<ChatTurn> = {
@@ -955,6 +963,10 @@ pub async fn chat_ask(
         lighthouse_core::answer_cache::CacheCtl {
             bypass_cache: bypass_cache.unwrap_or(false),
             persist_allowed: persist_allowed.unwrap_or(false),
+        },
+        lighthouse_core::beam::PlanCtl {
+            plan_only: plan_only.unwrap_or(false),
+            approved_plan,
         },
         preferred_conversation_ids,
     );

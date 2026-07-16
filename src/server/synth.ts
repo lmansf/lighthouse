@@ -322,6 +322,14 @@ export async function* answerPipeline(
   cache: CacheCtl = {},
   preferredConversationIds: string[] = [],
 ): AsyncGenerator<ChatChunk> {
+  // PARITY (openspec: add-beam-loop §4.4): two-phase plan approval is Rust-only.
+  // Plan generation lives in the analytics branch, which the Rust engine ships
+  // and this dev twin has no equivalent of — so the twin exposes no `planOnly`/
+  // `approvedPlan` params, never previews-then-stops, and never emits a `plan`
+  // chunk (its shape is mirrored in types.ts so the same UI can render the Rust
+  // engine's preview; the Rust `answer_pipeline` also bypasses the answer cache
+  // for a plan-only op — a case that cannot arise here). Honest degradation, not
+  // a stub. KEEP IN SYNC with synth.rs::answer_pipeline.
   // Key at ask entry. A failing cache degrades to "no cache this ask".
   let key: string | null = null;
   try {

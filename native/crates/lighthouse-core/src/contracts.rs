@@ -113,6 +113,18 @@ pub struct ChatChunk {
     /// twin (user-visible text).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub draft: Option<bool>,
+    /// Two-phase plan approval (openspec: add-beam-loop §4.1): on a `plan_only`
+    /// ask the engine returns THIS terminal PLAN chunk — the verbatim proposed
+    /// step-1 SQL and the tables it would read — and executes NOTHING, so nothing
+    /// runs against the vault and no execution/narration egress happens (the
+    /// plan-generation model call is the sole cost of previewing; it rides the
+    /// `meta.cost` meter honestly). Phase 2 re-issues the ask with the approved
+    /// SQL echoed back; the engine runs that exact plan without re-planning. Only
+    /// the (Rust-only) analytics plan-only branch sets this. PARITY: the TS twin
+    /// has no analytics branch, so it never emits a plan — KEEP IN SYNC with the
+    /// ChatChunk["plan"] shape in src/contracts/types.ts.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub plan: Option<PlanPreview>,
     /// Engine-emitted provenance stamp on the FINAL chunk (privacy-legibility):
     /// where the answer was computed and how much was sent. NEVER model text —
     /// the engine sets it where the prompt is assembled, so it counts what was
@@ -192,6 +204,22 @@ pub struct CostMeta {
 pub struct AnalyticsMeta {
     pub sql: String,
     pub file_ids: Vec<String>,
+}
+
+/// A previewed analytics plan (openspec: add-beam-loop §4.1), carried on a
+/// `plan_only` ask's terminal PLAN chunk. `sql` is the VERBATIM proposed
+/// step-1 SQL — the exact statement Phase 2 would execute — shown before it
+/// ever touches the vault (constitution §14). `tables` are the names of the
+/// registered tables/views the SQL would read (from `regs`/`view_regs`) —
+/// METADATA ONLY, never the context bytes (the full per-entry manifest is §5).
+/// Because the SQL is not executed in Phase 1, nothing runs against the vault
+/// and no execution/narration egress happens. KEEP IN SYNC with the
+/// ChatChunk["plan"] shape in src/contracts/types.ts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanPreview {
+    pub sql: String,
+    pub tables: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

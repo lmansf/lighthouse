@@ -10,7 +10,8 @@ use std::pin::Pin;
 use futures::{Stream, StreamExt};
 
 use crate::contracts::{
-    AnalyticsMeta, ChatChunk, ChatProgress, ChatTurn, ChunkMeta, CostMeta, RagReference,
+    AnalyticsMeta, ChatChunk, ChatProgress, ChatTurn, ChunkMeta, CostMeta, PlanPreview,
+    RagReference,
 };
 use crate::llm::{self, Ctx, ModelCfg};
 use crate::table_profile::{is_profileable, table_profile};
@@ -336,6 +337,7 @@ fn progress(label: String, step: usize, total: usize) -> ChatChunk {
         progress: Some(ChatProgress { label, step, total, intent: None }),
         analytics: None,
         draft: None,
+        plan: None,
         meta: None,
         done: false,
     }
@@ -354,6 +356,7 @@ fn step_progress(label: String, step: usize, total: usize, intent: &str) -> Chat
         progress: Some(ChatProgress { label, step, total, intent: Some(intent.to_string()) }),
         analytics: None,
         draft: None,
+        plan: None,
         meta: None,
         done: false,
     }
@@ -366,6 +369,7 @@ fn delta(d: String) -> ChatChunk {
         progress: None,
         analytics: None,
         draft: None,
+        plan: None,
         meta: None,
         done: false,
     }
@@ -381,6 +385,7 @@ fn draft_chunk(d: String) -> ChatChunk {
         progress: None,
         analytics: None,
         draft: Some(true),
+        plan: None,
         meta: None,
         done: false,
     }
@@ -406,12 +411,47 @@ fn final_chunk(
         progress: None,
         analytics: None,
         draft: None,
+        plan: None,
         meta: Some(ChunkMeta {
             origin: origin.to_string(),
             excerpt_count,
             source_file_count,
             // Live answers never carry the replay stamp; the answer-cache
             // wrapper adds `cached_at` only when it replays a stored entry.
+            cached_at: None,
+            cost: Some(cost),
+        }),
+        done: true,
+    }
+}
+
+/// The terminal PLAN chunk of a Phase-1 `plan_only` op (openspec: add-beam-loop
+/// §4.1): the verbatim proposed step-1 SQL and the tables it would read, with
+/// NOTHING executed. It rides the final-chunk seam (`done: true`) so the
+/// transport closes the stream after it, carries the plan's `references` (the
+/// files whose schemas the planning call saw) and an honest `cost` meter — the
+/// plan-generation model call IS egress, but no SQL ran, so nothing touched the
+/// vault and no narration egressed. PARITY: analytics is Rust-only, so the twin
+/// never emits a plan.
+fn plan_chunk(
+    preview: PlanPreview,
+    references: Vec<RagReference>,
+    excerpt_count: usize,
+    origin: &str,
+    cost: CostMeta,
+) -> ChatChunk {
+    let source_file_count = references.len();
+    ChatChunk {
+        delta: String::new(),
+        references: Some(references),
+        progress: None,
+        analytics: None,
+        draft: None,
+        plan: Some(preview),
+        meta: Some(ChunkMeta {
+            origin: origin.to_string(),
+            excerpt_count,
+            source_file_count,
             cached_at: None,
             cost: Some(cost),
         }),
@@ -530,10 +570,30 @@ pub fn answer_pipeline(
     history: Vec<ChatTurn>,
     cfg: ModelCfg,
     cache: crate::answer_cache::CacheCtl,
+    plan: crate::beam::PlanCtl,
     preferred_conversation_ids: Vec<String>,
 ) -> Pin<Box<dyn Stream<Item = ChatChunk> + Send>> {
     Box::pin(async_stream::stream! {
         let is_cloud = is_cloud_provider(&cfg);
+        // Phase 1 (openspec: add-beam-loop §4.3): a `plan_only` op is a PREVIEW,
+        // not an answer — it must neither read nor write the answer cache. Run
+        // live directly (no key, no lookup, no insert, no posture side effect) so
+        // the cache is left exactly as it was; caching keys on the APPROVED ask.
+        if crate::beam::plan_only_bypasses_cache(plan.plan_only) {
+            let mut inner = live_pipeline(
+                question,
+                included_file_ids,
+                attachment_file_ids,
+                history,
+                cfg,
+                plan,
+                preferred_conversation_ids,
+            );
+            while let Some(c) = inner.next().await {
+                yield c;
+            }
+            return;
+        }
         // Key at ask entry (blocking: one cached walk + a stat per candidate).
         // A panicked helper degrades to "no cache this ask", never a failure.
         let key: Option<String> = {
@@ -575,6 +635,7 @@ pub fn answer_pipeline(
                     progress: None,
                     analytics: hit.analytics,
                     draft: None,
+                    plan: None,
                     meta: Some(ChunkMeta { cached_at: Some(hit.created_ms), ..hit.meta }),
                     done: true,
                 };
@@ -591,6 +652,7 @@ pub fn answer_pipeline(
             attachment_file_ids,
             history,
             cfg,
+            plan,
             preferred_conversation_ids,
         );
         let mut text = String::new();
@@ -645,6 +707,11 @@ fn live_pipeline(
     attachment_file_ids: Vec<String>,
     history: Vec<ChatTurn>,
     cfg: ModelCfg,
+    // Two-phase plan approval (openspec: add-beam-loop §4). `plan_only` previews
+    // step-1 SQL and stops; `approved_plan` runs the approved SQL as step 1
+    // without re-planning. Both apply only in the remote-keyed analytics branch;
+    // everywhere else they are inert (an ordinary ask).
+    plan: crate::beam::PlanCtl,
     preferred_conversation_ids: Vec<String>,
 ) -> Pin<Box<dyn Stream<Item = ChatChunk> + Send>> {
     Box::pin(async_stream::stream! {
@@ -1081,6 +1148,85 @@ fn live_pipeline(
                     //     retry; every number stays engine-computed.
                     let remote_keyed =
                         cfg.provider_id.as_deref().is_some_and(|id| id != "local");
+                    // The Beam loop's configured step budget (openspec §2.3),
+                    // hoisted so BOTH the plan-approval preview (§4) and the loop
+                    // read the same value.
+                    let max_steps =
+                        crate::settings::read_desktop_settings().beam_max_steps_effective();
+
+                    // === Two-phase plan approval — Phase 1 (openspec §4.1) ===
+                    // A `plan_only` ask previews the step-1 SQL and STOPS: it
+                    // executes no query, so nothing runs against the vault and no
+                    // execution/narration egress happens. The plan-generation model
+                    // call is the sole cost of previewing (surfaced honestly on the
+                    // plan chunk's cost meter). Remote-keyed analytics only — local
+                    // keeps its single-query path and never previews. The planner
+                    // MATCHES the path that would run (the multi-step step-1 prompt
+                    // for a multi_step_cue ask, else the single-query prompt), so the
+                    // previewed SQL is faithful to what execution would plan; the
+                    // tables are the registered names (metadata only — §5 is the
+                    // full manifest).
+                    if remote_keyed && plan.plan_only {
+                        let multi = crate::analytics::multi_step_cue(&question);
+                        yield step_progress(
+                            "Planning the query…".to_string(),
+                            1,
+                            max_steps,
+                            "planning",
+                        );
+                        let planner = if multi {
+                            crate::analytics::step_question(&question, &[], max_steps)
+                        } else {
+                            crate::analytics::sql_question(
+                                &question,
+                                crate::analytics::last_query_used(&history).as_deref(),
+                            )
+                        };
+                        let raw = collect(llm::stream_answer(
+                            planner,
+                            sql_ctxs.clone(),
+                            cfg.clone(),
+                            history.clone(),
+                            Some(sink.clone()),
+                        ))
+                        .await;
+                        let proposed = if multi {
+                            match crate::analytics::parse_step_reply(&strip_markers(&raw)) {
+                                crate::analytics::StepReply::Sql(sql) => Some(sql),
+                                crate::analytics::StepReply::Done => None,
+                            }
+                        } else {
+                            crate::analytics::extract_sql(&strip_markers(&raw))
+                        };
+                        // The plan's honest cost is the previewing call's tokens
+                        // (None ⇒ "not reported"); no SQL ran, so no vault or
+                        // narration egress. `refs` are the files whose schema cards
+                        // the planner saw.
+                        let (refs, _meta_ids) = analytics_refs(&regs);
+                        let cost = cost_meta(&cfg, sink.total());
+                        match proposed {
+                            Some(sql) => {
+                                let tables: Vec<String> = regs
+                                    .iter()
+                                    .map(|r| r.file_name.clone())
+                                    .chain(view_regs.iter().map(|v| v.name.clone()))
+                                    .collect();
+                                yield plan_chunk(
+                                    PlanPreview { sql, tables },
+                                    refs,
+                                    sql_ctxs.len(),
+                                    &origin,
+                                    cost,
+                                );
+                            }
+                            // The model proposed no query (an immediate DONE / no
+                            // SQL): nothing to preview and — plan_only — nothing to
+                            // execute. A bare terminal chunk closes the stream.
+                            None => yield final_chunk(refs, sql_ctxs.len(), &origin, cost),
+                        }
+                        return;
+                    }
+
                     if remote_keyed && crate::analytics::multi_step_cue(&question) {
                         let mut steps: Vec<crate::analytics::StepRecord> = Vec::new();
                         let mut last_chart: Option<String> = None;
@@ -1104,9 +1250,9 @@ fn live_pipeline(
                         // and the §1 token ceiling — plus a no-progress guard. The
                         // single combined plan+decide model call per iteration
                         // (§2.2) is unchanged, and every number is still computed
-                        // by the guarded `run_query`. See crate::beam.
-                        let max_steps =
-                            crate::settings::read_desktop_settings().beam_max_steps_effective();
+                        // by the guarded `run_query`. See crate::beam. (max_steps
+                        // is hoisted above the plan-approval preview so both read
+                        // the same budget.)
                         // §2 wires the token ceiling as unset (None ⇒ never
                         // binding); §3 supplies a real ceiling from the pricing
                         // constants. With None — and with usage possibly
@@ -1117,30 +1263,43 @@ fn live_pipeline(
                             std::time::Instant::now() + crate::beam::DEADLINE,
                             None,
                         ));
+                        // Phase 2 (openspec: add-beam-loop §4.2): an approved plan
+                        // runs as step 1 with NO planning call — the plan the user
+                        // saw is the plan that runs (trust, and no double plan
+                        // cost). `step_one_plan` yields the seed SQL, taken once on
+                        // the first iteration; the guard is NOT bypassed — the
+                        // `run_query` below still runs `guard_sql` on it.
+                        let mut step_one =
+                            crate::beam::step_one_plan(plan.approved_plan.as_deref());
                         'steps: while beam
                             .stop_before_step(steps.len(), sink.total())
                             .is_none()
                         {
                             let n = steps.len() + 1;
-                            yield step_progress(
-                                format!("Planning query {n} (of up to {max_steps})…"),
-                                n,
-                                max_steps,
-                                "planning",
-                            );
-                            let raw = collect(llm::stream_answer(
-                                crate::analytics::step_question(&question, &steps, max_steps),
-                                sql_ctxs.clone(),
-                                cfg.clone(),
-                                history.clone(),
-                                Some(sink.clone()),
-                            ))
-                            .await;
-                            let mut attempt =
+                            let mut attempt = if let Some(sql) = step_one.sql.take() {
+                                // Approved step-1 SQL: skip planning, execute the
+                                // exact plan the user approved (guarded below).
+                                sql
+                            } else {
+                                yield step_progress(
+                                    format!("Planning query {n} (of up to {max_steps})…"),
+                                    n,
+                                    max_steps,
+                                    "planning",
+                                );
+                                let raw = collect(llm::stream_answer(
+                                    crate::analytics::step_question(&question, &steps, max_steps),
+                                    sql_ctxs.clone(),
+                                    cfg.clone(),
+                                    history.clone(),
+                                    Some(sink.clone()),
+                                ))
+                                .await;
                                 match crate::analytics::parse_step_reply(&strip_markers(&raw)) {
                                     crate::analytics::StepReply::Done => break 'steps,
                                     crate::analytics::StepReply::Sql(sql) => sql,
-                                };
+                                }
+                            };
                             // No-progress guard rule (a): a planned SQL identical
                             // to a prior step re-computes a known result — stop
                             // instead of spending budget on it.
@@ -1347,19 +1506,28 @@ fn live_pipeline(
                         }
                     }
 
-                    yield progress("Writing a query…".to_string(), 2, 4);
                     // A refining follow-up should adapt the conversation's
                     // previous query, not re-derive it from scratch.
                     let prior_sql = crate::analytics::last_query_used(&history);
-                    let raw = collect(llm::stream_answer(
-                        crate::analytics::sql_question(&question, prior_sql.as_deref()),
-                        sql_ctxs.clone(),
-                        cfg.clone(),
-                        history.clone(),
-                        Some(sink.clone()),
-                    ))
-                    .await;
-                    let mut attempt = crate::analytics::extract_sql(&strip_markers(&raw));
+                    // Phase 2 (openspec: add-beam-loop §4.2) also seeds the
+                    // single-query path: an approved plan runs as the query with no
+                    // planning call — the guard still runs in `run_query` below.
+                    let mut attempt =
+                        match crate::beam::step_one_plan(plan.approved_plan.as_deref()).sql {
+                            Some(sql) => Some(sql),
+                            None => {
+                                yield progress("Writing a query…".to_string(), 2, 4);
+                                let raw = collect(llm::stream_answer(
+                                    crate::analytics::sql_question(&question, prior_sql.as_deref()),
+                                    sql_ctxs.clone(),
+                                    cfg.clone(),
+                                    history.clone(),
+                                    Some(sink.clone()),
+                                ))
+                                .await;
+                                crate::analytics::extract_sql(&strip_markers(&raw))
+                            }
+                        };
                     let mut outcome: Option<(String, crate::analytics::QueryResult)> = None;
                     for round in 0..2 {
                         let Some(sql) = attempt.clone() else { break };
