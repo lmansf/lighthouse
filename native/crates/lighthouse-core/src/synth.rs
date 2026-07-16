@@ -988,6 +988,9 @@ fn live_pipeline(
             let mut steps: Vec<crate::analytics::StepRecord> = Vec::new();
             let mut labels: Vec<String> = Vec::new();
             let mut last_rows: Option<crate::ledger::RowFacts> = None;
+            // The representative step's full result (plan[0], the query
+            // AnalyticsMeta carries), retained for the §4 trust re-run.
+            let mut representative_result: Option<crate::analytics::QueryResult> = None;
             for (i, q) in plan.iter().enumerate() {
                 yield progress(
                     format!("Running query {} of {}…", i + 1, plan.len()),
@@ -997,9 +1000,15 @@ fn live_pipeline(
                 if let Ok(res) = crate::analytics::run_query(&ctx, &q.sql).await {
                     last_rows = Some(crate::ledger::RowFacts::of(&res));
                     labels.push(q.label.clone());
+                    let markdown = res.markdown.clone();
+                    // Hold the representative query's result (plan[0]) for the §4
+                    // re-run; other steps' batches drop after their markdown.
+                    if q.sql == representative_sql && representative_result.is_none() {
+                        representative_result = Some(res);
+                    }
                     steps.push(crate::analytics::StepRecord {
                         sql: q.sql.clone(),
-                        result_markdown: res.markdown,
+                        result_markdown: markdown,
                     });
                 }
             }
@@ -1101,6 +1110,18 @@ fn live_pipeline(
                     yield delta(format!("\n{ledger}\n"));
                 }
             }
+            // Certified answers (openspec: add-semantic-layer §3): the metrics
+            // the representative query (the one AnalyticsMeta carries) verifiably
+            // computed — engine-emitted after the Assumptions footer, never model
+            // text; empty ⇒ no line (byte-identical to a metric-free vault).
+            let semantic_eligible = crate::semantic::eligible_for_posture(is_cloud);
+            let certified = crate::analytics::certified_metrics(
+                &representative_sql,
+                &semantic_eligible.metrics,
+            );
+            if !certified.is_empty() {
+                yield delta(format!("\n*Certified:* {}\n", certified.join(", ")));
+            }
             if let Some(cap) = crate::analytics::row_cap_footer(&regs) {
                 yield delta(cap);
             }
@@ -1108,9 +1129,24 @@ fn live_pipeline(
             let (refs, meta_ids) = analytics_refs(&regs);
             let mut done =
                 final_chunk(refs, steps.len(), &origin, cost_meta(&cfg, sink.total()), manifest);
+            // Trust check (openspec: add-semantic-layer §4): reconcile the
+            // representative query's certified metric through the SAME guard
+            // (model-free, honest degradation) when a metric certified and its
+            // result is in hand.
+            let metric_rec = certified.first().and_then(|name| {
+                semantic_eligible.metrics.iter().find(|m| &m.name == name)
+            });
+            let trust = match (metric_rec, &representative_result) {
+                (Some(m), Some(res)) => {
+                    Some(crate::analytics::reconcile_metric(&ctx, &representative_sql, res, m).await)
+                }
+                _ => None,
+            };
             done.analytics = Some(AnalyticsMeta {
                 sql: representative_sql,
                 file_ids: meta_ids,
+                certified: (!certified.is_empty()).then(|| certified.clone()),
+                trust,
             });
             yield done;
             return;
@@ -1423,6 +1459,10 @@ fn live_pipeline(
                         // here (cheap) rather than reparse a row count out of
                         // the markdown (unreliable). None if no step succeeds.
                         let mut last_rows: Option<crate::ledger::RowFacts> = None;
+                        // The last executed step's full result, retained for the
+                        // §4 trust re-run (the query AnalyticsMeta carries); the
+                        // StepRecord keeps only markdown, so hold the batches here.
+                        let mut last_result: Option<crate::analytics::QueryResult> = None;
                         // Per-ask token accounting (openspec: add-beam-loop §1):
                         // the ask-level `sink` (opened at the top of the pipeline)
                         // is shared across this ask's plan calls, corrective
@@ -1511,8 +1551,9 @@ fn live_pipeline(
                                         beam.record_step(attempt.clone());
                                         steps.push(crate::analytics::StepRecord {
                                             sql: attempt.clone(),
-                                            result_markdown: res.markdown,
+                                            result_markdown: res.markdown.clone(),
                                         });
+                                        last_result = Some(res);
                                         continue 'steps;
                                     }
                                     Err(err) if round == 0 => {
@@ -1664,6 +1705,19 @@ fn live_pipeline(
                                     yield delta(format!("\n{ledger}\n"));
                                 }
                             }
+                            // Certified answers (openspec: add-semantic-layer §3):
+                            // the metrics the LAST executed step's SQL (the query
+                            // AnalyticsMeta carries) verifiably computed — emitted
+                            // after the Assumptions footer, never model text.
+                            let semantic_eligible =
+                                crate::semantic::eligible_for_posture(is_cloud);
+                            let certified = crate::analytics::certified_metrics(
+                                steps.last().map(|s| s.sql.as_str()).unwrap_or(""),
+                                &semantic_eligible.metrics,
+                            );
+                            if !certified.is_empty() {
+                                yield delta(format!("\n*Certified:* {}\n", certified.join(", ")));
+                            }
                             // Same row-cap honesty as the single-query path:
                             // the steps read the same registrations, so a
                             // capped workbook must disclose here too.
@@ -1690,9 +1744,28 @@ fn live_pipeline(
                             let (refs, meta_ids) = analytics_refs(&regs);
                             let mut done =
                                 final_chunk(refs, excerpt_count, &origin, cost, manifest);
+                            // Trust check (openspec: add-semantic-layer §4):
+                            // reconcile the last step's certified metric through
+                            // the SAME guard (model-free, honest degradation).
+                            // Reconciles only when a metric certified AND its
+                            // result is in hand.
+                            let last_sql =
+                                steps.last().map(|s| s.sql.clone()).unwrap_or_default();
+                            let metric_rec = certified.first().and_then(|name| {
+                                semantic_eligible.metrics.iter().find(|m| &m.name == name)
+                            });
+                            let trust = match (metric_rec, &last_result) {
+                                (Some(m), Some(res)) => Some(
+                                    crate::analytics::reconcile_metric(&ctx, &last_sql, res, m)
+                                        .await,
+                                ),
+                                _ => None,
+                            };
                             done.analytics = Some(AnalyticsMeta {
-                                sql: steps.last().map(|s| s.sql.clone()).unwrap_or_default(),
+                                sql: last_sql,
                                 file_ids: meta_ids,
+                                certified: (!certified.is_empty()).then(|| certified.clone()),
+                                trust,
                             });
                             yield done;
                             return;
@@ -1837,6 +1910,22 @@ fn live_pipeline(
                         {
                             yield delta(format!("\n{ledger}\n"));
                         }
+                        // Certified answers (openspec: add-semantic-layer §3):
+                        // the metric names this answer's SQL VERIFIABLY computed
+                        // (AST-equality vs the posture-eligible blessed
+                        // definitions) — engine-emitted AFTER the Query-used /
+                        // Computed-from / Assumptions footers, deterministic,
+                        // never model text. Empty ⇒ no line, so a vault with no
+                        // metrics stays byte-identical.
+                        let semantic_eligible =
+                            crate::semantic::eligible_for_posture(is_cloud);
+                        let certified = crate::analytics::certified_metrics(
+                            &sql,
+                            &semantic_eligible.metrics,
+                        );
+                        if !certified.is_empty() {
+                            yield delta(format!("\n*Certified:* {}\n", certified.join(", ")));
+                        }
                         // Truncation honesty: a capped result states its true
                         // total deterministically (matches the model-free
                         // run_direct footer), so 200 of 12,431 never reads as 200.
@@ -1897,7 +1986,26 @@ fn live_pipeline(
                             cost_meta(&cfg, sink.total()),
                             manifest,
                         );
-                        done.analytics = Some(AnalyticsMeta { sql, file_ids: meta_ids });
+                        // Trust check (openspec: add-semantic-layer §4): re-run
+                        // the certified metric's blessed definition through the
+                        // SAME guard and reconcile it to this answer — model-free,
+                        // honest degradation, never breaks the answer. Only a
+                        // certified metric is reconciled; a non-metric answer
+                        // carries no verdict (no badge).
+                        let trust = match certified.first().and_then(|name| {
+                            semantic_eligible.metrics.iter().find(|m| &m.name == name)
+                        }) {
+                            Some(m) => {
+                                Some(crate::analytics::reconcile_metric(&ctx, &sql, &res, m).await)
+                            }
+                            None => None,
+                        };
+                        done.analytics = Some(AnalyticsMeta {
+                            sql,
+                            file_ids: meta_ids,
+                            certified: (!certified.is_empty()).then(|| certified.clone()),
+                            trust,
+                        });
                         yield done;
                         return;
                     }

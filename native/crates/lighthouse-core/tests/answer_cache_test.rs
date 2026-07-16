@@ -14,7 +14,9 @@ mod common;
 use futures::StreamExt;
 use lighthouse_core::answer_cache::{self, CacheCtl, CachedAnswer};
 use lighthouse_core::beam::PlanCtl;
-use lighthouse_core::contracts::{ChatChunk, ChunkMeta, CostMeta, CtxManifestEntry};
+use lighthouse_core::contracts::{
+    AnalyticsMeta, ChatChunk, ChunkMeta, CostMeta, CtxManifestEntry, TrustVerdict,
+};
 use lighthouse_core::llm::ModelCfg;
 use lighthouse_core::synth::answer_pipeline;
 use lighthouse_core::vault;
@@ -290,6 +292,62 @@ fn a_cache_replay_shows_the_original_manifest_not_a_blank() {
     let replay_meta = ChunkMeta { cached_at: Some(hit.created_ms), ..hit.meta };
     let m = replay_meta.manifest.expect("the original manifest rides the replay");
     assert_eq!(m.len(), 2, "a replay shows the original manifest, not an empty one");
+}
+
+#[test]
+fn a_certified_answer_replays_certified_from_the_stored_analytics_meta() {
+    // openspec: add-semantic-layer §3.4/§4 — the certified mark + trust verdict
+    // ride `AnalyticsMeta`, which `CachedAnswer.analytics` stores and a replay
+    // re-emits via `..hit.analytics`, so a cached certified answer replays STILL
+    // certified with its ORIGINAL verdict, NOTHING recomputed (no ctx, no model:
+    // the model-free meta path). The additive-optional fields round-trip the
+    // store byte-for-byte through disk.
+    let dir = tempfile::tempdir().unwrap();
+    let _guard = common::lock_env(dir.path());
+    std::env::remove_var("LIGHTHOUSE_APP_STATE_DIR");
+    answer_cache::reset_store();
+
+    let mut e = entry("Revenue by region.\n\n*Certified:* revenue");
+    e.analytics = Some(AnalyticsMeta {
+        sql: "SELECT region, SUM(amount) FILTER (WHERE status = 'paid') AS revenue \
+              FROM sales GROUP BY region"
+            .into(),
+        file_ids: vec!["id-sales".into()],
+        certified: Some(vec!["revenue".into()]),
+        trust: Some(TrustVerdict {
+            certified: true,
+            reconciled: true,
+            metric: Some("revenue".into()),
+            expected: Some("37.0".into()),
+            got: Some("37.0".into()),
+        }),
+    });
+    answer_cache::insert("k", e, ALLOWED);
+
+    // Drop the in-memory store so the lookup RELOADS from disk — a genuine serde
+    // round-trip of the new wire fields, not just a clone.
+    answer_cache::reset_store();
+    let hit = answer_cache::lookup("k", ALLOWED).expect("stored");
+    let analytics = hit.analytics.clone().expect("analytics persisted in CachedAnswer");
+    assert_eq!(
+        analytics.certified,
+        Some(vec!["revenue".to_string()]),
+        "the certified mark survives the store"
+    );
+    let trust = analytics.trust.expect("trust verdict persisted");
+    assert!(trust.certified && trust.reconciled, "{trust:?}");
+    assert_eq!(trust.metric.as_deref(), Some("revenue"));
+    assert_eq!(trust.expected, trust.got, "the original figures replay unchanged");
+
+    // The `*Certified:*` footer rides inside the stored answer TEXT, so it
+    // replays verbatim too (engine text, never recomputed).
+    assert!(hit.text.contains("*Certified:* revenue"), "{}", hit.text);
+
+    // A replay re-emits the stored analytics via `..hit.analytics` — the same
+    // seam the manifest/cost/provenance use — unchanged.
+    let replayed = hit.analytics.expect("rides the replay");
+    assert_eq!(replayed.certified, Some(vec!["revenue".to_string()]));
+    assert!(replayed.trust.is_some());
 }
 
 // --- E2E over the model-free meta path ---------------------------------------------

@@ -475,10 +475,40 @@ export interface ChatChunk {
   done: boolean;
 }
 
-/** The exact executed SQL of an analytics answer and the files it read. */
+/**
+ * The engine's verdict that an answer VERIFIABLY computed a blessed metric
+ * definition (openspec: add-semantic-layer §4). Deterministic and MODEL-FREE:
+ * `certified` is AST-equality of the executed SQL's projection to the metric's
+ * blessed expression; `reconciled` is a numeric re-run of that definition through
+ * the same guarded executor. `metric` names the definition; `expected`/`got`
+ * carry the re-run and answer figures on a mismatch (or the reason on an honest
+ * degradation). A non-metric answer is `{certified:false, reconciled:false}` — an
+ * honest "not certified", never a failure. PARITY: certification/reconciliation
+ * are RUST-ONLY (analytics/DataFusion); this dev twin never takes the analytics
+ * branch, so it never populates a verdict — this is the wire shape only. KEEP IN
+ * SYNC with the Rust `TrustVerdict` in contracts.rs.
+ */
+export interface TrustVerdict {
+  certified: boolean;
+  reconciled: boolean;
+  metric?: string;
+  expected?: string;
+  got?: string;
+}
+
+/**
+ * The exact executed SQL of an analytics answer and the files it read.
+ * `certified`/`trust` (openspec: add-semantic-layer §3/§4) ride here as
+ * additive-optional (pre-Phase-B cache entries carry neither and stay valid), so
+ * a cached certified answer replays with its ORIGINAL verdict — nothing
+ * recomputed. PARITY: both are Rust-only (analytics); this twin never populates
+ * them. KEEP IN SYNC with the Rust `AnalyticsMeta` in contracts.rs.
+ */
 export interface AnalyticsMeta {
   sql: string;
   fileIds: string[];
+  certified?: string[];
+  trust?: TrustVerdict;
 }
 
 /**

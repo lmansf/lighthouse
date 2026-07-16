@@ -1612,6 +1612,276 @@ pub fn guard_metric_expression(expression: &str, entity: &str) -> Result<Vec<Str
     crate::views::collect_table_names(&sql)
 }
 
+// --- Certified answers + trust check (openspec: add-semantic-layer §3/§4) --------
+//
+// CERTIFICATION (§3) is DETERMINISTIC and MODEL-FREE (constitution §14): the
+// engine parses the executed SQL with the SAME `DFParser` the guard uses — so
+// the certifier can never disagree with the guard about what the query says —
+// and compares each projection expression to a metric's blessed `expression` by
+// NORMALIZED-AST equality (`Expr::to_string()`, the `ledger.rs` idiom).
+// Whitespace, casing, and alias differences fold away; a genuinely different
+// aggregation does not. Unparseable/dirty SQL certifies nothing (never a false
+// positive) — the ledger's under-report posture. A `SUM(amount)` near-miss of
+// `SUM(amount) FILTER (WHERE status='paid')` is NOT AST-equal, so NOT certified.
+//
+// The TRUST CHECK (§4) adds a numeric reconciliation: RE-RUN the blessed
+// definition over the SAME `ctx` through the SAME guarded `run_query`, and
+// compare the definition's value(s) to the answer's. A mismatch is CAUGHT
+// (`reconciled:false` with expected/got); a re-run error degrades honestly
+// (`reconciled:false` with the reason), never a fabricated pass; a non-metric
+// answer is honestly `certified:false` with no reconcile.
+//
+// PARITY: certification and reconciliation are RUST-ONLY (analytics/DataFusion
+// is Rust-engine-only; ts-twin.md). The TS twin never takes the analytics
+// branch, so it never certifies or reconciles — the `certified`/`TrustVerdict`
+// wire shape is mirrored in src/contracts/types.ts (wire only; twin never
+// populates it).
+
+/// The metric names an executed answer VERIFIABLY computed (openspec §3.1): for
+/// each eligible metric, its blessed `expression` is AST-equal to one of the
+/// answer SQL's projection expressions. Model-free; returns the certified names
+/// in `defs` order. UNDER-reports (fewer/none) on unparseable SQL — never a
+/// guess. Pass the posture-eligible definitions (`semantic::eligible_for_posture`).
+pub fn certified_metrics(sql: &str, defs: &[crate::semantic::Metric]) -> Vec<String> {
+    let Some(projection) = projection_expr_strings(sql) else {
+        return Vec::new();
+    };
+    defs.iter()
+        .filter(|m| expression_in_projection(&projection, &m.expression))
+        .map(|m| m.name.clone())
+        .collect()
+}
+
+/// The trust verdict for an answer against a blessed metric (openspec §4.1):
+/// certify the executed SQL used the definition, then RE-RUN that definition
+/// over the SAME `ctx` through the SAME guarded `run_query` and reconcile the
+/// definition's value(s) to the answer's — a real check, MODEL-FREE at every
+/// step. Takes the blessed `metric` record itself (its `expression`/`name`/
+/// `entity` are the single source of truth — the caller already holds the
+/// posture-eligible `Metric`, so no store round-trip and no model call).
+/// Deterministic: the same `(sql, result, metric)` over the same `ctx` yields a
+/// byte-identical verdict. The trust check NEVER breaks the already-computed
+/// answer — a re-run error is an honest `reconciled:false` with the reason
+/// (doubt is never certified), and a non-metric answer an honest
+/// `certified:false` with no reconcile.
+pub async fn reconcile_metric(
+    ctx: &SessionContext,
+    sql: &str,
+    result: &QueryResult,
+    metric: &crate::semantic::Metric,
+) -> crate::contracts::TrustVerdict {
+    use crate::contracts::TrustVerdict;
+    // Confirm the executed SQL verifiably computed this definition (§3) — else
+    // an honest "not certified", not a failure.
+    let Some(slot) = certified_slot(sql, &metric.expression) else {
+        return uncertified();
+    };
+    // Re-run the definition in the answer's shape (its WHERE/GROUP BY, so like
+    // compares to like) over the SAME ctx, through the SAME guard/timeout/caps.
+    let rerun_sql = definition_query(sql, &metric.expression, &metric.name, &metric.entity);
+    match run_query(ctx, &rerun_sql).await {
+        Ok(rerun) => {
+            let expected = metric_column_values(&rerun.batches, &metric.name, 0);
+            let got = metric_column_values(&result.batches, &metric.name, slot);
+            TrustVerdict {
+                certified: true,
+                reconciled: values_match(&expected, &got),
+                metric: Some(metric.name.clone()),
+                expected: Some(display_values(&expected)),
+                got: Some(display_values(&got)),
+            }
+        }
+        // Honest degradation: doubt is never certified (constitution §14). The
+        // number was already computed and shown; the verdict only adds meta.
+        Err(err) => TrustVerdict {
+            certified: true,
+            reconciled: false,
+            metric: Some(metric.name.clone()),
+            expected: None,
+            got: Some(format!("re-run unavailable: {err}")),
+        },
+    }
+}
+
+/// The "not certified" verdict — an honest absence of a blessed definition, not
+/// a failure (openspec §4.3).
+fn uncertified() -> crate::contracts::TrustVerdict {
+    crate::contracts::TrustVerdict {
+        certified: false,
+        reconciled: false,
+        metric: None,
+        expected: None,
+        got: None,
+    }
+}
+
+/// Parse `sql` with the guard's own `DFParser` and return its outermost simple
+/// SELECT (unwrapping a parenthesized/subquery body), or `None` for a non-query,
+/// a set-op/VALUES body, or unparseable text — the ledger's under-report posture.
+fn answer_select(sql: &str) -> Option<datafusion::sql::sqlparser::ast::Select> {
+    use datafusion::sql::parser::{DFParser, Statement as DFStatement};
+    use datafusion::sql::sqlparser::ast::{SetExpr, Statement as SqlStatement};
+    let stmts = DFParser::parse_sql(sql).ok()?;
+    let mut body = match stmts.front()? {
+        DFStatement::Statement(s) => match &**s {
+            SqlStatement::Query(q) => (*q.body).clone(),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    // Unwrap a parenthesized/subquery-wrapped body to the innermost simple SELECT.
+    loop {
+        match body {
+            SetExpr::Select(s) => return Some(*s),
+            SetExpr::Query(inner) => body = *inner.body,
+            _ => return None,
+        }
+    }
+}
+
+/// The normalized `Expr::to_string()` of each projection expression of `sql`'s
+/// outer SELECT (the `ledger.rs` idiom), or `None` when it isn't a readable
+/// single SELECT. A `*` (no expression) contributes nothing.
+fn projection_expr_strings(sql: &str) -> Option<Vec<String>> {
+    let select = answer_select(sql)?;
+    Some(
+        select
+            .projection
+            .iter()
+            .filter_map(select_item_expr_string)
+            .collect(),
+    )
+}
+
+/// A projection item's expression as a normalized `Expr::to_string()`, or `None`
+/// for a wildcard / qualified-wildcard item (no single expression).
+fn select_item_expr_string(item: &datafusion::sql::sqlparser::ast::SelectItem) -> Option<String> {
+    use datafusion::sql::sqlparser::ast::SelectItem;
+    match item {
+        SelectItem::UnnamedExpr(e) => Some(e.to_string()),
+        SelectItem::ExprWithAlias { expr, .. } => Some(expr.to_string()),
+        _ => None,
+    }
+}
+
+/// Whether a metric's blessed `expression` is AST-equal (normalized) to one of
+/// the answer's projection expressions.
+fn expression_in_projection(projection: &[String], expression: &str) -> bool {
+    match normalized_metric_expr(expression) {
+        Some(target) => projection.iter().any(|p| *p == target),
+        None => false,
+    }
+}
+
+/// The metric's stored aggregation EXPRESSION as a normalized `Expr::to_string()`
+/// — parsed by wrapping it in the canonical `SELECT <expression> AS metric_value
+/// FROM t` (the SAME synthesis `guard_metric_expression` uses), so the certifier
+/// and the guard can never disagree. `None` when it doesn't parse.
+fn normalized_metric_expr(expression: &str) -> Option<String> {
+    let sql = format!("SELECT {expression} AS {METRIC_ALIAS} FROM t");
+    let select = answer_select(&sql)?;
+    select.projection.first().and_then(select_item_expr_string)
+}
+
+/// The 0-based projection position AST-equal to `expression` — the answer's
+/// result column that carries the metric's values. `None` when unparseable or
+/// absent (not certified).
+fn certified_slot(sql: &str, expression: &str) -> Option<usize> {
+    let select = answer_select(sql)?;
+    let target = normalized_metric_expr(expression)?;
+    select
+        .projection
+        .iter()
+        .position(|item| select_item_expr_string(item).as_deref() == Some(target.as_str()))
+}
+
+/// Reconstruct the blessed definition as a re-runnable query in the ANSWER's
+/// shape: `SELECT <expression> AS <name> FROM <entity>` plus the answer's own
+/// WHERE and GROUP BY (rendered from its AST) when present — so the definition is
+/// evaluated over the same rows and grouping the answer used, and like compares
+/// to like. Bare scalar definition when the answer doesn't parse.
+fn definition_query(sql: &str, expression: &str, name: &str, entity: &str) -> String {
+    use datafusion::sql::sqlparser::ast::GroupByExpr;
+    let mut out = format!("SELECT {expression} AS {name} FROM {entity}");
+    if let Some(select) = answer_select(sql) {
+        if let Some(pred) = &select.selection {
+            out.push_str(&format!(" WHERE {pred}"));
+        }
+        if let GroupByExpr::Expressions(keys, _) = &select.group_by {
+            if !keys.is_empty() {
+                let rendered: Vec<String> = keys.iter().map(|k| k.to_string()).collect();
+                out.push_str(&format!(" GROUP BY {}", rendered.join(", ")));
+            }
+        }
+    }
+    out
+}
+
+/// The values of a result's metric column as strings, matched by the metric's
+/// aliased column NAME (wildcard-safe) else the certified projection `slot`.
+/// Empty when neither resolves — the reconcile then reports a non-match honestly.
+fn metric_column_values(batches: &[RecordBatch], name: &str, slot: usize) -> Vec<String> {
+    let Some(first) = batches.iter().find(|b| b.num_columns() > 0) else {
+        return Vec::new();
+    };
+    let idx = first
+        .schema()
+        .fields()
+        .iter()
+        .position(|f| f.name().eq_ignore_ascii_case(name))
+        .unwrap_or(slot);
+    let mut out = Vec::new();
+    for b in batches {
+        if idx >= b.num_columns() {
+            continue;
+        }
+        let col = b.column(idx);
+        for row in 0..b.num_rows() {
+            out.push(array_value_to_string(col, row).unwrap_or_default());
+        }
+    }
+    out
+}
+
+/// Order-insensitive equality of two NON-EMPTY metric-value multisets — the
+/// answer's rows may be ordered (ORDER BY) differently than the re-run's, but a
+/// reconciliation compares VALUES, not their order. Empty on either side is a
+/// non-match (nothing to reconcile against — honest, never a fabricated pass).
+fn values_match(expected: &[String], got: &[String]) -> bool {
+    if expected.is_empty() || got.is_empty() {
+        return false;
+    }
+    let mut e = expected.to_vec();
+    let mut g = got.to_vec();
+    e.sort();
+    g.sort();
+    e == g
+}
+
+/// A deterministic, human-readable rendering of a metric's value(s) for the
+/// verdict's `expected`/`got`: the lone value for a scalar metric, the sorted
+/// values joined for a grouped one (digested when long) — byte-stable across runs.
+fn display_values(values: &[String]) -> String {
+    match values {
+        [] => String::new(),
+        [one] => one.clone(),
+        _ => {
+            let mut sorted = values.to_vec();
+            sorted.sort();
+            let joined = sorted.join(", ");
+            if joined.len() <= 200 {
+                joined
+            } else {
+                let digest: String = Sha1::digest(joined.as_bytes())
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect();
+                format!("{} values (digest {})", sorted.len(), &digest[..12])
+            }
+        }
+    }
+}
+
 // --- Execution + rendering -------------------------------------------------------
 
 /// A verified query result, ready for the narration prompt and the chat.
@@ -2635,6 +2905,187 @@ pub fn batches_to_markdown(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- Certified answers (openspec: add-semantic-layer §3) --------------------
+    // Pure (model-free) certification over synthetic definitions; the trust-check
+    // re-run (which needs a real ctx + registered table) lives in
+    // tests/semantic_test.rs under the shared VAULT_DIR lock.
+
+    fn metric_def(name: &str, expression: &str) -> crate::semantic::Metric {
+        crate::semantic::Metric {
+            id: format!("metric-{name}"),
+            name: name.to_string(),
+            expression: expression.to_string(),
+            description: String::new(),
+            entity: "sales".to_string(),
+            reads: crate::views::Reads::default(),
+            summary: crate::views::ViewSummary {
+                text: String::new(),
+                source: crate::views::SummarySource::Question,
+            },
+            created_ms: 0,
+        }
+    }
+
+    #[test]
+    fn certified_metrics_names_the_ast_equal_definition() {
+        let revenue = metric_def("revenue", "SUM(amount) FILTER (WHERE status='paid')");
+        // The blessed definition certifies the answer + names the metric —
+        // whitespace/casing/alias differences fold away (normalized-AST idiom).
+        let sql = "SELECT region, SUM(amount) FILTER (WHERE status = 'paid') AS revenue \
+                   FROM sales GROUP BY region ORDER BY revenue DESC";
+        assert_eq!(
+            certified_metrics(sql, std::slice::from_ref(&revenue)),
+            vec!["revenue".to_string()],
+        );
+        // A scalar answer (no grouping) certifies just the same.
+        assert_eq!(
+            certified_metrics(
+                "SELECT SUM(amount) FILTER (WHERE status = 'paid') AS revenue FROM sales",
+                std::slice::from_ref(&revenue),
+            ),
+            vec!["revenue".to_string()],
+        );
+    }
+
+    #[test]
+    fn certified_metrics_withholds_the_near_miss_and_under_reports() {
+        let revenue = metric_def("revenue", "SUM(amount) FILTER (WHERE status='paid')");
+        // SUM(amount) is NOT AST-equal to SUM(amount) FILTER(...): the mark is
+        // withheld rather than decorating a different number.
+        let near = "SELECT region, SUM(amount) AS revenue FROM sales GROUP BY region";
+        assert!(certified_metrics(near, std::slice::from_ref(&revenue)).is_empty());
+        // Unparseable SQL certifies nothing (under-report, never a guess).
+        assert!(certified_metrics("SELECT SUM(", std::slice::from_ref(&revenue)).is_empty());
+        // A non-metric ad-hoc query certifies nothing.
+        assert!(
+            certified_metrics("SELECT COUNT(*) AS n FROM sales", std::slice::from_ref(&revenue))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn certified_mark_is_a_pure_function_of_sql_and_store() {
+        // The certifier's ONLY inputs are the executed SQL and the definitions —
+        // no narration text enters, so the mark is identical run to run (narration
+        // present or absent yields the same verdict).
+        let revenue = metric_def("revenue", "SUM(amount) FILTER (WHERE status='paid')");
+        let sql = "SELECT SUM(amount) FILTER (WHERE status = 'paid') AS revenue FROM sales";
+        let first = certified_metrics(sql, std::slice::from_ref(&revenue));
+        let second = certified_metrics(sql, std::slice::from_ref(&revenue));
+        assert_eq!(first, second);
+        assert_eq!(first, vec!["revenue".to_string()]);
+    }
+
+    // --- Trust check (openspec: add-semantic-layer §4) --------------------------
+    // Reconciliation over a real (in-memory) context — the re-run executes
+    // exactly as an answer's query does. Model-free; no store/VAULT_DIR needed
+    // because `reconcile_metric` takes the blessed `Metric` record directly.
+
+    /// An in-memory `sales(region, amount, status)` context. Paid rows total 37
+    /// (north 10 + south 20 + south 7); the void row (north 5) makes the un-
+    /// filtered total 42, so a near-miss `SUM(amount)` differs from the metric.
+    async fn sales_ctx() -> SessionContext {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("region", DataType::Utf8, false),
+            Field::new("amount", DataType::Float64, false),
+            Field::new("status", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(StringArray::from(vec!["north", "south", "south", "north"])),
+                Arc::new(Float64Array::from(vec![10.0, 20.0, 7.0, 5.0])),
+                Arc::new(StringArray::from(vec!["paid", "paid", "paid", "void"])),
+            ],
+        )
+        .unwrap();
+        let mem = MemTable::try_new(schema, vec![vec![batch]]).unwrap();
+        let ctx = SessionContext::new();
+        ctx.register_table("sales", Arc::new(mem)).unwrap();
+        ctx
+    }
+
+    #[tokio::test]
+    async fn reconcile_matches_a_genuine_answer_and_catches_a_mismatch() {
+        let ctx = sales_ctx().await;
+        let revenue = metric_def("revenue", "SUM(amount) FILTER (WHERE status = 'paid')");
+        let sql = "SELECT SUM(amount) FILTER (WHERE status = 'paid') AS revenue FROM sales";
+        // A genuine answer reconciles: certified:true, reconciled:true, and the
+        // re-run definition's figure equals the answer's.
+        let genuine = run_query(&ctx, sql).await.unwrap();
+        let v = reconcile_metric(&ctx, sql, &genuine, &revenue).await;
+        assert!(v.certified && v.reconciled, "{v:?}");
+        assert_eq!(v.metric.as_deref(), Some("revenue"));
+        assert_eq!(v.expected, v.got, "definition == answer");
+        assert!(v.expected.is_some());
+
+        // A hand-crafted answer whose number differs (the no-filter total, 42)
+        // beside the SAME certified SQL is CAUGHT: reconciled:false + expected/got.
+        let tampered = run_query(&ctx, "SELECT SUM(amount) AS revenue FROM sales")
+            .await
+            .unwrap();
+        let v = reconcile_metric(&ctx, sql, &tampered, &revenue).await;
+        assert!(v.certified && !v.reconciled, "mismatch caught: {v:?}");
+        assert!(
+            v.expected.is_some() && v.got.is_some() && v.expected != v.got,
+            "expected (definition) differs from got (answer): {v:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_adhoc_answer_is_honestly_uncertified_not_failed() {
+        let ctx = sales_ctx().await;
+        let revenue = metric_def("revenue", "SUM(amount) FILTER (WHERE status = 'paid')");
+        // Uses no blessed definition (no FILTER): certified:false, no reconcile —
+        // an honest "not certified", not a failure.
+        let sql = "SELECT SUM(amount) AS revenue FROM sales";
+        let res = run_query(&ctx, sql).await.unwrap();
+        let v = reconcile_metric(&ctx, sql, &res, &revenue).await;
+        assert!(!v.certified && !v.reconciled, "{v:?}");
+        assert!(v.metric.is_none() && v.expected.is_none() && v.got.is_none());
+    }
+
+    #[tokio::test]
+    async fn reconcile_degrades_honestly_when_the_rerun_errors() {
+        let ctx = sales_ctx().await;
+        // The answer certifies (its SQL projects the blessed expression over the
+        // registered `sales`), but the metric's entity names an UNREGISTERED
+        // table, so the definition re-run errors — an honest reconciled:false with
+        // the reason, never a fabricated pass.
+        let mut ghost = metric_def("revenue", "SUM(amount) FILTER (WHERE status = 'paid')");
+        ghost.entity = "ghost".to_string();
+        let sql = "SELECT SUM(amount) FILTER (WHERE status = 'paid') AS revenue FROM sales";
+        let res = run_query(&ctx, sql).await.unwrap();
+        let v = reconcile_metric(&ctx, sql, &res, &ghost).await;
+        assert!(v.certified, "the SQL still used the definition");
+        assert!(!v.reconciled, "a re-run over a missing table can't reconcile");
+        assert!(v.expected.is_none());
+        assert!(
+            v.got.as_deref().unwrap_or_default().contains("re-run unavailable"),
+            "reason recorded: {v:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_grouped_verdict_reconciles_and_is_byte_identical_across_two_runs() {
+        let ctx = sales_ctx().await;
+        let revenue = metric_def("revenue", "SUM(amount) FILTER (WHERE status = 'paid')");
+        // A grouped, ORDER BY'd answer still reconciles (like compares to like,
+        // order-insensitive) and the verdict is byte-identical run to run — a pure
+        // function of (sql, result, metric) over the same ctx.
+        let sql = "SELECT region, SUM(amount) FILTER (WHERE status = 'paid') AS revenue \
+                   FROM sales GROUP BY region ORDER BY revenue DESC";
+        let res = run_query(&ctx, sql).await.unwrap();
+        let a = reconcile_metric(&ctx, sql, &res, &revenue).await;
+        let b = reconcile_metric(&ctx, sql, &res, &revenue).await;
+        assert!(a.certified && a.reconciled, "{a:?}");
+        assert_eq!(
+            serde_json::to_string(&a).unwrap(),
+            serde_json::to_string(&b).unwrap(),
+            "byte-identical verdict"
+        );
+    }
 
     #[test]
     fn cue_detects_aggregate_asks() {
