@@ -353,7 +353,22 @@ pub async fn rag_post(headers: HeaderMap, body: Option<Json<Value>>) -> Response
                 }))
                 .into_response()
             }
-            _ => bad_request("views action must be list, create, rename, delete, or dependents"),
+            // Inspector on a view (openspec: add-shaped-views §4): the exact
+            // definition SQL, the provenance-labeled summary, the source files
+            // it reads (transitive) with their saved-age freshness, the
+            // effectively-local-only flag, and the dependent names the
+            // rename/delete dialogs warn with. Pure stored-state read — no SQL
+            // executes, so the TS twin returns the identical shape.
+            Some("inspect") => {
+                let Some(id) = body["id"].as_str().filter(|s| !s.is_empty()) else {
+                    return bad_request("id required");
+                };
+                Json(json!({ "inspection": lighthouse_core::inspect::inspect_view(id) }))
+                    .into_response()
+            }
+            _ => bad_request(
+                "views action must be list, create, rename, delete, dependents, or inspect",
+            ),
         },
         // Shaping ask (openspec: add-shaped-views §3): ONE guarded completion
         // proposes a transform SELECT over a registered source; the engine
@@ -754,11 +769,11 @@ pub async fn rag_post(headers: HeaderMap, body: Option<Json<Value>>) -> Response
             // provider identity the chat pipeline uses.
             let is_cloud =
                 lighthouse_core::synth::is_cloud_provider(&lighthouse_core::profile::model_config());
-            let asks = tokio::task::spawn_blocking(move || {
-                lighthouse_core::meta::suggested_asks(&ids, is_cloud)
-            })
-            .await
-            .unwrap_or_default();
+            // Saved views join the suggestions when any exist (openspec:
+            // add-shaped-views §4): the resolving entry point derives view chips
+            // from resolved result columns and stays byte-identical to the
+            // file-only path when the store is empty.
+            let asks = lighthouse_core::meta::suggested_asks_resolved(ids, is_cloud).await;
             return Json(json!({ "asks": asks })).into_response();
         }
         Some("restore") => {

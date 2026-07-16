@@ -24,6 +24,7 @@ import type {
   ShapeViewResult,
   View,
   ViewCreateInput,
+  ViewInspection,
 } from "../types";
 import { SEED_NODES, SEED_SOURCES } from "./files";
 
@@ -906,6 +907,63 @@ class MockRagService implements RagService {
       .filter((v) => v.id !== id && doomed.has(v.id))
       .map((v) => v.name);
     return { dependents: direct, transitive };
+  }
+
+  async inspectView(id: string): Promise<ViewInspection> {
+    // Believable stored-state inspection so the UI agent can build the
+    // inspector offline: the definition SQL, the labeled summary, the source
+    // names from the stored reads (walked transitively through reads.views),
+    // and the dependent lists — everything the engines return without
+    // executing SQL. Unknown id → {} (the FileInspection precedent).
+    const rec = this.views.find((v) => v.id === id);
+    if (!rec) return {};
+    // Transitive source files: own reads.files then every parent view's,
+    // deduped in reads order (mirrors the engines' accumulation).
+    const files: { fileId: string; tableName: string }[] = [];
+    const seenViews = new Set<string>([id]);
+    const walk = (v: View) => {
+      for (const f of v.reads.files) {
+        if (!files.some((k) => k.fileId === f.fileId)) files.push(f);
+      }
+      for (const pid of v.reads.views) {
+        if (seenViews.has(pid)) continue;
+        seenViews.add(pid);
+        const parent = this.views.find((r) => r.id === pid);
+        if (parent) walk(parent);
+      }
+    };
+    walk(rec);
+    const direct = this.views.filter((v) => v.reads.views.includes(id)).map((v) => v.name);
+    const doomed = new Set<string>([id]);
+    let grew = true;
+    while (grew) {
+      grew = false;
+      for (const v of this.views) {
+        if (!doomed.has(v.id) && v.reads.views.some((p) => doomed.has(p))) {
+          doomed.add(v.id);
+          grew = true;
+        }
+      }
+    }
+    const transitive = this.views.filter((v) => v.id !== id && doomed.has(v.id)).map((v) => v.name);
+    return {
+      id: rec.id,
+      name: rec.name,
+      sql: rec.sql,
+      summary: rec.summary.text,
+      summarySource: rec.summary.source,
+      // The mock pins the fileId as the table name (see createView); a
+      // believable inspection reflects it with a saved-age placeholder so the
+      // inspector renders end to end offline.
+      sources: files.map((f) => ({ fileId: f.fileId, name: f.tableName, savedAge: "just now" })),
+      readsViews: rec.reads.views
+        .map((vid) => this.views.find((r) => r.id === vid)?.name)
+        .filter((n): n is string => !!n),
+      localOnly: false,
+      dependents: direct,
+      transitiveDependents: transitive,
+      createdMs: rec.createdMs,
+    };
   }
 
   async shapeView(

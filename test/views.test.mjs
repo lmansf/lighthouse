@@ -525,6 +525,88 @@ test("local-only marks propagate to views transitively and gate the cloud postur
   assert.equal(views.eligibleForPosture(true).length, 3);
 });
 
+// --- §4: the inspector (openspec: add-shaped-views) ----------------------------------
+// PARITY: inspectView is a pure STORED-STATE read (no execution), so the twin
+// returns the IDENTICAL shape as inspect.rs::inspect_view — mirrors
+// views_test.rs::inspect_view_reports_definition_summary_sources_and_dependents.
+
+test("inspectView returns the stored-state inspection (no execution)", () => {
+  const { dir } = freshVault();
+  seedSales(dir);
+
+  const base = views.createView(
+    "shaped",
+    "SELECT region, SUM(amount) AS total FROM sales GROUP BY region",
+    summary("which regions sell most"),
+    ["sales.csv"],
+  );
+  const over = views.createView("over", "SELECT * FROM shaped", summary("just a peek"), []);
+
+  const insp = views.inspectView(base.id);
+  assert.equal(insp.id, base.id);
+  assert.equal(insp.name, "shaped");
+  assert.equal(insp.sql, "SELECT region, SUM(amount) AS total FROM sales GROUP BY region");
+  assert.equal(insp.summary, "which regions sell most");
+  assert.equal(insp.summarySource, "question");
+  assert.equal(insp.localOnly, false);
+  // Sources: the transitive file resolved to its display name + a saved age.
+  assert.equal(insp.sources.length, 1);
+  assert.equal(insp.sources[0].fileId, "sales.csv");
+  assert.equal(insp.sources[0].name, "sales.csv");
+  assert.equal(typeof insp.sources[0].savedAge, "string");
+  assert.equal(insp.sources[0].missing, undefined);
+  // Dependents: 'over' reads 'shaped' (direct and transitive here).
+  assert.deepEqual(insp.dependents, ["over"]);
+  assert.deepEqual(insp.transitiveDependents, ["over"]);
+
+  // The child carries the parent's file transitively and names the view it reads.
+  const overInsp = views.inspectView(over.id);
+  assert.deepEqual(
+    overInsp.sources.map((s) => s.fileId),
+    ["sales.csv"],
+  );
+  assert.deepEqual(overInsp.readsViews, ["shaped"]);
+  assert.deepEqual(overInsp.dependents, []);
+
+  // Unknown id → an empty inspection.
+  assert.deepEqual(views.inspectView("view-nope"), {});
+});
+
+test("inspectView flags local-only transitively and unresolvable sources as missing", () => {
+  const { dir } = freshVault();
+  fs.writeFileSync(path.join(dir, "private.csv"), "region,amount\nNE,5\n");
+  vault.setLocalOnly("private.csv", true);
+  const priv = views.createView("private_view", "SELECT * FROM private", summary("q"), [
+    "private.csv",
+  ]);
+  const over = views.createView(
+    "over_private",
+    "SELECT COUNT(*) AS n FROM private_view",
+    summary("q"),
+    [],
+  );
+  assert.equal(views.inspectView(priv.id).localOnly, true);
+  assert.equal(
+    views.inspectView(over.id).localOnly,
+    true,
+    "the mark rides through the parent view",
+  );
+
+  // A stored binding whose file id doesn't resolve → missing, name falls back
+  // to the pinned table binding (no fs removal, so the walk cache stays sane).
+  const ghost = views.createViewWithTables(
+    "ghost",
+    "SELECT * FROM gone",
+    summary("q"),
+    [{ fileId: "removed-id", name: "gone.csv" }],
+    [],
+  );
+  const s = views.inspectView(ghost.id).sources[0];
+  assert.equal(s.missing, true);
+  assert.equal(s.name, "gone", "name falls back to the pinned table binding");
+  assert.equal(s.savedAge, undefined);
+});
+
 // --- §3: dispatch arms (openspec: add-shaped-views) ----------------------------------
 // The twin's route (app/api/rag/route.ts) can't be invoked under node --test
 // (NextResponse), so its guarantees are asserted structurally against the
@@ -544,9 +626,12 @@ test("route.ts views arms round-trip through src/server/views.ts", () => {
     "deleteView(",
     "dependentsOf(",
     "transitiveDependents(",
+    "inspectView(",
   ]) {
     assert.ok(routeSrc.includes(fn), `${fn} is called by an arm`);
   }
+  // Inspector arm (openspec: add-shaped-views §4): stored-state read.
+  assert.match(routeSrc, /inspection: inspectView\(body\.id\)/);
   // The wire carries the summary FLATTENED; the arm builds the labeled record
   // and rejects an out-of-whitelist source with the engines' exact reason.
   assert.match(routeSrc, /summarySource must be "question" or "model"/);
@@ -557,7 +642,10 @@ test("route.ts views arms round-trip through src/server/views.ts", () => {
   assert.match(routeSrc, /dependents: dependentsOf\(body\.id\)\.map\(\(v\) => v\.name\)/);
   assert.match(routeSrc, /transitive: transitiveDependents\(body\.id\)\.map\(\(v\) => v\.name\)/);
   // Refusals surface as 400 + the engine's reason (the boards idiom).
-  assert.match(routeSrc, /views action must be list, create, rename, delete, or dependents/);
+  assert.match(
+    routeSrc,
+    /views action must be list, create, rename, delete, dependents, or inspect/,
+  );
 });
 
 test("route.ts shapeView arm is the PARITY stub: available:false, nothing persisted", () => {

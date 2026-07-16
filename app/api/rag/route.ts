@@ -60,6 +60,7 @@ import {
   createView,
   deleteView,
   dependentsOf,
+  inspectView,
   listViews,
   renameView,
   transitiveDependents,
@@ -411,8 +412,18 @@ export async function POST(req: Request) {
           transitive: transitiveDependents(body.id).map((v) => v.name),
         });
       }
+      // Inspector on a view (openspec: add-shaped-views §4): stored-state read
+      // that runs FOR REAL against the twin store — definition SQL, labeled
+      // summary, transitive source names + saved-age freshness, local-only
+      // flag, dependents. No SQL executes, so the shape matches inspect_view.
+      if (body.action === "inspect") {
+        if (typeof body.id !== "string" || !body.id) {
+          return NextResponse.json({ error: "id required" }, { status: 400 });
+        }
+        return NextResponse.json({ inspection: inspectView(body.id) });
+      }
       return NextResponse.json(
-        { error: "views action must be list, create, rename, delete, or dependents" },
+        { error: "views action must be list, create, rename, delete, dependents, or inspect" },
         { status: 400 },
       );
     }

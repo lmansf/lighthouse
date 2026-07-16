@@ -311,7 +311,19 @@ pub async fn rag_op(app: AppHandle, body: Value) -> Result<Value, String> {
                     "transitive": names(lighthouse_core::views::transitive_dependents(id)),
                 }))
             }
-            _ => Err("views action must be list, create, rename, delete, or dependents".into()),
+            // Inspector on a view (openspec: add-shaped-views §4) — mirrors the
+            // routes.rs arm: definition SQL, provenance-labeled summary,
+            // transitive source files with saved-age freshness, local-only flag,
+            // and dependent names. Pure stored-state read.
+            Some("inspect") => {
+                let Some(id) = body["id"].as_str().filter(|s| !s.is_empty()) else {
+                    return Err("id required".into());
+                };
+                Ok(json!({ "inspection": lighthouse_core::inspect::inspect_view(id) }))
+            }
+            _ => Err(
+                "views action must be list, create, rename, delete, dependents, or inspect".into(),
+            ),
         },
         // Shaping ask (openspec: add-shaped-views §3) — mirrors the routes.rs
         // op exactly: ONE guarded completion proposes a transform SELECT; the
@@ -731,11 +743,10 @@ pub async fn rag_op(app: AppHandle, body: Value) -> Result<Value, String> {
             // a marked file's columns never surface as a suggestion.
             let is_cloud =
                 lighthouse_core::synth::is_cloud_provider(&lighthouse_core::profile::model_config());
-            let asks = tokio::task::spawn_blocking(move || {
-                lighthouse_core::meta::suggested_asks(&ids, is_cloud)
-            })
-            .await
-            .unwrap_or_default();
+            // Saved views join the suggestions when any exist (openspec:
+            // add-shaped-views §4); byte-identical to the file-only path when
+            // the store is empty.
+            let asks = lighthouse_core::meta::suggested_asks_resolved(ids, is_cloud).await;
             Ok(json!({ "asks": asks }))
         }
         // Managed policy snapshot (openspec: add-managed-policy) — read-only;

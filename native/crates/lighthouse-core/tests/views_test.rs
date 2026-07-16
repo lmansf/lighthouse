@@ -1083,3 +1083,172 @@ async fn shape_view_refuses_an_unknown_source_before_any_completion() {
     assert!(views::list().is_empty(), "nothing persisted");
 }
 
+// --- §4: visibility surfaces (openspec: add-shaped-views) ----------------------------
+//
+// The inspector on a view (definition SQL, provenance-labeled summary,
+// transitive source files with freshness, local-only flag, dependents) and the
+// suggested-asks view inclusion — the engine halves of "views are visible and
+// inspectable wherever tables are".
+
+use lighthouse_core::inspect::inspect_view;
+
+/// The "Inspector on a view" scenario: the exact SELECT, the labeled summary,
+/// the source files it reads (transitively) with freshness, and the dependent
+/// names the rename/delete dialogs warn with. Unknown id → an empty inspection.
+#[test]
+fn inspect_view_reports_definition_summary_sources_and_dependents() {
+    let vault = tempfile::tempdir().unwrap();
+    let _guard = common::lock_env(vault.path());
+    seed_sales(vault.path());
+
+    let base = views::create(
+        "shaped",
+        "SELECT region, SUM(amount) AS total FROM sales GROUP BY region",
+        summary("which regions sell most"),
+        &["sales.csv".to_string()],
+    )
+    .expect("creates");
+    let over = views::create("over", "SELECT * FROM shaped", summary("just a peek"), &[])
+        .expect("creates");
+
+    let insp = inspect_view(&base.id);
+    assert_eq!(insp.id.as_deref(), Some(base.id.as_str()));
+    assert_eq!(insp.name.as_deref(), Some("shaped"));
+    assert_eq!(
+        insp.sql.as_deref(),
+        Some("SELECT region, SUM(amount) AS total FROM sales GROUP BY region")
+    );
+    assert_eq!(insp.summary.as_deref(), Some("which regions sell most"));
+    assert_eq!(insp.summary_source.as_deref(), Some("question"));
+    assert_eq!(insp.local_only, Some(false));
+    // Sources: the transitive file resolved to its display name + a saved age.
+    let sources = insp.sources.expect("sources");
+    assert_eq!(sources.len(), 1);
+    assert_eq!(sources[0].file_id, "sales.csv");
+    assert_eq!(sources[0].name, "sales.csv");
+    assert!(sources[0].saved_age.is_some(), "freshness from the source's saved time");
+    assert_eq!(sources[0].missing, None);
+    // Dependents: 'over' reads 'shaped' (both direct and transitive here).
+    assert_eq!(insp.dependents.as_deref(), Some(&["over".to_string()][..]));
+    assert_eq!(insp.transitive_dependents.as_deref(), Some(&["over".to_string()][..]));
+
+    // The child's inspection carries the parent's file TRANSITIVELY and names
+    // the view it reads; a model-stated summary carries the "model" label.
+    let peek = views::create(
+        "peek",
+        "SELECT * FROM shaped",
+        ViewSummary { text: "model said so".into(), source: SummarySource::Model },
+        &[],
+    )
+    .expect("creates");
+    let peek_insp = inspect_view(&peek.id);
+    assert_eq!(peek_insp.summary_source.as_deref(), Some("model"));
+    assert_eq!(
+        peek_insp.sources.unwrap().iter().map(|s| s.file_id.clone()).collect::<Vec<_>>(),
+        vec!["sales.csv"],
+        "the parent's file rides through transitively"
+    );
+    assert_eq!(peek_insp.reads_views.as_deref(), Some(&["shaped".to_string()][..]));
+    assert!(peek_insp.dependents.unwrap().is_empty(), "a leaf has no dependents");
+    let _ = over;
+
+    // Unknown id → an empty inspection (every field absent — the FileInspection
+    // precedent).
+    let empty = inspect_view("view-nope");
+    assert!(empty.id.is_none() && empty.name.is_none() && empty.sql.is_none());
+    assert!(empty.sources.is_none() && empty.dependents.is_none());
+}
+
+/// Local-only propagates to the inspector transitively, and a source the id no
+/// longer resolves to is reported missing honestly (design.md "Failure &
+/// degradation").
+#[test]
+fn inspect_view_flags_local_only_and_missing_sources() {
+    let vault = tempfile::tempdir().unwrap();
+    let _guard = common::lock_env(vault.path());
+    write(&vault.path().join("private.csv"), "region,amount\nNE,5\n");
+    lighthouse_core::vault::invalidate_walk_cache();
+    lighthouse_core::vault::set_local_only("private.csv", true);
+
+    let v = views::create(
+        "private_view",
+        "SELECT * FROM private",
+        summary("q"),
+        &["private.csv".to_string()],
+    )
+    .expect("creates");
+    let insp = inspect_view(&v.id);
+    assert_eq!(
+        insp.local_only,
+        Some(true),
+        "a view over a local-only file is effectively local-only"
+    );
+    assert_eq!(insp.sources.as_ref().unwrap()[0].missing, None);
+
+    // Remove the source from disk: the inspector reports it missing, honestly,
+    // with the pinned table binding as the fallback name.
+    std::fs::remove_file(vault.path().join("private.csv")).unwrap();
+    lighthouse_core::vault::invalidate_walk_cache();
+    let s = inspect_view(&v.id).sources.unwrap().into_iter().next().unwrap();
+    assert_eq!(s.missing, Some(true), "removed source is flagged missing");
+    assert_eq!(s.name, "private", "name falls back to the pinned table binding");
+    assert!(s.saved_age.is_none(), "no honest age for a missing file");
+}
+
+/// Suggested asks gain a view-scoped chip when a view resolves with columns,
+/// and a view over a local-only source is excluded on cloud asks (the is_cloud
+/// filter) while a shareable view still appears.
+#[tokio::test]
+async fn suggested_asks_include_resolving_views_and_exclude_local_only_on_cloud() {
+    let vault = tempfile::tempdir().unwrap();
+    let _guard = common::lock_env(vault.path());
+    write(&vault.path().join("sales.csv"), "region,amount\nnorth,3\nsouth,7\n");
+    lighthouse_core::vault::invalidate_walk_cache();
+    lighthouse_core::vault::set_included("sales.csv", true);
+
+    views::create(
+        "clean_sales",
+        "SELECT region, amount FROM sales",
+        summary("tidied sales"),
+        &["sales.csv".to_string()],
+    )
+    .expect("saves");
+
+    // A resolving view over an included source contributes a view-scoped chip
+    // (numeric + text columns → the "Total {num} by {text} in {view}" idiom).
+    let local = lighthouse_core::meta::suggested_asks_resolved(vec!["sales.csv".to_string()], false).await;
+    assert!(
+        local.iter().any(|a| a.question == "Total amount by region in clean_sales"),
+        "a resolving view contributes a view chip: {local:?}"
+    );
+
+    // A view over a LOCAL-ONLY source: present locally, gone on cloud.
+    write(&vault.path().join("private.csv"), "region,amount\nNE,5\nNW,9\n");
+    lighthouse_core::vault::invalidate_walk_cache();
+    lighthouse_core::vault::set_included("private.csv", true);
+    lighthouse_core::vault::set_local_only("private.csv", true);
+    views::create(
+        "private_clean",
+        "SELECT region, amount FROM private",
+        summary("private tidy"),
+        &["private.csv".to_string()],
+    )
+    .expect("saves");
+
+    let ids = vec!["sales.csv".to_string(), "private.csv".to_string()];
+    let local2 = lighthouse_core::meta::suggested_asks_resolved(ids.clone(), false).await;
+    assert!(
+        local2.iter().any(|a| a.question == "Total amount by region in private_clean"),
+        "a local ask surfaces the private view: {local2:?}"
+    );
+    let cloud2 = lighthouse_core::meta::suggested_asks_resolved(ids, true).await;
+    assert!(
+        cloud2.iter().any(|a| a.question.contains("clean_sales")),
+        "the shareable view still appears on cloud: {cloud2:?}"
+    );
+    assert!(
+        !cloud2.iter().any(|a| a.question.contains("private_clean")),
+        "a cloud ask never surfaces a local-only view: {cloud2:?}"
+    );
+}
+

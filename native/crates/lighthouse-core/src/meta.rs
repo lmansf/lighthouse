@@ -16,9 +16,13 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
+use datafusion::arrow::datatypes::DataType;
+use datafusion::prelude::SessionContext;
 use serde::Serialize;
 
-use crate::analytics::{is_tabular, sanitize_table_name, saved_age_label};
+use crate::analytics::{
+    is_pdf, is_tabular, register_tables, register_views, sanitize_table_name, saved_age_label,
+};
 use crate::catalog::{self, ColumnKind};
 use crate::contracts::RagReference;
 use crate::vault;
@@ -547,6 +551,177 @@ pub fn suggested_asks(included: &[String], is_cloud: bool) -> Vec<SuggestedAsk> 
         }
     }
     asks
+}
+
+/// Suggested asks INCLUDING saved views (openspec: add-shaped-views §4). The
+/// file-derived chips are the existing `suggested_asks` (unchanged, cheap: a
+/// cache-first header read, no DataFusion); when the ask still has room under
+/// `SUGGEST_MAX` AND any saved view is eligible under the posture, the eligible
+/// views are resolved ONCE — their transitive source files registered and
+/// `register_views` run — and view-derived chips are appended from each
+/// resolved result's columns, in the same idioms as the file chips but scoped
+/// to the view (the view name rides in both the label and the question, so a
+/// view chip is distinct from any same-column file chip and names the table the
+/// ask targets).
+///
+/// Gated so the common zero-view path is byte-identical to `suggested_asks` and
+/// pays NO DataFusion cost: an empty store, no eligible views, or no in-scope
+/// source files all short-circuit before any context is built. A view over a
+/// local-only source is excluded on cloud asks — `eligible_for_posture` /
+/// `register_views` honor the posture exactly as the ask pipeline does.
+///
+/// Column KINDS come from the resolved result's Arrow schema (a `ViewReg`
+/// carries column NAMES only): `is_numeric()` is authoritative for the
+/// "Total {num} by {text}" idiom; the engine registers CSV dates as ISO text,
+/// so the date-driven "Monthly trend" idiom fires only for genuinely
+/// date-typed results (e.g. a parquet-backed view) — honest under-suggestion,
+/// never a fabricated kind. This is the cheapest correct path to real view
+/// columns: no value sampling, and no cost at all until a view exists.
+pub async fn suggested_asks_resolved(included: Vec<String>, is_cloud: bool) -> Vec<SuggestedAsk> {
+    // File chips first — the unchanged blocking path.
+    let file_included = included.clone();
+    let mut asks = tokio::task::spawn_blocking(move || suggested_asks(&file_included, is_cloud))
+        .await
+        .unwrap_or_default();
+    if asks.len() >= SUGGEST_MAX {
+        return asks;
+    }
+    // Resolve the eligible views' in-scope source files (blocking: store read +
+    // per-file vault-state checks). An empty result means the whole view branch
+    // is skipped — the zero-view path never builds a context.
+    let files = tokio::task::spawn_blocking(move || {
+        let eligible = crate::views::eligible_for_posture(is_cloud);
+        if eligible.is_empty() {
+            return Vec::new();
+        }
+        view_source_files(&eligible, &included, is_cloud)
+    })
+    .await
+    .unwrap_or_default();
+    if files.is_empty() {
+        return asks;
+    }
+    // One fresh context: register the sources, then the views virtually (the
+    // ask-time primitive). register_views re-applies the posture, so a
+    // local-only view never resolves on a cloud ask.
+    let ctx = SessionContext::new();
+    let regs = register_tables(&ctx, &files, is_cloud).await;
+    if regs.is_empty() {
+        return asks;
+    }
+    let view_regs = register_views(&ctx, &regs, is_cloud).await;
+    // Dedup view chips against the file chips (and each other) by label.
+    let mut seen: HashSet<String> = asks.iter().map(|a| a.label.clone()).collect();
+    for vr in &view_regs {
+        if asks.len() >= SUGGEST_MAX {
+            break;
+        }
+        let cols = view_typed_columns(&ctx, &vr.name).await;
+        push_view_suggestions(&mut asks, &mut seen, &vr.name, &cols);
+    }
+    asks
+}
+
+/// The in-scope, tabular/PDF source files the eligible views read, as
+/// `(file_id, name, abs)` triples for `register_tables`. "In scope" is the
+/// SHAREABLE set for the posture (active-included minus effectively-local-only
+/// on cloud) intersected with the caller's `included` set — the same scope the
+/// file chips honor, so a view chip never rests on a file the chat isn't
+/// showing as included. Deduped by file id; a view over another view still
+/// contributes its transitive sources because that parent view is eligible too
+/// (so its `reads.files` are in this union).
+fn view_source_files(
+    eligible: &[crate::views::View],
+    included: &[String],
+    is_cloud: bool,
+) -> Vec<(String, String, PathBuf)> {
+    let active: HashSet<String> = vault::shareable_file_ids(is_cloud).into_iter().collect();
+    let included: HashSet<&str> = included.iter().map(String::as_str).collect();
+    let mut out: Vec<(String, String, PathBuf)> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for v in eligible {
+        for f in &v.reads.files {
+            if !active.contains(&f.file_id) || !included.contains(f.file_id.as_str()) {
+                continue;
+            }
+            if !seen.insert(f.file_id.clone()) {
+                continue;
+            }
+            if let Some((name, abs)) = vault::doc_path(&f.file_id) {
+                if is_tabular(&name) || is_pdf(&name) {
+                    out.push((f.file_id.clone(), name, abs));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// A registered view's result columns as `(lowercased name, kind)`, kinds read
+/// from the Arrow schema (no rows collected). Empty when the view isn't
+/// registered.
+async fn view_typed_columns(ctx: &SessionContext, name: &str) -> Vec<(String, ColumnKind)> {
+    let Ok(df) = ctx.table(name).await else {
+        return Vec::new();
+    };
+    df.schema()
+        .fields()
+        .iter()
+        .map(|f| (f.name().to_lowercase(), arrow_kind(f.data_type())))
+        .collect()
+}
+
+/// Arrow type → the catalog's coarse column kind. `is_numeric()` is
+/// authoritative; only genuinely temporal types read as Date (CSV dates arrive
+/// as ISO text and read as Text — see `suggested_asks_resolved`).
+fn arrow_kind(dt: &DataType) -> ColumnKind {
+    if dt.is_numeric() {
+        ColumnKind::Numeric
+    } else if matches!(
+        dt,
+        DataType::Date32
+            | DataType::Date64
+            | DataType::Timestamp(_, _)
+            | DataType::Time32(_)
+            | DataType::Time64(_)
+    ) {
+        ColumnKind::Date
+    } else {
+        ColumnKind::Text
+    }
+}
+
+/// Append the view-scoped chips for one resolved view's columns — the same
+/// idioms as the file chips ("Total {num} by {text}", "Monthly trend of
+/// {num}") with the view name in both label and question. Pure and
+/// budget-aware, so it is unit-testable without a SessionContext.
+fn push_view_suggestions(
+    asks: &mut Vec<SuggestedAsk>,
+    seen: &mut HashSet<String>,
+    view_name: &str,
+    cols: &[(String, ColumnKind)],
+) {
+    let numeric = cols.iter().find(|(_, k)| *k == ColumnKind::Numeric);
+    let text = cols.iter().find(|(_, k)| *k == ColumnKind::Text);
+    let date = cols.iter().find(|(_, k)| *k == ColumnKind::Date);
+    if let (Some((n, _)), Some((c, _))) = (numeric, text) {
+        let q = format!("Total {n} by {c} in {view_name}");
+        if asks.len() < SUGGEST_MAX && seen.insert(q.clone()) {
+            asks.push(SuggestedAsk {
+                label: q.clone(),
+                question: q,
+            });
+        }
+    }
+    if let (Some(_), Some((n, _))) = (date, numeric) {
+        let q = format!("Monthly trend of {n} in {view_name}");
+        if asks.len() < SUGGEST_MAX && seen.insert(q.clone()) {
+            asks.push(SuggestedAsk {
+                label: q.clone(),
+                question: q,
+            });
+        }
+    }
 }
 
 // --- Tests -----------------------------------------------------------------------

@@ -31,8 +31,10 @@
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
+import type { ViewInspection, ViewSource } from "@/contracts";
 import { stateDir, writeJson } from "./config";
-import { activeIncludedFileIds, listNodes, localOnlySubset } from "./vault";
+import { activeIncludedFileIds, listNodes, localOnlySubset, resolveNodePath } from "./vault";
+import { savedAgeLabel } from "./meta";
 
 /** Envelope version this engine reads and writes. */
 const STORE_VERSION = 1;
@@ -767,4 +769,79 @@ export function deleteView(id: string, cascade: boolean): string[] {
   const deleted = records.filter((r) => doomed.has(r.id)).map((r) => r.id);
   save(records.filter((r) => !doomed.has(r.id))); // the ONE write
   return deleted;
+}
+
+// --- Inspector (openspec: add-shaped-views §4) -------------------------------------
+
+/**
+ * Inspect a saved view: the exact definition SQL, the provenance-labeled
+ * summary, the source files it reads (transitively, through reads.views) with
+ * their saved-age freshness, the effectively-local-only flag, and the direct +
+ * transitive dependent names the rename/delete dialogs warn with. Unknown id →
+ * `{}` (the FileInspection precedent).
+ *
+ * PARITY: this is a pure STORED-STATE read — no SQL executes, so unlike the
+ * resolution/samples surfaces the twin returns the identical shape as
+ * inspect.rs::inspect_view. Freshness reads the sources' on-disk mtimes through
+ * the shared savedAgeLabel; a source the id no longer resolves to is reported
+ * honestly with `missing` (its name falls back to the pinned table binding).
+ * KEEP IN SYNC with inspect.rs::inspect_view.
+ */
+export function inspectView(id: string): ViewInspection {
+  const records = listViews();
+  const rec = records.find((r) => r.id === id);
+  if (!rec) return {};
+
+  // Transitive source files: own reads.files then every parent view's, deduped
+  // in reads order (the accumulation register_views / views.rs do).
+  const files: ViewFileRead[] = [];
+  const seenViews = new Set<string>([id]);
+  const walk = (v: View): void => {
+    for (const f of v.reads.files) {
+      if (!files.some((k) => k.fileId === f.fileId)) files.push(f);
+    }
+    for (const pid of v.reads.views) {
+      if (seenViews.has(pid)) continue;
+      seenViews.add(pid);
+      const parent = records.find((r) => r.id === pid);
+      if (parent) walk(parent);
+    }
+  };
+  walk(rec);
+
+  const byId = fileNamesById();
+  const now = Date.now();
+  const sources: ViewSource[] = files.map((f) => {
+    const name = byId.get(f.fileId);
+    if (name === undefined) {
+      // The id no longer resolves — honest missing marker (name falls back to
+      // the pinned table-name binding, so the row still names something).
+      return { fileId: f.fileId, name: f.tableName, missing: true };
+    }
+    let savedAge: string | undefined;
+    try {
+      savedAge = savedAgeLabel(fs.statSync(resolveNodePath(f.fileId)).mtimeMs, now);
+    } catch {
+      /* unreadable since the walk — keep the name, omit the age */
+    }
+    return savedAge ? { fileId: f.fileId, name, savedAge } : { fileId: f.fileId, name };
+  });
+
+  const readsViews = rec.reads.views
+    .map((vid) => records.find((r) => r.id === vid)?.name)
+    .filter((n): n is string => n !== undefined);
+
+  return {
+    id: rec.id,
+    name: rec.name,
+    sql: rec.sql,
+    summary: rec.summary.text,
+    summarySource: rec.summary.source,
+    sources,
+    readsViews,
+    localOnly: viewEffectivelyLocalOnly(rec, records),
+    dependents: dependentsIn(records, id).map((d) => d.name),
+    transitiveDependents: transitiveDependentsIn(records, id).map((d) => d.name),
+    createdMs: rec.createdMs,
+  };
 }

@@ -635,6 +635,55 @@ export interface ViewCreateInput {
 }
 
 /**
+ * One source file a view reads, resolved for the inspector: its display name
+ * and how fresh the on-disk copy is (`savedAge`, from the file's saved time —
+ * the SAME saved-age label the analytics footer uses). A file the id no longer
+ * resolves to is reported honestly with `missing:true` (and `name` falls back
+ * to the pinned table-name binding). KEEP IN SYNC with `ViewSource` in
+ * lighthouse-core inspect.rs.
+ */
+export interface ViewSource {
+  fileId: string;
+  name: string;
+  /** "2 hours ago" — absent when the file is missing/unreadable. */
+  savedAge?: string;
+  /** The file id no longer resolves in the vault. Present (true) only then. */
+  missing?: boolean;
+}
+
+/**
+ * "Inspector on a view" (openspec: add-shaped-views §4): a read-only view of a
+ * saved view — the exact definition SQL, the provenance-labeled summary, the
+ * source files it reads (transitively) with their freshness, the
+ * effectively-local-only flag, and the dependent names the rename/delete
+ * dialogs warn with. Every field is optional so an unknown id returns `{}`.
+ * All values are stored state (no SQL executes), so BOTH engines fill in the
+ * identical shape — unlike `FileInspection`, there are no Rust-only fields.
+ * KEEP IN SYNC with `ViewInspection` in lighthouse-core inspect.rs.
+ */
+export interface ViewInspection {
+  id?: string;
+  name?: string;
+  /** The exact stored SELECT the engine re-guards and runs at ask time. */
+  sql?: string;
+  /** The one-line summary text (may be "" — a model-shaped view can carry none). */
+  summary?: string;
+  /** Where the summary came from — the provenance label shown beside it. */
+  summarySource?: ViewSummarySource;
+  /** Every source FILE this view reads, transitively, with saved-age freshness. */
+  sources?: ViewSource[];
+  /** The names of the views this one reads directly (the stack above the files). */
+  readsViews?: string[];
+  /** Effectively local-only: any transitive source file is local-only. */
+  localOnly?: boolean;
+  /** Direct dependent view names — what the rename warning shows. */
+  dependents?: string[];
+  /** Transitive dependent view names — what the delete/cascade confirmation shows. */
+  transitiveDependents?: string[];
+  createdMs?: number;
+}
+
+/**
  * A shaping-ask proposal (openspec: add-shaped-views §3): the model's ONE
  * validated transform SELECT plus engine-rendered evidence — the first
  * sample rows of the source (`before`) and of the proposed SELECT (`after`)

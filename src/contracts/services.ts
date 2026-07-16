@@ -34,6 +34,7 @@ import type {
   ShapeViewResult,
   View,
   ViewCreateInput,
+  ViewInspection,
 } from "./types";
 
 /** Curates which files/sources are exposed to retrieval, and runs retrieval. */
@@ -418,6 +419,14 @@ export interface RagService {
    * confirmation must show) — name lists for the dialogs.
    */
   viewDependents(id: string): Promise<{ dependents: string[]; transitive: string[] }>;
+  /**
+   * Inspect a saved view (openspec: add-shaped-views §4): the exact definition
+   * SQL, the provenance-labeled summary, the source files it reads
+   * (transitively) with their saved-age freshness, the effectively-local-only
+   * flag, and the dependent names. Pure stored-state read — no SQL executes, so
+   * BOTH engines return the identical shape. An unknown id returns `{}`.
+   */
+  inspectView(id: string): Promise<ViewInspection>;
   /**
    * Shaping ask (openspec: add-shaped-views §3): ONE engine-guarded model
    * completion proposes a transform SELECT over `source` (a registered table

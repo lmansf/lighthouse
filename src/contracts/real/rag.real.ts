@@ -26,6 +26,7 @@ import type {
   ShapeViewResult,
   View,
   ViewCreateInput,
+  ViewInspection,
 } from "../types";
 
 async function getTree(): Promise<{ sources: DataSource[]; nodes: FileNode[]; desktop: boolean }> {
@@ -503,6 +504,14 @@ class RealRagService implements RagService {
       dependents: Array.isArray(res.dependents) ? (res.dependents as string[]) : [],
       transitive: Array.isArray(res.transitive) ? (res.transitive as string[]) : [],
     };
+  }
+
+  async inspectView(id: string): Promise<ViewInspection> {
+    // Stored-state read: the engine returns `{inspection}`; an unknown id
+    // yields `{}` (the FileInspection precedent). The twin computes the
+    // identical shape from the stored record (no execution — PARITY).
+    const res = await this.viewsOp({ action: "inspect", id });
+    return (res.inspection ?? {}) as ViewInspection;
   }
 
   async shapeView(
