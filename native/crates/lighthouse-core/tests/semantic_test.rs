@@ -118,7 +118,7 @@ fn metric_round_trips_byte_stable_with_derived_reads() {
 }
 
 #[test]
-fn unknown_version_and_corrupt_json_load_empty_and_bak_on_write() {
+fn unknown_version_loads_empty_and_baks_on_write() {
     let vault = tempfile::tempdir().unwrap();
     let _guard = common::lock_env(vault.path());
     let state = vault.path().join(".rag-vault");
@@ -143,8 +143,13 @@ fn unknown_version_and_corrupt_json_load_empty_and_bak_on_write() {
             .unwrap();
     assert_eq!(parsed["v"], 1);
     assert_eq!(parsed["synonyms"][0]["term"], "gmv");
+}
 
-    // Corrupt JSON in a fresh vault baks the same way.
+/// Corrupt JSON baks the same way — a SEPARATE `#[test]` so it takes the env
+/// lock on its own. Holding two `common::lock_env` guards at once on one thread
+/// would deadlock the non-reentrant `ENV_LOCK` mutex.
+#[test]
+fn corrupt_json_loads_empty_and_baks_on_write() {
     let vault2 = tempfile::tempdir().unwrap();
     let _guard2 = common::lock_env(vault2.path());
     let state2 = vault2.path().join(".rag-vault");
