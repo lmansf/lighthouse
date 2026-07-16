@@ -298,3 +298,81 @@ test("source files are never touched by any op", () => {
   assert.ok(before.equals(fs.readFileSync(csv)), "source bytes identical after create/refusal/delete");
   assert.deepEqual(semantic.listSemantic().metrics, []);
 });
+
+// --- §2 prompt block: resolution into NL→SQL ---------------------------------
+// PARITY: the analytics-branch injection is Rust-only (this twin has no
+// analytics branch), but renderBlock's label strings + SEMANTIC_FEWSHOTS lines
+// are byte-identical to semantic.rs::render_block. This snapshot is the byte
+// contract — it must match the Rust test render_block_pins_the_business_...
+test("renderBlock pins the business-definitions block byte-for-byte (PARITY)", () => {
+  const set = {
+    metrics: [
+      {
+        id: "metric-x",
+        name: "revenue",
+        expression: "SUM(amount) FILTER (WHERE status='paid')",
+        description: "paid revenue",
+        entity: "sales",
+        reads: { files: [], views: [] },
+        summary: { text: "q", source: "question" },
+        createdMs: 1,
+      },
+    ],
+    synonyms: [{ term: "GMV", canonical: "revenue" }],
+    entities: [
+      { name: "sales", table: "sales", keyColumns: ["region", "product"], description: "the sales ledger" },
+    ],
+    joinHints: [
+      { leftEntity: "orders", leftColumn: "rep", rightEntity: "reps", rightColumn: "rep", description: "each order's owner" },
+    ],
+  };
+  const block = semantic.renderBlock(set);
+  assert.equal(block.name, "business definitions");
+  const expected = [
+    "Business definitions for this vault (curated meanings — prefer these over guessing; write SQL that uses each metric's exact definition):",
+    "",
+    "Metrics (name = definition):",
+    "- revenue = SUM(amount) FILTER (WHERE status='paid') — paid revenue",
+    "",
+    "Synonyms (term → canonical column or metric):",
+    "- GMV → revenue",
+    "",
+    "Entities (name: table (key columns) — description):",
+    "- sales: sales (region, product) — the sales ledger",
+    "",
+    "Curated join hints (authoritative — prefer over inferred joins):",
+    "- orders.rep = reps.rep — each order's owner",
+    "",
+    "Examples (a defined term expands to its metric definition):",
+    "Q: revenue by region",
+    "SQL: SELECT region, SUM(amount) FILTER (WHERE status = 'paid') AS revenue FROM sales GROUP BY region ORDER BY revenue DESC",
+    "Q: gmv by month (gmv is the revenue metric)",
+    "SQL: SELECT substr(order_date, 1, 7) AS month, SUM(amount) FILTER (WHERE status = 'paid') AS revenue FROM sales GROUP BY month ORDER BY month",
+  ].join("\n");
+  assert.equal(block.text, expected);
+  // An empty set renders nothing (the byte-identical-prompt invariant).
+  assert.equal(semantic.renderBlock({ metrics: [], synonyms: [], entities: [], joinHints: [] }), null);
+});
+
+test("promptBlock is null on an empty store and respects the ask posture", () => {
+  const { dir } = freshVault();
+  assert.equal(semantic.promptBlock(false), null, "empty store ⇒ no block");
+
+  fs.writeFileSync(path.join(dir, "private.csv"), "region,amount\nNE,5\n");
+  fs.writeFileSync(path.join(dir, "public.csv"), "region,amount\nSW,7\n");
+  vault.setIncluded("private.csv", true);
+  vault.setIncluded("public.csv", true);
+  vault.setLocalOnly("private.csv", true);
+  semantic.createMetric("private_rev", "SUM(amount)", "", "private", summary("q"), ["private.csv"]);
+  semantic.createMetric("public_rev", "SUM(amount)", "", "public", summary("q"), ["public.csv"]);
+
+  // Device posture: both definitions ride into the block.
+  const local = semantic.promptBlock(false);
+  assert.ok(local.text.includes("- private_rev = SUM(amount)"), local.text);
+  assert.ok(local.text.includes("- public_rev = SUM(amount)"), local.text);
+
+  // Cloud posture: the local-only metric is absent; the public one stays.
+  const cloud = semantic.promptBlock(true);
+  assert.ok(!cloud.text.includes("private_rev"), cloud.text);
+  assert.ok(cloud.text.includes("- public_rev = SUM(amount)"), cloud.text);
+});

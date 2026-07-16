@@ -351,6 +351,121 @@ export function resolveMetric(name: string): string | undefined {
     ?.expression;
 }
 
+// --- §2 prompt block: resolution into NL→SQL ---------------------------------------
+//
+// PARITY: the analytics-branch prompt injection is RUST-ONLY (synth.rs) — this
+// dev twin has no analytics branch, and the §2.4 curated-vs-heuristic join-hint
+// merge + `curatedJoinPairs` are Rust-only (there is no heuristic join_hints
+// here). What the twin DOES mirror, byte-identically, is the rendered block
+// itself: `renderBlock` produces the SAME label strings + `SEMANTIC_FEWSHOTS`
+// lines as semantic.rs::render_block (ts-twin.md rule 2), so the two engines
+// agree on every business-definitions string. Change these in lockstep with
+// semantic.rs.
+
+/** Block label (rendered `[n] business definitions`). KEEP IN SYNC with BLOCK_NAME. */
+const BLOCK_NAME = "business definitions";
+const BLOCK_HEADER =
+  "Business definitions for this vault (curated meanings — prefer these over guessing; write SQL that uses each metric's exact definition):";
+const METRICS_HEADER = "Metrics (name = definition):";
+const SYNONYMS_HEADER = "Synonyms (term → canonical column or metric):";
+const ENTITIES_HEADER = "Entities (name: table (key columns) — description):";
+const CURATED_JOIN_HEADER = "Curated join hints (authoritative — prefer over inferred joins):";
+const EXAMPLES_HEADER = "Examples (a defined term expands to its metric definition):";
+
+// Per-kind caps — keep the NEWEST N of each kind. KEEP IN SYNC with semantic.rs.
+const MAX_BLOCK_METRICS = 24;
+const MAX_BLOCK_SYNONYMS = 24;
+const MAX_BLOCK_ENTITIES = 12;
+const MAX_BLOCK_JOIN_HINTS = 12;
+
+/**
+ * Blessed question→SQL pairs demonstrating a metric reference EXPANDING to its
+ * definition — rendered in the block when a metric is present. KEEP IN SYNC
+ * with semantic.rs::SEMANTIC_FEWSHOTS (byte-identical rendered lines).
+ */
+const SEMANTIC_FEWSHOTS: [string, string][] = [
+  [
+    "revenue by region",
+    "SELECT region, SUM(amount) FILTER (WHERE status = 'paid') AS revenue FROM sales GROUP BY region ORDER BY revenue DESC",
+  ],
+  [
+    "gmv by month (gmv is the revenue metric)",
+    "SELECT substr(order_date, 1, 7) AS month, SUM(amount) FILTER (WHERE status = 'paid') AS revenue FROM sales GROUP BY month ORDER BY month",
+  ],
+];
+
+/** Keep the newest `cap` records, newest-first (the register_tables slot-cap idiom). */
+function newestFirst<T>(items: T[], cap: number): T[] {
+  return cap <= 0 ? [] : items.slice(-cap).reverse();
+}
+
+/** A trailing ` — description` clause, or empty (never a bare `— `). */
+function descSuffix(description: string): string {
+  const d = description.trim();
+  return d ? ` — ${d}` : "";
+}
+
+/**
+ * The pure renderer over an already-posture-filtered set — byte-identical to
+ * semantic.rs::render_block. Fixed order: metrics, synonyms, entities, curated
+ * join hints, then examples (only with a metric present). `null` when nothing
+ * is eligible (keeps the prompt byte-identical to today). KEEP IN SYNC.
+ */
+export function renderBlock(set: SemanticSet): { name: string; text: string } | null {
+  const metrics = newestFirst(set.metrics, MAX_BLOCK_METRICS);
+  const synonyms = newestFirst(set.synonyms, MAX_BLOCK_SYNONYMS);
+  const entities = newestFirst(set.entities, MAX_BLOCK_ENTITIES);
+  const hints = newestFirst(set.joinHints, MAX_BLOCK_JOIN_HINTS);
+
+  const sections: string[] = [];
+  if (metrics.length > 0) {
+    const lines = [METRICS_HEADER];
+    for (const m of metrics) lines.push(`- ${m.name} = ${m.expression}${descSuffix(m.description)}`);
+    sections.push(lines.join("\n"));
+  }
+  if (synonyms.length > 0) {
+    const lines = [SYNONYMS_HEADER];
+    for (const s of synonyms) lines.push(`- ${s.term} → ${s.canonical}`);
+    sections.push(lines.join("\n"));
+  }
+  if (entities.length > 0) {
+    const lines = [ENTITIES_HEADER];
+    for (const e of entities) {
+      const cols = e.keyColumns.length > 0 ? ` (${e.keyColumns.join(", ")})` : "";
+      lines.push(`- ${e.name}: ${e.table}${cols}${descSuffix(e.description)}`);
+    }
+    sections.push(lines.join("\n"));
+  }
+  if (hints.length > 0) {
+    const lines = [CURATED_JOIN_HEADER];
+    for (const j of hints) {
+      lines.push(
+        `- ${j.leftEntity}.${j.leftColumn} = ${j.rightEntity}.${j.rightColumn}${descSuffix(j.description)}`,
+      );
+    }
+    sections.push(lines.join("\n"));
+  }
+  // Metric-expansion examples ride only when a metric exists (byte-identical
+  // gate to semantic.rs), so an empty/metric-free store adds nothing.
+  if (metrics.length > 0) {
+    const lines = [EXAMPLES_HEADER];
+    for (const [q, sql] of SEMANTIC_FEWSHOTS) lines.push(`Q: ${q}\nSQL: ${sql}`);
+    sections.push(lines.join("\n"));
+  }
+  if (sections.length === 0) return null;
+  return { name: BLOCK_NAME, text: `${BLOCK_HEADER}\n\n${sections.join("\n\n")}` };
+}
+
+/**
+ * The business-definitions block for an ask's posture — the §1
+ * `eligibleForPosture` gate then `renderBlock`. KEEP IN SYNC with
+ * semantic.rs::prompt_block. PARITY: the twin never injects it (no analytics
+ * branch); this exists so the label strings stay byte-pinned.
+ */
+export function promptBlock(isCloud: boolean): { name: string; text: string } | null {
+  return renderBlock(eligibleForPosture(isCloud));
+}
+
 // --- Dependency helpers (pure) -----------------------------------------------------
 
 /** The synonyms whose canonical names `metricName` (case-insensitive). */

@@ -47,6 +47,7 @@ use sha1::{Digest, Sha1};
 use std::path::PathBuf;
 
 use crate::config::{now_ms, state_dir, write_json};
+use crate::llm::Ctx;
 // The store machinery + name rules are SHARED with shaped views: a metric's
 // `reads`/`summary` are the view types verbatim (byte-identical wire), and the
 // name sanitization + reserved list are the SAME rules (KEEP IN SYNC).
@@ -386,6 +387,187 @@ pub fn resolve_metric(name: &str) -> Option<String> {
         .into_iter()
         .find(|m| m.name.eq_ignore_ascii_case(name))
         .map(|m| m.expression)
+}
+
+// --- §2 prompt block: resolution into NL→SQL ---------------------------------------
+//
+// The posture-eligible definitions render into ONE deterministic `Ctx` — the
+// "business definitions" block — spliced into the analytics prompt beside the
+// table/view schema cards (synth.rs), so the model writes SQL that USES the
+// agreed meaning of a term instead of re-guessing it. The block is model-free,
+// fixed-order, and COUNT-CAPPED (newest-first, the `register_tables` slot-cap
+// idiom) so it can never blow the 6144-token analytics window. Zero eligible
+// definitions ⇒ `None` ⇒ nothing spliced ⇒ every analytics prompt string is
+// byte-identical to the pre-semantic-layer prompt (pinned by a test).
+//
+// PARITY: the analytics-branch injection is Rust-only (the TS twin has no
+// analytics branch), but `semantic.ts::renderBlock` mirrors every label string
+// here BYTE-IDENTICALLY for the ctxs it can assemble (ts-twin.md rule 2). The
+// header/label constants and `SEMANTIC_FEWSHOTS` below are the byte contract —
+// change them in lockstep with semantic.ts.
+
+/// The block's prompt label (rendered as `[n] business definitions`), lowercase
+/// like the "join hints" card. KEEP IN SYNC with semantic.ts::BLOCK_NAME.
+const BLOCK_NAME: &str = "business definitions";
+/// Leading line of the block body. KEEP IN SYNC with semantic.ts::BLOCK_HEADER.
+const BLOCK_HEADER: &str = "Business definitions for this vault (curated meanings — prefer these over guessing; write SQL that uses each metric's exact definition):";
+const METRICS_HEADER: &str = "Metrics (name = definition):";
+const SYNONYMS_HEADER: &str = "Synonyms (term → canonical column or metric):";
+const ENTITIES_HEADER: &str = "Entities (name: table (key columns) — description):";
+const CURATED_JOIN_HEADER: &str = "Curated join hints (authoritative — prefer over inferred joins):";
+const EXAMPLES_HEADER: &str = "Examples (a defined term expands to its metric definition):";
+
+// Per-kind caps: the block keeps the NEWEST N of each kind (the
+// `register_tables` slot-cap idiom) so an ever-growing store can never blow the
+// analytics window. KEEP IN SYNC with semantic.ts.
+const MAX_BLOCK_METRICS: usize = 24;
+const MAX_BLOCK_SYNONYMS: usize = 24;
+const MAX_BLOCK_ENTITIES: usize = 12;
+const MAX_BLOCK_JOIN_HINTS: usize = 12;
+
+/// Blessed question→SQL pairs demonstrating a metric reference EXPANDING to its
+/// stored definition — they ride in the block (metrics present) so the model
+/// learns to substitute the agreed definition. Every SELECT passes `guard_sql`
+/// (pinned by a test, the `SQL_FEWSHOTS` validating-test precedent). KEEP IN
+/// SYNC with semantic.ts::SEMANTIC_FEWSHOTS (byte-identical rendered lines).
+pub const SEMANTIC_FEWSHOTS: &[(&str, &str)] = &[
+    (
+        "revenue by region",
+        "SELECT region, SUM(amount) FILTER (WHERE status = 'paid') AS revenue FROM sales GROUP BY region ORDER BY revenue DESC",
+    ),
+    (
+        "gmv by month (gmv is the revenue metric)",
+        "SELECT substr(order_date, 1, 7) AS month, SUM(amount) FILTER (WHERE status = 'paid') AS revenue FROM sales GROUP BY month ORDER BY month",
+    ),
+];
+
+/// Keep the NEWEST `cap` records and render them newest-first — the
+/// `register_tables` slot-cap idiom (there, singles sort `Reverse(mtime)` then
+/// fill until the cap). The store appends in creation order, so the tail is the
+/// newest; `rev().take(cap)` yields the newest, newest-first.
+fn newest_first<T: Clone>(items: &[T], cap: usize) -> Vec<T> {
+    items.iter().rev().take(cap).cloned().collect()
+}
+
+/// A trailing ` — description` clause when a definition carries one, else empty
+/// (never a bare `— `). KEEP IN SYNC with semantic.ts::descSuffix.
+fn desc_suffix(description: &str) -> String {
+    let d = description.trim();
+    if d.is_empty() {
+        String::new()
+    } else {
+        format!(" — {d}")
+    }
+}
+
+/// The business-definitions block for an ask's posture (openspec §2.1). Renders
+/// the posture-eligible metrics, synonyms, entities, and curated join hints (the
+/// §1 `eligible_for_posture` gate — local-only definitions are excluded on a
+/// cloud ask), then metric-expansion examples. `None` when nothing is eligible
+/// (empty store OR all filtered out), which keeps the prompt byte-identical to
+/// today. KEEP IN SYNC with semantic.ts::promptBlock.
+pub fn prompt_block(is_cloud: bool) -> Option<Ctx> {
+    render_block(&eligible_for_posture(is_cloud))
+}
+
+/// The pure renderer over an already-posture-filtered set (testable without a
+/// vault). Fixed section order: metrics, synonyms, entities, curated join hints,
+/// then examples (only when a metric is present — they demonstrate metric
+/// expansion). An all-empty set renders `None`. KEEP IN SYNC with
+/// semantic.ts::renderBlock (byte-identical output).
+fn render_block(set: &SemanticSet) -> Option<Ctx> {
+    let metrics = newest_first(&set.metrics, MAX_BLOCK_METRICS);
+    let synonyms = newest_first(&set.synonyms, MAX_BLOCK_SYNONYMS);
+    let entities = newest_first(&set.entities, MAX_BLOCK_ENTITIES);
+    let hints = newest_first(&set.join_hints, MAX_BLOCK_JOIN_HINTS);
+
+    let mut sections: Vec<String> = Vec::new();
+    if !metrics.is_empty() {
+        let mut lines = vec![METRICS_HEADER.to_string()];
+        for m in &metrics {
+            lines.push(format!("- {} = {}{}", m.name, m.expression, desc_suffix(&m.description)));
+        }
+        sections.push(lines.join("\n"));
+    }
+    if !synonyms.is_empty() {
+        let mut lines = vec![SYNONYMS_HEADER.to_string()];
+        for s in &synonyms {
+            lines.push(format!("- {} → {}", s.term, s.canonical));
+        }
+        sections.push(lines.join("\n"));
+    }
+    if !entities.is_empty() {
+        let mut lines = vec![ENTITIES_HEADER.to_string()];
+        for e in &entities {
+            let cols = if e.key_columns.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", e.key_columns.join(", "))
+            };
+            lines.push(format!("- {}: {}{}{}", e.name, e.table, cols, desc_suffix(&e.description)));
+        }
+        sections.push(lines.join("\n"));
+    }
+    if !hints.is_empty() {
+        let mut lines = vec![CURATED_JOIN_HEADER.to_string()];
+        for j in &hints {
+            lines.push(format!(
+                "- {}.{} = {}.{}{}",
+                j.left_entity, j.left_column, j.right_entity, j.right_column,
+                desc_suffix(&j.description)
+            ));
+        }
+        sections.push(lines.join("\n"));
+    }
+    // Metric-expansion examples ride only when a metric exists; a metric-free or
+    // empty store never adds them, so the byte-identical-prompt invariant holds.
+    if !metrics.is_empty() {
+        let mut lines = vec![EXAMPLES_HEADER.to_string()];
+        for (q, sql) in SEMANTIC_FEWSHOTS {
+            lines.push(format!("Q: {q}\nSQL: {sql}"));
+        }
+        sections.push(lines.join("\n"));
+    }
+    if sections.is_empty() {
+        return None;
+    }
+    Some(Ctx {
+        name: BLOCK_NAME.to_string(),
+        text: format!("{BLOCK_HEADER}\n\n{}", sections.join("\n\n")),
+        // Auxiliary guidance, like the heuristic join-hints card (score 0.0).
+        score: 0.0,
+    })
+}
+
+/// The normalized TABLE pairs the posture-eligible curated join hints name, for
+/// the §2.4 merge: the heuristic `analytics::join_hints` drops a pair a curated
+/// hint already covers (the curated hint WINS, rendered in the block above).
+/// Each entity name resolves to its sanitized table (falling back to the name
+/// as a literal table), so a pair compares to the heuristic hints' registered
+/// table names. PARITY: Rust-only (the twin has no analytics/join_hints).
+pub fn curated_join_pairs(is_cloud: bool) -> Vec<(String, String)> {
+    let set = eligible_for_posture(is_cloud);
+    set.join_hints
+        .iter()
+        .map(|j| {
+            (
+                resolved_table(&j.left_entity, &set.entities),
+                resolved_table(&j.right_entity, &set.entities),
+            )
+        })
+        .collect()
+}
+
+/// Resolve an entity name to the sanitized table it stands for (its stored
+/// `table`, sanitized like a registered file table), falling back to treating
+/// the name itself as a literal table when it is not a defined entity.
+fn resolved_table(entity_name: &str, entities: &[Entity]) -> String {
+    let table = entities
+        .iter()
+        .find(|e| e.name.eq_ignore_ascii_case(entity_name))
+        .map(|e| e.table.as_str())
+        .unwrap_or(entity_name);
+    crate::analytics::sanitize_table_name(table)
 }
 
 // --- Dependency helpers (pure, testable on synthetic stores) -----------------------
@@ -886,5 +1068,125 @@ mod tests {
             .collect();
         assert_eq!(deps, vec!["GMV", "turnover"], "case-insensitive, order kept");
         assert!(dependent_synonyms(&synonyms, "revenue_other").is_empty());
+    }
+
+    // --- §2 prompt block ------------------------------------------------------
+
+    fn metric(name: &str, expression: &str, description: &str, created_ms: i64) -> Metric {
+        Metric {
+            id: format!("metric-{name}"),
+            name: name.to_string(),
+            expression: expression.to_string(),
+            description: description.to_string(),
+            entity: "sales".to_string(),
+            reads: file_reads("sales.csv"),
+            summary: summary("q"),
+            created_ms,
+        }
+    }
+
+    #[test]
+    fn newest_first_keeps_the_newest_and_caps() {
+        assert_eq!(newest_first(&[1, 2, 3, 4], 2), vec![4, 3], "newest, newest-first");
+        assert_eq!(newest_first(&[1, 2], 5), vec![2, 1], "under the cap: all, still newest-first");
+        assert!(newest_first::<i32>(&[], 3).is_empty());
+    }
+
+    #[test]
+    fn render_block_is_none_for_an_empty_set() {
+        // The byte-identical-prompt invariant's foundation: nothing eligible ⇒
+        // no block ⇒ synth.rs pushes nothing.
+        assert!(render_block(&SemanticSet::default()).is_none());
+    }
+
+    #[test]
+    fn render_block_pins_the_business_definitions_string() {
+        // A full set exercises every section + the metric-expansion examples;
+        // the exact string is the byte contract with semantic.ts::renderBlock.
+        let set = SemanticSet {
+            metrics: vec![metric(
+                "revenue",
+                "SUM(amount) FILTER (WHERE status='paid')",
+                "paid revenue",
+                1,
+            )],
+            synonyms: vec![Synonym { term: "GMV".into(), canonical: "revenue".into() }],
+            entities: vec![Entity {
+                name: "sales".into(),
+                table: "sales".into(),
+                key_columns: vec!["region".into(), "product".into()],
+                description: "the sales ledger".into(),
+            }],
+            join_hints: vec![JoinHint {
+                left_entity: "orders".into(),
+                left_column: "rep".into(),
+                right_entity: "reps".into(),
+                right_column: "rep".into(),
+                description: "each order's owner".into(),
+            }],
+        };
+        let block = render_block(&set).expect("a non-empty set renders a block");
+        assert_eq!(block.name, "business definitions");
+        assert_eq!(block.score, 0.0);
+        let expected = [
+            "Business definitions for this vault (curated meanings — prefer these over guessing; write SQL that uses each metric's exact definition):",
+            "",
+            "Metrics (name = definition):",
+            "- revenue = SUM(amount) FILTER (WHERE status='paid') — paid revenue",
+            "",
+            "Synonyms (term → canonical column or metric):",
+            "- GMV → revenue",
+            "",
+            "Entities (name: table (key columns) — description):",
+            "- sales: sales (region, product) — the sales ledger",
+            "",
+            "Curated join hints (authoritative — prefer over inferred joins):",
+            "- orders.rep = reps.rep — each order's owner",
+            "",
+            "Examples (a defined term expands to its metric definition):",
+            "Q: revenue by region",
+            "SQL: SELECT region, SUM(amount) FILTER (WHERE status = 'paid') AS revenue FROM sales GROUP BY region ORDER BY revenue DESC",
+            "Q: gmv by month (gmv is the revenue metric)",
+            "SQL: SELECT substr(order_date, 1, 7) AS month, SUM(amount) FILTER (WHERE status = 'paid') AS revenue FROM sales GROUP BY month ORDER BY month",
+        ]
+        .join("\n");
+        assert_eq!(block.text, expected);
+    }
+
+    #[test]
+    fn render_block_renders_metrics_newest_first_and_omits_examples_without_metrics() {
+        // Newest metric first (the slot-cap idiom), empty descriptions add no
+        // dangling `— `.
+        let set = SemanticSet {
+            metrics: vec![
+                metric("older", "COUNT(*)", "", 1),
+                metric("newer", "SUM(x)", "", 2),
+            ],
+            ..Default::default()
+        };
+        let text = render_block(&set).unwrap().text;
+        // A metric with no description renders as a bare `- name = expr` (no
+        // dangling `— `); newest metric renders first (the slot-cap idiom).
+        assert!(text.contains("- newer = SUM(x)\n- older = COUNT(*)"), "newest first, no suffix:\n{text}");
+
+        // A synonym-only set renders a block but NO examples (they demonstrate
+        // metric expansion, so ride only when a metric exists).
+        let syn_only = SemanticSet {
+            synonyms: vec![Synonym { term: "GMV".into(), canonical: "revenue".into() }],
+            ..Default::default()
+        };
+        let text = render_block(&syn_only).unwrap().text;
+        assert!(text.contains("- GMV → revenue"));
+        assert!(!text.contains(EXAMPLES_HEADER), "no examples without a metric:\n{text}");
+    }
+
+    #[test]
+    fn every_semantic_fewshot_passes_the_guard() {
+        // The block's blessed examples are re-runnable read-only SELECTs — the
+        // SAME guard every executed query and every saved metric passes.
+        for (q, sql) in SEMANTIC_FEWSHOTS {
+            crate::analytics::guard_sql(sql)
+                .unwrap_or_else(|e| panic!("semantic few-shot for {q:?} rejected: {e}"));
+        }
     }
 }

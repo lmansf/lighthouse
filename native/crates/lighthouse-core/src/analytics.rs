@@ -1311,10 +1311,29 @@ fn is_generic_join_col(c: &str) -> bool {
 }
 
 pub fn join_hints(regs: &[TableReg]) -> Option<String> {
+    join_hints_excluding(regs, &[])
+}
+
+/// `join_hints`, but skipping any table pair a curated semantic join hint
+/// already names (openspec: add-semantic-layer §2.4). The curated hint WINS: it
+/// renders in the business-definitions block (semantic.rs), so the heuristic
+/// card must not also emit a line for that pair. `excluded` holds the
+/// posture-eligible curated pairs from `semantic::curated_join_pairs` as
+/// (table, table) — order-insensitive, lowercased. An EMPTY slice reproduces
+/// `join_hints` byte-for-byte, so a zero-curated-hint vault leaves the prompt
+/// unchanged. PARITY: Rust-only (the twin has no analytics branch).
+pub fn join_hints_excluding(regs: &[TableReg], excluded: &[(String, String)]) -> Option<String> {
+    let excluded: std::collections::HashSet<(String, String)> =
+        excluded.iter().map(|(a, b)| norm_pair(a, b)).collect();
     let mut lines: Vec<String> = Vec::new();
     'outer: for i in 0..regs.len() {
         for j in i + 1..regs.len() {
             if regs[i].table == regs[j].table {
+                continue;
+            }
+            // A curated hint already names this pair — it renders in the block,
+            // and it wins, so drop the heuristic line entirely for the pair.
+            if !excluded.is_empty() && excluded.contains(&norm_pair(&regs[i].table, &regs[j].table)) {
                 continue;
             }
             for c in &regs[i].columns {
@@ -1341,6 +1360,16 @@ pub fn join_hints(regs: &[TableReg]) -> Option<String> {
             "Join hints (columns shared across tables — use when combining them):\n{}",
             lines.join("\n")
         ))
+    }
+}
+
+/// An unordered, lowercased table-name pair key (so `(a,b)` and `(b,a)` match).
+fn norm_pair(a: &str, b: &str) -> (String, String) {
+    let (a, b) = (a.to_lowercase(), b.to_lowercase());
+    if a <= b {
+        (a, b)
+    } else {
+        (b, a)
     }
 }
 
@@ -4130,6 +4159,46 @@ mod tests {
         );
         // No shared specific columns → no block at all.
         assert!(join_hints(&[reg("a", &["x"]), reg("b", &["y"])]).is_none());
+    }
+
+    #[test]
+    fn join_hints_excluding_wins_the_pair_and_is_byte_identical_when_empty() {
+        // openspec: add-semantic-layer §2.4 — a curated hint over the (orders,
+        // reps) pair suppresses the heuristic line for that pair, while other
+        // pairs still hint. An EMPTY exclusion set reproduces `join_hints`.
+        let reg = |table: &str, cols: &[&str]| TableReg {
+            table: table.into(),
+            file_id: table.into(),
+            file_name: format!("{table}.csv"),
+            card: String::new(),
+            modified_ms: None,
+            columns: cols.iter().map(|s| s.to_string()).collect(),
+            group: None,
+            capped_rows: None,
+        };
+        let regs = vec![
+            reg("orders", &["rep", "region"]),
+            reg("reps", &["rep", "team"]),
+            reg("regions", &["region", "label"]),
+        ];
+        // Baseline: both shared-column pairs hint.
+        let base = join_hints(&regs).expect("hints");
+        assert!(base.contains("- orders.rep = reps.rep"), "{base}");
+        assert!(base.contains("- orders.region = regions.region"), "{base}");
+        // The empty exclusion is byte-identical to `join_hints`.
+        assert_eq!(join_hints_excluding(&regs, &[]), Some(base.clone()));
+
+        // Excluding (orders, reps) drops ONLY that pair's line; order-insensitive.
+        let merged = join_hints_excluding(&regs, &[("reps".into(), "orders".into())]).expect("hints");
+        assert!(!merged.contains("orders.rep = reps.rep"), "curated pair suppressed: {merged}");
+        assert!(merged.contains("- orders.region = regions.region"), "other pairs remain: {merged}");
+
+        // Excluding every hinted pair collapses the card to None.
+        assert!(join_hints_excluding(
+            &regs,
+            &[("orders".into(), "reps".into()), ("orders".into(), "regions".into())],
+        )
+        .is_none());
     }
 
     #[tokio::test]

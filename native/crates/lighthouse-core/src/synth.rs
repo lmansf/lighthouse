@@ -565,11 +565,14 @@ fn analytics_manifest(
 /// context the previewed/executed SQL was written from, which is exactly
 /// `sql_ctxs`: the first `regs.len()` blocks are file `schema-card`s (attributed
 /// to their file), the next `n_views` are saved-view `schema-card`s (virtual, no
-/// file), and any trailing block is the `join-hints` card.
+/// file), then — when `has_semantic` — the one semantic `business-definitions`
+/// block (openspec: add-semantic-layer §2.2), and any trailing block is the
+/// `join-hints` card.
 fn planning_manifest(
     sql_ctxs: &[Ctx],
     regs: &[crate::analytics::TableReg],
     n_views: usize,
+    has_semantic: bool,
 ) -> Vec<CtxManifestEntry> {
     let mut m = Vec::with_capacity(sql_ctxs.len());
     for (c, r) in sql_ctxs.iter().take(regs.len()).zip(regs.iter()) {
@@ -584,7 +587,12 @@ fn planning_manifest(
     for c in sql_ctxs.iter().skip(regs.len()).take(n_views) {
         m.push(manifest_entry("schema-card", &c.name, c.text.len(), c.score, None));
     }
-    for c in sql_ctxs.iter().skip(regs.len() + n_views) {
+    // The semantic block rides between the view cards and the join-hints card.
+    let n_semantic = usize::from(has_semantic);
+    for c in sql_ctxs.iter().skip(regs.len() + n_views).take(n_semantic) {
+        m.push(manifest_entry("business-definitions", &c.name, c.text.len(), c.score, None));
+    }
+    for c in sql_ctxs.iter().skip(regs.len() + n_views + n_semantic) {
         m.push(manifest_entry("join-hints", &c.name, c.text.len(), c.score, None));
     }
     m
@@ -1269,13 +1277,40 @@ fn live_pipeline(
                         .iter()
                         .map(|r| Ctx { name: r.file_name.clone(), text: r.card.clone(), score: 1.0 })
                         .collect();
-                    // Deterministic prompt order: file cards, view cards, hints.
+                    // Deterministic prompt order: file cards, view cards, the
+                    // semantic business-definitions block, then join hints.
                     sql_ctxs.extend(view_regs.iter().map(|v| Ctx {
                         name: v.name.clone(),
                         text: v.card.clone(),
                         score: 1.0,
                     }));
-                    if let Some(hints) = crate::analytics::join_hints(&regs) {
+                    // The semantic layer's business-definitions block (openspec:
+                    // add-semantic-layer §2.2): posture-eligible metrics,
+                    // synonyms, entities, curated join hints, and metric-
+                    // expansion examples, rendered deterministically and
+                    // count-capped. Pushed here so BOTH the single-query and
+                    // multi-step paths (each consumes `sql_ctxs`) see it. Zero
+                    // eligible definitions ⇒ None ⇒ NOT pushed ⇒ every prompt
+                    // string below is byte-identical to the pre-semantic-layer
+                    // prompt (pinned by a test). PARITY: this analytics-branch
+                    // injection is Rust-only (the TS twin has no analytics
+                    // branch); semantic.ts::renderBlock mirrors the labels.
+                    let has_semantic =
+                        if let Some(block) = crate::semantic::prompt_block(is_cloud) {
+                            sql_ctxs.push(block);
+                            true
+                        } else {
+                            false
+                        };
+                    // Curated join hints WIN over the heuristic ones for the same
+                    // table pair (§2.4): the curated hint renders in the block
+                    // above, so drop the heuristic line for that pair. Zero
+                    // curated hints ⇒ empty exclude ⇒ `join_hints_excluding`
+                    // reproduces `join_hints` byte-for-byte.
+                    let curated_pairs = crate::semantic::curated_join_pairs(is_cloud);
+                    if let Some(hints) =
+                        crate::analytics::join_hints_excluding(&regs, &curated_pairs)
+                    {
                         sql_ctxs.push(Ctx {
                             name: "join hints".to_string(),
                             text: hints,
@@ -1353,7 +1388,8 @@ fn live_pipeline(
                         // Manifest (§5): the planning context the previewed SQL was
                         // written from — schema/view cards + join hints — metadata
                         // only, already the gated shareable set.
-                        let manifest = planning_manifest(&sql_ctxs, &regs, view_regs.len());
+                        let manifest =
+                            planning_manifest(&sql_ctxs, &regs, view_regs.len(), has_semantic);
                         match proposed {
                             Some(sql) => {
                                 let tables: Vec<String> = regs
@@ -2460,12 +2496,31 @@ mod tests {
             ctx("join hints", "sales.region = regions.region", 0.0),
         ];
         let regs = vec![reg("id-sales", "sales.csv", "region TEXT, amt INT")];
-        let m = planning_manifest(&sql_ctxs, &regs, 1);
+        let m = planning_manifest(&sql_ctxs, &regs, 1, false);
         assert_eq!(m.len(), 3);
         assert_eq!(m[0].kind, "schema-card");
         assert_eq!(m[0].file_id.as_deref(), Some("id-sales"));
         assert_eq!(m[1].kind, "schema-card");
         assert!(m[1].file_id.is_none(), "a saved view is virtual — no source file");
+        assert_eq!(m[2].kind, "join-hints");
+    }
+
+    #[test]
+    fn planning_manifest_labels_the_semantic_block() {
+        // openspec: add-semantic-layer §2.2 — the business-definitions block
+        // rides between the view cards and the join-hints card and is labeled
+        // its own kind (never mislabeled as a join-hints card).
+        let sql_ctxs = vec![
+            ctx("sales.csv", "region TEXT, amt INT", 1.0),
+            ctx("business definitions", "Business definitions …", 0.0),
+            ctx("join hints", "sales.region = regions.region", 0.0),
+        ];
+        let regs = vec![reg("id-sales", "sales.csv", "region TEXT, amt INT")];
+        let m = planning_manifest(&sql_ctxs, &regs, 0, true);
+        assert_eq!(m.len(), 3);
+        assert_eq!(m[0].kind, "schema-card");
+        assert_eq!(m[1].kind, "business-definitions");
+        assert!(m[1].file_id.is_none(), "the semantic block has no source file");
         assert_eq!(m[2].kind, "join-hints");
     }
 

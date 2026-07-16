@@ -425,3 +425,114 @@ fn source_files_are_never_touched_by_any_op() {
     );
     assert!(semantic::list().metrics.is_empty());
 }
+
+// --- §2 prompt block: resolution into NL→SQL ---------------------------------
+
+/// A synthetic registered table for the prompt-assembly comparison below.
+fn reg(file_name: &str, table: &str, columns: &[&str]) -> lighthouse_core::analytics::TableReg {
+    lighthouse_core::analytics::TableReg {
+        table: table.to_string(),
+        file_id: file_name.to_string(),
+        file_name: file_name.to_string(),
+        card: format!("{table} card"),
+        modified_ms: None,
+        columns: columns.iter().map(|c| c.to_string()).collect(),
+        group: None,
+        capped_rows: None,
+    }
+}
+
+/// The block carries every posture-eligible metric on a device ask, and a
+/// local-only metric is ABSENT on a cloud ask (openspec §2.6) — the §1
+/// `eligible_for_posture` gate flows straight through `prompt_block`, so a
+/// private table's meaning never rides a vendor prompt.
+#[test]
+fn prompt_block_respects_the_ask_posture() {
+    let vault = tempfile::tempdir().unwrap();
+    let _guard = common::lock_env(vault.path());
+    write(&vault.path().join("private.csv"), "region,amount\nNE,5\n");
+    write(&vault.path().join("public.csv"), "region,amount\nSW,7\n");
+    lighthouse_core::vault::invalidate_walk_cache();
+    lighthouse_core::vault::set_included("private.csv", true);
+    lighthouse_core::vault::set_included("public.csv", true);
+    lighthouse_core::vault::set_local_only("private.csv", true);
+
+    semantic::create_metric_with_context(
+        "private_rev",
+        "SUM(amount)",
+        "",
+        "private",
+        summary("q"),
+        &[("private.csv".to_string(), "private.csv".to_string())],
+        &[],
+    )
+    .expect("creates");
+    semantic::create_metric_with_context(
+        "public_rev",
+        "SUM(amount)",
+        "",
+        "public",
+        summary("q"),
+        &[("public.csv".to_string(), "public.csv".to_string())],
+        &[],
+    )
+    .expect("creates");
+
+    // Device posture: both metric definitions ride into the block.
+    let local = semantic::prompt_block(false).expect("device block");
+    assert!(local.text.contains("- private_rev = SUM(amount)"), "{}", local.text);
+    assert!(local.text.contains("- public_rev = SUM(amount)"), "{}", local.text);
+
+    // Cloud posture: the local-only metric is dropped; the public one stays.
+    let cloud = semantic::prompt_block(true).expect("cloud block");
+    assert!(
+        !cloud.text.contains("private_rev"),
+        "a local-only metric must never ride a cloud prompt: {}",
+        cloud.text
+    );
+    assert!(cloud.text.contains("- public_rev = SUM(amount)"), "{}", cloud.text);
+}
+
+/// The byte-identical-prompt invariant (openspec §2.2/§2.6): with ZERO
+/// definitions, `prompt_block` is `None`, `curated_join_pairs` is empty, and the
+/// assembled planning ctxs are byte-for-byte the pre-semantic-layer baseline.
+#[test]
+fn empty_store_keeps_the_planning_ctxs_byte_identical() {
+    let vault = tempfile::tempdir().unwrap();
+    let _guard = common::lock_env(vault.path());
+    // No semantic.json exists → the store is empty for the session.
+    assert!(semantic::prompt_block(false).is_none());
+    assert!(semantic::prompt_block(true).is_none());
+    assert!(semantic::curated_join_pairs(false).is_empty());
+    assert!(semantic::curated_join_pairs(true).is_empty());
+
+    // Two tables share a non-generic column so join hints emit a line.
+    let regs = vec![
+        reg("orders.csv", "orders", &["rep", "amount"]),
+        reg("reps.csv", "reps", &["rep", "team"]),
+    ];
+    // Baseline assembly (pre-semantic-layer): file cards, then join hints.
+    let mut baseline: Vec<(String, String, f64)> = regs
+        .iter()
+        .map(|r| (r.file_name.clone(), r.card.clone(), 1.0))
+        .collect();
+    if let Some(h) = lighthouse_core::analytics::join_hints(&regs) {
+        baseline.push(("join hints".to_string(), h, 0.0));
+    }
+    // The exact splice synth.rs performs, with the (empty) semantic layer.
+    let mut with_semantic: Vec<(String, String, f64)> = regs
+        .iter()
+        .map(|r| (r.file_name.clone(), r.card.clone(), 1.0))
+        .collect();
+    if let Some(b) = semantic::prompt_block(false) {
+        with_semantic.push((b.name, b.text, b.score));
+    }
+    let pairs = semantic::curated_join_pairs(false);
+    if let Some(h) = lighthouse_core::analytics::join_hints_excluding(&regs, &pairs) {
+        with_semantic.push(("join hints".to_string(), h, 0.0));
+    }
+    assert_eq!(
+        with_semantic, baseline,
+        "an empty store adds no ctx and changes no prompt string"
+    );
+}
