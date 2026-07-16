@@ -1039,10 +1039,11 @@ export function FileExplorer() {
       setJustAdded(new Set());
     }, 3800);
   };
-  // Acknowledge interest in a not-yet-shipped feature: thank the user, without
-  // running any real connector flow and without recording anything.
-  const registerInterest = (thanks: string) => {
-    setInterestNote(thanks);
+  // Acknowledge a click on a not-yet-shipped feature with an honest note —
+  // no real connector flow runs and nothing is recorded, so the note must
+  // never promise a follow-up.
+  const registerInterest = (note: string) => {
+    setInterestNote(note);
     if (interestTimer.current) window.clearTimeout(interestTimer.current);
     interestTimer.current = window.setTimeout(() => setInterestNote(null), 4200);
   };
@@ -1694,9 +1695,7 @@ export function FileExplorer() {
                 <MenuItem
                   icon={<CloudArrowUpRegular />}
                   onClick={() =>
-                    registerInterest(
-                      "Thanks for your interest! We'll let you know the moment SharePoint is ready.",
-                    )
+                    registerInterest("SharePoint isn't ready yet — it's on the way.")
                   }
                 >
                   <span className={styles.comingSoonItem}>

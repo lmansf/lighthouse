@@ -89,8 +89,8 @@ const STEPS: TourStep[] = [
   {
     anchor: "beam",
     icon: <DataBarVerticalRegular />,
-    title: "Analytics you can verify",
-    body: "Ask for a number and Lighthouse computes it from your data, then shows the exact SQL it ran. Verified figures you can check — not guesses.",
+    title: "Beam: analytics you can verify",
+    body: "Ask for a number and Beam, the built-in analytics engine, computes it from your data — then shows the exact SQL it ran. Verified figures you can check, not guesses.",
     position: "below",
   },
   {

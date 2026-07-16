@@ -217,8 +217,8 @@ export function OnboardingPanel() {
           </li>
         </ul>
         <Text className={styles.hint}>
-          Your documents live in your Lighthouse vault folder. Add files there and
-          Lighthouse can search them and answer questions grounded in what they say.
+          Your documents live in your vault folder. Add files there and Lighthouse
+          can search them and answer from what they say.
         </Text>
         {isDesktop && (
           <>
@@ -411,7 +411,7 @@ export function OnboardingPanel() {
             />
             <Radio
               value="exclude"
-              label="Keep files out by default — nothing is searchable until you include it (more careful; you opt each one in)"
+              label="Keep files out by default — nothing is searchable until you include it (you opt each one in)"
             />
           </RadioGroup>
         </Field>

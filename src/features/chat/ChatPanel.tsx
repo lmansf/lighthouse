@@ -378,6 +378,22 @@ const useStyles = makeStyles({
       marginTop: tokens.spacingVerticalM,
       marginBottom: tokens.spacingVerticalM,
     },
+    // The card's tiny "Beam" wordmark — UI chrome naming the analytics engine
+    // (the engine's own footer text never carries the name and is never
+    // edited). Type only, quiet neutral, top-right, in normal flow so it can
+    // never overlap the result table; aria-hidden and unselectable so it
+    // stays out of copies and screen-reader passes.
+    "& .lh-beam-mark": {
+      display: "block",
+      textAlign: "right",
+      color: tokens.colorNeutralForeground4,
+      fontSize: tokens.fontSizeBase100,
+      lineHeight: "1",
+      letterSpacing: "0.08em",
+      textTransform: "uppercase",
+      userSelect: "none",
+      marginBottom: tokens.spacingVerticalXS,
+    },
     // The engine's SQL-transparency footer, folded quiet: a collapsed native
     // disclosure whose <summary> is the engine's own label paragraph (text
     // byte-identical), in the small-print register. Keyboard focus gets the
@@ -1089,7 +1105,8 @@ function isFooterish(node: MdNode): boolean {
  *     <summary> (via `data.hName`), so the visible label stays byte-identical.
  *  2. The verified result table, the quiet footers between, and the
  *     ```lighthouse-chart fence are wrapped into ONE `.lh-answer-card` <div> —
- *     the elevated flagship card (styled in `answer` above).
+ *     the elevated flagship card (styled in `answer` above), crowned by a
+ *     tiny injected "Beam" wordmark (UI chrome, not engine text).
  *  3. Emphasis-led footer paragraphs inside that card get `.lh-card-note`
  *     for the quiet small-print register.
  *
@@ -1171,10 +1188,21 @@ function remarkAnswerCard() {
       }
     }
 
+    // A tiny "Beam" wordmark crowns the card — injected UI chrome (a synthetic
+    // node, aria-hidden), NOT engine text: the engine's own footers stay
+    // byte-identical and never carry the name.
+    const beamMark: MdNode = {
+      type: "lhBeamMark",
+      data: {
+        hName: "span",
+        hProperties: { className: ["lh-beam-mark"], ariaHidden: "true" },
+      },
+      children: [{ type: "text", value: "Beam" }],
+    };
     const card: MdNode = {
       type: "lhAnswerCard",
       data: { hName: "div", hProperties: { className: ["lh-answer-card"] } },
-      children: children.slice(start, end + 1),
+      children: [beamMark, ...children.slice(start, end + 1)],
     };
     children.splice(start, end - start + 1, card);
   };
@@ -3839,8 +3867,8 @@ export function ChatPanel() {
           <span className={styles.beacon} />
           <Title3 data-tour="beam">Ask Lighthouse</Title3>
           <Text className={styles.heroHint}>
-            I&apos;ll answer using only the files visible to AI. Drag a file from the
-            explorer (or drop one here) to ask about just that file.
+            Answers use only the files visible to AI. Drop a file from the explorer
+            here to ask about that file alone.
           </Text>
           {includedFileIds.length === 0 && attachments.length === 0 ? (
             // Pre-flight: nothing is visible to AI yet. Inform gently and offer
@@ -4159,8 +4187,8 @@ export function ChatPanel() {
                             <div className={styles.savedNote}>
                               <CheckmarkRegular fontSize={14} />
                               <Text size={200}>
-                                Saved “{savedNotes[m.id].name}” to Lighthouse Results — it&apos;s
-                                now a queryable vault file.
+                                Saved “{savedNotes[m.id].name}” to Lighthouse Results — now a
+                                queryable vault file.
                               </Text>
                               <Button
                                 size="small"

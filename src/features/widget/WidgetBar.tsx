@@ -231,16 +231,6 @@ const useStyles = makeStyles({
   },
   actionBtn: { color: tokens.colorNeutralForeground3 },
   actionOn: { color: tokens.colorBrandForeground1 },
-  // Trial-over note: replaces actionable results; the only affordance left is
-  // raising the main window, where the lock gate lives.
-  lockNote: {
-    display: "flex",
-    alignItems: "center",
-    gap: tokens.spacingHorizontalS,
-    ...shorthands.padding(tokens.spacingVerticalS, tokens.spacingHorizontalS),
-    color: tokens.colorNeutralForeground2,
-  },
-  lockText: { flexGrow: 1, minWidth: 0 },
   // Egress transparency footer (S3): a quiet one-liner at the bottom of the
   // expanded dropdown.
   egressFooter: {
@@ -766,16 +756,9 @@ export function WidgetBar() {
     });
   };
 
-  /** Raise the main window bare — where the lock gate / renewal flow lives. */
-  const openLighthouse = () => {
-    setPinAlertDot(false); // the main window's banner takes over
-    void invokeShell("show_main");
-    hide();
-  };
-
   const activateRow = (row: WidgetRow) => {
-    // Locked: rows are inert — the lock note under them is the only answer
-    // (main-window parity: a locked vault is greyed out and inert).
+    // Locked: rows are inert (main-window parity: a locked vault is greyed
+    // out and inert). `locked` is hardwired false — see its declaration.
     if (locked) return;
     if (row.kind === "ask") askInline();
     else if (row.kind === "name") openNode(row.node.id);
@@ -965,16 +948,6 @@ export function WidgetBar() {
                   )}
                 </div>
               ))}
-            </div>
-          )}
-          {locked && (
-            <div className={styles.lockNote}>
-              <Text size={300} className={styles.lockText}>
-                Your trial has ended — open Lighthouse to continue.
-              </Text>
-              <Button size="small" appearance="primary" onClick={openLighthouse}>
-                Open Lighthouse
-              </Button>
             </div>
           )}
           {/* Egress transparency (S3): the one-line "what left this machine"
