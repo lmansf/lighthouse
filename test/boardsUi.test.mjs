@@ -200,6 +200,30 @@ test("formatCheckedRelative mirrors the pins dialog's wording", () => {
   assert.match(model.formatCheckedRelative(now - 30 * 24 * 60 * min, now), /^checked \S/);
 });
 
+test("cardFreshness: one helper for screen AND export (§5.1) — never reworded", () => {
+  const now = Date.UTC(2026, 6, 16, 12, 0, 0);
+  // Live + engine footer → the footer's own Computed-from sentence verbatim.
+  assert.equal(
+    model.cardFreshness(
+      { live: true, footer: '*Computed from:* "sales.csv" (saved just now)' },
+      now,
+    ),
+    'Computed from: "sales.csv" (saved just now)',
+  );
+  // Live but the footer carries no freshness line → the checked-relative
+  // fallback, never a paraphrase of engine text.
+  assert.equal(
+    model.cardFreshness({ live: true, footer: "*Query used:*", lastRunMs: now - 300_000 }, now),
+    "checked 5m ago",
+  );
+  // Stored (twin) → labeled stored, never passed off as live.
+  assert.equal(
+    model.cardFreshness({ live: false, lastRunMs: now - 300_000 }, now),
+    "stored · checked 5m ago",
+  );
+  assert.equal(model.cardFreshness({ live: false }, now), "stored · not checked yet");
+});
+
 // --- Structural guarantees on the JSX surfaces --------------------------------
 
 const panel = read("src/features/boards/BoardPanel.tsx");
@@ -260,8 +284,10 @@ test("cards render engine results with the honesty postures", () => {
   assert.match(card, /fontVariantNumeric: "tabular-nums"/, "stat numerals are tabular");
   assert.match(card, /This pin was removed\./, "tombstone copy");
   assert.match(card, /answer\.error \?\? `stale: \$\{answer\.staleReason\}`/, "staleReason posture");
-  assert.match(card, /freshnessFromFooter/, "live freshness comes from the engine footer");
-  assert.match(card, /stored · /, "stored cards are labeled stored, never passed off as live");
+  // Freshness rides the ONE shared helper (unit-tested above): live cards get
+  // the engine footer's sentence verbatim, stored cards the "stored ·" label —
+  // and the export uses the same function, so screen and pack can't diverge.
+  assert.match(card, /cardFreshness\(answer, Date\.now\(\)\)/, "the shared freshness helper");
 });
 
 test("layout persists through setBoardCards; keyboard first, drag as extra", () => {
@@ -281,6 +307,25 @@ test("the board opens beside the pins entry and mounts once from the page", () =
   assert.match(panel, /addEventListener\("lighthouse:open-board"/, "the host listens for it");
   assert.match(page, /BoardHost/, "the host mounts from the composition root");
   assert.match(page, /onboarded && \(/, "…inside the onboarded-only overlay fragment");
+});
+
+test("export composes client-side and rides the allowlisted artifact path (§5.1)", () => {
+  assert.match(panel, /composeBoardPack/, "the shared composer, beside composeEvidencePack");
+  assert.match(
+    panel,
+    /standaloneChartSvg/,
+    "charts are the ALREADY-RENDERED SVGs, serialized in place",
+  );
+  assert.match(
+    panel,
+    /data-lh-board-card/,
+    "…captured through each card's own DOM node (the saveEvidencePack idiom)",
+  );
+  assert.match(card, /data-lh-board-card=\{cardRef\.pinId\}/, "the card carries the anchor");
+  assert.match(panel, /cardFreshness\(answer, now\)/, "pack stamps = the screen's own helper");
+  assert.match(panel, /subdir: "Lighthouse Results"/, "the strict engine-side allowlist");
+  assert.match(panel, /ext: "html"/, "…as a self-contained HTML artifact");
+  assert.doesNotMatch(panel, /fetch\(/, "no network of its own — exportChat is the one write");
 });
 
 test("Add to board exists at the pin-success moment and on pins-dialog rows", () => {

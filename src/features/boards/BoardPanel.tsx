@@ -28,6 +28,13 @@
  * closing the board consumes the badges for its cards, drilling into a card
  * consumes that card's, and "Refresh all" consumes all of them. No new
  * events, no new scheduler — the one existing relay.
+ *
+ * EXPORT (§5.1): "Export board" composes ONE self-contained evidence-pack
+ * HTML CLIENT-SIDE from exactly what the panel is showing — live
+ * markdown/footers on desktop, stored summaries on the twin, each card's
+ * rendered chart serialized in place — and writes it through the existing
+ * allowlisted `exportChat` artifact path into `Lighthouse Results/`. No
+ * re-query, no model, no network beyond the local write op.
  */
 
 import { useCallback, useEffect, useRef, useState, type DragEvent } from "react";
@@ -43,7 +50,7 @@ import {
   makeStyles,
   tokens,
 } from "@fluentui/react-components";
-import { ArrowClockwiseRegular } from "@fluentui/react-icons";
+import { ArrowClockwiseRegular, DocumentRegular } from "@fluentui/react-icons";
 import type {
   Board,
   BoardCardRef,
@@ -53,8 +60,16 @@ import type {
 } from "@/contracts";
 import { ragService } from "@/contracts";
 import { useChatStore } from "@/stores/useChatStore";
+import { composeBoardPack, type BoardPackCard } from "@/lib/evidencePack";
+import { standaloneChartSvg } from "@/features/chat/AnalyticsChart";
 import { currentScopeBoard } from "@/features/boards/boardScope";
-import { moveCard, reorderCard, withCardSize, withoutCard } from "@/features/boards/boardModel";
+import {
+  cardFreshness,
+  moveCard,
+  reorderCard,
+  withCardSize,
+  withoutCard,
+} from "@/features/boards/boardModel";
 import { BOARD_CARD_MIME, BoardCard } from "@/features/boards/BoardCard";
 
 const useStyles = makeStyles({
@@ -109,6 +124,13 @@ export function BoardHost() {
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string | null>(null);
+  // The export confirmation (the saveEvidencePack packNotes idiom): pending
+  // while writing, then the saved name — or the engine's error — verbatim.
+  const [packNote, setPackNote] = useState<{
+    pending?: boolean;
+    name?: string;
+    error?: string;
+  } | null>(null);
 
   // Latest-closure refs (the ChatPanel askSeedRef pattern): the mount-once
   // listeners below act on fresh state without re-subscribing per render.
@@ -136,6 +158,7 @@ export function BoardHost() {
     const seq = ++loadSeq.current;
     setLoading(true);
     setNote(null);
+    setPackNote(null);
     try {
       const b = await currentScopeBoard(currentInvestigationId);
       if (seq !== loadSeq.current) return;
@@ -213,6 +236,90 @@ export function BoardHost() {
       consumeChanged(b.cards.map((c) => c.pinId));
     } finally {
       setBusy(false);
+    }
+  }
+
+  /**
+   * "Export board" (§5.1): compose ONE self-contained board pack from the
+   * panel's CURRENT refresh state and save it through the allowlisted
+   * artifact path. Charts are snapshotted synchronously at click time — the
+   * saveEvidencePack capture idiom: the ALREADY-RENDERED SVG inside each
+   * card's node, theme colors baked in (only live chart cards render one;
+   * stored cards export their summary text). Tombstones are skipped: a
+   * deleted pin has no question, result, or SQL — nothing shareable.
+   */
+  async function exportBoard() {
+    const b = board;
+    if (!b || loading || busy || packNote?.pending || b.cards.length === 0) return;
+    const now = Date.now();
+    const svgByPin = new Map<string, string>();
+    for (const ref of b.cards) {
+      const el = document.querySelector<SVGSVGElement>(
+        `[data-lh-board-card="${ref.pinId}"] figure svg[role="img"]`,
+      );
+      if (!el) continue;
+      try {
+        svgByPin.set(ref.pinId, standaloneChartSvg(el));
+      } catch {
+        /* capture is best-effort — the card's table/summary still travels */
+      }
+    }
+    const current = answers;
+    setPackNote({ pending: true });
+    try {
+      // SQL lives on the PIN (refresh answers don't carry it): one listing,
+      // indexed by id. It doubles as the stored-state fallback for a card
+      // whose refresh never landed — exactly the twin's own answer shape.
+      const pins = await ragService.listPins();
+      const pinById = new Map(pins.map((p) => [p.id, p]));
+      const cards: BoardPackCard[] = [];
+      for (const ref of b.cards) {
+        const pin = pinById.get(ref.pinId);
+        const answer: BoardCardRefresh | undefined =
+          current[ref.pinId] ??
+          (pin
+            ? {
+                pinId: ref.pinId,
+                live: false,
+                question: pin.question,
+                lastRunMs: pin.lastRunMs,
+                lastSummary: pin.lastSummary,
+                staleReason: pin.staleReason,
+              }
+            : undefined);
+        if (!answer || answer.tombstone || !pin) continue;
+        const failed = Boolean(answer.error || answer.staleReason);
+        cards.push({
+          question: answer.question ?? pin.question,
+          // The on-screen body: live → the engine's row-capped result table;
+          // stored → the pin's compact summary text; failed → omitted (the
+          // stale note stands as the body, exactly like the card).
+          markdown: failed
+            ? undefined
+            : answer.live
+              ? answer.markdown ?? ""
+              : answer.lastSummary ?? "Not checked yet.",
+          chartSvg: answer.live ? svgByPin.get(ref.pinId) : undefined,
+          freshness: cardFreshness(answer, now),
+          sql: pin.sql,
+          footer: answer.live ? answer.footer : undefined,
+          live: answer.live,
+          staleNote: failed ? answer.error ?? `stale: ${answer.staleReason}` : undefined,
+        });
+      }
+      const html = composeBoardPack({ title: b.name, generatedAt: now, cards });
+      const hint = b.name.trim().replace(/\s+/g, " ").slice(0, 60) || "Board";
+      const res = await ragService.exportChat(hint, html, {
+        subdir: "Lighthouse Results",
+        ext: "html",
+      });
+      if (res.error || !res.savedId) {
+        setPackNote({ error: res.error ?? "save failed" });
+      } else {
+        setPackNote({ name: res.savedName });
+      }
+    } catch (err) {
+      setPackNote({ error: err instanceof Error ? err.message : "save failed" });
     }
   }
 
@@ -317,6 +424,17 @@ export function BoardHost() {
                 {note}
               </Text>
             )}
+            {packNote?.name && (
+              <Text size={200} className={styles.quietNote} role="status">
+                Saved “{packNote.name}” to Lighthouse Results — a self-contained board
+                pack you can share.
+              </Text>
+            )}
+            {packNote?.error && (
+              <Text size={200} className={styles.errorNote} role="status">
+                Couldn&apos;t save the board pack — {packNote.error}
+              </Text>
+            )}
             {board && board.cards.length === 0 && !loading && (
               <Text size={300}>
                 No cards yet. Ask a data question, choose <b>Pin</b> under the answer, then{" "}
@@ -351,6 +469,19 @@ export function BoardHost() {
           <DialogActions>
             <Button appearance="secondary" onClick={close}>
               Close
+            </Button>
+            {/* Quiet, beside Refresh all (§5.1): the evidence-pack affordance
+                for the whole board — works on BOTH engines (stored summaries
+                export honestly on the twin). */}
+            <Button
+              appearance="subtle"
+              icon={<DocumentRegular />}
+              disabled={
+                loading || busy || packNote?.pending || !board || board.cards.length === 0
+              }
+              onClick={() => void exportBoard()}
+            >
+              {packNote?.pending ? "Exporting…" : "Export board"}
             </Button>
             <Button
               appearance="primary"

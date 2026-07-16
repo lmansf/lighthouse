@@ -13,7 +13,7 @@
  * stat tile or delta can never show a figure the engine didn't compute.
  */
 
-import type { BoardCardRef, BoardCardSize } from "../../contracts";
+import type { BoardCardRef, BoardCardRefresh, BoardCardSize } from "../../contracts";
 // Relative (not @/) imports: node's test runner executes this module directly
 // (test/boardsUi.test.mjs via the extensionless hook), and only the bundler
 // knows the alias.
@@ -244,6 +244,28 @@ export function freshnessFromFooter(footer: string): string | null {
   if (emphasized) return emphasized[0].replace(/^\*Computed from:\*/, "Computed from:");
   const plain = /^Computed from: .*$/m.exec(footer);
   return plain ? plain[0] : null;
+}
+
+/**
+ * The freshness stamp a (non-tombstone) card carries — spec: every card has
+ * one. SHARED by BoardCard (the on-screen line) and the board export (the
+ * pack's stamp, openspec §5.1) so the exported file can never label a card
+ * differently than the screen did. Live cards show the engine footer's own
+ * freshness sentence VERBATIM (via freshnessFromFooter), falling back to the
+ * "checked …" wording only when the footer carries none; stored (twin) cards
+ * are labeled stored, never passed off as live.
+ */
+export function cardFreshness(
+  answer: Pick<BoardCardRefresh, "live" | "footer" | "lastRunMs">,
+  now: number,
+): string {
+  if (answer.live) {
+    return (
+      (answer.footer ? freshnessFromFooter(answer.footer) : null) ??
+      formatCheckedRelative(answer.lastRunMs, now)
+    );
+  }
+  return `stored · ${formatCheckedRelative(answer.lastRunMs, now)}`;
 }
 
 /**

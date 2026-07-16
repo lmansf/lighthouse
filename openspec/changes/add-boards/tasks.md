@@ -16,7 +16,7 @@
 - [x] 4.1 Responsive grid (S/M/L spans); keyboard-first move controls; HTML5 drag enhancement (FileExplorer pattern); size cycling via card menu; order/size persist through setCards.
 
 ## 5. Export
-- [ ] 5.1 `composeBoardPack` in evidencePack.ts (title, per-card table HTML + inline SVG via standaloneChartSvg, freshness stamps, SQL appendix from pin SQL + engine footers) → exportChat into Lighthouse Results (html); unit tests on the composer.
+- [x] 5.1 `composeBoardPack` in evidencePack.ts (title, per-card table HTML + inline SVG via standaloneChartSvg, freshness stamps, SQL appendix from pin SQL + engine footers) → exportChat into Lighthouse Results (html); unit tests on the composer.
 
 ## 6. Verify
 - [ ] 6.1 E2E: pin two questions in an investigation → arrange board → modify fixture CSV → watcher recheck updates the card + diff badge with ZERO model calls (mocked provider proves) → drill-in narrates → export produces the file; twin renders boards with stored-state cards.

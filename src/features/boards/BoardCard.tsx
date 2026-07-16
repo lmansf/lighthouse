@@ -68,9 +68,8 @@ import { pinChartData } from "@/lib/pinChart";
 import { AnalyticsChart } from "@/features/chat/AnalyticsChart";
 import { PinMiniChart } from "@/features/chat/PinMiniChart";
 import {
+  cardFreshness,
   detectStat,
-  formatCheckedRelative,
-  freshnessFromFooter,
   parseMarkdownTable,
   spanForSize,
   statDelta,
@@ -349,17 +348,11 @@ export function BoardCard(props: BoardCardProps) {
   const failed = Boolean(answer && !tombstone && (answer.error || answer.staleReason));
   const drillable = Boolean(question && !tombstone);
 
-  // Freshness, per card (spec: every card carries one): live → the engine
-  // footer's own freshness sentence VERBATIM (never reworded; fall back to
-  // "checked …" only when the footer carries none); stored → the pins
-  // dialog's "checked <relative>" wording, marked stored.
-  let freshness: string | null = null;
-  if (answer && !tombstone) {
-    freshness = answer.live
-      ? (answer.footer ? freshnessFromFooter(answer.footer) : null) ??
-        formatCheckedRelative(answer.lastRunMs, Date.now())
-      : `stored · ${formatCheckedRelative(answer.lastRunMs, Date.now())}`;
-  }
+  // Freshness, per card (spec: every card carries one): the ONE shared
+  // helper — live → the engine footer's own freshness sentence VERBATIM,
+  // stored → "stored · checked <relative>" — also used by the board export,
+  // so the pack can never label a card differently than the screen does.
+  const freshness = answer && !tombstone ? cardFreshness(answer, Date.now()) : null;
 
   let body: React.ReactNode;
   if (!answer) {
@@ -409,6 +402,10 @@ export function BoardCard(props: BoardCardProps) {
   return (
     <div
       role="listitem"
+      // The export's capture anchor (§5.1): "Export board" serializes the
+      // ALREADY-RENDERED chart via `[data-lh-board-card=…] figure svg[role=img]`
+      // — AnalyticsChart's figure only; the PinMiniChart svg has no figure.
+      data-lh-board-card={cardRef.pinId}
       className={mergeClasses(styles.card, sizeClass, props.dropTarget && styles.cardDropTarget)}
       draggable
       onDragStart={(e) => props.onDragStartCard(index, e)}
