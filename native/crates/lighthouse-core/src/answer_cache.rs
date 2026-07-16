@@ -5,10 +5,11 @@
 //! normalized question, a digest of the provider-effective candidate set (the
 //! shareable file ids paired with their `mtimeMs:size` freshness keys — which
 //! already folds include flags, local-only marks under a cloud provider, and
-//! per-file freshness), the provider AND model id, and the sorted attachment
-//! id set. Global-digest tradeoff (v1, pinned in the design): ANY vault change
-//! invalidates every entry — over-invalidation accepted, correctness beats hit
-//! rate.
+//! per-file freshness), the provider AND model id, the sorted attachment id
+//! set, and — only when any exist — the posture-eligible saved-view registry
+//! (openspec: add-shaped-views). Global-digest tradeoff (v1, pinned in the
+//! design): ANY vault change invalidates every entry — over-invalidation
+//! accepted, correctness beats hit rate.
 //!
 //! Store: a bounded in-memory LRU (always on, session scope) plus an optional
 //! disk mirror (`app_state_dir()/answer-cache.json`, compact JSON, versioned
@@ -132,7 +133,18 @@ pub fn candidate_digest(pairs: &[(String, String)]) -> String {
 /// and existing cache entries stay valid. Without this, a recall-cued answer
 /// cached in one investigation could replay inside another whose preferences
 /// order the references differently.
-/// KEEP IN SYNC with answerCache.ts::keyFromParts.
+///
+/// `view_registry` (openspec: add-shaped-views): the saved-view registry as
+/// it could apply to this ask — the posture-eligible views as (name, sql)
+/// pairs, sorted by name (`cache_key` passes them sorted; the pair strings
+/// are re-sorted here so the contract is self-enforcing, the attachments
+/// posture). It joins the key ONLY when at least one view exists — the "r:"
+/// precedent — so every zero-view key stays byte-identical and legacy cache
+/// entries keep hitting. Byte layout of the component, KEEP IN SYNC with
+/// answerCache.ts::keyFromParts: `\nv:` followed by each pair rendered as
+/// `name\u{0}sql`, pairs joined with `\u{0}` too (flat
+/// `n1\u{0}s1\u{0}n2\u{0}s2`) — view names are sanitized `[a-z0-9_]`, so the
+/// flat NUL join can never be ambiguous.
 pub fn key_from_parts(
     question: &str,
     provider_id: Option<&str>,
@@ -140,6 +152,7 @@ pub fn key_from_parts(
     attachment_ids: &[String],
     preferred_conversation_ids: &[String],
     candidate_digest: &str,
+    view_registry: &[(String, String)],
 ) -> String {
     let mut atts: Vec<&str> = attachment_ids.iter().map(|s| s.as_str()).collect();
     atts.sort_unstable();
@@ -159,6 +172,15 @@ pub fn key_from_parts(
         material.push_str("\nr:");
         material.push_str(&refs.join("\u{0}"));
     }
+    if !view_registry.is_empty() {
+        let mut pairs: Vec<String> = view_registry
+            .iter()
+            .map(|(name, sql)| format!("{name}\u{0}{sql}"))
+            .collect();
+        pairs.sort_unstable();
+        material.push_str("\nv:");
+        material.push_str(&pairs.join("\u{0}"));
+    }
     sha256_hex(&material)
 }
 
@@ -175,6 +197,17 @@ pub fn cache_key(
     is_cloud: bool,
 ) -> String {
     let digest = candidate_digest(&crate::vault::shareable_freshness_keys(is_cloud));
+    // The view REGISTRY as it could apply to this ask (openspec:
+    // add-shaped-views, design.md "Answer cache"): every view eligible under
+    // the ask's posture — cloud asks exclude effectively-local-only views —
+    // sorted by name. The DEFINITIONS are the material (source-data freshness
+    // already rides the candidate digest), so creating, renaming, or deleting
+    // a view invalidates honestly, and zero views leaves every key untouched.
+    let mut views: Vec<(String, String)> = crate::views::eligible_for_posture(is_cloud)
+        .into_iter()
+        .map(|v| (v.name, v.sql))
+        .collect();
+    views.sort();
     key_from_parts(
         question,
         provider_id,
@@ -182,6 +215,7 @@ pub fn cache_key(
         attachment_ids,
         preferred_conversation_ids,
         &digest,
+        &views,
     )
 }
 
@@ -297,26 +331,26 @@ mod tests {
     #[test]
     fn key_from_parts_is_order_insensitive_over_attachments_and_sensitive_to_everything_else() {
         let d = "digest";
-        let base = key_from_parts("What were Q3 sales?", Some("openai"), Some("gpt-5-mini"), &[], &[], d);
+        let base = key_from_parts("What were Q3 sales?", Some("openai"), Some("gpt-5-mini"), &[], &[], d, &[]);
         // Normalized variants of the same question share the key…
         assert_eq!(
-            key_from_parts("  what   WERE q3 sales?! ", Some("openai"), Some("gpt-5-mini"), &[], &[], d),
+            key_from_parts("  what   WERE q3 sales?! ", Some("openai"), Some("gpt-5-mini"), &[], &[], d, &[]),
             base
         );
         // …and every other component is load-bearing.
-        assert_ne!(key_from_parts("What were Q4 sales?", Some("openai"), Some("gpt-5-mini"), &[], &[], d), base);
-        assert_ne!(key_from_parts("What were Q3 sales?", Some("anthropic"), Some("gpt-5-mini"), &[], &[], d), base);
-        assert_ne!(key_from_parts("What were Q3 sales?", Some("openai"), Some("gpt-5"), &[], &[], d), base);
-        assert_ne!(key_from_parts("What were Q3 sales?", Some("openai"), Some("gpt-5-mini"), &[], &[], "other"), base);
-        assert_ne!(key_from_parts("What were Q3 sales?", None, None, &[], &[], d), base);
+        assert_ne!(key_from_parts("What were Q4 sales?", Some("openai"), Some("gpt-5-mini"), &[], &[], d, &[]), base);
+        assert_ne!(key_from_parts("What were Q3 sales?", Some("anthropic"), Some("gpt-5-mini"), &[], &[], d, &[]), base);
+        assert_ne!(key_from_parts("What were Q3 sales?", Some("openai"), Some("gpt-5"), &[], &[], d, &[]), base);
+        assert_ne!(key_from_parts("What were Q3 sales?", Some("openai"), Some("gpt-5-mini"), &[], &[], "other", &[]), base);
+        assert_ne!(key_from_parts("What were Q3 sales?", None, None, &[], &[], d, &[]), base);
 
         // The attachment SET is the component: order and duplicates fold.
         let a = ["a.md".to_string(), "b.csv".to_string()];
         let b = ["b.csv".to_string(), "a.md".to_string(), "a.md".to_string()];
-        let with_a = key_from_parts("q", Some("openai"), None, &a, &[], d);
-        assert_eq!(key_from_parts("q", Some("openai"), None, &b, &[], d), with_a);
-        assert_ne!(key_from_parts("q", Some("openai"), None, &[], &[], d), with_a);
-        assert_ne!(key_from_parts("q", Some("openai"), None, &a[..1].to_vec(), &[], d), with_a);
+        let with_a = key_from_parts("q", Some("openai"), None, &a, &[], d, &[]);
+        assert_eq!(key_from_parts("q", Some("openai"), None, &b, &[], d, &[]), with_a);
+        assert_ne!(key_from_parts("q", Some("openai"), None, &[], &[], d, &[]), with_a);
+        assert_ne!(key_from_parts("q", Some("openai"), None, &a[..1].to_vec(), &[], d, &[]), with_a);
     }
 
     #[test]
@@ -341,16 +375,65 @@ mod tests {
         // preference re-keys, and the SET is the component (order/dupes fold).
         let d = "digest";
         let atts = ["a.md".to_string()];
-        let legacy = key_from_parts("q", Some("openai"), None, &atts, &[], d);
-        assert_eq!(key_from_parts("q", Some("openai"), None, &atts, &[], d), legacy);
+        let legacy = key_from_parts("q", Some("openai"), None, &atts, &[], d, &[]);
+        assert_eq!(key_from_parts("q", Some("openai"), None, &atts, &[], d, &[]), legacy);
         let p1 = ["c1".to_string(), "c2".to_string()];
         let p2 = ["c2".to_string(), "c1".to_string(), "c1".to_string()];
-        let with_pref = key_from_parts("q", Some("openai"), None, &atts, &p1, d);
+        let with_pref = key_from_parts("q", Some("openai"), None, &atts, &p1, d, &[]);
         assert_ne!(with_pref, legacy);
-        assert_eq!(key_from_parts("q", Some("openai"), None, &atts, &p2, d), with_pref);
+        assert_eq!(key_from_parts("q", Some("openai"), None, &atts, &p2, d, &[]), with_pref);
         assert_ne!(
-            key_from_parts("q", Some("openai"), None, &atts, &p1[..1].to_vec(), d),
+            key_from_parts("q", Some("openai"), None, &atts, &p1[..1].to_vec(), d, &[]),
             with_pref
+        );
+    }
+
+    #[test]
+    fn view_registry_joins_the_key_only_when_non_empty() {
+        // openspec: add-shaped-views — zero views = the legacy key
+        // BYTE-FOR-BYTE, pinned against the raw material layout (a sha256 of
+        // the literal pre-views string), not just self-consistency, so this
+        // test fails if the empty-registry path ever grows a component.
+        fn sha(material: &str) -> String {
+            use sha2::{Digest, Sha256};
+            hex::encode(Sha256::digest(material.as_bytes()))
+        }
+        let d = "digest";
+        let legacy = key_from_parts("q", Some("openai"), None, &[], &[], d, &[]);
+        assert_eq!(
+            legacy,
+            sha("q:q\nc:digest\np:openai\nm:\na:"),
+            "an empty registry emits the pre-views material"
+        );
+
+        // One view re-keys; the definition TEXT is load-bearing.
+        let totals = ("totals".to_string(), "SELECT 1".to_string());
+        let regions = ("regions".to_string(), "SELECT 2".to_string());
+        let with_view = key_from_parts("q", Some("openai"), None, &[], &[], d, &[totals.clone()]);
+        assert_ne!(with_view, legacy, "a saved view re-keys");
+        assert_ne!(
+            key_from_parts("q", Some("openai"), None, &[], &[], d, &[("totals".into(), "SELECT 9".into())]),
+            with_view,
+            "same name, different sql re-keys"
+        );
+
+        // The registry is a SET sorted by name: order never changes the key,
+        // and the exact byte layout (\nv: + name\0sql pairs \0-joined) is
+        // pinned. KEEP IN SYNC with answerCache.ts.
+        let ab = key_from_parts("q", Some("openai"), None, &[], &[], d, &[totals.clone(), regions.clone()]);
+        let ba = key_from_parts("q", Some("openai"), None, &[], &[], d, &[regions.clone(), totals.clone()]);
+        assert_eq!(ab, ba, "registry order never changes the key");
+        assert_eq!(
+            ab,
+            sha("q:q\nc:digest\np:openai\nm:\na:\nv:regions\u{0}SELECT 2\u{0}totals\u{0}SELECT 1"),
+            "the v: byte layout is pinned"
+        );
+
+        // The v: block composes with a recall preference (r: precedes v:).
+        let both = key_from_parts("q", Some("openai"), None, &[], &["c1".to_string()], d, &[totals]);
+        assert_eq!(
+            both,
+            sha("q:q\nc:digest\np:openai\nm:\na:\nr:c1\nv:totals\u{0}SELECT 1")
         );
     }
 

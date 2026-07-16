@@ -336,3 +336,81 @@ test("recall preference joins the key only when non-empty (openspec: add-investi
   assert.equal(keyFromParts("q", "openai", null, ["a.md"], ["c2", "c1", "c1"], d), withPref);
   assert.notEqual(keyFromParts("q", "openai", null, ["a.md"], ["c1"], d), withPref);
 });
+
+
+// --- Saved views in the key (openspec: add-shaped-views) ----------------------------
+// PARITY: answer_cache.rs::view_registry_joins_the_key_only_when_non_empty —
+// same literal materials, so the twins can never drift a byte.
+
+const { createHash } = await import("node:crypto");
+const viewsMod = await import("../src/server/views.ts");
+const sha256 = (s) => createHash("sha256").update(s, "utf8").digest("hex");
+
+test("view registry joins the key only when non-empty (byte-pinned layout)", () => {
+  const { keyFromParts } = cache;
+  const d = "digest";
+
+  // Zero views = the legacy key BYTE-FOR-BYTE, pinned against the raw
+  // material (not just self-consistency) — and the omitted argument takes
+  // the same path, so every pre-views call site keeps its exact keys.
+  const legacy = keyFromParts("q", "openai", null, [], [], d, []);
+  assert.equal(legacy, sha256("q:q\nc:digest\np:openai\nm:\na:"));
+  assert.equal(keyFromParts("q", "openai", null, [], [], d), legacy);
+
+  // One view re-keys; the definition TEXT is load-bearing.
+  const totals = ["totals", "SELECT 1"];
+  const regions = ["regions", "SELECT 2"];
+  const withView = keyFromParts("q", "openai", null, [], [], d, [totals]);
+  assert.notEqual(withView, legacy);
+  assert.notEqual(keyFromParts("q", "openai", null, [], [], d, [["totals", "SELECT 9"]]), withView);
+
+  // The registry is a SET sorted by name: order never changes the key, and
+  // the exact byte layout (\nv: + NUL-joined name/sql pairs) is pinned.
+  const ab = keyFromParts("q", "openai", null, [], [], d, [totals, regions]);
+  assert.equal(keyFromParts("q", "openai", null, [], [], d, [regions, totals]), ab);
+  assert.equal(
+    ab,
+    sha256("q:q\nc:digest\np:openai\nm:\na:\nv:regions\u0000SELECT 2\u0000totals\u0000SELECT 1"),
+    "the v: byte layout is pinned",
+  );
+
+  // The v: block composes with a recall preference (r: precedes v:).
+  assert.equal(
+    keyFromParts("q", "openai", null, [], ["c1"], d, [totals]),
+    sha256("q:q\nc:digest\np:openai\nm:\na:\nr:c1\nv:totals\u0000SELECT 1"),
+  );
+});
+
+test("cacheKey folds the view registry by posture (local-only views re-key local asks only)", () => {
+  const vault = freshVault();
+  cache.resetStore();
+  const { setIncluded, setLocalOnly } = vaultMod;
+  writeFileSync(path.join(vault, "sales.csv"), "region,amount\nnorth,3\n");
+  writeFileSync(path.join(vault, "private.csv"), "region,amount\nNE,5\n");
+  setIncluded("sales.csv", true);
+  setIncluded("private.csv", true);
+  setLocalOnly("private.csv", true);
+
+  const q = "what were sales";
+  const localKey = () => cache.cacheKey(q, "local", null, [], [], false);
+  const cloudKey = () => cache.cacheKey(q, "openai", "gpt-5-mini", [], [], true);
+  const local0 = localKey();
+  const cloud0 = cloudKey();
+
+  // A view over the MARKED file is eligible locally only: the local key
+  // moves, the cloud key stays byte-identical.
+  viewsMod.createView("private_view", "SELECT * FROM private", { text: "q", source: "question" }, [
+    "private.csv",
+  ]);
+  const local1 = localKey();
+  const cloud1 = cloudKey();
+  assert.notEqual(local1, local0, "a local-only view re-keys the local ask");
+  assert.equal(cloud1, cloud0, "…and never the cloud ask");
+
+  // A view over the unmarked file re-keys both postures.
+  viewsMod.createView("sales_view", "SELECT * FROM sales", { text: "q", source: "question" }, [
+    "sales.csv",
+  ]);
+  assert.notEqual(localKey(), local1);
+  assert.notEqual(cloudKey(), cloud1, "an eligible view re-keys the cloud ask");
+});

@@ -750,10 +750,23 @@ fn live_pipeline(
                 let ctx = datafusion::prelude::SessionContext::new();
                 let regs = crate::analytics::register_tables(&ctx, &files, is_cloud).await;
                 if !regs.is_empty() {
+                    // Saved views resolve as virtual tables AFTER the files
+                    // (openspec: add-shaped-views §2): each eligible view
+                    // registers under the shared table caps and contributes a
+                    // view-marked card. Zero saved views ⇒ empty, and every
+                    // prompt string below is byte-identical to today.
+                    let view_regs =
+                        crate::analytics::register_views(&ctx, &regs, is_cloud).await;
                     let mut sql_ctxs: Vec<Ctx> = regs
                         .iter()
                         .map(|r| Ctx { name: r.file_name.clone(), text: r.card.clone(), score: 1.0 })
                         .collect();
+                    // Deterministic prompt order: file cards, view cards, hints.
+                    sql_ctxs.extend(view_regs.iter().map(|v| Ctx {
+                        name: v.name.clone(),
+                        text: v.card.clone(),
+                        score: 1.0,
+                    }));
                     if let Some(hints) = crate::analytics::join_hints(&regs) {
                         sql_ctxs.push(Ctx {
                             name: "join hints".to_string(),
@@ -902,9 +915,14 @@ fn live_pipeline(
                                 .map(|s| s.sql.as_str())
                                 .collect::<Vec<_>>()
                                 .join("\n");
+                            // A step FROM a saved view still stamps its SOURCE
+                            // files (the expansion is freshness-only input,
+                            // never rendered).
                             if let Some(fresh) = crate::analytics::freshness_line(
                                 &regs,
-                                &all_sql,
+                                &crate::analytics::expand_views_for_freshness(
+                                    &all_sql, &view_regs,
+                                ),
                                 crate::config::now_ms(),
                             ) {
                                 yield delta(fresh);
@@ -1031,10 +1049,13 @@ fn live_pipeline(
                         // Deterministic transparency — never model-generated.
                         yield delta(format!("\n\n*Query used:*\n```sql\n{sql}\n```\n"));
                         // …and which file versions it read, so stale-looking
-                        // numbers point at the file, not the engine.
+                        // numbers point at the file, not the engine. A query
+                        // FROM a saved view expands to its source tables here
+                        // (freshness-only input, never rendered), keeping the
+                        // footer on real files.
                         if let Some(fresh) = crate::analytics::freshness_line(
                             &regs,
-                            &sql,
+                            &crate::analytics::expand_views_for_freshness(&sql, &view_regs),
                             crate::config::now_ms(),
                         ) {
                             yield delta(fresh);

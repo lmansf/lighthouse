@@ -9,6 +9,7 @@ import { FileExplorer } from "@/features/explorer/FileExplorer";
 // into the first-paint graph, so the host adds only its own few lines.
 import { FileInspectorHost } from "@/features/explorer/FileInspector";
 import { InvestigationsNav } from "@/features/investigations/InvestigationsNav";
+import { ViewsNav } from "@/features/views/ViewsNav";
 import { ChatPanel } from "@/features/chat/ChatPanel";
 import { VersionBadge } from "@/shell/VersionBadge";
 
@@ -75,6 +76,7 @@ export default function Home() {
       <AppShell
         sidebar={
           <>
+            <ViewsNav />
             <InvestigationsNav />
             <FileExplorer />
           </>

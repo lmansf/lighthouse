@@ -281,6 +281,130 @@ pub async fn rag_post(headers: HeaderMap, body: Option<Json<Value>>) -> Response
                 "boards action must be list, create, rename, delete, setCards, or refreshCards",
             ),
         },
+        // Shaped views (openspec: add-shaped-views §3): CRUD on the views
+        // store — engine-minted ids, save-time guard + reads/DAG validation,
+        // dependent-aware lifecycle — plus `dependents`, the name lists the
+        // rename/delete dialogs show. The wire carries the summary FLATTENED
+        // (summaryText + summarySource); the ViewSummary is built here.
+        // Validation failures → 400 with the engine's reason, like boards.
+        // PARITY: commands.rs mirrors this op exactly; the TS twin's CRUD
+        // runs for real against src/server/views.ts.
+        Some("views") => match body["action"].as_str() {
+            Some("list") => {
+                Json(json!({ "views": lighthouse_core::views::list() })).into_response()
+            }
+            Some("create") => {
+                let summary_source = if body["summarySource"].is_null() {
+                    lighthouse_core::views::SummarySource::Question
+                } else {
+                    match body["summarySource"].as_str() {
+                        Some("question") => lighthouse_core::views::SummarySource::Question,
+                        Some("model") => lighthouse_core::views::SummarySource::Model,
+                        _ => {
+                            return bad_request(
+                                "summarySource must be \"question\" or \"model\"",
+                            )
+                        }
+                    }
+                };
+                let file_ids = string_array(&body["fileIds"]);
+                match lighthouse_core::views::create(
+                    body["name"].as_str().unwrap_or(""),
+                    body["sql"].as_str().unwrap_or(""),
+                    lighthouse_core::views::ViewSummary {
+                        text: body["summaryText"].as_str().unwrap_or("").to_string(),
+                        source: summary_source,
+                    },
+                    &file_ids,
+                ) {
+                    Ok(view) => Json(json!({ "view": view })).into_response(),
+                    Err(e) => bad_request(&e),
+                }
+            }
+            Some("rename") => {
+                let Some(id) = body["id"].as_str().filter(|s| !s.is_empty()) else {
+                    return bad_request("id required");
+                };
+                match lighthouse_core::views::rename(id, body["name"].as_str().unwrap_or("")) {
+                    Ok(view) => Json(json!({ "view": view })).into_response(),
+                    Err(e) => bad_request(&e),
+                }
+            }
+            Some("delete") => {
+                let Some(id) = body["id"].as_str().filter(|s| !s.is_empty()) else {
+                    return bad_request("id required");
+                };
+                let cascade = body["cascade"].as_bool().unwrap_or(false);
+                match lighthouse_core::views::delete(id, cascade) {
+                    Ok(deleted) => Json(json!({ "deletedIds": deleted })).into_response(),
+                    Err(e) => bad_request(&e),
+                }
+            }
+            Some("dependents") => {
+                let Some(id) = body["id"].as_str().filter(|s| !s.is_empty()) else {
+                    return bad_request("id required");
+                };
+                let names = |views: Vec<lighthouse_core::views::View>| -> Vec<String> {
+                    views.into_iter().map(|v| v.name).collect()
+                };
+                Json(json!({
+                    "dependents": names(lighthouse_core::views::dependents_of(id)),
+                    "transitive": names(lighthouse_core::views::transitive_dependents(id)),
+                }))
+                .into_response()
+            }
+            // Inspector on a view (openspec: add-shaped-views §4): the exact
+            // definition SQL, the provenance-labeled summary, the source files
+            // it reads (transitive) with their saved-age freshness, the
+            // effectively-local-only flag, and the dependent names the
+            // rename/delete dialogs warn with. Pure stored-state read — no SQL
+            // executes, so the TS twin returns the identical shape.
+            Some("inspect") => {
+                let Some(id) = body["id"].as_str().filter(|s| !s.is_empty()) else {
+                    return bad_request("id required");
+                };
+                Json(json!({ "inspection": lighthouse_core::inspect::inspect_view(id) }))
+                    .into_response()
+            }
+            _ => bad_request(
+                "views action must be list, create, rename, delete, dependents, or inspect",
+            ),
+        },
+        // Shaping ask (openspec: add-shaped-views §3): ONE guarded completion
+        // proposes a transform SELECT over a registered source; the engine
+        // validates it and renders before/after sample evidence. NOTHING
+        // persists here — creation happens only via op:"views" create on the
+        // user's explicit Save. A local-only source forces the local model
+        // path engine-side; an extractive/keyless provider answers
+        // {available:false} with honest copy (the TS twin ALWAYS does —
+        // PARITY: shaping runs the model + DataFusion, Rust-engine-only).
+        Some("shapeView") => {
+            let source = body["source"].as_str().unwrap_or("").to_string();
+            let instruction = body["instruction"].as_str().unwrap_or("").to_string();
+            let file_ids = string_array(&body["fileIds"]);
+            return match lighthouse_core::views::shape_view(
+                &source,
+                &instruction,
+                &file_ids,
+                profile::model_config(),
+            )
+            .await
+            {
+                Ok(p) => Json(json!({
+                    "proposal": {
+                        "sql": p.sql,
+                        "before": p.before,
+                        "after": p.after,
+                        "summary": p.summary,
+                    }
+                }))
+                .into_response(),
+                Err(e) if e == lighthouse_core::views::SHAPE_NEEDS_MODEL => {
+                    Json(json!({ "available": false, "reason": e })).into_response()
+                }
+                Err(e) => bad_request(&e),
+            };
+        }
         Some("source") => {
             let Some(available) = body["available"].as_bool() else {
                 return bad_request("available required");
@@ -645,11 +769,11 @@ pub async fn rag_post(headers: HeaderMap, body: Option<Json<Value>>) -> Response
             // provider identity the chat pipeline uses.
             let is_cloud =
                 lighthouse_core::synth::is_cloud_provider(&lighthouse_core::profile::model_config());
-            let asks = tokio::task::spawn_blocking(move || {
-                lighthouse_core::meta::suggested_asks(&ids, is_cloud)
-            })
-            .await
-            .unwrap_or_default();
+            // Saved views join the suggestions when any exist (openspec:
+            // add-shaped-views §4): the resolving entry point derives view chips
+            // from resolved result columns and stays byte-identical to the
+            // file-only path when the store is empty.
+            let asks = lighthouse_core::meta::suggested_asks_resolved(ids, is_cloud).await;
             return Json(json!({ "asks": asks })).into_response();
         }
         Some("restore") => {

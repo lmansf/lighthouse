@@ -22,6 +22,11 @@ import type {
   AuditVerdict,
   RagReference,
   RestoreToken,
+  ShapeProposal,
+  ShapeViewResult,
+  View,
+  ViewCreateInput,
+  ViewInspection,
   SigninPoll,
   SigninStart,
   SigninStatus,
@@ -445,6 +450,111 @@ class RealRagService implements RagService {
     return Array.isArray(res.cards) ? (res.cards as BoardCardRefresh[]) : [];
   }
 
+  /**
+   * Views sub-ops (openspec: add-shaped-views) return refusals as 400 +
+   * {error}; unlike boards, the service surface THROWS the engine's reason
+   * (the dialogs catch and show it verbatim — the engine owns the rules).
+   */
+  private async viewsOp(body: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const r = await fetch("/api/rag", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ op: "views", ...body }),
+    });
+    const data = (await r.json().catch(() => ({}))) as Record<string, unknown>;
+    if (!r.ok) {
+      throw new Error(
+        typeof data.error === "string" && data.error ? data.error : `POST /api/rag ${r.status}`,
+      );
+    }
+    return data;
+  }
+
+  async listViews(): Promise<View[]> {
+    const res = await this.viewsOp({ action: "list" });
+    return Array.isArray(res.views) ? (res.views as View[]) : [];
+  }
+
+  async createView(input: ViewCreateInput): Promise<View> {
+    // The summary rides FLATTENED on the wire; the engine builds the labeled
+    // record and owns every validation rule.
+    const res = await this.viewsOp({
+      action: "create",
+      name: input.name,
+      sql: input.sql,
+      summaryText: input.summaryText,
+      summarySource: input.summarySource,
+      fileIds: input.fileIds,
+    });
+    return res.view as View;
+  }
+
+  async renameView(id: string, name: string): Promise<View> {
+    const res = await this.viewsOp({ action: "rename", id, name });
+    return res.view as View;
+  }
+
+  async deleteView(id: string, cascade?: boolean): Promise<string[]> {
+    // `cascade` rides only when true — the privacy-shaped absent-means-no
+    // default every other optional wire flag uses.
+    const res = await this.viewsOp({ action: "delete", id, ...(cascade ? { cascade: true } : {}) });
+    return Array.isArray(res.deletedIds) ? (res.deletedIds as string[]) : [];
+  }
+
+  async viewDependents(id: string): Promise<{ dependents: string[]; transitive: string[] }> {
+    const res = await this.viewsOp({ action: "dependents", id });
+    return {
+      dependents: Array.isArray(res.dependents) ? (res.dependents as string[]) : [],
+      transitive: Array.isArray(res.transitive) ? (res.transitive as string[]) : [],
+    };
+  }
+
+  async inspectView(id: string): Promise<ViewInspection> {
+    // Stored-state read: the engine returns `{inspection}`; an unknown id
+    // yields `{}` (the FileInspection precedent). The twin computes the
+    // identical shape from the stored record (no execution — PARITY).
+    const res = await this.viewsOp({ action: "inspect", id });
+    return (res.inspection ?? {}) as ViewInspection;
+  }
+
+  async shapeView(
+    source: string,
+    instruction: string,
+    fileIds: string[],
+  ): Promise<ShapeViewResult> {
+    // Refusals (unknown source, guard rejection, the model's own refusal)
+    // come back 400 + {error} and THROW so the dialog shows the reason;
+    // {available:false} is a normal answer (extractive provider / dev twin).
+    const r = await fetch("/api/rag", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ op: "shapeView", source, instruction, fileIds }),
+    });
+    const data = (await r.json().catch(() => ({}))) as {
+      proposal?: ShapeProposal;
+      available?: boolean;
+      reason?: string;
+      error?: string;
+    };
+    if (!r.ok) {
+      throw new Error(data.error ?? `POST /api/rag ${r.status}`);
+    }
+    if (data.available === false) {
+      return {
+        available: false,
+        reason:
+          typeof data.reason === "string" && data.reason ? data.reason : "shaping is unavailable",
+      };
+    }
+    const p = data.proposal;
+    return {
+      available: true,
+      sql: typeof p?.sql === "string" ? p.sql : "",
+      before: typeof p?.before === "string" ? p.before : "",
+      after: typeof p?.after === "string" ? p.after : "",
+      summary: typeof p?.summary === "string" ? p.summary : "",
+    };
+  }
   // Provider sign-in (0.12.1 §3): the generic, registration-gated device
   // flow. Every op answers 200 (fail-closed availability + flow errors ride
   // in the body — the pinAsk idiom), so these never throw on a stock build.

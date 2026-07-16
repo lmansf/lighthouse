@@ -252,6 +252,112 @@ pub async fn rag_op(app: AppHandle, body: Value) -> Result<Value, String> {
                     .into(),
             ),
         },
+        // Shaped views (openspec: add-shaped-views §3) — mirrors the routes.rs
+        // op exactly: store CRUD (engine-minted ids, save-time guard +
+        // reads/DAG validation, dependent-aware lifecycle) plus `dependents`,
+        // the name lists the rename/delete dialogs show. The wire carries the
+        // summary FLATTENED (summaryText + summarySource); the ViewSummary is
+        // built here. Views never touch vault files or the tree, so there is
+        // NO vault-changed broadcast (like boards/investigations).
+        Some("views") => match body["action"].as_str() {
+            Some("list") => Ok(json!({ "views": lighthouse_core::views::list() })),
+            Some("create") => {
+                let summary_source = if body["summarySource"].is_null() {
+                    lighthouse_core::views::SummarySource::Question
+                } else {
+                    match body["summarySource"].as_str() {
+                        Some("question") => lighthouse_core::views::SummarySource::Question,
+                        Some("model") => lighthouse_core::views::SummarySource::Model,
+                        _ => return Err("summarySource must be \"question\" or \"model\"".into()),
+                    }
+                };
+                let file_ids = string_array(&body["fileIds"]);
+                let view = lighthouse_core::views::create(
+                    body["name"].as_str().unwrap_or(""),
+                    body["sql"].as_str().unwrap_or(""),
+                    lighthouse_core::views::ViewSummary {
+                        text: body["summaryText"].as_str().unwrap_or("").to_string(),
+                        source: summary_source,
+                    },
+                    &file_ids,
+                )?;
+                Ok(json!({ "view": view }))
+            }
+            Some("rename") => {
+                let Some(id) = body["id"].as_str().filter(|s| !s.is_empty()) else {
+                    return Err("id required".into());
+                };
+                let view =
+                    lighthouse_core::views::rename(id, body["name"].as_str().unwrap_or(""))?;
+                Ok(json!({ "view": view }))
+            }
+            Some("delete") => {
+                let Some(id) = body["id"].as_str().filter(|s| !s.is_empty()) else {
+                    return Err("id required".into());
+                };
+                let cascade = body["cascade"].as_bool().unwrap_or(false);
+                let deleted = lighthouse_core::views::delete(id, cascade)?;
+                Ok(json!({ "deletedIds": deleted }))
+            }
+            Some("dependents") => {
+                let Some(id) = body["id"].as_str().filter(|s| !s.is_empty()) else {
+                    return Err("id required".into());
+                };
+                let names = |views: Vec<lighthouse_core::views::View>| -> Vec<String> {
+                    views.into_iter().map(|v| v.name).collect()
+                };
+                Ok(json!({
+                    "dependents": names(lighthouse_core::views::dependents_of(id)),
+                    "transitive": names(lighthouse_core::views::transitive_dependents(id)),
+                }))
+            }
+            // Inspector on a view (openspec: add-shaped-views §4) — mirrors the
+            // routes.rs arm: definition SQL, provenance-labeled summary,
+            // transitive source files with saved-age freshness, local-only flag,
+            // and dependent names. Pure stored-state read.
+            Some("inspect") => {
+                let Some(id) = body["id"].as_str().filter(|s| !s.is_empty()) else {
+                    return Err("id required".into());
+                };
+                Ok(json!({ "inspection": lighthouse_core::inspect::inspect_view(id) }))
+            }
+            _ => Err(
+                "views action must be list, create, rename, delete, dependents, or inspect".into(),
+            ),
+        },
+        // Shaping ask (openspec: add-shaped-views §3) — mirrors the routes.rs
+        // op exactly: ONE guarded completion proposes a transform SELECT; the
+        // engine validates it and renders before/after sample evidence.
+        // NOTHING persists here — creation happens only via op:"views" create
+        // on the user's explicit Save. A local-only source forces the local
+        // model path engine-side; an extractive/keyless provider answers
+        // {available:false} with honest copy.
+        Some("shapeView") => {
+            let source = body["source"].as_str().unwrap_or("").to_string();
+            let instruction = body["instruction"].as_str().unwrap_or("").to_string();
+            let file_ids = string_array(&body["fileIds"]);
+            match lighthouse_core::views::shape_view(
+                &source,
+                &instruction,
+                &file_ids,
+                profile::model_config(),
+            )
+            .await
+            {
+                Ok(p) => Ok(json!({
+                    "proposal": {
+                        "sql": p.sql,
+                        "before": p.before,
+                        "after": p.after,
+                        "summary": p.summary,
+                    }
+                })),
+                Err(e) if e == lighthouse_core::views::SHAPE_NEEDS_MODEL => {
+                    Ok(json!({ "available": false, "reason": e }))
+                }
+                Err(e) => Err(e),
+            }
+        }
         Some("source") => {
             let Some(available) = body["available"].as_bool() else {
                 return Err("available required".into());
@@ -637,11 +743,10 @@ pub async fn rag_op(app: AppHandle, body: Value) -> Result<Value, String> {
             // a marked file's columns never surface as a suggestion.
             let is_cloud =
                 lighthouse_core::synth::is_cloud_provider(&lighthouse_core::profile::model_config());
-            let asks = tokio::task::spawn_blocking(move || {
-                lighthouse_core::meta::suggested_asks(&ids, is_cloud)
-            })
-            .await
-            .unwrap_or_default();
+            // Saved views join the suggestions when any exist (openspec:
+            // add-shaped-views §4); byte-identical to the file-only path when
+            // the store is empty.
+            let asks = lighthouse_core::meta::suggested_asks_resolved(ids, is_cloud).await;
             Ok(json!({ "asks": asks }))
         }
         // Provider sign-in (0.12.1 §3) — mirrors the routes.rs op exactly: a

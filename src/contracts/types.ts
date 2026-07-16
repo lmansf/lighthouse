@@ -619,3 +619,138 @@ export interface BoardCardRefresh {
   /** Stored state: why the last recheck couldn't run. */
   staleReason?: string;
 }
+
+/**
+ * Where a view's one-line summary came from (openspec: add-shaped-views):
+ * recorded from the asked question ("Save as view" on a Beam answer) or
+ * stated by the model during a shaping ask. The whole whitelist — a view
+ * never carries an unlabeled summary.
+ */
+export type ViewSummarySource = "question" | "model";
+
+/** The provenance-labeled one-line summary a view carries. */
+export interface ViewSummary {
+  text: string;
+  source: ViewSummarySource;
+}
+
+/**
+ * One source-file dependency of a view, with the table-name binding the
+ * definition's SQL uses pinned at save time.
+ */
+export interface ViewFileRead {
+  fileId: string;
+  tableName: string;
+}
+
+/** A view's dependencies — source files and other views — resolved at save. */
+export interface ViewReads {
+  files: ViewFileRead[];
+  views: string[];
+}
+
+/**
+ * A shaped view (openspec: add-shaped-views): a named, guarded SELECT over
+ * vault tables, stored as a DEFINITION and resolved virtually at ask time —
+ * results always reflect the sources' current bytes, and no view operation
+ * ever writes to a source file. Shape mirrors the engines' record
+ * (views.rs ⇄ views.ts) exactly.
+ */
+export interface View {
+  /** Engine-minted, stable across renames. */
+  id: string;
+  /** Sanitized identifier (lowercase [a-z0-9_]), unique among views. */
+  name: string;
+  /** Exactly ONE read-only SELECT — guarded at save AND before execution. */
+  sql: string;
+  reads: ViewReads;
+  summary: ViewSummary;
+  createdMs: number;
+}
+
+/**
+ * What the client sends to create a view. The summary rides FLATTENED on the
+ * wire (summaryText + summarySource); the engine builds the labeled record
+ * and owns every rule — name sanitization, the SQL guard, reads derivation,
+ * cycle/depth checks. The UI never re-validates beyond trimming.
+ */
+export interface ViewCreateInput {
+  name: string;
+  sql: string;
+  summaryText: string;
+  summarySource: ViewSummarySource;
+  fileIds: string[];
+}
+
+/**
+ * One source file a view reads, resolved for the inspector: its display name
+ * and how fresh the on-disk copy is (`savedAge`, from the file's saved time —
+ * the SAME saved-age label the analytics footer uses). A file the id no longer
+ * resolves to is reported honestly with `missing:true` (and `name` falls back
+ * to the pinned table-name binding). KEEP IN SYNC with `ViewSource` in
+ * lighthouse-core inspect.rs.
+ */
+export interface ViewSource {
+  fileId: string;
+  name: string;
+  /** "2 hours ago" — absent when the file is missing/unreadable. */
+  savedAge?: string;
+  /** The file id no longer resolves in the vault. Present (true) only then. */
+  missing?: boolean;
+}
+
+/**
+ * "Inspector on a view" (openspec: add-shaped-views §4): a read-only view of a
+ * saved view — the exact definition SQL, the provenance-labeled summary, the
+ * source files it reads (transitively) with their freshness, the
+ * effectively-local-only flag, and the dependent names the rename/delete
+ * dialogs warn with. Every field is optional so an unknown id returns `{}`.
+ * All values are stored state (no SQL executes), so BOTH engines fill in the
+ * identical shape — unlike `FileInspection`, there are no Rust-only fields.
+ * KEEP IN SYNC with `ViewInspection` in lighthouse-core inspect.rs.
+ */
+export interface ViewInspection {
+  id?: string;
+  name?: string;
+  /** The exact stored SELECT the engine re-guards and runs at ask time. */
+  sql?: string;
+  /** The one-line summary text (may be "" — a model-shaped view can carry none). */
+  summary?: string;
+  /** Where the summary came from — the provenance label shown beside it. */
+  summarySource?: ViewSummarySource;
+  /** Every source FILE this view reads, transitively, with saved-age freshness. */
+  sources?: ViewSource[];
+  /** The names of the views this one reads directly (the stack above the files). */
+  readsViews?: string[];
+  /** Effectively local-only: any transitive source file is local-only. */
+  localOnly?: boolean;
+  /** Direct dependent view names — what the rename warning shows. */
+  dependents?: string[];
+  /** Transitive dependent view names — what the delete/cascade confirmation shows. */
+  transitiveDependents?: string[];
+  createdMs?: number;
+}
+
+/**
+ * A shaping-ask proposal (openspec: add-shaped-views §3): the model's ONE
+ * validated transform SELECT plus engine-rendered evidence — the first
+ * sample rows of the source (`before`) and of the proposed SELECT (`after`)
+ * as markdown tables — and the model's one-line summary ("" when it stated
+ * none). NOTHING is persisted until the user explicitly saves.
+ */
+export interface ShapeProposal {
+  sql: string;
+  before: string;
+  after: string;
+  summary: string;
+}
+
+/**
+ * What `shapeView` answers: the proposal, or `{available:false}` with an
+ * honest reason — the extractive/no-model posture on the desktop engine, and
+ * ALWAYS on the web dev twin (shaping runs the model + DataFusion,
+ * Rust-engine-only — PARITY).
+ */
+export type ShapeViewResult =
+  | ({ available: true } & ShapeProposal)
+  | { available: false; reason: string };

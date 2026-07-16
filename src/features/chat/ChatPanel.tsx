@@ -81,6 +81,7 @@ import {
   SettingsRegular,
   ShieldRegular,
   SquareRegular,
+  TableRegular,
   ThumbDislikeRegular,
   ThumbLikeRegular,
   WarningRegular,
@@ -116,6 +117,7 @@ import { askSuggestions, lastAsk, type AskHistoryItem } from "@/lib/askTypeahead
 import { AnalyticsChart, standaloneChartSvg } from "@/features/chat/AnalyticsChart";
 import { BriefingsPanel } from "@/features/chat/BriefingsPanel";
 import { PinMiniChart } from "@/features/chat/PinMiniChart";
+import { SaveViewDialog } from "@/features/views/SaveViewDialog";
 import { EgressShield } from "@/features/egress/EgressShield";
 import { ProviderSwitch } from "@/features/chat/ProviderSwitch";
 import {
@@ -1579,6 +1581,7 @@ function RefineChips({
   packPending,
   onPin,
   pinPending,
+  onSaveView,
 }: {
   meta: AnalyticsMeta;
   /** The answer markdown — the "Chart it" heuristic reads its GFM table. */
@@ -1600,6 +1603,9 @@ function RefineChips({
   /** Pin this answer so vault changes recheck it (desktop rechecks live). */
   onPin?: (meta: AnalyticsMeta) => void;
   pinPending?: boolean;
+  /** Save this answer's SQL as a named view (openspec: add-shaped-views) —
+   *  same visibility as Edit SQL: any answer whose meta carries the SQL. */
+  onSaveView?: (meta: AnalyticsMeta) => void;
 }) {
   const styles = useStyles();
   // "Chart it": offered only when (a) the answer carries a parseable GFM
@@ -1689,6 +1695,19 @@ function RefineChips({
           onClick={() => onPin(meta)}
         >
           {pinPending ? "Pinning…" : "Pin"}
+        </Button>
+      )}
+      {onSaveView && (
+        <Button
+          appearance="subtle"
+          size="small"
+          shape="circular"
+          className={styles.quietChip}
+          icon={<TableRegular />}
+          disabled={disabled}
+          onClick={() => onSaveView(meta)}
+        >
+          Save as view
         </Button>
       )}
     </div>
@@ -2187,6 +2206,15 @@ export function ChatPanel() {
   const [pinsOpen, setPinsOpen] = useState(false);
   const [pinList, setPinList] = useState<Pin[]>([]);
   const [pinsBusy, setPinsBusy] = useState(false);
+  // --- Save as view (openspec: add-shaped-views §3.1): the dialog's target
+  //     (the answer's meta + the question that produced it) and the per-turn
+  //     saved confirmation — the savedNotes idiom. ---
+  const [saveView, setSaveView] = useState<{
+    msgId: string;
+    meta: AnalyticsMeta;
+    question: string;
+  } | null>(null);
+  const [viewNotes, setViewNotes] = useState<Record<string, { name?: string }>>({});
   // G5: transient "Saved to Lighthouse Notes" note after a manual refresh.
   const [briefingSaved, setBriefingSaved] = useState<string | null>(null);
   // Outcome of a pins-dialog row's "Add to board" (openspec: add-boards).
@@ -2204,6 +2232,11 @@ export function ChatPanel() {
     setPinNotes({});
     setRatings({});
     setInlineCharts({});
+    // Save-as-view state is per-conversation too (like the "Chart it" inline
+    // charts above): close a dialog opened from another chat and drop its
+    // notes, so a same-id answer here can never inherit a "Saved view…" line.
+    setSaveView(null);
+    setViewNotes({});
   }, [currentId]);
   // Cancels the in-flight ask() when the user presses Stop.
   const abortRef = useRef<AbortController | null>(null);
@@ -3010,6 +3043,23 @@ export function ChatPanel() {
     setExportNote(next);
     if (exportNoteTimer.current !== null) window.clearTimeout(exportNoteTimer.current);
     exportNoteTimer.current = window.setTimeout(() => setExportNote(null), 8000);
+  }
+
+  /**
+   * "Save as view" (openspec: add-shaped-views §3.1): open the name dialog
+   * with this answer's meta and the question that produced it — the same
+   * preceding-user-turn derivation as pinAnswer. The question becomes the
+   * view's summary, labeled "question"; no model is consulted anywhere in
+   * this flow.
+   */
+  function openSaveView(asstId: string, meta: AnalyticsMeta) {
+    const msgs = useChatStore.getState().messages;
+    const idx = msgs.findIndex((x) => x.id === asstId);
+    const prev = idx > 0 ? msgs[idx - 1] : undefined;
+    const question =
+      (prev?.role === "user" ? prev.content : "").trim().replace(/\s+/g, " ").slice(0, 200) ||
+      "Saved view";
+    setSaveView({ msgId: asstId, meta, question });
   }
 
   /**
@@ -4680,6 +4730,7 @@ export function ChatPanel() {
                             packPending={packNotes[m.id]?.pending}
                             onPin={(meta) => void pinAnswer(m.id, meta)}
                             pinPending={pinNotes[m.id]?.pending}
+                            onSaveView={(meta) => openSaveView(m.id, meta)}
                           />
                           {pinNotes[m.id]?.ok && (
                             <div className={styles.savedNote}>
@@ -4760,6 +4811,18 @@ export function ChatPanel() {
                               <ErrorCircleRegular fontSize={14} />
                               <Text size={200}>
                                 Couldn&apos;t save the evidence pack — {packNotes[m.id].error}
+                              </Text>
+                            </div>
+                          )}
+                          {/* Save-as-view confirmation (openspec:
+                              add-shaped-views §3.1) — the Save-as-CSV quiet
+                              inline pattern; refusals show in the dialog. */}
+                          {viewNotes[m.id]?.name && (
+                            <div className={styles.savedNote}>
+                              <CheckmarkRegular fontSize={14} />
+                              <Text size={200}>
+                                Saved view “{viewNotes[m.id].name}” — ask against it like any
+                                table.
                               </Text>
                             </div>
                           )}
@@ -4924,6 +4987,25 @@ export function ChatPanel() {
           </DialogBody>
         </DialogSurface>
       </Dialog>
+
+      {/* Save as view (openspec: add-shaped-views §3.1): a name-only dialog
+          over this answer's exact SQL + files; the asked question is recorded
+          as the summary (source "question"). The engine owns every rule —
+          refusals render inside the dialog, the success line above is the
+          quiet Save-as-CSV pattern. */}
+      <SaveViewDialog
+        open={saveView !== null}
+        onClose={() => setSaveView(null)}
+        sql={saveView?.meta.sql ?? ""}
+        fileIds={saveView?.meta.fileIds ?? []}
+        question={saveView?.question ?? ""}
+        onSaved={(view) => {
+          const target = saveView;
+          if (target) {
+            setViewNotes((s) => ({ ...s, [target.msgId]: { name: view.name } }));
+          }
+        }}
+      />
     </section>
   );
 }
