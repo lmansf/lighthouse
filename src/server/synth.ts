@@ -270,20 +270,70 @@ export function localOnlySkipNote(n: number): string {
  * (privacy-legibility). `excerptCount` is the number of context blocks the
  * branch that ran actually handed to the model; `sourceFileCount` is derived
  * here from the references so it can never drift from what's cited (nor from the
- * audit record's `fileIds`, which are those same refs' ids). KEEP IN SYNC with
- * lighthouse-core/src/synth.rs::final_chunk.
+ * audit record's `fileIds`, which are those same refs' ids). `cost` is the
+ * answer's cost meter (openspec: add-beam-loop §3.1). PARITY: the cost VALUES
+ * are Rust-shipped — this dev twin does not parse provider usage (§1), so every
+ * twin answer honestly reports "not reported" (`reported: false`), never a
+ * fabricated count; the shape is mirrored so the same UI renders either engine's
+ * meter, and the Rust engine's own unreported meter serializes byte-identically
+ * (costEstimateUsd omitted). `manifest` is the context manifest (openspec:
+ * add-beam-loop §5) — the metadata of every context block handed to the model;
+ * empty ⇒ omitted (byte-identical to the Rust engine, which omits an empty
+ * manifest). KEEP IN SYNC with
+ * lighthouse-core/src/synth.rs::final_chunk / cost_meta.
  */
 function finalChunk(
   references: RagReference[],
   excerptCount: number,
   origin: string,
+  manifest: ManifestEntry[] = [],
 ): ChatChunk {
   return {
     delta: "",
     references,
-    meta: { origin, excerptCount, sourceFileCount: references.length },
+    meta: {
+      origin,
+      excerptCount,
+      sourceFileCount: references.length,
+      cost: { inputTokens: 0, outputTokens: 0, totalTokens: 0, reported: false },
+      ...(manifest.length ? { manifest } : {}),
+    },
     done: true,
   };
+}
+
+/** One context-manifest entry (openspec: add-beam-loop §5.1) — the element shape
+ *  of `ChatChunk.meta.manifest`, kept DRY against the contract type. */
+type ManifestEntry = NonNullable<NonNullable<ChatChunk["meta"]>["manifest"]>[number];
+
+/**
+ * Context manifest (openspec: add-beam-loop §5.1/§5.3) for a retrieval context
+ * set — one entry per retrieved chunk, `kind` `conversation-note` for a
+ * past-chat note else `retrieved-chunk`, attributed to its source `fileId` via
+ * the per-file `references` (matched by display name — references are
+ * one-per-file). The entry `name` is the prompt label the model saw (`ctxLabel`).
+ * METADATA ONLY: `chars` is the block's LENGTH, never the text bytes. PARITY:
+ * this dev twin has no analytics branch, so it only ever emits the RAG kinds its
+ * paths assemble (`retrieved-chunk` / `conversation-note`) — the analytics kinds
+ * (`schema-card` / `query-result` / `join-hints` / `chart-options`) are Rust-only;
+ * the kind labels here are byte-identical to
+ * lighthouse-core::synth::retrieval_manifest.
+ */
+function retrievalManifest(
+  contexts: { name: string; text: string; score: number; kind?: "file" | "conversation" }[],
+  references: RagReference[],
+): ManifestEntry[] {
+  const fileOf = new Map(references.map((r) => [r.name, r.fileId]));
+  return contexts.map((c) => {
+    const fileId = fileOf.get(c.name);
+    return {
+      name: ctxLabel(c),
+      kind: c.kind === "conversation" ? "conversation-note" : "retrieved-chunk",
+      chars: c.text.length,
+      ...(fileId !== undefined ? { fileId } : {}),
+      score: c.score,
+    };
+  });
 }
 
 /**
@@ -311,6 +361,14 @@ export async function* answerPipeline(
   cache: CacheCtl = {},
   preferredConversationIds: string[] = [],
 ): AsyncGenerator<ChatChunk> {
+  // PARITY (openspec: add-beam-loop §4.4): two-phase plan approval is Rust-only.
+  // Plan generation lives in the analytics branch, which the Rust engine ships
+  // and this dev twin has no equivalent of — so the twin exposes no `planOnly`/
+  // `approvedPlan` params, never previews-then-stops, and never emits a `plan`
+  // chunk (its shape is mirrored in types.ts so the same UI can render the Rust
+  // engine's preview; the Rust `answer_pipeline` also bypasses the answer cache
+  // for a plan-only op — a case that cannot arise here). Honest degradation, not
+  // a stub. KEEP IN SYNC with synth.rs::answer_pipeline.
   // Key at ask entry. A failing cache degrades to "no cache this ask".
   let key: string | null = null;
   try {
@@ -632,10 +690,19 @@ async function* answerPipelineLive(
         text: e.text,
         score: e.ref.score,
       }));
+      // Manifest (§5): one retrieved-chunk per synthesized document, attributed
+      // to its source file via the flowing reference — metadata only.
+      const manifest: ManifestEntry[] = extracts.map((e) => ({
+        name: e.ref.name,
+        kind: "retrieved-chunk",
+        chars: e.text.length,
+        fileId: e.ref.fileId,
+        score: e.ref.score,
+      }));
       for await (const delta of streamAnswer(question, reduceCtxs, cfg, history)) {
         yield { delta, done: false };
       }
-      yield finalChunk(extracts.map((e) => e.ref), reduceCtxs.length, origin);
+      yield finalChunk(extracts.map((e) => e.ref), reduceCtxs.length, origin, manifest);
       return;
     }
     // Fewer than two documents had anything to say — fall through to the
@@ -688,10 +755,19 @@ async function* answerPipelineLive(
           // the TS local path never clamps, so they only carry the order.
           score: 1 - i * 1e-4,
         }));
+        // Manifest (§5): each whole-document part is a retrieved chunk attributed
+        // to this one file — metadata only.
+        const manifest: ManifestEntry[] = ctxs.map((c) => ({
+          name: c.name,
+          kind: "retrieved-chunk",
+          chars: c.text.length,
+          fileId: reference.fileId,
+          score: c.score,
+        }));
         for await (const delta of streamAnswer(question, ctxs, cfg, history)) {
           yield { delta, done: false };
         }
-        yield finalChunk([reference], ctxs.length, origin);
+        yield finalChunk([reference], ctxs.length, origin, manifest);
         return;
       }
       // Too big for one prompt: sweep EVERY chunk in ordered segments,
@@ -734,10 +810,19 @@ async function* answerPipelineLive(
           text: t,
           score: 1,
         }));
+        // Manifest (§5): each synthesized segment is a retrieved chunk attributed
+        // to this one file — metadata only.
+        const manifest: ManifestEntry[] = reduceCtxs.map((c) => ({
+          name: c.name,
+          kind: "retrieved-chunk",
+          chars: c.text.length,
+          fileId: reference.fileId,
+          score: c.score,
+        }));
         for await (const delta of streamAnswer(question, reduceCtxs, cfg, history)) {
           yield { delta, done: false };
         }
-        yield finalChunk([reference], reduceCtxs.length, origin);
+        yield finalChunk([reference], reduceCtxs.length, origin, manifest);
         return;
       }
       // Every segment came back empty/failed — fall through to the ordinary
@@ -751,6 +836,10 @@ async function* answerPipelineLive(
     text: c.text,
     score: c.score,
   }));
+  // Manifest (§5): the retrieved chunks (attributed to their files via the
+  // flowing references), grown alongside `contexts` with a schema-card entry per
+  // appended table profile below. Metadata only.
+  const manifest: ManifestEntry[] = retrievalManifest(initial.contexts, initial.references);
   let profiled = 0;
   const seen = new Set<string>();
   for (const r of initial.references) {
@@ -760,7 +849,9 @@ async function* answerPipelineLive(
     const full = await docText(r.fileId);
     const profile = full ? tableProfile(r.name, full.text) : null;
     if (profile) {
-      contexts.push({ name: `${r.name} — table profile`, text: profile, score: 0 });
+      const pname = `${r.name} — table profile`;
+      manifest.push({ name: pname, kind: "schema-card", chars: profile.length, fileId: r.fileId, score: 0 });
+      contexts.push({ name: pname, text: profile, score: 0 });
       profiled += 1;
     }
   }
@@ -768,5 +859,5 @@ async function* answerPipelineLive(
   for await (const delta of streamAnswer(question, contexts, cfg, history)) {
     yield { delta, done: false };
   }
-  yield finalChunk(initial.references, contexts.length, origin);
+  yield finalChunk(initial.references, contexts.length, origin, manifest);
 }

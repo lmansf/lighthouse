@@ -2917,9 +2917,14 @@ mod tests {
 
     #[test]
     fn step_prompt_stays_inside_budget() {
-        // Maximal shape: 3 completed steps, each with a long SQL and a result
-        // at the carry cap — the prompt must stay comfortably under ~8k chars.
-        let steps: Vec<StepRecord> = (0..3)
+        // Maximal shape under the Beam budget (openspec: add-beam-loop §2): the
+        // planning prompt for the last step carries every prior step's SQL and
+        // its result clipped to STEP_RESULT_CAP. At the configurable ceiling (12
+        // steps, settings::BEAM_MAX_STEPS_CEILING) that is 11 prior steps — the
+        // prompt grows past the old hardcoded-3 bound but stays a tiny fraction
+        // of any remote window (the loop is remote-gated for exactly this
+        // reason). 24k chars ≈ 6k tokens — comfortably inside every remote model.
+        let steps: Vec<StepRecord> = (0..11)
             .map(|i| StepRecord {
                 sql: format!(
                     "SELECT c{i}, SUM(v) FROM {} GROUP BY c{i} ORDER BY 2 DESC",
@@ -2928,13 +2933,14 @@ mod tests {
                 result_markdown: "| a | b |\n| 1 | 2 |\n".repeat(200), // > cap, gets clipped
             })
             .collect();
-        let q = step_question(&"compare everything and explain why ".repeat(8), &steps);
+        let q = step_question(&"compare everything and explain why ".repeat(8), &steps, 12);
         assert!(
-            q.chars().count() < 8_000,
+            q.chars().count() < 24_000,
             "prompt budget blown: {}",
             q.chars().count()
         );
-        assert!(q.contains("Step 3 SQL"));
+        assert!(q.contains("Step 11 SQL"));
+        assert!(q.contains("up to 12 SQL queries total"));
     }
 
     #[test]
@@ -4423,9 +4429,12 @@ const STEP_RESULT_CAP: usize = 1200;
 
 /// The iterative step ask: original question + every completed step's SQL and
 /// capped result. Schema cards ride as context blocks (not in this string).
-/// Budget: ≤ ~8k chars at the 3-step maximum — comfortably inside every
-/// remote window (unit-tested).
-pub fn step_question(question: &str, steps: &[StepRecord]) -> String {
+/// `max_steps` is the Beam loop's configured step budget (openspec:
+/// add-beam-loop §2.3) — the former hardcoded "3" now reads the budget so the
+/// prompt matches the loop's actual bound. Budget: ~8k chars per completed step
+/// at the STEP_RESULT_CAP carry, comfortably inside every remote window at the
+/// default budget (unit-tested).
+pub fn step_question(question: &str, steps: &[StepRecord], max_steps: usize) -> String {
     let prior = if steps.is_empty() {
         " (none yet)".to_string()
     } else {
@@ -4443,7 +4452,7 @@ pub fn step_question(question: &str, steps: &[StepRecord]) -> String {
     format!(
         "You are running a multi-step analysis over the user's tables to answer \
          one question. The table schemas are in the context blocks. You may run \
-         up to 3 SQL queries total, one at a time.\n\
+         up to {max_steps} SQL queries total, one at a time.\n\
          Completed steps so far:{prior}\n\n\
          If one more query would materially improve the answer, reply with exactly:\n\
          NEXT_SQL:\n```sql\n<one single SELECT statement>\n```\n\

@@ -38,6 +38,7 @@ fn every_settings_field_round_trips() {
         briefing_note_hour: Some(7),
         tour_shown: Some(true),
         openai_auth_method: Some("signin".into()),
+        beam_max_steps: Some(6),
         extra,
     };
 
@@ -61,6 +62,7 @@ fn every_settings_field_round_trips() {
         briefing_note_hour,
         tour_shown,
         openai_auth_method,
+        beam_max_steps,
         extra,
     } = back;
 
@@ -79,6 +81,7 @@ fn every_settings_field_round_trips() {
     assert_eq!(briefing_note_hour, Some(7));
     assert_eq!(tour_shown, Some(true));
     assert_eq!(openai_auth_method.as_deref(), Some("signin"));
+    assert_eq!(beam_max_steps, Some(6));
     assert_eq!(extra.get("widgetPos"), Some(&serde_json::json!([12, 34])));
 
     // Wire keys are camelCase (serde rename drift check — the TS twin and the
@@ -99,6 +102,7 @@ fn every_settings_field_round_trips() {
         "briefingNoteHour",
         "tourShown",
         "openaiAuthMethod",
+        "beamMaxSteps",
         "widgetPos",
     ] {
         assert!(
@@ -138,6 +142,7 @@ fn writer_persists_every_toggle_and_preserves_shell_keys() {
         Some(false),                    // briefing_notify
         Some(7),                        // briefing_note_hour
         Some(true),                     // tour_shown
+        Some(8),                        // beam_max_steps
     );
     let s = read_desktop_settings();
     std::env::remove_var("LIGHTHOUSE_SETTINGS_FILE");
@@ -155,6 +160,7 @@ fn writer_persists_every_toggle_and_preserves_shell_keys() {
     assert_eq!(s.briefing_notify, Some(false));
     assert_eq!(s.briefing_note_hour, Some(7));
     assert_eq!(s.tour_shown, Some(true));
+    assert_eq!(s.beam_max_steps, Some(8));
     assert_eq!(
         s.vault_dir.as_deref(),
         Some("/somewhere/vault"),

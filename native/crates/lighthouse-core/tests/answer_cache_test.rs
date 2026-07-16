@@ -13,7 +13,8 @@ mod common;
 
 use futures::StreamExt;
 use lighthouse_core::answer_cache::{self, CacheCtl, CachedAnswer};
-use lighthouse_core::contracts::{ChatChunk, ChunkMeta};
+use lighthouse_core::beam::PlanCtl;
+use lighthouse_core::contracts::{ChatChunk, ChunkMeta, CostMeta, CtxManifestEntry};
 use lighthouse_core::llm::ModelCfg;
 use lighthouse_core::synth::answer_pipeline;
 use lighthouse_core::vault;
@@ -41,6 +42,8 @@ fn entry(text: &str) -> CachedAnswer {
             excerpt_count: 0,
             source_file_count: 0,
             cached_at: None,
+            cost: None,
+            manifest: None,
         },
     }
 }
@@ -199,6 +202,96 @@ fn corrupt_or_version_mismatched_store_is_a_miss_and_self_heals() {
     assert!(answer_cache::lookup("k9", ALLOWED).is_none(), "version mismatch is a miss");
 }
 
+// --- Cost meter persistence + replay (openspec: add-beam-loop §3.3/§3.5) -----------
+
+#[test]
+fn a_cache_replay_reports_zero_new_cost_but_carries_the_original_as_history() {
+    // A stored answer's cost meter is HISTORY; replaying it re-stamps `cachedAt`
+    // (the replay computed nothing) and reports 0 NEW cost, so the running total
+    // never double-counts a replay.
+    let dir = tempfile::tempdir().unwrap();
+    let _guard = common::lock_env(dir.path());
+    std::env::remove_var("LIGHTHOUSE_APP_STATE_DIR");
+    answer_cache::reset_store();
+
+    // A billable cloud answer's stored meter: 100/50 provider-reported tokens
+    // and a labeled estimate of $0.01.
+    let mut e = entry("verified cloud answer");
+    e.meta.origin = "anthropic".into();
+    e.meta.cost = Some(CostMeta {
+        input_tokens: 100,
+        output_tokens: 50,
+        total_tokens: 150,
+        reported: true,
+        cost_estimate_usd: Some(0.01),
+    });
+    answer_cache::insert("k", e, ALLOWED);
+
+    // The original figures survive the store byte-for-byte (persisted history).
+    let hit = answer_cache::lookup("k", ALLOWED).expect("stored");
+    let stored = hit.meta.cost.clone().expect("cost persisted in CachedAnswer");
+    assert_eq!(stored.total_tokens, 150);
+    assert_eq!(stored.cost_estimate_usd, Some(0.01));
+    assert!(stored.reported);
+
+    // The replay stamp the wrapper adds (`cachedAt`) means 0 NEW cost, while the
+    // stored figures ride along as the historical record.
+    let replay_meta = ChunkMeta { cached_at: Some(hit.created_ms), ..hit.meta };
+    assert!(replay_meta.cost.is_some(), "the original figures ride the replay as history");
+    assert!(
+        lighthouse_core::audit::ask_new_cost(&replay_meta).is_none(),
+        "a replay reports 0 new tokens / $0"
+    );
+}
+
+// --- Context manifest persistence + replay (openspec: add-beam-loop §5.4/§5.7) -----
+
+#[test]
+fn a_cache_replay_shows_the_original_manifest_not_a_blank() {
+    // The context manifest is stored on the cached answer and rides the replay via
+    // `..hit.meta` (the same seam the provenance stamp and cost meter get), so a
+    // replay renders the ORIGINAL manifest, never an empty one. METADATA ONLY —
+    // the persisted entries carry names/kinds/counts/file ids, never context text.
+    let dir = tempfile::tempdir().unwrap();
+    let _guard = common::lock_env(dir.path());
+    std::env::remove_var("LIGHTHOUSE_APP_STATE_DIR");
+    answer_cache::reset_store();
+
+    let mut e = entry("verified answer over private files");
+    e.meta.manifest = Some(vec![
+        CtxManifestEntry {
+            name: "budget.csv — schema".into(),
+            kind: "schema-card".into(),
+            chars: 128,
+            file_id: Some("id-budget".into()),
+            local_only: None,
+            score: 0.0,
+        },
+        CtxManifestEntry {
+            name: "q3.md".into(),
+            kind: "retrieved-chunk".into(),
+            chars: 512,
+            file_id: Some("id-q3".into()),
+            local_only: None,
+            score: 0.9,
+        },
+    ]);
+    answer_cache::insert("k", e, ALLOWED);
+
+    // The manifest survives the store byte-for-byte (persisted history).
+    let hit = answer_cache::lookup("k", ALLOWED).expect("stored");
+    let stored = hit.meta.manifest.clone().expect("manifest persisted in CachedAnswer");
+    assert_eq!(stored.len(), 2);
+    assert_eq!(stored[1].kind, "retrieved-chunk");
+    assert_eq!(stored[1].file_id.as_deref(), Some("id-q3"), "a chunk carries its file id");
+
+    // The replay stamp the wrapper adds (`cachedAt`) carries the ORIGINAL manifest
+    // forward via the `..hit.meta` spread — the replay shows it, not a blank.
+    let replay_meta = ChunkMeta { cached_at: Some(hit.created_ms), ..hit.meta };
+    let m = replay_meta.manifest.expect("the original manifest rides the replay");
+    assert_eq!(m.len(), 2, "a replay shows the original manifest, not an empty one");
+}
+
 // --- E2E over the model-free meta path ---------------------------------------------
 
 async fn drive(
@@ -238,6 +331,7 @@ async fn unchanged_question_replays_verbatim_and_a_touched_file_runs_live() {
             vec![],
             cfg,
             Default::default(),
+            Default::default(),
             vec![],
         )
     };
@@ -246,7 +340,13 @@ async fn unchanged_question_replays_verbatim_and_a_touched_file_runs_live() {
     let (text1, chunks1) = drive(ask(cfg.clone())).await;
     let done1 = chunks1.iter().find(|c| c.done).expect("terminating chunk");
     assert!(!text1.trim().is_empty());
-    assert!(done1.meta.as_ref().unwrap().cached_at.is_none(), "a live answer carries no cachedAt");
+    let meta1 = done1.meta.as_ref().unwrap();
+    assert!(meta1.cached_at.is_none(), "a live answer carries no cachedAt");
+    // The model-free meta path runs no model, so its cost meter is honestly
+    // "not reported" — never a fabricated count (openspec: add-beam-loop §3.1).
+    let cost1 = meta1.cost.as_ref().expect("a live answer carries a cost meter");
+    assert!(!cost1.reported, "no model call ⇒ not reported");
+    assert_eq!(cost1.total_tokens, 0);
 
     // 2nd ask, nothing changed: a verbatim replay — byte-equal text, the same
     // references and stamp, `cachedAt` present, and the whole stream is
@@ -259,6 +359,9 @@ async fn unchanged_question_replays_verbatim_and_a_touched_file_runs_live() {
     assert!(done2.done);
     let meta2 = done2.meta.as_ref().unwrap();
     assert!(meta2.cached_at.is_some(), "replay stamps the original answer time");
+    // The replay carries the original answer's cost meter as history; its 0-new
+    // reading follows from the `cachedAt` stamp above (openspec §3.3).
+    assert!(meta2.cost.is_some(), "the replay carries the stored cost meter");
     let refs = |c: &ChatChunk| -> Vec<String> {
         c.references.iter().flatten().map(|r| r.file_id.clone()).collect()
     };
@@ -304,6 +407,7 @@ async fn bypass_runs_live_and_refreshes_the_entry() {
             vec![],
             cfg.clone(),
             cache,
+            Default::default(),
             vec![],
         )
     };
@@ -322,4 +426,68 @@ async fn bypass_runs_live_and_refreshes_the_entry() {
     let (_t4, c4) = drive(ask(CacheCtl::default())).await;
     let second_stamp = c4.last().unwrap().meta.as_ref().unwrap().cached_at.expect("hit again");
     assert!(second_stamp >= first_stamp, "Re-run refreshed the entry");
+}
+
+// --- Two-phase plan approval, cache bypass (openspec: add-beam-loop §4.3) -----------
+
+/// Phase 1: a `plan_only` op is a PREVIEW, not an answer — it must neither READ
+/// nor WRITE the answer cache; caching keys on the APPROVED ask instead. The
+/// plan preview itself needs a live model (it egresses a plan-generation call)
+/// and so can't run in this no-network harness — but the cache decision is
+/// MODEL-FREE, so it is exercised here over the deterministic meta path: with
+/// `plan_only` set, `answer_pipeline` bypasses the whole key/lookup/insert path.
+#[tokio::test]
+async fn plan_only_neither_reads_nor_writes_the_answer_cache() {
+    let dir = tempfile::tempdir().unwrap();
+    let _guard = common::lock_env(dir.path());
+    std::env::remove_var("LIGHTHOUSE_APP_STATE_DIR");
+    answer_cache::reset_store();
+    write(
+        &dir.path().join("sales.csv"),
+        "date,region,amount\n2026-01-05,NE,100\n2026-01-06,NW,50\n",
+    );
+    write(&dir.path().join("notes.md"), "# planning\nsome prose\n");
+    vault::invalidate_walk_cache();
+    vault::set_included("sales.csv", true);
+    vault::set_included("notes.md", true);
+
+    let ids = vec!["sales.csv".to_string(), "notes.md".to_string()];
+    let cfg = ModelCfg { provider_id: Some("local".into()), model_id: None, api_key: None };
+    let ask = |plan: PlanCtl| {
+        answer_pipeline(
+            "What's new this week?".to_string(),
+            ids.clone(),
+            vec![],
+            vec![],
+            cfg.clone(),
+            CacheCtl::default(),
+            plan,
+            vec![],
+        )
+    };
+    let plan_only = || PlanCtl { plan_only: true, approved_plan: None };
+    let cached_at = |chunks: &[ChatChunk]| -> Option<i64> {
+        chunks.iter().rfind(|c| c.done).unwrap().meta.as_ref().unwrap().cached_at
+    };
+
+    // 1. A plan_only op runs live and writes NOTHING to the cache…
+    let (_t0, c0) = drive(ask(plan_only())).await;
+    assert!(cached_at(&c0).is_none(), "a plan_only op runs live");
+
+    // 2. …so a following ORDINARY ask still runs LIVE — the cache is empty
+    //    because the plan_only op never populated it. Had it cached, this replays.
+    let (_t1, c1) = drive(ask(PlanCtl::default())).await;
+    assert!(cached_at(&c1).is_none(), "the plan_only op left the cache unwritten");
+
+    // 3. The ordinary ask DID key + cache normally; a repeat replays it.
+    let (_t2, c2) = drive(ask(PlanCtl::default())).await;
+    assert!(cached_at(&c2).is_some(), "an ordinary ask caches normally");
+
+    // 4. A plan_only op does NOT read that cached answer — it bypasses the
+    //    lookup and runs live (no replay stamp), leaving the entry intact.
+    let (_t3, c3) = drive(ask(plan_only())).await;
+    assert!(
+        cached_at(&c3).is_none(),
+        "plan_only bypasses the lookup — it never replays a cached answer"
+    );
 }

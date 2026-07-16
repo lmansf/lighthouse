@@ -14,6 +14,16 @@ use crate::config::write_json;
 /// key — no standard hotkey API can register a modifier-only chord).
 pub const DEFAULT_SUMMON_SHORTCUT: &str = "ctrl+super+shift+space";
 
+/// The Beam multi-step analytics loop's default step budget (openspec:
+/// add-beam-loop §2) — the number of sequential verified SQL steps the loop may
+/// run when `beam_max_steps` is unset. Replaces the former hardcoded 3.
+pub const DEFAULT_BEAM_MAX_STEPS: usize = 5;
+
+/// Hard ceiling on the configurable Beam step budget. Keeps the accumulated
+/// per-step context (STEP_RESULT_CAP × N) a small fraction of any remote model
+/// window even at the maximum; a persisted value above this clamps down.
+pub const BEAM_MAX_STEPS_CEILING: usize = 12;
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DesktopSettings {
@@ -93,11 +103,34 @@ pub struct DesktopSettings {
     /// by `set_openai_auth_method`, never by the positional writer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub openai_auth_method: Option<String>,
+    /// Beam loop (openspec: add-beam-loop §2.7): the multi-step analytics loop's
+    /// step budget — how many sequential verified SQL steps a keyed-remote ask
+    /// may run (replaces the former hardcoded 3). None = the default
+    /// (`DEFAULT_BEAM_MAX_STEPS`). Read via `beam_max_steps_effective`, which
+    /// clamps to `[1, BEAM_MAX_STEPS_CEILING]`. PARITY: mirrored as
+    /// `beamMaxSteps` in src/server/settings.ts — the twin round-trips the pref
+    /// for the UI, but the loop itself is Rust-only analytics, so the twin never
+    /// runs it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub beam_max_steps: Option<i64>,
     /// Keys this struct doesn't model (e.g. the shell's hand-persisted
     /// `widgetPos`) must survive a read-modify-write round trip — without
     /// this flatten, any Preferences toggle would silently delete them.
     #[serde(flatten)]
     pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+impl DesktopSettings {
+    /// The effective Beam loop step budget (openspec: add-beam-loop §2.1): the
+    /// configured `beam_max_steps` clamped to `[1, BEAM_MAX_STEPS_CEILING]`, or
+    /// `DEFAULT_BEAM_MAX_STEPS` when unset or out of range. The loop reads this
+    /// in place of the former hardcoded 3.
+    pub fn beam_max_steps_effective(&self) -> usize {
+        match self.beam_max_steps {
+            Some(n) if n >= 1 => (n as usize).min(BEAM_MAX_STEPS_CEILING),
+            _ => DEFAULT_BEAM_MAX_STEPS,
+        }
+    }
 }
 
 fn settings_file() -> Option<PathBuf> {
@@ -133,6 +166,7 @@ pub fn write_desktop_settings(
     briefing_notify: Option<bool>,
     briefing_note_hour: Option<i64>,
     tour_shown: Option<bool>,
+    beam_max_steps: Option<i64>,
 ) -> DesktopSettings {
     let Some(f) = settings_file() else {
         return DesktopSettings::default();
@@ -182,6 +216,13 @@ pub fn write_desktop_settings(
     }
     if tour_shown.is_some() {
         next.tour_shown = tour_shown;
+    }
+    // Store only a sane positive budget (add-beam-loop §2.7); a value outside
+    // [1, BEAM_MAX_STEPS_CEILING] is ignored so the default/clamp stands at read.
+    if let Some(n) = beam_max_steps {
+        if (1..=BEAM_MAX_STEPS_CEILING as i64).contains(&n) {
+            next.beam_max_steps = Some(n);
+        }
     }
     write_json(&f, &next); // best-effort: a read-only location just means unsaved
     next

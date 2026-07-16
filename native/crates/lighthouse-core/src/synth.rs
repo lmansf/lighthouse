@@ -9,7 +9,10 @@ use std::pin::Pin;
 
 use futures::{Stream, StreamExt};
 
-use crate::contracts::{AnalyticsMeta, ChatChunk, ChatProgress, ChunkMeta, ChatTurn, RagReference};
+use crate::contracts::{
+    AnalyticsMeta, ChatChunk, ChatProgress, ChatTurn, ChunkMeta, CostMeta, CtxManifestEntry,
+    PlanPreview, RagReference,
+};
 use crate::llm::{self, Ctx, ModelCfg};
 use crate::table_profile::{is_profileable, table_profile};
 use crate::{sources, vault};
@@ -331,9 +334,29 @@ fn progress(label: String, step: usize, total: usize) -> ChatChunk {
     ChatChunk {
         delta: String::new(),
         references: None,
-        progress: Some(ChatProgress { label, step, total }),
+        progress: Some(ChatProgress { label, step, total, intent: None }),
         analytics: None,
         draft: None,
+        plan: None,
+        meta: None,
+        done: false,
+    }
+}
+
+/// A per-iteration Beam-loop progress chunk (openspec: add-beam-loop §2.4):
+/// like `progress`, but `step`/`total` carry the query index and the configured
+/// budget (not a fixed phase count), and `intent` stamps a short, stable machine
+/// label for the step so §3/§4/§5 can attach per iteration without re-parsing
+/// the human `label`. PARITY: the analytics loop is Rust-only, so the twin never
+/// emits these.
+fn step_progress(label: String, step: usize, total: usize, intent: &str) -> ChatChunk {
+    ChatChunk {
+        delta: String::new(),
+        references: None,
+        progress: Some(ChatProgress { label, step, total, intent: Some(intent.to_string()) }),
+        analytics: None,
+        draft: None,
+        plan: None,
         meta: None,
         done: false,
     }
@@ -346,6 +369,7 @@ fn delta(d: String) -> ChatChunk {
         progress: None,
         analytics: None,
         draft: None,
+        plan: None,
         meta: None,
         done: false,
     }
@@ -361,6 +385,7 @@ fn draft_chunk(d: String) -> ChatChunk {
         progress: None,
         analytics: None,
         draft: Some(true),
+        plan: None,
         meta: None,
         done: false,
     }
@@ -370,9 +395,20 @@ fn draft_chunk(d: String) -> ChatChunk {
 /// (privacy-legibility). `excerpt_count` is the number of context blocks the
 /// branch that ran actually handed to the model; `source_file_count` is derived
 /// here from the references so it can never drift from what's cited (and from
-/// the audit record's `fileIds`, which are those same refs' ids). KEEP IN SYNC
-/// with src/server/synth.ts::finalChunk.
-fn final_chunk(references: Vec<RagReference>, excerpt_count: usize, origin: &str) -> ChatChunk {
+/// the audit record's `fileIds`, which are those same refs' ids). `cost` is the
+/// ask's cost meter (openspec: add-beam-loop §3.1), computed from the per-ask
+/// usage sink. `manifest` is the context manifest (openspec: add-beam-loop §5) —
+/// the metadata of every context block handed to the model in the branch that
+/// ran, built from the already-gated shareable set; empty ⇒ omitted (a
+/// model-free or degradation path assembled nothing). KEEP IN SYNC with
+/// src/server/synth.ts::finalChunk.
+fn final_chunk(
+    references: Vec<RagReference>,
+    excerpt_count: usize,
+    origin: &str,
+    cost: CostMeta,
+    manifest: Vec<CtxManifestEntry>,
+) -> ChatChunk {
     let source_file_count = references.len();
     ChatChunk {
         delta: String::new(),
@@ -380,6 +416,7 @@ fn final_chunk(references: Vec<RagReference>, excerpt_count: usize, origin: &str
         progress: None,
         analytics: None,
         draft: None,
+        plan: None,
         meta: Some(ChunkMeta {
             origin: origin.to_string(),
             excerpt_count,
@@ -387,9 +424,203 @@ fn final_chunk(references: Vec<RagReference>, excerpt_count: usize, origin: &str
             // Live answers never carry the replay stamp; the answer-cache
             // wrapper adds `cached_at` only when it replays a stored entry.
             cached_at: None,
+            cost: Some(cost),
+            manifest: (!manifest.is_empty()).then_some(manifest),
         }),
         done: true,
     }
+}
+
+/// The terminal PLAN chunk of a Phase-1 `plan_only` op (openspec: add-beam-loop
+/// §4.1): the verbatim proposed step-1 SQL and the tables it would read, with
+/// NOTHING executed. It rides the final-chunk seam (`done: true`) so the
+/// transport closes the stream after it, carries the plan's `references` (the
+/// files whose schemas the planning call saw) and an honest `cost` meter — the
+/// plan-generation model call IS egress, but no SQL ran, so nothing touched the
+/// vault and no narration egressed. PARITY: analytics is Rust-only, so the twin
+/// never emits a plan.
+fn plan_chunk(
+    preview: PlanPreview,
+    references: Vec<RagReference>,
+    excerpt_count: usize,
+    origin: &str,
+    cost: CostMeta,
+    manifest: Vec<CtxManifestEntry>,
+) -> ChatChunk {
+    let source_file_count = references.len();
+    ChatChunk {
+        delta: String::new(),
+        references: Some(references),
+        progress: None,
+        analytics: None,
+        draft: None,
+        plan: Some(preview),
+        meta: Some(ChunkMeta {
+            origin: origin.to_string(),
+            excerpt_count,
+            source_file_count,
+            cached_at: None,
+            cost: Some(cost),
+            // The planning context the previewed SQL was written from (schema /
+            // view cards + join hints) — metadata only, the same gated set.
+            manifest: (!manifest.is_empty()).then_some(manifest),
+        }),
+        done: true,
+    }
+}
+
+/// The ask's cost meter (openspec: add-beam-loop §3.1) built from the per-ask
+/// usage sink's summed total. `total` is `sink.total()`: `Some` when a provider
+/// reported usage across the ask's model calls, `None` when none did (§1.4).
+/// Tokens are provider-reported measured facts; the dollar figure is a LABELED
+/// ESTIMATE from the shipped price table (`$0.00` for local/loopback, absent for
+/// an unknown model). An unreported ask is `reported: false` — the app shows
+/// "not reported", NEVER a `chars/4` guess (constitution §14). KEEP IN SYNC with
+/// the cost shape in src/server/synth.ts.
+fn cost_meta(cfg: &ModelCfg, total: Option<llm::Usage>) -> CostMeta {
+    match total {
+        Some(u) => CostMeta {
+            input_tokens: u.input,
+            output_tokens: u.output,
+            total_tokens: u.total(),
+            reported: true,
+            cost_estimate_usd: llm::cost_estimate_usd(cfg, u),
+        },
+        None => CostMeta {
+            input_tokens: 0,
+            output_tokens: 0,
+            total_tokens: 0,
+            reported: false,
+            cost_estimate_usd: None,
+        },
+    }
+}
+
+// --- Context manifest (openspec: add-beam-loop §5) --------------------------------
+//
+// A per-context-block manifest of what the model was handed — METADATA ONLY,
+// never `Ctx.text`. It rides `ChunkMeta` (like the cost meter), so the answer
+// cache persists it and a replay re-emits the ORIGINAL via `..hit.meta`. Every
+// builder below runs AFTER the shareable-subset gate (the ctxs are assembled
+// from candidate ids already filtered through `vault::shareable_subset`), so a
+// cloud ask's manifest lists only the shareable subset; what was withheld is
+// disclosed by `local_only_skip_note`. The `kind` strings are byte-exact and
+// mirrored in the TS twin (src/server/synth.ts).
+
+/// One manifest entry from a context block's METADATA — its `name`, `kind`,
+/// `chars` (the text LENGTH, a count — never the bytes), source `file_id`, and
+/// `score`. The text is deliberately absent: it stays behind the device-only
+/// file inspector (inspect.rs), never in the persisted `ChunkMeta`.
+fn manifest_entry(
+    kind: &str,
+    name: &str,
+    text_len: usize,
+    score: f64,
+    file_id: Option<String>,
+) -> CtxManifestEntry {
+    CtxManifestEntry {
+        name: name.to_string(),
+        kind: kind.to_string(),
+        chars: text_len,
+        file_id,
+        // The manifest is the gated shareable set, so every entry here is
+        // shareable; withholding is disclosed by the skip note, not per entry.
+        local_only: None,
+        score,
+    }
+}
+
+/// Manifest for an analytics NARRATION context (openspec: add-beam-loop §5.1),
+/// derived from the SAME assembled `ctxs` the model was handed (so every name
+/// and length is byte-exact to the prompt) plus its structural split: the
+/// leading `n_results` blocks are engine-computed `query-result`s, the next
+/// `regs.len()` are per-table `schema-card`s (each attributed to its source
+/// file), and any trailing block — present only on the single-query path — is
+/// the `chart-options` card.
+fn analytics_manifest(
+    ctxs: &[Ctx],
+    n_results: usize,
+    regs: &[crate::analytics::TableReg],
+) -> Vec<CtxManifestEntry> {
+    let mut m = Vec::with_capacity(ctxs.len());
+    for c in ctxs.iter().take(n_results) {
+        m.push(manifest_entry("query-result", &c.name, c.text.len(), c.score, None));
+    }
+    for (c, r) in ctxs.iter().skip(n_results).zip(regs.iter()) {
+        m.push(manifest_entry(
+            "schema-card",
+            &c.name,
+            c.text.len(),
+            c.score,
+            Some(r.file_id.clone()),
+        ));
+    }
+    for c in ctxs.iter().skip(n_results + regs.len()) {
+        m.push(manifest_entry("chart-options", &c.name, c.text.len(), c.score, None));
+    }
+    m
+}
+
+/// Manifest for the PLANNING context (openspec: add-beam-loop §5.1) — the
+/// context the previewed/executed SQL was written from, which is exactly
+/// `sql_ctxs`: the first `regs.len()` blocks are file `schema-card`s (attributed
+/// to their file), the next `n_views` are saved-view `schema-card`s (virtual, no
+/// file), and any trailing block is the `join-hints` card.
+fn planning_manifest(
+    sql_ctxs: &[Ctx],
+    regs: &[crate::analytics::TableReg],
+    n_views: usize,
+) -> Vec<CtxManifestEntry> {
+    let mut m = Vec::with_capacity(sql_ctxs.len());
+    for (c, r) in sql_ctxs.iter().take(regs.len()).zip(regs.iter()) {
+        m.push(manifest_entry(
+            "schema-card",
+            &c.name,
+            c.text.len(),
+            c.score,
+            Some(r.file_id.clone()),
+        ));
+    }
+    for c in sql_ctxs.iter().skip(regs.len()).take(n_views) {
+        m.push(manifest_entry("schema-card", &c.name, c.text.len(), c.score, None));
+    }
+    for c in sql_ctxs.iter().skip(regs.len() + n_views) {
+        m.push(manifest_entry("join-hints", &c.name, c.text.len(), c.score, None));
+    }
+    m
+}
+
+/// Manifest for a RETRIEVAL context (openspec: add-beam-loop §5.1/§5.3): one
+/// entry per retrieved chunk, `kind` = `conversation-note` for a past-chat note
+/// else `retrieved-chunk`, attributed to its source `file_id` via the per-file
+/// `references` (matched by display name — references are one-per-file). The
+/// entry `name` is the prompt label the model saw (`ctx_label`). Metadata only;
+/// the chunk text never rides along.
+fn retrieval_manifest(
+    contexts: &[vault::Context],
+    references: &[RagReference],
+) -> Vec<CtxManifestEntry> {
+    let file_of: std::collections::HashMap<&str, &str> = references
+        .iter()
+        .map(|r| (r.name.as_str(), r.file_id.as_str()))
+        .collect();
+    contexts
+        .iter()
+        .map(|c| {
+            let kind = if c.kind == crate::contracts::SourceKind::Conversation {
+                "conversation-note"
+            } else {
+                "retrieved-chunk"
+            };
+            manifest_entry(
+                kind,
+                &ctx_label(c),
+                c.text.len(),
+                c.score,
+                file_of.get(c.name.as_str()).map(|s| s.to_string()),
+            )
+        })
+        .collect()
 }
 
 async fn collect(mut s: llm::AnswerStream) -> String {
@@ -476,10 +707,30 @@ pub fn answer_pipeline(
     history: Vec<ChatTurn>,
     cfg: ModelCfg,
     cache: crate::answer_cache::CacheCtl,
+    plan: crate::beam::PlanCtl,
     preferred_conversation_ids: Vec<String>,
 ) -> Pin<Box<dyn Stream<Item = ChatChunk> + Send>> {
     Box::pin(async_stream::stream! {
         let is_cloud = is_cloud_provider(&cfg);
+        // Phase 1 (openspec: add-beam-loop §4.3): a `plan_only` op is a PREVIEW,
+        // not an answer — it must neither read nor write the answer cache. Run
+        // live directly (no key, no lookup, no insert, no posture side effect) so
+        // the cache is left exactly as it was; caching keys on the APPROVED ask.
+        if crate::beam::plan_only_bypasses_cache(plan.plan_only) {
+            let mut inner = live_pipeline(
+                question,
+                included_file_ids,
+                attachment_file_ids,
+                history,
+                cfg,
+                plan,
+                preferred_conversation_ids,
+            );
+            while let Some(c) = inner.next().await {
+                yield c;
+            }
+            return;
+        }
         // Key at ask entry (blocking: one cached walk + a stat per candidate).
         // A panicked helper degrades to "no cache this ask", never a failure.
         let key: Option<String> = {
@@ -521,6 +772,7 @@ pub fn answer_pipeline(
                     progress: None,
                     analytics: hit.analytics,
                     draft: None,
+                    plan: None,
                     meta: Some(ChunkMeta { cached_at: Some(hit.created_ms), ..hit.meta }),
                     done: true,
                 };
@@ -537,6 +789,7 @@ pub fn answer_pipeline(
             attachment_file_ids,
             history,
             cfg,
+            plan,
             preferred_conversation_ids,
         );
         let mut text = String::new();
@@ -591,6 +844,11 @@ fn live_pipeline(
     attachment_file_ids: Vec<String>,
     history: Vec<ChatTurn>,
     cfg: ModelCfg,
+    // Two-phase plan approval (openspec: add-beam-loop §4). `plan_only` previews
+    // step-1 SQL and stops; `approved_plan` runs the approved SQL as step 1
+    // without re-planning. Both apply only in the remote-keyed analytics branch;
+    // everywhere else they are inert (an ordinary ask).
+    plan: crate::beam::PlanCtl,
     preferred_conversation_ids: Vec<String>,
 ) -> Pin<Box<dyn Stream<Item = ChatChunk> + Send>> {
     Box::pin(async_stream::stream! {
@@ -598,6 +856,12 @@ fn live_pipeline(
         // active provider (agrees with the audit record's `provider`). Every
         // branch's final chunk carries it; it is never derived from model text.
         let origin = origin_of(&cfg);
+        // ONE per-ask usage sink (openspec: add-beam-loop §3.1): threaded into
+        // EVERY `stream_answer` call in EVERY branch below, so a single-shot,
+        // doc-focus, map-reduce, recipe-narration, or multi-step answer all sum
+        // their provider-reported usage here. `cost_meta(&cfg, sink.total())`
+        // reads it for the final chunk's cost meter (None ⇒ "not reported").
+        let sink = llm::UsageSink::new();
         // Local-only enforcement is armed only for a CLOUD provider. On the
         // device path this is false everywhere below, so the shareable gate is a
         // no-op and on-device answers are byte-identical to today.
@@ -696,7 +960,7 @@ fn live_pipeline(
                     recipe.needs.describe(),
                     cue.table,
                 ));
-                yield final_chunk(Vec::new(), 0, &origin);
+                yield final_chunk(Vec::new(), 0, &origin, cost_meta(&cfg, sink.total()), Vec::new());
                 return;
             };
 
@@ -737,7 +1001,7 @@ fn live_pipeline(
                      returned nothing.\n",
                     recipe.name, cue.table,
                 ));
-                yield final_chunk(Vec::new(), 0, &origin);
+                yield final_chunk(Vec::new(), 0, &origin, cost_meta(&cfg, sink.total()), Vec::new());
                 return;
             }
 
@@ -746,6 +1010,9 @@ fn live_pipeline(
             // narration_prompt. Extractive/no-model: nothing here — the
             // deterministic tables below ARE the answer. The footer + final chunk
             // NEVER depend on any narration output.
+            // The manifest (§5) describes only what a MODEL was handed; the
+            // extractive path narrates nothing, so it stays empty.
+            let mut manifest: Vec<CtxManifestEntry> = Vec::new();
             if has_real_model(&cfg) {
                 yield progress("Summarizing results…".to_string(), 4, 4);
                 let mut ctxs: Vec<Ctx> = steps
@@ -762,12 +1029,16 @@ fn live_pipeline(
                     text: r.card.clone(),
                     score: 0.0,
                 }));
+                // Metadata of the narration context (result cards + schema cards),
+                // built before `ctxs` is handed to the model below.
+                manifest = analytics_manifest(&ctxs, steps.len(), &regs);
                 let mut scrub = crate::analytics::DirectiveScrubber::new();
                 let mut answer = llm::stream_answer(
                     recipe.narration_prompt.to_string(),
                     ctxs,
                     cfg.clone(),
                     history.clone(),
+                    Some(sink.clone()),
                 );
                 while let Some(d) = answer.next().await {
                     let safe = scrub.push(&d);
@@ -827,7 +1098,8 @@ fn live_pipeline(
             }
             // Pin/board/save act on the representative query.
             let (refs, meta_ids) = analytics_refs(&regs);
-            let mut done = final_chunk(refs, steps.len(), &origin);
+            let mut done =
+                final_chunk(refs, steps.len(), &origin, cost_meta(&cfg, sink.total()), manifest);
             done.analytics = Some(AnalyticsMeta {
                 sql: representative_sql,
                 file_ids: meta_ids,
@@ -936,8 +1208,11 @@ fn live_pipeline(
                 if let Some(ans) = rendered {
                     yield delta(ans.markdown);
                     // Model-free deterministic answer: zero excerpts handed to a
-                    // model, files behind it are the cited references.
-                    yield final_chunk(ans.references, 0, &origin);
+                    // model, files behind it are the cited references, and the
+                    // cost meter is "not reported" (no model call, so no tokens).
+                    // No context was assembled for a model, so the manifest is
+                    // empty (§5).
+                    yield final_chunk(ans.references, 0, &origin, cost_meta(&cfg, sink.total()), Vec::new());
                     return;
                 }
             }
@@ -1019,6 +1294,90 @@ fn live_pipeline(
                     //     retry; every number stays engine-computed.
                     let remote_keyed =
                         cfg.provider_id.as_deref().is_some_and(|id| id != "local");
+                    // The Beam loop's configured step budget (openspec §2.3),
+                    // hoisted so BOTH the plan-approval preview (§4) and the loop
+                    // read the same value.
+                    let max_steps =
+                        crate::settings::read_desktop_settings().beam_max_steps_effective();
+
+                    // === Two-phase plan approval — Phase 1 (openspec §4.1) ===
+                    // A `plan_only` ask previews the step-1 SQL and STOPS: it
+                    // executes no query, so nothing runs against the vault and no
+                    // execution/narration egress happens. The plan-generation model
+                    // call is the sole cost of previewing (surfaced honestly on the
+                    // plan chunk's cost meter). Remote-keyed analytics only — local
+                    // keeps its single-query path and never previews. The planner
+                    // MATCHES the path that would run (the multi-step step-1 prompt
+                    // for a multi_step_cue ask, else the single-query prompt), so the
+                    // previewed SQL is faithful to what execution would plan; the
+                    // tables are the registered names (metadata only — §5 is the
+                    // full manifest).
+                    if remote_keyed && plan.plan_only {
+                        let multi = crate::analytics::multi_step_cue(&question);
+                        yield step_progress(
+                            "Planning the query…".to_string(),
+                            1,
+                            max_steps,
+                            "planning",
+                        );
+                        let planner = if multi {
+                            crate::analytics::step_question(&question, &[], max_steps)
+                        } else {
+                            crate::analytics::sql_question(
+                                &question,
+                                crate::analytics::last_query_used(&history).as_deref(),
+                            )
+                        };
+                        let raw = collect(llm::stream_answer(
+                            planner,
+                            sql_ctxs.clone(),
+                            cfg.clone(),
+                            history.clone(),
+                            Some(sink.clone()),
+                        ))
+                        .await;
+                        let proposed = if multi {
+                            match crate::analytics::parse_step_reply(&strip_markers(&raw)) {
+                                crate::analytics::StepReply::Sql(sql) => Some(sql),
+                                crate::analytics::StepReply::Done => None,
+                            }
+                        } else {
+                            crate::analytics::extract_sql(&strip_markers(&raw))
+                        };
+                        // The plan's honest cost is the previewing call's tokens
+                        // (None ⇒ "not reported"); no SQL ran, so no vault or
+                        // narration egress. `refs` are the files whose schema cards
+                        // the planner saw.
+                        let (refs, _meta_ids) = analytics_refs(&regs);
+                        let cost = cost_meta(&cfg, sink.total());
+                        // Manifest (§5): the planning context the previewed SQL was
+                        // written from — schema/view cards + join hints — metadata
+                        // only, already the gated shareable set.
+                        let manifest = planning_manifest(&sql_ctxs, &regs, view_regs.len());
+                        match proposed {
+                            Some(sql) => {
+                                let tables: Vec<String> = regs
+                                    .iter()
+                                    .map(|r| r.file_name.clone())
+                                    .chain(view_regs.iter().map(|v| v.name.clone()))
+                                    .collect();
+                                yield plan_chunk(
+                                    PlanPreview { sql, tables },
+                                    refs,
+                                    sql_ctxs.len(),
+                                    &origin,
+                                    cost,
+                                    manifest,
+                                );
+                            }
+                            // The model proposed no query (an immediate DONE / no
+                            // SQL): nothing to preview and — plan_only — nothing to
+                            // execute. A bare terminal chunk closes the stream.
+                            None => yield final_chunk(refs, sql_ctxs.len(), &origin, cost, manifest),
+                        }
+                        return;
+                    }
+
                     if remote_keyed && crate::analytics::multi_step_cue(&question) {
                         let mut steps: Vec<crate::analytics::StepRecord> = Vec::new();
                         let mut last_chart: Option<String> = None;
@@ -1028,23 +1387,83 @@ fn live_pipeline(
                         // here (cheap) rather than reparse a row count out of
                         // the markdown (unreliable). None if no step succeeds.
                         let mut last_rows: Option<crate::ledger::RowFacts> = None;
-                        'steps: while steps.len() < 3 {
+                        // Per-ask token accounting (openspec: add-beam-loop §1):
+                        // the ask-level `sink` (opened at the top of the pipeline)
+                        // is shared across this ask's plan calls, corrective
+                        // retries, and the final narration and sums their
+                        // provider-reported usage (§1.3). §2 reads it through the
+                        // loop's budget (below); §3 reads it for the cost meter on
+                        // the final chunk.
+                        // The budgeted Beam loop (openspec: add-beam-loop §2):
+                        // the former bare `steps.len() < 3` count is replaced by
+                        // an explicit Budget — max_steps (config `beam_max_steps`,
+                        // default 5), a generous whole-loop wall-clock deadline,
+                        // and the §1 token ceiling — plus a no-progress guard. The
+                        // single combined plan+decide model call per iteration
+                        // (§2.2) is unchanged, and every number is still computed
+                        // by the guarded `run_query`. See crate::beam. (max_steps
+                        // is hoisted above the plan-approval preview so both read
+                        // the same budget.)
+                        // §2 wires the token ceiling as unset (None ⇒ never
+                        // binding); §3 supplies a real ceiling from the pricing
+                        // constants. With None — and with usage possibly
+                        // unreported (§1.4) — the loop still bounds on
+                        // max_steps/deadline, never unbounded.
+                        let mut beam = crate::beam::BeamLoop::new(crate::beam::Budget::new(
+                            max_steps,
+                            std::time::Instant::now() + crate::beam::DEADLINE,
+                            None,
+                        ));
+                        // Phase 2 (openspec: add-beam-loop §4.2): an approved plan
+                        // runs as step 1 with NO planning call — the plan the user
+                        // saw is the plan that runs (trust, and no double plan
+                        // cost). `step_one_plan` yields the seed SQL, taken once on
+                        // the first iteration; the guard is NOT bypassed — the
+                        // `run_query` below still runs `guard_sql` on it.
+                        let mut step_one =
+                            crate::beam::step_one_plan(plan.approved_plan.as_deref());
+                        'steps: while beam
+                            .stop_before_step(steps.len(), sink.total())
+                            .is_none()
+                        {
                             let n = steps.len() + 1;
-                            yield progress(format!("Planning query {n} (of up to 3)…"), n, 4);
-                            let raw = collect(llm::stream_answer(
-                                crate::analytics::step_question(&question, &steps),
-                                sql_ctxs.clone(),
-                                cfg.clone(),
-                                history.clone(),
-                            ))
-                            .await;
-                            let mut attempt =
+                            let mut attempt = if let Some(sql) = step_one.sql.take() {
+                                // Approved step-1 SQL: skip planning, execute the
+                                // exact plan the user approved (guarded below).
+                                sql
+                            } else {
+                                yield step_progress(
+                                    format!("Planning query {n} (of up to {max_steps})…"),
+                                    n,
+                                    max_steps,
+                                    "planning",
+                                );
+                                let raw = collect(llm::stream_answer(
+                                    crate::analytics::step_question(&question, &steps, max_steps),
+                                    sql_ctxs.clone(),
+                                    cfg.clone(),
+                                    history.clone(),
+                                    Some(sink.clone()),
+                                ))
+                                .await;
                                 match crate::analytics::parse_step_reply(&strip_markers(&raw)) {
                                     crate::analytics::StepReply::Done => break 'steps,
                                     crate::analytics::StepReply::Sql(sql) => sql,
-                                };
+                                }
+                            };
+                            // No-progress guard rule (a): a planned SQL identical
+                            // to a prior step re-computes a known result — stop
+                            // instead of spending budget on it.
+                            if beam.is_repeat_sql(&attempt) {
+                                break 'steps;
+                            }
                             for round in 0..2 {
-                                yield progress(format!("Running query {n}…"), n, 4);
+                                yield step_progress(
+                                    format!("Running query {n}…"),
+                                    n,
+                                    max_steps,
+                                    "running",
+                                );
                                 match crate::analytics::run_query(&ctx, &attempt).await {
                                     Ok(res) => {
                                         last_chart = res.chart.clone();
@@ -1053,6 +1472,7 @@ fn live_pipeline(
                                             truncated: res.truncated,
                                             total: res.total,
                                         });
+                                        beam.record_step(attempt.clone());
                                         steps.push(crate::analytics::StepRecord {
                                             sql: attempt.clone(),
                                             result_markdown: res.markdown,
@@ -1060,30 +1480,49 @@ fn live_pipeline(
                                         continue 'steps;
                                     }
                                     Err(err) if round == 0 => {
-                                        // One corrective retry with the
-                                        // engine's error — the same pattern
-                                        // as the single-query path.
+                                        // First reply's SQL failed to advance
+                                        // (no-progress guard rule b) — one
+                                        // corrective retry with the engine's
+                                        // error, the same pattern as the
+                                        // single-query path.
+                                        beam.record_non_advance();
                                         let retry_q = format!(
                                             "{}\n\nYour previous SQL failed.\nPrevious SQL: {attempt}\nError: {err}\nReply with NEXT_SQL: and a corrected single SELECT statement.",
-                                            crate::analytics::step_question(&question, &steps)
+                                            crate::analytics::step_question(&question, &steps, max_steps)
                                         );
                                         let raw2 = collect(llm::stream_answer(
                                             retry_q,
                                             sql_ctxs.clone(),
                                             cfg.clone(),
                                             history.clone(),
+                                            Some(sink.clone()),
                                         ))
                                         .await;
                                         match crate::analytics::parse_step_reply(&strip_markers(
                                             &raw2,
                                         )) {
-                                            crate::analytics::StepReply::Sql(sql) => attempt = sql,
+                                            crate::analytics::StepReply::Sql(sql) => {
+                                                // A retry that just replays a
+                                                // prior step's SQL is no
+                                                // progress either (rule a).
+                                                if beam.is_repeat_sql(&sql) {
+                                                    break 'steps;
+                                                }
+                                                attempt = sql;
+                                            }
                                             crate::analytics::StepReply::Done => break 'steps,
                                         }
                                     }
-                                    // Second failure ends the loop; whatever
-                                    // was collected still narrates below.
-                                    Err(_) => break 'steps,
+                                    // The corrective retry's SQL also failed:
+                                    // two consecutive replies failed to advance
+                                    // (rule b). record_non_advance trips the
+                                    // no-progress guard, so the while-gate ends
+                                    // the loop with no further model call —
+                                    // whatever succeeded still narrates below
+                                    // (preserves today's stop-on-double-failure).
+                                    Err(_) => {
+                                        beam.record_non_advance();
+                                    }
                                 }
                             }
                         }
@@ -1110,6 +1549,11 @@ fn live_pipeline(
                                 score: 0.0,
                             }));
                             let excerpt_count = ctxs.len();
+                            // Manifest (§5): the per-step query results then the
+                            // schema cards — metadata of exactly what the narration
+                            // saw (the already-gated set), built before `ctxs` moves
+                            // into the model call below.
+                            let manifest = analytics_manifest(&ctxs, steps.len(), &regs);
                             // No chart card rides multi-step (its chart is the
                             // last step's heuristic), but the fence scrub still
                             // applies: a stray chart request must never reach
@@ -1122,6 +1566,7 @@ fn live_pipeline(
                                 ctxs,
                                 cfg.clone(),
                                 history.clone(),
+                                Some(sink.clone()),
                             );
                             while let Some(d) = answer.next().await {
                                 let safe = scrub.push(&d);
@@ -1199,9 +1644,16 @@ fn live_pipeline(
                             if let Some(chart) = &last_chart {
                                 yield delta(format!("\n```lighthouse-chart\n{chart}\n```\n"));
                             }
+                            // Cost meter (openspec: add-beam-loop §3.1): the ask's
+                            // summed provider-reported usage — Some(total) when a
+                            // provider reported, or None when none did (§1.4,
+                            // distinct from a real 0) — becomes the final chunk's
+                            // honest token/dollar meter.
+                            let cost = cost_meta(&cfg, sink.total());
                             // Chips act on the LAST query; the footer shows all.
                             let (refs, meta_ids) = analytics_refs(&regs);
-                            let mut done = final_chunk(refs, excerpt_count, &origin);
+                            let mut done =
+                                final_chunk(refs, excerpt_count, &origin, cost, manifest);
                             done.analytics = Some(AnalyticsMeta {
                                 sql: steps.last().map(|s| s.sql.clone()).unwrap_or_default(),
                                 file_ids: meta_ids,
@@ -1211,18 +1663,28 @@ fn live_pipeline(
                         }
                     }
 
-                    yield progress("Writing a query…".to_string(), 2, 4);
                     // A refining follow-up should adapt the conversation's
                     // previous query, not re-derive it from scratch.
                     let prior_sql = crate::analytics::last_query_used(&history);
-                    let raw = collect(llm::stream_answer(
-                        crate::analytics::sql_question(&question, prior_sql.as_deref()),
-                        sql_ctxs.clone(),
-                        cfg.clone(),
-                        history.clone(),
-                    ))
-                    .await;
-                    let mut attempt = crate::analytics::extract_sql(&strip_markers(&raw));
+                    // Phase 2 (openspec: add-beam-loop §4.2) also seeds the
+                    // single-query path: an approved plan runs as the query with no
+                    // planning call — the guard still runs in `run_query` below.
+                    let mut attempt =
+                        match crate::beam::step_one_plan(plan.approved_plan.as_deref()).sql {
+                            Some(sql) => Some(sql),
+                            None => {
+                                yield progress("Writing a query…".to_string(), 2, 4);
+                                let raw = collect(llm::stream_answer(
+                                    crate::analytics::sql_question(&question, prior_sql.as_deref()),
+                                    sql_ctxs.clone(),
+                                    cfg.clone(),
+                                    history.clone(),
+                                    Some(sink.clone()),
+                                ))
+                                .await;
+                                crate::analytics::extract_sql(&strip_markers(&raw))
+                            }
+                        };
                     let mut outcome: Option<(String, crate::analytics::QueryResult)> = None;
                     for round in 0..2 {
                         let Some(sql) = attempt.clone() else { break };
@@ -1243,6 +1705,7 @@ fn live_pipeline(
                                     sql_ctxs.clone(),
                                     cfg.clone(),
                                     history.clone(),
+                                    Some(sink.clone()),
                                 ))
                                 .await;
                                 attempt = crate::analytics::extract_sql(&strip_markers(&raw2));
@@ -1285,13 +1748,23 @@ fn live_pipeline(
                             }
                         }
                         let excerpt_count = ctxs.len();
+                        // Manifest (§5): one query-result, the schema cards, and
+                        // (when present) the trailing chart-options card — metadata
+                        // of exactly what the narration saw, built before `ctxs`
+                        // moves into the model call below.
+                        let manifest = analytics_manifest(&ctxs, 1, &regs);
                         // The narration streams through the directive scrubber:
                         // prose forwards as it arrives, chart-request fence
                         // bytes never do (the UI strip is a second net, not
                         // the mechanism).
                         let mut scrub = crate::analytics::DirectiveScrubber::new();
-                        let mut answer =
-                            llm::stream_answer(question.clone(), ctxs, cfg.clone(), history.clone());
+                        let mut answer = llm::stream_answer(
+                            question.clone(),
+                            ctxs,
+                            cfg.clone(),
+                            history.clone(),
+                            Some(sink.clone()),
+                        );
                         while let Some(d) = answer.next().await {
                             let safe = scrub.push(&d);
                             if !safe.is_empty() {
@@ -1381,7 +1854,13 @@ fn live_pipeline(
                         }
                         // Citations + structured provenance (chips/save/pins).
                         let (refs, meta_ids) = analytics_refs(&regs);
-                        let mut done = final_chunk(refs, excerpt_count, &origin);
+                        let mut done = final_chunk(
+                            refs,
+                            excerpt_count,
+                            &origin,
+                            cost_meta(&cfg, sink.total()),
+                            manifest,
+                        );
                         done.analytics = Some(AnalyticsMeta { sql, file_ids: meta_ids });
                         yield done;
                         return;
@@ -1518,6 +1997,7 @@ fn live_pipeline(
                     ctxs,
                     cfg.clone(),
                     Vec::new(),
+                    Some(sink.clone()),
                 ))
                 .await;
                 let extract = take_chars(strip_markers(&raw).trim(), MAP_EXTRACT_CHARS);
@@ -1565,8 +2045,22 @@ fn live_pipeline(
                     .map(|(r, t)| Ctx { name: r.name.clone(), text: t.clone(), score: r.score })
                     .collect();
                 let excerpt_count = reduce_ctxs.len();
-                let mut answer =
-                    llm::stream_answer(question.clone(), reduce_ctxs, cfg.clone(), history.clone());
+                // Manifest (§5): one retrieved-chunk per synthesized document,
+                // each attributed to its source file via the flowing reference —
+                // metadata only, built before `extracts` is consumed below.
+                let manifest: Vec<CtxManifestEntry> = extracts
+                    .iter()
+                    .map(|(r, t)| {
+                        manifest_entry("retrieved-chunk", &r.name, t.len(), r.score, Some(r.file_id.clone()))
+                    })
+                    .collect();
+                let mut answer = llm::stream_answer(
+                    question.clone(),
+                    reduce_ctxs,
+                    cfg.clone(),
+                    history.clone(),
+                    Some(sink.clone()),
+                );
                 while let Some(d) = answer.next().await {
                     yield delta(d);
                 }
@@ -1574,6 +2068,8 @@ fn live_pipeline(
                     extracts.into_iter().map(|(r, _)| r).collect(),
                     excerpt_count,
                     &origin,
+                    cost_meta(&cfg, sink.total()),
+                    manifest,
                 );
                 return;
             }
@@ -1659,12 +2155,38 @@ fn live_pipeline(
                         })
                         .collect();
                     let excerpt_count = ctxs.len();
-                    let mut answer =
-                        llm::stream_answer(question.clone(), ctxs, cfg.clone(), history.clone());
+                    // Manifest (§5): each whole-document part is a retrieved chunk
+                    // attributed to this one file — metadata only, built before
+                    // `ctxs`/`reference` move into the calls below.
+                    let manifest: Vec<CtxManifestEntry> = ctxs
+                        .iter()
+                        .map(|c| {
+                            manifest_entry(
+                                "retrieved-chunk",
+                                &c.name,
+                                c.text.len(),
+                                c.score,
+                                Some(reference.file_id.clone()),
+                            )
+                        })
+                        .collect();
+                    let mut answer = llm::stream_answer(
+                        question.clone(),
+                        ctxs,
+                        cfg.clone(),
+                        history.clone(),
+                        Some(sink.clone()),
+                    );
                     while let Some(d) = answer.next().await {
                         yield delta(d);
                     }
-                    yield final_chunk(vec![reference], excerpt_count, &origin);
+                    yield final_chunk(
+                        vec![reference],
+                        excerpt_count,
+                        &origin,
+                        cost_meta(&cfg, sink.total()),
+                        manifest,
+                    );
                     return;
                 }
                 // Too big for one prompt: sweep EVERY chunk in ordered
@@ -1696,6 +2218,7 @@ fn live_pipeline(
                         ctxs,
                         cfg.clone(),
                         Vec::new(),
+                        Some(sink.clone()),
                     ))
                     .await;
                     let extract = take_chars(strip_markers(&raw).trim(), MAP_EXTRACT_CHARS);
@@ -1719,16 +2242,38 @@ fn live_pipeline(
                         })
                         .collect();
                     let excerpt_count = reduce_ctxs.len();
+                    // Manifest (§5): each synthesized segment is a retrieved chunk
+                    // attributed to this one file — metadata only, built before
+                    // `reduce_ctxs`/`reference` move into the calls below.
+                    let manifest: Vec<CtxManifestEntry> = reduce_ctxs
+                        .iter()
+                        .map(|c| {
+                            manifest_entry(
+                                "retrieved-chunk",
+                                &c.name,
+                                c.text.len(),
+                                c.score,
+                                Some(reference.file_id.clone()),
+                            )
+                        })
+                        .collect();
                     let mut answer = llm::stream_answer(
                         question.clone(),
                         reduce_ctxs,
                         cfg.clone(),
                         history.clone(),
+                        Some(sink.clone()),
                     );
                     while let Some(d) = answer.next().await {
                         yield delta(d);
                     }
-                    yield final_chunk(vec![reference], excerpt_count, &origin);
+                    yield final_chunk(
+                        vec![reference],
+                        excerpt_count,
+                        &origin,
+                        cost_meta(&cfg, sink.total()),
+                        manifest,
+                    );
                     return;
                 }
                 // Every segment came back empty/failed — fall through to the
@@ -1742,6 +2287,10 @@ fn live_pipeline(
             .iter()
             .map(|c| Ctx { name: ctx_label(c), text: c.text.clone(), score: c.score })
             .collect();
+        // Manifest (§5): the retrieved chunks (attributed to their files via the
+        // flowing references), grown alongside `contexts` with a schema-card entry
+        // per appended table profile below. Metadata only.
+        let mut manifest = retrieval_manifest(&initial.contexts, &initial.references);
         let mut profiled = 0;
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         for r in &initial.references {
@@ -1755,21 +2304,34 @@ fn live_pipeline(
             if let Some(p) =
                 vault::doc_text(&r.file_id, None).and_then(|(_, full)| table_profile(&r.name, &full))
             {
-                contexts.push(Ctx {
-                    name: format!("{} — table profile", r.name),
-                    text: p,
-                    score: 0.0,
-                });
+                let pname = format!("{} — table profile", r.name);
+                manifest.push(manifest_entry(
+                    "schema-card",
+                    &pname,
+                    p.len(),
+                    0.0,
+                    Some(r.file_id.clone()),
+                ));
+                contexts.push(Ctx { name: pname, text: p, score: 0.0 });
                 profiled += 1;
             }
         }
 
         let excerpt_count = contexts.len();
-        let mut answer = llm::stream_answer(question, contexts, cfg, history);
+        // `cfg.clone()` (not a move) keeps `cfg` alive for the cost meter below —
+        // the sink only carries this call's usage once the stream has drained.
+        let mut answer =
+            llm::stream_answer(question, contexts, cfg.clone(), history, Some(sink.clone()));
         while let Some(d) = answer.next().await {
             yield delta(d);
         }
-        yield final_chunk(initial.references, excerpt_count, &origin);
+        yield final_chunk(
+            initial.references,
+            excerpt_count,
+            &origin,
+            cost_meta(&cfg, sink.total()),
+            manifest,
+        );
     })
 }
 
@@ -1785,6 +2347,156 @@ mod tests {
             score,
             kind: crate::contracts::SourceKind::File,
         }
+    }
+
+    // --- Context manifest (openspec: add-beam-loop §5.7) ---------------------------
+
+    fn ctx(name: &str, text: &str, score: f64) -> Ctx {
+        Ctx { name: name.into(), text: text.into(), score }
+    }
+
+    fn reg(file_id: &str, file_name: &str, card: &str) -> crate::analytics::TableReg {
+        crate::analytics::TableReg {
+            table: file_name.replace(['.', '-'], "_"),
+            file_id: file_id.into(),
+            file_name: file_name.into(),
+            card: card.into(),
+            modified_ms: None,
+            columns: Vec::new(),
+            group: None,
+            capped_rows: None,
+        }
+    }
+
+    fn vctx(name: &str, text: &str, score: f64, kind: crate::contracts::SourceKind) -> vault::Context {
+        vault::Context { name: name.into(), text: text.into(), score, kind }
+    }
+
+    #[test]
+    fn manifest_is_metadata_only_never_context_text() {
+        // §5.1/§5.7 — a manifest entry carries a block's NAME/KIND/length/file id,
+        // never its TEXT. The manifest rides ChunkMeta into CachedAnswer.text and
+        // G6 notes, so a private chunk's bytes must never appear in it.
+        let secret = "SSN 123-45-6789 — the merger closes Tuesday";
+        let contexts = vec![vctx("secrets.md", secret, 0.9, crate::contracts::SourceKind::File)];
+        let refs = vec![r("file-42", "secrets.md", 0.9)];
+        let manifest = retrieval_manifest(&contexts, &refs);
+        let json = serde_json::to_string(&manifest).unwrap();
+        assert!(!json.contains("123-45-6789"), "no context text bytes in the manifest");
+        assert!(!json.contains("merger"), "no context text bytes in the manifest");
+        // The METADATA is present: name, kind, a char COUNT (the text length), id.
+        assert_eq!(manifest.len(), 1);
+        assert_eq!(manifest[0].kind, "retrieved-chunk");
+        assert_eq!(manifest[0].chars, secret.len());
+        assert_eq!(manifest[0].file_id.as_deref(), Some("file-42"));
+    }
+
+    #[test]
+    fn retrieval_manifest_attributes_chunks_and_labels_conversations() {
+        // §5.3 — each retrieved-chunk entry carries the file_id of its source file
+        // (from the flowing references); a past-chat note is a conversation-note.
+        let contexts = vec![
+            vctx("q3.md", "prose about revenue", 0.8, crate::contracts::SourceKind::File),
+            vctx("chat.md", "my earlier chat", 0.5, crate::contracts::SourceKind::Conversation),
+        ];
+        let refs = vec![r("id-q3", "q3.md", 0.8), r("id-chat", "chat.md", 0.5)];
+        let m = retrieval_manifest(&contexts, &refs);
+        assert_eq!(m[0].kind, "retrieved-chunk");
+        assert_eq!(m[0].file_id.as_deref(), Some("id-q3"), "a chunk names its file");
+        assert_eq!(m[1].kind, "conversation-note");
+        // The conversation block's manifest name is the prompt label the model saw.
+        assert_eq!(m[1].name, "from your past Lighthouse conversation");
+    }
+
+    #[test]
+    fn manifest_reflects_only_the_gated_set_and_pairs_with_the_skip_note() {
+        // §5.2/§5.7 — the manifest is built from the ctxs assembled AFTER the
+        // shareable gate, so it lists ONLY the shared subset; a cloud ask discloses
+        // what was WITHHELD separately, via the skip note. Here the gate already
+        // dropped "private.md" (a local-only file), so it never reaches the builder.
+        let gated = vec![
+            vctx("a.csv", "rows…", 1.0, crate::contracts::SourceKind::File),
+            vctx("b.md", "prose…", 0.8, crate::contracts::SourceKind::File),
+        ];
+        let refs = vec![r("id-a", "a.csv", 1.0), r("id-b", "b.md", 0.8)];
+        let manifest = retrieval_manifest(&gated, &refs);
+        let names: Vec<&str> = manifest.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(manifest.len(), 2, "only the gated (shared) entries appear");
+        assert!(!names.contains(&"private.md"), "a withheld local-only file never enters the manifest");
+        // The withholding is disclosed by the paired skip note, which states the
+        // count of files withheld — the disclosure of "what went" + "what didn't".
+        assert!(local_only_skip_note(1).contains('1'), "the skip note states the withheld count");
+    }
+
+    #[test]
+    fn analytics_manifest_labels_results_schemas_and_chart_options() {
+        // §5.1 — the narration ctxs split into query-result(s), then one
+        // schema-card per registered table (attributed to its file), then a
+        // trailing chart-options card. Kinds are byte-exact; no text bytes ride.
+        let ctxs = vec![
+            ctx("query result — computed exactly by Lighthouse", "SQL:\nSELECT 1\n\nResult:\n| x |", 1.0),
+            ctx("sales.csv — schema", "region TEXT, amt INT", 0.0),
+            ctx("chart options", "kind: bar", 0.0),
+        ];
+        let regs = vec![reg("id-sales", "sales.csv", "region TEXT, amt INT")];
+        let m = analytics_manifest(&ctxs, 1, &regs);
+        assert_eq!(m.len(), 3);
+        assert_eq!(m[0].kind, "query-result");
+        assert_eq!(m[1].kind, "schema-card");
+        assert_eq!(m[1].file_id.as_deref(), Some("id-sales"));
+        assert_eq!(m[2].kind, "chart-options");
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(!json.contains("SELECT 1"), "no result text in the manifest");
+        assert!(!json.contains("region TEXT"), "no schema-card text in the manifest");
+    }
+
+    #[test]
+    fn planning_manifest_labels_schema_view_and_join_hint_cards() {
+        // §5.1 — the planning ctxs (sql_ctxs) are file schema-cards (attributed),
+        // then saved-view schema-cards (virtual, no file), then a join-hints card.
+        let sql_ctxs = vec![
+            ctx("sales.csv", "region TEXT, amt INT", 1.0),
+            ctx("monthly_view", "a saved view card", 1.0),
+            ctx("join hints", "sales.region = regions.region", 0.0),
+        ];
+        let regs = vec![reg("id-sales", "sales.csv", "region TEXT, amt INT")];
+        let m = planning_manifest(&sql_ctxs, &regs, 1);
+        assert_eq!(m.len(), 3);
+        assert_eq!(m[0].kind, "schema-card");
+        assert_eq!(m[0].file_id.as_deref(), Some("id-sales"));
+        assert_eq!(m[1].kind, "schema-card");
+        assert!(m[1].file_id.is_none(), "a saved view is virtual — no source file");
+        assert_eq!(m[2].kind, "join-hints");
+    }
+
+    #[test]
+    fn cost_meter_sums_tokens_prices_cloud_zeroes_local_and_flags_unreported() {
+        // openspec: add-beam-loop §3.1/§3.5 — the meter is built from the per-ask
+        // sink's SUMMED total (the sink accumulates across every model call).
+        let cloud = ModelCfg {
+            provider_id: Some("anthropic".into()),
+            model_id: Some("claude-sonnet-5".into()),
+            api_key: None,
+        };
+        // A summed two-call total (100+200 in, 40+60 out) ⇒ the meter shows the
+        // sum, reported, with a labeled dollar estimate.
+        let m = cost_meta(&cloud, Some(llm::Usage { input: 300, output: 100 }));
+        assert!(m.reported);
+        assert_eq!((m.input_tokens, m.output_tokens, m.total_tokens), (300, 100, 400));
+        assert!(m.cost_estimate_usd.unwrap() > 0.0, "a known cloud model is priced");
+
+        // Local reports its tokens with $0.00 (loopback, not egress).
+        let local = ModelCfg { provider_id: Some("local".into()), model_id: None, api_key: None };
+        let ml = cost_meta(&local, Some(llm::Usage { input: 500, output: 20 }));
+        assert!(ml.reported && ml.total_tokens == 520);
+        assert_eq!(ml.cost_estimate_usd, Some(0.0));
+
+        // A silent provider (sink None) is "not reported" — real zeros, no
+        // estimate, never a chars/4 guess (§14).
+        let mu = cost_meta(&cloud, None);
+        assert!(!mu.reported);
+        assert_eq!(mu.total_tokens, 0);
+        assert_eq!(mu.cost_estimate_usd, None);
     }
 
     #[test]

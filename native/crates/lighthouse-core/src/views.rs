@@ -1051,6 +1051,7 @@ pub async fn shape_view(
         ctxs,
         cfg,
         Vec::new(),
+        None,
     ))
     .await;
     let (sql, summary) = parse_shape_reply(&crate::synth::strip_markers(&raw))?;

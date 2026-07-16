@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager};
 
-use lighthouse_core::contracts::{ChatChunk, ChatTurn};
+use lighthouse_core::contracts::{ChatChunk, ChatTurn, CostMeta};
 use lighthouse_core::{local_model, profile, settings, sources, vault};
 
 fn string_array(v: &Value) -> Vec<String> {
@@ -899,6 +899,14 @@ pub async fn chat_ask(
     // privacy-safe default (memory-only cache, no disk mirror).
     bypass_cache: Option<bool>,
     persist_allowed: Option<bool>,
+    // Two-phase plan approval (openspec: add-beam-loop §4), mirroring the
+    // optional cache controls above. Phase 1: `plan_only` runs step-1 planning
+    // and returns a PLAN chunk, then STOPS (executes nothing, egresses only the
+    // plan-generation call). Phase 2: `approved_plan` is the approved SQL echoed
+    // back on re-issue — executed as step 1 without re-planning (the guard still
+    // runs). Absent = an ordinary ask, so an older caller invokes unchanged.
+    plan_only: Option<bool>,
+    approved_plan: Option<String>,
     on_chunk: Channel<ChatChunk>,
 ) -> Result<(), String> {
     let history: Vec<ChatTurn> = {
@@ -956,10 +964,17 @@ pub async fn chat_ask(
             bypass_cache: bypass_cache.unwrap_or(false),
             persist_allowed: persist_allowed.unwrap_or(false),
         },
+        lighthouse_core::beam::PlanCtl {
+            plan_only: plan_only.unwrap_or(false),
+            approved_plan,
+        },
         preferred_conversation_ids,
     );
     let mut final_files: Vec<String> = Vec::new();
     let mut artifacts: Vec<String> = Vec::new();
+    // The NEW cost this ask incurred (openspec: add-beam-loop §3.2), read from
+    // the final chunk's meter; a cache replay computes nothing (0 new).
+    let mut answer_cost: Option<CostMeta> = None;
     while let Some(c) = chunks.next().await {
         if c.done {
             if let Some(refs) = &c.references {
@@ -968,10 +983,13 @@ pub async fn chat_ask(
             if let Some(a) = &c.analytics {
                 artifacts.extend(a.file_ids.iter().cloned());
             }
+            if let Some(meta) = &c.meta {
+                answer_cost = lighthouse_core::audit::ask_new_cost(meta);
+            }
         }
         let _ = on_chunk.send(c);
     }
-    audit.finish(&provider, final_files, artifacts);
+    audit.finish(&provider, final_files, artifacts, answer_cost);
     Ok(())
 }
 
@@ -1238,6 +1256,7 @@ pub fn settings_set(
     briefing_notify: Option<bool>,
     briefing_note_hour: Option<i64>,
     tour_shown: Option<bool>,
+    beam_max_steps: Option<i64>,
 ) -> Value {
     // A new summon shortcut must PARSE before anything persists — saving an
     // unregistrable string would strand the user with no hotkey at all.
@@ -1279,6 +1298,7 @@ pub fn settings_set(
         briefing_notify,
         briefing_note_hour,
         tour_shown,
+        beam_max_steps,
     );
     if shortcut_changed && !crate::register_summon_shortcut(&app) {
         // The new chord didn't register — restore the previous one so the
@@ -1291,6 +1311,7 @@ pub fn settings_set(
             None,
             None,
             Some(prev_shortcut.clone().unwrap_or_default()),
+            None,
             None,
             None,
             None,

@@ -46,8 +46,9 @@ fn pdf_fixture_extracts_text_and_caches() {
     // Must track CACHE_VERSION in extract.rs AND src/server/extract.ts (bump all
     // three together). v5→6 pptx/odt/rtf (0.9.0), v6→7 OCR (add-ocr-perception),
     // v7→8 docx footnotes/headers + rels fallback (0.11.0), v8→9 PDF tables
-    // (add-pdf-tables).
-    assert_eq!(record["v"], 9, "cache schema version matches the TS engine");
+    // (add-pdf-tables), v9→10 cost-meter cached-answer shape (add-beam-loop §3.3),
+    // v10→11 context-manifest cached-answer shape (add-beam-loop §5.4).
+    assert_eq!(record["v"], 11, "cache schema version matches the TS engine");
     let mut poisoned = record.clone();
     poisoned["text"] = serde_json::Value::String("FROM-CACHE".into());
     std::fs::write(&entry, serde_json::to_string(&poisoned).unwrap()).unwrap();

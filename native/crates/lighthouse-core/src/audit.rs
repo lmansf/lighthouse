@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
 use crate::config::{app_state_dir, now_ms};
+use crate::contracts::{ChunkMeta, CostMeta};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -41,6 +42,17 @@ pub struct AuditRecord {
     /// `["none"]` or the hosts newly contacted answering this question.
     pub egress: Vec<String>,
     pub artifacts: Vec<String>,
+    /// The NEW cost this answer incurred (openspec: add-beam-loop §3.2): the
+    /// per-ask cost meter, so a running total can be derived across records.
+    /// Absent for a cache REPLAY (0 new tokens / $0 — it computed nothing) and
+    /// for older records written before the meter existed; a local answer
+    /// carries its tokens with `$0.00`, an unreported one stays `reported:false`.
+    /// NOT part of the HMAC chain below — the chain protects the privacy/egress
+    /// ledger ("what the AI read, what left the machine"); cost is a derived,
+    /// informational estimate, and keeping it outside keeps pre-cost records
+    /// verifying byte-for-byte after the upgrade.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<CostMeta>,
     pub prev_hmac: String,
     pub hmac: String,
 }
@@ -53,6 +65,21 @@ pub struct AuditInput {
     pub provider: String,
     pub egress: Vec<String>,
     pub artifacts: Vec<String>,
+    /// The NEW cost this answer incurred (openspec: add-beam-loop §3.2); None
+    /// for a cache replay (0 new) or when the meter is unavailable.
+    pub cost: Option<CostMeta>,
+}
+
+/// The NEW cost an answered question incurred, read from its final chunk's
+/// provenance stamp for the cumulative running total (openspec: add-beam-loop
+/// §3.2/§3.3). A live answer's metered cost; a cache REPLAY (its final chunk
+/// carries `cached_at`) computed nothing, so its NEW cost is 0 — returned as
+/// None so the running total never double-counts a replayed answer.
+pub fn ask_new_cost(meta: &ChunkMeta) -> Option<CostMeta> {
+    if meta.cached_at.is_some() {
+        return None;
+    }
+    meta.cost.clone()
 }
 
 fn audit_dir() -> PathBuf {
@@ -151,6 +178,7 @@ pub fn append(input: AuditInput) {
             input.egress
         },
         artifacts: input.artifacts,
+        cost: input.cost,
         prev_hmac: last_hmac(),
         hmac: String::new(),
     };
@@ -182,10 +210,12 @@ pub fn append(input: AuditInput) {
 
 /// The two transport choke points (`chat_ask`, `chat_post`) share this: call
 /// `AnswerAudit::start(question)` before driving the answer stream, then
-/// `.finish(provider, file_ids, artifacts)` once the final chunk lands. It
+/// `.finish(provider, file_ids, artifacts, cost)` once the final chunk lands. It
 /// captures the egress baseline at start and records the per-question delta,
-/// so the record's egress reflects exactly what this question sent. No-op
-/// (cheap) when the log is disabled — `start` still runs so the call sites
+/// so the record's egress reflects exactly what this question sent. `cost` is
+/// the NEW cost meter (openspec: add-beam-loop §3.2) — `ask_new_cost(&meta)`,
+/// which is None for a cache replay so the running total never double-counts.
+/// No-op (cheap) when the log is disabled — `start` still runs so the call sites
 /// stay unconditional, but `finish` short-circuits in `append`.
 pub struct AnswerAudit {
     question: String,
@@ -200,7 +230,13 @@ impl AnswerAudit {
         }
     }
 
-    pub fn finish(self, provider: &str, file_ids: Vec<String>, artifacts: Vec<String>) {
+    pub fn finish(
+        self,
+        provider: &str,
+        file_ids: Vec<String>,
+        artifacts: Vec<String>,
+        cost: Option<CostMeta>,
+    ) {
         if !enabled() {
             return;
         }
@@ -216,6 +252,7 @@ impl AnswerAudit {
             provider: provider.to_string(),
             egress: crate::egress::hosts_since(&self.egress_before),
             artifacts,
+            cost,
         });
     }
 }
@@ -244,8 +281,32 @@ pub fn verify(path: &std::path::Path) -> Result<usize, usize> {
     Ok(count)
 }
 
-/// The most recent `limit` records (for the viewer), newest first, plus the
-/// chain-intact verdict.
+/// The running cost total across EVERY logged ask (openspec: add-beam-loop
+/// §3.2), summed from each record's per-ask cost meter. Honest: an unreported
+/// ask contributes 0 tokens (never a fabricated count), a local ask contributes
+/// its tokens with `$0.00`, an unknown-model ask contributes tokens with no
+/// dollars, and a cache replay (no `cost` node) contributes nothing.
+fn cumulative_cost(records: &[AuditRecord]) -> serde_json::Value {
+    let mut input = 0u64;
+    let mut output = 0u64;
+    let mut total = 0u64;
+    let mut usd = 0f64;
+    for c in records.iter().filter_map(|r| r.cost.as_ref()) {
+        input += c.input_tokens;
+        output += c.output_tokens;
+        total += c.total_tokens;
+        usd += c.cost_estimate_usd.unwrap_or(0.0);
+    }
+    serde_json::json!({
+        "inputTokens": input,
+        "outputTokens": output,
+        "totalTokens": total,
+        "costEstimateUsd": usd,
+    })
+}
+
+/// The most recent `limit` records (for the viewer), newest first, the
+/// chain-intact verdict, and the cumulative cost total across all asks.
 pub fn recent(limit: usize) -> serde_json::Value {
     let path = audit_path();
     let intact = verify(&path).is_ok();
@@ -254,12 +315,15 @@ pub fn recent(limit: usize) -> serde_json::Value {
         .lines()
         .filter_map(|l| serde_json::from_str(l).ok())
         .collect();
+    // Running total over the FULL file, before the recency window truncates.
+    let cumulative = cumulative_cost(&records);
     records.reverse();
     records.truncate(limit);
     serde_json::json!({
         "enabled": enabled(),
         "intact": intact,
         "records": records,
+        "cumulative": cumulative,
     })
 }
 
@@ -359,6 +423,7 @@ mod tests {
             provider: provider.to_string(),
             egress,
             artifacts: vec![],
+            cost: None,
         }
     }
 
@@ -419,7 +484,7 @@ mod tests {
         // shared process-global egress registry can't make this flaky.
         let a = AnswerAudit::start("cloud question");
         crate::egress::record("https://audit-sentinel.example/v1", crate::egress::PURPOSE_AI_PROVIDER);
-        a.finish("openai", vec!["budget.md".into()], vec![]);
+        a.finish("openai", vec!["budget.md".into()], vec![], None);
 
         let snap = recent(1);
         let hosts: Vec<&str> = snap["records"][0]["egress"]
@@ -452,5 +517,59 @@ mod tests {
 
         std::env::remove_var("LIGHTHOUSE_POLICY_FILE");
         crate::policy::reset_for_tests();
+    }
+
+    fn reported_cost(input: u64, output: u64, usd: Option<f64>) -> CostMeta {
+        CostMeta {
+            input_tokens: input,
+            output_tokens: output,
+            total_tokens: input + output,
+            reported: true,
+            cost_estimate_usd: usd,
+        }
+    }
+
+    #[test]
+    fn ask_new_cost_is_the_meter_live_but_zero_for_a_replay() {
+        // A live answer's NEW cost is its metered cost; a cache REPLAY (its final
+        // chunk carries `cached_at`) computed nothing, so its NEW cost is 0 —
+        // returned as None so the running total never double-counts it
+        // (openspec: add-beam-loop §3.2/§3.3).
+        let live = ChunkMeta {
+            origin: "openai".into(),
+            excerpt_count: 3,
+            source_file_count: 2,
+            cached_at: None,
+            cost: Some(reported_cost(100, 50, Some(0.01))),
+            manifest: None,
+        };
+        assert_eq!(ask_new_cost(&live).map(|c| c.total_tokens), Some(150));
+        // Same stored figures, but a replay stamp ⇒ 0 new tokens / $0.
+        let replay = ChunkMeta { cached_at: Some(1_700_000_000_000), ..live };
+        assert!(ask_new_cost(&replay).is_none(), "a replay reports 0 new");
+    }
+
+    #[test]
+    fn recent_reports_a_cumulative_running_total_across_asks() {
+        let _c = setup(true);
+        // Two billable asks sum in the cumulative; a local ask contributes its
+        // tokens with $0; a replay (cost None) contributes nothing.
+        let mut billable = |q: &str, provider: &str, cost: Option<CostMeta>| {
+            append(AuditInput { cost, ..input(q, provider, vec!["api.example".into()]) });
+        };
+        billable("a", "openai", Some(reported_cost(100, 40, Some(0.02))));
+        billable("b", "anthropic", Some(reported_cost(200, 60, Some(0.05))));
+        billable("local", "local", Some(reported_cost(300, 0, Some(0.0))));
+        billable("replay", "openai", None);
+
+        let snap = recent(10);
+        let cum = &snap["cumulative"];
+        assert_eq!(cum["inputTokens"], 600, "100 + 200 + 300 (replay adds none)");
+        assert_eq!(cum["outputTokens"], 100);
+        assert_eq!(cum["totalTokens"], 700, "the running total sums the asks");
+        assert!(
+            (cum["costEstimateUsd"].as_f64().unwrap() - 0.07).abs() < 1e-9,
+            "labeled-estimate dollars sum; local is $0"
+        );
     }
 }

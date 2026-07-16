@@ -962,6 +962,13 @@ pub async fn chat_post(headers: HeaderMap, body: Option<Json<Value>>) -> Respons
         bypass_cache: body["bypassCache"].as_bool().unwrap_or(false),
         persist_allowed: body["persistAllowed"].as_bool().unwrap_or(false),
     };
+    // Two-phase plan approval (openspec: add-beam-loop §4): the Phase-1 preview
+    // flag and the Phase-2 approved SQL, both optional and mirroring the cache
+    // controls above. Absent = an ordinary ask. PARITY: commands.rs chat_ask.
+    let plan = lighthouse_core::beam::PlanCtl {
+        plan_only: body["planOnly"].as_bool().unwrap_or(false),
+        approved_plan: body["approvedPlan"].as_str().map(String::from),
+    };
     // Prior turns (sanitized) so follow-ups have conversational context; capped
     // to the last few to bound token cost.
     let history: Vec<ChatTurn> = body["history"]
@@ -1028,10 +1035,14 @@ pub async fn chat_post(headers: HeaderMap, body: Option<Json<Value>>) -> Respons
             history,
             cfg,
             cache,
+            plan,
             preferred_conversation_ids,
         );
         let mut final_files: Vec<String> = Vec::new();
         let mut artifacts: Vec<String> = Vec::new();
+        // The NEW cost this ask incurred (openspec: add-beam-loop §3.2), read
+        // from the final chunk's meter; a cache replay computes nothing (0 new).
+        let mut answer_cost: Option<lighthouse_core::contracts::CostMeta> = None;
         while let Some(c) = chunks.next().await {
             if c.done {
                 if let Some(refs) = &c.references {
@@ -1040,10 +1051,13 @@ pub async fn chat_post(headers: HeaderMap, body: Option<Json<Value>>) -> Respons
                 if let Some(a) = &c.analytics {
                     artifacts.extend(a.file_ids.iter().cloned());
                 }
+                if let Some(meta) = &c.meta {
+                    answer_cost = lighthouse_core::audit::ask_new_cost(meta);
+                }
             }
             yield Ok::<bytes::Bytes, std::convert::Infallible>(line(&c));
         }
-        audit.finish(&provider, final_files, artifacts);
+        audit.finish(&provider, final_files, artifacts, answer_cost);
     };
 
     Response::builder()
@@ -1406,6 +1420,7 @@ pub async fn settings_post(headers: HeaderMap, body: Option<Json<Value>>) -> Res
         body["briefingNotify"].as_bool(),
         body["briefingNoteHour"].as_i64(),
         body["tourShown"].as_bool(),
+        body["beamMaxSteps"].as_i64(),
     );
     Json(json!({
         "ok": true,

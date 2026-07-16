@@ -185,6 +185,7 @@ async fn collect_pipeline(question: &str, ids: Vec<String>, cfg: ModelCfg) -> (S
         vec![],
         cfg,
         Default::default(),
+        Default::default(),
         vec![],
     );
     let mut text = String::new();

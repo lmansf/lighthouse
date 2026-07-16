@@ -370,6 +370,14 @@ export interface ChatProgress {
   label: string;
   step: number;
   total: number;
+  /**
+   * Beam loop (openspec: add-beam-loop §2.4): a short, stable machine intent for
+   * the current step ("planning" | "running"), so the cost meter (§3), plan
+   * approval (§4), and context manifest (§5) can attach per iteration without
+   * re-parsing the human `label`. PARITY: `intent` in contracts.rs; the Rust-only
+   * analytics loop is the only emitter, so the twin never sets it.
+   */
+  intent?: string;
 }
 
 /** A streamed chunk emitted while the assistant answers. */
@@ -396,6 +404,17 @@ export interface ChatChunk {
    */
   draft?: boolean;
   /**
+   * Two-phase plan approval (openspec: add-beam-loop §4.1): on a `planOnly` ask
+   * the engine returns THIS terminal PLAN chunk — the verbatim proposed step-1
+   * SQL and the tables it would read — and executes nothing. Phase 2 re-issues
+   * the ask with the approved SQL echoed back, which runs without re-planning.
+   * PARITY: plan execution is Rust-only (analytics); this dev twin has no
+   * analytics branch, so it NEVER emits a plan — the shape is mirrored so the
+   * same UI renders the Rust engine's preview. KEEP IN SYNC with the Rust
+   * ChatChunk.plan / PlanPreview in contracts.rs.
+   */
+  plan?: PlanPreview;
+  /**
    * Engine-emitted provenance stamp (final chunk only): where this answer was
    * computed and how much was sent. NEVER derived from model text — the engine
    * sets it where the prompt is assembled, so it counts what was actually
@@ -409,10 +428,49 @@ export interface ChatChunk {
    * ONLY when this final chunk replays a cached answer: the epoch ms of the
    * ORIGINAL answer's completion — the UI renders its "From cache · same data
    * as HH:MM · Re-run" line from this field alone, never from prose; origin
-   * and the counts stay the original answer's. KEEP IN SYNC with the Rust
-   * ChunkMeta in contracts.rs.
+   * and the counts stay the original answer's. `cost` (openspec: add-beam-loop
+   * §3) is the answer's cost meter — provider-reported tokens summed across the
+   * ask's model calls, plus a LABELED dollar estimate (the app renders
+   * "estimated at $X/Mtok", NEVER a charge). `reported: false` ⇒ the meter shows
+   * "not reported" (never a chars/4 guess); a local answer reports tokens with
+   * `costEstimateUsd: 0`; an unknown model omits `costEstimateUsd` ("estimate
+   * unavailable"). PARITY: the cost VALUES are Rust-shipped — this dev twin does
+   * not parse provider usage (§1), so its answers report "not reported"; the
+   * shape is mirrored so the same UI renders either engine's meter. `manifest`
+   * (openspec: add-beam-loop §5) is the per-context-block METADATA the model was
+   * handed — built from the ALREADY-GATED shareable set, so a cloud ask lists
+   * only what left the device (what was withheld is disclosed by the skip note).
+   * METADATA ONLY, never the context text: `chars` is the block's LENGTH (a
+   * count), never the bytes, which stay behind the device-only file inspector.
+   * `kind` is a byte-exact string enum; `fileId` attributes a retrieved chunk to
+   * its source file. PARITY: this dev twin has no analytics branch, so it only
+   * ever emits `retrieved-chunk` / `conversation-note` entries (the kinds its RAG
+   * paths assemble) — the analytics kinds (`schema-card` / `query-result` /
+   * `join-hints` / `chart-options`) are Rust-only; the labels match byte-for-byte.
+   * KEEP IN SYNC with the Rust ChunkMeta / CostMeta / CtxManifestEntry in
+   * contracts.rs.
    */
-  meta?: { origin: string; excerptCount: number; sourceFileCount: number; cachedAt?: number };
+  meta?: {
+    origin: string;
+    excerptCount: number;
+    sourceFileCount: number;
+    cachedAt?: number;
+    cost?: {
+      inputTokens: number;
+      outputTokens: number;
+      totalTokens: number;
+      reported: boolean;
+      costEstimateUsd?: number;
+    };
+    manifest?: {
+      name: string;
+      kind: string;
+      chars: number;
+      fileId?: string;
+      localOnly?: boolean;
+      score: number;
+    }[];
+  };
   /** True on the last chunk of a response. */
   done: boolean;
 }
@@ -421,6 +479,20 @@ export interface ChatChunk {
 export interface AnalyticsMeta {
   sql: string;
   fileIds: string[];
+}
+
+/**
+ * A previewed analytics plan (openspec: add-beam-loop §4.1), carried on a
+ * `planOnly` ask's terminal PLAN chunk. `sql` is the VERBATIM proposed step-1
+ * SQL — the exact statement Phase 2 would execute — shown before it ever touches
+ * the vault. `tables` are the names of the registered tables/views it would read
+ * (metadata only, never the context bytes). PARITY: plan execution is Rust-only
+ * (analytics); this dev twin never emits a plan. KEEP IN SYNC with the Rust
+ * PlanPreview in contracts.rs.
+ */
+export interface PlanPreview {
+  sql: string;
+  tables: string[];
 }
 
 /**

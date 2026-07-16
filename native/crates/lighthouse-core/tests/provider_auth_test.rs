@@ -183,6 +183,7 @@ async fn collect_answer(cfg: ModelCfg) -> String {
         contexts,
         cfg,
         Vec::<ChatTurn>::new(),
+        None,
     );
     let mut out = String::new();
     while let Some(delta) = s.next().await {

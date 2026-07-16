@@ -65,6 +65,7 @@ async fn variance_recipe_local_path_tables_ledger_no_narration() {
         vec![],
         ModelCfg::default(),
         BYPASS,
+        Default::default(),
         vec![],
     ))
     .await;
@@ -127,6 +128,7 @@ async fn recipe_result_rechecks_through_the_pin_board_path() {
         vec![],
         ModelCfg::default(),
         BYPASS,
+        Default::default(),
         vec![],
     ))
     .await;
@@ -176,6 +178,7 @@ async fn recipe_cloud_posture_stamps_the_source_accurately() {
         vec![],
         cfg,
         BYPASS,
+        Default::default(),
         vec![],
     ))
     .await;
