@@ -27,6 +27,7 @@ use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use crate::config::{now_ms, state_dir, write_json};
+use crate::llm::ModelCfg;
 
 /// Envelope version this engine reads and writes.
 const STORE_VERSION: u32 = 1;
@@ -328,6 +329,75 @@ pub fn add_conversation_ref(
     Ok(records[idx].clone())
 }
 
+// --- Ask-context resolution (§2) --------------------------------------------
+
+/// The pure scope + policy decision for one ask, over an already-loaded
+/// record. PARITY: investigations.ts::resolveScopeAndPolicy — identical
+/// precedence, tested identically in both engines.
+///
+/// - No record (`investigationId` absent, or naming nothing in the store) →
+///   passthrough: the request's attachments, no forced-local.
+/// - Request attachments non-empty → **they win** (most-specific-wins, the
+///   same precedence philosophy as curation rules); scope is NOT intersected.
+/// - Scope non-empty and request attachments empty → attachments := scope,
+///   passed through UNFILTERED — dangling ids (files deleted since scoping)
+///   are harmless because downstream candidate selection ignores unknown ids
+///   and the skip-note honesty machinery counts drops.
+/// - An empty scope resolves to empty attachments — the whole vault, exactly
+///   as an attachment-less ask does today.
+/// - Archived records resolve like live ones (asking inside an archived
+///   investigation is allowed; archive only hides it from the nav).
+/// - `local-only` policy → `force_local` true, regardless of how the
+///   attachments resolved.
+pub fn resolve_scope_and_policy(
+    record: Option<&Investigation>,
+    attachment_file_ids: Vec<String>,
+) -> (Vec<String>, bool) {
+    let Some(record) = record else {
+        return (attachment_file_ids, false);
+    };
+    let attachments = if attachment_file_ids.is_empty() {
+        record.scope_file_ids.clone()
+    } else {
+        attachment_file_ids
+    };
+    (
+        attachments,
+        record.provider_policy == ProviderPolicy::LocalOnly,
+    )
+}
+
+/// Resolve an ask's effective attachments + model config. Entry points call
+/// this at the SAME chokepoint where `profile::model_config()` is consulted
+/// today — the identical depth at which the managed policy layer participates
+/// in provider resolution (`model_config()` → llm-time `provider_allowed`).
+/// A `local-only` investigation swaps the resolved config to the local
+/// provider HERE, before the pipeline ever sees it: no cloud transport is
+/// constructed, `origin_of(cfg)` reports "device" and `is_cloud_provider`
+/// false (the provenance stamp is accurate with no further code), and
+/// local-only-marked files stay readable (the private model may read them).
+/// The llm-layer `provider_allowed` belt stays untouched beneath; managed
+/// `forceLocalOnly` composes — most-restrictive wins because both act on the
+/// same cfg. Callers: routes.rs `chat_post`, commands.rs `chat_ask` (PARITY:
+/// investigations.ts::resolveAskContext ⇄ app/api/chat/route.ts).
+pub fn resolve_ask_context(
+    investigation_id: Option<&str>,
+    attachment_file_ids: Vec<String>,
+    cfg: ModelCfg,
+) -> (Vec<String>, ModelCfg) {
+    let record = investigation_id
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .and_then(|id| list().into_iter().find(|r| r.id == id));
+    let (attachments, force_local) = resolve_scope_and_policy(record.as_ref(), attachment_file_ids);
+    let cfg = if force_local {
+        crate::profile::local_model_config()
+    } else {
+        cfg
+    };
+    (attachments, cfg)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -389,5 +459,66 @@ mod tests {
         assert!(parse_store(r#"{"investigations":[]}"#).is_none());
         assert!(parse_store("{ not json").is_none());
         assert!(parse_store("null").is_none());
+    }
+
+    /// A record for the pure resolver tests — no store, no disk.
+    fn record(scope: &[&str], policy: ProviderPolicy, archived: bool) -> Investigation {
+        Investigation {
+            id: "inv-test".into(),
+            name: "T".into(),
+            created_ms: 1,
+            archived,
+            scope_file_ids: scope.iter().map(|s| s.to_string()).collect(),
+            provider_policy: policy,
+            conversation_refs: Vec::new(),
+            folder_name: "T".into(),
+        }
+    }
+
+    fn ids(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    // PARITY: test/investigations.test.mjs mirrors this precedence table.
+    #[test]
+    fn scope_precedence_resolves_most_specific_wins() {
+        // Absent/unknown investigation → passthrough, no forced-local.
+        let (atts, force) = resolve_scope_and_policy(None, ids(&["req.md"]));
+        assert_eq!(atts, ids(&["req.md"]));
+        assert!(!force);
+
+        // Scope non-empty, request attachments empty → attachments := scope.
+        let rec = record(&["a.md", "b.md"], ProviderPolicy::Default, false);
+        let (atts, force) = resolve_scope_and_policy(Some(&rec), vec![]);
+        assert_eq!(atts, ids(&["a.md", "b.md"]));
+        assert!(!force, "default policy never forces local");
+
+        // Request attachments non-empty → they WIN; scope is not intersected
+        // (c.md is outside the scope and still stands alone).
+        let (atts, _) = resolve_scope_and_policy(Some(&rec), ids(&["c.md"]));
+        assert_eq!(atts, ids(&["c.md"]), "explicit attachments override scope");
+
+        // Empty scope = whole vault: attachments stay empty.
+        let whole = record(&[], ProviderPolicy::Default, false);
+        let (atts, _) = resolve_scope_and_policy(Some(&whole), vec![]);
+        assert!(atts.is_empty());
+
+        // Dangling scope ids pass through UNTOUCHED — resolution never
+        // filters; downstream candidate selection ignores unknown ids and
+        // the skip-note honesty counts drops.
+        let dangling = record(&["gone.md", "a.md"], ProviderPolicy::Default, false);
+        let (atts, _) = resolve_scope_and_policy(Some(&dangling), vec![]);
+        assert_eq!(atts, ids(&["gone.md", "a.md"]));
+
+        // Archived records resolve exactly like live ones.
+        let archived = record(&["a.md"], ProviderPolicy::LocalOnly, true);
+        let (atts, force) = resolve_scope_and_policy(Some(&archived), vec![]);
+        assert_eq!(atts, ids(&["a.md"]));
+        assert!(force, "archive never weakens the policy");
+
+        // local-only forces local regardless of how attachments resolve.
+        let local = record(&["a.md"], ProviderPolicy::LocalOnly, false);
+        let (_, force) = resolve_scope_and_policy(Some(&local), ids(&["c.md"]));
+        assert!(force, "attachment override still respects the policy");
     }
 }

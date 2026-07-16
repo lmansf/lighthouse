@@ -613,6 +613,10 @@ pub async fn chat_ask(
     included_file_ids: Vec<String>,
     history: Vec<Value>,
     attachment_file_ids: Vec<String>,
+    // The investigation this ask runs inside (openspec: add-investigations).
+    // `Option` so an older caller that omits it still invokes cleanly; absent
+    // = the global context. Resolved below, beside model_config().
+    investigation_id: Option<String>,
     // Answer cache controls (openspec: add-answer-cache). `Option` so an older
     // caller that omits them still invokes cleanly; absent means false — the
     // privacy-safe default (memory-only cache, no disk mirror).
@@ -635,7 +639,17 @@ pub async fn chat_ask(
         let skip = turns.len().saturating_sub(8);
         turns.into_iter().skip(skip).collect()
     };
-    let cfg = profile::model_config();
+    // Investigation scope + provider policy resolve HERE — the same
+    // chokepoint where the profile's model config is consulted (and beneath
+    // which the managed policy's llm-time belt sits), so a local-only
+    // investigation swaps cfg before any transport exists and scope arrives
+    // as ordinary attachments (openspec: add-investigations). PARITY:
+    // routes.rs chat_post.
+    let (attachment_file_ids, cfg) = lighthouse_core::investigations::resolve_ask_context(
+        investigation_id.as_deref(),
+        attachment_file_ids,
+        profile::model_config(),
+    );
     // Mark a chat in flight so background-conserve suspension (hide-to-tray /
     // idle) can't kill the local chat server out from under this stream — the
     // teardown waits until the guard drops at the end of the ask.

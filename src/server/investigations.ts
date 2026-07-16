@@ -25,6 +25,8 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { stateDir, writeJson } from "./config";
 import { historyAllowed } from "./policy";
+import { localModelConfig } from "./profile";
+import type { ModelCfg } from "./synth";
 
 /** Envelope version this engine reads and writes. */
 const STORE_VERSION = 1;
@@ -287,4 +289,62 @@ export function addInvestigationConversationRef(
     save(records);
   }
   return { ...rec };
+}
+
+// --- Ask-context resolution (§2) --------------------------------------------
+
+/**
+ * The pure scope + policy decision for one ask, over an already-loaded
+ * record. PARITY: investigations.rs::resolve_scope_and_policy — identical
+ * precedence, tested identically in both engines.
+ *
+ * - No record (`investigationId` absent, or naming nothing in the store) →
+ *   passthrough: the request's attachments, no forced-local.
+ * - Request attachments non-empty → **they win** (most-specific-wins, the
+ *   same precedence philosophy as curation rules); scope is NOT intersected.
+ * - Scope non-empty and request attachments empty → attachments := scope,
+ *   passed through UNFILTERED — dangling ids (files deleted since scoping)
+ *   are harmless because downstream candidate selection ignores unknown ids
+ *   and the skip-note honesty machinery counts drops.
+ * - An empty scope resolves to empty attachments — the whole vault, exactly
+ *   as an attachment-less ask does today.
+ * - Archived records resolve like live ones (asking inside an archived
+ *   investigation is allowed; archive only hides it from the nav).
+ * - `local-only` policy → `forceLocal` true, regardless of how the
+ *   attachments resolved.
+ */
+export function resolveScopeAndPolicy(
+  record: Investigation | undefined,
+  attachmentFileIds: string[],
+): [string[], boolean] {
+  if (!record) return [attachmentFileIds, false];
+  const attachments =
+    attachmentFileIds.length === 0 ? [...record.scopeFileIds] : attachmentFileIds;
+  return [attachments, record.providerPolicy === "local-only"];
+}
+
+/**
+ * Resolve an ask's effective attachments + model config. Entry points call
+ * this at the SAME chokepoint where `modelConfig()` is consulted today — the
+ * identical depth at which the managed policy layer participates in provider
+ * resolution (`modelConfig()` → llm-time `providerAllowed`). A `local-only`
+ * investigation swaps the resolved config to the local provider HERE, before
+ * the pipeline ever sees it: no cloud transport is constructed,
+ * `originOf(cfg)` reports "device" and `isCloudProvider` false (the
+ * provenance stamp is accurate with no further code), and local-only-marked
+ * files stay readable (the private model may read them). The llm-layer
+ * `providerAllowed` belt stays untouched beneath; managed `forceLocalOnly`
+ * composes — most-restrictive wins because both act on the same cfg.
+ * Caller: app/api/chat/route.ts (PARITY: investigations.rs::
+ * resolve_ask_context ⇄ routes.rs chat_post / commands.rs chat_ask).
+ */
+export function resolveAskContext(
+  investigationId: string | undefined,
+  attachmentFileIds: string[],
+  cfg: ModelCfg,
+): [string[], ModelCfg] {
+  const id = investigationId?.trim();
+  const record = id ? listInvestigations().find((r) => r.id === id) : undefined;
+  const [attachments, forceLocal] = resolveScopeAndPolicy(record, attachmentFileIds);
+  return [attachments, forceLocal ? localModelConfig() : cfg];
 }

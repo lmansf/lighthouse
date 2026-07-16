@@ -6,9 +6,9 @@
 - [x] 1.3 Store unit tests: round trip, versioning bak, history-off ref rule, name collision, archive flag.
 
 ## 2. Scoping + provider policy (engine)
-- [ ] 2.1 `resolve_ask_context(investigationId, attachments, cfg)` both engines: scope→attachments (attachments win when present), local-only→cfg swap to local at the model_config resolution point; wire `investigationId` through the three ask entry points.
-- [ ] 2.2 Parity test: fixture vault, scoped ask → identical candidate sets Rust ⇄ TS.
-- [ ] 2.3 Unit tests: local-only cfg swap (mocked cloud cfg in → local out), attachments-override precedence, dangling scope ids ignored.
+- [x] 2.1 `resolve_ask_context(investigationId, attachments, cfg)` both engines: scope→attachments (attachments win when present), local-only→cfg swap to local at the model_config resolution point; wire `investigationId` through the three ask entry points.
+- [x] 2.2 Parity test: fixture vault, scoped ask → identical candidate sets Rust ⇄ TS.
+- [x] 2.3 Unit tests: local-only cfg swap (mocked cloud cfg in → local out), attachments-override precedence, dangling scope ids ignored.
 
 ## 3. Belonging (engine)
 - [ ] 3.1 `Pin.investigationId` optional (serde default ⇄ TS optional) + pinAsk op carries current id; list filter.

@@ -354,6 +354,14 @@ export interface AuthService {
 export interface AskOptions {
   bypassCache?: boolean;
   persistAllowed?: boolean;
+  /**
+   * The investigation this ask runs inside (openspec: add-investigations).
+   * Engine-resolved: a non-empty scope becomes the ask's attachments unless
+   * explicit `attachmentFileIds` are passed (most-specific wins), and a
+   * local-only policy forces the private path at the model-config chokepoint.
+   * Absent = the global context.
+   */
+  investigationId?: string;
 }
 
 /** Streams an assistant answer plus its references for a user question. */

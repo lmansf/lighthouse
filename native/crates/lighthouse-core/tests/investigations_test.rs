@@ -1,11 +1,15 @@
 //! Investigations store over a real temp vault (openspec: add-investigations):
 //! round trip, unknown-version/corrupt bak-on-write, the history-posture gate
-//! on conversation refs, duplicate-name rejection, and the archive flag.
+//! on conversation refs, duplicate-name rejection, the archive flag, and the
+//! §2 ask-context resolution (scope → attachments, local-only → cfg swap)
+//! plus its cross-engine retrieval-parity fixture.
 //! Mirrored by the TS twin's test/investigations.test.mjs (PARITY).
 
 mod common;
 
 use lighthouse_core::investigations::{self, ProviderPolicy};
+use lighthouse_core::llm::ModelCfg;
+use lighthouse_core::vault;
 
 /// Point the managed policy at a throwaway file (or an absent path) for the
 /// closure, then restore — same seam policy.rs's own tests use.
@@ -221,4 +225,135 @@ fn history_posture_gates_conversation_refs() {
         assert!(investigations::add_conversation_ref(&inv.id, "   ", true).is_err());
     });
     assert_eq!(investigations::list()[0].conversation_refs, vec!["c-1"]);
+}
+
+// --- §2 ask-context resolution over a real store ----------------------------
+
+/// A mocked CLOUD model config — what `model_config()` yields for a keyed
+/// remote profile. The resolution must return it untouched except under a
+/// local-only investigation.
+fn cloud_cfg() -> ModelCfg {
+    ModelCfg {
+        provider_id: Some("anthropic".to_string()),
+        model_id: Some("claude-haiku-4-5".to_string()),
+        api_key: Some("sk-test-cloud".to_string()),
+    }
+}
+
+fn ids(v: &[&str]) -> Vec<String> {
+    v.iter().map(|s| s.to_string()).collect()
+}
+
+#[test]
+fn resolve_ask_context_applies_scope_and_swaps_local_only_cfg() {
+    let vault_dir = tempfile::tempdir().unwrap();
+    let _guard = common::lock_env(vault_dir.path());
+
+    // Scope carries a dangling id on purpose — resolution must NOT filter
+    // (downstream ignores unknowns; the skip-note honesty counts drops).
+    let scoped = investigations::create(
+        "Scoped",
+        &ids(&["cases/a.md", "cases/gone.md"]),
+        ProviderPolicy::Default,
+    )
+    .unwrap();
+    let sealed = investigations::create("Sealed", &[], ProviderPolicy::LocalOnly).unwrap();
+
+    // Default policy: scope becomes the attachments; the mocked cloud cfg
+    // passes through UNTOUCHED (key included).
+    let (atts, cfg) =
+        investigations::resolve_ask_context(Some(&scoped.id), vec![], cloud_cfg());
+    assert_eq!(atts, ids(&["cases/a.md", "cases/gone.md"]), "dangling id kept");
+    assert_eq!(cfg.provider_id.as_deref(), Some("anthropic"));
+    assert_eq!(cfg.api_key.as_deref(), Some("sk-test-cloud"), "cfg passthrough");
+
+    // Explicit per-ask attachments WIN; scope is not intersected.
+    let (atts, _) = investigations::resolve_ask_context(
+        Some(&scoped.id),
+        ids(&["other/c.md"]),
+        cloud_cfg(),
+    );
+    assert_eq!(atts, ids(&["other/c.md"]), "attachments override scope");
+
+    // local-only: the mocked cloud cfg goes in, the LOCAL config comes out —
+    // provider "local", the local model sentinel, no key — at the same
+    // resolution point model_config() is consulted, so origin_of() stamps
+    // "device" and no cloud transport is ever constructed.
+    let (atts, cfg) =
+        investigations::resolve_ask_context(Some(&sealed.id), vec![], cloud_cfg());
+    assert!(atts.is_empty(), "empty scope = whole vault");
+    assert_eq!(cfg.provider_id.as_deref(), Some("local"));
+    assert_eq!(cfg.model_id.as_deref(), Some("lighthouse-local"));
+    assert_eq!(cfg.api_key, None, "no key rides into the private path");
+
+    // Archived investigations resolve like live ones (never weaker).
+    investigations::set_archived(&sealed.id, true).unwrap();
+    let (_, cfg) = investigations::resolve_ask_context(Some(&sealed.id), vec![], cloud_cfg());
+    assert_eq!(cfg.provider_id.as_deref(), Some("local"), "archived still enforces");
+
+    // Absent/blank/unknown investigation → passthrough, cfg untouched.
+    for missing in [None, Some(""), Some("   "), Some("inv-nope")] {
+        let (atts, cfg) =
+            investigations::resolve_ask_context(missing, ids(&["req.md"]), cloud_cfg());
+        assert_eq!(atts, ids(&["req.md"]), "passthrough for {missing:?}");
+        assert_eq!(cfg.provider_id.as_deref(), Some("anthropic"));
+    }
+}
+
+// --- Cross-engine parity -----------------------------------------------------
+
+/// The byte-pinned §2 parity fixture. The node twin (test/investigations.
+/// test.mjs) builds the SAME vault + investigation and asserts the SAME
+/// candidate ids, so scope resolution can't drift between the engines: an
+/// investigation scoped to 2 of 3 fixture files yields a retrieval candidate
+/// set of exactly those 2 — the out-of-scope decoy loses even though it
+/// matches the query best.
+#[test]
+fn parity_scoped_ask_retrieval_candidate_ids() {
+    let dir = tempfile::tempdir().unwrap();
+    let _guard = common::lock_env(dir.path());
+    let write = |rel: &str, text: &str| {
+        let p = dir.path().join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, text).unwrap();
+    };
+    write("cases/alpha.md", "the harbor ledger shows the missing shipment entries");
+    write("cases/beta.md", "harbor ledger notes about the missing shipment manifest");
+    write(
+        "cases/decoy.md",
+        "missing shipment missing shipment harbor ledger decoy dossier",
+    );
+    vault::invalidate_walk_cache();
+    let all = ids(&["cases/alpha.md", "cases/beta.md", "cases/decoy.md"]);
+    for id in &all {
+        vault::set_included(id, true);
+    }
+
+    let inv = investigations::create(
+        "Harbor case",
+        &ids(&["cases/alpha.md", "cases/beta.md"]),
+        ProviderPolicy::Default,
+    )
+    .unwrap();
+
+    // Control (no investigation): the decoy is a candidate — it matches best.
+    let open = vault::retrieve("missing shipment harbor ledger", &all, 5, &[], &[], false);
+    let open_ids: Vec<String> = open.references.iter().map(|r| r.file_id.clone()).collect();
+    assert!(
+        open_ids.contains(&"cases/decoy.md".to_string()),
+        "unscoped ask sees the decoy: {open_ids:?}"
+    );
+
+    // Scoped: resolution turns the scope into attachments; the candidate set
+    // is exactly the scope, decoy excluded.
+    let (atts, _cfg) = investigations::resolve_ask_context(Some(&inv.id), vec![], ModelCfg::default());
+    let scoped = vault::retrieve("missing shipment harbor ledger", &all, 5, &[], &atts, false);
+    let mut scoped_ids: Vec<String> =
+        scoped.references.iter().map(|r| r.file_id.clone()).collect();
+    scoped_ids.sort();
+    assert_eq!(
+        scoped_ids,
+        ids(&["cases/alpha.md", "cases/beta.md"]),
+        "candidate ids match the TS twin"
+    );
 }

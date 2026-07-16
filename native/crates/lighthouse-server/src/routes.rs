@@ -631,6 +631,9 @@ pub async fn chat_post(headers: HeaderMap, body: Option<Json<Value>>) -> Respons
     let included_file_ids = string_array(&body["includedFileIds"]);
     // Files the user explicitly attached to this question.
     let attachment_ids = string_array(&body["attachmentFileIds"]);
+    // The investigation this ask runs inside (openspec: add-investigations);
+    // absent = the global context. Resolved below, beside model_config().
+    let investigation_id = body["investigationId"].as_str().map(String::from);
     // Answer cache controls (openspec: add-answer-cache): Re-run's lookup
     // bypass, and the client's per-request persistence verdict. Both default
     // false — an absent field fails toward privacy (memory-only cache).
@@ -663,7 +666,16 @@ pub async fn chat_post(headers: HeaderMap, body: Option<Json<Value>>) -> Respons
         })
         .unwrap_or_default();
 
-    let cfg = profile::model_config();
+    // Investigation scope + provider policy resolve HERE — the same
+    // chokepoint where the profile's model config is consulted (and beneath
+    // which the managed policy's llm-time belt sits), so a local-only
+    // investigation swaps cfg before any transport exists and scope arrives
+    // as ordinary attachments (openspec: add-investigations).
+    let (attachment_ids, cfg) = lighthouse_core::investigations::resolve_ask_context(
+        investigation_id.as_deref(),
+        attachment_ids,
+        profile::model_config(),
+    );
 
     let line = |c: &ChatChunk| -> bytes::Bytes {
         bytes::Bytes::from(format!(

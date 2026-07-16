@@ -216,6 +216,22 @@ export function modelConfig(): { providerId: string | null; modelId: string | nu
 }
 
 /**
+ * The local (on-device, key-less) model config — the exact shape
+ * `modelConfig()` yields when the local provider is active. The
+ * investigations local-only swap uses it at the ask chokepoint (openspec:
+ * add-investigations); this module owns the sentinels, so the swap can never
+ * drift from what selecting the private model produces. KEEP IN SYNC with
+ * profile.rs::local_model_config.
+ */
+export function localModelConfig(): {
+  providerId: string | null;
+  modelId: string | null;
+  apiKey: string | null;
+} {
+  return { providerId: LOCAL_PROVIDER_ID, modelId: LOCAL_MODEL_ID, apiKey: null };
+}
+
+/**
  * The key a chat with `providerId` would use right now (env → stored map →
  * legacy anthropic slot). Null for local/unknown providers or when unkeyed.
  */
