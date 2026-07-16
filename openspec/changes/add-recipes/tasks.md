@@ -20,5 +20,5 @@
 - [x] 4.1 Per-recipe goldens in examples/analytics_eval.rs Section 1 (model-free, CI-gated): a known-series fixture per recipe → deterministic plan → run_query per template → assert expected variance/cohort/dq-audit/anomaly/top-movers numbers. Ledger snapshot as a sibling check (byte-deterministic).
 
 ## 5. Verify
-- [ ] 5.1 E2E (recipes_test.rs / views_test.rs style): variance recipe via the LOCAL path (tables + assumptions, no narration) + a mocked-cloud path (narrated, stamp accurate) + pin the result to a board. Ledger snapshot tests. UI structural: gallery, chips, ledger disclosure.
-- [ ] 5.2 Full gates: cargo core+server, npm suite, tsc, lint, smoke, analytics + chart eval floors (recipe goldens green on the floor), `openspec validate --all`.
+- [x] 5.1 E2E (recipes_test.rs / views_test.rs style): variance recipe via the LOCAL path (tables + assumptions, no narration) + a mocked-cloud path (narrated, stamp accurate) + pin the result to a board. Ledger snapshot tests. UI structural: gallery, chips, ledger disclosure.
+- [x] 5.2 Full gates: cargo core+server, npm suite, tsc, lint, smoke, analytics + chart eval floors (recipe goldens green on the floor), `openspec validate --all`.

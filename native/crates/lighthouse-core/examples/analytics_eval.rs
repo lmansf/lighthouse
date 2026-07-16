@@ -261,16 +261,18 @@ async fn main() {
     // above: a mismatch bumps `failures` and the process exits non-zero.
     println!("\n== recipe goldens (model-free) ==");
     {
-        // Explicit schemas: the date column is Utf8 (recipes bucket months with a
-        // bare substr on ISO-text dates), amount is nullable Float64 (blank → NULL).
+        // Explicit schemas mirror the REAL CSV path: the date column is Date32
+        // (what register_csv infers for ISO dates — see the ISO-date golden note
+        // above), amount is nullable Float64 (blank → NULL). Recipes bucket months
+        // with substr(CAST(date AS VARCHAR),1,7), robust to a Date32 date column.
         let sales_schema = Schema::new(vec![
-            Field::new("d", DataType::Utf8, false),
+            Field::new("d", DataType::Date32, false),
             Field::new("region", DataType::Utf8, false),
             Field::new("order_id", DataType::Utf8, false),
             Field::new("amount", DataType::Float64, true),
         ]);
         let trend_schema = Schema::new(vec![
-            Field::new("d", DataType::Utf8, false),
+            Field::new("d", DataType::Date32, false),
             Field::new("amount", DataType::Float64, false),
         ]);
         let rctx = SessionContext::new();

@@ -260,9 +260,15 @@ const DQ_IQR_MAX: usize = 4;
 /// Rank/top-N cap for the movers recipe.
 const MOVERS_TOP_N: usize = 20;
 
-/// The month bucket for a (text ISO) date column — the analytics idiom.
+/// The month bucket for an ISO date column — the analytics idiom, CAST-first so
+/// it is robust to the column's registered type. `register_csv` infers an
+/// ISO-date CSV column as `Date32` (only the workbook path arrives as Utf8
+/// text), and `substr` requires a string — so bare `substr(date, 1, 7)` fails on
+/// the common CSV case. `CAST(date AS VARCHAR)` renders both Date32 and Utf8 to
+/// the same `YYYY-MM-DD` text, and the §1 ledger's month-bucket detector already
+/// reads through the CAST to name the date column.
 fn month_bucket(date_col: &str) -> String {
-    format!("substr({date_col}, 1, 7)")
+    format!("substr(CAST({date_col} AS VARCHAR), 1, 7)")
 }
 
 fn plan_variance(p: &ResolvedParams) -> Vec<PlannedQuery> {
