@@ -59,6 +59,7 @@ import {
   ArrowDownRegular,
   ArrowUndoRegular,
   AttachRegular,
+  BoardRegular,
   CheckmarkRegular,
   CodeRegular,
   CopyRegular,
@@ -98,6 +99,7 @@ import {
   type SortDir,
 } from "@/lib/sortTable";
 import { pinChartData } from "@/lib/pinChart";
+import { addPinToCurrentBoard } from "@/features/boards/boardScope";
 import { citationQuery, requestFileInspect } from "@/lib/citePreview";
 import { composeEvidencePack, provenanceStampText } from "@/lib/evidencePack";
 import { recallRelated, type RecallHit } from "@/lib/recall";
@@ -2037,7 +2039,13 @@ export function ChatPanel() {
   // --- Pinned questions: per-turn pin outcome, the changed-pins alerts (from
   //     the shell's watcher-driven recheck pass), and the pins dialog. ---
   const [pinNotes, setPinNotes] = useState<
-    Record<string, { pending?: boolean; ok?: boolean; error?: string }>
+    Record<
+      string,
+      // `pinId` (set on success) feeds the "Add to board" affordance beside
+      // the confirmation; `boardNote` is that affordance's outcome line
+      // (openspec: add-boards §4.1).
+      { pending?: boolean; ok?: boolean; error?: string; pinId?: string; boardNote?: string }
+    >
   >({});
   const [pinAlerts, setPinAlerts] = useState<ChangedPin[]>([]);
   const [pinsOpen, setPinsOpen] = useState(false);
@@ -2045,6 +2053,8 @@ export function ChatPanel() {
   const [pinsBusy, setPinsBusy] = useState(false);
   // G5: transient "Saved to Lighthouse Notes" note after a manual refresh.
   const [briefingSaved, setBriefingSaved] = useState<string | null>(null);
+  // Outcome of a pins-dialog row's "Add to board" (openspec: add-boards).
+  const [pinBoardNote, setPinBoardNote] = useState<string | null>(null);
   // Saved/pinned notes AND thumbs ratings are keyed by message id, and ids
   // RESTART per conversation — clear them on a conversation switch so a new
   // chat's "a2" never inherits another chat's "Saved…"/"Pinned…"/👍.
@@ -2892,7 +2902,7 @@ export function ChatPanel() {
       if (res.error || !res.pin) {
         setPinNotes((s) => ({ ...s, [asstId]: { error: res.error ?? "could not pin" } }));
       } else {
-        setPinNotes((s) => ({ ...s, [asstId]: { ok: true } }));
+        setPinNotes((s) => ({ ...s, [asstId]: { ok: true, pinId: res.pin?.id } }));
       }
     } catch (err) {
       if (!stillHere()) return;
@@ -2928,6 +2938,7 @@ export function ChatPanel() {
   // Load the pin list whenever the dialog opens.
   useEffect(() => {
     if (!pinsOpen) return;
+    setPinBoardNote(null); // last session's "Added to …" note is stale
     let cancelled = false;
     ragService
       .listPins()
@@ -3004,6 +3015,36 @@ export function ChatPanel() {
     }
     setPinList((pins) => pins.filter((p) => p.id !== id));
     setPinAlerts((alerts) => alerts.filter((a) => a.id !== id));
+  }
+
+  /**
+   * "Add to board" beside a pin confirmation (openspec: add-boards §4.1):
+   * append a size-M card for the just-created pin to the current scope's
+   * board; the outcome replaces the button inline.
+   */
+  async function addPinNoteToBoard(asstId: string) {
+    const note = pinNotes[asstId];
+    if (!note?.pinId || note.boardNote) return; // in flight or already added
+    // The interim note replaces the button at once, so a double-click can't
+    // race two appends past the board's duplicate check.
+    setPinNotes((s) => ({ ...s, [asstId]: { ...s[asstId], boardNote: "Adding…" } }));
+    const res = await addPinToCurrentBoard(note.pinId);
+    setPinNotes((s) => ({
+      ...s,
+      [asstId]: { ...s[asstId], boardNote: res.note ?? `Couldn't add — ${res.error}` },
+    }));
+  }
+
+  /** "Add to board" on a pins-dialog row; the outcome shows in the actions row. */
+  async function addPinRowToBoard(pinId: string) {
+    if (pinsBusy) return;
+    setPinsBusy(true); // one add at a time — the row buttons disable meanwhile
+    try {
+      const res = await addPinToCurrentBoard(pinId);
+      setPinBoardNote(res.note ?? `Couldn't add — ${res.error}`);
+    } finally {
+      setPinsBusy(false);
+    }
   }
 
   /** Ask a pinned/changed question again — the fresh answer is the drill-down. */
@@ -3864,6 +3905,17 @@ export function ChatPanel() {
                     >
                       Ask again
                     </Button>
+                    {/* Every listed pin can become a board card (add-boards). */}
+                    <Tooltip content="Add to board" relationship="label">
+                      <Button
+                        size="small"
+                        appearance="subtle"
+                        icon={<BoardRegular />}
+                        aria-label={`Add to board: ${p.question}`}
+                        disabled={pinsBusy}
+                        onClick={() => void addPinRowToBoard(p.id)}
+                      />
+                    </Tooltip>
                     <Button
                       size="small"
                       appearance="subtle"
@@ -3881,6 +3933,11 @@ export function ChatPanel() {
             <BriefingsPanel pins={pinList} />
           </DialogContent>
           <DialogActions>
+            {pinBoardNote && (
+              <Text size={200} className={styles.quietNote} role="status">
+                {pinBoardNote}
+              </Text>
+            )}
             {briefingSaved && (
               <Text size={200} className={styles.quietNote}>
                 {briefingSaved}
@@ -4468,6 +4525,20 @@ export function ChatPanel() {
                               >
                                 View pins
                               </Button>
+                              {/* The pin-success moment doubles as the board's
+                                  add affordance (openspec: add-boards §4.1). */}
+                              {pinNotes[m.id]?.boardNote ? (
+                                <Text size={200}>{pinNotes[m.id].boardNote}</Text>
+                              ) : (
+                                <Button
+                                  size="small"
+                                  appearance="subtle"
+                                  icon={<BoardRegular />}
+                                  onClick={() => void addPinNoteToBoard(m.id)}
+                                >
+                                  Add to board
+                                </Button>
+                              )}
                             </div>
                           )}
                           {pinNotes[m.id]?.error && (

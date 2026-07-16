@@ -893,3 +893,145 @@ async fn auth_layers_reject_cross_origin_and_bad_tokens() {
     );
     std::env::remove_var("LIGHTHOUSE_API_TOKEN");
 }
+
+/// Boards over the real wire (openspec: add-boards): the lazy global
+/// default lists virtual under its deterministic id, create + setCards
+/// persist order and sizes, refreshCards re-runs a real pin's SQL through
+/// the guarded direct path — live rows + digest back on the wire, the
+/// pin's STORED digest advanced (a manual board refresh IS a recheck),
+/// tombstone for an unknown pin — and validation failures answer 400 with
+/// the engine's byte-exact reasons.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn boards_over_the_wire() {
+    let _env = lock_env();
+    let (base, _vault_dir) = spawn_server().await;
+    let client = reqwest::Client::new();
+    let post = |body: Value| client.post(format!("{base}/api/rag")).json(&body).send();
+
+    // A real tabular file the pin will watch (upload + include).
+    let form = reqwest::multipart::Form::new()
+        .part(
+            "files",
+            reqwest::multipart::Part::bytes(b"priority,count\nP1,3\nP2,7\n".to_vec())
+                .file_name("tickets.csv"),
+        )
+        .text("paths", "tickets.csv");
+    let up = client
+        .post(format!("{base}/api/upload"))
+        .multipart(form)
+        .send()
+        .await
+        .unwrap();
+    assert!(up.status().is_success());
+    let inc = post(json!({ "op": "include", "nodeId": "tickets.csv", "included": true }))
+        .await
+        .unwrap();
+    assert!(inc.status().is_success());
+
+    // Empty store: the listing serves the virtual global default — the
+    // deterministic id the client may mutate directly (lazy, not stored).
+    let listed: Value = post(json!({ "op": "boards", "action": "list" }))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let boards = listed["boards"].as_array().unwrap();
+    assert_eq!(boards.len(), 1);
+    assert_eq!(boards[0]["id"], "default-global");
+    assert_eq!(boards[0]["name"], "My board");
+    assert_eq!(boards[0]["createdMs"], 0, "virtual = never persisted");
+
+    // create → setCards: order and sizes persist; the board rides back.
+    let created: Value = post(json!({ "op": "boards", "action": "create", "name": "Ops" }))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let board_id = created["board"]["id"].as_str().unwrap().to_string();
+    assert!(board_id.starts_with("board-"), "{board_id}");
+
+    let pinned: Value = post(json!({
+        "op": "pinAsk", "question": "open tickets by priority",
+        "sql": "SELECT priority, SUM(count) AS total FROM tickets GROUP BY priority ORDER BY priority",
+        "fileIds": ["tickets.csv"],
+    }))
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    let pin_id = pinned["pin"]["id"].as_str().unwrap().to_string();
+
+    let set: Value = post(json!({
+        "op": "boards", "action": "setCards", "id": board_id,
+        "cards": [
+            { "pinId": pin_id, "size": "L" },
+            { "pinId": "pin-gone", "size": "S" },
+        ],
+    }))
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    assert_eq!(set["board"]["cards"][0]["size"], "L");
+    assert_eq!(set["board"]["cards"][1]["pinId"], "pin-gone");
+
+    // refreshCards: the real pin computes LIVE through run_direct (rows,
+    // digest, footer), the unknown one tombstones, and the pin's stored
+    // digest matches what came back — refresh IS a recheck.
+    let refreshed: Value = post(json!({
+        "op": "boards", "action": "refreshCards", "pinIds": [pin_id, "pin-gone"],
+    }))
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    let cards = refreshed["cards"].as_array().unwrap();
+    assert_eq!(cards.len(), 2);
+    assert_eq!(cards[0]["pinId"], pin_id.as_str());
+    assert_eq!(cards[0]["live"], true);
+    let markdown = cards[0]["markdown"].as_str().unwrap();
+    assert!(markdown.contains("P1"), "{markdown}");
+    assert!(cards[0]["footer"].as_str().is_some(), "freshness line");
+    let digest = cards[0]["resultDigest"].as_str().unwrap().to_string();
+    assert_eq!(cards[1]["tombstone"], true);
+    let pins: Value = post(json!({ "op": "listPins" })).await.unwrap().json().await.unwrap();
+    assert_eq!(
+        pins["pins"][0]["lastDigest"].as_str().unwrap(),
+        digest,
+        "stored digest advanced with the refresh"
+    );
+
+    // Validation over the wire: 400 + the engine's byte-exact reasons.
+    for (body, want) in [
+        (
+            // The reason echoes the REQUESTED (trimmed) name, exactly like
+            // investigations' duplicate error.
+            json!({ "op": "boards", "action": "create", "name": "ops" }),
+            "a board named \"ops\" already exists",
+        ),
+        (
+            json!({ "op": "boards", "action": "setCards", "id": board_id,
+                    "cards": [{ "pinId": "p", "size": "XL" }] }),
+            "card size must be \"S\", \"M\", or \"L\"",
+        ),
+        (
+            json!({ "op": "boards", "action": "setCards", "id": board_id,
+                    "cards": [{ "size": "S" }] }),
+            "every card needs a pinId",
+        ),
+        (
+            json!({ "op": "boards", "action": "rename", "id": "board-nope", "name": "X" }),
+            "board not found",
+        ),
+    ] {
+        let res = post(body.clone()).await.unwrap();
+        assert_eq!(res.status().as_u16(), 400, "must reject: {body}");
+        let err: Value = res.json().await.unwrap();
+        assert_eq!(err["error"], want, "{body}");
+    }
+}

@@ -214,6 +214,73 @@ pub async fn rag_post(headers: HeaderMap, body: Option<Json<Value>>) -> Response
                 "investigations action must be list, create, rename, setArchived, or addConversationRef",
             ),
         },
+        // Boards (openspec: add-boards): pin-backed local dashboards. CRUD on
+        // the vault-scoped boards store — engine-minted ids, per-scope name
+        // validation, lazy virtual defaults that materialize on first
+        // mutation — plus refreshCards, the model-free per-pin re-execution
+        // through the SAME run_direct guard as pin rechecks (a manual board
+        // refresh IS a recheck: the pin's stored digest/summary advance
+        // identically). Validation failures → 400 with the engine's reason,
+        // like investigations. PARITY: commands.rs mirrors this op exactly;
+        // the TS twin answers refreshCards from stored pin state
+        // (live: false — analytics is Rust-engine-only).
+        Some("boards") => match body["action"].as_str() {
+            Some("list") => {
+                // Optional investigation filter — absent (or blank) is "all",
+                // the listPins convention exactly.
+                let investigation_id = body["investigationId"].as_str().filter(|s| !s.is_empty());
+                Json(json!({ "boards": lighthouse_core::boards::list_for(investigation_id) }))
+                    .into_response()
+            }
+            Some("create") => match lighthouse_core::boards::create(
+                body["name"].as_str().unwrap_or(""),
+                body["investigationId"].as_str(),
+            ) {
+                Ok(board) => Json(json!({ "board": board })).into_response(),
+                Err(e) => bad_request(&e),
+            },
+            Some("rename") => {
+                let Some(id) = body["id"].as_str().filter(|s| !s.is_empty()) else {
+                    return bad_request("id required");
+                };
+                match lighthouse_core::boards::rename(id, body["name"].as_str().unwrap_or("")) {
+                    Ok(board) => Json(json!({ "board": board })).into_response(),
+                    Err(e) => bad_request(&e),
+                }
+            }
+            Some("delete") => {
+                let Some(id) = body["id"].as_str().filter(|s| !s.is_empty()) else {
+                    return bad_request("id required");
+                };
+                match lighthouse_core::boards::delete(id) {
+                    Ok(()) => Json(json!({ "ok": true })).into_response(),
+                    Err(e) => bad_request(&e),
+                }
+            }
+            Some("setCards") => {
+                let Some(id) = body["id"].as_str().filter(|s| !s.is_empty()) else {
+                    return bad_request("id required");
+                };
+                let cards = match lighthouse_core::boards::parse_cards(&body["cards"]) {
+                    Ok(cards) => cards,
+                    Err(e) => return bad_request(&e),
+                };
+                match lighthouse_core::boards::set_cards(id, cards) {
+                    Ok(board) => Json(json!({ "board": board })).into_response(),
+                    Err(e) => bad_request(&e),
+                }
+            }
+            Some("refreshCards") => {
+                let pin_ids = string_array(&body["pinIds"]);
+                Json(json!({
+                    "cards": lighthouse_core::boards::refresh_cards(&pin_ids).await
+                }))
+                .into_response()
+            }
+            _ => bad_request(
+                "boards action must be list, create, rename, delete, setCards, or refreshCards",
+            ),
+        },
         Some("source") => {
             let Some(available) = body["available"].as_bool() else {
                 return bad_request("available required");

@@ -1,20 +1,23 @@
 /**
- * Evidence-pack export for Beam analytics answers (src/features/chat/ChatPanel.tsx).
+ * Evidence-pack export for Beam analytics answers (src/features/chat/ChatPanel.tsx)
+ * and board packs (openspec: add-boards §5.1, src/features/boards/BoardPanel.tsx).
  *
  * One analytics answer → one SELF-CONTAINED HTML file the analyst can attach
  * to an email or drop in a share folder: the question, the narrative + result
  * table (with every honesty footer preserved verbatim), the chart as inline
- * SVG, the exact SQL, and file provenance + freshness. Everything in the pack
- * is already on the answer — this module only COMPOSES; it derives no numbers,
- * fetches nothing, and embeds no external resource (no scripts, no remote
- * fonts/images — the file renders identically offline, which doubles as the
- * privacy proof: opening it can't phone anywhere).
+ * SVG, the exact SQL, and file provenance + freshness. `composeBoardPack`
+ * composes a whole board the same way: per-card sections plus ONE Queries
+ * appendix. Everything in a pack is already on the answer/card — this module
+ * only COMPOSES; it derives no numbers, fetches nothing, and embeds no
+ * external resource (no scripts, no remote fonts/images — the file renders
+ * identically offline, which doubles as the privacy proof: opening it can't
+ * phone anywhere).
  *
  * Pure and dependency-light so it's unit-testable in node
  * (test/evidencePack.test.mjs) without a DOM, like sortTable.ts/chartSpec.ts:
- * the caller passes the timestamp in (never Date.now() here) and the chart as
- * an already-serialized SVG string (ChatPanel captures the rendered chart);
- * fixed inputs always produce byte-identical output.
+ * the caller passes the timestamp in (never Date.now() here) and every chart
+ * as an already-serialized SVG string (the panels capture the rendered
+ * charts); fixed inputs always produce byte-identical output.
  */
 
 // RELATIVE leaf imports (not the "@/contracts" barrel), deliberately: the
@@ -262,7 +265,35 @@ const PACK_CSS = `
   ol.files, ul.files { margin: 6px 0 10px; padding-left: 26px; }
   footer { margin-top: 32px; border-top: 1px solid #e0e0e0; padding-top: 8px;
            color: #777; font-size: 12px; }
+  /* Board packs only: the per-card heading is the pin's QUESTION — content,
+     not a section label — so it keeps sentence case and body ink. */
+  section.card > h2 { text-transform: none; letter-spacing: 0; color: #1a1a1a; font-size: 16px; }
+  /* A card's stale/error note: the board card's honesty posture, danger ink. */
+  p.stale { color: #a4262c; }
 `;
+
+/**
+ * Wrap composed body parts in the packs' one self-contained document shell:
+ * system font stack, PACK_CSS inlined, no external resource of any kind.
+ * Shared by both composers so the offline invariant lives in one place.
+ */
+function packDocument(title: string, body: string): string {
+  return [
+    `<!doctype html>`,
+    `<html lang="en">`,
+    `<head>`,
+    `<meta charset="utf-8">`,
+    `<meta name="viewport" content="width=device-width, initial-scale=1">`,
+    `<title>${escapeHtml(title)}</title>`,
+    `<style>${PACK_CSS}</style>`,
+    `</head>`,
+    `<body>`,
+    body,
+    `</body>`,
+    `</html>`,
+    ``,
+  ].join("\n");
+}
 
 /**
  * Compose one self-contained evidence-pack HTML document from a settled
@@ -346,19 +377,119 @@ export function composeEvidencePack(input: EvidencePackInput): string {
     )} · every number computed by the engine from your files</footer>`,
   );
 
-  return [
-    `<!doctype html>`,
-    `<html lang="en">`,
-    `<head>`,
-    `<meta charset="utf-8">`,
-    `<meta name="viewport" content="width=device-width, initial-scale=1">`,
-    `<title>${escapeHtml(question)}</title>`,
-    `<style>${PACK_CSS}</style>`,
-    `</head>`,
-    `<body>`,
-    parts.join("\n"),
-    `</body>`,
-    `</html>`,
-    ``,
-  ].join("\n");
+  return packDocument(question, parts.join("\n"));
+}
+
+// --- Board pack (openspec: add-boards §5.1) -----------------------------------
+
+/**
+ * One board card as its pack section — everything here is already ON the
+ * rendered card; the composer rewords nothing.
+ */
+export interface BoardPackCard {
+  /** The pin's question — the card section's heading. */
+  question: string;
+  /** The card body's markdown: the engine's row-capped result table on a
+   *  live card; the pin's stored compact summary text on a stored (twin)
+   *  card. Absent on a failed card — the stale note stands as the body,
+   *  exactly like the on-screen card. */
+  markdown?: string | null;
+  /** The rendered chart serialized as a standalone SVG string — the CALLER
+   *  captures it (standaloneChartSvg); this module stays DOM-free. */
+  chartSvg?: string | null;
+  /** The freshness stamp EXACTLY as the card shows it: the engine footer's
+   *  "Computed from: …" sentence on a live card, "stored · checked 3m ago"
+   *  on a stored one — the stored labeling travels verbatim, never reworded. */
+  freshness: string;
+  /** The pin's stored SQL — this card's entry in the Queries appendix. */
+  sql: string;
+  /** Live cards: the engine's provenance footer, reproduced VERBATIM in the
+   *  appendix. Stored cards carry none (the twin executed nothing). */
+  footer?: string | null;
+  /** True = computed now by the engine; false = stored state (twin). A
+   *  stored card's appendix entry repeats its stored freshness stamp where
+   *  a live card shows its engine footer, so no query reads as fresher than
+   *  it is. */
+  live: boolean;
+  /** The card's on-screen stale/error text, when its refresh failed. */
+  staleNote?: string | null;
+}
+
+/** A board export: the board's name, the composition instant (the CALLER
+ *  supplies it — pure function), and the cards in board order. */
+export interface BoardPackInput {
+  title: string;
+  generatedAt: number;
+  cards: BoardPackCard[];
+}
+
+/**
+ * Compose one self-contained board-pack HTML document (openspec: add-boards):
+ * the board title, per-card sections (the question as heading, the rendered
+ * result table, the chart as inline SVG when captured, the freshness stamp,
+ * the stale/error note when present), and ONE "Queries" appendix at the end
+ * listing every card's exact SQL and engine footer verbatim. Same promises
+ * as composeEvidencePack: composed from the inputs alone — nothing derived,
+ * nothing fetched, no external resource — so fixed inputs produce
+ * byte-identical output that renders offline.
+ */
+export function composeBoardPack(input: BoardPackInput): string {
+  const { title, generatedAt, cards } = input;
+  const ts = formatUtc(generatedAt);
+  const parts: string[] = [];
+
+  parts.push(`<header>`);
+  parts.push(`<h1>${escapeHtml(title)}</h1>`);
+  parts.push(`<p class="generated">Generated ${escapeHtml(ts)}</p>`);
+  parts.push(`</header>`);
+
+  // An empty board exports honestly: the pack says so instead of implying
+  // results that never existed — and carries no Queries appendix.
+  if (cards.length === 0) {
+    parts.push(`<section>`);
+    parts.push(`<p>This board has no cards.</p>`);
+    parts.push(`</section>`);
+  }
+
+  for (const c of cards) {
+    parts.push(`<section class="card">`);
+    parts.push(`<h2>${escapeHtml(c.question)}</h2>`);
+    if (c.markdown && c.markdown.trim()) parts.push(answerMarkdownToHtml(c.markdown));
+    // The chart exactly as rendered on the card — inline SVG, nothing remote.
+    if (c.chartSvg && c.chartSvg.trim()) {
+      parts.push(`<figure class="chart">${c.chartSvg}</figure>`);
+    }
+    parts.push(`<p class="stamp">${escapeHtml(c.freshness)}</p>`);
+    if (c.staleNote && c.staleNote.trim()) {
+      parts.push(`<p class="stale">${escapeHtml(c.staleNote)}</p>`);
+    }
+    parts.push(`</section>`);
+  }
+
+  // ONE appendix at the end: every card's exact SQL fence plus its engine
+  // footer verbatim — the evidence pack's "Query used" honesty, board-wide.
+  // A stored card has no engine footer (nothing ran), so its entry repeats
+  // the card's stored freshness stamp instead — the same on-screen wording.
+  if (cards.length > 0) {
+    parts.push(`<section>`);
+    parts.push(`<h2>Queries</h2>`);
+    for (const c of cards) {
+      parts.push(`<h3>${escapeHtml(c.question)}</h3>`);
+      parts.push(`<pre><code>${escapeHtml(c.sql)}</code></pre>`);
+      if (c.footer && c.footer.trim()) {
+        parts.push(answerMarkdownToHtml(c.footer));
+      } else if (!c.live) {
+        parts.push(`<p class="stamp">${escapeHtml(c.freshness)}</p>`);
+      }
+    }
+    parts.push(`</section>`);
+  }
+
+  parts.push(
+    `<footer>Generated by Lighthouse · ${escapeHtml(
+      ts,
+    )} · every number computed by the engine from your files</footer>`,
+  );
+
+  return packDocument(title, parts.join("\n"));
 }
