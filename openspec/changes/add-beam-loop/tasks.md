@@ -1,12 +1,12 @@
 # Tasks — the Beam loop (budget + cost + approval + manifest)
 
 ## 1. Engine-reported token accounting (llm.rs) — do first (§2 and §3 consume it)
-- [ ] 1.1 Generalize `sse_deltas` (llm.rs:607) to pick a `usage` event alongside text deltas: thread a typed `Usage { input, output }` out of `stream_answer` (llm.rs:184) — change the stream item to `Delta(String) | Usage(Usage)` or add a final out-param; callers still receive text deltas unchanged.
-- [ ] 1.2 Parse Anthropic default usage (`message_start.message.usage.input_tokens` + `message_delta.usage.output_tokens`). Add `stream_options:{include_usage:true}` to the OpenAI-compat + local request bodies (llm.rs:524-529) and parse their usage event.
-- [ ] 1.3 Accumulate usage per ask across EVERY model call — plan calls, corrective retries, and narration — into one summed `Usage` for the ask.
-- [ ] 1.4 Fallback: when a provider reports no usage, the accumulated budget stays 0; assert the loop still bounds on max_steps/deadline (never unbounded) and the meter later shows "not reported" (never chars/4).
-- [ ] 1.5 Twin PARITY: mirror the `Usage` type as unset in `src/server/llm.ts` with a `PARITY:` comment (usage parse is Rust-shipped).
-- [ ] 1.6 Tests: per-dialect usage-parse unit tests (Anthropic default; OpenAI-compat + local with `include_usage`; a silent provider → 0/unreported).
+- [x] 1.1 Generalize `sse_deltas` (llm.rs:607) to pick a `usage` event alongside text deltas: thread a typed `Usage { input, output }` out of `stream_answer` (llm.rs:184) — change the stream item to `Delta(String) | Usage(Usage)` or add a final out-param; callers still receive text deltas unchanged.
+- [x] 1.2 Parse Anthropic default usage (`message_start.message.usage.input_tokens` + `message_delta.usage.output_tokens`). Add `stream_options:{include_usage:true}` to the OpenAI-compat + local request bodies (llm.rs:524-529) and parse their usage event.
+- [x] 1.3 Accumulate usage per ask across EVERY model call — plan calls, corrective retries, and narration — into one summed `Usage` for the ask.
+- [x] 1.4 Fallback: when a provider reports no usage, the accumulated budget stays 0; assert the loop still bounds on max_steps/deadline (never unbounded) and the meter later shows "not reported" (never chars/4).
+- [x] 1.5 Twin PARITY: mirror the `Usage` type as unset in `src/server/llm.ts` with a `PARITY:` comment (usage parse is Rust-shipped).
+- [x] 1.6 Tests: per-dialect usage-parse unit tests (Anthropic default; OpenAI-compat + local with `include_usage`; a silent provider → 0/unreported).
 
 ## 2. The budgeted loop core (beam.rs / analytics.rs — Rust-only; twin unchanged)
 - [ ] 2.1 Lift the multi-step loop (synth.rs:1020-1210) into a small owned struct parameterized by a `Budget { max_steps (config default ~5–6), deadline (wall-clock), no_progress guard (SQL identical to a prior step / two non-advancing replies), token_ceiling (from §1) }`. Continue while under max_steps AND before the deadline AND no-progress hasn't tripped AND (ceiling unset OR tokens under it). Keep `StepReply::Done` early-stop.

@@ -768,6 +768,7 @@ fn live_pipeline(
                     ctxs,
                     cfg.clone(),
                     history.clone(),
+                    None,
                 );
                 while let Some(d) = answer.next().await {
                     let safe = scrub.push(&d);
@@ -1028,6 +1029,13 @@ fn live_pipeline(
                         // here (cheap) rather than reparse a row count out of
                         // the markdown (unreliable). None if no step succeeds.
                         let mut last_rows: Option<crate::ledger::RowFacts> = None;
+                        // Per-ask token accounting (openspec: add-beam-loop §1):
+                        // ONE sink shared across this ask's plan calls,
+                        // corrective retries, and the final narration sums their
+                        // provider-reported usage (§1.3). §1 only makes the total
+                        // obtainable; §2 will read it as the loop's token ceiling
+                        // and §3 will surface it on the cost meter.
+                        let usage_sink = llm::UsageSink::new();
                         'steps: while steps.len() < 3 {
                             let n = steps.len() + 1;
                             yield progress(format!("Planning query {n} (of up to 3)…"), n, 4);
@@ -1036,6 +1044,7 @@ fn live_pipeline(
                                 sql_ctxs.clone(),
                                 cfg.clone(),
                                 history.clone(),
+                                Some(usage_sink.clone()),
                             ))
                             .await;
                             let mut attempt =
@@ -1072,6 +1081,7 @@ fn live_pipeline(
                                             sql_ctxs.clone(),
                                             cfg.clone(),
                                             history.clone(),
+                                            Some(usage_sink.clone()),
                                         ))
                                         .await;
                                         match crate::analytics::parse_step_reply(&strip_markers(
@@ -1122,6 +1132,7 @@ fn live_pipeline(
                                 ctxs,
                                 cfg.clone(),
                                 history.clone(),
+                                Some(usage_sink.clone()),
                             );
                             while let Some(d) = answer.next().await {
                                 let safe = scrub.push(&d);
@@ -1199,6 +1210,14 @@ fn live_pipeline(
                             if let Some(chart) = &last_chart {
                                 yield delta(format!("\n```lighthouse-chart\n{chart}\n```\n"));
                             }
+                            // §1 foundation (openspec: add-beam-loop): the ask's
+                            // summed provider-reported usage is now obtainable
+                            // here — Some(total) when a provider reported, or None
+                            // when none did (§1.4, distinct from a real 0). §3
+                            // will attach this to the cost meter on `done`; §1
+                            // leaves it read-only so the plumbing is proven end to
+                            // end without changing what ships on the chunk.
+                            let _ask_usage: Option<llm::Usage> = usage_sink.total();
                             // Chips act on the LAST query; the footer shows all.
                             let (refs, meta_ids) = analytics_refs(&regs);
                             let mut done = final_chunk(refs, excerpt_count, &origin);
@@ -1220,6 +1239,7 @@ fn live_pipeline(
                         sql_ctxs.clone(),
                         cfg.clone(),
                         history.clone(),
+                        None,
                     ))
                     .await;
                     let mut attempt = crate::analytics::extract_sql(&strip_markers(&raw));
@@ -1243,6 +1263,7 @@ fn live_pipeline(
                                     sql_ctxs.clone(),
                                     cfg.clone(),
                                     history.clone(),
+                                    None,
                                 ))
                                 .await;
                                 attempt = crate::analytics::extract_sql(&strip_markers(&raw2));
@@ -1290,8 +1311,13 @@ fn live_pipeline(
                         // bytes never do (the UI strip is a second net, not
                         // the mechanism).
                         let mut scrub = crate::analytics::DirectiveScrubber::new();
-                        let mut answer =
-                            llm::stream_answer(question.clone(), ctxs, cfg.clone(), history.clone());
+                        let mut answer = llm::stream_answer(
+                            question.clone(),
+                            ctxs,
+                            cfg.clone(),
+                            history.clone(),
+                            None,
+                        );
                         while let Some(d) = answer.next().await {
                             let safe = scrub.push(&d);
                             if !safe.is_empty() {
@@ -1518,6 +1544,7 @@ fn live_pipeline(
                     ctxs,
                     cfg.clone(),
                     Vec::new(),
+                    None,
                 ))
                 .await;
                 let extract = take_chars(strip_markers(&raw).trim(), MAP_EXTRACT_CHARS);
@@ -1565,8 +1592,13 @@ fn live_pipeline(
                     .map(|(r, t)| Ctx { name: r.name.clone(), text: t.clone(), score: r.score })
                     .collect();
                 let excerpt_count = reduce_ctxs.len();
-                let mut answer =
-                    llm::stream_answer(question.clone(), reduce_ctxs, cfg.clone(), history.clone());
+                let mut answer = llm::stream_answer(
+                    question.clone(),
+                    reduce_ctxs,
+                    cfg.clone(),
+                    history.clone(),
+                    None,
+                );
                 while let Some(d) = answer.next().await {
                     yield delta(d);
                 }
@@ -1659,8 +1691,13 @@ fn live_pipeline(
                         })
                         .collect();
                     let excerpt_count = ctxs.len();
-                    let mut answer =
-                        llm::stream_answer(question.clone(), ctxs, cfg.clone(), history.clone());
+                    let mut answer = llm::stream_answer(
+                        question.clone(),
+                        ctxs,
+                        cfg.clone(),
+                        history.clone(),
+                        None,
+                    );
                     while let Some(d) = answer.next().await {
                         yield delta(d);
                     }
@@ -1696,6 +1733,7 @@ fn live_pipeline(
                         ctxs,
                         cfg.clone(),
                         Vec::new(),
+                        None,
                     ))
                     .await;
                     let extract = take_chars(strip_markers(&raw).trim(), MAP_EXTRACT_CHARS);
@@ -1724,6 +1762,7 @@ fn live_pipeline(
                         reduce_ctxs,
                         cfg.clone(),
                         history.clone(),
+                        None,
                     );
                     while let Some(d) = answer.next().await {
                         yield delta(d);
@@ -1765,7 +1804,7 @@ fn live_pipeline(
         }
 
         let excerpt_count = contexts.len();
-        let mut answer = llm::stream_answer(question, contexts, cfg, history);
+        let mut answer = llm::stream_answer(question, contexts, cfg, history, None);
         while let Some(d) = answer.next().await {
             yield delta(d);
         }

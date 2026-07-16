@@ -178,14 +178,177 @@ fn prior_turns(history: &[ChatTurn]) -> Vec<&ChatTurn> {
     turns
 }
 
+// --- Engine-reported token accounting (openspec: add-beam-loop §1) ------------------
+//
+// Providers REPORT token counts on the very SSE streams we already open for the
+// answer text, so accounting rides them with NO new egress. §1 threads those
+// measured facts out of `stream_answer` so §2 can bound the Beam loop on a token
+// ceiling and §3 can show an honest cost meter. These are provider-reported
+// MEASURED facts — never estimated. The `chars/4` heuristic that sizes the local
+// prompt (the LOCAL_* budgets below) stays prompt-sizing ONLY and is NEVER a
+// user-facing or accounting number (constitution §14).
+//
+// Mechanism — the side-channel sink (design "usage-aware SSE parse", option
+// (b)): `stream_answer` gains an optional `UsageSink` it writes into, rather
+// than changing the public stream item to a `Delta(String) | Usage(Usage)` enum
+// (option (a)). Every existing text consumer is untouched — the two `collect()`
+// drains (synth.rs / views.rs) and every `while let Some(d) = answer.next()`
+// streaming site keep receiving plain `String` deltas UNCHANGED; only a caller
+// that wants the numbers passes a sink and reads it after the stream. Option (a)
+// would have forced all ~13 text consumers to match a new enum for zero
+// text-path benefit; the sink additionally makes per-ask accumulation (§1.3)
+// free — one sink shared across an ask's plan / retry / narration calls sums
+// them with no extra accumulator.
+
+/// Provider-reported token usage for one model call: input (prompt) and output
+/// (completion) token counts AS REPORTED by the provider. Never estimated.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Usage {
+    pub input: u64,
+    pub output: u64,
+}
+
+impl Usage {
+    pub fn total(&self) -> u64 {
+        self.input + self.output
+    }
+}
+
+/// A running tally folded from a provider's SSE `usage` events. `reported`
+/// records whether ANY real usage event was seen, so an UNREPORTED stream (a
+/// vendor that silently ignored `include_usage`, or a stream that ended with no
+/// usage event) stays DISTINGUISHABLE from a genuine 0-token result (§1.4):
+/// `as_usage()` returns None, so §3 can show "not reported" (never a `chars/4`
+/// guess) and §2 falls back to max_steps/deadline instead of reading 0 as a
+/// satisfied ceiling.
+#[derive(Debug, Clone, Copy, Default)]
+struct UsageTally {
+    input: u64,
+    output: u64,
+    reported: bool,
+}
+
+impl UsageTally {
+    /// Sum another call's tally into this one (per-ask accumulation, §1.3).
+    fn merge(&mut self, other: &UsageTally) {
+        self.input += other.input;
+        self.output += other.output;
+        self.reported |= other.reported;
+    }
+
+    /// The reported usage, or None when nothing was reported (§1.4 fallback —
+    /// distinct from a real `Usage { input: 0, output: 0 }`).
+    fn as_usage(&self) -> Option<Usage> {
+        if self.reported {
+            Some(Usage { input: self.input, output: self.output })
+        } else {
+            None
+        }
+    }
+}
+
+/// Which provider dialect's SSE `usage` events to fold. Anthropic reports usage
+/// by default; the OpenAI-compatible shape (hosted vendors + local llama) needs
+/// `stream_options.include_usage` on the request (added below) to emit a
+/// terminal usage chunk.
+#[derive(Debug, Clone, Copy)]
+enum UsageDialect {
+    /// Anthropic Messages API: `message_start.message.usage.input_tokens` and
+    /// `message_delta.usage.output_tokens` (output is the running total for the
+    /// message — the last value wins, not summed).
+    Anthropic,
+    /// OpenAI chat-completions: a terminal chunk (empty `choices`) carrying
+    /// `usage.{prompt_tokens,completion_tokens}` once `include_usage` is set.
+    OpenAiCompat,
+}
+
+impl UsageDialect {
+    /// Fold one parsed SSE event into `tally`. Pure (no I/O) so it is unit-tested
+    /// directly against representative event fixtures (§1.6).
+    fn fold(&self, tally: &mut UsageTally, evt: &serde_json::Value) {
+        match self {
+            UsageDialect::Anthropic => {
+                // input rides message_start.message.usage.input_tokens.
+                if let Some(n) = evt["message"]["usage"]["input_tokens"].as_u64() {
+                    tally.input = n;
+                    tally.reported = true;
+                }
+                // output rides message_delta.usage.output_tokens — a running
+                // total for the message, so SET (last wins), never add.
+                if let Some(n) = evt["usage"]["output_tokens"].as_u64() {
+                    tally.output = n;
+                    tally.reported = true;
+                }
+                // A message_delta may also restate input (e.g. with caching);
+                // honor a top-level input_tokens if present so the count stays
+                // complete.
+                if let Some(n) = evt["usage"]["input_tokens"].as_u64() {
+                    tally.input = n;
+                    tally.reported = true;
+                }
+            }
+            UsageDialect::OpenAiCompat => {
+                // With include_usage the content chunks carry `usage: null` and
+                // the terminal chunk carries the totals; guard on object so a
+                // null frame is ignored.
+                let usage = &evt["usage"];
+                if usage.is_object() {
+                    if let Some(n) = usage["prompt_tokens"].as_u64() {
+                        tally.input = n;
+                        tally.reported = true;
+                    }
+                    if let Some(n) = usage["completion_tokens"].as_u64() {
+                        tally.output = n;
+                        tally.reported = true;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A shared, cheaply-cloned accumulator that SUMS provider-reported usage across
+/// every model call in one ask — plan calls, corrective retries, and narration
+/// (§1.3). Passed as the optional out-param of `stream_answer`; each provider
+/// stream folds its own call's usage in when its SSE stream ends. `None` from
+/// `total()` means NO provider reported usage for the ask (§1.4).
+#[derive(Debug, Clone, Default)]
+pub struct UsageSink(std::sync::Arc<std::sync::Mutex<UsageTally>>);
+
+impl UsageSink {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add one completed call's tally (called by `sse_deltas` at stream end).
+    fn add_call(&self, call: &UsageTally) {
+        if let Ok(mut g) = self.0.lock() {
+            g.merge(call);
+        }
+    }
+
+    /// The summed per-ask usage, or None if NO provider reported usage — the
+    /// §1.4 "not reported" state, distinct from a real `Usage { 0, 0 }`.
+    pub fn total(&self) -> Option<Usage> {
+        self.0.lock().ok().and_then(|g| g.as_usage())
+    }
+}
+
 pub type AnswerStream = Pin<Box<dyn Stream<Item = String> + Send>>;
 
 /// Stream an answer as incremental text deltas.
+///
+/// `usage` is the optional per-ask sink (openspec: add-beam-loop §1): when
+/// `Some`, each underlying provider stream folds its provider-reported token
+/// usage into it, so a caller that shares one sink across an ask's model calls
+/// (plan / retry / narration) reads the summed total afterward. Passing `None`
+/// keeps the call text-only and behaviorally unchanged.
 pub fn stream_answer(
     question: String,
     contexts: Vec<Ctx>,
     cfg: ModelCfg,
     history: Vec<ChatTurn>,
+    usage: Option<UsageSink>,
 ) -> AnswerStream {
     Box::pin(async_stream::stream! {
         if contexts.is_empty() {
@@ -206,7 +369,8 @@ pub fn stream_answer(
             let mut emitted = false;
             let mut failed: Option<String> = None;
             {
-                let mut s = stream_local(&question, &contexts, &local_model, &history).await;
+                let mut s =
+                    stream_local(&question, &contexts, &local_model, &history, usage.clone()).await;
                 loop {
                     match s.next().await {
                         Some(Ok(delta)) => {
@@ -331,6 +495,7 @@ pub fn stream_answer(
                             &access,
                             &model,
                             &history,
+                            usage.clone(),
                         )
                         .await;
                         loop {
@@ -383,9 +548,15 @@ pub fn stream_answer(
             let mut emitted = false;
             let mut failed: Option<String> = None;
             {
-                let mut s =
-                    stream_claude(&question, &contexts, cfg.api_key.as_deref().unwrap_or(""), &model, &history)
-                        .await;
+                let mut s = stream_claude(
+                    &question,
+                    &contexts,
+                    cfg.api_key.as_deref().unwrap_or(""),
+                    &model,
+                    &history,
+                    usage.clone(),
+                )
+                .await;
                 loop {
                     match s.next().await {
                         Some(Ok(delta)) => {
@@ -433,7 +604,8 @@ pub fn stream_answer(
             let mut failed: Option<String> = None;
             {
                 let mut s =
-                    stream_openai_compat(p, &question, &contexts, &key, &model, &history).await;
+                    stream_openai_compat(p, &question, &contexts, &key, &model, &history, usage.clone())
+                        .await;
                 loop {
                     match s.next().await {
                         Some(Ok(delta)) => {
@@ -482,6 +654,7 @@ async fn stream_openai_compat(
     api_key: &str,
     model: &str,
     history: &[ChatTurn],
+    usage: Option<UsageSink>,
 ) -> DeltaStream {
     stream_chat_completions(
         provider.chat_url.to_string(),
@@ -493,6 +666,7 @@ async fn stream_openai_compat(
         api_key,
         model,
         history,
+        usage,
     )
     .await
 }
@@ -514,6 +688,7 @@ async fn stream_chat_completions(
     bearer: &str,
     model: &str,
     history: &[ChatTurn],
+    usage: Option<UsageSink>,
 ) -> DeltaStream {
     let mut messages: Vec<serde_json::Value> =
         vec![json!({ "role": "system", "content": SYSTEM_PROMPT })];
@@ -527,6 +702,11 @@ async fn stream_chat_completions(
         "messages": messages,
     });
     body[max_tokens_param] = json!(REMOTE_MAX_TOKENS);
+    // Ask for a terminal usage chunk (openspec: add-beam-loop §1) so the stream
+    // reports prompt/completion tokens. Rides the stream already opened — no new
+    // egress. A vendor that ignores it simply reports nothing → the §1.4
+    // fallback (usage stays unreported, never a chars/4 guess).
+    body["stream_options"] = json!({ "include_usage": true });
     let bearer = bearer.to_string();
     Box::pin(async_stream::stream! {
         let client = http_client();
@@ -555,9 +735,12 @@ async fn stream_chat_completions(
             ));
             return;
         }
-        let mut inner = sse_deltas(res, |evt| {
-            evt["choices"][0]["delta"]["content"].as_str().map(String::from)
-        });
+        let mut inner = sse_deltas(
+            res,
+            |evt| evt["choices"][0]["delta"]["content"].as_str().map(String::from),
+            UsageDialect::OpenAiCompat,
+            usage,
+        );
         while let Some(item) = inner.next().await {
             yield item;
         }
@@ -603,13 +786,21 @@ pub async fn validate_key(provider_id: &str, api_key: &str) -> Result<(), String
 
 type DeltaStream = Pin<Box<dyn Stream<Item = anyhow::Result<String>> + Send>>;
 
-/// Parse an SSE byte stream into `data:` payload deltas via `pick_delta`.
+/// Parse an SSE byte stream into `data:` payload deltas via `pick_delta`, and
+/// (openspec: add-beam-loop §1) fold this call's provider-reported token usage
+/// per `dialect`, flushing the total into `usage` when the stream drains. Text
+/// deltas are yielded exactly as before; usage rides the SAME stream, so this
+/// adds no egress.
 fn sse_deltas(
     res: reqwest::Response,
     pick_delta: fn(&serde_json::Value) -> Option<String>,
+    dialect: UsageDialect,
+    usage: Option<UsageSink>,
 ) -> DeltaStream {
     Box::pin(async_stream::stream! {
         let mut buf = String::new();
+        // This call's usage, folded across its events and flushed once at end.
+        let mut call_usage = UsageTally::default();
         let mut body = res.bytes_stream();
         while let Some(chunk) = body.next().await {
             let chunk = match chunk {
@@ -630,6 +821,8 @@ fn sse_deltas(
                     continue;
                 }
                 if let Ok(evt) = serde_json::from_str::<serde_json::Value>(payload) {
+                    // Fold usage from the same parsed event before picking text.
+                    dialect.fold(&mut call_usage, &evt);
                     if let Some(delta) = pick_delta(&evt) {
                         if !delta.is_empty() {
                             yield Ok(delta);
@@ -638,6 +831,12 @@ fn sse_deltas(
                 }
                 // Non-JSON keep-alive frames are ignored.
             }
+        }
+        // Stream drained cleanly: add this call's reported usage to the shared
+        // per-ask sink. An early error `return` above skips this — a call that
+        // never completed has no reliable count to report.
+        if let Some(sink) = &usage {
+            sink.add_call(&call_usage);
         }
     })
 }
@@ -648,6 +847,7 @@ async fn stream_claude(
     api_key: &str,
     model: &str,
     history: &[ChatTurn],
+    usage: Option<UsageSink>,
 ) -> DeltaStream {
     let mut messages: Vec<serde_json::Value> = prior_turns(history)
         .iter()
@@ -690,13 +890,18 @@ async fn stream_claude(
             ));
             return;
         }
-        let mut inner = sse_deltas(res, |evt| {
-            if evt["type"] == "content_block_delta" && evt["delta"]["type"] == "text_delta" {
-                evt["delta"]["text"].as_str().map(String::from)
-            } else {
-                None
-            }
-        });
+        let mut inner = sse_deltas(
+            res,
+            |evt| {
+                if evt["type"] == "content_block_delta" && evt["delta"]["type"] == "text_delta" {
+                    evt["delta"]["text"].as_str().map(String::from)
+                } else {
+                    None
+                }
+            },
+            UsageDialect::Anthropic,
+            usage,
+        );
         while let Some(item) = inner.next().await {
             yield item;
         }
@@ -812,6 +1017,7 @@ async fn stream_local(
     contexts: &[Ctx],
     model: &str,
     history: &[ChatTurn],
+    usage: Option<UsageSink>,
 ) -> DeltaStream {
     let contexts = clamp_local_contexts(contexts);
     let history = clamp_local_history(history);
@@ -825,6 +1031,11 @@ async fn stream_local(
         "model": model,
         "max_tokens": 1024,
         "stream": true,
+        // Ask for a terminal usage chunk (openspec: add-beam-loop §1). Local
+        // llama-server reports tokens (and $0 — loopback is not egress); a
+        // server that ignores it falls back to unreported (§1.4). PARITY: the
+        // TS twin body omits this (usage parse is Rust-shipped, §1.5).
+        "stream_options": { "include_usage": true },
         // llama-server extension (harmlessly ignored by Ollama/LM Studio):
         // reuse the KV cache for the longest common prefix with the previous
         // request. The system prompt + conversation history ARE that prefix,
@@ -862,9 +1073,12 @@ async fn stream_local(
             ));
             return;
         }
-        let mut inner = sse_deltas(res, |evt| {
-            evt["choices"][0]["delta"]["content"].as_str().map(String::from)
-        });
+        let mut inner = sse_deltas(
+            res,
+            |evt| evt["choices"][0]["delta"]["content"].as_str().map(String::from),
+            UsageDialect::OpenAiCompat,
+            usage,
+        );
         while let Some(item) = inner.next().await {
             yield item;
         }
@@ -1067,5 +1281,97 @@ mod tests {
         // 300-char snippet clamp on the long one (+ the trailing ellipsis char).
         let snippet_len = blocks[1].chars().count() - "[2] **q2.csv** — ".chars().count() - 1;
         assert_eq!(snippet_len, 300, "snippet clamped to 300 chars");
+    }
+
+    // --- Engine-reported token accounting (openspec: add-beam-loop §1) ---------
+    // Fold representative SSE event fixtures per dialect (real event shapes) and
+    // assert the parser surfaces PROVIDER-REPORTED counts — never an estimate —
+    // and that a silent provider yields NO usage (distinct from a real 0) so §3
+    // shows "not reported" and §2 falls back to max_steps/deadline.
+
+    fn fold_all(dialect: UsageDialect, events: &[serde_json::Value]) -> UsageTally {
+        let mut t = UsageTally::default();
+        for e in events {
+            dialect.fold(&mut t, e);
+        }
+        t
+    }
+
+    #[test]
+    fn anthropic_default_usage_is_parsed() {
+        // Real Anthropic stream shape: input rides message_start, output rides
+        // the (running-total) message_delta; content_block_delta carries no
+        // usage. No request change is needed — Anthropic streams usage always.
+        let events = vec![
+            json!({"type":"message_start","message":{"usage":{"input_tokens":57,"output_tokens":1}}}),
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}),
+            json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":42}}),
+            json!({"type":"message_stop"}),
+        ];
+        let t = fold_all(UsageDialect::Anthropic, &events);
+        assert_eq!(t.as_usage(), Some(Usage { input: 57, output: 42 }));
+    }
+
+    #[test]
+    fn openai_compat_and_local_include_usage_terminal_chunk_is_parsed() {
+        // With stream_options.include_usage the content chunks carry usage:null
+        // and a terminal chunk (empty choices) carries the totals. Local llama
+        // uses this SAME OpenAI-compatible shape, so this covers both the hosted
+        // chat-completions providers and the local path.
+        let events = vec![
+            json!({"choices":[{"delta":{"content":"Hel"}}],"usage":null}),
+            json!({"choices":[{"delta":{"content":"lo"}}],"usage":null}),
+            json!({"choices":[],"usage":{"prompt_tokens":128,"completion_tokens":64,"total_tokens":192}}),
+        ];
+        let t = fold_all(UsageDialect::OpenAiCompat, &events);
+        assert_eq!(t.as_usage(), Some(Usage { input: 128, output: 64 }));
+        assert_eq!(t.as_usage().unwrap().total(), 192);
+    }
+
+    #[test]
+    fn silent_provider_reports_no_usage_never_zero_fabricated() {
+        // A vendor that ignored include_usage never sends a usage object. The
+        // tally must stay UNREPORTED (None) — NOT Usage{0,0} — so §3 shows "not
+        // reported" and §2 falls back to max_steps/deadline (never a chars/4
+        // guess, §1.4).
+        let events = vec![
+            json!({"choices":[{"delta":{"content":"Hello"}}]}),
+            json!({"choices":[{"delta":{"content":" world"}}]}),
+        ];
+        let t = fold_all(UsageDialect::OpenAiCompat, &events);
+        assert_eq!(t.as_usage(), None, "unreported must be None, not a 0 count");
+        assert!(!t.reported);
+    }
+
+    #[test]
+    fn usage_sums_across_calls_in_one_ask() {
+        // §1.3: one sink shared across an ask's plan + corrective retry +
+        // narration calls sums their reported usage. `sse_deltas` adds each
+        // call's tally at stream end; here we exercise that directly.
+        let sink = UsageSink::new();
+        let plan = fold_all(
+            UsageDialect::Anthropic,
+            &[
+                json!({"type":"message_start","message":{"usage":{"input_tokens":30}}}),
+                json!({"type":"message_delta","usage":{"output_tokens":10}}),
+            ],
+        );
+        let retry = fold_all(
+            UsageDialect::OpenAiCompat,
+            &[json!({"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":25}})],
+        );
+        sink.add_call(&plan);
+        sink.add_call(&retry);
+        assert_eq!(sink.total(), Some(Usage { input: 130, output: 35 }));
+    }
+
+    #[test]
+    fn empty_or_unreported_sink_stays_unreported() {
+        // An ask where no call reported usage: the sink is None (not 0/0), so
+        // the loop can never mistake it for a satisfied 0-token ceiling (§1.4).
+        let sink = UsageSink::new();
+        assert_eq!(sink.total(), None);
+        sink.add_call(&UsageTally::default());
+        assert_eq!(sink.total(), None);
     }
 }

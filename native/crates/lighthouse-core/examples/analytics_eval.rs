@@ -621,7 +621,7 @@ async fn nl_answer(
     question: &str,
 ) -> Result<(String, QueryResult), String> {
     let prompt = sql_question(question, None);
-    let mut stream = stream_answer(prompt, sql_ctxs.to_vec(), cfg.clone(), Vec::new());
+    let mut stream = stream_answer(prompt, sql_ctxs.to_vec(), cfg.clone(), Vec::new(), None);
     let mut raw = String::new();
     while let Some(d) = stream.next().await {
         raw.push_str(&d);
@@ -661,7 +661,7 @@ async fn narrate(
             });
         }
     }
-    let mut stream = stream_answer(question.to_string(), ctxs, cfg.clone(), Vec::new());
+    let mut stream = stream_answer(question.to_string(), ctxs, cfg.clone(), Vec::new(), None);
     let mut out = String::new();
     while let Some(d) = stream.next().await {
         out.push_str(&d);
