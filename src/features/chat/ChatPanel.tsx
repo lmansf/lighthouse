@@ -69,6 +69,7 @@ import {
   DocumentRegular,
   EditRegular,
   ErrorCircleRegular,
+  FilterRegular,
   HistoryRegular,
   OpenRegular,
   PinRegular,
@@ -76,6 +77,7 @@ import {
   SaveRegular,
   SendRegular,
   SettingsRegular,
+  ShieldRegular,
   SquareRegular,
   ThumbDislikeRegular,
   ThumbLikeRegular,
@@ -105,7 +107,12 @@ import { BriefingsPanel } from "@/features/chat/BriefingsPanel";
 import { PinMiniChart } from "@/features/chat/PinMiniChart";
 import { EgressShield } from "@/features/egress/EgressShield";
 import { ProviderSwitch } from "@/features/chat/ProviderSwitch";
-import { useChatStore, type TranscriptMessage } from "@/stores/useChatStore";
+import {
+  conversationsForContext,
+  useChatStore,
+  type TranscriptMessage,
+} from "@/stores/useChatStore";
+import { useInvestigationsStore } from "@/stores/useInvestigationsStore";
 import { chatHistoryLocked } from "@/stores/managedLocks";
 import { modKey } from "@/features/onboarding/ModeChooser";
 import { ACCENTS, BEAM_SWEEP } from "@/shell/theme";
@@ -237,6 +244,31 @@ const useStyles = makeStyles({
     marginBottom: tokens.spacingVerticalM,
   },
   headerMeta: { display: "flex", alignItems: "center", gap: tokens.spacingHorizontalS },
+  // Compact context header (openspec: add-investigations §4.2): the Title3 is
+  // the investigation's name with its scope size as a quiet baseline caption
+  // ("Ask" alone in the global context). The name truncates before it can
+  // shove the meta row around.
+  headerTitle: {
+    display: "flex",
+    alignItems: "baseline",
+    gap: tokens.spacingHorizontalS,
+    minWidth: 0,
+  },
+  headerTitleName: {
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  },
+  headerCaption: { color: tokens.colorNeutralForeground3, whiteSpace: "nowrap" },
+  // The hero's investigation line: name · scope + the policy badge, kept
+  // together so the context is visible even when the visible-files badge is
+  // replaced by the no-files card.
+  heroInvRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: tokens.spacingHorizontalS,
+    color: tokens.colorNeutralForeground3,
+  },
   // Positioning context for the floating "Jump to latest" pill, which hovers
   // over the scrolling transcript rather than taking layout space.
   bodyWrap: {
@@ -1880,10 +1912,44 @@ export function ChatPanel() {
   const providerId = useAuthStore((s) => s.onboarding.providerId);
   const providerLabel =
     MODEL_PROVIDERS.find((p) => p.id === providerId)?.label ?? "your AI provider";
-  const provenance =
-    !providerId || providerId === "local"
+
+  // --- Investigation context (openspec: add-investigations §4.2). The chat
+  //     store owns WHICH investigation is current; the investigations store
+  //     caches the engine records (name, scope, policy) behind it. ---
+  const currentInvestigationId = useChatStore((s) => s.currentInvestigationId);
+  const investigations = useInvestigationsStore((s) => s.investigations);
+  const ensureInvestigationsLoaded = useInvestigationsStore((s) => s.ensureLoaded);
+  useEffect(() => {
+    ensureInvestigationsLoaded();
+  }, [ensureInvestigationsLoaded]);
+  const currentInvestigation = useMemo(
+    () =>
+      currentInvestigationId
+        ? investigations.find((i) => i.id === currentInvestigationId) ?? null
+        : null,
+    [investigations, currentInvestigationId],
+  );
+  const investigationLocalOnly = currentInvestigation?.providerPolicy === "local-only";
+
+  const provenance = investigationLocalOnly
+    ? // The engine forces the private path for every ask in a local-only
+      // investigation (the cfg swap at the model_config chokepoint), so this
+      // line stays truthful regardless of the profile's active provider.
+      "Private — this investigation always answers on this device."
+    : !providerId || providerId === "local"
       ? "Private — answers are generated entirely on this device."
       : `Excerpts from files visible to AI are sent to ${providerLabel} to answer your questions.`;
+
+  // LIVE scope size: dangling scope ids (files deleted since scoping) don't
+  // count — the pill shows what the scope can actually reach right now.
+  // null = no investigation or an empty scope (= the whole vault, no pill).
+  const scopeCount = useMemo(() => {
+    if (!currentInvestigation || currentInvestigation.scopeFileIds.length === 0) return null;
+    const present = new Set(nodes.map((n) => n.id));
+    return currentInvestigation.scopeFileIds.filter((id) => present.has(id)).length;
+  }, [currentInvestigation, nodes]);
+  const scopeLabel =
+    scopeCount === null ? "Whole vault" : `Scoped to ${scopeCount} file${scopeCount === 1 ? "" : "s"}`;
 
   const [question, setQuestion] = useState("");
   // The transcript lives in a session store so it survives leaving/returning to
@@ -2435,6 +2501,13 @@ export function ChatPanel() {
     // lock (same fail-closed pairing as the conversation-note export below),
     // so a policy applied after mount can't let a disk write slip through.
     const persistAllowed = useChatStore.getState().persistEnabled && !chatHistoryLocked();
+    // Investigation context (openspec: add-investigations §4.2), captured at
+    // ask time: the id rides the wire (scope + local-only policy resolve
+    // ENGINE-side), and the settle-time conversation-ref write below reuses
+    // this exact id + conversation + persistAllowed verdict, so a mid-stream
+    // context or chat switch can never retarget any of them.
+    const investigationId = useChatStore.getState().currentInvestigationId ?? undefined;
+    const conversationIdAtAsk = useChatStore.getState().currentId;
     // The conversation so far (completed turns only — failed turns are excluded)
     // becomes the model's history. Read from the store, not the render closure,
     // so a retry that just removed its failed turn builds the right history.
@@ -2473,7 +2546,7 @@ export function ChatPanel() {
         history,
         attachmentIds,
         controller.signal,
-        { bypassCache: opts?.bypassCache === true, persistAllowed },
+        { bypassCache: opts?.bypassCache === true, persistAllowed, investigationId },
       )) {
         // Stop pressed: some transports (the Tauri fetch interceptor) don't
         // honor AbortSignal, so also bail out of the loop explicitly and keep
@@ -2524,6 +2597,15 @@ export function ChatPanel() {
       }
       if (controller.signal.aborted) {
         markStopped(asstId);
+      } else if (investigationId) {
+        // The ask succeeded inside an investigation: record this conversation
+        // on it — a REF (an opaque id), never a transcript — with the SAME
+        // persistAllowed verdict the ask itself carried. Fire-and-forget: the
+        // engine silently no-ops the write when the history posture (client
+        // opt-out or managed policy) disallows it.
+        void ragService
+          .addInvestigationConversationRef(investigationId, conversationIdAtAsk, persistAllowed)
+          .catch(() => {});
       }
     } catch (err) {
       if (controller.signal.aborted || (err instanceof DOMException && err.name === "AbortError")) {
@@ -2754,9 +2836,17 @@ export function ChatPanel() {
     setExportBusy(true);
     const title =
       conversations.find((c) => c.id === currentId)?.title.trim() || "Lighthouse chat";
+    // Inside an investigation the note lands in ITS folder under Lighthouse
+    // Notes/ — the engine resolves the folder from the record (openspec:
+    // add-investigations §3); the global context keeps the original path.
+    const investigationId = useChatStore.getState().currentInvestigationId ?? undefined;
     let next: { id?: string; name?: string; error?: string };
     try {
-      const res = await ragService.exportChat(title, transcriptMarkdown(msgs, title));
+      const res = await ragService.exportChat(
+        title,
+        transcriptMarkdown(msgs, title),
+        investigationId ? { investigationId } : undefined,
+      );
       next =
         res.error || !res.savedId
           ? { error: res.error ?? "export failed" }
@@ -2790,7 +2880,14 @@ export function ChatPanel() {
     const stillHere = () => useChatStore.getState().currentId === convo;
     setPinNotes((s) => ({ ...s, [asstId]: { pending: true } }));
     try {
-      const res = await ragService.pinAsk(question, meta.sql, meta.fileIds);
+      // The pin adopts the current investigation (openspec: add-investigations
+      // §3) — its membership; the global context leaves it uncategorized.
+      const res = await ragService.pinAsk(
+        question,
+        meta.sql,
+        meta.fileIds,
+        useChatStore.getState().currentInvestigationId ?? undefined,
+      );
       if (!stillHere()) return;
       if (res.error || !res.pin) {
         setPinNotes((s) => ({ ...s, [asstId]: { error: res.error ?? "could not pin" } }));
@@ -3322,15 +3419,17 @@ export function ChatPanel() {
     return recallRelated(question, conversations, { currentId });
   }, [historyPersistEnabled, question, conversations, currentId]);
 
-  // Recent conversations for the history drawer: real (non-empty) chats, newest
-  // first, filtered by the search box (title match).
+  // Recent conversations for the history drawer: real (non-empty) chats IN
+  // THE CURRENT CONTEXT (openspec: add-investigations — an investigation's
+  // chats live in it; the global view shows only unassigned ones, see
+  // conversationsForContext), newest first, filtered by the search box.
   const recentChats = useMemo(() => {
     const q = histSearch.trim().toLowerCase();
-    return conversations
+    return conversationsForContext(conversations, currentInvestigationId)
       .filter((c) => c.messages.length > 0)
       .filter((c) => !q || c.title.toLowerCase().includes(q))
       .sort((a, b) => b.updatedAt - a.updatedAt);
-  }, [conversations, histSearch]);
+  }, [conversations, histSearch, currentInvestigationId]);
 
   // Vault files offered by the attach picker: files not already attached,
   // filtered by the picker's search, capped so the list stays snappy.
@@ -3346,6 +3445,32 @@ export function ChatPanel() {
   const visibleBadgeText = `${includedFileIds.length} ${
     includedFileIds.length === 1 ? "file" : "files"
   } visible to AI`;
+
+  // Policy badge (openspec: add-investigations §4.2): a local-only
+  // investigation's on-device promise, in the provenance convention (amber
+  // tint = on-device). Rendered in BOTH headers; the ENGINE enforces the
+  // policy at the model-config chokepoint — this badge only tells the truth.
+  const onDeviceBadge = investigationLocalOnly ? (
+    <Tooltip content="This investigation always answers on-device" relationship="description">
+      <Badge appearance="tint" icon={<ShieldRegular />}>
+        On-device
+      </Badge>
+    </Tooltip>
+  ) : null;
+
+  // Scope pill (openspec: add-investigations §4.2), the attachBar register: a
+  // quiet reminder that asks here read only the investigation's files. Hidden
+  // for an empty scope (= the whole vault — nothing narrower to disclose).
+  // Per-ask attachments still override scope; their own bar says so beneath.
+  const scopePill =
+    currentInvestigation && scopeCount !== null ? (
+      <div className={styles.attachBar}>
+        <Text size={200} className={styles.attachHint}>
+          <FilterRegular fontSize={14} />
+          {scopeLabel} · {currentInvestigation.name}
+        </Text>
+      </div>
+    ) : null;
 
   const attachmentBar =
     attachments.length > 0 ? (
@@ -3556,6 +3681,7 @@ export function ChatPanel() {
           ))}
         </div>
       )}
+      {scopePill}
       {attachmentBar}
       <div className={styles.composerWrap}>
         {suggestsShown && (
@@ -3992,7 +4118,19 @@ export function ChatPanel() {
         {recentChats.length > 0 && <div className={styles.heroHistory}>{historyButton}</div>}
         <div className={styles.hero}>
           <span className={styles.beacon} />
-          <Title3 data-tour="beam">Ask Lighthouse</Title3>
+          <Title3 data-tour="beam">
+            {currentInvestigation ? currentInvestigation.name : "Ask Lighthouse"}
+          </Title3>
+          {/* Hero context line (openspec: add-investigations §4.2): name is the
+              title above; this row carries scope size + the policy badge. It
+              lives OUTSIDE the visible-files branch so the on-device promise
+              never disappears with the badge when no files are visible yet. */}
+          {currentInvestigation && (
+            <div className={styles.heroInvRow}>
+              <Text size={200}>{scopeLabel}</Text>
+              {onDeviceBadge}
+            </div>
+          )}
           <Text className={styles.heroHint}>
             Answers use only the files visible to AI. Drop a file from the explorer
             here to ask about that file alone.
@@ -4065,12 +4203,32 @@ export function ChatPanel() {
       <div className={styles.conversation}>
         {pinAlertBanner}
         <div className={styles.header}>
-          <Title3>Ask</Title3>
+          {/* Compact context header (openspec: add-investigations §4.2): inside
+              an investigation the Title3 is its name with the scope size as a
+              quiet caption; the global context stays plain "Ask". */}
+          <div className={styles.headerTitle}>
+            <Title3 className={styles.headerTitleName}>
+              {currentInvestigation ? currentInvestigation.name : "Ask"}
+            </Title3>
+            {currentInvestigation && (
+              <Text size={200} className={styles.headerCaption}>
+                {scopeLabel}
+              </Text>
+            )}
+          </div>
           <div className={styles.headerMeta}>
             {/* Quick provider switch (time-savers): configured providers only;
                 selection applies from the NEXT ask — provenance + local-only
-                enforcement follow the active provider automatically. */}
-            <ProviderSwitch onSwitched={noteProviderSwitch} />
+                enforcement follow the active provider automatically. Inside a
+                local-only investigation the switch is moot (the engine forces
+                the private path), so it renders disabled with the reason. */}
+            <ProviderSwitch
+              onSwitched={noteProviderSwitch}
+              disabledReason={
+                investigationLocalOnly ? "This investigation always answers on-device" : undefined
+              }
+            />
+            {onDeviceBadge}
             <Badge appearance="tint">{visibleBadgeText}</Badge>
             <EgressShield />
             {historyButton}

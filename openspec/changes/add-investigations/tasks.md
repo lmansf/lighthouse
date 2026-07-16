@@ -16,8 +16,8 @@
 - [x] 3.3 Recall preference: retrieve gains preferred conversation ids; INVESTIGATION_BOOST above CONV_BOOST; parity-identical ordering test.
 
 ## 4. UI
-- [ ] 4.1 `InvestigationsNav` in the sidebar fragment (create/rename/archive, data-tour anchor); useChatStore currentInvestigationId + Conversation.investigationId; history drawer + newChat respect it.
-- [ ] 4.2 Scope pill + policy badge (hero and conversation headers); ask call sites pass investigationId; provider switch disabled inside local-only investigations.
+- [x] 4.1 `InvestigationsNav` in the sidebar fragment (create/rename/archive, data-tour anchor); useChatStore currentInvestigationId + Conversation.investigationId; history drawer + newChat respect it.
+- [x] 4.2 Scope pill + policy badge (hero and conversation headers); ask call sites pass investigationId; provider switch disabled inside local-only investigations.
 
 ## 5. Read-from-the-top scroll (client-only)
 - [ ] 5.1 Replace the streaming bottom-follow: anchor the streaming answer's top at stream start; hold unless the user scrolls; reduced-motion instant; widget untouched; opening old conversations unchanged.

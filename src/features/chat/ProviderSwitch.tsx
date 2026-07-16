@@ -57,9 +57,18 @@ function switchedNote(providerId: string, label: string): string {
 
 export function ProviderSwitch({
   onSwitched,
+  disabledReason,
 }: {
   /** House-style transient strip host (ChatPanel renders it by the composer). */
   onSwitched: (note: { ok: boolean; text: string }) => void;
+  /**
+   * Set = switching is unavailable and this is why (openspec:
+   * add-investigations: a local-only investigation always answers on-device,
+   * so the switch is moot there). The trigger stays focusable/hoverable
+   * (disabledFocusable) so the reason is announced and shown as the tooltip;
+   * the engine enforces the policy regardless — this is honesty, not the gate.
+   */
+  disabledReason?: string;
 }) {
   const styles = useStyles();
   const onboarding = useAuthStore((s) => s.onboarding);
@@ -122,7 +131,10 @@ export function ProviderSwitch({
     >
       <MenuTrigger disableButtonEnhancement>
         <Tooltip
-          content={`Answering with ${label}. Switch the AI model — applies from your next ask.`}
+          content={
+            disabledReason ??
+            `Answering with ${label}. Switch the AI model — applies from your next ask.`
+          }
           relationship="description"
         >
           <MenuButton
@@ -131,7 +143,8 @@ export function ProviderSwitch({
             className={styles.trigger}
             icon={<BrainCircuitRegular />}
             disabled={busy}
-            aria-label={`AI model: ${label} — switch`}
+            disabledFocusable={disabledReason !== undefined}
+            aria-label={disabledReason ?? `AI model: ${label} — switch`}
           >
             {label}
           </MenuButton>

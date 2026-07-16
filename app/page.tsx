@@ -8,6 +8,7 @@ import { FileExplorer } from "@/features/explorer/FileExplorer";
 // Static import (no dynamic gain): FileExplorer already pulls FileInspector
 // into the first-paint graph, so the host adds only its own few lines.
 import { FileInspectorHost } from "@/features/explorer/FileInspector";
+import { InvestigationsNav } from "@/features/investigations/InvestigationsNav";
 import { ChatPanel } from "@/features/chat/ChatPanel";
 import { VersionBadge } from "@/shell/VersionBadge";
 
@@ -64,7 +65,19 @@ export default function Home() {
       </div>
     );
   } else {
-    shell = <AppShell sidebar={<FileExplorer />} main={<ChatPanel />} />;
+    // Investigations mount ABOVE the file tree as a sidebar fragment
+    // (openspec: add-investigations design) — no Sidebar API change.
+    shell = (
+      <AppShell
+        sidebar={
+          <>
+            <InvestigationsNav />
+            <FileExplorer />
+          </>
+        }
+        main={<ChatPanel />}
+      />
+    );
   }
 
   return (
