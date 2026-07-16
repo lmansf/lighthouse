@@ -100,6 +100,13 @@ const checksFor = (P) => [
   ["check glyph on checked fill", P.checkFg, P.compound, 3],
   ["check glyph on checked hover", P.checkFg, P.compoundHover, 3],
   ["check glyph on checked pressed", P.checkFg, P.compoundPressed, 3],
+  // Beam chart series (AnalyticsChart SERIES_FILLS ride exactly these
+  // tokens: colorBrandForeground1, colorBrandForegroundLink,
+  // colorNeutralForeground2): each series mark against the answer-card /
+  // canvas surface it draws on (non-text, 1.4.11).
+  ["chart series 1 (amber) vs bg1", P.mark, P.bg1, 3],
+  ["chart series 2 (slate) vs bg1", P.link, P.bg1, 3],
+  ["chart series 3 (neutral ink) vs bg1", P.fg2, P.bg1, 3],
 ];
 
 let allPass = true;

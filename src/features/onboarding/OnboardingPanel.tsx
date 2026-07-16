@@ -47,6 +47,7 @@ import { useAuthStore } from "@/stores/useAuthStore";
 import { useRagStore } from "@/stores/useRagStore";
 import { ModeChooserAuto } from "./ModeChooser";
 import { isDesktopShell } from "@/shell/desktopBridge";
+import { BEAM_SWEEP } from "@/shell/theme";
 
 const useStyles = makeStyles({
   panel: {
@@ -54,6 +55,17 @@ const useStyles = makeStyles({
     flexDirection: "column",
     gap: tokens.spacingVerticalM,
     padding: tokens.spacingHorizontalL,
+  },
+  // The Beam signature crowning each slide: a slim ink→amber sweep band — a
+  // hero moment (BEAM_SWEEP is reserved for these) that never sits behind
+  // body text. providers.tsx stamps data-theme on <html>; the :global rule
+  // picks the sweep variant with the theme (same pattern as chat's beacon).
+  beamBand: {
+    height: "4px",
+    flexShrink: 0,
+    borderRadius: tokens.borderRadiusCircular,
+    backgroundImage: BEAM_SWEEP.light,
+    ':global([data-theme="dark"])': { backgroundImage: BEAM_SWEEP.dark },
   },
   hint: { color: tokens.colorNeutralForeground3 },
   // Quiet progress marker ("Step n of 3") so the user knows how much is left.
@@ -188,6 +200,7 @@ export function OnboardingPanel() {
           void finishVault();
         }}
       >
+        <span className={styles.beamBand} aria-hidden />
         <Text size={200} className={styles.stepLabel}>
           Step 1 of 3
         </Text>
@@ -258,6 +271,7 @@ export function OnboardingPanel() {
           continueFromModel();
         }}
       >
+        <span className={styles.beamBand} aria-hidden />
         <Text size={200} className={styles.stepLabel}>
           Step 2 of 3
         </Text>
@@ -378,6 +392,7 @@ export function OnboardingPanel() {
           void completeInclusion();
         }}
       >
+        <span className={styles.beamBand} aria-hidden />
         <Text size={200} className={styles.stepLabel}>
           Step 3 of 3
         </Text>

@@ -4,19 +4,20 @@
 > (`src/contracts/`) and store design below still govern the UI, but the
 > product has moved on from what this file describes: the engine is Rust
 > (`native/` — see `native/README.md` and `docs/ts-twin.md`), the shell is
-> Tauri (not Electron), and the theme is Forerunner steel/blue (the
-> sandy-beach theme described below shipped Jun 28 and was replaced Jun 30).
+> Tauri (not Electron), and the theme is the Beam identity — warm paper/ink
+> neutrals with a single amber accent (the sandy-beach theme described below
+> shipped Jun 28 and has been re-skinned twice since).
 > Kept for the seams and the history.
 
 RAG Vault lets a user curate which of their files and data sources are exposed to a RAG (retrieval-augmented generation) system.
-Browse files in an organic, sandy-beach light-themed File-Explorer-like tree, then toggle items as **included** or **excluded** from retrieval.
+Browse files in a calm, paper-surfaced File-Explorer-like tree (the Beam identity: quiet neutrals, one amber accent for what the AI can see), then toggle items as **included** or **excluded** from retrieval.
 Anything included is searchable by the AI; anything excluded is invisible to it.
 A Google-style chat surface (answer on top, related files below, streamed in realtime) queries only the included material.
 
 ## Stack
 
 - **Next.js 15** (App Router) + **React 19** + **TypeScript**, **npm**.
-- **Fluent UI 2** (`@fluentui/react-components`, Griffel `makeStyles` + design tokens) - the only styling system. Light theme (`createLightTheme`, a sandy-beach palette with sparing lighthouse-red and sky/amber accents) by default.
+- **Fluent UI 2** (`@fluentui/react-components`, Griffel `makeStyles` + design tokens) - the only styling system. Two Beam themes in `theme.ts` (Paper light / Ink dark: warm neutral surfaces, hairline strokes, one amber accent), AA-gated by `scripts/check-contrast.mjs`.
 - **Zustand** for small, domain-scoped shared stores.
 - Backend is a **local-first** implementation behind the real interfaces: a filesystem vault, local TF-IDF retrieval, and streamed chat (Claude, an on-device local model, or an extractive fallback), served by Node routes under `app/api/` (logic in `src/server/`). No cloud database. The in-memory mocks stay swappable behind the same interfaces.
 
@@ -66,7 +67,7 @@ Two Zustand stores carry shared state between features:
 
 | Feature | Folder | Owns | Depends on |
 |---|---|---|---|
-| shell | `src/shell/` | `FluentProvider`/sandy-beach light theme (`theme.ts`), app frame, collapsible left file sidebar (front-and-center chat in the main area) | contracts |
+| shell | `src/shell/` | `FluentProvider`/the Beam Paper & Ink themes (`theme.ts`), app frame, collapsible left file sidebar (front-and-center chat in the main area) | contracts |
 | onboarding | `src/features/onboarding/` | sign-in slides → model-select (provider/model/key + key links; the local provider needs no key) | contracts, `AuthService`, `useAuthStore` |
 | explorer | `src/features/explorer/` | file tree, hierarchical RAG toggle / selection mode, add files/folders, link files in place, remove from vault (recoverable trash) | contracts, `RagService`, `useRagStore` |
 | chat | `src/features/chat/` | running conversation (transcript of turns + follow-ups, "New chat" to reset) of answer-on-top (Markdown-rendered via `react-markdown`/`remark-gfm`) + reference files below (clickable to open the cited file natively on desktop), realtime streaming, drag/drop a file in to scope a question to just it (`attachmentFileIds`) | contracts, `ChatService`, `useRagStore`, `src/shell/dnd` |

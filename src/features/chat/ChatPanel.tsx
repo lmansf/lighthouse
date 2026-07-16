@@ -69,7 +69,6 @@ import {
   DocumentRegular,
   EditRegular,
   ErrorCircleRegular,
-  GlobeRegular,
   HistoryRegular,
   OpenRegular,
   PinRegular,
@@ -77,7 +76,6 @@ import {
   SaveRegular,
   SendRegular,
   SettingsRegular,
-  ShieldCheckmarkRegular,
   SquareRegular,
   ThumbDislikeRegular,
   ThumbLikeRegular,
@@ -289,6 +287,17 @@ const useStyles = makeStyles({
   },
 
   turn: { display: "flex", flexDirection: "column", gap: tokens.spacingVerticalXS },
+  // Each Q&A pair after the first opens on a hairline, so the transcript
+  // reads as document sections on the paper canvas rather than one long
+  // scroll. Applied to user turns only; the first turn stays clean.
+  turnBoundary: {
+    ...shorthands.borderTop("1px", "solid", tokens.colorNeutralStroke3),
+    paddingTop: tokens.spacingVerticalL,
+    ":first-child": {
+      borderTopStyle: "none",
+      paddingTop: "0",
+    },
+  },
   // The user's question — a compact tinted bubble aligned to the right.
   question: {
     alignSelf: "flex-end",
@@ -304,14 +313,23 @@ const useStyles = makeStyles({
     lineHeight: tokens.lineHeightBase400,
     // Tame the Markdown block elements react-markdown emits so answers read as a
     // tight, well-spaced block rather than with browser-default margins.
-    "& p": { marginTop: 0, marginBottom: tokens.spacingVerticalS },
+    // Prose keeps a generous document measure (~72ch) so answers read like
+    // pages on the paper canvas; data surfaces (tables, code, charts) keep
+    // the full column.
+    "& p": { marginTop: 0, marginBottom: tokens.spacingVerticalS, maxWidth: "72ch" },
     "& p:last-child": { marginBottom: 0 },
-    "& ul, & ol": { marginTop: 0, marginBottom: tokens.spacingVerticalS, paddingLeft: tokens.spacingHorizontalXL },
+    "& ul, & ol": {
+      marginTop: 0,
+      marginBottom: tokens.spacingVerticalS,
+      paddingLeft: tokens.spacingHorizontalXL,
+      maxWidth: "72ch",
+    },
     "& li": { marginBottom: tokens.spacingVerticalXXS },
     "& h1, & h2, & h3, & h4": {
       marginTop: tokens.spacingVerticalM,
       marginBottom: tokens.spacingVerticalXS,
       lineHeight: tokens.lineHeightBase300,
+      maxWidth: "72ch",
     },
     "& h1": { fontSize: tokens.fontSizeBase500 },
     "& h2, & h3, & h4": { fontSize: tokens.fontSizeBase400 },
@@ -345,6 +363,59 @@ const useStyles = makeStyles({
       borderLeftStyle: "solid",
       borderLeftColor: tokens.colorNeutralStroke2,
       color: tokens.colorNeutralForeground2,
+      maxWidth: "72ch",
+    },
+    // --- The Beam answer card (flagship): the verified result table, the
+    //     quiet engine footers between, and the chart ride ONE elevated card —
+    //     10px radius, rest elevation (hairline ring + soft ambient, one
+    //     token). Grouped by remarkAnswerCard below; presentation only, the
+    //     engine's bytes are never edited.
+    "& .lh-answer-card": {
+      backgroundColor: tokens.colorNeutralBackground1,
+      borderRadius: tokens.borderRadiusLarge,
+      boxShadow: tokens.shadow4,
+      ...shorthands.padding(tokens.spacingVerticalM, tokens.spacingHorizontalL),
+      marginTop: tokens.spacingVerticalM,
+      marginBottom: tokens.spacingVerticalM,
+    },
+    // The engine's SQL-transparency footer, folded quiet: a collapsed native
+    // disclosure whose <summary> is the engine's own label paragraph (text
+    // byte-identical), in the small-print register. Keyboard focus gets the
+    // theme's amber ring.
+    "& .lh-query-used": {
+      marginTop: tokens.spacingVerticalXS,
+      marginBottom: tokens.spacingVerticalXS,
+    },
+    "& .lh-query-used summary": {
+      cursor: "pointer",
+      width: "fit-content",
+      color: tokens.colorNeutralForeground3,
+      fontSize: tokens.fontSizeBase200,
+      lineHeight: tokens.lineHeightBase300,
+      userSelect: "none",
+    },
+    "& .lh-query-used summary:focus-visible": {
+      outline: `2px solid ${tokens.colorStrokeFocus2}`,
+      outlineOffset: "2px",
+      borderRadius: tokens.borderRadiusSmall,
+    },
+    "& .lh-query-used summary::marker": { color: tokens.colorNeutralForeground3 },
+    // The label rides an emphasis node; render it upright — a disclosure
+    // label, not a caption.
+    "& .lh-query-used em": { fontStyle: "normal" },
+    "& .lh-query-used pre": {
+      marginTop: tokens.spacingVerticalXS,
+      marginBottom: tokens.spacingVerticalXS,
+    },
+    // Engine footers (freshness stamp, truncation/coverage honesty lines) in
+    // the quiet small-print register — text untouched, numbers lining.
+    "& .lh-card-note": {
+      color: tokens.colorNeutralForeground3,
+      fontSize: tokens.fontSizeBase200,
+      lineHeight: tokens.lineHeightBase300,
+      marginTop: tokens.spacingVerticalXXS,
+      marginBottom: tokens.spacingVerticalXXS,
+      fontVariantNumeric: "tabular-nums",
     },
   },
   // The streaming turn's plain-text surface: preserve the model's newlines and
@@ -435,6 +506,13 @@ const useStyles = makeStyles({
     gap: tokens.spacingHorizontalXS,
     marginTop: tokens.spacingVerticalXS,
   },
+  // Quiet secondary actions under an answer (refine/Edit SQL/save/evidence
+  // pack/pin): subtle buttons carrying only a hairline, so the row reads as
+  // small print until engaged. Text/disabled colors stay Fluent's subtle
+  // defaults (fg2 / disabled) — only the stroke is added.
+  quietChip: {
+    ...shorthands.border("1px", "solid", tokens.colorNeutralStroke2),
+  },
   sqlDialogSurface: { maxWidth: "720px", width: "92vw" },
   sqlDialogContent: {
     display: "flex",
@@ -518,15 +596,29 @@ const useStyles = makeStyles({
   // Quiet one-liners: the "(stopped)" note and the zero-references honesty note.
   quietNote: { color: tokens.colorNeutralForeground3 },
   // Engine-emitted provenance stamp under an answer ("Answered on this device /
-  // via <vendor>") — a quiet icon+text row echoing the egress shield's style.
+  // via <vendor>") — a small hairline badge whose dot carries the origin:
+  // amber = on-device (the AA-gated mark amber), neutral = a named vendor.
+  // The stamp text itself is engine-emitted and byte-unchanged.
   provenanceStamp: {
     display: "inline-flex",
     alignItems: "center",
+    alignSelf: "flex-start",
     gap: tokens.spacingHorizontalXS,
-    marginTop: tokens.spacingVerticalXXS,
+    marginTop: tokens.spacingVerticalXS,
+    ...shorthands.padding("2px", tokens.spacingHorizontalS),
+    ...shorthands.border("1px", "solid", tokens.colorNeutralStroke2),
+    borderRadius: tokens.borderRadiusCircular,
     color: tokens.colorNeutralForeground3,
     fontVariantNumeric: "tabular-nums",
   },
+  provenanceDot: {
+    width: "6px",
+    height: "6px",
+    borderRadius: "50%",
+    flexShrink: 0,
+  },
+  provenanceDotDevice: { backgroundColor: tokens.colorBrandForeground1 },
+  provenanceDotVendor: { backgroundColor: tokens.colorNeutralForeground3 },
   // Answer-cache line under a replayed answer ("From cache · same data as
   // HH:MM · Re-run") — same quiet register as the provenance stamp; rendered
   // only from the final chunk's engine-emitted `meta.cachedAt`.
@@ -588,6 +680,25 @@ const useStyles = makeStyles({
     alignItems: "flex-end",
     gap: tokens.spacingHorizontalS,
     marginTop: tokens.spacingVerticalM,
+    // The ask box is the focal point — Spotlight-calm: ONE raised paper
+    // surface (generous 12px radius, level-2 elevation, roomy padding) that
+    // IS the field; the Textarea inside is stripped bare (composerField) so
+    // the shell carries the whole look.
+    backgroundColor: tokens.colorNeutralBackground1,
+    ...shorthands.borderRadius(tokens.borderRadiusXLarge),
+    boxShadow: tokens.shadow8,
+    ...shorthands.padding(
+      tokens.spacingVerticalS,
+      tokens.spacingHorizontalS,
+      tokens.spacingVerticalS,
+      tokens.spacingHorizontalM,
+    ),
+    // Focus is the theme's amber ring, drawn on the shell (the field's own
+    // indicator is suppressed below); outline follows the radius.
+    ":focus-within": {
+      outline: `2px solid ${tokens.colorStrokeFocus2}`,
+      outlineOffset: "1px",
+    },
   },
   // Multiline composer: starts one line tall (matching the Input it replaced)
   // and auto-grows with the draft up to COMPOSER_MAX_HEIGHT. The min/max here
@@ -595,6 +706,11 @@ const useStyles = makeStyles({
   composerField: {
     flexGrow: 1,
     minHeight: "32px",
+    // Bare inside the shell: no own border, fill, or focus underline — the
+    // composer shell above carries the box and the amber focus ring.
+    backgroundColor: "transparent",
+    ...shorthands.borderColor("transparent"),
+    "::after": { display: "none" },
     "& textarea": {
       height: "auto",
       maxHeight: `${COMPOSER_MAX_HEIGHT}px`,
@@ -861,11 +977,15 @@ function citeCardId(turnId: string, n: number): string {
  */
 const CITATION_MARKER = /\[(\d{1,3})\]/g;
 
-/** Minimal mdast node shape — just enough to walk the tree and split text nodes. */
+/** Minimal mdast node shape — just enough to walk the tree, split text nodes,
+ *  and (for remarkAnswerCard) regroup block siblings via the standard
+ *  `data.hName`/`hProperties` mdast→hast escape hatch. */
 interface MdNode {
   type: string;
   value?: string;
   url?: string;
+  lang?: string | null;
+  data?: { hName?: string; hProperties?: Record<string, unknown> };
   children?: MdNode[];
 }
 
@@ -911,6 +1031,153 @@ function splitCitationMarkers(node: MdNode): void {
     }
   }
   node.children = next;
+}
+
+/** The engine's SQL-transparency label (singular and plural forms), as the
+ *  emphasis-only paragraph that precedes the ```sql fence(s). Matched by
+ *  prefix so both forms fold; the label text itself is never touched. */
+const QUERY_LABEL_RE = /^Quer(?:y|ies) used/;
+
+/** All text under an mdast node (labels may nest inside emphasis). */
+function mdText(node: MdNode): string {
+  if (typeof node.value === "string") return node.value;
+  return (node.children ?? []).map(mdText).join("");
+}
+
+/** Paragraph consisting of the engine's SQL-transparency label. The plural
+ *  numbered form drags its first "1." numbering artifact into the label's
+ *  paragraph (an empty list item cannot interrupt a paragraph), so allow only
+ *  digits/dots/whitespace after the emphasis — never real prose. */
+function isQueryLabel(node: MdNode): boolean {
+  const first = node.children?.[0];
+  return (
+    node.type === "paragraph" &&
+    first?.type === "emphasis" &&
+    QUERY_LABEL_RE.test(mdText(first)) &&
+    /^[\s\d.]*$/.test((node.children ?? []).slice(1).map(mdText).join(""))
+  );
+}
+
+function isSqlFence(node: MdNode): boolean {
+  return node.type === "code" && node.lang === "sql";
+}
+
+function isChartFence(node: MdNode): boolean {
+  return node.type === "code" && node.lang === "lighthouse-chart";
+}
+
+/** Footer-shaped block between the result table and the chart: the folded SQL
+ *  disclosure, the engine's emphasis-led honesty lines (freshness, truncation,
+ *  coverage, row cap), or the stray list nodes a numbered multi-query footer
+ *  parses into. */
+function isFooterish(node: MdNode): boolean {
+  return (
+    node.type === "lhQueryDetails" ||
+    node.type === "list" ||
+    (node.type === "paragraph" && node.children?.[0]?.type === "emphasis")
+  );
+}
+
+/**
+ * Remark plugin (a plain tree transform, like remarkCitations — no added
+ * dependency) that gives an analytics answer its Beam card treatment without
+ * editing a byte of the engine's text:
+ *
+ *  1. The SQL-transparency footer — the engine's emphasis-only label
+ *     paragraph followed by its ```sql fence(s) — becomes a collapsed native
+ *     <details> disclosure. The label paragraph itself is re-tagged as the
+ *     <summary> (via `data.hName`), so the visible label stays byte-identical.
+ *  2. The verified result table, the quiet footers between, and the
+ *     ```lighthouse-chart fence are wrapped into ONE `.lh-answer-card` <div> —
+ *     the elevated flagship card (styled in `answer` above).
+ *  3. Emphasis-led footer paragraphs inside that card get `.lh-card-note`
+ *     for the quiet small-print register.
+ *
+ * Prose-only answers (no disclosure, no chart) are left completely alone, so
+ * an ordinary markdown table in a document summary renders as before.
+ */
+function remarkAnswerCard() {
+  return (tree: unknown) => {
+    const root = tree as MdNode;
+    const children = root.children;
+    if (!children) return;
+
+    // 1) Fold the SQL fence(s) behind their engine-written label. The plural
+    //    numbered form interleaves list artifacts between fences; they ride
+    //    along inside the disclosure. A label with no fence is left alone.
+    for (let i = 0; i < children.length; i += 1) {
+      if (!isQueryLabel(children[i])) continue;
+      let end = i + 1;
+      while (
+        end < children.length &&
+        (isSqlFence(children[end]) || children[end].type === "list")
+      ) {
+        end += 1;
+      }
+      if (!children.slice(i + 1, end).some(isSqlFence)) continue;
+      const label = children[i];
+      // The plural form's leading "1." numbering artifact rides the label's
+      // paragraph; split it into the disclosure body so the <summary> is the
+      // label alone — same bytes, same reading order.
+      const extras = (label.children ?? []).slice(1);
+      const extrasPara: MdNode | null =
+        extras.length > 0 && extras.map(mdText).join("").trim() !== ""
+          ? { type: "paragraph", children: extras }
+          : null;
+      if (extras.length > 0) label.children = [label.children![0]];
+      label.data = { ...label.data, hName: "summary" };
+      const details: MdNode = {
+        type: "lhQueryDetails",
+        data: { hName: "details", hProperties: { className: ["lh-query-used"] } },
+        children: [label, ...(extrasPara ? [extrasPara] : []), ...children.slice(i + 1, end)],
+      };
+      children.splice(i, end - i, details);
+      break; // the engine writes one transparency footer per answer
+    }
+
+    // 2) Card range: anchored on the chart fence (the engine appends it last)
+    //    or, chartless, on the disclosure; extends back across the footer run
+    //    to the result table directly above it, and forward to the end of the
+    //    footer run. No analytics markers → no card.
+    const detailsIdx = children.findIndex((n) => n.type === "lhQueryDetails");
+    let chartIdx = -1;
+    for (let i = children.length - 1; i >= 0; i -= 1) {
+      if (isChartFence(children[i])) {
+        chartIdx = i;
+        break;
+      }
+    }
+    if (detailsIdx === -1 && chartIdx === -1) return;
+    const anchor = chartIdx >= 0 ? chartIdx : detailsIdx;
+    let start = anchor;
+    while (start > 0 && isFooterish(children[start - 1])) start -= 1;
+    if (start > 0 && children[start - 1].type === "table") start -= 1;
+    let end = anchor;
+    while (
+      end + 1 < children.length &&
+      (isFooterish(children[end + 1]) || isChartFence(children[end + 1]))
+    ) {
+      end += 1;
+    }
+
+    // 3) Quiet register for the engine's footer lines riding the card.
+    for (let i = start; i <= end; i += 1) {
+      const n = children[i];
+      if (n.type === "paragraph" && n.children?.[0]?.type === "emphasis") {
+        n.data = {
+          ...n.data,
+          hProperties: { ...n.data?.hProperties, className: ["lh-card-note"] },
+        };
+      }
+    }
+
+    const card: MdNode = {
+      type: "lhAnswerCard",
+      data: { hName: "div", hProperties: { className: ["lh-answer-card"] } },
+      children: children.slice(start, end + 1),
+    };
+    children.splice(start, end - start + 1, card);
+  };
 }
 
 /** Reduce a thrown ask() failure to a short plain-language reason for the banner. */
@@ -1210,15 +1477,18 @@ function RefineChips({
   pinPending?: boolean;
 }) {
   const styles = useStyles();
+  // Quiet secondary actions (Beam): subtle + hairline, never a filled chip —
+  // the answer stays the loudest thing on the card.
   return (
     <div className={styles.refineRow}>
       {isLast &&
         REFINE_CHIPS.map((c) => (
           <Button
             key={c.label}
-            appearance="secondary"
+            appearance="subtle"
             size="small"
             shape="circular"
+            className={styles.quietChip}
             disabled={disabled}
             onClick={() => onAsk(c.ask)}
           >
@@ -1226,9 +1496,10 @@ function RefineChips({
           </Button>
         ))}
       <Button
-        appearance="secondary"
+        appearance="subtle"
         size="small"
         shape="circular"
+        className={styles.quietChip}
         icon={<CodeRegular />}
         disabled={disabled}
         onClick={() => onEditSql(meta)}
@@ -1237,9 +1508,10 @@ function RefineChips({
       </Button>
       {onSave && (
         <Button
-          appearance="secondary"
+          appearance="subtle"
           size="small"
           shape="circular"
+          className={styles.quietChip}
           icon={<SaveRegular />}
           disabled={disabled || savePending}
           onClick={() => onSave(meta)}
@@ -1249,9 +1521,10 @@ function RefineChips({
       )}
       {onEvidencePack && (
         <Button
-          appearance="secondary"
+          appearance="subtle"
           size="small"
           shape="circular"
+          className={styles.quietChip}
           icon={<DocumentRegular />}
           disabled={disabled || packPending}
           onClick={() => onEvidencePack(meta)}
@@ -1261,9 +1534,10 @@ function RefineChips({
       )}
       {onPin && (
         <Button
-          appearance="secondary"
+          appearance="subtle"
           size="small"
           shape="circular"
+          className={styles.quietChip}
           icon={<PinRegular />}
           disabled={disabled || pinPending}
           onClick={() => onPin(meta)}
@@ -1379,7 +1653,11 @@ const AnswerMarkdown = memo(function AnswerMarkdown({
     [styles, turnId, onCite, truncationNote],
   );
   return (
-    <MarkdownView content={cleaned} components={components} remarkPlugins={[remarkCitations]} />
+    <MarkdownView
+      content={cleaned}
+      components={components}
+      remarkPlugins={[remarkCitations, remarkAnswerCard]}
+    />
   );
 });
 
@@ -3666,7 +3944,9 @@ export function ChatPanel() {
           <div className={styles.body} ref={bodyRef} onScroll={handleBodyScroll}>
             {messages.map((m) =>
               m.role === "user" ? (
-                <div key={m.id} className={styles.turn}>
+                // Each new question opens a document section: hairline above
+                // (except the very first), so Q&A pairs read as pages.
+                <div key={m.id} className={mergeClasses(styles.turn, styles.turnBoundary)}>
                   {editingId === m.id ? (
                     <div className={styles.editWrap}>
                       <Textarea
@@ -3949,11 +4229,15 @@ export function ChatPanel() {
                           from the final chunk's meta — always truthful. */}
                       {m.meta && !m.error && !(streaming && m.id === lastId) && (
                         <Text size={200} className={styles.provenanceStamp}>
-                          {m.meta.origin === "device" ? (
-                            <ShieldCheckmarkRegular fontSize={14} />
-                          ) : (
-                            <GlobeRegular fontSize={14} />
-                          )}
+                          <span
+                            aria-hidden
+                            className={mergeClasses(
+                              styles.provenanceDot,
+                              m.meta.origin === "device"
+                                ? styles.provenanceDotDevice
+                                : styles.provenanceDotVendor,
+                            )}
+                          />
                           {provenanceStampText(m.meta)}
                         </Text>
                       )}

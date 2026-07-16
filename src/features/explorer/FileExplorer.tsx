@@ -309,9 +309,13 @@ const useStyles = makeStyles({
   rowIncluded: {
     backgroundColor: tokens.colorBrandBackground2,
   },
+  // Calm selection (Beam): a subtle inset — neutral fill plus a neutral
+  // hairline ring. The checked checkbox carries the state; the accent stays
+  // reserved for the visibility marks, so a big multi-select never floods the
+  // tree with amber.
   rowSelected: {
     backgroundColor: tokens.colorNeutralBackground1Selected,
-    ...shorthands.outline("1px", "solid", tokens.colorBrandStroke1),
+    ...shorthands.outline("1px", "solid", tokens.colorNeutralStroke1),
   },
   // Freshly-added rows slide in and glow, then settle — so a completed add
   // has a visible landing spot instead of files silently appearing.
@@ -353,13 +357,18 @@ const useStyles = makeStyles({
     backgroundColor: tokens.colorNeutralBackground2,
   },
   check: { flexShrink: 0 },
-  // The eye reads as part of the row until you need it; brand color marks the
-  // "visible to AI" state so scanning the tree shows what the AI can see.
+  // The eye reads as part of the row until you need it; the amber mark (the
+  // AA-gated foreground amber, via colorBrandForeground1) says "in the beam"
+  // — scanning the tree shows exactly what the AI can see.
   eyeOn: { color: tokens.colorBrandForeground1 },
   // A folder that's only partly visible to AI — distinct from a solid on/off.
   eyePartial: { color: tokens.colorBrandForeground2 },
-  // The lock (local-only) axis: a warm "danger" hue when engaged, deliberately
-  // NOT the brand color of the eye so the two controls never read as the same.
+  // The lock (local-only) axis KEEPS red — a deliberate Beam-era decision:
+  // amber here already means "exposed to AI" (the eye), the exact opposite of
+  // "private to this device", and these two toggles sit side by side in a
+  // 34px row where color is the scan channel. Red-as-"stop, never shared" is
+  // the clearer privacy signal, and the palette retains red as its one
+  // semantic non-brand hue. QuickOpen mirrors this pairing.
   lockOn: { color: tokens.colorPaletteRedForeground1 },
   size: {
     color: tokens.colorNeutralForeground3,

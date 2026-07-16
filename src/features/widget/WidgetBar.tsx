@@ -109,6 +109,11 @@ const useStyles = makeStyles({
     boxShadow: tokens.shadow16,
     ...shorthands.borderRadius(tokens.borderRadiusXLarge),
     overflow: "hidden",
+    // Spotlight-grade focus: the theme's amber ring while the bar has focus,
+    // drawn INSET so the frameless window's own edge never clips it.
+    ":focus-within": {
+      boxShadow: `${tokens.shadow16}, inset 0 0 0 2px ${tokens.colorStrokeFocus2}`,
+    },
   },
   // A quick fade + scale-in replayed on every summon (window "focus"): a pure
   // flourish on top of the resting pill — it never gates the drag region or the
@@ -245,12 +250,25 @@ const useStyles = makeStyles({
     textAlign: "center",
   },
   // The inline answer: a compact chat turn living under the pill — the answer
-  // "freezes" on the desktop (the shell holds blur-hide while it's open).
+  // "freezes" on the desktop (the shell holds blur-hide while it's open). It
+  // inherits the Beam answer-card treatment compactly: a 10px-radius card at
+  // rest elevation (hairline ring + soft ambient), inset from the pill's
+  // edges. The breathing room is the WRAP's padding — the resize effect
+  // measures getBoundingClientRect (padding counts, margins would not).
+  answerWrap: {
+    ...shorthands.padding(
+      tokens.spacingVerticalXS,
+      tokens.spacingHorizontalS,
+      tokens.spacingVerticalS,
+    ),
+  },
   answer: {
     display: "flex",
     flexDirection: "column",
     gap: tokens.spacingVerticalXS,
-    ...shorthands.borderTop("1px", "solid", tokens.colorNeutralStroke2),
+    backgroundColor: tokens.colorNeutralBackground1,
+    ...shorthands.borderRadius(tokens.borderRadiusLarge),
+    boxShadow: tokens.shadow2,
     ...shorthands.padding(tokens.spacingVerticalS, tokens.spacingHorizontalM),
   },
   answerHead: {
@@ -974,95 +992,97 @@ export function WidgetBar() {
           brings results back on top (the answer returns when the box clears,
           and a new ask replaces it). */}
       {answer && !query.trim() && (
-        <div ref={answerElRef} className={styles.answer} data-lh-widget-answer>
-          <div className={styles.answerHead}>
-            <ChatSparkleRegular className={styles.rowIcon} />
-            <Text size={200} className={styles.answerQ} title={answer.question}>
-              {answer.question}
-            </Text>
-            {answer.streaming ? (
-              <Button
-                size="small"
-                appearance="subtle"
-                icon={<SquareRegular />}
-                aria-label="Stop answering"
-                title="Stop answering"
-                onClick={() => abortRef.current?.abort()}
-              />
-            ) : (
-              <Button
-                size="small"
-                appearance="subtle"
-                icon={copied ? <CheckmarkRegular /> : <CopyRegular />}
-                aria-label="Copy answer"
-                title="Copy answer"
-                onClick={copyAnswer}
-              />
-            )}
-            <Button
-              size="small"
-              appearance="subtle"
-              icon={<OpenRegular />}
-              aria-label="Continue in Lighthouse"
-              title="Continue in Lighthouse — reopens this question in the full app"
-              onClick={continueInApp}
-            />
-            <Button
-              size="small"
-              appearance="subtle"
-              icon={<DismissRegular />}
-              aria-label="Clear answer (Esc)"
-              title="Clear answer (Esc)"
-              onClick={clearAnswer}
-            />
-          </div>
-          <div className={styles.answerBody}>
-            {answer.content ? (
-              // The pill is too small for the analytics charts the engine can
-              // append (```lighthouse-chart fences) — strip them here; the
-              // numbers are in the prose, and the main window draws the chart.
-              // The (?:-request)? arm also drops any residual chart-DIRECTIVE
-              // fence (chart-directive; the engine withholds these already —
-              // this is the widget's belt-and-braces strip).
-              <MarkdownView
-                content={answer.content.replace(
-                  /```lighthouse-chart(?:-request)?[\s\S]*?(```|$)/g,
-                  "",
-                )}
-              />
-            ) : answer.streaming ? (
-              <Text size={200} className={styles.snippet}>
-                {answer.progress || "Thinking…"}
+        <div ref={answerElRef} className={styles.answerWrap} data-lh-widget-answer>
+          <div className={styles.answer}>
+            <div className={styles.answerHead}>
+              <ChatSparkleRegular className={styles.rowIcon} />
+              <Text size={200} className={styles.answerQ} title={answer.question}>
+                {answer.question}
               </Text>
-            ) : null}
-            {answer.error && (
-              <Text size={200} className={styles.answerError}>
-                Couldn&apos;t get an answer — {answer.error}
-              </Text>
-            )}
-          </div>
-          {answer.refs.length > 0 && (
-            <div className={styles.refsRow}>
-              {answer.refs.slice(0, 4).map((r) => (
+              {answer.streaming ? (
                 <Button
-                  key={r.fileId}
                   size="small"
-                  appearance="outline"
-                  title={r.snippet}
-                  onClick={() => previewCitation(r)}
-                >
-                  {r.name}
-                </Button>
-              ))}
+                  appearance="subtle"
+                  icon={<SquareRegular />}
+                  aria-label="Stop answering"
+                  title="Stop answering"
+                  onClick={() => abortRef.current?.abort()}
+                />
+              ) : (
+                <Button
+                  size="small"
+                  appearance="subtle"
+                  icon={copied ? <CheckmarkRegular /> : <CopyRegular />}
+                  aria-label="Copy answer"
+                  title="Copy answer"
+                  onClick={copyAnswer}
+                />
+              )}
+              <Button
+                size="small"
+                appearance="subtle"
+                icon={<OpenRegular />}
+                aria-label="Continue in Lighthouse"
+                title="Continue in Lighthouse — reopens this question in the full app"
+                onClick={continueInApp}
+              />
+              <Button
+                size="small"
+                appearance="subtle"
+                icon={<DismissRegular />}
+                aria-label="Clear answer (Esc)"
+                title="Clear answer (Esc)"
+                onClick={clearAnswer}
+              />
             </div>
-          )}
-          {/* Engine-emitted provenance stamp (final chunk), compact for the pill.
-              Truthful by construction — read only from meta, never model text. */}
-          {answer.meta && !answer.streaming && (
-            <Text size={100} className={styles.provenance}>
-              {widgetProvenance(answer.meta)}
-            </Text>
-          )}
+            <div className={styles.answerBody}>
+              {answer.content ? (
+                // The pill is too small for the analytics charts the engine can
+                // append (```lighthouse-chart fences) — strip them here; the
+                // numbers are in the prose, and the main window draws the chart.
+                // The (?:-request)? arm also drops any residual chart-DIRECTIVE
+                // fence (chart-directive; the engine withholds these already —
+                // this is the widget's belt-and-braces strip).
+                <MarkdownView
+                  content={answer.content.replace(
+                    /```lighthouse-chart(?:-request)?[\s\S]*?(```|$)/g,
+                    "",
+                  )}
+                />
+              ) : answer.streaming ? (
+                <Text size={200} className={styles.snippet}>
+                  {answer.progress || "Thinking…"}
+                </Text>
+              ) : null}
+              {answer.error && (
+                <Text size={200} className={styles.answerError}>
+                  Couldn&apos;t get an answer — {answer.error}
+                </Text>
+              )}
+            </div>
+            {answer.refs.length > 0 && (
+              <div className={styles.refsRow}>
+                {answer.refs.slice(0, 4).map((r) => (
+                  <Button
+                    key={r.fileId}
+                    size="small"
+                    appearance="outline"
+                    title={r.snippet}
+                    onClick={() => previewCitation(r)}
+                  >
+                    {r.name}
+                  </Button>
+                ))}
+              </div>
+            )}
+            {/* Engine-emitted provenance stamp (final chunk), compact for the pill.
+                Truthful by construction — read only from meta, never model text. */}
+            {answer.meta && !answer.streaming && (
+              <Text size={100} className={styles.provenance}>
+                {widgetProvenance(answer.meta)}
+              </Text>
+            )}
+          </div>
         </div>
       )}
     </div>

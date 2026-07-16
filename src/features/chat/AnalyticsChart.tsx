@@ -75,11 +75,19 @@ const useStyles = makeStyles({
   },
 });
 
-/** Series palette from the theme; cycles if the engine ever sends more. */
+/**
+ * Series palette from the theme — the Beam amber leads; the two companions
+ * are quiet by design (the slate link hue and the secondary ink), so a chart
+ * carries one accent, not three. All ride tokens (auto light/dark) and clear
+ * WCAG 1.4.11's 3:1 non-text bar against the answer-card surface in BOTH
+ * themes: light 3.99 / 5.49 / 6.55, dark 8.84 / 8.85 / 7.55 vs bg1 — gated by
+ * the "chart series" rows in scripts/check-contrast.mjs. Cycles if the engine
+ * ever sends more series.
+ */
 const SERIES_FILLS = [
   tokens.colorBrandForeground1,
-  tokens.colorPaletteBerryForeground2,
-  tokens.colorPaletteMarigoldForeground2,
+  tokens.colorBrandForegroundLink,
+  tokens.colorNeutralForeground2,
 ];
 
 function truncateLabel(l: string): string {
