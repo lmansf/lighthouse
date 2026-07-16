@@ -297,8 +297,10 @@ function finalChunk(
  * a miss (or `bypassCache`, the Re-run affordance) runs the live pipeline
  * unchanged and inserts only a SUCCESSFUL, COMPLETED answer under the
  * ask-time key. Any cache failure degrades to a live run — the cache can only
- * add speed, never break an answer. KEEP IN SYNC with
- * lighthouse-core/src/synth.rs::answer_pipeline.
+ * add speed, never break an answer. `preferredConversationIds` (openspec:
+ * add-investigations) is the ask's investigation's conversationRefs —
+ * retrieval's recall preference; empty when no investigation rides the ask.
+ * KEEP IN SYNC with lighthouse-core/src/synth.rs::answer_pipeline.
  */
 export async function* answerPipeline(
   question: string,
@@ -307,11 +309,12 @@ export async function* answerPipeline(
   history: ChatTurn[],
   cfg: ModelCfg,
   cache: CacheCtl = {},
+  preferredConversationIds: string[] = [],
 ): AsyncGenerator<ChatChunk> {
   // Key at ask entry. A failing cache degrades to "no cache this ask".
   let key: string | null = null;
   try {
-    key = cacheKey(question, cfg.providerId, cfg.modelId, attachmentFileIds, isCloudProvider(cfg));
+    key = cacheKey(question, cfg.providerId, cfg.modelId, attachmentFileIds, preferredConversationIds, isCloudProvider(cfg));
     // Lookup also enforces the persistence posture (a disallowed ask deletes
     // any disk mirror even when it misses or bypasses).
     const hit = cacheLookup(key, cache);
@@ -344,6 +347,7 @@ export async function* answerPipeline(
     attachmentFileIds,
     history,
     cfg,
+    preferredConversationIds,
   )) {
     if (chunk.delta) {
       if (chunk.draft) {
@@ -395,6 +399,7 @@ async function* answerPipelineLive(
   attachmentFileIds: string[],
   history: ChatTurn[],
   cfg: ModelCfg,
+  preferredConversationIds: string[] = [],
 ): AsyncGenerator<ChatChunk> {
   // Provenance origin for this answer's stamp — resolved once from the active
   // provider (agrees with the audit record's `provider`). Every branch's final
@@ -411,7 +416,14 @@ async function* answerPipelineLive(
   const lastUserTurn = [...history].reverse().find((t) => t.role === "user");
   const retrievalQuery = lastUserTurn ? `${lastUserTurn.content}\n${question}` : question;
 
-  const initial = await registryRetrieve(retrievalQuery, includedFileIds, attachmentFileIds, 5, isCloud);
+  const initial = await registryRetrieve(
+    retrievalQuery,
+    includedFileIds,
+    attachmentFileIds,
+    5,
+    isCloud,
+    preferredConversationIds,
+  );
 
   // Instant acknowledgment: local models take seconds to a first token, but
   // retrieval lands in milliseconds — naming the sources NOW makes the answer
@@ -517,7 +529,14 @@ async function* answerPipelineLive(
     } else if (attachmentFileIds.length === 0 && crossDocCue(question)) {
       // Rank documents by a wide retrieval pass; when few files are included,
       // make sure each of them gets a seat even if the query's tokens miss it.
-      const wide = await registryRetrieve(retrievalQuery, includedFileIds, [], WIDE_K, isCloud);
+      const wide = await registryRetrieve(
+        retrievalQuery,
+        includedFileIds,
+        [],
+        WIDE_K,
+        isCloud,
+        preferredConversationIds,
+      );
       docs = rankDocsFromHits(wide.references, MAX_MAP_DOCS);
       const active = new Set(shareableFileIds(isCloud));
       const inScope = includedFileIds.filter((id) => active.has(id));
@@ -547,7 +566,9 @@ async function* answerPipelineLive(
 
       // This document's best chunks, via the attachment-scoping retrieval path
       // (one file id = retrieval constrained to exactly this file). doc.id is
-      // already shareable (filtered above), so isCloud only re-affirms it.
+      // already shareable (filtered above), so isCloud only re-affirms it. No
+      // recall preference: scoped to ONE document, there is no cross-candidate
+      // order to prefer.
       const perDoc = await vaultRetrieve(retrievalQuery, [], PER_DOC_CHUNKS, [], [doc.id], isCloud);
       const ctxs: Ctx[] =
         perDoc.contexts.length > 0

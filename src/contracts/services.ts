@@ -18,6 +18,8 @@ import type {
   DataSource,
   FileInspection,
   FileNode,
+  Investigation,
+  InvestigationCreateInput,
   OnboardingState,
   Pin,
   PolicySnapshot,
@@ -114,6 +116,13 @@ export interface RagService {
    * allowlist ("Lighthouse Notes"|"Lighthouse Results"; "md"|"html") — the
    * client can never name arbitrary folders or extensions. Returns the new
    * file's id + final name (collision-suffixed, never overwrites).
+   *
+   * `investigationId` (openspec: add-investigations): when an investigation
+   * is current, pass its id and the NOTES destination becomes the
+   * investigation's own folder — `Lighthouse Notes/<folderName>/`, with the
+   * folder resolved ENGINE-SIDE from the store (the client never names it).
+   * An explicit "Lighthouse Results" subdir (the evidence pack) is
+   * unaffected; an unknown id comes back as `error`.
    */
   exportChat(
     title: string,
@@ -121,6 +130,7 @@ export interface RagService {
     options?: {
       subdir?: "Lighthouse Notes" | "Lighthouse Results";
       ext?: "md" | "html";
+      investigationId?: string;
     },
   ): Promise<{ savedId?: string; savedName?: string; error?: string }>;
   /**
@@ -141,17 +151,25 @@ export interface RagService {
    * engine watches it: vault changes re-run the SQL (guarded, model-free) and
    * alert when the computed result changes. Re-pinning the same SQL replaces
    * the pin; past the cap the error explains the limit. The desktop engine
-   * primes the fresh pin's summary immediately.
+   * primes the fresh pin's summary immediately. `investigationId` (openspec:
+   * add-investigations) records the current investigation on the pin — its
+   * membership; absent leaves the pin uncategorized, and a re-pin adopts the
+   * new ask's investigation.
    */
   pinAsk(
     question: string,
     sql: string,
     fileIds: string[],
+    investigationId?: string,
   ): Promise<{ pin?: Pin; error?: string }>;
   /** Remove a pin (idempotent). */
   unpinAsk(id: string): Promise<void>;
-  /** All pins, oldest first. */
-  listPins(): Promise<Pin[]>;
+  /**
+   * All pins, oldest first. `investigationId` (openspec: add-investigations)
+   * filters to the pins carrying that investigation; absent = all pins, the
+   * original behavior.
+   */
+  listPins(investigationId?: string): Promise<Pin[]>;
   /**
    * Re-run every pin now (manual refresh). Returns the pins whose computed
    * result changed plus the refreshed list. PARITY: the web dev twin can't
@@ -261,6 +279,56 @@ export interface RagService {
    * dev twin composes from each pin's last known summary (no before).
    */
   refreshBriefingNote(): Promise<{ savedId?: string; savedName?: string; error?: string }>;
+  /**
+   * Investigations (openspec: add-investigations): named, durable containers
+   * for analysis. Every record in creation order — the caller filters
+   * archived ones (archive hides, never deletes). `pinRefs`/`noteRefs` come
+   * back derived by the engine at read time (pins carrying the id; files
+   * under the investigation's notes folder).
+   */
+  listInvestigations(): Promise<Investigation[]>;
+  /**
+   * Create an investigation. The engine mints the id, stamps creation time,
+   * fixes the sanitized notes folder name, and validates: non-empty name,
+   * unique case-insensitively (archived records count). Empty/absent
+   * `scopeFileIds` = whole vault. A validation rejection comes back as
+   * `error` with the engine's reason (like addRule), so the create form can
+   * surface it inline.
+   */
+  createInvestigation(
+    input: InvestigationCreateInput,
+  ): Promise<{ investigation?: Investigation; error?: string }>;
+  /**
+   * Rename an investigation — same uniqueness rule as create (a case change
+   * of its own name is allowed). The notes `folderName` deliberately does
+   * NOT move: membership = location, and rename moves nothing.
+   */
+  renameInvestigation(
+    id: string,
+    name: string,
+  ): Promise<{ investigation?: Investigation; error?: string }>;
+  /**
+   * Archive or unarchive — a visibility flag only. Nothing cascades or is
+   * deleted: pins, notes, scope, and conversation refs stay untouched, and
+   * unarchiving restores the investigation fully.
+   */
+  setInvestigationArchived(
+    id: string,
+    archived: boolean,
+  ): Promise<{ investigation?: Investigation; error?: string }>;
+  /**
+   * Record a conversation ref (an opaque client Conversation.id — never a
+   * transcript). The engine accepts it only when `persistAllowed` (the
+   * client's history verdict: persistEnabled && !chatHistoryLocked(), the
+   * same value the ask path sends) AND the managed policy allow history;
+   * either false ⇒ a silent no-op — the returned record simply lacks the
+   * ref. Refs dedupe.
+   */
+  addInvestigationConversationRef(
+    id: string,
+    conversationId: string,
+    persistAllowed: boolean,
+  ): Promise<{ investigation?: Investigation; error?: string }>;
 }
 
 /**
@@ -302,6 +370,14 @@ export interface AuthService {
 export interface AskOptions {
   bypassCache?: boolean;
   persistAllowed?: boolean;
+  /**
+   * The investigation this ask runs inside (openspec: add-investigations).
+   * Engine-resolved: a non-empty scope becomes the ask's attachments unless
+   * explicit `attachmentFileIds` are passed (most-specific wins), and a
+   * local-only policy forces the private path at the model-config chokepoint.
+   * Absent = the global context.
+   */
+  investigationId?: string;
 }
 
 /** Streams an assistant answer plus its references for a user question. */

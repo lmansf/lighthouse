@@ -74,6 +74,15 @@ pub fn cross_doc_cue(question: &str) -> bool {
 /// (applied in `vault::retrieve`). Keep identical in the TS twin.
 pub const CONV_BOOST: f64 = 1.5;
 
+/// Recall preference for the current investigation (openspec:
+/// add-investigations): where `CONV_BOOST` applies, a conversation note
+/// BELONGING to the ask's investigation (its filename's `[cid8]` matches a
+/// preferred conversation id) is lifted this much FURTHER — preference, not
+/// exclusion: global notes still surface, ordered after. Applied in
+/// `vault::retrieve`. PARITY: keep identical to
+/// src/server/vault.ts::INVESTIGATION_BOOST.
+pub const INVESTIGATION_BOOST: f64 = 1.3;
+
 /// Anchored recall frames — a "what did I …" self-reference, not loose keywords.
 /// KEEP BYTE-IDENTICAL with the TS twin.
 const RECALL_FRAMES: &[&str] = &[
@@ -456,6 +465,9 @@ fn analytics_refs(regs: &[crate::analytics::TableReg]) -> (Vec<RagReference>, Ve
 /// `live_pipeline` unchanged and inserts only a SUCCESSFUL, COMPLETED answer
 /// under the ask-time key. Any cache doubt already read as a miss inside
 /// `answer_cache`, so this layer can only add speed, never break an answer.
+/// `preferred_conversation_ids` (openspec: add-investigations) is the ask's
+/// investigation's conversationRefs — retrieval's recall preference; empty
+/// when no investigation rides the ask.
 /// KEEP IN SYNC with src/server/synth.ts::answerPipeline.
 pub fn answer_pipeline(
     question: String,
@@ -464,6 +476,7 @@ pub fn answer_pipeline(
     history: Vec<ChatTurn>,
     cfg: ModelCfg,
     cache: crate::answer_cache::CacheCtl,
+    preferred_conversation_ids: Vec<String>,
 ) -> Pin<Box<dyn Stream<Item = ChatChunk> + Send>> {
     Box::pin(async_stream::stream! {
         let is_cloud = is_cloud_provider(&cfg);
@@ -474,12 +487,14 @@ pub fn answer_pipeline(
             let provider = cfg.provider_id.clone();
             let model = cfg.model_id.clone();
             let atts = attachment_file_ids.clone();
+            let prefs = preferred_conversation_ids.clone();
             tokio::task::spawn_blocking(move || {
                 crate::answer_cache::cache_key(
                     &q,
                     provider.as_deref(),
                     model.as_deref(),
                     &atts,
+                    &prefs,
                     is_cloud,
                 )
             })
@@ -516,8 +531,14 @@ pub fn answer_pipeline(
         // Miss or bypass: run live, observing the stream so only a successful,
         // completed answer is stored. The settled text mirrors the UI's rule:
         // a provisional draft is REPLACED by the first authoritative delta.
-        let mut inner =
-            live_pipeline(question, included_file_ids, attachment_file_ids, history, cfg);
+        let mut inner = live_pipeline(
+            question,
+            included_file_ids,
+            attachment_file_ids,
+            history,
+            cfg,
+            preferred_conversation_ids,
+        );
         let mut text = String::new();
         let mut draft_active = false;
         let mut final_chunk: Option<ChatChunk> = None;
@@ -570,6 +591,7 @@ fn live_pipeline(
     attachment_file_ids: Vec<String>,
     history: Vec<ChatTurn>,
     cfg: ModelCfg,
+    preferred_conversation_ids: Vec<String>,
 ) -> Pin<Box<dyn Stream<Item = ChatChunk> + Send>> {
     Box::pin(async_stream::stream! {
         // Provenance origin for this answer's stamp — resolved once from the
@@ -589,8 +611,15 @@ fn live_pipeline(
             None => question.clone(),
         };
 
-        let initial =
-            sources::retrieve(&retrieval_query, &included_file_ids, &attachment_file_ids, 5, is_cloud).await;
+        let initial = sources::retrieve(
+            &retrieval_query,
+            &included_file_ids,
+            &attachment_file_ids,
+            5,
+            is_cloud,
+            &preferred_conversation_ids,
+        )
+        .await;
 
         // Instant acknowledgment: local models take seconds to a first token,
         // but retrieval lands in milliseconds — naming the sources NOW makes
@@ -1107,8 +1136,15 @@ fn live_pipeline(
                     .map(|id| DocCandidate { id: id.clone(), name: String::new(), score: ASSUMED_DOC_SCORE })
                     .collect();
             } else if attachment_file_ids.is_empty() && cross_doc_cue(&question) {
-                let wide =
-                    sources::retrieve(&retrieval_query, &included_file_ids, &[], WIDE_K, is_cloud).await;
+                let wide = sources::retrieve(
+                    &retrieval_query,
+                    &included_file_ids,
+                    &[],
+                    WIDE_K,
+                    is_cloud,
+                    &preferred_conversation_ids,
+                )
+                .await;
                 docs = rank_docs_from_hits(&wide.references, MAX_MAP_DOCS);
                 let active: std::collections::HashSet<String> =
                     vault::shareable_file_ids(is_cloud).into_iter().collect();
@@ -1151,7 +1187,8 @@ fn live_pipeline(
 
                 // This document's best chunks via the attachment-scoping path.
                 // doc.id is already shareable (filtered above), so is_cloud here
-                // only re-affirms the guarantee.
+                // only re-affirms the guarantee. No recall preference: scoped to
+                // ONE document, there is no cross-candidate order to prefer.
                 let per_doc = vault::retrieve(
                     &retrieval_query,
                     &[],
@@ -1159,6 +1196,7 @@ fn live_pipeline(
                     &[],
                     std::slice::from_ref(&doc.id),
                     is_cloud,
+                    &[],
                 );
                 let mut ctxs: Vec<Ctx> = if per_doc.contexts.is_empty() {
                     vec![Ctx { name: name.clone(), text: preview_text.clone(), score: 1.0 }]

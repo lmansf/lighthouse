@@ -315,6 +315,195 @@ async fn wire_protocol_end_to_end() {
     assert!(vault_dir.path().join(".rag-vault/trash").exists());
 }
 
+/// Investigations §2 over the real wire (openspec: add-investigations): an
+/// ask carrying an `investigationId` resolves the investigation's scope
+/// through the attachment machinery (citations come only from scope), and a
+/// `local-only` investigation swaps the resolved model config to the private
+/// path at the model_config() chokepoint — under a cloud-configured profile
+/// with a (fake-keyed, never-dialed) provider, the final chunk's meta.origin
+/// says "device". Zero network: if the swap ever regressed, origin would
+/// stamp "anthropic" and this test fails before any citation check.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn investigation_scope_and_local_only_over_the_wire() {
+    let _env = lock_env();
+    let (base, _vault_dir) = spawn_server().await;
+    let client = reqwest::Client::new();
+
+    // Three fixture files; the decoy matches the probe query best and sits
+    // OUTSIDE the investigation's scope.
+    let form = reqwest::multipart::Form::new()
+        .part(
+            "files",
+            reqwest::multipart::Part::bytes(
+                b"the harbor ledger shows the missing shipment entries".to_vec(),
+            )
+            .file_name("alpha.md"),
+        )
+        .text("paths", "cases/alpha.md")
+        .part(
+            "files",
+            reqwest::multipart::Part::bytes(
+                b"harbor ledger notes about the missing shipment manifest".to_vec(),
+            )
+            .file_name("beta.md"),
+        )
+        .text("paths", "cases/beta.md")
+        .part(
+            "files",
+            reqwest::multipart::Part::bytes(
+                b"missing shipment missing shipment harbor ledger decoy dossier".to_vec(),
+            )
+            .file_name("decoy.md"),
+        )
+        .text("paths", "cases/decoy.md");
+    let up: Value = client
+        .post(format!("{base}/api/upload"))
+        .multipart(form)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(up["skipped"].as_array().unwrap().is_empty());
+    let r = client
+        .post(format!("{base}/api/rag"))
+        .json(&json!({ "op": "include", "nodeId": "cases", "included": true }))
+        .send()
+        .await
+        .unwrap();
+    assert!(r.status().is_success());
+    let all = json!(["cases/alpha.md", "cases/beta.md", "cases/decoy.md"]);
+
+    // Create the investigations over the wire (§1's op): one scoped to 2 of
+    // the 3 files, one local-only over the whole vault.
+    let created: Value = client
+        .post(format!("{base}/api/rag"))
+        .json(&json!({
+            "op": "investigations",
+            "action": "create",
+            "name": "Harbor case",
+            "scopeFileIds": ["cases/alpha.md", "cases/beta.md"],
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let scoped_id = created["investigation"]["id"].as_str().unwrap().to_string();
+    let created: Value = client
+        .post(format!("{base}/api/rag"))
+        .json(&json!({
+            "op": "investigations",
+            "action": "create",
+            "name": "Sealed",
+            "providerPolicy": "local-only",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let sealed_id = created["investigation"]["id"].as_str().unwrap().to_string();
+
+    // NDJSON /api/chat helper: (final chunk, concatenated deltas).
+    let chat = |body: Value| {
+        let client = client.clone();
+        let base = base.clone();
+        async move {
+            let res = client
+                .post(format!("{base}/api/chat"))
+                .json(&body)
+                .send()
+                .await
+                .unwrap();
+            assert!(res.status().is_success());
+            let text = res.text().await.unwrap();
+            let lines: Vec<Value> = text
+                .lines()
+                .map(|l| serde_json::from_str(l).expect("every line is a ChatChunk"))
+                .collect();
+            let last = lines.last().unwrap().clone();
+            assert_eq!(last["done"], true);
+            let full: String = lines
+                .iter()
+                .filter_map(|l| l["delta"].as_str().map(String::from))
+                .collect();
+            (last, full)
+        }
+    };
+    let ref_ids = |last: &Value| -> Vec<String> {
+        last["references"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["fileId"].as_str().unwrap().to_string())
+            .collect()
+    };
+
+    // Control (no investigationId): the out-of-scope decoy is a candidate.
+    let (last, _) = chat(json!({
+        "question": "where did the missing shipment go?",
+        "includedFileIds": all,
+    }))
+    .await;
+    assert!(
+        ref_ids(&last).contains(&"cases/decoy.md".to_string()),
+        "unscoped ask sees the decoy: {last}"
+    );
+
+    // Scoped ask: citations come ONLY from the investigation's scope — the
+    // scope rode the existing attachment machinery, so every downstream
+    // choke point (retrieval, honesty footers) applied verbatim.
+    let (last, _) = chat(json!({
+        "question": "what do the case notes say about the missing shipment?",
+        "includedFileIds": all,
+        "investigationId": scoped_id,
+    }))
+    .await;
+    let cited = ref_ids(&last);
+    assert!(!cited.is_empty(), "scoped ask still grounds: {last}");
+    for id in &cited {
+        assert!(
+            id == "cases/alpha.md" || id == "cases/beta.md",
+            "citation escaped the scope: {cited:?}"
+        );
+    }
+
+    // Cloud-configure the profile with a FAKE key (spawn_server cleared the
+    // env one). From here every ask would resolve a keyed anthropic config —
+    // stamping origin "anthropic" — unless the investigation swaps it.
+    let p: Value = client
+        .post(format!("{base}/api/profile"))
+        .json(&json!({ "op": "selectModel", "providerId": "anthropic", "modelId": "claude-haiku-4-5", "apiKey": "sk-test-fake" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(p["hasApiKey"], true, "profile really is cloud-keyed now");
+
+    // Local-only investigation, cloud profile: the cfg swap at the
+    // model_config() chokepoint means no cloud transport is ever built — the
+    // private path answers (local model absent here, so its extractive
+    // fallback), grounded, and the provenance stamp is truthfully on-device.
+    let (last, full) = chat(json!({
+        "question": "what does the harbor ledger show?",
+        "includedFileIds": all,
+        "investigationId": sealed_id,
+    }))
+    .await;
+    assert_eq!(
+        last["meta"]["origin"], "device",
+        "local-only must stamp on-device under a cloud profile: {last}"
+    );
+    assert!(!ref_ids(&last).is_empty(), "private path still grounds: {last}");
+    assert!(!full.is_empty(), "private path still answers");
+}
+
 /// Beam §2 (evidence packs): the exportChat op's optional subdir/ext routing.
 /// The default wire shape stays byte-compatible (markdown note into
 /// Lighthouse Notes/); the html/Lighthouse Results pair rides the SAME
@@ -388,6 +577,126 @@ async fn export_chat_routes_artifacts_through_the_allowlist() {
     assert!(
         !vault_dir.path().join("Lighthouse Notes/x.md").exists()
             && !vault_dir.path().join("Lighthouse Results/x.md").exists(),
+        "a rejected export writes nothing"
+    );
+}
+
+/// Investigations §3 over the real wire (openspec: add-investigations):
+/// exportChat with an investigationId lands under the investigation's OWN
+/// folder (engine-resolved — the client never names it), the evidence-pack
+/// destination is unaffected, unknown ids and client-sent folder segments
+/// reject, pinAsk records the membership, and the investigations listing
+/// derives pinRefs + noteRefs from those two sources of truth.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn investigation_belonging_over_the_wire() {
+    let _env = lock_env();
+    let (base, vault_dir) = spawn_server().await;
+    let client = reqwest::Client::new();
+    let post = |body: Value| client.post(format!("{base}/api/rag")).json(&body).send();
+
+    let created: Value = post(json!({
+        "op": "investigations", "action": "create", "name": "Harbor case",
+    }))
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    let inv_id = created["investigation"]["id"].as_str().unwrap().to_string();
+
+    // --- exportChat + investigationId: the note lands in the investigation's
+    //     folder, resolved engine-side from the store. -----------------------
+    let res: Value = post(json!({
+        "op": "exportChat", "title": "Team sync", "markdown": "# hi",
+        "investigationId": inv_id,
+    }))
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    assert_eq!(res["savedId"], "Lighthouse Notes/Harbor case/Team sync.md");
+    assert_eq!(res["savedName"], "Team sync.md");
+    assert!(vault_dir
+        .path()
+        .join("Lighthouse Notes/Harbor case/Team sync.md")
+        .exists());
+
+    // --- The evidence pack is unaffected: explicit Lighthouse Results stays
+    //     in Results even inside an investigation (packs are results, not
+    //     notes — note membership = location). ------------------------------
+    let res: Value = post(json!({
+        "op": "exportChat", "title": "pack", "markdown": "<html></html>",
+        "subdir": "Lighthouse Results", "ext": "html", "investigationId": inv_id,
+    }))
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    assert_eq!(res["savedId"], "Lighthouse Results/pack.html");
+
+    // --- pinAsk + investigationId: the pin carries its membership; the
+    //     filtered list narrows to it while the plain list stays "all". -----
+    let res: Value = post(json!({
+        "op": "pinAsk", "question": "how many?", "sql": "SELECT 1", "fileIds": ["a.csv"],
+        "investigationId": inv_id,
+    }))
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    let pin_id = res["pin"]["id"].as_str().unwrap().to_string();
+    assert_eq!(res["pin"]["investigationId"], inv_id.as_str());
+    let _: Value = post(json!({
+        "op": "pinAsk", "question": "global?", "sql": "SELECT 2", "fileIds": [],
+    }))
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    let all: Value = post(json!({ "op": "listPins" })).await.unwrap().json().await.unwrap();
+    assert_eq!(all["pins"].as_array().unwrap().len(), 2, "no filter = all pins");
+    let filtered: Value = post(json!({ "op": "listPins", "investigationId": inv_id }))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let filtered = filtered["pins"].as_array().unwrap();
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0]["id"], pin_id.as_str());
+
+    // --- The listing derives both memberships (§3): pins from pins.json,
+    //     notes from the investigation's folder. ----------------------------
+    let listed: Value = post(json!({ "op": "investigations", "action": "list" }))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let view = &listed["investigations"][0];
+    assert_eq!(view["pinRefs"], json!([pin_id]));
+    assert_eq!(
+        view["noteRefs"],
+        json!(["Lighthouse Notes/Harbor case/Team sync.md"])
+    );
+
+    // --- Rejections: an unknown id (a silently-global note would lose its
+    //     membership) and a client-SENT folder segment (the subdir allowlist
+    //     is unchanged — only the engine resolves investigation folders). ---
+    for bad in [
+        json!({ "op": "exportChat", "title": "x", "markdown": "x", "investigationId": "inv-nope" }),
+        json!({ "op": "exportChat", "title": "x", "markdown": "x", "subdir": "Lighthouse Notes/Harbor case" }),
+    ] {
+        let res = post(bad.clone()).await.unwrap();
+        assert_eq!(res.status().as_u16(), 400, "must reject: {bad}");
+    }
+    assert!(
+        !vault_dir.path().join("Lighthouse Notes/x.md").exists()
+            && !vault_dir.path().join("Lighthouse Notes/Harbor case/x.md").exists(),
         "a rejected export writes nothing"
     );
 }

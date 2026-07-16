@@ -27,6 +27,10 @@ class RealChatService implements ChatService {
         // booleans so the wire never carries undefined.
         bypassCache: opts?.bypassCache === true,
         persistAllowed: opts?.persistAllowed === true,
+        // The investigation this ask runs inside (openspec:
+        // add-investigations). Optional: JSON.stringify drops the key when
+        // absent, so a global-context ask stays byte-identical to today's.
+        investigationId: opts?.investigationId,
       }),
       signal,
     });

@@ -66,19 +66,19 @@ test("normalization folds case, whitespace, and trailing punctuation only", () =
 test("keyFromParts: attachment order folds; every other component re-keys", () => {
   const { keyFromParts } = cache;
   const d = "digest";
-  const base = keyFromParts("What were Q3 sales?", "openai", "gpt-5-mini", [], d);
-  assert.equal(keyFromParts("  what   WERE q3 sales?! ", "openai", "gpt-5-mini", [], d), base);
-  assert.notEqual(keyFromParts("What were Q4 sales?", "openai", "gpt-5-mini", [], d), base);
-  assert.notEqual(keyFromParts("What were Q3 sales?", "anthropic", "gpt-5-mini", [], d), base);
-  assert.notEqual(keyFromParts("What were Q3 sales?", "openai", "gpt-5", [], d), base);
-  assert.notEqual(keyFromParts("What were Q3 sales?", "openai", "gpt-5-mini", [], "other"), base);
-  assert.notEqual(keyFromParts("What were Q3 sales?", null, null, [], d), base);
+  const base = keyFromParts("What were Q3 sales?", "openai", "gpt-5-mini", [], [], d);
+  assert.equal(keyFromParts("  what   WERE q3 sales?! ", "openai", "gpt-5-mini", [], [], d), base);
+  assert.notEqual(keyFromParts("What were Q4 sales?", "openai", "gpt-5-mini", [], [], d), base);
+  assert.notEqual(keyFromParts("What were Q3 sales?", "anthropic", "gpt-5-mini", [], [], d), base);
+  assert.notEqual(keyFromParts("What were Q3 sales?", "openai", "gpt-5", [], [], d), base);
+  assert.notEqual(keyFromParts("What were Q3 sales?", "openai", "gpt-5-mini", [], [], "other"), base);
+  assert.notEqual(keyFromParts("What were Q3 sales?", null, null, [], [], d), base);
 
   // The attachment SET is the component: order and duplicates fold.
-  const withA = keyFromParts("q", "openai", null, ["a.md", "b.csv"], d);
-  assert.equal(keyFromParts("q", "openai", null, ["b.csv", "a.md", "a.md"], d), withA);
-  assert.notEqual(keyFromParts("q", "openai", null, [], d), withA);
-  assert.notEqual(keyFromParts("q", "openai", null, ["a.md"], d), withA);
+  const withA = keyFromParts("q", "openai", null, ["a.md", "b.csv"], [], d);
+  assert.equal(keyFromParts("q", "openai", null, ["b.csv", "a.md", "a.md"], [], d), withA);
+  assert.notEqual(keyFromParts("q", "openai", null, [], [], d), withA);
+  assert.notEqual(keyFromParts("q", "openai", null, ["a.md"], [], d), withA);
 });
 
 test("candidateDigest orders pairs and separates id from key", () => {
@@ -124,7 +124,7 @@ test("provider, model, attachments, marks, and freshness each re-key", () => {
 
   const q = "What were Q3 sales?";
   const key = (question, provider, model, atts, cloud) =>
-    cache.cacheKey(question, provider, model, atts, cloud);
+    cache.cacheKey(question, provider, model, atts, [], cloud);
 
   const base = key(q, "openai", "gpt-5-mini", [], true);
   assert.equal(key("  what   WERE q3 sales?! ", "openai", "gpt-5-mini", [], true), base);
@@ -321,4 +321,18 @@ test("E2E: re-ask replays with ZERO provider calls; a touched file runs live", a
   } finally {
     globalThis.fetch = realFetch;
   }
+});
+
+test("recall preference joins the key only when non-empty (openspec: add-investigations)", () => {
+  const { keyFromParts } = cache;
+  const d = "digest";
+  // Empty preference = the legacy key, byte-for-byte: pre-investigations
+  // entries and asks outside any investigation keep hitting.
+  const legacy = keyFromParts("q", "openai", null, ["a.md"], [], d);
+  assert.equal(keyFromParts("q", "openai", null, ["a.md"], [], d), legacy);
+  // A preference changes the key; the SET is the component (order/dupes fold).
+  const withPref = keyFromParts("q", "openai", null, ["a.md"], ["c1", "c2"], d);
+  assert.notEqual(withPref, legacy);
+  assert.equal(keyFromParts("q", "openai", null, ["a.md"], ["c2", "c1", "c1"], d), withPref);
+  assert.notEqual(keyFromParts("q", "openai", null, ["a.md"], ["c1"], d), withPref);
 });

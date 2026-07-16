@@ -126,18 +126,25 @@ pub fn candidate_digest(pairs: &[(String, String)]) -> String {
 
 /// The full cache key from pre-computed parts (pure — unit-testable without a
 /// vault). Attachments are sorted + deduped: the SET is what was asked.
+/// Preferred conversation ids (openspec: add-investigations — the current
+/// investigation's recall preference) join the key ONLY when non-empty, so
+/// every pre-investigations key — and every ask outside one — is unchanged
+/// and existing cache entries stay valid. Without this, a recall-cued answer
+/// cached in one investigation could replay inside another whose preferences
+/// order the references differently.
 /// KEEP IN SYNC with answerCache.ts::keyFromParts.
 pub fn key_from_parts(
     question: &str,
     provider_id: Option<&str>,
     model_id: Option<&str>,
     attachment_ids: &[String],
+    preferred_conversation_ids: &[String],
     candidate_digest: &str,
 ) -> String {
     let mut atts: Vec<&str> = attachment_ids.iter().map(|s| s.as_str()).collect();
     atts.sort_unstable();
     atts.dedup();
-    let material = format!(
+    let mut material = format!(
         "q:{}\nc:{}\np:{}\nm:{}\na:{}",
         normalize_question(question),
         candidate_digest,
@@ -145,6 +152,13 @@ pub fn key_from_parts(
         model_id.unwrap_or(""),
         atts.join("\u{0}"),
     );
+    if !preferred_conversation_ids.is_empty() {
+        let mut refs: Vec<&str> = preferred_conversation_ids.iter().map(|s| s.as_str()).collect();
+        refs.sort_unstable();
+        refs.dedup();
+        material.push_str("\nr:");
+        material.push_str(&refs.join("\u{0}"));
+    }
     sha256_hex(&material)
 }
 
@@ -157,10 +171,18 @@ pub fn cache_key(
     provider_id: Option<&str>,
     model_id: Option<&str>,
     attachment_ids: &[String],
+    preferred_conversation_ids: &[String],
     is_cloud: bool,
 ) -> String {
     let digest = candidate_digest(&crate::vault::shareable_freshness_keys(is_cloud));
-    key_from_parts(question, provider_id, model_id, attachment_ids, &digest)
+    key_from_parts(
+        question,
+        provider_id,
+        model_id,
+        attachment_ids,
+        preferred_conversation_ids,
+        &digest,
+    )
 }
 
 // --- Store ------------------------------------------------------------------------
@@ -275,26 +297,26 @@ mod tests {
     #[test]
     fn key_from_parts_is_order_insensitive_over_attachments_and_sensitive_to_everything_else() {
         let d = "digest";
-        let base = key_from_parts("What were Q3 sales?", Some("openai"), Some("gpt-5-mini"), &[], d);
+        let base = key_from_parts("What were Q3 sales?", Some("openai"), Some("gpt-5-mini"), &[], &[], d);
         // Normalized variants of the same question share the key…
         assert_eq!(
-            key_from_parts("  what   WERE q3 sales?! ", Some("openai"), Some("gpt-5-mini"), &[], d),
+            key_from_parts("  what   WERE q3 sales?! ", Some("openai"), Some("gpt-5-mini"), &[], &[], d),
             base
         );
         // …and every other component is load-bearing.
-        assert_ne!(key_from_parts("What were Q4 sales?", Some("openai"), Some("gpt-5-mini"), &[], d), base);
-        assert_ne!(key_from_parts("What were Q3 sales?", Some("anthropic"), Some("gpt-5-mini"), &[], d), base);
-        assert_ne!(key_from_parts("What were Q3 sales?", Some("openai"), Some("gpt-5"), &[], d), base);
-        assert_ne!(key_from_parts("What were Q3 sales?", Some("openai"), Some("gpt-5-mini"), &[], "other"), base);
-        assert_ne!(key_from_parts("What were Q3 sales?", None, None, &[], d), base);
+        assert_ne!(key_from_parts("What were Q4 sales?", Some("openai"), Some("gpt-5-mini"), &[], &[], d), base);
+        assert_ne!(key_from_parts("What were Q3 sales?", Some("anthropic"), Some("gpt-5-mini"), &[], &[], d), base);
+        assert_ne!(key_from_parts("What were Q3 sales?", Some("openai"), Some("gpt-5"), &[], &[], d), base);
+        assert_ne!(key_from_parts("What were Q3 sales?", Some("openai"), Some("gpt-5-mini"), &[], &[], "other"), base);
+        assert_ne!(key_from_parts("What were Q3 sales?", None, None, &[], &[], d), base);
 
         // The attachment SET is the component: order and duplicates fold.
         let a = ["a.md".to_string(), "b.csv".to_string()];
         let b = ["b.csv".to_string(), "a.md".to_string(), "a.md".to_string()];
-        let with_a = key_from_parts("q", Some("openai"), None, &a, d);
-        assert_eq!(key_from_parts("q", Some("openai"), None, &b, d), with_a);
-        assert_ne!(key_from_parts("q", Some("openai"), None, &[], d), with_a);
-        assert_ne!(key_from_parts("q", Some("openai"), None, &a[..1].to_vec(), d), with_a);
+        let with_a = key_from_parts("q", Some("openai"), None, &a, &[], d);
+        assert_eq!(key_from_parts("q", Some("openai"), None, &b, &[], d), with_a);
+        assert_ne!(key_from_parts("q", Some("openai"), None, &[], &[], d), with_a);
+        assert_ne!(key_from_parts("q", Some("openai"), None, &a[..1].to_vec(), &[], d), with_a);
     }
 
     #[test]
@@ -312,4 +334,24 @@ mod tests {
             "the NUL boundary keeps id/key material apart"
         );
     }
+    #[test]
+    fn recall_preference_joins_the_key_only_when_non_empty() {
+        // openspec: add-investigations — empty preference = the legacy key,
+        // byte-for-byte, so pre-investigations cache entries stay valid; a
+        // preference re-keys, and the SET is the component (order/dupes fold).
+        let d = "digest";
+        let atts = ["a.md".to_string()];
+        let legacy = key_from_parts("q", Some("openai"), None, &atts, &[], d);
+        assert_eq!(key_from_parts("q", Some("openai"), None, &atts, &[], d), legacy);
+        let p1 = ["c1".to_string(), "c2".to_string()];
+        let p2 = ["c2".to_string(), "c1".to_string(), "c1".to_string()];
+        let with_pref = key_from_parts("q", Some("openai"), None, &atts, &p1, d);
+        assert_ne!(with_pref, legacy);
+        assert_eq!(key_from_parts("q", Some("openai"), None, &atts, &p2, d), with_pref);
+        assert_ne!(
+            key_from_parts("q", Some("openai"), None, &atts, &p1[..1].to_vec(), d),
+            with_pref
+        );
+    }
+
 }

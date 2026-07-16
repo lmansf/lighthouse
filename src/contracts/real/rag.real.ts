@@ -10,6 +10,8 @@ import type {
   DataSource,
   FileInspection,
   FileNode,
+  Investigation,
+  InvestigationCreateInput,
   Pin,
   PolicySnapshot,
   EgressSnapshot,
@@ -128,16 +130,23 @@ class RealRagService implements RagService {
   async exportChat(
     title: string,
     markdown: string,
-    options?: { subdir?: "Lighthouse Notes" | "Lighthouse Results"; ext?: "md" | "html" },
+    options?: {
+      subdir?: "Lighthouse Notes" | "Lighthouse Results";
+      ext?: "md" | "html";
+      investigationId?: string;
+    },
   ): Promise<{ savedId?: string; savedName?: string; error?: string }> {
     // Absent fields keep the original markdown-note wire shape byte-for-byte;
-    // the evidence pack adds subdir/ext (engine-side strict allowlist).
+    // the evidence pack adds subdir/ext (engine-side strict allowlist), and an
+    // investigation ask adds investigationId — the engine resolves the notes
+    // folder from its store (openspec: add-investigations).
     return (await post({
       op: "exportChat",
       title,
       markdown,
       ...(options?.subdir ? { subdir: options.subdir } : {}),
       ...(options?.ext ? { ext: options.ext } : {}),
+      ...(options?.investigationId ? { investigationId: options.investigationId } : {}),
     })) as {
       savedId?: string;
       savedName?: string;
@@ -169,8 +178,17 @@ class RealRagService implements RagService {
     question: string,
     sql: string,
     fileIds: string[],
+    investigationId?: string,
   ): Promise<{ pin?: Pin; error?: string }> {
-    return (await post({ op: "pinAsk", question, sql, fileIds })) as {
+    // Absent investigationId keeps the original wire shape byte-for-byte —
+    // a global-context pin stays uncategorized (openspec: add-investigations).
+    return (await post({
+      op: "pinAsk",
+      question,
+      sql,
+      fileIds,
+      ...(investigationId ? { investigationId } : {}),
+    })) as {
       pin?: Pin;
       error?: string;
     };
@@ -180,8 +198,11 @@ class RealRagService implements RagService {
     await post({ op: "unpinAsk", id });
   }
 
-  async listPins(): Promise<Pin[]> {
-    const res = await post({ op: "listPins" });
+  async listPins(investigationId?: string): Promise<Pin[]> {
+    const res = await post({
+      op: "listPins",
+      ...(investigationId ? { investigationId } : {}),
+    });
     return Array.isArray(res.pins) ? (res.pins as Pin[]) : [];
   }
 
@@ -290,6 +311,70 @@ class RealRagService implements RagService {
       savedName?: string;
       error?: string;
     };
+  }
+
+  /**
+   * Mutating investigations sub-ops return validation failures as 400 +
+   * {error} (like addRule); read the body instead of throwing so the UI can
+   * surface the engine's reason inline.
+   */
+  private async investigationsOp(
+    body: Record<string, unknown>,
+  ): Promise<{ investigation?: Investigation; error?: string }> {
+    const r = await fetch("/api/rag", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ op: "investigations", ...body }),
+    });
+    const data = (await r.json().catch(() => ({}))) as {
+      investigation?: Investigation;
+      error?: string;
+    };
+    if (!r.ok) return { error: data.error ?? `POST /api/rag ${r.status}` };
+    return data;
+  }
+
+  async listInvestigations(): Promise<Investigation[]> {
+    const res = await post({ op: "investigations", action: "list" });
+    return Array.isArray(res.investigations) ? (res.investigations as Investigation[]) : [];
+  }
+
+  async createInvestigation(
+    input: InvestigationCreateInput,
+  ): Promise<{ investigation?: Investigation; error?: string }> {
+    return this.investigationsOp({
+      action: "create",
+      name: input.name,
+      scopeFileIds: input.scopeFileIds ?? [],
+      providerPolicy: input.providerPolicy ?? "default",
+    });
+  }
+
+  async renameInvestigation(
+    id: string,
+    name: string,
+  ): Promise<{ investigation?: Investigation; error?: string }> {
+    return this.investigationsOp({ action: "rename", id, name });
+  }
+
+  async setInvestigationArchived(
+    id: string,
+    archived: boolean,
+  ): Promise<{ investigation?: Investigation; error?: string }> {
+    return this.investigationsOp({ action: "setArchived", id, archived });
+  }
+
+  async addInvestigationConversationRef(
+    id: string,
+    conversationId: string,
+    persistAllowed: boolean,
+  ): Promise<{ investigation?: Investigation; error?: string }> {
+    return this.investigationsOp({
+      action: "addConversationRef",
+      id,
+      conversationId,
+      persistAllowed,
+    });
   }
 }
 

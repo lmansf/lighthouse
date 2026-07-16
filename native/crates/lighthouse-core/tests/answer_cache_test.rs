@@ -63,45 +63,45 @@ fn every_key_component_is_load_bearing_and_normalization_folds_noise_only() {
     vault::set_included("private.csv", true);
 
     let q = "What were Q3 sales?";
-    let base = answer_cache::cache_key(q, Some("openai"), Some("gpt-5-mini"), &[], true);
+    let base = answer_cache::cache_key(q, Some("openai"), Some("gpt-5-mini"), &[], &[], true);
 
     // Normalization: case, whitespace, and trailing `?!.` fold — nothing else.
     assert_eq!(
-        answer_cache::cache_key("  what   WERE q3 sales?! ", Some("openai"), Some("gpt-5-mini"), &[], true),
+        answer_cache::cache_key("  what   WERE q3 sales?! ", Some("openai"), Some("gpt-5-mini"), &[], &[], true),
         base
     );
     assert_ne!(
-        answer_cache::cache_key("What were Q4 sales?", Some("openai"), Some("gpt-5-mini"), &[], true),
+        answer_cache::cache_key("What were Q4 sales?", Some("openai"), Some("gpt-5-mini"), &[], &[], true),
         base,
         "a reworded question is a different key"
     );
 
     // Provider and model each re-key (a different narrator is a different answer).
-    assert_ne!(answer_cache::cache_key(q, Some("anthropic"), Some("gpt-5-mini"), &[], true), base);
-    assert_ne!(answer_cache::cache_key(q, Some("openai"), Some("gpt-5"), &[], true), base);
+    assert_ne!(answer_cache::cache_key(q, Some("anthropic"), Some("gpt-5-mini"), &[], &[], true), base);
+    assert_ne!(answer_cache::cache_key(q, Some("openai"), Some("gpt-5"), &[], &[], true), base);
 
     // The attachment SET re-keys; its order does not.
     let one = vec!["report.md".to_string()];
     let ab = vec!["report.md".to_string(), "private.csv".to_string()];
     let ba = vec!["private.csv".to_string(), "report.md".to_string()];
-    let with_one = answer_cache::cache_key(q, Some("openai"), Some("gpt-5-mini"), &one, true);
+    let with_one = answer_cache::cache_key(q, Some("openai"), Some("gpt-5-mini"), &one, &[], true);
     assert_ne!(with_one, base);
     assert_eq!(
-        answer_cache::cache_key(q, Some("openai"), Some("gpt-5-mini"), &ab, true),
-        answer_cache::cache_key(q, Some("openai"), Some("gpt-5-mini"), &ba, true)
+        answer_cache::cache_key(q, Some("openai"), Some("gpt-5-mini"), &ab, &[], true),
+        answer_cache::cache_key(q, Some("openai"), Some("gpt-5-mini"), &ba, &[], true)
     );
 
     // A local-only mark flip re-keys the CLOUD ask (the provider-effective
     // candidate set shrank) and leaves the DEVICE ask alone (the mark is inert
     // on-device — byte-identical answers, so the cache may keep serving).
-    let device_base = answer_cache::cache_key(q, Some("local"), None, &[], false);
+    let device_base = answer_cache::cache_key(q, Some("local"), None, &[], &[], false);
     vault::set_local_only("private.csv", true);
-    assert_ne!(answer_cache::cache_key(q, Some("openai"), Some("gpt-5-mini"), &[], true), base);
-    assert_eq!(answer_cache::cache_key(q, Some("local"), None, &[], false), device_base);
+    assert_ne!(answer_cache::cache_key(q, Some("openai"), Some("gpt-5-mini"), &[], &[], true), base);
+    assert_eq!(answer_cache::cache_key(q, Some("local"), None, &[], &[], false), device_base);
 
     // Per-file freshness: touching a candidate (new mtime/size) re-keys.
     write(&dir.path().join("report.md"), "quarterly revenue summary — updated");
-    assert_ne!(answer_cache::cache_key(q, Some("local"), None, &[], false), device_base);
+    assert_ne!(answer_cache::cache_key(q, Some("local"), None, &[], &[], false), device_base);
 }
 
 // --- The history gate --------------------------------------------------------------
@@ -238,6 +238,7 @@ async fn unchanged_question_replays_verbatim_and_a_touched_file_runs_live() {
             vec![],
             cfg,
             Default::default(),
+            vec![],
         )
     };
 
@@ -303,6 +304,7 @@ async fn bypass_runs_live_and_refreshes_the_entry() {
             vec![],
             cfg.clone(),
             cache,
+            vec![],
         )
     };
 

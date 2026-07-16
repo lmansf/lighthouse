@@ -22,6 +22,11 @@ import { chatHistoryLocked } from "./managedLocks";
 const KEY = "lighthouse.chat.history.v1";
 // Opt-in flag: "1" once the user has turned on saving chats to this device.
 const PERSIST_KEY = "lighthouse.chat.persist";
+// The current investigation pointer (openspec: add-investigations §4.1) — its
+// OWN key, deliberately outside the history envelope: it's UI context (like
+// the sidebar-collapsed flag), not a transcript, so it survives a reload even
+// with "save chats on this device" off and is never wiped with history.
+const INVESTIGATION_KEY = "lighthouse.chat.investigation";
 // The pre-history session-only key, migrated once (only when saving is on) so an
 // in-progress transcript isn't dropped when a user upgrades into this version.
 const LEGACY_KEY = "lighthouse.chat.transcript.v1";
@@ -74,6 +79,13 @@ export interface Conversation {
   createdAt: number;
   updatedAt: number;
   messages: TranscriptMessage[];
+  /**
+   * The investigation this conversation belongs to (openspec:
+   * add-investigations): stamped at creation from the then-current context and
+   * never re-stamped afterwards. Absent = the global context — every
+   * conversation from before investigations existed stays there.
+   */
+  investigationId?: string;
 }
 
 interface Persisted {
@@ -89,9 +101,58 @@ function newId(): string {
   return `c${Date.now().toString(36)}${seq.toString(36)}`;
 }
 
-function emptyConversation(): Conversation {
+function emptyConversation(investigationId?: string | null): Conversation {
   const now = Date.now();
-  return { id: newId(), title: "New conversation", createdAt: now, updatedAt: now, messages: [] };
+  return {
+    id: newId(),
+    title: "New conversation",
+    createdAt: now,
+    updatedAt: now,
+    messages: [],
+    // Stamped at birth (openspec: add-investigations): a conversation belongs
+    // to the context it was started in, for its whole life.
+    ...(investigationId ? { investigationId } : {}),
+  };
+}
+
+/**
+ * The conversation list for a context (openspec: add-investigations §4.1) —
+ * the pure filter behind the history drawer. Membership is exact:
+ *
+ *  - inside an investigation, ONLY its own conversations show;
+ *  - the global context (`null`) shows ONLY unassigned conversations — an
+ *    investigation's chats live inside it, so the global view is deliberately
+ *    NOT a mixed bucket of everything. Conversations from before
+ *    investigations existed carry no id and therefore stay global.
+ *
+ * Exported for unit tests (test/chatStore.investigations.test.mjs).
+ */
+export function conversationsForContext(
+  conversations: Conversation[],
+  currentInvestigationId: string | null,
+): Conversation[] {
+  return conversations.filter((c) => (c.investigationId ?? null) === currentInvestigationId);
+}
+
+/** Read the persisted current-investigation pointer (null = global context). */
+function loadCurrentInvestigation(): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    return window.localStorage.getItem(INVESTIGATION_KEY) || null;
+  } catch {
+    return null;
+  }
+}
+
+/** Persist the pointer (its own key — see INVESTIGATION_KEY). */
+function saveCurrentInvestigation(id: string | null): void {
+  if (typeof window === "undefined") return;
+  try {
+    if (id === null) window.localStorage.removeItem(INVESTIGATION_KEY);
+    else window.localStorage.setItem(INVESTIGATION_KEY, id);
+  } catch {
+    /* storage blocked — the in-session context still works */
+  }
 }
 
 /** First user line, trimmed to a scannable list title. */
@@ -241,6 +302,14 @@ interface ChatStore {
   lastLeftId: string | null;
   /** Whether chats are being saved to this device (opt-in; default off). */
   persistEnabled: boolean;
+  /**
+   * The current investigation context (openspec: add-investigations §4.1);
+   * null = the global context. New conversations are stamped with it, the
+   * history drawer filters by it (see conversationsForContext), and asks carry
+   * it on the wire. Persisted under its own localStorage key — never inside
+   * the history envelope.
+   */
+  currentInvestigationId: string | null;
 
   /** Replace the active transcript (value or updater, mirrors React's setState). */
   setMessages: (next: MessagesUpdater) => void;
@@ -265,6 +334,14 @@ interface ChatStore {
   undoNewConversation: () => void;
   /** Switch the active conversation to an existing one. */
   openConversation: (id: string) => void;
+  /**
+   * Switch the investigation context (null = global). When the active
+   * conversation doesn't belong to the new context, this behaves like "New
+   * chat" within it — a fresh conversation stamped with the new id — so
+   * transcripts are never mixed across contexts; an empty scratch
+   * conversation is adopted in place instead of minting another.
+   */
+  setCurrentInvestigation: (id: string | null) => void;
   /** Give a conversation a custom title (stops the auto-title following Q1). */
   renameConversation: (id: string, title: string) => void;
   /** Delete a conversation; deleting the active one falls back to the newest. */
@@ -274,12 +351,25 @@ interface ChatStore {
 export const useChatStore = create<ChatStore>((set) => {
   const init = bootstrap();
   const current = init.conversations.find((c) => c.id === init.currentId) ?? init.conversations[0];
+  // Reconcile the restored investigation pointer with the restored active
+  // conversation (openspec: add-investigations): context follows a real
+  // conversation (same rule as openConversation), while a fresh/empty scratch
+  // conversation is stamped INTO the restored context so the first ask after a
+  // reload still lands in the investigation.
+  let currentInvestigationId = loadCurrentInvestigation();
+  if (current.messages.length > 0) {
+    currentInvestigationId = current.investigationId ?? null;
+    saveCurrentInvestigation(currentInvestigationId);
+  } else if (currentInvestigationId) {
+    current.investigationId = currentInvestigationId;
+  }
   return {
     conversations: init.conversations,
     currentId: current.id,
     messages: current.messages,
     lastLeftId: null,
     persistEnabled: persistEnabled(),
+    currentInvestigationId,
 
     setMessages: (next) =>
       set((s) => ({
@@ -335,6 +425,9 @@ export const useChatStore = create<ChatStore>((set) => {
             createdAt: now,
             updatedAt: now,
             messages: s.messages,
+            // A reconstructed conversation belongs to the context it was
+            // being held in (openspec: add-investigations).
+            ...(s.currentInvestigationId ? { investigationId: s.currentInvestigationId } : {}),
           });
         }
         save(conversations, s.currentId);
@@ -346,7 +439,9 @@ export const useChatStore = create<ChatStore>((set) => {
         const current = s.conversations.find((c) => c.id === s.currentId);
         // Nothing to archive if the current conversation is empty — just stay.
         if (!current || current.messages.length === 0) return {};
-        const fresh = emptyConversation();
+        // "New chat" stays within the current investigation (openspec:
+        // add-investigations): the fresh conversation is stamped with it.
+        const fresh = emptyConversation(s.currentInvestigationId);
         const conversations = [fresh, ...s.conversations];
         save(conversations, fresh.id);
         return {
@@ -367,11 +462,16 @@ export const useChatStore = create<ChatStore>((set) => {
           (c) => !(c.id === s.currentId && c.messages.length === 0),
         );
         save(conversations, target.id);
+        // Context follows the conversation (same rule as openConversation) —
+        // in practice Undo lands in the same context New chat left.
+        const investigationId = target.investigationId ?? null;
+        saveCurrentInvestigation(investigationId);
         return {
           conversations,
           currentId: target.id,
           messages: target.messages,
           lastLeftId: null,
+          currentInvestigationId: investigationId,
         };
       }),
 
@@ -386,7 +486,60 @@ export const useChatStore = create<ChatStore>((set) => {
           // …then shed the current one if it was an empty scratch conversation.
           .filter((c) => !(c.id === s.currentId && s.messages.length === 0));
         save(conversations, id);
-        return { conversations, currentId: id, messages: target.messages, lastLeftId: null };
+        // Opening a conversation from another investigation ALSO switches the
+        // context to match (openspec: add-investigations): the transcript and
+        // its scope/policy surfaces must never disagree.
+        const investigationId = target.investigationId ?? null;
+        saveCurrentInvestigation(investigationId);
+        return {
+          conversations,
+          currentId: id,
+          messages: target.messages,
+          lastLeftId: null,
+          currentInvestigationId: investigationId,
+        };
+      }),
+
+    setCurrentInvestigation: (id) =>
+      set((s) => {
+        const next = id ?? null;
+        if (next === s.currentInvestigationId) return {};
+        saveCurrentInvestigation(next);
+        const current = s.conversations.find((c) => c.id === s.currentId);
+        // An empty scratch conversation has no transcript to mix: adopt it
+        // into the new context in place instead of minting another empty one.
+        if (!current || current.messages.length === 0) {
+          const conversations = s.conversations.map((c) =>
+            c.id === s.currentId
+              ? { ...c, investigationId: next ?? undefined }
+              : c,
+          );
+          save(conversations, s.currentId);
+          return { conversations, currentInvestigationId: next };
+        }
+        // The active conversation already belongs to the new context (e.g. a
+        // pointer restored out of sync) — just move the pointer.
+        if ((current.investigationId ?? null) === next) {
+          return { currentInvestigationId: next };
+        }
+        // The active conversation belongs elsewhere: behave like "New chat"
+        // within the new context — a fresh stamped conversation, the old one
+        // kept in history (fold the live transcript back in first, like
+        // openConversation). lastLeftId is cleared, not set: an Undo strip
+        // that silently jumped contexts would be more confusing than helpful.
+        const fresh = emptyConversation(next);
+        const conversations = [
+          fresh,
+          ...s.conversations.map((c) => (c.id === s.currentId ? { ...c, messages: s.messages } : c)),
+        ];
+        save(conversations, fresh.id);
+        return {
+          conversations,
+          currentId: fresh.id,
+          messages: fresh.messages,
+          lastLeftId: null,
+          currentInvestigationId: next,
+        };
       }),
 
     renameConversation: (id, title) =>
@@ -406,11 +559,15 @@ export const useChatStore = create<ChatStore>((set) => {
           save(remaining, s.currentId);
           return { conversations: remaining };
         }
-        // Deleting the active conversation: fall back to the newest remaining,
-        // or a fresh empty one when nothing is left.
-        const newest = remaining.slice().sort((a, b) => b.updatedAt - a.updatedAt)[0];
-        const next = newest ?? emptyConversation();
-        const conversations = newest ? remaining : [next];
+        // Deleting the active conversation: fall back to the newest remaining
+        // IN THE CURRENT CONTEXT (deleting an investigation's last chat must
+        // not teleport the user into another context's transcript), or a fresh
+        // empty one stamped with the context when none is left there.
+        const newest = conversationsForContext(remaining, s.currentInvestigationId)
+          .slice()
+          .sort((a, b) => b.updatedAt - a.updatedAt)[0];
+        const next = newest ?? emptyConversation(s.currentInvestigationId);
+        const conversations = newest ? remaining : [...remaining, next];
         save(conversations, next.id);
         return { conversations, currentId: next.id, messages: next.messages, lastLeftId: null };
       }),

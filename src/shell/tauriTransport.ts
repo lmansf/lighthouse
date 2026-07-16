@@ -145,6 +145,10 @@ function handleChat(
           includedFileIds: Array.isArray(body.includedFileIds) ? body.includedFileIds : [],
           history: Array.isArray(body.history) ? body.history : [],
           attachmentFileIds: Array.isArray(body.attachmentFileIds) ? body.attachmentFileIds : [],
+          // The investigation this ask runs inside (openspec:
+          // add-investigations); absent serializes away → None on the Rust
+          // side (the global context).
+          investigationId: typeof body.investigationId === "string" ? body.investigationId : undefined,
           // Answer-cache controls (openspec: add-answer-cache) ride the IPC
           // verbatim; absent fields fail toward privacy (false).
           bypassCache: body.bypassCache === true,

@@ -18,6 +18,7 @@ pub mod egress;
 pub mod extract;
 pub mod index;
 pub mod inspect;
+pub mod investigations;
 pub mod llm;
 pub mod local_model;
 pub mod meta;

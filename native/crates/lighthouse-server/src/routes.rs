@@ -118,6 +118,102 @@ pub async fn rag_post(headers: HeaderMap, body: Option<Json<Value>>) -> Response
             }
             _ => bad_request("rules action must be list, add, or remove"),
         },
+        // Investigations (openspec: add-investigations): named, durable
+        // containers for analysis. CRUD on the vault-scoped STRUCTURE store —
+        // ids are minted engine-side and validation failures → 400 with the
+        // engine's reason, like rules. Conversation-ref writes are gated
+        // engine-side: the client's persistAllowed verdict AND the managed
+        // history policy must both allow (either false ⇒ silent no-op).
+        // PARITY: commands.rs and the TS twin (app/api/rag/route.ts) mirror
+        // this op exactly.
+        Some("investigations") => match body["action"].as_str() {
+            Some("list") => Json(json!({
+                "investigations": lighthouse_core::investigations::listing()
+            }))
+            .into_response(),
+            Some("create") => {
+                let provider_policy = if body["providerPolicy"].is_null() {
+                    lighthouse_core::investigations::ProviderPolicy::Default
+                } else {
+                    match body["providerPolicy"].as_str() {
+                        Some("default") => lighthouse_core::investigations::ProviderPolicy::Default,
+                        Some("local-only") => {
+                            lighthouse_core::investigations::ProviderPolicy::LocalOnly
+                        }
+                        _ => {
+                            return bad_request("providerPolicy must be \"default\" or \"local-only\"")
+                        }
+                    }
+                };
+                let scope = string_array(&body["scopeFileIds"]);
+                match lighthouse_core::investigations::create(
+                    body["name"].as_str().unwrap_or(""),
+                    &scope,
+                    provider_policy,
+                ) {
+                    Ok(inv) => Json(json!({
+                        "investigation": lighthouse_core::investigations::view(inv)
+                    }))
+                    .into_response(),
+                    Err(e) => bad_request(&e),
+                }
+            }
+            Some("rename") => {
+                let Some(id) = body["id"].as_str().filter(|s| !s.is_empty()) else {
+                    return bad_request("id required");
+                };
+                match lighthouse_core::investigations::rename(
+                    id,
+                    body["name"].as_str().unwrap_or(""),
+                ) {
+                    Ok(inv) => Json(json!({
+                        "investigation": lighthouse_core::investigations::view(inv)
+                    }))
+                    .into_response(),
+                    Err(e) => bad_request(&e),
+                }
+            }
+            Some("setArchived") => {
+                let (Some(id), Some(archived)) = (
+                    body["id"].as_str().filter(|s| !s.is_empty()),
+                    body["archived"].as_bool(),
+                ) else {
+                    return bad_request("id and archived required");
+                };
+                match lighthouse_core::investigations::set_archived(id, archived) {
+                    Ok(inv) => Json(json!({
+                        "investigation": lighthouse_core::investigations::view(inv)
+                    }))
+                    .into_response(),
+                    Err(e) => bad_request(&e),
+                }
+            }
+            Some("addConversationRef") => {
+                let (Some(id), Some(conversation_id)) = (
+                    body["id"].as_str().filter(|s| !s.is_empty()),
+                    body["conversationId"].as_str().filter(|s| !s.is_empty()),
+                ) else {
+                    return bad_request("id and conversationId required");
+                };
+                // persistAllowed defaults false — an absent field fails
+                // toward privacy, exactly like the ask path's cache controls.
+                let persist_allowed = body["persistAllowed"].as_bool().unwrap_or(false);
+                match lighthouse_core::investigations::add_conversation_ref(
+                    id,
+                    conversation_id,
+                    persist_allowed,
+                ) {
+                    Ok(inv) => Json(json!({
+                        "investigation": lighthouse_core::investigations::view(inv)
+                    }))
+                    .into_response(),
+                    Err(e) => bad_request(&e),
+                }
+            }
+            _ => bad_request(
+                "investigations action must be list, create, rename, setArchived, or addConversationRef",
+            ),
+        },
         Some("source") => {
             let Some(available) = body["available"].as_bool() else {
                 return bad_request("available required");
@@ -130,7 +226,8 @@ pub async fn rag_post(headers: HeaderMap, body: Option<Json<Value>>) -> Response
             let ids: Vec<String> = string_array(&body["includedFileIds"]);
             // Explorer search is a LOCAL preview (never sent to a provider), so
             // it runs the device path — local-only files stay searchable here.
-            let retrieved = sources::retrieve(query, &ids, &[], 5, false).await;
+            // No investigation context: search is global, no recall preference.
+            let retrieved = sources::retrieve(query, &ids, &[], 5, false, &[]).await;
             Json(json!({ "references": retrieved.references })).into_response()
         }
         // Read-only per-file inspector ("What the AI sees", openspec:
@@ -276,6 +373,25 @@ pub async fn rag_post(headers: HeaderMap, body: Option<Json<Value>>) -> Response
                 Some(_) => return bad_request("ext must be \"md\" or \"html\""),
             }
             .to_string();
+            // Investigation notes (openspec: add-investigations §3): a
+            // non-empty investigationId routes the NOTES destination to the
+            // investigation's own folder — resolved ENGINE-SIDE from the
+            // store (`Lighthouse Notes/<stored folderName>`, re-validated at
+            // use); a client-sent folder is never trusted and the subdir
+            // allowlist above is unchanged. An explicit "Lighthouse Results"
+            // (the evidence pack) stays in Results — packs are results, not
+            // notes, and note membership = location. An unknown id rejects:
+            // a silently-global note would lose its membership. Parsed like
+            // the ask wire's investigationId (non-string reads as absent).
+            let subdir = match body["investigationId"].as_str().map(str::trim) {
+                Some(id) if !id.is_empty() && subdir == "Lighthouse Notes" => {
+                    match lighthouse_core::investigations::notes_subdir(id) {
+                        Ok(sub) => sub,
+                        Err(e) => return bad_request(&e),
+                    }
+                }
+                _ => subdir,
+            };
             let written = tokio::task::spawn_blocking(move || {
                 lighthouse_core::vault::write_artifact(&subdir, &title, &ext, markdown.as_bytes())
             })
@@ -339,7 +455,11 @@ pub async fn rag_post(headers: HeaderMap, body: Option<Json<Value>>) -> Response
                 .as_array()
                 .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
                 .unwrap_or_default();
-            return match lighthouse_core::pins::add(&question, &sql, &file_ids) {
+            // The current investigation, when one is (openspec:
+            // add-investigations) — the pin carries it as its membership.
+            let investigation_id = body["investigationId"].as_str();
+            return match lighthouse_core::pins::add(&question, &sql, &file_ids, investigation_id)
+            {
                 Ok(pin) => {
                     // Prime the fresh pin's digest + summary so the dialog has
                     // something to show (and the first real change alerts).
@@ -360,7 +480,11 @@ pub async fn rag_post(headers: HeaderMap, body: Option<Json<Value>>) -> Response
             return Json(json!({ "ok": true })).into_response();
         }
         Some("listPins") => {
-            return Json(json!({ "pins": lighthouse_core::pins::list() })).into_response();
+            // Optional investigation filter (openspec: add-investigations);
+            // absent (or blank) keeps the original "all pins" behavior.
+            let investigation_id = body["investigationId"].as_str().filter(|s| !s.is_empty());
+            return Json(json!({ "pins": lighthouse_core::pins::list_for(investigation_id) }))
+                .into_response();
         }
         Some("recheckPins") => {
             let changed = lighthouse_core::pins::recheck_all().await;
@@ -535,6 +659,9 @@ pub async fn chat_post(headers: HeaderMap, body: Option<Json<Value>>) -> Respons
     let included_file_ids = string_array(&body["includedFileIds"]);
     // Files the user explicitly attached to this question.
     let attachment_ids = string_array(&body["attachmentFileIds"]);
+    // The investigation this ask runs inside (openspec: add-investigations);
+    // absent = the global context. Resolved below, beside model_config().
+    let investigation_id = body["investigationId"].as_str().map(String::from);
     // Answer cache controls (openspec: add-answer-cache): Re-run's lookup
     // bypass, and the client's per-request persistence verdict. Both default
     // false — an absent field fails toward privacy (memory-only cache).
@@ -567,7 +694,19 @@ pub async fn chat_post(headers: HeaderMap, body: Option<Json<Value>>) -> Respons
         })
         .unwrap_or_default();
 
-    let cfg = profile::model_config();
+    // Investigation scope + provider policy resolve HERE — the same
+    // chokepoint where the profile's model config is consulted (and beneath
+    // which the managed policy's llm-time belt sits), so a local-only
+    // investigation swaps cfg before any transport exists and scope arrives
+    // as ordinary attachments (openspec: add-investigations). The third
+    // element is the investigation's conversationRefs — retrieval's recall
+    // preference (§3); empty when no investigation rides the ask.
+    let (attachment_ids, cfg, preferred_conversation_ids) =
+        lighthouse_core::investigations::resolve_ask_context(
+            investigation_id.as_deref(),
+            attachment_ids,
+            profile::model_config(),
+        );
 
     let line = |c: &ChatChunk| -> bytes::Bytes {
         bytes::Bytes::from(format!(
@@ -596,6 +735,7 @@ pub async fn chat_post(headers: HeaderMap, body: Option<Json<Value>>) -> Respons
             history,
             cfg,
             cache,
+            preferred_conversation_ids,
         );
         let mut final_files: Vec<String> = Vec::new();
         let mut artifacts: Vec<String> = Vec::new();

@@ -5,6 +5,7 @@
 import type { ChatChunk, ChatTurn } from "@/contracts";
 import { answerPipeline } from "@/server/synth";
 import { modelConfig } from "@/server/profile";
+import { resolveAskContext } from "@/server/investigations";
 import { isSameOrigin } from "@/server/http";
 import { beginAudit, finishAudit } from "@/server/audit";
 
@@ -24,9 +25,12 @@ export async function POST(req: Request) {
   // Files the user explicitly attached to this question (dragged from the
   // explorer, or dropped from the OS onto chat). When present, retrieval is
   // scoped to just these files — see retrieve()/vaultRetrieve.
-  const attachmentFileIds: string[] = Array.isArray(body.attachmentFileIds)
+  const requestAttachmentFileIds: string[] = Array.isArray(body.attachmentFileIds)
     ? body.attachmentFileIds.filter((id: unknown): id is string => typeof id === "string")
     : [];
+  // The investigation this ask runs inside (openspec: add-investigations);
+  // absent = the global context. Resolved below, beside modelConfig().
+  const investigationId = typeof body.investigationId === "string" ? body.investigationId : undefined;
   // Answer cache controls (openspec: add-answer-cache): Re-run's lookup
   // bypass, and the client's per-request persistence verdict. Both default
   // false — an absent field fails toward privacy (memory-only cache).
@@ -44,7 +48,18 @@ export async function POST(req: Request) {
         .slice(-8) // cap context: last few turns are enough and bound token cost
     : [];
 
-  const cfg = modelConfig();
+  // Investigation scope + provider policy resolve HERE — the same chokepoint
+  // where the profile's model config is consulted (and beneath which the
+  // managed policy's llm-time belt sits), so a local-only investigation swaps
+  // cfg before any transport exists and scope arrives as ordinary attachments
+  // (openspec: add-investigations). The third element is the investigation's
+  // conversationRefs — retrieval's recall preference (§3); empty when no
+  // investigation rides the ask. PARITY: chat_post in routes.rs.
+  const [attachmentFileIds, cfg, preferredConversationIds] = resolveAskContext(
+    investigationId,
+    requestAttachmentFileIds,
+    modelConfig(),
+  );
 
   const encoder = new TextEncoder();
   const line = (c: ChatChunk) => encoder.encode(JSON.stringify(c) + "\n");
@@ -67,6 +82,7 @@ export async function POST(req: Request) {
           history,
           cfg,
           { bypassCache, persistAllowed },
+          preferredConversationIds,
         )) {
           if (chunk.done) {
             if (chunk.references) finalFiles = chunk.references.map((r) => r.fileId);

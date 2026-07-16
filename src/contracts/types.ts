@@ -392,6 +392,13 @@ export interface Pin {
   /** Compact "NE 125 · NW 50" render of the last result (≤3 rows). */
   lastSummary?: string;
   staleReason?: string;
+  /**
+   * The investigation this pin belongs to (openspec: add-investigations):
+   * the SINGLE source of truth for pin membership — the investigation view's
+   * `pinRefs` is derived from it at read time. Absent = uncategorized, which
+   * is what every pin created before investigations existed remains.
+   */
+  investigationId?: string;
 }
 
 /** One changed pin from a recheck pass — the alert payload. */
@@ -432,4 +439,60 @@ export interface BriefingReport {
   title: string;
   generatedMs: number;
   sections: BriefingSection[];
+}
+
+/**
+ * Provider posture of an investigation (openspec: add-investigations):
+ * "local-only" forces the private path for every ask inside it at the same
+ * chokepoint the managed policy layer gates; "default" follows the profile's
+ * active provider.
+ */
+export type InvestigationProviderPolicy = "default" | "local-only";
+
+/**
+ * A named, durable container for analysis (openspec: add-investigations):
+ * structure persisted vault-scoped engine-side (versioned envelope, atomic
+ * writes). `conversationRefs` are opaque client Conversation.id values —
+ * refs, never transcripts — and are accepted only when the client's
+ * persistAllowed verdict AND the managed history policy both allow.
+ * `folderName` is sanitized at creation and never moved by rename. Shape
+ * mirrors the engines' view (investigations.rs ⇄ investigations.ts) exactly.
+ */
+export interface Investigation {
+  /** Engine-minted, stable across renames. */
+  id: string;
+  /** Display name, unique case-insensitively (archived records included). */
+  name: string;
+  createdMs: number;
+  /** Archive hides, never deletes: a visibility flag with no cascade. */
+  archived: boolean;
+  /** Vault node ids; empty = whole vault. */
+  scopeFileIds: string[];
+  providerPolicy: InvestigationProviderPolicy;
+  conversationRefs: string[];
+  /** Notes folder recorded at creation (rename moves nothing). */
+  folderName: string;
+  /**
+   * DERIVED at read time from pins.json (§3): the ids of pins carrying
+   * `Pin.investigationId == id`. Never stored on the record.
+   */
+  pinRefs: string[];
+  /**
+   * DERIVED at read time from the investigation's folder under
+   * `Lighthouse Notes/<folderName>/` (§3): the file ids there — membership =
+   * location. Never stored on the record.
+   */
+  noteRefs: string[];
+}
+
+/**
+ * What the client sends to create an investigation: the display name plus an
+ * optional file scope (absent/empty = whole vault) and provider posture
+ * (absent = "default"). The engine mints the id, stamps creation time, and
+ * fixes the sanitized notes folder name.
+ */
+export interface InvestigationCreateInput {
+  name: string;
+  scopeFileIds?: string[];
+  providerPolicy?: InvestigationProviderPolicy;
 }
