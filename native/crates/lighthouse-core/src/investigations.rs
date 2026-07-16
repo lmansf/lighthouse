@@ -77,15 +77,18 @@ pub struct Investigation {
     #[serde(default)]
     pub conversation_refs: Vec<String>,
     /// Folder name for exported notes, sanitized (traversal-safe) at
-    /// CREATION time and never moved by rename — membership = location (§4
-    /// derives note refs from it; §1 only records it).
+    /// CREATION time and never moved by rename — membership = location (§3
+    /// derives note refs from it and routes `exportChat` under it; §1 only
+    /// records it).
     pub folder_name: String,
 }
 
 /// Read-time enriched view the `investigations` op returns: the record plus
-/// DERIVED memberships. §1 returns them empty — §3 derives `pinRefs` from
-/// pins.json (`Pin.investigationId`), §4 derives `noteRefs` from the
-/// investigation's folder under `Lighthouse Notes/`.
+/// DERIVED memberships (§3) — `pinRefs` from pins.json (the ids of pins
+/// carrying `Pin.investigationId == id`), `noteRefs` from the investigation's
+/// folder under `Lighthouse Notes/` (a prefix scan of the walk: membership =
+/// location). Nothing here is stored on the record — no two-way bookkeeping
+/// to drift.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InvestigationView {
@@ -147,12 +150,37 @@ pub fn list() -> Vec<Investigation> {
     }
 }
 
-/// Enrich one record for the wire (empty derived memberships in §1).
+/// Enrich one record for the wire (§3): memberships are DERIVED at read
+/// time, never stored. `pinRefs` = ids of pins whose `investigationId` is
+/// this record's id (pins.json is the source of truth, oldest first);
+/// `noteRefs` = file ids under `Lighthouse Notes/<folderName>/` (a prefix
+/// scan of the cached walk — membership = location, so a note moved out of
+/// the folder simply stops being a member). An unusable stored folder name
+/// (tampered store) derives NO notes rather than scanning a wrong prefix.
+/// PARITY: investigations.ts::investigationView.
 pub fn view(record: Investigation) -> InvestigationView {
+    let pin_refs = crate::pins::list()
+        .into_iter()
+        .filter(|p| p.investigation_id.as_deref() == Some(record.id.as_str()))
+        .map(|p| p.id)
+        .collect();
+    let note_refs = match notes_folder_segment(&record) {
+        Some(folder) => {
+            let prefix = format!("Lighthouse Notes/{folder}/");
+            crate::vault::list_nodes()
+                .into_iter()
+                .filter(|n| {
+                    n.kind == crate::contracts::NodeKind::File && n.id.starts_with(&prefix)
+                })
+                .map(|n| n.id)
+                .collect()
+        }
+        None => Vec::new(),
+    };
     InvestigationView {
         record,
-        pin_refs: Vec::new(),
-        note_refs: Vec::new(),
+        pin_refs,
+        note_refs,
     }
 }
 
@@ -194,6 +222,47 @@ fn sanitize_folder_name(name: &str) -> String {
     } else {
         collapsed
     }
+}
+
+/// The record's notes-folder SEGMENT, re-validated AT USE (§3): §1's
+/// sanitizer guarantees a safe single segment at creation, but the store is
+/// a file on disk — a hand-edited `folderName` must not become a write path.
+/// `None` when the stored value is unusable: empty, multi-segment (any `/`
+/// or `\`), dots-only (`.`/`..`), or the reserved G6 `Chats` segment
+/// (case-insensitive) — `Lighthouse Notes/Chats/` means auto-exported
+/// conversation notes (recall classifies by that prefix and the save-chats
+/// opt-out purges the whole folder), and an investigation folder must never
+/// alias it. PARITY: investigations.ts::notesFolderSegment.
+fn notes_folder_segment(record: &Investigation) -> Option<String> {
+    let folder = record.folder_name.trim();
+    if folder.is_empty()
+        || folder.contains('/')
+        || folder.contains('\\')
+        || folder.chars().all(|c| c == '.')
+        || folder.eq_ignore_ascii_case("chats")
+    {
+        return None;
+    }
+    Some(folder.to_string())
+}
+
+/// Resolve the `exportChat` destination for an investigation (§3):
+/// `Lighthouse Notes/<stored folderName>` — the ONLY way a note reaches an
+/// investigation subfolder. The folder is resolved ENGINE-SIDE from the
+/// store, never taken from the client, and the segment is re-validated at
+/// use (see `notes_folder_segment`), so the write-artifact allowlist extends
+/// to exactly the folders of known investigations and nothing else. Errors
+/// are human-readable and byte-identical to the TS twin
+/// (investigations.ts::investigationNotesSubdir).
+pub fn notes_subdir(investigation_id: &str) -> Result<String, String> {
+    let id = investigation_id.trim();
+    let record = list()
+        .into_iter()
+        .find(|r| r.id == id)
+        .ok_or_else(|| "investigation not found".to_string())?;
+    let folder = notes_folder_segment(&record)
+        .ok_or_else(|| "investigation folder name is not usable".to_string())?;
+    Ok(format!("Lighthouse Notes/{folder}"))
 }
 
 /// Stable engine-minted id (pins-style sha, like `pin_id`): `inv-` + first
@@ -367,35 +436,47 @@ pub fn resolve_scope_and_policy(
     )
 }
 
-/// Resolve an ask's effective attachments + model config. Entry points call
-/// this at the SAME chokepoint where `profile::model_config()` is consulted
-/// today — the identical depth at which the managed policy layer participates
-/// in provider resolution (`model_config()` → llm-time `provider_allowed`).
-/// A `local-only` investigation swaps the resolved config to the local
-/// provider HERE, before the pipeline ever sees it: no cloud transport is
-/// constructed, `origin_of(cfg)` reports "device" and `is_cloud_provider`
-/// false (the provenance stamp is accurate with no further code), and
+/// Resolve an ask's effective attachments + model config + recall
+/// preference. Entry points call this at the SAME chokepoint where
+/// `profile::model_config()` is consulted today — the identical depth at
+/// which the managed policy layer participates in provider resolution
+/// (`model_config()` → llm-time `provider_allowed`). A `local-only`
+/// investigation swaps the resolved config to the local provider HERE,
+/// before the pipeline ever sees it: no cloud transport is constructed,
+/// `origin_of(cfg)` reports "device" and `is_cloud_provider` false (the
+/// provenance stamp is accurate with no further code), and
 /// local-only-marked files stay readable (the private model may read them).
 /// The llm-layer `provider_allowed` belt stays untouched beneath; managed
 /// `forceLocalOnly` composes — most-restrictive wins because both act on the
-/// same cfg. Callers: routes.rs `chat_post`, commands.rs `chat_ask` (PARITY:
-/// investigations.ts::resolveAskContext ⇄ app/api/chat/route.ts).
+/// same cfg.
+///
+/// The third element (§3) is the investigation's `conversationRefs`, for the
+/// pipeline's recall preference: where a recall cue boosts conversation
+/// notes, notes belonging to these conversations get `INVESTIGATION_BOOST`
+/// on top — preference, not exclusion. Empty when no (or an unknown)
+/// investigation rides the ask. Callers: routes.rs `chat_post`, commands.rs
+/// `chat_ask` (PARITY: investigations.ts::resolveAskContext ⇄
+/// app/api/chat/route.ts).
 pub fn resolve_ask_context(
     investigation_id: Option<&str>,
     attachment_file_ids: Vec<String>,
     cfg: ModelCfg,
-) -> (Vec<String>, ModelCfg) {
+) -> (Vec<String>, ModelCfg, Vec<String>) {
     let record = investigation_id
         .map(str::trim)
         .filter(|id| !id.is_empty())
         .and_then(|id| list().into_iter().find(|r| r.id == id));
+    let preferred_conversation_ids = record
+        .as_ref()
+        .map(|r| r.conversation_refs.clone())
+        .unwrap_or_default();
     let (attachments, force_local) = resolve_scope_and_policy(record.as_ref(), attachment_file_ids);
     let cfg = if force_local {
         crate::profile::local_model_config()
     } else {
         cfg
     };
-    (attachments, cfg)
+    (attachments, cfg, preferred_conversation_ids)
 }
 
 #[cfg(test)]
@@ -420,6 +501,45 @@ mod tests {
         assert_eq!(sanitize_folder_name(" . "), "Investigation");
         assert_eq!(sanitize_folder_name("///"), "Investigation");
         assert_eq!(sanitize_folder_name(""), "Investigation");
+    }
+
+    // PARITY: test/investigations.test.mjs mirrors this validate-at-use table.
+    #[test]
+    fn notes_folder_segments_are_revalidated_at_use() {
+        let with_folder = |folder: &str| Investigation {
+            id: "inv-test".into(),
+            name: "T".into(),
+            created_ms: 1,
+            archived: false,
+            scope_file_ids: Vec::new(),
+            provider_policy: ProviderPolicy::Default,
+            conversation_refs: Vec::new(),
+            folder_name: folder.into(),
+        };
+        // Sanitizer-shaped names pass through.
+        assert_eq!(
+            notes_folder_segment(&with_folder("Q3 audit")).as_deref(),
+            Some("Q3 audit")
+        );
+        assert_eq!(
+            notes_folder_segment(&with_folder("v1.2 notes")).as_deref(),
+            Some("v1.2 notes")
+        );
+        // A tampered store never becomes a write path: multi-segment,
+        // dots-only, empty — all unusable.
+        for bad in ["../evil", "a/b", "a\\b", "..", ".", "", "   "] {
+            assert_eq!(notes_folder_segment(&with_folder(bad)), None, "{bad:?}");
+        }
+        // The G6 conversation-notes folder is reserved (case-insensitive):
+        // recall classifies by that prefix and the save-chats opt-out purges
+        // it wholesale — an investigation folder must never alias it.
+        for reserved in ["Chats", "chats", "CHATS"] {
+            assert_eq!(
+                notes_folder_segment(&with_folder(reserved)),
+                None,
+                "{reserved:?}"
+            );
+        }
     }
 
     #[test]

@@ -24,8 +24,8 @@ async fn pins_prime_alert_on_change_and_go_stale() {
     let ids = vec!["tickets.csv".to_string()];
 
     // Cap + replace semantics.
-    let pin = pins::add("open tickets by priority", sql, &ids).expect("adds");
-    let again = pins::add("open tickets by priority", sql, &ids).expect("re-pin replaces");
+    let pin = pins::add("open tickets by priority", sql, &ids, None).expect("adds");
+    let again = pins::add("open tickets by priority", sql, &ids, None).expect("re-pin replaces");
     assert_eq!(pin.id, again.id, "same SQL ⇒ same pin id");
     assert_eq!(pins::list().len(), 1);
 
@@ -59,9 +59,9 @@ async fn pins_prime_alert_on_change_and_go_stale() {
 
     // Cap enforced with a human-readable reason.
     for i in 0..pins::MAX_PINS {
-        pins::add(&format!("q{i}"), &format!("SELECT {i}"), &ids).expect("under cap");
+        pins::add(&format!("q{i}"), &format!("SELECT {i}"), &ids, None).expect("under cap");
     }
-    let err = pins::add("one more", "SELECT 999", &ids).unwrap_err();
+    let err = pins::add("one more", "SELECT 999", &ids, None).unwrap_err();
     assert!(err.contains("pin limit"), "{err}");
 
     // Removal is idempotent and frees a slot.

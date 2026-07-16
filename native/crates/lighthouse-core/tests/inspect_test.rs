@@ -36,7 +36,7 @@ fn setup(dir: &std::path::Path) {
     // Warm the persistent index so the peek-based chunkCount/indexedAt/freshness
     // fields are populated — exactly what warm_index_async does on include/boot.
     let ids = vec!["sales.csv".to_string(), "other.md".to_string()];
-    let _ = vault::retrieve("warm", &ids, 5, &[], &[], false);
+    let _ = vault::retrieve("warm", &ids, 5, &[], &[], false, &[]);
 }
 
 #[test]

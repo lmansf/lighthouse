@@ -238,6 +238,7 @@ async fn unchanged_question_replays_verbatim_and_a_touched_file_runs_live() {
             vec![],
             cfg,
             Default::default(),
+            vec![],
         )
     };
 
@@ -303,6 +304,7 @@ async fn bypass_runs_live_and_refreshes_the_entry() {
             vec![],
             cfg.clone(),
             cache,
+            vec![],
         )
     };
 

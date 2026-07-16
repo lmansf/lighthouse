@@ -11,9 +11,9 @@
 - [x] 2.3 Unit tests: local-only cfg swap (mocked cloud cfg in → local out), attachments-override precedence, dangling scope ids ignored.
 
 ## 3. Belonging (engine)
-- [ ] 3.1 `Pin.investigationId` optional (serde default ⇄ TS optional) + pinAsk op carries current id; list filter.
-- [ ] 3.2 `exportChat` under `Lighthouse Notes/<investigation>/` (allowlist extension, sanitized, traversal-safe).
-- [ ] 3.3 Recall preference: retrieve gains preferred conversation ids; INVESTIGATION_BOOST above CONV_BOOST; parity-identical ordering test.
+- [x] 3.1 `Pin.investigationId` optional (serde default ⇄ TS optional) + pinAsk op carries current id; list filter.
+- [x] 3.2 `exportChat` under `Lighthouse Notes/<investigation>/` (allowlist extension, sanitized, traversal-safe).
+- [x] 3.3 Recall preference: retrieve gains preferred conversation ids; INVESTIGATION_BOOST above CONV_BOOST; parity-identical ordering test.
 
 ## 4. UI
 - [ ] 4.1 `InvestigationsNav` in the sidebar fragment (create/rename/archive, data-tour anchor); useChatStore currentInvestigationId + Conversation.investigationId; history drawer + newChat respect it.

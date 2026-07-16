@@ -166,6 +166,7 @@ export async function retrieve(
   attachmentIds: string[] = [],
   k = 5,
   isCloud = false,
+  preferredConversationIds: string[] = [],
 ): Promise<Retrieved> {
   // When the question is scoped to explicit attachments, retrieve only from those
   // vault files and skip cloud mirroring (attachments are vault files here).
@@ -180,7 +181,17 @@ export async function retrieve(
       ).flat();
   // `isCloud` narrows the candidate + external sets to the shareable ones inside
   // vaultRetrieve, so a marked file's content never reaches the vendor.
-  return vaultRetrieve(query, includedFileIds, k, external, attachmentIds, isCloud);
+  // `preferredConversationIds` rides through to the recall preference
+  // (openspec: add-investigations); empty = no preference.
+  return vaultRetrieve(
+    query,
+    includedFileIds,
+    k,
+    external,
+    attachmentIds,
+    isCloud,
+    preferredConversationIds,
+  );
 }
 
 /**

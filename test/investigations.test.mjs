@@ -14,6 +14,7 @@ import { register } from "node:module";
 register("./_ts-extensionless-hook.mjs", import.meta.url);
 
 const inv = await import("../src/server/investigations.ts");
+const pinsMod = await import("../src/server/pins.ts");
 const policy = await import("../src/server/policy.ts");
 const vaultMod = await import("../src/server/vault.ts");
 
@@ -272,10 +273,12 @@ test("resolveAskContext: scope applies, attachments win, local-only swaps the cf
   const sealed = inv.createInvestigation("Sealed", [], "local-only");
 
   // Default policy: scope becomes the attachments; the mocked cloud cfg
-  // passes through UNTOUCHED (key included).
-  let [atts, cfg] = inv.resolveAskContext(scoped.id, [], cloudCfg());
+  // passes through UNTOUCHED (key included). No conversation refs yet, so
+  // the recall preference (§3) is empty.
+  let [atts, cfg, preferred] = inv.resolveAskContext(scoped.id, [], cloudCfg());
   assert.deepEqual(atts, ["cases/a.md", "cases/gone.md"], "dangling id kept");
   assert.deepEqual(cfg, cloudCfg(), "cfg passthrough");
+  assert.deepEqual(preferred, [], "no refs ⇒ no recall preference");
 
   // Explicit per-ask attachments WIN; scope is not intersected.
   [atts] = inv.resolveAskContext(scoped.id, ["other/c.md"], cloudCfg());
@@ -294,11 +297,25 @@ test("resolveAskContext: scope applies, attachments win, local-only swaps the cf
   [, cfg] = inv.resolveAskContext(sealed.id, [], cloudCfg());
   assert.equal(cfg.providerId, "local", "archived still enforces");
 
-  // Absent/blank/unknown investigation → passthrough, cfg untouched.
+  // The investigation's conversation refs ride out as the recall preference
+  // (§3) once recorded (history posture allowing).
+  withPolicy(null, () => {
+    inv.addInvestigationConversationRef(scoped.id, "c-91", true);
+  });
+  [, , preferred] = inv.resolveAskContext(scoped.id, [], cloudCfg());
+  assert.deepEqual(preferred, ["c-91"], "conversationRefs become the preference");
+
+  // Absent/blank/unknown investigation → passthrough, cfg untouched, no
+  // recall preference.
   for (const missing of [undefined, "", "   ", "inv-nope"]) {
-    const [passAtts, passCfg] = inv.resolveAskContext(missing, ["req.md"], cloudCfg());
+    const [passAtts, passCfg, passPreferred] = inv.resolveAskContext(
+      missing,
+      ["req.md"],
+      cloudCfg(),
+    );
     assert.deepEqual(passAtts, ["req.md"], `passthrough for ${JSON.stringify(missing)}`);
     assert.equal(passCfg.providerId, "anthropic");
+    assert.deepEqual(passPreferred, [], "no investigation ⇒ empty preference");
   }
 });
 
@@ -350,4 +367,156 @@ test("parity: scoped ask resolves identical retrieval candidate ids", async () =
     ["cases/alpha.md", "cases/beta.md"],
     "candidate ids match the Rust twin",
   );
+});
+
+// --- §3 belonging: pins, notes, recall ----------------------------------------
+
+test("pins belong via investigationId and the view derives pinRefs", () => {
+  // Mirrors investigations_test.rs::pins_belong_and_the_view_derives_pin_refs
+  // (PARITY): old stores load uncategorized, membership rides addPin, the
+  // filter narrows, the view derives, and a re-pin moves the membership.
+  const stateDir = freshVault();
+  fs.mkdirSync(stateDir, { recursive: true });
+
+  // A store written BEFORE the field existed (no investigationId anywhere).
+  fs.writeFileSync(
+    path.join(stateDir, "pins.json"),
+    '{"pins":[{"id":"pin-legacy000001","question":"legacy pin","sql":"SELECT 1","fileIds":["a.csv"],"createdMs":7}]}',
+  );
+  const legacy = pinsMod.listPins();
+  assert.equal(legacy.length, 1, "old stores still load");
+  assert.equal(legacy[0].investigationId, undefined, "…and stay uncategorized");
+
+  const created = inv.createInvestigation("Q3 audit", [], "default");
+
+  // One pin inside the investigation, one global, plus a blank id that must
+  // normalize to uncategorized.
+  const member = pinsMod.addPin("member?", "SELECT 2", ["a.csv"], created.id);
+  assert.equal(member.investigationId, created.id);
+  const global = pinsMod.addPin("global?", "SELECT 3", []);
+  assert.equal(global.investigationId, undefined);
+  const blank = pinsMod.addPin("blank?", "SELECT 4", [], "  ");
+  assert.equal(blank.investigationId, undefined, "blank id = uncategorized");
+
+  // Round trip: re-read from disk, fields intact; the raw store carries
+  // investigationId ONLY on the member pin (absent = omitted, so legacy
+  // pins keep round-tripping byte-compatibly).
+  const listed = pinsMod.listPins();
+  assert.equal(listed.length, 4);
+  assert.equal(listed.find((p) => p.id === member.id).investigationId, created.id);
+  assert.equal(listed.find((p) => p.id === "pin-legacy000001").investigationId, undefined);
+  const raw = fs.readFileSync(path.join(stateDir, "pins.json"), "utf8");
+  assert.equal(raw.match(/"investigationId"/g).length, 1, raw);
+
+  // The list filter narrows to the investigation; absent keeps "all".
+  assert.equal(pinsMod.listPins().length, 4);
+  const filtered = pinsMod.listPins(created.id);
+  assert.equal(filtered.length, 1);
+  assert.equal(filtered[0].id, member.id);
+  assert.deepEqual(pinsMod.listPins("inv-nope"), []);
+
+  // The view derives pinRefs from the store — the member only.
+  const views = inv.investigationsListing();
+  assert.equal(views.length, 1);
+  assert.deepEqual(views[0].pinRefs, [member.id]);
+
+  // Re-pinning the same SQL from the GLOBAL context replaces the pin and
+  // drops its membership (replace semantics, like every other field).
+  const repinned = pinsMod.addPin("member?", "SELECT 2", ["a.csv"]);
+  assert.equal(repinned.id, member.id, "same SQL ⇒ same pin id");
+  assert.equal(repinned.investigationId, undefined);
+  assert.deepEqual(inv.investigationsListing()[0].pinRefs, [], "membership followed the re-pin");
+});
+
+test("notes land under the investigation folder and the view derives noteRefs", () => {
+  // Mirrors investigations_test.rs::
+  // notes_land_under_the_investigation_folder_and_derive_note_refs (PARITY,
+  // identical error strings).
+  const stateDir = freshVault();
+  const vault = path.dirname(stateDir);
+
+  const created = inv.createInvestigation("Harbor case", [], "default");
+  const subdir = inv.investigationNotesSubdir(created.id);
+  assert.equal(subdir, "Lighthouse Notes/Harbor case");
+
+  // Export through the resolved folder (what the exportChat op does) plus
+  // one GLOBAL note — membership = location, so only the first derives.
+  const note = vaultMod.writeArtifact(subdir, "Findings so far", "md", Buffer.from("# findings"));
+  assert.equal(note.id, `Lighthouse Notes/Harbor case/${note.name}`);
+  assert.ok(fs.existsSync(path.join(vault, note.id)), "written inside the vault");
+  vaultMod.writeArtifact("Lighthouse Notes", "Global note", "md", Buffer.from("# global"));
+
+  const views = inv.investigationsListing();
+  assert.deepEqual(views[0].noteRefs, [note.id], "prefix scan, member only");
+
+  // Unknown ids reject — a silently-global note would lose its membership.
+  assert.throws(() => inv.investigationNotesSubdir("inv-nope"), /investigation not found/);
+
+  // Validate-at-use: hand-tamper the store (the API's sanitizer can't be
+  // driven to these) — a traversal segment, and the reserved G6 "Chats"
+  // folder. Neither resolves; neither derives notes.
+  fs.writeFileSync(
+    path.join(stateDir, "investigations.json"),
+    `{"v":1,"investigations":[
+      {"id":"inv-evil","name":"Evil","createdMs":1,"archived":false,"scopeFileIds":[],"providerPolicy":"default","conversationRefs":[],"folderName":"../evil"},
+      {"id":"inv-chats","name":"Chats twin","createdMs":2,"archived":false,"scopeFileIds":[],"providerPolicy":"default","conversationRefs":[],"folderName":"Chats"}
+    ]}`,
+  );
+  assert.throws(
+    () => inv.investigationNotesSubdir("inv-evil"),
+    /investigation folder name is not usable/,
+    "traversal attempt rejected",
+  );
+  assert.throws(
+    () => inv.investigationNotesSubdir("inv-chats"),
+    /investigation folder name is not usable/,
+    "the G6 Chats folder can never be aliased",
+  );
+  for (const view of inv.investigationsListing()) {
+    assert.deepEqual(view.noteRefs, [], "unusable folders derive nothing");
+  }
+});
+
+test("parity: recall prefers the investigation's conversation notes, same order", async () => {
+  // The byte-pinned §3 parity fixture. The Rust twin (tests/
+  // investigations_test.rs recall_prefers_the_investigations_conversation_
+  // notes) builds the SAME two conversation notes and asserts the SAME
+  // reference ORDER: identical bodies score equally on a recall-cued ask;
+  // naming one conversation as preferred ranks its note FIRST while the
+  // other still surfaces (preference, not exclusion). The preferred ids are
+  // the RAW conversation ids — matching the filenames' [cid8] proves
+  // retrieve reuses writeConversationNote's exact derivation.
+  freshVault();
+
+  const body = Buffer.from(
+    "We concluded the missing shipment was rerouted through the harbor depot.",
+  );
+  const alpha = vaultMod.writeConversationNote("conv-alpha", "Alpha thread", body);
+  const beta = vaultMod.writeConversationNote("conv-beta", "Beta thread", body);
+  vaultMod.setIncluded(alpha.id, true);
+  vaultMod.setIncluded(beta.id, true);
+  const all = [alpha.id, beta.id];
+
+  // The recall-cued probe ("what did i conclude…" fires the cue; the topic
+  // tokens hit both bodies equally).
+  const query = "what did i conclude about the missing shipment?";
+  const refIds = async (preferred) =>
+    (await vaultMod.retrieve(query, all, 5, [], [], false, preferred)).references.map(
+      (r) => r.fileId,
+    );
+
+  // No preference: both conversation notes surface (equal scores).
+  const open = await refIds([]);
+  assert.ok(open.includes(alpha.id) && open.includes(beta.id), `${open}`);
+
+  // Preferring one conversation ranks ITS note first — and flipping the
+  // preference flips the order, so it is the preference (not name or
+  // insertion luck) that decides. The global note is still present.
+  const preferAlpha = await refIds(["conv-alpha"]);
+  assert.equal(preferAlpha[0], alpha.id, `preferred first: ${preferAlpha}`);
+  assert.ok(preferAlpha.includes(beta.id), `global still surfaces: ${preferAlpha}`);
+
+  const preferBeta = await refIds(["conv-beta"]);
+  assert.equal(preferBeta[0], beta.id, `flipped preference flips order: ${preferBeta}`);
+  assert.ok(preferBeta.includes(alpha.id), `preference never excludes: ${preferBeta}`);
 });

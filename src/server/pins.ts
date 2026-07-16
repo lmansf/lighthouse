@@ -28,20 +28,37 @@ export interface Pin {
   lastDigest?: string;
   lastSummary?: string;
   staleReason?: string;
+  /**
+   * The investigation this pin belongs to (openspec: add-investigations):
+   * the SINGLE source of truth for pin membership — the investigation view
+   * derives its `pinRefs` from this field at read time. Optional so pins
+   * written before the field existed load unchanged and stay uncategorized;
+   * omitted when absent so their store round-trips byte-identically.
+   */
+  investigationId?: string;
 }
 
 function pinsPath(): string {
   return path.join(stateDir(), "pins.json");
 }
 
-/** All pins, oldest first. A missing or corrupt store reads as empty. */
-export function listPins(): Pin[] {
+/**
+ * All pins, oldest first. A missing or corrupt store reads as empty. With
+ * `investigationId` (openspec: add-investigations) the list filters to the
+ * pins carrying that investigation; absent = the unchanged "all" behavior.
+ * KEEP IN SYNC with pins.rs::list / list_for.
+ */
+export function listPins(investigationId?: string): Pin[] {
+  let pins: Pin[];
   try {
     const parsed = JSON.parse(fs.readFileSync(pinsPath(), "utf8")) as { pins?: Pin[] };
-    return Array.isArray(parsed.pins) ? parsed.pins : [];
+    pins = Array.isArray(parsed.pins) ? parsed.pins : [];
   } catch {
     return [];
   }
+  return investigationId === undefined
+    ? pins
+    : pins.filter((p) => p.investigationId === investigationId);
 }
 
 function save(pins: Pin[]): void {
@@ -60,8 +77,20 @@ function pinId(sql: string): string {
   return `pin-${crypto.createHash("sha1").update(sql).digest("hex").slice(0, 12)}`;
 }
 
-/** Add (or replace) a pin. Fails past the cap with a human-readable reason. */
-export function addPin(question: string, sql: string, fileIds: string[]): Pin {
+/**
+ * Add (or replace) a pin. Fails past the cap with a human-readable reason.
+ * `investigationId` (openspec: add-investigations) records the current
+ * investigation on the pin — blank/absent leaves it uncategorized, and a
+ * re-pin adopts the NEW ask's investigation (replace semantics, like every
+ * other field). Stored as given, dangling-tolerant like scope file ids.
+ * KEEP IN SYNC with pins.rs::add.
+ */
+export function addPin(
+  question: string,
+  sql: string,
+  fileIds: string[],
+  investigationId?: string,
+): Pin {
   const q = question.trim();
   const s = sql.trim();
   if (!q || !s) throw new Error("a pin needs the question and its SQL");
@@ -71,7 +100,15 @@ export function addPin(question: string, sql: string, fileIds: string[]): Pin {
   if (kept.length >= MAX_PINS) {
     throw new Error(`pin limit reached (${MAX_PINS}) — remove one in the pins dialog first`);
   }
-  const pin: Pin = { id, question: q, sql: s, fileIds, createdMs: Date.now() };
+  const inv = investigationId?.trim();
+  const pin: Pin = {
+    id,
+    question: q,
+    sql: s,
+    fileIds,
+    createdMs: Date.now(),
+    ...(inv ? { investigationId: inv } : {}),
+  };
   kept.push(pin);
   save(kept);
   return pin;

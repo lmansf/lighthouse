@@ -55,6 +55,14 @@ pub struct Pin {
     /// shown in the dialog; a stale pin never alerts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stale_reason: Option<String>,
+    /// The investigation this pin belongs to (openspec: add-investigations):
+    /// the SINGLE source of truth for pin membership — the investigation view
+    /// derives its `pinRefs` from this field at read time, never the other
+    /// way round. Serde-default so pins written before the field existed load
+    /// unchanged and stay uncategorized; skipped when absent so their store
+    /// round-trips byte-identically.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub investigation_id: Option<String>,
 }
 
 /// One changed pin in a recheck pass — the alert payload.
@@ -86,6 +94,21 @@ pub fn list() -> Vec<Pin> {
         .unwrap_or_default()
 }
 
+/// The `listPins` op's read: `Some(id)` filters to the pins carrying that
+/// investigation (openspec: add-investigations); `None` is the unchanged
+/// "all" behavior — byte-identical to `list()`. KEEP IN SYNC with
+/// src/server/pins.ts::listPins.
+pub fn list_for(investigation_id: Option<&str>) -> Vec<Pin> {
+    let pins = list();
+    match investigation_id {
+        None => pins,
+        Some(id) => pins
+            .into_iter()
+            .filter(|p| p.investigation_id.as_deref() == Some(id))
+            .collect(),
+    }
+}
+
 fn save(pins: &[Pin]) {
     let path = pins_path();
     if let Some(parent) = path.parent() {
@@ -110,7 +133,17 @@ fn pin_id(sql: &str) -> String {
 }
 
 /// Add (or replace) a pin. Fails past the cap with a human-readable reason.
-pub fn add(question: &str, sql: &str, file_ids: &[String]) -> Result<Pin, String> {
+/// `investigation_id` (openspec: add-investigations) records the current
+/// investigation on the pin — blank/absent leaves it uncategorized, and a
+/// re-pin adopts the NEW ask's investigation (replace semantics, like every
+/// other field). The id is stored as given, dangling-tolerant like scope
+/// file ids: an id naming nothing simply never matches a derived view.
+pub fn add(
+    question: &str,
+    sql: &str,
+    file_ids: &[String],
+    investigation_id: Option<&str>,
+) -> Result<Pin, String> {
     let question = question.trim();
     let sql = sql.trim();
     if question.is_empty() || sql.is_empty() {
@@ -135,6 +168,10 @@ pub fn add(question: &str, sql: &str, file_ids: &[String]) -> Result<Pin, String
         last_digest: None,
         last_summary: None,
         stale_reason: None,
+        investigation_id: investigation_id
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
     };
     pins.push(pin.clone());
     save(&pins);

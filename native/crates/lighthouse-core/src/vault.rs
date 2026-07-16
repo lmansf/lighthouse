@@ -1406,6 +1406,29 @@ pub fn refresh_artifact(
     Ok((id, name))
 }
 
+/// G6: 8 hex chars of SHA-1(conversation_id) — collision-resistant, stable,
+/// and independent of the (mutable) title. THE one derivation of the
+/// `[cid8]` key: `write_conversation_note` brackets it into the note's
+/// filename, and `retrieve`'s investigation preference (openspec:
+/// add-investigations) recomputes it from preferred conversation ids to
+/// recognize those same filenames — extracted here so the two can never
+/// drift. KEEP IN SYNC with src/server/vault.ts::conversationCid8.
+fn conversation_cid8(conversation_id: &str) -> String {
+    use sha1::{Digest, Sha1};
+    let digest = Sha1::digest(conversation_id.as_bytes());
+    digest.iter().take(4).map(|b| format!("{b:02x}")).collect()
+}
+
+/// The `[cid8]` key a conversation-note FILENAME carries (the
+/// `"<title> [<cid8>].md"` format `write_conversation_note` produces), or
+/// `None` for any other id. The LAST ` [` wins, so a title that itself
+/// contains brackets still yields the engine-appended key. KEEP IN SYNC with
+/// src/server/vault.ts::noteCid8Of.
+fn note_cid8_of(file_id: &str) -> Option<&str> {
+    let stem = file_id.strip_suffix("].md")?;
+    stem.rsplit_once(" [").map(|(_, cid)| cid)
+}
+
 /// G6: write (overwrite) the auto-exported note for ONE conversation under
 /// `CHATS_SUBDIR`. The filename is the sanitized title plus a short, stable id
 /// derived from the conversation id — `"<title> [<cid8>].md"` — so the note is
@@ -1419,11 +1442,8 @@ pub fn write_conversation_note(
     title: &str,
     bytes: &[u8],
 ) -> anyhow::Result<(String, String)> {
-    use sha1::{Digest, Sha1};
-    // 8 hex chars of SHA-1(conversation_id): collision-resistant, stable, and
-    // independent of the (mutable) title — the dedup key in brackets.
-    let digest = Sha1::digest(conversation_id.as_bytes());
-    let cid8: String = digest.iter().take(4).map(|b| format!("{b:02x}")).collect();
+    // The dedup key in brackets (shared derivation — see conversation_cid8).
+    let cid8 = conversation_cid8(conversation_id);
     let mut clean: String = title
         .chars()
         .map(|c| if c == '/' || c == '\\' || c.is_control() { '-' } else { c })
@@ -2560,6 +2580,10 @@ pub fn warm_index_async() {
 
 /// Retrieval over the included files: TF-IDF cosine over content chunks combined
 /// with a filename/path match, plus catalog/listing enumeration.
+/// `preferred_conversation_ids` (openspec: add-investigations) names the
+/// current investigation's conversations so a recall cue can prefer THEIR
+/// notes over global ones — empty means no preference (byte-identical to
+/// the pre-investigations ranking).
 pub fn retrieve(
     query: &str,
     included_file_ids: &[String],
@@ -2567,6 +2591,7 @@ pub fn retrieve(
     external: &[ExternalItem],
     attachment_ids: &[String],
     is_cloud: bool,
+    preferred_conversation_ids: &[String],
 ) -> Retrieved {
     let state = load_state();
     // The candidate id set. When a cloud provider is active, both branches are
@@ -2813,10 +2838,27 @@ pub fn retrieve(
     // scales existing conversation-kind candidates before the sort, never invents
     // a cand and never asks the model to rank. Runs on every retrieve pass (both
     // the initial k and the wide pass) since it's inside `retrieve`.
+    //
+    // Investigation preference (openspec: add-investigations): where the cue
+    // boosts conversation notes, a note BELONGING to the ask's investigation
+    // — its filename's [cid8] matches a preferred conversation id, the same
+    // derivation write_conversation_note bracketed in — is lifted a further
+    // INVESTIGATION_BOOST. Preference, not exclusion: global notes keep
+    // their CONV_BOOST and still surface, ordered after.
     if crate::synth::recall_cue(query) {
+        let preferred_cid8s: HashSet<String> = preferred_conversation_ids
+            .iter()
+            .map(|id| conversation_cid8(id))
+            .collect();
         for c in &mut cands {
             if source_kind_of(&c.file_id) == crate::contracts::SourceKind::Conversation {
                 c.score *= crate::synth::CONV_BOOST;
+                if !preferred_cid8s.is_empty()
+                    && note_cid8_of(&c.file_id)
+                        .is_some_and(|cid| preferred_cid8s.contains(cid))
+                {
+                    c.score *= crate::synth::INVESTIGATION_BOOST;
+                }
             }
         }
     }

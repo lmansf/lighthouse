@@ -209,7 +209,8 @@ pub async fn rag_op(app: AppHandle, body: Value) -> Result<Value, String> {
             let query = body["query"].as_str().unwrap_or("");
             let ids = string_array(&body["includedFileIds"]);
             // Local search preview — device path, so local-only stays searchable.
-            let retrieved = sources::retrieve(query, &ids, &[], 5, false).await;
+            // No investigation context: search is global, no recall preference.
+            let retrieved = sources::retrieve(query, &ids, &[], 5, false, &[]).await;
             Ok(json!({ "references": retrieved.references }))
         }
         // Read-only per-file inspector ("What the AI sees", openspec:
@@ -374,6 +375,22 @@ pub async fn rag_op(app: AppHandle, body: Value) -> Result<Value, String> {
                 Some(_) => return Err("ext must be \"md\" or \"html\"".into()),
             }
             .to_string();
+            // Investigation notes (openspec: add-investigations §3): a
+            // non-empty investigationId routes the NOTES destination to the
+            // investigation's own folder — resolved ENGINE-SIDE from the
+            // store (`Lighthouse Notes/<stored folderName>`, re-validated at
+            // use); a client-sent folder is never trusted and the subdir
+            // allowlist above is unchanged. An explicit "Lighthouse Results"
+            // (the evidence pack) stays in Results — packs are results, not
+            // notes, and note membership = location. An unknown id rejects:
+            // a silently-global note would lose its membership. Parsed like
+            // the ask wire's investigationId (non-string reads as absent).
+            let subdir = match body["investigationId"].as_str().map(str::trim) {
+                Some(id) if !id.is_empty() && subdir == "Lighthouse Notes" => {
+                    lighthouse_core::investigations::notes_subdir(id)?
+                }
+                _ => subdir,
+            };
             let written = tokio::task::spawn_blocking(move || {
                 lighthouse_core::vault::write_artifact(&subdir, &title, &ext, markdown.as_bytes())
             })
@@ -487,7 +504,10 @@ pub async fn rag_op(app: AppHandle, body: Value) -> Result<Value, String> {
                 .as_array()
                 .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
                 .unwrap_or_default();
-            Ok(match lighthouse_core::pins::add(&question, &sql, &file_ids) {
+            // The current investigation, when one is (openspec:
+            // add-investigations) — the pin carries it as its membership.
+            let investigation_id = body["investigationId"].as_str();
+            Ok(match lighthouse_core::pins::add(&question, &sql, &file_ids, investigation_id) {
                 Ok(pin) => {
                     // Prime the fresh pin's digest + summary so the dialog has
                     // something to show (and the first real change alerts).
@@ -507,7 +527,12 @@ pub async fn rag_op(app: AppHandle, body: Value) -> Result<Value, String> {
             lighthouse_core::pins::remove(id);
             Ok(json!({ "ok": true }))
         }
-        Some("listPins") => Ok(json!({ "pins": lighthouse_core::pins::list() })),
+        Some("listPins") => {
+            // Optional investigation filter (openspec: add-investigations);
+            // absent (or blank) keeps the original "all pins" behavior.
+            let investigation_id = body["investigationId"].as_str().filter(|s| !s.is_empty());
+            Ok(json!({ "pins": lighthouse_core::pins::list_for(investigation_id) }))
+        }
         Some("recheckPins") => {
             let changed = lighthouse_core::pins::recheck_all().await;
             Ok(json!({
@@ -643,13 +668,16 @@ pub async fn chat_ask(
     // chokepoint where the profile's model config is consulted (and beneath
     // which the managed policy's llm-time belt sits), so a local-only
     // investigation swaps cfg before any transport exists and scope arrives
-    // as ordinary attachments (openspec: add-investigations). PARITY:
+    // as ordinary attachments (openspec: add-investigations). The third
+    // element is the investigation's conversationRefs — retrieval's recall
+    // preference (§3); empty when no investigation rides the ask. PARITY:
     // routes.rs chat_post.
-    let (attachment_file_ids, cfg) = lighthouse_core::investigations::resolve_ask_context(
-        investigation_id.as_deref(),
-        attachment_file_ids,
-        profile::model_config(),
-    );
+    let (attachment_file_ids, cfg, preferred_conversation_ids) =
+        lighthouse_core::investigations::resolve_ask_context(
+            investigation_id.as_deref(),
+            attachment_file_ids,
+            profile::model_config(),
+        );
     // Mark a chat in flight so background-conserve suspension (hide-to-tray /
     // idle) can't kill the local chat server out from under this stream — the
     // teardown waits until the guard drops at the end of the ask.
@@ -676,6 +704,7 @@ pub async fn chat_ask(
             bypass_cache: bypass_cache.unwrap_or(false),
             persist_allowed: persist_allowed.unwrap_or(false),
         },
+        preferred_conversation_ids,
     );
     let mut final_files: Vec<String> = Vec::new();
     let mut artifacts: Vec<String> = Vec::new();

@@ -197,19 +197,41 @@ class MockRagService implements RagService {
   async exportChat(
     title: string,
     markdown: string,
-    options?: { subdir?: "Lighthouse Notes" | "Lighthouse Results"; ext?: "md" | "html" },
+    options?: {
+      subdir?: "Lighthouse Notes" | "Lighthouse Results";
+      ext?: "md" | "html";
+      investigationId?: string;
+    },
   ): Promise<{ savedId?: string; savedName?: string; error?: string }> {
     await new Promise((r) => setTimeout(r, 150));
     if (!markdown.trim()) return { error: "markdown required" };
     // Mirror the engines' strict allowlist so a bad caller fails offline too.
-    const subdir = options?.subdir ?? "Lighthouse Notes";
+    let subdir: string = options?.subdir ?? "Lighthouse Notes";
     const ext = options?.ext ?? "md";
     if (subdir !== "Lighthouse Notes" && subdir !== "Lighthouse Results") {
       return { error: 'subdir must be "Lighthouse Notes" or "Lighthouse Results"' };
     }
     if (ext !== "md" && ext !== "html") return { error: 'ext must be "md" or "html"' };
+    // Investigation notes (openspec: add-investigations §3), mirroring the
+    // engines: a non-empty investigationId routes the NOTES destination to
+    // the investigation's own folder (resolved from the record — the caller
+    // never names it); "Lighthouse Results" is unaffected; unknown → error.
+    const investigationId = options?.investigationId?.trim();
+    let noteInvestigation: Investigation | undefined;
+    if (investigationId && subdir === "Lighthouse Notes") {
+      noteInvestigation = this.investigations.find((i) => i.id === investigationId);
+      if (!noteInvestigation) return { error: "investigation not found" };
+      subdir = `Lighthouse Notes/${noteInvestigation.folderName}`;
+    }
     const name = `${title.trim() || "Chat"}.${ext}`;
-    return { savedId: `${subdir}/${name}`, savedName: name };
+    const savedId = `${subdir}/${name}`;
+    if (noteInvestigation) {
+      // Membership = location: remember the note so the view derives it.
+      const notes = this.noteIdsByInvestigation.get(noteInvestigation.id) ?? [];
+      if (!notes.includes(savedId)) notes.push(savedId);
+      this.noteIdsByInvestigation.set(noteInvestigation.id, notes);
+    }
+    return { savedId, savedName: name };
   }
 
   async exportConversationNote(
@@ -237,11 +259,13 @@ class MockRagService implements RagService {
     question: string,
     sql: string,
     fileIds: string[],
+    investigationId?: string,
   ): Promise<{ pin?: Pin; error?: string }> {
     if (!question.trim() || !sql.trim()) return { error: "a pin needs the question and its SQL" };
     const id = `pin-${sql.length}-${sql.slice(0, 8).replace(/\W/g, "")}`;
     this.pins = this.pins.filter((p) => p.id !== id);
     if (this.pins.length >= 20) return { error: "pin limit reached (20) — remove one in the pins dialog first" };
+    const inv = investigationId?.trim();
     const pin: Pin = {
       id,
       question: question.trim(),
@@ -250,6 +274,9 @@ class MockRagService implements RagService {
       createdMs: Date.now(),
       lastRunMs: Date.now(),
       lastSummary: "NE 150 · NW 200",
+      // The pin's membership (openspec: add-investigations) — absent stays
+      // uncategorized, mirroring the engines.
+      ...(inv ? { investigationId: inv } : {}),
     };
     this.pins.push(pin);
     return { pin: { ...pin } };
@@ -259,8 +286,14 @@ class MockRagService implements RagService {
     this.pins = this.pins.filter((p) => p.id !== id);
   }
 
-  async listPins(): Promise<Pin[]> {
-    return this.pins.map((p) => ({ ...p }));
+  async listPins(investigationId?: string): Promise<Pin[]> {
+    // Optional investigation filter (openspec: add-investigations); absent
+    // keeps the original "all pins" behavior — mirroring the engines.
+    const pins =
+      investigationId === undefined
+        ? this.pins
+        : this.pins.filter((p) => p.investigationId === investigationId);
+    return pins.map((p) => ({ ...p }));
   }
 
   async recheckPins(): Promise<{ changed: ChangedPin[]; pins: Pin[] }> {
@@ -464,9 +497,22 @@ class MockRagService implements RagService {
   // exercisable offline. Mirrors the engines' validation (non-empty name,
   // case-insensitive uniqueness across archived records, traversal-safe
   // folder name fixed at creation); ids are mock-simple counters, not the
-  // engines' sha mint. pinRefs/noteRefs are DERIVED fields — empty in §1
-  // (§3/§4 populate them engine-side).
+  // engines' sha mint. pinRefs/noteRefs are DERIVED at read time exactly
+  // like the engines (§3): pins carrying the id; notes exported into the
+  // investigation's folder this session.
   private investigations: Investigation[] = [];
+
+  /** Note ids exported per investigation — the mock's "folder" (no real walk). */
+  private noteIdsByInvestigation = new Map<string, string[]>();
+
+  /** Mirror of the engines' read-time view derivation (§3). */
+  private investigationViewOf(rec: Investigation): Investigation {
+    return {
+      ...rec,
+      pinRefs: this.pins.filter((p) => p.investigationId === rec.id).map((p) => p.id),
+      noteRefs: [...(this.noteIdsByInvestigation.get(rec.id) ?? [])],
+    };
+  }
 
   /** Mirror of the engines' sanitizeFolderName (traversal-safe). */
   private sanitizeFolderName(name: string): string {
@@ -487,7 +533,7 @@ class MockRagService implements RagService {
   }
 
   async listInvestigations(): Promise<Investigation[]> {
-    return this.investigations.map((i) => ({ ...i }));
+    return this.investigations.map((i) => this.investigationViewOf(i));
   }
 
   async createInvestigation(
@@ -511,7 +557,7 @@ class MockRagService implements RagService {
       noteRefs: [],
     };
     this.investigations.push(investigation);
-    return { investigation: { ...investigation } };
+    return { investigation: this.investigationViewOf(investigation) };
   }
 
   async renameInvestigation(
@@ -526,7 +572,7 @@ class MockRagService implements RagService {
     const rec = this.investigations.find((i) => i.id === id);
     if (!rec) return { error: "investigation not found" };
     rec.name = trimmed; // folderName deliberately unchanged (rename moves nothing)
-    return { investigation: { ...rec } };
+    return { investigation: this.investigationViewOf(rec) };
   }
 
   async setInvestigationArchived(
@@ -536,7 +582,7 @@ class MockRagService implements RagService {
     const rec = this.investigations.find((i) => i.id === id);
     if (!rec) return { error: "investigation not found" };
     rec.archived = archived; // a visibility flag only — nothing cascades
-    return { investigation: { ...rec } };
+    return { investigation: this.investigationViewOf(rec) };
   }
 
   async addInvestigationConversationRef(
@@ -554,7 +600,7 @@ class MockRagService implements RagService {
     if (persistAllowed && !rec.conversationRefs.includes(ref)) {
       rec.conversationRefs.push(ref);
     }
-    return { investigation: { ...rec } };
+    return { investigation: this.investigationViewOf(rec) };
   }
 
   /** A node plus all of its descendants (so toggling a folder cascades). */

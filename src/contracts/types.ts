@@ -392,6 +392,13 @@ export interface Pin {
   /** Compact "NE 125 · NW 50" render of the last result (≤3 rows). */
   lastSummary?: string;
   staleReason?: string;
+  /**
+   * The investigation this pin belongs to (openspec: add-investigations):
+   * the SINGLE source of truth for pin membership — the investigation view's
+   * `pinRefs` is derived from it at read time. Absent = uncategorized, which
+   * is what every pin created before investigations existed remains.
+   */
+  investigationId?: string;
 }
 
 /** One changed pin from a recheck pass — the alert payload. */
@@ -466,13 +473,14 @@ export interface Investigation {
   /** Notes folder recorded at creation (rename moves nothing). */
   folderName: string;
   /**
-   * DERIVED at read time from pins.json (`Pin.investigationId`), never
-   * stored on the record — §1 returns it empty; §3 populates it.
+   * DERIVED at read time from pins.json (§3): the ids of pins carrying
+   * `Pin.investigationId == id`. Never stored on the record.
    */
   pinRefs: string[];
   /**
    * DERIVED at read time from the investigation's folder under
-   * `Lighthouse Notes/`, never stored — §1 returns it empty; §4 populates it.
+   * `Lighthouse Notes/<folderName>/` (§3): the file ids there — membership =
+   * location. Never stored on the record.
    */
   noteRefs: string[];
 }

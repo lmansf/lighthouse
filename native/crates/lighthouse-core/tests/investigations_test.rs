@@ -260,15 +260,17 @@ fn resolve_ask_context_applies_scope_and_swaps_local_only_cfg() {
     let sealed = investigations::create("Sealed", &[], ProviderPolicy::LocalOnly).unwrap();
 
     // Default policy: scope becomes the attachments; the mocked cloud cfg
-    // passes through UNTOUCHED (key included).
-    let (atts, cfg) =
+    // passes through UNTOUCHED (key included). No conversation refs yet, so
+    // the recall preference (§3) is empty.
+    let (atts, cfg, preferred) =
         investigations::resolve_ask_context(Some(&scoped.id), vec![], cloud_cfg());
     assert_eq!(atts, ids(&["cases/a.md", "cases/gone.md"]), "dangling id kept");
     assert_eq!(cfg.provider_id.as_deref(), Some("anthropic"));
     assert_eq!(cfg.api_key.as_deref(), Some("sk-test-cloud"), "cfg passthrough");
+    assert!(preferred.is_empty(), "no refs ⇒ no recall preference");
 
     // Explicit per-ask attachments WIN; scope is not intersected.
-    let (atts, _) = investigations::resolve_ask_context(
+    let (atts, _, _) = investigations::resolve_ask_context(
         Some(&scoped.id),
         ids(&["other/c.md"]),
         cloud_cfg(),
@@ -279,7 +281,7 @@ fn resolve_ask_context_applies_scope_and_swaps_local_only_cfg() {
     // provider "local", the local model sentinel, no key — at the same
     // resolution point model_config() is consulted, so origin_of() stamps
     // "device" and no cloud transport is ever constructed.
-    let (atts, cfg) =
+    let (atts, cfg, _) =
         investigations::resolve_ask_context(Some(&sealed.id), vec![], cloud_cfg());
     assert!(atts.is_empty(), "empty scope = whole vault");
     assert_eq!(cfg.provider_id.as_deref(), Some("local"));
@@ -288,15 +290,26 @@ fn resolve_ask_context_applies_scope_and_swaps_local_only_cfg() {
 
     // Archived investigations resolve like live ones (never weaker).
     investigations::set_archived(&sealed.id, true).unwrap();
-    let (_, cfg) = investigations::resolve_ask_context(Some(&sealed.id), vec![], cloud_cfg());
+    let (_, cfg, _) = investigations::resolve_ask_context(Some(&sealed.id), vec![], cloud_cfg());
     assert_eq!(cfg.provider_id.as_deref(), Some("local"), "archived still enforces");
 
-    // Absent/blank/unknown investigation → passthrough, cfg untouched.
+    // The investigation's conversation refs ride out as the recall
+    // preference (§3) once recorded (history posture allowing).
+    with_policy(None, || {
+        investigations::add_conversation_ref(&scoped.id, "c-91", true).unwrap();
+    });
+    let (_, _, preferred) =
+        investigations::resolve_ask_context(Some(&scoped.id), vec![], cloud_cfg());
+    assert_eq!(preferred, vec!["c-91"], "conversationRefs become the preference");
+
+    // Absent/blank/unknown investigation → passthrough, cfg untouched,
+    // no recall preference.
     for missing in [None, Some(""), Some("   "), Some("inv-nope")] {
-        let (atts, cfg) =
+        let (atts, cfg, preferred) =
             investigations::resolve_ask_context(missing, ids(&["req.md"]), cloud_cfg());
         assert_eq!(atts, ids(&["req.md"]), "passthrough for {missing:?}");
         assert_eq!(cfg.provider_id.as_deref(), Some("anthropic"));
+        assert!(preferred.is_empty(), "no investigation ⇒ empty preference");
     }
 }
 
@@ -337,7 +350,7 @@ fn parity_scoped_ask_retrieval_candidate_ids() {
     .unwrap();
 
     // Control (no investigation): the decoy is a candidate — it matches best.
-    let open = vault::retrieve("missing shipment harbor ledger", &all, 5, &[], &[], false);
+    let open = vault::retrieve("missing shipment harbor ledger", &all, 5, &[], &[], false, &[]);
     let open_ids: Vec<String> = open.references.iter().map(|r| r.file_id.clone()).collect();
     assert!(
         open_ids.contains(&"cases/decoy.md".to_string()),
@@ -346,8 +359,9 @@ fn parity_scoped_ask_retrieval_candidate_ids() {
 
     // Scoped: resolution turns the scope into attachments; the candidate set
     // is exactly the scope, decoy excluded.
-    let (atts, _cfg) = investigations::resolve_ask_context(Some(&inv.id), vec![], ModelCfg::default());
-    let scoped = vault::retrieve("missing shipment harbor ledger", &all, 5, &[], &atts, false);
+    let (atts, _cfg, _) =
+        investigations::resolve_ask_context(Some(&inv.id), vec![], ModelCfg::default());
+    let scoped = vault::retrieve("missing shipment harbor ledger", &all, 5, &[], &atts, false, &[]);
     let mut scoped_ids: Vec<String> =
         scoped.references.iter().map(|r| r.file_id.clone()).collect();
     scoped_ids.sort();
@@ -356,4 +370,179 @@ fn parity_scoped_ask_retrieval_candidate_ids() {
         ids(&["cases/alpha.md", "cases/beta.md"]),
         "candidate ids match the TS twin"
     );
+}
+
+// --- §3 belonging: pins, notes, recall ----------------------------------------
+
+/// Pins belong via `Pin.investigationId` — the single source of truth the
+/// view derives `pinRefs` from. Old pins (written before the field existed)
+/// load unchanged, stay uncategorized, and keep round-tripping WITHOUT the
+/// field; the list op's filter narrows to one investigation without touching
+/// the "all" behavior. Mirrored by test/investigations.test.mjs (PARITY).
+#[test]
+fn pins_belong_and_the_view_derives_pin_refs() {
+    let vault_dir = tempfile::tempdir().unwrap();
+    let _guard = common::lock_env(vault_dir.path());
+    let state = vault_dir.path().join(".rag-vault");
+    std::fs::create_dir_all(&state).unwrap();
+
+    // A store written BEFORE the field existed (no investigationId anywhere).
+    std::fs::write(
+        state.join("pins.json"),
+        r#"{"pins":[{"id":"pin-legacy000001","question":"legacy pin","sql":"SELECT 1","fileIds":["a.csv"],"createdMs":7}]}"#,
+    )
+    .unwrap();
+    let legacy = lighthouse_core::pins::list();
+    assert_eq!(legacy.len(), 1, "old stores still load");
+    assert_eq!(legacy[0].investigation_id, None, "…and stay uncategorized");
+
+    let inv = investigations::create("Q3 audit", &[], ProviderPolicy::Default).unwrap();
+
+    // One pin inside the investigation, one global (explicit None), plus a
+    // blank id that must normalize to uncategorized.
+    let member =
+        lighthouse_core::pins::add("member?", "SELECT 2", &ids(&["a.csv"]), Some(&inv.id))
+            .expect("adds");
+    assert_eq!(member.investigation_id.as_deref(), Some(inv.id.as_str()));
+    let global = lighthouse_core::pins::add("global?", "SELECT 3", &[], None).expect("adds");
+    assert_eq!(global.investigation_id, None);
+    let blank = lighthouse_core::pins::add("blank?", "SELECT 4", &[], Some("  ")).expect("adds");
+    assert_eq!(blank.investigation_id, None, "blank id = uncategorized");
+
+    // Round trip: re-read from disk, fields intact; the raw store carries
+    // investigationId ONLY on the member pin (absent = omitted, so legacy
+    // pins keep round-tripping byte-compatibly).
+    let listed = lighthouse_core::pins::list();
+    assert_eq!(listed.len(), 4);
+    assert_eq!(
+        listed.iter().find(|p| p.id == member.id).unwrap().investigation_id.as_deref(),
+        Some(inv.id.as_str())
+    );
+    assert_eq!(listed.iter().find(|p| p.id == "pin-legacy000001").unwrap().investigation_id, None);
+    let raw = std::fs::read_to_string(state.join("pins.json")).unwrap();
+    assert_eq!(raw.matches("\"investigationId\"").count(), 1, "{raw}");
+
+    // The list filter narrows to the investigation; None keeps "all".
+    assert_eq!(lighthouse_core::pins::list_for(None).len(), 4);
+    let filtered = lighthouse_core::pins::list_for(Some(&inv.id));
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0].id, member.id);
+    assert!(lighthouse_core::pins::list_for(Some("inv-nope")).is_empty());
+
+    // The view derives pinRefs from the store — the member only.
+    let views = investigations::listing();
+    assert_eq!(views.len(), 1);
+    assert_eq!(views[0].pin_refs, vec![member.id.clone()]);
+
+    // Re-pinning the same SQL from the GLOBAL context replaces the pin and
+    // drops its membership (replace semantics, like every other field).
+    let repinned = lighthouse_core::pins::add("member?", "SELECT 2", &ids(&["a.csv"]), None)
+        .expect("re-pin");
+    assert_eq!(repinned.id, member.id, "same SQL ⇒ same pin id");
+    assert_eq!(repinned.investigation_id, None);
+    assert!(investigations::listing()[0].pin_refs.is_empty(), "membership followed the re-pin");
+}
+
+/// Notes belong by location: `notes_subdir` resolves `Lighthouse
+/// Notes/<stored folderName>` for a KNOWN investigation only (unknown id and
+/// tampered stores reject — the traversal attempt never becomes a write
+/// path), exports land under it via the same sanitized write_artifact, and
+/// the view derives `noteRefs` from exactly that folder. Mirrored by
+/// test/investigations.test.mjs (PARITY, identical error strings).
+#[test]
+fn notes_land_under_the_investigation_folder_and_derive_note_refs() {
+    let vault_dir = tempfile::tempdir().unwrap();
+    let _guard = common::lock_env(vault_dir.path());
+    let state = vault_dir.path().join(".rag-vault");
+
+    let inv = investigations::create("Harbor case", &[], ProviderPolicy::Default).unwrap();
+    let subdir = investigations::notes_subdir(&inv.id).expect("resolves");
+    assert_eq!(subdir, "Lighthouse Notes/Harbor case");
+
+    // Export through the resolved folder (what the exportChat op does) plus
+    // one GLOBAL note — membership = location, so only the first derives.
+    let (note_id, note_name) =
+        vault::write_artifact(&subdir, "Findings so far", "md", b"# findings").unwrap();
+    assert_eq!(note_id, format!("Lighthouse Notes/Harbor case/{note_name}"));
+    assert!(vault_dir.path().join(&note_id).exists(), "written inside the vault");
+    vault::write_artifact("Lighthouse Notes", "Global note", "md", b"# global").unwrap();
+
+    let views = investigations::listing();
+    assert_eq!(views[0].note_refs, vec![note_id.clone()], "prefix scan, member only");
+
+    // Unknown ids reject — a silently-global note would lose its membership.
+    assert_eq!(
+        investigations::notes_subdir("inv-nope").unwrap_err(),
+        "investigation not found"
+    );
+
+    // Validate-at-use: hand-tamper the store (the API's sanitizer can't be
+    // driven to these) — a traversal segment, and the reserved G6 "Chats"
+    // folder. Neither resolves; neither derives notes.
+    let tampered = r#"{"v":1,"investigations":[
+        {"id":"inv-evil","name":"Evil","createdMs":1,"folderName":"../evil"},
+        {"id":"inv-chats","name":"Chats twin","createdMs":2,"folderName":"Chats"}
+    ]}"#;
+    std::fs::write(state.join("investigations.json"), tampered).unwrap();
+    assert_eq!(
+        investigations::notes_subdir("inv-evil").unwrap_err(),
+        "investigation folder name is not usable",
+        "traversal attempt rejected"
+    );
+    assert_eq!(
+        investigations::notes_subdir("inv-chats").unwrap_err(),
+        "investigation folder name is not usable",
+        "the G6 Chats folder can never be aliased"
+    );
+    let views = investigations::listing();
+    assert!(views.iter().all(|v| v.note_refs.is_empty()), "unusable folders derive nothing");
+}
+
+/// §3 recall preference — the byte-pinned parity fixture (the node twin in
+/// test/investigations.test.mjs builds the SAME two conversation notes and
+/// asserts the SAME reference ORDER): two notes with IDENTICAL bodies score
+/// equally on a recall-cued ask; naming one conversation as preferred ranks
+/// its note FIRST while the other still surfaces (preference, not
+/// exclusion). The preferred ids are the RAW conversation ids — matching the
+/// filenames' [cid8] proves retrieve reuses write_conversation_note's exact
+/// derivation.
+#[test]
+fn recall_prefers_the_investigations_conversation_notes() {
+    let vault_dir = tempfile::tempdir().unwrap();
+    let _guard = common::lock_env(vault_dir.path());
+
+    let body = b"We concluded the missing shipment was rerouted through the harbor depot.";
+    let (alpha_id, _) =
+        vault::write_conversation_note("conv-alpha", "Alpha thread", body).unwrap();
+    let (beta_id, _) = vault::write_conversation_note("conv-beta", "Beta thread", body).unwrap();
+    vault::invalidate_walk_cache();
+    vault::set_included(&alpha_id, true);
+    vault::set_included(&beta_id, true);
+    let all = vec![alpha_id.clone(), beta_id.clone()];
+
+    // The recall-cued probe ("what did i conclude…" fires the cue; the topic
+    // tokens hit both bodies equally).
+    let query = "what did i conclude about the missing shipment?";
+    let ref_ids = |preferred: &[String]| -> Vec<String> {
+        vault::retrieve(query, &all, 5, &[], &[], false, preferred)
+            .references
+            .iter()
+            .map(|r| r.file_id.clone())
+            .collect()
+    };
+
+    // No preference: both conversation notes surface (equal scores).
+    let open = ref_ids(&[]);
+    assert!(open.contains(&alpha_id) && open.contains(&beta_id), "{open:?}");
+
+    // Preferring one conversation ranks ITS note first — and flipping the
+    // preference flips the order, so it is the preference (not name or
+    // insertion luck) that decides. The global note is still present.
+    let prefer_alpha = ref_ids(&[String::from("conv-alpha")]);
+    assert_eq!(prefer_alpha[0], alpha_id, "preferred first: {prefer_alpha:?}");
+    assert!(prefer_alpha.contains(&beta_id), "global still surfaces: {prefer_alpha:?}");
+
+    let prefer_beta = ref_ids(&[String::from("conv-beta")]);
+    assert_eq!(prefer_beta[0], beta_id, "flipped preference flips order: {prefer_beta:?}");
+    assert!(prefer_beta.contains(&alpha_id), "preference never excludes: {prefer_beta:?}");
 }

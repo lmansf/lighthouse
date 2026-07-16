@@ -130,16 +130,23 @@ class RealRagService implements RagService {
   async exportChat(
     title: string,
     markdown: string,
-    options?: { subdir?: "Lighthouse Notes" | "Lighthouse Results"; ext?: "md" | "html" },
+    options?: {
+      subdir?: "Lighthouse Notes" | "Lighthouse Results";
+      ext?: "md" | "html";
+      investigationId?: string;
+    },
   ): Promise<{ savedId?: string; savedName?: string; error?: string }> {
     // Absent fields keep the original markdown-note wire shape byte-for-byte;
-    // the evidence pack adds subdir/ext (engine-side strict allowlist).
+    // the evidence pack adds subdir/ext (engine-side strict allowlist), and an
+    // investigation ask adds investigationId — the engine resolves the notes
+    // folder from its store (openspec: add-investigations).
     return (await post({
       op: "exportChat",
       title,
       markdown,
       ...(options?.subdir ? { subdir: options.subdir } : {}),
       ...(options?.ext ? { ext: options.ext } : {}),
+      ...(options?.investigationId ? { investigationId: options.investigationId } : {}),
     })) as {
       savedId?: string;
       savedName?: string;
@@ -171,8 +178,17 @@ class RealRagService implements RagService {
     question: string,
     sql: string,
     fileIds: string[],
+    investigationId?: string,
   ): Promise<{ pin?: Pin; error?: string }> {
-    return (await post({ op: "pinAsk", question, sql, fileIds })) as {
+    // Absent investigationId keeps the original wire shape byte-for-byte —
+    // a global-context pin stays uncategorized (openspec: add-investigations).
+    return (await post({
+      op: "pinAsk",
+      question,
+      sql,
+      fileIds,
+      ...(investigationId ? { investigationId } : {}),
+    })) as {
       pin?: Pin;
       error?: string;
     };
@@ -182,8 +198,11 @@ class RealRagService implements RagService {
     await post({ op: "unpinAsk", id });
   }
 
-  async listPins(): Promise<Pin[]> {
-    const res = await post({ op: "listPins" });
+  async listPins(investigationId?: string): Promise<Pin[]> {
+    const res = await post({
+      op: "listPins",
+      ...(investigationId ? { investigationId } : {}),
+    });
     return Array.isArray(res.pins) ? (res.pins as Pin[]) : [];
   }
 

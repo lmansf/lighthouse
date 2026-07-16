@@ -1084,6 +1084,44 @@ export function sourceKindOf(fileId: string): "file" | "conversation" {
  */
 export const CONV_BOOST = 1.5;
 
+/**
+ * Recall preference for the current investigation (openspec:
+ * add-investigations): where `CONV_BOOST` applies, a conversation note
+ * BELONGING to the ask's investigation (its filename's `[cid8]` matches a
+ * preferred conversation id) is lifted this much FURTHER — preference, not
+ * exclusion: global notes still surface, ordered after. Applied in
+ * `retrieve`. PARITY: keep identical to
+ * lighthouse-core::synth::INVESTIGATION_BOOST.
+ */
+export const INVESTIGATION_BOOST = 1.3;
+
+/**
+ * G6: 8 hex chars of SHA-1(conversationId) — collision-resistant, stable,
+ * and independent of the (mutable) title. THE one derivation of the `[cid8]`
+ * key: `writeConversationNote` brackets it into the note's filename, and
+ * `retrieve`'s investigation preference (openspec: add-investigations)
+ * recomputes it from preferred conversation ids to recognize those same
+ * filenames — extracted here so the two can never drift. KEEP IN SYNC with
+ * vault.rs::conversation_cid8.
+ */
+function conversationCid8(conversationId: string): string {
+  return createHash("sha1").update(conversationId).digest("hex").slice(0, 8);
+}
+
+/**
+ * The `[cid8]` key a conversation-note FILENAME carries (the
+ * `"<title> [<cid8>].md"` format `writeConversationNote` produces), or null
+ * for any other id. The LAST ` [` wins, so a title that itself contains
+ * brackets still yields the engine-appended key. KEEP IN SYNC with
+ * vault.rs::note_cid8_of.
+ */
+function noteCid8Of(fileId: string): string | null {
+  if (!fileId.endsWith("].md")) return null;
+  const stem = fileId.slice(0, -"].md".length);
+  const at = stem.lastIndexOf(" [");
+  return at === -1 ? null : stem.slice(at + 2);
+}
+
 /** Anchored recall frames. KEEP BYTE-IDENTICAL with the Rust RECALL_FRAMES. */
 const RECALL_FRAMES = [
   "what did i ask", "what did i conclude", "what did we conclude",
@@ -1128,7 +1166,8 @@ export function writeConversationNote(
   title: string,
   bytes: Buffer,
 ): { id: string; name: string } {
-  const cid8 = createHash("sha1").update(conversationId).digest("hex").slice(0, 8);
+  // The dedup key in brackets (shared derivation — see conversationCid8).
+  const cid8 = conversationCid8(conversationId);
   let clean = [...title]
     .slice(0, 80)
     .map((c) => {
@@ -1836,6 +1875,10 @@ const MAX_TOTAL_CHUNKS = 4000;
  * with a *filename/path* match — so a file is findable both by what it contains
  * and by what it's called. (A file literally named "creditcard.csv" answers
  * "do I have any credit cards?" even when its rows are anonymized numbers.)
+ * `preferredConversationIds` (openspec: add-investigations) names the current
+ * investigation's conversations so a recall cue can prefer THEIR notes over
+ * global ones — empty means no preference (byte-identical to the
+ * pre-investigations ranking).
  */
 export async function retrieve(
   query: string,
@@ -1844,6 +1887,7 @@ export async function retrieve(
   external: { id: string; name: string; abs: string }[] = [],
   attachmentIds: string[] = [],
   isCloud = false,
+  preferredConversationIds: string[] = [],
 ): Promise<Retrieved> {
   // Explicit per-question attachments: the user dragged/attached these specific
   // files to *this* question, so honor them directly and scope retrieval to only
@@ -1969,9 +2013,23 @@ export async function retrieve(
   // G6 recall cue: "what did I ask/conclude about X" biases toward past-
   // conversation notes so synthesis draws on them. Deterministic — only scales
   // existing conversation-kind cands before the sort. KEEP IN SYNC with vault.rs.
+  //
+  // Investigation preference (openspec: add-investigations): where the cue
+  // boosts conversation notes, a note BELONGING to the ask's investigation —
+  // its filename's [cid8] matches a preferred conversation id, the same
+  // derivation writeConversationNote bracketed in — is lifted a further
+  // INVESTIGATION_BOOST. Preference, not exclusion: global notes keep their
+  // CONV_BOOST and still surface, ordered after.
   if (recallCue(query)) {
+    const preferredCid8s = new Set(preferredConversationIds.map(conversationCid8));
     for (const c of cands) {
-      if (sourceKindOf(c.fileId) === "conversation") c.score *= CONV_BOOST;
+      if (sourceKindOf(c.fileId) === "conversation") {
+        c.score *= CONV_BOOST;
+        if (preferredCid8s.size > 0) {
+          const cid = noteCid8Of(c.fileId);
+          if (cid !== null && preferredCid8s.has(cid)) c.score *= INVESTIGATION_BOOST;
+        }
+      }
     }
   }
   const sorted = cands.sort((a, b) => b.score - a.score);

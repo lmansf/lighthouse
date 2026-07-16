@@ -52,8 +52,10 @@ export async function POST(req: Request) {
   // where the profile's model config is consulted (and beneath which the
   // managed policy's llm-time belt sits), so a local-only investigation swaps
   // cfg before any transport exists and scope arrives as ordinary attachments
-  // (openspec: add-investigations). PARITY: chat_post in routes.rs.
-  const [attachmentFileIds, cfg] = resolveAskContext(
+  // (openspec: add-investigations). The third element is the investigation's
+  // conversationRefs — retrieval's recall preference (§3); empty when no
+  // investigation rides the ask. PARITY: chat_post in routes.rs.
+  const [attachmentFileIds, cfg, preferredConversationIds] = resolveAskContext(
     investigationId,
     requestAttachmentFileIds,
     modelConfig(),
@@ -80,6 +82,7 @@ export async function POST(req: Request) {
           history,
           cfg,
           { bypassCache, persistAllowed },
+          preferredConversationIds,
         )) {
           if (chunk.done) {
             if (chunk.references) finalFiles = chunk.references.map((r) => r.fileId);

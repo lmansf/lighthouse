@@ -24,8 +24,10 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { stateDir, writeJson } from "./config";
+import { listPins } from "./pins";
 import { historyAllowed } from "./policy";
 import { localModelConfig } from "./profile";
+import { listNodes } from "./vault";
 import type { ModelCfg } from "./synth";
 
 /** Envelope version this engine reads and writes. */
@@ -58,17 +60,19 @@ export interface Investigation {
   conversationRefs: string[];
   /**
    * Folder name for exported notes, sanitized (traversal-safe) at CREATION
-   * time and never moved by rename — membership = location (§4 derives note
-   * refs from it; §1 only records it).
+   * time and never moved by rename — membership = location (§3 derives note
+   * refs from it and routes `exportChat` under it; §1 only records it).
    */
   folderName: string;
 }
 
 /**
  * Read-time enriched view the `investigations` op returns: the record plus
- * DERIVED memberships. §1 returns them empty — §3 derives `pinRefs` from
- * pins.json (`Pin.investigationId`), §4 derives `noteRefs` from the
- * investigation's folder under `Lighthouse Notes/`.
+ * DERIVED memberships (§3) — `pinRefs` from pins.json (the ids of pins
+ * carrying `Pin.investigationId == id`), `noteRefs` from the investigation's
+ * folder under `Lighthouse Notes/` (a prefix scan of the walk: membership =
+ * location). Nothing here is stored on the record — no two-way bookkeeping
+ * to drift.
  */
 export interface InvestigationView extends Investigation {
   pinRefs: string[];
@@ -128,9 +132,29 @@ export function listInvestigations(): Investigation[] {
   return loaded.kind === "records" ? loaded.records : [];
 }
 
-/** Enrich one record for the wire (empty derived memberships in §1). */
+/**
+ * Enrich one record for the wire (§3): memberships are DERIVED at read time,
+ * never stored. `pinRefs` = ids of pins whose `investigationId` is this
+ * record's id (pins.json is the source of truth, oldest first); `noteRefs` =
+ * file ids under `Lighthouse Notes/<folderName>/` (a prefix scan of the
+ * cached walk — membership = location, so a note moved out of the folder
+ * simply stops being a member). An unusable stored folder name (tampered
+ * store) derives NO notes rather than scanning a wrong prefix. PARITY:
+ * investigations.rs::view.
+ */
 export function investigationView(record: Investigation): InvestigationView {
-  return { ...record, pinRefs: [], noteRefs: [] };
+  const pinRefs = listPins()
+    .filter((p) => p.investigationId === record.id)
+    .map((p) => p.id);
+  const folder = notesFolderSegment(record);
+  let noteRefs: string[] = [];
+  if (folder) {
+    const prefix = `Lighthouse Notes/${folder}/`;
+    noteRefs = listNodes()
+      .filter((n) => n.kind === "file" && n.id.startsWith(prefix))
+      .map((n) => n.id);
+  }
+  return { ...record, pinRefs, noteRefs };
 }
 
 /** Every record, enriched for the `{op:"investigations", action:"list"}` op. */
@@ -173,6 +197,50 @@ function sanitizeFolderName(name: string): string {
     .join(" ");
   if (!collapsed || /^\.+$/.test(collapsed)) return "Investigation";
   return collapsed;
+}
+
+/**
+ * The record's notes-folder SEGMENT, re-validated AT USE (§3): §1's
+ * sanitizer guarantees a safe single segment at creation, but the store is a
+ * file on disk — a hand-edited `folderName` must not become a write path.
+ * `null` when the stored value is unusable: empty, multi-segment (any `/` or
+ * `\`), dots-only (`.`/`..`), or the reserved G6 `Chats` segment
+ * (case-insensitive) — `Lighthouse Notes/Chats/` means auto-exported
+ * conversation notes (recall classifies by that prefix and the save-chats
+ * opt-out purges the whole folder), and an investigation folder must never
+ * alias it. PARITY: investigations.rs::notes_folder_segment.
+ */
+function notesFolderSegment(record: Investigation): string | null {
+  const folder = record.folderName.trim();
+  if (
+    !folder ||
+    folder.includes("/") ||
+    folder.includes("\\") ||
+    /^\.+$/.test(folder) ||
+    folder.toLowerCase() === "chats"
+  ) {
+    return null;
+  }
+  return folder;
+}
+
+/**
+ * Resolve the `exportChat` destination for an investigation (§3):
+ * `Lighthouse Notes/<stored folderName>` — the ONLY way a note reaches an
+ * investigation subfolder. The folder is resolved ENGINE-SIDE from the
+ * store, never taken from the client, and the segment is re-validated at
+ * use (see `notesFolderSegment`), so the write-artifact allowlist extends to
+ * exactly the folders of known investigations and nothing else. Errors are
+ * human-readable and byte-identical to the Rust twin
+ * (investigations.rs::notes_subdir).
+ */
+export function investigationNotesSubdir(investigationId: string): string {
+  const id = investigationId.trim();
+  const record = listInvestigations().find((r) => r.id === id);
+  if (!record) throw new Error("investigation not found");
+  const folder = notesFolderSegment(record);
+  if (!folder) throw new Error("investigation folder name is not usable");
+  return `Lighthouse Notes/${folder}`;
 }
 
 /**
@@ -324,27 +392,38 @@ export function resolveScopeAndPolicy(
 }
 
 /**
- * Resolve an ask's effective attachments + model config. Entry points call
- * this at the SAME chokepoint where `modelConfig()` is consulted today — the
- * identical depth at which the managed policy layer participates in provider
- * resolution (`modelConfig()` → llm-time `providerAllowed`). A `local-only`
- * investigation swaps the resolved config to the local provider HERE, before
- * the pipeline ever sees it: no cloud transport is constructed,
- * `originOf(cfg)` reports "device" and `isCloudProvider` false (the
- * provenance stamp is accurate with no further code), and local-only-marked
- * files stay readable (the private model may read them). The llm-layer
- * `providerAllowed` belt stays untouched beneath; managed `forceLocalOnly`
- * composes — most-restrictive wins because both act on the same cfg.
- * Caller: app/api/chat/route.ts (PARITY: investigations.rs::
- * resolve_ask_context ⇄ routes.rs chat_post / commands.rs chat_ask).
+ * Resolve an ask's effective attachments + model config + recall preference.
+ * Entry points call this at the SAME chokepoint where `modelConfig()` is
+ * consulted today — the identical depth at which the managed policy layer
+ * participates in provider resolution (`modelConfig()` → llm-time
+ * `providerAllowed`). A `local-only` investigation swaps the resolved config
+ * to the local provider HERE, before the pipeline ever sees it: no cloud
+ * transport is constructed, `originOf(cfg)` reports "device" and
+ * `isCloudProvider` false (the provenance stamp is accurate with no further
+ * code), and local-only-marked files stay readable (the private model may
+ * read them). The llm-layer `providerAllowed` belt stays untouched beneath;
+ * managed `forceLocalOnly` composes — most-restrictive wins because both act
+ * on the same cfg.
+ *
+ * The third element (§3) is the investigation's `conversationRefs`, for the
+ * pipeline's recall preference: where a recall cue boosts conversation
+ * notes, notes belonging to these conversations get `INVESTIGATION_BOOST` on
+ * top — preference, not exclusion. Empty when no (or an unknown)
+ * investigation rides the ask. Caller: app/api/chat/route.ts (PARITY:
+ * investigations.rs::resolve_ask_context ⇄ routes.rs chat_post /
+ * commands.rs chat_ask).
  */
 export function resolveAskContext(
   investigationId: string | undefined,
   attachmentFileIds: string[],
   cfg: ModelCfg,
-): [string[], ModelCfg] {
+): [string[], ModelCfg, string[]] {
   const id = investigationId?.trim();
   const record = id ? listInvestigations().find((r) => r.id === id) : undefined;
   const [attachments, forceLocal] = resolveScopeAndPolicy(record, attachmentFileIds);
-  return [attachments, forceLocal ? localModelConfig() : cfg];
+  return [
+    attachments,
+    forceLocal ? localModelConfig() : cfg,
+    record ? [...record.conversationRefs] : [],
+  ];
 }

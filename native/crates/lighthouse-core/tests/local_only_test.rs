@@ -164,12 +164,12 @@ fn parity_retrieval_candidate_ids_under_a_cloud_provider() {
     let ids = vec!["quarterly report.md".to_string(), "salaries.md".to_string()];
     // Cloud: the marked file is dropped from the candidate set even though its
     // content matches the query best.
-    let cloud = vault::retrieve("quarterly revenue report", &ids, 5, &[], &[], true);
+    let cloud = vault::retrieve("quarterly revenue report", &ids, 5, &[], &[], true, &[]);
     let cloud_ids: Vec<String> = cloud.references.iter().map(|r| r.file_id.clone()).collect();
     assert_eq!(cloud_ids, vec!["quarterly report.md".to_string()], "cloud candidate ids");
 
     // Device: both files are candidates (the mark is inert on-device).
-    let device = vault::retrieve("quarterly revenue report", &ids, 5, &[], &[], false);
+    let device = vault::retrieve("quarterly revenue report", &ids, 5, &[], &[], false, &[]);
     let mut device_ids: Vec<String> = device.references.iter().map(|r| r.file_id.clone()).collect();
     device_ids.sort();
     assert_eq!(device_ids, vec!["quarterly report.md".to_string(), "salaries.md".to_string()]);
@@ -178,8 +178,15 @@ fn parity_retrieval_candidate_ids_under_a_cloud_provider() {
 // --- End-to-end ------------------------------------------------------------------
 
 async fn collect_pipeline(question: &str, ids: Vec<String>, cfg: ModelCfg) -> (String, Vec<String>) {
-    let mut stream =
-        answer_pipeline(question.to_string(), ids, vec![], vec![], cfg, Default::default());
+    let mut stream = answer_pipeline(
+        question.to_string(),
+        ids,
+        vec![],
+        vec![],
+        cfg,
+        Default::default(),
+        vec![],
+    );
     let mut text = String::new();
     let mut final_files: Vec<String> = Vec::new();
     while let Some(c) = stream.next().await {

@@ -581,6 +581,126 @@ async fn export_chat_routes_artifacts_through_the_allowlist() {
     );
 }
 
+/// Investigations §3 over the real wire (openspec: add-investigations):
+/// exportChat with an investigationId lands under the investigation's OWN
+/// folder (engine-resolved — the client never names it), the evidence-pack
+/// destination is unaffected, unknown ids and client-sent folder segments
+/// reject, pinAsk records the membership, and the investigations listing
+/// derives pinRefs + noteRefs from those two sources of truth.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn investigation_belonging_over_the_wire() {
+    let _env = lock_env();
+    let (base, vault_dir) = spawn_server().await;
+    let client = reqwest::Client::new();
+    let post = |body: Value| client.post(format!("{base}/api/rag")).json(&body).send();
+
+    let created: Value = post(json!({
+        "op": "investigations", "action": "create", "name": "Harbor case",
+    }))
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    let inv_id = created["investigation"]["id"].as_str().unwrap().to_string();
+
+    // --- exportChat + investigationId: the note lands in the investigation's
+    //     folder, resolved engine-side from the store. -----------------------
+    let res: Value = post(json!({
+        "op": "exportChat", "title": "Team sync", "markdown": "# hi",
+        "investigationId": inv_id,
+    }))
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    assert_eq!(res["savedId"], "Lighthouse Notes/Harbor case/Team sync.md");
+    assert_eq!(res["savedName"], "Team sync.md");
+    assert!(vault_dir
+        .path()
+        .join("Lighthouse Notes/Harbor case/Team sync.md")
+        .exists());
+
+    // --- The evidence pack is unaffected: explicit Lighthouse Results stays
+    //     in Results even inside an investigation (packs are results, not
+    //     notes — note membership = location). ------------------------------
+    let res: Value = post(json!({
+        "op": "exportChat", "title": "pack", "markdown": "<html></html>",
+        "subdir": "Lighthouse Results", "ext": "html", "investigationId": inv_id,
+    }))
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    assert_eq!(res["savedId"], "Lighthouse Results/pack.html");
+
+    // --- pinAsk + investigationId: the pin carries its membership; the
+    //     filtered list narrows to it while the plain list stays "all". -----
+    let res: Value = post(json!({
+        "op": "pinAsk", "question": "how many?", "sql": "SELECT 1", "fileIds": ["a.csv"],
+        "investigationId": inv_id,
+    }))
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    let pin_id = res["pin"]["id"].as_str().unwrap().to_string();
+    assert_eq!(res["pin"]["investigationId"], inv_id.as_str());
+    let _: Value = post(json!({
+        "op": "pinAsk", "question": "global?", "sql": "SELECT 2", "fileIds": [],
+    }))
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    let all: Value = post(json!({ "op": "listPins" })).await.unwrap().json().await.unwrap();
+    assert_eq!(all["pins"].as_array().unwrap().len(), 2, "no filter = all pins");
+    let filtered: Value = post(json!({ "op": "listPins", "investigationId": inv_id }))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let filtered = filtered["pins"].as_array().unwrap();
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0]["id"], pin_id.as_str());
+
+    // --- The listing derives both memberships (§3): pins from pins.json,
+    //     notes from the investigation's folder. ----------------------------
+    let listed: Value = post(json!({ "op": "investigations", "action": "list" }))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let view = &listed["investigations"][0];
+    assert_eq!(view["pinRefs"], json!([pin_id]));
+    assert_eq!(
+        view["noteRefs"],
+        json!(["Lighthouse Notes/Harbor case/Team sync.md"])
+    );
+
+    // --- Rejections: an unknown id (a silently-global note would lose its
+    //     membership) and a client-SENT folder segment (the subdir allowlist
+    //     is unchanged — only the engine resolves investigation folders). ---
+    for bad in [
+        json!({ "op": "exportChat", "title": "x", "markdown": "x", "investigationId": "inv-nope" }),
+        json!({ "op": "exportChat", "title": "x", "markdown": "x", "subdir": "Lighthouse Notes/Harbor case" }),
+    ] {
+        let res = post(bad.clone()).await.unwrap();
+        assert_eq!(res.status().as_u16(), 400, "must reject: {bad}");
+    }
+    assert!(
+        !vault_dir.path().join("Lighthouse Notes/x.md").exists()
+            && !vault_dir.path().join("Lighthouse Notes/Harbor case/x.md").exists(),
+        "a rejected export writes nothing"
+    );
+}
+
 /// Bulk curation rules over the wire (openspec: add-curation-rules): create a
 /// rule via the op, land a NEW matching file (a real upload — the same path an
 /// arriving file takes), and assert it resolves with the rule's flags on the

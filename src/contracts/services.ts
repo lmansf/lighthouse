@@ -116,6 +116,13 @@ export interface RagService {
    * allowlist ("Lighthouse Notes"|"Lighthouse Results"; "md"|"html") — the
    * client can never name arbitrary folders or extensions. Returns the new
    * file's id + final name (collision-suffixed, never overwrites).
+   *
+   * `investigationId` (openspec: add-investigations): when an investigation
+   * is current, pass its id and the NOTES destination becomes the
+   * investigation's own folder — `Lighthouse Notes/<folderName>/`, with the
+   * folder resolved ENGINE-SIDE from the store (the client never names it).
+   * An explicit "Lighthouse Results" subdir (the evidence pack) is
+   * unaffected; an unknown id comes back as `error`.
    */
   exportChat(
     title: string,
@@ -123,6 +130,7 @@ export interface RagService {
     options?: {
       subdir?: "Lighthouse Notes" | "Lighthouse Results";
       ext?: "md" | "html";
+      investigationId?: string;
     },
   ): Promise<{ savedId?: string; savedName?: string; error?: string }>;
   /**
@@ -143,17 +151,25 @@ export interface RagService {
    * engine watches it: vault changes re-run the SQL (guarded, model-free) and
    * alert when the computed result changes. Re-pinning the same SQL replaces
    * the pin; past the cap the error explains the limit. The desktop engine
-   * primes the fresh pin's summary immediately.
+   * primes the fresh pin's summary immediately. `investigationId` (openspec:
+   * add-investigations) records the current investigation on the pin — its
+   * membership; absent leaves the pin uncategorized, and a re-pin adopts the
+   * new ask's investigation.
    */
   pinAsk(
     question: string,
     sql: string,
     fileIds: string[],
+    investigationId?: string,
   ): Promise<{ pin?: Pin; error?: string }>;
   /** Remove a pin (idempotent). */
   unpinAsk(id: string): Promise<void>;
-  /** All pins, oldest first. */
-  listPins(): Promise<Pin[]>;
+  /**
+   * All pins, oldest first. `investigationId` (openspec: add-investigations)
+   * filters to the pins carrying that investigation; absent = all pins, the
+   * original behavior.
+   */
+  listPins(investigationId?: string): Promise<Pin[]>;
   /**
    * Re-run every pin now (manual refresh). Returns the pins whose computed
    * result changed plus the refreshed list. PARITY: the web dev twin can't
@@ -267,8 +283,8 @@ export interface RagService {
    * Investigations (openspec: add-investigations): named, durable containers
    * for analysis. Every record in creation order — the caller filters
    * archived ones (archive hides, never deletes). `pinRefs`/`noteRefs` come
-   * back derived by the engine at read time (empty until §3/§4 populate
-   * them).
+   * back derived by the engine at read time (pins carrying the id; files
+   * under the investigation's notes folder).
    */
   listInvestigations(): Promise<Investigation[]>;
   /**

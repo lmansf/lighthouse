@@ -164,7 +164,7 @@ pub fn inspect(file_id: &str, query: Option<&str>) -> FileInspection {
     // the one file, so this returns that file's top chunks with scores.
     if let Some(q) = query.map(str::trim).filter(|q| !q.is_empty()) {
         let ids = [file_id.to_string()];
-        let retrieved = crate::vault::retrieve(q, &ids, TEST_SEARCH_K, &[], &[], false);
+        let retrieved = crate::vault::retrieve(q, &ids, TEST_SEARCH_K, &[], &[], false, &[]);
         out.test_search = Some(
             retrieved
                 .contexts
