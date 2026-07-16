@@ -320,7 +320,7 @@ pub(crate) fn union_groups(
 /// `register_*` replaces silently — so the guess could overwrite a live table
 /// and leave two cards pointing at one. Looping to an actually-unused suffix
 /// closes that.
-fn unique_table_name(base: &str, used: &[String]) -> String {
+pub(crate) fn unique_table_name(base: &str, used: &[String]) -> String {
     if !used.iter().any(|u| u == base) {
         return base.to_string();
     }

@@ -35,4 +35,5 @@ pub mod sources;
 pub mod synth;
 pub mod table_profile;
 pub mod vault;
+pub mod views;
 pub mod watch;
