@@ -14,7 +14,7 @@ mod common;
 use futures::StreamExt;
 use lighthouse_core::answer_cache::{self, CacheCtl, CachedAnswer};
 use lighthouse_core::beam::PlanCtl;
-use lighthouse_core::contracts::{ChatChunk, ChunkMeta, CostMeta};
+use lighthouse_core::contracts::{ChatChunk, ChunkMeta, CostMeta, CtxManifestEntry};
 use lighthouse_core::llm::ModelCfg;
 use lighthouse_core::synth::answer_pipeline;
 use lighthouse_core::vault;
@@ -43,6 +43,7 @@ fn entry(text: &str) -> CachedAnswer {
             source_file_count: 0,
             cached_at: None,
             cost: None,
+            manifest: None,
         },
     }
 }
@@ -241,6 +242,54 @@ fn a_cache_replay_reports_zero_new_cost_but_carries_the_original_as_history() {
         lighthouse_core::audit::ask_new_cost(&replay_meta).is_none(),
         "a replay reports 0 new tokens / $0"
     );
+}
+
+// --- Context manifest persistence + replay (openspec: add-beam-loop §5.4/§5.7) -----
+
+#[test]
+fn a_cache_replay_shows_the_original_manifest_not_a_blank() {
+    // The context manifest is stored on the cached answer and rides the replay via
+    // `..hit.meta` (the same seam the provenance stamp and cost meter get), so a
+    // replay renders the ORIGINAL manifest, never an empty one. METADATA ONLY —
+    // the persisted entries carry names/kinds/counts/file ids, never context text.
+    let dir = tempfile::tempdir().unwrap();
+    let _guard = common::lock_env(dir.path());
+    std::env::remove_var("LIGHTHOUSE_APP_STATE_DIR");
+    answer_cache::reset_store();
+
+    let mut e = entry("verified answer over private files");
+    e.meta.manifest = Some(vec![
+        CtxManifestEntry {
+            name: "budget.csv — schema".into(),
+            kind: "schema-card".into(),
+            chars: 128,
+            file_id: Some("id-budget".into()),
+            local_only: None,
+            score: 0.0,
+        },
+        CtxManifestEntry {
+            name: "q3.md".into(),
+            kind: "retrieved-chunk".into(),
+            chars: 512,
+            file_id: Some("id-q3".into()),
+            local_only: None,
+            score: 0.9,
+        },
+    ]);
+    answer_cache::insert("k", e, ALLOWED);
+
+    // The manifest survives the store byte-for-byte (persisted history).
+    let hit = answer_cache::lookup("k", ALLOWED).expect("stored");
+    let stored = hit.meta.manifest.clone().expect("manifest persisted in CachedAnswer");
+    assert_eq!(stored.len(), 2);
+    assert_eq!(stored[1].kind, "retrieved-chunk");
+    assert_eq!(stored[1].file_id.as_deref(), Some("id-q3"), "a chunk carries its file id");
+
+    // The replay stamp the wrapper adds (`cachedAt`) carries the ORIGINAL manifest
+    // forward via the `..hit.meta` spread — the replay shows it, not a blank.
+    let replay_meta = ChunkMeta { cached_at: Some(hit.created_ms), ..hit.meta };
+    let m = replay_meta.manifest.expect("the original manifest rides the replay");
+    assert_eq!(m.len(), 2, "a replay shows the original manifest, not an empty one");
 }
 
 // --- E2E over the model-free meta path ---------------------------------------------

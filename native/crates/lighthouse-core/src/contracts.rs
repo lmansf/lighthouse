@@ -164,6 +164,19 @@ pub struct ChunkMeta {
     /// src/contracts/types.ts.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub cost: Option<CostMeta>,
+    /// Context manifest (openspec: add-beam-loop §5): the per-context-block
+    /// METADATA the model was actually handed, built from the ALREADY-GATED
+    /// shareable set (post `vault::shareable_subset`) — so a cloud ask lists ONLY
+    /// what left the device, while what was withheld is disclosed separately by
+    /// the `local_only_skip_note`. METADATA ONLY, NEVER `Ctx.text` (see
+    /// `CtxManifestEntry`). Present on a live final chunk that assembled any
+    /// context; a replay carries the ORIGINAL manifest as history (it rides this
+    /// `ChunkMeta`, so `..hit.meta` re-emits it — the replay computed nothing).
+    /// `#[serde(default)]` keeps pre-manifest cached entries (no field) valid.
+    /// KEEP IN SYNC with the ChatChunk["meta"]["manifest"] shape in
+    /// src/contracts/types.ts.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub manifest: Option<Vec<CtxManifestEntry>>,
 }
 
 /// The cost meter for one answer (openspec: add-beam-loop §3.1), stamped on the
@@ -196,6 +209,40 @@ pub struct CostMeta {
     /// unavailable (an unknown model, or unreported tokens).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cost_estimate_usd: Option<f64>,
+}
+
+/// One entry in the context manifest (openspec: add-beam-loop §5.1) that rides
+/// the final chunk's `ChunkMeta.manifest` — a per-context-block DESCRIPTION of
+/// what the model was handed, METADATA ONLY. It NEVER carries `Ctx.text`: the
+/// manifest rides `ChunkMeta`, which the answer cache persists into
+/// `CachedAnswer` (and which G6 exports into conversation notes), so copying
+/// context bytes here would land private file text past a boundary `local_only`
+/// never authorized — a leak. The bytes stay behind the device-only file
+/// inspector (inspect.rs); this is the label, not the content.
+///
+/// - `name` is the context block's prompt label (what the model saw).
+/// - `kind` is a byte-exact string enum: `schema-card` | `query-result` |
+///   `retrieved-chunk` | `join-hints` | `chart-options` | `conversation-note`.
+/// - `chars` is the block's LENGTH (a count), never the text.
+/// - `file_id` attributes a retrieved chunk to its source file (from the flowing
+///   `references`, `RagReference.file_id`); absent for engine-computed blocks.
+/// - `local_only` is reserved for per-entry local-only marking on the loopback
+///   path; the cloud path's manifest is already the gated shareable set, so
+///   withholding is disclosed by the skip note rather than per entry.
+///
+/// KEEP IN SYNC with the `CtxManifestEntry` shape (ChatChunk["meta"]["manifest"])
+/// in src/contracts/types.ts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CtxManifestEntry {
+    pub name: String,
+    pub kind: String,
+    pub chars: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_only: Option<bool>,
+    pub score: f64,
 }
 
 /// The exact executed SQL of an analytics answer and the vault files it read.

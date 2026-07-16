@@ -436,8 +436,19 @@ export interface ChatChunk {
    * `costEstimateUsd: 0`; an unknown model omits `costEstimateUsd` ("estimate
    * unavailable"). PARITY: the cost VALUES are Rust-shipped — this dev twin does
    * not parse provider usage (§1), so its answers report "not reported"; the
-   * shape is mirrored so the same UI renders either engine's meter. KEEP IN SYNC
-   * with the Rust ChunkMeta / CostMeta in contracts.rs.
+   * shape is mirrored so the same UI renders either engine's meter. `manifest`
+   * (openspec: add-beam-loop §5) is the per-context-block METADATA the model was
+   * handed — built from the ALREADY-GATED shareable set, so a cloud ask lists
+   * only what left the device (what was withheld is disclosed by the skip note).
+   * METADATA ONLY, never the context text: `chars` is the block's LENGTH (a
+   * count), never the bytes, which stay behind the device-only file inspector.
+   * `kind` is a byte-exact string enum; `fileId` attributes a retrieved chunk to
+   * its source file. PARITY: this dev twin has no analytics branch, so it only
+   * ever emits `retrieved-chunk` / `conversation-note` entries (the kinds its RAG
+   * paths assemble) — the analytics kinds (`schema-card` / `query-result` /
+   * `join-hints` / `chart-options`) are Rust-only; the labels match byte-for-byte.
+   * KEEP IN SYNC with the Rust ChunkMeta / CostMeta / CtxManifestEntry in
+   * contracts.rs.
    */
   meta?: {
     origin: string;
@@ -451,6 +462,14 @@ export interface ChatChunk {
       reported: boolean;
       costEstimateUsd?: number;
     };
+    manifest?: {
+      name: string;
+      kind: string;
+      chars: number;
+      fileId?: string;
+      localOnly?: boolean;
+      score: number;
+    }[];
   };
   /** True on the last chunk of a response. */
   done: boolean;

@@ -10,8 +10,8 @@ use std::pin::Pin;
 use futures::{Stream, StreamExt};
 
 use crate::contracts::{
-    AnalyticsMeta, ChatChunk, ChatProgress, ChatTurn, ChunkMeta, CostMeta, PlanPreview,
-    RagReference,
+    AnalyticsMeta, ChatChunk, ChatProgress, ChatTurn, ChunkMeta, CostMeta, CtxManifestEntry,
+    PlanPreview, RagReference,
 };
 use crate::llm::{self, Ctx, ModelCfg};
 use crate::table_profile::{is_profileable, table_profile};
@@ -397,12 +397,17 @@ fn draft_chunk(d: String) -> ChatChunk {
 /// here from the references so it can never drift from what's cited (and from
 /// the audit record's `fileIds`, which are those same refs' ids). `cost` is the
 /// ask's cost meter (openspec: add-beam-loop §3.1), computed from the per-ask
-/// usage sink. KEEP IN SYNC with src/server/synth.ts::finalChunk.
+/// usage sink. `manifest` is the context manifest (openspec: add-beam-loop §5) —
+/// the metadata of every context block handed to the model in the branch that
+/// ran, built from the already-gated shareable set; empty ⇒ omitted (a
+/// model-free or degradation path assembled nothing). KEEP IN SYNC with
+/// src/server/synth.ts::finalChunk.
 fn final_chunk(
     references: Vec<RagReference>,
     excerpt_count: usize,
     origin: &str,
     cost: CostMeta,
+    manifest: Vec<CtxManifestEntry>,
 ) -> ChatChunk {
     let source_file_count = references.len();
     ChatChunk {
@@ -420,6 +425,7 @@ fn final_chunk(
             // wrapper adds `cached_at` only when it replays a stored entry.
             cached_at: None,
             cost: Some(cost),
+            manifest: (!manifest.is_empty()).then_some(manifest),
         }),
         done: true,
     }
@@ -439,6 +445,7 @@ fn plan_chunk(
     excerpt_count: usize,
     origin: &str,
     cost: CostMeta,
+    manifest: Vec<CtxManifestEntry>,
 ) -> ChatChunk {
     let source_file_count = references.len();
     ChatChunk {
@@ -454,6 +461,9 @@ fn plan_chunk(
             source_file_count,
             cached_at: None,
             cost: Some(cost),
+            // The planning context the previewed SQL was written from (schema /
+            // view cards + join hints) — metadata only, the same gated set.
+            manifest: (!manifest.is_empty()).then_some(manifest),
         }),
         done: true,
     }
@@ -484,6 +494,133 @@ fn cost_meta(cfg: &ModelCfg, total: Option<llm::Usage>) -> CostMeta {
             cost_estimate_usd: None,
         },
     }
+}
+
+// --- Context manifest (openspec: add-beam-loop §5) --------------------------------
+//
+// A per-context-block manifest of what the model was handed — METADATA ONLY,
+// never `Ctx.text`. It rides `ChunkMeta` (like the cost meter), so the answer
+// cache persists it and a replay re-emits the ORIGINAL via `..hit.meta`. Every
+// builder below runs AFTER the shareable-subset gate (the ctxs are assembled
+// from candidate ids already filtered through `vault::shareable_subset`), so a
+// cloud ask's manifest lists only the shareable subset; what was withheld is
+// disclosed by `local_only_skip_note`. The `kind` strings are byte-exact and
+// mirrored in the TS twin (src/server/synth.ts).
+
+/// One manifest entry from a context block's METADATA — its `name`, `kind`,
+/// `chars` (the text LENGTH, a count — never the bytes), source `file_id`, and
+/// `score`. The text is deliberately absent: it stays behind the device-only
+/// file inspector (inspect.rs), never in the persisted `ChunkMeta`.
+fn manifest_entry(
+    kind: &str,
+    name: &str,
+    text_len: usize,
+    score: f64,
+    file_id: Option<String>,
+) -> CtxManifestEntry {
+    CtxManifestEntry {
+        name: name.to_string(),
+        kind: kind.to_string(),
+        chars: text_len,
+        file_id,
+        // The manifest is the gated shareable set, so every entry here is
+        // shareable; withholding is disclosed by the skip note, not per entry.
+        local_only: None,
+        score,
+    }
+}
+
+/// Manifest for an analytics NARRATION context (openspec: add-beam-loop §5.1),
+/// derived from the SAME assembled `ctxs` the model was handed (so every name
+/// and length is byte-exact to the prompt) plus its structural split: the
+/// leading `n_results` blocks are engine-computed `query-result`s, the next
+/// `regs.len()` are per-table `schema-card`s (each attributed to its source
+/// file), and any trailing block — present only on the single-query path — is
+/// the `chart-options` card.
+fn analytics_manifest(
+    ctxs: &[Ctx],
+    n_results: usize,
+    regs: &[crate::analytics::TableReg],
+) -> Vec<CtxManifestEntry> {
+    let mut m = Vec::with_capacity(ctxs.len());
+    for c in ctxs.iter().take(n_results) {
+        m.push(manifest_entry("query-result", &c.name, c.text.len(), c.score, None));
+    }
+    for (c, r) in ctxs.iter().skip(n_results).zip(regs.iter()) {
+        m.push(manifest_entry(
+            "schema-card",
+            &c.name,
+            c.text.len(),
+            c.score,
+            Some(r.file_id.clone()),
+        ));
+    }
+    for c in ctxs.iter().skip(n_results + regs.len()) {
+        m.push(manifest_entry("chart-options", &c.name, c.text.len(), c.score, None));
+    }
+    m
+}
+
+/// Manifest for the PLANNING context (openspec: add-beam-loop §5.1) — the
+/// context the previewed/executed SQL was written from, which is exactly
+/// `sql_ctxs`: the first `regs.len()` blocks are file `schema-card`s (attributed
+/// to their file), the next `n_views` are saved-view `schema-card`s (virtual, no
+/// file), and any trailing block is the `join-hints` card.
+fn planning_manifest(
+    sql_ctxs: &[Ctx],
+    regs: &[crate::analytics::TableReg],
+    n_views: usize,
+) -> Vec<CtxManifestEntry> {
+    let mut m = Vec::with_capacity(sql_ctxs.len());
+    for (c, r) in sql_ctxs.iter().take(regs.len()).zip(regs.iter()) {
+        m.push(manifest_entry(
+            "schema-card",
+            &c.name,
+            c.text.len(),
+            c.score,
+            Some(r.file_id.clone()),
+        ));
+    }
+    for c in sql_ctxs.iter().skip(regs.len()).take(n_views) {
+        m.push(manifest_entry("schema-card", &c.name, c.text.len(), c.score, None));
+    }
+    for c in sql_ctxs.iter().skip(regs.len() + n_views) {
+        m.push(manifest_entry("join-hints", &c.name, c.text.len(), c.score, None));
+    }
+    m
+}
+
+/// Manifest for a RETRIEVAL context (openspec: add-beam-loop §5.1/§5.3): one
+/// entry per retrieved chunk, `kind` = `conversation-note` for a past-chat note
+/// else `retrieved-chunk`, attributed to its source `file_id` via the per-file
+/// `references` (matched by display name — references are one-per-file). The
+/// entry `name` is the prompt label the model saw (`ctx_label`). Metadata only;
+/// the chunk text never rides along.
+fn retrieval_manifest(
+    contexts: &[vault::Context],
+    references: &[RagReference],
+) -> Vec<CtxManifestEntry> {
+    let file_of: std::collections::HashMap<&str, &str> = references
+        .iter()
+        .map(|r| (r.name.as_str(), r.file_id.as_str()))
+        .collect();
+    contexts
+        .iter()
+        .map(|c| {
+            let kind = if c.kind == crate::contracts::SourceKind::Conversation {
+                "conversation-note"
+            } else {
+                "retrieved-chunk"
+            };
+            manifest_entry(
+                kind,
+                &ctx_label(c),
+                c.text.len(),
+                c.score,
+                file_of.get(c.name.as_str()).map(|s| s.to_string()),
+            )
+        })
+        .collect()
 }
 
 async fn collect(mut s: llm::AnswerStream) -> String {
@@ -823,7 +960,7 @@ fn live_pipeline(
                     recipe.needs.describe(),
                     cue.table,
                 ));
-                yield final_chunk(Vec::new(), 0, &origin, cost_meta(&cfg, sink.total()));
+                yield final_chunk(Vec::new(), 0, &origin, cost_meta(&cfg, sink.total()), Vec::new());
                 return;
             };
 
@@ -864,7 +1001,7 @@ fn live_pipeline(
                      returned nothing.\n",
                     recipe.name, cue.table,
                 ));
-                yield final_chunk(Vec::new(), 0, &origin, cost_meta(&cfg, sink.total()));
+                yield final_chunk(Vec::new(), 0, &origin, cost_meta(&cfg, sink.total()), Vec::new());
                 return;
             }
 
@@ -873,6 +1010,9 @@ fn live_pipeline(
             // narration_prompt. Extractive/no-model: nothing here — the
             // deterministic tables below ARE the answer. The footer + final chunk
             // NEVER depend on any narration output.
+            // The manifest (§5) describes only what a MODEL was handed; the
+            // extractive path narrates nothing, so it stays empty.
+            let mut manifest: Vec<CtxManifestEntry> = Vec::new();
             if has_real_model(&cfg) {
                 yield progress("Summarizing results…".to_string(), 4, 4);
                 let mut ctxs: Vec<Ctx> = steps
@@ -889,6 +1029,9 @@ fn live_pipeline(
                     text: r.card.clone(),
                     score: 0.0,
                 }));
+                // Metadata of the narration context (result cards + schema cards),
+                // built before `ctxs` is handed to the model below.
+                manifest = analytics_manifest(&ctxs, steps.len(), &regs);
                 let mut scrub = crate::analytics::DirectiveScrubber::new();
                 let mut answer = llm::stream_answer(
                     recipe.narration_prompt.to_string(),
@@ -955,7 +1098,8 @@ fn live_pipeline(
             }
             // Pin/board/save act on the representative query.
             let (refs, meta_ids) = analytics_refs(&regs);
-            let mut done = final_chunk(refs, steps.len(), &origin, cost_meta(&cfg, sink.total()));
+            let mut done =
+                final_chunk(refs, steps.len(), &origin, cost_meta(&cfg, sink.total()), manifest);
             done.analytics = Some(AnalyticsMeta {
                 sql: representative_sql,
                 file_ids: meta_ids,
@@ -1066,7 +1210,9 @@ fn live_pipeline(
                     // Model-free deterministic answer: zero excerpts handed to a
                     // model, files behind it are the cited references, and the
                     // cost meter is "not reported" (no model call, so no tokens).
-                    yield final_chunk(ans.references, 0, &origin, cost_meta(&cfg, sink.total()));
+                    // No context was assembled for a model, so the manifest is
+                    // empty (§5).
+                    yield final_chunk(ans.references, 0, &origin, cost_meta(&cfg, sink.total()), Vec::new());
                     return;
                 }
             }
@@ -1204,6 +1350,10 @@ fn live_pipeline(
                         // the planner saw.
                         let (refs, _meta_ids) = analytics_refs(&regs);
                         let cost = cost_meta(&cfg, sink.total());
+                        // Manifest (§5): the planning context the previewed SQL was
+                        // written from — schema/view cards + join hints — metadata
+                        // only, already the gated shareable set.
+                        let manifest = planning_manifest(&sql_ctxs, &regs, view_regs.len());
                         match proposed {
                             Some(sql) => {
                                 let tables: Vec<String> = regs
@@ -1217,12 +1367,13 @@ fn live_pipeline(
                                     sql_ctxs.len(),
                                     &origin,
                                     cost,
+                                    manifest,
                                 );
                             }
                             // The model proposed no query (an immediate DONE / no
                             // SQL): nothing to preview and — plan_only — nothing to
                             // execute. A bare terminal chunk closes the stream.
-                            None => yield final_chunk(refs, sql_ctxs.len(), &origin, cost),
+                            None => yield final_chunk(refs, sql_ctxs.len(), &origin, cost, manifest),
                         }
                         return;
                     }
@@ -1398,6 +1549,11 @@ fn live_pipeline(
                                 score: 0.0,
                             }));
                             let excerpt_count = ctxs.len();
+                            // Manifest (§5): the per-step query results then the
+                            // schema cards — metadata of exactly what the narration
+                            // saw (the already-gated set), built before `ctxs` moves
+                            // into the model call below.
+                            let manifest = analytics_manifest(&ctxs, steps.len(), &regs);
                             // No chart card rides multi-step (its chart is the
                             // last step's heuristic), but the fence scrub still
                             // applies: a stray chart request must never reach
@@ -1496,7 +1652,8 @@ fn live_pipeline(
                             let cost = cost_meta(&cfg, sink.total());
                             // Chips act on the LAST query; the footer shows all.
                             let (refs, meta_ids) = analytics_refs(&regs);
-                            let mut done = final_chunk(refs, excerpt_count, &origin, cost);
+                            let mut done =
+                                final_chunk(refs, excerpt_count, &origin, cost, manifest);
                             done.analytics = Some(AnalyticsMeta {
                                 sql: steps.last().map(|s| s.sql.clone()).unwrap_or_default(),
                                 file_ids: meta_ids,
@@ -1591,6 +1748,11 @@ fn live_pipeline(
                             }
                         }
                         let excerpt_count = ctxs.len();
+                        // Manifest (§5): one query-result, the schema cards, and
+                        // (when present) the trailing chart-options card — metadata
+                        // of exactly what the narration saw, built before `ctxs`
+                        // moves into the model call below.
+                        let manifest = analytics_manifest(&ctxs, 1, &regs);
                         // The narration streams through the directive scrubber:
                         // prose forwards as it arrives, chart-request fence
                         // bytes never do (the UI strip is a second net, not
@@ -1692,8 +1854,13 @@ fn live_pipeline(
                         }
                         // Citations + structured provenance (chips/save/pins).
                         let (refs, meta_ids) = analytics_refs(&regs);
-                        let mut done =
-                            final_chunk(refs, excerpt_count, &origin, cost_meta(&cfg, sink.total()));
+                        let mut done = final_chunk(
+                            refs,
+                            excerpt_count,
+                            &origin,
+                            cost_meta(&cfg, sink.total()),
+                            manifest,
+                        );
                         done.analytics = Some(AnalyticsMeta { sql, file_ids: meta_ids });
                         yield done;
                         return;
@@ -1878,6 +2045,15 @@ fn live_pipeline(
                     .map(|(r, t)| Ctx { name: r.name.clone(), text: t.clone(), score: r.score })
                     .collect();
                 let excerpt_count = reduce_ctxs.len();
+                // Manifest (§5): one retrieved-chunk per synthesized document,
+                // each attributed to its source file via the flowing reference —
+                // metadata only, built before `extracts` is consumed below.
+                let manifest: Vec<CtxManifestEntry> = extracts
+                    .iter()
+                    .map(|(r, t)| {
+                        manifest_entry("retrieved-chunk", &r.name, t.len(), r.score, Some(r.file_id.clone()))
+                    })
+                    .collect();
                 let mut answer = llm::stream_answer(
                     question.clone(),
                     reduce_ctxs,
@@ -1893,6 +2069,7 @@ fn live_pipeline(
                     excerpt_count,
                     &origin,
                     cost_meta(&cfg, sink.total()),
+                    manifest,
                 );
                 return;
             }
@@ -1978,6 +2155,21 @@ fn live_pipeline(
                         })
                         .collect();
                     let excerpt_count = ctxs.len();
+                    // Manifest (§5): each whole-document part is a retrieved chunk
+                    // attributed to this one file — metadata only, built before
+                    // `ctxs`/`reference` move into the calls below.
+                    let manifest: Vec<CtxManifestEntry> = ctxs
+                        .iter()
+                        .map(|c| {
+                            manifest_entry(
+                                "retrieved-chunk",
+                                &c.name,
+                                c.text.len(),
+                                c.score,
+                                Some(reference.file_id.clone()),
+                            )
+                        })
+                        .collect();
                     let mut answer = llm::stream_answer(
                         question.clone(),
                         ctxs,
@@ -1993,6 +2185,7 @@ fn live_pipeline(
                         excerpt_count,
                         &origin,
                         cost_meta(&cfg, sink.total()),
+                        manifest,
                     );
                     return;
                 }
@@ -2049,6 +2242,21 @@ fn live_pipeline(
                         })
                         .collect();
                     let excerpt_count = reduce_ctxs.len();
+                    // Manifest (§5): each synthesized segment is a retrieved chunk
+                    // attributed to this one file — metadata only, built before
+                    // `reduce_ctxs`/`reference` move into the calls below.
+                    let manifest: Vec<CtxManifestEntry> = reduce_ctxs
+                        .iter()
+                        .map(|c| {
+                            manifest_entry(
+                                "retrieved-chunk",
+                                &c.name,
+                                c.text.len(),
+                                c.score,
+                                Some(reference.file_id.clone()),
+                            )
+                        })
+                        .collect();
                     let mut answer = llm::stream_answer(
                         question.clone(),
                         reduce_ctxs,
@@ -2064,6 +2272,7 @@ fn live_pipeline(
                         excerpt_count,
                         &origin,
                         cost_meta(&cfg, sink.total()),
+                        manifest,
                     );
                     return;
                 }
@@ -2078,6 +2287,10 @@ fn live_pipeline(
             .iter()
             .map(|c| Ctx { name: ctx_label(c), text: c.text.clone(), score: c.score })
             .collect();
+        // Manifest (§5): the retrieved chunks (attributed to their files via the
+        // flowing references), grown alongside `contexts` with a schema-card entry
+        // per appended table profile below. Metadata only.
+        let mut manifest = retrieval_manifest(&initial.contexts, &initial.references);
         let mut profiled = 0;
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         for r in &initial.references {
@@ -2091,11 +2304,15 @@ fn live_pipeline(
             if let Some(p) =
                 vault::doc_text(&r.file_id, None).and_then(|(_, full)| table_profile(&r.name, &full))
             {
-                contexts.push(Ctx {
-                    name: format!("{} — table profile", r.name),
-                    text: p,
-                    score: 0.0,
-                });
+                let pname = format!("{} — table profile", r.name);
+                manifest.push(manifest_entry(
+                    "schema-card",
+                    &pname,
+                    p.len(),
+                    0.0,
+                    Some(r.file_id.clone()),
+                ));
+                contexts.push(Ctx { name: pname, text: p, score: 0.0 });
                 profiled += 1;
             }
         }
@@ -2108,7 +2325,13 @@ fn live_pipeline(
         while let Some(d) = answer.next().await {
             yield delta(d);
         }
-        yield final_chunk(initial.references, excerpt_count, &origin, cost_meta(&cfg, sink.total()));
+        yield final_chunk(
+            initial.references,
+            excerpt_count,
+            &origin,
+            cost_meta(&cfg, sink.total()),
+            manifest,
+        );
     })
 }
 
@@ -2124,6 +2347,126 @@ mod tests {
             score,
             kind: crate::contracts::SourceKind::File,
         }
+    }
+
+    // --- Context manifest (openspec: add-beam-loop §5.7) ---------------------------
+
+    fn ctx(name: &str, text: &str, score: f64) -> Ctx {
+        Ctx { name: name.into(), text: text.into(), score }
+    }
+
+    fn reg(file_id: &str, file_name: &str, card: &str) -> crate::analytics::TableReg {
+        crate::analytics::TableReg {
+            table: file_name.replace(['.', '-'], "_"),
+            file_id: file_id.into(),
+            file_name: file_name.into(),
+            card: card.into(),
+            modified_ms: None,
+            columns: Vec::new(),
+            group: None,
+            capped_rows: None,
+        }
+    }
+
+    fn vctx(name: &str, text: &str, score: f64, kind: crate::contracts::SourceKind) -> vault::Context {
+        vault::Context { name: name.into(), text: text.into(), score, kind }
+    }
+
+    #[test]
+    fn manifest_is_metadata_only_never_context_text() {
+        // §5.1/§5.7 — a manifest entry carries a block's NAME/KIND/length/file id,
+        // never its TEXT. The manifest rides ChunkMeta into CachedAnswer.text and
+        // G6 notes, so a private chunk's bytes must never appear in it.
+        let secret = "SSN 123-45-6789 — the merger closes Tuesday";
+        let contexts = vec![vctx("secrets.md", secret, 0.9, crate::contracts::SourceKind::File)];
+        let refs = vec![r("file-42", "secrets.md", 0.9)];
+        let manifest = retrieval_manifest(&contexts, &refs);
+        let json = serde_json::to_string(&manifest).unwrap();
+        assert!(!json.contains("123-45-6789"), "no context text bytes in the manifest");
+        assert!(!json.contains("merger"), "no context text bytes in the manifest");
+        // The METADATA is present: name, kind, a char COUNT (the text length), id.
+        assert_eq!(manifest.len(), 1);
+        assert_eq!(manifest[0].kind, "retrieved-chunk");
+        assert_eq!(manifest[0].chars, secret.len());
+        assert_eq!(manifest[0].file_id.as_deref(), Some("file-42"));
+    }
+
+    #[test]
+    fn retrieval_manifest_attributes_chunks_and_labels_conversations() {
+        // §5.3 — each retrieved-chunk entry carries the file_id of its source file
+        // (from the flowing references); a past-chat note is a conversation-note.
+        let contexts = vec![
+            vctx("q3.md", "prose about revenue", 0.8, crate::contracts::SourceKind::File),
+            vctx("chat.md", "my earlier chat", 0.5, crate::contracts::SourceKind::Conversation),
+        ];
+        let refs = vec![r("id-q3", "q3.md", 0.8), r("id-chat", "chat.md", 0.5)];
+        let m = retrieval_manifest(&contexts, &refs);
+        assert_eq!(m[0].kind, "retrieved-chunk");
+        assert_eq!(m[0].file_id.as_deref(), Some("id-q3"), "a chunk names its file");
+        assert_eq!(m[1].kind, "conversation-note");
+        // The conversation block's manifest name is the prompt label the model saw.
+        assert_eq!(m[1].name, "from your past Lighthouse conversation");
+    }
+
+    #[test]
+    fn manifest_reflects_only_the_gated_set_and_pairs_with_the_skip_note() {
+        // §5.2/§5.7 — the manifest is built from the ctxs assembled AFTER the
+        // shareable gate, so it lists ONLY the shared subset; a cloud ask discloses
+        // what was WITHHELD separately, via the skip note. Here the gate already
+        // dropped "private.md" (a local-only file), so it never reaches the builder.
+        let gated = vec![
+            vctx("a.csv", "rows…", 1.0, crate::contracts::SourceKind::File),
+            vctx("b.md", "prose…", 0.8, crate::contracts::SourceKind::File),
+        ];
+        let refs = vec![r("id-a", "a.csv", 1.0), r("id-b", "b.md", 0.8)];
+        let manifest = retrieval_manifest(&gated, &refs);
+        let names: Vec<&str> = manifest.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(manifest.len(), 2, "only the gated (shared) entries appear");
+        assert!(!names.contains(&"private.md"), "a withheld local-only file never enters the manifest");
+        // The withholding is disclosed by the paired skip note, which states the
+        // count of files withheld — the disclosure of "what went" + "what didn't".
+        assert!(local_only_skip_note(1).contains('1'), "the skip note states the withheld count");
+    }
+
+    #[test]
+    fn analytics_manifest_labels_results_schemas_and_chart_options() {
+        // §5.1 — the narration ctxs split into query-result(s), then one
+        // schema-card per registered table (attributed to its file), then a
+        // trailing chart-options card. Kinds are byte-exact; no text bytes ride.
+        let ctxs = vec![
+            ctx("query result — computed exactly by Lighthouse", "SQL:\nSELECT 1\n\nResult:\n| x |", 1.0),
+            ctx("sales.csv — schema", "region TEXT, amt INT", 0.0),
+            ctx("chart options", "kind: bar", 0.0),
+        ];
+        let regs = vec![reg("id-sales", "sales.csv", "region TEXT, amt INT")];
+        let m = analytics_manifest(&ctxs, 1, &regs);
+        assert_eq!(m.len(), 3);
+        assert_eq!(m[0].kind, "query-result");
+        assert_eq!(m[1].kind, "schema-card");
+        assert_eq!(m[1].file_id.as_deref(), Some("id-sales"));
+        assert_eq!(m[2].kind, "chart-options");
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(!json.contains("SELECT 1"), "no result text in the manifest");
+        assert!(!json.contains("region TEXT"), "no schema-card text in the manifest");
+    }
+
+    #[test]
+    fn planning_manifest_labels_schema_view_and_join_hint_cards() {
+        // §5.1 — the planning ctxs (sql_ctxs) are file schema-cards (attributed),
+        // then saved-view schema-cards (virtual, no file), then a join-hints card.
+        let sql_ctxs = vec![
+            ctx("sales.csv", "region TEXT, amt INT", 1.0),
+            ctx("monthly_view", "a saved view card", 1.0),
+            ctx("join hints", "sales.region = regions.region", 0.0),
+        ];
+        let regs = vec![reg("id-sales", "sales.csv", "region TEXT, amt INT")];
+        let m = planning_manifest(&sql_ctxs, &regs, 1);
+        assert_eq!(m.len(), 3);
+        assert_eq!(m[0].kind, "schema-card");
+        assert_eq!(m[0].file_id.as_deref(), Some("id-sales"));
+        assert_eq!(m[1].kind, "schema-card");
+        assert!(m[1].file_id.is_none(), "a saved view is virtual — no source file");
+        assert_eq!(m[2].kind, "join-hints");
     }
 
     #[test]

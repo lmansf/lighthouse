@@ -1330,7 +1330,12 @@ fn extract_by_ext(abs: &Path, ext: &str) -> anyhow::Result<String> {
 ///     cached-answer wire-shape change. Extraction output itself is unchanged;
 ///     the lockstep bump (ts-twin.md rule 4) keeps the shared cache-schema
 ///     assertion green. The one-time re-extraction it triggers is harmless.
-const CACHE_VERSION: u32 = 10;
+/// v11: the context manifest (openspec: add-beam-loop §5.4) adds a `manifest`
+///     field to the final chunk's `ChunkMeta`, which the answer cache persists —
+///     another shared cached-answer wire-shape change. Extraction output is
+///     unchanged; the lockstep bump keeps the shared cache-schema assertion green
+///     and the one-time re-extraction is harmless.
+const CACHE_VERSION: u32 = 11;
 
 #[derive(Serialize, Deserialize)]
 struct CacheRecord {
