@@ -39,6 +39,7 @@ import {
   tokens,
 } from "@fluentui/react-components";
 import { MODEL_PROVIDERS } from "@/contracts";
+import { apiKeyBillingNote } from "@/lib/billingNotes";
 import {
   LocalModelInstallPanel,
   useLocalModel,
@@ -356,6 +357,11 @@ export function OnboardingPanel() {
                 ))}
               </Dropdown>
             </Field>
+            {/* Billing clarity (0.12.1 §4): name the vendor's products so a
+                user doesn't assume a chat subscription covers API-key use. */}
+            {apiKeyBillingNote(providerId) && (
+              <Text className={styles.hint}>{apiKeyBillingNote(providerId)}</Text>
+            )}
             <Field
               label="API key"
               hint={

@@ -189,6 +189,54 @@ export interface AuditVerdict {
   count: number;
 }
 
+/**
+ * Provider sign-in (0.12.1 §3) — read-only status of the generic OAuth
+ * device-authorization flow (native provider_auth.rs) offered as an
+ * alternative to pasting an OpenAI API key. `available` is false on a stock
+ * build (the flow ships with NO endpoints or client id configured — a
+ * maintainer must register with the vendor first), on the web twin, and
+ * under any partial configuration; the UI renders NO sign-in affordance
+ * while it is false (the code-signing pattern). `method` is the persisted
+ * auth-method choice — "key" is the default and leaves the existing API-key
+ * path byte-untouched.
+ */
+export interface SigninStatus {
+  available: boolean;
+  signedIn: boolean;
+  /** How the OpenAI provider authenticates: API key (default) or sign-in. */
+  method: "key" | "signin";
+  /** Display-only account hint (e.g. an email) when the grant carried one. */
+  accountHint?: string;
+  /** Epoch ms the current access token expires (refreshed engine-side). */
+  expiresMs?: number;
+  /** Why the flow is unavailable, when it is — honest and user-renderable. */
+  reason?: string;
+}
+
+/**
+ * A started device-authorization sign-in: what the user must do. The UI
+ * shows `userCode` large, offers to open `verificationUri` in the browser,
+ * and polls at `intervalMs` until the vendor reports approval.
+ */
+export interface SigninStart {
+  userCode: string;
+  verificationUri: string;
+  intervalMs: number;
+  expiresInMs?: number;
+}
+
+/**
+ * One poll of a started sign-in. `pending` may carry a bumped `intervalMs`
+ * (the vendor asked to slow down); `error` is terminal (expired/declined) —
+ * reset the flow and show it.
+ */
+export interface SigninPoll {
+  status: "pending" | "complete" | "idle";
+  intervalMs?: number;
+  accountHint?: string;
+  error?: string;
+}
+
 /** A model provider the user can pick during onboarding. */
 export interface ModelProvider {
   id: string;

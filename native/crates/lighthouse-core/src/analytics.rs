@@ -1738,7 +1738,11 @@ pub fn chart_spec_from_batches(batches: &[RecordBatch]) -> Option<String> {
         return None;
     }
     let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
-    if !(2..=CHART_MAX_POINTS).contains(&rows) {
+    // Fewer than 2 rows is never a chart. MORE than CHART_MAX_POINTS is no
+    // longer an outright decline: a CATEGORICAL shape gets top-N + “Other”
+    // bucketing below (charts by default, 0.12.1); temporal and scatter
+    // shapes beyond the cap still decline, in their own paths.
+    if rows < 2 {
         return None;
     }
     // Identifier labels (add-chart-directive): a label column NAMED like an
@@ -1785,6 +1789,13 @@ pub fn chart_spec_from_batches(batches: &[RecordBatch]) -> Option<String> {
 
     let temporal = x.iter().all(|l| looks_temporal(l));
 
+    // Beyond the point cap, TEMPORAL shapes keep declining exactly as before:
+    // top-N bucketing ranks rows by value, and ranking a time axis by value
+    // would destroy it. (Categorical shapes are bucketed further down.)
+    if rows > CHART_MAX_POINTS && temporal {
+        return None;
+    }
+
     // Scatter (G4): a genuinely CONTINUOUS first column is a real (x, y)
     // relationship, not a category axis. Gated to a FLOATING-POINT first column
     // (not merely numeric): small-integer keys — star ratings 1–5, status codes,
@@ -1818,6 +1829,12 @@ pub fn chart_spec_from_batches(batches: &[RecordBatch]) -> Option<String> {
         // x — at least one fractional value; integral keys fall through to the
         // categorical bar below.
         if x_values.iter().flatten().any(|v| v.fract() != 0.0) {
+            // Beyond the point cap a SCATTER keeps declining exactly as
+            // before: ranking a continuous x by the y value would destroy
+            // the (x, y) relationship, so no top-N bucketing applies here.
+            if rows > CHART_MAX_POINTS {
+                return None;
+            }
             // Need ≥2 points where BOTH x and y are finite, else the scatter
             // is too sparse to read — degrade to the table.
             let ys = &series[0].1;
@@ -1846,6 +1863,25 @@ pub fn chart_spec_from_batches(batches: &[RecordBatch]) -> Option<String> {
     } else {
         "bar"
     };
+    // Top-N + “Other” bucketing (charts by default, 0.12.1): a CATEGORICAL
+    // shape beyond the point cap is still comparable — rank rows descending
+    // by the first series and fold the tail into one honest “Other” row.
+    // Temporal and scatter shapes never reach here beyond the cap (both
+    // declined above). The disclosing subtitle is engine-computed and rides
+    // the spec ONLY when bucketing happened, so every ≤24-row output stays
+    // byte-identical to before.
+    let mut subtitle: Option<String> = None;
+    if rows > CHART_MAX_POINTS {
+        subtitle = Some(bucket_top_n(&mut x, &mut series));
+        // Re-check the per-series floor on the bucketed view: a series whose
+        // finite values all landed in “Other” would render a single point,
+        // which the renderer (rightly) rejects — degrade to the table.
+        for (_, vals) in &series {
+            if vals.iter().filter(|v| v.is_some()).count() < 2 {
+                return None;
+            }
+        }
+    }
     let series_json = series
         .iter()
         .map(|(name, vals)| serde_json::json!({ "name": name, "values": vals }))
@@ -1853,21 +1889,68 @@ pub fn chart_spec_from_batches(batches: &[RecordBatch]) -> Option<String> {
     // Stacked bar (G4): only when the batches PROVE part-of-whole — every
     // category's series values sum to the same constant whole. Otherwise the
     // object is byte-identical to before (no `stacked` key → grouped).
-    if kind == "bar" && is_stackable(&series) {
-        let spec = serde_json::json!({
+    let mut spec = if kind == "bar" && is_stackable(&series) {
+        serde_json::json!({
             "kind": "bar",
             "x": x,
             "series": series_json,
             "stacked": true,
-        });
-        return Some(spec.to_string());
+        })
+    } else {
+        serde_json::json!({
+            "kind": kind,
+            "x": x,
+            "series": series_json,
+        })
+    };
+    if let Some(s) = &subtitle {
+        spec["subtitle"] = serde_json::json!(s);
     }
-    let spec = serde_json::json!({
-        "kind": kind,
-        "x": x,
-        "series": series_json,
-    });
     Some(spec.to_string())
+}
+
+/// Fold a beyond-cap CATEGORICAL result into the top CHART_MAX_POINTS-1 rows
+/// plus one final “Other” row: rows are ranked DESCENDING by the FIRST
+/// series' value (missing values last; stable, so ties keep result order,
+/// mirroring the directed sort), and EVERY remaining row is aggregated into
+/// “Other” as per-series sums (SQL SUM semantics: nulls are skipped; a series
+/// with no finite tail value stays null). Returns the engine-computed
+/// subtitle disclosing exactly what was folded. Callers guarantee
+/// `x.len() > CHART_MAX_POINTS` and non-temporal labels.
+fn bucket_top_n(x: &mut Vec<String>, series: &mut Vec<(String, Vec<Option<f64>>)>) -> String {
+    let n = x.len();
+    let keep = CHART_MAX_POINTS - 1;
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&a, &b| {
+        use std::cmp::Ordering;
+        match (series[0].1[a], series[0].1[b]) {
+            (Some(va), Some(vb)) => vb.partial_cmp(&va).unwrap_or(Ordering::Equal),
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => Ordering::Equal,
+        }
+    });
+    let mut new_x: Vec<String> = order[..keep].iter().map(|&i| x[i].clone()).collect();
+    new_x.push("Other".to_string());
+    for (_, vals) in series.iter_mut() {
+        let mut kept: Vec<Option<f64>> = order[..keep].iter().map(|&i| vals[i]).collect();
+        let mut tail_sum: Option<f64> = None;
+        for &i in &order[keep..] {
+            if let Some(v) = vals[i] {
+                tail_sum = Some(tail_sum.unwrap_or(0.0) + v);
+            }
+        }
+        kept.push(tail_sum);
+        *vals = kept;
+    }
+    *x = new_x;
+    // KEEP IN SYNC: src/lib/chartFromTable.ts builds this same subtitle for
+    // the client-side “Chart it” heuristic; a unit test on each side pins it.
+    format!(
+        "Top {keep} of {n} by {} — {} smaller rows grouped as “Other”",
+        series[0].0,
+        n - keep
+    )
 }
 
 /// Largest cross-series epsilon (absolute) for the ~100 whole, and the relative
@@ -1971,7 +2054,8 @@ fn id_like_label(name: &str) -> bool {
 // prose (`DirectiveScrubber`), validates every named column against the real
 // batch schema, and materializes the spec FROM the batches
 // (`chart_spec_from_batches_directed`). Anything invalid falls back to the
-// unchanged heuristic; `"none"` suppresses the auto-chart.
+// unchanged heuristic; `"none"` is advisory only — the engine decides
+// chartability, so a "none" lands on the heuristic like any absent directive.
 
 /// The directive fence opener. PARITY: src/lib/chartSpec.ts::CHART_DIRECTIVE_FENCE.
 pub const CHART_DIRECTIVE_FENCE: &str = "```lighthouse-chart-request";
@@ -1979,9 +2063,10 @@ pub const CHART_DIRECTIVE_FENCE: &str = "```lighthouse-chart-request";
 /// PARITY: src/lib/chartSpec.ts::MAX_TITLE_CHARS.
 const CHART_TITLE_MAX_CHARS: usize = 80;
 
-/// What the model asked for. `None` = "draw no chart" (an explicit choice —
-/// distinct from an absent/malformed directive, which falls back to the
-/// heuristic).
+/// What the model asked for. `None` = "I think nothing here compares" — an
+/// advisory the engine records but no longer obeys: since charts-by-default
+/// (0.12.1) a "none" lands on the heuristic exactly like an absent directive
+/// (the heuristic already declines genuinely non-chartable shapes itself).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChartDirectiveKind {
     Bar,
@@ -2141,6 +2226,11 @@ pub fn chart_spec_from_batches_directed(
     let first = batches.iter().find(|b| b.num_columns() > 0)?;
     let schema = first.schema();
     let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    // Beyond the point cap the DIRECTED path declines and decide_chart's
+    // existing `.or_else` lands on the heuristic, whose top-N + “Other”
+    // bucketing (charts by default, 0.12.1) takes over — one bucketing
+    // implementation, not two. (The chart card only rides ≤24-row results,
+    // so a beyond-cap directive is a spontaneous one anyway.)
     if !(2..=CHART_MAX_POINTS).contains(&rows) {
         return None;
     }
@@ -2235,14 +2325,21 @@ pub fn chart_spec_from_batches_directed(
 
 /// The chart decision for a completed narration — the single point synth.rs
 /// consults after streaming (the deterministic emission point made
-/// directive-aware). "none" suppresses even a chartable result; a valid
-/// directive materializes from the batches; anything else (absent, malformed,
-/// invalid, or a directed build that fails on the data) lands on today's
-/// unchanged heuristic. Truncated results are gated by the CALLER (they never
-/// reach this point), matching run_query's own gate.
+/// directive-aware). Charts by default (0.12.1): the ENGINE decides
+/// chartability; a directive REFINES the chart (kind/columns/title/sort) but
+/// may no longer suppress a chartable result. A "none" directive behaves
+/// exactly like no directive — the heuristic still runs, and it already
+/// declines the genuinely non-chartable shapes by itself (single value,
+/// single row, no numeric series, id-like labels). A valid directive
+/// materializes from the batches; anything else (absent, malformed, invalid,
+/// or a directed build that fails on the data) lands on the unchanged
+/// heuristic. Truncated results are gated by the CALLER (they never reach
+/// this point), matching run_query's own gate.
 pub fn decide_chart(batches: &[RecordBatch], narration: &str) -> Option<String> {
     match parse_chart_directive(narration) {
-        Some(d) if d.kind == ChartDirectiveKind::None => None,
+        // "none" is advisory only: fall through to the heuristic, exactly as
+        // if no directive had been written.
+        Some(d) if d.kind == ChartDirectiveKind::None => chart_spec_from_batches(batches),
         Some(d) => chart_spec_from_batches_directed(batches, &d)
             .or_else(|| chart_spec_from_batches(batches)),
         None => chart_spec_from_batches(batches),
@@ -2254,10 +2351,11 @@ pub fn decide_chart(batches: &[RecordBatch], narration: &str) -> Option<String> 
 /// Version stamp for the chart card. The full text is snapshot-pinned in a
 /// unit test, so any edit (and the version bump that should ride with a
 /// behavioral one) is a reviewed diff.
-pub const CHART_CARD_VERSION: &str = "v1";
-/// Card budget: ~200 tokens. Asserted by `chart_card_stays_inside_budget`
-/// and re-checked by the chart_eval floor.
-pub const CHART_CARD_MAX_CHARS: usize = 800;
+pub const CHART_CARD_VERSION: &str = "v2";
+/// Card budget: ~215 tokens (v2's advisory "none" line bought ~56 chars).
+/// Asserted by `chart_card_stays_inside_budget` and re-checked by the
+/// chart_eval floor.
+pub const CHART_CARD_MAX_CHARS: usize = 860;
 /// Cap on the interpolated column list — a 24-column result must not blow the
 /// card budget; the full header already rides in the result block itself.
 const CHART_CARD_COLS_CHARS: usize = 96;
@@ -2324,7 +2422,8 @@ pub fn chart_card(batches: &[RecordBatch]) -> Option<String> {
          the app builds it from the verified result (a request can never supply values):\n\
          {CHART_DIRECTIVE_FENCE}\n{}\n```\n\
          kind: bar = categories; line = trend, 2-3 series; area = trend, 1 series; \
-         none = no chart (single number, id/SKU/code labels, nothing to compare). \
+         none = you think nothing here is comparable (single number, id/SKU/code labels) — \
+         the app still charts results whose shape fits. \
          series_columns: 1-3 numeric columns; title and sort (asc|desc, by first series) optional.\n\
          Examples: {} → {} · {} → {}",
         CHART_CARD_EXAMPLES[1].directive,
@@ -2953,6 +3052,101 @@ mod tests {
         );
     }
 
+    // Charts by default (0.12.1): a beyond-cap CATEGORICAL result folds into
+    // top-23 + “Other” instead of declining; the disclosing subtitle is
+    // pinned byte-for-byte (KEEP IN SYNC: src/lib/chartFromTable.ts mirrors
+    // both the fold and this exact string).
+    #[test]
+    fn beyond_cap_categorical_buckets_into_top_n_plus_other() {
+        let labels: Vec<String> = (1..=40).map(|i| format!("cat{i:02}")).collect();
+        let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+        let values: Vec<f64> = (1..=40).map(|i| (i as f64) * 10.0).collect();
+        let spec = chart_spec_from_batches(&[batch(&refs, &values)]).expect("bucketed chart");
+        let v: serde_json::Value = serde_json::from_str(&spec).unwrap();
+        assert_eq!(v["kind"], "bar");
+        let x = v["x"].as_array().unwrap();
+        assert_eq!(x.len(), CHART_MAX_POINTS);
+        assert_eq!(x[0], "cat40", "ranked descending by the first series");
+        assert_eq!(x[22], "cat18");
+        assert_eq!(x[23], "Other");
+        let vals = v["series"][0]["values"].as_array().unwrap();
+        assert_eq!(vals.len(), CHART_MAX_POINTS);
+        assert_eq!(vals[0], 400.0);
+        // “Other” = the exact engine-computed sum of the 17 smallest rows:
+        // 10 + 20 + … + 170 = 1530.
+        assert_eq!(vals[23], 1530.0);
+        assert_eq!(
+            v["subtitle"],
+            "Top 23 of 40 by total — 17 smaller rows grouped as “Other”"
+        );
+        // ≤24-row outputs stay byte-identical: no subtitle key at all.
+        let small = chart_spec_from_batches(&[batch(&["NE", "NW"], &[1.0, 2.0])]).unwrap();
+        assert!(!small.contains("subtitle"));
+
+        // Boundary: 25 rows folds exactly the 2 smallest into “Other”.
+        let labels: Vec<String> = (1..=25).map(|i| format!("c{i:02}")).collect();
+        let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+        let values: Vec<f64> = (1..=25).map(|i| i as f64).collect();
+        let v: serde_json::Value =
+            serde_json::from_str(&chart_spec_from_batches(&[batch(&refs, &values)]).unwrap())
+                .unwrap();
+        assert_eq!(v["x"].as_array().unwrap().len(), CHART_MAX_POINTS);
+        assert_eq!(v["x"][23], "Other");
+        assert_eq!(v["series"][0]["values"][23], 3.0); // 1 + 2
+        assert_eq!(
+            v["subtitle"],
+            "Top 23 of 25 by total — 2 smaller rows grouped as “Other”"
+        );
+    }
+
+    #[test]
+    fn beyond_cap_temporal_and_scatter_still_decline() {
+        // 25 months: top-N ranking would destroy the time axis — decline,
+        // exactly as before the bucketing change.
+        let labels: Vec<String> = (0..25)
+            .map(|i| format!("{}-{:02}", 2020 + i / 12, i % 12 + 1))
+            .collect();
+        let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+        let values: Vec<f64> = (0..25).map(|i| i as f64).collect();
+        assert!(chart_spec_from_batches(&[batch(&refs, &values)]).is_none());
+
+        // 25 genuinely continuous x points: a value-ranked scatter is no
+        // scatter — decline, exactly as before.
+        let xs: Vec<f64> = (0..25).map(|i| i as f64 + 0.5).collect();
+        let ys: Vec<f64> = (0..25).map(|i| i as f64).collect();
+        assert!(chart_spec_from_batches(&[num_batch(&xs, &ys)]).is_none());
+    }
+
+    #[test]
+    fn bucketing_declines_when_a_folded_series_loses_its_points() {
+        // Second series finite ONLY in tail rows: after folding, its kept
+        // view is all-null plus one “Other” sum — a single point the renderer
+        // rejects — so the engine degrades to the table instead.
+        let n = 30usize;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("label", DataType::Utf8, false),
+            Field::new("a", DataType::Float64, true),
+            Field::new("b", DataType::Float64, true),
+        ]));
+        let labels: Vec<String> = (0..n).map(|i| format!("r{i:02}")).collect();
+        let a: Vec<f64> = (0..n).map(|i| (n - i) as f64).collect(); // descending
+        let b: Vec<Option<f64>> = (0..n)
+            .map(|i| if i >= n - 2 { Some(1.0) } else { None })
+            .collect();
+        let sparse = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(
+                    labels.iter().map(String::as_str).collect::<Vec<_>>(),
+                )),
+                Arc::new(Float64Array::from(a)),
+                Arc::new(Float64Array::from(b)),
+            ],
+        )
+        .unwrap();
+        assert!(chart_spec_from_batches(&[sparse]).is_none());
+    }
+
     fn num_batch(xs: &[f64], ys: &[f64]) -> RecordBatch {
         RecordBatch::try_new(
             Arc::new(Schema::new(vec![
@@ -3415,7 +3609,7 @@ mod tests {
     }
 
     #[test]
-    fn decide_chart_honors_valid_falls_back_and_suppresses() {
+    fn decide_chart_honors_valid_falls_back_and_never_suppresses() {
         let b = batch(&["NE", "NW"], &[150.0, 200.0]);
         let heuristic =
             r#"{"kind":"bar","series":[{"name":"total","values":[150.0,200.0]}],"x":["NE","NW"]}"#;
@@ -3436,9 +3630,16 @@ mod tests {
         // No fence at all → heuristic.
         assert_eq!(decide_chart(&[b.clone()], "Done.").as_deref(), Some(heuristic));
 
-        // "none" suppresses even a chartable result.
+        // Charts by default (0.12.1): "none" no longer suppresses a chartable
+        // result — it behaves exactly like no directive (heuristic, byte-
+        // identical to the undirected spec).
         let none = "Done.\n```lighthouse-chart-request\n{\"kind\":\"none\"}\n```";
-        assert!(decide_chart(&[b], none).is_none());
+        assert_eq!(decide_chart(&[b.clone()], none).as_deref(), Some(heuristic));
+
+        // …while a genuinely non-chartable shape stays uncharted under a
+        // "none" too — the heuristic itself declines a single row.
+        let single = batch(&["only"], &[1.0]);
+        assert!(decide_chart(&[single], none).is_none());
     }
 
     #[test]
@@ -3478,12 +3679,12 @@ mod tests {
     #[test]
     fn chart_card_snapshot_is_pinned() {
         let card = chart_card(&[batch(&["NE", "NW"], &[150.0, 200.0])]).unwrap();
-        let expected = "Chart options (v1) — result columns: label (text), total (numeric).\n\
+        let expected = "Chart options (v2) — result columns: label (text), total (numeric).\n\
             End the answer with at most ONE fenced request to choose this answer's chart; the app builds it from the verified result (a request can never supply values):\n\
             ```lighthouse-chart-request\n\
             {\"kind\":\"bar\",\"label_column\":\"region\",\"series_columns\":[\"revenue\"],\"title\":\"Revenue by region\",\"sort\":\"desc\"}\n\
             ```\n\
-            kind: bar = categories; line = trend, 2-3 series; area = trend, 1 series; none = no chart (single number, id/SKU/code labels, nothing to compare). series_columns: 1-3 numeric columns; title and sort (asc|desc, by first series) optional.\n\
+            kind: bar = categories; line = trend, 2-3 series; area = trend, 1 series; none = you think nothing here is comparable (single number, id/SKU/code labels) — the app still charts results whose shape fits. series_columns: 1-3 numeric columns; title and sort (asc|desc, by first series) optional.\n\
             Examples: (month, total) → {\"kind\":\"area\",\"label_column\":\"month\",\"series_columns\":[\"total\"]} · (store_id, revenue) → {\"kind\":\"none\"}";
         assert_eq!(card, expected);
     }
@@ -3631,12 +3832,14 @@ mod tests {
         assert_eq!(chart.as_deref(), Some(heuristic));
         assert!(!prose.contains("lighthouse-chart-request"), "{prose}");
 
-        // (c) "none" → no chart at all.
+        // (c) "none" over a chartable result → the heuristic chart anyway
+        //     (charts by default, 0.12.1): the fence is still scrubbed from
+        //     prose, but the engine — not the model — decides chartability.
         let (prose, chart) = run(&[
             "The total is a single figure [1].\n",
             "```lighthouse-chart-request\n{\"kind\":\"none\"}\n```",
         ]);
-        assert!(chart.is_none());
+        assert_eq!(chart.as_deref(), Some(heuristic));
         assert!(!prose.contains("lighthouse-chart-request"), "{prose}");
     }
 

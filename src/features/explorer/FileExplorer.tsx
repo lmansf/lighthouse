@@ -80,6 +80,7 @@ import { FileInspector } from "./FileInspector";
 import { FolderRulesDialog } from "./FolderRulesDialog";
 import { useRagStore } from "@/stores/useRagStore";
 import { useAuthStore } from "@/stores/useAuthStore";
+import { cloudProviderActive } from "@/lib/privacyState";
 import { FILE_DRAG_MIME, parseDraggedFiles, serializeDraggedFiles } from "@/shell/dnd";
 import { desktopBridge, isDesktopShell, pathsForFiles } from "@/shell/desktopBridge";
 
@@ -370,6 +371,12 @@ const useStyles = makeStyles({
   // the clearer privacy signal, and the palette retains red as its one
   // semantic non-brand hue. QuickOpen mirrors this pairing.
   lockOn: { color: tokens.colorPaletteRedForeground1 },
+  // The SAME closed lock while the PRIVATE model answers (0.12.1 §2): the mark
+  // is armed but idle — nothing is being withheld right now — so it drops to a
+  // muted neutral. Red stays reserved for ACTIVE enforcement (a cloud provider
+  // is being denied these files), so the tint itself answers "is the lock
+  // doing anything right now?".
+  lockDormant: { color: tokens.colorNeutralForeground3 },
   size: {
     color: tokens.colorNeutralForeground3,
     flexShrink: 0,
@@ -505,6 +512,11 @@ interface TreeRowProps {
   /** True while this row is the just-revealed quick-open target: plays the
    *  brief background flash so the eye lands on it after the scroll. */
   flash: boolean;
+  /** True when a CLOUD provider is active (the UI mirror of the engine's
+   *  is_cloud_provider — see src/lib/privacyState.ts): a marked row's lock is
+   *  ENFORCING (red, "hidden right now"); on the private model it's DORMANT
+   *  (neutral, armed but idle). Presentation only — the engine enforces. */
+  cloudActive: boolean;
 }
 
 /** Stable empty move-target list so a closed row's memo isn't broken by a fresh
@@ -537,6 +549,7 @@ function TreeRowImpl({
   onSetExpanded,
   justAdded,
   flash,
+  cloudActive,
 }: TreeRowProps) {
   const styles = useStyles();
   // The row's right-click menu open state. moveTargetsFor is O(rows × folders),
@@ -591,9 +604,15 @@ function TreeRowImpl({
   // The lock is the SECOND axis, distinct from the eye: effective local-only
   // (ancestor-wins) is carried on the node from the walk. A locked node stays
   // on-device only — the private model reads it, no cloud provider ever does.
+  // TWO STATES for a marked node (0.12.1 §2): ENFORCING while a cloud provider
+  // is active (files are being withheld right now), DORMANT on the private
+  // model (armed but idle). The label doubles as the aria-label, so screen
+  // readers hear which state the lock is in.
   const isLocalOnly = node.localOnly === true;
   const lockLabel = isLocalOnly
-    ? "Private — this device only; click to allow cloud models"
+    ? cloudActive
+      ? "Private — hidden from cloud models right now; click to allow cloud models"
+      : "Hidden from cloud models. The private model can always read it."
     : "Shareable with cloud models — click to keep on this device only";
   const toggleLocalOnly = () => {
     onToggleLocalOnly(node.id);
@@ -743,7 +762,9 @@ function TreeRowImpl({
           <Button
             appearance="subtle"
             size="small"
-            className={isLocalOnly ? styles.lockOn : undefined}
+            className={
+              isLocalOnly ? (cloudActive ? styles.lockOn : styles.lockDormant) : undefined
+            }
             icon={isLocalOnly ? <LockClosedRegular /> : <LockOpenRegular />}
             aria-label={lockLabel}
             aria-pressed={isLocalOnly}
@@ -976,6 +997,12 @@ export function FileExplorer() {
   // choice, else the conservative `exclude`). "include" carries a prominent "you
   // control what AI sees" reassurance since files are searchable once added.
   const includeByDefault = useAuthStore((s) => s.onboarding.defaultInclusion === "include");
+  // Whether a CLOUD provider is answering (the UI mirror of the engine's
+  // is_cloud_provider — src/lib/privacyState.ts): drives the lock's
+  // ENFORCING (red) vs DORMANT (neutral) rendering. Presentation only; the
+  // engine enforces local-only marks at its own chokepoint regardless.
+  const providerId = useAuthStore((s) => s.onboarding.providerId);
+  const cloudActive = cloudProviderActive(providerId);
 
   const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
   const isSelected = useCallback((id: string) => selectedSet.has(id), [selectedSet]);
@@ -986,6 +1013,31 @@ export function FileExplorer() {
   // The lock switch does the same for the local-only (this-device-only) axis.
   const allSelectedLocalOnly =
     selectedIds.length > 0 && selectedIds.every((id) => nodeById.get(id)?.localOnly);
+  // When the whole selection is already marked, a tooltip on the bulk switch
+  // says what the mark is DOING right now (enforcing vs dormant — the row
+  // lock's two states); the label and the action stay unchanged.
+  const bulkLockSwitch = (
+    <Switch
+      checked={Boolean(allSelectedLocalOnly)}
+      disabled={selectedIds.length === 0}
+      onChange={(_, d) => void applyLocalOnly(d.checked)}
+      label="Private (this device)"
+    />
+  );
+  const bulkLock = allSelectedLocalOnly ? (
+    <Tooltip
+      content={
+        cloudActive
+          ? "Private — hidden from cloud models right now"
+          : "Hidden from cloud models. The private model can always read it."
+      }
+      relationship="description"
+    >
+      {bulkLockSwitch}
+    </Tooltip>
+  ) : (
+    bulkLockSwitch
+  );
 
   // Ids queued for a "Remove from vault" confirmation (single via right-click, or
   // the whole selection via the bulk action).
@@ -1061,6 +1113,11 @@ export function FileExplorer() {
     return () => window.clearTimeout(t);
   }, [query]);
   const [onlyVisible, setOnlyVisible] = useState(false);
+  // "Hidden from cloud" filter (0.12.1 §2): narrows the tree to nodes marked
+  // "Private — this device only". Toggled in the filter bar, and switched on
+  // by the chat header's "{n} files hidden from cloud models" count (the
+  // lighthouse:filter-local-only event below).
+  const [onlyLocalOnly, setOnlyLocalOnly] = useState(false);
   const [sort, setSort] = useState<SortState>({ key: "name", dir: "asc" });
   const compareNodes = useMemo(() => makeComparator(sort), [sort]);
 
@@ -1137,7 +1194,7 @@ export function FileExplorer() {
   }, [nodes, childrenByParent]);
 
   const trimmedQuery = debouncedQuery.trim().toLowerCase();
-  const filterActive = trimmedQuery !== "" || onlyVisible;
+  const filterActive = trimmedQuery !== "" || onlyVisible || onlyLocalOnly;
   // Rows the active search/filter keeps: direct matches plus every ancestor,
   // so a match nested inside collapsed folders stays reachable. null means no
   // filter - render everything. One pass over `nodes` keeps this cheap.
@@ -1147,7 +1204,8 @@ export function FileExplorer() {
     for (const n of nodes) {
       const matches =
         (trimmedQuery === "" || n.name.toLowerCase().includes(trimmedQuery)) &&
-        (!onlyVisible || n.ragIncluded);
+        (!onlyVisible || n.ragIncluded) &&
+        (!onlyLocalOnly || n.localOnly);
       if (!matches) continue;
       let cur: FileNode | undefined = n;
       while (cur && !set.has(cur.id)) {
@@ -1156,7 +1214,7 @@ export function FileExplorer() {
       }
     }
     return set;
-  }, [filterActive, nodes, trimmedQuery, onlyVisible, nodeById]);
+  }, [filterActive, nodes, trimmedQuery, onlyVisible, onlyLocalOnly, nodeById]);
 
   // Central expand/collapse state for the flattened + windowed tree (a folder is
   // expanded when present in this set). Top-level folders seed open exactly once
@@ -1230,6 +1288,7 @@ export function FileExplorer() {
     setQuery("");
     setDebouncedQuery("");
     setOnlyVisible(false);
+    setOnlyLocalOnly(false);
     // Expand every ancestor folder so the row exists in the flattened list.
     const toOpen: string[] = [];
     let cur = target.parentId === null ? undefined : nodeById.get(target.parentId);
@@ -1254,6 +1313,20 @@ export function FileExplorer() {
     };
     window.addEventListener("lighthouse:reveal-node", onReveal);
     return () => window.removeEventListener("lighthouse:reveal-node", onReveal);
+  }, []);
+  // Chat header → explorer (0.12.1 §2): clicking "{n} files hidden from cloud
+  // models" filters the tree to the marked set. The search clears too (both
+  // debounce halves), so what's shown is honestly "everything hidden from
+  // cloud" — not "hidden from cloud ∩ stale search". State setters are stable,
+  // so the listener mounts once (the reveal-node cleanup style above).
+  useEffect(() => {
+    const onFilterLocalOnly = () => {
+      setOnlyLocalOnly(true);
+      setQuery("");
+      setDebouncedQuery("");
+    };
+    window.addEventListener("lighthouse:filter-local-only", onFilterLocalOnly);
+    return () => window.removeEventListener("lighthouse:filter-local-only", onFilterLocalOnly);
   }, []);
   // Phase two: after the expansion/filter state committed, locate the row —
   // recompute each source's flat list exactly as the render below does, find
@@ -1887,12 +1960,7 @@ export function FileExplorer() {
             onChange={(_, d) => void applySelection(d.checked)}
             label="Visible to AI"
           />
-          <Switch
-            checked={Boolean(allSelectedLocalOnly)}
-            disabled={selectedIds.length === 0}
-            onChange={(_, d) => void applyLocalOnly(d.checked)}
-            label="Private (this device)"
-          />
+          {bulkLock}
           <Button
             icon={<DeleteRegular />}
             size="small"
@@ -1929,6 +1997,18 @@ export function FileExplorer() {
             onClick={() => setOnlyVisible((v) => !v)}
           >
             Only visible to AI
+          </ToggleButton>
+          {/* The lock axis of the eye filter above: only nodes marked "Private —
+              this device only". Also switched on by the chat header's hidden-
+              from-cloud count, so that filter is visible and clearable HERE. */}
+          <ToggleButton
+            size="small"
+            appearance="subtle"
+            icon={<LockClosedRegular />}
+            checked={onlyLocalOnly}
+            onClick={() => setOnlyLocalOnly((v) => !v)}
+          >
+            Hidden from cloud
           </ToggleButton>
           <Menu>
             <MenuTrigger disableButtonEnhancement>
@@ -2050,6 +2130,7 @@ export function FileExplorer() {
                           onSetExpanded={setExpanded}
                           justAdded={justAdded}
                           flash={revealFlashId === row.node.id}
+                          cloudActive={cloudActive}
                         />
                       )}
                     />

@@ -46,8 +46,15 @@ import {
   ShieldTaskRegular,
   WarningRegular,
 } from "@fluentui/react-icons";
-import { MODEL_PROVIDERS, ragService, type AuditSnapshot } from "@/contracts";
+import {
+  MODEL_PROVIDERS,
+  ragService,
+  type AuditSnapshot,
+  type SigninStart,
+  type SigninStatus,
+} from "@/contracts";
 import { LocalModelInstallPanel } from "@/features/localModel/LocalModelOption";
+import { apiKeyBillingNote, signinBillingNote } from "@/lib/billingNotes";
 import { RULE_ACTION_LABEL } from "@/features/explorer/FolderRulesDialog";
 import { START_TOUR_EVENT } from "@/features/help/FirstRunTour";
 import { showWidget, summonHotkey, prettyShortcut, modKey } from "@/features/onboarding/ModeChooser";
@@ -65,6 +72,25 @@ const useStyles = makeStyles({
   muted: { color: tokens.colorNeutralForeground3, fontSize: tokens.fontSizeBase200 },
   modelFields: { display: "flex", flexDirection: "column", gap: tokens.spacingVerticalM },
   testKeyRow: { display: "flex", alignItems: "center", gap: tokens.spacingHorizontalS },
+  // Provider sign-in (0.12.1 §3): the device-flow pane under the OpenAI row.
+  signinPane: {
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "flex-start",
+    gap: tokens.spacingVerticalS,
+  },
+  signinRow: { display: "flex", alignItems: "center", gap: tokens.spacingHorizontalS },
+  // The user code, LARGE and unmistakable — monospace with tabular numerals
+  // so the digits the user must retype line up glyph-for-glyph.
+  signinCode: {
+    fontFamily: tokens.fontFamilyMonospace,
+    fontSize: tokens.fontSizeHero800,
+    fontWeight: tokens.fontWeightSemibold,
+    letterSpacing: "0.08em",
+    fontVariantNumeric: "tabular-nums",
+    color: tokens.colorNeutralForeground1,
+  },
+  signinOk: { color: tokens.colorPaletteGreenForeground1 },
   testKeyOk: { color: tokens.colorPaletteGreenForeground1 },
   savedNote: { color: tokens.colorPaletteGreenForeground1, fontSize: tokens.fontSizeBase200 },
   // Preferences dialog: sections separated by a little vertical air.
@@ -185,6 +211,13 @@ function firstModelFor(pid: string): string {
   return (MODEL_PROVIDERS.find((p) => p.id === pid) ?? MODEL_PROVIDERS[0]).models[0];
 }
 
+/** External hand-off in the user's own browser — the feedback flow's idiom
+ *  (BugReport.tsx openExternal): a plain window.open the desktop shell routes
+ *  to the OS browser; Lighthouse itself transmits nothing here. */
+function openExternal(url: string) {
+  window.open(url, "_blank", "noopener,noreferrer");
+}
+
 /**
  * Manage the active model provider/model and API key after onboarding. Reuses
  * the same selectModel seam as the onboarding model step; the server preserves
@@ -210,6 +243,16 @@ function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean
   const [error, setError] = useState<string | null>(null);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; error?: string } | null>(null);
+  // Provider sign-in (0.12.1 §3), OpenAI row only. `signin` is the engine's
+  // status — null until loaded, and available:false on every stock build, so
+  // NOTHING sign-in-related renders unless a maintainer configured the flow
+  // (fail-closed invisibility). Desktop-gated like other filesystem-backed
+  // affordances.
+  const desktop = useRagStore((s) => s.desktop);
+  const [signin, setSignin] = useState<SigninStatus | null>(null);
+  const [signinFlow, setSigninFlow] = useState<SigninStart | null>(null);
+  const [signinError, setSigninError] = useState<string | null>(null);
+  const [signinBusy, setSigninBusy] = useState(false);
 
   // Re-sync the fields to the saved settings on the open transition.
   useEffect(() => {
@@ -221,7 +264,69 @@ function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean
     setApiKey("");
     setError(null);
     setTestResult(null);
+    setSigninFlow(null);
+    setSigninError(null);
   }, [open]);
+
+  // Load the sign-in status when the OpenAI row is in view; any provider
+  // switch abandons an in-flight code (the engine's pending handshake simply
+  // expires — nothing was granted).
+  useEffect(() => {
+    setSigninFlow(null);
+    setSigninError(null);
+    if (!open || providerId !== "openai") {
+      setSignin(null);
+      return;
+    }
+    let alive = true;
+    ragService
+      .providerAuthStatus()
+      .then((s) => {
+        if (alive) setSignin(s);
+      })
+      .catch(() => {
+        if (alive) setSignin(null); // unknown ⇒ render nothing (fail closed)
+      });
+    return () => {
+      alive = false;
+    };
+  }, [open, providerId]);
+
+  // Live poll while a sign-in code is on screen, at the vendor's interval
+  // (chained timeouts so a slow_down bump takes effect on the next tick).
+  useEffect(() => {
+    if (!open || !signinFlow) return;
+    let alive = true;
+    let timer: number | undefined;
+    let interval = Math.max(signinFlow.intervalMs, 500);
+    const tick = async () => {
+      try {
+        const p = await ragService.providerAuthPoll();
+        if (!alive) return;
+        if (p.error) {
+          setSigninError(p.error); // expired/declined — reset with the reason
+          setSigninFlow(null);
+          return;
+        }
+        if (p.status === "complete") {
+          const s = await ragService.providerAuthStatus();
+          if (!alive) return;
+          setSigninFlow(null);
+          setSignin(s);
+          return;
+        }
+        if (typeof p.intervalMs === "number" && p.intervalMs > 0) interval = p.intervalMs;
+      } catch {
+        // Transient transport hiccup — keep polling at the same cadence.
+      }
+      timer = window.setTimeout(() => void tick(), interval);
+    };
+    timer = window.setTimeout(() => void tick(), interval);
+    return () => {
+      alive = false;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [open, signinFlow]);
 
   const provider = MODEL_PROVIDERS.find((p) => p.id === providerId) ?? MODEL_PROVIDERS[0];
   // Per-provider "a key is on file" — falls back to the legacy flag for the
@@ -238,6 +343,68 @@ function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean
   const isAllowed = (id: string) => (allowedProviders ? allowedProviders.includes(id) : true);
   const firstAllowedCloud = cloudProviders.find((p) => isAllowed(p.id)) ?? cloudProviders[0];
   const localModelId = MODEL_PROVIDERS.find((p) => p.id === "local")!.models[0];
+
+  // Sign-in only surfaces when the engine says the flow is CONFIGURED
+  // (available) — plus the one recovery case: a persisted "signin" choice on
+  // a build where the flow has since become unavailable still shows the
+  // control (with the honest reason instead of a button) so the user can
+  // switch back to the key without editing files by hand. A stock build has
+  // method "key" and available false ⇒ nothing renders.
+  const signinControl =
+    providerId === "openai" &&
+    desktop &&
+    signin !== null &&
+    (signin.available || signin.method === "signin");
+  const signinPane = signinControl && signin.method === "signin";
+
+  function updateAuthMethod(next: "key" | "signin") {
+    if (!signin || signin.method === next) return;
+    const prev = signin.method;
+    setSignin({ ...signin, method: next });
+    setSigninError(null);
+    setSigninFlow(null);
+    void ragService
+      .providerAuthSetMethod(next)
+      .then((r) => {
+        if (!r.ok) {
+          // Rolled back — the control never lies about a choice that didn't
+          // persist (the Preferences postSetting idiom).
+          setSignin((s) => (s ? { ...s, method: prev } : s));
+          setSigninError(r.error ?? "That change couldn't be saved — try again.");
+        }
+      })
+      .catch(() => {
+        setSignin((s) => (s ? { ...s, method: prev } : s));
+        setSigninError("That change couldn't be saved — try again.");
+      });
+  }
+
+  async function startSignin() {
+    setSigninBusy(true);
+    setSigninError(null);
+    try {
+      const res = await ragService.providerAuthStart();
+      if (res.start) setSigninFlow(res.start);
+      else setSigninError(res.error ?? "couldn't start sign-in");
+    } catch {
+      setSigninError("couldn't start sign-in — try again");
+    } finally {
+      setSigninBusy(false);
+    }
+  }
+
+  async function signOutProvider() {
+    setSigninBusy(true);
+    setSigninError(null);
+    try {
+      await ragService.providerAuthSignout();
+      setSignin(await ragService.providerAuthStatus());
+    } catch {
+      setSigninError("couldn't sign out — try again");
+    } finally {
+      setSigninBusy(false);
+    }
+  }
 
   async function testKey() {
     setTesting(true);
@@ -353,50 +520,143 @@ function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean
                       ))}
                     </Dropdown>
                   </Field>
-                  <Field
-                    label="API key"
-                    hint={
-                      <Link href={provider.apiKeyUrl} target="_blank" rel="noreferrer">
-                        Get your {provider.label} key →
-                      </Link>
-                    }
-                  >
-                    <Input
-                      type="password"
-                      value={apiKey}
-                      onChange={(_, d) => {
-                        setApiKey(d.value);
-                        setTestResult(null);
-                      }}
-                      placeholder={
-                        providerHasSavedKey
-                          ? "•••••••• saved — leave blank to keep"
-                          : "Paste your API key"
-                      }
-                    />
-                  </Field>
-                  {(apiKey || providerHasSavedKey) && (
-                    <div className={styles.testKeyRow}>
-                      <Button
-                        size="small"
-                        appearance="secondary"
-                        disabled={testing}
-                        icon={testing ? <Spinner size="tiny" /> : undefined}
-                        onClick={() => void testKey()}
+                  {/* Provider sign-in (0.12.1 §3), OpenAI only: renders ONLY
+                      when the engine reports the registration-gated flow as
+                      configured (stock builds: never — fail-closed
+                      invisibility, the code-signing pattern). */}
+                  {signinControl && (
+                    <Field label="Connect with">
+                      <RadioGroup
+                        layout="horizontal"
+                        value={signin.method}
+                        onChange={(_, d) =>
+                          updateAuthMethod(d.value === "signin" ? "signin" : "key")
+                        }
                       >
-                        {testing ? "Testing…" : apiKey ? "Test key" : "Test saved key"}
-                      </Button>
-                      {testResult &&
-                        (testResult.ok ? (
-                          <Text size={200} className={styles.testKeyOk}>
-                            ✓ Key works
+                        <Radio value="key" label="Use API key" />
+                        <Radio value="signin" label="Sign in" />
+                      </RadioGroup>
+                    </Field>
+                  )}
+                  {signinPane && (
+                    <div className={styles.signinPane}>
+                      {signin.signedIn ? (
+                        <>
+                          <Text className={styles.signinOk}>
+                            ✓ Signed in
+                            {signin.accountHint ? ` as ${signin.accountHint}` : ""}
                           </Text>
-                        ) : (
-                          <Text size={200} className={styles.error}>
-                            ✗ {testResult.error ?? "the key didn't work"}
+                          {/* Billing clarity (0.12.1 §4): signed-in usage draws
+                              on the vendor account/subscription, not per-key
+                              developer billing. */}
+                          {signinBillingNote(providerId) && (
+                            <Text className={styles.prefHint}>{signinBillingNote(providerId)}</Text>
+                          )}
+                          <Button
+                            size="small"
+                            appearance="secondary"
+                            disabled={signinBusy}
+                            onClick={() => void signOutProvider()}
+                          >
+                            Sign out
+                          </Button>
+                        </>
+                      ) : !signin.available ? (
+                        <Text className={styles.prefHint}>
+                          {signin.reason ?? "sign-in isn't configured in this build"} — switch
+                          back to “Use API key” above.
+                        </Text>
+                      ) : signinFlow ? (
+                        <>
+                          <Text className={styles.prefHint}>
+                            Enter this code in your browser to approve the sign-in:
                           </Text>
-                        ))}
+                          <Text className={styles.signinCode} data-testid="signin-user-code">
+                            {signinFlow.userCode}
+                          </Text>
+                          <div className={styles.signinRow}>
+                            <Button
+                              appearance="primary"
+                              onClick={() => openExternal(signinFlow.verificationUri)}
+                            >
+                              Open browser
+                            </Button>
+                            <Spinner size="tiny" />
+                            <Text size={200} className={styles.prefHint}>
+                              Waiting for approval…
+                            </Text>
+                          </div>
+                        </>
+                      ) : (
+                        <Button
+                          appearance="primary"
+                          disabled={signinBusy}
+                          icon={signinBusy ? <Spinner size="tiny" /> : undefined}
+                          onClick={() => void startSignin()}
+                        >
+                          Sign in
+                        </Button>
+                      )}
+                      {signinError && <Text className={styles.error}>{signinError}</Text>}
                     </div>
+                  )}
+                  {/* The key field steps aside only while the sign-in pane
+                      owns the row; method "key" (the default everywhere the
+                      flow isn't configured) leaves it exactly as it was. */}
+                  {!signinPane && (
+                    <>
+                      <Field
+                        label="API key"
+                        hint={
+                          <Link href={provider.apiKeyUrl} target="_blank" rel="noreferrer">
+                            Get your {provider.label} key →
+                          </Link>
+                        }
+                      >
+                        <Input
+                          type="password"
+                          value={apiKey}
+                          onChange={(_, d) => {
+                            setApiKey(d.value);
+                            setTestResult(null);
+                          }}
+                          placeholder={
+                            providerHasSavedKey
+                              ? "•••••••• saved — leave blank to keep"
+                              : "Paste your API key"
+                          }
+                        />
+                      </Field>
+                      {/* Billing clarity (0.12.1 §4): a chat subscription does
+                          not cover API-key usage — name the vendor's products so
+                          the distinction is unmissable. */}
+                      {apiKeyBillingNote(providerId) && (
+                        <Text className={styles.prefHint}>{apiKeyBillingNote(providerId)}</Text>
+                      )}
+                      {(apiKey || providerHasSavedKey) && (
+                        <div className={styles.testKeyRow}>
+                          <Button
+                            size="small"
+                            appearance="secondary"
+                            disabled={testing}
+                            icon={testing ? <Spinner size="tiny" /> : undefined}
+                            onClick={() => void testKey()}
+                          >
+                            {testing ? "Testing…" : apiKey ? "Test key" : "Test saved key"}
+                          </Button>
+                          {testResult &&
+                            (testResult.ok ? (
+                              <Text size={200} className={styles.testKeyOk}>
+                                ✓ Key works
+                              </Text>
+                            ) : (
+                              <Text size={200} className={styles.error}>
+                                ✗ {testResult.error ?? "the key didn't work"}
+                              </Text>
+                            ))}
+                        </div>
+                      )}
+                    </>
                   )}
                 </>
               )}
