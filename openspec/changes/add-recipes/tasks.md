@@ -17,7 +17,7 @@
 - [x] 3.2 Evidence-pack plan: verify the N-query plan + ledger already ride composeEvidencePack section (b) via the verbatim footer; add a dedicated "Plan" section only if the verbatim footer is insufficient (document the choice).
 
 ## 4. Eval floor
-- [ ] 4.1 Per-recipe goldens in examples/analytics_eval.rs Section 1 (model-free, CI-gated): a known-series fixture per recipe → deterministic plan → run_query per template → assert expected variance/cohort/dq-audit/anomaly/top-movers numbers. Ledger snapshot as a sibling check (byte-deterministic).
+- [x] 4.1 Per-recipe goldens in examples/analytics_eval.rs Section 1 (model-free, CI-gated): a known-series fixture per recipe → deterministic plan → run_query per template → assert expected variance/cohort/dq-audit/anomaly/top-movers numbers. Ledger snapshot as a sibling check (byte-deterministic).
 
 ## 5. Verify
 - [ ] 5.1 E2E (recipes_test.rs / views_test.rs style): variance recipe via the LOCAL path (tables + assumptions, no narration) + a mocked-cloud path (narrated, stamp accurate) + pin the result to a board. Ledger snapshot tests. UI structural: gallery, chips, ledger disclosure.
