@@ -1,5 +1,8 @@
 import type { RagService } from "../services";
 import type {
+  Board,
+  BoardCardRef,
+  BoardCardRefresh,
   Briefing,
   BriefingReport,
   Cadence,
@@ -601,6 +604,184 @@ class MockRagService implements RagService {
       rec.conversationRefs.push(ref);
     }
     return { investigation: this.investigationViewOf(rec) };
+  }
+
+  // In-memory boards (openspec: add-boards) so the board panel is
+  // exercisable offline. Mirrors the engines' validation and lazy defaults:
+  // per-scope case-insensitive name uniqueness, S|M|L size whitelist,
+  // tombstone-tolerant pin refs, and virtual defaults under deterministic
+  // ids ("default-global" / "default-<invId>") that materialize on first
+  // mutation. refreshCards answers from the mock's stored pins (live:
+  // false), so cards render like the twin's last-known snapshots.
+  private boards: Board[] = [];
+
+  private cloneBoard(b: Board): Board {
+    return { ...b, cards: b.cards.map((c) => ({ ...c })) };
+  }
+
+  private boardNameTaken(name: string, scope: string | undefined, excludingId?: string): boolean {
+    const wanted = name.toLowerCase();
+    return this.boards.some(
+      (b) =>
+        b.id !== excludingId && b.investigationId === scope && b.name.toLowerCase() === wanted,
+    );
+  }
+
+  /** The scope + default name a never-persisted default id names, or null. */
+  private virtualBoardScope(id: string): { scope?: string; name: string } | null {
+    if (id === "default-global") return { name: "My board" };
+    if (!id.startsWith("default-")) return null;
+    const inv = this.investigations.find((i) => i.id === id.slice("default-".length));
+    return inv ? { scope: inv.id, name: inv.name } : null;
+  }
+
+  private virtualBoard(scope: string | undefined, name: string): Board {
+    return {
+      id: scope ? `default-${scope}` : "default-global",
+      name,
+      ...(scope ? { investigationId: scope } : {}),
+      cards: [],
+      createdMs: 0,
+    };
+  }
+
+  /** Mirrors the engines' card validation, byte-identical reasons. */
+  private validateBoardCards(cards: BoardCardRef[]): string | null {
+    for (const c of cards) {
+      if (!c.pinId.trim()) return "every card needs a pinId";
+      if (c.size !== "S" && c.size !== "M" && c.size !== "L") {
+        return 'card size must be "S", "M", or "L"';
+      }
+    }
+    return null;
+  }
+
+  async listBoards(investigationId?: string): Promise<Board[]> {
+    if (investigationId) {
+      const out = this.boards
+        .filter((b) => b.investigationId === investigationId)
+        .map((b) => this.cloneBoard(b));
+      if (out.length === 0) {
+        const inv = this.investigations.find((i) => i.id === investigationId);
+        if (inv) out.push(this.virtualBoard(inv.id, inv.name));
+      }
+      return out;
+    }
+    const out = this.boards.map((b) => this.cloneBoard(b));
+    if (!this.boards.some((b) => b.investigationId === undefined)) {
+      out.push(this.virtualBoard(undefined, "My board"));
+    }
+    for (const inv of this.investigations) {
+      if (!this.boards.some((b) => b.investigationId === inv.id)) {
+        out.push(this.virtualBoard(inv.id, inv.name));
+      }
+    }
+    return out;
+  }
+
+  async createBoard(
+    name: string,
+    investigationId?: string,
+  ): Promise<{ board?: Board; error?: string }> {
+    const trimmed = name.trim();
+    if (!trimmed) return { error: "a board needs a name" };
+    const scope = investigationId?.trim() || undefined;
+    if (this.boardNameTaken(trimmed, scope)) {
+      return { error: `a board named "${trimmed}" already exists` };
+    }
+    const board: Board = {
+      id: `board-${(this.boards.length + 1).toString(16).padStart(12, "0")}`,
+      name: trimmed,
+      ...(scope ? { investigationId: scope } : {}),
+      cards: [],
+      createdMs: Date.now(),
+    };
+    this.boards.push(board);
+    return { board: this.cloneBoard(board) };
+  }
+
+  async renameBoard(id: string, name: string): Promise<{ board?: Board; error?: string }> {
+    const trimmed = name.trim();
+    if (!trimmed) return { error: "a board needs a name" };
+    const rec = this.boards.find((b) => b.id === id);
+    if (rec) {
+      if (this.boardNameTaken(trimmed, rec.investigationId, id)) {
+        return { error: `a board named "${trimmed}" already exists` };
+      }
+      rec.name = trimmed;
+      return { board: this.cloneBoard(rec) };
+    }
+    // First mutation of a virtual default materializes it under the new
+    // name, keeping the deterministic id (mirroring the engines).
+    const virtual = this.virtualBoardScope(id);
+    if (!virtual) return { error: "board not found" };
+    if (this.boardNameTaken(trimmed, virtual.scope)) {
+      return { error: `a board named "${trimmed}" already exists` };
+    }
+    const board: Board = {
+      id,
+      name: trimmed,
+      ...(virtual.scope ? { investigationId: virtual.scope } : {}),
+      cards: [],
+      createdMs: Date.now(),
+    };
+    this.boards.push(board);
+    return { board: this.cloneBoard(board) };
+  }
+
+  async deleteBoard(id: string): Promise<{ ok?: boolean; error?: string }> {
+    const before = this.boards.length;
+    this.boards = this.boards.filter((b) => b.id !== id);
+    if (this.boards.length !== before) return { ok: true };
+    // A never-persisted virtual default is an Ok no-op (deleting a default
+    // is always effectively a reset — it relists empty either way).
+    if (this.virtualBoardScope(id)) return { ok: true };
+    return { error: "board not found" };
+  }
+
+  async setBoardCards(
+    id: string,
+    cards: BoardCardRef[],
+  ): Promise<{ board?: Board; error?: string }> {
+    const invalid = this.validateBoardCards(cards);
+    if (invalid) return { error: invalid };
+    const rec = this.boards.find((b) => b.id === id);
+    if (rec) {
+      rec.cards = cards.map((c) => ({ ...c }));
+      return { board: this.cloneBoard(rec) };
+    }
+    const virtual = this.virtualBoardScope(id);
+    if (!virtual) return { error: "board not found" };
+    if (this.boardNameTaken(virtual.name, virtual.scope)) {
+      return { error: `a board named "${virtual.name}" already exists` };
+    }
+    const board: Board = {
+      id,
+      name: virtual.name,
+      ...(virtual.scope ? { investigationId: virtual.scope } : {}),
+      cards: cards.map((c) => ({ ...c })),
+      createdMs: Date.now(),
+    };
+    this.boards.push(board);
+    return { board: this.cloneBoard(board) };
+  }
+
+  async refreshBoardCards(pinIds: string[]): Promise<BoardCardRefresh[]> {
+    // Stored-state answers (the twin posture) so cards render offline: the
+    // mock never computes results, it replays each pin's last-known state.
+    return pinIds.map((pinId) => {
+      const pin = this.pins.find((p) => p.id === pinId);
+      if (!pin) return { pinId, live: false, tombstone: true };
+      return {
+        pinId,
+        live: false,
+        question: pin.question,
+        ...(pin.lastRunMs !== undefined ? { lastRunMs: pin.lastRunMs } : {}),
+        ...(pin.lastSummary !== undefined ? { lastSummary: pin.lastSummary } : {}),
+        ...(pin.lastDigest !== undefined ? { lastDigest: pin.lastDigest } : {}),
+        ...(pin.staleReason !== undefined ? { staleReason: pin.staleReason } : {}),
+      };
+    });
   }
 
   /** A node plus all of its descendants (so toggling a folder cascades). */

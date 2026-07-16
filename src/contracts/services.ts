@@ -7,6 +7,9 @@
  */
 
 import type {
+  Board,
+  BoardCardRef,
+  BoardCardRefresh,
   Briefing,
   BriefingReport,
   Cadence,
@@ -329,6 +332,56 @@ export interface RagService {
     conversationId: string,
     persistAllowed: boolean,
   ): Promise<{ investigation?: Investigation; error?: string }>;
+  /**
+   * Boards (openspec: add-boards): pin-backed local dashboards.
+   * `investigationId` filters to that investigation's boards; absent = all
+   * boards (the listPins convention). A scope with no persisted board
+   * returns its VIRTUAL default (deterministic `default-…` id, empty cards,
+   * `createdMs` 0) — mutating that id materializes it engine-side.
+   */
+  listBoards(investigationId?: string): Promise<Board[]>;
+  /**
+   * Create a board in the global scope (absent/blank `investigationId`) or
+   * inside an investigation. The engine mints the id, stamps creation time,
+   * and validates: non-empty name, unique case-insensitively WITHIN the
+   * scope. A validation rejection comes back as `error` with the engine's
+   * reason (like createInvestigation), so the form can surface it inline.
+   */
+  createBoard(
+    name: string,
+    investigationId?: string,
+  ): Promise<{ board?: Board; error?: string }>;
+  /**
+   * Rename a board — same per-scope uniqueness rule as create (a case
+   * change of its own name is allowed). Renaming a virtual default
+   * materializes it under the new name, keeping the deterministic id.
+   */
+  renameBoard(id: string, name: string): Promise<{ board?: Board; error?: string }>;
+  /**
+   * Delete a board. Deleting a scope's default (virtual or materialized) is
+   * effectively a reset — the next listing synthesizes a fresh empty
+   * default for the scope. Cards are references: no pin is ever touched.
+   */
+  deleteBoard(id: string): Promise<{ ok?: boolean; error?: string }>;
+  /**
+   * Replace a board's card list wholesale — the ONE mutation for reorder,
+   * resize, add, and remove alike (atomic full-list replace). Pin ids are
+   * not validated against pins (tombstone-tolerant); sizes must be S|M|L.
+   * Targeting a virtual default id materializes it with these cards.
+   */
+  setBoardCards(
+    id: string,
+    cards: BoardCardRef[],
+  ): Promise<{ board?: Board; error?: string }>;
+  /**
+   * Refresh a board's cards, one answer per requested pin. Desktop re-runs
+   * each pin's stored SQL through the guarded model-free direct path (a
+   * manual refresh IS a recheck — the pin's stored digest/summary advance)
+   * and answers `live: true`; the web dev twin can't execute SQL (PARITY)
+   * and answers `live: false` with each pin's stored state. Unknown pins
+   * answer `tombstone: true`.
+   */
+  refreshBoardCards(pinIds: string[]): Promise<BoardCardRefresh[]>;
 }
 
 /**

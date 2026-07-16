@@ -41,6 +41,15 @@ import {
   setInvestigationArchived,
 } from "@/server/investigations";
 import {
+  createBoard,
+  deleteBoard,
+  listBoards,
+  parseBoardCards,
+  refreshBoardCards,
+  renameBoard,
+  setBoardCards,
+} from "@/server/boards";
+import {
   addBriefing,
   listBriefings,
   removeBriefing,
@@ -221,6 +230,93 @@ export async function POST(req: Request) {
           error:
             "investigations action must be list, create, rename, setArchived, or addConversationRef",
         },
+        { status: 400 },
+      );
+    }
+
+    // Boards (openspec: add-boards): pin-backed local dashboards. CRUD on
+    // the vault-scoped boards store — engine-minted ids, per-scope name
+    // validation, lazy virtual defaults that materialize on first mutation.
+    // Validation failures → 400 with the engine's reason, like
+    // investigations. PARITY: routes.rs / commands.rs mirror this op;
+    // refreshCards HERE answers from stored pin state (live: false) because
+    // analytics/DataFusion is Rust-engine-only.
+    case "boards": {
+      if (body.action === "list") {
+        // Optional investigation filter — absent (or blank) is "all", the
+        // listPins convention exactly.
+        return NextResponse.json({
+          boards: listBoards(
+            typeof body.investigationId === "string" && body.investigationId
+              ? body.investigationId
+              : undefined,
+          ),
+        });
+      }
+      if (body.action === "create") {
+        try {
+          const board = createBoard(
+            typeof body.name === "string" ? body.name : "",
+            typeof body.investigationId === "string" ? body.investigationId : undefined,
+          );
+          return NextResponse.json({ board });
+        } catch (err) {
+          return NextResponse.json(
+            { error: err instanceof Error ? err.message : "could not create the board" },
+            { status: 400 },
+          );
+        }
+      }
+      if (body.action === "rename") {
+        if (typeof body.id !== "string" || !body.id) {
+          return NextResponse.json({ error: "id required" }, { status: 400 });
+        }
+        try {
+          const board = renameBoard(body.id, typeof body.name === "string" ? body.name : "");
+          return NextResponse.json({ board });
+        } catch (err) {
+          return NextResponse.json(
+            { error: err instanceof Error ? err.message : "could not rename the board" },
+            { status: 400 },
+          );
+        }
+      }
+      if (body.action === "delete") {
+        if (typeof body.id !== "string" || !body.id) {
+          return NextResponse.json({ error: "id required" }, { status: 400 });
+        }
+        try {
+          deleteBoard(body.id);
+          return NextResponse.json({ ok: true });
+        } catch (err) {
+          return NextResponse.json(
+            { error: err instanceof Error ? err.message : "could not delete the board" },
+            { status: 400 },
+          );
+        }
+      }
+      if (body.action === "setCards") {
+        if (typeof body.id !== "string" || !body.id) {
+          return NextResponse.json({ error: "id required" }, { status: 400 });
+        }
+        try {
+          const board = setBoardCards(body.id, parseBoardCards(body.cards));
+          return NextResponse.json({ board });
+        } catch (err) {
+          return NextResponse.json(
+            { error: err instanceof Error ? err.message : "could not update the board" },
+            { status: 400 },
+          );
+        }
+      }
+      if (body.action === "refreshCards") {
+        const pinIds = Array.isArray(body.pinIds)
+          ? body.pinIds.filter((x: unknown): x is string => typeof x === "string")
+          : [];
+        return NextResponse.json({ cards: refreshBoardCards(pinIds) });
+      }
+      return NextResponse.json(
+        { error: "boards action must be list, create, rename, delete, setCards, or refreshCards" },
         { status: 400 },
       );
     }

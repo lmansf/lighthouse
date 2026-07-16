@@ -1,9 +1,9 @@
 # Tasks — boards
 
 ## 1. Engine store + ops (both engines, PARITY)
-- [ ] 1.1 `boards.rs` ⇄ `boards.ts`: envelope {v:1, boards}, bak-on-write, CRUD (list/create/rename/delete/setCards) with per-scope name uniqueness + size enum validation; lazy defaults (virtual until first mutation); tombstone-tolerant (pin existence not enforced at write).
-- [ ] 1.2 `refreshCards` op: desktop wraps `run_direct` per pin (markdown/chart/footer/digest, live:true); twin returns stored pin state (live:false, PARITY comment); dispatch `op:"boards"` across routes.rs / commands.rs / app/api/rag/route.ts; RagService + real/mock; Board types.
-- [ ] 1.3 Store + refresh unit tests both engines: round trip order/sizes, bak-on-write, card-removal-preserves-pin, per-scope name collision, tombstone render data, twin stored-state shape.
+- [x] 1.1 `boards.rs` ⇄ `boards.ts`: envelope {v:1, boards}, bak-on-write, CRUD (list/create/rename/delete/setCards) with per-scope name uniqueness + size enum validation; lazy defaults (virtual until first mutation); tombstone-tolerant (pin existence not enforced at write).
+- [x] 1.2 `refreshCards` op: desktop wraps `run_direct` per pin (markdown/chart/footer/digest, live:true); twin returns stored pin state (live:false, PARITY comment); dispatch `op:"boards"` across routes.rs / commands.rs / app/api/rag/route.ts; RagService + real/mock; Board types.
+- [x] 1.3 Store + refresh unit tests both engines: round trip order/sizes, bak-on-write, card-removal-preserves-pin, per-scope name collision, tombstone render data, twin stored-state shape.
 
 ## 2. Cards + board panel (UI)
 - [ ] 2.1 BoardPanel + card components: chart card (AnalyticsChart from parsed spec), stat tile (tabular numeral + delta vs previous summary via pinChart parsing), compact table, tombstone, staleReason posture; freshness line per card; 0.12.0 card treatment both themes.

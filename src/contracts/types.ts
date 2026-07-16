@@ -496,3 +496,78 @@ export interface InvestigationCreateInput {
   scopeFileIds?: string[];
   providerPolicy?: InvestigationProviderPolicy;
 }
+
+/** Card footprint on a board's responsive grid (openspec: add-boards). */
+export type BoardCardSize = "S" | "M" | "L";
+
+/**
+ * One ordered board card (openspec: add-boards): a pin reference plus its
+ * size — nothing else. Pin existence is deliberately not enforced at write
+ * time; a card whose pin was deleted renders as a tombstone, and removing a
+ * card never deletes or modifies the pin.
+ */
+export interface BoardCardRef {
+  pinId: string;
+  size: BoardCardSize;
+}
+
+/**
+ * A board (openspec: add-boards): existing pins arranged as a living, local
+ * dashboard — ordered card references persisted vault-scoped engine-side
+ * (versioned envelope, atomic writes, the investigations idiom). Names are
+ * unique case-insensitively WITHIN a scope (global vs each investigation).
+ * A scope with no persisted board lists a VIRTUAL default ("My board"
+ * globally; the investigation's name when scoped) under a deterministic id
+ * (`default-global` / `default-<invId>`, `createdMs` 0); the first mutation
+ * targeting that id materializes it as a real record — mutate exactly what
+ * the listing returned.
+ */
+export interface Board {
+  /** Engine-minted, stable across renames. */
+  id: string;
+  /** Display name, unique case-insensitively within its scope. */
+  name: string;
+  /** Owning investigation; absent = the global scope (mirrors Pin). */
+  investigationId?: string;
+  /** Ordered card references — order IS the layout order. */
+  cards: BoardCardRef[];
+  /** Creation instant; 0 on a virtual (not yet persisted) default. */
+  createdMs: number;
+}
+
+/**
+ * One card's answer from a board refresh (openspec: add-boards). `live`
+ * distinguishes the engines' modes: the desktop engine re-runs the pin's
+ * stored SQL through the same guarded, model-free `run_direct` path as
+ * watcher rechecks (a manual refresh IS a recheck — the pin's stored
+ * digest/summary advance identically) and answers `live: true` with the
+ * fresh markdown/chart/footer/digest; the dev twin cannot execute SQL
+ * (analytics is Rust-only, PARITY) and answers `live: false` with the pin's
+ * STORED state so cards render the last-known snapshot honestly. A pin that
+ * no longer exists answers `tombstone: true`.
+ */
+export interface BoardCardRefresh {
+  pinId: string;
+  /** True = computed now by the engine; false = stored state (twin). */
+  live: boolean;
+  /** The pin no longer exists — render the tombstone card. */
+  tombstone?: boolean;
+  question?: string;
+  /** Live only: narration-capped result table from the re-execution. */
+  markdown?: string;
+  /** Live only: chart spec when the result is chartable. */
+  chart?: string;
+  /** Live only: the engine freshness/provenance footer. */
+  footer?: string;
+  /** Live only: full-fidelity digest (what rechecks compare). */
+  resultDigest?: string;
+  lastRunMs?: number;
+  /** Live only: the re-execution failed — shown staleReason-style. */
+  error?: string;
+  /** Stored state: the pin's compact summary as of the last recheck. */
+  lastSummary?: string;
+  /** Stored state: the pin's digest as of the last recheck. */
+  lastDigest?: string;
+  /** Stored state: why the last recheck couldn't run. */
+  staleReason?: string;
+}

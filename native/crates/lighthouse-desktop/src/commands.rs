@@ -197,6 +197,61 @@ pub async fn rag_op(app: AppHandle, body: Value) -> Result<Value, String> {
                     .into(),
             ),
         },
+        // Boards (openspec: add-boards) — mirrors the routes.rs op exactly:
+        // store CRUD (engine-minted ids, per-scope name validation, lazy
+        // virtual defaults) plus refreshCards, the model-free per-pin
+        // re-execution through the SAME run_direct guard as pin rechecks (a
+        // manual board refresh IS a recheck). Boards never touch vault files
+        // or the tree, so there is NO vault-changed broadcast (like
+        // investigations); refresh freshness reaches the UI in the response
+        // itself, and watcher-driven changes keep riding the existing
+        // pins-changed relay — no new event channel.
+        Some("boards") => match body["action"].as_str() {
+            Some("list") => {
+                // Optional investigation filter — absent (or blank) is "all",
+                // the listPins convention exactly.
+                let investigation_id = body["investigationId"].as_str().filter(|s| !s.is_empty());
+                Ok(json!({ "boards": lighthouse_core::boards::list_for(investigation_id) }))
+            }
+            Some("create") => {
+                let board = lighthouse_core::boards::create(
+                    body["name"].as_str().unwrap_or(""),
+                    body["investigationId"].as_str(),
+                )?;
+                Ok(json!({ "board": board }))
+            }
+            Some("rename") => {
+                let Some(id) = body["id"].as_str().filter(|s| !s.is_empty()) else {
+                    return Err("id required".into());
+                };
+                let board =
+                    lighthouse_core::boards::rename(id, body["name"].as_str().unwrap_or(""))?;
+                Ok(json!({ "board": board }))
+            }
+            Some("delete") => {
+                let Some(id) = body["id"].as_str().filter(|s| !s.is_empty()) else {
+                    return Err("id required".into());
+                };
+                lighthouse_core::boards::delete(id)?;
+                Ok(json!({ "ok": true }))
+            }
+            Some("setCards") => {
+                let Some(id) = body["id"].as_str().filter(|s| !s.is_empty()) else {
+                    return Err("id required".into());
+                };
+                let cards = lighthouse_core::boards::parse_cards(&body["cards"])?;
+                let board = lighthouse_core::boards::set_cards(id, cards)?;
+                Ok(json!({ "board": board }))
+            }
+            Some("refreshCards") => {
+                let pin_ids = string_array(&body["pinIds"]);
+                Ok(json!({ "cards": lighthouse_core::boards::refresh_cards(&pin_ids).await }))
+            }
+            _ => Err(
+                "boards action must be list, create, rename, delete, setCards, or refreshCards"
+                    .into(),
+            ),
+        },
         Some("source") => {
             let Some(available) = body["available"].as_bool() else {
                 return Err("available required".into());

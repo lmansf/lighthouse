@@ -215,10 +215,19 @@ fn summarize(markdown: &str) -> String {
     markdown.lines().next().unwrap_or("").chars().take(80).collect()
 }
 
-/// Re-run one pin. `Some` = the result digest CHANGED since the last run (a
-/// first run only primes the digest — nothing to compare yet, no alert).
+/// Re-run one pin in place. The alert (`Some` = the result digest CHANGED
+/// since the last run; a first run only primes the digest — nothing to
+/// compare yet, no alert) rides alongside the full deterministic result:
+/// boards' refresh (openspec: add-boards) renders the rows/chart/footer
+/// that rechecks deliberately never persist, and returning them from the
+/// ONE execution keeps a board refresh from running every query twice.
 /// Errors mark the pin stale (reason kept) and never alert.
-async fn recheck_pin(pin: &mut Pin) -> Option<ChangedPin> {
+async fn recheck_pin(
+    pin: &mut Pin,
+) -> (
+    Option<ChangedPin>,
+    Result<crate::analytics::DirectResult, String>,
+) {
     match crate::analytics::run_direct(&pin.sql, &pin.file_ids).await {
         Ok(res) => {
             // Full-fidelity digest (the whole execution-capped result), NOT
@@ -232,17 +241,20 @@ async fn recheck_pin(pin: &mut Pin) -> Option<ChangedPin> {
             pin.last_digest = Some(digest);
             pin.last_summary = Some(summary.clone());
             pin.stale_reason = None;
-            changed.then(|| ChangedPin {
-                id: pin.id.clone(),
-                question: pin.question.clone(),
-                before,
-                after: summary,
-            })
+            (
+                changed.then(|| ChangedPin {
+                    id: pin.id.clone(),
+                    question: pin.question.clone(),
+                    before,
+                    after: summary,
+                }),
+                Ok(res),
+            )
         }
         Err(e) => {
             pin.last_run_ms = Some(now_ms());
-            pin.stale_reason = Some(e);
-            None
+            pin.stale_reason = Some(e.clone());
+            (None, Err(e))
         }
     }
 }
@@ -264,7 +276,7 @@ pub async fn recheck_all() -> Vec<ChangedPin> {
     }
     let mut changed = Vec::new();
     for p in &mut snapshot {
-        if let Some(c) = recheck_pin(p).await {
+        if let (Some(c), _) = recheck_pin(p).await {
             changed.push(c);
         }
     }
@@ -297,22 +309,16 @@ pub async fn recheck_all() -> Vec<ChangedPin> {
     changed
 }
 
-/// Recheck a single pin (used to prime a fresh pin's summary on add). Merges
-/// like `recheck_all`: if the pin was removed while its query ran, the update
-/// is dropped and nothing alerts.
-pub async fn recheck_one(id: &str) -> Option<ChangedPin> {
-    let mut pin = {
-        let _guard = store_lock();
-        list().into_iter().find(|p| p.id == id)
-    }?;
-    let changed = recheck_pin(&mut pin).await;
+/// Merge one re-run pin's outputs back onto a fresh load — the guard
+/// `recheck_all` applies per pin, factored for the single-pin paths: copy
+/// ONLY the recheck outputs, and only when the pin wasn't removed or
+/// re-pinned (same created_ms / file_ids) while the query ran. `false` =
+/// the update was dropped and nothing was saved.
+fn merge_recheck(pin: &Pin) -> bool {
     let _guard = store_lock();
     let mut current = list();
     let mut merged = false;
     for c in &mut current {
-        // Same guard as recheck_all: apply only the recheck outputs, and only
-        // if the pin wasn't removed or re-pinned (new created_ms / file_ids)
-        // while the priming query ran.
         if c.id == pin.id && c.created_ms == pin.created_ms && c.file_ids == pin.file_ids {
             c.last_run_ms = pin.last_run_ms;
             c.last_digest = pin.last_digest.clone();
@@ -321,11 +327,46 @@ pub async fn recheck_one(id: &str) -> Option<ChangedPin> {
             merged = true;
         }
     }
-    if !merged {
+    if merged {
+        save(&current);
+    }
+    merged
+}
+
+/// Recheck a single pin (used to prime a fresh pin's summary on add). Merges
+/// like `recheck_all`: if the pin was removed while its query ran, the update
+/// is dropped and nothing alerts.
+pub async fn recheck_one(id: &str) -> Option<ChangedPin> {
+    let mut pin = {
+        let _guard = store_lock();
+        list().into_iter().find(|p| p.id == id)
+    }?;
+    let (changed, _) = recheck_pin(&mut pin).await;
+    if !merge_recheck(&pin) {
         return None; // removed or re-pinned while the query ran
     }
-    save(&current);
     changed
+}
+
+/// One pin's guarded re-execution WITH its full deterministic result — the
+/// boards refresh path (openspec: add-boards). A manual board refresh IS a
+/// recheck: the same `run_direct` guard, the same `summarize`, the same
+/// digest/summary/lastRun/staleReason write-back (merged under the
+/// `recheck_all` guard) — plus the rows/chart/footer the recheck loop
+/// deliberately never persists, returned to the caller for rendering.
+/// `None` = no such pin (the caller renders a tombstone). A pin removed or
+/// re-pinned while the query ran keeps the store untouched (merge dropped)
+/// but still answers with what was computed — the next refresh tombstones.
+pub async fn refresh_one(
+    id: &str,
+) -> Option<(Pin, Result<crate::analytics::DirectResult, String>)> {
+    let mut pin = {
+        let _guard = store_lock();
+        list().into_iter().find(|p| p.id == id)
+    }?;
+    let (_, outcome) = recheck_pin(&mut pin).await;
+    let _ = merge_recheck(&pin);
+    Some((pin, outcome))
 }
 
 #[cfg(test)]
