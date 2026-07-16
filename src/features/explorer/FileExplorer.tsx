@@ -60,6 +60,7 @@ import {
   DocumentPdfRegular,
   EyeOffRegular,
   EyeRegular,
+  FilterRegular,
   FolderArrowRightRegular,
   FolderRegular,
   FolderAddRegular,
@@ -76,6 +77,7 @@ import {
 import type { FileNode } from "@/contracts";
 import { flattenVisible, type FlatRow } from "./flatten";
 import { FileInspector } from "./FileInspector";
+import { FolderRulesDialog } from "./FolderRulesDialog";
 import { useRagStore } from "@/stores/useRagStore";
 import { useAuthStore } from "@/stores/useAuthStore";
 import { FILE_DRAG_MIME, parseDraggedFiles, serializeDraggedFiles } from "@/shell/dnd";
@@ -323,6 +325,17 @@ const useStyles = makeStyles({
     animationTimingFunction: tokens.curveDecelerateMid,
     "@media (prefers-reduced-motion: reduce)": { animationName: "none" },
   },
+  // Brief highlight when quick-open reveals this row (the ChatPanel citation
+  // flash pattern): a brand-tinted background that fades back out, so the eye
+  // lands on the right file after the scroll.
+  rowRevealFlash: {
+    animationName: {
+      from: { backgroundColor: tokens.colorBrandBackground2 },
+      to: { backgroundColor: "transparent" },
+    },
+    animationDuration: "1.2s",
+    animationTimingFunction: "ease-out",
+  },
   // A folder lights up as a "move into here" target while a file row is dragged
   // over it — the reparent gesture that surfaces the engine's op:move.
   rowDropInto: {
@@ -453,6 +466,9 @@ interface TreeRowProps {
   onReveal: (id: string) => void;
   /** Open the read-only "What the AI sees" inspector for a file. */
   onInspect: (id: string, name: string) => void;
+  /** Open the curation-rules dialog scoped to a folder (openspec:
+   *  add-curation-rules). */
+  onFolderRules: (id: string, name: string) => void;
   /** Reparent a node under a folder (or the vault root, null). */
   onMove: (fromId: string, toParentId: string | null) => void;
   /** Open the rename dialog for a node (local vault nodes only). */
@@ -477,6 +493,9 @@ interface TreeRowProps {
   onSetExpanded: (id: string, value: boolean) => void;
   /** Ids added in the last few seconds — these rows play the enter animation. */
   justAdded: Set<string>;
+  /** True while this row is the just-revealed quick-open target: plays the
+   *  brief background flash so the eye lands on it after the scroll. */
+  flash: boolean;
 }
 
 /** Stable empty move-target list so a closed row's memo isn't broken by a fresh
@@ -498,6 +517,7 @@ function TreeRowImpl({
   onOpen,
   onReveal,
   onInspect,
+  onFolderRules,
   onMove,
   onRename,
   onNewFolderInside,
@@ -507,6 +527,7 @@ function TreeRowImpl({
   onToggleExpand,
   onSetExpanded,
   justAdded,
+  flash,
 }: TreeRowProps) {
   const styles = useStyles();
   // The row's right-click menu open state. moveTargetsFor is O(rows × folders),
@@ -577,8 +598,8 @@ function TreeRowImpl({
         className={`${styles.row}${node.ragIncluded ? ` ${styles.rowIncluded}` : ""}${
           selected ? ` ${styles.rowSelected}` : ""
         }${justAdded.has(node.id) ? ` ${styles.rowJustAdded}` : ""}${
-          dropInto ? ` ${styles.rowDropInto}` : ""
-        }`}
+          flash ? ` ${styles.rowRevealFlash}` : ""
+        }${dropInto ? ` ${styles.rowDropInto}` : ""}`}
         style={{ paddingLeft: `${depth * 18 + 4}px` }}
         role="button"
         tabIndex={0}
@@ -787,6 +808,14 @@ function TreeRowImpl({
                 What the AI sees
               </MenuItem>
             )}
+            {/* Bulk curation rules (openspec: add-curation-rules): manage the
+                predicate rules scoped to this folder. Local + linked folders
+                only — cloud nodes resolve connector-side. */}
+            {node.kind === "folder" && !isRemote && (
+              <MenuItem icon={<FilterRegular />} onClick={() => onFolderRules(node.id, node.name)}>
+                Rules for this folder…
+              </MenuItem>
+            )}
             <MenuItem
               icon={node.ragIncluded ? <EyeOffRegular /> : <EyeRegular />}
               onClick={toggleVisibility}
@@ -846,10 +875,14 @@ function VirtualRows({
   rows,
   scrollRef,
   renderRow,
+  dataSourceId,
 }: {
   rows: FlatRow[];
   scrollRef: React.RefObject<HTMLDivElement | null>;
   renderRow: (row: FlatRow) => React.ReactNode;
+  /** Stamped on the block so the quick-open reveal can find this source's
+   *  block in the DOM and scroll to a row inside it by index. */
+  dataSourceId: string;
 }) {
   const blockRef = useRef<HTMLDivElement>(null);
   const [range, setRange] = useState({ start: 0, end: Math.min(rows.length, 40) });
@@ -880,7 +913,11 @@ function VirtualRows({
 
   const visible = rows.slice(range.start, range.end);
   return (
-    <div ref={blockRef} style={{ position: "relative", height: count * VROW_H }}>
+    <div
+      ref={blockRef}
+      data-vrows-source={dataSourceId}
+      style={{ position: "relative", height: count * VROW_H }}
+    >
       {visible.map((row, i) => (
         <div
           key={row.node.id}
@@ -1158,6 +1195,97 @@ export function FileExplorer() {
   // The shared scroll viewport the windowed row blocks measure against.
   const scrollRef = useRef<HTMLDivElement>(null);
 
+  // --- Quick-open "reveal in explorer" (time-savers): the palette's Enter
+  // dispatches "lighthouse:reveal-node" {id}; we expand the node's ancestors,
+  // scroll the windowed list to its row, and flash it. Two-phase because the
+  // target row usually isn't mounted yet: the handler updates state, then the
+  // effect below measures the freshly-committed DOM and scrolls.
+  const [revealTarget, setRevealTarget] = useState<{ id: string; nonce: number } | null>(null);
+  const [revealFlashId, setRevealFlashId] = useState<string | null>(null);
+  const revealTimer = useRef<number | null>(null);
+  const revealNonce = useRef(0);
+  useEffect(
+    () => () => {
+      if (revealTimer.current) window.clearTimeout(revealTimer.current);
+    },
+    [],
+  );
+  const revealInExplorerRef = useRef<(id: string) => void>(() => {});
+  revealInExplorerRef.current = (id: string) => {
+    const target = nodeById.get(id);
+    if (!target) return;
+    // An active search/filter may be hiding the node — reveal means "show me
+    // this file in the tree", so drop the filter (both halves of the debounce,
+    // to skip the 150ms trailing edge) and leave selection mode alone.
+    setQuery("");
+    setDebouncedQuery("");
+    setOnlyVisible(false);
+    // Expand every ancestor folder so the row exists in the flattened list.
+    const toOpen: string[] = [];
+    let cur = target.parentId === null ? undefined : nodeById.get(target.parentId);
+    while (cur) {
+      toOpen.push(cur.id);
+      cur = cur.parentId === null ? undefined : nodeById.get(cur.parentId);
+    }
+    if (toOpen.length) {
+      setExpandedIds((prev) => {
+        const next = new Set(prev);
+        for (const openId of toOpen) next.add(openId);
+        return next;
+      });
+    }
+    revealNonce.current += 1;
+    setRevealTarget({ id, nonce: revealNonce.current });
+  };
+  useEffect(() => {
+    const onReveal = (e: Event) => {
+      const id = (e as CustomEvent<{ id?: string }>).detail?.id;
+      if (typeof id === "string") revealInExplorerRef.current(id);
+    };
+    window.addEventListener("lighthouse:reveal-node", onReveal);
+    return () => window.removeEventListener("lighthouse:reveal-node", onReveal);
+  }, []);
+  // Phase two: after the expansion/filter state committed, locate the row —
+  // recompute each source's flat list exactly as the render below does, find
+  // the target's index, and scroll the shared viewport to `block top + index ×
+  // VROW_H` (rows are fixed-height; the block's offset is measured, so source
+  // headers of any height are handled). Then flash the row.
+  useEffect(() => {
+    if (!revealTarget) return;
+    setRevealTarget(null); // consume — reruns from data churn must not re-scroll
+    const sc = scrollRef.current;
+    if (!sc) return;
+    let found: { sourceId: string; index: number } | null = null;
+    for (const source of sources) {
+      const roots = nodes
+        .filter(
+          (n) =>
+            n.sourceId === source.id &&
+            n.parentId === null &&
+            (!visibleIds || visibleIds.has(n.id)),
+        )
+        .sort(compareNodes);
+      const rows = flattenVisible(roots, childrenOf, compareNodes, isExpanded, visibleIds);
+      const index = rows.findIndex((r) => r.node.id === revealTarget.id);
+      if (index >= 0) {
+        found = { sourceId: source.id, index };
+        break;
+      }
+    }
+    if (!found) return;
+    const block = sc.querySelector(`[data-vrows-source="${CSS.escape(found.sourceId)}"]`);
+    if (!(block instanceof HTMLElement)) return;
+    // Same content-relative measurement VirtualRows uses, so the two agree.
+    const blockTop =
+      block.getBoundingClientRect().top - sc.getBoundingClientRect().top + sc.scrollTop;
+    const rowTop = blockTop + found.index * VROW_H;
+    const centered = rowTop - (sc.clientHeight - VROW_H) / 2;
+    sc.scrollTop = Math.max(0, Math.min(centered, sc.scrollHeight - sc.clientHeight));
+    setRevealFlashId(revealTarget.id);
+    if (revealTimer.current) window.clearTimeout(revealTimer.current);
+    revealTimer.current = window.setTimeout(() => setRevealFlashId(null), 1400);
+  }, [revealTarget, sources, nodes, visibleIds, compareNodes, childrenOf, isExpanded]);
+
   // Outcome of the last add (link or upload) worth telling the user about -
   // rendered as a dismissible banner instead of a silent console.warn.
   const [addNotice, setAddNotice] = useState<string | null>(null);
@@ -1247,6 +1375,11 @@ export function FileExplorer() {
   // closed). Opening it is a pure navigation gesture — it mutates nothing.
   const [inspectNode, setInspectNode] = useState<{ id: string; name: string } | null>(null);
   const openInspect = useCallback((id: string, name: string) => setInspectNode({ id, name }), []);
+
+  // "Rules for this folder…" (openspec: add-curation-rules): which folder the
+  // rules dialog is open for (null = closed).
+  const [rulesFolder, setRulesFolder] = useState<{ id: string; name: string } | null>(null);
+  const openFolderRules = useCallback((id: string, name: string) => setRulesFolder({ id, name }), []);
 
   // Stable per-row callbacks (forwarding to the store's stable actions), so the
   // memoized TreeRow isn't re-rendered by every explorer render just because
@@ -1881,6 +2014,7 @@ export function FileExplorer() {
                     <VirtualRows
                       rows={flattenVisible(roots, childrenOf, compareNodes, isExpanded, visibleIds)}
                       scrollRef={scrollRef}
+                      dataSourceId={source.id}
                       renderRow={(row) => (
                         <TreeRow
                           node={row.node}
@@ -1897,6 +2031,7 @@ export function FileExplorer() {
                           onOpen={openNode}
                           onReveal={revealNode}
                           onInspect={openInspect}
+                          onFolderRules={openFolderRules}
                           onMove={handleMove}
                           onRename={openRename}
                           onNewFolderInside={openNewFolder}
@@ -1906,6 +2041,7 @@ export function FileExplorer() {
                           onToggleExpand={toggleExpand}
                           onSetExpanded={setExpanded}
                           justAdded={justAdded}
+                          flash={revealFlashId === row.node.id}
                         />
                       )}
                     />
@@ -2018,6 +2154,13 @@ export function FileExplorer() {
         fileName={inspectNode?.name ?? ""}
         desktop={desktop}
         onClose={() => setInspectNode(null)}
+      />
+
+      {/* Per-folder curation rules (openspec: add-curation-rules). */}
+      <FolderRulesDialog
+        scope={rulesFolder?.id ?? null}
+        scopeName={rulesFolder?.name ?? ""}
+        onClose={() => setRulesFolder(null)}
       />
     </section>
   );

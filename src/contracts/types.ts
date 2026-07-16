@@ -53,6 +53,60 @@ export interface FileNode {
  */
 export type RestoreToken = Record<string, unknown>;
 
+/** What a curation rule does to the files it matches (openspec:
+ *  add-curation-rules). `clear` is a scoped return-to-default that masks
+ *  broader rules. */
+export type CurationRuleAction = "include" | "exclude" | "local-only" | "clear";
+
+/** The file-kind predicate values — the extraction/catalog classification. */
+export type CurationRuleKind = "tabular" | "document" | "image";
+
+/**
+ * What the client sends to create a rule (openspec: add-curation-rules):
+ * one scope folder (`""` = the vault root), exactly ONE predicate
+ * (kind | ext | glob), and an action. The engine validates (whitelists, glob
+ * parse) and mints the id.
+ */
+export interface CurationRuleInput {
+  /** Scope folder node id; "" is the vault root. */
+  scope: string;
+  /** File kind, from the extraction/catalog classification. */
+  kind?: CurationRuleKind;
+  /** Extension list (lowercased engine-side, dots optional on input). */
+  ext?: string[];
+  /** Glob over the path relative to the scope — `*`, `**`, `?` only. */
+  glob?: string;
+  action: CurationRuleAction;
+}
+
+/**
+ * A stored curation rule as the wire returns it: the input plus the
+ * engine-minted id and display enrichment — a generated `name` (e.g.
+ * "spreadsheets in /reports", also what the inspector's attribution line
+ * quotes), a human `scopeLabel`, and `orphaned` (the scope folder no longer
+ * exists — the rule matches nothing but is kept for cleanup). Shape mirrors
+ * the engines' RuleListing (vault.rs ⇄ vault.ts) exactly.
+ */
+export interface CurationRule extends CurationRuleInput {
+  id: string;
+  name: string;
+  scopeLabel: string;
+  orphaned: boolean;
+}
+
+/**
+ * Why an effective flag is what it is (openspec: add-curation-rules): which
+ * resolution layer decided — the node's own explicit flag, an ancestor's, a
+ * curation rule (with its id + display name), or the global default. Carried
+ * on the inspect payload so the inspector can say
+ * `included by rule "spreadsheets in /reports"`.
+ */
+export interface FlagAttribution {
+  source: "explicit" | "ancestor" | "rule" | "default";
+  ruleId?: string;
+  ruleName?: string;
+}
+
 /**
  * Read-only snapshot of the machine-scope managed policy (org deployments):
  * which settings an IT-deployed policy.json locks, so the UI can disable the
@@ -236,6 +290,12 @@ export interface FileInspection {
    *  retrieval scorer and scoped to this one file. Present only when a query was
    *  supplied. */
   testSearch?: { text: string; score: number }[];
+  /** WHY the effective inclusion is what it is (openspec: add-curation-rules):
+   *  which layer decided — explicit flag, ancestor, a rule (named), or the
+   *  default. Shared field — both engines compute it. */
+  includedBy?: FlagAttribution;
+  /** The local-only analog of `includedBy`. */
+  localOnlyBy?: FlagAttribution;
 }
 
 export type ChatRole = "user" | "assistant";
@@ -297,9 +357,14 @@ export interface ChatChunk {
    * (device⇔local/none) and the egress registry. `excerptCount` is how many
    * context blocks the model received in the branch that ran; `sourceFileCount`
    * is the number of distinct source files behind them (the final chunk's
-   * `references` length). KEEP IN SYNC with the Rust ChunkMeta in contracts.rs.
+   * `references` length). `cachedAt` (openspec: add-answer-cache) is present
+   * ONLY when this final chunk replays a cached answer: the epoch ms of the
+   * ORIGINAL answer's completion — the UI renders its "From cache · same data
+   * as HH:MM · Re-run" line from this field alone, never from prose; origin
+   * and the counts stay the original answer's. KEEP IN SYNC with the Rust
+   * ChunkMeta in contracts.rs.
    */
-  meta?: { origin: string; excerptCount: number; sourceFileCount: number };
+  meta?: { origin: string; excerptCount: number; sourceFileCount: number; cachedAt?: number };
   /** True on the last chunk of a response. */
   done: boolean;
 }

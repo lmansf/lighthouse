@@ -36,6 +36,7 @@ import {
   DrawerHeader,
   DrawerHeaderTitle,
   Input,
+  Link,
   OverlayDrawer,
   Popover,
   PopoverSurface,
@@ -97,12 +98,15 @@ import {
   type SortDir,
 } from "@/lib/sortTable";
 import { pinChartData } from "@/lib/pinChart";
+import { citationQuery, requestFileInspect } from "@/lib/citePreview";
 import { composeEvidencePack, provenanceStampText } from "@/lib/evidencePack";
 import { recallRelated, type RecallHit } from "@/lib/recall";
+import { askSuggestions, lastAsk, type AskHistoryItem } from "@/lib/askTypeahead";
 import { AnalyticsChart, standaloneChartSvg } from "@/features/chat/AnalyticsChart";
 import { BriefingsPanel } from "@/features/chat/BriefingsPanel";
 import { PinMiniChart } from "@/features/chat/PinMiniChart";
 import { EgressShield } from "@/features/egress/EgressShield";
+import { ProviderSwitch } from "@/features/chat/ProviderSwitch";
 import { useChatStore, type TranscriptMessage } from "@/stores/useChatStore";
 import { chatHistoryLocked } from "@/stores/managedLocks";
 import { modKey } from "@/features/onboarding/ModeChooser";
@@ -520,6 +524,14 @@ const useStyles = makeStyles({
     marginTop: tokens.spacingVerticalXXS,
     color: tokens.colorNeutralForeground3,
   },
+  // Answer-cache line under a replayed answer ("From cache · same data as
+  // HH:MM · Re-run") — same quiet register as the provenance stamp; rendered
+  // only from the final chunk's engine-emitted `meta.cachedAt`.
+  cacheLine: {
+    display: "block",
+    marginTop: tokens.spacingVerticalXXS,
+    color: tokens.colorNeutralForeground3,
+  },
   // G4: the truncation disclosure bound to a sortable result table's <caption>,
   // so it stays with the table through sorting.
   tableCaption: {
@@ -548,6 +560,8 @@ const useStyles = makeStyles({
     cursor: "pointer",
     ":hover": { backgroundColor: tokens.colorNeutralBackground2Hover },
     ":hover .open-affordance": { opacity: 1 },
+    // Keyboard path: reveal the secondary open-in-app button on focus too.
+    ":focus-within .open-affordance": { opacity: 1 },
   },
   // Brief highlight when a citation chip jumps to this card (class is toggled
   // for ~1.2s): a brand-tinted background that fades back out.
@@ -776,6 +790,48 @@ const useStyles = makeStyles({
   },
   attachItemName: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 },
   attachEmpty: { color: tokens.colorNeutralForeground3, ...shorthands.padding(tokens.spacingVerticalM, tokens.spacingHorizontalS) },
+
+  // --- Ask type-ahead (time-savers): past asks + pinned questions matched
+  //     against the draft, in a compact flyout anchored to the composer. It
+  //     opens UPWARD (the composer sits at the panel's bottom edge) and is
+  //     absolutely positioned so it never shoves the layout around. Rows
+  //     follow attachItem; the surface uses the flyout tokens (both themes). ---
+  composerWrap: { position: "relative" },
+  askSuggestPop: {
+    position: "absolute",
+    bottom: "calc(100% + 4px)",
+    left: "0",
+    right: "0",
+    zIndex: 10,
+    display: "flex",
+    flexDirection: "column",
+    gap: "1px",
+    maxHeight: "240px",
+    overflowY: "auto",
+    ...shorthands.padding(tokens.spacingVerticalXS),
+    ...shorthands.border("1px", "solid", tokens.colorNeutralStroke2),
+    borderRadius: tokens.borderRadiusMedium,
+    backgroundColor: tokens.colorNeutralBackground1,
+    boxShadow: tokens.shadow16,
+  },
+  askSuggestItem: {
+    display: "flex",
+    alignItems: "center",
+    gap: tokens.spacingHorizontalS,
+    ...shorthands.padding(tokens.spacingVerticalXS, tokens.spacingHorizontalS),
+    borderRadius: tokens.borderRadiusMedium,
+    cursor: "pointer",
+    ":hover": { backgroundColor: tokens.colorNeutralBackground2Hover },
+  },
+  askSuggestItemActive: { backgroundColor: tokens.colorNeutralBackground1Selected },
+  askSuggestIcon: { color: tokens.colorNeutralForeground3, flexShrink: 0 },
+  askSuggestText: {
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+    flexGrow: 1,
+    minWidth: 0,
+  },
 });
 
 /** DOM id for a turn's nth reference card ([n] chips scroll to these). */
@@ -871,6 +927,25 @@ function stripCitations(content: string): string {
 // via <vendor> — …") is rendered via `provenanceStampText` from
 // @/lib/evidencePack — one source of truth shared with the evidence-pack
 // export, so the pack's stamp line is byte-identical to the on-screen one.
+
+/**
+ * The freshness stamp on a replayed answer's cache line (openspec:
+ * add-answer-cache): "HH:MM" for a same-day answer, date + time once it
+ * crosses midnight (the disk cache survives restarts) — the honest "same data
+ * as" moment must never read as today when it isn't. Rendered ONLY from the
+ * final chunk's engine-emitted `meta.cachedAt`, never from prose.
+ */
+function cachedAtLabel(ms: number): string {
+  const d = new Date(ms);
+  const now = new Date();
+  const time = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const sameDay =
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate();
+  if (sameDay) return time;
+  return `${d.toLocaleDateString([], { month: "short", day: "numeric" })} ${time}`;
+}
 
 /** Compact "how long ago" for the recent-chats list (e.g. "3m", "2h", "Apr 5"). */
 function formatRelativeTime(ts: number): string {
@@ -1330,12 +1405,17 @@ const References = memo(function References({
   desktop,
   flashCite,
   onOpen,
+  onPreview,
 }: {
   turnId: string;
   references: RagReference[];
   desktop: boolean;
   flashCite: string | null;
+  /** Secondary action (desktop only): hand the file to its OS app. */
   onOpen: (fileId: string) => void;
+  /** Primary action: open the in-app preview ON the cited chunk (time-savers
+   *  feature 4) — works on the web twin too, so cards are always interactive. */
+  onPreview: (turnId: string, r: RagReference) => void;
 }) {
   const styles = useStyles();
   return (
@@ -1350,21 +1430,27 @@ const References = memo(function References({
           id={citeCardId(turnId, i + 1)}
           className={mergeClasses(
             styles.refCard,
-            desktop && styles.refCardInteractive,
+            styles.refCardInteractive,
             flashCite === `${turnId}:${i + 1}` && styles.refCardFlash,
           )}
           appearance="filled-alternative"
-          {...(desktop
-            ? {
-                role: "button",
-                tabIndex: 0,
-                title:
-                  r.kind === "conversation" ? "Open past conversation note" : `Open ${r.name}`,
-                onClick: () => void onOpen(r.fileId),
-                onKeyDown: (e: KeyboardEvent) =>
-                  (e.key === "Enter" || e.key === " ") && void onOpen(r.fileId),
-              }
-            : {})}
+          role="button"
+          tabIndex={0}
+          title={
+            r.kind === "conversation"
+              ? "Preview the cited passage from this past conversation"
+              : `Preview the cited passage from ${r.name}`
+          }
+          onClick={() => onPreview(turnId, r)}
+          onKeyDown={(e: KeyboardEvent) => {
+            // Card-level keys only: Enter on the inner open-in-app button must
+            // not ALSO fire the preview.
+            if (e.target !== e.currentTarget) return;
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              onPreview(turnId, r);
+            }
+          }}
         >
           {/* Number matches the [n] markers in the answer text. */}
           <Badge appearance="tint" shape="circular" size="small">
@@ -1384,7 +1470,25 @@ const References = memo(function References({
               {r.snippet}
             </Text>
           </div>
-          {desktop && <OpenRegular className={`${styles.openIcon} open-affordance`} fontSize={18} />}
+          {/* "Open in app" stays as the SECONDARY action on the card. */}
+          {desktop && (
+            <Button
+              size="small"
+              appearance="subtle"
+              className={`${styles.openIcon} open-affordance`}
+              icon={<OpenRegular fontSize={18} />}
+              aria-label={
+                r.kind === "conversation"
+                  ? "Open the conversation note in its app"
+                  : `Open ${r.name} in its app`
+              }
+              title="Open in app"
+              onClick={(e) => {
+                e.stopPropagation();
+                void onOpen(r.fileId);
+              }}
+            />
+          )}
           <Badge appearance="outline">{Math.round(r.score * 100)}%</Badge>
         </Card>
       ))}
@@ -1482,6 +1586,11 @@ export function ChatPanel() {
   // Attach-picker popover (quick search over the vault's own files) + its query.
   const [attachOpen, setAttachOpen] = useState(false);
   const [attachSearch, setAttachSearch] = useState("");
+  // Ask type-ahead (time-savers): open only tracks TYPED input (Esc/accept/blur
+  // close it; programmatic fills never open it); index is the highlighted row,
+  // -1 = none — so a plain Enter still sends (see handleComposerKeyDown).
+  const [suggestOpen, setSuggestOpen] = useState(false);
+  const [suggestIndex, setSuggestIndex] = useState(-1);
   // Per-answer 👍/👎, remembered for the session so the choice reads as "set".
   const [ratings, setRatings] = useState<Record<string, "up" | "down">>({});
   // --- Edit SQL dialog (analytics refinement): the answer meta being edited
@@ -1506,6 +1615,15 @@ export function ChatPanel() {
     null,
   );
   const exportNoteTimer = useRef<number | null>(null);
+  // Quick provider switch (header menu): its transient confirmation strip,
+  // house-styled like the export/undo bars and auto-dismissed the same way.
+  const [providerNote, setProviderNote] = useState<{ ok: boolean; text: string } | null>(null);
+  const providerNoteTimer = useRef<number | null>(null);
+  const noteProviderSwitch = useCallback((note: { ok: boolean; text: string }) => {
+    setProviderNote(note);
+    if (providerNoteTimer.current !== null) window.clearTimeout(providerNoteTimer.current);
+    providerNoteTimer.current = window.setTimeout(() => setProviderNote(null), 6000);
+  }, []);
   // In-flight guard: a double-click must not write "Chat.md" AND "Chat (1).md".
   const [exportBusy, setExportBusy] = useState(false);
   // --- Pinned questions: per-turn pin outcome, the changed-pins alerts (from
@@ -1609,6 +1727,7 @@ export function ChatPanel() {
       if (flashTimer.current !== null) window.clearTimeout(flashTimer.current);
       if (undoTimer.current !== null) window.clearTimeout(undoTimer.current);
       if (exportNoteTimer.current !== null) window.clearTimeout(exportNoteTimer.current);
+      if (providerNoteTimer.current !== null) window.clearTimeout(providerNoteTimer.current);
       if (streamRafRef.current !== null) cancelAnimationFrame(streamRafRef.current);
     },
     [],
@@ -1808,6 +1927,28 @@ export function ChatPanel() {
     return () => window.removeEventListener("lighthouse:new-chat", onNewChat);
   }, []);
 
+  // Quick-open's Ctrl/Cmd+Enter attaches a file to the conversation through
+  // this window event, the same decoupling as new-chat above. It rides the
+  // exact append path the explorer-drag/OS-drop use (addAttachments dedupes by
+  // id) and then focuses the composer so the follow-up question can be typed
+  // immediately — rAF so the focus lands after the palette dialog's own
+  // close-time focus restore. Latest-closure ref pattern.
+  const attachFileRef = useRef<(f: DraggedFile) => void>(() => {});
+  attachFileRef.current = (f) => {
+    addAttachments([f]);
+    requestAnimationFrame(() => composerRef.current?.focus());
+  };
+  useEffect(() => {
+    const onAttachFile = (e: Event) => {
+      const d = (e as CustomEvent<{ id?: string; name?: string }>).detail;
+      if (d && typeof d.id === "string" && typeof d.name === "string") {
+        attachFileRef.current({ id: d.id, name: d.name });
+      }
+    };
+    window.addEventListener("lighthouse:attach-file", onAttachFile);
+    return () => window.removeEventListener("lighthouse:attach-file", onAttachFile);
+  }, []);
+
   // The desktop widget's "Ask Lighthouse →" hand-off: Rust `show_main` emits
   // `ask-question` to this window and the transport re-broadcasts it as this
   // DOM event (docs/widget-scope.md, W1 contract). Send it through the same
@@ -1841,11 +1982,18 @@ export function ChatPanel() {
     setMessages((m) => m.map((x) => (x.id === asstId ? { ...x, stopped: true } : x)));
   }
 
-  async function sendQuestion(q: string) {
+  async function sendQuestion(q: string, opts?: { bypassCache?: boolean }) {
     if (!q || streaming) return;
     // Warm the split markdown chunk now, while the answer streams as plain text,
     // so it's ready the instant the turn settles into a full markdown render.
     warmMarkdown();
+    // Answer cache (openspec: add-answer-cache): the client's per-ask
+    // persistence verdict. Chat-history opt-in is client-only state by design
+    // (useChatStore + localStorage), so the engine only ever learns this
+    // per-request boolean — read LIVE from the store plus the managed-policy
+    // lock (same fail-closed pairing as the conversation-note export below),
+    // so a policy applied after mount can't let a disk write slip through.
+    const persistAllowed = useChatStore.getState().persistEnabled && !chatHistoryLocked();
     // The conversation so far (completed turns only — failed turns are excluded)
     // becomes the model's history. Read from the store, not the render closure,
     // so a retry that just removed its failed turn builds the right history.
@@ -1882,6 +2030,7 @@ export function ChatPanel() {
         history,
         attachmentIds,
         controller.signal,
+        { bypassCache: opts?.bypassCache === true, persistAllowed },
       )) {
         // Stop pressed: some transports (the Tauri fetch interceptor) don't
         // honor AbortSignal, so also bail out of the loop explicitly and keep
@@ -2248,6 +2397,24 @@ export function ChatPanel() {
     };
   }, [pinsOpen]);
 
+  // …and once at mount, so pinned questions feed the ask type-ahead before the
+  // dialog is ever opened. Same local engine list the dialog reads — on
+  // failure the type-ahead simply has no pins.
+  useEffect(() => {
+    let cancelled = false;
+    ragService
+      .listPins()
+      .then((pins) => {
+        if (!cancelled && pins.length > 0) setPinList(pins);
+      })
+      .catch(() => {
+        /* history-only suggestions */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   /** Manual re-check from the dialog; changed pins also feed the banner. */
   async function recheckPinsNow() {
     if (pinsBusy) return;
@@ -2413,7 +2580,7 @@ export function ChatPanel() {
     setEditingId(null);
   }
 
-  /** Begin editing a past question in place (pencil affordance / ArrowUp). */
+  /** Begin editing a past question in place (pencil affordance). */
   function startEdit(userId: string, current: string) {
     if (streaming) return;
     setEditingId(userId);
@@ -2435,7 +2602,12 @@ export function ChatPanel() {
     setMessages((m) => m.slice(0, idx));
     void sendQuestion(next);
   }
-  /** Regenerate an answer: drop the question+answer pair (and after) and re-ask. */
+  /**
+   * Regenerate an answer: drop the question+answer pair (and after) and re-ask
+   * LIVE. Always bypasses the answer cache — regenerating into an identical
+   * cached replay would be a no-op — and the fresh completion refreshes the
+   * entry. The "Re-run" affordance on a cached answer is this same path.
+   */
   function regenerate(asstId: string) {
     if (streaming) return;
     const msgs = useChatStore.getState().messages;
@@ -2443,7 +2615,7 @@ export function ChatPanel() {
     const prev = idx > 0 ? msgs[idx - 1] : undefined;
     if (!prev || prev.role !== "user") return;
     setMessages((m) => m.slice(0, idx - 1));
-    void sendQuestion(prev.content);
+    void sendQuestion(prev.content, { bypassCache: true });
   }
 
   /** Record a 👍/👎 on an answer (a quality signal); clicking again clears it. */
@@ -2490,18 +2662,46 @@ export function ChatPanel() {
     copyTimer.current = window.setTimeout(() => setCopiedId(null), 1500);
   }
 
-  // Clicking a [n] chip scrolls that turn's nth reference card into view and
-  // flashes it briefly so the eye lands on the right card.
-  const handleCitationClick = useCallback((turnId: string, n: number) => {
-    const card = document.getElementById(citeCardId(turnId, n));
-    if (!card) return; // marker without a matching reference — nothing to jump to
-    card.scrollIntoView({ behavior: "smooth", block: "nearest" });
-    setFlashCite(`${turnId}:${n}`);
-    if (flashTimer.current !== null) window.clearTimeout(flashTimer.current);
-    flashTimer.current = window.setTimeout(() => setFlashCite(null), 1200);
+  // Citation → preview (time-savers feature 4): open the file inspector ON the
+  // cited chunk. References carry no chunk id — the inspector's file-scoped
+  // test-search relocates the chunk from the citation's snippet (or, when the
+  // snippet has nothing scorable, the turn's question). Stable identity so the
+  // hoisted, memoized <References> keeps a stable onPreview.
+  const openPreview = useCallback((turnId: string, r: RagReference) => {
+    // The user question that produced this turn — the fallback locator query.
+    const msgs = useChatStore.getState().messages;
+    const idx = msgs.findIndex((x) => x.id === turnId);
+    const prev = idx > 0 ? msgs[idx - 1] : undefined;
+    const question = prev?.role === "user" ? prev.content : "";
+    requestFileInspect({
+      fileId: r.fileId,
+      name: r.name,
+      query: citationQuery(r.snippet, question),
+    });
   }, []);
 
+  // Clicking a [n] chip scrolls that turn's nth reference card into view,
+  // flashes it briefly so the eye lands on the right card — and opens the
+  // in-app preview on the passage that citation drew on.
+  const handleCitationClick = useCallback(
+    (turnId: string, n: number) => {
+      const card = document.getElementById(citeCardId(turnId, n));
+      if (card) {
+        card.scrollIntoView({ behavior: "smooth", block: "nearest" });
+        setFlashCite(`${turnId}:${n}`);
+        if (flashTimer.current !== null) window.clearTimeout(flashTimer.current);
+        flashTimer.current = window.setTimeout(() => setFlashCite(null), 1200);
+      }
+      // Marker without a matching reference (e.g. the SQL editor's transient
+      // answers) — nothing to preview.
+      const ref = useChatStore.getState().messages.find((x) => x.id === turnId)?.references?.[n - 1];
+      if (ref) openPreview(turnId, ref);
+    },
+    [openPreview],
+  );
+
   // Open a cited file in its native app (desktop only; the route no-ops on web).
+  // Now the SECONDARY action — the card body opens the in-app preview instead.
   // useCallback so the hoisted, memoized <References> keeps a stable onOpen and
   // its cards don't re-render as the panel does.
   const openFile = useCallback(async (fileId: string) => {
@@ -2512,7 +2712,76 @@ export function ChatPanel() {
     }).catch(() => {});
   }, []);
 
+  // --- Ask type-ahead (time-savers): local autocomplete over past asks. ---
+  // Every past user ask, stamped with its conversation's updatedAt (messages
+  // carry no per-turn clock). The live transcript stands in for the current
+  // conversation — its copy in `conversations` lags until persist(). With
+  // "save chats" off the store only holds this session anyway, so history-off
+  // = session asks by construction. Zero network: it all ranks in memory.
+  const askHistoryItems = useMemo<AskHistoryItem[]>(() => {
+    const items: AskHistoryItem[] = [];
+    const currentTs = conversations.find((c) => c.id === currentId)?.updatedAt ?? 0;
+    for (const c of conversations) {
+      if (c.id === currentId) continue;
+      for (const m of c.messages) {
+        if (m.role === "user" && m.content.trim()) items.push({ text: m.content, ts: c.updatedAt });
+      }
+    }
+    for (const m of messages) {
+      if (m.role === "user" && m.content.trim()) items.push({ text: m.content, ts: currentTs });
+    }
+    return items;
+  }, [conversations, currentId, messages]);
+  const pinQuestions = useMemo(() => pinList.map((p) => p.question), [pinList]);
+  const askSuggests = useMemo(
+    () => askSuggestions(question, { history: askHistoryItems, pins: pinQuestions }),
+    [question, askHistoryItems, pinQuestions],
+  );
+  const suggestsShown = suggestOpen && askSuggests.length > 0;
+  // Clamp the highlight when the list shrinks under it (a turn settling can
+  // re-rank mid-hover): out of range reads as "nothing highlighted".
+  const suggestSel = suggestIndex < askSuggests.length ? suggestIndex : -1;
+  // Shell-style ↑-recall target: this conversation's last ask (index as the
+  // tiebreak clock — later turn wins), else the most recent ask anywhere.
+  const lastAskText = useMemo(() => {
+    const session = messages
+      .filter((m) => m.role === "user")
+      .map((m, i) => ({ text: m.content, ts: i }));
+    return lastAsk({ history: session }) ?? lastAsk({ history: askHistoryItems });
+  }, [messages, askHistoryItems]);
+
   function handleComposerKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
+    // Type-ahead first: while the popover is open it owns Down/Up/Esc — and
+    // Enter/Tab only when a row is highlighted (suggestSel >= 0), so a plain
+    // Enter still sends and Shift+Enter still makes a newline.
+    if (suggestsShown) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setSuggestIndex((suggestSel + 1) % askSuggests.length);
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setSuggestIndex(suggestSel <= 0 ? askSuggests.length - 1 : suggestSel - 1);
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setSuggestOpen(false); // dismiss only — the draft is untouched
+        return;
+      }
+      if (e.key === "Tab" && !e.shiftKey) {
+        // Shell-style completion: Tab takes the highlighted row (or the top one).
+        e.preventDefault();
+        acceptSuggestion(askSuggests[Math.max(suggestSel, 0)].text);
+        return;
+      }
+      if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && suggestSel >= 0) {
+        e.preventDefault();
+        acceptSuggestion(askSuggests[suggestSel].text);
+        return;
+      }
+    }
     // Enter sends; Shift+Enter inserts a newline. `isComposing` guards IME
     // composition (e.g. Japanese input), where Enter commits the composition
     // rather than the message.
@@ -2521,23 +2790,32 @@ export function ChatPanel() {
       ask();
       return;
     }
-    // ArrowUp on an empty composer edits your last question — the familiar
-    // chat convention for "fix what I just asked".
-    if (e.key === "ArrowUp" && !question && !streaming && messages.length > 0) {
-      for (let i = messages.length - 1; i >= 0; i -= 1) {
-        if (messages[i].role === "user") {
-          e.preventDefault();
-          startEdit(messages[i].id, messages[i].content);
-          break;
-        }
-      }
+    // ArrowUp on an EMPTY composer recalls your last ask into the box,
+    // shell-style — edit or resend without retyping (the pencil on a past turn
+    // still edits in place). A fill, not a search: the popover stays closed.
+    if (e.key === "ArrowUp" && !question && lastAskText) {
+      e.preventDefault();
+      applySuggestion(lastAskText);
     }
   }
 
-  /** Fill the composer with a suggested prompt (never auto-send) and focus it. */
+  /** Accept a type-ahead row: fill the composer (never auto-send) and close. */
+  function acceptSuggestion(text: string) {
+    applySuggestion(text);
+    setSuggestOpen(false);
+    setSuggestIndex(-1);
+  }
+
+  /** Fill the composer with a suggested prompt (never auto-send), focus it,
+   *  and land the caret at the end so typing continues the fill. */
   function applySuggestion(fill: string) {
     setQuestion(fill);
-    composerRef.current?.focus();
+    requestAnimationFrame(() => {
+      const el = composerRef.current;
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(el.value.length, el.value.length);
+    });
   }
 
   // Engine-derived example questions for the empty state — each names real
@@ -2771,6 +3049,28 @@ export function ChatPanel() {
           />
         </div>
       )}
+      {providerNote && (
+        <div className={styles.undoBar} role="status">
+          {providerNote.ok ? (
+            <CheckmarkRegular fontSize={16} />
+          ) : (
+            <ErrorCircleRegular fontSize={16} />
+          )}
+          <Text size={200}>{providerNote.text}</Text>
+          <span style={{ flex: 1 }} />
+          <Button
+            size="small"
+            appearance="subtle"
+            icon={<DismissRegular />}
+            aria-label="Dismiss"
+            onClick={() => {
+              if (providerNoteTimer.current !== null)
+                window.clearTimeout(providerNoteTimer.current);
+              setProviderNote(null);
+            }}
+          />
+        </div>
+      )}
       {addNotice && (
         <div className={styles.addNotice}>
           <Text size={200}>{addNotice}</Text>
@@ -2809,32 +3109,79 @@ export function ChatPanel() {
         </div>
       )}
       {attachmentBar}
-      <div className={styles.composer} data-tour="chat">
-        {attachButton}
-        <Textarea
-          ref={composerRef}
-          className={styles.composerField}
-          resize="none"
-          rows={1}
-          value={question}
-          placeholder={attachments.length > 0 ? "Ask about the attached files…" : placeholder}
-          onChange={(_, d) => setQuestion(d.value)}
-          onKeyDown={handleComposerKeyDown}
-        />
-        {streaming ? (
-          <Button appearance="secondary" icon={<SquareRegular />} onClick={stopStreaming}>
-            Stop
-          </Button>
-        ) : (
-          <Button appearance="primary" icon={<SendRegular />} onClick={() => ask()}>
-            Ask
-          </Button>
+      <div className={styles.composerWrap}>
+        {suggestsShown && (
+          <div
+            role="listbox"
+            id="ask-typeahead-listbox"
+            aria-label="Suggestions from your past questions"
+            className={styles.askSuggestPop}
+          >
+            {askSuggests.map((s, i) => (
+              <div
+                key={`${s.source}:${s.text}`}
+                id={`ask-suggest-${i}`}
+                role="option"
+                aria-selected={i === suggestSel}
+                title={s.source === "pin" ? "Pinned question" : "You asked this before"}
+                className={mergeClasses(
+                  styles.askSuggestItem,
+                  i === suggestSel && styles.askSuggestItemActive,
+                )}
+                // The highlight is KEYBOARD-driven only (hover keeps its CSS
+                // affordance): a mouse resting over the popover must never
+                // flip Enter from "send" to "accept".
+                // Keep keyboard focus in the composer while clicking rows.
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => acceptSuggestion(s.text)}
+              >
+                {s.source === "pin" ? (
+                  <PinRegular fontSize={14} className={styles.askSuggestIcon} />
+                ) : (
+                  <HistoryRegular fontSize={14} className={styles.askSuggestIcon} />
+                )}
+                <span className={styles.askSuggestText}>{s.text}</span>
+              </div>
+            ))}
+          </div>
         )}
+        <div className={styles.composer} data-tour="chat">
+          {attachButton}
+          <Textarea
+            ref={composerRef}
+            className={styles.composerField}
+            resize="none"
+            rows={1}
+            value={question}
+            placeholder={attachments.length > 0 ? "Ask about the attached files…" : placeholder}
+            aria-activedescendant={
+              suggestsShown && suggestSel >= 0 ? `ask-suggest-${suggestSel}` : undefined
+            }
+            onChange={(_, d) => {
+              setQuestion(d.value);
+              // Typing (re)filters and reopens; the highlight restarts unset so
+              // Enter keeps sending until the user arrows into the list.
+              setSuggestIndex(-1);
+              setSuggestOpen(d.value.trim().length > 0);
+            }}
+            onBlur={() => setSuggestOpen(false)}
+            onKeyDown={handleComposerKeyDown}
+          />
+          {streaming ? (
+            <Button appearance="secondary" icon={<SquareRegular />} onClick={stopStreaming}>
+              Stop
+            </Button>
+          ) : (
+            <Button appearance="primary" icon={<SendRegular />} onClick={() => ask()}>
+              Ask
+            </Button>
+          )}
+        </div>
       </div>
       <div className={styles.composerMeta}>
         <Text size={200} className={styles.metaLine}>
           Enter to send · Shift+Enter for a new line
-          {messages.length > 0 ? " · ↑ to edit your last question" : ""}
+          {lastAskText ? " · ↑ to recall your last question" : ""}
         </Text>
         <Text size={200} className={styles.metaLine} data-tour="models">
           {provenance}
@@ -3272,6 +3619,10 @@ export function ChatPanel() {
         <div className={styles.header}>
           <Title3>Ask</Title3>
           <div className={styles.headerMeta}>
+            {/* Quick provider switch (time-savers): configured providers only;
+                selection applies from the NEXT ask — provenance + local-only
+                enforcement follow the active provider automatically. */}
+            <ProviderSwitch onSwitched={noteProviderSwitch} />
             <Badge appearance="tint">{visibleBadgeText}</Badge>
             <EgressShield />
             {historyButton}
@@ -3564,6 +3915,7 @@ export function ChatPanel() {
                           desktop={desktop}
                           flashCite={flashCite}
                           onOpen={openFile}
+                          onPreview={openPreview}
                         />
                       )}
                       {/* Honesty note: files were visible, yet nothing matched. */}
@@ -3590,6 +3942,21 @@ export function ChatPanel() {
                           {provenanceStampText(m.meta)}
                         </Text>
                       )}
+                      {/* Answer-cache honesty line (openspec: add-answer-cache):
+                          a replayed answer is visibly marked with the ORIGINAL
+                          answer time, from the engine-emitted meta.cachedAt
+                          only — never model text. Re-run re-asks the same
+                          question live (bypassCache) and refreshes the entry. */}
+                      {m.meta?.cachedAt !== undefined &&
+                        !m.error &&
+                        !(streaming && m.id === lastId) && (
+                          <Text size={200} className={styles.cacheLine}>
+                            From cache · same data as {cachedAtLabel(m.meta.cachedAt)} ·{" "}
+                            <Link inline disabled={streaming} onClick={() => regenerate(m.id)}>
+                              Re-run
+                            </Link>
+                          </Text>
+                        )}
                     </>
                   )}
                 </div>

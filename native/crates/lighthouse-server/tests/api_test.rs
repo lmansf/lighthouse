@@ -392,6 +392,126 @@ async fn export_chat_routes_artifacts_through_the_allowlist() {
     );
 }
 
+/// Bulk curation rules over the wire (openspec: add-curation-rules): create a
+/// rule via the op, land a NEW matching file (a real upload — the same path an
+/// arriving file takes), and assert it resolves with the rule's flags on the
+/// next listing with NO per-node write in state.json, while the inspect op
+/// attributes the rule by name. Also pins add-time validation → 400 and that
+/// removal reverts the rule's layer only.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn curation_rules_over_the_wire() {
+    let _env = lock_env();
+    let (base, vault_dir) = spawn_server().await;
+    let client = reqwest::Client::new();
+    let post = |body: Value| client.post(format!("{base}/api/rag")).json(&body).send();
+
+    // --- Create the spec's rule FIRST: spreadsheets in /reports → include. --
+    let res = post(json!({
+        "op": "rules", "action": "add",
+        "rule": { "scope": "reports", "kind": "tabular", "action": "include" },
+    }))
+    .await
+    .unwrap();
+    assert!(res.status().is_success());
+    let added: Value = res.json().await.unwrap();
+    let rule_id = added["rule"]["id"].as_str().unwrap().to_string();
+    assert_eq!(added["rule"]["name"], "spreadsheets in /reports");
+
+    // --- A NEW matching file arrives AFTER the rule (real upload). ----------
+    let form = reqwest::multipart::Form::new()
+        .part(
+            "files",
+            reqwest::multipart::Part::bytes(b"region,amount\nNE,1\n".to_vec())
+                .file_name("late.xlsx"),
+        )
+        .text("paths", "reports/late.xlsx");
+    let up = client
+        .post(format!("{base}/api/upload"))
+        .multipart(form)
+        .send()
+        .await
+        .unwrap();
+    assert!(up.status().is_success());
+
+    // --- The next listing resolves it included, with no user action. --------
+    let rag: Value = client
+        .get(format!("{base}/api/rag"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let late = rag["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["id"] == "reports/late.xlsx")
+        .expect("uploaded file walked");
+    assert_eq!(late["ragIncluded"], true, "the rule includes the future arrival");
+
+    // --- NO per-node write: state.json's flag maps stay empty. --------------
+    let raw = std::fs::read_to_string(vault_dir.path().join(".rag-vault/state.json")).unwrap();
+    let state: Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(state["included"].as_object().map(|m| m.len()), Some(0), "{raw}");
+    assert_eq!(state["localOnly"].as_object().map(|m| m.len()), Some(0), "{raw}");
+
+    // --- The inspector attributes the rule by name. --------------------------
+    let inspection: Value = post(json!({ "op": "inspect", "fileId": "reports/late.xlsx" }))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(inspection["included"], true);
+    assert_eq!(inspection["includedBy"]["source"], "rule");
+    assert_eq!(inspection["includedBy"]["ruleId"], rule_id.as_str());
+    assert_eq!(inspection["includedBy"]["ruleName"], "spreadsheets in /reports");
+
+    // --- The list op enriches: name + scope label + orphaned=false. ----------
+    let listing: Value = post(json!({ "op": "rules", "action": "list" }))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let rules = listing["rules"].as_array().unwrap();
+    assert_eq!(rules.len(), 1);
+    assert_eq!(rules[0]["scopeLabel"], "reports");
+    assert_eq!(rules[0]["orphaned"], false);
+
+    // --- Add-time validation rejects with 400 (bad glob / bad action). -------
+    for bad in [
+        json!({ "op": "rules", "action": "add", "rule": { "scope": "", "glob": "a**b", "action": "include" } }),
+        json!({ "op": "rules", "action": "add", "rule": { "scope": "", "kind": "tabular", "action": "banish" } }),
+        json!({ "op": "rules", "action": "add", "rule": { "scope": "", "action": "include" } }),
+    ] {
+        let res = post(bad.clone()).await.unwrap();
+        assert_eq!(res.status().as_u16(), 400, "must reject: {bad}");
+    }
+
+    // --- Removing the rule reverts exactly its layer (back to the default). --
+    let removed = post(json!({ "op": "rules", "action": "remove", "id": rule_id }))
+        .await
+        .unwrap();
+    assert!(removed.status().is_success());
+    let rag: Value = client
+        .get(format!("{base}/api/rag"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let late = rag["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["id"] == "reports/late.xlsx")
+        .unwrap();
+    assert_eq!(late["ragIncluded"], false, "reverts to the exclude default");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn auth_layers_reject_cross_origin_and_bad_tokens() {
     let _env = lock_env();

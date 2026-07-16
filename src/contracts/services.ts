@@ -13,6 +13,8 @@ import type {
   ChangedPin,
   ChatChunk,
   ChatTurn,
+  CurationRule,
+  CurationRuleInput,
   DataSource,
   FileInspection,
   FileNode,
@@ -41,6 +43,27 @@ export interface RagService {
    * cascade); resolution covers the subtree.
    */
   setLocalOnly(nodeId: string, localOnly: boolean): Promise<void>;
+  /**
+   * Bulk curation rules (openspec: add-curation-rules): every stored rule,
+   * enriched with its generated display name, human scope label, and orphaned
+   * flag (scope folder gone — matches nothing, kept for cleanup). Rules are a
+   * RESOLUTION layer: they decide matching files — present and future — where
+   * no explicit per-node flag speaks, and never write per-node state.
+   */
+  listRules(): Promise<CurationRule[]>;
+  /**
+   * Create a rule (the engine mints the id and validates: action/kind
+   * whitelists, exactly one predicate, glob parse). A validation rejection
+   * comes back as `error` with the engine's reason rather than a throw, so
+   * the create form can surface it inline.
+   */
+  addRule(rule: CurationRuleInput): Promise<{ rule?: CurationRule; error?: string }>;
+  /**
+   * Remove a rule (idempotent). Only the rule's layer disappears: every file
+   * it was deciding reverts to the next layer down; explicit per-node flags
+   * are untouched by construction.
+   */
+  removeRule(id: string): Promise<void>;
   /** Toggle whether a whole source is available. */
   setSourceAvailable(sourceId: string, available: boolean): Promise<void>;
   /** Retrieve references relevant to a query from the currently-included set. */
@@ -265,6 +288,22 @@ export interface AuthService {
   signOut(): Promise<void>;
 }
 
+/**
+ * Per-ask answer-cache controls (openspec: add-answer-cache), computed by the
+ * CLIENT per request and carried on the wire. `bypassCache` is the Re-run /
+ * Regenerate gesture: skip the cache lookup, run live, refresh the entry.
+ * `persistAllowed` is the chat-history verdict — `persistEnabled() &&
+ * !chatHistoryLocked()` at the moment of the ask — which gates the engine's
+ * DISK cache mirror (history opt-in is client-only state by design, so the
+ * engines only ever learn a per-request verdict). Both default false: an
+ * absent field fails toward privacy (in-memory cache only, disk mirror
+ * deleted).
+ */
+export interface AskOptions {
+  bypassCache?: boolean;
+  persistAllowed?: boolean;
+}
+
 /** Streams an assistant answer plus its references for a user question. */
 export interface ChatService {
   /**
@@ -276,7 +315,8 @@ export interface ChatService {
    * this question), regardless of the global included set. An aborted `signal`
    * cancels the in-flight request (the chat UI's Stop button); implementations
    * should surface the abort by throwing (an `AbortError` DOMException) so the
-   * caller can keep the partial answer and settle its state.
+   * caller can keep the partial answer and settle its state. `opts` carries the
+   * per-ask answer-cache controls (see AskOptions).
    */
   ask(
     question: string,
@@ -284,5 +324,6 @@ export interface ChatService {
     history?: ChatTurn[],
     attachmentFileIds?: string[],
     signal?: AbortSignal,
+    opts?: AskOptions,
   ): AsyncIterable<ChatChunk>;
 }

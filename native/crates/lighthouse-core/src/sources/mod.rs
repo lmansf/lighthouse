@@ -50,6 +50,35 @@ pub async fn set_local_only(node_id: &str, value: bool) {
     vault::set_local_only(node_id, value);
 }
 
+/// Bulk curation rules (openspec: add-curation-rules). Like local-only marks,
+/// rules live in the vault state and resolve by node id, so they route
+/// straight to the vault engine regardless of the owning source.
+pub async fn rules_listing() -> Vec<vault::RuleListing> {
+    vault::rules_listing()
+}
+
+/// Validate + add a rule (engine-minted id); returns the enriched rule for
+/// the wire. A rule can newly include content, so warm the index like a
+/// visibility flip does.
+pub async fn add_rule(
+    scope: &str,
+    kind: Option<&str>,
+    ext: Option<&[String]>,
+    glob: Option<&str>,
+    action: &str,
+) -> anyhow::Result<vault::RuleListing> {
+    let rule = vault::add_rule(scope, kind, ext, glob, action)?;
+    vault::warm_index_async();
+    Ok(vault::enrich_rule(rule))
+}
+
+/// Remove a rule (idempotent). Removing an exclude rule can newly include
+/// content too — warm the index the same way.
+pub async fn remove_rule(id: &str) {
+    vault::remove_rule(id);
+    vault::warm_index_async();
+}
+
 pub async fn set_source_available(available: bool, source_id: Option<&str>) {
     if source_id == Some(crate::config::SHAREPOINT_SOURCE_ID) {
         sharepoint::set_available(available);

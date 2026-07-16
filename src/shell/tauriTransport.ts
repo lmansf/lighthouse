@@ -12,6 +12,12 @@
  * Outside Tauri (web deploy, `next dev`) this is a no-op.
  */
 
+import {
+  INSPECT_FILE_EVENT,
+  INSPECT_FILE_SHELL_EVENT,
+  type InspectFileDetail,
+} from "@/lib/citePreview";
+
 type TauriCore = typeof import("@tauri-apps/api/core");
 type TauriEvent = typeof import("@tauri-apps/api/event");
 type TauriWebviewWindow = typeof import("@tauri-apps/api/webviewWindow");
@@ -139,6 +145,10 @@ function handleChat(
           includedFileIds: Array.isArray(body.includedFileIds) ? body.includedFileIds : [],
           history: Array.isArray(body.history) ? body.history : [],
           attachmentFileIds: Array.isArray(body.attachmentFileIds) ? body.attachmentFileIds : [],
+          // Answer-cache controls (openspec: add-answer-cache) ride the IPC
+          // verbatim; absent fields fail toward privacy (false).
+          bypassCache: body.bypassCache === true,
+          persistAllowed: body.persistAllowed === true,
           onChunk: channel,
         })
         .catch((err) => {
@@ -313,6 +323,22 @@ function installDesktopBridge(
   void eventApi.listen<{ question?: string }>("ask-question", (e) => {
     const question = e.payload?.question;
     if (question) broadcast("lighthouse:ask-question", { question });
+  });
+
+  // --- Widget → preview hand-off (citation → preview, time-savers feature 4):
+  // a citation button in the widget's inline answer raises the main window and
+  // emits this (JS emitTo — no shell command involved) with the cited file +
+  // chunk-locating query; re-broadcast as the DOM event the FileInspectorHost
+  // in the main window listens for. Windows without the host ignore it.
+  void eventApi.listen<Partial<InspectFileDetail>>(INSPECT_FILE_SHELL_EVENT, (e) => {
+    const d = e.payload;
+    if (d && typeof d.fileId === "string" && d.fileId) {
+      broadcast(INSPECT_FILE_EVENT, {
+        fileId: d.fileId,
+        name: typeof d.name === "string" ? d.name : "",
+        ...(typeof d.query === "string" && d.query ? { query: d.query } : {}),
+      });
+    }
   });
 
   // --- Shell-driven pin changes (switching interface mode applies the new

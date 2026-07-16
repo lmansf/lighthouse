@@ -8,7 +8,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import type { DataSource, FileNode, RagReference } from "@/contracts";
 import {
   VAULT_SOURCE_ID,
@@ -26,6 +26,30 @@ interface Reference {
   path: string;
   name: string;
   kind: "file" | "folder";
+}
+
+/**
+ * A bulk curation rule (openspec: add-curation-rules): `{scope folder, ONE
+ * predicate, action}`, evaluated LIVE inside the effective-state resolvers as
+ * a layer between explicit per-node flags and the global default. A rule never
+ * writes `included`/`localOnly` — future arrivals are covered by construction,
+ * and deleting a rule reverts exactly the nodes it was deciding. A hand-edited
+ * rule with a missing/unknown predicate or action simply matches nothing.
+ * KEEP IN SYNC with vault.rs::CurationRule — state.json is shared
+ * byte-compatibly.
+ */
+export interface CurationRule {
+  id: string;
+  /** Scope folder node id; "" = the vault root (vault-resident files only —
+   *  a linked root (`extN`) is its own folder scope). */
+  scope: string;
+  /** Predicate (exactly one of kind/ext/glob, add-time validated). */
+  kind?: string; // "tabular" | "document" | "image"
+  /** Lowercase extension list, stored dot-less (e.g. ["xlsx","csv"]). */
+  ext?: string[];
+  /** Glob over the path RELATIVE to the scope — `*`, `**`, `?` only. */
+  glob?: string;
+  action: string; // "include" | "exclude" | "local-only" | "clear"
 }
 
 interface VaultState {
@@ -46,6 +70,14 @@ interface VaultState {
    * content lives at `path` on disk and is read in place — no copy is made.
    */
   references: Record<string, Reference>;
+  /**
+   * Bulk curation rules (openspec: add-curation-rules) — a RESOLUTION layer,
+   * never per-node writes. Definition order matters (within one scope the
+   * last-defined rule wins). The `raw.rules ?? []` read below keeps an old
+   * state.json (no `rules` key) loading rule-less — the established
+   * un-versioned migration story. KEEP IN SYNC with vault.rs.
+   */
+  rules: CurationRule[];
 }
 
 function loadState(): VaultState {
@@ -57,6 +89,7 @@ function loadState(): VaultState {
     included: { ...(raw.included ?? {}) },
     localOnly: { ...(raw.localOnly ?? {}) },
     references: { ...(raw.references ?? {}) },
+    rules: [...(raw.rules ?? [])],
   };
 }
 
@@ -138,46 +171,314 @@ function defaultIncluded(): boolean {
   return effectiveDefaultInclusion() === "include";
 }
 
+// --- curation rules: evaluation (openspec: add-curation-rules) -----------------
+//
+// Rules are a resolution layer for FILES: explicit flags (own, then the
+// existing ancestor semantics) always win; rules decide only where today's
+// code fell through to the default. Folders never take the rule layer — a
+// rule "applies to every matching file under its scope", and folder eyes in
+// the explorer derive from their descendants anyway. KEEP IN SYNC with the
+// vault.rs rules-evaluation section.
+
+/** Rule actions / kinds the engine accepts (add-time whitelist). */
+const RULE_ACTIONS = new Set(["include", "exclude", "local-only", "clear"]);
+const RULE_KINDS = new Set(["tabular", "document", "image"]);
+
+/** `kind:"tabular"` — the catalog gate. KEEP IN SYNC with analytics::is_tabular. */
+const RULE_TABULAR_EXT = new Set(["csv", "tsv", "parquet", "xlsx", "xlsm", "xls"]);
+
 /**
- * Effective inclusion. An ancestor folder explicitly excluded always forces a
- * node out (ancestor exclusion wins). For an absent own flag the default is the
- * user's setting: EXCLUDED under `exclude` (the original/conservative default),
- * INCLUDED under `include`. Consequences, by design:
+ * `kind:"document"` — the prose document formats THIS twin extracts or reads
+ * (.pdf/.docx via ./extract plus the prose documents of TEXT_EXT). PARITY:
+ * .doc/.pptx/.odt/.odp/.rtf are Rust-only extraction — name-match-only here,
+ * so kind rules deliberately don't match them (an honest degrade, never a
+ * fake); ext/glob rules are full-fidelity both sides.
+ */
+const RULE_DOCUMENT_EXT = new Set([
+  "pdf", "docx", "md", "markdown", "txt", "text", "rst", "html", "htm",
+]);
+
+/**
+ * `kind:"image"` — OCR is Rust-only, so images are name-match-only in this
+ * twin and `kind:"image"` matches NOTHING here (PARITY: the desktop engine
+ * matches its OCR raster set).
+ */
+const RULE_IMAGE_EXT = new Set<string>([]);
+
+/**
+ * Validate a rule glob: `/`-separated, wildcards `*`/`**`/`?` only, no empty
+ * segments, `**` only as a whole segment, no backslashes. Returns the
+ * segments, or throws the human-readable reason. KEEP IN SYNC with
+ * vault.rs::parse_rule_glob.
+ */
+function parseRuleGlob(glob: string): string[] {
+  if (!glob.trim()) throw new Error("glob must not be empty");
+  if (glob.includes("\\")) throw new Error("glob uses / as its separator");
+  if (glob.startsWith("/") || glob.endsWith("/") || glob.includes("//")) {
+    throw new Error("glob must not have empty segments");
+  }
+  const segs = glob.split("/");
+  for (const s of segs) {
+    if (s.includes("**") && s !== "**") throw new Error("** must stand alone between slashes");
+  }
+  return segs;
+}
+
+/**
+ * `*` / `?` within ONE path segment (never crosses `/`). Linear two-pointer
+ * backtracking, so a pathological pattern can't go exponential. KEEP
+ * BYTE-IDENTICAL in behavior with vault.rs::glob_segment_matches.
+ */
+function globSegmentMatches(pat: string, seg: string): boolean {
+  let p = 0;
+  let s = 0;
+  let star = -1;
+  let mark = 0;
+  while (s < seg.length) {
+    if (p < pat.length && (pat[p] === "?" || pat[p] === seg[s])) {
+      p += 1;
+      s += 1;
+    } else if (p < pat.length && pat[p] === "*") {
+      star = p;
+      mark = s;
+      p += 1;
+    } else if (star !== -1) {
+      p = star + 1;
+      mark += 1;
+      s = mark;
+    } else {
+      return false;
+    }
+  }
+  while (p < pat.length && pat[p] === "*") p += 1;
+  return p === pat.length;
+}
+
+/** Segment-wise glob match; `**` spans zero or more whole segments. KEEP IN
+ *  SYNC with vault.rs::glob_segments_match. */
+function globSegmentsMatch(pat: string[], pathSegs: string[]): boolean {
+  if (pat.length === 0) return pathSegs.length === 0;
+  if (pat[0] === "**") {
+    if (globSegmentsMatch(pat.slice(1), pathSegs)) return true; // zero segments
+    return pathSegs.length > 0 && globSegmentsMatch(pat, pathSegs.slice(1));
+  }
+  if (pathSegs.length === 0) return false;
+  return (
+    globSegmentMatches(pat[0], pathSegs[0]) && globSegmentsMatch(pat.slice(1), pathSegs.slice(1))
+  );
+}
+
+/**
+ * The path of `id` RELATIVE to `scope` when the scope contains it, else null.
+ * Scope "" (the vault root) contains every vault-resident id but NOT linked
+ * (`extN…`) subtrees — a linked root is its own folder scope. The scope
+ * folder itself is never "under" its own scope. KEEP IN SYNC with
+ * vault.rs::scope_rel.
+ */
+function scopeRel(scope: string, id: string, state: VaultState): string | null {
+  if (scope === "") return refIdOf(id, state.references) === null ? id : null;
+  if (!id.startsWith(`${scope}/`)) return null;
+  return id.slice(scope.length + 1);
+}
+
+/** Scope depth for deepest-scope-wins ordering ("" = 0). */
+function scopeDepth(scope: string): number {
+  return scope === "" ? 0 : scope.split("/").length;
+}
+
+/** Lowercased dot-less extension of a basename ("" when none). */
+function bareExtOf(name: string): string {
+  const dot = name.lastIndexOf(".");
+  return dot > 0 ? name.slice(dot + 1).toLowerCase() : "";
+}
+
+/**
+ * Does the rule's predicate match a FILE at `rel` (path relative to the
+ * rule's scope)? A stored rule that fails to evaluate — missing/unknown
+ * predicate, unparseable glob — matches nothing (the layer falls through)
+ * rather than breaking the walk. KEEP IN SYNC with
+ * vault.rs::rule_predicate_matches.
+ */
+function rulePredicateMatches(rule: CurationRule, rel: string): boolean {
+  const name = rel.split("/").pop() ?? rel;
+  if (rule.kind !== undefined) {
+    const bare = bareExtOf(name);
+    if (rule.kind === "tabular") return RULE_TABULAR_EXT.has(bare);
+    if (rule.kind === "document") return RULE_DOCUMENT_EXT.has(bare);
+    if (rule.kind === "image") return RULE_IMAGE_EXT.has(bare);
+    return false;
+  }
+  if (rule.ext !== undefined) {
+    const bare = bareExtOf(name);
+    return bare !== "" && rule.ext.includes(bare);
+  }
+  if (rule.glob !== undefined) {
+    let pat: string[];
+    try {
+      pat = parseRuleGlob(rule.glob);
+    } catch {
+      return false;
+    }
+    return globSegmentsMatch(pat, rel.split("/"));
+  }
+  return false;
+}
+
+type RuleAxis = "inclusion" | "localOnly";
+
+/**
+ * Whether an action participates in an axis. `clear` is first-class on BOTH:
+ * a scoped return-to-default that masks broader rules (inclusion → the global
+ * default; local-only → unmarked).
+ */
+function axisAction(axis: RuleAxis, action: string): boolean {
+  return axis === "inclusion"
+    ? action === "include" || action === "exclude" || action === "clear"
+    : action === "local-only" || action === "clear";
+}
+
+/**
+ * The matching rule that DECIDES a file on one axis: deepest scope wins;
+ * within one scope the last-defined (highest index) wins. Null ⇒ the rule
+ * layer falls through to the default. KEEP IN SYNC with vault.rs::winning_rule.
+ */
+function winningRule(id: string, state: VaultState, axis: RuleAxis): CurationRule | null {
+  let best: { depth: number; idx: number; rule: CurationRule } | null = null;
+  for (let idx = 0; idx < state.rules.length; idx++) {
+    const rule = state.rules[idx];
+    if (!axisAction(axis, rule.action)) continue;
+    const rel = scopeRel(rule.scope, id, state);
+    if (rel === null) continue;
+    if (!rulePredicateMatches(rule, rel)) continue;
+    const depth = scopeDepth(rule.scope);
+    if (!best || depth > best.depth || (depth === best.depth && idx > best.idx)) {
+      best = { depth, idx, rule };
+    }
+  }
+  return best?.rule ?? null;
+}
+
+/**
+ * Which layer decided a flag. The boolean resolvers AND the inspector's
+ * attribution both read this one decision, so "what resolved" and "why" can
+ * never disagree. KEEP IN SYNC with vault.rs::FlagDecision.
+ */
+type FlagDecision =
+  | { layer: "ancestor" }
+  | { layer: "explicit"; value: boolean }
+  | { layer: "rule"; rule: CurationRule }
+  | { layer: "default" };
+
+function inclusionDecision(id: string, state: VaultState, isFile: boolean): FlagDecision {
+  const parts = id.split("/");
+  let prefix = "";
+  for (let i = 0; i < parts.length - 1; i++) {
+    prefix = prefix ? `${prefix}/${parts[i]}` : parts[i];
+    if (state.included[prefix] === false) return { layer: "ancestor" }; // excluded ancestor
+  }
+  if (state.included[id] !== undefined) return { layer: "explicit", value: state.included[id] };
+  if (isFile) {
+    const rule = winningRule(id, state, "inclusion");
+    if (rule) return { layer: "rule", rule };
+  }
+  return { layer: "default" };
+}
+
+function localOnlyDecision(id: string, state: VaultState, isFile: boolean): FlagDecision {
+  const parts = id.split("/");
+  let prefix = "";
+  for (let i = 0; i < parts.length - 1; i++) {
+    prefix = prefix ? `${prefix}/${parts[i]}` : parts[i];
+    if (state.localOnly[prefix] === true) return { layer: "ancestor" }; // marked ancestor
+  }
+  if (state.localOnly[id] !== undefined) return { layer: "explicit", value: state.localOnly[id] };
+  if (isFile) {
+    const rule = winningRule(id, state, "localOnly");
+    if (rule) return { layer: "rule", rule };
+  }
+  return { layer: "default" };
+}
+
+/**
+ * Effective inclusion. Precedence (spec-pinned, openspec add-curation-rules):
+ * explicit ancestor exclusion (the existing ancestor-wins semantics — a rule
+ * can never resurrect an excluded subtree) → explicit own flag → matching
+ * rules (FILES only: deepest scope, then last-defined; `clear` yields the
+ * default and masks shallower rules) → the global default. Consequences, by
+ * design:
  *  - exclude: anything new (added from the computer, anywhere) defaults out;
  *  - include: anything new defaults in until the user opts it out;
  *  - an excluded folder forces every descendant out, even a file moved in
  *    later that carried an included flag (ancestor exclusion wins);
  *  - an internal move preserves the node's own flag (see moveNode), but the
  *    ancestor rule above still applies at its new location.
+ * Exported for the node twin's precedence tests. KEEP IN SYNC with
+ * vault.rs::is_effectively_included.
  */
-function isEffectivelyIncluded(id: string, state: VaultState, defaultIn = defaultIncluded()): boolean {
-  const parts = id.split("/");
-  let prefix = "";
-  for (let i = 0; i < parts.length - 1; i++) {
-    prefix = prefix ? `${prefix}/${parts[i]}` : parts[i];
-    if (state.included[prefix] === false) return false; // an ancestor folder is excluded
+export function isEffectivelyIncluded(
+  id: string,
+  state: VaultState,
+  defaultIn = defaultIncluded(),
+  isFile = true,
+): boolean {
+  const d = inclusionDecision(id, state, isFile);
+  if (d.layer === "ancestor") return false;
+  if (d.layer === "explicit") return d.value;
+  if (d.layer === "rule") {
+    if (d.rule.action === "include") return true;
+    if (d.rule.action === "exclude") return false;
+    return defaultIn; // "clear": a scoped return-to-default
   }
-  // absent ⇒ included under opt_out, excluded under opt_in
-  return defaultIn ? state.included[id] !== false : state.included[id] === true;
+  return defaultIn;
 }
 
 /**
  * Effective "Private — this device only" state. ANCESTOR-WINS: a node is
- * local-only when it OR any ancestor carries an explicit `true`. Absence means
- * not local-only (the safe default for the extractive/local path, where the
- * mark is inert). Mirrors the ancestor walk in isEffectivelyIncluded, but with
- * no default flip — a `true` anywhere up the chain wins, and a child's own
- * `false` cannot override a marked ancestor (the safe, privacy-preserving
- * direction). KEEP IN SYNC with vault.rs::is_effectively_local_only.
+ * local-only when it OR any ancestor carries an explicit `true`; a child's own
+ * `false` cannot override a marked ancestor (the safe direction). An explicit
+ * OWN flag — either way — beats rules ("explicit user state always beats
+ * rules": a rule can only ADD privacy where the user hasn't spoken, and never
+ * removes an explicit mark). With no explicit state, matching `local-only`
+ * rules mark the file (`clear` masks them back to unmarked); absence means not
+ * local-only. Exported for the node twin's tests. KEEP IN SYNC with
+ * vault.rs::is_effectively_local_only.
  */
-function isEffectivelyLocalOnly(id: string, state: VaultState): boolean {
-  const parts = id.split("/");
-  let prefix = "";
-  for (let i = 0; i < parts.length - 1; i++) {
-    prefix = prefix ? `${prefix}/${parts[i]}` : parts[i];
-    if (state.localOnly[prefix] === true) return true; // an ancestor is marked
+export function isEffectivelyLocalOnly(id: string, state: VaultState, isFile = true): boolean {
+  const d = localOnlyDecision(id, state, isFile);
+  if (d.layer === "ancestor") return true;
+  if (d.layer === "explicit") return d.value;
+  if (d.layer === "rule") return d.rule.action === "local-only"; // "clear" → unmarked
+  return false;
+}
+
+/**
+ * Wire attribution for the inspector ("why is this flag what it is"): which
+ * layer decided. `ruleName` is the generated display name so the panel can say
+ * `included by rule "spreadsheets in /reports"`. KEEP IN SYNC with
+ * vault.rs::FlagAttribution and the FileInspection shape in contracts.
+ */
+export interface FlagAttribution {
+  source: "explicit" | "ancestor" | "rule" | "default";
+  ruleId?: string;
+  ruleName?: string;
+}
+
+function attributionOf(d: FlagDecision): FlagAttribution {
+  if (d.layer === "rule") {
+    return { source: "rule", ruleId: d.rule.id, ruleName: ruleDisplayName(d.rule) };
   }
-  return state.localOnly[id] === true;
+  return { source: d.layer };
+}
+
+/** Attribution sibling of isEffectivelyIncluded for ONE file — computed on
+ *  demand (the inspector's single file), never stored. */
+export function inclusionAttribution(fileId: string): FlagAttribution {
+  return attributionOf(inclusionDecision(fileId, loadState(), true));
+}
+
+/** Attribution sibling of isEffectivelyLocalOnly for ONE file. */
+export function localOnlyAttribution(fileId: string): FlagAttribution {
+  return attributionOf(localOnlyDecision(fileId, loadState(), true));
 }
 
 /**
@@ -221,10 +522,13 @@ function walkUncached(root: string): FileNode[] {
   const out: FileNode[] = [];
   const state = loadState();
   const defaultIn = defaultIncluded(); // resolve the variant once for this walk
-  const included = (id: string) => isEffectivelyIncluded(id, state, defaultIn);
+  // Rules resolve FILES only (folders keep explicit-flags + default), so the
+  // node kind threads through — see the rules-evaluation section above.
+  const included = (id: string, isFile: boolean) =>
+    isEffectivelyIncluded(id, state, defaultIn, isFile);
   // Effective local-only (ancestor-wins), carried on each node so the explorer
   // can render the lock without re-resolving.
-  const localOnly = (id: string) => isEffectivelyLocalOnly(id, state);
+  const localOnly = (id: string, isFile: boolean) => isEffectivelyLocalOnly(id, state, isFile);
 
   const recurse = (absDir: string, parentId: string | null) => {
     let entries: fs.Dirent[];
@@ -240,7 +544,7 @@ function walkUncached(root: string): FileNode[] {
       if (e.isDirectory()) {
         out.push({
           id, parentId, sourceId: VAULT_SOURCE_ID, name: e.name,
-          kind: "folder", ragIncluded: included(id), localOnly: localOnly(id),
+          kind: "folder", ragIncluded: included(id, false), localOnly: localOnly(id, false),
         });
         recurse(abs, id);
       } else if (e.isFile()) {
@@ -253,7 +557,7 @@ function walkUncached(root: string): FileNode[] {
         out.push({
           id, parentId, sourceId: VAULT_SOURCE_ID, name: e.name,
           kind: "file", mimeType: mimeOf(e.name), size,
-          ragIncluded: included(id), localOnly: localOnly(id),
+          ragIncluded: included(id, true), localOnly: localOnly(id, true),
         });
       }
     }
@@ -278,13 +582,13 @@ function walkUncached(root: string): FileNode[] {
       out.push({
         id: refId, parentId: null, sourceId: VAULT_SOURCE_ID, name: ref.name,
         kind: "file", mimeType: mimeOf(ref.name), size,
-        ragIncluded: included(refId), localOnly: localOnly(refId), external: true,
+        ragIncluded: included(refId, true), localOnly: localOnly(refId, true), external: true,
       });
       continue;
     }
     out.push({
       id: refId, parentId: null, sourceId: VAULT_SOURCE_ID, name: ref.name,
-      kind: "folder", ragIncluded: included(refId), localOnly: localOnly(refId), external: true,
+      kind: "folder", ragIncluded: included(refId, false), localOnly: localOnly(refId, false), external: true,
     });
     if (!exists) continue;
 
@@ -303,7 +607,7 @@ function walkUncached(root: string): FileNode[] {
         if (e.isDirectory()) {
           out.push({
             id, parentId, sourceId: VAULT_SOURCE_ID, name: e.name,
-            kind: "folder", ragIncluded: included(id), localOnly: localOnly(id), external: true,
+            kind: "folder", ragIncluded: included(id, false), localOnly: localOnly(id, false), external: true,
           });
           recurseExt(abs, id);
         } else if (e.isFile()) {
@@ -316,7 +620,7 @@ function walkUncached(root: string): FileNode[] {
           out.push({
             id, parentId, sourceId: VAULT_SOURCE_ID, name: e.name,
             kind: "file", mimeType: mimeOf(e.name), size,
-            ragIncluded: included(id), localOnly: localOnly(id), external: true,
+            ragIncluded: included(id, true), localOnly: localOnly(id, true), external: true,
           });
         }
       }
@@ -382,6 +686,174 @@ export function setSourceAvailable(available: boolean): void {
   saveState(state);
 }
 
+// --- curation rules: CRUD + display (openspec: add-curation-rules) --------------
+
+/**
+ * Generated display name from predicate + scope — e.g. "spreadsheets in
+ * /reports". Derived on demand (never stored, so it can't go stale). KEEP
+ * BYTE-IDENTICAL with vault.rs::rule_display_name.
+ */
+export function ruleDisplayName(rule: CurationRule): string {
+  const predicate =
+    rule.kind !== undefined
+      ? rule.kind === "tabular"
+        ? "spreadsheets"
+        : rule.kind === "document"
+          ? "documents"
+          : rule.kind === "image"
+            ? "images"
+            : `${rule.kind} files`
+      : rule.ext !== undefined
+        ? `${rule.ext.map((e) => `.${e}`).join("/")} files`
+        : rule.glob !== undefined
+          ? `files matching ${rule.glob}`
+          : "files"; // degenerate stored rule — matches nothing anyway
+  const place = rule.scope === "" ? "the vault" : `/${rule.scope}`;
+  return `${predicate} in ${place}`;
+}
+
+/** Mint a short random rule id ("r" + 8 hex chars), re-rolled on collision. */
+function mintRuleId(existing: CurationRule[]): string {
+  for (;;) {
+    const id = `r${randomBytes(4).toString("hex")}`;
+    if (!existing.some((r) => r.id === id)) return id;
+  }
+}
+
+/** All stored rules, definition order. */
+export function listRules(): CurationRule[] {
+  return loadState().rules;
+}
+
+/**
+ * Validate + add a rule; the id is minted engine-side. Exactly ONE predicate
+ * (kind | ext | glob) must be given; kinds/actions are whitelisted; the glob
+ * must parse; extensions normalize to lowercase dot-less. Throws the
+ * human-readable reason (the route surfaces it as a 400). Saving goes through
+ * saveState, so a rule write invalidates the walk cache exactly like a flag
+ * write. KEEP IN SYNC with vault.rs::add_rule.
+ */
+export function addRule(input: {
+  scope: string;
+  kind?: string;
+  ext?: string[];
+  glob?: string;
+  action: string;
+}): CurationRule {
+  const { scope, kind, ext, glob, action } = input;
+  if (!RULE_ACTIONS.has(action)) {
+    throw new Error("action must be include, exclude, local-only, or clear");
+  }
+  if (
+    scope.includes("\\") ||
+    scope.startsWith("/") ||
+    scope.endsWith("/") ||
+    scope.includes("//")
+  ) {
+    throw new Error("invalid scope");
+  }
+  const picked =
+    Number(kind !== undefined) + Number(ext !== undefined) + Number(glob !== undefined);
+  if (picked !== 1) throw new Error("exactly one of kind, ext, or glob is required");
+  if (kind !== undefined && !RULE_KINDS.has(kind)) {
+    throw new Error("kind must be tabular, document, or image");
+  }
+  let extNorm: string[] | undefined;
+  if (ext !== undefined) {
+    extNorm = ext.map((e) => e.trim().replace(/^\.+/, "").toLowerCase()).filter(Boolean);
+    if (extNorm.length === 0) throw new Error("ext needs at least one extension");
+    const bad = extNorm.find((e) => !/^[a-z0-9]+$/.test(e));
+    if (bad !== undefined) throw new Error(`invalid extension "${bad}"`);
+  }
+  if (glob !== undefined) {
+    try {
+      parseRuleGlob(glob);
+    } catch (err) {
+      throw new Error(`invalid glob: ${err instanceof Error ? err.message : "unparseable"}`);
+    }
+  }
+  const state = loadState();
+  const rule: CurationRule = {
+    id: mintRuleId(state.rules),
+    scope,
+    ...(kind !== undefined ? { kind } : {}),
+    ...(extNorm !== undefined ? { ext: extNorm } : {}),
+    ...(glob !== undefined ? { glob } : {}),
+    action,
+  };
+  state.rules.push(rule);
+  saveState(state); // invalidates the walk cache like a flag write
+  return rule;
+}
+
+/**
+ * Remove a rule by id (idempotent). Only the rule's own layer disappears:
+ * every node it was deciding reverts to the next layer down — explicit flags
+ * are untouched by construction (rules never wrote any).
+ */
+export function removeRule(id: string): void {
+  const state = loadState();
+  const before = state.rules.length;
+  state.rules = state.rules.filter((r) => r.id !== id);
+  if (state.rules.length !== before) saveState(state);
+}
+
+/**
+ * A rule enriched for the UI: generated display name, a human scope label, and
+ * whether the scope folder currently exists (an orphaned rule matches nothing
+ * but is kept for cleanup — the folder may return, e.g. an unplugged linked
+ * root). KEEP IN SYNC with vault.rs::RuleListing.
+ */
+export type RuleListing = CurationRule & {
+  name: string;
+  scopeLabel: string;
+  orphaned: boolean;
+};
+
+/** Human label for a rule scope: "" → "Vault"; a linked subtree renders under
+ *  its link's display name instead of the synthetic `extN`. */
+function scopeLabelOf(scope: string, state: VaultState): string {
+  if (scope === "") return "Vault";
+  const refId = refIdOf(scope, state.references);
+  if (refId !== null) {
+    const name = state.references[refId].name;
+    const rest = scope.slice(refId.length).replace(/^\//, "");
+    return rest ? `${name}/${rest}` : name;
+  }
+  return scope;
+}
+
+function enrichWith(rule: CurationRule, state: VaultState, folderIds: Set<string>): RuleListing {
+  return {
+    ...rule,
+    name: ruleDisplayName(rule),
+    scopeLabel: scopeLabelOf(rule.scope, state),
+    orphaned: rule.scope !== "" && !folderIds.has(rule.scope),
+  };
+}
+
+/** Enrich one rule for the wire (the `add` response). */
+export function enrichRule(rule: CurationRule): RuleListing {
+  const state = loadState();
+  const folderIds = new Set(
+    walk(vaultDir())
+      .filter((n) => n.kind === "folder")
+      .map((n) => n.id),
+  );
+  return enrichWith(rule, state, folderIds);
+}
+
+/** Every rule enriched for the UI (Preferences list + folder dialogs). */
+export function rulesListing(): RuleListing[] {
+  const state = loadState();
+  const folderIds = new Set(
+    walk(vaultDir())
+      .filter((n) => n.kind === "folder")
+      .map((n) => n.id),
+  );
+  return state.rules.map((r) => enrichWith(r, state, folderIds));
+}
+
 /** Resolve a vault-relative id to an absolute path, refusing to escape the vault. */
 function safeAbs(relId: string): string {
   const base = vaultDir();
@@ -413,12 +885,29 @@ export function moveNode(fromId: string, toParentId: string | null): { newId: st
   fs.renameSync(fromAbs, toAbs);
 
   // Remap the node and every descendant's inclusion + local-only flags onto the
-  // new prefix (both maps move together — see renameNode).
+  // new prefix (both maps move together — see renameNode). Rule SCOPES remap
+  // too: a rule follows its folder like the flags do, instead of silently
+  // orphaning on an in-app move (orphaning is for deletion).
   const state = loadState();
   state.included = remapPrefix(state.included, fromId, newId);
   state.localOnly = remapPrefix(state.localOnly, fromId, newId);
+  remapRuleScopes(state.rules, fromId, newId);
   saveState(state);
   return { newId };
+}
+
+/**
+ * Remap rule scopes onto a moved/renamed folder's new id (the scope itself and
+ * any scope beneath it) — the rules analog of remapPrefix, so a rule travels
+ * with its folder exactly like the per-node flags do. Scope-relative globs
+ * survive untouched by construction. KEEP IN SYNC with
+ * vault.rs::remap_rule_scopes.
+ */
+function remapRuleScopes(rules: CurationRule[], oldId: string, newId: string): void {
+  for (const r of rules) {
+    if (r.scope === oldId) r.scope = newId;
+    else if (r.scope.startsWith(`${oldId}/`)) r.scope = newId + r.scope.slice(oldId.length);
+  }
 }
 
 /**
@@ -461,10 +950,11 @@ export function renameNode(id: string, newName: string): { newId: string } {
   if (fs.existsSync(toAbs)) throw new Error("destination already exists");
   fs.renameSync(fromAbs, toAbs);
   // Remap the node and every descendant's inclusion + local-only flags onto the
-  // new prefix (same as moveNode).
+  // new prefix (same as moveNode), plus any rule scopes anchored at or beneath it.
   const state = loadState();
   state.included = remapPrefix(state.included, id, newId);
   state.localOnly = remapPrefix(state.localOnly, id, newId);
+  remapRuleScopes(state.rules, id, newId);
   saveState(state);
   return { newId };
 }
@@ -880,7 +1370,7 @@ export function activeIncludedFileIds(): string[] {
   if (!state.sourceAvailable) return [];
   const defaultIn = defaultIncluded();
   return walk(vaultDir())
-    .filter((n) => n.kind === "file" && isEffectivelyIncluded(n.id, state, defaultIn))
+    .filter((n) => n.kind === "file" && isEffectivelyIncluded(n.id, state, defaultIn, true))
     .map((n) => n.id);
 }
 
@@ -896,7 +1386,31 @@ export function shareableFileIds(isCloud: boolean): string[] {
   const ids = activeIncludedFileIds();
   if (!isCloud) return ids;
   const state = loadState();
-  return ids.filter((id) => !isEffectivelyLocalOnly(id, state));
+  return ids.filter((id) => !isEffectivelyLocalOnly(id, state, true));
+}
+
+/**
+ * The shareable candidate set with each file's CURRENT freshness key
+ * (`mtimeMs:size`), in one walk + one state load: the answer cache's
+ * candidate-digest input (openspec: add-answer-cache). Inherits every gate the
+ * answer respects via `shareableFileIds`; an unreadable file participates with
+ * an empty key (readable⇄unreadable is itself an answer-changing event).
+ * KEEP IN SYNC with vault.rs::shareable_freshness_keys — same SHAPE, but the
+ * twin stats mtime+size itself (PARITY: no persistent index here), so the
+ * VALUES are twin-local and the twins never share a cache file.
+ */
+export function shareableFreshnessKeys(isCloud: boolean): [string, string][] {
+  const state = loadState();
+  return shareableFileIds(isCloud).map((id) => {
+    let key = "";
+    try {
+      const st = fs.statSync(resolveAbs(id, state));
+      key = `${st.mtimeMs}:${st.size}`;
+    } catch {
+      /* unreadable — the empty key still participates in the digest */
+    }
+    return [id, key];
+  });
 }
 
 /**
@@ -908,7 +1422,7 @@ export function shareableFileIds(isCloud: boolean): string[] {
 export function shareableSubset(ids: string[], isCloud: boolean): string[] {
   if (!isCloud) return ids.slice();
   const state = loadState();
-  return ids.filter((id) => !isEffectivelyLocalOnly(id, state));
+  return ids.filter((id) => !isEffectivelyLocalOnly(id, state, true));
 }
 
 /**
@@ -919,7 +1433,7 @@ export function shareableSubset(ids: string[], isCloud: boolean): string[] {
 export function localOnlySubset(ids: string[], isCloud: boolean): string[] {
   if (!isCloud) return [];
   const state = loadState();
-  return ids.filter((id) => isEffectivelyLocalOnly(id, state));
+  return ids.filter((id) => isEffectivelyLocalOnly(id, state, true));
 }
 
 /**
@@ -1359,7 +1873,7 @@ export async function retrieve(
   // effectively-local-only when cloud is active, at this choke point.
   if (isCloud && external.length > 0) {
     const state = loadState();
-    external = external.filter((e) => !isEffectivelyLocalOnly(e.id, state));
+    external = external.filter((e) => !isEffectivelyLocalOnly(e.id, state, true));
   }
   const nodes = walk(vaultDir()).filter((n) => n.kind === "file" && idset.has(n.id));
   if (nodes.length === 0 && external.length === 0) return { references: [], contexts: [] };

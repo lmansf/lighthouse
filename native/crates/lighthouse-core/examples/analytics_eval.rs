@@ -13,7 +13,10 @@
 //!      `LIGHTHOUSE_EVAL_KEY`) is set, each natural-language question is run
 //!      end-to-end — `sql_question` → provider → `extract_sql` → `guard_sql` →
 //!      `run_query` — and every expected number must appear in the VERIFIED
-//!      result. With no provider configured it prints a note and exits 0, so it
+//!      result. A final case then narrates the verified result the way
+//!      synth.rs does and asserts the lead-with-the-number style (SYSTEM_PROMPT
+//!      Style section): the figure must sit on the FIRST non-empty line of the
+//!      answer. With no provider configured it prints a note and exits 0, so it
 //!      never flakes CI.
 //!
 //! Run: `cargo run -p lighthouse-core --example analytics_eval`
@@ -28,7 +31,7 @@ use std::process::exit;
 use datafusion::prelude::{CsvReadOptions, SessionContext};
 use futures::StreamExt;
 use lighthouse_core::analytics::{
-    extract_sql, guard_sql, register_tables, run_query, sql_question, QueryResult,
+    chart_card, extract_sql, guard_sql, register_tables, run_query, sql_question, QueryResult,
 };
 use lighthouse_core::llm::{stream_answer, Ctx, ModelCfg};
 
@@ -180,7 +183,7 @@ async fn main() {
             ];
             for (q, expect) in nl {
                 match nl_answer(&ctx, &cfg, &sql_ctxs, q).await {
-                    Ok(res) => match contains(&res, expect) {
+                    Ok((_, res)) => match contains(&res, expect) {
                         Ok(()) => println!("  PASS  {q:?}"),
                         Err(e) => {
                             failures += 1;
@@ -191,6 +194,31 @@ async fn main() {
                         failures += 1;
                         println!("  FAIL  {q:?} — {e}");
                     }
+                }
+            }
+            // Lead-with-the-number (time-savers 7): narrate the verified total
+            // the way synth.rs does and require the figure on the FIRST
+            // non-empty line of the answer — the SYSTEM_PROMPT Style rule,
+            // observed end-to-end rather than assumed.
+            let q = "What is the total of all amounts?";
+            match nl_answer(&ctx, &cfg, &sql_ctxs, q).await {
+                Ok((sql, res)) => {
+                    let narration = narrate(&cfg, &sql_ctxs, q, &sql, &res).await;
+                    match first_line_leads_with(&narration, "385") {
+                        Ok(()) => {
+                            println!(
+                                "  PASS  narration leads with the number (385 on the first line)"
+                            );
+                        }
+                        Err(e) => {
+                            failures += 1;
+                            println!("  FAIL  narration leads with the number\n        {e}");
+                        }
+                    }
+                }
+                Err(e) => {
+                    failures += 1;
+                    println!("  FAIL  narration leads with the number — setup: {e}");
                 }
             }
         }
@@ -215,13 +243,14 @@ fn provider_from_env() -> Option<ModelCfg> {
 }
 
 /// The real analytics NL loop: model writes SQL, the guard vets it, the engine
-/// executes it, and the VERIFIED result is returned (numbers never model text).
+/// executes it, and the VERIFIED result is returned (numbers never model text)
+/// along with the executed SQL (the narration prompt embeds it).
 async fn nl_answer(
     ctx: &SessionContext,
     cfg: &ModelCfg,
     sql_ctxs: &[Ctx],
     question: &str,
-) -> Result<QueryResult, String> {
+) -> Result<(String, QueryResult), String> {
     let prompt = sql_question(question, None);
     let mut stream = stream_answer(prompt, sql_ctxs.to_vec(), cfg.clone(), Vec::new());
     let mut raw = String::new();
@@ -230,5 +259,60 @@ async fn nl_answer(
     }
     let sql = extract_sql(&raw).ok_or_else(|| format!("no SQL in model reply: {raw}"))?;
     guard_sql(&sql)?;
-    run_query(ctx, &sql).await
+    let res = run_query(ctx, &sql).await?;
+    Ok((sql, res))
+}
+
+/// Narrate a verified result the way synth.rs does: the result rides as the
+/// top context block, schema cards behind it, plus the chart card when the
+/// untruncated result could chart. Returns the model's full narration text.
+async fn narrate(
+    cfg: &ModelCfg,
+    schema_ctxs: &[Ctx],
+    question: &str,
+    sql: &str,
+    res: &QueryResult,
+) -> String {
+    let mut ctxs = vec![Ctx {
+        name: "query result — computed exactly by Lighthouse".to_string(),
+        text: format!("SQL:\n{sql}\n\nResult ({} row(s)):\n{}", res.shown, res.markdown),
+        score: 1.0,
+    }];
+    ctxs.extend(schema_ctxs.iter().cloned().map(|mut c| {
+        c.name = format!("{} — schema", c.name);
+        c.score = 0.0;
+        c
+    }));
+    if !res.truncated {
+        if let Some(card) = chart_card(&res.batches) {
+            ctxs.push(Ctx {
+                name: "chart options".to_string(),
+                text: card,
+                score: 0.0,
+            });
+        }
+    }
+    let mut stream = stream_answer(question.to_string(), ctxs, cfg.clone(), Vec::new());
+    let mut out = String::new();
+    while let Some(d) = stream.next().await {
+        out.push_str(&d);
+    }
+    out
+}
+
+/// Lead-with-the-number style check (SYSTEM_PROMPT Style section): the FIRST
+/// non-empty line of the narration must already carry the expected figure.
+fn first_line_leads_with(narration: &str, figure: &str) -> Result<(), String> {
+    let first = narration
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or_default();
+    if first.contains(figure) {
+        Ok(())
+    } else {
+        Err(format!(
+            "first line {first:?} does not carry {figure:?}; full narration:\n{narration}"
+        ))
+    }
 }

@@ -172,8 +172,8 @@ test("optional private model: absent -> interrupted (clean) -> downloading -> re
     }
     assert.equal(s.status, "error", "an interrupted download must surface as error");
     assert.equal(existsSync(destPath), false, "no installed model after an interrupted download");
-    assert.equal(existsSync(partPath), false, "the partial .part file must be cleaned up");
-    log("2. interrupted ->", s.status + ";", "installed?", existsSync(destPath), "leftover .part?", existsSync(partPath));
+    assert.equal(existsSync(partPath), true, "the partial .part file is KEPT for a later Range resume");
+    log("2. interrupted ->", s.status + ";", "installed?", existsSync(destPath), "resumable .part?", existsSync(partPath));
 
     // 3 + 4. A clean run: observe progress, then ready.
     mode = "full";
@@ -181,7 +181,11 @@ test("optional private model: absent -> interrupted (clean) -> downloading -> re
     let sawProgress = null;
     let cur = modelStatus();
     while (cur.status !== "ready") {
-      if (cur.status === "downloading" && cur.received > 0 && !sawProgress) {
+      // Snapshot once progress is MEASURABLE (total known from the response
+      // headers). With Range resume, `received` reflects the kept .part's
+      // offset immediately — before headers land — so received>0 alone would
+      // capture a transient total=0 instant.
+      if (cur.status === "downloading" && cur.received > 0 && cur.total > 0 && !sawProgress) {
         sawProgress = { ...cur };
         const pct = Math.floor((cur.received / cur.total) * 100);
         log(`3. downloading -> ${pct}% (${(cur.received / MB).toFixed(0)}/${(cur.total / MB).toFixed(0)} MB) (picker shows spinner + %)`);

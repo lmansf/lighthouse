@@ -5,6 +5,9 @@ import { useAuthStore } from "@/stores/useAuthStore";
 import { AppShell } from "@/shell/AppShell";
 import { OnboardingPanel } from "@/features/onboarding/OnboardingPanel";
 import { FileExplorer } from "@/features/explorer/FileExplorer";
+// Static import (no dynamic gain): FileExplorer already pulls FileInspector
+// into the first-paint graph, so the host adds only its own few lines.
+import { FileInspectorHost } from "@/features/explorer/FileInspector";
 import { ChatPanel } from "@/features/chat/ChatPanel";
 import { VersionBadge } from "@/shell/VersionBadge";
 
@@ -29,6 +32,10 @@ const SummonHint = dynamic(
 );
 const FirstRunTour = dynamic(
   () => import("@/features/help/FirstRunTour").then((m) => m.FirstRunTour),
+  { ssr: false },
+);
+const QuickOpen = dynamic(
+  () => import("@/features/quickopen/QuickOpen").then((m) => m.QuickOpen),
   { ssr: false },
 );
 
@@ -79,6 +86,13 @@ export default function Home() {
           <FirstRunTour />
           {/* First-run summon hint (desktop only, self-gated once-shown). */}
           <SummonHint />
+          {/* Citation → preview host: opens the file inspector on the cited
+              chunk for chat citations and the widget's cross-window handoff. */}
+          <FileInspectorHost />
+          {/* Ctrl/Cmd+P quick-open palette (time-savers): fuzzy-find a vault
+              file, then reveal it in the explorer or attach it to the chat.
+              Main window only — AppShell owns the shortcut. */}
+          <QuickOpen />
         </>
       )}
     </>

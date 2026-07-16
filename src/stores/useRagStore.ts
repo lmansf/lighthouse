@@ -1,5 +1,13 @@
 import { create } from "zustand";
-import type { DataSource, EgressSnapshot, FileNode, PolicySnapshot, RestoreToken } from "@/contracts";
+import type {
+  CurationRule,
+  CurationRuleInput,
+  DataSource,
+  EgressSnapshot,
+  FileNode,
+  PolicySnapshot,
+  RestoreToken,
+} from "@/contracts";
 import { setManagedLocks } from "./managedLocks";
 import { ragService } from "@/contracts";
 
@@ -141,6 +149,23 @@ interface RagStore {
   /** Undo the last removal: re-link, restore flags, or move a trashed file back. */
   restoreLast: () => Promise<void>;
 
+  /**
+   * Bulk curation rules (openspec: add-curation-rules), enriched by the engine
+   * (display name, scope label, orphaned flag). Loaded on demand by the two
+   * rule UIs (the folder dialog and Preferences).
+   */
+  rules: CurationRule[];
+  /** Refresh the rule list from the engine. */
+  loadRules: () => Promise<void>;
+  /**
+   * Create a rule. Resolves `{}` on success (rules + tree reloaded — rules
+   * change effective eye/lock states) or `{ error }` with the engine's
+   * validation reason for the form to surface inline.
+   */
+  addRule: (rule: CurationRuleInput) => Promise<{ error?: string }>;
+  /** Remove a rule; the files it was deciding revert to the next layer down. */
+  removeRule: (id: string) => Promise<void>;
+
   /** SharePoint connection flow state (device-code dialog + polling). */
   sharepoint: SharePointConnect;
   /** Begin the SharePoint device-code sign-in; opens the dialog and polls. */
@@ -193,6 +218,10 @@ function nodesEqual(a: FileNode[], b: FileNode[]): boolean {
       x.mimeType !== y.mimeType ||
       x.size !== y.size ||
       x.ragIncluded !== y.ragIncluded ||
+      // localOnly participates: a local-only RULE can flip a node's lock with
+      // no optimistic paint to cover for it (openspec: add-curation-rules), so
+      // an equal-looking poll must not swallow the change.
+      x.localOnly !== y.localOnly ||
       x.external !== y.external
     ) {
       return false;
@@ -575,6 +604,34 @@ export const useRagStore = create<RagStore>((set, get) => ({
   },
 
   lastRemoved: [],
+
+  rules: [],
+
+  loadRules: async () => {
+    const rules = await ragService.listRules().catch(() => null);
+    if (rules) set({ rules });
+  },
+
+  addRule: async (rule) => {
+    let res: { rule?: CurationRule; error?: string };
+    try {
+      res = await ragService.addRule(rule);
+    } catch (err) {
+      res = { error: err instanceof Error && err.message ? err.message : "request failed" };
+    }
+    if (res.error) return { error: res.error };
+    // Rules change effective eye/lock states with no optimistic paint —
+    // reload both the rule list and the tree from the engine's truth.
+    await get().loadRules();
+    await get().load().catch(() => {});
+    return {};
+  },
+
+  removeRule: async (id) => {
+    await ragService.removeRule(id).catch(() => {});
+    await get().loadRules();
+    await get().load().catch(() => {});
+  },
 
   restoreLast: async () => {
     const tokens = get().lastRemoved;

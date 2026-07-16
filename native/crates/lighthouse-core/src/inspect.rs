@@ -72,6 +72,15 @@ pub struct FileInspection {
     /// for that query with scores, scoped to this one file. Shared field.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub test_search: Option<Vec<InspectHit>>,
+    /// WHY the effective inclusion is what it is (openspec: add-curation-rules):
+    /// which layer decided — the node's own explicit flag, an ancestor's, a
+    /// curation rule (named, e.g. "spreadsheets in /reports"), or the global
+    /// default. Shared field — the TS twin computes it with full fidelity.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub included_by: Option<crate::vault::FlagAttribution>,
+    /// The local-only analog of `included_by`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_only_by: Option<crate::vault::FlagAttribution>,
 }
 
 /// Preview slice cap — a glance at the extracted text, not the whole document.
@@ -111,6 +120,10 @@ pub fn inspect(file_id: &str, query: Option<&str>) -> FileInspection {
         included: Some(node.rag_included),
         local_only: Some(node.local_only),
         chunk_mode: Some(if tabular { "tabular" } else { "prose" }.to_string()),
+        // Attribution ("included by rule 'spreadsheets in /reports'") — the
+        // same decision layer the walk above resolved, reported as WHY.
+        included_by: Some(crate::vault::inclusion_attribution(file_id)),
+        local_only_by: Some(crate::vault::local_only_attribution(file_id)),
         ..Default::default()
     };
 

@@ -12,9 +12,12 @@ import {
   renameNode,
   createFolder,
   addReference,
+  addRule,
   removeReference,
   removeFromVault,
+  removeRule,
   restoreFromVault,
+  rulesListing,
 } from "@/server/sources/registry";
 import { isSameOrigin } from "@/server/http";
 import { isDesktopApp } from "@/server/config";
@@ -66,6 +69,48 @@ export async function POST(req: Request) {
       }
       await setLocalOnly(body.nodeId, body.localOnly);
       return NextResponse.json({ ok: true });
+
+    // Bulk curation rules (openspec: add-curation-rules): a per-folder
+    // predicate layer resolved live at walk time — never per-node writes.
+    // `add` validates (predicate/action whitelists, glob parse) → 400 with
+    // the reason; ids are minted engine-side. PARITY: routes.rs / commands.rs
+    // mirror this op exactly.
+    case "rules": {
+      if (body.action === "list") {
+        return NextResponse.json({ rules: await rulesListing() });
+      }
+      if (body.action === "add") {
+        const r = (body.rule ?? {}) as Record<string, unknown>;
+        try {
+          const rule = await addRule({
+            scope: typeof r.scope === "string" ? r.scope : "",
+            ...(typeof r.kind === "string" ? { kind: r.kind } : {}),
+            ...(Array.isArray(r.ext)
+              ? { ext: r.ext.filter((x: unknown): x is string => typeof x === "string") }
+              : {}),
+            ...(typeof r.glob === "string" ? { glob: r.glob } : {}),
+            action: typeof r.action === "string" ? r.action : "",
+          });
+          return NextResponse.json({ rule });
+        } catch (err) {
+          return NextResponse.json(
+            { error: err instanceof Error ? err.message : "could not add the rule" },
+            { status: 400 },
+          );
+        }
+      }
+      if (body.action === "remove") {
+        if (typeof body.id !== "string" || !body.id) {
+          return NextResponse.json({ error: "id required" }, { status: 400 });
+        }
+        await removeRule(body.id);
+        return NextResponse.json({ ok: true });
+      }
+      return NextResponse.json(
+        { error: "rules action must be list, add, or remove" },
+        { status: 400 },
+      );
+    }
 
     case "source":
       if (typeof body.available !== "boolean") {

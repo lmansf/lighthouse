@@ -375,6 +375,9 @@ fn final_chunk(references: Vec<RagReference>, excerpt_count: usize, origin: &str
             origin: origin.to_string(),
             excerpt_count,
             source_file_count,
+            // Live answers never carry the replay stamp; the answer-cache
+            // wrapper adds `cached_at` only when it replays a stored entry.
+            cached_at: None,
         }),
         done: true,
     }
@@ -444,8 +447,124 @@ fn analytics_refs(regs: &[crate::analytics::TableReg]) -> (Vec<RagReference>, Ve
 }
 
 /// The full ask path — see the module docs. Every surface (axum route,
-/// desktop IPC) forwards these chunks verbatim.
+/// desktop IPC) forwards these chunks verbatim. This wrapper is the answer
+/// cache's ONE choke point (openspec: add-answer-cache): the key is computed
+/// ONCE at ask entry — BEFORE retrieval — from the same inputs the live
+/// pipeline will use; a hit replays the stored answer verbatim (one text chunk
+/// + the final chunk re-stamped with `cachedAt`) with zero retrieval and zero
+/// model calls; a miss (or `bypass_cache`, the Re-run affordance) runs
+/// `live_pipeline` unchanged and inserts only a SUCCESSFUL, COMPLETED answer
+/// under the ask-time key. Any cache doubt already read as a miss inside
+/// `answer_cache`, so this layer can only add speed, never break an answer.
+/// KEEP IN SYNC with src/server/synth.ts::answerPipeline.
 pub fn answer_pipeline(
+    question: String,
+    included_file_ids: Vec<String>,
+    attachment_file_ids: Vec<String>,
+    history: Vec<ChatTurn>,
+    cfg: ModelCfg,
+    cache: crate::answer_cache::CacheCtl,
+) -> Pin<Box<dyn Stream<Item = ChatChunk> + Send>> {
+    Box::pin(async_stream::stream! {
+        let is_cloud = is_cloud_provider(&cfg);
+        // Key at ask entry (blocking: one cached walk + a stat per candidate).
+        // A panicked helper degrades to "no cache this ask", never a failure.
+        let key: Option<String> = {
+            let q = question.clone();
+            let provider = cfg.provider_id.clone();
+            let model = cfg.model_id.clone();
+            let atts = attachment_file_ids.clone();
+            tokio::task::spawn_blocking(move || {
+                crate::answer_cache::cache_key(
+                    &q,
+                    provider.as_deref(),
+                    model.as_deref(),
+                    &atts,
+                    is_cloud,
+                )
+            })
+            .await
+            .ok()
+        };
+        if let Some(key) = &key {
+            // Lookup also enforces the persistence posture (a disallowed ask
+            // deletes any disk mirror even when it misses or bypasses).
+            let hit = {
+                let key = key.clone();
+                tokio::task::spawn_blocking(move || crate::answer_cache::lookup(&key, cache))
+                    .await
+                    .ok()
+                    .flatten()
+            };
+            if let Some(hit) = hit {
+                // Verbatim replay: the full text as ONE chunk (no progress, no
+                // draft), then the stored final chunk plus the honesty stamp.
+                yield delta(hit.text);
+                yield ChatChunk {
+                    delta: String::new(),
+                    references: Some(hit.references),
+                    progress: None,
+                    analytics: hit.analytics,
+                    draft: None,
+                    meta: Some(ChunkMeta { cached_at: Some(hit.created_ms), ..hit.meta }),
+                    done: true,
+                };
+                return;
+            }
+        }
+
+        // Miss or bypass: run live, observing the stream so only a successful,
+        // completed answer is stored. The settled text mirrors the UI's rule:
+        // a provisional draft is REPLACED by the first authoritative delta.
+        let mut inner =
+            live_pipeline(question, included_file_ids, attachment_file_ids, history, cfg);
+        let mut text = String::new();
+        let mut draft_active = false;
+        let mut final_chunk: Option<ChatChunk> = None;
+        while let Some(c) = inner.next().await {
+            if !c.delta.is_empty() {
+                if c.draft == Some(true) {
+                    draft_active = true;
+                } else if draft_active {
+                    draft_active = false;
+                    text.clear();
+                }
+                text.push_str(&c.delta);
+            }
+            if c.done {
+                final_chunk = Some(c.clone());
+            }
+            yield c;
+        }
+        // Insert only on successful completion: a terminating chunk with its
+        // provenance stamp arrived, real text settled (never a bare draft),
+        // and no engine failure note rode in the answer (llm turns provider
+        // errors into "…model unavailable — …" notes, not throws — the same
+        // marker the map steps already filter on).
+        if let (Some(key), Some(done), false) = (key, final_chunk, draft_active) {
+            if let Some(meta) = done.meta {
+                if !text.trim().is_empty() && !text.contains("model unavailable —") {
+                    let entry = crate::answer_cache::CachedAnswer {
+                        key: String::new(), // stamped by insert
+                        created_ms: crate::config::now_ms(),
+                        text,
+                        references: done.references.unwrap_or_default(),
+                        analytics: done.analytics,
+                        meta,
+                    };
+                    let _ = tokio::task::spawn_blocking(move || {
+                        crate::answer_cache::insert(&key, entry, cache)
+                    })
+                    .await;
+                }
+            }
+        }
+    })
+}
+
+/// The live ask path (pre-cache behavior, byte-identical): single-shot RAG or
+/// multi-document synthesis, streamed as ChatChunks.
+fn live_pipeline(
     question: String,
     included_file_ids: Vec<String>,
     attachment_file_ids: Vec<String>,

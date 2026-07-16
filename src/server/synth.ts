@@ -34,6 +34,12 @@ import {
 import { readDesktopSettings } from "./settings";
 import { metaIntent, renderMeta } from "./meta";
 import { isProfileable, tableProfile } from "./tableProfile";
+import {
+  cacheKey,
+  insert as cacheInsert,
+  lookup as cacheLookup,
+  type CacheCtl,
+} from "./answerCache";
 
 /** Budgets — mirrored in lighthouse-core/src/synth.rs. */
 const MAX_MAP_DOCS = 6;
@@ -283,9 +289,107 @@ function finalChunk(
 /**
  * The full ask path: single-shot RAG (with table profiles for CSV hits), or —
  * when the question spans documents — per-document extraction then a streamed
- * synthesis with document-level citations.
+ * synthesis with document-level citations. This wrapper is the answer cache's
+ * ONE choke point (openspec: add-answer-cache): the key is computed ONCE at
+ * ask entry — BEFORE retrieval — from the same inputs the live pipeline will
+ * use; a hit replays the stored answer verbatim (one text chunk + the final
+ * chunk re-stamped with `cachedAt`) with zero retrieval and zero model calls;
+ * a miss (or `bypassCache`, the Re-run affordance) runs the live pipeline
+ * unchanged and inserts only a SUCCESSFUL, COMPLETED answer under the
+ * ask-time key. Any cache failure degrades to a live run — the cache can only
+ * add speed, never break an answer. KEEP IN SYNC with
+ * lighthouse-core/src/synth.rs::answer_pipeline.
  */
 export async function* answerPipeline(
+  question: string,
+  includedFileIds: string[],
+  attachmentFileIds: string[],
+  history: ChatTurn[],
+  cfg: ModelCfg,
+  cache: CacheCtl = {},
+): AsyncGenerator<ChatChunk> {
+  // Key at ask entry. A failing cache degrades to "no cache this ask".
+  let key: string | null = null;
+  try {
+    key = cacheKey(question, cfg.providerId, cfg.modelId, attachmentFileIds, isCloudProvider(cfg));
+    // Lookup also enforces the persistence posture (a disallowed ask deletes
+    // any disk mirror even when it misses or bypasses).
+    const hit = cacheLookup(key, cache);
+    if (hit) {
+      // Verbatim replay: the full text as ONE chunk (no progress, no draft),
+      // then the stored final chunk plus the honesty stamp.
+      yield { delta: hit.text, done: false };
+      yield {
+        delta: "",
+        references: hit.references,
+        ...(hit.analytics ? { analytics: hit.analytics } : {}),
+        meta: { ...hit.meta, cachedAt: hit.createdMs },
+        done: true,
+      };
+      return;
+    }
+  } catch {
+    key = null;
+  }
+
+  // Miss or bypass: run live, observing the stream so only a successful,
+  // completed answer is stored. The settled text mirrors the UI's rule: a
+  // provisional draft is REPLACED by the first authoritative delta.
+  let text = "";
+  let draftActive = false;
+  let finalChunk: ChatChunk | null = null;
+  for await (const chunk of answerPipelineLive(
+    question,
+    includedFileIds,
+    attachmentFileIds,
+    history,
+    cfg,
+  )) {
+    if (chunk.delta) {
+      if (chunk.draft) {
+        draftActive = true;
+      } else if (draftActive) {
+        draftActive = false;
+        text = "";
+      }
+      text += chunk.delta;
+    }
+    if (chunk.done) finalChunk = chunk;
+    yield chunk;
+  }
+  // Insert only on successful completion: a terminating chunk with its
+  // provenance stamp arrived, real text settled (never a bare draft), and no
+  // engine failure note rode in the answer (llm turns provider errors into
+  // "…model unavailable — …" notes, not throws — the same marker the map
+  // steps already filter on).
+  if (
+    key &&
+    finalChunk?.meta &&
+    !draftActive &&
+    text.trim() !== "" &&
+    !text.includes("model unavailable —")
+  ) {
+    try {
+      cacheInsert(
+        key,
+        {
+          createdMs: Date.now(),
+          text,
+          references: finalChunk.references ?? [],
+          ...(finalChunk.analytics ? { analytics: finalChunk.analytics } : {}),
+          meta: finalChunk.meta,
+        },
+        cache,
+      );
+    } catch {
+      /* a cache write failure never breaks an already-delivered answer */
+    }
+  }
+}
+
+/** The live ask path (pre-cache behavior, byte-identical): single-shot RAG or
+ *  multi-document synthesis, streamed as ChatChunks. */
+async function* answerPipelineLive(
   question: string,
   includedFileIds: string[],
   attachmentFileIds: string[],
