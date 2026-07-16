@@ -73,6 +73,14 @@ const useStyles = makeStyles({
     fontWeight: tokens.fontWeightSemibold,
     marginBottom: tokens.spacingVerticalXXS,
   },
+  // Bucketing disclosure (charts by default): quieter than the title —
+  // muted small text under the title slot, existing tokens only.
+  subtitle: {
+    display: "block",
+    color: tokens.colorNeutralForeground3,
+    fontSize: tokens.fontSizeBase200,
+    marginBottom: tokens.spacingVerticalXXS,
+  },
 });
 
 /**
@@ -237,6 +245,12 @@ export function AnalyticsChart({ spec }: { spec: ChartSpec }) {
       {spec.title && (
         <Text as="span" className={styles.title}>
           {spec.title}
+        </Text>
+      )}
+      {/* Emitter-computed bucketing disclosure (top-N + “Other”) — never data. */}
+      {spec.subtitle && (
+        <Text as="span" className={styles.subtitle}>
+          {spec.subtitle}
         </Text>
       )}
       <Tooltip content="Download chart as PNG" relationship="label">

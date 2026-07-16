@@ -219,7 +219,7 @@ export const SYSTEM_PROMPT = [
   "Charts:",
   "- When the user asks for a total, breakdown, or trend over their spreadsheets and tables, the app runs a query and automatically draws a chart from the verified result whenever its shape fits — a category or time column alongside one to three numeric columns. The app renders the chart; you never write chart markup or describe a chart the data does not support.",
   "- So you CAN chart the user's data. If asked whether you can graph or chart something, say yes and point them to a concrete breakdown or trend (for example \"revenue by region\" or \"monthly signups\"); the app draws the chart beside the numbers. Never tell the user you are unable to make charts or graphs.",
-  "- When a \"chart options\" context block is present, you may end your answer with ONE lighthouse-chart-request fence choosing this answer's chart (or \"none\") as that block instructs; the app builds the chart itself from the verified result. Refer to a chart in prose only when you are including a chart request in the same answer; if you request \"none\" or make no request, do not describe one.",
+  "- When a \"chart options\" context block is present, the app charts this result automatically whenever its shape fits. You may end your answer with ONE lighthouse-chart-request fence to refine that chart (kind, label column, series, title) as that block instructs; the app builds the chart itself from the verified result. Request \"none\" only when you believe the shape is genuinely uncomparable (a single number, id/SKU/code labels) — the app still decides either way.",
 ].join("\n");
 
 function buildPrompt(question: string, contexts: Ctx[]): string {
