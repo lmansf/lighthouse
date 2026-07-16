@@ -493,6 +493,232 @@ pub fn unregistered_count(files: &[(String, String, PathBuf)], regs: &[TableReg]
         .count()
 }
 
+// --- Saved views (openspec: add-shaped-views §2) -----------------------------------
+
+/// One saved view registered into an ask's context, and the card the model
+/// plans against. `source_file_ids` / `source_tables` are the view's
+/// TRANSITIVE sources — every underlying file id, and the ambient table name
+/// its covering registration carries — deduped, reads order: the freshness
+/// expansion (`expand_views_for_freshness`) leans on `source_tables` so the
+/// provenance footer keeps naming real files, never the view.
+#[derive(Debug, Clone)]
+pub struct ViewReg {
+    pub name: String,
+    /// View-marked table card (summary line + the standard schema/sample
+    /// body), ready for a prompt block like `TableReg::card`.
+    pub card: String,
+    /// Lowercased column names of the view's result. NOT fed to `join_hints`
+    /// (hints are file-level heuristics); carried for later surfaces.
+    pub columns: Vec<String>,
+    pub source_file_ids: Vec<String>,
+    pub source_tables: Vec<String>,
+    /// The stored one-line summary text (provenance label stays in the store).
+    pub summary: String,
+}
+
+/// Register every ELIGIBLE saved view into `ctx` as a virtual table, AFTER
+/// ordinary file registration (design.md "Virtual resolution at ask time").
+/// Store (creation) order is the pass order — it IS topological for
+/// view-over-view, because a definition can only reference views that already
+/// existed at its save. A view registers when its transitive source files are
+/// all covered by `regs`, every view it reads registered earlier THIS pass,
+/// its stored name bindings resolve (aliasing the SAME provider under the
+/// stored name when ambient registration named a source differently — files
+/// and earlier registrations always win a collision), and a table slot
+/// remains under the shared `MAX_TABLES_TOTAL` accounting. Execution is the
+/// exact CSV-union primitive — re-`guard_sql`, `ctx.sql(&view.sql)`,
+/// `register_table(name, df.into_view())` — so no rows ever land on disk and
+/// results always reflect the sources' current bytes. On cloud asks an
+/// effectively-local-only view is ineligible (transitive mark propagation).
+/// ANY failure skips that view with a log line; an ask never fails because a
+/// view is broken. Zero saved views ⇒ an empty return and a byte-identical
+/// ask.
+pub async fn register_views(
+    ctx: &SessionContext,
+    regs: &[TableReg],
+    is_cloud: bool,
+) -> Vec<ViewReg> {
+    let mut out: Vec<ViewReg> = Vec::new();
+    if regs.is_empty() {
+        return out;
+    }
+    // The store read + per-file vault-state checks are blocking work — keep
+    // them off the runtime thread (the catalog pass above sets the pattern).
+    let views =
+        tokio::task::spawn_blocking(move || crate::views::eligible_for_posture(is_cloud))
+            .await
+            .unwrap_or_default();
+    if views.is_empty() {
+        return out;
+    }
+    // A reg covers file X when it IS X or its union family includes X.
+    let covering = |file_id: &str| -> Option<&TableReg> {
+        regs.iter().find(|r| {
+            r.file_id == file_id
+                || r.group
+                    .as_ref()
+                    .is_some_and(|g| g.file_ids.iter().any(|id| id == file_id))
+        })
+    };
+    // view id → its resolved transitive source files, for every view
+    // registered THIS pass: a child's eligibility and provenance build on it.
+    let mut registered: std::collections::HashMap<String, Vec<crate::views::FileRead>> =
+        std::collections::HashMap::new();
+    // Aliases this pass created: stored name → the ambient table it points at.
+    let mut aliased: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    'views: for v in &views {
+        // Slot cap: views share the file tables' MAX_TABLES_TOTAL accounting
+        // (mirrors register_tables' guard). The cap can only stay hit, so the
+        // remaining creation-order views all skip — never an error.
+        if regs.len() + out.len() >= MAX_TABLES_TOTAL {
+            eprintln!(
+                "[views] table cap reached — skipping \"{}\" and any later views",
+                v.name
+            );
+            break;
+        }
+        // Eligibility: every view it reads registered this pass (each parent
+        // already carried ITS transitive files, so induction covers the whole
+        // tree)…
+        let mut files: Vec<crate::views::FileRead> = Vec::new();
+        for f in &v.reads.files {
+            if !files.iter().any(|k| k.file_id == f.file_id) {
+                files.push(f.clone());
+            }
+        }
+        for pid in &v.reads.views {
+            let Some(parent_files) = registered.get(pid) else {
+                eprintln!(
+                    "[views] skipping \"{}\": a view it reads is not registered for this ask",
+                    v.name
+                );
+                continue 'views;
+            };
+            for f in parent_files {
+                if !files.iter().any(|k| k.file_id == f.file_id) {
+                    files.push(f.clone());
+                }
+            }
+        }
+        // …and every transitive source file covered by a registration (this
+        // composes with investigation scope and managed policy for free:
+        // out-of-scope sources were never registered).
+        if files.iter().any(|f| covering(&f.file_id).is_none()) {
+            eprintln!(
+                "[views] skipping \"{}\": a source file is not registered for this ask",
+                v.name
+            );
+            continue;
+        }
+        // Files win a name collision: the view's own name must be free
+        // (save-time refusal makes this rare, but ambient collisions happen).
+        if ctx.table_exist(v.name.as_str()).unwrap_or(true) {
+            eprintln!(
+                "[views] skipping \"{}\": a table by that name is already registered",
+                v.name
+            );
+            continue;
+        }
+        // Name bindings: the definition's SQL uses the table names pinned at
+        // save. When ambient registration named a source differently, register
+        // the SAME provider under the stored name; a stored name already bound
+        // to a DIFFERENT table skips the view — files and earlier
+        // registrations win.
+        for f in &v.reads.files {
+            let Some(reg) = covering(&f.file_id) else {
+                continue; // unreachable — coverage checked above
+            };
+            if reg.table == f.table_name {
+                continue;
+            }
+            match aliased.get(&f.table_name) {
+                // An earlier view already aliased this name to the same table.
+                Some(target) if *target == reg.table => continue,
+                Some(_) => {
+                    eprintln!(
+                        "[views] skipping \"{}\": \"{}\" is already bound to another table",
+                        v.name, f.table_name
+                    );
+                    continue 'views;
+                }
+                None => {}
+            }
+            if ctx.table_exist(f.table_name.as_str()).unwrap_or(true) {
+                eprintln!(
+                    "[views] skipping \"{}\": \"{}\" is already bound to another table",
+                    v.name, f.table_name
+                );
+                continue 'views;
+            }
+            let provider = match ctx.table_provider(reg.table.as_str()).await {
+                Ok(p) => p,
+                Err(err) => {
+                    eprintln!("[views] skipping \"{}\": {err}", v.name);
+                    continue 'views;
+                }
+            };
+            if let Err(err) = ctx.register_table(f.table_name.as_str(), provider) {
+                eprintln!("[views] skipping \"{}\": {err}", v.name);
+                continue 'views;
+            }
+            aliased.insert(f.table_name.clone(), reg.table.clone());
+        }
+        // Defense in depth: the SAME guard as save time, before every
+        // execution — a hand-edited views.json can't smuggle a write.
+        if let Err(err) = guard_sql(&v.sql) {
+            eprintln!("[views] skipping \"{}\": {err}", v.name);
+            continue;
+        }
+        // Execute the definition and register the result virtually — the
+        // exact CSV-union primitive. Rows never materialize to disk.
+        let df = match ctx.sql(&v.sql).await {
+            Ok(df) => df,
+            Err(err) => {
+                eprintln!("[views] skipping \"{}\": {err}", v.name);
+                continue;
+            }
+        };
+        if let Err(err) = ctx.register_table(v.name.as_str(), df.into_view()) {
+            eprintln!("[views] skipping \"{}\": {err}", v.name);
+            continue;
+        }
+        let Some((body, columns)) = table_card(ctx, &v.name).await else {
+            eprintln!(
+                "[views] skipping \"{}\": could not build its table card",
+                v.name
+            );
+            continue;
+        };
+        // The card leads with the view-ness and its meaning (survives-clipping
+        // rationale, like the union provenance line), then the standard body.
+        let summary = v.summary.text.trim();
+        let card = if summary.is_empty() {
+            format!("{} is a saved view\n{}", v.name, body)
+        } else {
+            format!("{} is a saved view — {}\n{}", v.name, summary, body)
+        };
+        let source_file_ids: Vec<String> = files.iter().map(|f| f.file_id.clone()).collect();
+        let mut source_tables: Vec<String> = Vec::new();
+        for f in &files {
+            if let Some(reg) = covering(&f.file_id) {
+                if !source_tables.iter().any(|t| t == &reg.table) {
+                    source_tables.push(reg.table.clone());
+                }
+            }
+        }
+        registered.insert(v.id.clone(), files);
+        out.push(ViewReg {
+            name: v.name.clone(),
+            card,
+            columns,
+            source_file_ids,
+            source_tables,
+            summary: v.summary.text.clone(),
+        });
+    }
+    out
+}
+
 /// Register one unioned table for a file family. CSV/TSV/Parquet union via
 /// DataFusion multi-path reads; workbooks concatenate row matrices and infer
 /// column types ONCE over the combined rows so a column's type can't drift
@@ -1217,6 +1443,34 @@ pub fn freshness_line(regs: &[TableReg], sql: &str, now_ms: i64) -> Option<Strin
         return None;
     }
     Some(format!("*Computed from:* {}\n", parts.join(", ")))
+}
+
+/// Freshness companion for saved views (design decision: "provenance keeps
+/// naming source files"). A query FROM a view mentions no file table, so
+/// `freshness_line` would fall back to listing EVERY registered file — the
+/// wrong emphasis. Appending one SQL comment naming each mentioned view's
+/// transitive `source_tables` lets the existing word-boundary mention check
+/// (`sql_mentions_table`) find the real files, so the footer names exactly
+/// the sources the view reads, with their saved times. Returns `sql`
+/// unchanged when `view_regs` is empty or none are mentioned — zero-view
+/// asks stay byte-identical. Call sites wrap every `freshness_line` input;
+/// the expanded string never renders anywhere else.
+pub fn expand_views_for_freshness(sql: &str, view_regs: &[ViewReg]) -> String {
+    let mut tables: Vec<&str> = Vec::new();
+    for vr in view_regs {
+        if !sql_mentions_table(sql, &vr.name) {
+            continue;
+        }
+        for t in &vr.source_tables {
+            if !tables.iter().any(|x| x == t) {
+                tables.push(t);
+            }
+        }
+    }
+    if tables.is_empty() {
+        return sql.to_string();
+    }
+    format!("{sql} /* reads {} */", tables.join(" "))
 }
 
 // --- SQL guard -------------------------------------------------------------------
@@ -2354,6 +2608,78 @@ mod tests {
         let l = freshness_line(&[reg("t", "f9", "x.csv", None)], "SELECT * FROM t", now).unwrap();
         assert!(l.contains("“x.csv”") && !l.contains("saved"), "{l}");
         assert!(freshness_line(&[], "SELECT 1", now).is_none());
+    }
+
+    // openspec: add-shaped-views §2 — the freshness expansion keeps the
+    // provenance footer naming SOURCE files for a query FROM a saved view.
+    #[test]
+    fn view_freshness_expansion_names_source_tables_only_when_mentioned() {
+        let vr = |name: &str, tables: &[&str]| ViewReg {
+            name: name.into(),
+            card: String::new(),
+            columns: vec![],
+            source_file_ids: vec![],
+            source_tables: tables.iter().map(|t| t.to_string()).collect(),
+            summary: String::new(),
+        };
+
+        // Empty registry ⇒ the IDENTICAL string (zero-view asks byte-stable).
+        assert_eq!(
+            expand_views_for_freshness("SELECT * FROM sales", &[]),
+            "SELECT * FROM sales"
+        );
+        // An unmentioned view changes nothing either.
+        let clean = vr("clean_sales", &["sales"]);
+        assert_eq!(
+            expand_views_for_freshness("SELECT * FROM orders", &[clean.clone()]),
+            "SELECT * FROM orders"
+        );
+        // Word boundaries hold: clean_sales_2 does not mention clean_sales.
+        assert_eq!(
+            expand_views_for_freshness("SELECT * FROM clean_sales_2", &[clean.clone()]),
+            "SELECT * FROM clean_sales_2"
+        );
+        // A mentioned view appends ONE comment naming its source tables…
+        assert_eq!(
+            expand_views_for_freshness("SELECT SUM(amount) FROM clean_sales", &[clean.clone()]),
+            "SELECT SUM(amount) FROM clean_sales /* reads sales */"
+        );
+        // …which makes freshness_line pick out exactly the source files.
+        let now = 1_700_000_000_000i64;
+        let reg = |table: &str, id: &str, name: &str| TableReg {
+            table: table.into(),
+            file_id: id.into(),
+            file_name: name.into(),
+            card: String::new(),
+            modified_ms: Some(now - 2 * 3_600_000),
+            columns: vec![],
+            group: None,
+            capped_rows: None,
+        };
+        let regs = vec![reg("sales", "f1", "sales.csv"), reg("costs", "f2", "costs.csv")];
+        let sql = "SELECT SUM(amount) FROM clean_sales";
+        let line = freshness_line(
+            &regs,
+            &expand_views_for_freshness(sql, &[clean.clone()]),
+            now,
+        )
+        .unwrap();
+        assert!(line.contains("sales.csv"), "{line}");
+        assert!(!line.contains("costs.csv"), "footer names the view's sources only: {line}");
+        // Without the expansion the fallback lists everything — the wrong
+        // emphasis this helper exists to fix.
+        let fallback = freshness_line(&regs, sql, now).unwrap();
+        assert!(fallback.contains("costs.csv"), "{fallback}");
+
+        // Two mentioned views merge into one comment, deduped, reads order.
+        let joined = vr("joined_view", &["sales", "regions"]);
+        assert_eq!(
+            expand_views_for_freshness(
+                "SELECT * FROM clean_sales JOIN joined_view ON true",
+                &[clean, joined]
+            ),
+            "SELECT * FROM clean_sales JOIN joined_view ON true /* reads sales regions */"
+        );
     }
 
     #[test]
@@ -3946,7 +4272,7 @@ pub struct DirectResult {
 /// reading a file the user has since hidden.
 async fn direct_tables(
     file_ids: &[String],
-) -> Result<(SessionContext, Vec<TableReg>, usize), String> {
+) -> Result<(SessionContext, Vec<TableReg>, Vec<ViewReg>, usize), String> {
     let active: std::collections::HashSet<String> = crate::vault::active_included_file_ids()
         .into_iter()
         .collect();
@@ -3975,7 +4301,12 @@ async fn direct_tables(
     if regs.is_empty() {
         return Err("the files couldn't be registered as tables".to_string());
     }
-    Ok((ctx, regs, skipped))
+    // Saved views resolve here too (openspec: add-shaped-views §2), so a
+    // re-executed query naming one still runs. Model-free like the rest of
+    // the direct path — local-only is inert by design, mirroring the
+    // is_cloud=false above.
+    let view_regs = register_views(&ctx, &regs, false).await;
+    Ok((ctx, regs, view_regs, skipped))
 }
 
 /// A grouped-thousands integer: 12431 → "12,431" — read-out friendly for the
@@ -4048,9 +4379,22 @@ pub fn row_cap_footer(regs: &[TableReg]) -> Option<String> {
     }
 }
 
-fn direct_footer(sql: &str, regs: &[TableReg], skipped: usize, res: &QueryResult) -> String {
+fn direct_footer(
+    sql: &str,
+    regs: &[TableReg],
+    view_regs: &[ViewReg],
+    skipped: usize,
+    res: &QueryResult,
+) -> String {
     let mut footer = format!("*Query used:*\n```sql\n{sql}\n```\n");
-    if let Some(fresh) = freshness_line(regs, sql, crate::config::now_ms()) {
+    // A query FROM a saved view still names its SOURCE files here — the
+    // expansion is freshness-only and never renders (openspec:
+    // add-shaped-views §2).
+    if let Some(fresh) = freshness_line(
+        regs,
+        &expand_views_for_freshness(sql, view_regs),
+        crate::config::now_ms(),
+    ) {
         footer.push_str(&fresh);
     }
     if let Some(trunc) = truncation_footer(res.shown, res.truncated, res.total) {
@@ -4073,9 +4417,9 @@ fn direct_footer(sql: &str, regs: &[TableReg], skipped: usize, res: &QueryResult
 /// model-free path behind Edit SQL, Save-as-CSV, and pin rechecks. Unknown /
 /// no-longer-tabular ids are skipped and noted in the footer.
 pub async fn run_direct(sql: &str, file_ids: &[String]) -> Result<DirectResult, String> {
-    let (ctx, regs, skipped) = direct_tables(file_ids).await?;
+    let (ctx, regs, view_regs, skipped) = direct_tables(file_ids).await?;
     let res = run_query(&ctx, sql).await?;
-    let footer = direct_footer(sql, &regs, skipped, &res);
+    let footer = direct_footer(sql, &regs, &view_regs, skipped, &res);
     Ok(DirectResult {
         markdown: res.markdown,
         chart: res.chart,
@@ -4152,7 +4496,7 @@ pub async fn run_direct_save(
     file_ids: &[String],
     name_hint: &str,
 ) -> Result<(DirectResult, SavedResult), String> {
-    let (ctx, regs, skipped) = direct_tables(file_ids).await?;
+    let (ctx, regs, view_regs, skipped) = direct_tables(file_ids).await?;
     let res = run_query(&ctx, sql).await?; // guard + preview + chart
     let df = ctx.sql(sql).await.map_err(|e| e.to_string())?;
     let df = df
@@ -4173,7 +4517,7 @@ pub async fn run_direct_save(
     .await
     .map_err(|e| e.to_string())?
     .map_err(|e| e.to_string())?;
-    let footer = direct_footer(sql, &regs, skipped, &res);
+    let footer = direct_footer(sql, &regs, &view_regs, skipped, &res);
     Ok((
         DirectResult {
             markdown: res.markdown,

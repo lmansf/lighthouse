@@ -32,7 +32,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { stateDir, writeJson } from "./config";
-import { activeIncludedFileIds, listNodes } from "./vault";
+import { activeIncludedFileIds, listNodes, localOnlySubset } from "./vault";
 
 /** Envelope version this engine reads and writes. */
 const STORE_VERSION = 1;
@@ -507,6 +507,49 @@ export function dependentsOf(id: string): View[] {
  */
 export function transitiveDependents(id: string): View[] {
   return transitiveDependentsIn(listViews(), id);
+}
+
+// --- Posture (ask-time eligibility, openspec: add-shaped-views §2) ------------------
+
+/**
+ * TRANSITIVE local-only propagation (design.md "Local-only propagation"):
+ * a view is effectively local-only when ANY transitive source file carries
+ * an effective local-only mark (the vault's ancestor-wins resolver, reached
+ * through the stateless `localOnlySubset` — passing `true` because the mark
+ * itself is the question; the posture gate lives in eligibleForPosture), or
+ * any view it reads is. Cycle-tolerant on synthetic graphs; unknown parent
+ * ids contribute nothing. KEEP IN SYNC with
+ * views.rs::view_effectively_local_only.
+ */
+export function viewEffectivelyLocalOnly(v: View, records: View[]): boolean {
+  const seen = new Set<string>([v.id]);
+  const walk = (cur: View): boolean => {
+    if (cur.reads.files.some((f) => localOnlySubset([f.fileId], true).length > 0)) {
+      return true;
+    }
+    for (const pid of cur.reads.views) {
+      if (seen.has(pid)) continue;
+      seen.add(pid);
+      const parent = records.find((r) => r.id === pid);
+      if (parent && walk(parent)) return true;
+    }
+    return false;
+  };
+  return walk(v);
+}
+
+/**
+ * The saved views eligible under an ask's posture, store (creation) order:
+ * every view when the ask stays on device (marks are inert locally); a cloud
+ * ask excludes the effectively-local-only ones so a private table's shape
+ * can never ride a view into a vendor prompt — or into its cache key
+ * (answerCache.ts::cacheKey digests exactly this list). KEEP IN SYNC with
+ * views.rs::eligible_for_posture.
+ */
+export function eligibleForPosture(isCloud: boolean): View[] {
+  const records = listViews();
+  if (!isCloud) return records;
+  return records.filter((v) => !viewEffectivelyLocalOnly(v, records));
 }
 
 // --- Vault lookups (createView's public entry fetches these) -----------------------

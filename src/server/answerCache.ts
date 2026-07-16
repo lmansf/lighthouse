@@ -6,10 +6,11 @@
  * normalized question, a digest of the provider-effective candidate set (the
  * shareable file ids paired with their `mtimeMs:size` freshness keys — which
  * already folds include flags, local-only marks under a cloud provider, and
- * per-file freshness), the provider AND model id, and the sorted attachment id
- * set. Global-digest tradeoff (v1, pinned in the design): ANY vault change
- * invalidates every entry — over-invalidation accepted, correctness beats hit
- * rate.
+ * per-file freshness), the provider AND model id, the sorted attachment id
+ * set, and — only when any exist — the posture-eligible saved-view registry
+ * (openspec: add-shaped-views). Global-digest tradeoff (v1, pinned in the
+ * design): ANY vault change invalidates every entry — over-invalidation
+ * accepted, correctness beats hit rate.
  *
  * Store: a bounded in-memory LRU (always on, session scope) plus an optional
  * disk mirror (`appStateDir()/answer-cache.json`, versioned envelope
@@ -32,6 +33,7 @@ import { createHash } from "node:crypto";
 import type { AnalyticsMeta, ChatChunk, RagReference } from "@/contracts";
 import { appStateDir, readJson, writeJson } from "./config";
 import { shareableFreshnessKeys } from "./vault";
+import { eligibleForPosture } from "./views";
 
 /**
  * LRU bound — small enough that the disk envelope stays trivial to rewrite per
@@ -127,7 +129,18 @@ export function candidateDigest(pairs: [string, string][]): string {
  * and existing cache entries stay valid. Without this, a recall-cued answer
  * cached in one investigation could replay inside another whose preferences
  * order the references differently.
- * KEEP IN SYNC with answer_cache.rs::key_from_parts.
+ *
+ * `viewRegistry` (openspec: add-shaped-views): the saved-view registry as it
+ * could apply to this ask — the posture-eligible views as [name, sql] pairs,
+ * sorted by name (`cacheKey` passes them sorted; the pair strings are
+ * re-sorted here so the contract is self-enforcing, the attachments posture).
+ * It joins the key ONLY when at least one view exists — the "r:" precedent —
+ * so every zero-view key stays byte-identical and legacy cache entries keep
+ * hitting. Byte layout of the component, KEEP IN SYNC with
+ * answer_cache.rs::key_from_parts: "\nv:" followed by each pair rendered as
+ * name + NUL (U+0000) + sql, pairs joined with NUL too (flat
+ * n1,NUL,s1,NUL,n2,NUL,s2) — view names are sanitized [a-z0-9_], so the flat
+ * NUL join can never be ambiguous.
  */
 export function keyFromParts(
   question: string,
@@ -136,6 +149,7 @@ export function keyFromParts(
   attachmentIds: string[],
   preferredConversationIds: string[],
   candidateDigestHex: string,
+  viewRegistry: [string, string][] = [],
 ): string {
   const atts = [...new Set(attachmentIds)].sort();
   let material = [
@@ -148,6 +162,10 @@ export function keyFromParts(
   if (preferredConversationIds.length > 0) {
     const refs = [...new Set(preferredConversationIds)].sort();
     material += `\nr:${refs.join("\u0000")}`;
+  }
+  if (viewRegistry.length > 0) {
+    const pairs = viewRegistry.map(([name, sql]) => `${name}\u0000${sql}`).sort();
+    material += `\nv:${pairs.join("\u0000")}`;
   }
   return sha256Hex(material);
 }
@@ -166,6 +184,15 @@ export function cacheKey(
   isCloud: boolean,
 ): string {
   const digest = candidateDigest(shareableFreshnessKeys(isCloud));
+  // The view REGISTRY as it could apply to this ask (openspec:
+  // add-shaped-views, design.md "Answer cache"): every view eligible under
+  // the ask's posture — cloud asks exclude effectively-local-only views —
+  // sorted by name. The DEFINITIONS are the material (source-data freshness
+  // already rides the candidate digest), so creating, renaming, or deleting
+  // a view invalidates honestly, and zero views leaves every key untouched.
+  const views = eligibleForPosture(isCloud)
+    .map((v): [string, string] => [v.name, v.sql])
+    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
   return keyFromParts(
     question,
     providerId,
@@ -173,6 +200,7 @@ export function cacheKey(
     attachmentIds,
     preferredConversationIds,
     digest,
+    views,
   );
 }
 

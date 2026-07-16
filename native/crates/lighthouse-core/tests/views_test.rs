@@ -472,3 +472,378 @@ fn source_files_are_never_touched_by_any_op() {
     );
     assert!(views::list().is_empty());
 }
+
+// --- §2: virtual resolution at ask time (openspec: add-shaped-views) ----------------
+
+use lighthouse_core::analytics::{register_tables, register_views, run_query, TableReg};
+
+/// (file_id, display name, abs) triple for `register_tables`, with the id
+/// doubling as the vault-relative name — the tests' usual shape.
+fn entry(vault: &std::path::Path, id: &str) -> (String, String, std::path::PathBuf) {
+    let name = id.rsplit('/').next().unwrap_or(id).to_string();
+    (id.to_string(), name, vault.join(id))
+}
+
+/// A hand-crafted registration for slot/posture tests — `register_views`
+/// reads only the table name, file id, and group coverage from a reg.
+fn fake_reg(table: &str, file_id: &str) -> TableReg {
+    TableReg {
+        table: table.to_string(),
+        file_id: file_id.to_string(),
+        file_name: file_id.to_string(),
+        card: String::new(),
+        modified_ms: None,
+        columns: vec![],
+        group: None,
+        capped_rows: None,
+    }
+}
+
+/// Task 2.4 scenario 1: an ask THROUGH a view returns the shaped number via
+/// real DataFusion — messy text amounts a raw SUM could never add.
+#[tokio::test]
+async fn ask_against_a_view_returns_shaped_numbers() {
+    let vault = tempfile::tempdir().unwrap();
+    let _guard = common::lock_env(vault.path());
+    write(
+        &vault.path().join("messy.csv"),
+        "region,amount\nnorth,$3\nsouth,$7\n",
+    );
+
+    views::create_with_tables(
+        "clean_sales",
+        "SELECT region, CAST(REPLACE(amount, '$', '') AS DOUBLE) AS amount FROM messy",
+        summary("clean the amounts"),
+        &[("messy.csv".to_string(), "messy.csv".to_string())],
+        &[],
+    )
+    .expect("saves");
+
+    let ctx = datafusion::prelude::SessionContext::new();
+    let regs = register_tables(&ctx, &[entry(vault.path(), "messy.csv")], false).await;
+    assert_eq!(regs.len(), 1, "the source registers as a table");
+    let view_regs = register_views(&ctx, &regs, false).await;
+    assert_eq!(view_regs.len(), 1, "the view registers virtually");
+
+    // The card leads with the view marker + summary, then the standard body,
+    // and the provenance fields point at the transitive source.
+    let vr = &view_regs[0];
+    assert_eq!(vr.name, "clean_sales");
+    assert!(
+        vr.card
+            .starts_with("clean_sales is a saved view — clean the amounts\n"),
+        "{}",
+        vr.card
+    );
+    assert!(vr.card.contains("table clean_sales — 2 rows"), "{}", vr.card);
+    assert_eq!(vr.columns, vec!["region", "amount"]);
+    assert_eq!(vr.source_file_ids, vec!["messy.csv"]);
+    assert_eq!(vr.source_tables, vec!["messy"]);
+    assert_eq!(vr.summary, "clean the amounts");
+
+    // The engine computes the shaped number from the view.
+    let res = run_query(
+        &ctx,
+        "SELECT CAST(SUM(amount) AS BIGINT) AS total FROM clean_sales",
+    )
+    .await
+    .expect("query runs");
+    assert!(res.markdown.contains("| 10 |"), "{}", res.markdown);
+}
+
+/// Task 2.4 scenario 2: a source edit flows straight through the view (no
+/// rows were ever materialized — the state dir holds ONLY views.json).
+#[tokio::test]
+async fn source_edits_flow_through_with_no_rows_on_disk() {
+    let vault = tempfile::tempdir().unwrap();
+    let _guard = common::lock_env(vault.path());
+    write(
+        &vault.path().join("messy.csv"),
+        "region,amount\nnorth,$3\nsouth,$7\n",
+    );
+    views::create_with_tables(
+        "clean_sales",
+        "SELECT CAST(REPLACE(amount, '$', '') AS DOUBLE) AS amount FROM messy",
+        summary("q"),
+        &[("messy.csv".to_string(), "messy.csv".to_string())],
+        &[],
+    )
+    .expect("saves");
+
+    let ask = |vault: std::path::PathBuf| async move {
+        let ctx = datafusion::prelude::SessionContext::new();
+        let regs = register_tables(&ctx, &[entry(&vault, "messy.csv")], false).await;
+        let view_regs = register_views(&ctx, &regs, false).await;
+        assert_eq!(view_regs.len(), 1);
+        run_query(
+            &ctx,
+            "SELECT CAST(SUM(amount) AS BIGINT) AS total FROM clean_sales",
+        )
+        .await
+        .expect("query runs")
+        .markdown
+    };
+
+    let first = ask(vault.path().to_path_buf()).await;
+    assert!(first.contains("| 10 |"), "{first}");
+
+    // Overwrite the source; a FRESH ctx + re-registration sees the new bytes.
+    write(
+        &vault.path().join("messy.csv"),
+        "region,amount\nnorth,$4\nsouth,$8\n",
+    );
+    let second = ask(vault.path().to_path_buf()).await;
+    assert!(second.contains("| 12 |"), "{second}");
+
+    // No materialized rows anywhere: the views feature put exactly ONE file
+    // in the state dir — views.json (the definition). The only other entry is
+    // the pre-existing extract/catalog `cache` directory, which registration
+    // creates with or without views.
+    let mut names: Vec<String> = std::fs::read_dir(vault.path().join(".rag-vault"))
+        .unwrap()
+        .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
+        .collect();
+    names.sort();
+    assert_eq!(names, vec!["cache", "views.json"], "no materialized rows on disk");
+}
+
+/// Task 2.4 scenario 3: views share the file tables' slot cap — a full ctx
+/// registers none, one free slot registers exactly the FIRST saved view.
+#[tokio::test]
+async fn views_share_the_table_slot_cap_deterministically() {
+    let vault = tempfile::tempdir().unwrap();
+    let _guard = common::lock_env(vault.path());
+    write(&vault.path().join("data.csv"), "x\n1\n2\n");
+    views::create_with_tables(
+        "v_first",
+        "SELECT * FROM data",
+        summary("q"),
+        &[("data.csv".to_string(), "data.csv".to_string())],
+        &[],
+    )
+    .expect("saves");
+    views::create_with_tables(
+        "v_second",
+        "SELECT COUNT(*) AS n FROM data",
+        summary("q"),
+        &[("data.csv".to_string(), "data.csv".to_string())],
+        &[],
+    )
+    .expect("saves");
+
+    // MAX_TABLES_TOTAL is 6 (analytics.rs) — craft a full registration: the
+    // real source table plus five fillers leaves no view slot.
+    let ctx = datafusion::prelude::SessionContext::new();
+    let regs = register_tables(&ctx, &[entry(vault.path(), "data.csv")], false).await;
+    assert_eq!(regs.len(), 1);
+    let mut full = regs.clone();
+    for i in 0..5 {
+        full.push(fake_reg(&format!("filler_{i}"), &format!("filler_{i}.csv")));
+    }
+    assert!(register_views(&ctx, &full, false).await.is_empty(), "no slots ⇒ no views");
+
+    // One free slot: exactly the first (creation-order) view registers.
+    let one_slot = &full[..5];
+    let view_regs = register_views(&ctx, one_slot, false).await;
+    assert_eq!(view_regs.len(), 1);
+    assert_eq!(view_regs[0].name, "v_first", "creation order decides");
+}
+
+/// Requirement 6 + task 2.4 scenario 4: a local-only mark propagates to the
+/// view transitively — visible locally, excluded from every cloud surface.
+#[tokio::test]
+async fn local_only_views_are_ineligible_on_cloud_asks() {
+    let vault = tempfile::tempdir().unwrap();
+    let _guard = common::lock_env(vault.path());
+    write(&vault.path().join("private.csv"), "region,amount\nNE,5\n");
+    lighthouse_core::vault::set_local_only("private.csv", true);
+
+    let base = views::create_with_tables(
+        "private_view",
+        "SELECT * FROM private",
+        summary("q"),
+        &[("private.csv".to_string(), "private.csv".to_string())],
+        &[],
+    )
+    .expect("saves");
+    // A view OVER the marked view inherits the mark transitively.
+    let over = views::create_with_tables(
+        "over_private",
+        "SELECT COUNT(*) AS n FROM private_view",
+        summary("q"),
+        &[],
+        &[],
+    )
+    .expect("saves");
+
+    let records = views::list();
+    assert!(views::view_effectively_local_only(&base, &records));
+    assert!(
+        views::view_effectively_local_only(&over, &records),
+        "the mark rides through the parent view"
+    );
+
+    // Posture: local sees both; cloud sees neither.
+    let local: Vec<String> = views::eligible_for_posture(false).iter().map(|v| v.name.clone()).collect();
+    assert_eq!(local, vec!["private_view", "over_private"]);
+    assert!(views::eligible_for_posture(true).is_empty());
+
+    // register_views honors the posture even when the file itself is
+    // registered (the crafted-regs belt-and-suspenders path).
+    let ctx = datafusion::prelude::SessionContext::new();
+    let regs = register_tables(&ctx, &[entry(vault.path(), "private.csv")], false).await;
+    assert_eq!(regs.len(), 1);
+    assert!(
+        register_views(&ctx, &regs, true).await.is_empty(),
+        "cloud ask never registers a local-only view"
+    );
+    let local_regs = register_views(&ctx, &regs, false).await;
+    assert_eq!(local_regs.len(), 2, "a local ask may use both normally");
+}
+
+/// Requirement 2 (cache posture, design.md "Answer cache"): the view registry
+/// re-keys exactly the asks it could apply to — a local-only view changes the
+/// LOCAL key and leaves the CLOUD key untouched.
+#[test]
+fn cache_keys_fold_the_view_registry_by_posture() {
+    let vault = tempfile::tempdir().unwrap();
+    let _guard = common::lock_env(vault.path());
+    write(&vault.path().join("sales.csv"), "region,amount\nnorth,3\n");
+    write(&vault.path().join("private.csv"), "region,amount\nNE,5\n");
+    lighthouse_core::vault::set_included("sales.csv", true);
+    lighthouse_core::vault::set_included("private.csv", true);
+    lighthouse_core::vault::set_local_only("private.csv", true);
+
+    let q = "what were sales";
+    let local = || lighthouse_core::answer_cache::cache_key(q, Some("local"), None, &[], &[], false);
+    let cloud =
+        || lighthouse_core::answer_cache::cache_key(q, Some("openai"), Some("gpt-5-mini"), &[], &[], true);
+    let (local0, cloud0) = (local(), cloud());
+
+    // A view over the MARKED file: eligible locally only ⇒ only the local
+    // key moves.
+    views::create(
+        "private_view",
+        "SELECT * FROM private",
+        summary("q"),
+        &["private.csv".to_string()],
+    )
+    .expect("saves");
+    let (local1, cloud1) = (local(), cloud());
+    assert_ne!(local1, local0, "a local-only view re-keys the local ask");
+    assert_eq!(cloud1, cloud0, "…and never the cloud ask");
+
+    // A view over the unmarked file re-keys both postures.
+    views::create(
+        "sales_view",
+        "SELECT * FROM sales",
+        summary("q"),
+        &["sales.csv".to_string()],
+    )
+    .expect("saves");
+    assert_ne!(local(), local1);
+    assert_ne!(cloud(), cloud1, "an eligible view re-keys the cloud ask");
+}
+
+/// Task 2.4 scenario 6: view-over-view registers when the whole chain's
+/// sources are in play; only the base registers when the child's extra
+/// source is missing.
+#[tokio::test]
+async fn view_over_view_registers_and_degrades_by_coverage() {
+    let vault = tempfile::tempdir().unwrap();
+    let _guard = common::lock_env(vault.path());
+    write(&vault.path().join("base.csv"), "region,amount\nnorth,$3\nsouth,$7\n");
+    write(&vault.path().join("extra.csv"), "region,factor\nnorth,2\nsouth,3\n");
+
+    views::create_with_tables(
+        "view_a",
+        "SELECT region, CAST(REPLACE(amount, '$', '') AS DOUBLE) AS amount FROM base",
+        summary("clean"),
+        &[("base.csv".to_string(), "base.csv".to_string())],
+        &[],
+    )
+    .expect("saves A");
+    views::create_with_tables(
+        "view_b",
+        "SELECT a.region, a.amount * e.factor AS scaled FROM view_a a JOIN extra e ON a.region = e.region",
+        summary("scaled"),
+        &[("extra.csv".to_string(), "extra.csv".to_string())],
+        &[],
+    )
+    .expect("saves B");
+
+    // Both sources in play: A and B register; B answers through the stack.
+    let ctx = datafusion::prelude::SessionContext::new();
+    let files = vec![entry(vault.path(), "base.csv"), entry(vault.path(), "extra.csv")];
+    let regs = register_tables(&ctx, &files, false).await;
+    assert_eq!(regs.len(), 2);
+    let view_regs = register_views(&ctx, &regs, false).await;
+    let names: Vec<&str> = view_regs.iter().map(|v| v.name.as_str()).collect();
+    assert_eq!(names, vec!["view_a", "view_b"], "store order, both eligible");
+    // B's provenance is TRANSITIVE: its own file plus A's, reads order.
+    assert_eq!(view_regs[1].source_file_ids, vec!["extra.csv", "base.csv"]);
+    assert_eq!(view_regs[1].source_tables, vec!["extra", "base"]);
+    let res = run_query(
+        &ctx,
+        "SELECT CAST(SUM(scaled) AS BIGINT) AS total FROM view_b",
+    )
+    .await
+    .expect("query runs");
+    assert!(res.markdown.contains("| 27 |"), "{}", res.markdown);
+
+    // Only the base source in play: A registers alone — B's extra source is
+    // missing, so B drops out without failing anything.
+    let ctx2 = datafusion::prelude::SessionContext::new();
+    let regs2 = register_tables(&ctx2, &[entry(vault.path(), "base.csv")], false).await;
+    let view_regs2 = register_views(&ctx2, &regs2, false).await;
+    let names2: Vec<&str> = view_regs2.iter().map(|v| v.name.as_str()).collect();
+    assert_eq!(names2, vec!["view_a"], "A alone when B's source is missing");
+}
+
+/// Design "Name bindings": ambient naming differences alias the SAME provider
+/// under the stored name; a registered table always wins the view's own name.
+#[tokio::test]
+async fn stored_name_bindings_alias_and_files_win_collisions() {
+    let vault = tempfile::tempdir().unwrap();
+    let _guard = common::lock_env(vault.path());
+    write(&vault.path().join("x/report.csv"), "region,amount\nnorth,1\n");
+    write(&vault.path().join("y/report.csv"), "region,amount\nsouth,5\n");
+
+    // Saved when BOTH same-named files were in play: the definition's SQL
+    // references only the second binding, pinned as report_2.
+    views::create_with_tables(
+        "second_only",
+        "SELECT * FROM report_2",
+        summary("q"),
+        &[
+            ("x/report.csv".to_string(), "report.csv".to_string()),
+            ("y/report.csv".to_string(), "report.csv".to_string()),
+        ],
+        &[],
+    )
+    .expect("saves");
+    // A view whose name an ask-time table will shadow (legal at save — no
+    // such file table existed then).
+    views::create_with_tables("shadowed", "SELECT 1 AS one", summary("q"), &[], &[])
+        .expect("saves");
+
+    // At ask time only y/report.csv is in play, registered ambient as
+    // plain `report` — the stored binding re-binds via an alias.
+    let ctx = datafusion::prelude::SessionContext::new();
+    let regs = register_tables(&ctx, &[entry(vault.path(), "y/report.csv")], false).await;
+    assert_eq!(regs.len(), 1);
+    assert_eq!(regs[0].table, "report");
+    // Craft an ambient collision for the second view's own name — a REAL
+    // registered table plus its reg: files win, the view skips.
+    let shadow_df = ctx.sql("SELECT 1 AS one").await.expect("plans");
+    ctx.register_table("shadowed", shadow_df.into_view()).expect("registers");
+    let mut with_shadow = regs.clone();
+    with_shadow.push(fake_reg("shadowed", "shadow.csv"));
+    let view_regs = register_views(&ctx, &with_shadow, false).await;
+    let names: Vec<&str> = view_regs.iter().map(|v| v.name.as_str()).collect();
+    assert_eq!(names, vec!["second_only"], "alias registers; shadowed name skips");
+    let res = run_query(&ctx, "SELECT CAST(SUM(amount) AS BIGINT) AS t FROM second_only")
+        .await
+        .expect("query runs");
+    assert!(res.markdown.contains("| 5 |"), "aliased to y's rows: {}", res.markdown);
+}

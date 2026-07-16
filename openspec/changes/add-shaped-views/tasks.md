@@ -6,10 +6,10 @@
 - [x] 1.3 Unit tests both engines: round trip, bak-on-write, guard refusals, name rules, cycle/depth rejection, dependent-refusal + cascade-set computation, sources untouched by every op.
 
 ## 2. Virtual resolution at ask time (Rust engine)
-- [ ] 2.1 Registration wrapper after file registration (ask path + `run_direct`): eligibility = transitive reads.files ⊆ registered ids (composes with scope/policy); creation-order determinism; stored-name alias when ambient naming differs, files-win on collision; re-guard then `ctx.sql` → `register_table(name, df.into_view())`; one table slot per view under existing caps; skip-and-log on any failure.
-- [ ] 2.2 View table cards (marked as view + summary) join the prompt; provenance footer keeps naming source files; local-only views ineligible on cloud asks (transitive `is_effectively_local_only`).
-- [ ] 2.3 Answer-cache key material gains registered views (`v:` component, sorted, only when non-empty — legacy keys byte-identical); freshness surfaces from underlying digests.
-- [ ] 2.4 Tests: ask-against-view returns shaped numbers via real DataFusion; source edit flows through with no on-disk rows; slot skipping deterministic; local-only exclusion; cache-key stability (no views) + sensitivity (view registered).
+- [x] 2.1 Registration wrapper after file registration (ask path + `run_direct`): eligibility = transitive reads.files ⊆ registered ids (composes with scope/policy); creation-order determinism; stored-name alias when ambient naming differs, files-win on collision; re-guard then `ctx.sql` → `register_table(name, df.into_view())`; one table slot per view under existing caps; skip-and-log on any failure.
+- [x] 2.2 View table cards (marked as view + summary) join the prompt; provenance footer keeps naming source files; local-only views ineligible on cloud asks (transitive `is_effectively_local_only`).
+- [x] 2.3 Answer-cache key material gains registered views (`v:` component, sorted, only when non-empty — legacy keys byte-identical); freshness surfaces from underlying digests.
+- [x] 2.4 Tests: ask-against-view returns shaped numbers via real DataFusion; source edit flows through with no on-disk rows; slot skipping deterministic; local-only exclusion; cache-key stability (no views) + sensitivity (view registered).
 
 ## 3. Creation flows
 - [ ] 3.1 "Save as view" chip on SQL-bearing answers (chip row slot): name dialog → `views.create`; summary = the asked question, source:"question"; wired through contracts (types/services/real/mock) + dispatch `op:"views"` all three layers.

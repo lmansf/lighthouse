@@ -479,3 +479,48 @@ test("source files are never touched by any op", () => {
   );
   assert.deepEqual(views.listViews(), []);
 });
+
+// --- §2: posture (local-only propagation, openspec: add-shaped-views) ---------------
+// PARITY: views_test.rs::local_only_views_are_ineligible_on_cloud_asks — the
+// resolution itself is Rust-only; the twin mirrors the posture helpers the
+// cache key leans on.
+
+test("local-only marks propagate to views transitively and gate the cloud posture", () => {
+  const { dir } = freshVault();
+  fs.writeFileSync(path.join(dir, "private.csv"), "region,amount\nNE,5\n");
+  fs.writeFileSync(path.join(dir, "public.csv"), "region,amount\nSW,7\n");
+  vault.setLocalOnly("private.csv", true);
+
+  const priv = views.createView("private_view", "SELECT * FROM private", summary("q"), [
+    "private.csv",
+  ]);
+  // A view OVER the marked view inherits the mark transitively.
+  const over = views.createView("over_private", "SELECT COUNT(*) AS n FROM private_view", summary("q"), []);
+  const pub_ = views.createView("public_view", "SELECT * FROM public", summary("q"), [
+    "public.csv",
+  ]);
+
+  const records = views.listViews();
+  assert.ok(views.viewEffectivelyLocalOnly(priv, records));
+  assert.ok(
+    views.viewEffectivelyLocalOnly(over, records),
+    "the mark rides through the parent view",
+  );
+  assert.ok(!views.viewEffectivelyLocalOnly(pub_, records));
+
+  // Posture: local sees everything; cloud sees only the unmarked view.
+  assert.deepEqual(
+    views.eligibleForPosture(false).map((v) => v.name),
+    ["private_view", "over_private", "public_view"],
+    "device posture keeps store order",
+  );
+  assert.deepEqual(
+    views.eligibleForPosture(true).map((v) => v.name),
+    ["public_view"],
+    "cloud posture drops the marked chain",
+  );
+
+  // Unmarking flows straight through (state is read per call, never cached).
+  vault.setLocalOnly("private.csv", false);
+  assert.equal(views.eligibleForPosture(true).length, 3);
+});

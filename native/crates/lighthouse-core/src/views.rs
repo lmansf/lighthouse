@@ -480,6 +480,58 @@ pub fn transitive_dependents(id: &str) -> Vec<View> {
     transitive_dependents_in(&list(), id)
 }
 
+// --- Posture (ask-time eligibility, openspec: add-shaped-views §2) ------------------
+
+/// TRANSITIVE local-only propagation (design.md "Local-only propagation"):
+/// a view is effectively local-only when ANY transitive source file carries
+/// an effective local-only mark (the vault's ancestor-wins resolver via its
+/// stateless single-file accessor, `vault::node_is_local_only`), or any view
+/// it reads is. Cycle-tolerant on synthetic graphs; unknown parent ids
+/// contribute nothing. KEEP IN SYNC with views.ts::viewEffectivelyLocalOnly.
+pub fn view_effectively_local_only(v: &View, records: &[View]) -> bool {
+    fn walk(cur: &View, records: &[View], seen: &mut Vec<String>) -> bool {
+        if cur
+            .reads
+            .files
+            .iter()
+            .any(|f| crate::vault::node_is_local_only(&f.file_id))
+        {
+            return true;
+        }
+        for pid in &cur.reads.views {
+            if seen.iter().any(|s| s == pid) {
+                continue;
+            }
+            seen.push(pid.clone());
+            if let Some(parent) = records.iter().find(|r| r.id == *pid) {
+                if walk(parent, records, seen) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+    walk(v, records, &mut vec![v.id.clone()])
+}
+
+/// The saved views eligible under an ask's posture, store (creation) order:
+/// every view when the ask stays on device (marks are inert locally); a
+/// cloud ask excludes the effectively-local-only ones so a private table's
+/// shape can never ride a view into a vendor prompt — or into its cache key
+/// (answer_cache::cache_key digests exactly this list). KEEP IN SYNC with
+/// views.ts::eligibleForPosture.
+pub fn eligible_for_posture(is_cloud: bool) -> Vec<View> {
+    let records = list();
+    if !is_cloud {
+        return records;
+    }
+    records
+        .iter()
+        .filter(|v| !view_effectively_local_only(v, &records))
+        .cloned()
+        .collect()
+}
+
 // --- Vault lookups (create's public entry fetches these) ---------------------------
 
 /// Table names the CURRENT catalog would give the vault's tabular files —
