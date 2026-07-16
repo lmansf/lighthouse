@@ -21,6 +21,7 @@ import {
 } from "@/server/sources/registry";
 import { isSameOrigin } from "@/server/http";
 import { isDesktopApp } from "@/server/config";
+import { readDesktopSettings, writeDesktopSettings } from "@/server/settings";
 import { policySnapshot } from "@/server/policy";
 import { egressSnapshot } from "@/server/egress";
 import { recentAudit, verifyActiveAudit, exportCsvAudit } from "@/server/audit";
@@ -661,6 +662,34 @@ export async function POST(req: Request) {
           error: err instanceof Error ? err.message : "could not write the briefing note",
         });
       }
+    }
+
+    // Provider sign-in (0.12.1 §3). PARITY: the RFC 8628 device flow lives in
+    // the desktop engine only (native provider_auth.rs — itself inert until a
+    // maintainer registers with a vendor and configures the four
+    // LIGHTHOUSE_SIGNIN_* identifiers); this dev twin never dials an auth
+    // host, so every action answers the fail-closed stub. `status` is
+    // honest-empty (available:false + the persisted method) so the UI's gate
+    // reads the same shape it would from the engine, and `setMethod "key"`
+    // mirrors the settings write (restoring the default is always safe);
+    // "signin" is refused like the flow it would arm.
+    case "providerAuth": {
+      if (body.action === "status") {
+        return NextResponse.json({
+          available: false,
+          signedIn: false,
+          method: readDesktopSettings().openaiAuthMethod === "signin" ? "signin" : "key",
+          reason: "sign-in runs in the desktop app",
+        });
+      }
+      if (body.action === "setMethod" && body.method === "key") {
+        writeDesktopSettings({ openaiAuthMethod: "key" });
+        return NextResponse.json({ ok: true, method: "key" });
+      }
+      return NextResponse.json({
+        available: false,
+        reason: "sign-in runs in the desktop app",
+      });
     }
 
     // Read-only managed-policy snapshot; the UI renders its locks as "Managed by your organization".

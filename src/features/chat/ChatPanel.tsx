@@ -72,6 +72,7 @@ import {
   ErrorCircleRegular,
   FilterRegular,
   HistoryRegular,
+  LockClosedRegular,
   OpenRegular,
   PinRegular,
   PlayRegular,
@@ -92,6 +93,14 @@ import { chatService, MODEL_PROVIDERS, ragService } from "@/contracts";
 import { useRagStore } from "@/stores/useRagStore";
 import { useAuthStore } from "@/stores/useAuthStore";
 import { parseChartSpec, stripChartRequestFences, tableToCsv } from "@/lib/chartSpec";
+import {
+  cloudProviderActive,
+  hiddenFromCloudCount,
+  hiddenFromCloudLabel,
+  LOCAL_ONLY_SKIP_NOTE_RE,
+} from "@/lib/privacyState";
+import { chartSpecFromTable, hasEngineChartFence } from "@/lib/chartFromTable";
+import { parseMarkdownTable } from "@/features/boards/boardModel";
 import {
   sortRows,
   truncationCaption,
@@ -611,6 +620,29 @@ const useStyles = makeStyles({
     flexWrap: "wrap",
     gap: tokens.spacingHorizontalS,
     marginTop: tokens.spacingVerticalXXS,
+    color: tokens.colorNeutralForeground3,
+  },
+  // The engine's local-only skip note ("(n files skipped — marked private…)",
+  // byte-identical across engines) rendered as a distinct inline callout
+  // instead of plain italics (0.12.1 §2): a hairline box + small lock in the
+  // savedNote/quietChip family, tokens only so both themes read. The string
+  // itself is the engine's — presentation only.
+  skipNoteCallout: {
+    display: "inline-flex",
+    alignItems: "flex-start",
+    gap: tokens.spacingHorizontalXS,
+    ...shorthands.padding("2px", tokens.spacingHorizontalS),
+    ...shorthands.border("1px", "solid", tokens.colorNeutralStroke2),
+    borderRadius: tokens.borderRadiusMedium,
+    color: tokens.colorNeutralForeground2,
+    fontStyle: "normal",
+  },
+  skipNoteIcon: { flexShrink: 0, marginTop: "3px", color: tokens.colorNeutralForeground3 },
+  // "{n} files hidden from cloud models" in the header, beside the egress
+  // shield — a quiet trigger sized like the shield's (subtle, no bulk).
+  hiddenFromCloud: {
+    minWidth: "auto",
+    ...shorthands.padding(0, tokens.spacingHorizontalXS),
     color: tokens.colorNeutralForeground3,
   },
   // --- Pinned questions: the changed-pins alert banner and the dialog. ---
@@ -1529,13 +1561,18 @@ const REFINE_CHIPS: { label: string; ask: string }[] = [
  * previous result", so they render only on the conversation's last turn where
  * that phrase is unambiguous; Edit SQL re-runs THIS answer's own SQL over its
  * own files (deterministic, model-free), so it stays useful on older turns.
+ * "Chart it" (charts by default, 0.12.1) offers a client-built chart of the
+ * answer's own table when the ENGINE didn't chart — zero model/network calls.
  */
 function RefineChips({
   meta,
+  content,
   isLast,
   disabled,
   onAsk,
   onEditSql,
+  chartShown,
+  onToggleChart,
   onSave,
   savePending,
   onEvidencePack,
@@ -1544,10 +1581,15 @@ function RefineChips({
   pinPending,
 }: {
   meta: AnalyticsMeta;
+  /** The answer markdown — the "Chart it" heuristic reads its GFM table. */
+  content: string;
   isLast: boolean;
   disabled: boolean;
   onAsk: (q: string) => void;
   onEditSql: (meta: AnalyticsMeta) => void;
+  /** "Chart it" per-turn visibility (savedNotes-style state in the parent). */
+  chartShown: boolean;
+  onToggleChart: () => void;
   /** Save-as-CSV (desktop engine only — omitted on the web dev twin). */
   onSave?: (meta: AnalyticsMeta) => void;
   savePending?: boolean;
@@ -1560,9 +1602,19 @@ function RefineChips({
   pinPending?: boolean;
 }) {
   const styles = useStyles();
+  // "Chart it": offered only when (a) the answer carries a parseable GFM
+  // table, (b) the client heuristic builds a spec the REAL parser accepts,
+  // and (c) the engine didn't already chart this answer. Pure computation
+  // over the displayed markdown — no rag/chat service is ever consulted.
+  const tableChart = useMemo(() => {
+    if (hasEngineChartFence(content)) return null;
+    const table = parseMarkdownTable(content);
+    return table ? chartSpecFromTable(table) : null;
+  }, [content]);
   // Quiet secondary actions (Beam): subtle + hairline, never a filled chip —
   // the answer stays the loudest thing on the card.
   return (
+    <>
     <div className={styles.refineRow}>
       {isLast &&
         REFINE_CHIPS.map((c) => (
@@ -1578,6 +1630,17 @@ function RefineChips({
             {c.label}
           </Button>
         ))}
+      {tableChart && (
+        <Button
+          appearance="subtle"
+          size="small"
+          shape="circular"
+          className={styles.quietChip}
+          onClick={onToggleChart}
+        >
+          {chartShown ? "Hide chart" : "Chart it"}
+        </Button>
+      )}
       <Button
         appearance="subtle"
         size="small"
@@ -1629,6 +1692,52 @@ function RefineChips({
         </Button>
       )}
     </div>
+    {/* "Chart it" inline mount: the client-built chart of this answer's own
+        table, drawn with the house renderer. Per-turn UI state only — never
+        persisted, recomputed from the markdown, zero model/network calls. */}
+    {chartShown && tableChart && <AnalyticsChart spec={tableChart} />}
+    </>
+  );
+}
+
+/**
+ * "Chart it" for answers WITHOUT analytics metadata (charts by default,
+ * 0.12.1): ANY answer whose markdown carries a chartable GFM table gets the
+ * same client-built chart — the numbers are already on screen, so drawing
+ * them adds no new trust surface. Same zero-model contract as RefineChips'
+ * chip; per-turn UI state only.
+ */
+function ChartItRow({
+  content,
+  chartShown,
+  onToggleChart,
+}: {
+  content: string;
+  chartShown: boolean;
+  onToggleChart: () => void;
+}) {
+  const styles = useStyles();
+  const tableChart = useMemo(() => {
+    if (hasEngineChartFence(content)) return null;
+    const table = parseMarkdownTable(content);
+    return table ? chartSpecFromTable(table) : null;
+  }, [content]);
+  if (!tableChart) return null;
+  return (
+    <>
+      <div className={styles.refineRow}>
+        <Button
+          appearance="subtle"
+          size="small"
+          shape="circular"
+          className={styles.quietChip}
+          onClick={onToggleChart}
+        >
+          {chartShown ? "Hide chart" : "Chart it"}
+        </Button>
+      </div>
+      {chartShown && <AnalyticsChart spec={tableChart} />}
+    </>
   );
 }
 
@@ -1698,6 +1807,25 @@ const AnswerMarkdown = memo(function AnswerMarkdown({
             {children}
           </a>
         );
+      },
+      // The engine's local-only skip note streams inline as one emphasis node
+      // ("_({n} files skipped — marked private …)_", byte-identical in both
+      // engines). Render THAT em — detected by its stable prefix over the
+      // node's text — as a small hairline callout with a lock, so "files were
+      // withheld" is visible at a scan instead of hiding in italics. Every
+      // other emphasis stays a plain <em>. Presentation only: the emitted
+      // string is untouched (test/privacyLegibility.test.mjs pins both
+      // engine templates).
+      em: ({ node, children, ...props }) => {
+        if (LOCAL_ONLY_SKIP_NOTE_RE.test(hastText(node))) {
+          return (
+            <span className={styles.skipNoteCallout}>
+              <LockClosedRegular fontSize={14} className={styles.skipNoteIcon} />
+              <span>{children}</span>
+            </span>
+          );
+        }
+        return <em {...props}>{children}</em>;
       },
       // Unwrap the <pre> around chart fences so the figure isn't inside
       // preformatted text; all other code blocks keep their default <pre>.
@@ -1914,6 +2042,14 @@ export function ChatPanel() {
   const providerId = useAuthStore((s) => s.onboarding.providerId);
   const providerLabel =
     MODEL_PROVIDERS.find((p) => p.id === providerId)?.label ?? "your AI provider";
+  // Local-only legibility (0.12.1 §2): while a CLOUD provider answers, the
+  // header counts the files actually being withheld right now — marked
+  // "Private — this device only" AND otherwise visible to AI. Same single
+  // rule as the engine's is_cloud_provider (src/lib/privacyState.ts); the
+  // count hides entirely on the private model (nothing is withheld) and at
+  // zero. Clicking filters the explorer to exactly that set.
+  const cloudActive = cloudProviderActive(providerId);
+  const hiddenFromCloud = useMemo(() => hiddenFromCloudCount(nodes), [nodes]);
 
   // --- Investigation context (openspec: add-investigations §4.2). The chat
   //     store owns WHICH investigation is current; the investigations store
@@ -2055,6 +2191,10 @@ export function ChatPanel() {
   const [briefingSaved, setBriefingSaved] = useState<string | null>(null);
   // Outcome of a pins-dialog row's "Add to board" (openspec: add-boards).
   const [pinBoardNote, setPinBoardNote] = useState<string | null>(null);
+  // "Chart it" (charts by default, 0.12.1): per-turn inline table-chart
+  // visibility — savedNotes-style UI state, never persisted; the spec itself
+  // recomputes from the answer markdown, zero model/network calls.
+  const [inlineCharts, setInlineCharts] = useState<Record<string, boolean>>({});
   // Saved/pinned notes AND thumbs ratings are keyed by message id, and ids
   // RESTART per conversation — clear them on a conversation switch so a new
   // chat's "a2" never inherits another chat's "Saved…"/"Pinned…"/👍.
@@ -2063,6 +2203,7 @@ export function ChatPanel() {
     setPackNotes({});
     setPinNotes({});
     setRatings({});
+    setInlineCharts({});
   }, [currentId]);
   // Cancels the in-flight ask() when the user presses Stop.
   const abortRef = useRef<AbortController | null>(null);
@@ -4288,6 +4429,30 @@ export function ChatPanel() {
             {onDeviceBadge}
             <Badge appearance="tint">{visibleBadgeText}</Badge>
             <EgressShield />
+            {/* "{n} files hidden from cloud models" (0.12.1 §2): beside the
+                egress shield — the two "what leaves this machine" surfaces sit
+                together. Cloud provider active + a non-empty withheld set
+                only. Clicking flips the explorer's "Hidden from cloud" filter
+                on (the explorer listens for the event and shows the toggle, so
+                the filter is visible and clearable in place); the detail-less
+                reveal-node ping only un-collapses the sidebar — AppShell
+                listens for the event name alone, and the explorer's own
+                reveal handler ignores it without an id. */}
+            {cloudActive && hiddenFromCloud > 0 && (
+              <Button
+                appearance="subtle"
+                size="small"
+                className={styles.hiddenFromCloud}
+                icon={<LockClosedRegular />}
+                aria-label={`${hiddenFromCloudLabel(hiddenFromCloud)} — show them in the file list`}
+                onClick={() => {
+                  window.dispatchEvent(new CustomEvent("lighthouse:filter-local-only"));
+                  window.dispatchEvent(new CustomEvent("lighthouse:reveal-node"));
+                }}
+              >
+                {hiddenFromCloudLabel(hiddenFromCloud)}
+              </Button>
+            )}
             {historyButton}
             <Tooltip content="Save this chat as a note in your vault" relationship="label">
               <Button
@@ -4496,10 +4661,15 @@ export function ChatPanel() {
                         <>
                           <RefineChips
                             meta={m.analytics}
+                            content={m.content}
                             isLast={m.id === lastId}
                             disabled={streaming}
                             onAsk={(q) => void sendQuestion(q)}
                             onEditSql={openSqlEditor}
+                            chartShown={!!inlineCharts[m.id]}
+                            onToggleChart={() =>
+                              setInlineCharts((prev) => ({ ...prev, [m.id]: !prev[m.id] }))
+                            }
                             onSave={
                               desktop ? (meta) => void saveResultCsv(m.id, meta) : undefined
                             }
@@ -4594,6 +4764,19 @@ export function ChatPanel() {
                             </div>
                           )}
                         </>
+                      )}
+                      {/* "Chart it" on ANY tabular answer (charts by default,
+                          0.12.1): answers without analytics meta — prose
+                          answers whose table is already on screen — get the
+                          same client-built chart, zero model calls. */}
+                      {!m.analytics && !m.error && !(streaming && m.id === lastId) && (
+                        <ChartItRow
+                          content={m.content}
+                          chartShown={!!inlineCharts[m.id]}
+                          onToggleChart={() =>
+                            setInlineCharts((prev) => ({ ...prev, [m.id]: !prev[m.id] }))
+                          }
+                        />
                       )}
                       {m.references && m.references.length > 0 && (
                         <References

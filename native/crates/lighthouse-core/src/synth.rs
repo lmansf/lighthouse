@@ -856,7 +856,9 @@ fn live_pipeline(
                             // No chart card rides multi-step (its chart is the
                             // last step's heuristic), but the fence scrub still
                             // applies: a stray chart request must never reach
-                            // displayed prose, and an explicit "none" is honored.
+                            // displayed prose. (Charts by default, 0.12.1: a
+                            // "none" no longer suppresses the step chart — the
+                            // engine decides chartability.)
                             let mut scrub = crate::analytics::DirectiveScrubber::new();
                             let mut answer = llm::stream_answer(
                                 question.clone(),
@@ -913,16 +915,14 @@ fn live_pipeline(
                             if let Some(cap) = crate::analytics::row_cap_footer(&regs) {
                                 yield delta(cap);
                             }
-                            // An explicit "none" directive suppresses the
-                            // step chart; a materializing directive can't run
-                            // here (steps carry markdown, not batches), so
-                            // anything else keeps the heuristic — the same
-                            // fallback contract as the single-query path.
-                            let suppressed = matches!(
-                                crate::analytics::parse_chart_directive(scrub.full_text()),
-                                Some(d) if d.kind == crate::analytics::ChartDirectiveKind::None
-                            );
-                            if let (false, Some(chart)) = (suppressed, &last_chart) {
+                            // Charts by default (0.12.1): the heuristic chart
+                            // of the LAST step flows regardless of any "none"
+                            // directive — the engine decides chartability, and
+                            // a materializing directive can't run here anyway
+                            // (steps carry markdown, not batches). last_chart
+                            // comes from run_query, which never charts a
+                            // truncated result.
+                            if let Some(chart) = &last_chart {
                                 yield delta(format!("\n```lighthouse-chart\n{chart}\n```\n"));
                             }
                             // Chips act on the LAST query; the footer shows all.
@@ -1074,12 +1074,14 @@ fn live_pipeline(
                         }
                         // Chartable result → engine-built spec the chat renders
                         // as SVG (Phase C), now directive-aware (openspec:
-                        // add-chart-directive): a valid chart request steers
-                        // which columns/kind, "none" suppresses, anything else
-                        // lands on the unchanged heuristic. Data comes straight
-                        // from the query batches in every case; the model's
-                        // text never supplies a number. Truncated results
-                        // still never chart.
+                        // add-chart-directive) with charts by default (0.12.1):
+                        // a valid chart request REFINES which columns/kind; a
+                        // "none" (or anything invalid) lands on the unchanged
+                        // heuristic — a directive can never suppress a
+                        // chartable result. Data comes straight from the query
+                        // batches in every case; the model's text never
+                        // supplies a number. Truncated results still never
+                        // chart.
                         let chart = if res.truncated {
                             None
                         } else {

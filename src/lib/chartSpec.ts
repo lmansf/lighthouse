@@ -30,6 +30,13 @@ export interface ChartSpec {
    * sanitized engine-side, never data.
    */
   title?: string;
+  /**
+   * Optional disclosure line, present ONLY when the emitter bucketed a
+   * beyond-cap categorical result into top-N + “Other” (charts by default,
+   * 0.12.1). Engine-computed (analytics.rs bucket_top_n) or client-computed
+   * (chartFromTable.ts) — never model text.
+   */
+  subtitle?: string;
 }
 
 /** Bounds the renderer trusts; anything outside is rejected as "not a chart". */
@@ -37,6 +44,9 @@ export const MAX_POINTS = 24;
 export const MAX_SERIES = 3;
 /** PARITY: lighthouse-core analytics.rs CHART_TITLE_MAX_CHARS. */
 export const MAX_TITLE_CHARS = 80;
+/** Cap on the bucketing-disclosure subtitle — generous headroom over the
+ *  longest string the emitters actually compute. */
+export const MAX_SUBTITLE_CHARS = 140;
 
 /**
  * Parse + validate the fenced JSON. Returns null on ANY shape violation —
@@ -110,6 +120,15 @@ export function parseChartSpec(raw: string): ChartSpec | null {
     const t = o.title;
     if (t.length === 0 || [...t].length > MAX_TITLE_CHARS) return null;
     spec.title = t;
+  }
+  // Bucketing-disclosure subtitle: emitter-computed display copy, validated
+  // like the title (string, trimmed, bounded) — anything else is a shape
+  // violation and the whole spec degrades to visible code.
+  if (o.subtitle !== undefined) {
+    if (typeof o.subtitle !== "string") return null;
+    const s = o.subtitle.trim();
+    if (s.length === 0 || [...s].length > MAX_SUBTITLE_CHARS) return null;
+    spec.subtitle = s;
   }
   return spec;
 }

@@ -51,6 +51,8 @@ import {
 } from "@fluentui/react-icons";
 import { ragService, type FileInspection } from "@/contracts";
 import { useRagStore } from "@/stores/useRagStore";
+import { useAuthStore } from "@/stores/useAuthStore";
+import { cloudProviderActive } from "@/lib/privacyState";
 import {
   citedChunkIndex,
   INSPECT_FILE_EVENT,
@@ -277,6 +279,16 @@ export function FileInspector({
   const included = data?.included;
   const localOnly = data?.localOnly === true;
   const tabular = data?.chunkMode === "tabular";
+  // The private pill carries the lock's two states (0.12.1 §2, the row's
+  // vocabulary): under a cloud provider the mark is ENFORCING right now;
+  // under the private model it's armed but idle. Same single rule as the
+  // engine's is_cloud_provider (src/lib/privacyState.ts).
+  const providerId = useAuthStore((s) => s.onboarding.providerId);
+  const privatePill = localOnly
+    ? cloudProviderActive(providerId)
+      ? "Private — hidden from cloud models right now"
+      : "Private — hidden from cloud models. The private model can always read it."
+    : "Shareable with cloud models";
 
   return (
     <Dialog open={fileId !== null} onOpenChange={(_, d) => { if (!d.open) onClose(); }}>
@@ -289,7 +301,8 @@ export function FileInspector({
 
             {data && !loading && (
               <>
-                {/* Visibility + private mark — the SAME wording as the row. */}
+                {/* Visibility + private mark — the row's two-state vocabulary
+                    (see privatePill above). */}
                 <div className={styles.section}>
                   <Text className={styles.label}>Status</Text>
                   <div className={styles.stateRow}>
@@ -299,7 +312,7 @@ export function FileInspector({
                     </span>
                     <span className={styles.pill}>
                       {localOnly ? <LockClosedRegular /> : <LockOpenRegular />}
-                      <Text>{localOnly ? "Private — this device only" : "Shareable with cloud models"}</Text>
+                      <Text>{privatePill}</Text>
                     </span>
                   </div>
                   {/* Attribution (openspec: add-curation-rules): when a RULE set

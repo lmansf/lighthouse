@@ -14,7 +14,7 @@
 mod common;
 
 use lighthouse_core::settings::{
-    read_desktop_settings, write_desktop_settings, DesktopSettings,
+    read_desktop_settings, set_openai_auth_method, write_desktop_settings, DesktopSettings,
 };
 
 #[test]
@@ -37,6 +37,7 @@ fn every_settings_field_round_trips() {
         briefing_notify: Some(false),
         briefing_note_hour: Some(7),
         tour_shown: Some(true),
+        openai_auth_method: Some("signin".into()),
         extra,
     };
 
@@ -59,6 +60,7 @@ fn every_settings_field_round_trips() {
         briefing_notify,
         briefing_note_hour,
         tour_shown,
+        openai_auth_method,
         extra,
     } = back;
 
@@ -76,6 +78,7 @@ fn every_settings_field_round_trips() {
     assert_eq!(briefing_notify, Some(false));
     assert_eq!(briefing_note_hour, Some(7));
     assert_eq!(tour_shown, Some(true));
+    assert_eq!(openai_auth_method.as_deref(), Some("signin"));
     assert_eq!(extra.get("widgetPos"), Some(&serde_json::json!([12, 34])));
 
     // Wire keys are camelCase (serde rename drift check — the TS twin and the
@@ -95,6 +98,7 @@ fn every_settings_field_round_trips() {
         "briefingNotify",
         "briefingNoteHour",
         "tourShown",
+        "openaiAuthMethod",
         "widgetPos",
     ] {
         assert!(
@@ -109,11 +113,12 @@ fn writer_persists_every_toggle_and_preserves_shell_keys() {
     let vault = tempfile::tempdir().expect("tempdir");
     let _guard = common::lock_env(vault.path());
     let file = vault.path().join("settings-under-test.json");
-    // Pre-seed the two things the typed writer must never clobber: the
-    // shell-owned vaultDir and an unmodeled key (widgetPos → `extra`).
+    // Pre-seed what the typed writer must never clobber: the shell-owned
+    // vaultDir, an unmodeled key (widgetPos → `extra`), and the sign-in
+    // auth-method choice, which only its narrow setter writes (0.12.1 §3).
     std::fs::write(
         &file,
-        r#"{"vaultDir":"/somewhere/vault","widgetPos":[7,9]}"#,
+        r#"{"vaultDir":"/somewhere/vault","widgetPos":[7,9],"openaiAuthMethod":"signin"}"#,
     )
     .expect("seed settings file");
     std::env::set_var("LIGHTHOUSE_SETTINGS_FILE", &file);
@@ -160,4 +165,47 @@ fn writer_persists_every_toggle_and_preserves_shell_keys() {
         Some(&serde_json::json!([7, 9])),
         "unmodeled keys must survive the read-modify-write (flatten)"
     );
+    assert_eq!(
+        s.openai_auth_method.as_deref(),
+        Some("signin"),
+        "the sign-in auth method must survive the positional writer untouched"
+    );
+}
+
+// Provider sign-in (0.12.1 §3): the auth-method choice has its own narrow
+// setter (never a positional param — see settings.rs) with a two-value
+// domain. It must round-trip, refuse anything else, and preserve every
+// other key exactly like the main writer.
+#[test]
+fn openai_auth_method_narrow_setter_round_trips_and_validates() {
+    let vault = tempfile::tempdir().expect("tempdir");
+    let _guard = common::lock_env(vault.path());
+    let file = vault.path().join("settings-signin-test.json");
+    std::fs::write(&file, r#"{"vaultDir":"/somewhere/vault","widgetPos":[7,9]}"#)
+        .expect("seed settings file");
+    std::env::set_var("LIGHTHOUSE_SETTINGS_FILE", &file);
+
+    // Default: absent ⇒ the key path ("key" is implied, nothing stored).
+    assert_eq!(read_desktop_settings().openai_auth_method, None);
+
+    // "signin" persists…
+    set_openai_auth_method("signin");
+    assert_eq!(
+        read_desktop_settings().openai_auth_method.as_deref(),
+        Some("signin")
+    );
+    // …an out-of-domain value is ignored (the stored choice stands)…
+    set_openai_auth_method("carrier-pigeon");
+    assert_eq!(
+        read_desktop_settings().openai_auth_method.as_deref(),
+        Some("signin")
+    );
+    // …and "key" restores the default explicitly.
+    set_openai_auth_method("key");
+    let s = read_desktop_settings();
+    std::env::remove_var("LIGHTHOUSE_SETTINGS_FILE");
+    assert_eq!(s.openai_auth_method.as_deref(), Some("key"));
+    // The narrow setter preserves shell-owned and unmodeled keys.
+    assert_eq!(s.vault_dir.as_deref(), Some("/somewhere/vault"));
+    assert_eq!(s.extra.get("widgetPos"), Some(&serde_json::json!([7, 9])));
 }

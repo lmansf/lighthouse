@@ -67,6 +67,26 @@ without a stored key for the selected provider. Organizations can enforce
 this: the managed policy layer's `allowedProviders`/`forceLocalOnly`
 (docs/managed-deployment.md) pins the choice engine-side.
 
+**Provider sign-in (inert by default).** The code also carries a generic,
+standards-based sign-in flow (OAuth 2.0 device authorization, RFC 8628) as
+an alternative to pasting an OpenAI API key
+(`native/crates/lighthouse-core/src/provider_auth.rs`) — but it ships with
+**no endpoints and no client id configured**, so a stock build makes **zero
+auth-related calls** and shows **no sign-in control** (the same fail-closed
+pattern as the updater's signing key). Every identifier — a public-client
+id, the device-authorization endpoint, the token endpoint, and the API
+base — must be supplied by the maintainer, at build or run time, **after
+registering this application with the vendor**; nothing vendor-specific is
+embedded as a default, and any of the four missing keeps the whole surface
+answering "unavailable". Only in a build a maintainer has configured does
+the egress become: the **configured auth host** (sign-in + token refresh —
+carries the client id and OAuth codes/tokens, **never document content or
+file names**; ledger purpose `Provider sign-in`), and the **configured API
+base** (signed-in asks — the same request and payload class as the table
+above, with a bearer token in place of the key; ledger purpose
+`Signed-in ask`). The granted tokens live in the same encrypted
+install-global secrets store as API keys, and sign-out deletes them.
+
 ## 2. Update check — GitHub releases API (notify-only)
 
 `GET https://api.github.com/repos/lmansf/lighthouse/releases/latest` at boot

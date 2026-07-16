@@ -22,6 +22,9 @@ import type {
   AuditVerdict,
   RagReference,
   RestoreToken,
+  SigninPoll,
+  SigninStart,
+  SigninStatus,
 } from "../types";
 
 async function getTree(): Promise<{ sources: DataSource[]; nodes: FileNode[]; desktop: boolean }> {
@@ -440,6 +443,82 @@ class RealRagService implements RagService {
   async refreshBoardCards(pinIds: string[]): Promise<BoardCardRefresh[]> {
     const res = await post({ op: "boards", action: "refreshCards", pinIds });
     return Array.isArray(res.cards) ? (res.cards as BoardCardRefresh[]) : [];
+  }
+
+  // Provider sign-in (0.12.1 §3): the generic, registration-gated device
+  // flow. Every op answers 200 (fail-closed availability + flow errors ride
+  // in the body — the pinAsk idiom), so these never throw on a stock build.
+
+  async providerAuthStatus(): Promise<SigninStatus> {
+    const res = await post({ op: "providerAuth", action: "status" });
+    return {
+      available: res.available === true,
+      signedIn: res.signedIn === true,
+      method: res.method === "signin" ? "signin" : "key",
+      ...(typeof res.accountHint === "string" && res.accountHint
+        ? { accountHint: res.accountHint }
+        : {}),
+      ...(typeof res.expiresMs === "number" ? { expiresMs: res.expiresMs } : {}),
+      ...(typeof res.reason === "string" && res.reason ? { reason: res.reason } : {}),
+    };
+  }
+
+  async providerAuthStart(): Promise<{ start?: SigninStart; error?: string }> {
+    const res = await post({ op: "providerAuth", action: "start" });
+    if (typeof res.userCode === "string" && res.userCode) {
+      return {
+        start: {
+          userCode: res.userCode,
+          verificationUri: typeof res.verificationUri === "string" ? res.verificationUri : "",
+          intervalMs: typeof res.intervalMs === "number" ? res.intervalMs : 5000,
+          ...(typeof res.expiresInMs === "number" ? { expiresInMs: res.expiresInMs } : {}),
+        },
+      };
+    }
+    const reason =
+      typeof res.error === "string" && res.error
+        ? res.error
+        : typeof res.reason === "string" && res.reason
+          ? res.reason
+          : "sign-in is unavailable";
+    return { error: reason };
+  }
+
+  async providerAuthPoll(): Promise<SigninPoll> {
+    const res = await post({ op: "providerAuth", action: "poll" });
+    if (typeof res.error === "string" && res.error) {
+      return { status: "idle", error: res.error };
+    }
+    if (typeof res.reason === "string" && res.reason && res.available === false) {
+      return { status: "idle", error: res.reason };
+    }
+    const status =
+      res.status === "pending" || res.status === "complete" ? res.status : "idle";
+    return {
+      status,
+      ...(typeof res.intervalMs === "number" ? { intervalMs: res.intervalMs } : {}),
+      ...(typeof res.accountHint === "string" && res.accountHint
+        ? { accountHint: res.accountHint }
+        : {}),
+    };
+  }
+
+  async providerAuthSignout(): Promise<void> {
+    await post({ op: "providerAuth", action: "signout" });
+  }
+
+  async providerAuthSetMethod(
+    method: "key" | "signin",
+  ): Promise<{ ok?: boolean; error?: string }> {
+    const res = await post({ op: "providerAuth", action: "setMethod", method });
+    if (res.ok === true) return { ok: true };
+    const reason =
+      typeof res.reason === "string" && res.reason
+        ? res.reason
+        : typeof res.error === "string" && res.error
+          ? res.error
+          : "couldn't save the choice";
+    return { error: reason };
   }
 }
 

@@ -84,6 +84,15 @@ pub struct DesktopSettings {
     /// localStorage so it survives vault switches. Default false (None = false).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tour_shown: Option<bool>,
+    /// Provider sign-in (0.12.1 §3): how the OpenAI provider authenticates —
+    /// "key" (API key, the default; None = "key") or "signin" (the OAuth
+    /// device flow in provider_auth.rs). Only meaningful when a maintainer
+    /// has configured the sign-in identifiers; with the flow unconfigured a
+    /// persisted "signin" makes asks fail with the honest reason rather than
+    /// silently using a key (fail-closed — the user chose sign-in). Written
+    /// by `set_openai_auth_method`, never by the positional writer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openai_auth_method: Option<String>,
     /// Keys this struct doesn't model (e.g. the shell's hand-persisted
     /// `widgetPos`) must survive a read-modify-write round trip — without
     /// this flatten, any Preferences toggle would silently delete them.
@@ -175,5 +184,23 @@ pub fn write_desktop_settings(
         next.tour_shown = tour_shown;
     }
     write_json(&f, &next); // best-effort: a read-only location just means unsaved
+    next
+}
+
+/// Provider sign-in (0.12.1 §3): persist the OpenAI auth-method choice
+/// ("key" | "signin") without disturbing any other key — a narrow
+/// read-modify-write beside the positional writer, so the shell's call
+/// sites don't grow a parameter for a field only the sign-in control
+/// touches. Any other value is ignored (the two methods are the whole
+/// domain); a garbled caller leaves the settings unchanged.
+pub fn set_openai_auth_method(method: &str) -> DesktopSettings {
+    let Some(f) = settings_file() else {
+        return DesktopSettings::default();
+    };
+    let mut next = read_desktop_settings();
+    if method == "key" || method == "signin" {
+        next.openai_auth_method = Some(method.to_string());
+        write_json(&f, &next); // best-effort, like the writer above
+    }
     next
 }

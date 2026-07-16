@@ -4,12 +4,14 @@
 //!
 //!   1. MODEL-FREE floor (always runs; the CI gate): the known heuristic
 //!      misfire classes (date-ish labels, top-N candidates, single-value
-//!      results, identifier columns, float-encoded categories) run as CSV
-//!      fixtures through the REAL executor (`run_query`), asserting the
-//!      expected kind-or-none; the directive grammar/validator cases (unknown
-//!      column, over-limit series, fabricated values, "none", title cap) run
-//!      through the REAL parse → validate → materialize path (`decide_chart`);
-//!      the chart card's budget and few-shot integrity are re-checked. The
+//!      results, identifier columns, float-encoded categories, beyond-cap
+//!      categorical bucketing) run as CSV fixtures through the REAL executor
+//!      (`run_query`), asserting the expected kind-or-none plus a
+//!      chart-coverage floor (charts by default, 0.12.1); the directive
+//!      grammar/validator cases (unknown column, over-limit series,
+//!      fabricated values, the now-advisory "none", title cap) run through
+//!      the REAL parse → validate → materialize path (`decide_chart`); the
+//!      chart card's budget and few-shot integrity are re-checked. The
 //!      process exits non-zero on any violation, so heuristic or card drift is
 //!      a reviewed diff.
 //!
@@ -65,6 +67,17 @@ const FIXTURES: &[(&str, &str)] = &[
     ("years", "yr,total\n2019,5\n2020,6\n2021,7\n"),
 ];
 
+/// Beyond-cap categorical fixture (charts by default, 0.12.1): 40 rows,
+/// values 10..=400 — the heuristic folds them into top-23 + “Other”
+/// (10 + 20 + … + 170 = 1530) instead of declining.
+fn many_fixture_csv() -> String {
+    let mut csv = String::from("cat,total\n");
+    for i in 1..=40 {
+        csv.push_str(&format!("cat{i:02},{}\n", i * 10));
+    }
+    csv
+}
+
 /// One model-free golden: fixture SQL → the expected chart kind (None = "the
 /// heuristic must decline").
 struct Golden {
@@ -109,7 +122,20 @@ const GOLDEN: &[Golden] = &[
         sql: "SELECT yr, total FROM years ORDER BY yr",
         kind: Some("area"),
     },
+    Golden {
+        what: "a beyond-cap categorical result folds into a top-N bar (bucketing)",
+        sql: "SELECT cat, total FROM many ORDER BY cat",
+        kind: Some("bar"),
+    },
 ];
+
+/// Section-1a chart-coverage floor (charts by default, 0.12.1): how many of
+/// the GOLDEN fixtures must produce Some(kind). Computed from the actual run
+/// (the per-fixture goldens above pin each one); the policy flip + bucketing
+/// moved it 5 → 6 — the beyond-cap categorical fixture now charts where the
+/// pre-flip heuristic declined it outright. A drop below this floor is a red
+/// build.
+const CHART_COVERAGE_BASELINE: usize = 6;
 
 fn kind_of(spec: &Option<String>) -> Option<String> {
     spec.as_deref().and_then(|s| {
@@ -131,10 +157,15 @@ async fn main() {
     let _ = fs::create_dir_all(&dir);
     let ctx = SessionContext::new();
     let mut files: Vec<(String, String, PathBuf)> = Vec::new();
-    for (table, body) in FIXTURES {
+    let many_csv = many_fixture_csv();
+    let all_fixtures = FIXTURES
+        .iter()
+        .map(|(t, b)| (*t, b.to_string()))
+        .chain(std::iter::once(("many", many_csv)));
+    for (table, body) in all_fixtures {
         let path = dir.join(format!("{table}.csv"));
         fs::write(&path, body).expect("write fixture");
-        ctx.register_csv(*table, path.to_str().unwrap(), CsvReadOptions::new())
+        ctx.register_csv(table, path.to_str().unwrap(), CsvReadOptions::new())
             .await
             .expect("register fixture");
         files.push((format!("{table}.csv"), format!("{table}.csv"), path));
@@ -151,11 +182,15 @@ async fn main() {
 
     // --- Section 1a: heuristic misfire floor (always enforced) ------------
     println!("== model-free heuristic floor ==");
+    let mut covered = 0usize;
     for g in GOLDEN {
         let outcome = match run_query(&ctx, g.sql).await {
             Err(e) => Err(format!("query failed: {e}")),
             Ok(res) => {
                 let got = kind_of(&res.chart);
+                if got.is_some() {
+                    covered += 1;
+                }
                 if got.as_deref() == g.kind {
                     Ok(())
                 } else {
@@ -165,6 +200,54 @@ async fn main() {
         };
         check(g.what, outcome);
     }
+    // Chart-coverage floor (charts by default, 0.12.1): the count of
+    // Section-1a fixtures that actually produced a chart must never regress.
+    check(
+        "chart-coverage floor: Section-1a fixtures producing a chart",
+        if covered >= CHART_COVERAGE_BASELINE {
+            Ok(())
+        } else {
+            Err(format!(
+                "only {covered} of {} fixtures charted (floor {CHART_COVERAGE_BASELINE})",
+                GOLDEN.len()
+            ))
+        },
+    );
+    // Bucketing detail (charts by default, 0.12.1): the folded bar is honest —
+    // exactly 24 points, the tail summed into one final “Other” row, and the
+    // engine-computed subtitle disclosing the fold, byte-pinned.
+    let many: QueryResult = run_query(&ctx, "SELECT cat, total FROM many ORDER BY cat")
+        .await
+        .expect("many fixture");
+    check(
+        "beyond-cap bucketing: 24 points, “Other” tail sum, pinned subtitle",
+        match many
+            .chart
+            .as_deref()
+            .map(serde_json::from_str::<serde_json::Value>)
+        {
+            Some(Ok(v)) => {
+                let x = v["x"].as_array().cloned().unwrap_or_default();
+                let vals = v["series"][0]["values"].as_array().cloned().unwrap_or_default();
+                if v["kind"] != "bar" {
+                    Err(format!("kind {:?}", v["kind"]))
+                } else if x.len() != 24 || vals.len() != 24 {
+                    Err(format!("{} points, {} values", x.len(), vals.len()))
+                } else if x[23] != "Other" {
+                    Err(format!("last label {:?}", x[23]))
+                } else if vals[23] != serde_json::json!(1530.0) {
+                    Err(format!("“Other” sum {:?} (expected 1530)", vals[23]))
+                } else if v["subtitle"]
+                    != "Top 23 of 40 by total — 17 smaller rows grouped as “Other”"
+                {
+                    Err(format!("subtitle {:?}", v["subtitle"]))
+                } else {
+                    Ok(())
+                }
+            }
+            other => Err(format!("no bucketed chart: {other:?}")),
+        },
+    );
 
     // --- Section 1b: directive floor (parse → validate → materialize) -----
     println!("\n== model-free directive floor ==");
@@ -212,12 +295,18 @@ async fn main() {
         },
     );
 
-    // "none" suppresses a chart the heuristic would draw.
+    // Charts by default (0.12.1): "none" no longer suppresses a chartable
+    // result — it behaves exactly like no directive, landing byte-equal on
+    // the undirected heuristic spec.
     check(
-        "\"none\" suppresses the auto-chart",
-        match decide_chart(&topn.batches, &fence(r#"{"kind":"none"}"#)) {
-            None => Ok(()),
-            Some(s) => Err(format!("charted anyway: {s}")),
+        "\"none\" is advisory: byte-equal to the undirected heuristic",
+        {
+            let got = decide_chart(&topn.batches, &fence(r#"{"kind":"none"}"#));
+            if got.is_some() && got == topn.chart {
+                Ok(())
+            } else {
+                Err(format!("got {got:?}, heuristic {:?}", topn.chart))
+            }
         },
     );
 

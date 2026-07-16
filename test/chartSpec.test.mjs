@@ -355,6 +355,28 @@ test("parseChartSpec accepts an engine-capped title on directed specs", () => {
   assert.ok(parseChartSpec(withTitle("x".repeat(80))));
 });
 
+test("parseChartSpec accepts the emitter's bucketing subtitle (charts by default)", () => {
+  const withSubtitle = (subtitle) =>
+    JSON.stringify({ kind: "bar", x: ["a", "b"], series: [{ name: "v", values: [1, 2] }], subtitle });
+  // The engine-computed disclosure, byte-for-byte (analytics.rs bucket_top_n).
+  const pinned = "Top 23 of 40 by total — 17 smaller rows grouped as “Other”";
+  const spec = parseChartSpec(withSubtitle(pinned));
+  assert.ok(spec);
+  assert.equal(spec.subtitle, pinned);
+  // Absent subtitle stays absent (≤24-row specs are byte-identical to before).
+  const plain = parseChartSpec(good);
+  assert.ok(plain);
+  assert.equal(plain.subtitle, undefined);
+  // Shape violations: non-string, empty/blank, over the 140-char cap.
+  assert.equal(parseChartSpec(withSubtitle(7)), null);
+  assert.equal(parseChartSpec(withSubtitle("")), null);
+  assert.equal(parseChartSpec(withSubtitle("   ")), null);
+  assert.equal(parseChartSpec(withSubtitle("x".repeat(141))), null);
+  assert.ok(parseChartSpec(withSubtitle("x".repeat(140))));
+  // Display copy is trimmed, mirroring the title discipline.
+  assert.equal(parseChartSpec(withSubtitle("  padded  "))?.subtitle, "padded");
+});
+
 test("stripChartRequestFences removes directive fences from displayed prose", () => {
   const fenced =
     'Before.\n\n```lighthouse-chart-request\n{"kind":"none"}\n```\nAfter.';

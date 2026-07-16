@@ -31,6 +31,9 @@ import type {
   AuditVerdict,
   RagReference,
   RestoreToken,
+  SigninPoll,
+  SigninStart,
+  SigninStatus,
 } from "./types";
 
 /** Curates which files/sources are exposed to retrieval, and runs retrieval. */
@@ -382,6 +385,30 @@ export interface RagService {
    * answer `tombstone: true`.
    */
   refreshBoardCards(pinIds: string[]): Promise<BoardCardRefresh[]>;
+  /**
+   * Provider sign-in (0.12.1 §3): status of the generic, registration-gated
+   * OAuth device flow. `available` is false on a stock build (no endpoints
+   * or client id are configured until a maintainer registers with the
+   * vendor), on the web twin, and under any partial configuration — never
+   * render a sign-in affordance while it is false.
+   */
+  providerAuthStatus(): Promise<SigninStatus>;
+  /**
+   * Begin a device-authorization sign-in. `error` carries the honest reason
+   * (unconfigured build, vendor refusal) instead of a throw so the dialog
+   * surfaces it inline — the addRule/pinAsk idiom.
+   */
+  providerAuthStart(): Promise<{ start?: SigninStart; error?: string }>;
+  /** Poll the started sign-in once; drive it at the returned interval. */
+  providerAuthPoll(): Promise<SigninPoll>;
+  /** Drop the signed-in session — sealed tokens removed engine-side. */
+  providerAuthSignout(): Promise<void>;
+  /**
+   * Persist how the OpenAI provider authenticates. "key" (the default)
+   * always saves; "signin" is registration-gated like the flow it arms and
+   * comes back as `error` on a build where sign-in isn't configured.
+   */
+  providerAuthSetMethod(method: "key" | "signin"): Promise<{ ok?: boolean; error?: string }>;
 }
 
 /**
