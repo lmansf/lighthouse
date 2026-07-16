@@ -44,7 +44,21 @@ const FIXTURES: &[(&str, &str)] = &[
     ),
     // A numeric column with a blank cell — exercises null-skipping AVG.
     ("ratios.csv", "region,ratio\nNE,2.0\nNW,4.0\nSE,\nS,6.0\n"),
+    // A "messy" amount column — currency-prefixed text DataFusion infers as
+    // Utf8 — the exact shape a shaped VIEW cleans (add-shaped-views §6.2).
+    (
+        "messy_sales.csv",
+        "region,amount\nNE,$1200\nNE,$300\nNW,$500\n",
+    ),
 ];
+
+/// The shaped-view definition the §6.2 Golden answers through: one guarded
+/// SELECT that casts the currency-text column to a real number. Passes
+/// `guard_sql` (asserted below) exactly as `views::create` requires, and
+/// registers virtually via `df.into_view()` — the same primitive
+/// `analytics::register_views` uses at ask time.
+const CLEAN_SALES_VIEW_SQL: &str =
+    "SELECT region, CAST(REPLACE(amount, '$', '') AS DOUBLE) AS amount FROM messy_sales";
 
 /// A model-free golden case: known-good SQL over the fixtures, plus a checker on
 /// the verified result.
@@ -80,6 +94,15 @@ const GOLDEN: &[Golden] = &[
         sql: "SELECT AVG(ratio) AS avg_ratio FROM ratios",
         check: |r| contains(r, &["4"]),
     },
+    Golden {
+        // add-shaped-views §6.2: a question answered THROUGH a saved view. The
+        // view (CLEAN_SALES_VIEW_SQL) is registered into this ctx before the
+        // loop, so this query reads cleaned DOUBLE amounts the raw CSV never
+        // held. NE: 1200 + 300 = 1500; NW: 500.
+        what: "totals through a shaped view over a messy currency column",
+        sql: "SELECT region, SUM(amount) AS total FROM clean_sales GROUP BY region ORDER BY region",
+        check: |r| contains(r, &["NE", "1500", "NW", "500"]),
+    },
 ];
 
 #[tokio::main]
@@ -103,6 +126,21 @@ async fn main() {
         ctx.register_csv(table, path.to_str().unwrap(), CsvReadOptions::new())
             .await
             .expect("register fixture");
+    }
+    // add-shaped-views §6.2: register the shaped view virtually — the SAME
+    // path the engine takes at ask time (guard the definition, then
+    // `df.into_view()`). A guard failure or a bad definition fails the floor.
+    guard_sql(CLEAN_SALES_VIEW_SQL).expect("shaped-view definition passes the SQL guard");
+    match ctx.sql(CLEAN_SALES_VIEW_SQL).await {
+        Ok(df) => {
+            ctx.register_table("clean_sales", df.into_view())
+                .expect("register shaped view");
+            println!("  PASS  shaped view registered virtually (guarded, into_view)");
+        }
+        Err(e) => {
+            failures += 1;
+            println!("  FAIL  shaped view failed to register: {e}");
+        }
     }
     for g in GOLDEN {
         match run_query(&ctx, g.sql)
