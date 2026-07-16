@@ -21,6 +21,9 @@ import type {
   AuditVerdict,
   RagReference,
   RestoreToken,
+  SigninPoll,
+  SigninStart,
+  SigninStatus,
 } from "../types";
 import { SEED_NODES, SEED_SOURCES } from "./files";
 
@@ -782,6 +785,71 @@ class MockRagService implements RagService {
         ...(pin.staleReason !== undefined ? { staleReason: pin.staleReason } : {}),
       };
     });
+  }
+
+  // Provider sign-in (0.12.1 §3): a scripted device flow so the AI-models
+  // dialog is exercisable offline. The mock simulates a CONFIGURED build
+  // (available: true) — the real engines are available:false until a
+  // maintainer registers with the vendor, and fail-closed invisibility is
+  // proven against that real gate, not this script. Script: start → canned
+  // code; two pending polls → complete; status flips; signout clears.
+  private signinMethod: "key" | "signin" = "key";
+  private signinSignedIn = false;
+  /** Polls remaining before the scripted flow completes; -1 = no flow. */
+  private signinPollsLeft = -1;
+  private static readonly SIGNIN_ACCOUNT = "mock@example.com";
+
+  async providerAuthStatus(): Promise<SigninStatus> {
+    return {
+      available: true,
+      signedIn: this.signinSignedIn,
+      method: this.signinMethod,
+      ...(this.signinSignedIn
+        ? {
+            accountHint: MockRagService.SIGNIN_ACCOUNT,
+            expiresMs: Date.now() + 3_600_000,
+          }
+        : {}),
+    };
+  }
+
+  async providerAuthStart(): Promise<{ start?: SigninStart; error?: string }> {
+    this.signinPollsLeft = 2;
+    return {
+      start: {
+        userCode: "MOCK-0421",
+        verificationUri: "https://signin.example/device",
+        intervalMs: 10,
+        expiresInMs: 600_000,
+      },
+    };
+  }
+
+  async providerAuthPoll(): Promise<SigninPoll> {
+    if (this.signinPollsLeft < 0) {
+      return this.signinSignedIn
+        ? { status: "complete", accountHint: MockRagService.SIGNIN_ACCOUNT }
+        : { status: "idle" };
+    }
+    if (this.signinPollsLeft > 0) {
+      this.signinPollsLeft -= 1;
+      return { status: "pending", intervalMs: 10 };
+    }
+    this.signinPollsLeft = -1;
+    this.signinSignedIn = true;
+    return { status: "complete", accountHint: MockRagService.SIGNIN_ACCOUNT };
+  }
+
+  async providerAuthSignout(): Promise<void> {
+    this.signinSignedIn = false;
+    this.signinPollsLeft = -1;
+  }
+
+  async providerAuthSetMethod(
+    method: "key" | "signin",
+  ): Promise<{ ok?: boolean; error?: string }> {
+    this.signinMethod = method;
+    return { ok: true };
   }
 
   /** A node plus all of its descendants (so toggling a folder cascades). */

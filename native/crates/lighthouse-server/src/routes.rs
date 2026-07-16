@@ -662,6 +662,91 @@ pub async fn rag_post(headers: HeaderMap, body: Option<Json<Value>>) -> Response
                 Err(e) => bad_request(&err_message(&e, "restore failed")),
             }
         }
+        // Provider sign-in (0.12.1 §3): a generic RFC 8628 device-
+        // authorization client that stays INERT until a maintainer registers
+        // with a vendor and configures all four LIGHTHOUSE_SIGNIN_* values
+        // (provider_auth.rs) — unconfigured, every action answers
+        // {available:false} and no host is dialed. Flow errors ride back as
+        // 200 + {error} (the pinAsk idiom) so the dialog resets with the
+        // reason instead of throwing. setMethod persists the auth-method
+        // choice ("key" restores the default and always works; "signin" is
+        // registration-gated like the flow it arms). PARITY: commands.rs
+        // mirrors this op exactly; the TS twin answers a fail-closed stub
+        // (sign-in runs in the desktop app).
+        Some("providerAuth") => match body["action"].as_str() {
+            Some("status") => {
+                Json(lighthouse_core::provider_auth::status_payload()).into_response()
+            }
+            Some("setMethod") => match body["method"].as_str() {
+                Some("key") => {
+                    lighthouse_core::settings::set_openai_auth_method("key");
+                    Json(json!({ "ok": true, "method": "key" })).into_response()
+                }
+                Some("signin") => {
+                    if lighthouse_core::provider_auth::signin_config().is_none() {
+                        Json(json!({
+                            "available": false,
+                            "reason": lighthouse_core::provider_auth::UNCONFIGURED_REASON,
+                        }))
+                        .into_response()
+                    } else {
+                        lighthouse_core::settings::set_openai_auth_method("signin");
+                        Json(json!({ "ok": true, "method": "signin" })).into_response()
+                    }
+                }
+                _ => bad_request("method must be \"key\" or \"signin\""),
+            },
+            Some("start") => match lighthouse_core::provider_auth::start().await {
+                Ok(flow) => Json(json!({
+                    "userCode": flow.user_code,
+                    "verificationUri": flow.verification_uri,
+                    "intervalMs": flow.interval_ms,
+                    "expiresInMs": flow.expires_in_ms,
+                }))
+                .into_response(),
+                Err(e) if e == lighthouse_core::provider_auth::UNCONFIGURED_REASON => {
+                    Json(json!({ "available": false, "reason": e })).into_response()
+                }
+                Err(e) => Json(json!({ "error": e })).into_response(),
+            },
+            Some("poll") => match lighthouse_core::provider_auth::poll_once().await {
+                Ok(lighthouse_core::provider_auth::Poll::Pending { interval_ms }) => {
+                    Json(json!({ "status": "pending", "intervalMs": interval_ms }))
+                        .into_response()
+                }
+                Ok(lighthouse_core::provider_auth::Poll::Complete { account }) => {
+                    let mut out = json!({ "status": "complete" });
+                    if let Some(a) = account {
+                        out["accountHint"] = json!(a);
+                    }
+                    Json(out).into_response()
+                }
+                Ok(lighthouse_core::provider_auth::Poll::Idle) => {
+                    Json(json!({ "status": "idle" })).into_response()
+                }
+                Err(e) if e == lighthouse_core::provider_auth::UNCONFIGURED_REASON => {
+                    Json(json!({ "available": false, "reason": e })).into_response()
+                }
+                Err(e) => Json(json!({ "error": e })).into_response(),
+            },
+            Some("signout") => {
+                // Dropping sealed tokens is local-only and always safe, so it
+                // runs regardless; the ANSWER stays fail-closed unconfigured.
+                lighthouse_core::provider_auth::signout();
+                if lighthouse_core::provider_auth::signin_config().is_none() {
+                    Json(json!({
+                        "available": false,
+                        "reason": lighthouse_core::provider_auth::UNCONFIGURED_REASON,
+                    }))
+                    .into_response()
+                } else {
+                    Json(json!({ "ok": true })).into_response()
+                }
+            }
+            _ => bad_request(
+                "providerAuth action must be status, setMethod, start, poll, or signout",
+            ),
+        },
         // Managed policy snapshot (openspec: add-managed-policy) — read-only;
         // the UI renders the reported locks as "Managed by your organization".
         Some("policy") => Json(lighthouse_core::policy::snapshot()).into_response(),

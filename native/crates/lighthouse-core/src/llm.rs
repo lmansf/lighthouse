@@ -267,6 +267,109 @@ pub fn stream_answer(
             }
         }
 
+        // --- Provider sign-in (0.12.1 §3): the user chose "Sign in" for the
+        // OpenAI provider instead of an API key. The ask rides the EXISTING
+        // chat-completions dialect (stream_chat_completions — same body, same
+        // SSE parsing) with only the base URL (the maintainer-configured
+        // api_base) and the bearer (a fresh OAuth access token) swapped. This
+        // branch NEVER falls back to the API-key path: the user chose
+        // sign-in, so an unconfigured build / signed-out session / dead
+        // refresh fails with the honest reason and answers from local
+        // passages, exactly like any other provider failure. Managed policy
+        // gates it like the keyed paths; the method defaults to "key", so a
+        // build that never touches the sign-in control never enters here.
+        let signin_selected = cfg.provider_id.as_deref() == Some("openai")
+            && crate::settings::read_desktop_settings().openai_auth_method.as_deref()
+                == Some("signin");
+        if signin_selected {
+            if !crate::policy::provider_allowed("openai") {
+                // Same fail-closed fallthrough as a disallowed keyed provider.
+                let mut fb = extractive(&question, &contexts, true);
+                while let Some(w) = fb.next().await {
+                    yield w;
+                }
+                return;
+            }
+            match crate::provider_auth::ensure_fresh_access().await {
+                Err(reason) => {
+                    yield format!(
+                        "\n\n_(OpenAI sign-in unavailable — {reason}; falling back to local passages.)_\n\n"
+                    );
+                    let mut fb = extractive(&question, &contexts, false);
+                    while let Some(w) = fb.next().await {
+                        yield w;
+                    }
+                    return;
+                }
+                Ok(access) => {
+                    // The openai table row still supplies the DIALECT knobs
+                    // (token-cap param, default model); only the destination
+                    // and credential differ. Provenance is untouched:
+                    // provider_id stays "openai", so origin_of/audit report
+                    // the same identity as the keyed path.
+                    let p = remote_provider("openai").expect("openai is a built-in provider");
+                    let api_base = crate::provider_auth::signin_config()
+                        .map(|c| c.api_base)
+                        .unwrap_or_default();
+                    let chat_url =
+                        format!("{}/chat/completions", api_base.trim_end_matches('/'));
+                    let model = cfg
+                        .model_id
+                        .clone()
+                        .filter(|m| !m.is_empty())
+                        .unwrap_or_else(|| p.default_model.to_string());
+                    let mut emitted = false;
+                    let mut failed: Option<String> = None;
+                    {
+                        let mut s = stream_chat_completions(
+                            chat_url,
+                            "OpenAI (signed in)",
+                            p.max_tokens_param,
+                            crate::provider_auth::PURPOSE_SIGNED_IN_ASK,
+                            &question,
+                            &contexts,
+                            &access,
+                            &model,
+                            &history,
+                        )
+                        .await;
+                        loop {
+                            match s.next().await {
+                                Some(Ok(delta)) => {
+                                    emitted = true;
+                                    yield delta;
+                                }
+                                Some(Err(e)) => {
+                                    failed = Some(e.to_string());
+                                    break;
+                                }
+                                None => break,
+                            }
+                        }
+                    }
+                    match failed {
+                        None => return,
+                        Some(msg) => {
+                            let note = format!(
+                                "\n\n_(Live model unavailable — {}{})_\n\n",
+                                msg,
+                                if emitted { "." } else { "; falling back to local passages." }
+                            );
+                            yield note;
+                            if emitted {
+                                return;
+                            }
+                            let mut fb = extractive(&question, &contexts, false);
+                            while let Some(w) = fb.next().await {
+                                yield w;
+                            }
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+
         let key = cfg.api_key.clone().unwrap_or_default();
         // Managed policy: a disallowed cloud provider is refused HERE, not
         // just at selection time — a profile stored before the policy landed
@@ -380,6 +483,38 @@ async fn stream_openai_compat(
     model: &str,
     history: &[ChatTurn],
 ) -> DeltaStream {
+    stream_chat_completions(
+        provider.chat_url.to_string(),
+        provider.label,
+        provider.max_tokens_param,
+        crate::egress::PURPOSE_AI_PROVIDER,
+        question,
+        contexts,
+        api_key,
+        model,
+        history,
+    )
+    .await
+}
+
+/// The ONE hosted chat-completions streamer behind every bearer-authed ask:
+/// the keyed provider table above, and the signed-in OpenAI path (0.12.1 §3),
+/// which differs ONLY in where it points (the maintainer-configured
+/// `signin_config().api_base`) and what rides the Authorization header (a
+/// fresh OAuth access token instead of an API key) — zero new wire dialect.
+/// `label` prefixes error notes; `purpose` is the egress-ledger row.
+#[allow(clippy::too_many_arguments)]
+async fn stream_chat_completions(
+    chat_url: String,
+    label: &'static str,
+    max_tokens_param: &'static str,
+    purpose: &'static str,
+    question: &str,
+    contexts: &[Ctx],
+    bearer: &str,
+    model: &str,
+    history: &[ChatTurn],
+) -> DeltaStream {
     let mut messages: Vec<serde_json::Value> =
         vec![json!({ "role": "system", "content": SYSTEM_PROMPT })];
     for t in prior_turns(history) {
@@ -391,15 +526,15 @@ async fn stream_openai_compat(
         "stream": true,
         "messages": messages,
     });
-    body[provider.max_tokens_param] = json!(REMOTE_MAX_TOKENS);
-    let api_key = api_key.to_string();
+    body[max_tokens_param] = json!(REMOTE_MAX_TOKENS);
+    let bearer = bearer.to_string();
     Box::pin(async_stream::stream! {
         let client = http_client();
-        crate::egress::record(provider.chat_url, crate::egress::PURPOSE_AI_PROVIDER);
+        crate::egress::record(&chat_url, purpose);
         let res = match client
-            .post(provider.chat_url)
+            .post(&chat_url)
             .header("content-type", "application/json")
-            .header("authorization", format!("Bearer {api_key}"))
+            .header("authorization", format!("Bearer {bearer}"))
             .json(&body)
             .send()
             .await
@@ -415,7 +550,7 @@ async fn stream_openai_compat(
             let text = res.text().await.unwrap_or_default();
             yield Err(anyhow::anyhow!(
                 "{} {status}: {}",
-                provider.label,
+                label,
                 text.chars().take(200).collect::<String>()
             ));
             return;

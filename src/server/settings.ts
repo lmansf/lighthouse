@@ -81,6 +81,15 @@ export interface DesktopSettings {
    * tour would re-greet on a plain web reload — desktop is the shipping target).
    */
   tourShown?: boolean;
+  /**
+   * Provider sign-in (0.12.1 §3): how the OpenAI provider authenticates —
+   * "key" (API key, the default; unset = "key") or "signin" (the OAuth device
+   * flow, desktop-Rust-only and itself inert until a maintainer registers with
+   * the vendor and configures it). PARITY: openai_auth_method in settings.rs;
+   * the twin round-trips the preference for the UI but never runs the flow —
+   * its providerAuth ops answer the fail-closed stub.
+   */
+  openaiAuthMethod?: "key" | "signin";
 }
 
 function settingsFile(): string | null {
