@@ -23,6 +23,6 @@
 - [x] 5.1 Rename refuses with dependent list (surfaced in UI); delete refuses by default with transitive list, cascade only behind explicit confirmation showing it; delete/cascade never touch sources; twin CRUD parity.
 
 ## 6. Verify
-- [ ] 6.1 Engine E2E (views_test.rs): messy fixture CSV → shaping proposal path on a canned model reply (real extract/guard/sample) → save → guarded ask via the view returns verified numbers → cascade delete → fixture byte-identical. UI structural tests: chip, dialog, nav, inspector, lifecycle dialogs.
-- [ ] 6.2 Eval floor: +1 view-backed Golden in `examples/analytics_eval.rs` (messy fixture + saved view + question answered through the view).
-- [ ] 6.3 Full gates: cargo core+server, npm suite, tsc, lint, smoke, analytics + chart eval floors, `openspec validate --all`.
+- [x] 6.1 Engine E2E (views_test.rs): messy fixture CSV → shaping proposal path on a canned model reply (real extract/guard/sample) → save → guarded ask via the view returns verified numbers → cascade delete → fixture byte-identical. UI structural tests: chip, dialog, nav, inspector, lifecycle dialogs.
+- [x] 6.2 Eval floor: +1 view-backed Golden in `examples/analytics_eval.rs` (messy fixture + saved view + question answered through the view).
+- [x] 6.3 Full gates: cargo core+server, npm suite, tsc, lint, smoke, analytics + chart eval floors, `openspec validate --all`.
