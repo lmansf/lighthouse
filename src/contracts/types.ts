@@ -53,6 +53,60 @@ export interface FileNode {
  */
 export type RestoreToken = Record<string, unknown>;
 
+/** What a curation rule does to the files it matches (openspec:
+ *  add-curation-rules). `clear` is a scoped return-to-default that masks
+ *  broader rules. */
+export type CurationRuleAction = "include" | "exclude" | "local-only" | "clear";
+
+/** The file-kind predicate values — the extraction/catalog classification. */
+export type CurationRuleKind = "tabular" | "document" | "image";
+
+/**
+ * What the client sends to create a rule (openspec: add-curation-rules):
+ * one scope folder (`""` = the vault root), exactly ONE predicate
+ * (kind | ext | glob), and an action. The engine validates (whitelists, glob
+ * parse) and mints the id.
+ */
+export interface CurationRuleInput {
+  /** Scope folder node id; "" is the vault root. */
+  scope: string;
+  /** File kind, from the extraction/catalog classification. */
+  kind?: CurationRuleKind;
+  /** Extension list (lowercased engine-side, dots optional on input). */
+  ext?: string[];
+  /** Glob over the path relative to the scope — `*`, `**`, `?` only. */
+  glob?: string;
+  action: CurationRuleAction;
+}
+
+/**
+ * A stored curation rule as the wire returns it: the input plus the
+ * engine-minted id and display enrichment — a generated `name` (e.g.
+ * "spreadsheets in /reports", also what the inspector's attribution line
+ * quotes), a human `scopeLabel`, and `orphaned` (the scope folder no longer
+ * exists — the rule matches nothing but is kept for cleanup). Shape mirrors
+ * the engines' RuleListing (vault.rs ⇄ vault.ts) exactly.
+ */
+export interface CurationRule extends CurationRuleInput {
+  id: string;
+  name: string;
+  scopeLabel: string;
+  orphaned: boolean;
+}
+
+/**
+ * Why an effective flag is what it is (openspec: add-curation-rules): which
+ * resolution layer decided — the node's own explicit flag, an ancestor's, a
+ * curation rule (with its id + display name), or the global default. Carried
+ * on the inspect payload so the inspector can say
+ * `included by rule "spreadsheets in /reports"`.
+ */
+export interface FlagAttribution {
+  source: "explicit" | "ancestor" | "rule" | "default";
+  ruleId?: string;
+  ruleName?: string;
+}
+
 /**
  * Read-only snapshot of the machine-scope managed policy (org deployments):
  * which settings an IT-deployed policy.json locks, so the UI can disable the
@@ -133,6 +187,54 @@ export interface AuditVerdict {
   intact: boolean;
   breakAt: number;
   count: number;
+}
+
+/**
+ * Provider sign-in (0.12.1 §3) — read-only status of the generic OAuth
+ * device-authorization flow (native provider_auth.rs) offered as an
+ * alternative to pasting an OpenAI API key. `available` is false on a stock
+ * build (the flow ships with NO endpoints or client id configured — a
+ * maintainer must register with the vendor first), on the web twin, and
+ * under any partial configuration; the UI renders NO sign-in affordance
+ * while it is false (the code-signing pattern). `method` is the persisted
+ * auth-method choice — "key" is the default and leaves the existing API-key
+ * path byte-untouched.
+ */
+export interface SigninStatus {
+  available: boolean;
+  signedIn: boolean;
+  /** How the OpenAI provider authenticates: API key (default) or sign-in. */
+  method: "key" | "signin";
+  /** Display-only account hint (e.g. an email) when the grant carried one. */
+  accountHint?: string;
+  /** Epoch ms the current access token expires (refreshed engine-side). */
+  expiresMs?: number;
+  /** Why the flow is unavailable, when it is — honest and user-renderable. */
+  reason?: string;
+}
+
+/**
+ * A started device-authorization sign-in: what the user must do. The UI
+ * shows `userCode` large, offers to open `verificationUri` in the browser,
+ * and polls at `intervalMs` until the vendor reports approval.
+ */
+export interface SigninStart {
+  userCode: string;
+  verificationUri: string;
+  intervalMs: number;
+  expiresInMs?: number;
+}
+
+/**
+ * One poll of a started sign-in. `pending` may carry a bumped `intervalMs`
+ * (the vendor asked to slow down); `error` is terminal (expired/declined) —
+ * reset the flow and show it.
+ */
+export interface SigninPoll {
+  status: "pending" | "complete" | "idle";
+  intervalMs?: number;
+  accountHint?: string;
+  error?: string;
 }
 
 /** A model provider the user can pick during onboarding. */
@@ -236,6 +338,12 @@ export interface FileInspection {
    *  retrieval scorer and scoped to this one file. Present only when a query was
    *  supplied. */
   testSearch?: { text: string; score: number }[];
+  /** WHY the effective inclusion is what it is (openspec: add-curation-rules):
+   *  which layer decided — explicit flag, ancestor, a rule (named), or the
+   *  default. Shared field — both engines compute it. */
+  includedBy?: FlagAttribution;
+  /** The local-only analog of `includedBy`. */
+  localOnlyBy?: FlagAttribution;
 }
 
 export type ChatRole = "user" | "assistant";
@@ -262,6 +370,14 @@ export interface ChatProgress {
   label: string;
   step: number;
   total: number;
+  /**
+   * Beam loop (openspec: add-beam-loop §2.4): a short, stable machine intent for
+   * the current step ("planning" | "running"), so the cost meter (§3), plan
+   * approval (§4), and context manifest (§5) can attach per iteration without
+   * re-parsing the human `label`. PARITY: `intent` in contracts.rs; the Rust-only
+   * analytics loop is the only emitter, so the twin never sets it.
+   */
+  intent?: string;
 }
 
 /** A streamed chunk emitted while the assistant answers. */
@@ -288,6 +404,17 @@ export interface ChatChunk {
    */
   draft?: boolean;
   /**
+   * Two-phase plan approval (openspec: add-beam-loop §4.1): on a `planOnly` ask
+   * the engine returns THIS terminal PLAN chunk — the verbatim proposed step-1
+   * SQL and the tables it would read — and executes nothing. Phase 2 re-issues
+   * the ask with the approved SQL echoed back, which runs without re-planning.
+   * PARITY: plan execution is Rust-only (analytics); this dev twin has no
+   * analytics branch, so it NEVER emits a plan — the shape is mirrored so the
+   * same UI renders the Rust engine's preview. KEEP IN SYNC with the Rust
+   * ChatChunk.plan / PlanPreview in contracts.rs.
+   */
+  plan?: PlanPreview;
+  /**
    * Engine-emitted provenance stamp (final chunk only): where this answer was
    * computed and how much was sent. NEVER derived from model text — the engine
    * sets it where the prompt is assembled, so it counts what was actually
@@ -297,17 +424,105 @@ export interface ChatChunk {
    * (device⇔local/none) and the egress registry. `excerptCount` is how many
    * context blocks the model received in the branch that ran; `sourceFileCount`
    * is the number of distinct source files behind them (the final chunk's
-   * `references` length). KEEP IN SYNC with the Rust ChunkMeta in contracts.rs.
+   * `references` length). `cachedAt` (openspec: add-answer-cache) is present
+   * ONLY when this final chunk replays a cached answer: the epoch ms of the
+   * ORIGINAL answer's completion — the UI renders its "From cache · same data
+   * as HH:MM · Re-run" line from this field alone, never from prose; origin
+   * and the counts stay the original answer's. `cost` (openspec: add-beam-loop
+   * §3) is the answer's cost meter — provider-reported tokens summed across the
+   * ask's model calls, plus a LABELED dollar estimate (the app renders
+   * "estimated at $X/Mtok", NEVER a charge). `reported: false` ⇒ the meter shows
+   * "not reported" (never a chars/4 guess); a local answer reports tokens with
+   * `costEstimateUsd: 0`; an unknown model omits `costEstimateUsd` ("estimate
+   * unavailable"). PARITY: the cost VALUES are Rust-shipped — this dev twin does
+   * not parse provider usage (§1), so its answers report "not reported"; the
+   * shape is mirrored so the same UI renders either engine's meter. `manifest`
+   * (openspec: add-beam-loop §5) is the per-context-block METADATA the model was
+   * handed — built from the ALREADY-GATED shareable set, so a cloud ask lists
+   * only what left the device (what was withheld is disclosed by the skip note).
+   * METADATA ONLY, never the context text: `chars` is the block's LENGTH (a
+   * count), never the bytes, which stay behind the device-only file inspector.
+   * `kind` is a byte-exact string enum; `fileId` attributes a retrieved chunk to
+   * its source file. PARITY: this dev twin has no analytics branch, so it only
+   * ever emits `retrieved-chunk` / `conversation-note` entries (the kinds its RAG
+   * paths assemble) — the analytics kinds (`schema-card` / `query-result` /
+   * `join-hints` / `chart-options`) are Rust-only; the labels match byte-for-byte.
+   * KEEP IN SYNC with the Rust ChunkMeta / CostMeta / CtxManifestEntry in
+   * contracts.rs.
    */
-  meta?: { origin: string; excerptCount: number; sourceFileCount: number };
+  meta?: {
+    origin: string;
+    excerptCount: number;
+    sourceFileCount: number;
+    cachedAt?: number;
+    cost?: {
+      inputTokens: number;
+      outputTokens: number;
+      totalTokens: number;
+      reported: boolean;
+      costEstimateUsd?: number;
+    };
+    manifest?: {
+      name: string;
+      kind: string;
+      chars: number;
+      fileId?: string;
+      localOnly?: boolean;
+      score: number;
+    }[];
+  };
   /** True on the last chunk of a response. */
   done: boolean;
 }
 
-/** The exact executed SQL of an analytics answer and the files it read. */
+/**
+ * The engine's verdict that an answer VERIFIABLY computed a blessed metric
+ * definition (openspec: add-semantic-layer §4). Deterministic and MODEL-FREE:
+ * `certified` is AST-equality of the executed SQL's projection to the metric's
+ * blessed expression; `reconciled` is a numeric re-run of that definition through
+ * the same guarded executor. `metric` names the definition; `expected`/`got`
+ * carry the re-run and answer figures on a mismatch (or the reason on an honest
+ * degradation). A non-metric answer is `{certified:false, reconciled:false}` — an
+ * honest "not certified", never a failure. PARITY: certification/reconciliation
+ * are RUST-ONLY (analytics/DataFusion); this dev twin never takes the analytics
+ * branch, so it never populates a verdict — this is the wire shape only. KEEP IN
+ * SYNC with the Rust `TrustVerdict` in contracts.rs.
+ */
+export interface TrustVerdict {
+  certified: boolean;
+  reconciled: boolean;
+  metric?: string;
+  expected?: string;
+  got?: string;
+}
+
+/**
+ * The exact executed SQL of an analytics answer and the files it read.
+ * `certified`/`trust` (openspec: add-semantic-layer §3/§4) ride here as
+ * additive-optional (pre-Phase-B cache entries carry neither and stay valid), so
+ * a cached certified answer replays with its ORIGINAL verdict — nothing
+ * recomputed. PARITY: both are Rust-only (analytics); this twin never populates
+ * them. KEEP IN SYNC with the Rust `AnalyticsMeta` in contracts.rs.
+ */
 export interface AnalyticsMeta {
   sql: string;
   fileIds: string[];
+  certified?: string[];
+  trust?: TrustVerdict;
+}
+
+/**
+ * A previewed analytics plan (openspec: add-beam-loop §4.1), carried on a
+ * `planOnly` ask's terminal PLAN chunk. `sql` is the VERBATIM proposed step-1
+ * SQL — the exact statement Phase 2 would execute — shown before it ever touches
+ * the vault. `tables` are the names of the registered tables/views it would read
+ * (metadata only, never the context bytes). PARITY: plan execution is Rust-only
+ * (analytics); this dev twin never emits a plan. KEEP IN SYNC with the Rust
+ * PlanPreview in contracts.rs.
+ */
+export interface PlanPreview {
+  sql: string;
+  tables: string[];
 }
 
 /**
@@ -327,6 +542,13 @@ export interface Pin {
   /** Compact "NE 125 · NW 50" render of the last result (≤3 rows). */
   lastSummary?: string;
   staleReason?: string;
+  /**
+   * The investigation this pin belongs to (openspec: add-investigations):
+   * the SINGLE source of truth for pin membership — the investigation view's
+   * `pinRefs` is derived from it at read time. Absent = uncategorized, which
+   * is what every pin created before investigations existed remains.
+   */
+  investigationId?: string;
 }
 
 /** One changed pin from a recheck pass — the alert payload. */
@@ -367,4 +589,505 @@ export interface BriefingReport {
   title: string;
   generatedMs: number;
   sections: BriefingSection[];
+}
+
+/**
+ * Provider posture of an investigation (openspec: add-investigations):
+ * "local-only" forces the private path for every ask inside it at the same
+ * chokepoint the managed policy layer gates; "default" follows the profile's
+ * active provider.
+ */
+export type InvestigationProviderPolicy = "default" | "local-only";
+
+/**
+ * A named, durable container for analysis (openspec: add-investigations):
+ * structure persisted vault-scoped engine-side (versioned envelope, atomic
+ * writes). `conversationRefs` are opaque client Conversation.id values —
+ * refs, never transcripts — and are accepted only when the client's
+ * persistAllowed verdict AND the managed history policy both allow.
+ * `folderName` is sanitized at creation and never moved by rename. Shape
+ * mirrors the engines' view (investigations.rs ⇄ investigations.ts) exactly.
+ */
+export interface Investigation {
+  /** Engine-minted, stable across renames. */
+  id: string;
+  /** Display name, unique case-insensitively (archived records included). */
+  name: string;
+  createdMs: number;
+  /** Archive hides, never deletes: a visibility flag with no cascade. */
+  archived: boolean;
+  /** Vault node ids; empty = whole vault. */
+  scopeFileIds: string[];
+  providerPolicy: InvestigationProviderPolicy;
+  conversationRefs: string[];
+  /** Notes folder recorded at creation (rename moves nothing). */
+  folderName: string;
+  /**
+   * DERIVED at read time from pins.json (§3): the ids of pins carrying
+   * `Pin.investigationId == id`. Never stored on the record.
+   */
+  pinRefs: string[];
+  /**
+   * DERIVED at read time from the investigation's folder under
+   * `Lighthouse Notes/<folderName>/` (§3): the file ids there — membership =
+   * location. Never stored on the record.
+   */
+  noteRefs: string[];
+}
+
+/**
+ * What the client sends to create an investigation: the display name plus an
+ * optional file scope (absent/empty = whole vault) and provider posture
+ * (absent = "default"). The engine mints the id, stamps creation time, and
+ * fixes the sanitized notes folder name.
+ */
+export interface InvestigationCreateInput {
+  name: string;
+  scopeFileIds?: string[];
+  providerPolicy?: InvestigationProviderPolicy;
+}
+
+/** Card footprint on a board's responsive grid (openspec: add-boards). */
+export type BoardCardSize = "S" | "M" | "L";
+
+/**
+ * One ordered board card (openspec: add-boards): a pin reference plus its
+ * size — nothing else. Pin existence is deliberately not enforced at write
+ * time; a card whose pin was deleted renders as a tombstone, and removing a
+ * card never deletes or modifies the pin.
+ */
+export interface BoardCardRef {
+  pinId: string;
+  size: BoardCardSize;
+}
+
+/**
+ * A board (openspec: add-boards): existing pins arranged as a living, local
+ * dashboard — ordered card references persisted vault-scoped engine-side
+ * (versioned envelope, atomic writes, the investigations idiom). Names are
+ * unique case-insensitively WITHIN a scope (global vs each investigation).
+ * A scope with no persisted board lists a VIRTUAL default ("My board"
+ * globally; the investigation's name when scoped) under a deterministic id
+ * (`default-global` / `default-<invId>`, `createdMs` 0); the first mutation
+ * targeting that id materializes it as a real record — mutate exactly what
+ * the listing returned.
+ */
+export interface Board {
+  /** Engine-minted, stable across renames. */
+  id: string;
+  /** Display name, unique case-insensitively within its scope. */
+  name: string;
+  /** Owning investigation; absent = the global scope (mirrors Pin). */
+  investigationId?: string;
+  /** Ordered card references — order IS the layout order. */
+  cards: BoardCardRef[];
+  /** Creation instant; 0 on a virtual (not yet persisted) default. */
+  createdMs: number;
+}
+
+/**
+ * One card's answer from a board refresh (openspec: add-boards). `live`
+ * distinguishes the engines' modes: the desktop engine re-runs the pin's
+ * stored SQL through the same guarded, model-free `run_direct` path as
+ * watcher rechecks (a manual refresh IS a recheck — the pin's stored
+ * digest/summary advance identically) and answers `live: true` with the
+ * fresh markdown/chart/footer/digest; the dev twin cannot execute SQL
+ * (analytics is Rust-only, PARITY) and answers `live: false` with the pin's
+ * STORED state so cards render the last-known snapshot honestly. A pin that
+ * no longer exists answers `tombstone: true`.
+ */
+export interface BoardCardRefresh {
+  pinId: string;
+  /** True = computed now by the engine; false = stored state (twin). */
+  live: boolean;
+  /** The pin no longer exists — render the tombstone card. */
+  tombstone?: boolean;
+  question?: string;
+  /** Live only: narration-capped result table from the re-execution. */
+  markdown?: string;
+  /** Live only: chart spec when the result is chartable. */
+  chart?: string;
+  /** Live only: the engine freshness/provenance footer. */
+  footer?: string;
+  /** Live only: full-fidelity digest (what rechecks compare). */
+  resultDigest?: string;
+  lastRunMs?: number;
+  /** Live only: the re-execution failed — shown staleReason-style. */
+  error?: string;
+  /** Stored state: the pin's compact summary as of the last recheck. */
+  lastSummary?: string;
+  /** Stored state: the pin's digest as of the last recheck. */
+  lastDigest?: string;
+  /** Stored state: why the last recheck couldn't run. */
+  staleReason?: string;
+}
+
+/**
+ * Where a view's one-line summary came from (openspec: add-shaped-views):
+ * recorded from the asked question ("Save as view" on a Beam answer) or
+ * stated by the model during a shaping ask. The whole whitelist — a view
+ * never carries an unlabeled summary.
+ */
+export type ViewSummarySource = "question" | "model";
+
+/** The provenance-labeled one-line summary a view carries. */
+export interface ViewSummary {
+  text: string;
+  source: ViewSummarySource;
+}
+
+/**
+ * One source-file dependency of a view, with the table-name binding the
+ * definition's SQL uses pinned at save time.
+ */
+export interface ViewFileRead {
+  fileId: string;
+  tableName: string;
+}
+
+/** A view's dependencies — source files and other views — resolved at save. */
+export interface ViewReads {
+  files: ViewFileRead[];
+  views: string[];
+}
+
+/**
+ * A shaped view (openspec: add-shaped-views): a named, guarded SELECT over
+ * vault tables, stored as a DEFINITION and resolved virtually at ask time —
+ * results always reflect the sources' current bytes, and no view operation
+ * ever writes to a source file. Shape mirrors the engines' record
+ * (views.rs ⇄ views.ts) exactly.
+ */
+export interface View {
+  /** Engine-minted, stable across renames. */
+  id: string;
+  /** Sanitized identifier (lowercase [a-z0-9_]), unique among views. */
+  name: string;
+  /** Exactly ONE read-only SELECT — guarded at save AND before execution. */
+  sql: string;
+  reads: ViewReads;
+  summary: ViewSummary;
+  createdMs: number;
+}
+
+/**
+ * What the client sends to create a view. The summary rides FLATTENED on the
+ * wire (summaryText + summarySource); the engine builds the labeled record
+ * and owns every rule — name sanitization, the SQL guard, reads derivation,
+ * cycle/depth checks. The UI never re-validates beyond trimming.
+ */
+export interface ViewCreateInput {
+  name: string;
+  sql: string;
+  summaryText: string;
+  summarySource: ViewSummarySource;
+  fileIds: string[];
+}
+
+/**
+ * One source file a view reads, resolved for the inspector: its display name
+ * and how fresh the on-disk copy is (`savedAge`, from the file's saved time —
+ * the SAME saved-age label the analytics footer uses). A file the id no longer
+ * resolves to is reported honestly with `missing:true` (and `name` falls back
+ * to the pinned table-name binding). KEEP IN SYNC with `ViewSource` in
+ * lighthouse-core inspect.rs.
+ */
+export interface ViewSource {
+  fileId: string;
+  name: string;
+  /** "2 hours ago" — absent when the file is missing/unreadable. */
+  savedAge?: string;
+  /** The file id no longer resolves in the vault. Present (true) only then. */
+  missing?: boolean;
+}
+
+/**
+ * "Inspector on a view" (openspec: add-shaped-views §4): a read-only view of a
+ * saved view — the exact definition SQL, the provenance-labeled summary, the
+ * source files it reads (transitively) with their freshness, the
+ * effectively-local-only flag, and the dependent names the rename/delete
+ * dialogs warn with. Every field is optional so an unknown id returns `{}`.
+ * All values are stored state (no SQL executes), so BOTH engines fill in the
+ * identical shape — unlike `FileInspection`, there are no Rust-only fields.
+ * KEEP IN SYNC with `ViewInspection` in lighthouse-core inspect.rs.
+ */
+export interface ViewInspection {
+  id?: string;
+  name?: string;
+  /** The exact stored SELECT the engine re-guards and runs at ask time. */
+  sql?: string;
+  /** The one-line summary text (may be "" — a model-shaped view can carry none). */
+  summary?: string;
+  /** Where the summary came from — the provenance label shown beside it. */
+  summarySource?: ViewSummarySource;
+  /** Every source FILE this view reads, transitively, with saved-age freshness. */
+  sources?: ViewSource[];
+  /** The names of the views this one reads directly (the stack above the files). */
+  readsViews?: string[];
+  /** Effectively local-only: any transitive source file is local-only. */
+  localOnly?: boolean;
+  /** Direct dependent view names — what the rename warning shows. */
+  dependents?: string[];
+  /** Transitive dependent view names — what the delete/cascade confirmation shows. */
+  transitiveDependents?: string[];
+  createdMs?: number;
+}
+
+/**
+ * A shaping-ask proposal (openspec: add-shaped-views §3): the model's ONE
+ * validated transform SELECT plus engine-rendered evidence — the first
+ * sample rows of the source (`before`) and of the proposed SELECT (`after`)
+ * as markdown tables — and the model's one-line summary ("" when it stated
+ * none). NOTHING is persisted until the user explicitly saves.
+ */
+export interface ShapeProposal {
+  sql: string;
+  before: string;
+  after: string;
+  summary: string;
+}
+
+/**
+ * What `shapeView` answers: the proposal, or `{available:false}` with an
+ * honest reason — the extractive/no-model posture on the desktop engine, and
+ * ALWAYS on the web dev twin (shaping runs the model + DataFusion,
+ * Rust-engine-only — PARITY).
+ */
+export type ShapeViewResult =
+  | ({ available: true } & ShapeProposal)
+  | { available: false; reason: string };
+
+/**
+ * A built-in analysis recipe (openspec: add-recipes §2): a named, deterministic
+ * bundle of guarded SELECT templates that plans model-free and runs on every
+ * provider (cloud, local, extractive). v1 ships five built-ins and NO
+ * user-authored recipes — the descriptor is the extension seam, not a creation
+ * surface. KEEP IN SYNC with the `Recipe` descriptor in lighthouse-core
+ * recipes.rs (id/name/summary).
+ */
+export interface Recipe {
+  /** Wire-stable built-in key the run cue names (`run-recipe:{id} on {table}`). */
+  id: string;
+  name: string;
+  /** One line for the gallery/chip. */
+  summary: string;
+}
+
+/**
+ * An applicable recipe resolved for the Library gallery / empty-state chips: the
+ * built-in plus the table (file display name) or view (name) it runs on. Only
+ * surfaces where the catalog satisfies the recipe's applicability predicate — a
+ * view that is effectively local-only never surfaces on a cloud ask. KEEP IN
+ * SYNC with `RecipeCard` in lighthouse-core meta.rs.
+ */
+export interface RecipeCard extends Recipe {
+  /** The file (display name) or view (name) this recipe runs on. */
+  table: string;
+}
+
+/**
+ * The run-recipe seam (openspec: add-recipes §2.4). LOWER-CHURN CHOICE: a recipe
+ * chip/gallery row runs a recipe by dispatching the EXISTING
+ * `lighthouse:ask-question` event with a recipe-CUED question — no new event and
+ * no new streaming op. The Rust engine's `synth.rs` detects this exact prefix
+ * (`recipes::parse_recipe_cue`) BEFORE the model gate and runs the recipe
+ * deterministically; a plain natural-language question never carries the prefix,
+ * so a recipe never triggers by accident. KEEP the format in sync with
+ * `RECIPE_CUE_PREFIX` in lighthouse-core recipes.rs.
+ */
+export const RECIPE_CUE_PREFIX = "run-recipe:";
+
+/** Build the recipe-cued question a chip/gallery row seeds the chat with. */
+export function runRecipeQuestion(id: string, table: string): string {
+  return `${RECIPE_CUE_PREFIX}${id} on ${table}`;
+}
+
+// --- Semantic layer (openspec: add-semantic-layer §6) ------------------------------
+
+/**
+ * A canonical metric (openspec: add-semantic-layer §1): a business name bound to
+ * a guarded, re-runnable aggregation `expression` over a named `entity`. Shape
+ * mirrors the engines' record (semantic.rs ⇄ semantic.ts) exactly; `reads`/
+ * `summary` reuse the view types. Returned by createMetric/renameMetric; the nav
+ * lists the lighter `MetricCard`. KEEP IN SYNC with the Rust `Metric`.
+ */
+export interface SemanticMetric {
+  /** Engine-minted, stable across renames (`metric-` + sha1[..12]). */
+  id: string;
+  /** Sanitized identifier (lowercase [a-z0-9_]), unique among metrics. */
+  name: string;
+  /** The aggregation EXPRESSION — guarded at save, NOT a full statement. */
+  expression: string;
+  description: string;
+  /** The table (or saved view) the expression aggregates over. */
+  entity: string;
+  reads: ViewReads;
+  summary: ViewSummary;
+  createdMs: number;
+}
+
+/** A colloquial term mapped to a canonical column OR metric name. */
+export interface Synonym {
+  term: string;
+  canonical: string;
+}
+
+/**
+ * One metric surfaced for the semantic nav (openspec §6.1): enough to list, ask
+ * about, and manage it. `localOnly` drives the per-row lock badge (the ViewsNav
+ * idiom) — only ever true on a device ask (a cloud posture's eligible set
+ * already excludes local-only metrics). KEEP IN SYNC with the Rust `MetricCard`
+ * in meta.rs and semantic.ts.
+ */
+export interface MetricCard {
+  id: string;
+  name: string;
+  expression: string;
+  description: string;
+  entity: string;
+  localOnly: boolean;
+}
+
+// --- Deep analysis + capability map (openspec: add-deep-analysis) -----------------
+
+/** A typed column in the capability map — `kind` mirrors the Rust `ColumnKind`. */
+export type CapabilityColumnKind = "numeric" | "date" | "text";
+
+/**
+ * One analyzable table in the capability map: its display name, typed columns,
+ * and whether it has a Date+Numeric shape (⇒ investigable by deep analysis). KEEP
+ * IN SYNC with `CapabilityTable` in lighthouse-core meta.rs.
+ */
+export interface CapabilityTable {
+  name: string;
+  columns: { name: string; kind: CapabilityColumnKind }[];
+  investigable: boolean;
+}
+
+/**
+ * One "Investigate {table}" suggestion — offered for a Date+Numeric table only,
+ * so it never proposes an investigation that would produce an empty report. KEEP
+ * IN SYNC with `SuggestedInvestigation` in lighthouse-core meta.rs.
+ */
+export interface SuggestedInvestigation {
+  label: string;
+  table: string;
+}
+
+/**
+ * The capability map (openspec: add-deep-analysis §3): a single view of what the
+ * included vault makes investigable — the analyzable tables + their columns, the
+ * recipes and metrics that apply, the suggested asks, and one investigation per
+ * Date+Numeric table. A pure aggregate of the posture-gated `applicable_*`
+ * surfaces (no new analysis). KEEP IN SYNC with `CapabilityMap` in meta.rs.
+ * PARITY: Rust-only — the TS `capabilityMap` op returns an empty map.
+ */
+export interface CapabilityMap {
+  tables: CapabilityTable[];
+  recipes: RecipeCard[];
+  metrics: MetricCard[];
+  suggestedAsks: { label: string; question: string }[];
+  suggestedInvestigations: SuggestedInvestigation[];
+}
+
+/** The honest empty capability map — the TS twin's degradation + a safe default. */
+export const EMPTY_CAPABILITY_MAP: CapabilityMap = {
+  tables: [],
+  recipes: [],
+  metrics: [],
+  suggestedAsks: [],
+  suggestedInvestigations: [],
+};
+
+/** One synonym surfaced for the semantic nav. KEEP IN SYNC with the Rust twin. */
+export interface SynonymCard {
+  term: string;
+  canonical: string;
+}
+
+/**
+ * The posture-eligible metrics/synonyms applicable to the current tables — the
+ * semantic nav's data (openspec §6.1). A metric over a file the chat isn't
+ * showing never surfaces (the recipe/view applicability rule), and a local-only
+ * metric is absent on a cloud ask. KEEP IN SYNC with the Rust `SemanticCards`.
+ */
+export interface SemanticCards {
+  metrics: MetricCard[];
+  synonyms: SynonymCard[];
+}
+
+/**
+ * What the client sends to create a metric. The summary rides FLATTENED on the
+ * wire (summaryText + summarySource, the ViewCreateInput idiom); the ENGINE owns
+ * every rule — name sanitization, the guard, reads derivation, the name-shadow
+ * check — so a refusal THROWS with the engine's reason and the dialog shows it
+ * verbatim. `fileIds` are the answer's source files (reads derive from them).
+ */
+export interface MetricCreateInput {
+  name: string;
+  expression: string;
+  description: string;
+  entity: string;
+  summaryText: string;
+  summarySource: ViewSummarySource;
+  fileIds: string[];
+}
+
+/**
+ * What `defineMetric` answers (openspec §6.1): a proposed aggregation expression
+ * + entity parsed from a Beam answer's SQL (the "Save as view" precedent), or
+ * `{available:false}` with an honest reason. PARITY: SQL parsing is Rust-only
+ * (analytics/DataFusion), so the web dev twin ALWAYS answers unavailable — the
+ * "Define as metric" dialog then explains instead of pretending.
+ */
+export type DefineMetricResult =
+  | { available: true; expression: string; entity: string }
+  | { available: false; reason: string };
+
+// --- Proactive insights (openspec: add-quant-depth §5) -----------------------
+
+/**
+ * Which cheap deterministic detector produced a finding (openspec:
+ * add-quant-depth §5): a monthly z-score `anomaly`, a top-`mover`, or a
+ * level-shift `changepoint`. KEEP IN SYNC with the Rust `InsightKind` in
+ * lighthouse-core insights.rs.
+ */
+export type InsightKind = "anomaly" | "mover" | "changepoint";
+
+/**
+ * One noteworthy finding the engine surfaced WITHOUT the user asking (openspec:
+ * add-quant-depth §5). `headline` is an engine-computed, ready-to-display string
+ * — every number in it is engine SQL, and it is rendered VERBATIM (never model
+ * text). `magnitude` is the ranking key (findings arrive pre-ranked, most
+ * notable first) and `sql` is the guarded SELECT that produced the numbers. KEEP
+ * IN SYNC with the Rust `Insight` in lighthouse-core insights.rs.
+ */
+export interface InsightFinding {
+  /** The cataloged table (file display name / view name) the finding is about. */
+  table: string;
+  kind: InsightKind;
+  /** Engine-computed, ready-to-display headline — rendered verbatim. */
+  headline: string;
+  /** The finding's magnitude — the ranking key (e.g. a z-score or % move). */
+  magnitude: number;
+  /** The guarded SELECT that produced the finding's numbers. */
+  sql: string;
+}
+
+/**
+ * What the `insights` op answers (openspec: add-quant-depth §5): the ranked,
+ * bounded findings plus the scan's coverage. `tablesScanned` < `tablesAvailable`
+ * means the scan hit its cap and the surface MUST disclose it ("scanned N of M
+ * tables") rather than present the capped set as exhaustive. An empty `findings`
+ * is an honest "nothing stands out", never an error. PARITY: the scan runs the
+ * detectors as guarded SELECTs through DataFusion (Rust engine only), so the web
+ * dev twin answers an empty scan (findings [], both counts 0) — the panel then
+ * honestly shows "nothing stands out". KEEP IN SYNC with the Rust `InsightsScan`.
+ */
+export interface InsightsScan {
+  findings: InsightFinding[];
+  /** How many cataloged tables the scan actually visited (bounded by the cap). */
+  tablesScanned: number;
+  /** How many cataloged tables were available to scan. */
+  tablesAvailable: number;
 }

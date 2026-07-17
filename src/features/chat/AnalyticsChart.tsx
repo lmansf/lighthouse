@@ -32,7 +32,13 @@ const useStyles = makeStyles({
     ":hover .lh-chart-png": { opacity: 1 },
     ":focus-within .lh-chart-png": { opacity: 1 },
   },
-  svg: { width: "100%", height: "auto", display: "block" },
+  svg: {
+    width: "100%",
+    height: "auto",
+    display: "block",
+    // Axis tick labels are number surfaces: lining digits keep ticks aligned.
+    "& text": { fontVariantNumeric: "tabular-nums" },
+  },
   // Hover-revealed download affordance, mirroring the tables' Copy CSV button.
   pngBtn: {
     position: "absolute",
@@ -40,8 +46,10 @@ const useStyles = makeStyles({
     right: "0px",
     opacity: 0,
     transitionProperty: "opacity",
-    transitionDuration: tokens.durationFaster,
+    transitionDuration: tokens.durationFast, // 150ms ease-out (Beam standard)
+    transitionTimingFunction: tokens.curveDecelerateMid,
     backgroundColor: tokens.colorNeutralBackground1,
+    "@media (prefers-reduced-motion: reduce)": { transitionDuration: "0.01ms" },
   },
   legend: {
     display: "flex",
@@ -57,13 +65,37 @@ const useStyles = makeStyles({
     fontSize: tokens.fontSizeBase200,
   },
   swatch: { width: "10px", height: "10px", borderRadius: "2px", display: "inline-block" },
+  // Directed-chart heading (chart-directive): small, quiet, above the plot.
+  title: {
+    display: "block",
+    color: tokens.colorNeutralForeground2,
+    fontSize: tokens.fontSizeBase200,
+    fontWeight: tokens.fontWeightSemibold,
+    marginBottom: tokens.spacingVerticalXXS,
+  },
+  // Bucketing disclosure (charts by default): quieter than the title —
+  // muted small text under the title slot, existing tokens only.
+  subtitle: {
+    display: "block",
+    color: tokens.colorNeutralForeground3,
+    fontSize: tokens.fontSizeBase200,
+    marginBottom: tokens.spacingVerticalXXS,
+  },
 });
 
-/** Series palette from the theme; cycles if the engine ever sends more. */
+/**
+ * Series palette from the theme — the Beam amber leads; the two companions
+ * are quiet by design (the slate link hue and the secondary ink), so a chart
+ * carries one accent, not three. All ride tokens (auto light/dark) and clear
+ * WCAG 1.4.11's 3:1 non-text bar against the answer-card surface in BOTH
+ * themes: light 3.99 / 5.49 / 6.55, dark 8.84 / 8.85 / 7.55 vs bg1 — gated by
+ * the "chart series" rows in scripts/check-contrast.mjs. Cycles if the engine
+ * ever sends more series.
+ */
 const SERIES_FILLS = [
   tokens.colorBrandForeground1,
-  tokens.colorPaletteBerryForeground2,
-  tokens.colorPaletteMarigoldForeground2,
+  tokens.colorBrandForegroundLink,
+  tokens.colorNeutralForeground2,
 ];
 
 function truncateLabel(l: string): string {
@@ -71,14 +103,13 @@ function truncateLabel(l: string): string {
 }
 
 /**
- * Rasterize the rendered SVG to a 2× PNG and trigger a download
- * (openspec: add-answer-artifacts). Two theme requirements: the chart's
- * colors are Fluent CSS variables that a standalone SVG document can't
- * resolve, so each element's computed fill/stroke is baked into the clone;
- * and the canvas is painted with the surface's background first so a
- * dark-mode chart never exports transparent-on-dark. Client-only.
+ * Clone the rendered chart SVG with its theme resolved for standalone use:
+ * the chart's colors are Fluent CSS variables that a detached SVG document
+ * can't resolve, so each element's computed fill/stroke is baked into the
+ * clone, along with explicit dimensions and the app font. Shared by the PNG
+ * download and the evidence pack's inline-SVG capture. Client-only.
  */
-function downloadChartPng(svg: SVGSVGElement): void {
+function bakeStandaloneSvg(svg: SVGSVGElement): SVGSVGElement {
   const clone = svg.cloneNode(true) as SVGSVGElement;
   const orig = svg.querySelectorAll<SVGElement>("*");
   const copies = clone.querySelectorAll<SVGElement>("*");
@@ -91,20 +122,53 @@ function downloadChartPng(svg: SVGSVGElement): void {
     }
     if (el.hasAttribute("stroke")) copy.setAttribute("stroke", cs.stroke);
   });
-  // Nearest opaque ancestor background = the theme surface behind the chart.
-  let bg = "#ffffff";
-  for (let el: Element | null = svg; el; el = el.parentElement) {
-    const c = window.getComputedStyle(el).backgroundColor;
-    if (c && c !== "transparent" && !c.startsWith("rgba(0, 0, 0, 0)")) {
-      bg = c;
-      break;
-    }
-  }
   clone.setAttribute("width", String(W));
   clone.setAttribute("height", String(H));
   // The on-screen labels inherit the app font from CSS the standalone SVG
-  // won't have — bake it in so the PNG doesn't rasterize in the UA serif.
+  // won't have — bake it in so it doesn't render in the UA serif.
   clone.style.fontFamily = window.getComputedStyle(svg).fontFamily;
+  return clone;
+}
+
+/** Nearest opaque ancestor background = the theme surface behind the chart. */
+function surfaceColorBehind(svg: SVGSVGElement): string {
+  for (let el: Element | null = svg; el; el = el.parentElement) {
+    const c = window.getComputedStyle(el).backgroundColor;
+    if (c && c !== "transparent" && !c.startsWith("rgba(0, 0, 0, 0)")) {
+      return c;
+    }
+  }
+  return "#ffffff";
+}
+
+/**
+ * Serialize the rendered chart as a fully self-contained SVG string for the
+ * evidence pack (openspec Beam §2): theme colors + font baked in, plus the
+ * surface background painted as a backing rect — so a chart captured from a
+ * dark-themed app stays legible on the pack's page (mirrors the PNG path's
+ * canvas fill). No external references of any kind ride along.
+ */
+export function standaloneChartSvg(svg: SVGSVGElement): string {
+  const clone = bakeStandaloneSvg(svg);
+  const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+  rect.setAttribute("x", "0");
+  rect.setAttribute("y", "0");
+  rect.setAttribute("width", String(W));
+  rect.setAttribute("height", String(H));
+  rect.setAttribute("fill", surfaceColorBehind(svg));
+  clone.insertBefore(rect, clone.firstChild);
+  return new XMLSerializer().serializeToString(clone);
+}
+
+/**
+ * Rasterize the rendered SVG to a 2× PNG and trigger a download
+ * (openspec: add-answer-artifacts). The clone rides `bakeStandaloneSvg` and
+ * the canvas is painted with the surface's background first so a dark-mode
+ * chart never exports transparent-on-dark. Client-only.
+ */
+function downloadChartPng(svg: SVGSVGElement): void {
+  const clone = bakeStandaloneSvg(svg);
+  const bg = surfaceColorBehind(svg);
   const xml = new XMLSerializer().serializeToString(clone);
   const svgUrl = URL.createObjectURL(new Blob([xml], { type: "image/svg+xml;charset=utf-8" }));
   const img = new Image();
@@ -139,7 +203,15 @@ export function AnalyticsChart({ spec }: { spec: ChartSpec }) {
 
   const isStacked = spec.kind === "bar" && spec.stacked === true;
   const isScatter = spec.kind === "scatter";
-  const all = spec.series.flatMap((s) => s.values).filter((v): v is number => v !== null);
+  const isBand = spec.kind === "band";
+  // A band's shaded interval must fit the axis, so its lower/upper bounds extend
+  // the Y domain alongside the line's values (add-quant-depth).
+  const bandBounds = isBand
+    ? spec.series.flatMap((s) => [...(s.lower ?? []), ...(s.upper ?? [])])
+    : [];
+  const all = [...spec.series.flatMap((s) => s.values), ...bandBounds].filter(
+    (v): v is number => v !== null,
+  );
   // Per-category stack sums (only meaningful when stacked; parts are ≥0 by the
   // engine's is_stackable proof, so the sum is the true top of the bar).
   const stackSums = isStacked
@@ -150,7 +222,7 @@ export function AnalyticsChart({ spec }: { spec: ChartSpec }) {
   // waste the axis on an unused zero).
   const [yMin, yMax] = isStacked
     ? [0, Math.max(0, ...stackSums)]
-    : spec.kind === "line" || isScatter
+    : spec.kind === "line" || isScatter || isBand
       ? [Math.min(...all), Math.max(...all)]
       : [Math.min(0, ...all), Math.max(0, ...all)];
   const ticks = niceTicks(yMin, yMax, 4);
@@ -177,6 +249,18 @@ export function AnalyticsChart({ spec }: { spec: ChartSpec }) {
 
   return (
     <figure className={styles.frame} aria-label={aria}>
+      {/* Engine-capped display copy from a chart directive — never data. */}
+      {spec.title && (
+        <Text as="span" className={styles.title}>
+          {spec.title}
+        </Text>
+      )}
+      {/* Emitter-computed bucketing disclosure (top-N + “Other”) — never data. */}
+      {spec.subtitle && (
+        <Text as="span" className={styles.subtitle}>
+          {spec.subtitle}
+        </Text>
+      )}
       <Tooltip content="Download chart as PNG" relationship="label">
         <Button
           size="small"
@@ -341,10 +425,30 @@ export function AnalyticsChart({ spec }: { spec: ChartSpec }) {
                       pts[pts.length - 1].split(",")[0]
                     },${baseY}`
                   : null;
+              // Band interval (add-quant-depth): a shaded region between the
+              // lower and upper bounds, over the contiguous run of points that
+              // carry BOTH (the forecast tail; historical rows have null bounds).
+              // Upper edge forward + lower edge back = a closed cone.
+              const bandPts = (() => {
+                if (!isBand || !s.lower || !s.upper) return null;
+                const idx = s.values
+                  .map((_, i) => i)
+                  .filter((i) => s.lower![i] != null && s.upper![i] != null);
+                if (idx.length < 2) return null;
+                const up = idx.map((i) => `${xCenter(i)},${y(s.upper![i] as number)}`);
+                const down = idx
+                  .slice()
+                  .reverse()
+                  .map((i) => `${xCenter(i)},${y(s.lower![i] as number)}`);
+                return [...up, ...down].join(" ");
+              })();
               return (
                 <g key={`l${si}`}>
                   {areaPts && (
                     <polygon points={areaPts} fill={stroke} fillOpacity={0.14} stroke="none" />
+                  )}
+                  {bandPts && (
+                    <polygon points={bandPts} fill={stroke} fillOpacity={0.16} stroke="none" />
                   )}
                   <polyline
                     points={pts.join(" ")}

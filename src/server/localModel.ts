@@ -11,6 +11,16 @@
  * The desktop shell (native/crates/lighthouse-desktop) watches the models
  * directory and starts `llama-server` against the file as soon as it lands,
  * so the private model becomes usable without a restart.
+ *
+ * Downloads are RESUMABLE: the stream lands in a `<model>.part` file which is
+ * KEPT when the transfer is interrupted, fails, or is paused (DELETE
+ * /api/model while a download is in flight = pause). The next install sends
+ * `Range: bytes=<size>-` and appends the remainder (HTTP 206); servers that
+ * ignore Range (HTTP 200) restart from zero. Integrity stays strict — there
+ * is no upstream digest, so the checks are: a `.part` prefix must carry the
+ * GGUF magic to be resumed at all, and the completed file must match the
+ * advertised byte count and the magic exactly, or it is deleted rather than
+ * ever renamed into place as a "ready" model.
  */
 import {
   closeSync,
@@ -134,11 +144,51 @@ interface Progress {
    *  corrupt/partial/wrong leftover that isn't a usable model (status "absent"),
    *  so the UI can always offer to clear it. */
   removable?: boolean;
+  /** Bytes of a kept-for-resume `.part` on disk (status "absent"/"error" after
+   *  an interrupted, failed, or paused download) — lets the UI offer "Resume
+   *  download" instead of a from-scratch "Install". */
+  partialBytes?: number;
 }
 
 // One download at a time, tracked in module state so GET /api/model can report
 // progress while POST /api/model runs it in the background.
 let progress: Progress = { status: "absent", received: 0, total: 0 };
+// Pause/resume seams: requestUninstall() during a download flags a pause and
+// tears the transfer down via `abortInFlight` (the `.part` survives for a
+// Range resume); `generation` fences a torn-down download's async callbacks
+// off the module state once a NEWER download starts, so pause → quick resume
+// can never interleave a stale "error" over fresh progress.
+let pauseRequested = false;
+let abortInFlight: ((err: Error) => void) | null = null;
+let generation = 0;
+
+/** The on-disk resume artifact: downloads stream into `<model file>.part`. */
+function partPath(): string {
+  return `${join(modelsDir(), MODEL_FILE)}.part`;
+}
+
+/** Size of the `.part` on disk (0 when none) — a cheap stat, for status calls. */
+function partialSize(): number {
+  try {
+    return statSync(partPath()).size;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Bytes safe to resume from. A `.part` is only trusted when its prefix carries
+ * the GGUF magic — anything else (junk, a sub-magic stub) is discarded here so
+ * a corrupt partial can never poison the resumed file. This is the cheap first
+ * gate; the completed file is size- and magic-checked AGAIN before the rename.
+ */
+function resumableBytes(): number {
+  const tmp = partPath();
+  const size = partialSize();
+  if (size >= 4 && isGgufFile(tmp)) return size;
+  if (size > 0) rmSync(tmp, { force: true });
+  return 0;
+}
 
 /** Current model state; reports "ready" the moment an installed model is present. */
 export function modelStatus(): Progress {
@@ -147,9 +197,12 @@ export function modelStatus(): Progress {
   if (installedModel()) return { status: "ready", received: 0, total: 0 };
   // No usable model. A leftover file may still exist (corrupt/partial/wrong .gguf
   // from an older install) — surface it as removable so the user can clear it.
+  // A kept `.part` from an interrupted/paused download is surfaced too
+  // (partialBytes), so the UI can offer to RESUME instead of starting over.
   const removable = hasModelFile();
-  if (progress.status === "error") return { ...progress, removable };
-  return { status: "absent", received: 0, total: 0, removable };
+  const partialBytes = partialSize() || undefined;
+  if (progress.status === "error") return { ...progress, removable, partialBytes };
+  return { status: "absent", received: 0, total: 0, removable, partialBytes };
 }
 
 /**
@@ -157,13 +210,31 @@ export function modelStatus(): Progress {
  * (locked) by a running llama-server, which only the desktop shell can stop - so
  * we drop a marker it watches: the shell stops the server, deletes the weights, and
  * clears the marker. Lets the user free the ~4.2 GB or re-test a fresh install.
+ *
+ * While a download is IN FLIGHT this doubles as "pause": there are no weights
+ * to remove yet, so the transfer is torn down and the `.part` is KEPT — the
+ * next install resumes it via an HTTP Range request (the UI labels the
+ * affordance "Pause" in that state). A paused `.part` is cleared only by a
+ * REAL uninstall (alongside the weights/marker), never by a repeated DELETE on
+ * its own — a rapid second click must not silently discard gigabytes of
+ * resumable progress.
  */
 export function requestUninstall(): Progress {
+  if (progress.status === "downloading") {
+    pauseRequested = true;
+    abortInFlight?.(new Error("download paused"));
+    progress = { status: "absent", received: 0, total: 0 };
+    return { ...progress, partialBytes: partialSize() || undefined };
+  }
   // Clear ANY model file, not just a valid one — a corrupt/partial/wrong leftover
   // is exactly what a user needs to remove to get back to a clean install.
   if (!hasModelFile() && !uninstallPending()) {
-    return { status: "absent", received: 0, total: 0 };
+    return { status: "absent", received: 0, total: 0, partialBytes: partialSize() || undefined };
   }
+  // A real uninstall clears a stray/paused `.part` too. Unlike the weights it
+  // is never mmap'd by llama-server, so it can be removed directly here — no
+  // shell handshake needed.
+  rmSync(partPath(), { force: true });
   try {
     writeFileSync(join(modelsDir(), UNINSTALL_MARKER), String(Date.now()));
   } catch {
@@ -173,16 +244,32 @@ export function requestUninstall(): Progress {
   return { status: "uninstalling", received: 0, total: 0 };
 }
 
-/** Kick off the one-time model download if it isn't already present or running. */
+/**
+ * Kick off the one-time model download if it isn't already present or running.
+ * Fire-and-forget: returns immediately with the "downloading" state while the
+ * transfer proceeds in the background (module state carries progress) — which
+ * is what lets onboarding start the download and keep walking through setup.
+ * A kept `.part` from an earlier attempt is resumed via HTTP Range.
+ */
 export function startDownload(): Progress {
   if (progress.status === "downloading") return progress;
   if (installedModel()) return { status: "ready", received: 0, total: 0 };
+  pauseRequested = false;
+  const gen = ++generation; // fences a paused predecessor's callbacks off module state
   progress = { status: "downloading", received: 0, total: 0 };
   void download()
     .then(() => {
+      if (gen !== generation) return; // superseded by a newer download — not ours to report
       progress = { status: "ready", received: 0, total: 0 };
     })
     .catch((err) => {
+      if (gen !== generation) return; // superseded by a newer download — not ours to report
+      if (pauseRequested) {
+        // Not a failure: the user paused. The `.part` stays for a Range resume.
+        pauseRequested = false;
+        progress = { status: "absent", received: 0, total: 0 };
+        return;
+      }
       progress = {
         status: "error",
         received: progress.received,
@@ -193,21 +280,28 @@ export function startDownload(): Progress {
   return progress;
 }
 
-/** GET that follows redirects across hosts (HF resolve → CDN), resolving the response. */
-function get(url: string, redirects = 5): Promise<import("node:http").IncomingMessage> {
+/** GET that follows redirects across hosts (HF resolve → CDN), resolving the
+ *  response. Extra headers (the resume `Range`) are carried across redirects.
+ *  200 (full), 206 (Range honored) and 416 (range unsatisfiable — the caller
+ *  discards the partial and restarts) all resolve; anything else rejects. */
+function get(
+  url: string,
+  headers: Record<string, string> = {},
+  redirects = 5,
+): Promise<import("node:http").IncomingMessage> {
   return new Promise((resolve, reject) => {
-    const req = https.get(url, { headers: { "user-agent": "lighthouse-app" } }, (res) => {
-      const { statusCode, headers } = res;
-      if (statusCode && statusCode >= 300 && statusCode < 400 && headers.location) {
+    const req = https.get(url, { headers: { "user-agent": "lighthouse-app", ...headers } }, (res) => {
+      const { statusCode, headers: resHeaders } = res;
+      if (statusCode && statusCode >= 300 && statusCode < 400 && resHeaders.location) {
         res.resume();
         if (redirects <= 0) {
           reject(new Error(`too many redirects fetching ${url}`));
           return;
         }
-        resolve(get(new URL(headers.location, url).toString(), redirects - 1));
+        resolve(get(new URL(resHeaders.location, url).toString(), headers, redirects - 1));
         return;
       }
-      if (statusCode !== 200) {
+      if (statusCode !== 200 && statusCode !== 206 && statusCode !== 416) {
         res.resume();
         reject(new Error(`GET ${url} → ${statusCode}`));
         return;
@@ -223,35 +317,109 @@ function get(url: string, redirects = 5): Promise<import("node:http").IncomingMe
  * Stream the model to a `.part` temp file, updating `progress`, and rename into
  * place only once the full byte count arrives - so an interrupted download never
  * leaves a truncated file that later looks "installed".
+ *
+ * Resume protocol: an existing GGUF-prefixed `.part` is continued with
+ * `Range: bytes=<size>-`. HTTP 206 appends from that offset (progress reflects
+ * the resumed offset immediately); HTTP 200 means the server ignored the Range,
+ * so the `.part` is truncated and the transfer restarts from zero; HTTP 416
+ * means the `.part` is at/past the asset's size (or the asset changed) — it is
+ * discarded and a fresh request made. On failure the `.part` is KEPT for a
+ * later resume; it is deleted only when integrity is in doubt (junk prefix,
+ * 416, overshoot, or a completed file that is not a valid GGUF model).
  */
 async function download(): Promise<void> {
   const dest = join(modelsDir(), MODEL_FILE);
-  const tmp = `${dest}.part`;
+  const tmp = partPath();
+  let offset = resumableBytes();
+  if (offset > 0) {
+    // Reflect the resumed offset immediately — before the first byte arrives —
+    // so a resumed download never appears to restart at zero.
+    progress = { status: "downloading", received: offset, total: 0 };
+  }
+
   recordEgress(MODEL_URL, PURPOSE_MODEL_DOWNLOAD);
-  const res = await get(MODEL_URL);
-  const total = Number(res.headers["content-length"] || 0);
+  let res = await get(MODEL_URL, offset > 0 ? { range: `bytes=${offset}-` } : {});
+  if (res.statusCode === 416) {
+    // Range not satisfiable: the .part is at/past the asset's size, or the
+    // asset changed underneath us. Either way it can't be trusted — discard
+    // it and fetch from zero.
+    res.resume();
+    rmSync(tmp, { force: true });
+    offset = 0;
+    res = await get(MODEL_URL);
+    if (res.statusCode === 416) {
+      res.resume();
+      throw new Error(`GET ${MODEL_URL} → 416`);
+    }
+  }
+  if (pauseRequested) {
+    // Paused while connecting (nothing streamed yet): stop before writing.
+    res.destroy();
+    throw new Error("download paused");
+  }
+
+  let total: number;
+  if (res.statusCode === 206) {
+    // The server honored the Range: strictly verify it resumed at OUR offset
+    // (appending a mismatched slice would corrupt the file), and take the full
+    // size from Content-Range ("bytes <start>-<end>/<total>").
+    const contentRange = String(res.headers["content-range"] || "");
+    if (offset === 0 || !contentRange.startsWith(`bytes ${offset}-`)) {
+      res.destroy();
+      throw new Error(
+        `resume failed: server returned a mismatched range (${contentRange || "no content-range"})`,
+      );
+    }
+    const m = /\/(\d+)\s*$/.exec(contentRange);
+    total = m ? Number(m[1]) : offset + Number(res.headers["content-length"] || 0);
+  } else {
+    // 200: the full body — no .part, or the server ignored the Range (some
+    // hosts do). Restart from zero (the "w" open below truncates) so resumed
+    // bytes are never appended twice.
+    offset = 0;
+    total = Number(res.headers["content-length"] || 0);
+  }
   if (!total) {
     res.destroy();
     throw new Error("download unverifiable: server did not report a Content-Length");
   }
-  progress = { status: "downloading", received: 0, total };
+  progress = { status: "downloading", received: offset, total };
   try {
     await new Promise<void>((resolve, reject) => {
-      const out = createWriteStream(tmp);
+      const out = createWriteStream(tmp, { flags: offset > 0 ? "a" : "w" });
+      // Deterministic teardown on EVERY failure: destroy both ends so the fd
+      // closes (an open fd blocks rename/reopen on Windows) and the .part is
+      // quiescent for a later resume. Doubles as the pause abort seam.
+      const fail = (err: unknown) => {
+        res.destroy();
+        out.destroy();
+        reject(err instanceof Error ? err : new Error(String(err)));
+      };
+      abortInFlight = fail;
       res.on("data", (chunk: Buffer) => {
         progress = { status: "downloading", received: progress.received + chunk.length, total };
       });
       res.pipe(out);
       out.on("finish", () => out.close(() => resolve()));
-      out.on("error", reject);
-      res.on("error", reject);
+      out.on("error", fail);
+      res.on("error", fail);
     });
-    if (progress.received !== total) {
-      throw new Error(`incomplete download (${progress.received}/${total} bytes)`);
-    }
-  } catch (err) {
+  } finally {
+    abortInFlight = null;
+  }
+  // Integrity is size- and magic-based (there is no upstream digest). Too
+  // SHORT is an interruption — keep the `.part` so the next install resumes.
+  // Anything else wrong (overshoot, not a GGUF) is corruption — a corrupt part
+  // must never become a ready model, so delete it and start fresh next time.
+  const size = statSync(tmp).size;
+  if (size < total) throw new Error(`incomplete download (${size}/${total} bytes)`);
+  if (size > total) {
     rmSync(tmp, { force: true });
-    throw err;
+    throw new Error(`download corrupted (${size}/${total} bytes) — removed; installing again starts fresh`);
+  }
+  if (!isGgufFile(tmp)) {
+    rmSync(tmp, { force: true });
+    throw new Error("download corrupted (not a valid GGUF model file) — removed; installing again starts fresh");
   }
   renameSync(tmp, dest);
 }

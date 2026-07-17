@@ -12,6 +12,11 @@
  *                     `ModeChooserAuto`, which auto-advances on the web twin.
  *   2. select-model — pick a provider/model and paste a key (soft, never
  *                     blocking, gate when the local model isn't installed yet).
+ *                     When the private model is selected but absent, the panel
+ *                     offers to START the ~4.2 GB download right away — it is
+ *                     fire-and-forget on the server, so it keeps downloading
+ *                     in the background through the rest of onboarding (and
+ *                     the first-run tour) with no waiting at the end.
  *   3. inclusion    — whether newly-added files are searchable by default.
  *
  * then `completeOnboarding()` lands on "done" and the app shell takes over.
@@ -34,6 +39,7 @@ import {
   tokens,
 } from "@fluentui/react-components";
 import { MODEL_PROVIDERS } from "@/contracts";
+import { apiKeyBillingNote } from "@/lib/billingNotes";
 import {
   LocalModelInstallPanel,
   useLocalModel,
@@ -42,6 +48,7 @@ import { useAuthStore } from "@/stores/useAuthStore";
 import { useRagStore } from "@/stores/useRagStore";
 import { ModeChooserAuto } from "./ModeChooser";
 import { isDesktopShell } from "@/shell/desktopBridge";
+import { BEAM_SWEEP } from "@/shell/theme";
 
 const useStyles = makeStyles({
   panel: {
@@ -49,6 +56,17 @@ const useStyles = makeStyles({
     flexDirection: "column",
     gap: tokens.spacingVerticalM,
     padding: tokens.spacingHorizontalL,
+  },
+  // The Beam signature crowning each slide: a slim ink→amber sweep band — a
+  // hero moment (BEAM_SWEEP is reserved for these) that never sits behind
+  // body text. providers.tsx stamps data-theme on <html>; the :global rule
+  // picks the sweep variant with the theme (same pattern as chat's beacon).
+  beamBand: {
+    height: "4px",
+    flexShrink: 0,
+    borderRadius: tokens.borderRadiusCircular,
+    backgroundImage: BEAM_SWEEP.light,
+    ':global([data-theme="dark"])': { backgroundImage: BEAM_SWEEP.dark },
   },
   hint: { color: tokens.colorNeutralForeground3 },
   // Quiet progress marker ("Step n of 3") so the user knows how much is left.
@@ -82,7 +100,7 @@ const useStyles = makeStyles({
  */
 function ContinueSetupButton({ providerId, disabled }: { providerId: string; disabled: boolean }) {
   const styles = useStyles();
-  const { status, received, total } = useLocalModel();
+  const { status, received, total, partialBytes } = useLocalModel();
   const localNotReady = providerId === "local" && status !== "ready";
   // Percent only when the total is known — early in a download it isn't yet.
   const pct = total ? ` — ${Math.min(100, Math.floor((received / total) * 100))}%` : "";
@@ -92,8 +110,10 @@ function ContinueSetupButton({ providerId, disabled }: { providerId: string; dis
       {localNotReady && (
         <Text size={200} className={styles.warningText}>
           {status === "downloading"
-            ? `The private model is still downloading${pct}. You can continue now and check on it later in Settings → AI models.`
-            : "The private model isn't installed yet — install it above, or continue now and add it later in Settings → AI models."}
+            ? `The private model is still downloading${pct}. You can continue now — it keeps downloading in the background (check on it later in Settings → AI models).`
+            : partialBytes
+              ? "The private model download is paused — resume it above, or continue now and finish it later in Settings → AI models."
+              : "The private model isn't installed yet — install it above, or continue now and add it later in Settings → AI models."}
         </Text>
       )}
       {/* type=submit so the enclosing form's onSubmit (Enter or click) continues. */}
@@ -181,6 +201,7 @@ export function OnboardingPanel() {
           void finishVault();
         }}
       >
+        <span className={styles.beamBand} aria-hidden />
         <Text size={200} className={styles.stepLabel}>
           Step 1 of 3
         </Text>
@@ -197,8 +218,8 @@ export function OnboardingPanel() {
           </li>
         </ul>
         <Text className={styles.hint}>
-          Your documents live in your Lighthouse vault folder. Add files there and
-          Lighthouse can search them and answer questions grounded in what they say.
+          Your documents live in your vault folder. Add files there and Lighthouse
+          can search them and answer from what they say.
         </Text>
         {isDesktop && (
           <>
@@ -251,6 +272,7 @@ export function OnboardingPanel() {
           continueFromModel();
         }}
       >
+        <span className={styles.beamBand} aria-hidden />
         <Text size={200} className={styles.stepLabel}>
           Step 2 of 3
         </Text>
@@ -286,7 +308,11 @@ export function OnboardingPanel() {
         </RadioGroup>
 
         {isLocal ? (
-          <LocalModelInstallPanel />
+          /* onboarding copy: the panel's download button doubles as the
+             "start it now, keep setting up" offer — starting NEVER blocks
+             Continue (the soft gate below stays soft) because the download is
+             fire-and-forget on the server and survives leaving this step. */
+          <LocalModelInstallPanel onboarding />
         ) : (
           <>
             {/* Honest cloud heading, naming the selected vendor. */}
@@ -331,6 +357,11 @@ export function OnboardingPanel() {
                 ))}
               </Dropdown>
             </Field>
+            {/* Billing clarity (0.12.1 §4): name the vendor's products so a
+                user doesn't assume a chat subscription covers API-key use. */}
+            {apiKeyBillingNote(providerId) && (
+              <Text className={styles.hint}>{apiKeyBillingNote(providerId)}</Text>
+            )}
             <Field
               label="API key"
               hint={
@@ -367,6 +398,7 @@ export function OnboardingPanel() {
           void completeInclusion();
         }}
       >
+        <span className={styles.beamBand} aria-hidden />
         <Text size={200} className={styles.stepLabel}>
           Step 3 of 3
         </Text>
@@ -385,7 +417,7 @@ export function OnboardingPanel() {
             />
             <Radio
               value="exclude"
-              label="Keep files out by default — nothing is searchable until you include it (more careful; you opt each one in)"
+              label="Keep files out by default — nothing is searchable until you include it (you opt each one in)"
             />
           </RadioGroup>
         </Field>

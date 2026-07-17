@@ -12,9 +12,14 @@ export interface ChartSeries {
   name: string;
   /** One value per x label; null = missing point (skipped in line, zero-height in bar). */
   values: (number | null)[];
+  /** band only: the interval's lower bound per x label (null = no band there, e.g.
+   *  historical rows before a forecast). Aligned index-for-index with values. */
+  lower?: (number | null)[];
+  /** band only: the interval's upper bound per x label. Aligned with values. */
+  upper?: (number | null)[];
 }
 
-export type ChartKind = "bar" | "line" | "area" | "scatter";
+export type ChartKind = "bar" | "line" | "area" | "scatter" | "band";
 
 export interface ChartSpec {
   kind: ChartKind;
@@ -24,11 +29,43 @@ export interface ChartSpec {
   stacked?: boolean;
   /** scatter only: numeric x position per point, aligned index-for-index with series[0].values. */
   xValues?: number[];
+  /**
+   * Optional heading, present ONLY on a directed chart (chart-directive): the
+   * one model-chosen string the engine lets through — display copy, capped and
+   * sanitized engine-side, never data.
+   */
+  title?: string;
+  /**
+   * Optional disclosure line, present ONLY when the emitter bucketed a
+   * beyond-cap categorical result into top-N + “Other” (charts by default,
+   * 0.12.1). Engine-computed (analytics.rs bucket_top_n) or client-computed
+   * (chartFromTable.ts) — never model text.
+   */
+  subtitle?: string;
 }
 
 /** Bounds the renderer trusts; anything outside is rejected as "not a chart". */
 export const MAX_POINTS = 24;
 export const MAX_SERIES = 3;
+/** PARITY: lighthouse-core analytics.rs CHART_TITLE_MAX_CHARS. */
+export const MAX_TITLE_CHARS = 80;
+/** Cap on the bucketing-disclosure subtitle — generous headroom over the
+ *  longest string the emitters actually compute. */
+export const MAX_SUBTITLE_CHARS = 140;
+
+/** A band bound array: one entry per x label, each a finite number or null,
+ *  aligned to the series values. Null when the shape is wrong (rejects the spec).
+ *  PARITY: the engine reads bound columns NULL-safe (analytics.rs band branch). */
+function parseBound(raw: unknown, len: number): (number | null)[] | null {
+  if (!Array.isArray(raw) || raw.length !== len) return null;
+  const out: (number | null)[] = [];
+  for (const v of raw) {
+    if (v === null) out.push(null);
+    else if (typeof v === "number" && Number.isFinite(v)) out.push(v);
+    else return null;
+  }
+  return out;
+}
 
 /**
  * Parse + validate the fenced JSON. Returns null on ANY shape violation —
@@ -44,13 +81,21 @@ export function parseChartSpec(raw: string): ChartSpec | null {
   }
   if (typeof parsed !== "object" || parsed === null) return null;
   const o = parsed as Record<string, unknown>;
-  if (o.kind !== "bar" && o.kind !== "line" && o.kind !== "area" && o.kind !== "scatter")
+  if (
+    o.kind !== "bar" &&
+    o.kind !== "line" &&
+    o.kind !== "area" &&
+    o.kind !== "scatter" &&
+    o.kind !== "band"
+  )
     return null;
   if (!Array.isArray(o.x) || o.x.length < 2 || o.x.length > MAX_POINTS) return null;
   if (!o.x.every((l) => typeof l === "string")) return null;
   if (!Array.isArray(o.series) || o.series.length < 1 || o.series.length > MAX_SERIES) return null;
-  // Scatter is a single (x, y) relationship, never multi-series.
+  // Scatter is a single (x, y) relationship; a band is one line wrapped in an
+  // interval — neither is ever multi-series.
   if (o.kind === "scatter" && o.series.length !== 1) return null;
+  if (o.kind === "band" && o.series.length !== 1) return null;
   const x = o.x as string[];
   const series: ChartSeries[] = [];
   for (const s of o.series) {
@@ -71,7 +116,20 @@ export function parseChartSpec(raw: string): ChartSpec | null {
       }
     }
     if (finite < 2) return null; // a chart of one real point explains nothing
-    series.push({ name: so.name, values });
+    const built: ChartSeries = { name: so.name, values };
+    // band: the series carries a lower/upper interval (bounds may be null on
+    // any x, e.g. historical rows before a forecast — no finite floor). Off a
+    // band, bound arrays are meaningless and reject, keeping the union tight.
+    if (o.kind === "band") {
+      const lower = parseBound(so.lower, x.length);
+      const upper = parseBound(so.upper, x.length);
+      if (!lower || !upper) return null;
+      built.lower = lower;
+      built.upper = upper;
+    } else if (so.lower !== undefined || so.upper !== undefined) {
+      return null;
+    }
+    series.push(built);
   }
   const spec: ChartSpec = { kind: o.kind, x, series };
   // Stacked is a bar-only hint; reject it anywhere else to keep the union tight.
@@ -95,7 +153,155 @@ export function parseChartSpec(raw: string): ChartSpec | null {
   } else if (o.xValues !== undefined) {
     return null; // xValues is meaningless off a scatter
   }
+  // Directed-chart title: engine-capped display copy. Anything outside the
+  // emitter's own bounds (non-string, empty, over-length) is a shape violation.
+  if (o.title !== undefined) {
+    if (typeof o.title !== "string") return null;
+    const t = o.title;
+    if (t.length === 0 || [...t].length > MAX_TITLE_CHARS) return null;
+    spec.title = t;
+  }
+  // Bucketing-disclosure subtitle: emitter-computed display copy, validated
+  // like the title (string, trimmed, bounded) — anything else is a shape
+  // violation and the whole spec degrades to visible code.
+  if (o.subtitle !== undefined) {
+    if (typeof o.subtitle !== "string") return null;
+    const s = o.subtitle.trim();
+    if (s.length === 0 || [...s].length > MAX_SUBTITLE_CHARS) return null;
+    spec.subtitle = s;
+  }
   return spec;
+}
+
+// --- Chart directive (chart-directive) -----------------------------------------------
+//
+// PARITY: the grammar and validation rules below mirror lighthouse-core
+// analytics.rs (parse_chart_directive / validate_directive) byte-for-byte —
+// same fence, same five fields, same rejection rules and messages — and are
+// pinned against the same fixtures in test/chartSpec.test.mjs. The narrating
+// model may emit ONE such fenced block; the ENGINE materializes the chart from
+// its own result batches, so a directive can steer a chart but never supply a
+// value. This module only parses/validates; nothing here reads data.
+
+export type ChartDirectiveKind = "bar" | "line" | "area" | "band" | "none";
+
+export interface ChartDirective {
+  kind: ChartDirectiveKind;
+  /** Must name a real result column (exact, case-sensitive). Empty for "none". */
+  labelColumn: string;
+  /** 1..=3 names; each must exist and be numeric in the result. A `band` names
+   *  exactly ONE (the line the interval wraps). */
+  seriesColumns: string[];
+  /** band only: the result columns holding the interval's lower/upper bounds.
+   *  Both required for a band, absent (undefined) for every other kind — the
+   *  ENGINE (forecast recipe) authors a band; the model never sets these. */
+  lowerColumn?: string;
+  upperColumn?: string;
+  /** Optional display title — capped/sanitized by the engine, never data. */
+  title?: string;
+  sort?: "asc" | "desc";
+}
+
+/** PARITY: lighthouse-core analytics.rs CHART_DIRECTIVE_FENCE. */
+export const CHART_DIRECTIVE_FENCE = "```lighthouse-chart-request";
+
+/**
+ * Parse the FIRST lighthouse-chart-request fence out of a narration (later
+ * ones are ignored). Returns null for no fence, an unterminated fence, or any
+ * grammar violation — callers fall back to the heuristic chart, exactly like
+ * the engine. Only the five directive fields are read; extra keys (fabricated
+ * x/values/anything) are ignored wholesale.
+ */
+export function parseChartDirective(text: string): ChartDirective | null {
+  const start = text.indexOf(CHART_DIRECTIVE_FENCE);
+  if (start < 0) return null;
+  const after = text.slice(start + CHART_DIRECTIVE_FENCE.length);
+  const end = after.indexOf("```");
+  if (end < 0) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(after.slice(0, end).trim());
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const o = parsed as Record<string, unknown>;
+  if (o.kind === "none") return { kind: "none", labelColumn: "", seriesColumns: [] };
+  if (o.kind !== "bar" && o.kind !== "line" && o.kind !== "area" && o.kind !== "band") return null;
+  if (typeof o.label_column !== "string") return null;
+  if (!Array.isArray(o.series_columns) || !o.series_columns.every((s) => typeof s === "string"))
+    return null;
+  const d: ChartDirective = {
+    kind: o.kind,
+    labelColumn: o.label_column,
+    seriesColumns: o.series_columns as string[],
+  };
+  // band bound columns: present-and-string when given (validated numeric later),
+  // absent → undefined. Parsed for any kind, ignored off a band — the Rust twin.
+  if (o.lower_column !== undefined) {
+    if (typeof o.lower_column !== "string") return null;
+    d.lowerColumn = o.lower_column;
+  }
+  if (o.upper_column !== undefined) {
+    if (typeof o.upper_column !== "string") return null;
+    d.upperColumn = o.upper_column;
+  }
+  if (o.title !== undefined) {
+    if (typeof o.title !== "string") return null;
+    d.title = o.title;
+  }
+  if (o.sort !== undefined) {
+    if (o.sort !== "asc" && o.sort !== "desc") return null;
+    d.sort = o.sort;
+  }
+  return d;
+}
+
+/**
+ * Validate a directive against the actual result columns. Returns null when
+ * valid, else the SAME reason string the Rust validator produces (shared test
+ * fixtures keep the two from drifting).
+ */
+export function validateDirective(
+  d: ChartDirective,
+  columns: { name: string; numeric: boolean }[],
+): string | null {
+  if (d.kind === "none") return null;
+  if (!columns.some((c) => c.name === d.labelColumn))
+    return `unknown label_column ${JSON.stringify(d.labelColumn)}`;
+  if (d.seriesColumns.length < 1 || d.seriesColumns.length > MAX_SERIES)
+    return `series_columns must name 1-${MAX_SERIES} columns`;
+  for (const s of d.seriesColumns) {
+    const col = columns.find((c) => c.name === s);
+    if (!col) return `unknown series column ${JSON.stringify(s)}`;
+    if (!col.numeric) return `series column ${JSON.stringify(s)} is not numeric`;
+  }
+  // A band wraps ONE line in a lower/upper interval — exactly one series, and
+  // both bound columns must name existing numeric result columns. PARITY:
+  // analytics.rs validate_directive band block (same messages).
+  if (d.kind === "band") {
+    if (d.seriesColumns.length !== 1) return "a band names exactly one series column";
+    const bounds: [string, string | undefined][] = [
+      ["lower_column", d.lowerColumn],
+      ["upper_column", d.upperColumn],
+    ];
+    for (const [which, name] of bounds) {
+      if (name === undefined) return `band requires ${which}`;
+      const col = columns.find((c) => c.name === name);
+      if (!col) return `unknown ${which} ${JSON.stringify(name)}`;
+      if (!col.numeric) return `${which} ${JSON.stringify(name)} is not numeric`;
+    }
+  }
+  return null;
+}
+
+/**
+ * Belt-and-braces UI strip: the engine already withholds chart-request fences
+ * from streamed deltas (analytics.rs DirectiveScrubber); displayed prose
+ * strips any residue too, unterminated tails included.
+ */
+export function stripChartRequestFences(text: string): string {
+  return text.replace(/```lighthouse-chart-request[\s\S]*?(```|$)/g, "");
 }
 
 /** Thousands-grouped exact value ("1200" → "1,200", "0.25" → "0.25"), for

@@ -1,59 +1,59 @@
-# Whisper to your file system — launch copy (draft)
+# Beam — launch copy (draft)
 
-Marketing copy for the desktop-widget + Whisper-mode launch (W4). Draft for
-the site and release announcement; trim per surface.
+Draft for the 0.12 Beam release — site and release announcement; trim per
+surface. Tone: plain, specific, honest — no superlatives.
 
 ## One-liner
 
-**Whisper to your file system.** Lighthouse puts a private AI search bar one
-keystroke away — ask anything about your own files, get a grounded answer with
-citations, never leave what you're doing.
+**Private analytics on your own machine.** Ask your spreadsheets a question;
+Beam, the built-in analytics engine, writes the SQL, runs it on your device,
+and shows both the numbers and the query. Nothing leaves unless you choose.
 
-## Hero
+## How Beam works (four beats)
 
-A floating search bar that lives on your desktop. Tap **Ctrl + Super + Shift**
-and Lighthouse appears over whatever you're working on. Ask a question — the
-answer streams right there, cited to your own documents. Press it again and
-it's gone. Your files never leave your machine.
+1. **Ask.** The model reads only the shape of your tables — names, columns, a
+   few sample rows — and writes one read-only SQL SELECT.
+2. **Execute.** An embedded query engine runs that SQL on your machine. The
+   model never does arithmetic; every number comes from the engine.
+3. **Verify.** The answer leads with the figure, shows the exact result table
+   and a chart drawn from those same verified rows, and prints the SQL it ran —
+   plus which files it read and how fresh they were.
+4. **Keep.** Save the result as a CSV back into your vault, or as an evidence
+   pack — one self-contained HTML file: question, narrative, table, chart, SQL,
+   provenance. Pin the question; Lighthouse re-checks it when the files change.
 
-If you've used Wispr Flow to talk to your computer, this is the same reflex,
-pointed at everything you've ever saved.
+## Why you can trust it
 
-## How it works (three beats)
+- **Always unlocked.** No account, no license, no sign-in — none of it exists.
+- **No telemetry.** Only three kinds of request ever leave the machine: asks to
+  a cloud model you configure, an update check, and downloads you click.
+- **Provenance on every answer.** A stamp says the answer was computed on this
+  device — or names the vendor that saw excerpts. A session badge counts
+  exactly what left the machine, and to where.
+- **Local-only marks.** Lock a file to this device: the private model still
+  reads it; a cloud model never will.
+- **The inspector.** "What the AI sees" shows the exact text extracted from any
+  file, chunk by chunk, and can test what a question would retrieve.
+- **Honest edges.** Truncated results, skipped files, and cached replays say so
+  in fixed, engine-written footers the model can't reword. Limits are real: the
+  private model (Mistral 7B, a one-time ~4.2 GB download) runs in a modest
+  context window, so one ask carries only a few tables' schemas — and the
+  answer discloses when files were left out.
 
-1. **Summon.** One chord from anywhere — no window to find, no app to switch
-   to. Prefer a classic window? Lighthouse runs that way too; the bar is still
-   a keystroke away.
-2. **Ask.** Type a question. Lighthouse searches only the files you've made
-   visible to it and answers inline, with citation chips that open the source.
-3. **Stay.** The answer freezes on your desktop while you keep reading your
-   document. Dismiss when you're done — or hand it to the full app for the big
-   canvas.
+## The time-savers, briefly
 
-## What makes it different
+A repeated ask replays instantly from a visibly marked cache, with a one-click
+re-run. Type-ahead suggests past questions and pins; ↑ recalls your last ask.
+Citations open the exact passage in the inspector. Ctrl/Cmd+P finds any file.
+Per-folder rules curate whole folders, including files that arrive later. And
+switching models is one click in the chat header — the provenance stamp follows.
 
-- **Local-first and private.** Your vault stays on your disk. The local model
-  runs on your machine; nothing is uploaded to answer a question.
-- **You choose what it sees.** Every file has a visibility toggle. Select all,
-  or curate file by file — the AI only reads what you've included.
-- **It's genuinely fast.** Rewritten in Rust: a ten-thousand-file vault indexes
-  in under a second and answers instantly, without pinning your CPU.
-- **Two ways to live on your desktop.** Classic window, or the experimental
-  widget where the search bar *is* the app and the window waits in the tray.
+## The identity
 
-## Whisper mode (the pitch line)
+Beam is also how Lighthouse looks: ink and paper with a single amber beam, in
+light and dark — one accent, quiet surfaces, the content is the interface.
 
-Most search boxes make you go to them. Whisper mode brings the search box to
-you: a modifier-only tap — hold **Ctrl + Super + Shift**, no letter key — and
-the bar is there. It's opt-in, it's per-platform native (a keyboard hook on
-Windows, an event monitor on macOS, raw input on X11), and it never eats a
-keystroke it shouldn't.
+## Availability
 
-## Availability line
-
-Free trial. Windows, macOS, and Linux. Download at **lhvault.app**.
-
-*(Unsigned builds today — SmartScreen/Gatekeeper may warn on first launch;
-the signing pipeline is wired and awaits certificates — docs/signing.md.
-Once signed, in-app updates are one click and cryptographically verified;
-until then the update notice links to the releases page.)*
+Windows, macOS, and Linux — download at **lhvault.app**. *(Unsigned builds
+today — SmartScreen/Gatekeeper may warn on first launch; docs/signing.md.)*

@@ -4,7 +4,7 @@
 
 mod common;
 
-use lighthouse_core::meta::{meta_intent, render_meta, suggested_asks};
+use lighthouse_core::meta::{capability_map, meta_intent, render_meta, suggested_asks};
 use lighthouse_core::vault;
 
 fn write(path: &std::path::Path, text: &str) {
@@ -66,4 +66,98 @@ fn meta_answers_and_suggestions_come_from_the_vault() {
     vault::set_included("sales.csv", false);
     vault::invalidate_walk_cache();
     assert!(suggested_asks(&included, false).is_empty(), "no tabular ⇒ no suggestions");
+}
+
+// --- Capability map (openspec: add-deep-analysis §3) ------------------------------
+
+#[tokio::test]
+async fn capability_map_aggregates_the_investigable_surfaces() {
+    let dir = tempfile::tempdir().unwrap();
+    let _guard = common::lock_env(dir.path());
+    write(
+        &dir.path().join("sales.csv"),
+        "date,region,amount\n2026-01-05,NE,100\n2026-02-06,NW,50\n2026-03-06,NE,75\n",
+    );
+    vault::invalidate_walk_cache();
+    vault::set_included("sales.csv", true);
+
+    let map = capability_map(vec!["sales.csv".to_string()], false).await;
+
+    // The Date+Numeric table is listed, typed, and flagged investigable.
+    let sales = map.tables.iter().find(|t| t.name == "sales.csv").expect("sales table listed");
+    assert!(sales.investigable, "a date+numeric table is investigable");
+    assert!(sales.columns.iter().any(|c| c.name == "amount"), "typed columns carried");
+
+    // Exactly one "Investigate sales.csv" — one investigation per date+numeric table.
+    assert!(
+        map.suggested_investigations
+            .iter()
+            .any(|s| s.table == "sales.csv" && s.label == "Investigate sales.csv"),
+        "an investigation is offered: {:?}",
+        map.suggested_investigations
+    );
+
+    // The recipes + asks the nav computes are aggregated here verbatim.
+    assert!(map.recipes.iter().any(|r| r.table == "sales.csv"), "recipes for the table: {:?}", map.recipes);
+    assert!(
+        map.recipes.iter().any(|r| r.id == "variance-vs-last-period"),
+        "the temporal recipes apply: {:?}",
+        map.recipes
+    );
+    assert!(
+        map.suggested_asks
+            .iter()
+            .any(|a| a.label == "Total amount by region" || a.label == "Monthly trend of amount"),
+        "asks aggregated: {:?}",
+        map.suggested_asks
+    );
+}
+
+#[tokio::test]
+async fn a_vault_with_no_analyzable_table_offers_no_investigations() {
+    let dir = tempfile::tempdir().unwrap();
+    let _guard = common::lock_env(dir.path());
+    // A text-only table (no numeric, no date) — nothing investigable.
+    write(&dir.path().join("labels.csv"), "label,note\na,hello\nb,world\n");
+    vault::invalidate_walk_cache();
+    vault::set_included("labels.csv", true);
+
+    let map = capability_map(vec!["labels.csv".to_string()], false).await;
+
+    // The table is still listed (with its columns) but flagged not investigable,
+    // and NO investigation is offered (it would produce an empty report).
+    let labels = map.tables.iter().find(|t| t.name == "labels.csv").expect("table listed");
+    assert!(!labels.investigable, "no date+numeric ⇒ not investigable");
+    assert!(map.suggested_investigations.is_empty(), "no analyzable table ⇒ no investigations");
+}
+
+#[tokio::test]
+async fn cloud_posture_drops_local_only_capabilities() {
+    let dir = tempfile::tempdir().unwrap();
+    let _guard = common::lock_env(dir.path());
+    write(
+        &dir.path().join("private.csv"),
+        "date,region,amount\n2026-01-05,NE,100\n2026-02-06,NW,50\n2026-03-06,NE,75\n",
+    );
+    vault::invalidate_walk_cache();
+    vault::set_included("private.csv", true);
+    vault::set_local_only("private.csv", true);
+
+    let included = vec!["private.csv".to_string()];
+
+    // On device: the table + its investigation are present.
+    let local = capability_map(included.clone(), false).await;
+    assert!(local.tables.iter().any(|t| t.name == "private.csv"), "present on device");
+    assert!(
+        local.suggested_investigations.iter().any(|s| s.table == "private.csv"),
+        "investigable on device"
+    );
+
+    // On cloud: a local-only file is dropped everywhere (the shareable subset the
+    // sources gate on), so the map offers no table, no investigation, no recipe —
+    // matching what the underlying `applicable_*` return for the same posture.
+    let cloud = capability_map(included, true).await;
+    assert!(!cloud.tables.iter().any(|t| t.name == "private.csv"), "dropped from cloud tables");
+    assert!(cloud.suggested_investigations.is_empty(), "no cloud investigation for a local-only table");
+    assert!(!cloud.recipes.iter().any(|r| r.table == "private.csv"), "no cloud recipes for a local-only table");
 }

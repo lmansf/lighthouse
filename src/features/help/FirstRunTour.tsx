@@ -45,6 +45,7 @@ import {
   SettingsRegular,
 } from "@fluentui/react-icons";
 import { shouldAutoOpenTour } from "./tourGating";
+import { BEAM_SWEEP } from "@/shell/theme";
 
 /**
  * The former Quick Start's localStorage once-flag. SummonHint keys its "wait
@@ -75,7 +76,7 @@ const STEPS: TourStep[] = [
     anchor: "explorer",
     icon: <DocumentAddRegular />,
     title: "Add files, choose what's visible",
-    body: "Drag files and folders in, or browse to them — they stay on your machine. The eye toggle on each row controls exactly what the AI can see, so nothing is read unless you choose it. The lock toggle marks a file private to this device — the on-device model still reads it, but it's never sent to a cloud model.",
+    body: "Drag files and folders in, or browse to them — they stay on your machine. The eye toggle on each row controls exactly what the AI can see, so nothing is read unless you choose it. The lock toggle keeps a file private to this device — hidden from cloud models, while the private model can always read it.",
     position: "after",
   },
   {
@@ -88,8 +89,8 @@ const STEPS: TourStep[] = [
   {
     anchor: "beam",
     icon: <DataBarVerticalRegular />,
-    title: "Analytics you can verify",
-    body: "Ask for a number and Lighthouse computes it from your data, then shows the exact SQL it ran. Verified figures you can check — not guesses.",
+    title: "Beam: analytics you can verify",
+    body: "Ask for a number and Beam, the built-in analytics engine, computes it from your data — then shows the exact SQL it ran. Verified figures you can check, not guesses.",
     position: "below",
   },
   {
@@ -109,10 +110,21 @@ const STEPS: TourStep[] = [
 ];
 
 const useStyles = makeStyles({
-  // Neutral TeachingPopover surface: keep it compact and readable.
+  // Neutral TeachingPopover surface: it rides the Paper/Ink tokens (raised
+  // background + the theme's one raised shadow); keep it compact and readable.
   surface: { maxWidth: "340px" },
   fallbackSurface: { maxWidth: "440px" },
   content: { display: "flex", flexDirection: "column", gap: tokens.spacingVerticalS },
+  // The Beam signature crowning each step: a slim ink→amber sweep band — a
+  // hero-moment use of BEAM_SWEEP, never behind body text. Theme variant via
+  // the data-theme stamp on <html> (same pattern as chat's beacon).
+  beamBand: {
+    height: "3px",
+    flexShrink: 0,
+    borderRadius: tokens.borderRadiusCircular,
+    backgroundImage: BEAM_SWEEP.light,
+    ':global([data-theme="dark"])': { backgroundImage: BEAM_SWEEP.dark },
+  },
   header: {
     display: "flex",
     alignItems: "center",
@@ -131,8 +143,10 @@ const useStyles = makeStyles({
   // "1 of 5" — a quiet progress marker pinned to the left of the actions.
   count: { color: tokens.colorNeutralForeground3, whiteSpace: "nowrap" },
   spacer: { flex: 1 },
-  // The centered-fallback title reuses the icon+label header layout.
+  // The centered-fallback title reuses the icon+label header layout, stacked
+  // under the same slim sweep band as the anchored popover.
   dialogTitle: { display: "flex", alignItems: "center", gap: tokens.spacingHorizontalS },
+  dialogTitleStack: { display: "flex", flexDirection: "column", gap: tokens.spacingVerticalS },
 });
 
 export function FirstRunTour() {
@@ -306,6 +320,7 @@ export function FirstRunTour() {
           data-tour-step={index + 1}
         >
           <div className={styles.content}>
+            <span className={styles.beamBand} aria-hidden />
             <div className={styles.header}>
               <span className={styles.icon} aria-hidden>
                 {step.icon}
@@ -333,11 +348,14 @@ export function FirstRunTour() {
       <DialogSurface className={styles.fallbackSurface} data-tour-step={index + 1}>
         <DialogBody>
           <DialogTitle>
-            <span className={styles.dialogTitle}>
-              <span className={styles.icon} aria-hidden>
-                {step.icon}
+            <span className={styles.dialogTitleStack}>
+              <span className={styles.beamBand} aria-hidden />
+              <span className={styles.dialogTitle}>
+                <span className={styles.icon} aria-hidden>
+                  {step.icon}
+                </span>
+                {step.title}
               </span>
-              {step.title}
             </span>
           </DialogTitle>
           <DialogContent>

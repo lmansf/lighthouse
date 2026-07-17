@@ -8,11 +8,16 @@
  */
 import type { DataSource, FileInspection, FileNode } from "@/contracts";
 import {
+  addRule as vaultAddRule,
+  enrichRule as vaultEnrichRule,
+  removeRule as vaultRemoveRule,
   retrieve as vaultRetrieve,
   restoreFromVault as vaultRestoreFromVault,
+  rulesListing as vaultRulesListing,
   setLocalOnly as vaultSetLocalOnly,
   type Retrieved,
   type RestoreDescriptor,
+  type RuleListing,
 } from "../vault";
 import { inspect as vaultInspect } from "../inspect";
 import { localVault } from "./local";
@@ -63,6 +68,32 @@ export async function setIncluded(nodeId: string, included: boolean): Promise<vo
  */
 export async function setLocalOnly(nodeId: string, value: boolean): Promise<void> {
   vaultSetLocalOnly(nodeId, value);
+}
+
+/**
+ * Bulk curation rules (openspec: add-curation-rules). Like local-only marks,
+ * rules live in the vault state and resolve by node id, so they route straight
+ * to the vault engine regardless of the owning source. KEEP IN SYNC with
+ * lighthouse-core sources::rules_listing / add_rule / remove_rule.
+ */
+export async function rulesListing(): Promise<RuleListing[]> {
+  return vaultRulesListing();
+}
+
+/** Validate + add a rule (engine-minted id); returns the enriched rule. */
+export async function addRule(input: {
+  scope: string;
+  kind?: string;
+  ext?: string[];
+  glob?: string;
+  action: string;
+}): Promise<RuleListing> {
+  return vaultEnrichRule(vaultAddRule(input));
+}
+
+/** Remove a rule (idempotent). */
+export async function removeRule(id: string): Promise<void> {
+  vaultRemoveRule(id);
 }
 
 export async function setSourceAvailable(
@@ -135,6 +166,7 @@ export async function retrieve(
   attachmentIds: string[] = [],
   k = 5,
   isCloud = false,
+  preferredConversationIds: string[] = [],
 ): Promise<Retrieved> {
   // When the question is scoped to explicit attachments, retrieve only from those
   // vault files and skip cloud mirroring (attachments are vault files here).
@@ -149,7 +181,17 @@ export async function retrieve(
       ).flat();
   // `isCloud` narrows the candidate + external sets to the shareable ones inside
   // vaultRetrieve, so a marked file's content never reaches the vendor.
-  return vaultRetrieve(query, includedFileIds, k, external, attachmentIds, isCloud);
+  // `preferredConversationIds` rides through to the recall preference
+  // (openspec: add-investigations); empty = no preference.
+  return vaultRetrieve(
+    query,
+    includedFileIds,
+    k,
+    external,
+    attachmentIds,
+    isCloud,
+    preferredConversationIds,
+  );
 }
 
 /**

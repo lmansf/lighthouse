@@ -36,6 +36,7 @@ import {
   DrawerHeader,
   DrawerHeaderTitle,
   Input,
+  Link,
   OverlayDrawer,
   Popover,
   PopoverSurface,
@@ -58,6 +59,7 @@ import {
   ArrowDownRegular,
   ArrowUndoRegular,
   AttachRegular,
+  BoardRegular,
   CheckmarkRegular,
   CodeRegular,
   CopyRegular,
@@ -68,16 +70,19 @@ import {
   DocumentRegular,
   EditRegular,
   ErrorCircleRegular,
-  GlobeRegular,
+  FilterRegular,
   HistoryRegular,
+  LockClosedRegular,
   OpenRegular,
   PinRegular,
   PlayRegular,
   SaveRegular,
   SendRegular,
   SettingsRegular,
-  ShieldCheckmarkRegular,
+  ShieldRegular,
   SquareRegular,
+  TableRegular,
+  TagRegular,
   ThumbDislikeRegular,
   ThumbLikeRegular,
   WarningRegular,
@@ -85,11 +90,19 @@ import {
 import dynamic from "next/dynamic";
 import { type Components } from "react-markdown";
 import type { DragEvent } from "react";
-import type { AnalyticsMeta, ChangedPin, ChatChunk, ChatTurn, Pin, RagReference } from "@/contracts";
-import { chatService, MODEL_PROVIDERS, ragService } from "@/contracts";
+import type { AnalyticsMeta, ChangedPin, ChatTurn, Pin, RagReference, RecipeCard } from "@/contracts";
+import { chatService, MODEL_PROVIDERS, ragService, runRecipeQuestion } from "@/contracts";
 import { useRagStore } from "@/stores/useRagStore";
 import { useAuthStore } from "@/stores/useAuthStore";
-import { parseChartSpec, tableToCsv } from "@/lib/chartSpec";
+import { parseChartSpec, stripChartRequestFences, tableToCsv } from "@/lib/chartSpec";
+import {
+  cloudProviderActive,
+  hiddenFromCloudCount,
+  hiddenFromCloudLabel,
+  LOCAL_ONLY_SKIP_NOTE_RE,
+} from "@/lib/privacyState";
+import { chartSpecFromTable, hasEngineChartFence } from "@/lib/chartFromTable";
+import { parseMarkdownTable } from "@/features/boards/boardModel";
 import {
   sortRows,
   truncationCaption,
@@ -97,15 +110,27 @@ import {
   type SortDir,
 } from "@/lib/sortTable";
 import { pinChartData } from "@/lib/pinChart";
+import { addPinToCurrentBoard } from "@/features/boards/boardScope";
+import { citationQuery, requestFileInspect } from "@/lib/citePreview";
+import { composeEvidencePack, provenanceStampText } from "@/lib/evidencePack";
 import { recallRelated, type RecallHit } from "@/lib/recall";
-import { AnalyticsChart } from "@/features/chat/AnalyticsChart";
+import { askSuggestions, lastAsk, type AskHistoryItem } from "@/lib/askTypeahead";
+import { AnalyticsChart, standaloneChartSvg } from "@/features/chat/AnalyticsChart";
 import { BriefingsPanel } from "@/features/chat/BriefingsPanel";
 import { PinMiniChart } from "@/features/chat/PinMiniChart";
+import { SaveViewDialog } from "@/features/views/SaveViewDialog";
+import { DefineMetricDialog } from "@/features/semantic/DefineMetricDialog";
 import { EgressShield } from "@/features/egress/EgressShield";
-import { useChatStore, type TranscriptMessage } from "@/stores/useChatStore";
+import { ProviderSwitch } from "@/features/chat/ProviderSwitch";
+import {
+  conversationsForContext,
+  useChatStore,
+  type TranscriptMessage,
+} from "@/stores/useChatStore";
+import { useInvestigationsStore } from "@/stores/useInvestigationsStore";
 import { chatHistoryLocked } from "@/stores/managedLocks";
 import { modKey } from "@/features/onboarding/ModeChooser";
-import { ACCENTS } from "@/shell/theme";
+import { ACCENTS, BEAM_SWEEP } from "@/shell/theme";
 import { FILE_DRAG_MIME, parseDraggedFiles, type DraggedFile } from "@/shell/dnd";
 import { isDesktopShell, pathsForFiles } from "@/shell/desktopBridge";
 
@@ -120,10 +145,25 @@ function warmMarkdown() {
   void import("@/shell/MarkdownView");
 }
 
-// A user this close to the bottom (px) counts as "pinned": we keep auto-
-// scrolling for them as tokens stream in. Scrolling further up releases the
-// pin so the view is never yanked back down mid-read.
+// A user this close to the bottom (px) counts as "pinned" — near enough that
+// "Jump to latest" would be a no-op, so the pill stays hidden. The band also
+// absorbs touchpad wobble and streaming reflow so the state doesn't flap.
+// Pinned gates ONLY the pill: it drives no automatic scrolling (a streaming
+// answer anchors its own top instead — see the read-from-the-top hold).
 const PIN_THRESHOLD = 80;
+
+// Read-from-the-top hold (openspec: add-investigations §5.1): the scrollTop
+// that puts an anchored message row's first line at the top of the scrollport,
+// just below the container's own top padding, clamped to the scrollable range.
+// `anchorTop` is the row's top in scroll-content coordinates. Pure — the
+// [messages] effect feeds it live geometry on every growth of the answer.
+export function computeAnchorScrollTop(
+  anchorTop: number,
+  paddingTop: number,
+  maxScrollTop: number,
+): number {
+  return Math.max(0, Math.min(anchorTop - paddingTop, Math.max(0, maxScrollTop)));
+}
 
 // Composer auto-grow cap: ~6 lines of fontSizeBase300 (20px line height) plus
 // the Textarea's vertical padding. Beyond this the textarea scrolls internally.
@@ -219,6 +259,31 @@ const useStyles = makeStyles({
     marginBottom: tokens.spacingVerticalM,
   },
   headerMeta: { display: "flex", alignItems: "center", gap: tokens.spacingHorizontalS },
+  // Compact context header (openspec: add-investigations §4.2): the Title3 is
+  // the investigation's name with its scope size as a quiet baseline caption
+  // ("Ask" alone in the global context). The name truncates before it can
+  // shove the meta row around.
+  headerTitle: {
+    display: "flex",
+    alignItems: "baseline",
+    gap: tokens.spacingHorizontalS,
+    minWidth: 0,
+  },
+  headerTitleName: {
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  },
+  headerCaption: { color: tokens.colorNeutralForeground3, whiteSpace: "nowrap" },
+  // The hero's investigation line: name · scope + the policy badge, kept
+  // together so the context is visible even when the visible-files badge is
+  // replaced by the no-files card.
+  heroInvRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: tokens.spacingHorizontalS,
+    color: tokens.colorNeutralForeground3,
+  },
   // Positioning context for the floating "Jump to latest" pill, which hovers
   // over the scrolling transcript rather than taking layout space.
   bodyWrap: {
@@ -232,12 +297,18 @@ const useStyles = makeStyles({
     flex: 1,
     minHeight: 0,
     overflowY: "auto",
+    // The read-from-the-top hold is the only scroll compensation this
+    // container wants: native scroll anchoring would fight it, and its
+    // adjustments look like user scrolls and would spuriously cancel the hold.
+    overflowAnchor: "none",
     display: "flex",
     flexDirection: "column",
     gap: tokens.spacingVerticalL,
   },
-  // Floating re-pin affordance shown when the user has scrolled up mid-stream.
-  // A subtle Button needs its own surface + shadow to stay readable over text.
+  // Floating affordance shown mid-stream whenever the viewport is far from the
+  // transcript bottom (an anchored answer outgrowing the viewport, or the user
+  // scrolled away). A subtle Button needs its own surface + shadow to stay
+  // readable over text.
   jumpPill: {
     position: "absolute",
     bottom: tokens.spacingVerticalM,
@@ -284,6 +355,17 @@ const useStyles = makeStyles({
   },
 
   turn: { display: "flex", flexDirection: "column", gap: tokens.spacingVerticalXS },
+  // Each Q&A pair after the first opens on a hairline, so the transcript
+  // reads as document sections on the paper canvas rather than one long
+  // scroll. Applied to user turns only; the first turn stays clean.
+  turnBoundary: {
+    ...shorthands.borderTop("1px", "solid", tokens.colorNeutralStroke3),
+    paddingTop: tokens.spacingVerticalL,
+    ":first-child": {
+      borderTopStyle: "none",
+      paddingTop: "0",
+    },
+  },
   // The user's question — a compact tinted bubble aligned to the right.
   question: {
     alignSelf: "flex-end",
@@ -299,14 +381,23 @@ const useStyles = makeStyles({
     lineHeight: tokens.lineHeightBase400,
     // Tame the Markdown block elements react-markdown emits so answers read as a
     // tight, well-spaced block rather than with browser-default margins.
-    "& p": { marginTop: 0, marginBottom: tokens.spacingVerticalS },
+    // Prose keeps a generous document measure (~72ch) so answers read like
+    // pages on the paper canvas; data surfaces (tables, code, charts) keep
+    // the full column.
+    "& p": { marginTop: 0, marginBottom: tokens.spacingVerticalS, maxWidth: "72ch" },
     "& p:last-child": { marginBottom: 0 },
-    "& ul, & ol": { marginTop: 0, marginBottom: tokens.spacingVerticalS, paddingLeft: tokens.spacingHorizontalXL },
+    "& ul, & ol": {
+      marginTop: 0,
+      marginBottom: tokens.spacingVerticalS,
+      paddingLeft: tokens.spacingHorizontalXL,
+      maxWidth: "72ch",
+    },
     "& li": { marginBottom: tokens.spacingVerticalXXS },
     "& h1, & h2, & h3, & h4": {
       marginTop: tokens.spacingVerticalM,
       marginBottom: tokens.spacingVerticalXS,
       lineHeight: tokens.lineHeightBase300,
+      maxWidth: "72ch",
     },
     "& h1": { fontSize: tokens.fontSizeBase500 },
     "& h2, & h3, & h4": { fontSize: tokens.fontSizeBase400 },
@@ -330,6 +421,8 @@ const useStyles = makeStyles({
       ...shorthands.border("1px", "solid", tokens.colorNeutralStroke2),
       ...shorthands.padding(tokens.spacingVerticalXS, tokens.spacingHorizontalS),
       textAlign: "left",
+      // Result tables are number surfaces: lining digits keep columns scannable.
+      fontVariantNumeric: "tabular-nums",
     },
     "& blockquote": {
       marginLeft: 0,
@@ -338,6 +431,75 @@ const useStyles = makeStyles({
       borderLeftStyle: "solid",
       borderLeftColor: tokens.colorNeutralStroke2,
       color: tokens.colorNeutralForeground2,
+      maxWidth: "72ch",
+    },
+    // --- The Beam answer card (flagship): the verified result table, the
+    //     quiet engine footers between, and the chart ride ONE elevated card —
+    //     10px radius, rest elevation (hairline ring + soft ambient, one
+    //     token). Grouped by remarkAnswerCard below; presentation only, the
+    //     engine's bytes are never edited.
+    "& .lh-answer-card": {
+      backgroundColor: tokens.colorNeutralBackground1,
+      borderRadius: tokens.borderRadiusLarge,
+      boxShadow: tokens.shadow4,
+      ...shorthands.padding(tokens.spacingVerticalM, tokens.spacingHorizontalL),
+      marginTop: tokens.spacingVerticalM,
+      marginBottom: tokens.spacingVerticalM,
+    },
+    // The card's tiny "Beam" wordmark — UI chrome naming the analytics engine
+    // (the engine's own footer text never carries the name and is never
+    // edited). Type only, quiet neutral, top-right, in normal flow so it can
+    // never overlap the result table; aria-hidden and unselectable so it
+    // stays out of copies and screen-reader passes.
+    "& .lh-beam-mark": {
+      display: "block",
+      textAlign: "right",
+      color: tokens.colorNeutralForeground4,
+      fontSize: tokens.fontSizeBase100,
+      lineHeight: "1",
+      letterSpacing: "0.08em",
+      textTransform: "uppercase",
+      userSelect: "none",
+      marginBottom: tokens.spacingVerticalXS,
+    },
+    // The engine's SQL-transparency footer, folded quiet: a collapsed native
+    // disclosure whose <summary> is the engine's own label paragraph (text
+    // byte-identical), in the small-print register. Keyboard focus gets the
+    // theme's amber ring.
+    "& .lh-query-used": {
+      marginTop: tokens.spacingVerticalXS,
+      marginBottom: tokens.spacingVerticalXS,
+    },
+    "& .lh-query-used summary": {
+      cursor: "pointer",
+      width: "fit-content",
+      color: tokens.colorNeutralForeground3,
+      fontSize: tokens.fontSizeBase200,
+      lineHeight: tokens.lineHeightBase300,
+      userSelect: "none",
+    },
+    "& .lh-query-used summary:focus-visible": {
+      outline: `2px solid ${tokens.colorStrokeFocus2}`,
+      outlineOffset: "2px",
+      borderRadius: tokens.borderRadiusSmall,
+    },
+    "& .lh-query-used summary::marker": { color: tokens.colorNeutralForeground3 },
+    // The label rides an emphasis node; render it upright — a disclosure
+    // label, not a caption.
+    "& .lh-query-used em": { fontStyle: "normal" },
+    "& .lh-query-used pre": {
+      marginTop: tokens.spacingVerticalXS,
+      marginBottom: tokens.spacingVerticalXS,
+    },
+    // Engine footers (freshness stamp, truncation/coverage honesty lines) in
+    // the quiet small-print register — text untouched, numbers lining.
+    "& .lh-card-note": {
+      color: tokens.colorNeutralForeground3,
+      fontSize: tokens.fontSizeBase200,
+      lineHeight: tokens.lineHeightBase300,
+      marginTop: tokens.spacingVerticalXXS,
+      marginBottom: tokens.spacingVerticalXXS,
+      fontVariantNumeric: "tabular-nums",
     },
   },
   // The streaming turn's plain-text surface: preserve the model's newlines and
@@ -428,6 +590,13 @@ const useStyles = makeStyles({
     gap: tokens.spacingHorizontalXS,
     marginTop: tokens.spacingVerticalXS,
   },
+  // Quiet secondary actions under an answer (refine/Edit SQL/save/evidence
+  // pack/pin): subtle buttons carrying only a hairline, so the row reads as
+  // small print until engaged. Text/disabled colors stay Fluent's subtle
+  // defaults (fg2 / disabled) — only the stroke is added.
+  quietChip: {
+    ...shorthands.border("1px", "solid", tokens.colorNeutralStroke2),
+  },
   sqlDialogSurface: { maxWidth: "720px", width: "92vw" },
   sqlDialogContent: {
     display: "flex",
@@ -455,6 +624,40 @@ const useStyles = makeStyles({
     flexWrap: "wrap",
     gap: tokens.spacingHorizontalS,
     marginTop: tokens.spacingVerticalXXS,
+    color: tokens.colorNeutralForeground3,
+  },
+  // Certified / trust badges under an analytics answer (openspec:
+  // add-semantic-layer §6.2): a VERIFIED mark, never a decoration — a failed
+  // reconcile is a visible caution, never hidden. Tokens only, both themes free.
+  trustRow: {
+    display: "flex",
+    alignItems: "center",
+    flexWrap: "wrap",
+    gap: tokens.spacingHorizontalXS,
+    marginTop: tokens.spacingVerticalXS,
+  },
+  trustDetail: { color: tokens.colorNeutralForeground3 },
+  // The engine's local-only skip note ("(n files skipped — marked private…)",
+  // byte-identical across engines) rendered as a distinct inline callout
+  // instead of plain italics (0.12.1 §2): a hairline box + small lock in the
+  // savedNote/quietChip family, tokens only so both themes read. The string
+  // itself is the engine's — presentation only.
+  skipNoteCallout: {
+    display: "inline-flex",
+    alignItems: "flex-start",
+    gap: tokens.spacingHorizontalXS,
+    ...shorthands.padding("2px", tokens.spacingHorizontalS),
+    ...shorthands.border("1px", "solid", tokens.colorNeutralStroke2),
+    borderRadius: tokens.borderRadiusMedium,
+    color: tokens.colorNeutralForeground2,
+    fontStyle: "normal",
+  },
+  skipNoteIcon: { flexShrink: 0, marginTop: "3px", color: tokens.colorNeutralForeground3 },
+  // "{n} files hidden from cloud models" in the header, beside the egress
+  // shield — a quiet trigger sized like the shield's (subtle, no bulk).
+  hiddenFromCloud: {
+    minWidth: "auto",
+    ...shorthands.padding(0, tokens.spacingHorizontalXS),
     color: tokens.colorNeutralForeground3,
   },
   // --- Pinned questions: the changed-pins alert banner and the dialog. ---
@@ -511,13 +714,37 @@ const useStyles = makeStyles({
   // Quiet one-liners: the "(stopped)" note and the zero-references honesty note.
   quietNote: { color: tokens.colorNeutralForeground3 },
   // Engine-emitted provenance stamp under an answer ("Answered on this device /
-  // via <vendor>") — a quiet icon+text row echoing the egress shield's style.
+  // via <vendor>") — a small hairline badge whose dot carries the origin:
+  // amber = on-device (the AA-gated mark amber), neutral = a named vendor.
+  // The stamp text itself is engine-emitted and byte-unchanged.
   provenanceStamp: {
     display: "inline-flex",
     alignItems: "center",
+    alignSelf: "flex-start",
     gap: tokens.spacingHorizontalXS,
+    marginTop: tokens.spacingVerticalXS,
+    ...shorthands.padding("2px", tokens.spacingHorizontalS),
+    ...shorthands.border("1px", "solid", tokens.colorNeutralStroke2),
+    borderRadius: tokens.borderRadiusCircular,
+    color: tokens.colorNeutralForeground3,
+    fontVariantNumeric: "tabular-nums",
+  },
+  provenanceDot: {
+    width: "6px",
+    height: "6px",
+    borderRadius: "50%",
+    flexShrink: 0,
+  },
+  provenanceDotDevice: { backgroundColor: tokens.colorBrandForeground1 },
+  provenanceDotVendor: { backgroundColor: tokens.colorNeutralForeground3 },
+  // Answer-cache line under a replayed answer ("From cache · same data as
+  // HH:MM · Re-run") — same quiet register as the provenance stamp; rendered
+  // only from the final chunk's engine-emitted `meta.cachedAt`.
+  cacheLine: {
+    display: "block",
     marginTop: tokens.spacingVerticalXXS,
     color: tokens.colorNeutralForeground3,
+    fontVariantNumeric: "tabular-nums",
   },
   // G4: the truncation disclosure bound to a sortable result table's <caption>,
   // so it stays with the table through sorting.
@@ -528,6 +755,7 @@ const useStyles = makeStyles({
     fontSize: tokens.fontSizeBase200,
     fontStyle: "italic",
     paddingTop: tokens.spacingVerticalXXS,
+    fontVariantNumeric: "tabular-nums",
   },
   // G2 draft-then-verify: the muted "verifying…" badge shown under the
   // provisional extractive draft while the private model composes the answer.
@@ -547,6 +775,8 @@ const useStyles = makeStyles({
     cursor: "pointer",
     ":hover": { backgroundColor: tokens.colorNeutralBackground2Hover },
     ":hover .open-affordance": { opacity: 1 },
+    // Keyboard path: reveal the secondary open-in-app button on focus too.
+    ":focus-within .open-affordance": { opacity: 1 },
   },
   // Brief highlight when a citation chip jumps to this card (class is toggled
   // for ~1.2s): a brand-tinted background that fades back out.
@@ -557,6 +787,7 @@ const useStyles = makeStyles({
     },
     animationDuration: "1.2s",
     animationTimingFunction: "ease-out",
+    "@media (prefers-reduced-motion: reduce)": { animationName: "none" },
   },
   openIcon: { opacity: 0, transition: "opacity 120ms ease", color: tokens.colorNeutralForeground3 },
   refMeta: { display: "flex", flexDirection: "column", flex: 1, minWidth: 0 },
@@ -567,6 +798,25 @@ const useStyles = makeStyles({
     alignItems: "flex-end",
     gap: tokens.spacingHorizontalS,
     marginTop: tokens.spacingVerticalM,
+    // The ask box is the focal point — Spotlight-calm: ONE raised paper
+    // surface (generous 12px radius, level-2 elevation, roomy padding) that
+    // IS the field; the Textarea inside is stripped bare (composerField) so
+    // the shell carries the whole look.
+    backgroundColor: tokens.colorNeutralBackground1,
+    ...shorthands.borderRadius(tokens.borderRadiusXLarge),
+    boxShadow: tokens.shadow8,
+    ...shorthands.padding(
+      tokens.spacingVerticalS,
+      tokens.spacingHorizontalS,
+      tokens.spacingVerticalS,
+      tokens.spacingHorizontalM,
+    ),
+    // Focus is the theme's amber ring, drawn on the shell (the field's own
+    // indicator is suppressed below); outline follows the radius.
+    ":focus-within": {
+      outline: `2px solid ${tokens.colorStrokeFocus2}`,
+      outlineOffset: "1px",
+    },
   },
   // Multiline composer: starts one line tall (matching the Input it replaced)
   // and auto-grows with the draft up to COMPOSER_MAX_HEIGHT. The min/max here
@@ -574,6 +824,11 @@ const useStyles = makeStyles({
   composerField: {
     flexGrow: 1,
     minHeight: "32px",
+    // Bare inside the shell: no own border, fill, or focus underline — the
+    // composer shell above carries the box and the amber focus ring.
+    backgroundColor: "transparent",
+    ...shorthands.borderColor("transparent"),
+    "::after": { display: "none" },
     "& textarea": {
       height: "auto",
       maxHeight: `${COMPOSER_MAX_HEIGHT}px`,
@@ -611,15 +866,22 @@ const useStyles = makeStyles({
     ...shorthands.padding(tokens.spacingVerticalS, "0"),
     color: tokens.colorNeutralForeground3,
   },
-  // Static glowing beacon for the centered pre-ask prompt — the lighthouse light.
+  // Static glowing beacon for the centered pre-ask prompt — the lighthouse
+  // light, carrying the Beam signature: the ink→amber sweep (a hero moment —
+  // the empty state — never behind content). providers.tsx stamps
+  // data-theme on <html>; the :global() rule (compiled to
+  // `[data-theme="dark"] .beacon`) picks the sweep variant with the theme.
   beacon: {
     width: "14px",
     height: "14px",
     borderRadius: "50%",
     backgroundColor: tokens.colorBrandBackground,
+    backgroundImage: BEAM_SWEEP.light,
     boxShadow: `0 0 12px 3px ${ACCENTS.beam}`,
+    ':global([data-theme="dark"])': { backgroundImage: BEAM_SWEEP.dark },
   },
-  // Small gently-pulsing dot used by the loader.
+  // Small gently-pulsing dot used by the loader; rests steady (fully lit)
+  // under prefers-reduced-motion.
   loaderDot: {
     width: "10px",
     height: "10px",
@@ -634,6 +896,7 @@ const useStyles = makeStyles({
     animationDuration: "1.2s",
     animationIterationCount: "infinite",
     animationTimingFunction: "ease-in-out",
+    "@media (prefers-reduced-motion: reduce)": { animationName: "none" },
   },
   beaconInline: {
     display: "inline-block",
@@ -651,6 +914,7 @@ const useStyles = makeStyles({
     animationDuration: "1s",
     animationIterationCount: "infinite",
     animationTimingFunction: "ease-in-out",
+    "@media (prefers-reduced-motion: reduce)": { animationName: "none" },
   },
 
   // --- New chat "Undo" bar: a quiet reassurance strip shown briefly after a
@@ -775,6 +1039,48 @@ const useStyles = makeStyles({
   },
   attachItemName: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 },
   attachEmpty: { color: tokens.colorNeutralForeground3, ...shorthands.padding(tokens.spacingVerticalM, tokens.spacingHorizontalS) },
+
+  // --- Ask type-ahead (time-savers): past asks + pinned questions matched
+  //     against the draft, in a compact flyout anchored to the composer. It
+  //     opens UPWARD (the composer sits at the panel's bottom edge) and is
+  //     absolutely positioned so it never shoves the layout around. Rows
+  //     follow attachItem; the surface uses the flyout tokens (both themes). ---
+  composerWrap: { position: "relative" },
+  askSuggestPop: {
+    position: "absolute",
+    bottom: "calc(100% + 4px)",
+    left: "0",
+    right: "0",
+    zIndex: 10,
+    display: "flex",
+    flexDirection: "column",
+    gap: "1px",
+    maxHeight: "240px",
+    overflowY: "auto",
+    ...shorthands.padding(tokens.spacingVerticalXS),
+    ...shorthands.border("1px", "solid", tokens.colorNeutralStroke2),
+    borderRadius: tokens.borderRadiusMedium,
+    backgroundColor: tokens.colorNeutralBackground1,
+    boxShadow: tokens.shadow16,
+  },
+  askSuggestItem: {
+    display: "flex",
+    alignItems: "center",
+    gap: tokens.spacingHorizontalS,
+    ...shorthands.padding(tokens.spacingVerticalXS, tokens.spacingHorizontalS),
+    borderRadius: tokens.borderRadiusMedium,
+    cursor: "pointer",
+    ":hover": { backgroundColor: tokens.colorNeutralBackground2Hover },
+  },
+  askSuggestItemActive: { backgroundColor: tokens.colorNeutralBackground1Selected },
+  askSuggestIcon: { color: tokens.colorNeutralForeground3, flexShrink: 0 },
+  askSuggestText: {
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+    flexGrow: 1,
+    minWidth: 0,
+  },
 });
 
 /** DOM id for a turn's nth reference card ([n] chips scroll to these). */
@@ -789,11 +1095,15 @@ function citeCardId(turnId: string, n: number): string {
  */
 const CITATION_MARKER = /\[(\d{1,3})\]/g;
 
-/** Minimal mdast node shape — just enough to walk the tree and split text nodes. */
+/** Minimal mdast node shape — just enough to walk the tree, split text nodes,
+ *  and (for remarkAnswerCard) regroup block siblings via the standard
+ *  `data.hName`/`hProperties` mdast→hast escape hatch. */
 interface MdNode {
   type: string;
   value?: string;
   url?: string;
+  lang?: string | null;
+  data?: { hName?: string; hProperties?: Record<string, unknown> };
   children?: MdNode[];
 }
 
@@ -841,6 +1151,214 @@ function splitCitationMarkers(node: MdNode): void {
   node.children = next;
 }
 
+/** The engine's SQL-transparency label (singular and plural forms), as the
+ *  emphasis-only paragraph that precedes the ```sql fence(s). Matched by
+ *  prefix so both forms fold; the label text itself is never touched. */
+const QUERY_LABEL_RE = /^Quer(?:y|ies) used/;
+
+/** All text under an mdast node (labels may nest inside emphasis). */
+function mdText(node: MdNode): string {
+  if (typeof node.value === "string") return node.value;
+  return (node.children ?? []).map(mdText).join("");
+}
+
+/** Paragraph consisting of the engine's SQL-transparency label. The plural
+ *  numbered form drags its first "1." numbering artifact into the label's
+ *  paragraph (an empty list item cannot interrupt a paragraph), so allow only
+ *  digits/dots/whitespace after the emphasis — never real prose. */
+function isQueryLabel(node: MdNode): boolean {
+  const first = node.children?.[0];
+  return (
+    node.type === "paragraph" &&
+    first?.type === "emphasis" &&
+    QUERY_LABEL_RE.test(mdText(first)) &&
+    /^[\s\d.]*$/.test((node.children ?? []).slice(1).map(mdText).join(""))
+  );
+}
+
+/** The engine's assumption-ledger label (openspec: add-recipes §1): the
+ *  emphasis-only `*Assumptions:*` paragraph that precedes the bullet list. */
+const ASSUMPTIONS_LABEL_RE = /^Assumptions:?\s*$/;
+
+/** Paragraph consisting solely of the engine's assumption-ledger label — the
+ *  emphasis node, nothing else of substance. Folded, with the list that follows
+ *  it, into its own <details> the same way the SQL footer is. */
+function isAssumptionsLabel(node: MdNode): boolean {
+  const first = node.children?.[0];
+  return (
+    node.type === "paragraph" &&
+    first?.type === "emphasis" &&
+    ASSUMPTIONS_LABEL_RE.test(mdText(first)) &&
+    (node.children ?? [])
+      .slice(1)
+      .map(mdText)
+      .join("")
+      .trim() === ""
+  );
+}
+
+function isSqlFence(node: MdNode): boolean {
+  return node.type === "code" && node.lang === "sql";
+}
+
+function isChartFence(node: MdNode): boolean {
+  return node.type === "code" && node.lang === "lighthouse-chart";
+}
+
+/** Footer-shaped block between the result table and the chart: the folded SQL
+ *  disclosure, the engine's emphasis-led honesty lines (freshness, truncation,
+ *  coverage, row cap), or the stray list nodes a numbered multi-query footer
+ *  parses into. */
+function isFooterish(node: MdNode): boolean {
+  return (
+    node.type === "lhQueryDetails" ||
+    node.type === "lhAssumptions" ||
+    node.type === "list" ||
+    (node.type === "paragraph" && node.children?.[0]?.type === "emphasis")
+  );
+}
+
+/**
+ * Remark plugin (a plain tree transform, like remarkCitations — no added
+ * dependency) that gives an analytics answer its Beam card treatment without
+ * editing a byte of the engine's text:
+ *
+ *  1. The SQL-transparency footer — the engine's emphasis-only label
+ *     paragraph followed by its ```sql fence(s) — becomes a collapsed native
+ *     <details> disclosure. The label paragraph itself is re-tagged as the
+ *     <summary> (via `data.hName`), so the visible label stays byte-identical.
+ *  1b. The engine's assumption ledger — its `*Assumptions:*` label paragraph
+ *     followed by the bullet list (openspec: add-recipes §1) — is folded the
+ *     SAME way into its own <details>, so it reads as a peer disclosure of the
+ *     SQL footer rather than flat card-note text.
+ *  2. The verified result table, the quiet footers between, and the
+ *     ```lighthouse-chart fence are wrapped into ONE `.lh-answer-card` <div> —
+ *     the elevated flagship card (styled in `answer` above), crowned by a
+ *     tiny injected "Beam" wordmark (UI chrome, not engine text).
+ *  3. Emphasis-led footer paragraphs inside that card get `.lh-card-note`
+ *     for the quiet small-print register.
+ *
+ * Prose-only answers (no disclosure, no chart) are left completely alone, so
+ * an ordinary markdown table in a document summary renders as before.
+ */
+function remarkAnswerCard() {
+  return (tree: unknown) => {
+    const root = tree as MdNode;
+    const children = root.children;
+    if (!children) return;
+
+    // 1) Fold the SQL fence(s) behind their engine-written label. The plural
+    //    numbered form interleaves list artifacts between fences; they ride
+    //    along inside the disclosure. A label with no fence is left alone.
+    for (let i = 0; i < children.length; i += 1) {
+      if (!isQueryLabel(children[i])) continue;
+      let end = i + 1;
+      while (
+        end < children.length &&
+        (isSqlFence(children[end]) || children[end].type === "list")
+      ) {
+        end += 1;
+      }
+      if (!children.slice(i + 1, end).some(isSqlFence)) continue;
+      const label = children[i];
+      // The plural form's leading "1." numbering artifact rides the label's
+      // paragraph; split it into the disclosure body so the <summary> is the
+      // label alone — same bytes, same reading order.
+      const extras = (label.children ?? []).slice(1);
+      const extrasPara: MdNode | null =
+        extras.length > 0 && extras.map(mdText).join("").trim() !== ""
+          ? { type: "paragraph", children: extras }
+          : null;
+      if (extras.length > 0) label.children = [label.children![0]];
+      label.data = { ...label.data, hName: "summary" };
+      const details: MdNode = {
+        type: "lhQueryDetails",
+        data: { hName: "details", hProperties: { className: ["lh-query-used"] } },
+        children: [label, ...(extrasPara ? [extrasPara] : []), ...children.slice(i + 1, end)],
+      };
+      children.splice(i, end - i, details);
+      break; // the engine writes one transparency footer per answer
+    }
+
+    // 1b) Fold the assumption ledger (openspec: add-recipes §1) — its emphasis
+    //     label paragraph followed by the bullet list — into its own native
+    //     <details>, mirroring the SQL fold above (same summary/hName wiring and
+    //     the same quiet `lh-query-used` disclosure styling; `lh-assumptions` is
+    //     a semantic hook carrying no rules). A label with no list after it is
+    //     left alone.
+    for (let i = 0; i < children.length; i += 1) {
+      if (!isAssumptionsLabel(children[i])) continue;
+      if (i + 1 >= children.length || children[i + 1].type !== "list") continue;
+      const label = children[i];
+      label.data = { ...label.data, hName: "summary" };
+      const details: MdNode = {
+        type: "lhAssumptions",
+        data: {
+          hName: "details",
+          hProperties: { className: ["lh-query-used", "lh-assumptions"] },
+        },
+        children: [label, children[i + 1]],
+      };
+      children.splice(i, 2, details);
+      break; // the engine writes one assumption ledger per answer
+    }
+
+    // 2) Card range: anchored on the chart fence (the engine appends it last)
+    //    or, chartless, on the disclosure; extends back across the footer run
+    //    to the result table directly above it, and forward to the end of the
+    //    footer run. No analytics markers → no card.
+    const detailsIdx = children.findIndex((n) => n.type === "lhQueryDetails");
+    let chartIdx = -1;
+    for (let i = children.length - 1; i >= 0; i -= 1) {
+      if (isChartFence(children[i])) {
+        chartIdx = i;
+        break;
+      }
+    }
+    if (detailsIdx === -1 && chartIdx === -1) return;
+    const anchor = chartIdx >= 0 ? chartIdx : detailsIdx;
+    let start = anchor;
+    while (start > 0 && isFooterish(children[start - 1])) start -= 1;
+    if (start > 0 && children[start - 1].type === "table") start -= 1;
+    let end = anchor;
+    while (
+      end + 1 < children.length &&
+      (isFooterish(children[end + 1]) || isChartFence(children[end + 1]))
+    ) {
+      end += 1;
+    }
+
+    // 3) Quiet register for the engine's footer lines riding the card.
+    for (let i = start; i <= end; i += 1) {
+      const n = children[i];
+      if (n.type === "paragraph" && n.children?.[0]?.type === "emphasis") {
+        n.data = {
+          ...n.data,
+          hProperties: { ...n.data?.hProperties, className: ["lh-card-note"] },
+        };
+      }
+    }
+
+    // A tiny "Beam" wordmark crowns the card — injected UI chrome (a synthetic
+    // node, aria-hidden), NOT engine text: the engine's own footers stay
+    // byte-identical and never carry the name.
+    const beamMark: MdNode = {
+      type: "lhBeamMark",
+      data: {
+        hName: "span",
+        hProperties: { className: ["lh-beam-mark"], ariaHidden: "true" },
+      },
+      children: [{ type: "text", value: "Beam" }],
+    };
+    const card: MdNode = {
+      type: "lhAnswerCard",
+      data: { hName: "div", hProperties: { className: ["lh-answer-card"] } },
+      children: [beamMark, ...children.slice(start, end + 1)],
+    };
+    children.splice(start, end - start + 1, card);
+  };
+}
+
 /** Reduce a thrown ask() failure to a short plain-language reason for the banner. */
 function describeAskError(err: unknown): string {
   // fetch() rejects with a TypeError when the network/server is unreachable.
@@ -866,24 +1384,28 @@ function stripCitations(content: string): string {
     .replace(/[ \t]+([.,;:!?])/g, "$1");
 }
 
-/** Map a provider id to its vendor label for the provenance stamp; falls back
- *  to the id itself when the provider isn't in the picker table. */
-function vendorLabelFor(id: string): string {
-  return MODEL_PROVIDERS.find((p) => p.id === id)?.label ?? id;
-}
+// The engine-emitted provenance stamp ("Answered on this device" / "Answered
+// via <vendor> — …") is rendered via `provenanceStampText` from
+// @/lib/evidencePack — one source of truth shared with the evidence-pack
+// export, so the pack's stamp line is byte-identical to the on-screen one.
 
 /**
- * The engine-emitted provenance stamp rendered under a finished answer. Reads
- * ONLY the final chunk's `meta` (never the model's text), so it is always
- * truthful: "Answered on this device" when nothing left the machine, else
- * "Answered via <vendor> — N excerpts from M files sent", naming the vendor and
- * the exact counts the engine computed where the prompt was assembled.
+ * The freshness stamp on a replayed answer's cache line (openspec:
+ * add-answer-cache): "HH:MM" for a same-day answer, date + time once it
+ * crosses midnight (the disk cache survives restarts) — the honest "same data
+ * as" moment must never read as today when it isn't. Rendered ONLY from the
+ * final chunk's engine-emitted `meta.cachedAt`, never from prose.
  */
-function provenanceStampText(meta: NonNullable<ChatChunk["meta"]>): string {
-  if (meta.origin === "device") return "Answered on this device";
-  const excerpts = `${meta.excerptCount} excerpt${meta.excerptCount === 1 ? "" : "s"}`;
-  const files = `${meta.sourceFileCount} file${meta.sourceFileCount === 1 ? "" : "s"}`;
-  return `Answered via ${vendorLabelFor(meta.origin)} — ${excerpts} from ${files} sent`;
+function cachedAtLabel(ms: number): string {
+  const d = new Date(ms);
+  const now = new Date();
+  const time = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const sameDay =
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate();
+  if (sameDay) return time;
+  return `${d.toLocaleDateString([], { month: "short", day: "numeric" })} ${time}`;
 }
 
 /** Compact "how long ago" for the recent-chats list (e.g. "3m", "2h", "Apr 5"). */
@@ -1103,50 +1625,99 @@ const REFINE_CHIPS: { label: string; ask: string }[] = [
  * previous result", so they render only on the conversation's last turn where
  * that phrase is unambiguous; Edit SQL re-runs THIS answer's own SQL over its
  * own files (deterministic, model-free), so it stays useful on older turns.
+ * "Chart it" (charts by default, 0.12.1) offers a client-built chart of the
+ * answer's own table when the ENGINE didn't chart — zero model/network calls.
  */
 function RefineChips({
   meta,
+  content,
   isLast,
   disabled,
   onAsk,
   onEditSql,
+  chartShown,
+  onToggleChart,
   onSave,
   savePending,
+  onEvidencePack,
+  packPending,
   onPin,
   pinPending,
+  onSaveView,
+  onDefineMetric,
 }: {
   meta: AnalyticsMeta;
+  /** The answer markdown — the "Chart it" heuristic reads its GFM table. */
+  content: string;
   isLast: boolean;
   disabled: boolean;
   onAsk: (q: string) => void;
   onEditSql: (meta: AnalyticsMeta) => void;
+  /** "Chart it" per-turn visibility (savedNotes-style state in the parent). */
+  chartShown: boolean;
+  onToggleChart: () => void;
   /** Save-as-CSV (desktop engine only — omitted on the web dev twin). */
   onSave?: (meta: AnalyticsMeta) => void;
   savePending?: boolean;
+  /** Evidence pack: one self-contained HTML file of this answer (question,
+   *  narrative, table, chart, SQL, provenance) — desktop-gated like onSave. */
+  onEvidencePack?: (meta: AnalyticsMeta) => void;
+  packPending?: boolean;
   /** Pin this answer so vault changes recheck it (desktop rechecks live). */
   onPin?: (meta: AnalyticsMeta) => void;
   pinPending?: boolean;
+  /** Save this answer's SQL as a named view (openspec: add-shaped-views) —
+   *  same visibility as Edit SQL: any answer whose meta carries the SQL. */
+  onSaveView?: (meta: AnalyticsMeta) => void;
+  /** Define this answer's aggregation as a named metric (openspec:
+   *  add-semantic-layer §6.2) — offered only when the SQL carries an aggregate. */
+  onDefineMetric?: (meta: AnalyticsMeta) => void;
 }) {
   const styles = useStyles();
+  // "Chart it": offered only when (a) the answer carries a parseable GFM
+  // table, (b) the client heuristic builds a spec the REAL parser accepts,
+  // and (c) the engine didn't already chart this answer. Pure computation
+  // over the displayed markdown — no rag/chat service is ever consulted.
+  const tableChart = useMemo(() => {
+    if (hasEngineChartFence(content)) return null;
+    const table = parseMarkdownTable(content);
+    return table ? chartSpecFromTable(table) : null;
+  }, [content]);
+  // Quiet secondary actions (Beam): subtle + hairline, never a filled chip —
+  // the answer stays the loudest thing on the card.
   return (
+    <>
     <div className={styles.refineRow}>
       {isLast &&
         REFINE_CHIPS.map((c) => (
           <Button
             key={c.label}
-            appearance="secondary"
+            appearance="subtle"
             size="small"
             shape="circular"
+            className={styles.quietChip}
             disabled={disabled}
             onClick={() => onAsk(c.ask)}
           >
             {c.label}
           </Button>
         ))}
+      {tableChart && (
+        <Button
+          appearance="subtle"
+          size="small"
+          shape="circular"
+          className={styles.quietChip}
+          onClick={onToggleChart}
+        >
+          {chartShown ? "Hide chart" : "Chart it"}
+        </Button>
+      )}
       <Button
-        appearance="secondary"
+        appearance="subtle"
         size="small"
         shape="circular"
+        className={styles.quietChip}
         icon={<CodeRegular />}
         disabled={disabled}
         onClick={() => onEditSql(meta)}
@@ -1155,9 +1726,10 @@ function RefineChips({
       </Button>
       {onSave && (
         <Button
-          appearance="secondary"
+          appearance="subtle"
           size="small"
           shape="circular"
+          className={styles.quietChip}
           icon={<SaveRegular />}
           disabled={disabled || savePending}
           onClick={() => onSave(meta)}
@@ -1165,11 +1737,25 @@ function RefineChips({
           {savePending ? "Saving…" : "Save as CSV"}
         </Button>
       )}
-      {onPin && (
+      {onEvidencePack && (
         <Button
-          appearance="secondary"
+          appearance="subtle"
           size="small"
           shape="circular"
+          className={styles.quietChip}
+          icon={<DocumentRegular />}
+          disabled={disabled || packPending}
+          onClick={() => onEvidencePack(meta)}
+        >
+          {packPending ? "Saving…" : "Evidence pack"}
+        </Button>
+      )}
+      {onPin && (
+        <Button
+          appearance="subtle"
+          size="small"
+          shape="circular"
+          className={styles.quietChip}
           icon={<PinRegular />}
           disabled={disabled || pinPending}
           onClick={() => onPin(meta)}
@@ -1177,7 +1763,137 @@ function RefineChips({
           {pinPending ? "Pinning…" : "Pin"}
         </Button>
       )}
+      {onSaveView && (
+        <Button
+          appearance="subtle"
+          size="small"
+          shape="circular"
+          className={styles.quietChip}
+          icon={<TableRegular />}
+          disabled={disabled}
+          onClick={() => onSaveView(meta)}
+        >
+          Save as view
+        </Button>
+      )}
+      {onDefineMetric && sqlHasAggregate(meta.sql) && (
+        <Button
+          appearance="subtle"
+          size="small"
+          shape="circular"
+          className={styles.quietChip}
+          icon={<TagRegular />}
+          disabled={disabled}
+          onClick={() => onDefineMetric(meta)}
+        >
+          Define as metric
+        </Button>
+      )}
     </div>
+    {/* "Chart it" inline mount: the client-built chart of this answer's own
+        table, drawn with the house renderer. Per-turn UI state only — never
+        persisted, recomputed from the markdown, zero model/network calls. */}
+    {chartShown && tableChart && <AnalyticsChart spec={tableChart} />}
+    </>
+  );
+}
+
+/** A cheap client heuristic: does this answer's SQL carry an aggregate the
+ *  "Define as metric" chip could name? Gates the chip so it offers only on
+ *  aggregate answers; the engine's `propose_metric` is authoritative. */
+function sqlHasAggregate(sql: string): boolean {
+  return /\b(sum|count|avg|min|max|median|stddev|var|variance|approx_)\s*\(/i.test(sql);
+}
+
+/**
+ * Certified badge + trust verdict on an analytics answer (openspec:
+ * add-semantic-layer §6.2), rendered from the VERIFIED `AnalyticsMeta.certified`
+ * / `.trust` the engine set — never a decoration. A certified metric shows a
+ * "Certified" affordance; a failed reconcile (the check CAUGHT a mismatch, or
+ * degraded honestly) shows a visible caution with the engine's expected/got,
+ * never hidden. PARITY: certification/reconciliation are Rust-only, so the web
+ * dev twin never populates these and this renders nothing there.
+ */
+function TrustBadges({ meta }: { meta: AnalyticsMeta }) {
+  const styles = useStyles();
+  const trust = meta.trust;
+  const certifiedNames =
+    meta.certified && meta.certified.length > 0
+      ? meta.certified
+      : trust?.certified && trust.metric
+        ? [trust.metric]
+        : [];
+  if (certifiedNames.length === 0) return null;
+  const reconcileFailed = trust?.certified === true && trust.reconciled === false;
+  return (
+    <div className={styles.trustRow}>
+      <Tooltip
+        content="The engine parsed this answer's SQL and confirmed it computes the blessed definition."
+        relationship="description"
+      >
+        <Badge appearance="tint" color="success" icon={<ShieldRegular />}>
+          Certified: {certifiedNames.join(", ")}
+        </Badge>
+      </Tooltip>
+      {trust?.reconciled === true && (
+        <Text size={200} className={styles.trustDetail}>
+          reconciled against its definition
+        </Text>
+      )}
+      {reconcileFailed && (
+        <Badge appearance="tint" color="danger" icon={<WarningRegular />}>
+          Couldn&apos;t reconcile{trust?.metric ? ` ${trust.metric}` : ""}
+        </Badge>
+      )}
+      {reconcileFailed && (trust?.expected || trust?.got) && (
+        <Text size={200} className={styles.trustDetail}>
+          {trust?.expected ? `expected ${trust.expected}` : ""}
+          {trust?.expected && trust?.got ? ", " : ""}
+          {trust?.got ? `got ${trust.got}` : ""}
+        </Text>
+      )}
+    </div>
+  );
+}
+
+/**
+ * "Chart it" for answers WITHOUT analytics metadata (charts by default,
+ * 0.12.1): ANY answer whose markdown carries a chartable GFM table gets the
+ * same client-built chart — the numbers are already on screen, so drawing
+ * them adds no new trust surface. Same zero-model contract as RefineChips'
+ * chip; per-turn UI state only.
+ */
+function ChartItRow({
+  content,
+  chartShown,
+  onToggleChart,
+}: {
+  content: string;
+  chartShown: boolean;
+  onToggleChart: () => void;
+}) {
+  const styles = useStyles();
+  const tableChart = useMemo(() => {
+    if (hasEngineChartFence(content)) return null;
+    const table = parseMarkdownTable(content);
+    return table ? chartSpecFromTable(table) : null;
+  }, [content]);
+  if (!tableChart) return null;
+  return (
+    <>
+      <div className={styles.refineRow}>
+        <Button
+          appearance="subtle"
+          size="small"
+          shape="circular"
+          className={styles.quietChip}
+          onClick={onToggleChart}
+        >
+          {chartShown ? "Hide chart" : "Chart it"}
+        </Button>
+      </div>
+      {chartShown && <AnalyticsChart spec={tableChart} />}
+    </>
   );
 }
 
@@ -1211,13 +1927,18 @@ const AnswerMarkdown = memo(function AnswerMarkdown({
   onCite: (turnId: string, n: number) => void;
 }) {
   const styles = useStyles();
+  // Belt-and-braces (chart-directive): the engine already withholds
+  // lighthouse-chart-request fences from streamed deltas; displayed prose
+  // strips any residue too. ```lighthouse-chart fences are NOT stripped here —
+  // they render as charts below.
+  const cleaned = useMemo(() => stripChartRequestFences(content), [content]);
   // G4: a truncated analytics result carries the G1 "first N of M rows" footer.
   // The footer ALWAYS stays in the body (a deterministic, never-model-generated
   // disclosure — never stripped, so it shows even when the answer narrates in
   // prose with no result table). When a result table IS rendered and the user
   // sorts it, a caption additionally flags that the sort covers only the shown
   // rows (see SortableTable).
-  const truncationNote = useMemo(() => truncationNoteFrom(content), [content]);
+  const truncationNote = useMemo(() => truncationNoteFrom(cleaned), [cleaned]);
   const components = useMemo<Components>(
     () => ({
       a: ({ node, href, children, ...props }) => {
@@ -1242,6 +1963,25 @@ const AnswerMarkdown = memo(function AnswerMarkdown({
             {children}
           </a>
         );
+      },
+      // The engine's local-only skip note streams inline as one emphasis node
+      // ("_({n} files skipped — marked private …)_", byte-identical in both
+      // engines). Render THAT em — detected by its stable prefix over the
+      // node's text — as a small hairline callout with a lock, so "files were
+      // withheld" is visible at a scan instead of hiding in italics. Every
+      // other emphasis stays a plain <em>. Presentation only: the emitted
+      // string is untouched (test/privacyLegibility.test.mjs pins both
+      // engine templates).
+      em: ({ node, children, ...props }) => {
+        if (LOCAL_ONLY_SKIP_NOTE_RE.test(hastText(node))) {
+          return (
+            <span className={styles.skipNoteCallout}>
+              <LockClosedRegular fontSize={14} className={styles.skipNoteIcon} />
+              <span>{children}</span>
+            </span>
+          );
+        }
+        return <em {...props}>{children}</em>;
       },
       // Unwrap the <pre> around chart fences so the figure isn't inside
       // preformatted text; all other code blocks keep their default <pre>.
@@ -1280,7 +2020,11 @@ const AnswerMarkdown = memo(function AnswerMarkdown({
     [styles, turnId, onCite, truncationNote],
   );
   return (
-    <MarkdownView content={content} components={components} remarkPlugins={[remarkCitations]} />
+    <MarkdownView
+      content={cleaned}
+      components={components}
+      remarkPlugins={[remarkCitations, remarkAnswerCard]}
+    />
   );
 });
 
@@ -1301,7 +2045,9 @@ const StreamingAnswer = memo(function StreamingAnswer({
   content: string;
   className: string;
 }) {
-  return <div className={className}>{content}</div>;
+  // Same belt-and-braces strip as AnswerMarkdown — a chart-request fence
+  // (even a still-open one, via the regex's `$` arm) never shows mid-stream.
+  return <div className={className}>{stripChartRequestFences(content)}</div>;
 });
 
 /**
@@ -1319,12 +2065,17 @@ const References = memo(function References({
   desktop,
   flashCite,
   onOpen,
+  onPreview,
 }: {
   turnId: string;
   references: RagReference[];
   desktop: boolean;
   flashCite: string | null;
+  /** Secondary action (desktop only): hand the file to its OS app. */
   onOpen: (fileId: string) => void;
+  /** Primary action: open the in-app preview ON the cited chunk (time-savers
+   *  feature 4) — works on the web twin too, so cards are always interactive. */
+  onPreview: (turnId: string, r: RagReference) => void;
 }) {
   const styles = useStyles();
   return (
@@ -1339,21 +2090,27 @@ const References = memo(function References({
           id={citeCardId(turnId, i + 1)}
           className={mergeClasses(
             styles.refCard,
-            desktop && styles.refCardInteractive,
+            styles.refCardInteractive,
             flashCite === `${turnId}:${i + 1}` && styles.refCardFlash,
           )}
           appearance="filled-alternative"
-          {...(desktop
-            ? {
-                role: "button",
-                tabIndex: 0,
-                title:
-                  r.kind === "conversation" ? "Open past conversation note" : `Open ${r.name}`,
-                onClick: () => void onOpen(r.fileId),
-                onKeyDown: (e: KeyboardEvent) =>
-                  (e.key === "Enter" || e.key === " ") && void onOpen(r.fileId),
-              }
-            : {})}
+          role="button"
+          tabIndex={0}
+          title={
+            r.kind === "conversation"
+              ? "Preview the cited passage from this past conversation"
+              : `Preview the cited passage from ${r.name}`
+          }
+          onClick={() => onPreview(turnId, r)}
+          onKeyDown={(e: KeyboardEvent) => {
+            // Card-level keys only: Enter on the inner open-in-app button must
+            // not ALSO fire the preview.
+            if (e.target !== e.currentTarget) return;
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              onPreview(turnId, r);
+            }
+          }}
         >
           {/* Number matches the [n] markers in the answer text. */}
           <Badge appearance="tint" shape="circular" size="small">
@@ -1373,7 +2130,25 @@ const References = memo(function References({
               {r.snippet}
             </Text>
           </div>
-          {desktop && <OpenRegular className={`${styles.openIcon} open-affordance`} fontSize={18} />}
+          {/* "Open in app" stays as the SECONDARY action on the card. */}
+          {desktop && (
+            <Button
+              size="small"
+              appearance="subtle"
+              className={`${styles.openIcon} open-affordance`}
+              icon={<OpenRegular fontSize={18} />}
+              aria-label={
+                r.kind === "conversation"
+                  ? "Open the conversation note in its app"
+                  : `Open ${r.name} in its app`
+              }
+              title="Open in app"
+              onClick={(e) => {
+                e.stopPropagation();
+                void onOpen(r.fileId);
+              }}
+            />
+          )}
           <Badge appearance="outline">{Math.round(r.score * 100)}%</Badge>
         </Card>
       ))}
@@ -1423,10 +2198,52 @@ export function ChatPanel() {
   const providerId = useAuthStore((s) => s.onboarding.providerId);
   const providerLabel =
     MODEL_PROVIDERS.find((p) => p.id === providerId)?.label ?? "your AI provider";
-  const provenance =
-    !providerId || providerId === "local"
+  // Local-only legibility (0.12.1 §2): while a CLOUD provider answers, the
+  // header counts the files actually being withheld right now — marked
+  // "Private — this device only" AND otherwise visible to AI. Same single
+  // rule as the engine's is_cloud_provider (src/lib/privacyState.ts); the
+  // count hides entirely on the private model (nothing is withheld) and at
+  // zero. Clicking filters the explorer to exactly that set.
+  const cloudActive = cloudProviderActive(providerId);
+  const hiddenFromCloud = useMemo(() => hiddenFromCloudCount(nodes), [nodes]);
+
+  // --- Investigation context (openspec: add-investigations §4.2). The chat
+  //     store owns WHICH investigation is current; the investigations store
+  //     caches the engine records (name, scope, policy) behind it. ---
+  const currentInvestigationId = useChatStore((s) => s.currentInvestigationId);
+  const investigations = useInvestigationsStore((s) => s.investigations);
+  const ensureInvestigationsLoaded = useInvestigationsStore((s) => s.ensureLoaded);
+  useEffect(() => {
+    ensureInvestigationsLoaded();
+  }, [ensureInvestigationsLoaded]);
+  const currentInvestigation = useMemo(
+    () =>
+      currentInvestigationId
+        ? investigations.find((i) => i.id === currentInvestigationId) ?? null
+        : null,
+    [investigations, currentInvestigationId],
+  );
+  const investigationLocalOnly = currentInvestigation?.providerPolicy === "local-only";
+
+  const provenance = investigationLocalOnly
+    ? // The engine forces the private path for every ask in a local-only
+      // investigation (the cfg swap at the model_config chokepoint), so this
+      // line stays truthful regardless of the profile's active provider.
+      "Private — this investigation always answers on this device."
+    : !providerId || providerId === "local"
       ? "Private — answers are generated entirely on this device."
       : `Excerpts from files visible to AI are sent to ${providerLabel} to answer your questions.`;
+
+  // LIVE scope size: dangling scope ids (files deleted since scoping) don't
+  // count — the pill shows what the scope can actually reach right now.
+  // null = no investigation or an empty scope (= the whole vault, no pill).
+  const scopeCount = useMemo(() => {
+    if (!currentInvestigation || currentInvestigation.scopeFileIds.length === 0) return null;
+    const present = new Set(nodes.map((n) => n.id));
+    return currentInvestigation.scopeFileIds.filter((id) => present.has(id)).length;
+  }, [currentInvestigation, nodes]);
+  const scopeLabel =
+    scopeCount === null ? "Whole vault" : `Scoped to ${scopeCount} file${scopeCount === 1 ? "" : "s"}`;
 
   const [question, setQuestion] = useState("");
   // The transcript lives in a session store so it survives leaving/returning to
@@ -1471,6 +2288,11 @@ export function ChatPanel() {
   // Attach-picker popover (quick search over the vault's own files) + its query.
   const [attachOpen, setAttachOpen] = useState(false);
   const [attachSearch, setAttachSearch] = useState("");
+  // Ask type-ahead (time-savers): open only tracks TYPED input (Esc/accept/blur
+  // close it; programmatic fills never open it); index is the highlighted row,
+  // -1 = none — so a plain Enter still sends (see handleComposerKeyDown).
+  const [suggestOpen, setSuggestOpen] = useState(false);
+  const [suggestIndex, setSuggestIndex] = useState(-1);
   // Per-answer 👍/👎, remembered for the session so the choice reads as "set".
   const [ratings, setRatings] = useState<Record<string, "up" | "down">>({});
   // --- Edit SQL dialog (analytics refinement): the answer meta being edited
@@ -1487,30 +2309,79 @@ export function ChatPanel() {
   const [savedNotes, setSavedNotes] = useState<
     Record<string, { pending?: boolean; id?: string; name?: string; error?: string }>
   >({});
+  // Per-turn evidence-pack outcome — the pack chip's twin of savedNotes.
+  const [packNotes, setPackNotes] = useState<
+    Record<string, { pending?: boolean; id?: string; name?: string; error?: string }>
+  >({});
   const [exportNote, setExportNote] = useState<{ id?: string; name?: string; error?: string } | null>(
     null,
   );
   const exportNoteTimer = useRef<number | null>(null);
+  // Quick provider switch (header menu): its transient confirmation strip,
+  // house-styled like the export/undo bars and auto-dismissed the same way.
+  const [providerNote, setProviderNote] = useState<{ ok: boolean; text: string } | null>(null);
+  const providerNoteTimer = useRef<number | null>(null);
+  const noteProviderSwitch = useCallback((note: { ok: boolean; text: string }) => {
+    setProviderNote(note);
+    if (providerNoteTimer.current !== null) window.clearTimeout(providerNoteTimer.current);
+    providerNoteTimer.current = window.setTimeout(() => setProviderNote(null), 6000);
+  }, []);
   // In-flight guard: a double-click must not write "Chat.md" AND "Chat (1).md".
   const [exportBusy, setExportBusy] = useState(false);
   // --- Pinned questions: per-turn pin outcome, the changed-pins alerts (from
   //     the shell's watcher-driven recheck pass), and the pins dialog. ---
   const [pinNotes, setPinNotes] = useState<
-    Record<string, { pending?: boolean; ok?: boolean; error?: string }>
+    Record<
+      string,
+      // `pinId` (set on success) feeds the "Add to board" affordance beside
+      // the confirmation; `boardNote` is that affordance's outcome line
+      // (openspec: add-boards §4.1).
+      { pending?: boolean; ok?: boolean; error?: string; pinId?: string; boardNote?: string }
+    >
   >({});
   const [pinAlerts, setPinAlerts] = useState<ChangedPin[]>([]);
   const [pinsOpen, setPinsOpen] = useState(false);
   const [pinList, setPinList] = useState<Pin[]>([]);
   const [pinsBusy, setPinsBusy] = useState(false);
+  // --- Save as view (openspec: add-shaped-views §3.1): the dialog's target
+  //     (the answer's meta + the question that produced it) and the per-turn
+  //     saved confirmation — the savedNotes idiom. ---
+  const [saveView, setSaveView] = useState<{
+    msgId: string;
+    meta: AnalyticsMeta;
+    question: string;
+  } | null>(null);
+  const [viewNotes, setViewNotes] = useState<Record<string, { name?: string }>>({});
+  // "Define as metric" (openspec: add-semantic-layer §6.2): the dialog's target
+  // — the answer's meta + the question that produced it (the Save-as-view idiom).
+  const [defineMetric, setDefineMetric] = useState<{
+    msgId: string;
+    meta: AnalyticsMeta;
+    question: string;
+  } | null>(null);
   // G5: transient "Saved to Lighthouse Notes" note after a manual refresh.
   const [briefingSaved, setBriefingSaved] = useState<string | null>(null);
+  // Outcome of a pins-dialog row's "Add to board" (openspec: add-boards).
+  const [pinBoardNote, setPinBoardNote] = useState<string | null>(null);
+  // "Chart it" (charts by default, 0.12.1): per-turn inline table-chart
+  // visibility — savedNotes-style UI state, never persisted; the spec itself
+  // recomputes from the answer markdown, zero model/network calls.
+  const [inlineCharts, setInlineCharts] = useState<Record<string, boolean>>({});
   // Saved/pinned notes AND thumbs ratings are keyed by message id, and ids
   // RESTART per conversation — clear them on a conversation switch so a new
   // chat's "a2" never inherits another chat's "Saved…"/"Pinned…"/👍.
   useEffect(() => {
     setSavedNotes({});
+    setPackNotes({});
     setPinNotes({});
     setRatings({});
+    setInlineCharts({});
+    // Save-as-view state is per-conversation too (like the "Chart it" inline
+    // charts above): close a dialog opened from another chat and drop its
+    // notes, so a same-id answer here can never inherit a "Saved view…" line.
+    setSaveView(null);
+    setViewNotes({});
+    setDefineMetric(null);
   }, [currentId]);
   // Cancels the in-flight ask() when the user presses Stop.
   const abortRef = useRef<AbortController | null>(null);
@@ -1575,11 +2446,27 @@ export function ChatPanel() {
   }, [currentId]);
   // Fires the activation event only on the first answered question this session.
 
-  // "Pinned" = the user is at (or near) the bottom of the transcript, so it's
-  // safe to keep auto-scrolling as tokens stream in. The ref mirrors the state
-  // for use inside the scroll effect without retriggering it.
+  // "Pinned" = the viewport is at (or near) the transcript bottom. It gates
+  // exactly one thing: the "Jump to latest" pill stays hidden while pinned
+  // (jumping would be a no-op). It drives no automatic scrolling. The ref
+  // mirrors the state for use inside scroll handlers without re-binding them.
   const [pinned, setPinned] = useState(true);
   const pinnedRef = useRef(true);
+  // Read-from-the-top hold (openspec: add-investigations §5.1): the in-flight
+  // answer whose message row owns the viewport top.
+  //   "armed"   = question sent, no answer content yet — the transcript may
+  //               still show the bottom (the just-sent question + loader).
+  //   "holding" = the answer is streaming — its row's top is held at the top
+  //               of the viewport, re-asserted as the message grows.
+  //   null      = no hold: nothing in flight, the stream settled, or the user
+  //               scrolled (any manual scroll cancels the hold for that
+  //               answer — the transcript never fights the user).
+  const anchorRef = useRef<{ id: string; phase: "armed" | "holding" } | null>(null);
+  // scrollTop as WE last wrote it (post-clamp). A scroll event reporting
+  // (about) this value is our own write echoing back; any other position is
+  // user intent and releases the hold (see handleBodyScroll). All programmatic
+  // writes go through writeScrollTop so this bookkeeping can't be skipped.
+  const programmaticScrollTopRef = useRef<number | null>(null);
 
   // Copy-answer feedback: which message briefly shows the checkmark.
   const [copiedId, setCopiedId] = useState<string | null>(null);
@@ -1593,6 +2480,7 @@ export function ChatPanel() {
       if (flashTimer.current !== null) window.clearTimeout(flashTimer.current);
       if (undoTimer.current !== null) window.clearTimeout(undoTimer.current);
       if (exportNoteTimer.current !== null) window.clearTimeout(exportNoteTimer.current);
+      if (providerNoteTimer.current !== null) window.clearTimeout(providerNoteTimer.current);
       if (streamRafRef.current !== null) cancelAnimationFrame(streamRafRef.current);
     },
     [],
@@ -1741,30 +2629,113 @@ export function ChatPanel() {
     },
   };
 
-  // Keep the newest turn in view as the transcript grows and tokens stream in —
-  // but only while the user is pinned near the bottom. Scrolling up to re-read
-  // releases the pin (see handleBodyScroll) so the view is never yanked down.
-  useEffect(() => {
-    const el = bodyRef.current;
-    if (el && pinnedRef.current) el.scrollTop = el.scrollHeight;
-  }, [messages]);
+  // Every programmatic scroll is a plain, instant scrollTop assignment — never
+  // a smooth scrollIntoView — so reduced-motion preferences need no special
+  // case. Records the value actually applied (post-clamp) so handleBodyScroll
+  // can tell our own echo from a user scroll.
+  const writeScrollTop = useCallback((el: HTMLElement, top: number) => {
+    el.scrollTop = top;
+    programmaticScrollTopRef.current = el.scrollTop;
+  }, []);
 
-  function handleBodyScroll() {
-    const el = bodyRef.current;
-    if (!el) return;
-    // A small band above the bottom still counts as pinned, so touchpad wobble
-    // or reflow from a streaming token doesn't spuriously release the pin.
+  // Re-derive "pinned" from live geometry. Called from scroll events AND from
+  // the [messages] effect: content growing under a held anchor moves the
+  // bottom without firing any scroll event, and the pill must track that.
+  const derivePinned = useCallback((el: HTMLElement) => {
     const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
     const next = distance < PIN_THRESHOLD;
     pinnedRef.current = next;
     setPinned(next);
+  }, []);
+
+  // Opening a conversation (initial mount, drawer, undo, delete-fallback)
+  // lands at the bottom, exactly as before read-from-the-top: the landing is a
+  // conversation-level event, not part of any answer's hold — so it clears one.
+  useEffect(() => {
+    anchorRef.current = null;
+    const el = bodyRef.current;
+    if (!el) return;
+    writeScrollTop(el, el.scrollHeight);
+    derivePinned(el);
+  }, [currentId, writeScrollTop, derivePinned]);
+
+  // Read-from-the-top (openspec: add-investigations §5.1). While an ask is in
+  // flight this effect owns the scroll position, in two phases:
+  //   armed   → no answer content yet: keep the bottom in view so the
+  //             just-sent question and the loader are visible.
+  //   holding → the answer is streaming: hold the TOP of its message row at
+  //             the top of the viewport, re-asserted on every growth so
+  //             reflow above the row (e.g. the markdown chunk mounting into
+  //             earlier turns) never drifts the first line. Reference cards,
+  //             chips, and the provenance stamp append BELOW the answer and
+  //             never displace the anchored start; the question bubble
+  //             scrolling out above is deliberate — the answer owns the top.
+  // The hold is one-sided: any user scroll clears anchorRef (handleBodyScroll,
+  // wheel/touch) and this effect goes dormant — with no hold active it never
+  // scrolls at all, so a settling stream stops anchoring without jumping.
+  useEffect(() => {
+    const el = bodyRef.current;
+    if (!el) return;
+    const anchor = anchorRef.current;
+    if (anchor) {
+      if (anchor.phase === "armed") {
+        if (messages.some((m) => m.id === anchor.id && m.content !== "")) {
+          anchor.phase = "holding";
+        } else {
+          writeScrollTop(el, el.scrollHeight);
+        }
+      }
+      if (anchor.phase === "holding") {
+        // The turn ROW is the anchor target — it exists from the moment the
+        // ask is appended and data-lh-turn already identifies it. Rect delta
+        // rather than offsetTop: the rows' offsetParent is the positioned
+        // bodyWrap, not the scroll container.
+        const row = el.querySelector<HTMLElement>(`[data-lh-turn="${anchor.id}"]`);
+        if (row) {
+          const anchorTop =
+            row.getBoundingClientRect().top -
+            el.getBoundingClientRect().top -
+            el.clientTop +
+            el.scrollTop;
+          const paddingTop = Number.parseFloat(getComputedStyle(el).paddingTop) || 0;
+          writeScrollTop(
+            el,
+            computeAnchorScrollTop(anchorTop, paddingTop, el.scrollHeight - el.clientHeight),
+          );
+        }
+      }
+    }
+    derivePinned(el);
+  }, [messages, writeScrollTop, derivePinned]);
+
+  function handleBodyScroll() {
+    const el = bodyRef.current;
+    if (!el) return;
+    // A scroll we didn't write ourselves is user intent: release the hold for
+    // the in-flight answer. Our own writes echo back at exactly the recorded
+    // position (sub-pixel slack for zoomed displays); anything else — wheel,
+    // touch, scrollbar, keyboard, a citation-chip scrollIntoView — cancels.
+    const expected = programmaticScrollTopRef.current;
+    if (expected === null || Math.abs(el.scrollTop - expected) > 1) {
+      anchorRef.current = null;
+    }
+    derivePinned(el);
+  }
+
+  // Belt-and-braces for the cancel rule: a wheel tick or touch drag is user
+  // intent even when it cannot move scrollTop (already clamped at an edge),
+  // and it fires before any scroll event it causes.
+  function cancelHoldOnUserInput() {
+    anchorRef.current = null;
   }
 
   function jumpToLatest() {
-    pinnedRef.current = true;
-    setPinned(true);
+    // Explicit user intent: drop any hold and go watch the transcript tail.
+    anchorRef.current = null;
     const el = bodyRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
+    if (!el) return;
+    writeScrollTop(el, el.scrollHeight);
+    derivePinned(el);
   }
 
   // Focus the composer on mount so the user can just start typing.
@@ -1790,6 +2761,28 @@ export function ChatPanel() {
     const onNewChat = () => newChatRef.current();
     window.addEventListener("lighthouse:new-chat", onNewChat);
     return () => window.removeEventListener("lighthouse:new-chat", onNewChat);
+  }, []);
+
+  // Quick-open's Ctrl/Cmd+Enter attaches a file to the conversation through
+  // this window event, the same decoupling as new-chat above. It rides the
+  // exact append path the explorer-drag/OS-drop use (addAttachments dedupes by
+  // id) and then focuses the composer so the follow-up question can be typed
+  // immediately — rAF so the focus lands after the palette dialog's own
+  // close-time focus restore. Latest-closure ref pattern.
+  const attachFileRef = useRef<(f: DraggedFile) => void>(() => {});
+  attachFileRef.current = (f) => {
+    addAttachments([f]);
+    requestAnimationFrame(() => composerRef.current?.focus());
+  };
+  useEffect(() => {
+    const onAttachFile = (e: Event) => {
+      const d = (e as CustomEvent<{ id?: string; name?: string }>).detail;
+      if (d && typeof d.id === "string" && typeof d.name === "string") {
+        attachFileRef.current({ id: d.id, name: d.name });
+      }
+    };
+    window.addEventListener("lighthouse:attach-file", onAttachFile);
+    return () => window.removeEventListener("lighthouse:attach-file", onAttachFile);
   }, []);
 
   // The desktop widget's "Ask Lighthouse →" hand-off: Rust `show_main` emits
@@ -1825,11 +2818,25 @@ export function ChatPanel() {
     setMessages((m) => m.map((x) => (x.id === asstId ? { ...x, stopped: true } : x)));
   }
 
-  async function sendQuestion(q: string) {
+  async function sendQuestion(q: string, opts?: { bypassCache?: boolean }) {
     if (!q || streaming) return;
     // Warm the split markdown chunk now, while the answer streams as plain text,
     // so it's ready the instant the turn settles into a full markdown render.
     warmMarkdown();
+    // Answer cache (openspec: add-answer-cache): the client's per-ask
+    // persistence verdict. Chat-history opt-in is client-only state by design
+    // (useChatStore + localStorage), so the engine only ever learns this
+    // per-request boolean — read LIVE from the store plus the managed-policy
+    // lock (same fail-closed pairing as the conversation-note export below),
+    // so a policy applied after mount can't let a disk write slip through.
+    const persistAllowed = useChatStore.getState().persistEnabled && !chatHistoryLocked();
+    // Investigation context (openspec: add-investigations §4.2), captured at
+    // ask time: the id rides the wire (scope + local-only policy resolve
+    // ENGINE-side), and the settle-time conversation-ref write below reuses
+    // this exact id + conversation + persistAllowed verdict, so a mid-stream
+    // context or chat switch can never retarget any of them.
+    const investigationId = useChatStore.getState().currentInvestigationId ?? undefined;
+    const conversationIdAtAsk = useChatStore.getState().currentId;
     // The conversation so far (completed turns only — failed turns are excluded)
     // becomes the model's history. Read from the store, not the render closure,
     // so a retry that just removed its failed turn builds the right history.
@@ -1851,9 +2858,11 @@ export function ChatPanel() {
     };
     setMessages((m) => [...m, userMsg, asstMsg]);
     setStreaming(true);
-    // Asking always re-pins: the user wants to watch their new answer arrive.
-    pinnedRef.current = true;
-    setPinned(true);
+    // Read-from-the-top: arm the hold for the answer about to stream. Until
+    // its first content arrives the [messages] effect keeps the bottom in view
+    // (the just-sent question + loader); the first delta then anchors the
+    // answer's top to the viewport top and holds it there.
+    anchorRef.current = { id: asstId, phase: "armed" };
     const controller = new AbortController();
     abortRef.current = controller;
     draftRef.current = false;
@@ -1866,6 +2875,7 @@ export function ChatPanel() {
         history,
         attachmentIds,
         controller.signal,
+        { bypassCache: opts?.bypassCache === true, persistAllowed, investigationId },
       )) {
         // Stop pressed: some transports (the Tauri fetch interceptor) don't
         // honor AbortSignal, so also bail out of the loop explicitly and keep
@@ -1916,6 +2926,15 @@ export function ChatPanel() {
       }
       if (controller.signal.aborted) {
         markStopped(asstId);
+      } else if (investigationId) {
+        // The ask succeeded inside an investigation: record this conversation
+        // on it — a REF (an opaque id), never a transcript — with the SAME
+        // persistAllowed verdict the ask itself carried. Fire-and-forget: the
+        // engine silently no-ops the write when the history posture (client
+        // opt-out or managed policy) disallows it.
+        void ragService
+          .addInvestigationConversationRef(investigationId, conversationIdAtAsk, persistAllowed)
+          .catch(() => {});
       }
     } catch (err) {
       if (controller.signal.aborted || (err instanceof DOMException && err.name === "AbortError")) {
@@ -1945,6 +2964,11 @@ export function ChatPanel() {
       // finished transcript (and what we persist) holds the complete answer even
       // if the last frame's flush hadn't fired yet.
       flushStreamNow();
+      // The stream is over: stop anchoring and go nowhere. Cleared before
+      // React flushes the batched settle updates, so the [messages] effect
+      // sees no hold and the settle re-render (markdown swap, actions,
+      // provenance stamp) cannot move the reader.
+      anchorRef.current = null;
       abortRef.current = null;
       setStreaming(false);
       setProgressLabel(null);
@@ -2007,6 +3031,71 @@ export function ChatPanel() {
     } catch (err) {
       if (!stillHere()) return;
       setSavedNotes((s) => ({
+        ...s,
+        [asstId]: { error: err instanceof Error ? err.message : "save failed" },
+      }));
+    }
+  }
+
+  /**
+   * Evidence pack (Beam §2): compose ONE self-contained HTML file from this
+   * analytics answer — question, narrative + result table (honesty footers
+   * verbatim), the rendered chart as inline SVG, the exact SQL, and file
+   * provenance/freshness — and write it into `Lighthouse Results/` through
+   * the same sanitized artifact op the chat export uses. Everything is
+   * composed CLIENT-SIDE from what's already on the turn: no re-query, no
+   * model, no network beyond the local write op.
+   */
+  async function saveEvidencePack(asstId: string, meta: AnalyticsMeta) {
+    const msgs = useChatStore.getState().messages;
+    const idx = msgs.findIndex((x) => x.id === asstId);
+    const msg = idx >= 0 ? msgs[idx] : undefined;
+    if (!msg || !msg.content) return;
+    const prev = idx > 0 ? msgs[idx - 1] : undefined;
+    const question =
+      (prev?.role === "user" ? prev.content : "").trim().replace(/\s+/g, " ") ||
+      "Analytics answer";
+    const hint = question.slice(0, 60) || "Evidence pack";
+    // Serialize the ALREADY-RENDERED chart SVG for this turn (theme colors
+    // baked in). Absent or unparsable chart ⇒ the pack omits the section.
+    let chartSvg: string | undefined;
+    const svgEl = document.querySelector<SVGSVGElement>(
+      `[data-lh-turn="${asstId}"] figure svg[role="img"]`,
+    );
+    if (svgEl) {
+      try {
+        chartSvg = standaloneChartSvg(svgEl);
+      } catch {
+        /* chart capture is best-effort — the pack stands without it */
+      }
+    }
+    const html = composeEvidencePack({
+      question,
+      contentMarkdown: msg.content,
+      chartSvg,
+      meta: msg.meta,
+      analytics: meta,
+      references: msg.references ?? [],
+      generatedAt: Date.now(),
+    });
+    // Same per-conversation guard as saveResultCsv: ids restart per chat.
+    const convo = useChatStore.getState().currentId;
+    const stillHere = () => useChatStore.getState().currentId === convo;
+    setPackNotes((s) => ({ ...s, [asstId]: { pending: true } }));
+    try {
+      const res = await ragService.exportChat(hint, html, {
+        subdir: "Lighthouse Results",
+        ext: "html",
+      });
+      if (!stillHere()) return;
+      if (res.error || !res.savedId) {
+        setPackNotes((s) => ({ ...s, [asstId]: { error: res.error ?? "save failed" } }));
+      } else {
+        setPackNotes((s) => ({ ...s, [asstId]: { id: res.savedId, name: res.savedName } }));
+      }
+    } catch (err) {
+      if (!stillHere()) return;
+      setPackNotes((s) => ({
         ...s,
         [asstId]: { error: err instanceof Error ? err.message : "save failed" },
       }));
@@ -2076,9 +3165,17 @@ export function ChatPanel() {
     setExportBusy(true);
     const title =
       conversations.find((c) => c.id === currentId)?.title.trim() || "Lighthouse chat";
+    // Inside an investigation the note lands in ITS folder under Lighthouse
+    // Notes/ — the engine resolves the folder from the record (openspec:
+    // add-investigations §3); the global context keeps the original path.
+    const investigationId = useChatStore.getState().currentInvestigationId ?? undefined;
     let next: { id?: string; name?: string; error?: string };
     try {
-      const res = await ragService.exportChat(title, transcriptMarkdown(msgs, title));
+      const res = await ragService.exportChat(
+        title,
+        transcriptMarkdown(msgs, title),
+        investigationId ? { investigationId } : undefined,
+      );
       next =
         res.error || !res.savedId
           ? { error: res.error ?? "export failed" }
@@ -2091,6 +3188,39 @@ export function ChatPanel() {
     setExportNote(next);
     if (exportNoteTimer.current !== null) window.clearTimeout(exportNoteTimer.current);
     exportNoteTimer.current = window.setTimeout(() => setExportNote(null), 8000);
+  }
+
+  /**
+   * "Save as view" (openspec: add-shaped-views §3.1): open the name dialog
+   * with this answer's meta and the question that produced it — the same
+   * preceding-user-turn derivation as pinAnswer. The question becomes the
+   * view's summary, labeled "question"; no model is consulted anywhere in
+   * this flow.
+   */
+  function openSaveView(asstId: string, meta: AnalyticsMeta) {
+    const msgs = useChatStore.getState().messages;
+    const idx = msgs.findIndex((x) => x.id === asstId);
+    const prev = idx > 0 ? msgs[idx - 1] : undefined;
+    const question =
+      (prev?.role === "user" ? prev.content : "").trim().replace(/\s+/g, " ").slice(0, 200) ||
+      "Saved view";
+    setSaveView({ msgId: asstId, meta, question });
+  }
+
+  /**
+   * "Define as metric" (openspec: add-semantic-layer §6.2): open the dialog with
+   * this answer's meta and the question that produced it (the openSaveView
+   * derivation). The engine proposes the aggregation from the answer's own SQL;
+   * the question becomes the metric's summary, labeled "question".
+   */
+  function openDefineMetric(asstId: string, meta: AnalyticsMeta) {
+    const msgs = useChatStore.getState().messages;
+    const idx = msgs.findIndex((x) => x.id === asstId);
+    const prev = idx > 0 ? msgs[idx - 1] : undefined;
+    const question =
+      (prev?.role === "user" ? prev.content : "").trim().replace(/\s+/g, " ").slice(0, 200) ||
+      "Defined metric";
+    setDefineMetric({ msgId: asstId, meta, question });
   }
 
   /**
@@ -2112,12 +3242,19 @@ export function ChatPanel() {
     const stillHere = () => useChatStore.getState().currentId === convo;
     setPinNotes((s) => ({ ...s, [asstId]: { pending: true } }));
     try {
-      const res = await ragService.pinAsk(question, meta.sql, meta.fileIds);
+      // The pin adopts the current investigation (openspec: add-investigations
+      // §3) — its membership; the global context leaves it uncategorized.
+      const res = await ragService.pinAsk(
+        question,
+        meta.sql,
+        meta.fileIds,
+        useChatStore.getState().currentInvestigationId ?? undefined,
+      );
       if (!stillHere()) return;
       if (res.error || !res.pin) {
         setPinNotes((s) => ({ ...s, [asstId]: { error: res.error ?? "could not pin" } }));
       } else {
-        setPinNotes((s) => ({ ...s, [asstId]: { ok: true } }));
+        setPinNotes((s) => ({ ...s, [asstId]: { ok: true, pinId: res.pin?.id } }));
       }
     } catch (err) {
       if (!stillHere()) return;
@@ -2153,6 +3290,7 @@ export function ChatPanel() {
   // Load the pin list whenever the dialog opens.
   useEffect(() => {
     if (!pinsOpen) return;
+    setPinBoardNote(null); // last session's "Added to …" note is stale
     let cancelled = false;
     ragService
       .listPins()
@@ -2166,6 +3304,24 @@ export function ChatPanel() {
       cancelled = true;
     };
   }, [pinsOpen]);
+
+  // …and once at mount, so pinned questions feed the ask type-ahead before the
+  // dialog is ever opened. Same local engine list the dialog reads — on
+  // failure the type-ahead simply has no pins.
+  useEffect(() => {
+    let cancelled = false;
+    ragService
+      .listPins()
+      .then((pins) => {
+        if (!cancelled && pins.length > 0) setPinList(pins);
+      })
+      .catch(() => {
+        /* history-only suggestions */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   /** Manual re-check from the dialog; changed pins also feed the banner. */
   async function recheckPinsNow() {
@@ -2211,6 +3367,36 @@ export function ChatPanel() {
     }
     setPinList((pins) => pins.filter((p) => p.id !== id));
     setPinAlerts((alerts) => alerts.filter((a) => a.id !== id));
+  }
+
+  /**
+   * "Add to board" beside a pin confirmation (openspec: add-boards §4.1):
+   * append a size-M card for the just-created pin to the current scope's
+   * board; the outcome replaces the button inline.
+   */
+  async function addPinNoteToBoard(asstId: string) {
+    const note = pinNotes[asstId];
+    if (!note?.pinId || note.boardNote) return; // in flight or already added
+    // The interim note replaces the button at once, so a double-click can't
+    // race two appends past the board's duplicate check.
+    setPinNotes((s) => ({ ...s, [asstId]: { ...s[asstId], boardNote: "Adding…" } }));
+    const res = await addPinToCurrentBoard(note.pinId);
+    setPinNotes((s) => ({
+      ...s,
+      [asstId]: { ...s[asstId], boardNote: res.note ?? `Couldn't add — ${res.error}` },
+    }));
+  }
+
+  /** "Add to board" on a pins-dialog row; the outcome shows in the actions row. */
+  async function addPinRowToBoard(pinId: string) {
+    if (pinsBusy) return;
+    setPinsBusy(true); // one add at a time — the row buttons disable meanwhile
+    try {
+      const res = await addPinToCurrentBoard(pinId);
+      setPinBoardNote(res.note ?? `Couldn't add — ${res.error}`);
+    } finally {
+      setPinsBusy(false);
+    }
   }
 
   /** Ask a pinned/changed question again — the fresh answer is the drill-down. */
@@ -2332,7 +3518,7 @@ export function ChatPanel() {
     setEditingId(null);
   }
 
-  /** Begin editing a past question in place (pencil affordance / ArrowUp). */
+  /** Begin editing a past question in place (pencil affordance). */
   function startEdit(userId: string, current: string) {
     if (streaming) return;
     setEditingId(userId);
@@ -2354,7 +3540,12 @@ export function ChatPanel() {
     setMessages((m) => m.slice(0, idx));
     void sendQuestion(next);
   }
-  /** Regenerate an answer: drop the question+answer pair (and after) and re-ask. */
+  /**
+   * Regenerate an answer: drop the question+answer pair (and after) and re-ask
+   * LIVE. Always bypasses the answer cache — regenerating into an identical
+   * cached replay would be a no-op — and the fresh completion refreshes the
+   * entry. The "Re-run" affordance on a cached answer is this same path.
+   */
   function regenerate(asstId: string) {
     if (streaming) return;
     const msgs = useChatStore.getState().messages;
@@ -2362,7 +3553,7 @@ export function ChatPanel() {
     const prev = idx > 0 ? msgs[idx - 1] : undefined;
     if (!prev || prev.role !== "user") return;
     setMessages((m) => m.slice(0, idx - 1));
-    void sendQuestion(prev.content);
+    void sendQuestion(prev.content, { bypassCache: true });
   }
 
   /** Record a 👍/👎 on an answer (a quality signal); clicking again clears it. */
@@ -2409,18 +3600,46 @@ export function ChatPanel() {
     copyTimer.current = window.setTimeout(() => setCopiedId(null), 1500);
   }
 
-  // Clicking a [n] chip scrolls that turn's nth reference card into view and
-  // flashes it briefly so the eye lands on the right card.
-  const handleCitationClick = useCallback((turnId: string, n: number) => {
-    const card = document.getElementById(citeCardId(turnId, n));
-    if (!card) return; // marker without a matching reference — nothing to jump to
-    card.scrollIntoView({ behavior: "smooth", block: "nearest" });
-    setFlashCite(`${turnId}:${n}`);
-    if (flashTimer.current !== null) window.clearTimeout(flashTimer.current);
-    flashTimer.current = window.setTimeout(() => setFlashCite(null), 1200);
+  // Citation → preview (time-savers feature 4): open the file inspector ON the
+  // cited chunk. References carry no chunk id — the inspector's file-scoped
+  // test-search relocates the chunk from the citation's snippet (or, when the
+  // snippet has nothing scorable, the turn's question). Stable identity so the
+  // hoisted, memoized <References> keeps a stable onPreview.
+  const openPreview = useCallback((turnId: string, r: RagReference) => {
+    // The user question that produced this turn — the fallback locator query.
+    const msgs = useChatStore.getState().messages;
+    const idx = msgs.findIndex((x) => x.id === turnId);
+    const prev = idx > 0 ? msgs[idx - 1] : undefined;
+    const question = prev?.role === "user" ? prev.content : "";
+    requestFileInspect({
+      fileId: r.fileId,
+      name: r.name,
+      query: citationQuery(r.snippet, question),
+    });
   }, []);
 
+  // Clicking a [n] chip scrolls that turn's nth reference card into view,
+  // flashes it briefly so the eye lands on the right card — and opens the
+  // in-app preview on the passage that citation drew on.
+  const handleCitationClick = useCallback(
+    (turnId: string, n: number) => {
+      const card = document.getElementById(citeCardId(turnId, n));
+      if (card) {
+        card.scrollIntoView({ behavior: "smooth", block: "nearest" });
+        setFlashCite(`${turnId}:${n}`);
+        if (flashTimer.current !== null) window.clearTimeout(flashTimer.current);
+        flashTimer.current = window.setTimeout(() => setFlashCite(null), 1200);
+      }
+      // Marker without a matching reference (e.g. the SQL editor's transient
+      // answers) — nothing to preview.
+      const ref = useChatStore.getState().messages.find((x) => x.id === turnId)?.references?.[n - 1];
+      if (ref) openPreview(turnId, ref);
+    },
+    [openPreview],
+  );
+
   // Open a cited file in its native app (desktop only; the route no-ops on web).
+  // Now the SECONDARY action — the card body opens the in-app preview instead.
   // useCallback so the hoisted, memoized <References> keeps a stable onOpen and
   // its cards don't re-render as the panel does.
   const openFile = useCallback(async (fileId: string) => {
@@ -2431,7 +3650,76 @@ export function ChatPanel() {
     }).catch(() => {});
   }, []);
 
+  // --- Ask type-ahead (time-savers): local autocomplete over past asks. ---
+  // Every past user ask, stamped with its conversation's updatedAt (messages
+  // carry no per-turn clock). The live transcript stands in for the current
+  // conversation — its copy in `conversations` lags until persist(). With
+  // "save chats" off the store only holds this session anyway, so history-off
+  // = session asks by construction. Zero network: it all ranks in memory.
+  const askHistoryItems = useMemo<AskHistoryItem[]>(() => {
+    const items: AskHistoryItem[] = [];
+    const currentTs = conversations.find((c) => c.id === currentId)?.updatedAt ?? 0;
+    for (const c of conversations) {
+      if (c.id === currentId) continue;
+      for (const m of c.messages) {
+        if (m.role === "user" && m.content.trim()) items.push({ text: m.content, ts: c.updatedAt });
+      }
+    }
+    for (const m of messages) {
+      if (m.role === "user" && m.content.trim()) items.push({ text: m.content, ts: currentTs });
+    }
+    return items;
+  }, [conversations, currentId, messages]);
+  const pinQuestions = useMemo(() => pinList.map((p) => p.question), [pinList]);
+  const askSuggests = useMemo(
+    () => askSuggestions(question, { history: askHistoryItems, pins: pinQuestions }),
+    [question, askHistoryItems, pinQuestions],
+  );
+  const suggestsShown = suggestOpen && askSuggests.length > 0;
+  // Clamp the highlight when the list shrinks under it (a turn settling can
+  // re-rank mid-hover): out of range reads as "nothing highlighted".
+  const suggestSel = suggestIndex < askSuggests.length ? suggestIndex : -1;
+  // Shell-style ↑-recall target: this conversation's last ask (index as the
+  // tiebreak clock — later turn wins), else the most recent ask anywhere.
+  const lastAskText = useMemo(() => {
+    const session = messages
+      .filter((m) => m.role === "user")
+      .map((m, i) => ({ text: m.content, ts: i }));
+    return lastAsk({ history: session }) ?? lastAsk({ history: askHistoryItems });
+  }, [messages, askHistoryItems]);
+
   function handleComposerKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
+    // Type-ahead first: while the popover is open it owns Down/Up/Esc — and
+    // Enter/Tab only when a row is highlighted (suggestSel >= 0), so a plain
+    // Enter still sends and Shift+Enter still makes a newline.
+    if (suggestsShown) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setSuggestIndex((suggestSel + 1) % askSuggests.length);
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setSuggestIndex(suggestSel <= 0 ? askSuggests.length - 1 : suggestSel - 1);
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setSuggestOpen(false); // dismiss only — the draft is untouched
+        return;
+      }
+      if (e.key === "Tab" && !e.shiftKey) {
+        // Shell-style completion: Tab takes the highlighted row (or the top one).
+        e.preventDefault();
+        acceptSuggestion(askSuggests[Math.max(suggestSel, 0)].text);
+        return;
+      }
+      if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && suggestSel >= 0) {
+        e.preventDefault();
+        acceptSuggestion(askSuggests[suggestSel].text);
+        return;
+      }
+    }
     // Enter sends; Shift+Enter inserts a newline. `isComposing` guards IME
     // composition (e.g. Japanese input), where Enter commits the composition
     // rather than the message.
@@ -2440,23 +3728,32 @@ export function ChatPanel() {
       ask();
       return;
     }
-    // ArrowUp on an empty composer edits your last question — the familiar
-    // chat convention for "fix what I just asked".
-    if (e.key === "ArrowUp" && !question && !streaming && messages.length > 0) {
-      for (let i = messages.length - 1; i >= 0; i -= 1) {
-        if (messages[i].role === "user") {
-          e.preventDefault();
-          startEdit(messages[i].id, messages[i].content);
-          break;
-        }
-      }
+    // ArrowUp on an EMPTY composer recalls your last ask into the box,
+    // shell-style — edit or resend without retyping (the pencil on a past turn
+    // still edits in place). A fill, not a search: the popover stays closed.
+    if (e.key === "ArrowUp" && !question && lastAskText) {
+      e.preventDefault();
+      applySuggestion(lastAskText);
     }
   }
 
-  /** Fill the composer with a suggested prompt (never auto-send) and focus it. */
+  /** Accept a type-ahead row: fill the composer (never auto-send) and close. */
+  function acceptSuggestion(text: string) {
+    applySuggestion(text);
+    setSuggestOpen(false);
+    setSuggestIndex(-1);
+  }
+
+  /** Fill the composer with a suggested prompt (never auto-send), focus it,
+   *  and land the caret at the end so typing continues the fill. */
   function applySuggestion(fill: string) {
     setQuestion(fill);
-    composerRef.current?.focus();
+    requestAnimationFrame(() => {
+      const el = composerRef.current;
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(el.value.length, el.value.length);
+    });
   }
 
   // Engine-derived example questions for the empty state — each names real
@@ -2489,6 +3786,32 @@ export function ChatPanel() {
     };
   }, [emptyState, includedKey]);
 
+  // Applicable recipes for the empty state (openspec: add-recipes §3.1): the
+  // one-tap runnable analyses for the included set, rendered BESIDE the
+  // suggested asks. Same lifecycle as engineAsks — fetched when the empty state
+  // shows and when the included set changes; [] on the web dev twin (recipes
+  // are Rust-engine-only). Tapping one seeds the recipe-cued question through
+  // the SAME sendQuestion seam the suggested-ask chips use.
+  const [recipeChips, setRecipeChips] = useState<RecipeCard[]>([]);
+  useEffect(() => {
+    if (!emptyState || !includedKey) {
+      setRecipeChips([]);
+      return;
+    }
+    let cancelled = false;
+    ragService
+      .applicableRecipes(includedKey.split("\n"))
+      .then((rs) => {
+        if (!cancelled) setRecipeChips(Array.isArray(rs) ? rs.slice(0, 3) : []);
+      })
+      .catch(() => {
+        if (!cancelled) setRecipeChips([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [emptyState, includedKey]);
+
   // Up to 3 starter prompts built from the user's actual included file names.
   const suggestions = useMemo(() => {
     if (includedFiles.length === 0) return [];
@@ -2515,15 +3838,17 @@ export function ChatPanel() {
     return recallRelated(question, conversations, { currentId });
   }, [historyPersistEnabled, question, conversations, currentId]);
 
-  // Recent conversations for the history drawer: real (non-empty) chats, newest
-  // first, filtered by the search box (title match).
+  // Recent conversations for the history drawer: real (non-empty) chats IN
+  // THE CURRENT CONTEXT (openspec: add-investigations — an investigation's
+  // chats live in it; the global view shows only unassigned ones, see
+  // conversationsForContext), newest first, filtered by the search box.
   const recentChats = useMemo(() => {
     const q = histSearch.trim().toLowerCase();
-    return conversations
+    return conversationsForContext(conversations, currentInvestigationId)
       .filter((c) => c.messages.length > 0)
       .filter((c) => !q || c.title.toLowerCase().includes(q))
       .sort((a, b) => b.updatedAt - a.updatedAt);
-  }, [conversations, histSearch]);
+  }, [conversations, histSearch, currentInvestigationId]);
 
   // Vault files offered by the attach picker: files not already attached,
   // filtered by the picker's search, capped so the list stays snappy.
@@ -2539,6 +3864,32 @@ export function ChatPanel() {
   const visibleBadgeText = `${includedFileIds.length} ${
     includedFileIds.length === 1 ? "file" : "files"
   } visible to AI`;
+
+  // Policy badge (openspec: add-investigations §4.2): a local-only
+  // investigation's on-device promise, in the provenance convention (amber
+  // tint = on-device). Rendered in BOTH headers; the ENGINE enforces the
+  // policy at the model-config chokepoint — this badge only tells the truth.
+  const onDeviceBadge = investigationLocalOnly ? (
+    <Tooltip content="This investigation always answers on-device" relationship="description">
+      <Badge appearance="tint" icon={<ShieldRegular />}>
+        On-device
+      </Badge>
+    </Tooltip>
+  ) : null;
+
+  // Scope pill (openspec: add-investigations §4.2), the attachBar register: a
+  // quiet reminder that asks here read only the investigation's files. Hidden
+  // for an empty scope (= the whole vault — nothing narrower to disclose).
+  // Per-ask attachments still override scope; their own bar says so beneath.
+  const scopePill =
+    currentInvestigation && scopeCount !== null ? (
+      <div className={styles.attachBar}>
+        <Text size={200} className={styles.attachHint}>
+          <FilterRegular fontSize={14} />
+          {scopeLabel} · {currentInvestigation.name}
+        </Text>
+      </div>
+    ) : null;
 
   const attachmentBar =
     attachments.length > 0 ? (
@@ -2690,6 +4041,28 @@ export function ChatPanel() {
           />
         </div>
       )}
+      {providerNote && (
+        <div className={styles.undoBar} role="status">
+          {providerNote.ok ? (
+            <CheckmarkRegular fontSize={16} />
+          ) : (
+            <ErrorCircleRegular fontSize={16} />
+          )}
+          <Text size={200}>{providerNote.text}</Text>
+          <span style={{ flex: 1 }} />
+          <Button
+            size="small"
+            appearance="subtle"
+            icon={<DismissRegular />}
+            aria-label="Dismiss"
+            onClick={() => {
+              if (providerNoteTimer.current !== null)
+                window.clearTimeout(providerNoteTimer.current);
+              setProviderNote(null);
+            }}
+          />
+        </div>
+      )}
       {addNotice && (
         <div className={styles.addNotice}>
           <Text size={200}>{addNotice}</Text>
@@ -2727,33 +4100,81 @@ export function ChatPanel() {
           ))}
         </div>
       )}
+      {scopePill}
       {attachmentBar}
-      <div className={styles.composer} data-tour="chat">
-        {attachButton}
-        <Textarea
-          ref={composerRef}
-          className={styles.composerField}
-          resize="none"
-          rows={1}
-          value={question}
-          placeholder={attachments.length > 0 ? "Ask about the attached files…" : placeholder}
-          onChange={(_, d) => setQuestion(d.value)}
-          onKeyDown={handleComposerKeyDown}
-        />
-        {streaming ? (
-          <Button appearance="secondary" icon={<SquareRegular />} onClick={stopStreaming}>
-            Stop
-          </Button>
-        ) : (
-          <Button appearance="primary" icon={<SendRegular />} onClick={() => ask()}>
-            Ask
-          </Button>
+      <div className={styles.composerWrap}>
+        {suggestsShown && (
+          <div
+            role="listbox"
+            id="ask-typeahead-listbox"
+            aria-label="Suggestions from your past questions"
+            className={styles.askSuggestPop}
+          >
+            {askSuggests.map((s, i) => (
+              <div
+                key={`${s.source}:${s.text}`}
+                id={`ask-suggest-${i}`}
+                role="option"
+                aria-selected={i === suggestSel}
+                title={s.source === "pin" ? "Pinned question" : "You asked this before"}
+                className={mergeClasses(
+                  styles.askSuggestItem,
+                  i === suggestSel && styles.askSuggestItemActive,
+                )}
+                // The highlight is KEYBOARD-driven only (hover keeps its CSS
+                // affordance): a mouse resting over the popover must never
+                // flip Enter from "send" to "accept".
+                // Keep keyboard focus in the composer while clicking rows.
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => acceptSuggestion(s.text)}
+              >
+                {s.source === "pin" ? (
+                  <PinRegular fontSize={14} className={styles.askSuggestIcon} />
+                ) : (
+                  <HistoryRegular fontSize={14} className={styles.askSuggestIcon} />
+                )}
+                <span className={styles.askSuggestText}>{s.text}</span>
+              </div>
+            ))}
+          </div>
         )}
+        <div className={styles.composer} data-tour="chat">
+          {attachButton}
+          <Textarea
+            ref={composerRef}
+            className={styles.composerField}
+            resize="none"
+            rows={1}
+            value={question}
+            placeholder={attachments.length > 0 ? "Ask about the attached files…" : placeholder}
+            aria-activedescendant={
+              suggestsShown && suggestSel >= 0 ? `ask-suggest-${suggestSel}` : undefined
+            }
+            onChange={(_, d) => {
+              setQuestion(d.value);
+              // Typing (re)filters and reopens; the highlight restarts unset so
+              // Enter keeps sending until the user arrows into the list.
+              setSuggestIndex(-1);
+              setSuggestOpen(d.value.trim().length > 0);
+            }}
+            onBlur={() => setSuggestOpen(false)}
+            onKeyDown={handleComposerKeyDown}
+          />
+          {streaming ? (
+            <Button appearance="secondary" icon={<SquareRegular />} onClick={stopStreaming}>
+              Stop
+            </Button>
+          ) : (
+            <Button appearance="primary" icon={<SendRegular />} onClick={() => ask()}>
+              Ask
+            </Button>
+          )}
+        </div>
       </div>
       <div className={styles.composerMeta}>
         <Text size={200} className={styles.metaLine}>
           Enter to send · Shift+Enter for a new line
-          {messages.length > 0 ? " · ↑ to edit your last question" : ""}
+          {lastAskText ? " · ↑ to recall your last question" : ""}
         </Text>
         <Text size={200} className={styles.metaLine} data-tour="models">
           {provenance}
@@ -2862,6 +4283,17 @@ export function ChatPanel() {
                     >
                       Ask again
                     </Button>
+                    {/* Every listed pin can become a board card (add-boards). */}
+                    <Tooltip content="Add to board" relationship="label">
+                      <Button
+                        size="small"
+                        appearance="subtle"
+                        icon={<BoardRegular />}
+                        aria-label={`Add to board: ${p.question}`}
+                        disabled={pinsBusy}
+                        onClick={() => void addPinRowToBoard(p.id)}
+                      />
+                    </Tooltip>
                     <Button
                       size="small"
                       appearance="subtle"
@@ -2879,6 +4311,11 @@ export function ChatPanel() {
             <BriefingsPanel pins={pinList} />
           </DialogContent>
           <DialogActions>
+            {pinBoardNote && (
+              <Text size={200} className={styles.quietNote} role="status">
+                {pinBoardNote}
+              </Text>
+            )}
             {briefingSaved && (
               <Text size={200} className={styles.quietNote}>
                 {briefingSaved}
@@ -3116,10 +4553,22 @@ export function ChatPanel() {
         {recentChats.length > 0 && <div className={styles.heroHistory}>{historyButton}</div>}
         <div className={styles.hero}>
           <span className={styles.beacon} />
-          <Title3 data-tour="beam">Ask Lighthouse</Title3>
+          <Title3 data-tour="beam">
+            {currentInvestigation ? currentInvestigation.name : "Ask Lighthouse"}
+          </Title3>
+          {/* Hero context line (openspec: add-investigations §4.2): name is the
+              title above; this row carries scope size + the policy badge. It
+              lives OUTSIDE the visible-files branch so the on-device promise
+              never disappears with the badge when no files are visible yet. */}
+          {currentInvestigation && (
+            <div className={styles.heroInvRow}>
+              <Text size={200}>{scopeLabel}</Text>
+              {onDeviceBadge}
+            </div>
+          )}
           <Text className={styles.heroHint}>
-            I&apos;ll answer using only the files visible to AI. Drag a file from the
-            explorer (or drop one here) to ask about just that file.
+            Answers use only the files visible to AI. Drop a file from the explorer
+            here to ask about that file alone.
           </Text>
           {includedFileIds.length === 0 && attachments.length === 0 ? (
             // Pre-flight: nothing is visible to AI yet. Inform gently and offer
@@ -3167,6 +4616,22 @@ export function ChatPanel() {
                         {s.label}
                       </Button>
                     ))}
+                {/* Applicable-recipe chips (openspec: add-recipes §3.1), beside
+                    the suggested asks and styled identically. Each submits its
+                    recipe-cued question immediately — the engine plans it
+                    model-free before the model gate. */}
+                {recipeChips.map((r) => (
+                  <Button
+                    key={`recipe:${r.id}:${r.table}`}
+                    appearance="secondary"
+                    size="small"
+                    shape="circular"
+                    title={r.summary}
+                    onClick={() => void sendQuestion(runRecipeQuestion(r.id, r.table))}
+                  >
+                    {r.name}
+                  </Button>
+                ))}
               </div>
             </>
           )}
@@ -3189,10 +4654,58 @@ export function ChatPanel() {
       <div className={styles.conversation}>
         {pinAlertBanner}
         <div className={styles.header}>
-          <Title3>Ask</Title3>
+          {/* Compact context header (openspec: add-investigations §4.2): inside
+              an investigation the Title3 is its name with the scope size as a
+              quiet caption; the global context stays plain "Ask". */}
+          <div className={styles.headerTitle}>
+            <Title3 className={styles.headerTitleName}>
+              {currentInvestigation ? currentInvestigation.name : "Ask"}
+            </Title3>
+            {currentInvestigation && (
+              <Text size={200} className={styles.headerCaption}>
+                {scopeLabel}
+              </Text>
+            )}
+          </div>
           <div className={styles.headerMeta}>
+            {/* Quick provider switch (time-savers): configured providers only;
+                selection applies from the NEXT ask — provenance + local-only
+                enforcement follow the active provider automatically. Inside a
+                local-only investigation the switch is moot (the engine forces
+                the private path), so it renders disabled with the reason. */}
+            <ProviderSwitch
+              onSwitched={noteProviderSwitch}
+              disabledReason={
+                investigationLocalOnly ? "This investigation always answers on-device" : undefined
+              }
+            />
+            {onDeviceBadge}
             <Badge appearance="tint">{visibleBadgeText}</Badge>
             <EgressShield />
+            {/* "{n} files hidden from cloud models" (0.12.1 §2): beside the
+                egress shield — the two "what leaves this machine" surfaces sit
+                together. Cloud provider active + a non-empty withheld set
+                only. Clicking flips the explorer's "Hidden from cloud" filter
+                on (the explorer listens for the event and shows the toggle, so
+                the filter is visible and clearable in place); the detail-less
+                reveal-node ping only un-collapses the sidebar — AppShell
+                listens for the event name alone, and the explorer's own
+                reveal handler ignores it without an id. */}
+            {cloudActive && hiddenFromCloud > 0 && (
+              <Button
+                appearance="subtle"
+                size="small"
+                className={styles.hiddenFromCloud}
+                icon={<LockClosedRegular />}
+                aria-label={`${hiddenFromCloudLabel(hiddenFromCloud)} — show them in the file list`}
+                onClick={() => {
+                  window.dispatchEvent(new CustomEvent("lighthouse:filter-local-only"));
+                  window.dispatchEvent(new CustomEvent("lighthouse:reveal-node"));
+                }}
+              >
+                {hiddenFromCloudLabel(hiddenFromCloud)}
+              </Button>
+            )}
             {historyButton}
             <Tooltip content="Save this chat as a note in your vault" relationship="label">
               <Button
@@ -3216,10 +4729,18 @@ export function ChatPanel() {
         </div>
 
         <div className={styles.bodyWrap} data-tour="beam">
-          <div className={styles.body} ref={bodyRef} onScroll={handleBodyScroll}>
+          <div
+            className={styles.body}
+            ref={bodyRef}
+            onScroll={handleBodyScroll}
+            onWheel={cancelHoldOnUserInput}
+            onTouchMove={cancelHoldOnUserInput}
+          >
             {messages.map((m) =>
               m.role === "user" ? (
-                <div key={m.id} className={styles.turn}>
+                // Each new question opens a document section: hairline above
+                // (except the very first), so Q&A pairs read as pages.
+                <div key={m.id} className={mergeClasses(styles.turn, styles.turnBoundary)}>
                   {editingId === m.id ? (
                     <div className={styles.editWrap}>
                       <Textarea
@@ -3270,7 +4791,11 @@ export function ChatPanel() {
                   )}
                 </div>
               ) : (
-                <div key={m.id} className={styles.turn}>
+                // data-lh-turn: DOM anchor for the evidence-pack chart capture
+                // (the handler serializes this turn's rendered chart SVG) and
+                // for the read-from-the-top hold (the streaming answer's row
+                // is looked up by id and its top held at the viewport top).
+                <div key={m.id} className={styles.turn} data-lh-turn={m.id}>
                   {streaming && !m.content && m.id === lastId ? (
                     <LighthouseLoader
                       className={styles.loader}
@@ -3294,6 +4819,12 @@ export function ChatPanel() {
                           )}
                           {streaming && m.id === lastId && <span className={styles.beaconInline} />}
                         </div>
+                      )}
+                      {/* Certified badge + trust verdict (openspec:
+                          add-semantic-layer §6.2): rendered from the engine's
+                          VERIFIED meta, a failed reconcile shown, never hidden. */}
+                      {m.analytics && !m.error && !(streaming && m.id === lastId) && (
+                        <TrustBadges meta={m.analytics} />
                       )}
                       {streaming && m.id === lastId && draftActive && (
                         <Text size={200} className={styles.draftBadge}>
@@ -3389,16 +4920,27 @@ export function ChatPanel() {
                         <>
                           <RefineChips
                             meta={m.analytics}
+                            content={m.content}
                             isLast={m.id === lastId}
                             disabled={streaming}
                             onAsk={(q) => void sendQuestion(q)}
                             onEditSql={openSqlEditor}
+                            chartShown={!!inlineCharts[m.id]}
+                            onToggleChart={() =>
+                              setInlineCharts((prev) => ({ ...prev, [m.id]: !prev[m.id] }))
+                            }
                             onSave={
                               desktop ? (meta) => void saveResultCsv(m.id, meta) : undefined
                             }
                             savePending={savedNotes[m.id]?.pending}
+                            onEvidencePack={
+                              desktop ? (meta) => void saveEvidencePack(m.id, meta) : undefined
+                            }
+                            packPending={packNotes[m.id]?.pending}
                             onPin={(meta) => void pinAnswer(m.id, meta)}
                             pinPending={pinNotes[m.id]?.pending}
+                            onSaveView={(meta) => openSaveView(m.id, meta)}
+                            onDefineMetric={(meta) => openDefineMetric(m.id, meta)}
                           />
                           {pinNotes[m.id]?.ok && (
                             <div className={styles.savedNote}>
@@ -3414,6 +4956,20 @@ export function ChatPanel() {
                               >
                                 View pins
                               </Button>
+                              {/* The pin-success moment doubles as the board's
+                                  add affordance (openspec: add-boards §4.1). */}
+                              {pinNotes[m.id]?.boardNote ? (
+                                <Text size={200}>{pinNotes[m.id].boardNote}</Text>
+                              ) : (
+                                <Button
+                                  size="small"
+                                  appearance="subtle"
+                                  icon={<BoardRegular />}
+                                  onClick={() => void addPinNoteToBoard(m.id)}
+                                >
+                                  Add to board
+                                </Button>
+                              )}
                             </div>
                           )}
                           {pinNotes[m.id]?.error && (
@@ -3426,8 +4982,8 @@ export function ChatPanel() {
                             <div className={styles.savedNote}>
                               <CheckmarkRegular fontSize={14} />
                               <Text size={200}>
-                                Saved “{savedNotes[m.id].name}” to Lighthouse Results — it&apos;s
-                                now a queryable vault file.
+                                Saved “{savedNotes[m.id].name}” to Lighthouse Results — now a
+                                queryable vault file.
                               </Text>
                               <Button
                                 size="small"
@@ -3444,7 +5000,56 @@ export function ChatPanel() {
                               <Text size={200}>Couldn&apos;t save — {savedNotes[m.id].error}</Text>
                             </div>
                           )}
+                          {packNotes[m.id]?.name && (
+                            <div className={styles.savedNote}>
+                              <CheckmarkRegular fontSize={14} />
+                              <Text size={200}>
+                                Saved “{packNotes[m.id].name}” to Lighthouse Results — a
+                                self-contained evidence pack you can share.
+                              </Text>
+                              <Button
+                                size="small"
+                                appearance="subtle"
+                                onClick={() => revealSaved(packNotes[m.id].id ?? "")}
+                              >
+                                Reveal
+                              </Button>
+                            </div>
+                          )}
+                          {packNotes[m.id]?.error && (
+                            <div className={styles.savedNote}>
+                              <ErrorCircleRegular fontSize={14} />
+                              <Text size={200}>
+                                Couldn&apos;t save the evidence pack — {packNotes[m.id].error}
+                              </Text>
+                            </div>
+                          )}
+                          {/* Save-as-view confirmation (openspec:
+                              add-shaped-views §3.1) — the Save-as-CSV quiet
+                              inline pattern; refusals show in the dialog. */}
+                          {viewNotes[m.id]?.name && (
+                            <div className={styles.savedNote}>
+                              <CheckmarkRegular fontSize={14} />
+                              <Text size={200}>
+                                Saved view “{viewNotes[m.id].name}” — ask against it like any
+                                table.
+                              </Text>
+                            </div>
+                          )}
                         </>
+                      )}
+                      {/* "Chart it" on ANY tabular answer (charts by default,
+                          0.12.1): answers without analytics meta — prose
+                          answers whose table is already on screen — get the
+                          same client-built chart, zero model calls. */}
+                      {!m.analytics && !m.error && !(streaming && m.id === lastId) && (
+                        <ChartItRow
+                          content={m.content}
+                          chartShown={!!inlineCharts[m.id]}
+                          onToggleChart={() =>
+                            setInlineCharts((prev) => ({ ...prev, [m.id]: !prev[m.id] }))
+                          }
+                        />
                       )}
                       {m.references && m.references.length > 0 && (
                         <References
@@ -3453,6 +5058,7 @@ export function ChatPanel() {
                           desktop={desktop}
                           flashCite={flashCite}
                           onOpen={openFile}
+                          onPreview={openPreview}
                         />
                       )}
                       {/* Honesty note: files were visible, yet nothing matched. */}
@@ -3471,14 +5077,33 @@ export function ChatPanel() {
                           from the final chunk's meta — always truthful. */}
                       {m.meta && !m.error && !(streaming && m.id === lastId) && (
                         <Text size={200} className={styles.provenanceStamp}>
-                          {m.meta.origin === "device" ? (
-                            <ShieldCheckmarkRegular fontSize={14} />
-                          ) : (
-                            <GlobeRegular fontSize={14} />
-                          )}
+                          <span
+                            aria-hidden
+                            className={mergeClasses(
+                              styles.provenanceDot,
+                              m.meta.origin === "device"
+                                ? styles.provenanceDotDevice
+                                : styles.provenanceDotVendor,
+                            )}
+                          />
                           {provenanceStampText(m.meta)}
                         </Text>
                       )}
+                      {/* Answer-cache honesty line (openspec: add-answer-cache):
+                          a replayed answer is visibly marked with the ORIGINAL
+                          answer time, from the engine-emitted meta.cachedAt
+                          only — never model text. Re-run re-asks the same
+                          question live (bypassCache) and refreshes the entry. */}
+                      {m.meta?.cachedAt !== undefined &&
+                        !m.error &&
+                        !(streaming && m.id === lastId) && (
+                          <Text size={200} className={styles.cacheLine}>
+                            From cache · same data as {cachedAtLabel(m.meta.cachedAt)} ·{" "}
+                            <Link inline disabled={streaming} onClick={() => regenerate(m.id)}>
+                              Re-run
+                            </Link>
+                          </Text>
+                        )}
                     </>
                   )}
                 </div>
@@ -3572,6 +5197,36 @@ export function ChatPanel() {
           </DialogBody>
         </DialogSurface>
       </Dialog>
+
+      {/* Save as view (openspec: add-shaped-views §3.1): a name-only dialog
+          over this answer's exact SQL + files; the asked question is recorded
+          as the summary (source "question"). The engine owns every rule —
+          refusals render inside the dialog, the success line above is the
+          quiet Save-as-CSV pattern. */}
+      <SaveViewDialog
+        open={saveView !== null}
+        onClose={() => setSaveView(null)}
+        sql={saveView?.meta.sql ?? ""}
+        fileIds={saveView?.meta.fileIds ?? []}
+        question={saveView?.question ?? ""}
+        onSaved={(view) => {
+          const target = saveView;
+          if (target) {
+            setViewNotes((s) => ({ ...s, [target.msgId]: { name: view.name } }));
+          }
+        }}
+      />
+
+      {/* Define as metric (openspec: add-semantic-layer §6.2): the engine
+          proposes an aggregate expression + entity from this answer's own SQL;
+          the user names it and saves. PARITY: unavailable on the web twin. */}
+      <DefineMetricDialog
+        open={defineMetric !== null}
+        onClose={() => setDefineMetric(null)}
+        sql={defineMetric?.meta.sql ?? ""}
+        fileIds={defineMetric?.meta.fileIds ?? []}
+        question={defineMetric?.question ?? ""}
+      />
     </section>
   );
 }

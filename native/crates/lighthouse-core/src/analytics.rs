@@ -195,6 +195,13 @@ pub struct TableReg {
     /// Present when this table unions a file family; file_id/file_name then
     /// describe the family (first member id, pattern-style label).
     pub group: Option<GroupMeta>,
+    /// Rows actually registered when the source sheet holds MORE than the
+    /// engine's row cap (materialized xlsx/xls sheets only — path-registered
+    /// CSV/TSV/Parquet stream in full and never cap). None = full coverage.
+    /// Drives the leading card note and the deterministic answer footer.
+    /// Union-family omissions are whole-member drops disclosed via `group`
+    /// (card note + coverage footer), so a grouped reg never sets this.
+    pub capped_rows: Option<usize>,
 }
 
 /// A same-shaped file family destined for one unioned table.
@@ -313,7 +320,7 @@ pub(crate) fn union_groups(
 /// `register_*` replaces silently — so the guess could overwrite a live table
 /// and leave two cards pointing at one. Looping to an actually-unused suffix
 /// closes that.
-fn unique_table_name(base: &str, used: &[String]) -> String {
+pub(crate) fn unique_table_name(base: &str, used: &[String]) -> String {
     if !used.iter().any(|u| u == base) {
         return base.to_string();
     }
@@ -399,11 +406,15 @@ pub async fn register_tables(
         let base = unique_table_name(&sanitize_table_name(&name), &used);
         let modified_ms = file_mtime_ms(&abs);
         let path = abs.to_string_lossy().to_string();
-        let registered: Vec<String> = if lower.ends_with(".csv") || lower.ends_with(".tsv") {
+        // (table name, rows registered when the sheet was row-capped). Only
+        // materialized workbook sheets can cap; the streamed formats never do.
+        let registered: Vec<(String, Option<usize>)> = if lower.ends_with(".csv")
+            || lower.ends_with(".tsv")
+        {
             let delim = if lower.ends_with(".tsv") { b'\t' } else { b',' };
             let opts = CsvReadOptions::new().delimiter(delim);
             match ctx.register_csv(&base, &path, opts).await {
-                Ok(()) => vec![base.clone()],
+                Ok(()) => vec![(base.clone(), None)],
                 Err(_) => vec![],
             }
         } else if lower.ends_with(".parquet") {
@@ -411,20 +422,35 @@ pub async fn register_tables(
                 .register_parquet(&base, &path, ParquetReadOptions::default())
                 .await
             {
-                Ok(()) => vec![base.clone()],
+                Ok(()) => vec![(base.clone(), None)],
                 Err(_) => vec![],
             }
         } else if is_pdf(&lower) {
-            register_pdf(ctx, &base, &abs).await
+            register_pdf(ctx, &base, &abs)
+                .await
+                .into_iter()
+                .map(|t| (t, None))
+                .collect()
         } else {
             register_workbook(ctx, &base, &abs)
         };
         let mut any = false;
-        for table in registered {
+        for (table, capped_rows) in registered {
             if regs.len() >= MAX_TABLES_TOTAL {
                 break;
             }
             if let Some((card, columns)) = table_card(ctx, &table).await {
+                // A row-capped sheet must never read as the whole file: lead
+                // the card with the cap (same survives-clipping rationale as
+                // the union provenance line) so the model can't claim
+                // full-file totals over a truncated registration.
+                let card = match capped_rows {
+                    Some(n) => format!(
+                        "{table} — row cap: only the first {} rows of {name} are included\n{card}",
+                        commafy(n)
+                    ),
+                    None => card,
+                };
                 used.push(base.clone());
                 any = true;
                 regs.push(TableReg {
@@ -435,6 +461,7 @@ pub async fn register_tables(
                     modified_ms,
                     columns,
                     group: None,
+                    capped_rows,
                 });
             }
         }
@@ -464,6 +491,232 @@ pub fn unregistered_count(files: &[(String, String, PathBuf)], regs: &[TableReg]
         .iter()
         .filter(|(id, name, _)| is_tabular(name) && !represented.contains(id.as_str()))
         .count()
+}
+
+// --- Saved views (openspec: add-shaped-views §2) -----------------------------------
+
+/// One saved view registered into an ask's context, and the card the model
+/// plans against. `source_file_ids` / `source_tables` are the view's
+/// TRANSITIVE sources — every underlying file id, and the ambient table name
+/// its covering registration carries — deduped, reads order: the freshness
+/// expansion (`expand_views_for_freshness`) leans on `source_tables` so the
+/// provenance footer keeps naming real files, never the view.
+#[derive(Debug, Clone)]
+pub struct ViewReg {
+    pub name: String,
+    /// View-marked table card (summary line + the standard schema/sample
+    /// body), ready for a prompt block like `TableReg::card`.
+    pub card: String,
+    /// Lowercased column names of the view's result. NOT fed to `join_hints`
+    /// (hints are file-level heuristics); carried for later surfaces.
+    pub columns: Vec<String>,
+    pub source_file_ids: Vec<String>,
+    pub source_tables: Vec<String>,
+    /// The stored one-line summary text (provenance label stays in the store).
+    pub summary: String,
+}
+
+/// Register every ELIGIBLE saved view into `ctx` as a virtual table, AFTER
+/// ordinary file registration (design.md "Virtual resolution at ask time").
+/// Store (creation) order is the pass order — it IS topological for
+/// view-over-view, because a definition can only reference views that already
+/// existed at its save. A view registers when its transitive source files are
+/// all covered by `regs`, every view it reads registered earlier THIS pass,
+/// its stored name bindings resolve (aliasing the SAME provider under the
+/// stored name when ambient registration named a source differently — files
+/// and earlier registrations always win a collision), and a table slot
+/// remains under the shared `MAX_TABLES_TOTAL` accounting. Execution is the
+/// exact CSV-union primitive — re-`guard_sql`, `ctx.sql(&view.sql)`,
+/// `register_table(name, df.into_view())` — so no rows ever land on disk and
+/// results always reflect the sources' current bytes. On cloud asks an
+/// effectively-local-only view is ineligible (transitive mark propagation).
+/// ANY failure skips that view with a log line; an ask never fails because a
+/// view is broken. Zero saved views ⇒ an empty return and a byte-identical
+/// ask.
+pub async fn register_views(
+    ctx: &SessionContext,
+    regs: &[TableReg],
+    is_cloud: bool,
+) -> Vec<ViewReg> {
+    let mut out: Vec<ViewReg> = Vec::new();
+    if regs.is_empty() {
+        return out;
+    }
+    // The store read + per-file vault-state checks are blocking work — keep
+    // them off the runtime thread (the catalog pass above sets the pattern).
+    let views =
+        tokio::task::spawn_blocking(move || crate::views::eligible_for_posture(is_cloud))
+            .await
+            .unwrap_or_default();
+    if views.is_empty() {
+        return out;
+    }
+    // A reg covers file X when it IS X or its union family includes X.
+    let covering = |file_id: &str| -> Option<&TableReg> {
+        regs.iter().find(|r| {
+            r.file_id == file_id
+                || r.group
+                    .as_ref()
+                    .is_some_and(|g| g.file_ids.iter().any(|id| id == file_id))
+        })
+    };
+    // view id → its resolved transitive source files, for every view
+    // registered THIS pass: a child's eligibility and provenance build on it.
+    let mut registered: std::collections::HashMap<String, Vec<crate::views::FileRead>> =
+        std::collections::HashMap::new();
+    // Aliases this pass created: stored name → the ambient table it points at.
+    let mut aliased: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    'views: for v in &views {
+        // Slot cap: views share the file tables' MAX_TABLES_TOTAL accounting
+        // (mirrors register_tables' guard). The cap can only stay hit, so the
+        // remaining creation-order views all skip — never an error.
+        if regs.len() + out.len() >= MAX_TABLES_TOTAL {
+            eprintln!(
+                "[views] table cap reached — skipping \"{}\" and any later views",
+                v.name
+            );
+            break;
+        }
+        // Eligibility: every view it reads registered this pass (each parent
+        // already carried ITS transitive files, so induction covers the whole
+        // tree)…
+        let mut files: Vec<crate::views::FileRead> = Vec::new();
+        for f in &v.reads.files {
+            if !files.iter().any(|k| k.file_id == f.file_id) {
+                files.push(f.clone());
+            }
+        }
+        for pid in &v.reads.views {
+            let Some(parent_files) = registered.get(pid) else {
+                eprintln!(
+                    "[views] skipping \"{}\": a view it reads is not registered for this ask",
+                    v.name
+                );
+                continue 'views;
+            };
+            for f in parent_files {
+                if !files.iter().any(|k| k.file_id == f.file_id) {
+                    files.push(f.clone());
+                }
+            }
+        }
+        // …and every transitive source file covered by a registration (this
+        // composes with investigation scope and managed policy for free:
+        // out-of-scope sources were never registered).
+        if files.iter().any(|f| covering(&f.file_id).is_none()) {
+            eprintln!(
+                "[views] skipping \"{}\": a source file is not registered for this ask",
+                v.name
+            );
+            continue;
+        }
+        // Files win a name collision: the view's own name must be free
+        // (save-time refusal makes this rare, but ambient collisions happen).
+        if ctx.table_exist(v.name.as_str()).unwrap_or(true) {
+            eprintln!(
+                "[views] skipping \"{}\": a table by that name is already registered",
+                v.name
+            );
+            continue;
+        }
+        // Name bindings: the definition's SQL uses the table names pinned at
+        // save. When ambient registration named a source differently, register
+        // the SAME provider under the stored name; a stored name already bound
+        // to a DIFFERENT table skips the view — files and earlier
+        // registrations win.
+        for f in &v.reads.files {
+            let Some(reg) = covering(&f.file_id) else {
+                continue; // unreachable — coverage checked above
+            };
+            if reg.table == f.table_name {
+                continue;
+            }
+            match aliased.get(&f.table_name) {
+                // An earlier view already aliased this name to the same table.
+                Some(target) if *target == reg.table => continue,
+                Some(_) => {
+                    eprintln!(
+                        "[views] skipping \"{}\": \"{}\" is already bound to another table",
+                        v.name, f.table_name
+                    );
+                    continue 'views;
+                }
+                None => {}
+            }
+            if ctx.table_exist(f.table_name.as_str()).unwrap_or(true) {
+                eprintln!(
+                    "[views] skipping \"{}\": \"{}\" is already bound to another table",
+                    v.name, f.table_name
+                );
+                continue 'views;
+            }
+            let provider = match ctx.table_provider(reg.table.as_str()).await {
+                Ok(p) => p,
+                Err(err) => {
+                    eprintln!("[views] skipping \"{}\": {err}", v.name);
+                    continue 'views;
+                }
+            };
+            if let Err(err) = ctx.register_table(f.table_name.as_str(), provider) {
+                eprintln!("[views] skipping \"{}\": {err}", v.name);
+                continue 'views;
+            }
+            aliased.insert(f.table_name.clone(), reg.table.clone());
+        }
+        // Defense in depth: the SAME guard as save time, before every
+        // execution — a hand-edited views.json can't smuggle a write.
+        if let Err(err) = guard_sql(&v.sql) {
+            eprintln!("[views] skipping \"{}\": {err}", v.name);
+            continue;
+        }
+        // Execute the definition and register the result virtually — the
+        // exact CSV-union primitive. Rows never materialize to disk.
+        let df = match ctx.sql(&v.sql).await {
+            Ok(df) => df,
+            Err(err) => {
+                eprintln!("[views] skipping \"{}\": {err}", v.name);
+                continue;
+            }
+        };
+        if let Err(err) = ctx.register_table(v.name.as_str(), df.into_view()) {
+            eprintln!("[views] skipping \"{}\": {err}", v.name);
+            continue;
+        }
+        let Some((body, columns)) = table_card(ctx, &v.name).await else {
+            eprintln!(
+                "[views] skipping \"{}\": could not build its table card",
+                v.name
+            );
+            continue;
+        };
+        // The card leads with the view-ness and its meaning (survives-clipping
+        // rationale, like the union provenance line), then the standard body.
+        let summary = v.summary.text.trim();
+        let card = if summary.is_empty() {
+            format!("{} is a saved view\n{}", v.name, body)
+        } else {
+            format!("{} is a saved view — {}\n{}", v.name, summary, body)
+        };
+        let source_file_ids: Vec<String> = files.iter().map(|f| f.file_id.clone()).collect();
+        let mut source_tables: Vec<String> = Vec::new();
+        for f in &files {
+            if let Some(reg) = covering(&f.file_id) {
+                if !source_tables.iter().any(|t| t == &reg.table) {
+                    source_tables.push(reg.table.clone());
+                }
+            }
+        }
+        registered.insert(v.id.clone(), files);
+        out.push(ViewReg {
+            name: v.name.clone(),
+            card,
+            columns,
+            source_file_ids,
+            source_tables,
+            summary: v.summary.text.clone(),
+        });
+    }
+    out
 }
 
 /// Register one unioned table for a file family. CSV/TSV/Parquet union via
@@ -566,6 +819,9 @@ async fn register_group(
             file_names: names,
             newest_ms,
         }),
+        // Union row-cap omissions drop whole members and are disclosed above
+        // (card note) + by the coverage footer — never via `capped_rows`.
+        capped_rows: None,
     })
 }
 
@@ -767,8 +1023,15 @@ fn register_grid(ctx: &SessionContext, tname: &str, grid: &crate::pdf_tables::Ta
 }
 
 /// calamine → Arrow MemTable per sheet (detected header; ≥80% numeric column →
-/// Float64 with nulls, else Utf8). Returns the registered table names.
-fn register_workbook(ctx: &SessionContext, base: &str, abs: &PathBuf) -> Vec<String> {
+/// Float64 with nulls, else Utf8). Returns the registered table names, each
+/// with `Some(rows_registered)` when the sheet held more data rows than
+/// MAX_XLSX_ROWS — the caller turns that into the card note + answer footer,
+/// so the cap is never silent.
+fn register_workbook(
+    ctx: &SessionContext,
+    base: &str,
+    abs: &PathBuf,
+) -> Vec<(String, Option<usize>)> {
     use calamine::Reader;
     let Ok(mut wb) = calamine::open_workbook_auto(abs) else {
         return vec![];
@@ -780,6 +1043,9 @@ fn register_workbook(ctx: &SessionContext, base: &str, abs: &PathBuf) -> Vec<Str
         let Ok(range) = wb.worksheet_range(&sheet) else {
             continue;
         };
+        // The sheet's full used-range row count — compared against what the
+        // bounded reads below actually kept, to detect a row-capped sheet.
+        let sheet_rows = range.height();
         // Stringify once; real workbooks put titles/blank rows above the
         // header, so the header is detected, not assumed (row 0 fallback).
         let all: Vec<Vec<String>> = range
@@ -819,6 +1085,10 @@ fn register_workbook(ctx: &SessionContext, base: &str, abs: &PathBuf) -> Vec<Str
         if data.len() < 2 {
             continue;
         }
+        // Row-capped iff the sheet holds more data rows (past the detected
+        // header) than were registered — whether dropped by the `.take` above
+        // or by the bounded scan itself. Recorded, never silent.
+        let capped_rows = (sheet_rows.saturating_sub(h + 1) > data.len()).then_some(data.len());
         let Some((schema, batch)) = table_from_matrix(&headers, &data) else {
             continue;
         };
@@ -831,7 +1101,7 @@ fn register_workbook(ctx: &SessionContext, base: &str, abs: &PathBuf) -> Vec<Str
             base.to_string()
         };
         if ctx.register_table(&tname, Arc::new(mem)).is_ok() {
-            out.push(tname);
+            out.push((tname, capped_rows));
         }
     }
     out
@@ -1041,10 +1311,29 @@ fn is_generic_join_col(c: &str) -> bool {
 }
 
 pub fn join_hints(regs: &[TableReg]) -> Option<String> {
+    join_hints_excluding(regs, &[])
+}
+
+/// `join_hints`, but skipping any table pair a curated semantic join hint
+/// already names (openspec: add-semantic-layer §2.4). The curated hint WINS: it
+/// renders in the business-definitions block (semantic.rs), so the heuristic
+/// card must not also emit a line for that pair. `excluded` holds the
+/// posture-eligible curated pairs from `semantic::curated_join_pairs` as
+/// (table, table) — order-insensitive, lowercased. An EMPTY slice reproduces
+/// `join_hints` byte-for-byte, so a zero-curated-hint vault leaves the prompt
+/// unchanged. PARITY: Rust-only (the twin has no analytics branch).
+pub fn join_hints_excluding(regs: &[TableReg], excluded: &[(String, String)]) -> Option<String> {
+    let excluded: std::collections::HashSet<(String, String)> =
+        excluded.iter().map(|(a, b)| norm_pair(a, b)).collect();
     let mut lines: Vec<String> = Vec::new();
     'outer: for i in 0..regs.len() {
         for j in i + 1..regs.len() {
             if regs[i].table == regs[j].table {
+                continue;
+            }
+            // A curated hint already names this pair — it renders in the block,
+            // and it wins, so drop the heuristic line entirely for the pair.
+            if !excluded.is_empty() && excluded.contains(&norm_pair(&regs[i].table, &regs[j].table)) {
                 continue;
             }
             for c in &regs[i].columns {
@@ -1071,6 +1360,16 @@ pub fn join_hints(regs: &[TableReg]) -> Option<String> {
             "Join hints (columns shared across tables — use when combining them):\n{}",
             lines.join("\n")
         ))
+    }
+}
+
+/// An unordered, lowercased table-name pair key (so `(a,b)` and `(b,a)` match).
+fn norm_pair(a: &str, b: &str) -> (String, String) {
+    let (a, b) = (a.to_lowercase(), b.to_lowercase());
+    if a <= b {
+        (a, b)
+    } else {
+        (b, a)
     }
 }
 
@@ -1175,6 +1474,34 @@ pub fn freshness_line(regs: &[TableReg], sql: &str, now_ms: i64) -> Option<Strin
     Some(format!("*Computed from:* {}\n", parts.join(", ")))
 }
 
+/// Freshness companion for saved views (design decision: "provenance keeps
+/// naming source files"). A query FROM a view mentions no file table, so
+/// `freshness_line` would fall back to listing EVERY registered file — the
+/// wrong emphasis. Appending one SQL comment naming each mentioned view's
+/// transitive `source_tables` lets the existing word-boundary mention check
+/// (`sql_mentions_table`) find the real files, so the footer names exactly
+/// the sources the view reads, with their saved times. Returns `sql`
+/// unchanged when `view_regs` is empty or none are mentioned — zero-view
+/// asks stay byte-identical. Call sites wrap every `freshness_line` input;
+/// the expanded string never renders anywhere else.
+pub fn expand_views_for_freshness(sql: &str, view_regs: &[ViewReg]) -> String {
+    let mut tables: Vec<&str> = Vec::new();
+    for vr in view_regs {
+        if !sql_mentions_table(sql, &vr.name) {
+            continue;
+        }
+        for t in &vr.source_tables {
+            if !tables.iter().any(|x| x == t) {
+                tables.push(t);
+            }
+        }
+    }
+    if tables.is_empty() {
+        return sql.to_string();
+    }
+    format!("{sql} /* reads {} */", tables.join(" "))
+}
+
 // --- SQL guard -------------------------------------------------------------------
 
 /// Pull the SQL out of a model reply: fenced ```sql block if present, else the
@@ -1260,6 +1587,355 @@ fn set_expr_is_read_only(body: &datafusion::sql::sqlparser::ast::SetExpr) -> Res
     }
 }
 
+/// Placeholder projection alias for a synthesized metric definition. The guard
+/// and the `reads` walk don't depend on the alias, so a fixed identifier keeps
+/// `guard_metric_expression` a pure `(expression, entity)` function; §4's
+/// re-run rebuilds the SELECT with the metric's real name.
+const METRIC_ALIAS: &str = "metric_value";
+
+/// Guard a semantic-layer metric definition (openspec: add-semantic-layer
+/// §1.3). Synthesize the canonical single statement
+/// `SELECT <expression> AS metric_value FROM <entity>`, run the SAME read-only
+/// [`guard_sql`] every executed query passes (so a saved metric is always a
+/// re-runnable read-only SELECT — what §4 leans on), and return the table
+/// names the definition references via the `views::collect_table_names` AST
+/// walk (the SAME parser, so the guard and the reads derivation can never
+/// disagree). `Err` with a human-readable reason for an expression that does
+/// not parse or is not read-only; nothing is persisted by this pure function.
+/// The caller (`semantic::create_metric`) resolves the returned names to a
+/// metric's `reads`, refusing an unknown entity. PARITY: the TS twin
+/// (semantic.ts) guards textually via `views.ts::guardViewSql` and scans
+/// FROM/JOIN via `collectTableNames` — analytics/DataFusion is Rust-only.
+pub fn guard_metric_expression(expression: &str, entity: &str) -> Result<Vec<String>, String> {
+    let sql = format!("SELECT {expression} AS {METRIC_ALIAS} FROM {entity}");
+    guard_sql(&sql)?;
+    crate::views::collect_table_names(&sql)
+}
+
+/// Propose a metric definition from an executed analytics answer's SQL
+/// (openspec: add-semantic-layer §6.1 — the "Save as view" precedent, but for a
+/// metric). Returns `(expression, entity)`: the FIRST aggregate projection
+/// expression and the single base table the answer read, parsed with the SAME
+/// `DFParser` the guard and certifier use so the proposal can never disagree
+/// with them. `None` when the SQL is not a single-base-table SELECT carrying an
+/// aggregate projection — an honest "nothing to propose", never a guess (the
+/// caller answers `{available:false}`). The pair is a PROPOSAL only:
+/// `semantic::create_metric` re-guards and derives `reads` on the user's Save.
+/// PARITY: SQL parsing is Rust-only (analytics/DataFusion), so the TS twin
+/// answers `{available:false}` for op:"defineMetric".
+pub fn propose_metric(sql: &str) -> Option<(String, String)> {
+    let select = answer_select(sql)?;
+    let entity = sole_base_table(&select.from)?;
+    let expression = select
+        .projection
+        .iter()
+        .filter_map(select_item_expr_string)
+        .find(|e| looks_like_aggregate(e))?;
+    Some((expression, entity))
+}
+
+/// The lone base table of a SELECT's FROM (`FROM sales`), or `None` for a join,
+/// a subquery/derived table, a table function, or a multi-table FROM — a metric
+/// binds ONE entity, so a compound FROM has no single entity to propose.
+fn sole_base_table(from: &[datafusion::sql::sqlparser::ast::TableWithJoins]) -> Option<String> {
+    use datafusion::sql::sqlparser::ast::TableFactor;
+    let [only] = from else {
+        return None;
+    };
+    if !only.joins.is_empty() {
+        return None;
+    }
+    match &only.relation {
+        TableFactor::Table { name, .. } => Some(name.to_string()),
+        _ => None,
+    }
+}
+
+/// Whether a normalized projection expression reads as an aggregate — a leading
+/// aggregate function call. A heuristic for PROPOSING (the user confirms and the
+/// engine re-guards on Save), keyed off the SAME normalized `Expr::to_string()`
+/// the certifier compares, so `SUM(amount) FILTER (WHERE …)` and
+/// `COUNT(DISTINCT x)` read true while a grouping key like
+/// `substr(order_date, 1, 7)` does not.
+fn looks_like_aggregate(expr: &str) -> bool {
+    const AGGREGATES: &[&str] = &[
+        "SUM(", "COUNT(", "AVG(", "MIN(", "MAX(", "MEDIAN(", "STDDEV(", "STDDEV_", "VAR(",
+        "VARIANCE(", "VAR_", "APPROX_", "ARRAY_AGG(", "BOOL_AND(", "BOOL_OR(",
+    ];
+    let up = expr.trim_start().to_ascii_uppercase();
+    AGGREGATES.iter().any(|a| up.starts_with(a))
+}
+
+// --- Certified answers + trust check (openspec: add-semantic-layer §3/§4) --------
+//
+// CERTIFICATION (§3) is DETERMINISTIC and MODEL-FREE (constitution §14): the
+// engine parses the executed SQL with the SAME `DFParser` the guard uses — so
+// the certifier can never disagree with the guard about what the query says —
+// and compares each projection expression to a metric's blessed `expression` by
+// NORMALIZED-AST equality (`Expr::to_string()`, the `ledger.rs` idiom).
+// Whitespace, casing, and alias differences fold away; a genuinely different
+// aggregation does not. Unparseable/dirty SQL certifies nothing (never a false
+// positive) — the ledger's under-report posture. A `SUM(amount)` near-miss of
+// `SUM(amount) FILTER (WHERE status='paid')` is NOT AST-equal, so NOT certified.
+//
+// The TRUST CHECK (§4) adds a numeric reconciliation: RE-RUN the blessed
+// definition over the SAME `ctx` through the SAME guarded `run_query`, and
+// compare the definition's value(s) to the answer's. A mismatch is CAUGHT
+// (`reconciled:false` with expected/got); a re-run error degrades honestly
+// (`reconciled:false` with the reason), never a fabricated pass; a non-metric
+// answer is honestly `certified:false` with no reconcile.
+//
+// PARITY: certification and reconciliation are RUST-ONLY (analytics/DataFusion
+// is Rust-engine-only; ts-twin.md). The TS twin never takes the analytics
+// branch, so it never certifies or reconciles — the `certified`/`TrustVerdict`
+// wire shape is mirrored in src/contracts/types.ts (wire only; twin never
+// populates it).
+
+/// The metric names an executed answer VERIFIABLY computed (openspec §3.1): for
+/// each eligible metric, its blessed `expression` is AST-equal to one of the
+/// answer SQL's projection expressions. Model-free; returns the certified names
+/// in `defs` order. UNDER-reports (fewer/none) on unparseable SQL — never a
+/// guess. Pass the posture-eligible definitions (`semantic::eligible_for_posture`).
+pub fn certified_metrics(sql: &str, defs: &[crate::semantic::Metric]) -> Vec<String> {
+    let Some(projection) = projection_expr_strings(sql) else {
+        return Vec::new();
+    };
+    defs.iter()
+        .filter(|m| expression_in_projection(&projection, &m.expression))
+        .map(|m| m.name.clone())
+        .collect()
+}
+
+/// The trust verdict for an answer against a blessed metric (openspec §4.1):
+/// certify the executed SQL used the definition, then RE-RUN that definition
+/// over the SAME `ctx` through the SAME guarded `run_query` and reconcile the
+/// definition's value(s) to the answer's — a real check, MODEL-FREE at every
+/// step. Takes the blessed `metric` record itself (its `expression`/`name`/
+/// `entity` are the single source of truth — the caller already holds the
+/// posture-eligible `Metric`, so no store round-trip and no model call).
+/// Deterministic: the same `(sql, result, metric)` over the same `ctx` yields a
+/// byte-identical verdict. The trust check NEVER breaks the already-computed
+/// answer — a re-run error is an honest `reconciled:false` with the reason
+/// (doubt is never certified), and a non-metric answer an honest
+/// `certified:false` with no reconcile.
+pub async fn reconcile_metric(
+    ctx: &SessionContext,
+    sql: &str,
+    result: &QueryResult,
+    metric: &crate::semantic::Metric,
+) -> crate::contracts::TrustVerdict {
+    use crate::contracts::TrustVerdict;
+    // Confirm the executed SQL verifiably computed this definition (§3) — else
+    // an honest "not certified", not a failure.
+    let Some(slot) = certified_slot(sql, &metric.expression) else {
+        return uncertified();
+    };
+    // Re-run the definition in the answer's shape (its WHERE/GROUP BY, so like
+    // compares to like) over the SAME ctx, through the SAME guard/timeout/caps.
+    let rerun_sql = definition_query(sql, &metric.expression, &metric.name, &metric.entity);
+    match run_query(ctx, &rerun_sql).await {
+        Ok(rerun) => {
+            let expected = metric_column_values(&rerun.batches, &metric.name, 0);
+            let got = metric_column_values(&result.batches, &metric.name, slot);
+            TrustVerdict {
+                certified: true,
+                reconciled: values_match(&expected, &got),
+                metric: Some(metric.name.clone()),
+                expected: Some(display_values(&expected)),
+                got: Some(display_values(&got)),
+            }
+        }
+        // Honest degradation: doubt is never certified (constitution §14). The
+        // number was already computed and shown; the verdict only adds meta.
+        Err(err) => TrustVerdict {
+            certified: true,
+            reconciled: false,
+            metric: Some(metric.name.clone()),
+            expected: None,
+            got: Some(format!("re-run unavailable: {err}")),
+        },
+    }
+}
+
+/// The "not certified" verdict — an honest absence of a blessed definition, not
+/// a failure (openspec §4.3).
+fn uncertified() -> crate::contracts::TrustVerdict {
+    crate::contracts::TrustVerdict {
+        certified: false,
+        reconciled: false,
+        metric: None,
+        expected: None,
+        got: None,
+    }
+}
+
+/// Parse `sql` with the guard's own `DFParser` and return its outermost simple
+/// SELECT (unwrapping a parenthesized/subquery body), or `None` for a non-query,
+/// a set-op/VALUES body, or unparseable text — the ledger's under-report posture.
+fn answer_select(sql: &str) -> Option<datafusion::sql::sqlparser::ast::Select> {
+    use datafusion::sql::parser::{DFParser, Statement as DFStatement};
+    use datafusion::sql::sqlparser::ast::{SetExpr, Statement as SqlStatement};
+    let stmts = DFParser::parse_sql(sql).ok()?;
+    let mut body = match stmts.front()? {
+        DFStatement::Statement(s) => match &**s {
+            SqlStatement::Query(q) => (*q.body).clone(),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    // Unwrap a parenthesized/subquery-wrapped body to the innermost simple SELECT.
+    loop {
+        match body {
+            SetExpr::Select(s) => return Some(*s),
+            SetExpr::Query(inner) => body = *inner.body,
+            _ => return None,
+        }
+    }
+}
+
+/// The normalized `Expr::to_string()` of each projection expression of `sql`'s
+/// outer SELECT (the `ledger.rs` idiom), or `None` when it isn't a readable
+/// single SELECT. A `*` (no expression) contributes nothing.
+fn projection_expr_strings(sql: &str) -> Option<Vec<String>> {
+    let select = answer_select(sql)?;
+    Some(
+        select
+            .projection
+            .iter()
+            .filter_map(select_item_expr_string)
+            .collect(),
+    )
+}
+
+/// A projection item's expression as a normalized `Expr::to_string()`, or `None`
+/// for a wildcard / qualified-wildcard item (no single expression).
+fn select_item_expr_string(item: &datafusion::sql::sqlparser::ast::SelectItem) -> Option<String> {
+    use datafusion::sql::sqlparser::ast::SelectItem;
+    match item {
+        SelectItem::UnnamedExpr(e) => Some(e.to_string()),
+        SelectItem::ExprWithAlias { expr, .. } => Some(expr.to_string()),
+        _ => None,
+    }
+}
+
+/// Whether a metric's blessed `expression` is AST-equal (normalized) to one of
+/// the answer's projection expressions.
+fn expression_in_projection(projection: &[String], expression: &str) -> bool {
+    match normalized_metric_expr(expression) {
+        Some(target) => projection.iter().any(|p| *p == target),
+        None => false,
+    }
+}
+
+/// The metric's stored aggregation EXPRESSION as a normalized `Expr::to_string()`
+/// — parsed by wrapping it in the canonical `SELECT <expression> AS metric_value
+/// FROM t` (the SAME synthesis `guard_metric_expression` uses), so the certifier
+/// and the guard can never disagree. `None` when it doesn't parse.
+fn normalized_metric_expr(expression: &str) -> Option<String> {
+    let sql = format!("SELECT {expression} AS {METRIC_ALIAS} FROM t");
+    let select = answer_select(&sql)?;
+    select.projection.first().and_then(select_item_expr_string)
+}
+
+/// The 0-based projection position AST-equal to `expression` — the answer's
+/// result column that carries the metric's values. `None` when unparseable or
+/// absent (not certified).
+fn certified_slot(sql: &str, expression: &str) -> Option<usize> {
+    let select = answer_select(sql)?;
+    let target = normalized_metric_expr(expression)?;
+    select
+        .projection
+        .iter()
+        .position(|item| select_item_expr_string(item).as_deref() == Some(target.as_str()))
+}
+
+/// Reconstruct the blessed definition as a re-runnable query in the ANSWER's
+/// shape: `SELECT <expression> AS <name> FROM <entity>` plus the answer's own
+/// WHERE and GROUP BY (rendered from its AST) when present — so the definition is
+/// evaluated over the same rows and grouping the answer used, and like compares
+/// to like. Bare scalar definition when the answer doesn't parse.
+fn definition_query(sql: &str, expression: &str, name: &str, entity: &str) -> String {
+    use datafusion::sql::sqlparser::ast::GroupByExpr;
+    let mut out = format!("SELECT {expression} AS {name} FROM {entity}");
+    if let Some(select) = answer_select(sql) {
+        if let Some(pred) = &select.selection {
+            out.push_str(&format!(" WHERE {pred}"));
+        }
+        if let GroupByExpr::Expressions(keys, _) = &select.group_by {
+            if !keys.is_empty() {
+                let rendered: Vec<String> = keys.iter().map(|k| k.to_string()).collect();
+                out.push_str(&format!(" GROUP BY {}", rendered.join(", ")));
+            }
+        }
+    }
+    out
+}
+
+/// The values of a result's metric column as strings, matched by the metric's
+/// aliased column NAME (wildcard-safe) else the certified projection `slot`.
+/// Empty when neither resolves — the reconcile then reports a non-match honestly.
+fn metric_column_values(batches: &[RecordBatch], name: &str, slot: usize) -> Vec<String> {
+    let Some(first) = batches.iter().find(|b| b.num_columns() > 0) else {
+        return Vec::new();
+    };
+    let idx = first
+        .schema()
+        .fields()
+        .iter()
+        .position(|f| f.name().eq_ignore_ascii_case(name))
+        .unwrap_or(slot);
+    let mut out = Vec::new();
+    for b in batches {
+        if idx >= b.num_columns() {
+            continue;
+        }
+        let col = b.column(idx);
+        for row in 0..b.num_rows() {
+            out.push(array_value_to_string(col, row).unwrap_or_default());
+        }
+    }
+    out
+}
+
+/// Order-insensitive equality of two NON-EMPTY metric-value multisets — the
+/// answer's rows may be ordered (ORDER BY) differently than the re-run's, but a
+/// reconciliation compares VALUES, not their order. Empty on either side is a
+/// non-match (nothing to reconcile against — honest, never a fabricated pass).
+fn values_match(expected: &[String], got: &[String]) -> bool {
+    if expected.is_empty() || got.is_empty() {
+        return false;
+    }
+    let mut e = expected.to_vec();
+    let mut g = got.to_vec();
+    e.sort();
+    g.sort();
+    e == g
+}
+
+/// A deterministic, human-readable rendering of a metric's value(s) for the
+/// verdict's `expected`/`got`: the lone value for a scalar metric, the sorted
+/// values joined for a grouped one (digested when long) — byte-stable across runs.
+fn display_values(values: &[String]) -> String {
+    match values {
+        [] => String::new(),
+        [one] => one.clone(),
+        _ => {
+            let mut sorted = values.to_vec();
+            sorted.sort();
+            let joined = sorted.join(", ");
+            if joined.len() <= 200 {
+                joined
+            } else {
+                let digest: String = Sha1::digest(joined.as_bytes())
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect();
+                format!("{} values (digest {})", sorted.len(), &digest[..12])
+            }
+        }
+    }
+}
+
 // --- Execution + rendering -------------------------------------------------------
 
 /// A verified query result, ready for the narration prompt and the chat.
@@ -1285,6 +1961,10 @@ pub struct QueryResult {
     /// render) — pin change detection compares this, so a change anywhere in
     /// the result alerts even past the narration caps.
     pub digest: String,
+    /// The execution-capped record batches themselves (≤ MAX_RESULT_ROWS+1
+    /// rows, in-process only) — what the chart directive is validated against
+    /// and materialized from (openspec: add-chart-directive). Never serialized.
+    pub batches: Vec<RecordBatch>,
 }
 
 /// Run a guarded query with a hard timeout and result caps.
@@ -1387,6 +2067,7 @@ pub async fn run_query(ctx: &SessionContext, sql: &str) -> Result<QueryResult, S
         chart,
         digest,
         total,
+        batches,
     })
 }
 
@@ -1435,7 +2116,18 @@ pub fn chart_spec_from_batches(batches: &[RecordBatch]) -> Option<String> {
         return None;
     }
     let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
-    if !(2..=CHART_MAX_POINTS).contains(&rows) {
+    // Fewer than 2 rows is never a chart. MORE than CHART_MAX_POINTS is no
+    // longer an outright decline: a CATEGORICAL shape gets top-N + “Other”
+    // bucketing below (charts by default, 0.12.1); temporal and scatter
+    // shapes beyond the cap still decline, in their own paths.
+    if rows < 2 {
+        return None;
+    }
+    // Identifier labels (add-chart-directive): a label column NAMED like an
+    // identifier (id/sku/code, bare or _-prefixed, singular or plural) is a
+    // key, not a category — a bar per identifier states nothing. The heuristic
+    // declines; a valid directive can still chart it deliberately.
+    if id_like_label(schema.field(0).name()) {
         return None;
     }
 
@@ -1475,6 +2167,13 @@ pub fn chart_spec_from_batches(batches: &[RecordBatch]) -> Option<String> {
 
     let temporal = x.iter().all(|l| looks_temporal(l));
 
+    // Beyond the point cap, TEMPORAL shapes keep declining exactly as before:
+    // top-N bucketing ranks rows by value, and ranking a time axis by value
+    // would destroy it. (Categorical shapes are bucketed further down.)
+    if rows > CHART_MAX_POINTS && temporal {
+        return None;
+    }
+
     // Scatter (G4): a genuinely CONTINUOUS first column is a real (x, y)
     // relationship, not a category axis. Gated to a FLOATING-POINT first column
     // (not merely numeric): small-integer keys — star ratings 1–5, status codes,
@@ -1501,19 +2200,33 @@ pub fn chart_spec_from_batches(batches: &[RecordBatch]) -> Option<String> {
                 }
             }
         }
-        // Need ≥2 points where BOTH x and y are finite, else the scatter is
-        // too sparse to read — degrade to the table.
-        let ys = &series[0].1;
-        if x_values.iter().zip(ys).filter(|(xv, yv)| xv.is_some() && yv.is_some()).count() < 2 {
-            return None;
+        // Integral-valued float keys (1.0, 2.0, 3.0) are float-ENCODED
+        // categories (exports often type integer codes as floats); like the
+        // integer-key rule above they read wrong as a continuous scatter
+        // (add-chart-directive). Scatter stays only for a GENUINELY continuous
+        // x — at least one fractional value; integral keys fall through to the
+        // categorical bar below.
+        if x_values.iter().flatten().any(|v| v.fract() != 0.0) {
+            // Beyond the point cap a SCATTER keeps declining exactly as
+            // before: ranking a continuous x by the y value would destroy
+            // the (x, y) relationship, so no top-N bucketing applies here.
+            if rows > CHART_MAX_POINTS {
+                return None;
+            }
+            // Need ≥2 points where BOTH x and y are finite, else the scatter
+            // is too sparse to read — degrade to the table.
+            let ys = &series[0].1;
+            if x_values.iter().zip(ys).filter(|(xv, yv)| xv.is_some() && yv.is_some()).count() < 2 {
+                return None;
+            }
+            let spec = serde_json::json!({
+                "kind": "scatter",
+                "x": x,
+                "xValues": x_values,
+                "series": [serde_json::json!({ "name": series[0].0, "values": ys })],
+            });
+            return Some(spec.to_string());
         }
-        let spec = serde_json::json!({
-            "kind": "scatter",
-            "x": x,
-            "xValues": x_values,
-            "series": [serde_json::json!({ "name": series[0].0, "values": ys })],
-        });
-        return Some(spec.to_string());
     }
 
     // Time-series read best as a filled area when there's a single metric;
@@ -1528,6 +2241,25 @@ pub fn chart_spec_from_batches(batches: &[RecordBatch]) -> Option<String> {
     } else {
         "bar"
     };
+    // Top-N + “Other” bucketing (charts by default, 0.12.1): a CATEGORICAL
+    // shape beyond the point cap is still comparable — rank rows descending
+    // by the first series and fold the tail into one honest “Other” row.
+    // Temporal and scatter shapes never reach here beyond the cap (both
+    // declined above). The disclosing subtitle is engine-computed and rides
+    // the spec ONLY when bucketing happened, so every ≤24-row output stays
+    // byte-identical to before.
+    let mut subtitle: Option<String> = None;
+    if rows > CHART_MAX_POINTS {
+        subtitle = Some(bucket_top_n(&mut x, &mut series));
+        // Re-check the per-series floor on the bucketed view: a series whose
+        // finite values all landed in “Other” would render a single point,
+        // which the renderer (rightly) rejects — degrade to the table.
+        for (_, vals) in &series {
+            if vals.iter().filter(|v| v.is_some()).count() < 2 {
+                return None;
+            }
+        }
+    }
     let series_json = series
         .iter()
         .map(|(name, vals)| serde_json::json!({ "name": name, "values": vals }))
@@ -1535,21 +2267,68 @@ pub fn chart_spec_from_batches(batches: &[RecordBatch]) -> Option<String> {
     // Stacked bar (G4): only when the batches PROVE part-of-whole — every
     // category's series values sum to the same constant whole. Otherwise the
     // object is byte-identical to before (no `stacked` key → grouped).
-    if kind == "bar" && is_stackable(&series) {
-        let spec = serde_json::json!({
+    let mut spec = if kind == "bar" && is_stackable(&series) {
+        serde_json::json!({
             "kind": "bar",
             "x": x,
             "series": series_json,
             "stacked": true,
-        });
-        return Some(spec.to_string());
+        })
+    } else {
+        serde_json::json!({
+            "kind": kind,
+            "x": x,
+            "series": series_json,
+        })
+    };
+    if let Some(s) = &subtitle {
+        spec["subtitle"] = serde_json::json!(s);
     }
-    let spec = serde_json::json!({
-        "kind": kind,
-        "x": x,
-        "series": series_json,
-    });
     Some(spec.to_string())
+}
+
+/// Fold a beyond-cap CATEGORICAL result into the top CHART_MAX_POINTS-1 rows
+/// plus one final “Other” row: rows are ranked DESCENDING by the FIRST
+/// series' value (missing values last; stable, so ties keep result order,
+/// mirroring the directed sort), and EVERY remaining row is aggregated into
+/// “Other” as per-series sums (SQL SUM semantics: nulls are skipped; a series
+/// with no finite tail value stays null). Returns the engine-computed
+/// subtitle disclosing exactly what was folded. Callers guarantee
+/// `x.len() > CHART_MAX_POINTS` and non-temporal labels.
+fn bucket_top_n(x: &mut Vec<String>, series: &mut Vec<(String, Vec<Option<f64>>)>) -> String {
+    let n = x.len();
+    let keep = CHART_MAX_POINTS - 1;
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&a, &b| {
+        use std::cmp::Ordering;
+        match (series[0].1[a], series[0].1[b]) {
+            (Some(va), Some(vb)) => vb.partial_cmp(&va).unwrap_or(Ordering::Equal),
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => Ordering::Equal,
+        }
+    });
+    let mut new_x: Vec<String> = order[..keep].iter().map(|&i| x[i].clone()).collect();
+    new_x.push("Other".to_string());
+    for (_, vals) in series.iter_mut() {
+        let mut kept: Vec<Option<f64>> = order[..keep].iter().map(|&i| vals[i]).collect();
+        let mut tail_sum: Option<f64> = None;
+        for &i in &order[keep..] {
+            if let Some(v) = vals[i] {
+                tail_sum = Some(tail_sum.unwrap_or(0.0) + v);
+            }
+        }
+        kept.push(tail_sum);
+        *vals = kept;
+    }
+    *x = new_x;
+    // KEEP IN SYNC: src/lib/chartFromTable.ts builds this same subtitle for
+    // the client-side “Chart it” heuristic; a unit test on each side pins it.
+    format!(
+        "Top {keep} of {n} by {} — {} smaller rows grouped as “Other”",
+        series[0].0,
+        n - keep
+    )
 }
 
 /// Largest cross-series epsilon (absolute) for the ~100 whole, and the relative
@@ -1602,7 +2381,11 @@ fn looks_temporal(label: &str) -> bool {
     let bytes = l.as_bytes();
     let all_digits = |s: &[u8]| !s.is_empty() && s.iter().all(|b| b.is_ascii_digit());
     if bytes.len() == 4 && all_digits(bytes) {
-        return true; // bare year
+        // A bare 4-digit integer reads as a YEAR only in a plausible range —
+        // outside it, it's an identifier (store 1001, SKU 4520), and charting
+        // identifiers as a time axis was a known misfire (add-chart-directive).
+        let year: u16 = l.parse().unwrap_or(0);
+        return (1900..=2100).contains(&year);
     }
     if bytes.len() >= 7
         && all_digits(&bytes[..4])
@@ -1620,6 +2403,598 @@ fn looks_temporal(label: &str) -> bool {
         }
     }
     false
+}
+
+/// Identifier-named column: matches `(?i)(^|_)(id|sku|code)s?$` without a
+/// regex dependency — "id", "store_id", "SKUs", "zip_code", … but never
+/// "grid" or "period" (the id/sku/code stem must begin the name or follow an
+/// underscore).
+fn id_like_label(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    let stem = lower.strip_suffix('s').unwrap_or(&lower);
+    for suffix in ["id", "sku", "code"] {
+        if let Some(prefix) = stem.strip_suffix(suffix) {
+            if prefix.is_empty() || prefix.ends_with('_') {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+// --- Chart directive (openspec: add-chart-directive) -------------------------------
+//
+// The narrating model may STEER the chart — never its numbers — through one
+// plain-text fenced block, the same mechanism for all seven providers (no
+// per-provider function calling; the local 7B's tool-calling is unreliable and
+// chart data must keep coming from engine batches). The engine teaches the
+// syntax via a compact card (`chart_card`), scrubs the fence from displayed
+// prose (`DirectiveScrubber`), validates every named column against the real
+// batch schema, and materializes the spec FROM the batches
+// (`chart_spec_from_batches_directed`). Anything invalid falls back to the
+// unchanged heuristic; `"none"` is advisory only — the engine decides
+// chartability, so a "none" lands on the heuristic like any absent directive.
+
+/// The directive fence opener. PARITY: src/lib/chartSpec.ts::CHART_DIRECTIVE_FENCE.
+pub const CHART_DIRECTIVE_FENCE: &str = "```lighthouse-chart-request";
+/// The ONE directive string that reaches the spec — display copy, never data.
+/// PARITY: src/lib/chartSpec.ts::MAX_TITLE_CHARS.
+const CHART_TITLE_MAX_CHARS: usize = 80;
+
+/// What the model asked for. `None` = "I think nothing here compares" — an
+/// advisory the engine records but no longer obeys: since charts-by-default
+/// (0.12.1) a "none" lands on the heuristic exactly like an absent directive
+/// (the heuristic already declines genuinely non-chartable shapes itself).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChartDirectiveKind {
+    Bar,
+    Line,
+    Area,
+    /// A line plus a shaded lower/upper interval (add-quant-depth): the ENGINE
+    /// authors this (the forecast recipe), never the narrating model — the card
+    /// does not teach it, because a band needs bound columns the model can't
+    /// name. `lower_column`/`upper_column` on the directive supply the interval.
+    Band,
+    None,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChartSort {
+    Asc,
+    Desc,
+}
+
+/// A parsed chart directive. Only these five fields are ever read from the
+/// fenced JSON — extra keys (fabricated `x`/`values`/anything) are ignored
+/// wholesale, so a directive can never smuggle data into a chart.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChartDirective {
+    pub kind: ChartDirectiveKind,
+    /// Must name a real result column (exact, case-sensitive). Empty for "none".
+    pub label_column: String,
+    /// 1..=3 names; each must exist and be numeric (validated, not trusted).
+    /// A `band` names exactly ONE (the line the interval wraps).
+    pub series_columns: Vec<String>,
+    /// `band` only: the result columns holding the interval's lower and upper
+    /// bounds. Both required for a `band`, ignored for every other kind (and
+    /// `None` there — the model never sets them). Validated numeric, like a
+    /// series column; read from the batches, never trusted as data.
+    pub lower_column: Option<String>,
+    pub upper_column: Option<String>,
+    /// Optional display title — capped and control-stripped at materialization.
+    pub title: Option<String>,
+    pub sort: Option<ChartSort>,
+}
+
+/// Parse the FIRST `lighthouse-chart-request` fence out of a narration (later
+/// ones are ignored). Returns `None` for no fence, an unterminated fence, or
+/// any grammar violation (non-JSON body, unknown kind, wrong field types, a
+/// sort outside asc|desc) — all of which fall back to the heuristic. PARITY:
+/// src/lib/chartSpec.ts::parseChartDirective.
+pub fn parse_chart_directive(text: &str) -> Option<ChartDirective> {
+    let start = text.find(CHART_DIRECTIVE_FENCE)?;
+    let after = &text[start + CHART_DIRECTIVE_FENCE.len()..];
+    let end = after.find("```")?;
+    let body = after[..end].trim();
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    let obj = v.as_object()?;
+    let kind = match obj.get("kind")?.as_str()? {
+        "bar" => ChartDirectiveKind::Bar,
+        "line" => ChartDirectiveKind::Line,
+        "area" => ChartDirectiveKind::Area,
+        "band" => ChartDirectiveKind::Band,
+        "none" => {
+            return Some(ChartDirective {
+                kind: ChartDirectiveKind::None,
+                label_column: String::new(),
+                series_columns: Vec::new(),
+                lower_column: None,
+                upper_column: None,
+                title: None,
+                sort: None,
+            })
+        }
+        _ => return None,
+    };
+    let label_column = obj.get("label_column")?.as_str()?.to_string();
+    let series_columns: Vec<String> = obj
+        .get("series_columns")?
+        .as_array()?
+        .iter()
+        .map(|s| s.as_str().map(str::to_string))
+        .collect::<Option<Vec<_>>>()?;
+    // `band` bound columns: present-and-string when given (validated numeric
+    // later), absent → None. Other kinds never carry them.
+    let lower_column = match obj.get("lower_column") {
+        Some(v) => Some(v.as_str()?.to_string()),
+        None => None,
+    };
+    let upper_column = match obj.get("upper_column") {
+        Some(v) => Some(v.as_str()?.to_string()),
+        None => None,
+    };
+    let title = match obj.get("title") {
+        Some(t) => Some(t.as_str()?.to_string()),
+        None => None,
+    };
+    let sort = match obj.get("sort") {
+        Some(s) => match s.as_str()? {
+            "asc" => Some(ChartSort::Asc),
+            "desc" => Some(ChartSort::Desc),
+            _ => return None,
+        },
+        None => None,
+    };
+    Some(ChartDirective {
+        kind,
+        label_column,
+        series_columns,
+        lower_column,
+        upper_column,
+        title,
+        sort,
+    })
+}
+
+/// The result schema a directive is validated against: (column name, numeric).
+pub fn chart_columns(batches: &[RecordBatch]) -> Vec<(String, bool)> {
+    let Some(first) = batches.iter().find(|b| b.num_columns() > 0) else {
+        return Vec::new();
+    };
+    first
+        .schema()
+        .fields()
+        .iter()
+        .map(|f| (f.name().clone(), f.data_type().is_numeric()))
+        .collect()
+}
+
+/// Validate a directive against the ACTUAL result columns: the label column
+/// must exist (exact match), series must name 1..=3 existing numeric columns.
+/// Error strings are shared fixtures with the TS twin's tests. PARITY:
+/// src/lib/chartSpec.ts::validateDirective.
+pub fn validate_directive(
+    d: &ChartDirective,
+    columns: &[(String, bool)],
+) -> Result<(), String> {
+    if d.kind == ChartDirectiveKind::None {
+        return Ok(());
+    }
+    if !columns.iter().any(|(n, _)| *n == d.label_column) {
+        return Err(format!("unknown label_column {:?}", d.label_column));
+    }
+    if d.series_columns.is_empty() || d.series_columns.len() > CHART_MAX_SERIES {
+        return Err(format!(
+            "series_columns must name 1-{CHART_MAX_SERIES} columns"
+        ));
+    }
+    for s in &d.series_columns {
+        match columns.iter().find(|(n, _)| n == s) {
+            Some((_, true)) => {}
+            Some((_, false)) => return Err(format!("series column {s:?} is not numeric")),
+            None => return Err(format!("unknown series column {s:?}")),
+        }
+    }
+    // A band wraps ONE line in a lower/upper interval — exactly one series, and
+    // both bound columns must name existing numeric result columns.
+    if d.kind == ChartDirectiveKind::Band {
+        if d.series_columns.len() != 1 {
+            return Err("a band names exactly one series column".to_string());
+        }
+        for (which, col) in [
+            ("lower_column", d.lower_column.as_deref()),
+            ("upper_column", d.upper_column.as_deref()),
+        ] {
+            let name = col.ok_or_else(|| format!("band requires {which}"))?;
+            match columns.iter().find(|(n, _)| n == name) {
+                Some((_, true)) => {}
+                Some((_, false)) => return Err(format!("{which} {name:?} is not numeric")),
+                None => return Err(format!("unknown {which} {name:?}")),
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Cap + sanitize the one directive string that reaches the spec. Control
+/// characters are stripped, whitespace trimmed, length capped; an empty
+/// residue drops the title entirely.
+fn sanitize_title(raw: &str) -> Option<String> {
+    let cleaned: String = raw.chars().filter(|c| !c.is_control()).collect();
+    let trimmed = cleaned.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.chars().take(CHART_TITLE_MAX_CHARS).collect())
+}
+
+/// The DIRECTED variant of `chart_spec_from_batches`: the directive's choices
+/// (label/series/sort/title) are parameters; every value is read from the
+/// batches exactly as the heuristic reads them — a directive can steer, never
+/// supply, a number. Returns `None` on any violation (callers fall back to
+/// the heuristic): unknown columns, non-numeric series, out-of-range rows,
+/// unlabeled points, a series with <2 finite values.
+pub fn chart_spec_from_batches_directed(
+    batches: &[RecordBatch],
+    d: &ChartDirective,
+) -> Option<String> {
+    let kind = match d.kind {
+        ChartDirectiveKind::Bar => "bar",
+        ChartDirectiveKind::Line => "line",
+        ChartDirectiveKind::Area => "area",
+        ChartDirectiveKind::Band => "band",
+        ChartDirectiveKind::None => return None,
+    };
+    let columns = chart_columns(batches);
+    validate_directive(d, &columns).ok()?;
+    let first = batches.iter().find(|b| b.num_columns() > 0)?;
+    let schema = first.schema();
+    let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    // Beyond the point cap the DIRECTED path declines and decide_chart's
+    // existing `.or_else` lands on the heuristic, whose top-N + “Other”
+    // bucketing (charts by default, 0.12.1) takes over — one bucketing
+    // implementation, not two. (The chart card only rides ≤24-row results,
+    // so a beyond-cap directive is a spontaneous one anyway.)
+    if !(2..=CHART_MAX_POINTS).contains(&rows) {
+        return None;
+    }
+    let label_idx = schema.index_of(&d.label_column).ok()?;
+    let series_idx: Vec<usize> = d
+        .series_columns
+        .iter()
+        .map(|s| schema.index_of(s).ok())
+        .collect::<Option<Vec<_>>>()?;
+
+    let mut x: Vec<String> = Vec::with_capacity(rows);
+    let mut series: Vec<(String, Vec<Option<f64>>)> = d
+        .series_columns
+        .iter()
+        .map(|s| (s.clone(), Vec::with_capacity(rows)))
+        .collect();
+    for b in batches {
+        for row in 0..b.num_rows() {
+            let label = array_value_to_string(b.column(label_idx), row).unwrap_or_default();
+            if label.trim().is_empty() {
+                return None; // unlabeled point — the table tells it better
+            }
+            x.push(label.chars().take(40).collect());
+            for (k, idx) in series_idx.iter().enumerate() {
+                let col = b.column(*idx);
+                if col.is_null(row) {
+                    series[k].1.push(None);
+                } else {
+                    let raw = array_value_to_string(col, row).unwrap_or_default();
+                    match raw.trim().parse::<f64>() {
+                        Ok(v) if v.is_finite() => series[k].1.push(Some(v)),
+                        _ => return None, // a non-numeric render ⇒ don't chart
+                    }
+                }
+            }
+        }
+    }
+    for (_, vals) in &series {
+        if vals.iter().filter(|v| v.is_some()).count() < 2 {
+            return None;
+        }
+    }
+
+    // Band (add-quant-depth): the ENGINE-authored forecast interval. Emit the
+    // single line series plus its lower/upper bound arrays, read from the named
+    // bound columns exactly as the series values are read (NULL-safe; bounds are
+    // sparse — no finite floor). No sort (a forecast is temporal) and no stack.
+    // validate_directive already proved one series + numeric bound columns.
+    if d.kind == ChartDirectiveKind::Band {
+        let (Some(lo_name), Some(hi_name)) = (d.lower_column.as_deref(), d.upper_column.as_deref())
+        else {
+            return None;
+        };
+        let lo_idx = schema.index_of(lo_name).ok()?;
+        let hi_idx = schema.index_of(hi_name).ok()?;
+        let read_bound = |idx: usize| -> Option<Vec<Option<f64>>> {
+            let mut out = Vec::with_capacity(rows);
+            for b in batches {
+                let col = b.column(idx);
+                for row in 0..b.num_rows() {
+                    if col.is_null(row) {
+                        out.push(None);
+                    } else {
+                        let raw = array_value_to_string(col, row).unwrap_or_default();
+                        match raw.trim().parse::<f64>() {
+                            Ok(v) if v.is_finite() => out.push(Some(v)),
+                            _ => return None, // a non-numeric render ⇒ not a band
+                        }
+                    }
+                }
+            }
+            Some(out)
+        };
+        let lower = read_bound(lo_idx)?;
+        let upper = read_bound(hi_idx)?;
+        let (name, values) = &series[0];
+        let mut spec = serde_json::json!({
+            "kind": "band",
+            "x": x,
+            "series": [serde_json::json!({
+                "name": name,
+                "values": values,
+                "lower": lower,
+                "upper": upper,
+            })],
+        });
+        if let Some(t) = d.title.as_deref().and_then(sanitize_title) {
+            spec["title"] = serde_json::json!(t);
+        }
+        return Some(spec.to_string());
+    }
+
+    // Engine-side sort by the FIRST series column (missing values last in
+    // either direction); stable, so tied categories keep result order.
+    if let Some(sort) = d.sort {
+        let mut order: Vec<usize> = (0..x.len()).collect();
+        order.sort_by(|&a, &b| {
+            use std::cmp::Ordering;
+            match (series[0].1[a], series[0].1[b]) {
+                (Some(va), Some(vb)) => {
+                    let ord = va.partial_cmp(&vb).unwrap_or(Ordering::Equal);
+                    if sort == ChartSort::Desc {
+                        ord.reverse()
+                    } else {
+                        ord
+                    }
+                }
+                (Some(_), None) => Ordering::Less,
+                (None, Some(_)) => Ordering::Greater,
+                (None, None) => Ordering::Equal,
+            }
+        });
+        x = order.iter().map(|&i| x[i].clone()).collect();
+        for (_, vals) in &mut series {
+            *vals = order.iter().map(|&i| vals[i]).collect();
+        }
+    }
+
+    let series_json = series
+        .iter()
+        .map(|(name, vals)| serde_json::json!({ "name": name, "values": vals }))
+        .collect::<Vec<_>>();
+    let mut spec = serde_json::json!({
+        "kind": kind,
+        "x": x,
+        "series": series_json,
+    });
+    // The existing stacked behavior applied to the directed selection: only a
+    // batch-PROVEN part-of-whole stacks, so a directed share table isn't worse
+    // than the heuristic's drawing of it.
+    if kind == "bar" && is_stackable(&series) {
+        spec["stacked"] = serde_json::json!(true);
+    }
+    // `title` is emitted ONLY on the directed path — heuristic specs stay
+    // byte-identical to today.
+    if let Some(t) = d.title.as_deref().and_then(sanitize_title) {
+        spec["title"] = serde_json::json!(t);
+    }
+    Some(spec.to_string())
+}
+
+/// The chart decision for a completed narration — the single point synth.rs
+/// consults after streaming (the deterministic emission point made
+/// directive-aware). Charts by default (0.12.1): the ENGINE decides
+/// chartability; a directive REFINES the chart (kind/columns/title/sort) but
+/// may no longer suppress a chartable result. A "none" directive behaves
+/// exactly like no directive — the heuristic still runs, and it already
+/// declines the genuinely non-chartable shapes by itself (single value,
+/// single row, no numeric series, id-like labels). A valid directive
+/// materializes from the batches; anything else (absent, malformed, invalid,
+/// or a directed build that fails on the data) lands on the unchanged
+/// heuristic. Truncated results are gated by the CALLER (they never reach
+/// this point), matching run_query's own gate.
+pub fn decide_chart(batches: &[RecordBatch], narration: &str) -> Option<String> {
+    match parse_chart_directive(narration) {
+        // "none" is advisory only: fall through to the heuristic, exactly as
+        // if no directive had been written.
+        Some(d) if d.kind == ChartDirectiveKind::None => chart_spec_from_batches(batches),
+        Some(d) => chart_spec_from_batches_directed(batches, &d)
+            .or_else(|| chart_spec_from_batches(batches)),
+        None => chart_spec_from_batches(batches),
+    }
+}
+
+// --- Chart card ---------------------------------------------------------------------
+
+/// Version stamp for the chart card. The full text is snapshot-pinned in a
+/// unit test, so any edit (and the version bump that should ride with a
+/// behavioral one) is a reviewed diff.
+pub const CHART_CARD_VERSION: &str = "v2";
+/// Card budget: ~215 tokens (v2's advisory "none" line bought ~56 chars).
+/// Asserted by `chart_card_stays_inside_budget` and re-checked by the
+/// chart_eval floor.
+pub const CHART_CARD_MAX_CHARS: usize = 860;
+/// Cap on the interpolated column list — a 24-column result must not blow the
+/// card budget; the full header already rides in the result block itself.
+const CHART_CARD_COLS_CHARS: usize = 96;
+
+/// A few-shot the card teaches: a tiny result shape and the directive that
+/// fits it. Every example is validated by the engine's OWN validator against
+/// its example columns (`every_chart_card_example_validates`), so the card
+/// can never teach syntax the engine rejects.
+pub struct ChartCardExample {
+    /// The example table shape as shown in the card, e.g. "(month, total)".
+    pub what: &'static str,
+    /// The example table's columns: (name, numeric).
+    pub columns: &'static [(&'static str, bool)],
+    /// The taught directive JSON, exactly as it appears in the card.
+    pub directive: &'static str,
+}
+
+pub const CHART_CARD_EXAMPLES: &[ChartCardExample] = &[
+    ChartCardExample {
+        what: "(month, total)",
+        columns: &[("month", false), ("total", true)],
+        directive: r#"{"kind":"area","label_column":"month","series_columns":["total"]}"#,
+    },
+    ChartCardExample {
+        what: "(region, revenue)",
+        columns: &[("region", false), ("revenue", true)],
+        directive: r#"{"kind":"bar","label_column":"region","series_columns":["revenue"],"title":"Revenue by region","sort":"desc"}"#,
+    },
+    ChartCardExample {
+        what: "(store_id, revenue)",
+        columns: &[("store_id", true), ("revenue", true)],
+        directive: r#"{"kind":"none"}"#,
+    },
+];
+
+/// The chart card — the compact prompt block that teaches the narrating model
+/// the kinds, when none fits, this result's ACTUAL columns, and the directive
+/// syntax. `None` when the result shape can't chart at all (loose gate:
+/// 2..=24 rows, ≥1 numeric column) — then the ~200 tokens are not spent and
+/// no doomed directive is invited. Injected by synth.rs ONLY on untruncated
+/// analytics results.
+pub fn chart_card(batches: &[RecordBatch]) -> Option<String> {
+    let columns = chart_columns(batches);
+    if !columns.iter().any(|(_, numeric)| *numeric) {
+        return None;
+    }
+    let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    if !(2..=CHART_MAX_POINTS).contains(&rows) {
+        return None;
+    }
+    let mut listed = String::new();
+    for (name, numeric) in &columns {
+        let sep = if listed.is_empty() { "" } else { ", " };
+        let entry = format!("{sep}{name} ({})", if *numeric { "numeric" } else { "text" });
+        if listed.chars().count() + entry.chars().count() > CHART_CARD_COLS_CHARS {
+            listed.push_str(", …");
+            break;
+        }
+        listed.push_str(&entry);
+    }
+    Some(format!(
+        "Chart options ({CHART_CARD_VERSION}) — result columns: {listed}.\n\
+         End the answer with at most ONE fenced request to choose this answer's chart; \
+         the app builds it from the verified result (a request can never supply values):\n\
+         {CHART_DIRECTIVE_FENCE}\n{}\n```\n\
+         kind: bar = categories; line = trend, 2-3 series; area = trend, 1 series; \
+         none = you think nothing here is comparable (single number, id/SKU/code labels) — \
+         the app still charts results whose shape fits. \
+         series_columns: 1-3 numeric columns; title and sort (asc|desc, by first series) optional.\n\
+         Examples: {} → {} · {} → {}",
+        CHART_CARD_EXAMPLES[1].directive,
+        CHART_CARD_EXAMPLES[0].what,
+        CHART_CARD_EXAMPLES[0].directive,
+        CHART_CARD_EXAMPLES[2].what,
+        CHART_CARD_EXAMPLES[2].directive,
+    ))
+}
+
+// --- Directive stream scrubbing -----------------------------------------------------
+
+/// Withholds `lighthouse-chart-request` fences from forwarded narration
+/// deltas while accumulating the FULL narration for directive parsing at
+/// completion. Hold-back is minimal: prose is forwarded as it streams except
+/// a tail that could still become the fence opener; if it turns out not to be
+/// the fence, `push`/`finish` flush it. Fence bytes themselves (opener, body,
+/// closer) are never forwarded — the belt-and-braces UI strip is a second
+/// net, not the mechanism.
+#[derive(Default)]
+pub struct DirectiveScrubber {
+    full: String,
+    pending: String,
+    in_fence: bool,
+}
+
+impl DirectiveScrubber {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Feed one streamed delta; returns the prose safe to forward now.
+    pub fn push(&mut self, delta: &str) -> String {
+        self.full.push_str(delta);
+        self.pending.push_str(delta);
+        let mut out = String::new();
+        loop {
+            if self.in_fence {
+                // Swallow through the closing fence (plus one newline so the
+                // removal leaves no blank hole in the prose).
+                let Some(pos) = self.pending.find("```") else {
+                    return out; // fence still open — hold everything
+                };
+                let mut rest = self.pending.split_off(pos + 3);
+                if rest.starts_with('\n') {
+                    rest.remove(0);
+                }
+                self.pending = rest;
+                self.in_fence = false;
+                continue;
+            }
+            if let Some(pos) = self.pending.find(CHART_DIRECTIVE_FENCE) {
+                out.push_str(&self.pending[..pos]);
+                self.pending.drain(..pos + CHART_DIRECTIVE_FENCE.len());
+                self.in_fence = true;
+                continue;
+            }
+            // No opener yet: forward all but the longest tail that is still a
+            // prefix of the opener (it may complete in the next delta).
+            let keep = longest_opener_prefix_suffix(&self.pending);
+            let cut = self.pending.len() - keep;
+            out.push_str(&self.pending[..cut]);
+            self.pending.drain(..cut);
+            return out;
+        }
+    }
+
+    /// Stream finished: flush held prose that turned out not to be a fence.
+    /// An unterminated fence is directive text, not prose — it stays withheld
+    /// (and parses as malformed, so the chart falls back to the heuristic).
+    pub fn finish(&mut self) -> String {
+        if self.in_fence {
+            self.pending.clear();
+            return String::new();
+        }
+        std::mem::take(&mut self.pending)
+    }
+
+    /// Everything the model wrote, fences included — what the directive
+    /// parser reads at completion.
+    pub fn full_text(&self) -> &str {
+        &self.full
+    }
+}
+
+/// Length of the longest suffix of `hay` that is a proper prefix of the fence
+/// opener. Byte-wise: the opener is ASCII, so a matching suffix always ends
+/// on a char boundary.
+fn longest_opener_prefix_suffix(hay: &str) -> usize {
+    let hay = hay.as_bytes();
+    let needle = CHART_DIRECTIVE_FENCE.as_bytes();
+    let max = hay.len().min(needle.len() - 1);
+    for k in (1..=max).rev() {
+        if hay[hay.len() - k..] == needle[..k] {
+            return k;
+        }
+    }
+    0
 }
 
 /// Render record batches as a compact Markdown table (rows/cols/cell caps).
@@ -1679,6 +3054,213 @@ pub fn batches_to_markdown(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- Certified answers (openspec: add-semantic-layer §3) --------------------
+    // Pure (model-free) certification over synthetic definitions; the trust-check
+    // re-run (which needs a real ctx + registered table) lives in
+    // tests/semantic_test.rs under the shared VAULT_DIR lock.
+
+    fn metric_def(name: &str, expression: &str) -> crate::semantic::Metric {
+        crate::semantic::Metric {
+            id: format!("metric-{name}"),
+            name: name.to_string(),
+            expression: expression.to_string(),
+            description: String::new(),
+            entity: "sales".to_string(),
+            reads: crate::views::Reads::default(),
+            summary: crate::views::ViewSummary {
+                text: String::new(),
+                source: crate::views::SummarySource::Question,
+            },
+            created_ms: 0,
+        }
+    }
+
+    #[test]
+    fn certified_metrics_names_the_ast_equal_definition() {
+        let revenue = metric_def("revenue", "SUM(amount) FILTER (WHERE status='paid')");
+        // The blessed definition certifies the answer + names the metric —
+        // whitespace/casing/alias differences fold away (normalized-AST idiom).
+        let sql = "SELECT region, SUM(amount) FILTER (WHERE status = 'paid') AS revenue \
+                   FROM sales GROUP BY region ORDER BY revenue DESC";
+        assert_eq!(
+            certified_metrics(sql, std::slice::from_ref(&revenue)),
+            vec!["revenue".to_string()],
+        );
+        // A scalar answer (no grouping) certifies just the same.
+        assert_eq!(
+            certified_metrics(
+                "SELECT SUM(amount) FILTER (WHERE status = 'paid') AS revenue FROM sales",
+                std::slice::from_ref(&revenue),
+            ),
+            vec!["revenue".to_string()],
+        );
+    }
+
+    #[test]
+    fn certified_metrics_withholds_the_near_miss_and_under_reports() {
+        let revenue = metric_def("revenue", "SUM(amount) FILTER (WHERE status='paid')");
+        // SUM(amount) is NOT AST-equal to SUM(amount) FILTER(...): the mark is
+        // withheld rather than decorating a different number.
+        let near = "SELECT region, SUM(amount) AS revenue FROM sales GROUP BY region";
+        assert!(certified_metrics(near, std::slice::from_ref(&revenue)).is_empty());
+        // Unparseable SQL certifies nothing (under-report, never a guess).
+        assert!(certified_metrics("SELECT SUM(", std::slice::from_ref(&revenue)).is_empty());
+        // A non-metric ad-hoc query certifies nothing.
+        assert!(
+            certified_metrics("SELECT COUNT(*) AS n FROM sales", std::slice::from_ref(&revenue))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn certified_mark_is_a_pure_function_of_sql_and_store() {
+        // The certifier's ONLY inputs are the executed SQL and the definitions —
+        // no narration text enters, so the mark is identical run to run (narration
+        // present or absent yields the same verdict).
+        let revenue = metric_def("revenue", "SUM(amount) FILTER (WHERE status='paid')");
+        let sql = "SELECT SUM(amount) FILTER (WHERE status = 'paid') AS revenue FROM sales";
+        let first = certified_metrics(sql, std::slice::from_ref(&revenue));
+        let second = certified_metrics(sql, std::slice::from_ref(&revenue));
+        assert_eq!(first, second);
+        assert_eq!(first, vec!["revenue".to_string()]);
+    }
+
+    #[test]
+    fn propose_metric_extracts_the_aggregate_and_entity() {
+        // A grouped answer proposes its aggregate projection + single base table
+        // (the "Define as metric" seam); the grouping key is not the proposal.
+        let (expr, entity) = propose_metric(
+            "SELECT region, SUM(amount) FILTER (WHERE status = 'paid') AS revenue \
+             FROM sales GROUP BY region ORDER BY revenue DESC",
+        )
+        .expect("a single-table aggregate answer proposes a metric");
+        assert_eq!(entity, "sales");
+        // The normalized aggregate expression, alias stripped — re-guardable as-is.
+        assert!(expr.starts_with("SUM(amount)"), "aggregate, not the group key: {expr}");
+        assert!(expr.contains("FILTER"), "the FILTER rides into the definition: {expr}");
+
+        // A scalar aggregate answer proposes just the same.
+        let (expr, entity) =
+            propose_metric("SELECT COUNT(*) AS n FROM orders").expect("scalar aggregate proposes");
+        assert_eq!((expr.as_str(), entity.as_str()), ("COUNT(*)", "orders"));
+
+        // Nothing to propose: no aggregate projection, a join/compound FROM, or
+        // unparseable — an honest None (the caller answers {available:false}).
+        assert!(propose_metric("SELECT region FROM sales GROUP BY region").is_none());
+        assert!(propose_metric("SELECT SUM(a) AS s FROM x JOIN y ON x.id = y.id").is_none());
+        assert!(propose_metric("SELECT SUM(").is_none());
+    }
+
+    // --- Trust check (openspec: add-semantic-layer §4) --------------------------
+    // Reconciliation over a real (in-memory) context — the re-run executes
+    // exactly as an answer's query does. Model-free; no store/VAULT_DIR needed
+    // because `reconcile_metric` takes the blessed `Metric` record directly.
+
+    /// An in-memory `sales(region, amount, status)` context. Paid rows total 37
+    /// (north 10 + south 20 + south 7); the void row (north 5) makes the un-
+    /// filtered total 42, so a near-miss `SUM(amount)` differs from the metric.
+    async fn sales_ctx() -> SessionContext {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("region", DataType::Utf8, false),
+            Field::new("amount", DataType::Float64, false),
+            Field::new("status", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(StringArray::from(vec!["north", "south", "south", "north"])),
+                Arc::new(Float64Array::from(vec![10.0, 20.0, 7.0, 5.0])),
+                Arc::new(StringArray::from(vec!["paid", "paid", "paid", "void"])),
+            ],
+        )
+        .unwrap();
+        let mem = MemTable::try_new(schema, vec![vec![batch]]).unwrap();
+        let ctx = SessionContext::new();
+        ctx.register_table("sales", Arc::new(mem)).unwrap();
+        ctx
+    }
+
+    #[tokio::test]
+    async fn reconcile_matches_a_genuine_answer_and_catches_a_mismatch() {
+        let ctx = sales_ctx().await;
+        let revenue = metric_def("revenue", "SUM(amount) FILTER (WHERE status = 'paid')");
+        let sql = "SELECT SUM(amount) FILTER (WHERE status = 'paid') AS revenue FROM sales";
+        // A genuine answer reconciles: certified:true, reconciled:true, and the
+        // re-run definition's figure equals the answer's.
+        let genuine = run_query(&ctx, sql).await.unwrap();
+        let v = reconcile_metric(&ctx, sql, &genuine, &revenue).await;
+        assert!(v.certified && v.reconciled, "{v:?}");
+        assert_eq!(v.metric.as_deref(), Some("revenue"));
+        assert_eq!(v.expected, v.got, "definition == answer");
+        assert!(v.expected.is_some());
+
+        // A hand-crafted answer whose number differs (the no-filter total, 42)
+        // beside the SAME certified SQL is CAUGHT: reconciled:false + expected/got.
+        let tampered = run_query(&ctx, "SELECT SUM(amount) AS revenue FROM sales")
+            .await
+            .unwrap();
+        let v = reconcile_metric(&ctx, sql, &tampered, &revenue).await;
+        assert!(v.certified && !v.reconciled, "mismatch caught: {v:?}");
+        assert!(
+            v.expected.is_some() && v.got.is_some() && v.expected != v.got,
+            "expected (definition) differs from got (answer): {v:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_adhoc_answer_is_honestly_uncertified_not_failed() {
+        let ctx = sales_ctx().await;
+        let revenue = metric_def("revenue", "SUM(amount) FILTER (WHERE status = 'paid')");
+        // Uses no blessed definition (no FILTER): certified:false, no reconcile —
+        // an honest "not certified", not a failure.
+        let sql = "SELECT SUM(amount) AS revenue FROM sales";
+        let res = run_query(&ctx, sql).await.unwrap();
+        let v = reconcile_metric(&ctx, sql, &res, &revenue).await;
+        assert!(!v.certified && !v.reconciled, "{v:?}");
+        assert!(v.metric.is_none() && v.expected.is_none() && v.got.is_none());
+    }
+
+    #[tokio::test]
+    async fn reconcile_degrades_honestly_when_the_rerun_errors() {
+        let ctx = sales_ctx().await;
+        // The answer certifies (its SQL projects the blessed expression over the
+        // registered `sales`), but the metric's entity names an UNREGISTERED
+        // table, so the definition re-run errors — an honest reconciled:false with
+        // the reason, never a fabricated pass.
+        let mut ghost = metric_def("revenue", "SUM(amount) FILTER (WHERE status = 'paid')");
+        ghost.entity = "ghost".to_string();
+        let sql = "SELECT SUM(amount) FILTER (WHERE status = 'paid') AS revenue FROM sales";
+        let res = run_query(&ctx, sql).await.unwrap();
+        let v = reconcile_metric(&ctx, sql, &res, &ghost).await;
+        assert!(v.certified, "the SQL still used the definition");
+        assert!(!v.reconciled, "a re-run over a missing table can't reconcile");
+        assert!(v.expected.is_none());
+        assert!(
+            v.got.as_deref().unwrap_or_default().contains("re-run unavailable"),
+            "reason recorded: {v:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_grouped_verdict_reconciles_and_is_byte_identical_across_two_runs() {
+        let ctx = sales_ctx().await;
+        let revenue = metric_def("revenue", "SUM(amount) FILTER (WHERE status = 'paid')");
+        // A grouped, ORDER BY'd answer still reconciles (like compares to like,
+        // order-insensitive) and the verdict is byte-identical run to run — a pure
+        // function of (sql, result, metric) over the same ctx.
+        let sql = "SELECT region, SUM(amount) FILTER (WHERE status = 'paid') AS revenue \
+                   FROM sales GROUP BY region ORDER BY revenue DESC";
+        let res = run_query(&ctx, sql).await.unwrap();
+        let a = reconcile_metric(&ctx, sql, &res, &revenue).await;
+        let b = reconcile_metric(&ctx, sql, &res, &revenue).await;
+        assert!(a.certified && a.reconciled, "{a:?}");
+        assert_eq!(
+            serde_json::to_string(&a).unwrap(),
+            serde_json::to_string(&b).unwrap(),
+            "byte-identical verdict"
+        );
+    }
 
     #[test]
     fn cue_detects_aggregate_asks() {
@@ -1774,6 +3356,7 @@ mod tests {
             modified_ms: ms,
             columns: vec![],
             group: None,
+            capped_rows: None,
         };
         let regs = vec![
             reg("tickets", "f1", "Tickets.xlsx", Some(now - 2 * 3_600_000)),
@@ -1804,6 +3387,78 @@ mod tests {
         let l = freshness_line(&[reg("t", "f9", "x.csv", None)], "SELECT * FROM t", now).unwrap();
         assert!(l.contains("“x.csv”") && !l.contains("saved"), "{l}");
         assert!(freshness_line(&[], "SELECT 1", now).is_none());
+    }
+
+    // openspec: add-shaped-views §2 — the freshness expansion keeps the
+    // provenance footer naming SOURCE files for a query FROM a saved view.
+    #[test]
+    fn view_freshness_expansion_names_source_tables_only_when_mentioned() {
+        let vr = |name: &str, tables: &[&str]| ViewReg {
+            name: name.into(),
+            card: String::new(),
+            columns: vec![],
+            source_file_ids: vec![],
+            source_tables: tables.iter().map(|t| t.to_string()).collect(),
+            summary: String::new(),
+        };
+
+        // Empty registry ⇒ the IDENTICAL string (zero-view asks byte-stable).
+        assert_eq!(
+            expand_views_for_freshness("SELECT * FROM sales", &[]),
+            "SELECT * FROM sales"
+        );
+        // An unmentioned view changes nothing either.
+        let clean = vr("clean_sales", &["sales"]);
+        assert_eq!(
+            expand_views_for_freshness("SELECT * FROM orders", &[clean.clone()]),
+            "SELECT * FROM orders"
+        );
+        // Word boundaries hold: clean_sales_2 does not mention clean_sales.
+        assert_eq!(
+            expand_views_for_freshness("SELECT * FROM clean_sales_2", &[clean.clone()]),
+            "SELECT * FROM clean_sales_2"
+        );
+        // A mentioned view appends ONE comment naming its source tables…
+        assert_eq!(
+            expand_views_for_freshness("SELECT SUM(amount) FROM clean_sales", &[clean.clone()]),
+            "SELECT SUM(amount) FROM clean_sales /* reads sales */"
+        );
+        // …which makes freshness_line pick out exactly the source files.
+        let now = 1_700_000_000_000i64;
+        let reg = |table: &str, id: &str, name: &str| TableReg {
+            table: table.into(),
+            file_id: id.into(),
+            file_name: name.into(),
+            card: String::new(),
+            modified_ms: Some(now - 2 * 3_600_000),
+            columns: vec![],
+            group: None,
+            capped_rows: None,
+        };
+        let regs = vec![reg("sales", "f1", "sales.csv"), reg("costs", "f2", "costs.csv")];
+        let sql = "SELECT SUM(amount) FROM clean_sales";
+        let line = freshness_line(
+            &regs,
+            &expand_views_for_freshness(sql, &[clean.clone()]),
+            now,
+        )
+        .unwrap();
+        assert!(line.contains("sales.csv"), "{line}");
+        assert!(!line.contains("costs.csv"), "footer names the view's sources only: {line}");
+        // Without the expansion the fallback lists everything — the wrong
+        // emphasis this helper exists to fix.
+        let fallback = freshness_line(&regs, sql, now).unwrap();
+        assert!(fallback.contains("costs.csv"), "{fallback}");
+
+        // Two mentioned views merge into one comment, deduped, reads order.
+        let joined = vr("joined_view", &["sales", "regions"]);
+        assert_eq!(
+            expand_views_for_freshness(
+                "SELECT * FROM clean_sales JOIN joined_view ON true",
+                &[clean, joined]
+            ),
+            "SELECT * FROM clean_sales JOIN joined_view ON true /* reads sales regions */"
+        );
     }
 
     #[test]
@@ -1942,9 +3597,14 @@ mod tests {
 
     #[test]
     fn step_prompt_stays_inside_budget() {
-        // Maximal shape: 3 completed steps, each with a long SQL and a result
-        // at the carry cap — the prompt must stay comfortably under ~8k chars.
-        let steps: Vec<StepRecord> = (0..3)
+        // Maximal shape under the Beam budget (openspec: add-beam-loop §2): the
+        // planning prompt for the last step carries every prior step's SQL and
+        // its result clipped to STEP_RESULT_CAP. At the configurable ceiling (12
+        // steps, settings::BEAM_MAX_STEPS_CEILING) that is 11 prior steps — the
+        // prompt grows past the old hardcoded-3 bound but stays a tiny fraction
+        // of any remote window (the loop is remote-gated for exactly this
+        // reason). 24k chars ≈ 6k tokens — comfortably inside every remote model.
+        let steps: Vec<StepRecord> = (0..11)
             .map(|i| StepRecord {
                 sql: format!(
                     "SELECT c{i}, SUM(v) FROM {} GROUP BY c{i} ORDER BY 2 DESC",
@@ -1953,13 +3613,14 @@ mod tests {
                 result_markdown: "| a | b |\n| 1 | 2 |\n".repeat(200), // > cap, gets clipped
             })
             .collect();
-        let q = step_question(&"compare everything and explain why ".repeat(8), &steps);
+        let q = step_question(&"compare everything and explain why ".repeat(8), &steps, 12);
         assert!(
-            q.chars().count() < 8_000,
+            q.chars().count() < 24_000,
             "prompt budget blown: {}",
             q.chars().count()
         );
-        assert!(q.contains("Step 3 SQL"));
+        assert!(q.contains("Step 11 SQL"));
+        assert!(q.contains("up to 12 SQL queries total"));
     }
 
     #[test]
@@ -2003,6 +3664,32 @@ mod tests {
             vec![
                 Arc::new(StringArray::from(labels.to_vec())),
                 Arc::new(Float64Array::from(values.to_vec())),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// A forecast-shaped batch: period, value (the line), and a SPARSE lower/upper
+    /// interval (null on historical rows, present on the forecast tail).
+    fn band_batch(
+        periods: &[&str],
+        values: &[f64],
+        lower: &[Option<f64>],
+        upper: &[Option<f64>],
+    ) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("period", DataType::Utf8, false),
+            Field::new("value", DataType::Float64, true),
+            Field::new("lower", DataType::Float64, true),
+            Field::new("upper", DataType::Float64, true),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(periods.to_vec())),
+                Arc::new(Float64Array::from(values.to_vec())),
+                Arc::new(Float64Array::from(lower.to_vec())),
+                Arc::new(Float64Array::from(upper.to_vec())),
             ],
         )
         .unwrap()
@@ -2075,6 +3762,101 @@ mod tests {
             area,
             r#"{"kind":"area","series":[{"name":"total","values":[1.0,2.0]}],"x":["2024-01","2024-02"]}"#
         );
+    }
+
+    // Charts by default (0.12.1): a beyond-cap CATEGORICAL result folds into
+    // top-23 + “Other” instead of declining; the disclosing subtitle is
+    // pinned byte-for-byte (KEEP IN SYNC: src/lib/chartFromTable.ts mirrors
+    // both the fold and this exact string).
+    #[test]
+    fn beyond_cap_categorical_buckets_into_top_n_plus_other() {
+        let labels: Vec<String> = (1..=40).map(|i| format!("cat{i:02}")).collect();
+        let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+        let values: Vec<f64> = (1..=40).map(|i| (i as f64) * 10.0).collect();
+        let spec = chart_spec_from_batches(&[batch(&refs, &values)]).expect("bucketed chart");
+        let v: serde_json::Value = serde_json::from_str(&spec).unwrap();
+        assert_eq!(v["kind"], "bar");
+        let x = v["x"].as_array().unwrap();
+        assert_eq!(x.len(), CHART_MAX_POINTS);
+        assert_eq!(x[0], "cat40", "ranked descending by the first series");
+        assert_eq!(x[22], "cat18");
+        assert_eq!(x[23], "Other");
+        let vals = v["series"][0]["values"].as_array().unwrap();
+        assert_eq!(vals.len(), CHART_MAX_POINTS);
+        assert_eq!(vals[0], 400.0);
+        // “Other” = the exact engine-computed sum of the 17 smallest rows:
+        // 10 + 20 + … + 170 = 1530.
+        assert_eq!(vals[23], 1530.0);
+        assert_eq!(
+            v["subtitle"],
+            "Top 23 of 40 by total — 17 smaller rows grouped as “Other”"
+        );
+        // ≤24-row outputs stay byte-identical: no subtitle key at all.
+        let small = chart_spec_from_batches(&[batch(&["NE", "NW"], &[1.0, 2.0])]).unwrap();
+        assert!(!small.contains("subtitle"));
+
+        // Boundary: 25 rows folds exactly the 2 smallest into “Other”.
+        let labels: Vec<String> = (1..=25).map(|i| format!("c{i:02}")).collect();
+        let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+        let values: Vec<f64> = (1..=25).map(|i| i as f64).collect();
+        let v: serde_json::Value =
+            serde_json::from_str(&chart_spec_from_batches(&[batch(&refs, &values)]).unwrap())
+                .unwrap();
+        assert_eq!(v["x"].as_array().unwrap().len(), CHART_MAX_POINTS);
+        assert_eq!(v["x"][23], "Other");
+        assert_eq!(v["series"][0]["values"][23], 3.0); // 1 + 2
+        assert_eq!(
+            v["subtitle"],
+            "Top 23 of 25 by total — 2 smaller rows grouped as “Other”"
+        );
+    }
+
+    #[test]
+    fn beyond_cap_temporal_and_scatter_still_decline() {
+        // 25 months: top-N ranking would destroy the time axis — decline,
+        // exactly as before the bucketing change.
+        let labels: Vec<String> = (0..25)
+            .map(|i| format!("{}-{:02}", 2020 + i / 12, i % 12 + 1))
+            .collect();
+        let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+        let values: Vec<f64> = (0..25).map(|i| i as f64).collect();
+        assert!(chart_spec_from_batches(&[batch(&refs, &values)]).is_none());
+
+        // 25 genuinely continuous x points: a value-ranked scatter is no
+        // scatter — decline, exactly as before.
+        let xs: Vec<f64> = (0..25).map(|i| i as f64 + 0.5).collect();
+        let ys: Vec<f64> = (0..25).map(|i| i as f64).collect();
+        assert!(chart_spec_from_batches(&[num_batch(&xs, &ys)]).is_none());
+    }
+
+    #[test]
+    fn bucketing_declines_when_a_folded_series_loses_its_points() {
+        // Second series finite ONLY in tail rows: after folding, its kept
+        // view is all-null plus one “Other” sum — a single point the renderer
+        // rejects — so the engine degrades to the table instead.
+        let n = 30usize;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("label", DataType::Utf8, false),
+            Field::new("a", DataType::Float64, true),
+            Field::new("b", DataType::Float64, true),
+        ]));
+        let labels: Vec<String> = (0..n).map(|i| format!("r{i:02}")).collect();
+        let a: Vec<f64> = (0..n).map(|i| (n - i) as f64).collect(); // descending
+        let b: Vec<Option<f64>> = (0..n)
+            .map(|i| if i >= n - 2 { Some(1.0) } else { None })
+            .collect();
+        let sparse = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(
+                    labels.iter().map(String::as_str).collect::<Vec<_>>(),
+                )),
+                Arc::new(Float64Array::from(a)),
+                Arc::new(Float64Array::from(b)),
+            ],
+        )
+        .unwrap();
+        assert!(chart_spec_from_batches(&[sparse]).is_none());
     }
 
     fn num_batch(xs: &[f64], ys: &[f64]) -> RecordBatch {
@@ -2217,6 +3999,688 @@ mod tests {
         for l in ["NE", "widget-9000", "July", "20245", "2024-7"] {
             assert!(!looks_temporal(l), "{l}");
         }
+    }
+
+    // --- Chart directive (openspec: add-chart-directive) ---------------------------
+
+    #[test]
+    fn bare_year_range_gates_temporal_labels() {
+        // Plausible years still read as time…
+        for l in ["1900", "1999", "2024", "2100"] {
+            assert!(looks_temporal(l), "{l}");
+        }
+        // …but 4-digit identifiers (store 1001, SKU 4520) no longer do.
+        for l in ["0001", "1001", "1899", "2101", "4520", "9999"] {
+            assert!(!looks_temporal(l), "{l}");
+        }
+    }
+
+    #[test]
+    fn four_digit_id_values_stop_charting_as_time() {
+        // "revenue by store" with stores 1001..1004 used to draw a TIME series.
+        // The year-range gate makes them categorical keys → bar.
+        let stores = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("store", DataType::Int64, false),
+                Field::new("revenue", DataType::Float64, true),
+            ])),
+            vec![
+                Arc::new(datafusion::arrow::array::Int64Array::from(vec![
+                    1001, 1002, 1003, 1004,
+                ])),
+                Arc::new(Float64Array::from(vec![5.0, 6.0, 7.0, 8.0])),
+            ],
+        )
+        .unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&chart_spec_from_batches(&[stores]).unwrap()).unwrap();
+        assert_eq!(v["kind"], "bar", "4-digit ids are not a time axis");
+    }
+
+    #[test]
+    fn id_named_label_columns_decline() {
+        assert!(id_like_label("id"));
+        assert!(id_like_label("ids"));
+        assert!(id_like_label("store_id"));
+        assert!(id_like_label("Store_IDs"));
+        assert!(id_like_label("SKU"));
+        assert!(id_like_label("item_skus"));
+        assert!(id_like_label("code"));
+        assert!(id_like_label("zip_codes"));
+        assert!(!id_like_label("grid"));
+        assert!(!id_like_label("period"));
+        assert!(!id_like_label("postcode")); // no ^|_ boundary before "code"
+        assert!(!id_like_label("region"));
+        assert!(!id_like_label("store"));
+
+        // A meaningless bar-per-identifier is declined outright…
+        let ids = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("store_id", DataType::Int64, false),
+                Field::new("revenue", DataType::Float64, true),
+            ])),
+            vec![
+                Arc::new(datafusion::arrow::array::Int64Array::from(vec![
+                    1001, 1002, 1003,
+                ])),
+                Arc::new(Float64Array::from(vec![5.0, 6.0, 7.0])),
+            ],
+        )
+        .unwrap();
+        assert!(chart_spec_from_batches(&[ids.clone()]).is_none());
+        // …while a deliberate directive can still chart it as a bar.
+        let d = parse_chart_directive(
+            "```lighthouse-chart-request\n{\"kind\":\"bar\",\"label_column\":\"store_id\",\"series_columns\":[\"revenue\"]}\n```",
+        )
+        .unwrap();
+        let spec = chart_spec_from_batches_directed(&[ids], &d).expect("directed id bar");
+        let v: serde_json::Value = serde_json::from_str(&spec).unwrap();
+        assert_eq!(v["kind"], "bar");
+        assert_eq!(v["series"][0]["values"][2], 7.0);
+    }
+
+    #[test]
+    fn integral_float_keys_stay_bar_not_scatter() {
+        // Float-ENCODED categories (1.0..5.0) read wrong as a continuous
+        // scatter — they are keys, exactly like the Int64 rating case.
+        let v: serde_json::Value = serde_json::from_str(
+            &chart_spec_from_batches(&[num_batch(
+                &[1.0, 2.0, 3.0, 4.0, 5.0],
+                &[3.0, 8.0, 20.0, 40.0, 12.0],
+            )])
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(v["kind"], "bar", "integral floats are categorical keys");
+        assert!(v.get("xValues").is_none());
+        // A genuinely continuous x (some fractional value) still scatters.
+        let v: serde_json::Value = serde_json::from_str(
+            &chart_spec_from_batches(&[num_batch(&[10.5, 22.0, 30.0], &[1.0, 4.0, 9.0])]).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(v["kind"], "scatter");
+    }
+
+    #[test]
+    fn directive_parses_first_fence_and_ignores_fabricated_values() {
+        // Prose around the fence; fabricated x/values keys are never read;
+        // a SECOND fence is ignored entirely.
+        let narration = "NW leads [1].\n\n```lighthouse-chart-request\n{\"kind\":\"bar\",\"label_column\":\"region\",\"series_columns\":[\"total\"],\"x\":[\"fake\"],\"values\":[999]}\n```\ntail\n```lighthouse-chart-request\n{\"kind\":\"none\"}\n```";
+        let d = parse_chart_directive(narration).expect("first fence parses");
+        assert_eq!(d.kind, ChartDirectiveKind::Bar);
+        assert_eq!(d.label_column, "region");
+        assert_eq!(d.series_columns, vec!["total".to_string()]);
+        assert_eq!(d.title, None);
+        assert_eq!(d.sort, None);
+
+        // "none" is an explicit, well-formed choice.
+        let none = parse_chart_directive(
+            "```lighthouse-chart-request\n{\"kind\":\"none\"}\n```",
+        )
+        .unwrap();
+        assert_eq!(none.kind, ChartDirectiveKind::None);
+
+        // title + sort ride when present and typed correctly.
+        let full = parse_chart_directive(
+            "```lighthouse-chart-request\n{\"kind\":\"line\",\"label_column\":\"month\",\"series_columns\":[\"a\",\"b\"],\"title\":\"Trend\",\"sort\":\"asc\"}\n```",
+        )
+        .unwrap();
+        assert_eq!(full.kind, ChartDirectiveKind::Line);
+        assert_eq!(full.title.as_deref(), Some("Trend"));
+        assert_eq!(full.sort, Some(ChartSort::Asc));
+    }
+
+    #[test]
+    fn directive_grammar_rejects_malformed() {
+        // No fence at all.
+        assert!(parse_chart_directive("plain prose, no request").is_none());
+        // Unterminated fence.
+        assert!(parse_chart_directive("```lighthouse-chart-request\n{\"kind\":\"bar\"").is_none());
+        // Non-JSON body.
+        assert!(
+            parse_chart_directive("```lighthouse-chart-request\nbar of region\n```").is_none()
+        );
+        // Unknown kind.
+        assert!(parse_chart_directive(
+            "```lighthouse-chart-request\n{\"kind\":\"pie\",\"label_column\":\"a\",\"series_columns\":[\"b\"]}\n```"
+        )
+        .is_none());
+        // Missing label_column.
+        assert!(parse_chart_directive(
+            "```lighthouse-chart-request\n{\"kind\":\"bar\",\"series_columns\":[\"b\"]}\n```"
+        )
+        .is_none());
+        // series_columns not an array of strings.
+        assert!(parse_chart_directive(
+            "```lighthouse-chart-request\n{\"kind\":\"bar\",\"label_column\":\"a\",\"series_columns\":[1]}\n```"
+        )
+        .is_none());
+        // sort outside the whitelist.
+        assert!(parse_chart_directive(
+            "```lighthouse-chart-request\n{\"kind\":\"bar\",\"label_column\":\"a\",\"series_columns\":[\"b\"],\"sort\":\"sideways\"}\n```"
+        )
+        .is_none());
+        // Non-string title.
+        assert!(parse_chart_directive(
+            "```lighthouse-chart-request\n{\"kind\":\"bar\",\"label_column\":\"a\",\"series_columns\":[\"b\"],\"title\":7}\n```"
+        )
+        .is_none());
+    }
+
+    /// Shared validator fixtures — mirrored byte-for-byte by the node tests in
+    /// test/chartSpec.test.mjs (PARITY).
+    fn parity_columns() -> Vec<(String, bool)> {
+        vec![
+            ("region".to_string(), false),
+            ("total".to_string(), true),
+            ("pct".to_string(), true),
+            ("note".to_string(), false),
+        ]
+    }
+
+    #[test]
+    fn directive_validation_rules() {
+        let cols = parity_columns();
+        let d = |kind: ChartDirectiveKind, label: &str, series: &[&str]| ChartDirective {
+            kind,
+            label_column: label.to_string(),
+            series_columns: series.iter().map(|s| s.to_string()).collect(),
+            lower_column: None,
+            upper_column: None,
+            title: None,
+            sort: None,
+        };
+        // Happy path: real label, 1-2 numeric series.
+        assert!(validate_directive(&d(ChartDirectiveKind::Bar, "region", &["total"]), &cols).is_ok());
+        assert!(
+            validate_directive(&d(ChartDirectiveKind::Line, "region", &["total", "pct"]), &cols)
+                .is_ok()
+        );
+        // "none" is trivially valid.
+        assert!(validate_directive(&d(ChartDirectiveKind::None, "", &[]), &cols).is_ok());
+        // Unknown label column (exact, case-sensitive).
+        assert_eq!(
+            validate_directive(&d(ChartDirectiveKind::Bar, "Region", &["total"]), &cols)
+                .unwrap_err(),
+            "unknown label_column \"Region\""
+        );
+        // Over-limit series.
+        assert_eq!(
+            validate_directive(
+                &d(ChartDirectiveKind::Bar, "region", &["total", "pct", "total", "pct"]),
+                &cols
+            )
+            .unwrap_err(),
+            "series_columns must name 1-3 columns"
+        );
+        // Empty series.
+        assert!(validate_directive(&d(ChartDirectiveKind::Bar, "region", &[]), &cols).is_err());
+        // Unknown series column.
+        assert_eq!(
+            validate_directive(&d(ChartDirectiveKind::Bar, "region", &["revenue"]), &cols)
+                .unwrap_err(),
+            "unknown series column \"revenue\""
+        );
+        // Non-numeric series column.
+        assert_eq!(
+            validate_directive(&d(ChartDirectiveKind::Bar, "region", &["note"]), &cols)
+                .unwrap_err(),
+            "series column \"note\" is not numeric"
+        );
+    }
+
+    #[test]
+    fn directed_spec_reads_numbers_from_batches_only() {
+        let b = batch(&["NE", "NW", "SE"], &[150.0, 300.0, 200.0]);
+        // Fabricated values in the directive change NOTHING — the spec's
+        // numbers are the batches' numbers, byte-for-byte.
+        let d = parse_chart_directive(
+            "```lighthouse-chart-request\n{\"kind\":\"bar\",\"label_column\":\"label\",\"series_columns\":[\"total\"],\"values\":[1,2,3],\"x\":[\"a\"]}\n```",
+        )
+        .unwrap();
+        let spec = chart_spec_from_batches_directed(&[b.clone()], &d).unwrap();
+        assert_eq!(
+            spec,
+            r#"{"kind":"bar","series":[{"name":"total","values":[150.0,300.0,200.0]}],"x":["NE","NW","SE"]}"#
+        );
+
+        // sort=desc reorders rows engine-side by the first series column.
+        let sorted = ChartDirective { sort: Some(ChartSort::Desc), ..d.clone() };
+        assert_eq!(
+            chart_spec_from_batches_directed(&[b.clone()], &sorted).unwrap(),
+            r#"{"kind":"bar","series":[{"name":"total","values":[300.0,200.0,150.0]}],"x":["NW","SE","NE"]}"#
+        );
+        let asc = ChartDirective { sort: Some(ChartSort::Asc), ..d.clone() };
+        assert_eq!(
+            chart_spec_from_batches_directed(&[b.clone()], &asc).unwrap(),
+            r#"{"kind":"bar","series":[{"name":"total","values":[150.0,200.0,300.0]}],"x":["NE","SE","NW"]}"#
+        );
+
+        // The title is capped (~80 chars), control-stripped display copy —
+        // and the ONLY directive string that ever reaches the spec.
+        let titled = ChartDirective {
+            title: Some(format!("  Rev\u{7}enue {}  ", "x".repeat(100))),
+            ..d.clone()
+        };
+        let spec = chart_spec_from_batches_directed(&[b.clone()], &titled).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&spec).unwrap();
+        let title = v["title"].as_str().unwrap();
+        assert_eq!(title.chars().count(), 80);
+        assert!(title.starts_with("Revenue x"));
+        assert!(!title.contains('\u{7}'));
+
+        // Whitespace-only titles drop the key entirely.
+        let blank = ChartDirective { title: Some("  \u{7} ".to_string()), ..d.clone() };
+        let v: serde_json::Value = serde_json::from_str(
+            &chart_spec_from_batches_directed(&[b.clone()], &blank).unwrap(),
+        )
+        .unwrap();
+        assert!(v.get("title").is_none());
+
+        // A directed share table still gets the PROVEN stacked treatment.
+        let shares = share_batch(&[60.0, 40.0, 55.0], &[40.0, 60.0, 45.0]);
+        let two = ChartDirective {
+            kind: ChartDirectiveKind::Bar,
+            label_column: "region".to_string(),
+            series_columns: vec!["share_a".to_string(), "share_b".to_string()],
+            lower_column: None,
+            upper_column: None,
+            title: None,
+            sort: None,
+        };
+        let v: serde_json::Value = serde_json::from_str(
+            &chart_spec_from_batches_directed(&[shares], &two).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(v["stacked"], true);
+
+        // Data-level failures return None (caller falls back): one row…
+        let one = batch(&["only"], &[1.0]);
+        assert!(chart_spec_from_batches_directed(&[one], &d).is_none());
+        // …or an invalid directive (unknown column) against real batches.
+        let bad = ChartDirective {
+            label_column: "nope".to_string(),
+            ..d.clone()
+        };
+        assert!(chart_spec_from_batches_directed(&[b], &bad).is_none());
+    }
+
+    #[test]
+    fn directed_band_spec_carries_the_interval() {
+        // A forecast band: a line over 4 periods with a sparse interval on the
+        // last two (the projected tail); the head has null bounds.
+        let b = band_batch(
+            &["2026-01", "2026-02", "2026-03", "2026-04"],
+            &[100.0, 200.0, 300.0, 400.0],
+            &[None, None, Some(280.0), Some(360.0)],
+            &[None, None, Some(320.0), Some(440.0)],
+        );
+        let d = parse_chart_directive(
+            "```lighthouse-chart-request\n{\"kind\":\"band\",\"label_column\":\"period\",\"series_columns\":[\"value\"],\"lower_column\":\"lower\",\"upper_column\":\"upper\"}\n```",
+        )
+        .unwrap();
+        assert_eq!(d.kind, ChartDirectiveKind::Band);
+        assert_eq!(d.lower_column.as_deref(), Some("lower"));
+        assert_eq!(d.upper_column.as_deref(), Some("upper"));
+
+        let v: serde_json::Value =
+            serde_json::from_str(&chart_spec_from_batches_directed(&[b.clone()], &d).unwrap())
+                .unwrap();
+        assert_eq!(v["kind"], "band");
+        assert_eq!(v["series"][0]["name"], "value");
+        // The line values are the engine's, byte-for-byte.
+        assert_eq!(v["series"][0]["values"][0], 100.0);
+        assert_eq!(v["series"][0]["values"][3], 400.0);
+        // The interval is sparse: null on the history, the bounds on the tail.
+        assert_eq!(v["series"][0]["lower"][0], serde_json::Value::Null);
+        assert_eq!(v["series"][0]["lower"][2], 280.0);
+        assert_eq!(v["series"][0]["upper"][3], 440.0);
+
+        // A band needs BOTH bound columns — drop one and the directive is
+        // invalid, so the directed build declines (caller falls back to a line).
+        let no_upper = parse_chart_directive(
+            "```lighthouse-chart-request\n{\"kind\":\"band\",\"label_column\":\"period\",\"series_columns\":[\"value\"],\"lower_column\":\"lower\"}\n```",
+        )
+        .unwrap();
+        assert_eq!(
+            validate_directive(&no_upper, &chart_columns(&[b.clone()])).unwrap_err(),
+            "band requires upper_column"
+        );
+        assert!(chart_spec_from_batches_directed(&[b], &no_upper).is_none());
+    }
+
+    #[test]
+    fn directed_matches_heuristic_bytes_for_the_same_choice() {
+        // When the directive picks exactly what the heuristic would (no
+        // title, no sort), the emitted spec is byte-identical — one emitter,
+        // parameterized, not two.
+        let b = batch(&["NE", "NW"], &[150.0, 200.0]);
+        let d = ChartDirective {
+            kind: ChartDirectiveKind::Bar,
+            label_column: "label".to_string(),
+            series_columns: vec!["total".to_string()],
+            lower_column: None,
+            upper_column: None,
+            title: None,
+            sort: None,
+        };
+        assert_eq!(
+            chart_spec_from_batches_directed(&[b.clone()], &d).unwrap(),
+            chart_spec_from_batches(&[b]).unwrap()
+        );
+    }
+
+    #[test]
+    fn decide_chart_honors_valid_falls_back_and_never_suppresses() {
+        let b = batch(&["NE", "NW"], &[150.0, 200.0]);
+        let heuristic =
+            r#"{"kind":"bar","series":[{"name":"total","values":[150.0,200.0]}],"x":["NE","NW"]}"#;
+
+        // Valid directive → the directed spec (here byte-equal to the
+        // heuristic since it names the same columns).
+        let valid = "Done.\n```lighthouse-chart-request\n{\"kind\":\"bar\",\"label_column\":\"label\",\"series_columns\":[\"total\"]}\n```";
+        assert_eq!(decide_chart(&[b.clone()], valid).as_deref(), Some(heuristic));
+
+        // Unknown column → today's heuristic, byte-identical.
+        let invalid = "Done.\n```lighthouse-chart-request\n{\"kind\":\"bar\",\"label_column\":\"regionn\",\"series_columns\":[\"total\"]}\n```";
+        assert_eq!(decide_chart(&[b.clone()], invalid).as_deref(), Some(heuristic));
+
+        // Malformed JSON → heuristic.
+        let malformed = "Done.\n```lighthouse-chart-request\nnot json\n```";
+        assert_eq!(decide_chart(&[b.clone()], malformed).as_deref(), Some(heuristic));
+
+        // No fence at all → heuristic.
+        assert_eq!(decide_chart(&[b.clone()], "Done.").as_deref(), Some(heuristic));
+
+        // Charts by default (0.12.1): "none" no longer suppresses a chartable
+        // result — it behaves exactly like no directive (heuristic, byte-
+        // identical to the undirected spec).
+        let none = "Done.\n```lighthouse-chart-request\n{\"kind\":\"none\"}\n```";
+        assert_eq!(decide_chart(&[b.clone()], none).as_deref(), Some(heuristic));
+
+        // …while a genuinely non-chartable shape stays uncharted under a
+        // "none" too — the heuristic itself declines a single row.
+        let single = batch(&["only"], &[1.0]);
+        assert!(decide_chart(&[single], none).is_none());
+    }
+
+    #[test]
+    fn chart_card_rides_only_chartable_shapes() {
+        // Chartable (2..=24 rows, ≥1 numeric column) → card with the ACTUAL
+        // columns, typed.
+        let card = chart_card(&[batch(&["NE", "NW"], &[150.0, 200.0])]).expect("card");
+        assert!(card.contains(CHART_CARD_VERSION));
+        assert!(card.contains("label (text)"), "{card}");
+        assert!(card.contains("total (numeric)"), "{card}");
+        assert!(card.contains("```lighthouse-chart-request"), "{card}");
+
+        // A single row is not chartable — no card, no invited directive.
+        assert!(chart_card(&[batch(&["only"], &[1.0])]).is_none());
+        // 25 rows exceed the point cap.
+        let labels: Vec<String> = (0..25).map(|i| format!("r{i}")).collect();
+        let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+        let values: Vec<f64> = (0..25).map(|i| i as f64).collect();
+        assert!(chart_card(&[batch(&refs, &values)]).is_none());
+        // No numeric column → no card.
+        let two_text = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("a", DataType::Utf8, false),
+                Field::new("b", DataType::Utf8, false),
+            ])),
+            vec![
+                Arc::new(StringArray::from(vec!["x", "y"])),
+                Arc::new(StringArray::from(vec!["1", "2"])),
+            ],
+        )
+        .unwrap();
+        assert!(chart_card(&[two_text]).is_none());
+    }
+
+    // The card is PROMPT COPY: pin the full text so any edit is a reviewed
+    // diff (bump CHART_CARD_VERSION alongside behavioral changes).
+    #[test]
+    fn chart_card_snapshot_is_pinned() {
+        let card = chart_card(&[batch(&["NE", "NW"], &[150.0, 200.0])]).unwrap();
+        let expected = "Chart options (v2) — result columns: label (text), total (numeric).\n\
+            End the answer with at most ONE fenced request to choose this answer's chart; the app builds it from the verified result (a request can never supply values):\n\
+            ```lighthouse-chart-request\n\
+            {\"kind\":\"bar\",\"label_column\":\"region\",\"series_columns\":[\"revenue\"],\"title\":\"Revenue by region\",\"sort\":\"desc\"}\n\
+            ```\n\
+            kind: bar = categories; line = trend, 2-3 series; area = trend, 1 series; none = you think nothing here is comparable (single number, id/SKU/code labels) — the app still charts results whose shape fits. series_columns: 1-3 numeric columns; title and sort (asc|desc, by first series) optional.\n\
+            Examples: (month, total) → {\"kind\":\"area\",\"label_column\":\"month\",\"series_columns\":[\"total\"]} · (store_id, revenue) → {\"kind\":\"none\"}";
+        assert_eq!(card, expected);
+    }
+
+    #[test]
+    fn chart_card_stays_inside_budget() {
+        // Maximal shape: 24 long-named columns (list must clip, not overflow)
+        // over a full 24-row result — the card must stay inside its ~200-token
+        // budget in the worst case, not just the snapshot's.
+        let n = 24usize;
+        let fields: Vec<Field> = std::iter::once(Field::new(
+            "quite_long_label_column_name",
+            DataType::Utf8,
+            false,
+        ))
+        .chain((1..n).map(|i| {
+            Field::new(
+                format!("very_long_numeric_column_name_{i}"),
+                DataType::Float64,
+                true,
+            )
+        }))
+        .collect();
+        let mut cols: Vec<ArrayRef> = vec![Arc::new(StringArray::from(
+            (0..24).map(|i| format!("row{i}")).collect::<Vec<_>>(),
+        ))];
+        for _ in 1..n {
+            cols.push(Arc::new(Float64Array::from(
+                (0..24).map(|i| i as f64).collect::<Vec<_>>(),
+            )));
+        }
+        let wide = RecordBatch::try_new(Arc::new(Schema::new(fields)), cols).unwrap();
+        let card = chart_card(&[wide]).expect("card");
+        assert!(
+            card.chars().count() <= CHART_CARD_MAX_CHARS,
+            "card budget blown: {} chars\n{card}",
+            card.chars().count()
+        );
+        assert!(card.contains(", …"), "long column lists must clip: {card}");
+    }
+
+    // Few-shot integrity (copies every_fewshot_example_passes_the_guard):
+    // every example the card teaches must parse through the REAL parser and be
+    // ACCEPTED by the engine's own validator against its example table — a
+    // card edit can't teach syntax the engine rejects.
+    #[test]
+    fn every_chart_card_example_validates() {
+        let card = chart_card(&[batch(&["NE", "NW"], &[150.0, 200.0])]).unwrap();
+        for ex in CHART_CARD_EXAMPLES {
+            let fenced = format!("```lighthouse-chart-request\n{}\n```", ex.directive);
+            let d = parse_chart_directive(&fenced)
+                .unwrap_or_else(|| panic!("card example {} does not parse", ex.what));
+            let cols: Vec<(String, bool)> = ex
+                .columns
+                .iter()
+                .map(|(n, num)| (n.to_string(), *num))
+                .collect();
+            validate_directive(&d, &cols)
+                .unwrap_or_else(|e| panic!("card example {} rejected: {e}", ex.what));
+            // And each example actually rides in the rendered card.
+            assert!(
+                card.contains(ex.directive),
+                "card example {} missing from the card text",
+                ex.what
+            );
+        }
+    }
+
+    #[test]
+    fn directive_scrubber_withholds_fences_and_flushes_prose() {
+        // The fence split across deltas never reaches the forwarded prose.
+        let mut s = DirectiveScrubber::new();
+        let mut out = String::new();
+        for d in [
+            "NW leads [1].\n\n```lighthouse-",
+            "chart-request\n{\"kind\":\"none\"}",
+            "\n```\nDone.",
+        ] {
+            out.push_str(&s.push(d));
+        }
+        out.push_str(&s.finish());
+        assert_eq!(out, "NW leads [1].\n\nDone.");
+        assert!(s.full_text().contains("```lighthouse-chart-request"));
+
+        // Ordinary fences pass through untouched.
+        let mut s = DirectiveScrubber::new();
+        let mut out = s.push("Look:\n```sql\nSELECT 1\n```\nend");
+        out.push_str(&s.finish());
+        assert_eq!(out, "Look:\n```sql\nSELECT 1\n```\nend");
+
+        // A tail that LOOKED like the opener but wasn't flushes intact.
+        let mut s = DirectiveScrubber::new();
+        let mut out = s.push("see ```lighthouse-chart");
+        out.push_str(&s.push(" fences"));
+        out.push_str(&s.finish());
+        assert_eq!(out, "see ```lighthouse-chart fences");
+
+        // A held partial opener at end-of-stream flushes on finish.
+        let mut s = DirectiveScrubber::new();
+        let mut out = s.push("ends with ```lighthouse-chart");
+        out.push_str(&s.finish());
+        assert_eq!(out, "ends with ```lighthouse-chart");
+
+        // An UNTERMINATED fence is directive text, not prose — withheld.
+        let mut s = DirectiveScrubber::new();
+        let mut out = s.push("prose ```lighthouse-chart-request\n{\"kind\":");
+        out.push_str(&s.finish());
+        assert_eq!(out, "prose ");
+    }
+
+    // E2E (model-free): scripted narration deltas drive the exact synth flow —
+    // scrub the stream, then decide the chart from the FULL text + batches.
+    #[test]
+    fn directive_stream_end_to_end() {
+        let batches = vec![batch(&["NE", "NW"], &[150.0, 200.0])];
+        let heuristic =
+            r#"{"kind":"bar","series":[{"name":"total","values":[150.0,200.0]}],"x":["NE","NW"]}"#;
+        let run = |deltas: &[&str]| -> (String, Option<String>) {
+            let mut s = DirectiveScrubber::new();
+            let mut prose = String::new();
+            for d in deltas {
+                prose.push_str(&s.push(d));
+            }
+            prose.push_str(&s.finish());
+            (prose, decide_chart(&batches, s.full_text()))
+        };
+
+        // (a) A valid directive → that chart, numbers byte-identical to the
+        //     batches (the same bytes the byte-lock test pins).
+        let (prose, chart) = run(&[
+            "NW leads with 200 [1].",
+            "\n\n```lighthouse-chart-request\n{\"kind\":\"bar\",\"label_column\":\"label\",",
+            "\"series_columns\":[\"total\"]}\n```\n",
+        ]);
+        assert_eq!(chart.as_deref(), Some(heuristic));
+        assert!(!prose.contains("lighthouse-chart-request"), "{prose}");
+        assert!(!prose.contains("```"), "{prose}");
+        assert_eq!(prose, "NW leads with 200 [1].\n\n");
+
+        // (b) An invalid directive (unknown column) → today's heuristic.
+        let (prose, chart) = run(&[
+            "NW leads [1].\n```lighthouse-chart-request\n",
+            "{\"kind\":\"bar\",\"label_column\":\"nope\",\"series_columns\":[\"total\"]}\n```",
+        ]);
+        assert_eq!(chart.as_deref(), Some(heuristic));
+        assert!(!prose.contains("lighthouse-chart-request"), "{prose}");
+
+        // (c) "none" over a chartable result → the heuristic chart anyway
+        //     (charts by default, 0.12.1): the fence is still scrubbed from
+        //     prose, but the engine — not the model — decides chartability.
+        let (prose, chart) = run(&[
+            "The total is a single figure [1].\n",
+            "```lighthouse-chart-request\n{\"kind\":\"none\"}\n```",
+        ]);
+        assert_eq!(chart.as_deref(), Some(heuristic));
+        assert!(!prose.contains("lighthouse-chart-request"), "{prose}");
+    }
+
+    // Golden misfire fixtures (openspec: add-chart-directive §4.1): the known
+    // misfire classes assert kind-or-none for the heuristic AND what a
+    // deliberate directive may do. The chart_eval example runs these same
+    // shapes through the real executor as the CI floor.
+    #[test]
+    fn golden_misfire_fixtures_choose_kind_or_none() {
+        // Date-ish labels: months stay a single-series AREA…
+        let months = batch(&["2024-01", "2024-02", "2024-03"], &[1.0, 2.0, 3.0]);
+        let v: serde_json::Value =
+            serde_json::from_str(&chart_spec_from_batches(&[months.clone()]).unwrap()).unwrap();
+        assert_eq!(v["kind"], "area");
+        // …and a directive may deliberately restyle the SAME numbers as line.
+        let line = ChartDirective {
+            kind: ChartDirectiveKind::Line,
+            label_column: "label".to_string(),
+            series_columns: vec!["total".to_string()],
+            lower_column: None,
+            upper_column: None,
+            title: None,
+            sort: None,
+        };
+        let v: serde_json::Value = serde_json::from_str(
+            &chart_spec_from_batches_directed(&[months], &line).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(v["kind"], "line");
+        assert_eq!(v["series"][0]["values"][2], 3.0);
+
+        // Top-N candidates: categorical bar; a directed desc sort presents
+        // the ranking without touching a number.
+        let topn = batch(
+            &["acme", "globex", "initech", "umbrella", "wayne"],
+            &[50.0, 900.0, 300.0, 120.0, 700.0],
+        );
+        let v: serde_json::Value =
+            serde_json::from_str(&chart_spec_from_batches(&[topn.clone()]).unwrap()).unwrap();
+        assert_eq!(v["kind"], "bar");
+        let ranked = ChartDirective {
+            kind: ChartDirectiveKind::Bar,
+            label_column: "label".to_string(),
+            series_columns: vec!["total".to_string()],
+            lower_column: None,
+            upper_column: None,
+            title: None,
+            sort: Some(ChartSort::Desc),
+        };
+        let v: serde_json::Value = serde_json::from_str(
+            &chart_spec_from_batches_directed(&[topn], &ranked).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(v["x"][0], "globex");
+        assert_eq!(v["series"][0]["values"][0], 900.0);
+
+        // A single-value result is never a chart — heuristic declines, and a
+        // directive cannot rescue it (decide falls back → still nothing).
+        let single = batch(&["total"], &[385.0]);
+        assert!(chart_spec_from_batches(&[single.clone()]).is_none());
+        let forced = "```lighthouse-chart-request\n{\"kind\":\"bar\",\"label_column\":\"label\",\"series_columns\":[\"total\"]}\n```";
+        assert!(decide_chart(&[single], forced).is_none());
+
+        // Identifier columns: 4-digit ids in an id-NAMED column draw nothing
+        // by default (covered above for the directed rescue).
+        let ids = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("store_id", DataType::Int64, false),
+                Field::new("revenue", DataType::Float64, true),
+            ])),
+            vec![
+                Arc::new(datafusion::arrow::array::Int64Array::from(vec![
+                    1001, 1002, 1003, 1004,
+                ])),
+                Arc::new(Float64Array::from(vec![5.0, 6.0, 7.0, 8.0])),
+            ],
+        )
+        .unwrap();
+        assert!(chart_spec_from_batches(&[ids]).is_none());
     }
 
     #[tokio::test]
@@ -2387,6 +4851,7 @@ mod tests {
             modified_ms: None,
             columns: cols.iter().map(|s| s.to_string()).collect(),
             group: None,
+            capped_rows: None,
         };
         let regs = vec![
             reg("tickets", &["id", "region", "priority"]),
@@ -2400,6 +4865,46 @@ mod tests {
         );
         // No shared specific columns → no block at all.
         assert!(join_hints(&[reg("a", &["x"]), reg("b", &["y"])]).is_none());
+    }
+
+    #[test]
+    fn join_hints_excluding_wins_the_pair_and_is_byte_identical_when_empty() {
+        // openspec: add-semantic-layer §2.4 — a curated hint over the (orders,
+        // reps) pair suppresses the heuristic line for that pair, while other
+        // pairs still hint. An EMPTY exclusion set reproduces `join_hints`.
+        let reg = |table: &str, cols: &[&str]| TableReg {
+            table: table.into(),
+            file_id: table.into(),
+            file_name: format!("{table}.csv"),
+            card: String::new(),
+            modified_ms: None,
+            columns: cols.iter().map(|s| s.to_string()).collect(),
+            group: None,
+            capped_rows: None,
+        };
+        let regs = vec![
+            reg("orders", &["rep", "region"]),
+            reg("reps", &["rep", "team"]),
+            reg("regions", &["region", "label"]),
+        ];
+        // Baseline: both shared-column pairs hint.
+        let base = join_hints(&regs).expect("hints");
+        assert!(base.contains("- orders.rep = reps.rep"), "{base}");
+        assert!(base.contains("- orders.region = regions.region"), "{base}");
+        // The empty exclusion is byte-identical to `join_hints`.
+        assert_eq!(join_hints_excluding(&regs, &[]), Some(base.clone()));
+
+        // Excluding (orders, reps) drops ONLY that pair's line; order-insensitive.
+        let merged = join_hints_excluding(&regs, &[("reps".into(), "orders".into())]).expect("hints");
+        assert!(!merged.contains("orders.rep = reps.rep"), "curated pair suppressed: {merged}");
+        assert!(merged.contains("- orders.region = regions.region"), "other pairs remain: {merged}");
+
+        // Excluding every hinted pair collapses the card to None.
+        assert!(join_hints_excluding(
+            &regs,
+            &[("orders".into(), "reps".into()), ("orders".into(), "regions".into())],
+        )
+        .is_none());
     }
 
     #[tokio::test]
@@ -2724,9 +5229,12 @@ const STEP_RESULT_CAP: usize = 1200;
 
 /// The iterative step ask: original question + every completed step's SQL and
 /// capped result. Schema cards ride as context blocks (not in this string).
-/// Budget: ≤ ~8k chars at the 3-step maximum — comfortably inside every
-/// remote window (unit-tested).
-pub fn step_question(question: &str, steps: &[StepRecord]) -> String {
+/// `max_steps` is the Beam loop's configured step budget (openspec:
+/// add-beam-loop §2.3) — the former hardcoded "3" now reads the budget so the
+/// prompt matches the loop's actual bound. Budget: ~8k chars per completed step
+/// at the STEP_RESULT_CAP carry, comfortably inside every remote window at the
+/// default budget (unit-tested).
+pub fn step_question(question: &str, steps: &[StepRecord], max_steps: usize) -> String {
     let prior = if steps.is_empty() {
         " (none yet)".to_string()
     } else {
@@ -2744,7 +5252,7 @@ pub fn step_question(question: &str, steps: &[StepRecord]) -> String {
     format!(
         "You are running a multi-step analysis over the user's tables to answer \
          one question. The table schemas are in the context blocks. You may run \
-         up to 3 SQL queries total, one at a time.\n\
+         up to {max_steps} SQL queries total, one at a time.\n\
          Completed steps so far:{prior}\n\n\
          If one more query would materially improve the answer, reply with exactly:\n\
          NEXT_SQL:\n```sql\n<one single SELECT statement>\n```\n\
@@ -2776,7 +5284,7 @@ pub struct DirectResult {
 /// reading a file the user has since hidden.
 async fn direct_tables(
     file_ids: &[String],
-) -> Result<(SessionContext, Vec<TableReg>, usize), String> {
+) -> Result<(SessionContext, Vec<TableReg>, Vec<ViewReg>, usize), String> {
     let active: std::collections::HashSet<String> = crate::vault::active_included_file_ids()
         .into_iter()
         .collect();
@@ -2805,12 +5313,17 @@ async fn direct_tables(
     if regs.is_empty() {
         return Err("the files couldn't be registered as tables".to_string());
     }
-    Ok((ctx, regs, skipped))
+    // Saved views resolve here too (openspec: add-shaped-views §2), so a
+    // re-executed query naming one still runs. Model-free like the rest of
+    // the direct path — local-only is inert by design, mirroring the
+    // is_cloud=false above.
+    let view_regs = register_views(&ctx, &regs, false).await;
+    Ok((ctx, regs, view_regs, skipped))
 }
 
 /// A grouped-thousands integer: 12431 → "12,431" — read-out friendly for the
 /// truncation footer.
-fn commafy(n: usize) -> String {
+pub(crate) fn commafy(n: usize) -> String {
     let s = n.to_string();
     let b = s.as_bytes();
     let mut out = String::with_capacity(s.len() + s.len() / 3);
@@ -2847,13 +5360,62 @@ pub fn truncation_footer(shown: usize, truncated: bool, total: Option<usize>) ->
     })
 }
 
-fn direct_footer(sql: &str, regs: &[TableReg], skipped: usize, res: &QueryResult) -> String {
+/// Deterministic disclosure when a single workbook registered only its
+/// leading rows (`TableReg::capped_rows`): the answer must say the analysis
+/// reads the first N rows, never the whole file. One line per capped file
+/// (deduped — a multi-sheet book can cap several sheets), engine text only.
+/// Union-family omissions never fire here: they drop whole members and are
+/// disclosed via the group card note + the coverage footer instead. `None`
+/// when nothing was capped — the untruncated path stays byte-identical.
+pub fn row_cap_footer(regs: &[TableReg]) -> Option<String> {
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut out = String::new();
+    for r in regs {
+        if r.group.is_some() {
+            continue; // group drops are disclosed by the coverage footer
+        }
+        let Some(n) = r.capped_rows else { continue };
+        if !seen.insert(r.file_id.as_str()) {
+            continue;
+        }
+        out.push_str(&format!(
+            "_“{}” analyzed to its first {} rows (workbook row cap)._\n",
+            r.file_name,
+            commafy(n)
+        ));
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+fn direct_footer(
+    sql: &str,
+    regs: &[TableReg],
+    view_regs: &[ViewReg],
+    skipped: usize,
+    res: &QueryResult,
+) -> String {
     let mut footer = format!("*Query used:*\n```sql\n{sql}\n```\n");
-    if let Some(fresh) = freshness_line(regs, sql, crate::config::now_ms()) {
+    // A query FROM a saved view still names its SOURCE files here — the
+    // expansion is freshness-only and never renders (openspec:
+    // add-shaped-views §2).
+    if let Some(fresh) = freshness_line(
+        regs,
+        &expand_views_for_freshness(sql, view_regs),
+        crate::config::now_ms(),
+    ) {
         footer.push_str(&fresh);
     }
     if let Some(trunc) = truncation_footer(res.shown, res.truncated, res.total) {
         footer.push_str(&trunc);
+    }
+    // The same row-cap honesty as the ask path: a re-executed query over a
+    // capped workbook must not read as covering the whole file.
+    if let Some(cap) = row_cap_footer(regs) {
+        footer.push_str(&cap);
     }
     if skipped > 0 {
         footer.push_str(&format!(
@@ -2867,9 +5429,9 @@ fn direct_footer(sql: &str, regs: &[TableReg], skipped: usize, res: &QueryResult
 /// model-free path behind Edit SQL, Save-as-CSV, and pin rechecks. Unknown /
 /// no-longer-tabular ids are skipped and noted in the footer.
 pub async fn run_direct(sql: &str, file_ids: &[String]) -> Result<DirectResult, String> {
-    let (ctx, regs, skipped) = direct_tables(file_ids).await?;
+    let (ctx, regs, view_regs, skipped) = direct_tables(file_ids).await?;
     let res = run_query(&ctx, sql).await?;
-    let footer = direct_footer(sql, &regs, skipped, &res);
+    let footer = direct_footer(sql, &regs, &view_regs, skipped, &res);
     Ok(DirectResult {
         markdown: res.markdown,
         chart: res.chart,
@@ -2946,7 +5508,7 @@ pub async fn run_direct_save(
     file_ids: &[String],
     name_hint: &str,
 ) -> Result<(DirectResult, SavedResult), String> {
-    let (ctx, regs, skipped) = direct_tables(file_ids).await?;
+    let (ctx, regs, view_regs, skipped) = direct_tables(file_ids).await?;
     let res = run_query(&ctx, sql).await?; // guard + preview + chart
     let df = ctx.sql(sql).await.map_err(|e| e.to_string())?;
     let df = df
@@ -2967,7 +5529,7 @@ pub async fn run_direct_save(
     .await
     .map_err(|e| e.to_string())?
     .map_err(|e| e.to_string())?;
-    let footer = direct_footer(sql, &regs, skipped, &res);
+    let footer = direct_footer(sql, &regs, &view_regs, skipped, &res);
     Ok((
         DirectResult {
             markdown: res.markdown,
@@ -3014,6 +5576,7 @@ mod g1_regression {
             modified_ms: None,
             columns: cols.iter().map(|s| s.to_string()).collect(),
             group: None,
+            capped_rows: None,
         }
     }
 
@@ -3386,5 +5949,200 @@ mod g3_pdf_queryable {
     fn prose_bytes_yield_no_queryable_table() {
         let tables = crate::pdf_tables::queryable_tables(b"not a pdf, just prose bytes");
         assert!(tables.is_empty(), "no grid from non-tabular bytes");
+    }
+}
+
+// Registration-caps audit (docs/beam-caps-audit.md): the two fixture pairs the
+// audit demanded. Path-registered formats (CSV/TSV/Parquet) STREAM — the
+// workbook row cap must never touch them, and their aggregates cover every
+// row with no cap wording anywhere. Materialized workbooks (xlsx/xls) DO cap
+// at MAX_XLSX_ROWS — kept for memory, but never silently: the registration
+// records it, the schema card leads with it, and `row_cap_footer` names the
+// file in engine text.
+#[cfg(test)]
+mod row_cap_disclosure {
+    use super::*;
+    use std::io::Write as _;
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("lh-rowcap-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Minimal single-sheet .xlsx (the same zip-of-OOXML-parts pattern the
+    /// extraction tests use for .docx): header `id,amount` + `data_rows`
+    /// numeric rows with amount = 1 each.
+    fn write_xlsx(path: &std::path::Path, data_rows: usize) {
+        let mut sheet = String::with_capacity(64 * (data_rows + 2));
+        sheet.push_str(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>"#,
+        );
+        sheet.push_str(
+            r#"<row r="1"><c r="A1" t="inlineStr"><is><t>id</t></is></c><c r="B1" t="inlineStr"><is><t>amount</t></is></c></row>"#,
+        );
+        for i in 0..data_rows {
+            let r = i + 2;
+            sheet.push_str(&format!(
+                r#"<row r="{r}"><c r="A{r}"><v>{}</v></c><c r="B{r}"><v>1</v></c></row>"#,
+                i + 1
+            ));
+        }
+        sheet.push_str("</sheetData></worksheet>");
+
+        let parts: &[(&str, String)] = &[
+            (
+                "[Content_Types].xml",
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>"#
+                    .to_string(),
+            ),
+            (
+                "_rels/.rels",
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#
+                    .to_string(),
+            ),
+            (
+                "xl/workbook.xml",
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>"#
+                    .to_string(),
+            ),
+            (
+                "xl/_rels/workbook.xml.rels",
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#
+                    .to_string(),
+            ),
+            ("xl/worksheets/sheet1.xml", sheet),
+        ];
+        let file = std::fs::File::create(path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        for (name, body) in parts {
+            zip.start_file::<_, ()>(*name, Default::default()).unwrap();
+            zip.write_all(body.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap();
+    }
+
+    // Fixture A — guards streaming: a CSV bigger than the workbook row cap
+    // registers by path, DataFusion streams it, and the aggregate covers ALL
+    // rows exactly (sum 1..=120000 — a silently capped read cannot produce
+    // this number). No truncation/cap wording anywhere: not on the card, not
+    // in the result markdown, and neither honesty footer fires.
+    #[tokio::test]
+    async fn big_csv_streams_every_row_with_no_cap_note() {
+        let dir = temp_dir("csv");
+        let n = 120_000usize; // comfortably past MAX_XLSX_ROWS
+        let mut csv = String::with_capacity(16 * (n + 1));
+        csv.push_str("id,amount\n");
+        for i in 1..=n {
+            csv.push_str(&format!("{i},{i}\n"));
+        }
+        let path = dir.join("ledger.csv");
+        std::fs::write(&path, csv).unwrap();
+
+        let ctx = SessionContext::new();
+        let files = vec![("f1".to_string(), "ledger.csv".to_string(), path)];
+        let regs = register_tables(&ctx, &files, false).await;
+        assert_eq!(regs.len(), 1);
+        assert!(
+            regs[0].capped_rows.is_none(),
+            "a path-registered CSV must never row-cap"
+        );
+        assert!(!regs[0].card.contains("row cap"), "{}", regs[0].card);
+
+        let res = run_query(
+            &ctx,
+            "SELECT SUM(amount) AS total, COUNT(*) AS n FROM ledger",
+        )
+        .await
+        .unwrap();
+        assert!(
+            res.markdown.contains("7200060000"),
+            "sum must cover all 120k rows: {}",
+            res.markdown
+        );
+        assert!(res.markdown.contains("120000"), "{}", res.markdown);
+        assert!(!res.truncated);
+        assert!(truncation_footer(res.shown, res.truncated, res.total).is_none());
+        assert!(
+            row_cap_footer(&regs).is_none(),
+            "no workbook-cap footer for a streamed format"
+        );
+        assert!(
+            !res.markdown.to_lowercase().contains("cap"),
+            "{}",
+            res.markdown
+        );
+        assert_eq!(unregistered_count(&files, &regs), 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Fixture B — the audit's one real gap, now closed: a single workbook
+    // with more data rows than MAX_XLSX_ROWS registers capped AND discloses
+    // it — `capped_rows` recorded, the schema card LEADS with the row-cap
+    // note (model-facing, survives clipping), and `row_cap_footer` names the
+    // file deterministically (user-facing). Before this change the same
+    // registration truncated silently.
+    #[tokio::test]
+    async fn oversize_workbook_caps_with_card_note_and_footer() {
+        let dir = temp_dir("xlsx");
+        let path = dir.join("big.xlsx");
+        write_xlsx(&path, MAX_XLSX_ROWS + 1);
+
+        let ctx = SessionContext::new();
+        let files = vec![("f1".to_string(), "big.xlsx".to_string(), path)];
+        let regs = register_tables(&ctx, &files, false).await;
+        assert_eq!(regs.len(), 1);
+        let reg = &regs[0];
+        assert_eq!(
+            reg.capped_rows,
+            Some(MAX_XLSX_ROWS),
+            "registration must record the cap"
+        );
+        // Model-facing: the cap leads the card, so clipping can't hide it and
+        // the model can't claim full-file totals.
+        assert!(
+            reg.card
+                .starts_with("big — row cap: only the first 100,000 rows of big.xlsx are included"),
+            "{}",
+            reg.card
+        );
+        // The registered table holds exactly the cap.
+        let res = run_query(&ctx, "SELECT COUNT(*) AS n FROM big").await.unwrap();
+        assert!(res.markdown.contains("100000"), "{}", res.markdown);
+        // User-facing: deterministic engine footer naming the file.
+        assert_eq!(
+            row_cap_footer(&regs).as_deref(),
+            Some("_“big.xlsx” analyzed to its first 100,000 rows (workbook row cap)._\n")
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // A union family's row-cap omissions drop WHOLE members and are disclosed
+    // via the group card note + the coverage footer — the per-file row-cap
+    // footer must never double-fire for them.
+    #[test]
+    fn union_drops_never_fire_the_row_cap_footer() {
+        let grouped = TableReg {
+            table: "sales_all".into(),
+            file_id: "a".into(),
+            file_name: "sales*.xlsx".into(),
+            card: "sales_all unions 2 files (a.xlsx, b.xlsx) — row cap: 1 older file(s) NOT included\n…".into(),
+            modified_ms: None,
+            columns: vec![],
+            group: Some(GroupMeta {
+                file_ids: vec!["a".into(), "b".into()],
+                file_names: vec!["a.xlsx".into(), "b.xlsx".into()],
+                newest_ms: 0,
+            }),
+            capped_rows: None,
+        };
+        assert!(row_cap_footer(&[grouped]).is_none());
     }
 }

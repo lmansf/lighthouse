@@ -29,7 +29,7 @@ fn index_persists_and_rebuilds_incrementally() {
 
     // First query builds both entries; persistence is DEBOUNCED (a background
     // flusher batches writes), so flush explicitly before reading the disk.
-    let r = vault::retrieve("zebras migration", &ids, 5, &[], &[], false);
+    let r = vault::retrieve("zebras migration", &ids, 5, &[], &[], false, &[]);
     assert_eq!(r.references[0].file_id, "a.md");
     let index_file = vault_dir.path().join(".rag-vault/cache/index-v1.json");
     lighthouse_core::index::flush_now();
@@ -48,7 +48,7 @@ fn index_persists_and_rebuilds_incrementally() {
         &vault_dir.path().join("a.md"),
         "alpha document now about quasars and telescopes",
     );
-    let r = vault::retrieve("quasars telescopes", &ids, 5, &[], &[], false);
+    let r = vault::retrieve("quasars telescopes", &ids, 5, &[], &[], false, &[]);
     assert_eq!(r.references[0].file_id, "a.md");
     // The rebuild is in memory right away, but the disk write is deferred —
     // that deferral is the fix for the full-file fsync storm on big corpora.
@@ -63,7 +63,7 @@ fn index_persists_and_rebuilds_incrementally() {
         disk.contains("quasars"),
         "stale entry rebuilt on key mismatch"
     );
-    let stale = vault::retrieve("zebras migration", &ids, 5, &[], &[], false);
+    let stale = vault::retrieve("zebras migration", &ids, 5, &[], &[], false, &[]);
     assert!(
         stale.references.iter().all(|refr| refr.file_id != "a.md"),
         "old content no longer matches after rebuild"
@@ -71,7 +71,7 @@ fn index_persists_and_rebuilds_incrementally() {
 
     // A fresh process (simulated: drop the in-memory index) serves from disk.
     lighthouse_core::index::invalidate_all();
-    let warm = vault::retrieve("quasars telescopes", &ids, 5, &[], &[], false);
+    let warm = vault::retrieve("quasars telescopes", &ids, 5, &[], &[], false, &[]);
     assert_eq!(warm.references[0].file_id, "a.md");
 }
 
@@ -180,12 +180,12 @@ fn perf_gate_2k_file_corpus() {
         .collect();
 
     let t0 = std::time::Instant::now();
-    let cold = vault::retrieve("quarterly budget outcomes", &ids, 5, &[], &[], false);
+    let cold = vault::retrieve("quarterly budget outcomes", &ids, 5, &[], &[], false, &[]);
     let cold_ms = t0.elapsed().as_millis();
     assert!(!cold.references.is_empty());
 
     let t1 = std::time::Instant::now();
-    let warm = vault::retrieve("sourdough recipe review", &ids, 5, &[], &[], false);
+    let warm = vault::retrieve("sourdough recipe review", &ids, 5, &[], &[], false, &[]);
     let warm_ms = t1.elapsed().as_millis();
     assert!(!warm.references.is_empty());
 

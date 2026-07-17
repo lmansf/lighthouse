@@ -1,0 +1,20 @@
+[package]
+name = "lighthouse-mcp"
+description = "The Lighthouse MCP server: expose the vault engine as MCP stdio tools (openspec: add-automation §3)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "lighthouse-mcp"
+path = "src/main.rs"
+
+[dependencies]
+lighthouse-core = { path = "../lighthouse-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

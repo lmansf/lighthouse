@@ -60,6 +60,7 @@ import {
   DocumentPdfRegular,
   EyeOffRegular,
   EyeRegular,
+  FilterRegular,
   FolderArrowRightRegular,
   FolderRegular,
   FolderAddRegular,
@@ -76,8 +77,10 @@ import {
 import type { FileNode } from "@/contracts";
 import { flattenVisible, type FlatRow } from "./flatten";
 import { FileInspector } from "./FileInspector";
+import { FolderRulesDialog } from "./FolderRulesDialog";
 import { useRagStore } from "@/stores/useRagStore";
 import { useAuthStore } from "@/stores/useAuthStore";
+import { cloudProviderActive } from "@/lib/privacyState";
 import { FILE_DRAG_MIME, parseDraggedFiles, serializeDraggedFiles } from "@/shell/dnd";
 import { desktopBridge, isDesktopShell, pathsForFiles } from "@/shell/desktopBridge";
 
@@ -307,9 +310,13 @@ const useStyles = makeStyles({
   rowIncluded: {
     backgroundColor: tokens.colorBrandBackground2,
   },
+  // Calm selection (Beam): a subtle inset — neutral fill plus a neutral
+  // hairline ring. The checked checkbox carries the state; the accent stays
+  // reserved for the visibility marks, so a big multi-select never floods the
+  // tree with amber.
   rowSelected: {
     backgroundColor: tokens.colorNeutralBackground1Selected,
-    ...shorthands.outline("1px", "solid", tokens.colorBrandStroke1),
+    ...shorthands.outline("1px", "solid", tokens.colorNeutralStroke1),
   },
   // Freshly-added rows slide in and glow, then settle — so a completed add
   // has a visible landing spot instead of files silently appearing.
@@ -322,6 +329,17 @@ const useStyles = makeStyles({
     animationDuration: "1.4s",
     animationTimingFunction: tokens.curveDecelerateMid,
     "@media (prefers-reduced-motion: reduce)": { animationName: "none" },
+  },
+  // Brief highlight when quick-open reveals this row (the ChatPanel citation
+  // flash pattern): a brand-tinted background that fades back out, so the eye
+  // lands on the right file after the scroll.
+  rowRevealFlash: {
+    animationName: {
+      from: { backgroundColor: tokens.colorBrandBackground2 },
+      to: { backgroundColor: "transparent" },
+    },
+    animationDuration: "1.2s",
+    animationTimingFunction: "ease-out",
   },
   // A folder lights up as a "move into here" target while a file row is dragged
   // over it — the reparent gesture that surfaces the engine's op:move.
@@ -340,14 +358,25 @@ const useStyles = makeStyles({
     backgroundColor: tokens.colorNeutralBackground2,
   },
   check: { flexShrink: 0 },
-  // The eye reads as part of the row until you need it; brand color marks the
-  // "visible to AI" state so scanning the tree shows what the AI can see.
+  // The eye reads as part of the row until you need it; the amber mark (the
+  // AA-gated foreground amber, via colorBrandForeground1) says "in the beam"
+  // — scanning the tree shows exactly what the AI can see.
   eyeOn: { color: tokens.colorBrandForeground1 },
   // A folder that's only partly visible to AI — distinct from a solid on/off.
   eyePartial: { color: tokens.colorBrandForeground2 },
-  // The lock (local-only) axis: a warm "danger" hue when engaged, deliberately
-  // NOT the brand color of the eye so the two controls never read as the same.
+  // The lock (local-only) axis KEEPS red — a deliberate Beam-era decision:
+  // amber here already means "exposed to AI" (the eye), the exact opposite of
+  // "private to this device", and these two toggles sit side by side in a
+  // 34px row where color is the scan channel. Red-as-"stop, never shared" is
+  // the clearer privacy signal, and the palette retains red as its one
+  // semantic non-brand hue. QuickOpen mirrors this pairing.
   lockOn: { color: tokens.colorPaletteRedForeground1 },
+  // The SAME closed lock while the PRIVATE model answers (0.12.1 §2): the mark
+  // is armed but idle — nothing is being withheld right now — so it drops to a
+  // muted neutral. Red stays reserved for ACTIVE enforcement (a cloud provider
+  // is being denied these files), so the tint itself answers "is the lock
+  // doing anything right now?".
+  lockDormant: { color: tokens.colorNeutralForeground3 },
   size: {
     color: tokens.colorNeutralForeground3,
     flexShrink: 0,
@@ -453,6 +482,9 @@ interface TreeRowProps {
   onReveal: (id: string) => void;
   /** Open the read-only "What the AI sees" inspector for a file. */
   onInspect: (id: string, name: string) => void;
+  /** Open the curation-rules dialog scoped to a folder (openspec:
+   *  add-curation-rules). */
+  onFolderRules: (id: string, name: string) => void;
   /** Reparent a node under a folder (or the vault root, null). */
   onMove: (fromId: string, toParentId: string | null) => void;
   /** Open the rename dialog for a node (local vault nodes only). */
@@ -477,6 +509,14 @@ interface TreeRowProps {
   onSetExpanded: (id: string, value: boolean) => void;
   /** Ids added in the last few seconds — these rows play the enter animation. */
   justAdded: Set<string>;
+  /** True while this row is the just-revealed quick-open target: plays the
+   *  brief background flash so the eye lands on it after the scroll. */
+  flash: boolean;
+  /** True when a CLOUD provider is active (the UI mirror of the engine's
+   *  is_cloud_provider — see src/lib/privacyState.ts): a marked row's lock is
+   *  ENFORCING (red, "hidden right now"); on the private model it's DORMANT
+   *  (neutral, armed but idle). Presentation only — the engine enforces. */
+  cloudActive: boolean;
 }
 
 /** Stable empty move-target list so a closed row's memo isn't broken by a fresh
@@ -498,6 +538,7 @@ function TreeRowImpl({
   onOpen,
   onReveal,
   onInspect,
+  onFolderRules,
   onMove,
   onRename,
   onNewFolderInside,
@@ -507,6 +548,8 @@ function TreeRowImpl({
   onToggleExpand,
   onSetExpanded,
   justAdded,
+  flash,
+  cloudActive,
 }: TreeRowProps) {
   const styles = useStyles();
   // The row's right-click menu open state. moveTargetsFor is O(rows × folders),
@@ -561,9 +604,15 @@ function TreeRowImpl({
   // The lock is the SECOND axis, distinct from the eye: effective local-only
   // (ancestor-wins) is carried on the node from the walk. A locked node stays
   // on-device only — the private model reads it, no cloud provider ever does.
+  // TWO STATES for a marked node (0.12.1 §2): ENFORCING while a cloud provider
+  // is active (files are being withheld right now), DORMANT on the private
+  // model (armed but idle). The label doubles as the aria-label, so screen
+  // readers hear which state the lock is in.
   const isLocalOnly = node.localOnly === true;
   const lockLabel = isLocalOnly
-    ? "Private — this device only; click to allow cloud models"
+    ? cloudActive
+      ? "Private — hidden from cloud models right now; click to allow cloud models"
+      : "Hidden from cloud models. The private model can always read it."
     : "Shareable with cloud models — click to keep on this device only";
   const toggleLocalOnly = () => {
     onToggleLocalOnly(node.id);
@@ -577,8 +626,8 @@ function TreeRowImpl({
         className={`${styles.row}${node.ragIncluded ? ` ${styles.rowIncluded}` : ""}${
           selected ? ` ${styles.rowSelected}` : ""
         }${justAdded.has(node.id) ? ` ${styles.rowJustAdded}` : ""}${
-          dropInto ? ` ${styles.rowDropInto}` : ""
-        }`}
+          flash ? ` ${styles.rowRevealFlash}` : ""
+        }${dropInto ? ` ${styles.rowDropInto}` : ""}`}
         style={{ paddingLeft: `${depth * 18 + 4}px` }}
         role="button"
         tabIndex={0}
@@ -713,7 +762,9 @@ function TreeRowImpl({
           <Button
             appearance="subtle"
             size="small"
-            className={isLocalOnly ? styles.lockOn : undefined}
+            className={
+              isLocalOnly ? (cloudActive ? styles.lockOn : styles.lockDormant) : undefined
+            }
             icon={isLocalOnly ? <LockClosedRegular /> : <LockOpenRegular />}
             aria-label={lockLabel}
             aria-pressed={isLocalOnly}
@@ -787,6 +838,14 @@ function TreeRowImpl({
                 What the AI sees
               </MenuItem>
             )}
+            {/* Bulk curation rules (openspec: add-curation-rules): manage the
+                predicate rules scoped to this folder. Local + linked folders
+                only — cloud nodes resolve connector-side. */}
+            {node.kind === "folder" && !isRemote && (
+              <MenuItem icon={<FilterRegular />} onClick={() => onFolderRules(node.id, node.name)}>
+                Rules for this folder…
+              </MenuItem>
+            )}
             <MenuItem
               icon={node.ragIncluded ? <EyeOffRegular /> : <EyeRegular />}
               onClick={toggleVisibility}
@@ -846,10 +905,14 @@ function VirtualRows({
   rows,
   scrollRef,
   renderRow,
+  dataSourceId,
 }: {
   rows: FlatRow[];
   scrollRef: React.RefObject<HTMLDivElement | null>;
   renderRow: (row: FlatRow) => React.ReactNode;
+  /** Stamped on the block so the quick-open reveal can find this source's
+   *  block in the DOM and scroll to a row inside it by index. */
+  dataSourceId: string;
 }) {
   const blockRef = useRef<HTMLDivElement>(null);
   const [range, setRange] = useState({ start: 0, end: Math.min(rows.length, 40) });
@@ -880,7 +943,11 @@ function VirtualRows({
 
   const visible = rows.slice(range.start, range.end);
   return (
-    <div ref={blockRef} style={{ position: "relative", height: count * VROW_H }}>
+    <div
+      ref={blockRef}
+      data-vrows-source={dataSourceId}
+      style={{ position: "relative", height: count * VROW_H }}
+    >
       {visible.map((row, i) => (
         <div
           key={row.node.id}
@@ -930,6 +997,12 @@ export function FileExplorer() {
   // choice, else the conservative `exclude`). "include" carries a prominent "you
   // control what AI sees" reassurance since files are searchable once added.
   const includeByDefault = useAuthStore((s) => s.onboarding.defaultInclusion === "include");
+  // Whether a CLOUD provider is answering (the UI mirror of the engine's
+  // is_cloud_provider — src/lib/privacyState.ts): drives the lock's
+  // ENFORCING (red) vs DORMANT (neutral) rendering. Presentation only; the
+  // engine enforces local-only marks at its own chokepoint regardless.
+  const providerId = useAuthStore((s) => s.onboarding.providerId);
+  const cloudActive = cloudProviderActive(providerId);
 
   const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
   const isSelected = useCallback((id: string) => selectedSet.has(id), [selectedSet]);
@@ -940,6 +1013,31 @@ export function FileExplorer() {
   // The lock switch does the same for the local-only (this-device-only) axis.
   const allSelectedLocalOnly =
     selectedIds.length > 0 && selectedIds.every((id) => nodeById.get(id)?.localOnly);
+  // When the whole selection is already marked, a tooltip on the bulk switch
+  // says what the mark is DOING right now (enforcing vs dormant — the row
+  // lock's two states); the label and the action stay unchanged.
+  const bulkLockSwitch = (
+    <Switch
+      checked={Boolean(allSelectedLocalOnly)}
+      disabled={selectedIds.length === 0}
+      onChange={(_, d) => void applyLocalOnly(d.checked)}
+      label="Private (this device)"
+    />
+  );
+  const bulkLock = allSelectedLocalOnly ? (
+    <Tooltip
+      content={
+        cloudActive
+          ? "Private — hidden from cloud models right now"
+          : "Hidden from cloud models. The private model can always read it."
+      }
+      relationship="description"
+    >
+      {bulkLockSwitch}
+    </Tooltip>
+  ) : (
+    bulkLockSwitch
+  );
 
   // Ids queued for a "Remove from vault" confirmation (single via right-click, or
   // the whole selection via the bulk action).
@@ -993,10 +1091,11 @@ export function FileExplorer() {
       setJustAdded(new Set());
     }, 3800);
   };
-  // Acknowledge interest in a not-yet-shipped feature: thank the user, without
-  // running any real connector flow and without recording anything.
-  const registerInterest = (thanks: string) => {
-    setInterestNote(thanks);
+  // Acknowledge a click on a not-yet-shipped feature with an honest note —
+  // no real connector flow runs and nothing is recorded, so the note must
+  // never promise a follow-up.
+  const registerInterest = (note: string) => {
+    setInterestNote(note);
     if (interestTimer.current) window.clearTimeout(interestTimer.current);
     interestTimer.current = window.setTimeout(() => setInterestNote(null), 4200);
   };
@@ -1014,6 +1113,11 @@ export function FileExplorer() {
     return () => window.clearTimeout(t);
   }, [query]);
   const [onlyVisible, setOnlyVisible] = useState(false);
+  // "Hidden from cloud" filter (0.12.1 §2): narrows the tree to nodes marked
+  // "Private — this device only". Toggled in the filter bar, and switched on
+  // by the chat header's "{n} files hidden from cloud models" count (the
+  // lighthouse:filter-local-only event below).
+  const [onlyLocalOnly, setOnlyLocalOnly] = useState(false);
   const [sort, setSort] = useState<SortState>({ key: "name", dir: "asc" });
   const compareNodes = useMemo(() => makeComparator(sort), [sort]);
 
@@ -1090,7 +1194,7 @@ export function FileExplorer() {
   }, [nodes, childrenByParent]);
 
   const trimmedQuery = debouncedQuery.trim().toLowerCase();
-  const filterActive = trimmedQuery !== "" || onlyVisible;
+  const filterActive = trimmedQuery !== "" || onlyVisible || onlyLocalOnly;
   // Rows the active search/filter keeps: direct matches plus every ancestor,
   // so a match nested inside collapsed folders stays reachable. null means no
   // filter - render everything. One pass over `nodes` keeps this cheap.
@@ -1100,7 +1204,8 @@ export function FileExplorer() {
     for (const n of nodes) {
       const matches =
         (trimmedQuery === "" || n.name.toLowerCase().includes(trimmedQuery)) &&
-        (!onlyVisible || n.ragIncluded);
+        (!onlyVisible || n.ragIncluded) &&
+        (!onlyLocalOnly || n.localOnly);
       if (!matches) continue;
       let cur: FileNode | undefined = n;
       while (cur && !set.has(cur.id)) {
@@ -1109,7 +1214,7 @@ export function FileExplorer() {
       }
     }
     return set;
-  }, [filterActive, nodes, trimmedQuery, onlyVisible, nodeById]);
+  }, [filterActive, nodes, trimmedQuery, onlyVisible, onlyLocalOnly, nodeById]);
 
   // Central expand/collapse state for the flattened + windowed tree (a folder is
   // expanded when present in this set). Top-level folders seed open exactly once
@@ -1157,6 +1262,112 @@ export function FileExplorer() {
   }, []);
   // The shared scroll viewport the windowed row blocks measure against.
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  // --- Quick-open "reveal in explorer" (time-savers): the palette's Enter
+  // dispatches "lighthouse:reveal-node" {id}; we expand the node's ancestors,
+  // scroll the windowed list to its row, and flash it. Two-phase because the
+  // target row usually isn't mounted yet: the handler updates state, then the
+  // effect below measures the freshly-committed DOM and scrolls.
+  const [revealTarget, setRevealTarget] = useState<{ id: string; nonce: number } | null>(null);
+  const [revealFlashId, setRevealFlashId] = useState<string | null>(null);
+  const revealTimer = useRef<number | null>(null);
+  const revealNonce = useRef(0);
+  useEffect(
+    () => () => {
+      if (revealTimer.current) window.clearTimeout(revealTimer.current);
+    },
+    [],
+  );
+  const revealInExplorerRef = useRef<(id: string) => void>(() => {});
+  revealInExplorerRef.current = (id: string) => {
+    const target = nodeById.get(id);
+    if (!target) return;
+    // An active search/filter may be hiding the node — reveal means "show me
+    // this file in the tree", so drop the filter (both halves of the debounce,
+    // to skip the 150ms trailing edge) and leave selection mode alone.
+    setQuery("");
+    setDebouncedQuery("");
+    setOnlyVisible(false);
+    setOnlyLocalOnly(false);
+    // Expand every ancestor folder so the row exists in the flattened list.
+    const toOpen: string[] = [];
+    let cur = target.parentId === null ? undefined : nodeById.get(target.parentId);
+    while (cur) {
+      toOpen.push(cur.id);
+      cur = cur.parentId === null ? undefined : nodeById.get(cur.parentId);
+    }
+    if (toOpen.length) {
+      setExpandedIds((prev) => {
+        const next = new Set(prev);
+        for (const openId of toOpen) next.add(openId);
+        return next;
+      });
+    }
+    revealNonce.current += 1;
+    setRevealTarget({ id, nonce: revealNonce.current });
+  };
+  useEffect(() => {
+    const onReveal = (e: Event) => {
+      const id = (e as CustomEvent<{ id?: string }>).detail?.id;
+      if (typeof id === "string") revealInExplorerRef.current(id);
+    };
+    window.addEventListener("lighthouse:reveal-node", onReveal);
+    return () => window.removeEventListener("lighthouse:reveal-node", onReveal);
+  }, []);
+  // Chat header → explorer (0.12.1 §2): clicking "{n} files hidden from cloud
+  // models" filters the tree to the marked set. The search clears too (both
+  // debounce halves), so what's shown is honestly "everything hidden from
+  // cloud" — not "hidden from cloud ∩ stale search". State setters are stable,
+  // so the listener mounts once (the reveal-node cleanup style above).
+  useEffect(() => {
+    const onFilterLocalOnly = () => {
+      setOnlyLocalOnly(true);
+      setQuery("");
+      setDebouncedQuery("");
+    };
+    window.addEventListener("lighthouse:filter-local-only", onFilterLocalOnly);
+    return () => window.removeEventListener("lighthouse:filter-local-only", onFilterLocalOnly);
+  }, []);
+  // Phase two: after the expansion/filter state committed, locate the row —
+  // recompute each source's flat list exactly as the render below does, find
+  // the target's index, and scroll the shared viewport to `block top + index ×
+  // VROW_H` (rows are fixed-height; the block's offset is measured, so source
+  // headers of any height are handled). Then flash the row.
+  useEffect(() => {
+    if (!revealTarget) return;
+    setRevealTarget(null); // consume — reruns from data churn must not re-scroll
+    const sc = scrollRef.current;
+    if (!sc) return;
+    let found: { sourceId: string; index: number } | null = null;
+    for (const source of sources) {
+      const roots = nodes
+        .filter(
+          (n) =>
+            n.sourceId === source.id &&
+            n.parentId === null &&
+            (!visibleIds || visibleIds.has(n.id)),
+        )
+        .sort(compareNodes);
+      const rows = flattenVisible(roots, childrenOf, compareNodes, isExpanded, visibleIds);
+      const index = rows.findIndex((r) => r.node.id === revealTarget.id);
+      if (index >= 0) {
+        found = { sourceId: source.id, index };
+        break;
+      }
+    }
+    if (!found) return;
+    const block = sc.querySelector(`[data-vrows-source="${CSS.escape(found.sourceId)}"]`);
+    if (!(block instanceof HTMLElement)) return;
+    // Same content-relative measurement VirtualRows uses, so the two agree.
+    const blockTop =
+      block.getBoundingClientRect().top - sc.getBoundingClientRect().top + sc.scrollTop;
+    const rowTop = blockTop + found.index * VROW_H;
+    const centered = rowTop - (sc.clientHeight - VROW_H) / 2;
+    sc.scrollTop = Math.max(0, Math.min(centered, sc.scrollHeight - sc.clientHeight));
+    setRevealFlashId(revealTarget.id);
+    if (revealTimer.current) window.clearTimeout(revealTimer.current);
+    revealTimer.current = window.setTimeout(() => setRevealFlashId(null), 1400);
+  }, [revealTarget, sources, nodes, visibleIds, compareNodes, childrenOf, isExpanded]);
 
   // Outcome of the last add (link or upload) worth telling the user about -
   // rendered as a dismissible banner instead of a silent console.warn.
@@ -1247,6 +1458,11 @@ export function FileExplorer() {
   // closed). Opening it is a pure navigation gesture — it mutates nothing.
   const [inspectNode, setInspectNode] = useState<{ id: string; name: string } | null>(null);
   const openInspect = useCallback((id: string, name: string) => setInspectNode({ id, name }), []);
+
+  // "Rules for this folder…" (openspec: add-curation-rules): which folder the
+  // rules dialog is open for (null = closed).
+  const [rulesFolder, setRulesFolder] = useState<{ id: string; name: string } | null>(null);
+  const openFolderRules = useCallback((id: string, name: string) => setRulesFolder({ id, name }), []);
 
   // Stable per-row callbacks (forwarding to the store's stable actions), so the
   // memoized TreeRow isn't re-rendered by every explorer render just because
@@ -1552,9 +1768,7 @@ export function FileExplorer() {
                 <MenuItem
                   icon={<CloudArrowUpRegular />}
                   onClick={() =>
-                    registerInterest(
-                      "Thanks for your interest! We'll let you know the moment SharePoint is ready.",
-                    )
+                    registerInterest("SharePoint isn't ready yet — it's on the way.")
                   }
                 >
                   <span className={styles.comingSoonItem}>
@@ -1746,12 +1960,7 @@ export function FileExplorer() {
             onChange={(_, d) => void applySelection(d.checked)}
             label="Visible to AI"
           />
-          <Switch
-            checked={Boolean(allSelectedLocalOnly)}
-            disabled={selectedIds.length === 0}
-            onChange={(_, d) => void applyLocalOnly(d.checked)}
-            label="Private (this device)"
-          />
+          {bulkLock}
           <Button
             icon={<DeleteRegular />}
             size="small"
@@ -1788,6 +1997,18 @@ export function FileExplorer() {
             onClick={() => setOnlyVisible((v) => !v)}
           >
             Only visible to AI
+          </ToggleButton>
+          {/* The lock axis of the eye filter above: only nodes marked "Private —
+              this device only". Also switched on by the chat header's hidden-
+              from-cloud count, so that filter is visible and clearable HERE. */}
+          <ToggleButton
+            size="small"
+            appearance="subtle"
+            icon={<LockClosedRegular />}
+            checked={onlyLocalOnly}
+            onClick={() => setOnlyLocalOnly((v) => !v)}
+          >
+            Hidden from cloud
           </ToggleButton>
           <Menu>
             <MenuTrigger disableButtonEnhancement>
@@ -1881,6 +2102,7 @@ export function FileExplorer() {
                     <VirtualRows
                       rows={flattenVisible(roots, childrenOf, compareNodes, isExpanded, visibleIds)}
                       scrollRef={scrollRef}
+                      dataSourceId={source.id}
                       renderRow={(row) => (
                         <TreeRow
                           node={row.node}
@@ -1897,6 +2119,7 @@ export function FileExplorer() {
                           onOpen={openNode}
                           onReveal={revealNode}
                           onInspect={openInspect}
+                          onFolderRules={openFolderRules}
                           onMove={handleMove}
                           onRename={openRename}
                           onNewFolderInside={openNewFolder}
@@ -1906,6 +2129,8 @@ export function FileExplorer() {
                           onToggleExpand={toggleExpand}
                           onSetExpanded={setExpanded}
                           justAdded={justAdded}
+                          flash={revealFlashId === row.node.id}
+                          cloudActive={cloudActive}
                         />
                       )}
                     />
@@ -2018,6 +2243,13 @@ export function FileExplorer() {
         fileName={inspectNode?.name ?? ""}
         desktop={desktop}
         onClose={() => setInspectNode(null)}
+      />
+
+      {/* Per-folder curation rules (openspec: add-curation-rules). */}
+      <FolderRulesDialog
+        scope={rulesFolder?.id ?? null}
+        scopeName={rulesFolder?.name ?? ""}
+        onClose={() => setRulesFolder(null)}
       />
     </section>
   );

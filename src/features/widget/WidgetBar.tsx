@@ -50,6 +50,7 @@ import {
 import dynamic from "next/dynamic";
 import type { ChatChunk, ChatTurn, FileNode, RagReference } from "@/contracts";
 import { chatService, MODEL_PROVIDERS, ragService } from "@/contracts";
+import { citationQuery, INSPECT_FILE_SHELL_EVENT } from "@/lib/citePreview";
 import { useRagStore } from "@/stores/useRagStore";
 import { egressPillSummary } from "@/features/egress/EgressShield";
 import { isDesktopShell } from "@/shell/desktopBridge";
@@ -108,6 +109,11 @@ const useStyles = makeStyles({
     boxShadow: tokens.shadow16,
     ...shorthands.borderRadius(tokens.borderRadiusXLarge),
     overflow: "hidden",
+    // Spotlight-grade focus: the theme's amber ring while the bar has focus,
+    // drawn INSET so the frameless window's own edge never clips it.
+    ":focus-within": {
+      boxShadow: `${tokens.shadow16}, inset 0 0 0 2px ${tokens.colorStrokeFocus2}`,
+    },
   },
   // A quick fade + scale-in replayed on every summon (window "focus"): a pure
   // flourish on top of the resting pill — it never gates the drag region or the
@@ -149,7 +155,7 @@ const useStyles = makeStyles({
     cursor: "grab",
     ":active": { cursor: "grabbing" },
   },
-  // The beacon: same blue lamp + warm gold glow as the sidebar brand — the
+  // The beacon: same amber lamp + warm halo as the sidebar brand — the
   // one bit of identity on an otherwise chromeless bar.
   beacon: {
     width: "10px",
@@ -225,16 +231,6 @@ const useStyles = makeStyles({
   },
   actionBtn: { color: tokens.colorNeutralForeground3 },
   actionOn: { color: tokens.colorBrandForeground1 },
-  // Trial-over note: replaces actionable results; the only affordance left is
-  // raising the main window, where the lock gate lives.
-  lockNote: {
-    display: "flex",
-    alignItems: "center",
-    gap: tokens.spacingHorizontalS,
-    ...shorthands.padding(tokens.spacingVerticalS, tokens.spacingHorizontalS),
-    color: tokens.colorNeutralForeground2,
-  },
-  lockText: { flexGrow: 1, minWidth: 0 },
   // Egress transparency footer (S3): a quiet one-liner at the bottom of the
   // expanded dropdown.
   egressFooter: {
@@ -244,12 +240,25 @@ const useStyles = makeStyles({
     textAlign: "center",
   },
   // The inline answer: a compact chat turn living under the pill — the answer
-  // "freezes" on the desktop (the shell holds blur-hide while it's open).
+  // "freezes" on the desktop (the shell holds blur-hide while it's open). It
+  // inherits the Beam answer-card treatment compactly: a 10px-radius card at
+  // rest elevation (hairline ring + soft ambient), inset from the pill's
+  // edges. The breathing room is the WRAP's padding — the resize effect
+  // measures getBoundingClientRect (padding counts, margins would not).
+  answerWrap: {
+    ...shorthands.padding(
+      tokens.spacingVerticalXS,
+      tokens.spacingHorizontalS,
+      tokens.spacingVerticalS,
+    ),
+  },
   answer: {
     display: "flex",
     flexDirection: "column",
     gap: tokens.spacingVerticalXS,
-    ...shorthands.borderTop("1px", "solid", tokens.colorNeutralStroke2),
+    backgroundColor: tokens.colorNeutralBackground1,
+    ...shorthands.borderRadius(tokens.borderRadiusLarge),
+    boxShadow: tokens.shadow2,
     ...shorthands.padding(tokens.spacingVerticalS, tokens.spacingHorizontalM),
   },
   answerHead: {
@@ -524,6 +533,9 @@ export function WidgetBar() {
     };
   }, [query, includedFileIds, locked]);
 
+  // Ask type-ahead (src/lib/askTypeahead.ts) is main-window-only by decision:
+  // suggestion rows would complicate the pill's merged results list + resize
+  // contract (and this window doesn't carry the chat store) for little gain.
   // The flat list: name rows, then content rows (minus files already named),
   // then the Ask hand-off — which never renders locked (asking is disabled).
   const rows = useMemo<WidgetRow[]>(() => {
@@ -689,6 +701,36 @@ export function WidgetBar() {
     })();
   };
 
+  /**
+   * Citation → preview hand-off (time-savers feature 4): a citation button on
+   * the inline answer raises the MAIN window and lands it on the file
+   * inspector AT the cited chunk — the same DOM event the chat's citations
+   * dispatch, carried cross-window as a Tauri event (mirroring "ask-question")
+   * and re-broadcast by the main window's transport into its
+   * FileInspectorHost. "Open in app" stays one click away inside the preview.
+   * The bar itself behaves exactly as it did for opening a file: held open
+   * FIRST so the focus steal doesn't dismiss the frozen answer. Outside the
+   * shell there is no main window to hand off to — keep the old direct open.
+   */
+  const previewCitation = (r: RagReference) => {
+    if (!isDesktopShell()) {
+      openNode(r.fileId);
+      return;
+    }
+    setOpenHold(true);
+    const question = answerRef.current?.question ?? "";
+    void invokeShell("show_main");
+    void import("@tauri-apps/api/event")
+      .then((ev) =>
+        ev.emitTo("main", INSPECT_FILE_SHELL_EVENT, {
+          fileId: r.fileId,
+          name: r.name,
+          query: citationQuery(r.snippet, question),
+        }),
+      )
+      .catch(() => {});
+  };
+
   /** Clear the frozen answer (the ✕ / first Esc). Stops a live stream. */
   const clearAnswer = () => {
     abortRef.current?.abort();
@@ -714,16 +756,9 @@ export function WidgetBar() {
     });
   };
 
-  /** Raise the main window bare — where the lock gate / renewal flow lives. */
-  const openLighthouse = () => {
-    setPinAlertDot(false); // the main window's banner takes over
-    void invokeShell("show_main");
-    hide();
-  };
-
   const activateRow = (row: WidgetRow) => {
-    // Locked: rows are inert — the lock note under them is the only answer
-    // (main-window parity: a locked vault is greyed out and inert).
+    // Locked: rows are inert (main-window parity: a locked vault is greyed
+    // out and inert). `locked` is hardwired false — see its declaration.
     if (locked) return;
     if (row.kind === "ask") askInline();
     else if (row.kind === "name") openNode(row.node.id);
@@ -915,16 +950,6 @@ export function WidgetBar() {
               ))}
             </div>
           )}
-          {locked && (
-            <div className={styles.lockNote}>
-              <Text size={300} className={styles.lockText}>
-                Your trial has ended — open Lighthouse to continue.
-              </Text>
-              <Button size="small" appearance="primary" onClick={openLighthouse}>
-                Open Lighthouse
-              </Button>
-            </div>
-          )}
           {/* Egress transparency (S3): the one-line "what left this machine"
               summary. The collapsed pill is a fixed-height window with no
               room, so it lives in the footer of the expanded dropdown. */}
@@ -940,89 +965,97 @@ export function WidgetBar() {
           brings results back on top (the answer returns when the box clears,
           and a new ask replaces it). */}
       {answer && !query.trim() && (
-        <div ref={answerElRef} className={styles.answer} data-lh-widget-answer>
-          <div className={styles.answerHead}>
-            <ChatSparkleRegular className={styles.rowIcon} />
-            <Text size={200} className={styles.answerQ} title={answer.question}>
-              {answer.question}
-            </Text>
-            {answer.streaming ? (
-              <Button
-                size="small"
-                appearance="subtle"
-                icon={<SquareRegular />}
-                aria-label="Stop answering"
-                title="Stop answering"
-                onClick={() => abortRef.current?.abort()}
-              />
-            ) : (
-              <Button
-                size="small"
-                appearance="subtle"
-                icon={copied ? <CheckmarkRegular /> : <CopyRegular />}
-                aria-label="Copy answer"
-                title="Copy answer"
-                onClick={copyAnswer}
-              />
-            )}
-            <Button
-              size="small"
-              appearance="subtle"
-              icon={<OpenRegular />}
-              aria-label="Continue in Lighthouse"
-              title="Continue in Lighthouse — reopens this question in the full app"
-              onClick={continueInApp}
-            />
-            <Button
-              size="small"
-              appearance="subtle"
-              icon={<DismissRegular />}
-              aria-label="Clear answer (Esc)"
-              title="Clear answer (Esc)"
-              onClick={clearAnswer}
-            />
-          </div>
-          <div className={styles.answerBody}>
-            {answer.content ? (
-              // The pill is too small for the analytics charts the engine can
-              // append (```lighthouse-chart fences) — strip them here; the
-              // numbers are in the prose, and the main window draws the chart.
-              <MarkdownView
-                content={answer.content.replace(/```lighthouse-chart[\s\S]*?(```|$)/g, "")}
-              />
-            ) : answer.streaming ? (
-              <Text size={200} className={styles.snippet}>
-                {answer.progress || "Thinking…"}
+        <div ref={answerElRef} className={styles.answerWrap} data-lh-widget-answer>
+          <div className={styles.answer}>
+            <div className={styles.answerHead}>
+              <ChatSparkleRegular className={styles.rowIcon} />
+              <Text size={200} className={styles.answerQ} title={answer.question}>
+                {answer.question}
               </Text>
-            ) : null}
-            {answer.error && (
-              <Text size={200} className={styles.answerError}>
-                Couldn&apos;t get an answer — {answer.error}
-              </Text>
-            )}
-          </div>
-          {answer.refs.length > 0 && (
-            <div className={styles.refsRow}>
-              {answer.refs.slice(0, 4).map((r) => (
+              {answer.streaming ? (
                 <Button
-                  key={r.fileId}
                   size="small"
-                  appearance="outline"
-                  title={r.snippet}
-                  onClick={() => openNode(r.fileId)}
-                >
-                  {r.name}
-                </Button>
-              ))}
+                  appearance="subtle"
+                  icon={<SquareRegular />}
+                  aria-label="Stop answering"
+                  title="Stop answering"
+                  onClick={() => abortRef.current?.abort()}
+                />
+              ) : (
+                <Button
+                  size="small"
+                  appearance="subtle"
+                  icon={copied ? <CheckmarkRegular /> : <CopyRegular />}
+                  aria-label="Copy answer"
+                  title="Copy answer"
+                  onClick={copyAnswer}
+                />
+              )}
+              <Button
+                size="small"
+                appearance="subtle"
+                icon={<OpenRegular />}
+                aria-label="Continue in Lighthouse"
+                title="Continue in Lighthouse — reopens this question in the full app"
+                onClick={continueInApp}
+              />
+              <Button
+                size="small"
+                appearance="subtle"
+                icon={<DismissRegular />}
+                aria-label="Clear answer (Esc)"
+                title="Clear answer (Esc)"
+                onClick={clearAnswer}
+              />
             </div>
-          )}
-          {/* Engine-emitted provenance stamp (final chunk), compact for the pill.
-              Truthful by construction — read only from meta, never model text. */}
-          {answer.meta && !answer.streaming && (
-            <Text size={100} className={styles.provenance}>
-              {widgetProvenance(answer.meta)}
-            </Text>
-          )}
+            <div className={styles.answerBody}>
+              {answer.content ? (
+                // The pill is too small for the analytics charts the engine can
+                // append (```lighthouse-chart fences) — strip them here; the
+                // numbers are in the prose, and the main window draws the chart.
+                // The (?:-request)? arm also drops any residual chart-DIRECTIVE
+                // fence (chart-directive; the engine withholds these already —
+                // this is the widget's belt-and-braces strip).
+                <MarkdownView
+                  content={answer.content.replace(
+                    /```lighthouse-chart(?:-request)?[\s\S]*?(```|$)/g,
+                    "",
+                  )}
+                />
+              ) : answer.streaming ? (
+                <Text size={200} className={styles.snippet}>
+                  {answer.progress || "Thinking…"}
+                </Text>
+              ) : null}
+              {answer.error && (
+                <Text size={200} className={styles.answerError}>
+                  Couldn&apos;t get an answer — {answer.error}
+                </Text>
+              )}
+            </div>
+            {answer.refs.length > 0 && (
+              <div className={styles.refsRow}>
+                {answer.refs.slice(0, 4).map((r) => (
+                  <Button
+                    key={r.fileId}
+                    size="small"
+                    appearance="outline"
+                    title={r.snippet}
+                    onClick={() => previewCitation(r)}
+                  >
+                    {r.name}
+                  </Button>
+                ))}
+              </div>
+            )}
+            {/* Engine-emitted provenance stamp (final chunk), compact for the pill.
+                Truthful by construction — read only from meta, never model text. */}
+            {answer.meta && !answer.streaming && (
+              <Text size={100} className={styles.provenance}>
+                {widgetProvenance(answer.meta)}
+              </Text>
+            )}
+          </div>
         </div>
       )}
     </div>

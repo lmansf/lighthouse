@@ -9,6 +9,9 @@ register("./_ts-extensionless-hook.mjs", import.meta.url);
 
 const {
   parseChartSpec,
+  parseChartDirective,
+  validateDirective,
+  stripChartRequestFences,
   niceTicks,
   scaleLinear,
   formatTick,
@@ -214,4 +217,270 @@ test("formatXTick abbreviates by granularity", () => {
   assert.equal(formatXTick("2024-07-08", "day"), "07-08");
   assert.equal(formatXTick("4500", "numeric"), "4.5k");
   assert.equal(formatXTick("NE", "category"), "NE");
+});
+
+// --- Chart directive (chart-directive) ------------------------------------------
+// PARITY: fixtures shared byte-for-byte with the Rust validator tests
+// (analytics.rs::directive_* / parity_columns) so the grammar cannot drift.
+
+test("parseChartDirective reads the first fence and ignores fabricated values", () => {
+  const narration =
+    'NW leads [1].\n\n```lighthouse-chart-request\n{"kind":"bar","label_column":"region","series_columns":["total"],"x":["fake"],"values":[999]}\n```\ntail\n```lighthouse-chart-request\n{"kind":"none"}\n```';
+  const d = parseChartDirective(narration);
+  assert.ok(d);
+  assert.equal(d.kind, "bar");
+  assert.equal(d.labelColumn, "region");
+  assert.deepEqual(d.seriesColumns, ["total"]);
+  assert.equal(d.title, undefined);
+  assert.equal(d.sort, undefined);
+  // Only the five fields exist on the parsed directive — fabricated data
+  // keys are ignored wholesale.
+  assert.ok(!("x" in d) && !("values" in d));
+
+  const none = parseChartDirective('```lighthouse-chart-request\n{"kind":"none"}\n```');
+  assert.ok(none);
+  assert.equal(none.kind, "none");
+
+  const full = parseChartDirective(
+    '```lighthouse-chart-request\n{"kind":"line","label_column":"month","series_columns":["a","b"],"title":"Trend","sort":"asc"}\n```',
+  );
+  assert.ok(full);
+  assert.equal(full.title, "Trend");
+  assert.equal(full.sort, "asc");
+});
+
+test("parseChartDirective rejects malformed directives", () => {
+  assert.equal(parseChartDirective("plain prose, no request"), null);
+  // Unterminated fence.
+  assert.equal(parseChartDirective('```lighthouse-chart-request\n{"kind":"bar"'), null);
+  // Non-JSON body.
+  assert.equal(parseChartDirective("```lighthouse-chart-request\nbar of region\n```"), null);
+  // Unknown kind.
+  assert.equal(
+    parseChartDirective(
+      '```lighthouse-chart-request\n{"kind":"pie","label_column":"a","series_columns":["b"]}\n```',
+    ),
+    null,
+  );
+  // Missing label_column.
+  assert.equal(
+    parseChartDirective('```lighthouse-chart-request\n{"kind":"bar","series_columns":["b"]}\n```'),
+    null,
+  );
+  // series_columns not an array of strings.
+  assert.equal(
+    parseChartDirective(
+      '```lighthouse-chart-request\n{"kind":"bar","label_column":"a","series_columns":[1]}\n```',
+    ),
+    null,
+  );
+  // sort outside the whitelist.
+  assert.equal(
+    parseChartDirective(
+      '```lighthouse-chart-request\n{"kind":"bar","label_column":"a","series_columns":["b"],"sort":"sideways"}\n```',
+    ),
+    null,
+  );
+  // Non-string title.
+  assert.equal(
+    parseChartDirective(
+      '```lighthouse-chart-request\n{"kind":"bar","label_column":"a","series_columns":["b"],"title":7}\n```',
+    ),
+    null,
+  );
+});
+
+// Same column fixture as analytics.rs::parity_columns.
+const parityColumns = [
+  { name: "region", numeric: false },
+  { name: "total", numeric: true },
+  { name: "pct", numeric: true },
+  { name: "note", numeric: false },
+];
+
+test("validateDirective mirrors the Rust rules and messages", () => {
+  const d = (kind, labelColumn, seriesColumns) => ({ kind, labelColumn, seriesColumns });
+  // Happy path + "none" trivially valid.
+  assert.equal(validateDirective(d("bar", "region", ["total"]), parityColumns), null);
+  assert.equal(validateDirective(d("line", "region", ["total", "pct"]), parityColumns), null);
+  assert.equal(validateDirective(d("none", "", []), parityColumns), null);
+  // Unknown label column (exact, case-sensitive).
+  assert.equal(
+    validateDirective(d("bar", "Region", ["total"]), parityColumns),
+    'unknown label_column "Region"',
+  );
+  // Over-limit series.
+  assert.equal(
+    validateDirective(d("bar", "region", ["total", "pct", "total", "pct"]), parityColumns),
+    "series_columns must name 1-3 columns",
+  );
+  // Empty series.
+  assert.equal(
+    validateDirective(d("bar", "region", []), parityColumns),
+    "series_columns must name 1-3 columns",
+  );
+  // Unknown series column.
+  assert.equal(
+    validateDirective(d("bar", "region", ["revenue"]), parityColumns),
+    'unknown series column "revenue"',
+  );
+  // Non-numeric series column.
+  assert.equal(
+    validateDirective(d("bar", "region", ["note"]), parityColumns),
+    'series column "note" is not numeric',
+  );
+});
+
+// --- add-quant-depth: the band chart kind (PARITY with analytics.rs) ----------
+
+test("parseChartSpec accepts a band with lower/upper bounds; rejects bounds off a band", () => {
+  // A forecast band: a line plus a sparse interval (null on historical rows).
+  const band = parseChartSpec(
+    JSON.stringify({
+      kind: "band",
+      x: ["2026-01", "2026-02", "2026-03", "2026-04"],
+      series: [
+        {
+          name: "value",
+          values: [100, 200, 300, 400],
+          lower: [null, null, 280, 360],
+          upper: [null, null, 320, 440],
+        },
+      ],
+    }),
+  );
+  assert.ok(band);
+  assert.equal(band.kind, "band");
+  assert.deepEqual(band.series[0].lower, [null, null, 280, 360]);
+  assert.deepEqual(band.series[0].upper, [null, null, 320, 440]);
+
+  const base = { x: ["a", "b"], series: [{ name: "v", values: [1, 2] }] };
+  // Band bounds must be present and length-aligned.
+  assert.equal(parseChartSpec(JSON.stringify({ ...base, kind: "band" })), null); // no bounds
+  assert.equal(
+    parseChartSpec(
+      JSON.stringify({ kind: "band", x: ["a", "b"], series: [{ name: "v", values: [1, 2], lower: [0], upper: [3, 4] }] }),
+    ),
+    null, // lower length ≠ x
+  );
+  // A band is single-series, like a scatter.
+  assert.equal(
+    parseChartSpec(
+      JSON.stringify({
+        kind: "band",
+        x: ["a", "b"],
+        series: [
+          { name: "v", values: [1, 2], lower: [0, 1], upper: [2, 3] },
+          { name: "w", values: [3, 4], lower: [2, 3], upper: [4, 5] },
+        ],
+      }),
+    ),
+    null,
+  );
+  // lower/upper are meaningless off a band → reject.
+  assert.equal(
+    parseChartSpec(JSON.stringify({ ...base, kind: "line", series: [{ name: "v", values: [1, 2], lower: [0, 1] }] })),
+    null,
+  );
+});
+
+test("band directive parses bound columns and validates like the Rust engine", () => {
+  const d = parseChartDirective(
+    '```lighthouse-chart-request\n{"kind":"band","label_column":"period","series_columns":["value"],"lower_column":"lo","upper_column":"hi"}\n```',
+  );
+  assert.ok(d);
+  assert.equal(d.kind, "band");
+  assert.equal(d.lowerColumn, "lo");
+  assert.equal(d.upperColumn, "hi");
+
+  const cols = [
+    { name: "period", numeric: false },
+    { name: "value", numeric: true },
+    { name: "lo", numeric: true },
+    { name: "hi", numeric: true },
+    { name: "note", numeric: false },
+  ];
+  const band = (over) => ({
+    kind: "band",
+    labelColumn: "period",
+    seriesColumns: ["value"],
+    lowerColumn: "lo",
+    upperColumn: "hi",
+    ...over,
+  });
+  // Happy path.
+  assert.equal(validateDirective(band(), cols), null);
+  // Exactly one series.
+  assert.equal(
+    validateDirective(band({ seriesColumns: ["value", "lo"] }), cols),
+    "a band names exactly one series column",
+  );
+  // Both bounds required.
+  assert.equal(validateDirective(band({ lowerColumn: undefined }), cols), "band requires lower_column");
+  assert.equal(validateDirective(band({ upperColumn: undefined }), cols), "band requires upper_column");
+  // Bounds must exist and be numeric.
+  assert.equal(validateDirective(band({ upperColumn: "nope" }), cols), 'unknown upper_column "nope"');
+  assert.equal(validateDirective(band({ lowerColumn: "note" }), cols), 'lower_column "note" is not numeric');
+});
+
+test("parseChartSpec accepts an engine-capped title on directed specs", () => {
+  const titled = parseChartSpec(
+    JSON.stringify({
+      kind: "bar",
+      x: ["NE", "NW"],
+      series: [{ name: "total", values: [150, 200] }],
+      title: "Revenue by region",
+    }),
+  );
+  assert.ok(titled);
+  assert.equal(titled.title, "Revenue by region");
+  // Absent title stays absent (heuristic specs are unchanged).
+  const plain = parseChartSpec(good);
+  assert.ok(plain);
+  assert.equal(plain.title, undefined);
+  // Shape violations: non-string, empty, or over the engine's 80-char cap.
+  const withTitle = (title) =>
+    JSON.stringify({ kind: "bar", x: ["a", "b"], series: [{ name: "v", values: [1, 2] }], title });
+  assert.equal(parseChartSpec(withTitle(7)), null);
+  assert.equal(parseChartSpec(withTitle("")), null);
+  assert.equal(parseChartSpec(withTitle("x".repeat(81))), null);
+  assert.ok(parseChartSpec(withTitle("x".repeat(80))));
+});
+
+test("parseChartSpec accepts the emitter's bucketing subtitle (charts by default)", () => {
+  const withSubtitle = (subtitle) =>
+    JSON.stringify({ kind: "bar", x: ["a", "b"], series: [{ name: "v", values: [1, 2] }], subtitle });
+  // The engine-computed disclosure, byte-for-byte (analytics.rs bucket_top_n).
+  const pinned = "Top 23 of 40 by total — 17 smaller rows grouped as “Other”";
+  const spec = parseChartSpec(withSubtitle(pinned));
+  assert.ok(spec);
+  assert.equal(spec.subtitle, pinned);
+  // Absent subtitle stays absent (≤24-row specs are byte-identical to before).
+  const plain = parseChartSpec(good);
+  assert.ok(plain);
+  assert.equal(plain.subtitle, undefined);
+  // Shape violations: non-string, empty/blank, over the 140-char cap.
+  assert.equal(parseChartSpec(withSubtitle(7)), null);
+  assert.equal(parseChartSpec(withSubtitle("")), null);
+  assert.equal(parseChartSpec(withSubtitle("   ")), null);
+  assert.equal(parseChartSpec(withSubtitle("x".repeat(141))), null);
+  assert.ok(parseChartSpec(withSubtitle("x".repeat(140))));
+  // Display copy is trimmed, mirroring the title discipline.
+  assert.equal(parseChartSpec(withSubtitle("  padded  "))?.subtitle, "padded");
+});
+
+test("stripChartRequestFences removes directive fences from displayed prose", () => {
+  const fenced =
+    'Before.\n\n```lighthouse-chart-request\n{"kind":"none"}\n```\nAfter.';
+  assert.equal(stripChartRequestFences(fenced), "Before.\n\n\nAfter.");
+  // Unterminated fences (mid-stream) are dropped to the end of the text.
+  assert.equal(
+    stripChartRequestFences('Before. ```lighthouse-chart-request\n{"kind":'),
+    "Before. ",
+  );
+  // Chart SPECS are untouched — they render as charts, not prose.
+  const chart = "```lighthouse-chart\n{}\n```";
+  assert.equal(stripChartRequestFences(chart), chart);
+  // No fence, no change.
+  assert.equal(stripChartRequestFences("plain prose"), "plain prose");
 });

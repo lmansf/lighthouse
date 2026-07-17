@@ -7,15 +7,23 @@
  */
 
 import type {
+  Board,
+  BoardCardRef,
+  BoardCardRefresh,
   Briefing,
   BriefingReport,
   Cadence,
   ChangedPin,
   ChatChunk,
   ChatTurn,
+  CurationRule,
+  CurationRuleInput,
   DataSource,
   FileInspection,
   FileNode,
+  InsightsScan,
+  Investigation,
+  InvestigationCreateInput,
   OnboardingState,
   Pin,
   PolicySnapshot,
@@ -23,7 +31,21 @@ import type {
   AuditSnapshot,
   AuditVerdict,
   RagReference,
+  RecipeCard,
+  CapabilityMap,
   RestoreToken,
+  SemanticCards,
+  SemanticMetric,
+  MetricCreateInput,
+  DefineMetricResult,
+  Synonym,
+  ShapeViewResult,
+  View,
+  ViewCreateInput,
+  ViewInspection,
+  SigninPoll,
+  SigninStart,
+  SigninStatus,
 } from "./types";
 
 /** Curates which files/sources are exposed to retrieval, and runs retrieval. */
@@ -41,6 +63,27 @@ export interface RagService {
    * cascade); resolution covers the subtree.
    */
   setLocalOnly(nodeId: string, localOnly: boolean): Promise<void>;
+  /**
+   * Bulk curation rules (openspec: add-curation-rules): every stored rule,
+   * enriched with its generated display name, human scope label, and orphaned
+   * flag (scope folder gone — matches nothing, kept for cleanup). Rules are a
+   * RESOLUTION layer: they decide matching files — present and future — where
+   * no explicit per-node flag speaks, and never write per-node state.
+   */
+  listRules(): Promise<CurationRule[]>;
+  /**
+   * Create a rule (the engine mints the id and validates: action/kind
+   * whitelists, exactly one predicate, glob parse). A validation rejection
+   * comes back as `error` with the engine's reason rather than a throw, so
+   * the create form can surface it inline.
+   */
+  addRule(rule: CurationRuleInput): Promise<{ rule?: CurationRule; error?: string }>;
+  /**
+   * Remove a rule (idempotent). Only the rule's layer disappears: every file
+   * it was deciding reverts to the next layer down; explicit per-node flags
+   * are untouched by construction.
+   */
+  removeRule(id: string): Promise<void>;
   /** Toggle whether a whole source is available. */
   setSourceAvailable(sourceId: string, available: boolean): Promise<void>;
   /** Retrieve references relevant to a query from the currently-included set. */
@@ -82,13 +125,31 @@ export interface RagService {
     rows?: number;
   }>;
   /**
-   * Write a chat transcript (client-rendered markdown) as a note into
-   * `Lighthouse Notes/` in the vault. Implemented in BOTH engines. Returns the
-   * new file's id + final name (collision-suffixed, never overwrites).
+   * Write a client-composed artifact into the vault. Implemented in BOTH
+   * engines. Default (no options): a chat-transcript markdown note into
+   * `Lighthouse Notes/` — the original exportChat behavior, unchanged. With
+   * `options`, the SAME sanitized write op routes other client-composed
+   * artifacts — today the analytics evidence pack (a self-contained HTML file
+   * into `Lighthouse Results/`). `subdir`/`ext` are a STRICT engine-side
+   * allowlist ("Lighthouse Notes"|"Lighthouse Results"; "md"|"html") — the
+   * client can never name arbitrary folders or extensions. Returns the new
+   * file's id + final name (collision-suffixed, never overwrites).
+   *
+   * `investigationId` (openspec: add-investigations): when an investigation
+   * is current, pass its id and the NOTES destination becomes the
+   * investigation's own folder — `Lighthouse Notes/<folderName>/`, with the
+   * folder resolved ENGINE-SIDE from the store (the client never names it).
+   * An explicit "Lighthouse Results" subdir (the evidence pack) is
+   * unaffected; an unknown id comes back as `error`.
    */
   exportChat(
     title: string,
     markdown: string,
+    options?: {
+      subdir?: "Lighthouse Notes" | "Lighthouse Results";
+      ext?: "md" | "html";
+      investigationId?: string;
+    },
   ): Promise<{ savedId?: string; savedName?: string; error?: string }>;
   /**
    * G6: auto-export a conversation as an indexed vault note under
@@ -108,17 +169,25 @@ export interface RagService {
    * engine watches it: vault changes re-run the SQL (guarded, model-free) and
    * alert when the computed result changes. Re-pinning the same SQL replaces
    * the pin; past the cap the error explains the limit. The desktop engine
-   * primes the fresh pin's summary immediately.
+   * primes the fresh pin's summary immediately. `investigationId` (openspec:
+   * add-investigations) records the current investigation on the pin — its
+   * membership; absent leaves the pin uncategorized, and a re-pin adopts the
+   * new ask's investigation.
    */
   pinAsk(
     question: string,
     sql: string,
     fileIds: string[],
+    investigationId?: string,
   ): Promise<{ pin?: Pin; error?: string }>;
   /** Remove a pin (idempotent). */
   unpinAsk(id: string): Promise<void>;
-  /** All pins, oldest first. */
-  listPins(): Promise<Pin[]>;
+  /**
+   * All pins, oldest first. `investigationId` (openspec: add-investigations)
+   * filters to the pins carrying that investigation; absent = all pins, the
+   * original behavior.
+   */
+  listPins(investigationId?: string): Promise<Pin[]>;
   /**
    * Re-run every pin now (manual refresh). Returns the pins whose computed
    * result changed plus the refreshed list. PARITY: the web dev twin can't
@@ -154,6 +223,21 @@ export interface RagService {
    * which case the UI keeps its static empty-state hint.
    */
   suggestedAsks(includedFileIds: string[]): Promise<{ label: string; question: string }[]>;
+  /**
+   * Recipes applicable to the included set (openspec: add-recipes §2), for the
+   * Library gallery and the empty-state recipe chips. Each card names the file
+   * (display name) or view (name) it runs on; tapping it seeds the chat with the
+   * recipe-cued question (see `runRecipeQuestion`). Empty when nothing matches
+   * (or on the web dev twin — recipes are Rust-engine-only, so it returns []).
+   */
+  applicableRecipes(includedFileIds: string[]): Promise<RecipeCard[]>;
+  /**
+   * The capability map (openspec: add-deep-analysis §3): the analyzable tables +
+   * their recipes/metrics/asks + one "Investigate {table}" per Date+Numeric table
+   * for the included set — a single "what can I do" view. A pure aggregate of the
+   * posture-gated `applicable_*` surfaces. Empty on the web dev twin (Rust-only).
+   */
+  capabilityMap(includedFileIds: string[]): Promise<CapabilityMap>;
   /**
    * Link a file or folder by its real absolute path instead of copying it into
    * the vault (reduces duplication). Returns the new node id. Desktop-only —
@@ -228,6 +312,275 @@ export interface RagService {
    * dev twin composes from each pin's last known summary (no before).
    */
   refreshBriefingNote(): Promise<{ savedId?: string; savedName?: string; error?: string }>;
+  /**
+   * Investigations (openspec: add-investigations): named, durable containers
+   * for analysis. Every record in creation order — the caller filters
+   * archived ones (archive hides, never deletes). `pinRefs`/`noteRefs` come
+   * back derived by the engine at read time (pins carrying the id; files
+   * under the investigation's notes folder).
+   */
+  listInvestigations(): Promise<Investigation[]>;
+  /**
+   * Create an investigation. The engine mints the id, stamps creation time,
+   * fixes the sanitized notes folder name, and validates: non-empty name,
+   * unique case-insensitively (archived records count). Empty/absent
+   * `scopeFileIds` = whole vault. A validation rejection comes back as
+   * `error` with the engine's reason (like addRule), so the create form can
+   * surface it inline.
+   */
+  createInvestigation(
+    input: InvestigationCreateInput,
+  ): Promise<{ investigation?: Investigation; error?: string }>;
+  /**
+   * Rename an investigation — same uniqueness rule as create (a case change
+   * of its own name is allowed). The notes `folderName` deliberately does
+   * NOT move: membership = location, and rename moves nothing.
+   */
+  renameInvestigation(
+    id: string,
+    name: string,
+  ): Promise<{ investigation?: Investigation; error?: string }>;
+  /**
+   * Archive or unarchive — a visibility flag only. Nothing cascades or is
+   * deleted: pins, notes, scope, and conversation refs stay untouched, and
+   * unarchiving restores the investigation fully.
+   */
+  setInvestigationArchived(
+    id: string,
+    archived: boolean,
+  ): Promise<{ investigation?: Investigation; error?: string }>;
+  /**
+   * Record a conversation ref (an opaque client Conversation.id — never a
+   * transcript). The engine accepts it only when `persistAllowed` (the
+   * client's history verdict: persistEnabled && !chatHistoryLocked(), the
+   * same value the ask path sends) AND the managed policy allow history;
+   * either false ⇒ a silent no-op — the returned record simply lacks the
+   * ref. Refs dedupe.
+   */
+  addInvestigationConversationRef(
+    id: string,
+    conversationId: string,
+    persistAllowed: boolean,
+  ): Promise<{ investigation?: Investigation; error?: string }>;
+  /**
+   * Fork an investigation into a fresh line of inquiry (openspec:
+   * add-automation §4): a NEW record with its own id, creation time, and empty
+   * notes folder, copying ONLY the parent's STRUCTURE — scope, provider
+   * policy, and conversation refs. Derived membership (pins/notes) is NOT
+   * duplicated. `name` obeys the same rule as create (non-empty, unique
+   * case-insensitively); a rejection comes back as `error` with the engine's
+   * reason, so the branch form can surface it inline.
+   */
+  forkInvestigation(
+    id: string,
+    name: string,
+  ): Promise<{ investigation?: Investigation; error?: string }>;
+  /**
+   * Export an investigation to a standalone markdown note written under its
+   * own notes folder (`Lighthouse Notes/<folder>/`) via the write-artifact
+   * allowlist — a non-egress in-vault write. The markdown REFERENCES the
+   * investigation's structure and derived membership (scope, conversation
+   * ids, pins, notes) and never embeds transcripts. Returns the saved note's
+   * id and name, or an `error`.
+   */
+  exportInvestigation(
+    id: string,
+    title?: string,
+  ): Promise<{ savedId?: string; savedName?: string; error?: string }>;
+  /**
+   * Boards (openspec: add-boards): pin-backed local dashboards.
+   * `investigationId` filters to that investigation's boards; absent = all
+   * boards (the listPins convention). A scope with no persisted board
+   * returns its VIRTUAL default (deterministic `default-…` id, empty cards,
+   * `createdMs` 0) — mutating that id materializes it engine-side.
+   */
+  listBoards(investigationId?: string): Promise<Board[]>;
+  /**
+   * Create a board in the global scope (absent/blank `investigationId`) or
+   * inside an investigation. The engine mints the id, stamps creation time,
+   * and validates: non-empty name, unique case-insensitively WITHIN the
+   * scope. A validation rejection comes back as `error` with the engine's
+   * reason (like createInvestigation), so the form can surface it inline.
+   */
+  createBoard(
+    name: string,
+    investigationId?: string,
+  ): Promise<{ board?: Board; error?: string }>;
+  /**
+   * Rename a board — same per-scope uniqueness rule as create (a case
+   * change of its own name is allowed). Renaming a virtual default
+   * materializes it under the new name, keeping the deterministic id.
+   */
+  renameBoard(id: string, name: string): Promise<{ board?: Board; error?: string }>;
+  /**
+   * Delete a board. Deleting a scope's default (virtual or materialized) is
+   * effectively a reset — the next listing synthesizes a fresh empty
+   * default for the scope. Cards are references: no pin is ever touched.
+   */
+  deleteBoard(id: string): Promise<{ ok?: boolean; error?: string }>;
+  /**
+   * Replace a board's card list wholesale — the ONE mutation for reorder,
+   * resize, add, and remove alike (atomic full-list replace). Pin ids are
+   * not validated against pins (tombstone-tolerant); sizes must be S|M|L.
+   * Targeting a virtual default id materializes it with these cards.
+   */
+  setBoardCards(
+    id: string,
+    cards: BoardCardRef[],
+  ): Promise<{ board?: Board; error?: string }>;
+  /**
+   * Refresh a board's cards, one answer per requested pin. Desktop re-runs
+   * each pin's stored SQL through the guarded model-free direct path (a
+   * manual refresh IS a recheck — the pin's stored digest/summary advance)
+   * and answers `live: true`; the web dev twin can't execute SQL (PARITY)
+   * and answers `live: false` with each pin's stored state. Unknown pins
+   * answer `tombstone: true`.
+   */
+  refreshBoardCards(pinIds: string[]): Promise<BoardCardRefresh[]>;
+  /**
+   * Shaped views (openspec: add-shaped-views): every saved view, creation
+   * order. Views are named, guarded SELECTs stored as definitions and
+   * resolved virtually at ask time — never materialized rows.
+   */
+  listViews(): Promise<View[]>;
+  /**
+   * Create a view. The ENGINE owns every rule — name sanitization, the
+   * single-read-only-SELECT guard, reads derivation, cycle/depth caps, and
+   * collision checks — and refusals THROW with the engine's human-readable
+   * reason so the dialogs can show it verbatim (the UI never re-validates
+   * beyond trimming). Nothing persists on refusal.
+   */
+  createView(input: ViewCreateInput): Promise<View>;
+  /**
+   * Rename a view — refused (throws, with the dependent names in the
+   * message) while other views read it; otherwise a pure store update that
+   * keeps the id and every stored dependency binding.
+   */
+  renameView(id: string, name: string): Promise<View>;
+  /**
+   * Delete a view. Refused (throws, naming the transitive dependents) while
+   * dependents exist unless `cascade` — sent only after the UI's explicit
+   * confirmation showing that list. Returns the deleted ids. Sources are
+   * never touched by any path.
+   */
+  deleteView(id: string, cascade?: boolean): Promise<string[]>;
+  /**
+   * The views that read `id`: `dependents` directly (what the rename refusal
+   * names), `transitive` the whole downstream set (what the cascade
+   * confirmation must show) — name lists for the dialogs.
+   */
+  viewDependents(id: string): Promise<{ dependents: string[]; transitive: string[] }>;
+  /**
+   * Inspect a saved view (openspec: add-shaped-views §4): the exact definition
+   * SQL, the provenance-labeled summary, the source files it reads
+   * (transitively) with their saved-age freshness, the effectively-local-only
+   * flag, and the dependent names. Pure stored-state read — no SQL executes, so
+   * BOTH engines return the identical shape. An unknown id returns `{}`.
+   */
+  inspectView(id: string): Promise<ViewInspection>;
+  /**
+   * Shaping ask (openspec: add-shaped-views §3): ONE engine-guarded model
+   * completion proposes a transform SELECT over `source` (a registered table
+   * or saved view name), evidenced with engine-rendered before/after sample
+   * rows. Returns the proposal, or `{available:false}` with an honest reason
+   * (extractive/no-model provider; ALWAYS on the web dev twin — PARITY).
+   * Refusals — unknown source, guard rejection, the model's own refusal —
+   * throw with the engine's reason so the dialog shows it; retry is free.
+   * NOTHING persists until `createView` runs on the user's explicit Save.
+   */
+  shapeView(source: string, instruction: string, fileIds: string[]): Promise<ShapeViewResult>;
+  /**
+   * The semantic definitions (openspec: add-semantic-layer §6) applicable to the
+   * included set, posture-gated — metrics whose tables are in scope plus their
+   * synonyms, for the SemanticNav. A metric over a file the chat isn't showing
+   * never surfaces (the applicableRecipes rule); a local-only metric is absent on
+   * a cloud ask. PARITY: `list` needs no analytics, so BOTH engines compute the
+   * identical subset (unlike recipes, which the twin returns [] for). Empty when
+   * nothing matches.
+   */
+  applicableSemantics(includedFileIds: string[]): Promise<SemanticCards>;
+  /**
+   * Create a metric (openspec §6.1). The ENGINE owns every rule — name
+   * sanitization, the read-only aggregation guard, reads derivation, the
+   * name-shadow check — and refusals THROW with the engine's human-readable
+   * reason so the dialog shows it verbatim. Nothing persists on refusal.
+   */
+  createMetric(input: MetricCreateInput): Promise<SemanticMetric>;
+  /**
+   * Create a synonym: a colloquial `term` mapped to a canonical column or metric
+   * `canonical`. Unique case-insensitively; refusals throw the engine's reason.
+   */
+  createSynonym(term: string, canonical: string): Promise<Synonym>;
+  /**
+   * Rename a metric — refused (throws, naming the dependent synonyms) while any
+   * synonym maps to it; otherwise a pure store update keeping the id and reads.
+   */
+  renameMetric(id: string, name: string): Promise<SemanticMetric>;
+  /**
+   * Delete a metric. Refused (throws, naming the dependent synonyms) while
+   * synonyms map to it unless `cascade` — sent only after the UI's explicit
+   * confirmation showing that list; cascade removes the metric and its synonyms
+   * in one write. Returns the deleted metric id. Sources are never touched.
+   */
+  deleteMetric(id: string, cascade?: boolean): Promise<string>;
+  /** Delete a synonym by its term (case-insensitive). Throws if unknown. */
+  deleteSynonym(term: string): Promise<void>;
+  /**
+   * Propose a metric from a Beam answer's SQL (openspec §6.1 — the "Save as view"
+   * precedent): the engine parses the executed SQL and proposes an aggregate
+   * expression + entity the "Define as metric" dialog shows before the user names
+   * and saves it (via createMetric). `{available:false}` with an honest reason
+   * when there's no single-table aggregate — and ALWAYS on the web dev twin
+   * (SQL parsing is Rust-only — PARITY).
+   */
+  defineMetric(sql: string, fileIds: string[]): Promise<DefineMetricResult>;
+  /**
+   * Proactive insights (openspec: add-quant-depth §5): run the cheap
+   * deterministic detectors (the anomaly z-score, top-movers, and changepoint)
+   * over the cataloged tables and return the ranked, bounded findings plus the
+   * scan's coverage — what stands out WITHOUT the user asking. Takes no arguments
+   * (the engine scans its own catalog, bounded by a hard cap). Every headline is
+   * engine-computed and rendered verbatim; `tablesScanned` < `tablesAvailable`
+   * discloses the cap. PARITY: the scan is Rust-only (DataFusion), so the web dev
+   * twin answers an empty scan rather than a fabricated one — the panel then
+   * honestly shows "nothing stands out". Backs the proactive "What stands out"
+   * panel; recomputed on show and on the vault-change signal, never a background
+   * poll.
+   */
+  insights(): Promise<InsightsScan>;
+  /**
+   * Deep analysis (openspec: add-deep-analysis §2): run the applicable recipe
+   * battery over `table`, assemble the verified results into a report, and WRITE
+   * it into the vault as a markdown note — returns the saved node id + name so the
+   * caller can reveal it. Rust-only (DataFusion + recipes); the web dev twin
+   * throws (unavailable). `investigationId` optionally files the note under that
+   * investigation's notes folder instead of `Lighthouse Reports`.
+   */
+  investigate(table: string, investigationId?: string): Promise<{ savedId: string; savedName: string }>;
+  /**
+   * Provider sign-in (0.12.1 §3): status of the generic, registration-gated
+   * OAuth device flow. `available` is false on a stock build (no endpoints
+   * or client id are configured until a maintainer registers with the
+   * vendor), on the web twin, and under any partial configuration — never
+   * render a sign-in affordance while it is false.
+   */
+  providerAuthStatus(): Promise<SigninStatus>;
+  /**
+   * Begin a device-authorization sign-in. `error` carries the honest reason
+   * (unconfigured build, vendor refusal) instead of a throw so the dialog
+   * surfaces it inline — the addRule/pinAsk idiom.
+   */
+  providerAuthStart(): Promise<{ start?: SigninStart; error?: string }>;
+  /** Poll the started sign-in once; drive it at the returned interval. */
+  providerAuthPoll(): Promise<SigninPoll>;
+  /** Drop the signed-in session — sealed tokens removed engine-side. */
+  providerAuthSignout(): Promise<void>;
+  /**
+   * Persist how the OpenAI provider authenticates. "key" (the default)
+   * always saves; "signin" is registration-gated like the flow it arms and
+   * comes back as `error` on a build where sign-in isn't configured.
+   */
+  providerAuthSetMethod(method: "key" | "signin"): Promise<{ ok?: boolean; error?: string }>;
 }
 
 /**
@@ -255,6 +608,30 @@ export interface AuthService {
   signOut(): Promise<void>;
 }
 
+/**
+ * Per-ask answer-cache controls (openspec: add-answer-cache), computed by the
+ * CLIENT per request and carried on the wire. `bypassCache` is the Re-run /
+ * Regenerate gesture: skip the cache lookup, run live, refresh the entry.
+ * `persistAllowed` is the chat-history verdict — `persistEnabled() &&
+ * !chatHistoryLocked()` at the moment of the ask — which gates the engine's
+ * DISK cache mirror (history opt-in is client-only state by design, so the
+ * engines only ever learn a per-request verdict). Both default false: an
+ * absent field fails toward privacy (in-memory cache only, disk mirror
+ * deleted).
+ */
+export interface AskOptions {
+  bypassCache?: boolean;
+  persistAllowed?: boolean;
+  /**
+   * The investigation this ask runs inside (openspec: add-investigations).
+   * Engine-resolved: a non-empty scope becomes the ask's attachments unless
+   * explicit `attachmentFileIds` are passed (most-specific wins), and a
+   * local-only policy forces the private path at the model-config chokepoint.
+   * Absent = the global context.
+   */
+  investigationId?: string;
+}
+
 /** Streams an assistant answer plus its references for a user question. */
 export interface ChatService {
   /**
@@ -266,7 +643,8 @@ export interface ChatService {
    * this question), regardless of the global included set. An aborted `signal`
    * cancels the in-flight request (the chat UI's Stop button); implementations
    * should surface the abort by throwing (an `AbortError` DOMException) so the
-   * caller can keep the partial answer and settle its state.
+   * caller can keep the partial answer and settle its state. `opts` carries the
+   * per-ask answer-cache controls (see AskOptions).
    */
   ask(
     question: string,
@@ -274,5 +652,6 @@ export interface ChatService {
     history?: ChatTurn[],
     attachmentFileIds?: string[],
     signal?: AbortSignal,
+    opts?: AskOptions,
   ): AsyncIterable<ChatChunk>;
 }

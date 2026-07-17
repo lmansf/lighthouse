@@ -5,6 +5,15 @@ import { useAuthStore } from "@/stores/useAuthStore";
 import { AppShell } from "@/shell/AppShell";
 import { OnboardingPanel } from "@/features/onboarding/OnboardingPanel";
 import { FileExplorer } from "@/features/explorer/FileExplorer";
+// Static import (no dynamic gain): FileExplorer already pulls FileInspector
+// into the first-paint graph, so the host adds only its own few lines.
+import { FileInspectorHost } from "@/features/explorer/FileInspector";
+import { InvestigationsNav } from "@/features/investigations/InvestigationsNav";
+import { ViewsNav } from "@/features/views/ViewsNav";
+import { RecipesNav } from "@/features/recipes/RecipesNav";
+import { SemanticNav } from "@/features/semantic/SemanticNav";
+import { InsightsNav } from "@/features/insights/InsightsNav";
+import { CapabilityNav } from "@/features/capabilities/CapabilityNav";
 import { ChatPanel } from "@/features/chat/ChatPanel";
 import { VersionBadge } from "@/shell/VersionBadge";
 
@@ -29,6 +38,14 @@ const SummonHint = dynamic(
 );
 const FirstRunTour = dynamic(
   () => import("@/features/help/FirstRunTour").then((m) => m.FirstRunTour),
+  { ssr: false },
+);
+const QuickOpen = dynamic(
+  () => import("@/features/quickopen/QuickOpen").then((m) => m.QuickOpen),
+  { ssr: false },
+);
+const BoardHost = dynamic(
+  () => import("@/features/boards/BoardPanel").then((m) => m.BoardHost),
   { ssr: false },
 );
 
@@ -57,7 +74,34 @@ export default function Home() {
       </div>
     );
   } else {
-    shell = <AppShell sidebar={<FileExplorer />} main={<ChatPanel />} />;
+    // Investigations mount ABOVE the file tree as a sidebar fragment
+    // (openspec: add-investigations design) — no Sidebar API change.
+    shell = (
+      <AppShell
+        sidebar={
+          <>
+            {/* Proactive "What stands out" panel (openspec: add-quant-depth §5):
+                the one surface that shows a finding WITHOUT the user asking, so
+                it sits at the TOP of the analytics nav group. Placed above
+                SemanticNav — the RecipesNav→ViewsNav→InvestigationsNav→
+                FileExplorer adjacencies the nav-UI tests pin stay intact. */}
+            <InsightsNav />
+            <SemanticNav />
+            {/* Capability map (openspec: add-deep-analysis §4.3): a "what can I
+                do with this vault" overview + the Investigate affordance. Placed
+                between SemanticNav and RecipesNav so the InsightsNav→SemanticNav
+                and RecipesNav→ViewsNav→InvestigationsNav→FileExplorer adjacencies
+                the nav-UI tests pin all stay intact. */}
+            <CapabilityNav />
+            <RecipesNav />
+            <ViewsNav />
+            <InvestigationsNav />
+            <FileExplorer />
+          </>
+        }
+        main={<ChatPanel />}
+      />
+    );
   }
 
   return (
@@ -79,6 +123,18 @@ export default function Home() {
           <FirstRunTour />
           {/* First-run summon hint (desktop only, self-gated once-shown). */}
           <SummonHint />
+          {/* Citation → preview host: opens the file inspector on the cited
+              chunk for chat citations and the widget's cross-window handoff. */}
+          <FileInspectorHost />
+          {/* Ctrl/Cmd+P quick-open palette (time-savers): fuzzy-find a vault
+              file, then reveal it in the explorer or attach it to the chat.
+              Main window only — AppShell owns the shortcut. */}
+          <QuickOpen />
+          {/* The pin board (openspec: add-boards): opened from the settings
+              gear via lighthouse:open-board; mounted here (not lazily on
+              open) so its pins-changed listener retains change badges while
+              the board is closed. */}
+          <BoardHost />
         </>
       )}
     </>

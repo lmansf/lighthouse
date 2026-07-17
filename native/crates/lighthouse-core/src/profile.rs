@@ -282,6 +282,20 @@ pub fn model_config() -> ModelCfg {
     }
 }
 
+/// The local (on-device, key-less) model config — the exact shape
+/// `model_config()` yields when the local provider is active. The
+/// investigations local-only swap uses it at the ask chokepoint (openspec:
+/// add-investigations); this module owns the sentinels, so the swap can never
+/// drift from what selecting the private model produces. KEEP IN SYNC with
+/// profile.ts::localModelConfig.
+pub fn local_model_config() -> ModelCfg {
+    ModelCfg {
+        provider_id: Some(LOCAL_PROVIDER_ID.to_string()),
+        model_id: Some(LOCAL_MODEL_ID.to_string()),
+        api_key: None,
+    }
+}
+
 /// The key a chat with `provider_id` would use right now (env → stored map →
 /// legacy anthropic slot). None for local/unknown providers or when unkeyed.
 pub fn resolved_key_for(provider_id: &str) -> Option<String> {

@@ -50,6 +50,35 @@ pub async fn set_local_only(node_id: &str, value: bool) {
     vault::set_local_only(node_id, value);
 }
 
+/// Bulk curation rules (openspec: add-curation-rules). Like local-only marks,
+/// rules live in the vault state and resolve by node id, so they route
+/// straight to the vault engine regardless of the owning source.
+pub async fn rules_listing() -> Vec<vault::RuleListing> {
+    vault::rules_listing()
+}
+
+/// Validate + add a rule (engine-minted id); returns the enriched rule for
+/// the wire. A rule can newly include content, so warm the index like a
+/// visibility flip does.
+pub async fn add_rule(
+    scope: &str,
+    kind: Option<&str>,
+    ext: Option<&[String]>,
+    glob: Option<&str>,
+    action: &str,
+) -> anyhow::Result<vault::RuleListing> {
+    let rule = vault::add_rule(scope, kind, ext, glob, action)?;
+    vault::warm_index_async();
+    Ok(vault::enrich_rule(rule))
+}
+
+/// Remove a rule (idempotent). Removing an exclude rule can newly include
+/// content too — warm the index the same way.
+pub async fn remove_rule(id: &str) {
+    vault::remove_rule(id);
+    vault::warm_index_async();
+}
+
 pub async fn set_source_available(available: bool, source_id: Option<&str>) {
     if source_id == Some(crate::config::SHAREPOINT_SOURCE_ID) {
         sharepoint::set_available(available);
@@ -106,12 +135,15 @@ pub async fn restore_from_vault(desc: &serde_json::Value) -> anyhow::Result<serd
 /// Retrieval across the included set: vault files plus any cloud connector's
 /// mirrored content, ranked together in the source-agnostic engine.
 /// Attachment-scoped queries skip cloud mirroring (attachments are vault files).
+/// `preferred_conversation_ids` rides through to the recall preference
+/// (openspec: add-investigations); empty = no preference.
 pub async fn retrieve(
     query: &str,
     included_file_ids: &[String],
     attachment_ids: &[String],
     k: usize,
     is_cloud: bool,
+    preferred_conversation_ids: &[String],
 ) -> Retrieved {
     let external = if attachment_ids.is_empty() {
         sharepoint::retrieval_items(included_file_ids)
@@ -121,16 +153,19 @@ pub async fn retrieve(
     let query = query.to_string();
     let ids = included_file_ids.to_vec();
     let attachments = attachment_ids.to_vec();
+    let preferred = preferred_conversation_ids.to_vec();
     // The ranking engine is synchronous CPU+disk work; keep it off the async
     // reactor so a big corpus can't stall other requests (the TS engine blocks
     // Node's event loop here — this is the structural fix). `is_cloud` narrows
     // the candidate set to the shareable one inside `vault::retrieve`.
-    tokio::task::spawn_blocking(move || vault::retrieve(&query, &ids, k, &external, &attachments, is_cloud))
-        .await
-        .unwrap_or(Retrieved {
-            references: vec![],
-            contexts: vec![],
-        })
+    tokio::task::spawn_blocking(move || {
+        vault::retrieve(&query, &ids, k, &external, &attachments, is_cloud, &preferred)
+    })
+    .await
+    .unwrap_or(Retrieved {
+        references: vec![],
+        contexts: vec![],
+    })
 }
 
 /// Read-only inspection of a single file ("What the AI sees"): what the engine

@@ -67,6 +67,26 @@ without a stored key for the selected provider. Organizations can enforce
 this: the managed policy layer's `allowedProviders`/`forceLocalOnly`
 (docs/managed-deployment.md) pins the choice engine-side.
 
+**Provider sign-in (inert by default).** The code also carries a generic,
+standards-based sign-in flow (OAuth 2.0 device authorization, RFC 8628) as
+an alternative to pasting an OpenAI API key
+(`native/crates/lighthouse-core/src/provider_auth.rs`) — but it ships with
+**no endpoints and no client id configured**, so a stock build makes **zero
+auth-related calls** and shows **no sign-in control** (the same fail-closed
+pattern as the updater's signing key). Every identifier — a public-client
+id, the device-authorization endpoint, the token endpoint, and the API
+base — must be supplied by the maintainer, at build or run time, **after
+registering this application with the vendor**; nothing vendor-specific is
+embedded as a default, and any of the four missing keeps the whole surface
+answering "unavailable". Only in a build a maintainer has configured does
+the egress become: the **configured auth host** (sign-in + token refresh —
+carries the client id and OAuth codes/tokens, **never document content or
+file names**; ledger purpose `Provider sign-in`), and the **configured API
+base** (signed-in asks — the same request and payload class as the table
+above, with a bearer token in place of the key; ledger purpose
+`Signed-in ask`). The granted tokens live in the same encrypted
+install-global secrets store as API keys, and sign-out deletes them.
+
 ## 2. Update check — GitHub releases API (notify-only)
 
 `GET https://api.github.com/repos/lmansf/lighthouse/releases/latest` at boot
@@ -174,6 +194,32 @@ rebuilds any confident grid as markdown appended to the extracted text — pure
 geometry, no model, no network. Reconstructed tables ride the same on-device
 extraction/retrieval path as OCR text; nothing about them touches egress.
 
+Quantitative depth (`recipes.rs`, `insights.rs`, add-quant-depth) is
+computation, not a new destination. The `forecast` and `changepoint-scan`
+recipes are guarded SQL over DataFusion — every number is engine-computed
+on-device; they egress only what any recipe narration does (the result cards
+handed to the configured model, exactly as the existing recipes, and NOTHING
+when the model is local/extractive). Proactive **insights** (`insights::scan`,
+the "what stands out" surface) run those cheap detectors over the cataloged
+tables with **no model in the loop at all** — the headlines are templated from
+engine numbers — so a scan is pure on-device SQL and touches egress **not at
+all**. No new network path; the band chart the forecast draws rides inline in
+the answer markdown like every other chart.
+
+Deep analysis (`reports.rs` `investigate`, add-deep-analysis) is the same
+posture at a larger grain. "Investigate {table}" runs the applicable recipe
+battery — those same guarded DataFusion SELECTs — and assembles the VERIFIED
+results into a report that is **written into the vault** through the
+write-artifact allowlist (`vault::write_artifact`, the briefing/export note
+precedent): a sanitized, traversal-safe, never-overwrite **local file write**,
+never a network destination. The deterministic core uses **no model**, so it
+egresses **not at all**; the optional prose intro (off by default) would egress
+exactly as any recipe narration does and supplies no number. The **capability
+map** (`meta::capability_map`) is pure aggregation of the already-posture-gated
+`applicable_*` surfaces — it introduces no analysis and no network path, and a
+cloud posture drops a local-only table from the map just as it drops it from
+every other surface.
+
 ## 7. Build/CI-time only — never in the shipped app
 
 `scripts/fetch-local-model.mjs` (build machines): llama.cpp GitHub
@@ -198,6 +244,15 @@ that point (a detective control, not anti-root DRM — see the threat model in
 machine**: it is written and read locally, and the only way it moves is the
 user's own "Export CSV" into the vault. The TS dev twin mirrors the record shape
 but omits the HMAC chain (PARITY — it is not a security surface).
+
+The **headless entry points** — the `lighthouse` CLI (`ask`) and the
+`lighthouse-mcp` server (`ask_vault`) — answer through the SAME
+`ask::run_headless_ask` chokepoint the app uses (openspec: add-automation), so a
+scripted or MCP-driven ask is recorded here identically: one audit record with
+the file ids read, the provider, and the per-question egress delta. There is no
+new egress path — a `--local`/local-only ask (and every `list` /
+`run_analytics_sql` read) stays on-device, and the CLI's `export` is a
+non-egress in-vault write.
 
 ## Redirect / effective hosts (for allowlisting)
 

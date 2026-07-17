@@ -12,7 +12,7 @@
  * PURE READ: it calls listNodes / docText / retrieve — never a setter.
  */
 import type { FileInspection } from "@/contracts";
-import { docText, listNodes, retrieve } from "./vault";
+import { docText, inclusionAttribution, listNodes, localOnlyAttribution, retrieve } from "./vault";
 
 /** A glance at the extracted text, not the whole document. */
 const PREVIEW_CHARS = 600;
@@ -39,6 +39,11 @@ export async function inspect(fileId: string, query?: string): Promise<FileInspe
     included: node.ragIncluded,
     localOnly: node.localOnly === true,
     chunkMode: isTabular(node.name) ? "tabular" : "prose",
+    // Attribution ("included by rule 'spreadsheets in /reports'", openspec:
+    // add-curation-rules) — the same decision layer the walk above resolved,
+    // reported as WHY. Shared field: this twin computes it with full fidelity.
+    includedBy: inclusionAttribution(fileId),
+    localOnlyBy: localOnlyAttribution(fileId),
   };
 
   // Extract preview — the bounded slice of text the model would read. Null for a

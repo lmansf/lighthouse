@@ -315,6 +315,512 @@ async fn wire_protocol_end_to_end() {
     assert!(vault_dir.path().join(".rag-vault/trash").exists());
 }
 
+/// Investigations §2 over the real wire (openspec: add-investigations): an
+/// ask carrying an `investigationId` resolves the investigation's scope
+/// through the attachment machinery (citations come only from scope), and a
+/// `local-only` investigation swaps the resolved model config to the private
+/// path at the model_config() chokepoint — under a cloud-configured profile
+/// with a (fake-keyed, never-dialed) provider, the final chunk's meta.origin
+/// says "device". Zero network: if the swap ever regressed, origin would
+/// stamp "anthropic" and this test fails before any citation check.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn investigation_scope_and_local_only_over_the_wire() {
+    let _env = lock_env();
+    let (base, _vault_dir) = spawn_server().await;
+    let client = reqwest::Client::new();
+
+    // Three fixture files; the decoy matches the probe query best and sits
+    // OUTSIDE the investigation's scope.
+    let form = reqwest::multipart::Form::new()
+        .part(
+            "files",
+            reqwest::multipart::Part::bytes(
+                b"the harbor ledger shows the missing shipment entries".to_vec(),
+            )
+            .file_name("alpha.md"),
+        )
+        .text("paths", "cases/alpha.md")
+        .part(
+            "files",
+            reqwest::multipart::Part::bytes(
+                b"harbor ledger notes about the missing shipment manifest".to_vec(),
+            )
+            .file_name("beta.md"),
+        )
+        .text("paths", "cases/beta.md")
+        .part(
+            "files",
+            reqwest::multipart::Part::bytes(
+                b"missing shipment missing shipment harbor ledger decoy dossier".to_vec(),
+            )
+            .file_name("decoy.md"),
+        )
+        .text("paths", "cases/decoy.md");
+    let up: Value = client
+        .post(format!("{base}/api/upload"))
+        .multipart(form)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(up["skipped"].as_array().unwrap().is_empty());
+    let r = client
+        .post(format!("{base}/api/rag"))
+        .json(&json!({ "op": "include", "nodeId": "cases", "included": true }))
+        .send()
+        .await
+        .unwrap();
+    assert!(r.status().is_success());
+    let all = json!(["cases/alpha.md", "cases/beta.md", "cases/decoy.md"]);
+
+    // Create the investigations over the wire (§1's op): one scoped to 2 of
+    // the 3 files, one local-only over the whole vault.
+    let created: Value = client
+        .post(format!("{base}/api/rag"))
+        .json(&json!({
+            "op": "investigations",
+            "action": "create",
+            "name": "Harbor case",
+            "scopeFileIds": ["cases/alpha.md", "cases/beta.md"],
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let scoped_id = created["investigation"]["id"].as_str().unwrap().to_string();
+    let created: Value = client
+        .post(format!("{base}/api/rag"))
+        .json(&json!({
+            "op": "investigations",
+            "action": "create",
+            "name": "Sealed",
+            "providerPolicy": "local-only",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let sealed_id = created["investigation"]["id"].as_str().unwrap().to_string();
+
+    // NDJSON /api/chat helper: (final chunk, concatenated deltas).
+    let chat = |body: Value| {
+        let client = client.clone();
+        let base = base.clone();
+        async move {
+            let res = client
+                .post(format!("{base}/api/chat"))
+                .json(&body)
+                .send()
+                .await
+                .unwrap();
+            assert!(res.status().is_success());
+            let text = res.text().await.unwrap();
+            let lines: Vec<Value> = text
+                .lines()
+                .map(|l| serde_json::from_str(l).expect("every line is a ChatChunk"))
+                .collect();
+            let last = lines.last().unwrap().clone();
+            assert_eq!(last["done"], true);
+            let full: String = lines
+                .iter()
+                .filter_map(|l| l["delta"].as_str().map(String::from))
+                .collect();
+            (last, full)
+        }
+    };
+    let ref_ids = |last: &Value| -> Vec<String> {
+        last["references"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["fileId"].as_str().unwrap().to_string())
+            .collect()
+    };
+
+    // Control (no investigationId): the out-of-scope decoy is a candidate.
+    let (last, _) = chat(json!({
+        "question": "where did the missing shipment go?",
+        "includedFileIds": all,
+    }))
+    .await;
+    assert!(
+        ref_ids(&last).contains(&"cases/decoy.md".to_string()),
+        "unscoped ask sees the decoy: {last}"
+    );
+
+    // Scoped ask: citations come ONLY from the investigation's scope — the
+    // scope rode the existing attachment machinery, so every downstream
+    // choke point (retrieval, honesty footers) applied verbatim.
+    let (last, _) = chat(json!({
+        "question": "what do the case notes say about the missing shipment?",
+        "includedFileIds": all,
+        "investigationId": scoped_id,
+    }))
+    .await;
+    let cited = ref_ids(&last);
+    assert!(!cited.is_empty(), "scoped ask still grounds: {last}");
+    for id in &cited {
+        assert!(
+            id == "cases/alpha.md" || id == "cases/beta.md",
+            "citation escaped the scope: {cited:?}"
+        );
+    }
+
+    // Cloud-configure the profile with a FAKE key (spawn_server cleared the
+    // env one). From here every ask would resolve a keyed anthropic config —
+    // stamping origin "anthropic" — unless the investigation swaps it.
+    let p: Value = client
+        .post(format!("{base}/api/profile"))
+        .json(&json!({ "op": "selectModel", "providerId": "anthropic", "modelId": "claude-haiku-4-5", "apiKey": "sk-test-fake" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(p["hasApiKey"], true, "profile really is cloud-keyed now");
+
+    // Local-only investigation, cloud profile: the cfg swap at the
+    // model_config() chokepoint means no cloud transport is ever built — the
+    // private path answers (local model absent here, so its extractive
+    // fallback), grounded, and the provenance stamp is truthfully on-device.
+    let (last, full) = chat(json!({
+        "question": "what does the harbor ledger show?",
+        "includedFileIds": all,
+        "investigationId": sealed_id,
+    }))
+    .await;
+    assert_eq!(
+        last["meta"]["origin"], "device",
+        "local-only must stamp on-device under a cloud profile: {last}"
+    );
+    assert!(!ref_ids(&last).is_empty(), "private path still grounds: {last}");
+    assert!(!full.is_empty(), "private path still answers");
+}
+
+/// Beam §2 (evidence packs): the exportChat op's optional subdir/ext routing.
+/// The default wire shape stays byte-compatible (markdown note into
+/// Lighthouse Notes/); the html/Lighthouse Results pair rides the SAME
+/// sanitized write_artifact path (hostile hints repaired, never a vault
+/// escape); anything off the strict allowlist is a 400 that writes nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn export_chat_routes_artifacts_through_the_allowlist() {
+    let _env = lock_env();
+    let (base, vault_dir) = spawn_server().await;
+    let client = reqwest::Client::new();
+    let post = |body: Value| client.post(format!("{base}/api/rag")).json(&body).send();
+
+    // --- Default (no subdir/ext): the original markdown-note behavior. -----
+    let res: Value = post(json!({
+        "op": "exportChat", "title": "Team sync", "markdown": "# hi"
+    }))
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    assert_eq!(res["savedId"], "Lighthouse Notes/Team sync.md");
+    assert_eq!(res["savedName"], "Team sync.md");
+    assert!(vault_dir
+        .path()
+        .join("Lighthouse Notes/Team sync.md")
+        .exists());
+
+    // --- Evidence pack: html into Lighthouse Results/, hostile hint repaired
+    //     by write_artifact (reuse pinned: the file lands INSIDE the vault). --
+    let res: Value = post(json!({
+        "op": "exportChat",
+        "title": "../revenue by region",
+        "markdown": "<!doctype html>\n<html lang=\"en\"></html>",
+        "subdir": "Lighthouse Results",
+        "ext": "html",
+    }))
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    let id = res["savedId"].as_str().unwrap();
+    let name = res["savedName"].as_str().unwrap();
+    assert!(id.starts_with("Lighthouse Results/"), "{id}");
+    assert!(name.ends_with(".html"), "{name}");
+    assert_eq!(id, &format!("Lighthouse Results/{name}"));
+    let abs = vault_dir.path().join(id);
+    assert!(abs.exists(), "written inside the vault: {abs:?}");
+    assert!(
+        !vault_dir
+            .path()
+            .parent()
+            .unwrap()
+            .join("revenue by region.html")
+            .exists(),
+        "the traversal hint must never escape the vault"
+    );
+
+    // --- Off-allowlist values reject with 400 and write nothing. -----------
+    for bad in [
+        json!({ "op": "exportChat", "title": "x", "markdown": "x", "subdir": "Lighthouse Secrets" }),
+        json!({ "op": "exportChat", "title": "x", "markdown": "x", "subdir": ".." }),
+        json!({ "op": "exportChat", "title": "x", "markdown": "x", "ext": "exe" }),
+        json!({ "op": "exportChat", "title": "x", "markdown": "x", "ext": 5 }),
+        json!({ "op": "exportChat", "title": "x", "markdown": "x", "subdir": null }),
+    ] {
+        let res = post(bad.clone()).await.unwrap();
+        assert_eq!(res.status().as_u16(), 400, "must reject: {bad}");
+    }
+    assert!(
+        !vault_dir.path().join("Lighthouse Notes/x.md").exists()
+            && !vault_dir.path().join("Lighthouse Results/x.md").exists(),
+        "a rejected export writes nothing"
+    );
+}
+
+/// Investigations §3 over the real wire (openspec: add-investigations):
+/// exportChat with an investigationId lands under the investigation's OWN
+/// folder (engine-resolved — the client never names it), the evidence-pack
+/// destination is unaffected, unknown ids and client-sent folder segments
+/// reject, pinAsk records the membership, and the investigations listing
+/// derives pinRefs + noteRefs from those two sources of truth.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn investigation_belonging_over_the_wire() {
+    let _env = lock_env();
+    let (base, vault_dir) = spawn_server().await;
+    let client = reqwest::Client::new();
+    let post = |body: Value| client.post(format!("{base}/api/rag")).json(&body).send();
+
+    let created: Value = post(json!({
+        "op": "investigations", "action": "create", "name": "Harbor case",
+    }))
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    let inv_id = created["investigation"]["id"].as_str().unwrap().to_string();
+
+    // --- exportChat + investigationId: the note lands in the investigation's
+    //     folder, resolved engine-side from the store. -----------------------
+    let res: Value = post(json!({
+        "op": "exportChat", "title": "Team sync", "markdown": "# hi",
+        "investigationId": inv_id,
+    }))
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    assert_eq!(res["savedId"], "Lighthouse Notes/Harbor case/Team sync.md");
+    assert_eq!(res["savedName"], "Team sync.md");
+    assert!(vault_dir
+        .path()
+        .join("Lighthouse Notes/Harbor case/Team sync.md")
+        .exists());
+
+    // --- The evidence pack is unaffected: explicit Lighthouse Results stays
+    //     in Results even inside an investigation (packs are results, not
+    //     notes — note membership = location). ------------------------------
+    let res: Value = post(json!({
+        "op": "exportChat", "title": "pack", "markdown": "<html></html>",
+        "subdir": "Lighthouse Results", "ext": "html", "investigationId": inv_id,
+    }))
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    assert_eq!(res["savedId"], "Lighthouse Results/pack.html");
+
+    // --- pinAsk + investigationId: the pin carries its membership; the
+    //     filtered list narrows to it while the plain list stays "all". -----
+    let res: Value = post(json!({
+        "op": "pinAsk", "question": "how many?", "sql": "SELECT 1", "fileIds": ["a.csv"],
+        "investigationId": inv_id,
+    }))
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    let pin_id = res["pin"]["id"].as_str().unwrap().to_string();
+    assert_eq!(res["pin"]["investigationId"], inv_id.as_str());
+    let _: Value = post(json!({
+        "op": "pinAsk", "question": "global?", "sql": "SELECT 2", "fileIds": [],
+    }))
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    let all: Value = post(json!({ "op": "listPins" })).await.unwrap().json().await.unwrap();
+    assert_eq!(all["pins"].as_array().unwrap().len(), 2, "no filter = all pins");
+    let filtered: Value = post(json!({ "op": "listPins", "investigationId": inv_id }))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let filtered = filtered["pins"].as_array().unwrap();
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0]["id"], pin_id.as_str());
+
+    // --- The listing derives both memberships (§3): pins from pins.json,
+    //     notes from the investigation's folder. ----------------------------
+    let listed: Value = post(json!({ "op": "investigations", "action": "list" }))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let view = &listed["investigations"][0];
+    assert_eq!(view["pinRefs"], json!([pin_id]));
+    assert_eq!(
+        view["noteRefs"],
+        json!(["Lighthouse Notes/Harbor case/Team sync.md"])
+    );
+
+    // --- Rejections: an unknown id (a silently-global note would lose its
+    //     membership) and a client-SENT folder segment (the subdir allowlist
+    //     is unchanged — only the engine resolves investigation folders). ---
+    for bad in [
+        json!({ "op": "exportChat", "title": "x", "markdown": "x", "investigationId": "inv-nope" }),
+        json!({ "op": "exportChat", "title": "x", "markdown": "x", "subdir": "Lighthouse Notes/Harbor case" }),
+    ] {
+        let res = post(bad.clone()).await.unwrap();
+        assert_eq!(res.status().as_u16(), 400, "must reject: {bad}");
+    }
+    assert!(
+        !vault_dir.path().join("Lighthouse Notes/x.md").exists()
+            && !vault_dir.path().join("Lighthouse Notes/Harbor case/x.md").exists(),
+        "a rejected export writes nothing"
+    );
+}
+
+/// Bulk curation rules over the wire (openspec: add-curation-rules): create a
+/// rule via the op, land a NEW matching file (a real upload — the same path an
+/// arriving file takes), and assert it resolves with the rule's flags on the
+/// next listing with NO per-node write in state.json, while the inspect op
+/// attributes the rule by name. Also pins add-time validation → 400 and that
+/// removal reverts the rule's layer only.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn curation_rules_over_the_wire() {
+    let _env = lock_env();
+    let (base, vault_dir) = spawn_server().await;
+    let client = reqwest::Client::new();
+    let post = |body: Value| client.post(format!("{base}/api/rag")).json(&body).send();
+
+    // --- Create the spec's rule FIRST: spreadsheets in /reports → include. --
+    let res = post(json!({
+        "op": "rules", "action": "add",
+        "rule": { "scope": "reports", "kind": "tabular", "action": "include" },
+    }))
+    .await
+    .unwrap();
+    assert!(res.status().is_success());
+    let added: Value = res.json().await.unwrap();
+    let rule_id = added["rule"]["id"].as_str().unwrap().to_string();
+    assert_eq!(added["rule"]["name"], "spreadsheets in /reports");
+
+    // --- A NEW matching file arrives AFTER the rule (real upload). ----------
+    let form = reqwest::multipart::Form::new()
+        .part(
+            "files",
+            reqwest::multipart::Part::bytes(b"region,amount\nNE,1\n".to_vec())
+                .file_name("late.xlsx"),
+        )
+        .text("paths", "reports/late.xlsx");
+    let up = client
+        .post(format!("{base}/api/upload"))
+        .multipart(form)
+        .send()
+        .await
+        .unwrap();
+    assert!(up.status().is_success());
+
+    // --- The next listing resolves it included, with no user action. --------
+    let rag: Value = client
+        .get(format!("{base}/api/rag"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let late = rag["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["id"] == "reports/late.xlsx")
+        .expect("uploaded file walked");
+    assert_eq!(late["ragIncluded"], true, "the rule includes the future arrival");
+
+    // --- NO per-node write: state.json's flag maps stay empty. --------------
+    let raw = std::fs::read_to_string(vault_dir.path().join(".rag-vault/state.json")).unwrap();
+    let state: Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(state["included"].as_object().map(|m| m.len()), Some(0), "{raw}");
+    assert_eq!(state["localOnly"].as_object().map(|m| m.len()), Some(0), "{raw}");
+
+    // --- The inspector attributes the rule by name. --------------------------
+    let inspection: Value = post(json!({ "op": "inspect", "fileId": "reports/late.xlsx" }))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(inspection["included"], true);
+    assert_eq!(inspection["includedBy"]["source"], "rule");
+    assert_eq!(inspection["includedBy"]["ruleId"], rule_id.as_str());
+    assert_eq!(inspection["includedBy"]["ruleName"], "spreadsheets in /reports");
+
+    // --- The list op enriches: name + scope label + orphaned=false. ----------
+    let listing: Value = post(json!({ "op": "rules", "action": "list" }))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let rules = listing["rules"].as_array().unwrap();
+    assert_eq!(rules.len(), 1);
+    assert_eq!(rules[0]["scopeLabel"], "reports");
+    assert_eq!(rules[0]["orphaned"], false);
+
+    // --- Add-time validation rejects with 400 (bad glob / bad action). -------
+    for bad in [
+        json!({ "op": "rules", "action": "add", "rule": { "scope": "", "glob": "a**b", "action": "include" } }),
+        json!({ "op": "rules", "action": "add", "rule": { "scope": "", "kind": "tabular", "action": "banish" } }),
+        json!({ "op": "rules", "action": "add", "rule": { "scope": "", "action": "include" } }),
+    ] {
+        let res = post(bad.clone()).await.unwrap();
+        assert_eq!(res.status().as_u16(), 400, "must reject: {bad}");
+    }
+
+    // --- Removing the rule reverts exactly its layer (back to the default). --
+    let removed = post(json!({ "op": "rules", "action": "remove", "id": rule_id }))
+        .await
+        .unwrap();
+    assert!(removed.status().is_success());
+    let rag: Value = client
+        .get(format!("{base}/api/rag"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let late = rag["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["id"] == "reports/late.xlsx")
+        .unwrap();
+    assert_eq!(late["ragIncluded"], false, "reverts to the exclude default");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn auth_layers_reject_cross_origin_and_bad_tokens() {
     let _env = lock_env();
@@ -386,4 +892,146 @@ async fn auth_layers_reject_cross_origin_and_bad_tokens() {
         "the shell's per-launch token authenticates"
     );
     std::env::remove_var("LIGHTHOUSE_API_TOKEN");
+}
+
+/// Boards over the real wire (openspec: add-boards): the lazy global
+/// default lists virtual under its deterministic id, create + setCards
+/// persist order and sizes, refreshCards re-runs a real pin's SQL through
+/// the guarded direct path — live rows + digest back on the wire, the
+/// pin's STORED digest advanced (a manual board refresh IS a recheck),
+/// tombstone for an unknown pin — and validation failures answer 400 with
+/// the engine's byte-exact reasons.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn boards_over_the_wire() {
+    let _env = lock_env();
+    let (base, _vault_dir) = spawn_server().await;
+    let client = reqwest::Client::new();
+    let post = |body: Value| client.post(format!("{base}/api/rag")).json(&body).send();
+
+    // A real tabular file the pin will watch (upload + include).
+    let form = reqwest::multipart::Form::new()
+        .part(
+            "files",
+            reqwest::multipart::Part::bytes(b"priority,count\nP1,3\nP2,7\n".to_vec())
+                .file_name("tickets.csv"),
+        )
+        .text("paths", "tickets.csv");
+    let up = client
+        .post(format!("{base}/api/upload"))
+        .multipart(form)
+        .send()
+        .await
+        .unwrap();
+    assert!(up.status().is_success());
+    let inc = post(json!({ "op": "include", "nodeId": "tickets.csv", "included": true }))
+        .await
+        .unwrap();
+    assert!(inc.status().is_success());
+
+    // Empty store: the listing serves the virtual global default — the
+    // deterministic id the client may mutate directly (lazy, not stored).
+    let listed: Value = post(json!({ "op": "boards", "action": "list" }))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let boards = listed["boards"].as_array().unwrap();
+    assert_eq!(boards.len(), 1);
+    assert_eq!(boards[0]["id"], "default-global");
+    assert_eq!(boards[0]["name"], "My board");
+    assert_eq!(boards[0]["createdMs"], 0, "virtual = never persisted");
+
+    // create → setCards: order and sizes persist; the board rides back.
+    let created: Value = post(json!({ "op": "boards", "action": "create", "name": "Ops" }))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let board_id = created["board"]["id"].as_str().unwrap().to_string();
+    assert!(board_id.starts_with("board-"), "{board_id}");
+
+    let pinned: Value = post(json!({
+        "op": "pinAsk", "question": "open tickets by priority",
+        "sql": "SELECT priority, SUM(count) AS total FROM tickets GROUP BY priority ORDER BY priority",
+        "fileIds": ["tickets.csv"],
+    }))
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    let pin_id = pinned["pin"]["id"].as_str().unwrap().to_string();
+
+    let set: Value = post(json!({
+        "op": "boards", "action": "setCards", "id": board_id,
+        "cards": [
+            { "pinId": pin_id, "size": "L" },
+            { "pinId": "pin-gone", "size": "S" },
+        ],
+    }))
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    assert_eq!(set["board"]["cards"][0]["size"], "L");
+    assert_eq!(set["board"]["cards"][1]["pinId"], "pin-gone");
+
+    // refreshCards: the real pin computes LIVE through run_direct (rows,
+    // digest, footer), the unknown one tombstones, and the pin's stored
+    // digest matches what came back — refresh IS a recheck.
+    let refreshed: Value = post(json!({
+        "op": "boards", "action": "refreshCards", "pinIds": [pin_id, "pin-gone"],
+    }))
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    let cards = refreshed["cards"].as_array().unwrap();
+    assert_eq!(cards.len(), 2);
+    assert_eq!(cards[0]["pinId"], pin_id.as_str());
+    assert_eq!(cards[0]["live"], true);
+    let markdown = cards[0]["markdown"].as_str().unwrap();
+    assert!(markdown.contains("P1"), "{markdown}");
+    assert!(cards[0]["footer"].as_str().is_some(), "freshness line");
+    let digest = cards[0]["resultDigest"].as_str().unwrap().to_string();
+    assert_eq!(cards[1]["tombstone"], true);
+    let pins: Value = post(json!({ "op": "listPins" })).await.unwrap().json().await.unwrap();
+    assert_eq!(
+        pins["pins"][0]["lastDigest"].as_str().unwrap(),
+        digest,
+        "stored digest advanced with the refresh"
+    );
+
+    // Validation over the wire: 400 + the engine's byte-exact reasons.
+    for (body, want) in [
+        (
+            // The reason echoes the REQUESTED (trimmed) name, exactly like
+            // investigations' duplicate error.
+            json!({ "op": "boards", "action": "create", "name": "ops" }),
+            "a board named \"ops\" already exists",
+        ),
+        (
+            json!({ "op": "boards", "action": "setCards", "id": board_id,
+                    "cards": [{ "pinId": "p", "size": "XL" }] }),
+            "card size must be \"S\", \"M\", or \"L\"",
+        ),
+        (
+            json!({ "op": "boards", "action": "setCards", "id": board_id,
+                    "cards": [{ "size": "S" }] }),
+            "every card needs a pinId",
+        ),
+        (
+            json!({ "op": "boards", "action": "rename", "id": "board-nope", "name": "X" }),
+            "board not found",
+        ),
+    ] {
+        let res = post(body.clone()).await.unwrap();
+        assert_eq!(res.status().as_u16(), 400, "must reject: {body}");
+        let err: Value = res.json().await.unwrap();
+        assert_eq!(err["error"], want, "{body}");
+    }
 }

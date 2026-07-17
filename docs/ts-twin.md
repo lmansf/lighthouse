@@ -62,6 +62,10 @@ intents) but degrades as noted:
 | OCR (scanned PDFs, raster images) | `ocr.rs` | image files stay name-match-only |
 | Filesystem watcher (event-driven freshness) | `watch.rs` | poll-style freshness |
 | Extra rich formats: `.doc`, `.pptx`, `.odt`, `.odp`, `.rtf`, images | `extract.rs` `RICH_EXT` | name-match-only (TS extracts pdf/docx/xlsx/csv/md/txt via mammoth/unpdf/xlsx) |
+| Semantic layer: certification, trust reconcile, metric proposal (parse executed SQL) | `analytics.rs` (`certified_metrics`/`reconcile_metric`/`propose_metric`) + `synth.rs` prompt injection | never certifies/reconciles (no analytics branch → no `AnalyticsMeta.certified`/`.trust`); `op:"defineMetric"` answers `{available:false}`. The store/CRUD/`applicableSemantics` list ARE mirrored (`semantic.ts`) — a metric carries its `reads`, so `list` needs no DataFusion |
+| Automation entry points: the headless `lighthouse` CLI + `lighthouse-mcp` server | `lighthouse-cli` / `lighthouse-mcp` crates (thin wrappers over `ask::run_headless_ask` — audited + egress-attributed by construction) | no headless/MCP ask surface (the app is the only entry). Investigation `fork`/`export_markdown` themselves ARE mirrored in `investigations.ts` |
+| Quantitative depth: the `forecast` + `changepoint-scan` recipes and proactive `insights` | `recipes.rs` (`plan_forecast`/`plan_changepoint`) + `insights.rs` (`scan`) | recipe EXECUTION is Rust-only (the `recipes` op answers `{available:false}`); the `insights` op returns an empty scan (`findings:[]`, `tablesScanned/Available:0`). The **`band` chart kind** the forecast draws IS a real twin (`chartSpec.ts` — parse/validate mirrored byte-for-byte), NOT Rust-only |
+| Deep analysis (`investigate` → in-vault report) + the capability map | `reports.rs` (`investigate`/`write_report`) + `meta.rs` (`capability_map`) | `investigate` runs the applicable recipe battery through DataFusion and writes a report note — the `investigate` op answers `{available:false}`; `capabilityMap` aggregates the column catalog + recipe/metric applicability, so the op returns an EMPTY map (`tables/recipes/metrics/suggestedAsks/suggestedInvestigations` all `[]`). Both honest degradations, like the recipes/insights twins |
 
 These live in the **desktop shell** specifically (`lighthouse-desktop`), not
 in `lighthouse-core`, so even the headless Rust server lacks them:
@@ -77,7 +81,9 @@ in `lighthouse-core`, so even the headless Rust server lacks them:
 model download/uninstall marker, SharePoint/OneDrive connectors, licensing,
 experiments, table profiles, structure-aware chunking, meta answers
 (whatsNew/listFiles), profile + sealed secrets store, doc-focus
-(whole-document answers), multi-doc synthesis.
+(whole-document answers), multi-doc synthesis, semantic-layer store + CRUD +
+local-only propagation + `applicableSemantics` list (`semantic.rs` ⇄
+`semantic.ts`; only certify/reconcile/propose above are Rust-only).
 
 **TS-only bits** (the dev server's own plumbing, no Rust mirror needed):
 the Next `app/api/**` route layer (Rust mirror is `lighthouse-server`'s

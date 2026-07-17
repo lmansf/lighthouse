@@ -3798,8 +3798,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "lighthouse-cli"
+version = "0.12.2"
+dependencies = [
+ "futures",
+ "lighthouse-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "lighthouse-core"
-version = "0.11.3"
+version = "0.12.2"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -3838,7 +3850,7 @@ dependencies = [
 
 [[package]]
 name = "lighthouse-desktop"
-version = "0.11.3"
+version = "0.12.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -3869,8 +3881,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "lighthouse-mcp"
+version = "0.12.2"
+dependencies = [
+ "futures",
+ "lighthouse-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "lighthouse-server"
-version = "0.11.3"
+version = "0.12.2"
 dependencies = [
  "anyhow",
  "async-stream",

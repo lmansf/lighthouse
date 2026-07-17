@@ -1,6 +1,6 @@
 /** Real ChatService — streams grounded answers from the local `/api/chat` route
  *  (newline-delimited ChatChunk JSON). */
-import type { ChatService } from "../services";
+import type { AskOptions, ChatService } from "../services";
 import type { ChatChunk, ChatTurn } from "../types";
 
 class RealChatService implements ChatService {
@@ -10,6 +10,7 @@ class RealChatService implements ChatService {
     history: ChatTurn[] = [],
     attachmentFileIds: string[] = [],
     signal?: AbortSignal,
+    opts?: AskOptions,
   ): AsyncIterable<ChatChunk> {
     // `signal` cancels both the request and (once streaming) the body reader —
     // aborting rejects the pending read with an AbortError, which propagates out
@@ -17,7 +18,20 @@ class RealChatService implements ChatService {
     const res = await fetch("/api/chat", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ question, includedFileIds, history, attachmentFileIds }),
+      body: JSON.stringify({
+        question,
+        includedFileIds,
+        history,
+        attachmentFileIds,
+        // Answer-cache controls (openspec: add-answer-cache) — explicit
+        // booleans so the wire never carries undefined.
+        bypassCache: opts?.bypassCache === true,
+        persistAllowed: opts?.persistAllowed === true,
+        // The investigation this ask runs inside (openspec:
+        // add-investigations). Optional: JSON.stringify drops the key when
+        // absent, so a global-context ask stays byte-identical to today's.
+        investigationId: opts?.investigationId,
+      }),
       signal,
     });
     if (!res.ok || !res.body) {

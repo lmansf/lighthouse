@@ -1,27 +1,18 @@
 <svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
-  <defs>
-    <radialGradient id="g" cx="0.5" cy="0.45" r="0.5">
-      <stop offset="0" stop-color="#FFE49B" stop-opacity="0.9"/>
-      <stop offset="1" stop-color="#FFE49B" stop-opacity="0"/>
-    </radialGradient>
-  </defs>
-  <!-- transparent background; just the lighthouse mark -->
-  <circle cx="256" cy="150" r="150" fill="url(#g)"/>
-  <!-- base -->
-  <polygon points="150,392 362,392 344,360 168,360" fill="#7A1B14"/>
-  <!-- body -->
-  <polygon points="172,360 204,150 308,150 340,360" fill="#FCFBF7"/>
-  <g clip-path="url(#tw)" fill="#C02A20"/>
-  <clipPath id="tw"><polygon points="172,360 204,150 308,150 340,360"/></clipPath>
-  <g clip-path="url(#tw)" fill="#C02A20">
-    <rect x="150" y="150" width="212" height="40"/>
-    <rect x="150" y="248" width="212" height="40"/>
-    <rect x="150" y="320" width="212" height="44"/>
+  <!-- Lighthouse — Beam mark, monochrome template variant.
+       Same silhouette + beam wedge as build/icon.svg, solid black on
+       transparent: macOS template images may carry only black + alpha
+       (AppKit re-tints them for light/dark menubars). Rendered to
+       native/crates/lighthouse-desktop/icons/tray-template.png by
+       scripts/gen-icons.mjs. -->
+  <g fill="#000000">
+    <!-- beam wedge from the lantern -->
+    <polygon points="152,118 496,16 496,132"/>
+    <!-- the light -->
+    <circle cx="152" cy="118" r="26"/>
+    <!-- tower: footing, tapered body, gallery -->
+    <rect x="64" y="468" width="176" height="24" rx="12"/>
+    <polygon points="88,468 216,468 184,196 120,196"/>
+    <rect x="98" y="166" width="108" height="30" rx="15"/>
   </g>
-  <polygon points="172,360 204,150 308,150 340,360" fill="none" stroke="#E2CFA9" stroke-width="3"/>
-  <!-- gallery + lantern -->
-  <rect x="186" y="136" width="140" height="18" rx="6" fill="#5E140F"/>
-  <rect x="216" y="86" width="80" height="52" rx="6" fill="#2A2622"/>
-  <circle cx="256" cy="112" r="20" fill="#FFE49B"/>
-  <path d="M210,88 Q256,40 302,88 Z" fill="#A4231B"/>
 </svg>

@@ -80,6 +80,392 @@ pub async fn rag_post(headers: HeaderMap, body: Option<Json<Value>>) -> Response
             sources::set_local_only(node_id, local_only).await;
             Json(json!({ "ok": true })).into_response()
         }
+        // Bulk curation rules (openspec: add-curation-rules): a per-folder
+        // predicate layer resolved live at walk time — never per-node writes.
+        // `add` validates (predicate/action whitelists, glob parse) → 400 with
+        // the reason; ids are minted engine-side. PARITY: commands.rs and the
+        // TS twin (app/api/rag/route.ts) mirror this op exactly.
+        Some("rules") => match body["action"].as_str() {
+            Some("list") => {
+                Json(json!({ "rules": sources::rules_listing().await })).into_response()
+            }
+            Some("add") => {
+                let r = &body["rule"];
+                let ext: Option<Vec<String>> = r["ext"].as_array().map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                });
+                match sources::add_rule(
+                    r["scope"].as_str().unwrap_or(""),
+                    r["kind"].as_str(),
+                    ext.as_deref(),
+                    r["glob"].as_str(),
+                    r["action"].as_str().unwrap_or(""),
+                )
+                .await
+                {
+                    Ok(rule) => Json(json!({ "rule": rule })).into_response(),
+                    Err(e) => bad_request(&err_message(&e, "could not add the rule")),
+                }
+            }
+            Some("remove") => {
+                let Some(id) = body["id"].as_str().filter(|s| !s.is_empty()) else {
+                    return bad_request("id required");
+                };
+                sources::remove_rule(id).await;
+                Json(json!({ "ok": true })).into_response()
+            }
+            _ => bad_request("rules action must be list, add, or remove"),
+        },
+        // Investigations (openspec: add-investigations): named, durable
+        // containers for analysis. CRUD on the vault-scoped STRUCTURE store —
+        // ids are minted engine-side and validation failures → 400 with the
+        // engine's reason, like rules. Conversation-ref writes are gated
+        // engine-side: the client's persistAllowed verdict AND the managed
+        // history policy must both allow (either false ⇒ silent no-op).
+        // PARITY: commands.rs and the TS twin (app/api/rag/route.ts) mirror
+        // this op exactly.
+        Some("investigations") => match body["action"].as_str() {
+            Some("list") => Json(json!({
+                "investigations": lighthouse_core::investigations::listing()
+            }))
+            .into_response(),
+            Some("create") => {
+                let provider_policy = if body["providerPolicy"].is_null() {
+                    lighthouse_core::investigations::ProviderPolicy::Default
+                } else {
+                    match body["providerPolicy"].as_str() {
+                        Some("default") => lighthouse_core::investigations::ProviderPolicy::Default,
+                        Some("local-only") => {
+                            lighthouse_core::investigations::ProviderPolicy::LocalOnly
+                        }
+                        _ => {
+                            return bad_request("providerPolicy must be \"default\" or \"local-only\"")
+                        }
+                    }
+                };
+                let scope = string_array(&body["scopeFileIds"]);
+                match lighthouse_core::investigations::create(
+                    body["name"].as_str().unwrap_or(""),
+                    &scope,
+                    provider_policy,
+                ) {
+                    Ok(inv) => Json(json!({
+                        "investigation": lighthouse_core::investigations::view(inv)
+                    }))
+                    .into_response(),
+                    Err(e) => bad_request(&e),
+                }
+            }
+            Some("rename") => {
+                let Some(id) = body["id"].as_str().filter(|s| !s.is_empty()) else {
+                    return bad_request("id required");
+                };
+                match lighthouse_core::investigations::rename(
+                    id,
+                    body["name"].as_str().unwrap_or(""),
+                ) {
+                    Ok(inv) => Json(json!({
+                        "investigation": lighthouse_core::investigations::view(inv)
+                    }))
+                    .into_response(),
+                    Err(e) => bad_request(&e),
+                }
+            }
+            Some("setArchived") => {
+                let (Some(id), Some(archived)) = (
+                    body["id"].as_str().filter(|s| !s.is_empty()),
+                    body["archived"].as_bool(),
+                ) else {
+                    return bad_request("id and archived required");
+                };
+                match lighthouse_core::investigations::set_archived(id, archived) {
+                    Ok(inv) => Json(json!({
+                        "investigation": lighthouse_core::investigations::view(inv)
+                    }))
+                    .into_response(),
+                    Err(e) => bad_request(&e),
+                }
+            }
+            Some("addConversationRef") => {
+                let (Some(id), Some(conversation_id)) = (
+                    body["id"].as_str().filter(|s| !s.is_empty()),
+                    body["conversationId"].as_str().filter(|s| !s.is_empty()),
+                ) else {
+                    return bad_request("id and conversationId required");
+                };
+                // persistAllowed defaults false — an absent field fails
+                // toward privacy, exactly like the ask path's cache controls.
+                let persist_allowed = body["persistAllowed"].as_bool().unwrap_or(false);
+                match lighthouse_core::investigations::add_conversation_ref(
+                    id,
+                    conversation_id,
+                    persist_allowed,
+                ) {
+                    Ok(inv) => Json(json!({
+                        "investigation": lighthouse_core::investigations::view(inv)
+                    }))
+                    .into_response(),
+                    Err(e) => bad_request(&e),
+                }
+            }
+            // Fork a line of inquiry (openspec: add-automation §4): a fresh
+            // record copying the parent's STRUCTURE only (scope, policy,
+            // conversation refs) — engine-minted id, its own empty notes
+            // folder, same name rule as create. Rejections → 400.
+            Some("fork") => {
+                let Some(id) = body["id"].as_str().filter(|s| !s.is_empty()) else {
+                    return bad_request("id required");
+                };
+                match lighthouse_core::investigations::fork(
+                    id,
+                    body["name"].as_str().unwrap_or(""),
+                ) {
+                    Ok(inv) => Json(json!({
+                        "investigation": lighthouse_core::investigations::view(inv)
+                    }))
+                    .into_response(),
+                    Err(e) => bad_request(&e),
+                }
+            }
+            // Export the investigation to an in-vault markdown note (openspec:
+            // add-automation §4): render its structure + derived membership
+            // (references, never transcripts), then WRITE under its own notes
+            // folder via the exportChat precedent (notes_subdir +
+            // write_artifact — a non-egress, sanitized in-vault write). Render
+            // + folder resolution are engine reads (a validation failure —
+            // unknown id, unusable folder — is a 400, like the list arm's
+            // sync reads); only the write rides spawn_blocking. Titles is None:
+            // the op renders conversation ids (a caller holding titles may
+            // pass its own).
+            Some("export") => {
+                let Some(id) = body["id"].as_str().filter(|s| !s.is_empty()) else {
+                    return bad_request("id required");
+                };
+                let title = body["title"].as_str().unwrap_or("Investigation").to_string();
+                let markdown =
+                    match lighthouse_core::investigations::export_markdown(id, None) {
+                        Ok(md) => md,
+                        Err(e) => return bad_request(&e),
+                    };
+                let subdir = match lighthouse_core::investigations::notes_subdir(id) {
+                    Ok(sub) => sub,
+                    Err(e) => return bad_request(&e),
+                };
+                let written = tokio::task::spawn_blocking(move || {
+                    lighthouse_core::vault::write_artifact(
+                        &subdir,
+                        &title,
+                        "md",
+                        markdown.as_bytes(),
+                    )
+                })
+                .await
+                .map_err(|e| e.to_string())
+                .and_then(|r| r.map_err(|e| e.to_string()));
+                match written {
+                    Ok((id, name)) => {
+                        Json(json!({ "savedId": id, "savedName": name })).into_response()
+                    }
+                    Err(e) => Json(json!({ "error": e })).into_response(),
+                }
+            }
+            _ => bad_request(
+                "investigations action must be list, create, rename, setArchived, addConversationRef, fork, or export",
+            ),
+        },
+        // Boards (openspec: add-boards): pin-backed local dashboards. CRUD on
+        // the vault-scoped boards store — engine-minted ids, per-scope name
+        // validation, lazy virtual defaults that materialize on first
+        // mutation — plus refreshCards, the model-free per-pin re-execution
+        // through the SAME run_direct guard as pin rechecks (a manual board
+        // refresh IS a recheck: the pin's stored digest/summary advance
+        // identically). Validation failures → 400 with the engine's reason,
+        // like investigations. PARITY: commands.rs mirrors this op exactly;
+        // the TS twin answers refreshCards from stored pin state
+        // (live: false — analytics is Rust-engine-only).
+        Some("boards") => match body["action"].as_str() {
+            Some("list") => {
+                // Optional investigation filter — absent (or blank) is "all",
+                // the listPins convention exactly.
+                let investigation_id = body["investigationId"].as_str().filter(|s| !s.is_empty());
+                Json(json!({ "boards": lighthouse_core::boards::list_for(investigation_id) }))
+                    .into_response()
+            }
+            Some("create") => match lighthouse_core::boards::create(
+                body["name"].as_str().unwrap_or(""),
+                body["investigationId"].as_str(),
+            ) {
+                Ok(board) => Json(json!({ "board": board })).into_response(),
+                Err(e) => bad_request(&e),
+            },
+            Some("rename") => {
+                let Some(id) = body["id"].as_str().filter(|s| !s.is_empty()) else {
+                    return bad_request("id required");
+                };
+                match lighthouse_core::boards::rename(id, body["name"].as_str().unwrap_or("")) {
+                    Ok(board) => Json(json!({ "board": board })).into_response(),
+                    Err(e) => bad_request(&e),
+                }
+            }
+            Some("delete") => {
+                let Some(id) = body["id"].as_str().filter(|s| !s.is_empty()) else {
+                    return bad_request("id required");
+                };
+                match lighthouse_core::boards::delete(id) {
+                    Ok(()) => Json(json!({ "ok": true })).into_response(),
+                    Err(e) => bad_request(&e),
+                }
+            }
+            Some("setCards") => {
+                let Some(id) = body["id"].as_str().filter(|s| !s.is_empty()) else {
+                    return bad_request("id required");
+                };
+                let cards = match lighthouse_core::boards::parse_cards(&body["cards"]) {
+                    Ok(cards) => cards,
+                    Err(e) => return bad_request(&e),
+                };
+                match lighthouse_core::boards::set_cards(id, cards) {
+                    Ok(board) => Json(json!({ "board": board })).into_response(),
+                    Err(e) => bad_request(&e),
+                }
+            }
+            Some("refreshCards") => {
+                let pin_ids = string_array(&body["pinIds"]);
+                Json(json!({
+                    "cards": lighthouse_core::boards::refresh_cards(&pin_ids).await
+                }))
+                .into_response()
+            }
+            _ => bad_request(
+                "boards action must be list, create, rename, delete, setCards, or refreshCards",
+            ),
+        },
+        // Shaped views (openspec: add-shaped-views §3): CRUD on the views
+        // store — engine-minted ids, save-time guard + reads/DAG validation,
+        // dependent-aware lifecycle — plus `dependents`, the name lists the
+        // rename/delete dialogs show. The wire carries the summary FLATTENED
+        // (summaryText + summarySource); the ViewSummary is built here.
+        // Validation failures → 400 with the engine's reason, like boards.
+        // PARITY: commands.rs mirrors this op exactly; the TS twin's CRUD
+        // runs for real against src/server/views.ts.
+        Some("views") => match body["action"].as_str() {
+            Some("list") => {
+                Json(json!({ "views": lighthouse_core::views::list() })).into_response()
+            }
+            Some("create") => {
+                let summary_source = if body["summarySource"].is_null() {
+                    lighthouse_core::views::SummarySource::Question
+                } else {
+                    match body["summarySource"].as_str() {
+                        Some("question") => lighthouse_core::views::SummarySource::Question,
+                        Some("model") => lighthouse_core::views::SummarySource::Model,
+                        _ => {
+                            return bad_request(
+                                "summarySource must be \"question\" or \"model\"",
+                            )
+                        }
+                    }
+                };
+                let file_ids = string_array(&body["fileIds"]);
+                match lighthouse_core::views::create(
+                    body["name"].as_str().unwrap_or(""),
+                    body["sql"].as_str().unwrap_or(""),
+                    lighthouse_core::views::ViewSummary {
+                        text: body["summaryText"].as_str().unwrap_or("").to_string(),
+                        source: summary_source,
+                    },
+                    &file_ids,
+                ) {
+                    Ok(view) => Json(json!({ "view": view })).into_response(),
+                    Err(e) => bad_request(&e),
+                }
+            }
+            Some("rename") => {
+                let Some(id) = body["id"].as_str().filter(|s| !s.is_empty()) else {
+                    return bad_request("id required");
+                };
+                match lighthouse_core::views::rename(id, body["name"].as_str().unwrap_or("")) {
+                    Ok(view) => Json(json!({ "view": view })).into_response(),
+                    Err(e) => bad_request(&e),
+                }
+            }
+            Some("delete") => {
+                let Some(id) = body["id"].as_str().filter(|s| !s.is_empty()) else {
+                    return bad_request("id required");
+                };
+                let cascade = body["cascade"].as_bool().unwrap_or(false);
+                match lighthouse_core::views::delete(id, cascade) {
+                    Ok(deleted) => Json(json!({ "deletedIds": deleted })).into_response(),
+                    Err(e) => bad_request(&e),
+                }
+            }
+            Some("dependents") => {
+                let Some(id) = body["id"].as_str().filter(|s| !s.is_empty()) else {
+                    return bad_request("id required");
+                };
+                let names = |views: Vec<lighthouse_core::views::View>| -> Vec<String> {
+                    views.into_iter().map(|v| v.name).collect()
+                };
+                Json(json!({
+                    "dependents": names(lighthouse_core::views::dependents_of(id)),
+                    "transitive": names(lighthouse_core::views::transitive_dependents(id)),
+                }))
+                .into_response()
+            }
+            // Inspector on a view (openspec: add-shaped-views §4): the exact
+            // definition SQL, the provenance-labeled summary, the source files
+            // it reads (transitive) with their saved-age freshness, the
+            // effectively-local-only flag, and the dependent names the
+            // rename/delete dialogs warn with. Pure stored-state read — no SQL
+            // executes, so the TS twin returns the identical shape.
+            Some("inspect") => {
+                let Some(id) = body["id"].as_str().filter(|s| !s.is_empty()) else {
+                    return bad_request("id required");
+                };
+                Json(json!({ "inspection": lighthouse_core::inspect::inspect_view(id) }))
+                    .into_response()
+            }
+            _ => bad_request(
+                "views action must be list, create, rename, delete, dependents, or inspect",
+            ),
+        },
+        // Shaping ask (openspec: add-shaped-views §3): ONE guarded completion
+        // proposes a transform SELECT over a registered source; the engine
+        // validates it and renders before/after sample evidence. NOTHING
+        // persists here — creation happens only via op:"views" create on the
+        // user's explicit Save. A local-only source forces the local model
+        // path engine-side; an extractive/keyless provider answers
+        // {available:false} with honest copy (the TS twin ALWAYS does —
+        // PARITY: shaping runs the model + DataFusion, Rust-engine-only).
+        Some("shapeView") => {
+            let source = body["source"].as_str().unwrap_or("").to_string();
+            let instruction = body["instruction"].as_str().unwrap_or("").to_string();
+            let file_ids = string_array(&body["fileIds"]);
+            return match lighthouse_core::views::shape_view(
+                &source,
+                &instruction,
+                &file_ids,
+                profile::model_config(),
+            )
+            .await
+            {
+                Ok(p) => Json(json!({
+                    "proposal": {
+                        "sql": p.sql,
+                        "before": p.before,
+                        "after": p.after,
+                        "summary": p.summary,
+                    }
+                }))
+                .into_response(),
+                Err(e) if e == lighthouse_core::views::SHAPE_NEEDS_MODEL => {
+                    Json(json!({ "available": false, "reason": e })).into_response()
+                }
+                Err(e) => bad_request(&e),
+            };
+        }
         Some("source") => {
             let Some(available) = body["available"].as_bool() else {
                 return bad_request("available required");
@@ -92,7 +478,8 @@ pub async fn rag_post(headers: HeaderMap, body: Option<Json<Value>>) -> Response
             let ids: Vec<String> = string_array(&body["includedFileIds"]);
             // Explorer search is a LOCAL preview (never sent to a provider), so
             // it runs the device path — local-only files stay searchable here.
-            let retrieved = sources::retrieve(query, &ids, &[], 5, false).await;
+            // No investigation context: search is global, no recall preference.
+            let retrieved = sources::retrieve(query, &ids, &[], 5, false, &[]).await;
             Json(json!({ "references": retrieved.references })).into_response()
         }
         // Read-only per-file inspector ("What the AI sees", openspec:
@@ -204,22 +591,61 @@ pub async fn rag_post(headers: HeaderMap, body: Option<Json<Value>>) -> Response
                 Err(e) => Json(json!({ "error": e })).into_response(),
             };
         }
-        // Write the client-rendered transcript as a markdown note into
-        // Lighthouse Notes/ (openspec: add-answer-artifacts). Ordinary vault
-        // file: walked, watched, inclusion-ruled.
+        // Write a client-composed artifact into the vault (openspec:
+        // add-answer-artifacts). Default: the chat transcript as a markdown
+        // note into Lighthouse Notes/. Optional subdir/ext route the analytics
+        // evidence pack (self-contained HTML into Lighthouse Results/) through
+        // the SAME sanitized write_artifact path — STRICT allowlist, the
+        // client never names arbitrary folders or extensions. Ordinary vault
+        // file: walked, watched, inclusion-ruled. PARITY: commands.rs and the
+        // TS twin (app/api/rag/route.ts) mirror this op exactly.
         Some("exportChat") => {
             let title = body["title"].as_str().unwrap_or("Chat").to_string();
             let markdown = body["markdown"].as_str().unwrap_or("").to_string();
             if markdown.trim().is_empty() {
                 return bad_request("markdown required");
             }
+            // Absent field = the original default; anything present must
+            // match the allowlist EXACTLY (a null/number rejects too).
+            let subdir = match body.get("subdir").map(|v| v.as_str()) {
+                None => "Lighthouse Notes",
+                Some(Some("Lighthouse Notes")) => "Lighthouse Notes",
+                Some(Some("Lighthouse Results")) => "Lighthouse Results",
+                Some(_) => {
+                    return bad_request(
+                        "subdir must be \"Lighthouse Notes\" or \"Lighthouse Results\"",
+                    )
+                }
+            }
+            .to_string();
+            let ext = match body.get("ext").map(|v| v.as_str()) {
+                None => "md",
+                Some(Some("md")) => "md",
+                Some(Some("html")) => "html",
+                Some(_) => return bad_request("ext must be \"md\" or \"html\""),
+            }
+            .to_string();
+            // Investigation notes (openspec: add-investigations §3): a
+            // non-empty investigationId routes the NOTES destination to the
+            // investigation's own folder — resolved ENGINE-SIDE from the
+            // store (`Lighthouse Notes/<stored folderName>`, re-validated at
+            // use); a client-sent folder is never trusted and the subdir
+            // allowlist above is unchanged. An explicit "Lighthouse Results"
+            // (the evidence pack) stays in Results — packs are results, not
+            // notes, and note membership = location. An unknown id rejects:
+            // a silently-global note would lose its membership. Parsed like
+            // the ask wire's investigationId (non-string reads as absent).
+            let subdir = match body["investigationId"].as_str().map(str::trim) {
+                Some(id) if !id.is_empty() && subdir == "Lighthouse Notes" => {
+                    match lighthouse_core::investigations::notes_subdir(id) {
+                        Ok(sub) => sub,
+                        Err(e) => return bad_request(&e),
+                    }
+                }
+                _ => subdir,
+            };
             let written = tokio::task::spawn_blocking(move || {
-                lighthouse_core::vault::write_artifact(
-                    "Lighthouse Notes",
-                    &title,
-                    "md",
-                    markdown.as_bytes(),
-                )
+                lighthouse_core::vault::write_artifact(&subdir, &title, &ext, markdown.as_bytes())
             })
             .await
             .map_err(|e| e.to_string())
@@ -281,7 +707,11 @@ pub async fn rag_post(headers: HeaderMap, body: Option<Json<Value>>) -> Response
                 .as_array()
                 .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
                 .unwrap_or_default();
-            return match lighthouse_core::pins::add(&question, &sql, &file_ids) {
+            // The current investigation, when one is (openspec:
+            // add-investigations) — the pin carries it as its membership.
+            let investigation_id = body["investigationId"].as_str();
+            return match lighthouse_core::pins::add(&question, &sql, &file_ids, investigation_id)
+            {
                 Ok(pin) => {
                     // Prime the fresh pin's digest + summary so the dialog has
                     // something to show (and the first real change alerts).
@@ -302,7 +732,11 @@ pub async fn rag_post(headers: HeaderMap, body: Option<Json<Value>>) -> Response
             return Json(json!({ "ok": true })).into_response();
         }
         Some("listPins") => {
-            return Json(json!({ "pins": lighthouse_core::pins::list() })).into_response();
+            // Optional investigation filter (openspec: add-investigations);
+            // absent (or blank) keeps the original "all pins" behavior.
+            let investigation_id = body["investigationId"].as_str().filter(|s| !s.is_empty());
+            return Json(json!({ "pins": lighthouse_core::pins::list_for(investigation_id) }))
+                .into_response();
         }
         Some("recheckPins") => {
             let changed = lighthouse_core::pins::recheck_all().await;
@@ -396,12 +830,206 @@ pub async fn rag_post(headers: HeaderMap, body: Option<Json<Value>>) -> Response
             // provider identity the chat pipeline uses.
             let is_cloud =
                 lighthouse_core::synth::is_cloud_provider(&lighthouse_core::profile::model_config());
-            let asks = tokio::task::spawn_blocking(move || {
-                lighthouse_core::meta::suggested_asks(&ids, is_cloud)
+            // Saved views join the suggestions when any exist (openspec:
+            // add-shaped-views §4): the resolving entry point derives view chips
+            // from resolved result columns and stays byte-identical to the
+            // file-only path when the store is empty.
+            let asks = lighthouse_core::meta::suggested_asks_resolved(ids, is_cloud).await;
+            return Json(json!({ "asks": asks })).into_response();
+        }
+        // Recipes applicable to the included set (openspec: add-recipes §2.3) —
+        // the Library gallery / empty-state chips. Same posture/cloud-ness rule
+        // as suggestedAsks: cards resolve against the shareable set, so a marked
+        // file (or an effectively-local-only view) never surfaces a recipe on a
+        // cloud ask. Execution rides the ask path via the `run-recipe:{id} on
+        // {table}` cue, not a JSON op. PARITY: the TS twin returns [] (no
+        // catalog/DataFusion) and answers {available:false} on op:"recipes".
+        Some("applicableRecipes") => {
+            let ids: Vec<String> = body["includedFileIds"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            let is_cloud =
+                lighthouse_core::synth::is_cloud_provider(&lighthouse_core::profile::model_config());
+            let recipes = lighthouse_core::meta::applicable_recipes(ids, is_cloud).await;
+            return Json(json!({ "recipes": recipes })).into_response();
+        }
+        // Proactive insights (openspec: add-quant-depth §5): run the cheap
+        // detectors over the included TABULAR files WITHOUT a question and return
+        // the ranked, bounded findings + the scanned/available table counts. It is
+        // on-device (DataFusion SQL, no model), so a scan egresses nothing.
+        // PARITY: Rust-only (analytics); route.ts returns an empty result.
+        // commands.rs mirrors this arm.
+        Some("insights") => {
+            let is_cloud = lighthouse_core::synth::is_cloud_provider(
+                &lighthouse_core::profile::model_config(),
+            );
+            let files: Vec<(String, String, std::path::PathBuf)> =
+                lighthouse_core::vault::active_included_file_ids()
+                    .into_iter()
+                    .filter_map(|id| {
+                        lighthouse_core::vault::doc_path(&id).map(|(name, abs)| (id, name, abs))
+                    })
+                    .filter(|(_, name, _)| lighthouse_core::analytics::is_tabular(name))
+                    .collect();
+            let out = lighthouse_core::insights::scan(&files, is_cloud).await;
+            return Json(json!({ "insights": out })).into_response();
+        }
+        // Deep analysis (openspec: add-deep-analysis §4.1): investigate a table —
+        // run the applicable recipe battery over it and WRITE the assembled report
+        // in-vault (the exportChat/briefing precedent: render → write_artifact, a
+        // non-egress sanitized note), returning the saved artifact's id + name. The
+        // included TABULAR files are gathered server-side (active-included, the
+        // insights precedent), so a stale client can't widen the scan. PARITY:
+        // Rust-only (DataFusion + recipes); route.ts returns {available:false}.
+        // commands.rs mirrors this arm.
+        Some("investigate") => {
+            let Some(table) = body["table"].as_str().map(str::trim).filter(|s| !s.is_empty()) else {
+                return bad_request("investigate needs a table");
+            };
+            let table = table.to_string();
+            let investigation_id = body["investigationId"].as_str().map(String::from);
+            let is_cloud = lighthouse_core::synth::is_cloud_provider(
+                &lighthouse_core::profile::model_config(),
+            );
+            let files: Vec<(String, String, std::path::PathBuf)> =
+                lighthouse_core::vault::active_included_file_ids()
+                    .into_iter()
+                    .filter_map(|id| {
+                        lighthouse_core::vault::doc_path(&id).map(|(name, abs)| (id, name, abs))
+                    })
+                    .filter(|(_, name, _)| lighthouse_core::analytics::is_tabular(name))
+                    .collect();
+            let report = lighthouse_core::reports::investigate(&table, &files, is_cloud).await;
+            // The render + in-vault write is blocking fs — off the async runtime.
+            let written = tokio::task::spawn_blocking(move || {
+                lighthouse_core::reports::write_report(&report, investigation_id.as_deref())
             })
             .await
-            .unwrap_or_default();
-            return Json(json!({ "asks": asks })).into_response();
+            .map_err(|e| e.to_string())
+            .and_then(|r| r);
+            return match written {
+                Ok((id, name)) => Json(json!({ "savedId": id, "savedName": name })).into_response(),
+                Err(e) => Json(json!({ "error": e })).into_response(),
+            };
+        }
+        // The capability map (openspec: add-deep-analysis §4.2): aggregate the
+        // analyzable tables + their recipes/metrics/asks + one investigation per
+        // Date+Numeric table for the included set — a single "what can I do" view.
+        // Pure aggregation of the posture-gated applicable_* surfaces (no new
+        // analysis), so its cloud gating is inherited. PARITY: Rust-only; route.ts
+        // returns an empty map. commands.rs mirrors this arm.
+        Some("capabilityMap") => {
+            let ids: Vec<String> = body["includedFileIds"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            let is_cloud = lighthouse_core::synth::is_cloud_provider(
+                &lighthouse_core::profile::model_config(),
+            );
+            let map = lighthouse_core::meta::capability_map(ids, is_cloud).await;
+            return Json(json!({ "map": map })).into_response();
+        }
+        // Semantic layer (openspec: add-semantic-layer §6.1) — the metric/synonym
+        // authoring + nav surface. `list` returns the posture-eligible definitions
+        // applicable to the included tables (a card shape); create/rename/delete
+        // are the pure store lifecycle (the ENGINE owns every rule — a refusal
+        // rides back as 400 + {error}, shown verbatim). PARITY: the TS twin
+        // (route.ts) computes the identical `list` subset from its own store; only
+        // op:"defineMetric" below is Rust-only. commands.rs mirrors this arm.
+        Some("semantic") => match body["action"].as_str() {
+            Some("list") => {
+                let ids = string_array(&body["includedFileIds"]);
+                let is_cloud = lighthouse_core::synth::is_cloud_provider(
+                    &lighthouse_core::profile::model_config(),
+                );
+                Json(json!({ "semantic": lighthouse_core::meta::applicable_semantics(ids, is_cloud) }))
+                    .into_response()
+            }
+            Some("create-metric") => {
+                let summary_source = match body["summarySource"].as_str() {
+                    None | Some("question") => lighthouse_core::views::SummarySource::Question,
+                    Some("model") => lighthouse_core::views::SummarySource::Model,
+                    Some(_) => {
+                        return bad_request("summarySource must be \"question\" or \"model\"")
+                    }
+                };
+                let file_ids = string_array(&body["fileIds"]);
+                match lighthouse_core::semantic::create_metric(
+                    body["name"].as_str().unwrap_or(""),
+                    body["expression"].as_str().unwrap_or(""),
+                    body["description"].as_str().unwrap_or(""),
+                    body["entity"].as_str().unwrap_or(""),
+                    lighthouse_core::views::ViewSummary {
+                        text: body["summaryText"].as_str().unwrap_or("").to_string(),
+                        source: summary_source,
+                    },
+                    &file_ids,
+                ) {
+                    Ok(metric) => Json(json!({ "metric": metric })).into_response(),
+                    Err(e) => bad_request(&e),
+                }
+            }
+            Some("create-synonym") => {
+                match lighthouse_core::semantic::create_synonym(
+                    body["term"].as_str().unwrap_or(""),
+                    body["canonical"].as_str().unwrap_or(""),
+                ) {
+                    Ok(synonym) => Json(json!({ "synonym": synonym })).into_response(),
+                    Err(e) => bad_request(&e),
+                }
+            }
+            Some("rename") => {
+                let Some(id) = body["id"].as_str().filter(|s| !s.is_empty()) else {
+                    return bad_request("id required");
+                };
+                match lighthouse_core::semantic::rename_metric(id, body["name"].as_str().unwrap_or("")) {
+                    Ok(metric) => Json(json!({ "metric": metric })).into_response(),
+                    Err(e) => bad_request(&e),
+                }
+            }
+            // Delete a metric (by `id`, cascading its synonyms on explicit
+            // confirm) or a synonym (by `term`) — the same store lifecycle the
+            // engine owns. `id` wins when both are present.
+            Some("delete") => {
+                if let Some(id) = body["id"].as_str().filter(|s| !s.is_empty()) {
+                    let cascade = body["cascade"].as_bool().unwrap_or(false);
+                    match lighthouse_core::semantic::delete_metric(id, cascade) {
+                        Ok(deleted) => Json(json!({ "deletedId": deleted })).into_response(),
+                        Err(e) => bad_request(&e),
+                    }
+                } else if let Some(term) = body["term"].as_str().filter(|s| !s.is_empty()) {
+                    match lighthouse_core::semantic::delete_synonym(term) {
+                        Ok(()) => Json(json!({ "ok": true })).into_response(),
+                        Err(e) => bad_request(&e),
+                    }
+                } else {
+                    bad_request("id (metric) or term (synonym) required")
+                }
+            }
+            _ => bad_request(
+                "semantic action must be list, create-metric, create-synonym, rename, or delete",
+            ),
+        },
+        // Propose a metric from a Beam answer's SQL (openspec §6.1 — the "Save as
+        // view" precedent): the engine parses the executed SQL and proposes an
+        // aggregate expression + entity for the "Define as metric" dialog; the
+        // user names it and saves via op:"semantic" create-metric. PARITY: SQL
+        // parsing is Rust-only (analytics/DataFusion), so the TS twin answers
+        // {available:false} — the shapeView posture. commands.rs mirrors this.
+        Some("defineMetric") => {
+            let sql = body["sql"].as_str().unwrap_or("");
+            match lighthouse_core::analytics::propose_metric(sql) {
+                Some((expression, entity)) => {
+                    Json(json!({ "available": true, "expression": expression, "entity": entity }))
+                        .into_response()
+                }
+                None => Json(json!({
+                    "available": false,
+                    "reason": "this answer has no single-table aggregate to define as a metric",
+                }))
+                .into_response(),
+            }
         }
         Some("restore") => {
             let token = &body["token"];
@@ -413,6 +1041,91 @@ pub async fn rag_post(headers: HeaderMap, body: Option<Json<Value>>) -> Response
                 Err(e) => bad_request(&err_message(&e, "restore failed")),
             }
         }
+        // Provider sign-in (0.12.1 §3): a generic RFC 8628 device-
+        // authorization client that stays INERT until a maintainer registers
+        // with a vendor and configures all four LIGHTHOUSE_SIGNIN_* values
+        // (provider_auth.rs) — unconfigured, every action answers
+        // {available:false} and no host is dialed. Flow errors ride back as
+        // 200 + {error} (the pinAsk idiom) so the dialog resets with the
+        // reason instead of throwing. setMethod persists the auth-method
+        // choice ("key" restores the default and always works; "signin" is
+        // registration-gated like the flow it arms). PARITY: commands.rs
+        // mirrors this op exactly; the TS twin answers a fail-closed stub
+        // (sign-in runs in the desktop app).
+        Some("providerAuth") => match body["action"].as_str() {
+            Some("status") => {
+                Json(lighthouse_core::provider_auth::status_payload()).into_response()
+            }
+            Some("setMethod") => match body["method"].as_str() {
+                Some("key") => {
+                    lighthouse_core::settings::set_openai_auth_method("key");
+                    Json(json!({ "ok": true, "method": "key" })).into_response()
+                }
+                Some("signin") => {
+                    if lighthouse_core::provider_auth::signin_config().is_none() {
+                        Json(json!({
+                            "available": false,
+                            "reason": lighthouse_core::provider_auth::UNCONFIGURED_REASON,
+                        }))
+                        .into_response()
+                    } else {
+                        lighthouse_core::settings::set_openai_auth_method("signin");
+                        Json(json!({ "ok": true, "method": "signin" })).into_response()
+                    }
+                }
+                _ => bad_request("method must be \"key\" or \"signin\""),
+            },
+            Some("start") => match lighthouse_core::provider_auth::start().await {
+                Ok(flow) => Json(json!({
+                    "userCode": flow.user_code,
+                    "verificationUri": flow.verification_uri,
+                    "intervalMs": flow.interval_ms,
+                    "expiresInMs": flow.expires_in_ms,
+                }))
+                .into_response(),
+                Err(e) if e == lighthouse_core::provider_auth::UNCONFIGURED_REASON => {
+                    Json(json!({ "available": false, "reason": e })).into_response()
+                }
+                Err(e) => Json(json!({ "error": e })).into_response(),
+            },
+            Some("poll") => match lighthouse_core::provider_auth::poll_once().await {
+                Ok(lighthouse_core::provider_auth::Poll::Pending { interval_ms }) => {
+                    Json(json!({ "status": "pending", "intervalMs": interval_ms }))
+                        .into_response()
+                }
+                Ok(lighthouse_core::provider_auth::Poll::Complete { account }) => {
+                    let mut out = json!({ "status": "complete" });
+                    if let Some(a) = account {
+                        out["accountHint"] = json!(a);
+                    }
+                    Json(out).into_response()
+                }
+                Ok(lighthouse_core::provider_auth::Poll::Idle) => {
+                    Json(json!({ "status": "idle" })).into_response()
+                }
+                Err(e) if e == lighthouse_core::provider_auth::UNCONFIGURED_REASON => {
+                    Json(json!({ "available": false, "reason": e })).into_response()
+                }
+                Err(e) => Json(json!({ "error": e })).into_response(),
+            },
+            Some("signout") => {
+                // Dropping sealed tokens is local-only and always safe, so it
+                // runs regardless; the ANSWER stays fail-closed unconfigured.
+                lighthouse_core::provider_auth::signout();
+                if lighthouse_core::provider_auth::signin_config().is_none() {
+                    Json(json!({
+                        "available": false,
+                        "reason": lighthouse_core::provider_auth::UNCONFIGURED_REASON,
+                    }))
+                    .into_response()
+                } else {
+                    Json(json!({ "ok": true })).into_response()
+                }
+            }
+            _ => bad_request(
+                "providerAuth action must be status, setMethod, start, poll, or signout",
+            ),
+        },
         // Managed policy snapshot (openspec: add-managed-policy) — read-only;
         // the UI renders the reported locks as "Managed by your organization".
         Some("policy") => Json(lighthouse_core::policy::snapshot()).into_response(),
@@ -477,6 +1190,23 @@ pub async fn chat_post(headers: HeaderMap, body: Option<Json<Value>>) -> Respons
     let included_file_ids = string_array(&body["includedFileIds"]);
     // Files the user explicitly attached to this question.
     let attachment_ids = string_array(&body["attachmentFileIds"]);
+    // The investigation this ask runs inside (openspec: add-investigations);
+    // absent = the global context. Resolved below, beside model_config().
+    let investigation_id = body["investigationId"].as_str().map(String::from);
+    // Answer cache controls (openspec: add-answer-cache): Re-run's lookup
+    // bypass, and the client's per-request persistence verdict. Both default
+    // false — an absent field fails toward privacy (memory-only cache).
+    let cache = lighthouse_core::answer_cache::CacheCtl {
+        bypass_cache: body["bypassCache"].as_bool().unwrap_or(false),
+        persist_allowed: body["persistAllowed"].as_bool().unwrap_or(false),
+    };
+    // Two-phase plan approval (openspec: add-beam-loop §4): the Phase-1 preview
+    // flag and the Phase-2 approved SQL, both optional and mirroring the cache
+    // controls above. Absent = an ordinary ask. PARITY: commands.rs chat_ask.
+    let plan = lighthouse_core::beam::PlanCtl {
+        plan_only: body["planOnly"].as_bool().unwrap_or(false),
+        approved_plan: body["approvedPlan"].as_str().map(String::from),
+    };
     // Prior turns (sanitized) so follow-ups have conversational context; capped
     // to the last few to bound token cost.
     let history: Vec<ChatTurn> = body["history"]
@@ -502,7 +1232,19 @@ pub async fn chat_post(headers: HeaderMap, body: Option<Json<Value>>) -> Respons
         })
         .unwrap_or_default();
 
-    let cfg = profile::model_config();
+    // Investigation scope + provider policy resolve HERE — the same
+    // chokepoint where the profile's model config is consulted (and beneath
+    // which the managed policy's llm-time belt sits), so a local-only
+    // investigation swaps cfg before any transport exists and scope arrives
+    // as ordinary attachments (openspec: add-investigations). The third
+    // element is the investigation's conversationRefs — retrieval's recall
+    // preference (§3); empty when no investigation rides the ask.
+    let (attachment_ids, cfg, preferred_conversation_ids) =
+        lighthouse_core::investigations::resolve_ask_context(
+            investigation_id.as_deref(),
+            attachment_ids,
+            profile::model_config(),
+        );
 
     let line = |c: &ChatChunk| -> bytes::Bytes {
         bytes::Bytes::from(format!(
@@ -530,9 +1272,15 @@ pub async fn chat_post(headers: HeaderMap, body: Option<Json<Value>>) -> Respons
             attachment_ids,
             history,
             cfg,
+            cache,
+            plan,
+            preferred_conversation_ids,
         );
         let mut final_files: Vec<String> = Vec::new();
         let mut artifacts: Vec<String> = Vec::new();
+        // The NEW cost this ask incurred (openspec: add-beam-loop §3.2), read
+        // from the final chunk's meter; a cache replay computes nothing (0 new).
+        let mut answer_cost: Option<lighthouse_core::contracts::CostMeta> = None;
         while let Some(c) = chunks.next().await {
             if c.done {
                 if let Some(refs) = &c.references {
@@ -541,10 +1289,13 @@ pub async fn chat_post(headers: HeaderMap, body: Option<Json<Value>>) -> Respons
                 if let Some(a) = &c.analytics {
                     artifacts.extend(a.file_ids.iter().cloned());
                 }
+                if let Some(meta) = &c.meta {
+                    answer_cost = lighthouse_core::audit::ask_new_cost(meta);
+                }
             }
             yield Ok::<bytes::Bytes, std::convert::Infallible>(line(&c));
         }
-        audit.finish(&provider, final_files, artifacts);
+        audit.finish(&provider, final_files, artifacts, answer_cost);
     };
 
     Response::builder()
@@ -907,6 +1658,7 @@ pub async fn settings_post(headers: HeaderMap, body: Option<Json<Value>>) -> Res
         body["briefingNotify"].as_bool(),
         body["briefingNoteHour"].as_i64(),
         body["tourShown"].as_bool(),
+        body["beamMaxSteps"].as_i64(),
     );
     Json(json!({
         "ok": true,

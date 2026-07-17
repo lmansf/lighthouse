@@ -81,6 +81,25 @@ export interface DesktopSettings {
    * tour would re-greet on a plain web reload — desktop is the shipping target).
    */
   tourShown?: boolean;
+  /**
+   * Provider sign-in (0.12.1 §3): how the OpenAI provider authenticates —
+   * "key" (API key, the default; unset = "key") or "signin" (the OAuth device
+   * flow, desktop-Rust-only and itself inert until a maintainer registers with
+   * the vendor and configures it). PARITY: openai_auth_method in settings.rs;
+   * the twin round-trips the preference for the UI but never runs the flow —
+   * its providerAuth ops answer the fail-closed stub.
+   */
+  openaiAuthMethod?: "key" | "signin";
+  /**
+   * Beam loop (openspec: add-beam-loop §2.7): the multi-step analytics loop's
+   * step budget — how many sequential verified SQL steps a keyed-remote ask may
+   * run (replaces the former hardcoded 3). Default 5 (unset = 5), clamped to
+   * [1, 12] by the engine. PARITY: beam_max_steps in settings.rs. The loop is
+   * Rust-only analytics (like the DataFusion path itself), so the TS twin just
+   * round-trips this pref for the UI — as with semanticSearch/briefingNotify —
+   * and never runs the loop.
+   */
+  beamMaxSteps?: number;
 }
 
 function settingsFile(): string | null {

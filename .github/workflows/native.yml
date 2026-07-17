@@ -36,3 +36,10 @@ jobs:
         run: cargo build --workspace --locked
       - name: Test
         run: cargo test --workspace --locked
+      # Model-free quality floors (exit non-zero on any golden violation).
+      # Both evals also carry an opt-in provider NL section, but with no
+      # LIGHTHOUSE_EVAL_PROVIDER set only the deterministic floor runs here.
+      - name: Analytics eval floor (model-free)
+        run: cargo run -p lighthouse-core --example analytics_eval --locked
+      - name: Chart eval floor (model-free)
+        run: cargo run -p lighthouse-core --example chart_eval --locked

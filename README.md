@@ -11,15 +11,57 @@ Built for two people in particular: the **data analyst** who wants trustworthy,
 engine-verified answers over their own spreadsheets and reports, and the **IT
 security director** who needs to approve all of it.
 
-**Download:** installers for Windows, macOS, and Linux at
-**[lhvault.app](https://lhvault.app)** — or straight from the
-[latest release](https://github.com/lmansf/lighthouse/releases/latest).
+## Install
+
+One command per platform, straight from the
+[latest release](https://github.com/lmansf/lighthouse/releases/latest) — or
+download the same installers by hand at **[lhvault.app](https://lhvault.app)**.
+Installers bundle the whole on-device engine (embedded query engine,
+search index, embeddings model), so they weigh in around 300 MB.
+
+**Windows** (PowerShell):
+
+```powershell
+irm https://github.com/lmansf/lighthouse/releases/latest/download/Lighthouse-Setup.exe -OutFile "$env:TEMP\Lighthouse-Setup.exe"
+& "$env:TEMP\Lighthouse-Setup.exe"
+```
+
+**macOS** (Apple Silicon):
+
+```bash
+curl -fsSL https://api.github.com/repos/lmansf/lighthouse/releases/latest \
+  | grep -oE 'https://[^"]+aarch64\.dmg' | head -n1 | xargs curl -fL -o /tmp/Lighthouse.dmg
+hdiutil attach /tmp/Lighthouse.dmg -nobrowse -mountpoint /Volumes/Lighthouse
+cp -R /Volumes/Lighthouse/Lighthouse.app /Applications/
+hdiutil detach /Volumes/Lighthouse
+open /Applications/Lighthouse.app
+```
+
+**Linux — Ubuntu / Debian** (`apt` resolves the webview dependencies):
+
+```bash
+curl -fsSL https://api.github.com/repos/lmansf/lighthouse/releases/latest \
+  | grep -oE 'https://[^"]+amd64\.deb' | head -n1 | xargs curl -fL -o /tmp/lighthouse.deb
+sudo apt install -y /tmp/lighthouse.deb
+```
+
+Then launch **Lighthouse** from your app menu (or run `lighthouse-desktop`).
+Any other distro: grab the `.AppImage` instead —
+
+```bash
+curl -fsSL https://api.github.com/repos/lmansf/lighthouse/releases/latest \
+  | grep -oE 'https://[^"]+amd64\.AppImage' | head -n1 | xargs curl -fL -o ~/Lighthouse.AppImage
+chmod +x ~/Lighthouse.AppImage && ~/Lighthouse.AppImage
+```
+
+*Builds are not yet code-signed — Windows SmartScreen and macOS Gatekeeper
+may warn on first launch (see `docs/signing.md`).*
 
 > Naming debt, kept on purpose: the npm package is still named `rag-vault`,
 > and the hidden per-vault state directory is `.rag-vault/` — renaming either
 > would break existing installs' upgrades (orphaned indexes and settings), so
-> neither is renamed. The product and repo are **Lighthouse**. The UI is the
-> Forerunner theme — steel blues with a beacon accent — in light and dark.
+> neither is renamed. The product and repo are **Lighthouse**. The identity is
+> **Beam** — ink and paper with a single amber beam — in light and dark.
 
 ## What it does (as of 0.11)
 
@@ -60,8 +102,7 @@ security director** who needs to approve all of it.
 
 ### Desktop app (what users get)
 
-Install from [lhvault.app](https://lhvault.app) or the
-[releases page](https://github.com/lmansf/lighthouse/releases/latest). The app
+Install with one command — see [Install](#install) at the top. The app
 is a native shell (Tauri 2) around a Rust engine: system tray, opt-out
 launch-at-login, native dialogs, **no local TCP port** — the UI talks to the
 engine over IPC.

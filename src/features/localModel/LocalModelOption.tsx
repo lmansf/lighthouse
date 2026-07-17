@@ -24,6 +24,7 @@ import {
   ArrowDownloadRegular,
   CheckmarkCircleFilled,
   DeleteRegular,
+  PauseRegular,
 } from "@fluentui/react-icons";
 
 type ModelStatus = "ready" | "absent" | "downloading" | "uninstalling" | "error";
@@ -37,6 +38,10 @@ interface ModelState {
   removable?: boolean;
   /** Why the last install attempt failed (status "error"). */
   error?: string;
+  /** Bytes of a kept-for-resume `.part` on disk (after an interrupted, failed,
+   *  or paused download) — the next install resumes from here via HTTP Range,
+   *  so the UI says "Resume download" instead of "Install". */
+  partialBytes?: number;
   /** G2 GPU status — the shell's actual llama-server launch state. Present only
    *  on the desktop build (the web/dev server has no supervisor, so these are
    *  undefined and render as nothing). `gpuOn`: launched with GPU offload;
@@ -46,7 +51,10 @@ interface ModelState {
   gpuRunning?: boolean;
 }
 
-/** Poll the local-model status, exposing it plus `install()` / `uninstall()`. */
+/** Poll the local-model status, exposing it plus `install()` / `uninstall()` /
+ *  `pause()`. Pause and uninstall share DELETE /api/model — the server
+ *  disambiguates: during a download it pauses (keeps the resumable `.part`);
+ *  otherwise it uninstalls. */
 export function useLocalModel() {
   const [state, setState] = useState<ModelState>({ status: "absent", received: 0, total: 0 });
   const statusRef = useRef(state.status);
@@ -70,7 +78,9 @@ export function useLocalModel() {
   }, [poll, state.status]);
 
   const install = useCallback(async () => {
-    setState((s) => ({ ...s, status: "downloading" })); // optimistic - instant feedback
+    // Optimistic - instant feedback. A resumed download starts from the kept
+    // partial, so show those bytes rather than a misleading 0.
+    setState((s) => ({ ...s, status: "downloading", received: s.partialBytes ?? s.received }));
     try {
       const r = await fetch("/api/model", { method: "POST" });
       if (r.ok) setState(await r.json());
@@ -89,7 +99,19 @@ export function useLocalModel() {
     }
   }, [poll]);
 
-  return { ...state, install, uninstall };
+  /** Pause the in-flight download (same DELETE; the server keeps the `.part`
+   *  so a later install resumes where it left off). */
+  const pause = useCallback(async () => {
+    setState((s) => ({ ...s, status: "absent", partialBytes: s.received || s.partialBytes })); // optimistic
+    try {
+      const r = await fetch("/api/model", { method: "DELETE" });
+      if (r.ok) setState(await r.json());
+    } catch {
+      void poll();
+    }
+  }, [poll]);
+
+  return { ...state, install, uninstall, pause };
 }
 
 const useStyles = makeStyles({
@@ -198,23 +220,48 @@ function humanEta(sec: number): string {
  * local provider is selected. This is the primary install affordance: the tiny
  * "＋" inside the dropdown option is easy to miss and unmounts when the dropdown
  * closes, so on its own a user couldn't tell whether the model installed. This
- * panel prompts the install, streams live download progress, and confirms
- * "Installed" — all in the panel body where it stays visible.
+ * panel prompts the install, streams live download progress (pausable — the
+ * partial is kept and resumed via HTTP Range), and confirms "Installed" — all
+ * in the panel body where it stays visible.
+ *
+ * `onboarding` adjusts only the copy: the same download button becomes the
+ * "start it now, it keeps going in the background while you finish setting up"
+ * offer. The download itself is fire-and-forget server-side, so continuing
+ * through onboarding (or closing the dialog) never interrupts it.
  */
-export function LocalModelInstallPanel() {
+export function LocalModelInstallPanel({ onboarding = false }: { onboarding?: boolean } = {}) {
   const styles = useStyles();
-  const { status, received, total, removable, error, gpuOn, gpuLayers, gpuRunning, install, uninstall } =
-    useLocalModel();
+  const {
+    status,
+    received,
+    total,
+    removable,
+    error,
+    partialBytes,
+    gpuOn,
+    gpuLayers,
+    gpuRunning,
+    install,
+    uninstall,
+    pause,
+  } = useLocalModel();
   const pct = total ? Math.min(100, Math.floor((received / total) * 100)) : 0;
   // G2 GPU status: the shell reports the real llama-server launch state. Show it
-  // only once the model is installed AND the shell has spoken (gpuOn defined —
-  // absent on the web/dev build, which has no supervisor).
+  // once the shell has spoken (gpuOn defined — absent on the web/dev build,
+  // which has no supervisor): after install as the live state, and DURING a
+  // download as the honest "what will happen once this lands" note (the shell
+  // only knows its launch config after a chat server has run this session, so
+  // a fresh first install has nothing truthful to say and shows nothing).
   const gpuLine =
-    status === "ready" && typeof gpuOn === "boolean"
+    typeof gpuOn === "boolean" && status === "ready"
       ? gpuOn
         ? `GPU acceleration: on${gpuLayers ? ` (${gpuLayers} layers)` : ""}${gpuRunning ? "" : " — starts with your next question"}`
         : "GPU acceleration: off — running on CPU"
-      : null;
+      : typeof gpuOn === "boolean" && status === "downloading"
+        ? gpuOn
+          ? `GPU acceleration: on${gpuLayers ? ` (${gpuLayers} layers)` : ""} — your GPU will accelerate this model once it's installed`
+          : "GPU acceleration: off — this model will run on CPU"
+        : null;
 
   // Derive transfer speed + ETA from successive progress samples (the state
   // itself only reports received/total). Smoothed with an EMA so the readout
@@ -263,7 +310,22 @@ export function LocalModelInstallPanel() {
               Uninstall
             </Button>
           </Tooltip>
-        ) : status === "downloading" || status === "uninstalling" ? (
+        ) : status === "downloading" ? (
+          <span className={styles.actions}>
+            <Spinner size="tiny" />
+            {/* Honest label: pausing KEEPS the downloaded part (the server holds
+                the .part for an HTTP-Range resume), so this is "Pause", not
+                "Cancel" — nothing is thrown away. */}
+            <Tooltip
+              content="Pause the download — what's already downloaded is kept, and installing again resumes right where it left off"
+              relationship="label"
+            >
+              <Button size="small" appearance="subtle" icon={<PauseRegular />} onClick={() => void pause()}>
+                Pause
+              </Button>
+            </Tooltip>
+          </span>
+        ) : status === "uninstalling" ? (
           <Spinner size="tiny" />
         ) : (
           <Button
@@ -272,7 +334,15 @@ export function LocalModelInstallPanel() {
             icon={<ArrowDownloadRegular />}
             onClick={() => void install()}
           >
-            {status === "error" ? "Retry install" : removable ? "Reinstall" : "Install"}
+            {partialBytes
+              ? "Resume download"
+              : status === "error"
+                ? "Retry install"
+                : removable
+                  ? "Reinstall"
+                  : onboarding
+                    ? "Start download now"
+                    : "Install"}
           </Button>
         )}
       </div>
@@ -293,6 +363,12 @@ export function LocalModelInstallPanel() {
               {rate.etaSec > 0 ? ` · ${humanEta(rate.etaSec)}` : ""}
             </span>
           </div>
+          {onboarding && (
+            <Text className={styles.panelHint}>
+              You can keep setting up — the download continues in the background.
+            </Text>
+          )}
+          {gpuLine && <Text className={styles.panelHint}>{gpuLine}</Text>}
         </>
       ) : status === "uninstalling" ? (
         <Text className={styles.panelHint}>Removing the private model…</Text>
@@ -305,12 +381,21 @@ export function LocalModelInstallPanel() {
         </>
       ) : status === "error" ? (
         <Text className={styles.errorText}>
-          {error || "The download failed."} — check your connection and click Retry install.
+          {error || "The download failed."} —{" "}
+          {partialBytes
+            ? `the ${humanBytes(partialBytes)} downloaded so far is kept; check your connection and click Resume download to pick up where it left off.`
+            : "check your connection and click Retry install."}
+        </Text>
+      ) : partialBytes ? (
+        <Text className={styles.panelHint}>
+          Download paused — {humanBytes(partialBytes)} of the one-time ~4.2 GB download is already
+          saved. Resuming picks up right where it left off (nothing is re-downloaded).
         </Text>
       ) : (
         <Text className={styles.panelHint}>
-          A one-time ~4.2 GB download runs the AI fully on your machine (no API key, fully private).
-          Click Install to download it{removable ? " — this replaces an unusable leftover file" : ""}.
+          {onboarding
+            ? "A one-time ~4.2 GB download runs the AI fully on your machine (no API key, fully private). Start the download now and it keeps going in the background while you finish setting up."
+            : `A one-time ~4.2 GB download runs the AI fully on your machine (no API key, fully private). Click Install to download it${removable ? " — this replaces an unusable leftover file" : ""}.`}
         </Text>
       )}
     </div>
@@ -320,7 +405,7 @@ export function LocalModelInstallPanel() {
 /** Option content for the local provider: label + its install state / controls. */
 export function LocalModelOption({ label }: { label: string }) {
   const styles = useStyles();
-  const { status, received, total, removable, error, install, uninstall } = useLocalModel();
+  const { status, received, total, removable, error, partialBytes, install, uninstall } = useLocalModel();
   const pct = total ? Math.floor((received / total) * 100) : 0;
 
   // Clicks on these controls must not bubble up and select the option.
@@ -403,11 +488,13 @@ export function LocalModelOption({ label }: { label: string }) {
           )}
           <Tooltip
             content={
-              status === "error"
-                ? "Install failed - click to retry (~4.2 GB, one time)"
-                : removable
-                  ? "Install a fresh copy of the private model (~4.2 GB, one time)."
-                  : "Install the private model (~4.2 GB, one time). Runs fully on your machine."
+              partialBytes
+                ? "Resume the private model download — picks up where it left off (~4.2 GB total, one time)."
+                : status === "error"
+                  ? "Install failed - click to retry (~4.2 GB, one time)"
+                  : removable
+                    ? "Install a fresh copy of the private model (~4.2 GB, one time)."
+                    : "Install the private model (~4.2 GB, one time). Runs fully on your machine."
             }
             relationship="label"
           >

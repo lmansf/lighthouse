@@ -32,9 +32,12 @@ import {
   tokens,
 } from "@fluentui/react-components";
 import {
+  BoardRegular,
   ChatHelpRegular,
   BrainCircuitRegular,
+  DeleteRegular,
   HistoryRegular,
+  InfoRegular,
   OpenRegular,
   OptionsRegular,
   PinRegular,
@@ -43,14 +46,23 @@ import {
   ShieldTaskRegular,
   WarningRegular,
 } from "@fluentui/react-icons";
-import { MODEL_PROVIDERS, ragService, type AuditSnapshot } from "@/contracts";
+import {
+  MODEL_PROVIDERS,
+  ragService,
+  type AuditSnapshot,
+  type SigninStart,
+  type SigninStatus,
+} from "@/contracts";
 import { LocalModelInstallPanel } from "@/features/localModel/LocalModelOption";
+import { apiKeyBillingNote, signinBillingNote } from "@/lib/billingNotes";
+import { RULE_ACTION_LABEL } from "@/features/explorer/FolderRulesDialog";
 import { START_TOUR_EVENT } from "@/features/help/FirstRunTour";
 import { showWidget, summonHotkey, prettyShortcut, modKey } from "@/features/onboarding/ModeChooser";
 import { useAuthStore } from "@/stores/useAuthStore";
 import { useThemeStore } from "@/stores/useThemeStore";
 import { useChatStore } from "@/stores/useChatStore";
 import { useRagStore } from "@/stores/useRagStore";
+import { BEAM_SWEEP } from "@/shell/theme";
 
 const LH_REPO = "https://github.com/lmansf/lighthouse";
 
@@ -60,6 +72,25 @@ const useStyles = makeStyles({
   muted: { color: tokens.colorNeutralForeground3, fontSize: tokens.fontSizeBase200 },
   modelFields: { display: "flex", flexDirection: "column", gap: tokens.spacingVerticalM },
   testKeyRow: { display: "flex", alignItems: "center", gap: tokens.spacingHorizontalS },
+  // Provider sign-in (0.12.1 §3): the device-flow pane under the OpenAI row.
+  signinPane: {
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "flex-start",
+    gap: tokens.spacingVerticalS,
+  },
+  signinRow: { display: "flex", alignItems: "center", gap: tokens.spacingHorizontalS },
+  // The user code, LARGE and unmistakable — monospace with tabular numerals
+  // so the digits the user must retype line up glyph-for-glyph.
+  signinCode: {
+    fontFamily: tokens.fontFamilyMonospace,
+    fontSize: tokens.fontSizeHero800,
+    fontWeight: tokens.fontWeightSemibold,
+    letterSpacing: "0.08em",
+    fontVariantNumeric: "tabular-nums",
+    color: tokens.colorNeutralForeground1,
+  },
+  signinOk: { color: tokens.colorPaletteGreenForeground1 },
   testKeyOk: { color: tokens.colorPaletteGreenForeground1 },
   savedNote: { color: tokens.colorPaletteGreenForeground1, fontSize: tokens.fontSizeBase200 },
   // Preferences dialog: sections separated by a little vertical air.
@@ -73,6 +104,21 @@ const useStyles = makeStyles({
   // Waiting-on-permission note under the whisper switch — warning tint so it
   // reads as "action needed" without the alarm of a hard error red.
   prefWarn: { color: tokens.colorStatusWarningForeground1, fontSize: tokens.fontSizeBase200 },
+  // Curation rules (openspec: add-curation-rules): the Preferences list —
+  // name | action | scope | remove, one compact row per rule.
+  ruleList: { display: "flex", flexDirection: "column", gap: tokens.spacingVerticalXS },
+  ruleRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: tokens.spacingHorizontalS,
+    ...shorthands.padding(tokens.spacingVerticalXXS, tokens.spacingHorizontalS),
+    backgroundColor: tokens.colorNeutralBackground2,
+    borderRadius: tokens.borderRadiusMedium,
+  },
+  ruleName: { flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+  // An orphaned scope (folder gone — the rule matches nothing) is struck
+  // through, the promised "kept for cleanup" cue.
+  ruleOrphan: { textDecorationLine: "line-through" },
   // Summon-shortcut recorder: the chord chip, Change, and Reset on one line.
   shortcutRow: {
     display: "flex",
@@ -141,11 +187,35 @@ const useStyles = makeStyles({
   auditEgressOut: { fontWeight: tokens.fontWeightSemibold, color: tokens.colorPaletteRedForeground1 },
   // Friendly empty state when nothing has been recorded yet.
   auditEmpty: { color: tokens.colorNeutralForeground3, ...shorthands.padding(tokens.spacingVerticalL, 0) },
+  // About: settings' one hero use of the Beam signature — a slim ink→amber
+  // band crowning the dialog (same pattern as the onboarding/tour headers),
+  // never behind body text. Theme variant via the data-theme stamp on <html>.
+  aboutBand: {
+    height: "3px",
+    flexShrink: 0,
+    borderRadius: tokens.borderRadiusCircular,
+    backgroundImage: BEAM_SWEEP.light,
+    ':global([data-theme="dark"])': { backgroundImage: BEAM_SWEEP.dark },
+  },
+  aboutStack: { display: "flex", flexDirection: "column", gap: tokens.spacingVerticalM },
+  aboutVersion: {
+    color: tokens.colorNeutralForeground3,
+    fontSize: tokens.fontSizeBase200,
+    letterSpacing: "0.02em",
+  },
+  aboutIdentity: { color: tokens.colorNeutralForeground2 },
 });
 
 /** First model of a provider id, falling back to the first known provider. */
 function firstModelFor(pid: string): string {
   return (MODEL_PROVIDERS.find((p) => p.id === pid) ?? MODEL_PROVIDERS[0]).models[0];
+}
+
+/** External hand-off in the user's own browser — the feedback flow's idiom
+ *  (BugReport.tsx openExternal): a plain window.open the desktop shell routes
+ *  to the OS browser; Lighthouse itself transmits nothing here. */
+function openExternal(url: string) {
+  window.open(url, "_blank", "noopener,noreferrer");
 }
 
 /**
@@ -157,7 +227,9 @@ function firstModelFor(pid: string): string {
 function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean) => void }) {
   const styles = useStyles();
   const onboarding = useAuthStore((s) => s.onboarding);
-  const selectModel = useAuthStore((s) => s.selectModel);
+  // switchModel = selectModel + completeOnboarding in one publish: a post-
+  // onboarding save must never park the shell back on the onboarding step.
+  const switchModel = useAuthStore((s) => s.switchModel);
   const validateKey = useAuthStore((s) => s.validateKey);
   // Managed policy (add-managed-policy): null = unrestricted; a list means
   // only those providers may be selected (rows render disabled — the engine
@@ -171,6 +243,16 @@ function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean
   const [error, setError] = useState<string | null>(null);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; error?: string } | null>(null);
+  // Provider sign-in (0.12.1 §3), OpenAI row only. `signin` is the engine's
+  // status — null until loaded, and available:false on every stock build, so
+  // NOTHING sign-in-related renders unless a maintainer configured the flow
+  // (fail-closed invisibility). Desktop-gated like other filesystem-backed
+  // affordances.
+  const desktop = useRagStore((s) => s.desktop);
+  const [signin, setSignin] = useState<SigninStatus | null>(null);
+  const [signinFlow, setSigninFlow] = useState<SigninStart | null>(null);
+  const [signinError, setSigninError] = useState<string | null>(null);
+  const [signinBusy, setSigninBusy] = useState(false);
 
   // Re-sync the fields to the saved settings on the open transition.
   useEffect(() => {
@@ -182,7 +264,69 @@ function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean
     setApiKey("");
     setError(null);
     setTestResult(null);
+    setSigninFlow(null);
+    setSigninError(null);
   }, [open]);
+
+  // Load the sign-in status when the OpenAI row is in view; any provider
+  // switch abandons an in-flight code (the engine's pending handshake simply
+  // expires — nothing was granted).
+  useEffect(() => {
+    setSigninFlow(null);
+    setSigninError(null);
+    if (!open || providerId !== "openai") {
+      setSignin(null);
+      return;
+    }
+    let alive = true;
+    ragService
+      .providerAuthStatus()
+      .then((s) => {
+        if (alive) setSignin(s);
+      })
+      .catch(() => {
+        if (alive) setSignin(null); // unknown ⇒ render nothing (fail closed)
+      });
+    return () => {
+      alive = false;
+    };
+  }, [open, providerId]);
+
+  // Live poll while a sign-in code is on screen, at the vendor's interval
+  // (chained timeouts so a slow_down bump takes effect on the next tick).
+  useEffect(() => {
+    if (!open || !signinFlow) return;
+    let alive = true;
+    let timer: number | undefined;
+    let interval = Math.max(signinFlow.intervalMs, 500);
+    const tick = async () => {
+      try {
+        const p = await ragService.providerAuthPoll();
+        if (!alive) return;
+        if (p.error) {
+          setSigninError(p.error); // expired/declined — reset with the reason
+          setSigninFlow(null);
+          return;
+        }
+        if (p.status === "complete") {
+          const s = await ragService.providerAuthStatus();
+          if (!alive) return;
+          setSigninFlow(null);
+          setSignin(s);
+          return;
+        }
+        if (typeof p.intervalMs === "number" && p.intervalMs > 0) interval = p.intervalMs;
+      } catch {
+        // Transient transport hiccup — keep polling at the same cadence.
+      }
+      timer = window.setTimeout(() => void tick(), interval);
+    };
+    timer = window.setTimeout(() => void tick(), interval);
+    return () => {
+      alive = false;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [open, signinFlow]);
 
   const provider = MODEL_PROVIDERS.find((p) => p.id === providerId) ?? MODEL_PROVIDERS[0];
   // Per-provider "a key is on file" — falls back to the legacy flag for the
@@ -199,6 +343,68 @@ function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean
   const isAllowed = (id: string) => (allowedProviders ? allowedProviders.includes(id) : true);
   const firstAllowedCloud = cloudProviders.find((p) => isAllowed(p.id)) ?? cloudProviders[0];
   const localModelId = MODEL_PROVIDERS.find((p) => p.id === "local")!.models[0];
+
+  // Sign-in only surfaces when the engine says the flow is CONFIGURED
+  // (available) — plus the one recovery case: a persisted "signin" choice on
+  // a build where the flow has since become unavailable still shows the
+  // control (with the honest reason instead of a button) so the user can
+  // switch back to the key without editing files by hand. A stock build has
+  // method "key" and available false ⇒ nothing renders.
+  const signinControl =
+    providerId === "openai" &&
+    desktop &&
+    signin !== null &&
+    (signin.available || signin.method === "signin");
+  const signinPane = signinControl && signin.method === "signin";
+
+  function updateAuthMethod(next: "key" | "signin") {
+    if (!signin || signin.method === next) return;
+    const prev = signin.method;
+    setSignin({ ...signin, method: next });
+    setSigninError(null);
+    setSigninFlow(null);
+    void ragService
+      .providerAuthSetMethod(next)
+      .then((r) => {
+        if (!r.ok) {
+          // Rolled back — the control never lies about a choice that didn't
+          // persist (the Preferences postSetting idiom).
+          setSignin((s) => (s ? { ...s, method: prev } : s));
+          setSigninError(r.error ?? "That change couldn't be saved — try again.");
+        }
+      })
+      .catch(() => {
+        setSignin((s) => (s ? { ...s, method: prev } : s));
+        setSigninError("That change couldn't be saved — try again.");
+      });
+  }
+
+  async function startSignin() {
+    setSigninBusy(true);
+    setSigninError(null);
+    try {
+      const res = await ragService.providerAuthStart();
+      if (res.start) setSigninFlow(res.start);
+      else setSigninError(res.error ?? "couldn't start sign-in");
+    } catch {
+      setSigninError("couldn't start sign-in — try again");
+    } finally {
+      setSigninBusy(false);
+    }
+  }
+
+  async function signOutProvider() {
+    setSigninBusy(true);
+    setSigninError(null);
+    try {
+      await ragService.providerAuthSignout();
+      setSignin(await ragService.providerAuthStatus());
+    } catch {
+      setSigninError("couldn't sign out — try again");
+    } finally {
+      setSigninBusy(false);
+    }
+  }
 
   async function testKey() {
     setTesting(true);
@@ -218,10 +424,10 @@ function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean
     setError(null);
     try {
       // Empty key ⇒ keep the existing one (selectModel falls back to the stored key).
-      await selectModel(providerId, modelId, apiKey);
+      await switchModel(providerId, modelId, apiKey);
       setOpen(false); // close immediately on success — the close IS the confirmation
     } catch {
-      setError("Couldn't save your model settings. Please check your connection and try again.");
+      setError("Couldn't save your model settings. Check your connection and try again.");
     } finally {
       setSaving(false);
     }
@@ -314,50 +520,143 @@ function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean
                       ))}
                     </Dropdown>
                   </Field>
-                  <Field
-                    label="API key"
-                    hint={
-                      <Link href={provider.apiKeyUrl} target="_blank" rel="noreferrer">
-                        Get your {provider.label} key →
-                      </Link>
-                    }
-                  >
-                    <Input
-                      type="password"
-                      value={apiKey}
-                      onChange={(_, d) => {
-                        setApiKey(d.value);
-                        setTestResult(null);
-                      }}
-                      placeholder={
-                        providerHasSavedKey
-                          ? "•••••••• saved — leave blank to keep"
-                          : "Paste your API key"
-                      }
-                    />
-                  </Field>
-                  {(apiKey || providerHasSavedKey) && (
-                    <div className={styles.testKeyRow}>
-                      <Button
-                        size="small"
-                        appearance="secondary"
-                        disabled={testing}
-                        icon={testing ? <Spinner size="tiny" /> : undefined}
-                        onClick={() => void testKey()}
+                  {/* Provider sign-in (0.12.1 §3), OpenAI only: renders ONLY
+                      when the engine reports the registration-gated flow as
+                      configured (stock builds: never — fail-closed
+                      invisibility, the code-signing pattern). */}
+                  {signinControl && (
+                    <Field label="Connect with">
+                      <RadioGroup
+                        layout="horizontal"
+                        value={signin.method}
+                        onChange={(_, d) =>
+                          updateAuthMethod(d.value === "signin" ? "signin" : "key")
+                        }
                       >
-                        {testing ? "Testing…" : apiKey ? "Test key" : "Test saved key"}
-                      </Button>
-                      {testResult &&
-                        (testResult.ok ? (
-                          <Text size={200} className={styles.testKeyOk}>
-                            ✓ Key works
+                        <Radio value="key" label="Use API key" />
+                        <Radio value="signin" label="Sign in" />
+                      </RadioGroup>
+                    </Field>
+                  )}
+                  {signinPane && (
+                    <div className={styles.signinPane}>
+                      {signin.signedIn ? (
+                        <>
+                          <Text className={styles.signinOk}>
+                            ✓ Signed in
+                            {signin.accountHint ? ` as ${signin.accountHint}` : ""}
                           </Text>
-                        ) : (
-                          <Text size={200} className={styles.error}>
-                            ✗ {testResult.error ?? "the key didn't work"}
+                          {/* Billing clarity (0.12.1 §4): signed-in usage draws
+                              on the vendor account/subscription, not per-key
+                              developer billing. */}
+                          {signinBillingNote(providerId) && (
+                            <Text className={styles.prefHint}>{signinBillingNote(providerId)}</Text>
+                          )}
+                          <Button
+                            size="small"
+                            appearance="secondary"
+                            disabled={signinBusy}
+                            onClick={() => void signOutProvider()}
+                          >
+                            Sign out
+                          </Button>
+                        </>
+                      ) : !signin.available ? (
+                        <Text className={styles.prefHint}>
+                          {signin.reason ?? "sign-in isn't configured in this build"} — switch
+                          back to “Use API key” above.
+                        </Text>
+                      ) : signinFlow ? (
+                        <>
+                          <Text className={styles.prefHint}>
+                            Enter this code in your browser to approve the sign-in:
                           </Text>
-                        ))}
+                          <Text className={styles.signinCode} data-testid="signin-user-code">
+                            {signinFlow.userCode}
+                          </Text>
+                          <div className={styles.signinRow}>
+                            <Button
+                              appearance="primary"
+                              onClick={() => openExternal(signinFlow.verificationUri)}
+                            >
+                              Open browser
+                            </Button>
+                            <Spinner size="tiny" />
+                            <Text size={200} className={styles.prefHint}>
+                              Waiting for approval…
+                            </Text>
+                          </div>
+                        </>
+                      ) : (
+                        <Button
+                          appearance="primary"
+                          disabled={signinBusy}
+                          icon={signinBusy ? <Spinner size="tiny" /> : undefined}
+                          onClick={() => void startSignin()}
+                        >
+                          Sign in
+                        </Button>
+                      )}
+                      {signinError && <Text className={styles.error}>{signinError}</Text>}
                     </div>
+                  )}
+                  {/* The key field steps aside only while the sign-in pane
+                      owns the row; method "key" (the default everywhere the
+                      flow isn't configured) leaves it exactly as it was. */}
+                  {!signinPane && (
+                    <>
+                      <Field
+                        label="API key"
+                        hint={
+                          <Link href={provider.apiKeyUrl} target="_blank" rel="noreferrer">
+                            Get your {provider.label} key →
+                          </Link>
+                        }
+                      >
+                        <Input
+                          type="password"
+                          value={apiKey}
+                          onChange={(_, d) => {
+                            setApiKey(d.value);
+                            setTestResult(null);
+                          }}
+                          placeholder={
+                            providerHasSavedKey
+                              ? "•••••••• saved — leave blank to keep"
+                              : "Paste your API key"
+                          }
+                        />
+                      </Field>
+                      {/* Billing clarity (0.12.1 §4): a chat subscription does
+                          not cover API-key usage — name the vendor's products so
+                          the distinction is unmissable. */}
+                      {apiKeyBillingNote(providerId) && (
+                        <Text className={styles.prefHint}>{apiKeyBillingNote(providerId)}</Text>
+                      )}
+                      {(apiKey || providerHasSavedKey) && (
+                        <div className={styles.testKeyRow}>
+                          <Button
+                            size="small"
+                            appearance="secondary"
+                            disabled={testing}
+                            icon={testing ? <Spinner size="tiny" /> : undefined}
+                            onClick={() => void testKey()}
+                          >
+                            {testing ? "Testing…" : apiKey ? "Test key" : "Test saved key"}
+                          </Button>
+                          {testResult &&
+                            (testResult.ok ? (
+                              <Text size={200} className={styles.testKeyOk}>
+                                ✓ Key works
+                              </Text>
+                            ) : (
+                              <Text size={200} className={styles.error}>
+                                ✗ {testResult.error ?? "the key didn't work"}
+                              </Text>
+                            ))}
+                        </div>
+                      )}
+                    </>
                   )}
                 </>
               )}
@@ -416,7 +715,7 @@ function AuditLogDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean
         if (alive) setSnapshot(snap);
       })
       .catch(() => {
-        if (alive) setError("Couldn't load the audit log. Please try again.");
+        if (alive) setError("Couldn't load the audit log. Try again.");
       })
       .finally(() => {
         if (alive) setLoading(false);
@@ -437,7 +736,7 @@ function AuditLogDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean
         setExportNote({ name: res.savedName });
       }
     } catch {
-      setExportNote({ error: "Couldn't export the audit log. Please try again." });
+      setExportNote({ error: "Couldn't export the audit log. Try again." });
     } finally {
       setExporting(false);
     }
@@ -651,6 +950,11 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
   // "Managed by your organization" indication.
   const policy = useRagStore((s) => s.policy);
   const locks = policy?.locks;
+  // Curation rules (openspec: add-curation-rules): the complete rule list,
+  // scope-named and removable; orphaned scopes render struck-through.
+  const rules = useRagStore((s) => s.rules);
+  const loadRules = useRagStore((s) => s.loadRules);
+  const removeRule = useRagStore((s) => s.removeRule);
 
   const [desktop, setDesktop] = useState(false);
   const [runOnStartup, setRunOnStartup] = useState(true);
@@ -708,6 +1012,12 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
   // The modifier tap-chord, spelled per platform (whisper is modifier-only).
   const whisperChord = isMac ? "Control + ⌘ + Shift" : "Ctrl + Win + Shift";
 
+  // Refresh the curation-rule list whenever the dialog opens (rules are also
+  // created from the explorer's folder menus, so the list can be stale).
+  useEffect(() => {
+    if (open) void loadRules();
+  }, [open, loadRules]);
+
   // Load the file-backed prefs (usage consent, launch-at-login, …) when opened
   // or when Retry bumps reloadKey. The settings fetch drives settingsLoad so a
   // failure shows a retry note instead of quietly hiding the desktop options.
@@ -753,7 +1063,7 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
 
   const inclusion = defaultInclusion ?? "include";
 
-  const SAVE_FAILED = "That change couldn't be saved — please check your connection and try again.";
+  const SAVE_FAILED = "That change couldn't be saved — check your connection and try again.";
 
   /** POST a settings patch, rolling the optimistic UI back (and noting it) on
    *  failure so a control never shows a change that didn't actually persist.
@@ -904,7 +1214,7 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
         if (d && typeof d.summonShortcut === "string") setSummonShortcut(d.summonShortcut);
       }
     } catch {
-      setShortcutError("Couldn't save the shortcut. Please try again.");
+      setShortcutError("Couldn't save the shortcut. Try again.");
     }
   }
 
@@ -981,6 +1291,59 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
                   Only affects files you add from now on; files you&apos;ve already included or
                   excluded keep their setting.
                 </Text>
+              </Field>
+
+              {/* Bulk curation rules (openspec: add-curation-rules): every rule
+                  across every folder, scope-named and removable. Creation lives
+                  on the folder itself (right-click → Rules for this folder…). */}
+              <Field label="Curation rules">
+                {rules.length === 0 ? (
+                  <Text className={styles.prefHint}>
+                    No rules yet. Right-click a folder in Files and choose &ldquo;Rules for this
+                    folder…&rdquo; to decide matching files — present and future — in one move.
+                  </Text>
+                ) : (
+                  <div className={styles.ruleList}>
+                    {rules.map((r) => (
+                      <div key={r.id} className={styles.ruleRow}>
+                        <Text size={200} className={styles.ruleName} title={r.name}>
+                          {r.name}
+                        </Text>
+                        <Badge size="small" appearance="tint" color="brand">
+                          {RULE_ACTION_LABEL[r.action] ?? r.action}
+                        </Badge>
+                        <Text
+                          size={200}
+                          className={
+                            r.orphaned
+                              ? mergeClasses(styles.prefHint, styles.ruleOrphan)
+                              : styles.prefHint
+                          }
+                          title={
+                            r.orphaned
+                              ? "This folder no longer exists — the rule matches nothing until it returns"
+                              : undefined
+                          }
+                        >
+                          {r.scopeLabel}
+                        </Text>
+                        <Button
+                          size="small"
+                          appearance="subtle"
+                          icon={<DeleteRegular />}
+                          aria-label={`Remove rule ${r.name}`}
+                          onClick={() => void removeRule(r.id)}
+                        />
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {rules.length > 0 && (
+                  <Text className={styles.prefHint}>
+                    Rules decide matching files where you haven&apos;t set one yourself; removing a
+                    rule only undoes what it decided.
+                  </Text>
+                )}
               </Field>
 
               <Switch
@@ -1234,11 +1597,67 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
   );
 }
 
+/**
+ * About — the quiet identity card: name and version, the Beam identity line,
+ * what Beam (the built-in analytics engine) is, the three-egress privacy
+ * sentence, and the download site. The version rides the same build-time
+ * NEXT_PUBLIC_APP_VERSION as VersionBadge; when it's absent (plain web dev)
+ * the line shows the name alone.
+ */
+function AboutDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean) => void }) {
+  const styles = useStyles();
+  const version = process.env.NEXT_PUBLIC_APP_VERSION;
+  return (
+    <Dialog open={open} onOpenChange={(_, d) => setOpen(d.open)}>
+      <DialogSurface>
+        <DialogBody>
+          <DialogTitle>About Lighthouse</DialogTitle>
+          <DialogContent>
+            <div className={styles.aboutStack}>
+              <span className={styles.aboutBand} aria-hidden />
+              <Text>
+                <Text as="span" weight="semibold">
+                  Lighthouse
+                </Text>
+                {version && (
+                  <Text as="span" className={styles.aboutVersion}>
+                    {" "}v{version}
+                  </Text>
+                )}
+              </Text>
+              <Text className={styles.aboutIdentity}>Ink, paper, and one amber beam.</Text>
+              <Text>
+                Answers come from your own files, on your own machine. Beam, the
+                built-in analytics engine, computes figures with SQL it runs on this
+                device — and shows the query behind every number.
+              </Text>
+              <Text>
+                Only three kinds of request ever leave this machine: asks to a cloud
+                model you set up, an update check, and downloads you start. No
+                accounts, no telemetry.
+              </Text>
+              <Link href="https://lhvault.app" target="_blank" rel="noreferrer">
+                lhvault.app
+              </Link>
+            </div>
+          </DialogContent>
+          <DialogActions>
+            <DialogTrigger disableButtonEnhancement>
+              <Button appearance="secondary">Close</Button>
+            </DialogTrigger>
+          </DialogActions>
+        </DialogBody>
+      </DialogSurface>
+    </Dialog>
+  );
+}
+
 export function SettingsMenu() {
   const styles = useStyles();
   const [aiDlg, setAiDlg] = useState(false);
   const [prefDlg, setPrefDlg] = useState(false);
   const [auditDlg, setAuditDlg] = useState(false);
+  const [aboutDlg, setAboutDlg] = useState(false);
 
   // Other features (chat empty states, explorer hints, …) deep-link into these
   // dialogs by dispatching window CustomEvents — the menu owns the dialogs, so
@@ -1288,6 +1707,16 @@ export function SettingsMenu() {
               Pinned questions
             </MenuItem>
             <MenuItem
+              icon={<BoardRegular />}
+              onClick={() =>
+                // The board host (app/page.tsx) owns the panel; same seam
+                // as open-pins (openspec: add-boards §2.2).
+                window.dispatchEvent(new CustomEvent("lighthouse:open-board"))
+              }
+            >
+              Board
+            </MenuItem>
+            <MenuItem
               icon={<ChatHelpRegular />}
               onClick={() => window.dispatchEvent(new Event("lighthouse:open-feedback"))}
             >
@@ -1308,12 +1737,16 @@ export function SettingsMenu() {
             >
               Lighthouse on GitHub
             </MenuItem>
+            <MenuItem icon={<InfoRegular />} onClick={() => setAboutDlg(true)}>
+              About Lighthouse
+            </MenuItem>
           </MenuList>
         </MenuPopover>
       </Menu>
       <AiModelsDialog open={aiDlg} setOpen={setAiDlg} />
       <PreferencesDialog open={prefDlg} setOpen={setPrefDlg} />
       <AuditLogDialog open={auditDlg} setOpen={setAuditDlg} />
+      <AboutDialog open={aboutDlg} setOpen={setAboutDlg} />
     </>
   );
 }
