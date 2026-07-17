@@ -132,8 +132,15 @@ async function extractByExt(abs: string, ext: string): Promise<string> {
  * is built for the RAG contexts this twin assembles (byte-identical kind labels);
  * the version moves in lockstep (v6 rule) so the shared cache-schema assertion
  * stays green.
+ * v12: matches the Rust engine's add-semantic-layer §3/§4 bump — `certified` +
+ * `trust` are added to the final chunk's AnalyticsMeta, which the answer cache
+ * persists in CachedAnswer.analytics (another shared cached-answer wire-shape
+ * change; the §5.2 semantic-registry key-material change rides the same bump).
+ * PARITY: certification/reconciliation are Rust-only (this twin never populates
+ * those fields), but the version moves in lockstep (v6 rule) so the shared
+ * cache-schema assertion stays green.
  */
-const CACHE_VERSION = 11;
+const CACHE_VERSION = 12;
 
 interface CacheRecord {
   v: number;

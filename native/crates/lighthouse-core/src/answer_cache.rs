@@ -6,8 +6,9 @@
 //! shareable file ids paired with their `mtimeMs:size` freshness keys — which
 //! already folds include flags, local-only marks under a cloud provider, and
 //! per-file freshness), the provider AND model id, the sorted attachment id
-//! set, and — only when any exist — the posture-eligible saved-view registry
-//! (openspec: add-shaped-views). Global-digest tradeoff (v1, pinned in the
+//! set, and — each only when any exist — the posture-eligible saved-view
+//! registry (openspec: add-shaped-views) and semantic registry (openspec:
+//! add-semantic-layer). Global-digest tradeoff (v1, pinned in the
 //! design): ANY vault change invalidates every entry — over-invalidation
 //! accepted, correctness beats hit rate.
 //!
@@ -145,6 +146,17 @@ pub fn candidate_digest(pairs: &[(String, String)]) -> String {
 /// `name\u{0}sql`, pairs joined with `\u{0}` too (flat
 /// `n1\u{0}s1\u{0}n2\u{0}s2`) — view names are sanitized `[a-z0-9_]`, so the
 /// flat NUL join can never be ambiguous.
+///
+/// `semantic_registry` (openspec: add-semantic-layer §5.2): the semantic layer
+/// as it could apply to this ask — the posture-eligible definitions as
+/// (kind-prefixed name, value) pairs (`cache_key` builds and sorts them; the
+/// pair strings are re-sorted here, the `view_registry` posture). It joins the
+/// key ONLY when at least one definition exists, and is appended LAST (after
+/// `\nv:`), so every zero-definition key — and every legacy key — stays
+/// byte-identical and existing cache entries keep hitting. Byte layout, KEEP IN
+/// SYNC with answerCache.ts::keyFromParts: `\ns:` followed by each pair rendered
+/// as `name\u{0}value`, pairs joined with `\u{0}` too — the `m:`/`s:`/`e:`/`j:`
+/// kind prefix keeps the four definition kinds from colliding.
 pub fn key_from_parts(
     question: &str,
     provider_id: Option<&str>,
@@ -153,6 +165,7 @@ pub fn key_from_parts(
     preferred_conversation_ids: &[String],
     candidate_digest: &str,
     view_registry: &[(String, String)],
+    semantic_registry: &[(String, String)],
 ) -> String {
     let mut atts: Vec<&str> = attachment_ids.iter().map(|s| s.as_str()).collect();
     atts.sort_unstable();
@@ -179,6 +192,15 @@ pub fn key_from_parts(
             .collect();
         pairs.sort_unstable();
         material.push_str("\nv:");
+        material.push_str(&pairs.join("\u{0}"));
+    }
+    if !semantic_registry.is_empty() {
+        let mut pairs: Vec<String> = semantic_registry
+            .iter()
+            .map(|(name, value)| format!("{name}\u{0}{value}"))
+            .collect();
+        pairs.sort_unstable();
+        material.push_str("\ns:");
         material.push_str(&pairs.join("\u{0}"));
     }
     sha256_hex(&material)
@@ -208,6 +230,39 @@ pub fn cache_key(
         .map(|v| (v.name, v.sql))
         .collect();
     views.sort();
+    // The semantic REGISTRY as it could apply to this ask (openspec:
+    // add-semantic-layer §5.2): every posture-eligible definition of all four
+    // kinds — a cloud ask excludes the effectively-local-only metrics/entities
+    // and anything that references them (`eligible_for_posture`) — rendered as
+    // (kind-prefixed name, value) pairs so the kinds can never collide, sorted.
+    // The DEFINITIONS are the material, so editing any posture-eligible
+    // definition invalidates dependent entries, a cloud ask never keys on a
+    // local-only definition, and zero definitions leaves every key untouched.
+    let semantics = crate::semantic::eligible_for_posture(is_cloud);
+    let mut semantic_registry: Vec<(String, String)> = semantics
+        .metrics
+        .into_iter()
+        .map(|m| (format!("m:{}", m.name), m.expression))
+        .chain(
+            semantics
+                .synonyms
+                .into_iter()
+                .map(|s| (format!("s:{}", s.term), s.canonical)),
+        )
+        .chain(
+            semantics
+                .entities
+                .into_iter()
+                .map(|e| (format!("e:{}", e.name), e.table)),
+        )
+        .chain(semantics.join_hints.into_iter().map(|j| {
+            (
+                format!("j:{}.{}", j.left_entity, j.left_column),
+                format!("{}.{}", j.right_entity, j.right_column),
+            )
+        }))
+        .collect();
+    semantic_registry.sort();
     key_from_parts(
         question,
         provider_id,
@@ -216,6 +271,7 @@ pub fn cache_key(
         preferred_conversation_ids,
         &digest,
         &views,
+        &semantic_registry,
     )
 }
 
@@ -331,26 +387,26 @@ mod tests {
     #[test]
     fn key_from_parts_is_order_insensitive_over_attachments_and_sensitive_to_everything_else() {
         let d = "digest";
-        let base = key_from_parts("What were Q3 sales?", Some("openai"), Some("gpt-5-mini"), &[], &[], d, &[]);
+        let base = key_from_parts("What were Q3 sales?", Some("openai"), Some("gpt-5-mini"), &[], &[], d, &[], &[]);
         // Normalized variants of the same question share the key…
         assert_eq!(
-            key_from_parts("  what   WERE q3 sales?! ", Some("openai"), Some("gpt-5-mini"), &[], &[], d, &[]),
+            key_from_parts("  what   WERE q3 sales?! ", Some("openai"), Some("gpt-5-mini"), &[], &[], d, &[], &[]),
             base
         );
         // …and every other component is load-bearing.
-        assert_ne!(key_from_parts("What were Q4 sales?", Some("openai"), Some("gpt-5-mini"), &[], &[], d, &[]), base);
-        assert_ne!(key_from_parts("What were Q3 sales?", Some("anthropic"), Some("gpt-5-mini"), &[], &[], d, &[]), base);
-        assert_ne!(key_from_parts("What were Q3 sales?", Some("openai"), Some("gpt-5"), &[], &[], d, &[]), base);
-        assert_ne!(key_from_parts("What were Q3 sales?", Some("openai"), Some("gpt-5-mini"), &[], &[], "other", &[]), base);
-        assert_ne!(key_from_parts("What were Q3 sales?", None, None, &[], &[], d, &[]), base);
+        assert_ne!(key_from_parts("What were Q4 sales?", Some("openai"), Some("gpt-5-mini"), &[], &[], d, &[], &[]), base);
+        assert_ne!(key_from_parts("What were Q3 sales?", Some("anthropic"), Some("gpt-5-mini"), &[], &[], d, &[], &[]), base);
+        assert_ne!(key_from_parts("What were Q3 sales?", Some("openai"), Some("gpt-5"), &[], &[], d, &[], &[]), base);
+        assert_ne!(key_from_parts("What were Q3 sales?", Some("openai"), Some("gpt-5-mini"), &[], &[], "other", &[], &[]), base);
+        assert_ne!(key_from_parts("What were Q3 sales?", None, None, &[], &[], d, &[], &[]), base);
 
         // The attachment SET is the component: order and duplicates fold.
         let a = ["a.md".to_string(), "b.csv".to_string()];
         let b = ["b.csv".to_string(), "a.md".to_string(), "a.md".to_string()];
-        let with_a = key_from_parts("q", Some("openai"), None, &a, &[], d, &[]);
-        assert_eq!(key_from_parts("q", Some("openai"), None, &b, &[], d, &[]), with_a);
-        assert_ne!(key_from_parts("q", Some("openai"), None, &[], &[], d, &[]), with_a);
-        assert_ne!(key_from_parts("q", Some("openai"), None, &a[..1].to_vec(), &[], d, &[]), with_a);
+        let with_a = key_from_parts("q", Some("openai"), None, &a, &[], d, &[], &[]);
+        assert_eq!(key_from_parts("q", Some("openai"), None, &b, &[], d, &[], &[]), with_a);
+        assert_ne!(key_from_parts("q", Some("openai"), None, &[], &[], d, &[], &[]), with_a);
+        assert_ne!(key_from_parts("q", Some("openai"), None, &a[..1].to_vec(), &[], d, &[], &[]), with_a);
     }
 
     #[test]
@@ -375,15 +431,15 @@ mod tests {
         // preference re-keys, and the SET is the component (order/dupes fold).
         let d = "digest";
         let atts = ["a.md".to_string()];
-        let legacy = key_from_parts("q", Some("openai"), None, &atts, &[], d, &[]);
-        assert_eq!(key_from_parts("q", Some("openai"), None, &atts, &[], d, &[]), legacy);
+        let legacy = key_from_parts("q", Some("openai"), None, &atts, &[], d, &[], &[]);
+        assert_eq!(key_from_parts("q", Some("openai"), None, &atts, &[], d, &[], &[]), legacy);
         let p1 = ["c1".to_string(), "c2".to_string()];
         let p2 = ["c2".to_string(), "c1".to_string(), "c1".to_string()];
-        let with_pref = key_from_parts("q", Some("openai"), None, &atts, &p1, d, &[]);
+        let with_pref = key_from_parts("q", Some("openai"), None, &atts, &p1, d, &[], &[]);
         assert_ne!(with_pref, legacy);
-        assert_eq!(key_from_parts("q", Some("openai"), None, &atts, &p2, d, &[]), with_pref);
+        assert_eq!(key_from_parts("q", Some("openai"), None, &atts, &p2, d, &[], &[]), with_pref);
         assert_ne!(
-            key_from_parts("q", Some("openai"), None, &atts, &p1[..1].to_vec(), d, &[]),
+            key_from_parts("q", Some("openai"), None, &atts, &p1[..1].to_vec(), d, &[], &[]),
             with_pref
         );
     }
@@ -399,7 +455,7 @@ mod tests {
             hex::encode(Sha256::digest(material.as_bytes()))
         }
         let d = "digest";
-        let legacy = key_from_parts("q", Some("openai"), None, &[], &[], d, &[]);
+        let legacy = key_from_parts("q", Some("openai"), None, &[], &[], d, &[], &[]);
         assert_eq!(
             legacy,
             sha("q:q\nc:digest\np:openai\nm:\na:"),
@@ -409,10 +465,10 @@ mod tests {
         // One view re-keys; the definition TEXT is load-bearing.
         let totals = ("totals".to_string(), "SELECT 1".to_string());
         let regions = ("regions".to_string(), "SELECT 2".to_string());
-        let with_view = key_from_parts("q", Some("openai"), None, &[], &[], d, &[totals.clone()]);
+        let with_view = key_from_parts("q", Some("openai"), None, &[], &[], d, &[totals.clone()], &[]);
         assert_ne!(with_view, legacy, "a saved view re-keys");
         assert_ne!(
-            key_from_parts("q", Some("openai"), None, &[], &[], d, &[("totals".into(), "SELECT 9".into())]),
+            key_from_parts("q", Some("openai"), None, &[], &[], d, &[("totals".into(), "SELECT 9".into())], &[]),
             with_view,
             "same name, different sql re-keys"
         );
@@ -420,8 +476,8 @@ mod tests {
         // The registry is a SET sorted by name: order never changes the key,
         // and the exact byte layout (\nv: + name\0sql pairs \0-joined) is
         // pinned. KEEP IN SYNC with answerCache.ts.
-        let ab = key_from_parts("q", Some("openai"), None, &[], &[], d, &[totals.clone(), regions.clone()]);
-        let ba = key_from_parts("q", Some("openai"), None, &[], &[], d, &[regions.clone(), totals.clone()]);
+        let ab = key_from_parts("q", Some("openai"), None, &[], &[], d, &[totals.clone(), regions.clone()], &[]);
+        let ba = key_from_parts("q", Some("openai"), None, &[], &[], d, &[regions.clone(), totals.clone()], &[]);
         assert_eq!(ab, ba, "registry order never changes the key");
         assert_eq!(
             ab,
@@ -430,11 +486,63 @@ mod tests {
         );
 
         // The v: block composes with a recall preference (r: precedes v:).
-        let both = key_from_parts("q", Some("openai"), None, &[], &["c1".to_string()], d, &[totals]);
+        let both = key_from_parts("q", Some("openai"), None, &[], &["c1".to_string()], d, &[totals], &[]);
         assert_eq!(
             both,
             sha("q:q\nc:digest\np:openai\nm:\na:\nr:c1\nv:totals\u{0}SELECT 1")
         );
     }
 
+    #[test]
+    fn semantic_registry_joins_the_key_only_when_non_empty() {
+        // openspec: add-semantic-layer §5.2 — zero definitions = the legacy key
+        // BYTE-FOR-BYTE, pinned against the raw material layout (a sha256 of the
+        // literal pre-semantic string), not just self-consistency, so this test
+        // fails if the empty-registry path ever grows a component. The `\ns:`
+        // block is appended LAST (after `\nv:`), mirroring the view-registry
+        // precedent. KEEP IN SYNC with answerCache.ts (same literal materials).
+        fn sha(material: &str) -> String {
+            use sha2::{Digest, Sha256};
+            hex::encode(Sha256::digest(material.as_bytes()))
+        }
+        let d = "digest";
+        let legacy = key_from_parts("q", Some("openai"), None, &[], &[], d, &[], &[]);
+        assert_eq!(
+            legacy,
+            sha("q:q\nc:digest\np:openai\nm:\na:"),
+            "an empty semantic registry emits the pre-semantic material"
+        );
+
+        // One definition re-keys; the definition VALUE is load-bearing.
+        let revenue = ("m:revenue".to_string(), "SUM(amount)".to_string());
+        let with_semantic = key_from_parts("q", Some("openai"), None, &[], &[], d, &[], &[revenue.clone()]);
+        assert_ne!(with_semantic, legacy, "a semantic definition re-keys");
+        assert_ne!(
+            key_from_parts("q", Some("openai"), None, &[], &[], d, &[], &[("m:revenue".into(), "SUM(qty)".into())]),
+            with_semantic,
+            "same name, different value re-keys"
+        );
+
+        // The registry is a SET sorted by kind-prefixed name: order never
+        // changes the key, cross-kind entries can't collide, and the exact byte
+        // layout (\ns: + name\0value pairs \0-joined) is pinned. KEEP IN SYNC
+        // with answerCache.ts.
+        let gmv = ("s:gmv".to_string(), "revenue".to_string());
+        let ab = key_from_parts("q", Some("openai"), None, &[], &[], d, &[], &[revenue.clone(), gmv.clone()]);
+        let ba = key_from_parts("q", Some("openai"), None, &[], &[], d, &[], &[gmv.clone(), revenue.clone()]);
+        assert_eq!(ab, ba, "registry order never changes the key");
+        assert_eq!(
+            ab,
+            sha("q:q\nc:digest\np:openai\nm:\na:\ns:m:revenue\u{0}SUM(amount)\u{0}s:gmv\u{0}revenue"),
+            "the s: byte layout is pinned"
+        );
+
+        // The s: block is LAST — it composes after a view registry (\nv: first).
+        let totals = ("totals".to_string(), "SELECT 1".to_string());
+        let both = key_from_parts("q", Some("openai"), None, &[], &[], d, &[totals], &[revenue]);
+        assert_eq!(
+            both,
+            sha("q:q\nc:digest\np:openai\nm:\na:\nv:totals\u{0}SELECT 1\ns:m:revenue\u{0}SUM(amount)")
+        );
+    }
 }

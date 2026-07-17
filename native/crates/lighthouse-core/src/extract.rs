@@ -1335,7 +1335,13 @@ fn extract_by_ext(abs: &Path, ext: &str) -> anyhow::Result<String> {
 ///     another shared cached-answer wire-shape change. Extraction output is
 ///     unchanged; the lockstep bump keeps the shared cache-schema assertion green
 ///     and the one-time re-extraction is harmless.
-const CACHE_VERSION: u32 = 11;
+/// v12: the semantic layer (openspec: add-semantic-layer §3/§4) adds `certified`
+///     + `trust` to the final chunk's `AnalyticsMeta`, which the answer cache
+///     persists in `CachedAnswer.analytics` — another shared cached-answer
+///     wire-shape change (the §5.2 semantic-registry key-material change rides
+///     the same lockstep bump). The additive-optional fields keep old entries
+///     readable; extraction output is unchanged and the re-extraction is harmless.
+const CACHE_VERSION: u32 = 12;
 
 #[derive(Serialize, Deserialize)]
 struct CacheRecord {
