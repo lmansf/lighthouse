@@ -431,9 +431,16 @@ fn plan_data_quality(p: &ResolvedParams) -> Vec<PlannedQuery> {
         })
         .collect();
     if !arms.is_empty() {
+        // ORDER BY the output column so the UNION-ALL arms come back in a STABLE
+        // order — a bare UNION ALL has no ordering guarantee, so DataFusion may
+        // emit the per-column arms in any order across runs. That nondeterminism
+        // is invisible to a keyed reader (the eval looks rows up by `column_name`)
+        // but breaks any byte-stable render of the result (the deep-analysis
+        // report requires a reproducible document). Sorting here makes the recipe
+        // deterministic in its RESULT, not just its SQL.
         out.push(PlannedQuery {
             label: "Column completeness and duplicates".to_string(),
-            sql: arms.join(" UNION ALL "),
+            sql: format!("{} ORDER BY column_name", arms.join(" UNION ALL ")),
         });
     }
 
