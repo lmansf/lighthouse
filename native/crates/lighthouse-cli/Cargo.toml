@@ -1,0 +1,20 @@
+[package]
+name = "lighthouse-cli"
+description = "The headless `lighthouse` CLI: ask the vault and fork/export investigations (openspec: add-automation §2)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "lighthouse"
+path = "src/main.rs"
+
+[dependencies]
+lighthouse-core = { path = "../lighthouse-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
