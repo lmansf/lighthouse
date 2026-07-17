@@ -14,7 +14,8 @@
 mod common;
 
 use lighthouse_core::settings::{
-    read_desktop_settings, set_openai_auth_method, write_desktop_settings, DesktopSettings,
+    read_desktop_settings, set_explorer_width, set_openai_auth_method, write_desktop_settings,
+    DesktopSettings, EXPLORER_WIDTH_MAX, EXPLORER_WIDTH_MIN,
 };
 
 #[test]
@@ -214,4 +215,71 @@ fn openai_auth_method_narrow_setter_round_trips_and_validates() {
     // The narrow setter preserves shell-owned and unmodeled keys.
     assert_eq!(s.vault_dir.as_deref(), Some("/somewhere/vault"));
     assert_eq!(s.extra.get("widgetPos"), Some(&serde_json::json!([7, 9])));
+}
+
+// Resizable explorer width (openspec: add-usability-field-patch §1): a per-
+// window-mode value hand-persisted through the `extra` map (the widgetPos
+// precedent) with its own narrow read-modify-write setter. It must round-trip
+// per mode WITHOUT clobbering the sibling mode, clamp to the bounds at write
+// AND read, ignore an unknown mode or a non-finite width, and preserve every
+// shell-owned key — like the auth-method setter above.
+#[test]
+fn explorer_width_persists_per_mode_and_clamps() {
+    let vault = tempfile::tempdir().expect("tempdir");
+    let _guard = common::lock_env(vault.path());
+    let file = vault.path().join("settings-explorer-width-test.json");
+    std::fs::write(&file, r#"{"vaultDir":"/somewhere/vault","widgetPos":[7,9]}"#)
+        .expect("seed settings file");
+    std::env::set_var("LIGHTHOUSE_SETTINGS_FILE", &file);
+
+    // Unset ⇒ None for both modes.
+    assert_eq!(read_desktop_settings().explorer_width("window"), None);
+    assert_eq!(read_desktop_settings().explorer_width("widget"), None);
+
+    // An in-range width round-trips for its mode and does NOT bleed into the
+    // sibling mode.
+    set_explorer_width("window", 360.0);
+    assert_eq!(read_desktop_settings().explorer_width("window"), Some(360.0));
+    assert_eq!(read_desktop_settings().explorer_width("widget"), None);
+
+    // The sibling mode persists independently — a merge, not a clobber.
+    set_explorer_width("widget", 280.0);
+    let s = read_desktop_settings();
+    assert_eq!(s.explorer_width("widget"), Some(280.0));
+    assert_eq!(s.explorer_width("window"), Some(360.0));
+
+    // Clamp at write: above MAX and below MIN both saturate to the bounds.
+    set_explorer_width("window", 100_000.0);
+    assert_eq!(
+        read_desktop_settings().explorer_width("window"),
+        Some(EXPLORER_WIDTH_MAX)
+    );
+    set_explorer_width("window", 1.0);
+    assert_eq!(
+        read_desktop_settings().explorer_width("window"),
+        Some(EXPLORER_WIDTH_MIN)
+    );
+
+    // An unknown mode or a non-finite width leaves the file untouched.
+    set_explorer_width("sidebar", 300.0);
+    set_explorer_width("window", f64::NAN);
+    let s = read_desktop_settings();
+    assert_eq!(s.explorer_width("window"), Some(EXPLORER_WIDTH_MIN)); // unchanged
+    assert_eq!(s.explorer_width("widget"), Some(280.0)); // unchanged
+    assert_eq!(
+        s.extra.get("explorerWidth").and_then(|v| v.get("sidebar")),
+        None
+    );
+    // The narrow read-modify-write preserved shell-owned and unmodeled keys.
+    assert_eq!(s.vault_dir.as_deref(), Some("/somewhere/vault"));
+    assert_eq!(s.extra.get("widgetPos"), Some(&serde_json::json!([7, 9])));
+
+    // Clamp at READ too: a hand-written out-of-range file is bounded on the way
+    // out (the external-write path the shell might take, widgetPos-style).
+    std::fs::write(&file, r#"{"explorerWidth":{"window":9999,"widget":1}}"#)
+        .expect("rewrite settings file");
+    let s = read_desktop_settings();
+    std::env::remove_var("LIGHTHOUSE_SETTINGS_FILE");
+    assert_eq!(s.explorer_width("window"), Some(EXPLORER_WIDTH_MAX));
+    assert_eq!(s.explorer_width("widget"), Some(EXPLORER_WIDTH_MIN));
 }

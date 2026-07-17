@@ -53,6 +53,16 @@ async function readBody(init?: RequestInit): Promise<Record<string, unknown>> {
   }
 }
 
+/** A well-formed resizable-explorer patch (openspec: add-usability-field-patch
+ *  §1): {mode, width} for one window mode. The engine's narrow setter clamps +
+ *  merges; this only screens shape before forwarding. Mirrors the /api/settings
+ *  route twin's guard. */
+function isExplorerWidthPatch(v: unknown): v is { mode: "window" | "widget"; width: number } {
+  if (!v || typeof v !== "object") return false;
+  const o = v as Record<string, unknown>;
+  return (o.mode === "window" || o.mode === "widget") && typeof o.width === "number";
+}
+
 async function handleUpload(core: TauriCore, init: RequestInit | undefined): Promise<Response> {
   const form = init?.body;
   if (!(form instanceof FormData)) {
@@ -230,6 +240,11 @@ async function route(
             briefingNotify: typeof body.briefingNotify === "boolean" ? body.briefingNotify : null,
             briefingNoteHour: typeof body.briefingNoteHour === "number" ? body.briefingNoteHour : null,
             tourShown: typeof body.tourShown === "boolean" ? body.tourShown : null,
+            // Resizable explorer width (openspec §1): a per-mode {mode,width}
+            // routed to the engine's narrow merge-setter (set_explorer_width),
+            // NOT the positional writer — forwarded verbatim when well-formed,
+            // else null (dropped). Mirrors the /api/settings route twin.
+            explorerWidth: isExplorerWidthPatch(body.explorerWidth) ? body.explorerWidth : null,
           });
     default:
       return json({ error: "unknown route" }, 404);

@@ -1628,6 +1628,12 @@ pub async fn settings_get() -> Response {
         "briefingNotify": s.briefing_notify != Some(false), // default on (G5)
         "briefingNoteHour": s.briefing_note_hour.unwrap_or(9), // default 9am (G5)
         "tourShown": s.tour_shown == Some(true), // first-run tour, once per install
+        // Resizable explorer width per window mode (openspec §1), clamped at
+        // read; null when unset. Mirrors app/api/settings/route.ts GET.
+        "explorerWidth": {
+            "window": s.explorer_width("window"),
+            "widget": s.explorer_width("widget"),
+        },
     }))
     .into_response()
 }
@@ -1660,6 +1666,16 @@ pub async fn settings_post(headers: HeaderMap, body: Option<Json<Value>>) -> Res
         body["tourShown"].as_bool(),
         body["beamMaxSteps"].as_i64(),
     );
+    // Resizable explorer width (openspec §1): applied through its own narrow
+    // merge-setter (set_explorer_width) so one mode never clobbers the other —
+    // NOT the positional writer above. Absent = untouched; the engine clamps +
+    // validates the mode. Mirrors app/api/settings/route.ts POST.
+    let ew = &body["explorerWidth"];
+    if let (Some(mode), Some(width)) = (ew["mode"].as_str(), ew["width"].as_f64()) {
+        settings::set_explorer_width(mode, width);
+    }
+    // Re-read so the response reflects the merge above (the writer's `s` doesn't).
+    let widths = settings::read_desktop_settings();
     Json(json!({
         "ok": true,
         "runOnStartup": s.run_on_startup != Some(false),
@@ -1677,6 +1693,10 @@ pub async fn settings_post(headers: HeaderMap, body: Option<Json<Value>>) -> Res
         "briefingNotify": s.briefing_notify != Some(false),
         "briefingNoteHour": s.briefing_note_hour.unwrap_or(9),
         "tourShown": s.tour_shown == Some(true),
+        "explorerWidth": {
+            "window": widths.explorer_width("window"),
+            "widget": widths.explorer_width("widget"),
+        },
     }))
     .into_response()
 }

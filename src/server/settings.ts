@@ -100,6 +100,14 @@ export interface DesktopSettings {
    * and never runs the loop.
    */
   beamMaxSteps?: number;
+  /**
+   * Resizable explorer width per window mode (openspec: add-usability-field-patch
+   * §1), clamped to [EXPLORER_WIDTH_MIN, EXPLORER_WIDTH_MAX] at write AND read. It
+   * rides its own key (the widgetPos precedent) and merges per mode, so a
+   * "window" width never clobbers a "widget" one. PARITY: explorer_width /
+   * set_explorer_width in settings.rs.
+   */
+  explorerWidth?: { window?: number; widget?: number };
 }
 
 function settingsFile(): string | null {
@@ -125,6 +133,42 @@ export function writeDesktopSettings(patch: Partial<DesktopSettings>): DesktopSe
     writeJson(f, next);
   } catch {
     // Best-effort: a read-only location just means the preference isn't saved.
+  }
+  return next;
+}
+
+/**
+ * Resizable explorer width bounds (openspec: add-usability-field-patch §1).
+ * PARITY: EXPLORER_WIDTH_MIN/MAX in settings.rs.
+ */
+export const EXPLORER_WIDTH_MIN = 200;
+export const EXPLORER_WIDTH_MAX = 720;
+
+const clampExplorerWidth = (w: number): number =>
+  Math.min(EXPLORER_WIDTH_MAX, Math.max(EXPLORER_WIDTH_MIN, w));
+
+/** The persisted explorer width for `mode`, clamped to the bounds, or null when
+ * unset/unparseable. PARITY: DesktopSettings::explorer_width in settings.rs. */
+export function explorerWidth(s: DesktopSettings, mode: "window" | "widget"): number | null {
+  const w = s.explorerWidth?.[mode];
+  return typeof w === "number" && Number.isFinite(w) ? clampExplorerWidth(w) : null;
+}
+
+/** Persist the explorer width for one window mode WITHOUT disturbing the sibling
+ * mode — a narrow read-modify-write (the set_openai_auth_method precedent),
+ * clamped at write. An unknown mode or a non-finite width leaves the file
+ * untouched. PARITY: set_explorer_width in settings.rs. */
+export function setExplorerWidth(mode: "window" | "widget", width: number): DesktopSettings {
+  const f = settingsFile();
+  if (!f) return {};
+  const next = readDesktopSettings();
+  if ((mode === "window" || mode === "widget") && Number.isFinite(width)) {
+    next.explorerWidth = { ...(next.explorerWidth ?? {}), [mode]: clampExplorerWidth(width) };
+    try {
+      writeJson(f, next);
+    } catch {
+      // best-effort, like writeDesktopSettings
+    }
   }
   return next;
 }

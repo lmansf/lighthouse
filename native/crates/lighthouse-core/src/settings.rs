@@ -24,6 +24,13 @@ pub const DEFAULT_BEAM_MAX_STEPS: usize = 5;
 /// window even at the maximum; a persisted value above this clamps down.
 pub const BEAM_MAX_STEPS_CEILING: usize = 12;
 
+/// Resizable explorer width bounds (openspec: add-usability-field-patch §1). The
+/// explorer/sidebar width persists per window mode; a value is clamped to these
+/// bounds at BOTH write and read, so a hand-edited or stale settings file can
+/// never render an unusable rail. PARITY: mirrored in src/server/settings.ts.
+pub const EXPLORER_WIDTH_MIN: f64 = 200.0;
+pub const EXPLORER_WIDTH_MAX: f64 = 720.0;
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DesktopSettings {
@@ -130,6 +137,21 @@ impl DesktopSettings {
             Some(n) if n >= 1 => (n as usize).min(BEAM_MAX_STEPS_CEILING),
             _ => DEFAULT_BEAM_MAX_STEPS,
         }
+    }
+
+    /// The persisted resizable-explorer width for `mode` ("window"/"widget"),
+    /// clamped to `[EXPLORER_WIDTH_MIN, EXPLORER_WIDTH_MAX]` (openspec:
+    /// add-usability-field-patch §1). The value rides the `extra` map under
+    /// `explorerWidth`, keyed by mode (the `widgetPos` precedent), so the struct
+    /// stays additive. `None` when unset or unparseable — the UI then falls back
+    /// to its layout default. PARITY: src/server/settings.ts::explorerWidth.
+    pub fn explorer_width(&self, mode: &str) -> Option<f64> {
+        self.extra
+            .get("explorerWidth")
+            .and_then(|v| v.get(mode))
+            .and_then(|v| v.as_f64())
+            .filter(|w| w.is_finite())
+            .map(|w| w.clamp(EXPLORER_WIDTH_MIN, EXPLORER_WIDTH_MAX))
     }
 }
 
@@ -242,6 +264,36 @@ pub fn set_openai_auth_method(method: &str) -> DesktopSettings {
     if method == "key" || method == "signin" {
         next.openai_auth_method = Some(method.to_string());
         write_json(&f, &next); // best-effort, like the writer above
+    }
+    next
+}
+
+/// Persist the resizable explorer's width for one window mode (openspec:
+/// add-usability-field-patch §1) without disturbing any other key — a narrow
+/// read-modify-write beside the positional writer, the `set_openai_auth_method`
+/// precedent. The width rides the `extra` map under `explorerWidth` keyed by
+/// mode ("window"/"widget"), clamped to `[EXPLORER_WIDTH_MIN, EXPLORER_WIDTH_MAX]`
+/// at write (and again at read, in `explorer_width`). An unknown mode or a
+/// non-finite width is ignored, leaving the file untouched. PARITY:
+/// src/server/settings.ts::setExplorerWidth.
+pub fn set_explorer_width(mode: &str, width: f64) -> DesktopSettings {
+    let Some(f) = settings_file() else {
+        return DesktopSettings::default();
+    };
+    let mut next = read_desktop_settings();
+    if matches!(mode, "window" | "widget") && width.is_finite() {
+        let w = width.clamp(EXPLORER_WIDTH_MIN, EXPLORER_WIDTH_MAX);
+        let entry = next
+            .extra
+            .entry("explorerWidth".to_string())
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+        if !entry.is_object() {
+            *entry = serde_json::Value::Object(serde_json::Map::new());
+        }
+        if let Some(obj) = entry.as_object_mut() {
+            obj.insert(mode.to_string(), serde_json::Value::from(w));
+        }
+        write_json(&f, &next);
     }
     next
 }

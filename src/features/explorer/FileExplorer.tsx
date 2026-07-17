@@ -517,6 +517,15 @@ interface TreeRowProps {
    *  ENFORCING (red, "hidden right now"); on the private model it's DORMANT
    *  (neutral, armed but idle). Presentation only — the engine enforces. */
   cloudActive: boolean;
+  /**
+   * The enriched hover title (openspec: add-usability-field-patch §1): the full
+   * name plus its folder path, so a row truncated by a narrow sidebar still
+   * reveals itself on hover. Deliberately a PRIMITIVE string — passed to the
+   * row's existing native `title` attribute (no new DOM) so `memo(TreeRow)` and
+   * the fixed-`VROW_H` windowing stay untouched (NOT a per-row Fluent Tooltip,
+   * whose portal-per-row would be the regression this avoids).
+   */
+  titleText: string;
 }
 
 /** Stable empty move-target list so a closed row's memo isn't broken by a fresh
@@ -550,6 +559,7 @@ function TreeRowImpl({
   justAdded,
   flash,
   cloudActive,
+  titleText,
 }: TreeRowProps) {
   const styles = useStyles();
   // The row's right-click menu open state. moveTargetsFor is O(rows × folders),
@@ -729,7 +739,9 @@ function TreeRowImpl({
           />
         )}
         {fileIcon(node, styles.icon)}
-        <Text className={styles.name} size={300} title={node.name}>
+        {/* data-row-name lets §1's double-click auto-fit measure the widest
+            visible name via canvas metrics without reaching into React state. */}
+        <Text className={styles.name} size={300} title={titleText} data-row-name="">
           {node.name}
         </Text>
         {node.external && (
@@ -1007,6 +1019,22 @@ export function FileExplorer() {
   const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
   const isSelected = useCallback((id: string) => selectedSet.has(id), [selectedSet]);
   const nodeById = useMemo(() => new Map(nodes.map((n) => [n.id, n])), [nodes]);
+  // The enriched hover title for a row (openspec: add-usability-field-patch §1):
+  // the full name plus its folder path (walked via parentId → nodeById), so a
+  // name truncated by a narrow sidebar still reveals itself. Returns a plain
+  // string so passing it to `memo(TreeRow)` never breaks memoization.
+  const rowTitle = useCallback(
+    (node: FileNode): string => {
+      const parents: string[] = [];
+      let cur = node.parentId === null ? undefined : nodeById.get(node.parentId);
+      while (cur) {
+        parents.unshift(cur.name);
+        cur = cur.parentId === null ? undefined : nodeById.get(cur.parentId);
+      }
+      return parents.length ? `${node.name}\n${parents.join(" / ")}` : node.name;
+    },
+    [nodeById],
+  );
   // The visibility switch reflects (and sets) the whole selection at once.
   const allSelectedVisible =
     selectedIds.length > 0 && selectedIds.every((id) => nodeById.get(id)?.ragIncluded);
@@ -1262,6 +1290,47 @@ export function FileExplorer() {
   }, []);
   // The shared scroll viewport the windowed row blocks measure against.
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  // --- §1 auto-fit: the shell's resize handle double-click asks the explorer
+  // (which owns the rows) to size the sidebar to the widest visible name. We
+  // measure each windowed row's name with canvas text metrics (its natural
+  // width, independent of the flex box it's squeezed into) plus where it starts
+  // (indent + chevron + icon, read from the DOM), then reply with an ABSOLUTE
+  // width; the shell clamps it to the bounds. A reused offscreen canvas keeps it
+  // allocation-free. See src/shell/AppShell.tsx for the request/result events.
+  const autoFitCanvas = useRef<HTMLCanvasElement | null>(null);
+  useEffect(() => {
+    const onAutoFit = (e: Event) => {
+      const scroller = scrollRef.current;
+      if (!scroller) return;
+      const names = scroller.querySelectorAll<HTMLElement>("[data-row-name]");
+      if (names.length === 0) return;
+      const canvas = (autoFitCanvas.current ||= document.createElement("canvas"));
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+      const scrollerLeft = scroller.getBoundingClientRect().left;
+      let widestRight = 0;
+      names.forEach((el) => {
+        const cs = window.getComputedStyle(el);
+        ctx.font = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
+        const textWidth = ctx.measureText(el.textContent ?? "").width;
+        const leftInset = el.getBoundingClientRect().left - scrollerLeft; // indent + chrome
+        widestRight = Math.max(widestRight, leftInset + textWidth);
+      });
+      // The non-scroller chrome (sidebar border + scrollbar) so the fit accounts
+      // for space the text can't use; the shell passes its current sidebar width.
+      const current = (e as CustomEvent<{ width?: number }>).detail?.width;
+      const chrome =
+        typeof current === "number" ? Math.max(0, current - scroller.clientWidth) : 0;
+      const GUTTER = 20; // right breathing room past the name
+      const width = Math.ceil(widestRight + GUTTER + chrome);
+      window.dispatchEvent(
+        new CustomEvent("lighthouse:explorer-autofit-result", { detail: { width } }),
+      );
+    };
+    window.addEventListener("lighthouse:explorer-autofit", onAutoFit);
+    return () => window.removeEventListener("lighthouse:explorer-autofit", onAutoFit);
+  }, []);
 
   // --- Quick-open "reveal in explorer" (time-savers): the palette's Enter
   // dispatches "lighthouse:reveal-node" {id}; we expand the node's ancestors,
@@ -2131,6 +2200,7 @@ export function FileExplorer() {
                           justAdded={justAdded}
                           flash={revealFlashId === row.node.id}
                           cloudActive={cloudActive}
+                          titleText={rowTitle(row.node)}
                         />
                       )}
                     />

@@ -237,9 +237,18 @@ export const ACCENTS = {
 
 /** Layout constants shared across the shell. */
 export const LAYOUT = {
-  /** Width of the expanded file sidebar. */
+  /** Width of the expanded file sidebar (the default until the user drags it). */
   sidebarWidth: 360,
   /** Width of the collapsed sidebar (thin icon rail). */
   sidebarCollapsedWidth: 48,
   headerHeight: 56,
+  /**
+   * Resizable-explorer drag bounds (openspec: add-usability-field-patch §1).
+   * A client-safe mirror of the engine's clamp — the authoritative copy lives
+   * in `src/server/settings.ts` (EXPLORER_WIDTH_MIN/MAX) and `settings.rs`, but
+   * those pull `node:fs`, so a "use client" surface can't import them. Keep the
+   * three in sync. PARITY: EXPLORER_WIDTH_MIN / EXPLORER_WIDTH_MAX.
+   */
+  sidebarMinWidth: 200,
+  sidebarMaxWidth: 720,
 } as const;
