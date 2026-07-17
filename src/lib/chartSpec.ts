@@ -12,9 +12,14 @@ export interface ChartSeries {
   name: string;
   /** One value per x label; null = missing point (skipped in line, zero-height in bar). */
   values: (number | null)[];
+  /** band only: the interval's lower bound per x label (null = no band there, e.g.
+   *  historical rows before a forecast). Aligned index-for-index with values. */
+  lower?: (number | null)[];
+  /** band only: the interval's upper bound per x label. Aligned with values. */
+  upper?: (number | null)[];
 }
 
-export type ChartKind = "bar" | "line" | "area" | "scatter";
+export type ChartKind = "bar" | "line" | "area" | "scatter" | "band";
 
 export interface ChartSpec {
   kind: ChartKind;
@@ -48,6 +53,20 @@ export const MAX_TITLE_CHARS = 80;
  *  longest string the emitters actually compute. */
 export const MAX_SUBTITLE_CHARS = 140;
 
+/** A band bound array: one entry per x label, each a finite number or null,
+ *  aligned to the series values. Null when the shape is wrong (rejects the spec).
+ *  PARITY: the engine reads bound columns NULL-safe (analytics.rs band branch). */
+function parseBound(raw: unknown, len: number): (number | null)[] | null {
+  if (!Array.isArray(raw) || raw.length !== len) return null;
+  const out: (number | null)[] = [];
+  for (const v of raw) {
+    if (v === null) out.push(null);
+    else if (typeof v === "number" && Number.isFinite(v)) out.push(v);
+    else return null;
+  }
+  return out;
+}
+
 /**
  * Parse + validate the fenced JSON. Returns null on ANY shape violation —
  * callers fall back to showing the fence as plain code, so a malformed spec
@@ -62,13 +81,21 @@ export function parseChartSpec(raw: string): ChartSpec | null {
   }
   if (typeof parsed !== "object" || parsed === null) return null;
   const o = parsed as Record<string, unknown>;
-  if (o.kind !== "bar" && o.kind !== "line" && o.kind !== "area" && o.kind !== "scatter")
+  if (
+    o.kind !== "bar" &&
+    o.kind !== "line" &&
+    o.kind !== "area" &&
+    o.kind !== "scatter" &&
+    o.kind !== "band"
+  )
     return null;
   if (!Array.isArray(o.x) || o.x.length < 2 || o.x.length > MAX_POINTS) return null;
   if (!o.x.every((l) => typeof l === "string")) return null;
   if (!Array.isArray(o.series) || o.series.length < 1 || o.series.length > MAX_SERIES) return null;
-  // Scatter is a single (x, y) relationship, never multi-series.
+  // Scatter is a single (x, y) relationship; a band is one line wrapped in an
+  // interval — neither is ever multi-series.
   if (o.kind === "scatter" && o.series.length !== 1) return null;
+  if (o.kind === "band" && o.series.length !== 1) return null;
   const x = o.x as string[];
   const series: ChartSeries[] = [];
   for (const s of o.series) {
@@ -89,7 +116,20 @@ export function parseChartSpec(raw: string): ChartSpec | null {
       }
     }
     if (finite < 2) return null; // a chart of one real point explains nothing
-    series.push({ name: so.name, values });
+    const built: ChartSeries = { name: so.name, values };
+    // band: the series carries a lower/upper interval (bounds may be null on
+    // any x, e.g. historical rows before a forecast — no finite floor). Off a
+    // band, bound arrays are meaningless and reject, keeping the union tight.
+    if (o.kind === "band") {
+      const lower = parseBound(so.lower, x.length);
+      const upper = parseBound(so.upper, x.length);
+      if (!lower || !upper) return null;
+      built.lower = lower;
+      built.upper = upper;
+    } else if (so.lower !== undefined || so.upper !== undefined) {
+      return null;
+    }
+    series.push(built);
   }
   const spec: ChartSpec = { kind: o.kind, x, series };
   // Stacked is a bar-only hint; reject it anywhere else to keep the union tight.
@@ -143,14 +183,20 @@ export function parseChartSpec(raw: string): ChartSpec | null {
 // its own result batches, so a directive can steer a chart but never supply a
 // value. This module only parses/validates; nothing here reads data.
 
-export type ChartDirectiveKind = "bar" | "line" | "area" | "none";
+export type ChartDirectiveKind = "bar" | "line" | "area" | "band" | "none";
 
 export interface ChartDirective {
   kind: ChartDirectiveKind;
   /** Must name a real result column (exact, case-sensitive). Empty for "none". */
   labelColumn: string;
-  /** 1..=3 names; each must exist and be numeric in the result. */
+  /** 1..=3 names; each must exist and be numeric in the result. A `band` names
+   *  exactly ONE (the line the interval wraps). */
   seriesColumns: string[];
+  /** band only: the result columns holding the interval's lower/upper bounds.
+   *  Both required for a band, absent (undefined) for every other kind — the
+   *  ENGINE (forecast recipe) authors a band; the model never sets these. */
+  lowerColumn?: string;
+  upperColumn?: string;
   /** Optional display title — capped/sanitized by the engine, never data. */
   title?: string;
   sort?: "asc" | "desc";
@@ -181,7 +227,7 @@ export function parseChartDirective(text: string): ChartDirective | null {
   if (typeof parsed !== "object" || parsed === null) return null;
   const o = parsed as Record<string, unknown>;
   if (o.kind === "none") return { kind: "none", labelColumn: "", seriesColumns: [] };
-  if (o.kind !== "bar" && o.kind !== "line" && o.kind !== "area") return null;
+  if (o.kind !== "bar" && o.kind !== "line" && o.kind !== "area" && o.kind !== "band") return null;
   if (typeof o.label_column !== "string") return null;
   if (!Array.isArray(o.series_columns) || !o.series_columns.every((s) => typeof s === "string"))
     return null;
@@ -190,6 +236,16 @@ export function parseChartDirective(text: string): ChartDirective | null {
     labelColumn: o.label_column,
     seriesColumns: o.series_columns as string[],
   };
+  // band bound columns: present-and-string when given (validated numeric later),
+  // absent → undefined. Parsed for any kind, ignored off a band — the Rust twin.
+  if (o.lower_column !== undefined) {
+    if (typeof o.lower_column !== "string") return null;
+    d.lowerColumn = o.lower_column;
+  }
+  if (o.upper_column !== undefined) {
+    if (typeof o.upper_column !== "string") return null;
+    d.upperColumn = o.upper_column;
+  }
   if (o.title !== undefined) {
     if (typeof o.title !== "string") return null;
     d.title = o.title;
@@ -219,6 +275,22 @@ export function validateDirective(
     const col = columns.find((c) => c.name === s);
     if (!col) return `unknown series column ${JSON.stringify(s)}`;
     if (!col.numeric) return `series column ${JSON.stringify(s)} is not numeric`;
+  }
+  // A band wraps ONE line in a lower/upper interval — exactly one series, and
+  // both bound columns must name existing numeric result columns. PARITY:
+  // analytics.rs validate_directive band block (same messages).
+  if (d.kind === "band") {
+    if (d.seriesColumns.length !== 1) return "a band names exactly one series column";
+    const bounds: [string, string | undefined][] = [
+      ["lower_column", d.lowerColumn],
+      ["upper_column", d.upperColumn],
+    ];
+    for (const [which, name] of bounds) {
+      if (name === undefined) return `band requires ${which}`;
+      const col = columns.find((c) => c.name === name);
+      if (!col) return `unknown ${which} ${JSON.stringify(name)}`;
+      if (!col.numeric) return `${which} ${JSON.stringify(name)} is not numeric`;
+    }
   }
   return null;
 }

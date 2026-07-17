@@ -2450,6 +2450,11 @@ pub enum ChartDirectiveKind {
     Bar,
     Line,
     Area,
+    /// A line plus a shaded lower/upper interval (add-quant-depth): the ENGINE
+    /// authors this (the forecast recipe), never the narrating model — the card
+    /// does not teach it, because a band needs bound columns the model can't
+    /// name. `lower_column`/`upper_column` on the directive supply the interval.
+    Band,
     None,
 }
 
@@ -2468,7 +2473,14 @@ pub struct ChartDirective {
     /// Must name a real result column (exact, case-sensitive). Empty for "none".
     pub label_column: String,
     /// 1..=3 names; each must exist and be numeric (validated, not trusted).
+    /// A `band` names exactly ONE (the line the interval wraps).
     pub series_columns: Vec<String>,
+    /// `band` only: the result columns holding the interval's lower and upper
+    /// bounds. Both required for a `band`, ignored for every other kind (and
+    /// `None` there — the model never sets them). Validated numeric, like a
+    /// series column; read from the batches, never trusted as data.
+    pub lower_column: Option<String>,
+    pub upper_column: Option<String>,
     /// Optional display title — capped and control-stripped at materialization.
     pub title: Option<String>,
     pub sort: Option<ChartSort>,
@@ -2490,11 +2502,14 @@ pub fn parse_chart_directive(text: &str) -> Option<ChartDirective> {
         "bar" => ChartDirectiveKind::Bar,
         "line" => ChartDirectiveKind::Line,
         "area" => ChartDirectiveKind::Area,
+        "band" => ChartDirectiveKind::Band,
         "none" => {
             return Some(ChartDirective {
                 kind: ChartDirectiveKind::None,
                 label_column: String::new(),
                 series_columns: Vec::new(),
+                lower_column: None,
+                upper_column: None,
                 title: None,
                 sort: None,
             })
@@ -2508,6 +2523,16 @@ pub fn parse_chart_directive(text: &str) -> Option<ChartDirective> {
         .iter()
         .map(|s| s.as_str().map(str::to_string))
         .collect::<Option<Vec<_>>>()?;
+    // `band` bound columns: present-and-string when given (validated numeric
+    // later), absent → None. Other kinds never carry them.
+    let lower_column = match obj.get("lower_column") {
+        Some(v) => Some(v.as_str()?.to_string()),
+        None => None,
+    };
+    let upper_column = match obj.get("upper_column") {
+        Some(v) => Some(v.as_str()?.to_string()),
+        None => None,
+    };
     let title = match obj.get("title") {
         Some(t) => Some(t.as_str()?.to_string()),
         None => None,
@@ -2524,6 +2549,8 @@ pub fn parse_chart_directive(text: &str) -> Option<ChartDirective> {
         kind,
         label_column,
         series_columns,
+        lower_column,
+        upper_column,
         title,
         sort,
     })
@@ -2568,6 +2595,24 @@ pub fn validate_directive(
             None => return Err(format!("unknown series column {s:?}")),
         }
     }
+    // A band wraps ONE line in a lower/upper interval — exactly one series, and
+    // both bound columns must name existing numeric result columns.
+    if d.kind == ChartDirectiveKind::Band {
+        if d.series_columns.len() != 1 {
+            return Err("a band names exactly one series column".to_string());
+        }
+        for (which, col) in [
+            ("lower_column", d.lower_column.as_deref()),
+            ("upper_column", d.upper_column.as_deref()),
+        ] {
+            let name = col.ok_or_else(|| format!("band requires {which}"))?;
+            match columns.iter().find(|(n, _)| n == name) {
+                Some((_, true)) => {}
+                Some((_, false)) => return Err(format!("{which} {name:?} is not numeric")),
+                None => return Err(format!("unknown {which} {name:?}")),
+            }
+        }
+    }
     Ok(())
 }
 
@@ -2597,6 +2642,7 @@ pub fn chart_spec_from_batches_directed(
         ChartDirectiveKind::Bar => "bar",
         ChartDirectiveKind::Line => "line",
         ChartDirectiveKind::Area => "area",
+        ChartDirectiveKind::Band => "band",
         ChartDirectiveKind::None => return None,
     };
     let columns = chart_columns(batches);
@@ -2650,6 +2696,55 @@ pub fn chart_spec_from_batches_directed(
         if vals.iter().filter(|v| v.is_some()).count() < 2 {
             return None;
         }
+    }
+
+    // Band (add-quant-depth): the ENGINE-authored forecast interval. Emit the
+    // single line series plus its lower/upper bound arrays, read from the named
+    // bound columns exactly as the series values are read (NULL-safe; bounds are
+    // sparse — no finite floor). No sort (a forecast is temporal) and no stack.
+    // validate_directive already proved one series + numeric bound columns.
+    if d.kind == ChartDirectiveKind::Band {
+        let (Some(lo_name), Some(hi_name)) = (d.lower_column.as_deref(), d.upper_column.as_deref())
+        else {
+            return None;
+        };
+        let lo_idx = schema.index_of(lo_name).ok()?;
+        let hi_idx = schema.index_of(hi_name).ok()?;
+        let read_bound = |idx: usize| -> Option<Vec<Option<f64>>> {
+            let mut out = Vec::with_capacity(rows);
+            for b in batches {
+                let col = b.column(idx);
+                for row in 0..b.num_rows() {
+                    if col.is_null(row) {
+                        out.push(None);
+                    } else {
+                        let raw = array_value_to_string(col, row).unwrap_or_default();
+                        match raw.trim().parse::<f64>() {
+                            Ok(v) if v.is_finite() => out.push(Some(v)),
+                            _ => return None, // a non-numeric render ⇒ not a band
+                        }
+                    }
+                }
+            }
+            Some(out)
+        };
+        let lower = read_bound(lo_idx)?;
+        let upper = read_bound(hi_idx)?;
+        let (name, values) = &series[0];
+        let mut spec = serde_json::json!({
+            "kind": "band",
+            "x": x,
+            "series": [serde_json::json!({
+                "name": name,
+                "values": values,
+                "lower": lower,
+                "upper": upper,
+            })],
+        });
+        if let Some(t) = d.title.as_deref().and_then(sanitize_title) {
+            spec["title"] = serde_json::json!(t);
+        }
+        return Some(spec.to_string());
     }
 
     // Engine-side sort by the FIRST series column (missing values last in
@@ -3574,6 +3669,32 @@ mod tests {
         .unwrap()
     }
 
+    /// A forecast-shaped batch: period, value (the line), and a SPARSE lower/upper
+    /// interval (null on historical rows, present on the forecast tail).
+    fn band_batch(
+        periods: &[&str],
+        values: &[f64],
+        lower: &[Option<f64>],
+        upper: &[Option<f64>],
+    ) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("period", DataType::Utf8, false),
+            Field::new("value", DataType::Float64, true),
+            Field::new("lower", DataType::Float64, true),
+            Field::new("upper", DataType::Float64, true),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(periods.to_vec())),
+                Arc::new(Float64Array::from(values.to_vec())),
+                Arc::new(Float64Array::from(lower.to_vec())),
+                Arc::new(Float64Array::from(upper.to_vec())),
+            ],
+        )
+        .unwrap()
+    }
+
     #[test]
     fn chart_spec_from_group_by_results() {
         // Categorical labels → bar.
@@ -4064,6 +4185,8 @@ mod tests {
             kind,
             label_column: label.to_string(),
             series_columns: series.iter().map(|s| s.to_string()).collect(),
+            lower_column: None,
+            upper_column: None,
             title: None,
             sort: None,
         };
@@ -4160,6 +4283,8 @@ mod tests {
             kind: ChartDirectiveKind::Bar,
             label_column: "region".to_string(),
             series_columns: vec!["share_a".to_string(), "share_b".to_string()],
+            lower_column: None,
+            upper_column: None,
             title: None,
             sort: None,
         };
@@ -4181,6 +4306,50 @@ mod tests {
     }
 
     #[test]
+    fn directed_band_spec_carries_the_interval() {
+        // A forecast band: a line over 4 periods with a sparse interval on the
+        // last two (the projected tail); the head has null bounds.
+        let b = band_batch(
+            &["2026-01", "2026-02", "2026-03", "2026-04"],
+            &[100.0, 200.0, 300.0, 400.0],
+            &[None, None, Some(280.0), Some(360.0)],
+            &[None, None, Some(320.0), Some(440.0)],
+        );
+        let d = parse_chart_directive(
+            "```lighthouse-chart-request\n{\"kind\":\"band\",\"label_column\":\"period\",\"series_columns\":[\"value\"],\"lower_column\":\"lower\",\"upper_column\":\"upper\"}\n```",
+        )
+        .unwrap();
+        assert_eq!(d.kind, ChartDirectiveKind::Band);
+        assert_eq!(d.lower_column.as_deref(), Some("lower"));
+        assert_eq!(d.upper_column.as_deref(), Some("upper"));
+
+        let v: serde_json::Value =
+            serde_json::from_str(&chart_spec_from_batches_directed(&[b.clone()], &d).unwrap())
+                .unwrap();
+        assert_eq!(v["kind"], "band");
+        assert_eq!(v["series"][0]["name"], "value");
+        // The line values are the engine's, byte-for-byte.
+        assert_eq!(v["series"][0]["values"][0], 100.0);
+        assert_eq!(v["series"][0]["values"][3], 400.0);
+        // The interval is sparse: null on the history, the bounds on the tail.
+        assert_eq!(v["series"][0]["lower"][0], serde_json::Value::Null);
+        assert_eq!(v["series"][0]["lower"][2], 280.0);
+        assert_eq!(v["series"][0]["upper"][3], 440.0);
+
+        // A band needs BOTH bound columns — drop one and the directive is
+        // invalid, so the directed build declines (caller falls back to a line).
+        let no_upper = parse_chart_directive(
+            "```lighthouse-chart-request\n{\"kind\":\"band\",\"label_column\":\"period\",\"series_columns\":[\"value\"],\"lower_column\":\"lower\"}\n```",
+        )
+        .unwrap();
+        assert_eq!(
+            validate_directive(&no_upper, &chart_columns(&[b.clone()])).unwrap_err(),
+            "band requires upper_column"
+        );
+        assert!(chart_spec_from_batches_directed(&[b], &no_upper).is_none());
+    }
+
+    #[test]
     fn directed_matches_heuristic_bytes_for_the_same_choice() {
         // When the directive picks exactly what the heuristic would (no
         // title, no sort), the emitted spec is byte-identical — one emitter,
@@ -4190,6 +4359,8 @@ mod tests {
             kind: ChartDirectiveKind::Bar,
             label_column: "label".to_string(),
             series_columns: vec!["total".to_string()],
+            lower_column: None,
+            upper_column: None,
             title: None,
             sort: None,
         };
@@ -4450,6 +4621,8 @@ mod tests {
             kind: ChartDirectiveKind::Line,
             label_column: "label".to_string(),
             series_columns: vec!["total".to_string()],
+            lower_column: None,
+            upper_column: None,
             title: None,
             sort: None,
         };
@@ -4473,6 +4646,8 @@ mod tests {
             kind: ChartDirectiveKind::Bar,
             label_column: "label".to_string(),
             series_columns: vec!["total".to_string()],
+            lower_column: None,
+            upper_column: None,
             title: None,
             sort: Some(ChartSort::Desc),
         };

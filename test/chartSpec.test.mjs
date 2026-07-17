@@ -331,6 +331,98 @@ test("validateDirective mirrors the Rust rules and messages", () => {
   );
 });
 
+// --- add-quant-depth: the band chart kind (PARITY with analytics.rs) ----------
+
+test("parseChartSpec accepts a band with lower/upper bounds; rejects bounds off a band", () => {
+  // A forecast band: a line plus a sparse interval (null on historical rows).
+  const band = parseChartSpec(
+    JSON.stringify({
+      kind: "band",
+      x: ["2026-01", "2026-02", "2026-03", "2026-04"],
+      series: [
+        {
+          name: "value",
+          values: [100, 200, 300, 400],
+          lower: [null, null, 280, 360],
+          upper: [null, null, 320, 440],
+        },
+      ],
+    }),
+  );
+  assert.ok(band);
+  assert.equal(band.kind, "band");
+  assert.deepEqual(band.series[0].lower, [null, null, 280, 360]);
+  assert.deepEqual(band.series[0].upper, [null, null, 320, 440]);
+
+  const base = { x: ["a", "b"], series: [{ name: "v", values: [1, 2] }] };
+  // Band bounds must be present and length-aligned.
+  assert.equal(parseChartSpec(JSON.stringify({ ...base, kind: "band" })), null); // no bounds
+  assert.equal(
+    parseChartSpec(
+      JSON.stringify({ kind: "band", x: ["a", "b"], series: [{ name: "v", values: [1, 2], lower: [0], upper: [3, 4] }] }),
+    ),
+    null, // lower length ≠ x
+  );
+  // A band is single-series, like a scatter.
+  assert.equal(
+    parseChartSpec(
+      JSON.stringify({
+        kind: "band",
+        x: ["a", "b"],
+        series: [
+          { name: "v", values: [1, 2], lower: [0, 1], upper: [2, 3] },
+          { name: "w", values: [3, 4], lower: [2, 3], upper: [4, 5] },
+        ],
+      }),
+    ),
+    null,
+  );
+  // lower/upper are meaningless off a band → reject.
+  assert.equal(
+    parseChartSpec(JSON.stringify({ ...base, kind: "line", series: [{ name: "v", values: [1, 2], lower: [0, 1] }] })),
+    null,
+  );
+});
+
+test("band directive parses bound columns and validates like the Rust engine", () => {
+  const d = parseChartDirective(
+    '```lighthouse-chart-request\n{"kind":"band","label_column":"period","series_columns":["value"],"lower_column":"lo","upper_column":"hi"}\n```',
+  );
+  assert.ok(d);
+  assert.equal(d.kind, "band");
+  assert.equal(d.lowerColumn, "lo");
+  assert.equal(d.upperColumn, "hi");
+
+  const cols = [
+    { name: "period", numeric: false },
+    { name: "value", numeric: true },
+    { name: "lo", numeric: true },
+    { name: "hi", numeric: true },
+    { name: "note", numeric: false },
+  ];
+  const band = (over) => ({
+    kind: "band",
+    labelColumn: "period",
+    seriesColumns: ["value"],
+    lowerColumn: "lo",
+    upperColumn: "hi",
+    ...over,
+  });
+  // Happy path.
+  assert.equal(validateDirective(band(), cols), null);
+  // Exactly one series.
+  assert.equal(
+    validateDirective(band({ seriesColumns: ["value", "lo"] }), cols),
+    "a band names exactly one series column",
+  );
+  // Both bounds required.
+  assert.equal(validateDirective(band({ lowerColumn: undefined }), cols), "band requires lower_column");
+  assert.equal(validateDirective(band({ upperColumn: undefined }), cols), "band requires upper_column");
+  // Bounds must exist and be numeric.
+  assert.equal(validateDirective(band({ upperColumn: "nope" }), cols), 'unknown upper_column "nope"');
+  assert.equal(validateDirective(band({ lowerColumn: "note" }), cols), 'lower_column "note" is not numeric');
+});
+
 test("parseChartSpec accepts an engine-capped title on directed specs", () => {
   const titled = parseChartSpec(
     JSON.stringify({

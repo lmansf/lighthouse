@@ -203,7 +203,15 @@ export function AnalyticsChart({ spec }: { spec: ChartSpec }) {
 
   const isStacked = spec.kind === "bar" && spec.stacked === true;
   const isScatter = spec.kind === "scatter";
-  const all = spec.series.flatMap((s) => s.values).filter((v): v is number => v !== null);
+  const isBand = spec.kind === "band";
+  // A band's shaded interval must fit the axis, so its lower/upper bounds extend
+  // the Y domain alongside the line's values (add-quant-depth).
+  const bandBounds = isBand
+    ? spec.series.flatMap((s) => [...(s.lower ?? []), ...(s.upper ?? [])])
+    : [];
+  const all = [...spec.series.flatMap((s) => s.values), ...bandBounds].filter(
+    (v): v is number => v !== null,
+  );
   // Per-category stack sums (only meaningful when stacked; parts are ≥0 by the
   // engine's is_stackable proof, so the sum is the true top of the bar).
   const stackSums = isStacked
@@ -214,7 +222,7 @@ export function AnalyticsChart({ spec }: { spec: ChartSpec }) {
   // waste the axis on an unused zero).
   const [yMin, yMax] = isStacked
     ? [0, Math.max(0, ...stackSums)]
-    : spec.kind === "line" || isScatter
+    : spec.kind === "line" || isScatter || isBand
       ? [Math.min(...all), Math.max(...all)]
       : [Math.min(0, ...all), Math.max(0, ...all)];
   const ticks = niceTicks(yMin, yMax, 4);
@@ -417,10 +425,30 @@ export function AnalyticsChart({ spec }: { spec: ChartSpec }) {
                       pts[pts.length - 1].split(",")[0]
                     },${baseY}`
                   : null;
+              // Band interval (add-quant-depth): a shaded region between the
+              // lower and upper bounds, over the contiguous run of points that
+              // carry BOTH (the forecast tail; historical rows have null bounds).
+              // Upper edge forward + lower edge back = a closed cone.
+              const bandPts = (() => {
+                if (!isBand || !s.lower || !s.upper) return null;
+                const idx = s.values
+                  .map((_, i) => i)
+                  .filter((i) => s.lower![i] != null && s.upper![i] != null);
+                if (idx.length < 2) return null;
+                const up = idx.map((i) => `${xCenter(i)},${y(s.upper![i] as number)}`);
+                const down = idx
+                  .slice()
+                  .reverse()
+                  .map((i) => `${xCenter(i)},${y(s.lower![i] as number)}`);
+                return [...up, ...down].join(" ");
+              })();
               return (
                 <g key={`l${si}`}>
                   {areaPts && (
                     <polygon points={areaPts} fill={stroke} fillOpacity={0.14} stroke="none" />
+                  )}
+                  {bandPts && (
+                    <polygon points={bandPts} fill={stroke} fillOpacity={0.16} stroke="none" />
                   )}
                   <polyline
                     points={pts.join(" ")}
