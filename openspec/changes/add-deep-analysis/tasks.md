@@ -1,10 +1,10 @@
 # Tasks — deep analysis ("Investigate X" → structured report) + capability map
 
 ## 1. The report model + assembler + renderer (model-free core — do first)
-- [ ] 1.1 NEW `native/crates/lighthouse-core/src/reports.rs`: `Report { title, generated_ms: i64, summary: Vec<String>, sections: Vec<ReportSection>, caveats: Vec<String> }` + `ReportSection { heading, question, result_markdown, sql }`. `pub mod reports;` in `lib.rs`.
-- [ ] 1.2 `assemble(title, generated_ms, sub_analyses, caveats) -> Report` — pure: takes already-executed `(heading, question, QueryResult, sql)` tuples and builds the `Report`. The `summary` is TEMPLATED from each section's top-row key cells (the `insights::scan` headline discipline — engine numbers pulled from `QueryResult` cells, never model text).
-- [ ] 1.3 `render_markdown(&Report) -> String` reusing the `briefings.rs:245` idiom: `# {title}`, a `## Summary` bullet list, a `## {heading}` block per section (the question, the result table, a fenced `Query used` SQL block), a `## Caveats` block. Byte-stable given a fixed `generated_ms` (passed in, never read from the clock).
-- [ ] 1.4 Tests: `assemble` builds the expected sections + a summary whose numbers all appear in the section results; `render_markdown` is byte-stable across two calls; an empty `sub_analyses` renders an honest "nothing to analyze" summary + no sections.
+- [x] 1.1 NEW `reports.rs`: `Report { title, generated_ms, summary, sections, caveats }` + `ReportSection { heading, question, result_markdown, sql }` + `SubAnalysis` (the assembler input — carries the pre-templated `headline` so `reports.rs` stays free of analytics/recipe deps). `pub mod reports;` in `lib.rs`.
+- [x] 1.2 `assemble(title, generated_ms, subs, caveats) -> Report` — pure: sections = the subs; summary = the subs' `headline`s (each an engine-number finding the `investigate` engine templated from the result, per the `insights` discipline); empty subs → an honest "nothing to analyze" summary line.
+- [x] 1.3 `render_markdown(&Report) -> String` — the `briefings.rs:245` idiom extended: `# {title}` + a generated-time line, `## Summary` bullets, a `## {heading}` block per section (question + result table + a fenced `Query used` SQL block), a `## Caveats` block. Deterministic — the time formats from the carried `generated_ms`.
+- [x] 1.4 Tests: `assemble_collects_headlines_into_the_summary`, `an_empty_report_says_nothing_to_analyze`, `render_is_byte_stable_and_carries_the_sections` — VERIFIED (3 pass).
 
 ## 2. The `investigate` engine + in-vault write (engine, then write)
 - [ ] 2.1 `investigate(table, included_ids, is_cloud) -> Report`: build the catalog + register the tables (the `insights::scan` pattern — `catalog::columns_for` + `analytics::register_tables` over the included tabular files), resolve the target `table`'s registered SQL name + typed columns.
