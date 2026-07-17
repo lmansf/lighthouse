@@ -177,14 +177,23 @@ fn resolve_path(p: &str) -> PathBuf {
 }
 
 /// Resolve a vault-relative id to an absolute path, refusing to escape the vault.
+/// True when `abs` is `base` or lives beneath it, compared COMPONENT-WISE.
+/// A string prefix formatted with MAIN_SEPARATOR FALSE-REJECTS on Windows:
+/// `abs` is separator-normalized (backslashes, via lexical_resolve's component
+/// rebuild) while `base` keeps whatever slashes VAULT_DIR carried — a shell-
+/// provided `--vault` is forward/mixed — so an in-vault file fails the prefix
+/// test and its content read returns empty though the walk (tolerant of mixed
+/// separators) still lists and includes it. `Path::starts_with` is separator-
+/// agnostic AND stricter (never matches sibling "vault-x" against "vault").
+/// PARITY: vault.ts::isWithinBase.
+fn is_within_base(base: &Path, abs: &Path) -> bool {
+    abs == base || abs.starts_with(base)
+}
+
 fn safe_abs(rel_id: &str) -> anyhow::Result<PathBuf> {
     let base = vault_dir();
     let abs = lexical_resolve(&base, rel_id);
-    let (b, a) = (
-        base.to_string_lossy().to_string(),
-        abs.to_string_lossy().to_string(),
-    );
-    if a != b && !a.starts_with(&format!("{b}{MAIN_SEPARATOR}")) {
+    if !is_within_base(&base, &abs) {
         anyhow::bail!("path escapes the vault");
     }
     Ok(abs)
@@ -200,11 +209,7 @@ fn resolve_abs(id: &str, state: &VaultState) -> anyhow::Result<PathBuf> {
     let base = resolve_path(&state.references[ref_id].path);
     let sub = id[ref_id.len()..].trim_start_matches('/');
     let abs = lexical_resolve(&base, sub);
-    let (b, a) = (
-        base.to_string_lossy().to_string(),
-        abs.to_string_lossy().to_string(),
-    );
-    if a != b && !a.starts_with(&format!("{b}{MAIN_SEPARATOR}")) {
+    if !is_within_base(&base, &abs) {
         anyhow::bail!("path escapes the reference");
     }
     Ok(abs)
@@ -214,6 +219,27 @@ fn resolve_abs(id: &str, state: &VaultState) -> anyhow::Result<PathBuf> {
 /// Used to open a file in its native application from a chat citation.
 pub fn resolve_node_path(node_id: &str) -> anyhow::Result<PathBuf> {
     resolve_abs(node_id, &load_state())
+}
+
+#[cfg(test)]
+mod path_containment_tests {
+    use super::is_within_base;
+    use std::path::Path;
+
+    // The vault-escape guard must stay component-wise: accept in-vault paths,
+    // reject anything outside, and — critically — never match a sibling that
+    // merely shares a name prefix. (The Windows separator regression that the
+    // old string-prefix check caused is exercised end-to-end by the
+    // release-smoke headless CLI leg on windows-latest.)
+    #[test]
+    fn containment_is_component_wise() {
+        let base = Path::new("/vault");
+        assert!(is_within_base(base, Path::new("/vault")));
+        assert!(is_within_base(base, Path::new("/vault/docs/report.md")));
+        assert!(!is_within_base(base, Path::new("/vault-secrets/report.md")));
+        assert!(!is_within_base(base, Path::new("/elsewhere/report.md")));
+        assert!(!is_within_base(base, Path::new("/")));
+    }
 }
 
 /// The real roots of every linked reference (for the FS watcher).
