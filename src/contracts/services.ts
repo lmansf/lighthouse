@@ -21,6 +21,7 @@ import type {
   DataSource,
   FileInspection,
   FileNode,
+  InsightsScan,
   Investigation,
   InvestigationCreateInput,
   OnboardingState,
@@ -525,6 +526,20 @@ export interface RagService {
    * (SQL parsing is Rust-only — PARITY).
    */
   defineMetric(sql: string, fileIds: string[]): Promise<DefineMetricResult>;
+  /**
+   * Proactive insights (openspec: add-quant-depth §5): run the cheap
+   * deterministic detectors (the anomaly z-score, top-movers, and changepoint)
+   * over the cataloged tables and return the ranked, bounded findings plus the
+   * scan's coverage — what stands out WITHOUT the user asking. Takes no arguments
+   * (the engine scans its own catalog, bounded by a hard cap). Every headline is
+   * engine-computed and rendered verbatim; `tablesScanned` < `tablesAvailable`
+   * discloses the cap. PARITY: the scan is Rust-only (DataFusion), so the web dev
+   * twin answers an empty scan rather than a fabricated one — the panel then
+   * honestly shows "nothing stands out". Backs the proactive "What stands out"
+   * panel; recomputed on show and on the vault-change signal, never a background
+   * poll.
+   */
+  insights(): Promise<InsightsScan>;
   /**
    * Provider sign-in (0.12.1 §3): status of the generic, registration-gated
    * OAuth device flow. `available` is false on a stock build (no endpoints

@@ -12,6 +12,7 @@ import type {
   DataSource,
   FileInspection,
   FileNode,
+  InsightsScan,
   Investigation,
   InvestigationCreateInput,
   Pin,
@@ -410,6 +411,45 @@ class MockRagService implements RagService {
         table: sheet.name,
       },
     ];
+  }
+
+  async insights(): Promise<InsightsScan> {
+    // A small fixed sample so the proactive "What stands out" panel renders in
+    // the offline/mock flow. The findings arrive pre-ranked (most notable first)
+    // with engine-shaped headlines the panel renders VERBATIM, one per kind, and
+    // tablesScanned < tablesAvailable exercises the "scanned N of M" disclosure.
+    // PARITY: the real web dev twin answers an EMPTY scan (analytics is
+    // Rust-only), so under `npm run dev` the panel shows the honest empty state —
+    // this mock is what the offline/test flow drives against.
+    // Pre-ranked (most notable first) by magnitude — the order the panel renders
+    // in, mirroring the engine's ranked, bounded output.
+    return {
+      findings: [
+        {
+          table: "sales.csv",
+          kind: "mover",
+          headline: "sales.csv: South is up +400% vs last month",
+          magnitude: 4,
+          sql: "SELECT region, SUM(amount) AS total FROM sales GROUP BY region",
+        },
+        {
+          table: "sales.csv",
+          kind: "anomaly",
+          headline: "sales.csv: 2024-10 is a +2.85σ anomaly",
+          magnitude: 2.85,
+          sql: "SELECT month, SUM(amount) AS total FROM sales GROUP BY month",
+        },
+        {
+          table: "signups.csv",
+          kind: "changepoint",
+          headline: "signups.csv: level shift up at 2024-08 (+1.9σ)",
+          magnitude: 1.9,
+          sql: "SELECT month, SUM(count) AS total FROM signups GROUP BY month",
+        },
+      ],
+      tablesScanned: 3,
+      tablesAvailable: 5,
+    };
   }
 
   async addReference(path: string): Promise<{ id: string; kind: "file" | "folder" }> {

@@ -12,6 +12,7 @@ import { InvestigationsNav } from "@/features/investigations/InvestigationsNav";
 import { ViewsNav } from "@/features/views/ViewsNav";
 import { RecipesNav } from "@/features/recipes/RecipesNav";
 import { SemanticNav } from "@/features/semantic/SemanticNav";
+import { InsightsNav } from "@/features/insights/InsightsNav";
 import { ChatPanel } from "@/features/chat/ChatPanel";
 import { VersionBadge } from "@/shell/VersionBadge";
 
@@ -78,6 +79,12 @@ export default function Home() {
       <AppShell
         sidebar={
           <>
+            {/* Proactive "What stands out" panel (openspec: add-quant-depth §5):
+                the one surface that shows a finding WITHOUT the user asking, so
+                it sits at the TOP of the analytics nav group. Placed above
+                SemanticNav — the RecipesNav→ViewsNav→InvestigationsNav→
+                FileExplorer adjacencies the nav-UI tests pin stay intact. */}
+            <InsightsNav />
             <SemanticNav />
             <RecipesNav />
             <ViewsNav />
