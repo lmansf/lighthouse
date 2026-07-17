@@ -116,13 +116,28 @@ function refIdOf(id: string, refs: Record<string, Reference>): string | null {
  * the vault directory; referenced ids (`extN/...`) map under their registered
  * real path. Both reject paths that escape their base.
  */
+// Component-wise containment. A raw `abs.startsWith(base + path.sep)` string
+// test FALSE-REJECTS on Windows: `path.resolve` separator-normalizes `abs`
+// (backslashes) while `base` keeps whatever slashes the vault dir carried — a
+// shell-provided path is forward/mixed — so an in-vault file fails the prefix
+// test and its content reads empty though it is listed and included. Using
+// path.relative (which normalizes both sides) is separator-agnostic and, by
+// rejecting any `..` component, escape-safe.
+// PARITY: the Rust engine uses `Path::starts_with` (native/.../vault.rs
+// safe_abs) for the same decision.
+function isWithinBase(base: string, abs: string): boolean {
+  if (abs === base) return true;
+  const rel = path.relative(base, abs);
+  return rel !== "" && !rel.split(path.sep).includes("..") && !path.isAbsolute(rel);
+}
+
 function resolveAbs(id: string, state: VaultState): string {
   const refId = refIdOf(id, state.references);
   if (!refId) return safeAbs(id);
   const base = path.resolve(state.references[refId].path);
   const sub = id.slice(refId.length).replace(/^\//, "");
   const abs = path.resolve(base, sub);
-  if (abs !== base && !abs.startsWith(base + path.sep)) {
+  if (!isWithinBase(base, abs)) {
     throw new Error("path escapes the reference");
   }
   return abs;
@@ -858,7 +873,7 @@ export function rulesListing(): RuleListing[] {
 function safeAbs(relId: string): string {
   const base = vaultDir();
   const abs = path.resolve(base, relId);
-  if (abs !== base && !abs.startsWith(base + path.sep)) {
+  if (!isWithinBase(base, abs)) {
     throw new Error("path escapes the vault");
   }
   return abs;
