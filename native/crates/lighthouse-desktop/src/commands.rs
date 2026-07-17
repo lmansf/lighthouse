@@ -827,6 +827,58 @@ pub async fn rag_op(app: AppHandle, body: Value) -> Result<Value, String> {
             let out = lighthouse_core::insights::scan(&files, is_cloud).await;
             Ok(json!({ "insights": out }))
         }
+        // Deep analysis (openspec: add-deep-analysis §4.1) — mirrors the routes.rs
+        // arm: investigate a table (the applicable recipe battery) and WRITE the
+        // assembled report in-vault (render → write_artifact, a non-egress
+        // sanitized note), returning the saved id + name. The included TABULAR
+        // files are gathered server-side (active-included, the insights precedent).
+        // On-device (DataFusion + recipes); emits vault-changed so the tree
+        // refreshes. Mirrors the routes.rs arm exactly.
+        Some("investigate") => {
+            let Some(table) = body["table"].as_str().map(str::trim).filter(|s| !s.is_empty()) else {
+                return Err("investigate needs a table".into());
+            };
+            let table = table.to_string();
+            let investigation_id = body["investigationId"].as_str().map(String::from);
+            let is_cloud =
+                lighthouse_core::synth::is_cloud_provider(&lighthouse_core::profile::model_config());
+            let files: Vec<(String, String, std::path::PathBuf)> =
+                lighthouse_core::vault::active_included_file_ids()
+                    .into_iter()
+                    .filter_map(|id| {
+                        lighthouse_core::vault::doc_path(&id).map(|(name, abs)| (id, name, abs))
+                    })
+                    .filter(|(_, name, _)| lighthouse_core::analytics::is_tabular(name))
+                    .collect();
+            let report = lighthouse_core::reports::investigate(&table, &files, is_cloud).await;
+            let written = tokio::task::spawn_blocking(move || {
+                lighthouse_core::reports::write_report(&report, investigation_id.as_deref())
+            })
+            .await
+            .map_err(|e| e.to_string())
+            .and_then(|r| r);
+            Ok(match written {
+                Ok((sid, name)) => {
+                    let _ = app.emit("vault-changed", ());
+                    json!({ "savedId": sid, "savedName": name })
+                }
+                Err(e) => json!({ "error": e }),
+            })
+        }
+        // The capability map (openspec: add-deep-analysis §4.2) — mirrors the
+        // routes.rs arm: aggregate the analyzable tables + their recipes/metrics/
+        // asks + one investigation per Date+Numeric table for the included set.
+        // Pure aggregation of the posture-gated applicable_* surfaces.
+        Some("capabilityMap") => {
+            let ids: Vec<String> = body["includedFileIds"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            let is_cloud =
+                lighthouse_core::synth::is_cloud_provider(&lighthouse_core::profile::model_config());
+            let map = lighthouse_core::meta::capability_map(ids, is_cloud).await;
+            Ok(json!({ "map": map }))
+        }
         // Semantic layer (openspec: add-semantic-layer §6.1) — mirrors the
         // routes.rs arm exactly: `list` returns the posture-eligible definitions
         // applicable to the included tables (a card shape); create/rename/delete
