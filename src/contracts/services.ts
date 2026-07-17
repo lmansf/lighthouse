@@ -32,6 +32,7 @@ import type {
   AuditVerdict,
   RagReference,
   RecipeCard,
+  CapabilityMap,
   RestoreToken,
   SemanticCards,
   SemanticMetric,
@@ -230,6 +231,13 @@ export interface RagService {
    * (or on the web dev twin — recipes are Rust-engine-only, so it returns []).
    */
   applicableRecipes(includedFileIds: string[]): Promise<RecipeCard[]>;
+  /**
+   * The capability map (openspec: add-deep-analysis §3): the analyzable tables +
+   * their recipes/metrics/asks + one "Investigate {table}" per Date+Numeric table
+   * for the included set — a single "what can I do" view. A pure aggregate of the
+   * posture-gated `applicable_*` surfaces. Empty on the web dev twin (Rust-only).
+   */
+  capabilityMap(includedFileIds: string[]): Promise<CapabilityMap>;
   /**
    * Link a file or folder by its real absolute path instead of copying it into
    * the vault (reduces duplication). Returns the new node id. Desktop-only —
@@ -540,6 +548,15 @@ export interface RagService {
    * poll.
    */
   insights(): Promise<InsightsScan>;
+  /**
+   * Deep analysis (openspec: add-deep-analysis §2): run the applicable recipe
+   * battery over `table`, assemble the verified results into a report, and WRITE
+   * it into the vault as a markdown note — returns the saved node id + name so the
+   * caller can reveal it. Rust-only (DataFusion + recipes); the web dev twin
+   * throws (unavailable). `investigationId` optionally files the note under that
+   * investigation's notes folder instead of `Lighthouse Reports`.
+   */
+  investigate(table: string, investigationId?: string): Promise<{ savedId: string; savedName: string }>;
   /**
    * Provider sign-in (0.12.1 §3): status of the generic, registration-gated
    * OAuth device flow. `available` is false on a stock build (no endpoints

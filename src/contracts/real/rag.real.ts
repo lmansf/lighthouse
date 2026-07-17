@@ -24,6 +24,7 @@ import type {
   AuditVerdict,
   RagReference,
   RecipeCard,
+  CapabilityMap,
   RestoreToken,
   SemanticCards,
   SemanticMetric,
@@ -280,6 +281,42 @@ class RealRagService implements RagService {
       tablesScanned: typeof scan?.tablesScanned === "number" ? scan.tablesScanned : 0,
       tablesAvailable: typeof scan?.tablesAvailable === "number" ? scan.tablesAvailable : 0,
     };
+  }
+
+  async capabilityMap(includedFileIds: string[]): Promise<CapabilityMap> {
+    // The wire returns `{ map: CapabilityMap }`; PARITY: the dev twin answers an
+    // empty map (analytics is Rust-only), so the panel shows the honest empty
+    // state under dev. Every field defaults to [] so a partial wire never throws.
+    const res = await post({ op: "capabilityMap", includedFileIds });
+    const map = res.map as Partial<CapabilityMap> | undefined;
+    return {
+      tables: Array.isArray(map?.tables) ? map.tables : [],
+      recipes: Array.isArray(map?.recipes) ? map.recipes : [],
+      metrics: Array.isArray(map?.metrics) ? map.metrics : [],
+      suggestedAsks: Array.isArray(map?.suggestedAsks) ? map.suggestedAsks : [],
+      suggestedInvestigations: Array.isArray(map?.suggestedInvestigations)
+        ? map.suggestedInvestigations
+        : [],
+    };
+  }
+
+  async investigate(
+    table: string,
+    investigationId?: string,
+  ): Promise<{ savedId: string; savedName: string }> {
+    // Runs the recipe battery + writes the report note in the Rust engine.
+    // PARITY: the dev twin answers `{available:false}` (analytics is Rust-only);
+    // a write failure rides back as `{error}`. Either surfaces as an honest throw
+    // so the caller shows the error, never a fake saved note.
+    const res = await post({ op: "investigate", table, investigationId });
+    if (res.available === false || res.error || !res.savedId) {
+      throw new Error(
+        (res.reason as string) ||
+          (res.error as string) ||
+          "deep analysis is unavailable on this engine",
+      );
+    }
+    return { savedId: res.savedId as string, savedName: (res.savedName as string) ?? "" };
   }
 
   async addReference(path: string): Promise<{ id: string; kind: "file" | "folder" }> {

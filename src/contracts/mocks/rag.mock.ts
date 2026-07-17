@@ -22,6 +22,7 @@ import type {
   AuditVerdict,
   RagReference,
   RecipeCard,
+  CapabilityMap,
   RestoreToken,
   SemanticCards,
   SemanticMetric,
@@ -411,6 +412,59 @@ class MockRagService implements RagService {
         table: sheet.name,
       },
     ];
+  }
+
+  async capabilityMap(includedFileIds: string[]): Promise<CapabilityMap> {
+    // A small deterministic fixture so the capability gallery renders offline.
+    // Reuses the applicableRecipes mock's "first included tabular sheet" choice,
+    // plus a date+numeric column set (⇒ investigable), one metric, one ask, and
+    // one "Investigate {table}" suggestion. Empty everywhere when nothing tabular
+    // is included. PARITY: the real web dev twin returns an EMPTY map (analytics
+    // is Rust-only), so under `npm run dev` the panel shows the empty state.
+    const included = new Set(includedFileIds);
+    const sheet = this.nodes.find(
+      (n) => n.kind === "file" && included.has(n.id) && /\.(csv|tsv|xlsx?|parquet)$/i.test(n.name),
+    );
+    if (!sheet) {
+      return { tables: [], recipes: [], metrics: [], suggestedAsks: [], suggestedInvestigations: [] };
+    }
+    const recipes = await this.applicableRecipes(includedFileIds);
+    return {
+      tables: [
+        {
+          name: sheet.name,
+          columns: [
+            { name: "date", kind: "date" },
+            { name: "region", kind: "text" },
+            { name: "amount", kind: "numeric" },
+          ],
+          investigable: true,
+        },
+      ],
+      recipes,
+      metrics: [
+        {
+          id: "metric-revenue",
+          name: "revenue",
+          expression: "SUM(amount)",
+          description: "Total sales amount.",
+          entity: sheet.name,
+          localOnly: false,
+        },
+      ],
+      suggestedAsks: [
+        { label: "Total amount by region", question: `Total amount by region in ${sheet.name}` },
+      ],
+      suggestedInvestigations: [{ label: `Investigate ${sheet.name}`, table: sheet.name }],
+    };
+  }
+
+  async investigate(table: string): Promise<{ savedId: string; savedName: string }> {
+    // A fake saved note so the gallery's Investigate affordance is exercisable
+    // offline. PARITY: the real web dev twin throws (deep analysis is Rust-only);
+    // the desktop engine writes the real report under Lighthouse Reports/.
+    const name = `Investigate ${table}.md`;
+    return { savedId: `Lighthouse Reports/${name}`, savedName: name };
   }
 
   async insights(): Promise<InsightsScan> {
