@@ -162,6 +162,60 @@ d,amount
 2024-10-31,400
 ";
 
+// --- add-quant-depth golden fixtures (§2 forecast, §3 changepoint) ----------------
+//
+// All four are (d Date32, amount Float64) — so they reuse `trend_schema` — and are
+// hand-computed so the engine's rendered cells are known exactly.
+
+/// §2 forecast: an EXACT straight line. Monthly totals 100, 200, 300, 400, 500
+/// over five consecutive months (one row per month, so each month's SUM is the
+/// line value). With t = 1..5 the OLS fit is slope b = 100, intercept a = 0, and
+/// residual σ = 0 (a perfect fit) — so the horizon projects exactly on the line
+/// (t = 6/7/8 ⇒ 600/700/800) with the band collapsed (lower = upper = value).
+const FORECAST_LINE_CSV: &str = "\
+d,amount
+2024-01-15,100
+2024-02-15,200
+2024-03-15,300
+2024-04-15,400
+2024-05-15,500
+";
+
+/// §2 forecast degradation: only two months (n = 2 < 3). The forecast rows are
+/// gated out IN SQL, so the series shows with ZERO forecast rows.
+const FORECAST_SHORT_CSV: &str = "\
+d,amount
+2024-01-15,100
+2024-02-15,200
+";
+
+/// §3 changepoint: a step function — four months at 100 then four at 500 (n = 8).
+/// The normalized max-split is unambiguously the boundary after month 4 (score
+/// ≈ 1.87 vs ≈ 1.50 for its neighbours): mean_before = 100, mean_after = 500.
+const CHANGEPOINT_STEP_CSV: &str = "\
+d,amount
+2024-01-15,100
+2024-02-15,100
+2024-03-15,100
+2024-04-15,100
+2024-05-15,500
+2024-06-15,500
+2024-07-15,500
+2024-08-15,500
+";
+
+/// §3 changepoint degradation: a flat series (n = 4, all equal). Every split has
+/// mean_before = mean_after, so the score is ~0 (the +ε keeps it finite) — a top
+/// split is still returned, but with a near-zero magnitude the narration reads as
+/// "no material level shift."
+const CHANGEPOINT_FLAT_CSV: &str = "\
+d,amount
+2024-01-15,300
+2024-02-15,300
+2024-03-15,300
+2024-04-15,300
+";
+
 #[tokio::main]
 async fn main() {
     let dir = std::env::temp_dir().join(format!("lh-analytics-eval-{}", std::process::id()));
@@ -298,6 +352,25 @@ async fn main() {
         )
         .await
         .expect("register recipe_trend");
+
+        // add-quant-depth fixtures — all (d Date32, amount Float64), reusing
+        // trend_schema and trend_cols (a Date + a Numeric).
+        for (tbl, body) in [
+            ("forecast_line", FORECAST_LINE_CSV),
+            ("forecast_short", FORECAST_SHORT_CSV),
+            ("changepoint_step", CHANGEPOINT_STEP_CSV),
+            ("changepoint_flat", CHANGEPOINT_FLAT_CSV),
+        ] {
+            let path = dir.join(format!("{tbl}.csv"));
+            fs::write(&path, body).unwrap_or_else(|e| panic!("write {tbl}: {e}"));
+            rctx.register_csv(
+                tbl,
+                path.to_str().unwrap(),
+                CsvReadOptions::new().schema(&trend_schema),
+            )
+            .await
+            .unwrap_or_else(|e| panic!("register {tbl}: {e}"));
+        }
 
         // The typed catalog the executor resolves params from. `region` precedes
         // `order_id` so the first Text column (the group) is region; `amount` is
@@ -529,6 +602,169 @@ async fn main() {
             Err(e) => {
                 failures += 1;
                 println!("  FAIL  top-movers — {e}");
+            }
+        }
+
+        // --- add-quant-depth §2: forecast --------------------------------------
+        // A perfect line (100..500): slope 100, intercept 0, residual σ = 0, so the
+        // horizon lands exactly on the line and the band collapses (lower = upper =
+        // value). Model-free: the assertions pin the ryu floats DataFusion renders.
+        match run_recipe(&rctx, "forecast", "forecast_line", &trend_cols).await {
+            Ok(steps) => {
+                for (period, v) in
+                    [("2024-06", "600.0"), ("2024-07", "700.0"), ("2024-08", "800.0")]
+                {
+                    record(
+                        &mut failures,
+                        &format!("forecast: {period} projects {v} with a collapsed band"),
+                        assert_keyed(
+                            &steps[0].2,
+                            "period",
+                            period,
+                            &[("kind", "forecast"), ("value", v), ("lower", v), ("upper", v)],
+                        ),
+                    );
+                }
+                // σ = 0 ⇒ lower == upper on every forecast row, and there are
+                // exactly three (the horizon), independent of the value literals.
+                record(&mut failures, "forecast: σ=0 collapses the band on all 3 horizon rows", {
+                    let (cols, rows) = grid(&steps[0].2);
+                    let fc: Vec<&Vec<String>> = rows
+                        .iter()
+                        .filter(|r| cell(&cols, r, "kind") == "forecast")
+                        .collect();
+                    if fc.len() == 3
+                        && fc.iter().all(|r| cell(&cols, r, "lower") == cell(&cols, r, "upper"))
+                    {
+                        Ok(())
+                    } else {
+                        Err(format!("forecast rows (want 3, lower==upper): {fc:?}"))
+                    }
+                });
+                // A history row is 'actual' with the actual y and a NULL band
+                // (rendered as an empty cell).
+                record(
+                    &mut failures,
+                    "forecast: history row is actual with a null band",
+                    assert_keyed(
+                        &steps[0].2,
+                        "period",
+                        "2024-01",
+                        &[("kind", "actual"), ("value", "100.0"), ("lower", ""), ("upper", "")],
+                    ),
+                );
+                // The fit summary the narration cites the trend rate from.
+                record(
+                    &mut failures,
+                    "forecast: fit summary slope=100.0 intercept=0.0 sigma=0.0 n=5",
+                    assert_row(
+                        &steps[1].2,
+                        &[
+                            ("slope", "100.0"),
+                            ("intercept", "0.0"),
+                            ("residual_sigma", "0.0"),
+                            ("n", "5"),
+                        ],
+                    ),
+                );
+                // §2.3: the forecast recipe DRAWS a band chart over its
+                // representative result (plan[0]) — engine-authored, kind "band",
+                // values + bounds straight from the batches (the forecast tail
+                // carries a non-null upper bound).
+                record(&mut failures, "forecast: draws a band chart over the projection", {
+                    let chart = lookup("forecast").unwrap().chart(&steps[0].2);
+                    match chart.as_deref().map(serde_json::from_str::<serde_json::Value>) {
+                        Some(Ok(v))
+                            if v["kind"] == "band"
+                                && v["series"][0]["name"] == "value"
+                                && v["series"][0]["upper"]
+                                    .as_array()
+                                    .map(|a| a.iter().any(|x| !x.is_null()))
+                                    .unwrap_or(false) =>
+                        {
+                            Ok(())
+                        }
+                        other => Err(format!("unexpected forecast chart: {other:?}")),
+                    }
+                });
+            }
+            Err(e) => {
+                failures += 1;
+                println!("  FAIL  forecast (line) — {e}");
+            }
+        }
+
+        // Degradation: n = 2 < 3 ⇒ zero forecast rows are emitted (history only),
+        // gated in SQL — the recipe degrades to a plain series, never an error.
+        match run_recipe(&rctx, "forecast", "forecast_short", &trend_cols).await {
+            Ok(steps) => {
+                record(&mut failures, "forecast: n<3 emits zero forecast rows (history only)", {
+                    let (cols, rows) = grid(&steps[0].2);
+                    let forecasts =
+                        rows.iter().filter(|r| cell(&cols, r, "kind") == "forecast").count();
+                    let actuals =
+                        rows.iter().filter(|r| cell(&cols, r, "kind") == "actual").count();
+                    if forecasts == 0 && actuals == 2 {
+                        Ok(())
+                    } else {
+                        Err(format!("{forecasts} forecast / {actuals} actual (want 0 / 2)"))
+                    }
+                });
+            }
+            Err(e) => {
+                failures += 1;
+                println!("  FAIL  forecast (short) — {e}");
+            }
+        }
+
+        // --- add-quant-depth §3: changepoint -----------------------------------
+        // A 100 → 500 step: the normalized max-split is the boundary after month 4
+        // (row t=4, period 2024-04), with mean_before 100 and mean_after 500.
+        match run_recipe(&rctx, "changepoint-scan", "changepoint_step", &trend_cols).await {
+            Ok(steps) => {
+                record(
+                    &mut failures,
+                    "changepoint: step located at 2024-04 (100 -> 500, delta 400, mag 1.87)",
+                    assert_row(
+                        &steps[0].2,
+                        &[
+                            ("changepoint_period", "2024-04"),
+                            ("mean_before", "100.0"),
+                            ("mean_after", "500.0"),
+                            ("delta", "400.0"),
+                            ("magnitude", "1.87"),
+                        ],
+                    ),
+                );
+            }
+            Err(e) => {
+                failures += 1;
+                println!("  FAIL  changepoint (step) — {e}");
+            }
+        }
+
+        // Degradation: a flat series (n = 4, all equal) still returns a split, but
+        // with a near-zero magnitude (no material shift). mean_before == mean_after
+        // for EVERY split, so the assertion is stable regardless of the tie-break.
+        match run_recipe(&rctx, "changepoint-scan", "changepoint_flat", &trend_cols).await {
+            Ok(steps) => {
+                record(
+                    &mut failures,
+                    "changepoint: flat series => magnitude 0.0 (no material shift)",
+                    assert_row(
+                        &steps[0].2,
+                        &[
+                            ("mean_before", "300.0"),
+                            ("mean_after", "300.0"),
+                            ("delta", "0.0"),
+                            ("magnitude", "0.0"),
+                        ],
+                    ),
+                );
+            }
+            Err(e) => {
+                failures += 1;
+                println!("  FAIL  changepoint (flat) — {e}");
             }
         }
     }

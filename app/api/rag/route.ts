@@ -660,6 +660,15 @@ export async function POST(req: Request) {
     case "applicableRecipes":
       return NextResponse.json({ recipes: [] });
 
+    // PARITY: proactive insights run the cheap detectors as guarded SELECTs
+    // through DataFusion (Rust engine only) — this dev twin never takes the
+    // analytics branch, so it returns an honest EMPTY scan (no findings, nothing
+    // scanned) rather than a fabricated one (openspec: add-quant-depth §5).
+    case "insights":
+      return NextResponse.json({
+        insights: { findings: [], tablesScanned: 0, tablesAvailable: 0 },
+      });
+
     // PARITY: recipe EXECUTION runs guarded SELECTs through DataFusion (Rust
     // engine only) — this dev twin never takes the analytics branch, so a direct
     // recipes op is honestly unavailable (the shapeView precedent). On the Rust

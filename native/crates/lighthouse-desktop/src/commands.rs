@@ -809,6 +809,24 @@ pub async fn rag_op(app: AppHandle, body: Value) -> Result<Value, String> {
             let recipes = lighthouse_core::meta::applicable_recipes(ids, is_cloud).await;
             Ok(json!({ "recipes": recipes }))
         }
+        // Proactive insights (openspec: add-quant-depth §5) — mirrors the
+        // routes.rs arm: run the cheap detectors over the included tabular files
+        // WITHOUT a question and return the ranked, bounded findings + counts.
+        // On-device (DataFusion SQL, no model) — a scan egresses nothing.
+        Some("insights") => {
+            let is_cloud =
+                lighthouse_core::synth::is_cloud_provider(&lighthouse_core::profile::model_config());
+            let files: Vec<(String, String, std::path::PathBuf)> =
+                lighthouse_core::vault::active_included_file_ids()
+                    .into_iter()
+                    .filter_map(|id| {
+                        lighthouse_core::vault::doc_path(&id).map(|(name, abs)| (id, name, abs))
+                    })
+                    .filter(|(_, name, _)| lighthouse_core::analytics::is_tabular(name))
+                    .collect();
+            let out = lighthouse_core::insights::scan(&files, is_cloud).await;
+            Ok(json!({ "insights": out }))
+        }
         // Semantic layer (openspec: add-semantic-layer §6.1) — mirrors the
         // routes.rs arm exactly: `list` returns the posture-eligible definitions
         // applicable to the included tables (a card shape); create/rename/delete

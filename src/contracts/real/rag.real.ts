@@ -13,6 +13,8 @@ import type {
   DataSource,
   FileInspection,
   FileNode,
+  InsightFinding,
+  InsightsScan,
   Investigation,
   InvestigationCreateInput,
   Pin,
@@ -264,6 +266,20 @@ class RealRagService implements RagService {
   async applicableRecipes(includedFileIds: string[]): Promise<RecipeCard[]> {
     const res = await post({ op: "applicableRecipes", includedFileIds });
     return Array.isArray(res.recipes) ? (res.recipes as RecipeCard[]) : [];
+  }
+
+  async insights(): Promise<InsightsScan> {
+    // No args — the engine scans its own catalog (bounded by a hard cap). The
+    // wire returns `{ insights: { findings, tablesScanned, tablesAvailable } }`;
+    // PARITY: the dev twin answers an empty scan (analytics is Rust-only), so
+    // the panel shows the honest "nothing stands out" empty state under dev.
+    const res = await post({ op: "insights" });
+    const scan = res.insights as Partial<InsightsScan> | undefined;
+    return {
+      findings: Array.isArray(scan?.findings) ? (scan.findings as InsightFinding[]) : [],
+      tablesScanned: typeof scan?.tablesScanned === "number" ? scan.tablesScanned : 0,
+      tablesAvailable: typeof scan?.tablesAvailable === "number" ? scan.tablesAvailable : 0,
+    };
   }
 
   async addReference(path: string): Promise<{ id: string; kind: "file" | "folder" }> {

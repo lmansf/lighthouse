@@ -20,6 +20,7 @@ pub mod audit;
 pub mod egress;
 pub mod extract;
 pub mod index;
+pub mod insights;
 pub mod inspect;
 pub mod investigations;
 pub mod ledger;

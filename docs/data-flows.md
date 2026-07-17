@@ -194,6 +194,18 @@ rebuilds any confident grid as markdown appended to the extracted text — pure
 geometry, no model, no network. Reconstructed tables ride the same on-device
 extraction/retrieval path as OCR text; nothing about them touches egress.
 
+Quantitative depth (`recipes.rs`, `insights.rs`, add-quant-depth) is
+computation, not a new destination. The `forecast` and `changepoint-scan`
+recipes are guarded SQL over DataFusion — every number is engine-computed
+on-device; they egress only what any recipe narration does (the result cards
+handed to the configured model, exactly as the existing recipes, and NOTHING
+when the model is local/extractive). Proactive **insights** (`insights::scan`,
+the "what stands out" surface) run those cheap detectors over the cataloged
+tables with **no model in the loop at all** — the headlines are templated from
+engine numbers — so a scan is pure on-device SQL and touches egress **not at
+all**. No new network path; the band chart the forecast draws rides inline in
+the answer markdown like every other chart.
+
 ## 7. Build/CI-time only — never in the shipped app
 
 `scripts/fetch-local-model.mjs` (build machines): llama.cpp GitHub

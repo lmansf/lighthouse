@@ -992,3 +992,51 @@ export interface MetricCreateInput {
 export type DefineMetricResult =
   | { available: true; expression: string; entity: string }
   | { available: false; reason: string };
+
+// --- Proactive insights (openspec: add-quant-depth §5) -----------------------
+
+/**
+ * Which cheap deterministic detector produced a finding (openspec:
+ * add-quant-depth §5): a monthly z-score `anomaly`, a top-`mover`, or a
+ * level-shift `changepoint`. KEEP IN SYNC with the Rust `InsightKind` in
+ * lighthouse-core insights.rs.
+ */
+export type InsightKind = "anomaly" | "mover" | "changepoint";
+
+/**
+ * One noteworthy finding the engine surfaced WITHOUT the user asking (openspec:
+ * add-quant-depth §5). `headline` is an engine-computed, ready-to-display string
+ * — every number in it is engine SQL, and it is rendered VERBATIM (never model
+ * text). `magnitude` is the ranking key (findings arrive pre-ranked, most
+ * notable first) and `sql` is the guarded SELECT that produced the numbers. KEEP
+ * IN SYNC with the Rust `Insight` in lighthouse-core insights.rs.
+ */
+export interface InsightFinding {
+  /** The cataloged table (file display name / view name) the finding is about. */
+  table: string;
+  kind: InsightKind;
+  /** Engine-computed, ready-to-display headline — rendered verbatim. */
+  headline: string;
+  /** The finding's magnitude — the ranking key (e.g. a z-score or % move). */
+  magnitude: number;
+  /** The guarded SELECT that produced the finding's numbers. */
+  sql: string;
+}
+
+/**
+ * What the `insights` op answers (openspec: add-quant-depth §5): the ranked,
+ * bounded findings plus the scan's coverage. `tablesScanned` < `tablesAvailable`
+ * means the scan hit its cap and the surface MUST disclose it ("scanned N of M
+ * tables") rather than present the capped set as exhaustive. An empty `findings`
+ * is an honest "nothing stands out", never an error. PARITY: the scan runs the
+ * detectors as guarded SELECTs through DataFusion (Rust engine only), so the web
+ * dev twin answers an empty scan (findings [], both counts 0) — the panel then
+ * honestly shows "nothing stands out". KEEP IN SYNC with the Rust `InsightsScan`.
+ */
+export interface InsightsScan {
+  findings: InsightFinding[];
+  /** How many cataloged tables the scan actually visited (bounded by the cap). */
+  tablesScanned: number;
+  /** How many cataloged tables were available to scan. */
+  tablesAvailable: number;
+}
