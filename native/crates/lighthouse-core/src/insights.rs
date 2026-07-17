@@ -21,6 +21,7 @@ use std::path::PathBuf;
 
 use datafusion::arrow::util::display::array_value_to_string;
 use datafusion::prelude::SessionContext;
+use serde::Serialize;
 
 use crate::analytics::{register_tables, run_query, QueryResult};
 use crate::catalog::{columns_for, ColumnKind};
@@ -41,7 +42,8 @@ const INSIGHT_CHANGEPOINT_MIN_MAG: f64 = 1.0;
 /// score used only for ranking (a z-score, a percent/100, a changepoint
 /// magnitude — all on a roughly 0–5 scale); the `headline` carries the finding's
 /// NATIVE figure. `sql` is the query that produced it (provenance).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Insight {
     pub table: String,
     pub kind: &'static str,
@@ -53,7 +55,8 @@ pub struct Insight {
 /// The result of a scan: the ranked findings plus how many Date+Numeric tables
 /// were available versus actually scanned, so the surface can disclose a cap
 /// ("scanned N of M") rather than present a capped set as exhaustive.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Insights {
     pub findings: Vec<Insight>,
     pub tables_scanned: usize,
