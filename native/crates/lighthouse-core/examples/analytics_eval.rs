@@ -767,6 +767,101 @@ async fn main() {
                 println!("  FAIL  changepoint (flat) — {e}");
             }
         }
+
+        // --- Deep analysis (openspec: add-deep-analysis §5.1): the model-free
+        //     report floor. `investigate` over the on-disk Date+Numeric fixture
+        //     assembles a report whose SECTIONS are the applicable recipes'
+        //     VERIFIED results, whose every summary figure appears in a section
+        //     result (the every-number invariant), and whose render is
+        //     byte-identical across two runs at a fixed time. Model-free, so it
+        //     gates CI like the goldens above. ---
+        println!("\n== deep-analysis report floor (model-free) ==");
+        let inv_files = vec![(
+            "recipe_sales-id".to_string(),
+            "recipe_sales.csv".to_string(),
+            sales_path.clone(),
+        )];
+        let mut report =
+            lighthouse_core::reports::investigate("recipe_sales.csv", &inv_files, false).await;
+        record(
+            &mut failures,
+            "deep-analysis: a Date+Numeric table yields multiple sections",
+            if report.sections.len() >= 3 {
+                Ok(())
+            } else {
+                Err(format!("expected >= 3 sections, got {}", report.sections.len()))
+            },
+        );
+        // Every section is a known built-in recipe's result — no fabricated section.
+        let recipe_names: std::collections::HashSet<&str> =
+            lighthouse_core::recipes::BUILTINS.iter().map(|r| r.name).collect();
+        record(
+            &mut failures,
+            "deep-analysis: every section is a built-in recipe's verified result",
+            if report
+                .sections
+                .iter()
+                .all(|s| recipe_names.contains(s.heading.as_str()))
+            {
+                Ok(())
+            } else {
+                Err("a section heading is not a built-in recipe name".to_string())
+            },
+        );
+        // Each section carries its exact SQL + a non-empty evidence table.
+        record(
+            &mut failures,
+            "deep-analysis: every section carries its SQL + evidence",
+            if report
+                .sections
+                .iter()
+                .all(|s| !s.sql.trim().is_empty() && !s.result_markdown.trim().is_empty())
+            {
+                Ok(())
+            } else {
+                Err("a section is missing its SQL or evidence".to_string())
+            },
+        );
+        // The every-number invariant: each numeric token in the summary appears in
+        // SOME section's result markdown (the summary is reproducible from the SQL,
+        // no figure is introduced by any narration).
+        let evidence: String = report
+            .sections
+            .iter()
+            .map(|s| s.result_markdown.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let ungrounded: Vec<String> = report
+            .summary
+            .iter()
+            .flat_map(|line| numeric_tokens(line))
+            .filter(|tok| !evidence.contains(tok))
+            .collect();
+        record(
+            &mut failures,
+            "deep-analysis: every summary figure appears in a section result",
+            if ungrounded.is_empty() {
+                Ok(())
+            } else {
+                Err(format!("summary figures absent from the sections: {ungrounded:?}"))
+            },
+        );
+        // Determinism: byte-identical render across two runs at a fixed time.
+        let mut report2 =
+            lighthouse_core::reports::investigate("recipe_sales.csv", &inv_files, false).await;
+        report.generated_ms = 1_700_000_000_000;
+        report2.generated_ms = 1_700_000_000_000;
+        record(
+            &mut failures,
+            "deep-analysis: the rendered report is byte-identical across two runs",
+            if lighthouse_core::reports::render_markdown(&report)
+                == lighthouse_core::reports::render_markdown(&report2)
+            {
+                Ok(())
+            } else {
+                Err("the report render differs across two runs".to_string())
+            },
+        );
     }
 
     // --- Section 1 (cont.): Beam loop budget floor (openspec: add-beam-loop §6.1) ---
@@ -1163,4 +1258,19 @@ fn record(failures: &mut usize, what: &str, r: Result<(), String>) {
             println!("  FAIL  {what}\n        {e}");
         }
     }
+}
+
+/// The numeric-ish tokens in a report summary line — a whitespace/punctuation
+/// split, each fragment trimmed of surrounding non-digits and kept only if it
+/// still holds a digit and is ≥ 2 chars (so a lone "1" doesn't match trivially).
+/// Keeps internal `.`/`-` so `2.85` and `2024-10` stay whole. Used by the
+/// deep-analysis floor to assert every summary figure is grounded in a section
+/// result (the every-number invariant).
+fn numeric_tokens(line: &str) -> Vec<String> {
+    line.split(|c: char| c == ' ' || c == '(' || c == ')' || c == ':' || c == ',')
+        .filter_map(|w| {
+            let t = w.trim_matches(|c: char| !c.is_ascii_digit());
+            (t.len() >= 2 && t.chars().any(|c| c.is_ascii_digit())).then(|| t.to_string())
+        })
+        .collect()
 }
