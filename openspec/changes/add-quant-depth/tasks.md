@@ -28,9 +28,9 @@
 - [ ] 4.5 Tests: `insights::scan` over a fixture vault returns a ranked anomaly finding; a quiet vault returns `[]`; the cap is enforced + disclosed; an unanalyzable table is skipped; the scan issues no provider call (zero-egress). A node test for the TS op's empty degradation.
 
 ## 5. CI + docs
-- [ ] 5.1 The new `examples/analytics_eval.rs` (forecast + changepoint) and `examples/chart_eval.rs` (band) floors ride the already-gated evals (`native.yml:43/45`, both `--locked`); `cargo build/test --workspace` picks up the `insights` module + new tests with NO workflow edit. Confirm.
-- [ ] 5.2 `docs/ts-twin.md`: extend the analytics Rust-only row to name the `forecast`/`changepoint-scan` recipes + `insights::scan` (Rust-only; TS `insights` op returns `[]`); confirm the `band` chart kind is a REAL twin (`chartSpec.ts`), not Rust-only.
-- [ ] 5.3 `docs/data-flows.md`: note that `insights::scan` is on-device SQL over already-cataloged tables (zero network, NO new egress path); forecast/changepoint egress exactly as any recipe narration does under the configured provider (no new egress).
+- [x] 5.1 The new forecast/changepoint goldens ride the already-gated `analytics_eval` (`native.yml`, `--locked`); the `insights` module + `insights_test.rs` are picked up by `cargo build/test --workspace` with NO workflow edit. (The band grammar's CI floor is the `directed_band_spec` unit test + the §2.3 forecast-draws-a-band `analytics_eval` check, per §1.5.) Confirmed.
+- [x] 5.2 `docs/ts-twin.md`: added a Rust-only row for the `forecast`/`changepoint-scan` recipes + `insights::scan` (recipe execution Rust-only; `insights` op returns an empty scan) and stated the `band` chart kind IS a real `chartSpec.ts` twin, not Rust-only.
+- [x] 5.3 `docs/data-flows.md` §6: noted that `insights::scan` is pure on-device SQL with NO model in the loop (headlines templated from engine numbers) so it touches egress not at all; forecast/changepoint egress exactly as any recipe narration does; the band chart rides inline in the answer markdown — no new network path.
 
 ## 6. Verify + parity + gates + no-bump confirmation
 - [ ] 6.1 Confirm NO `CACHE_VERSION` bump (recipes stamp only the existing `AnalyticsMeta{sql, file_ids}`; the band chart rides inline in markdown; insights are computed on demand, not cached) — `CACHE_VERSION` stays 12 across the three lockstep sites. State it explicitly.
