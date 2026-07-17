@@ -63,6 +63,7 @@ intents) but degrades as noted:
 | Filesystem watcher (event-driven freshness) | `watch.rs` | poll-style freshness |
 | Extra rich formats: `.doc`, `.pptx`, `.odt`, `.odp`, `.rtf`, images | `extract.rs` `RICH_EXT` | name-match-only (TS extracts pdf/docx/xlsx/csv/md/txt via mammoth/unpdf/xlsx) |
 | Semantic layer: certification, trust reconcile, metric proposal (parse executed SQL) | `analytics.rs` (`certified_metrics`/`reconcile_metric`/`propose_metric`) + `synth.rs` prompt injection | never certifies/reconciles (no analytics branch → no `AnalyticsMeta.certified`/`.trust`); `op:"defineMetric"` answers `{available:false}`. The store/CRUD/`applicableSemantics` list ARE mirrored (`semantic.ts`) — a metric carries its `reads`, so `list` needs no DataFusion |
+| Automation entry points: the headless `lighthouse` CLI + `lighthouse-mcp` server | `lighthouse-cli` / `lighthouse-mcp` crates (thin wrappers over `ask::run_headless_ask` — audited + egress-attributed by construction) | no headless/MCP ask surface (the app is the only entry). Investigation `fork`/`export_markdown` themselves ARE mirrored in `investigations.ts` |
 
 These live in the **desktop shell** specifically (`lighthouse-desktop`), not
 in `lighthouse-core`, so even the headless Rust server lacks them:
