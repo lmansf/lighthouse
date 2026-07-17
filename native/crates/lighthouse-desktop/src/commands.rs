@@ -192,8 +192,54 @@ pub async fn rag_op(app: AppHandle, body: Value) -> Result<Value, String> {
                 )?;
                 Ok(json!({ "investigation": lighthouse_core::investigations::view(inv) }))
             }
+            // Fork a line of inquiry (openspec: add-automation §4) — mirrors
+            // the routes.rs arm: a fresh record copying STRUCTURE only (scope,
+            // policy, conversation refs), engine-minted id, its own empty
+            // notes folder, same name rule as create.
+            Some("fork") => {
+                let Some(id) = body["id"].as_str().filter(|s| !s.is_empty()) else {
+                    return Err("id required".into());
+                };
+                let inv = lighthouse_core::investigations::fork(
+                    id,
+                    body["name"].as_str().unwrap_or(""),
+                )?;
+                Ok(json!({ "investigation": lighthouse_core::investigations::view(inv) }))
+            }
+            // Export to an in-vault markdown note (openspec: add-automation §4):
+            // render structure + derived membership (references, never
+            // transcripts), then WRITE under the investigation's own notes
+            // folder via the exportChat precedent (notes_subdir +
+            // write_artifact — a non-egress, sanitized in-vault write). Titles
+            // is None: the op renders conversation ids.
+            Some("export") => {
+                let Some(id) = body["id"].as_str().filter(|s| !s.is_empty()) else {
+                    return Err("id required".into());
+                };
+                let title = body["title"].as_str().unwrap_or("Investigation").to_string();
+                let markdown = lighthouse_core::investigations::export_markdown(id, None)?;
+                let subdir = lighthouse_core::investigations::notes_subdir(id)?;
+                let written = tokio::task::spawn_blocking(move || {
+                    lighthouse_core::vault::write_artifact(
+                        &subdir,
+                        &title,
+                        "md",
+                        markdown.as_bytes(),
+                    )
+                })
+                .await
+                .map_err(|e| e.to_string())
+                .and_then(|r| r.map_err(|e| e.to_string()));
+                Ok(match written {
+                    Ok((sid, name)) => {
+                        let _ = app.emit("vault-changed", ());
+                        json!({ "savedId": sid, "savedName": name })
+                    }
+                    Err(e) => json!({ "error": e }),
+                })
+            }
             _ => Err(
-                "investigations action must be list, create, rename, setArchived, or addConversationRef"
+                "investigations action must be list, create, rename, setArchived, addConversationRef, fork, or export"
                     .into(),
             ),
         },

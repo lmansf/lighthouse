@@ -520,3 +520,170 @@ test("parity: recall prefers the investigation's conversation notes, same order"
   assert.equal(preferBeta[0], beta.id, `flipped preference flips order: ${preferBeta}`);
   assert.ok(preferBeta.includes(alpha.id), `preference never excludes: ${preferBeta}`);
 });
+
+// --- §4 fork + export (openspec: add-automation) ------------------------------
+
+test("fork copies structure only without touching the parent's members", () => {
+  // Mirrors investigations_test.rs::
+  // fork_copies_structure_only_without_touching_the_parents_members (PARITY).
+  freshVault();
+
+  const parent = inv.createInvestigation("Q3 parent", ["cases/a.md", "cases/b.md"], "local-only");
+  withPolicy(null, () => {
+    inv.addInvestigationConversationRef(parent.id, "conv-1", true);
+    inv.addInvestigationConversationRef(parent.id, "conv-2", true);
+  });
+  const parentPin = pinsMod.addPin("q?", "SELECT 1", ["cases/a.md"], parent.id);
+  const parentSubdir = inv.investigationNotesSubdir(parent.id);
+  const parentNote = vaultMod.writeArtifact(
+    parentSubdir,
+    "Parent note",
+    "md",
+    Buffer.from("# parent body"),
+  );
+
+  const fork = inv.forkInvestigation(parent.id, "Q3 deep dive");
+
+  // A fresh, non-archived line whose STRUCTURE is a copy of the parent's.
+  assert.notEqual(fork.id, parent.id, "fresh id (name differs ⇒ id differs)");
+  assert.ok(fork.id.startsWith("inv-"));
+  assert.equal(fork.archived, false);
+  assert.deepEqual(fork.scopeFileIds, ["cases/a.md", "cases/b.md"], "scope copied");
+  assert.equal(fork.providerPolicy, "local-only", "local-only stays local-only");
+  assert.deepEqual(fork.conversationRefs, ["conv-1", "conv-2"], "conversation refs copied");
+  assert.equal(fork.folderName, "Q3 deep dive", "its own sanitized folder");
+  assert.notEqual(fork.folderName, parent.folderName, "not the parent's folder");
+
+  // Derived membership is NOT duplicated: the fork's view is empty, while the
+  // parent keeps its pin and note.
+  const views = inv.investigationsListing();
+  const forkView = views.find((v) => v.id === fork.id);
+  assert.deepEqual(forkView.pinRefs, [], "fork has no pins");
+  assert.deepEqual(forkView.noteRefs, [], "fork has its own empty notes folder");
+  const parentView = views.find((v) => v.id === parent.id);
+  assert.deepEqual(parentView.pinRefs, [parentPin.id], "parent keeps its pin");
+  assert.deepEqual(parentView.noteRefs, [parentNote.id], "parent keeps its note");
+
+  // The pin still belongs to the PARENT — never re-pointed at the fork.
+  const pin = pinsMod.listPins().find((p) => p.id === parentPin.id);
+  assert.equal(pin.investigationId, parent.id);
+
+  // Both lines coexist (a branch adds a line; it moves nothing).
+  assert.equal(inv.listInvestigations().length, 2);
+});
+
+test("fork refuses blank, collision, and missing parent", () => {
+  // Mirrors investigations_test.rs::fork_refuses_blank_collision_and_missing_parent.
+  freshVault();
+  const parent = inv.createInvestigation("Origin", [], "default");
+  inv.createInvestigation("Taken", [], "default");
+
+  assert.throws(() => inv.forkInvestigation(parent.id, "   "), /needs a name/);
+  assert.throws(() => inv.forkInvestigation(parent.id, "taken"), /already exists/);
+  assert.throws(() => inv.forkInvestigation(parent.id, "ORIGIN"), /already exists/);
+  assert.throws(() => inv.forkInvestigation("inv-nope", "Fresh unique"), /not found/);
+
+  assert.equal(inv.listInvestigations().length, 2, "no partial fork landed");
+});
+
+test("export writes under the notes folder and lists membership without transcripts", () => {
+  // Mirrors investigations_test.rs::
+  // export_writes_under_the_notes_folder_and_lists_membership_without_transcripts.
+  const stateDir = freshVault();
+  const vault = path.dirname(stateDir);
+
+  const created = inv.createInvestigation("Harbor case", ["cases/x.md"], "default");
+  withPolicy(null, () => {
+    inv.addInvestigationConversationRef(created.id, "conv-9", true);
+  });
+  const pin = pinsMod.addPin("rows?", "SELECT count(*)", ["cases/x.md"], created.id);
+  // A prior note in the folder — its BODY must never leak into the export.
+  const subdir = inv.investigationNotesSubdir(created.id);
+  const priorNote = vaultMod.writeArtifact(
+    subdir,
+    "Prior note",
+    "md",
+    Buffer.from("SECRET TRANSCRIPT BODY"),
+  );
+
+  // Render: structure + derived membership; no transcript text anywhere.
+  const md = inv.exportMarkdown(created.id);
+  assert.ok(md.startsWith("# Harbor case\n"), md);
+  assert.ok(md.includes("- Status: Active\n"));
+  assert.ok(md.includes("- Provider policy: default\n"));
+  assert.ok(md.includes("\n## Scope\n\n- cases/x.md\n"), md);
+  assert.ok(md.includes("\n## Conversations\n\n- conv-9\n"), md);
+  assert.ok(md.includes(`\n## Pins\n\n- ${pin.id}\n`), md);
+  assert.ok(md.includes(`- ${priorNote.id}\n`), `note listed by id: ${md}`);
+  assert.ok(!md.includes("SECRET TRANSCRIPT BODY"), "never embeds transcripts");
+
+  // A caller-supplied title map only adds legibility.
+  const titled = inv.exportMarkdown(created.id, { "conv-9": "Kickoff call" });
+  assert.ok(titled.includes("- Kickoff call (conv-9)\n"), titled);
+  assert.ok(!titled.includes("SECRET TRANSCRIPT BODY"));
+
+  // The WRITE the op composes (render → notesSubdir → writeArtifact) lands
+  // under the investigation's OWN folder and derives back as its note.
+  const written = vaultMod.writeArtifact(subdir, "Harbor case", "md", Buffer.from(md, "utf8"));
+  assert.equal(written.id, `Lighthouse Notes/Harbor case/${written.name}`);
+  assert.ok(fs.existsSync(path.join(vault, written.id)), "written inside the vault");
+  const view = inv.investigationsListing().find((v) => v.id === created.id);
+  assert.ok(view.noteRefs.includes(written.id), "the export is itself a note member");
+});
+
+test("export refuses unknown id and unusable folder", () => {
+  // Mirrors investigations_test.rs::export_refuses_unknown_id_and_unusable_folder.
+  const stateDir = freshVault();
+  fs.mkdirSync(stateDir, { recursive: true });
+
+  assert.throws(() => inv.exportMarkdown("inv-nope"), /investigation not found/);
+
+  // A hand-tampered folderName: the render still succeeds (the folder isn't
+  // needed to render structure), but the WRITE step (notesSubdir) refuses.
+  fs.writeFileSync(
+    path.join(stateDir, "investigations.json"),
+    `{"v":1,"investigations":[
+      {"id":"inv-evil","name":"Evil","createdMs":1,"archived":false,"scopeFileIds":[],"providerPolicy":"default","conversationRefs":[],"folderName":"../evil"}
+    ]}`,
+  );
+  assert.equal(typeof inv.exportMarkdown("inv-evil"), "string", "render doesn't need the folder");
+  assert.throws(
+    () => inv.investigationNotesSubdir("inv-evil"),
+    /investigation folder name is not usable/,
+  );
+});
+
+test("export render is byte-stable (matches the Rust literal)", () => {
+  // PARITY: investigations.rs::
+  // export_render_is_byte_stable_and_references_not_transcripts pins the SAME
+  // literal from a constructed view; here a hand-written store (fixed createdMs
+  // 1784106180000 = 2026-07-15 09:03 UTC, no pins/notes) yields byte-for-byte
+  // the same markdown.
+  const stateDir = freshVault();
+  fs.mkdirSync(stateDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(stateDir, "investigations.json"),
+    JSON.stringify({
+      v: 1,
+      investigations: [
+        {
+          id: "inv-branch",
+          name: "Harbor branch",
+          createdMs: 1784106180000,
+          archived: false,
+          scopeFileIds: ["cases/a.md", "cases/b.md"],
+          providerPolicy: "local-only",
+          conversationRefs: ["conv-1", "conv-2"],
+          folderName: "Harbor branch",
+        },
+      ],
+    }),
+  );
+  const expected =
+    "# Harbor branch\n\n- Created: 2026-07-15 09:03 UTC\n- Status: Active\n- Provider policy: local-only\n\n## Scope\n\n- cases/a.md\n- cases/b.md\n\n## Conversations\n\n- conv-1\n- conv-2\n\n## Pins\n\n_No pins._\n\n## Notes\n\n_No notes._\n";
+  assert.equal(inv.exportMarkdown("inv-branch"), expected);
+
+  // A caller-supplied title map only adds legibility; an empty entry is a bare id.
+  const titled = inv.exportMarkdown("inv-branch", { "conv-1": "Kickoff", "conv-2": "" });
+  assert.ok(titled.includes("\n## Conversations\n\n- Kickoff (conv-1)\n- conv-2\n"), titled);
+});

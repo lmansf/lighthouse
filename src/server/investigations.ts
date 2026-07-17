@@ -359,6 +359,122 @@ export function addInvestigationConversationRef(
   return { ...rec };
 }
 
+// --- Fork + export (openspec: add-automation §4) ----------------------------
+
+/**
+ * Fork an investigation into a fresh line of inquiry. Load the parent and mint
+ * a FRESH record — new createdMs, new investigationId(newName, createdMs), new
+ * sanitizeFolderName (its own id and its own EMPTY notes folder) — copying
+ * ONLY the parent's STRUCTURE: scopeFileIds, providerPolicy (a fork of a
+ * `local-only` line stays `local-only`), and conversationRefs. Derived
+ * membership is DELIBERATELY not duplicated (module doc): pins carry a single
+ * investigationId and notes live in ONE folder (membership = location), so a
+ * fork is a new line seeded with the parent's scope + conversation context,
+ * never a clone of another investigation's members. `newName` is trimmed,
+ * non-empty, and unique case-insensitively (archived records count) — the
+ * create rule; the fork is NOT archived. Throws with a human-readable reason
+ * (blank/duplicate name, missing parent) and persists nothing on failure.
+ * PARITY: investigations.rs::fork (same order, same id minting, structure-only
+ * copy).
+ */
+export function forkInvestigation(id: string, newName: string): Investigation {
+  const trimmed = newName.trim();
+  if (!trimmed) throw new Error("an investigation needs a name");
+  const records = listInvestigations();
+  const parent = records.find((r) => r.id === id);
+  if (!parent) throw new Error("investigation not found");
+  if (nameTaken(records, trimmed)) {
+    throw new Error(`an investigation named "${trimmed}" already exists`);
+  }
+  const createdMs = Date.now();
+  const inv: Investigation = {
+    id: investigationId(trimmed, createdMs),
+    name: trimmed,
+    createdMs,
+    archived: false,
+    // Structure only — the parent's scope, policy, and conversation context
+    // seed the branch; derived membership (pins/notes) is NOT duplicated.
+    scopeFileIds: [...parent.scopeFileIds],
+    providerPolicy: parent.providerPolicy,
+    conversationRefs: [...parent.conversationRefs],
+    folderName: sanitizeFolderName(trimmed),
+  };
+  records.push(inv);
+  save(records);
+  return { ...inv };
+}
+
+/**
+ * Render an investigation to a standalone markdown document — the exportable
+ * artifact, reusing the briefings render idiom (`# title`, then `## `
+ * sections). The document states the investigation's STRUCTURE and DERIVED
+ * membership: name, created time (UTC), archive state, provider policy, scope
+ * files (or "whole vault" when empty), conversation refs, the derived pin
+ * list, and the derived note list. Conversation refs render by their opaque id
+ * — `title (id)` only when the optional `titles` map supplies a non-empty one
+ * — and NO transcript text is ever embedded, because the engine deliberately
+ * never stores transcripts (module doc): a ref is a pointer, not content.
+ * Throws when the id is unknown; nothing is written (a PURE render — the WRITE
+ * composes investigationNotesSubdir + writeArtifact at the op). KEEP
+ * BYTE-IDENTICAL with investigations.rs::export_markdown /
+ * render_investigation_markdown.
+ */
+export function exportMarkdown(id: string, titles?: Record<string, string>): string {
+  const record = listInvestigations().find((r) => r.id === id.trim());
+  if (!record) throw new Error("investigation not found");
+  return renderInvestigationMarkdown(investigationView(record), titles);
+}
+
+/** The byte-pinned render literal (twinned in investigations.rs). Pure — takes
+ *  an already-derived view so the render is testable without a store. */
+function renderInvestigationMarkdown(
+  view: InvestigationView,
+  titles?: Record<string, string>,
+): string {
+  const d = new Date(view.createdMs);
+  const p = (n: number) => String(n).padStart(2, "0");
+  const created = `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())} ${p(
+    d.getUTCHours(),
+  )}:${p(d.getUTCMinutes())} UTC`;
+  const status = view.archived ? "Archived" : "Active";
+
+  let out = `# ${view.name}\n`;
+  out += `\n- Created: ${created}\n- Status: ${status}\n- Provider policy: ${view.providerPolicy}\n`;
+
+  out += "\n## Scope\n\n";
+  if (view.scopeFileIds.length === 0) {
+    out += "- Whole vault\n";
+  } else {
+    for (const f of view.scopeFileIds) out += `- ${f}\n`;
+  }
+
+  out += "\n## Conversations\n\n";
+  if (view.conversationRefs.length === 0) {
+    out += "_No conversations._\n";
+  } else {
+    for (const c of view.conversationRefs) {
+      const t = titles ? titles[c] : undefined;
+      out += t ? `- ${t} (${c})\n` : `- ${c}\n`;
+    }
+  }
+
+  out += "\n## Pins\n\n";
+  if (view.pinRefs.length === 0) {
+    out += "_No pins._\n";
+  } else {
+    for (const pinId of view.pinRefs) out += `- ${pinId}\n`;
+  }
+
+  out += "\n## Notes\n\n";
+  if (view.noteRefs.length === 0) {
+    out += "_No notes._\n";
+  } else {
+    for (const n of view.noteRefs) out += `- ${n}\n`;
+  }
+
+  return out;
+}
+
 // --- Ask-context resolution (§2) --------------------------------------------
 
 /**

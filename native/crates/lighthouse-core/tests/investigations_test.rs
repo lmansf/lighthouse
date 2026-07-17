@@ -546,3 +546,193 @@ fn recall_prefers_the_investigations_conversation_notes() {
     assert_eq!(prefer_beta[0], beta_id, "flipped preference flips order: {prefer_beta:?}");
     assert!(prefer_beta.contains(&alpha_id), "preference never excludes: {prefer_beta:?}");
 }
+
+// --- §4 fork + export (openspec: add-automation) ------------------------------
+
+/// Fork copies the parent's STRUCTURE only — scope, policy, conversation refs —
+/// minting a fresh id + its own EMPTY notes folder, WITHOUT re-pointing or
+/// duplicating the parent's derived membership (pins by investigationId, notes
+/// by folder). Mirrored by test/investigations.test.mjs (PARITY).
+#[test]
+fn fork_copies_structure_only_without_touching_the_parents_members() {
+    let vault = tempfile::tempdir().unwrap();
+    let _guard = common::lock_env(vault.path());
+
+    // A parent with the full derived-membership surface: scope, a local-only
+    // policy, two conversation refs, a member pin, and a note in its folder.
+    let parent = investigations::create(
+        "Q3 parent",
+        &ids(&["cases/a.md", "cases/b.md"]),
+        ProviderPolicy::LocalOnly,
+    )
+    .unwrap();
+    with_policy(None, || {
+        investigations::add_conversation_ref(&parent.id, "conv-1", true).unwrap();
+        investigations::add_conversation_ref(&parent.id, "conv-2", true).unwrap();
+    });
+    let parent_pin =
+        lighthouse_core::pins::add("q?", "SELECT 1", &ids(&["cases/a.md"]), Some(&parent.id))
+            .unwrap();
+    let parent_subdir = investigations::notes_subdir(&parent.id).unwrap();
+    let (parent_note_id, _) =
+        vault::write_artifact(&parent_subdir, "Parent note", "md", b"# parent body").unwrap();
+    vault::invalidate_walk_cache();
+
+    // Fork it into a new line of inquiry.
+    let fork = investigations::fork(&parent.id, "Q3 deep dive").unwrap();
+
+    // A fresh, non-archived line whose STRUCTURE is a copy of the parent's.
+    assert_ne!(fork.id, parent.id, "fresh id (name differs ⇒ id differs)");
+    assert!(fork.id.starts_with("inv-"));
+    assert!(!fork.archived);
+    assert_eq!(fork.scope_file_ids, ids(&["cases/a.md", "cases/b.md"]), "scope copied");
+    assert_eq!(fork.provider_policy, ProviderPolicy::LocalOnly, "local-only stays local-only");
+    assert_eq!(fork.conversation_refs, ids(&["conv-1", "conv-2"]), "conversation refs copied");
+    assert_eq!(fork.folder_name, "Q3 deep dive", "its own sanitized folder");
+    assert_ne!(fork.folder_name, parent.folder_name, "not the parent's folder");
+
+    // Derived membership is NOT duplicated: the fork's view is empty (its own
+    // empty folder, no pins), while the parent keeps its pin and note.
+    let views = investigations::listing();
+    let fork_view = views.iter().find(|v| v.record.id == fork.id).unwrap();
+    assert!(fork_view.pin_refs.is_empty(), "fork has no pins: {:?}", fork_view.pin_refs);
+    assert!(fork_view.note_refs.is_empty(), "fork has its own empty notes folder");
+    let parent_view = views.iter().find(|v| v.record.id == parent.id).unwrap();
+    assert_eq!(parent_view.pin_refs, vec![parent_pin.id.clone()], "parent keeps its pin");
+    assert_eq!(parent_view.note_refs, vec![parent_note_id], "parent keeps its note");
+
+    // The pin still belongs to the PARENT — never re-pointed at the fork.
+    let pin = lighthouse_core::pins::list()
+        .into_iter()
+        .find(|p| p.id == parent_pin.id)
+        .unwrap();
+    assert_eq!(pin.investigation_id.as_deref(), Some(parent.id.as_str()));
+
+    // Both lines coexist (a branch adds a line; it moves nothing).
+    assert_eq!(investigations::list().len(), 2);
+}
+
+/// Fork obeys the create name rule and needs a real parent: a blank or
+/// case-insensitively-colliding name and a missing parent all refuse with a
+/// human-readable reason, and nothing is persisted. Mirrored by the TS twin.
+#[test]
+fn fork_refuses_blank_collision_and_missing_parent() {
+    let vault = tempfile::tempdir().unwrap();
+    let _guard = common::lock_env(vault.path());
+
+    let parent = investigations::create("Origin", &[], ProviderPolicy::Default).unwrap();
+    investigations::create("Taken", &[], ProviderPolicy::Default).unwrap();
+
+    assert!(
+        investigations::fork(&parent.id, "   ").unwrap_err().contains("needs a name"),
+        "blank refuses"
+    );
+    assert!(
+        investigations::fork(&parent.id, "taken").unwrap_err().contains("already exists"),
+        "case-insensitive collision refuses"
+    );
+    assert!(
+        investigations::fork(&parent.id, "ORIGIN").unwrap_err().contains("already exists"),
+        "can't collide with the parent's own name"
+    );
+    assert!(
+        investigations::fork("inv-nope", "Fresh unique").unwrap_err().contains("not found"),
+        "missing parent refuses"
+    );
+
+    // No partial fork landed — only the two originals exist.
+    assert_eq!(investigations::list().len(), 2);
+}
+
+/// Export renders STRUCTURE + DERIVED membership (scope, conversation ids, the
+/// pin list, the note list) and NEVER a transcript, then the op's composed
+/// WRITE lands the note under the investigation's OWN folder (the exportChat
+/// precedent — a non-egress in-vault write). Mirrored by the TS twin.
+#[test]
+fn export_writes_under_the_notes_folder_and_lists_membership_without_transcripts() {
+    let vault = tempfile::tempdir().unwrap();
+    let _guard = common::lock_env(vault.path());
+
+    let inv =
+        investigations::create("Harbor case", &ids(&["cases/x.md"]), ProviderPolicy::Default)
+            .unwrap();
+    with_policy(None, || {
+        investigations::add_conversation_ref(&inv.id, "conv-9", true).unwrap();
+    });
+    let pin = lighthouse_core::pins::add(
+        "rows?",
+        "SELECT count(*)",
+        &ids(&["cases/x.md"]),
+        Some(&inv.id),
+    )
+    .unwrap();
+    // A prior note in the folder — its BODY must never leak into the export.
+    let subdir = investigations::notes_subdir(&inv.id).unwrap();
+    let (prior_note_id, _) =
+        vault::write_artifact(&subdir, "Prior note", "md", b"SECRET TRANSCRIPT BODY").unwrap();
+    vault::invalidate_walk_cache();
+
+    // Render: structure + derived membership; no transcript text anywhere.
+    let md = investigations::export_markdown(&inv.id, None).unwrap();
+    assert!(md.starts_with("# Harbor case\n"), "{md}");
+    assert!(md.contains("- Status: Active\n"));
+    assert!(md.contains("- Provider policy: default\n"));
+    assert!(md.contains("\n## Scope\n\n- cases/x.md\n"), "{md}");
+    assert!(md.contains("\n## Conversations\n\n- conv-9\n"), "{md}");
+    assert!(md.contains(&format!("\n## Pins\n\n- {}\n", pin.id)), "{md}");
+    assert!(md.contains(&format!("- {prior_note_id}\n")), "note listed by id: {md}");
+    assert!(!md.contains("SECRET TRANSCRIPT BODY"), "never embeds transcripts: {md}");
+
+    // A caller-supplied title map only adds legibility.
+    let mut titles = std::collections::HashMap::new();
+    titles.insert("conv-9".to_string(), "Kickoff call".to_string());
+    let md_titled = investigations::export_markdown(&inv.id, Some(&titles)).unwrap();
+    assert!(md_titled.contains("- Kickoff call (conv-9)\n"), "{md_titled}");
+    assert!(!md_titled.contains("SECRET TRANSCRIPT BODY"));
+
+    // The WRITE the op composes (render → notes_subdir → write_artifact) lands
+    // under the investigation's OWN folder and derives back as its note.
+    let (written_id, written_name) =
+        vault::write_artifact(&subdir, "Harbor case", "md", md.as_bytes()).unwrap();
+    assert_eq!(written_id, format!("Lighthouse Notes/Harbor case/{written_name}"));
+    assert!(vault.path().join(&written_id).exists(), "written inside the vault");
+    vault::invalidate_walk_cache();
+    let view = investigations::listing()
+        .into_iter()
+        .find(|v| v.record.id == inv.id)
+        .unwrap();
+    assert!(view.note_refs.contains(&written_id), "the export is itself a note member");
+}
+
+/// Export refuses an unknown id (the render has nothing to render) and, for a
+/// tampered/unusable stored folder, refuses at the WRITE step (`notes_subdir`)
+/// so no traversal attempt ever becomes a write path — nothing lands, no
+/// egress. Mirrored by the TS twin (identical error strings).
+#[test]
+fn export_refuses_unknown_id_and_unusable_folder() {
+    let vault = tempfile::tempdir().unwrap();
+    let _guard = common::lock_env(vault.path());
+    let state = vault.path().join(".rag-vault");
+    std::fs::create_dir_all(&state).unwrap();
+
+    assert_eq!(
+        investigations::export_markdown("inv-nope", None).unwrap_err(),
+        "investigation not found"
+    );
+
+    // A hand-tampered folderName (the sanitizer can't be driven to it): the
+    // render still succeeds (the folder isn't needed to render structure), but
+    // the WRITE step refuses — the allowlist is re-validated at use.
+    let tampered = r#"{"v":1,"investigations":[
+        {"id":"inv-evil","name":"Evil","createdMs":1,"archived":false,"scopeFileIds":[],"providerPolicy":"default","conversationRefs":[],"folderName":"../evil"}
+    ]}"#;
+    std::fs::write(state.join("investigations.json"), tampered).unwrap();
+    assert!(
+        investigations::export_markdown("inv-evil", None).is_ok(),
+        "render doesn't need a usable folder"
+    );
+    assert_eq!(
+        investigations::notes_subdir("inv-evil").unwrap_err(),
+        "investigation folder name is not usable"
+    );
+}

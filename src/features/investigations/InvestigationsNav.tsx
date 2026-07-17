@@ -45,6 +45,8 @@ import {
 import {
   AddRegular,
   ArchiveRegular,
+  ArrowExportRegular,
+  BranchRegular,
   CheckmarkRegular,
   DismissRegular,
   RenameRegular,
@@ -160,6 +162,16 @@ export function InvestigationsNav() {
   const [createError, setCreateError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
+  // Branch (fork) dialog + a quiet success line for an export write (openspec:
+  // add-automation §4). Fork mints a NEW line copying the parent's structure;
+  // export writes a references-only markdown note under the investigation's
+  // own folder — both go through the ENGINE, and errors surface inline.
+  const [forkOpen, setForkOpen] = useState(false);
+  const [forkSourceId, setForkSourceId] = useState<string | null>(null);
+  const [forkName, setForkName] = useState("");
+  const [forkError, setForkError] = useState<string | null>(null);
+  const [navNote, setNavNote] = useState<string | null>(null);
+
   useEffect(() => {
     ensureLoaded();
   }, [ensureLoaded]);
@@ -249,6 +261,55 @@ export function InvestigationsNav() {
       if (id === currentInvestigationId) setCurrentInvestigation(null);
     } catch (err) {
       setNavError(err instanceof Error ? err.message : "the investigation could not be archived");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function openFork(inv: Investigation) {
+    setForkSourceId(inv.id);
+    setForkName(`${inv.name} (branch)`);
+    setForkError(null);
+    setNavNote(null);
+    setForkOpen(true);
+  }
+
+  async function forkNow() {
+    const name = forkName.trim();
+    if (!name || !forkSourceId || busy) return;
+    setBusy(true);
+    setForkError(null);
+    try {
+      const res = await ragService.forkInvestigation(forkSourceId, name);
+      if (res.error || !res.investigation) {
+        setForkError(res.error ?? "the investigation could not be branched");
+        return;
+      }
+      await refresh();
+      setForkOpen(false);
+      // Branching means working in the new line: enter it right away.
+      setCurrentInvestigation(res.investigation.id);
+    } catch (err) {
+      setForkError(err instanceof Error ? err.message : "the investigation could not be branched");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function exportNow(inv: Investigation) {
+    if (busy) return;
+    setBusy(true);
+    setNavError(null);
+    setNavNote(null);
+    try {
+      const res = await ragService.exportInvestigation(inv.id, inv.name);
+      if (res.error || !res.savedName) {
+        setNavError(res.error ?? "the investigation could not be exported");
+        return;
+      }
+      setNavNote(`Exported to ${res.savedName}`);
+    } catch (err) {
+      setNavError(err instanceof Error ? err.message : "the investigation could not be exported");
     } finally {
       setBusy(false);
     }
@@ -357,6 +418,17 @@ export function InvestigationsNav() {
                 >
                   Rename
                 </MenuItem>
+                {/* Branch: a fresh line seeded with this one's scope, policy,
+                    and conversation context — its own id and empty notes. */}
+                <MenuItem icon={<BranchRegular />} onClick={() => openFork(inv)}>
+                  Branch
+                </MenuItem>
+                {/* Export: a references-only markdown note (structure +
+                    membership, never transcripts) into this investigation's
+                    own notes folder. */}
+                <MenuItem icon={<ArrowExportRegular />} onClick={() => void exportNow(inv)}>
+                  Export
+                </MenuItem>
                 {/* Archive hides it from this list; chats, pins, and notes stay. */}
                 <MenuItem icon={<ArchiveRegular />} onClick={() => void archiveNow(inv.id)}>
                   Archive
@@ -375,6 +447,11 @@ export function InvestigationsNav() {
       {navError && (
         <Text size={200} className={styles.errorNote} role="status">
           {navError}
+        </Text>
+      )}
+      {navNote && (
+        <Text size={200} className={styles.note} role="status">
+          {navNote}
         </Text>
       )}
 
@@ -451,6 +528,55 @@ export function InvestigationsNav() {
                 onClick={() => void createNow()}
               >
                 Create
+              </Button>
+            </DialogActions>
+          </DialogBody>
+        </DialogSurface>
+      </Dialog>
+
+      {/* Branch dialog: a fork copies STRUCTURE only (scope, provider policy,
+          conversation context) into a new line with its own id and empty
+          notes folder — the engine owns the id minting and the name rule. */}
+      <Dialog
+        open={forkOpen}
+        onOpenChange={(_, d) => {
+          if (!d.open) setForkOpen(false);
+        }}
+      >
+        <DialogSurface>
+          <DialogBody>
+            <DialogTitle>Branch investigation</DialogTitle>
+            <DialogContent className={styles.dialogContent}>
+              <Text size={200} className={styles.dialogHint}>
+                Starts a new investigation with this one&apos;s scope, provider policy, and
+                conversation context. Pins and notes are not copied.
+              </Text>
+              <Input
+                value={forkName}
+                onChange={(_, d) => setForkName(d.value)}
+                placeholder="Name for the branch"
+                aria-label="Branch name"
+                autoFocus
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") void forkNow();
+                }}
+              />
+              {forkError && (
+                <Text size={200} className={styles.errorNote} role="status">
+                  {forkError}
+                </Text>
+              )}
+            </DialogContent>
+            <DialogActions>
+              <Button appearance="secondary" onClick={() => setForkOpen(false)}>
+                Cancel
+              </Button>
+              <Button
+                appearance="primary"
+                disabled={busy || !forkName.trim()}
+                onClick={() => void forkNow()}
+              >
+                Branch
               </Button>
             </DialogActions>
           </DialogBody>
