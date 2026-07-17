@@ -8,23 +8,29 @@ image post (4:5 portrait, 1080×1350, exported at 2× — 2160×2700 PNG).
 | Data analysts | `lighthouse-flyer-data-analyst.html` | `exports/lighthouse-flyer-data-analyst.png` |
 | Financial analysts | `lighthouse-flyer-financial-analyst.html` | `exports/lighthouse-flyer-financial-analyst.png` |
 
-Every product claim on the flyers is taken from the README/docs as of 0.11
-(read-only SQL analytics, [n] citations, pinned-question alerts, local-first
-engine/index/embeddings/OCR, optional on-device model, no telemetry/accounts,
-AES-256-GCM-sealed keys, audit log + egress panel, supported formats,
-Windows/macOS/Linux). The mock screens are illustrative — sample data, not
-real product output — and are labeled as such on the flyer.
+Positioning: **the AI harness for analysts**. Every product claim is taken
+from the tree as of **0.12.2** (the Beam release): read-only SQL on an
+embedded engine with the SQL shown verbatim, certified answers from the
+local semantic layer, provenance stamps ("Answered on this device"),
+local-only marks enforced fail-closed, boards, evidence packs, curation
+rules, seven BYO-key providers or the bundled on-device model, no
+telemetry/accounts, Windows/macOS/Linux. The mock screens are illustrative
+— sample data, not real product output — and are labeled as such on the
+flyer.
 
-Design: the app's Forerunner palette (`src/shell/theme.ts`) — night-steel
-blues, brass beacon accents — and the lighthouse mark redrawn from
-`build/icon.svg` for a dark canvas. `fonts.css` embeds Inter and
+Design: the **Beam identity** (`src/shell/theme.ts`, 0.12.0) — ink canvas
+`#0E0F12`, paper surfaces, a single warm-amber accent
+(`#E8A317`→`#FFC24D`), flat geometry, hairline strokes — with the
+lighthouse mark redrawn from `build/icon.svg` (paper tower, amber lamp,
+one beam wedge). Hero cards mirror the real Paper-theme UI (see
+`docs/brand/` for actual screenshots). `fonts.css` embeds Inter and
 JetBrains Mono (both SIL OFL 1.1) as data URIs so the HTML is
 self-contained and renders identically anywhere.
 
 ## Re-export after editing
 
 ```bash
-npm install --no-save --no-package-lock playwright-core   # once
+npm install --no-save --no-package-lock playwright-core   # once, outside-repo also fine
 node marketing/flyers/render.mjs
 ```
 

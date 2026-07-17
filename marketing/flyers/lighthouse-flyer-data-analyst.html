@@ -5,25 +5,32 @@
 <title>Lighthouse — LinkedIn flyer — Data Analysts (1080×1350)</title>
 <link rel="stylesheet" href="fonts.css">
 <style>
-  /* Palette: the app's Forerunner theme (src/shell/theme.ts) — night-steel
-     blues from the brand ramp, brass beacon accents, light-steel card. */
+  /* Palette: the Beam identity (src/shell/theme.ts, 0.12.0) — Ink canvas,
+     Paper card, one warm-amber accent. Flat geometry, hairline strokes. */
   :root {
-    --navy-0: #03080D;
-    --navy-1: #050F18;
-    --navy-2: #07203A;
-    --navy-3: #0A2E50;
-    --ink: #F3F9FD;
-    --slate: #B9CFE2;
-    --slate-dim: #8DA6BC;
-    --brand: #1A7AC0;
-    --sky: #63AFE0;
-    --beam: #E2B453;
-    --beam-fill: #F3E3BB;
-    --brass: #C28A2C;
-    --card: #EDF1F6;
-    --card-ink: #1A2531;
-    --card-slate: #45566A;
-    --card-dim: #5E6E80;
+    --ink: #0E0F12;        /* night canvas */
+    --ink-2: #16181C;      /* raised */
+    --ink-3: #1E2126;      /* inset */
+    --line: #26282E;       /* hairline (dark) */
+    --line-strong: #34383F;
+    --text: #ECECEA;
+    --muted: #A2A2A8;
+    --dim: #8A8A91;
+    --amber: #FFC24D;      /* night amber (large text / fills, ink text on it) */
+    --amber-deep: #E8A317; /* anchor amber */
+    --ember: #7D5707;
+    --paper: #FAFAF8;      /* light card canvas */
+    --paper-2: #F4F4F1;
+    --paper-3: #EDEDE9;    /* insets, code wells */
+    --hairline: #E7E7E2;   /* hairline (light) */
+    --hairline-strong: #D6D6D0;
+    --card-ink: #1B1B1F;
+    --card-muted: #5A5A60;
+    --card-dim: #68686F;
+    --amber-fg-paper: #8F6006;  /* amber as text on paper */
+    --amber-ic-paper: #A87107;  /* amber icons/marks on paper */
+    --amber-tint: #FBEFD4;      /* pale parchment fill */
+    --bar: #C9880B;             /* chart bars on paper */
   }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   html, body { background: #222; }
@@ -33,218 +40,210 @@
     height: 1350px;
     overflow: hidden;
     font-family: "Inter", sans-serif;
-    background:
-      radial-gradient(900px 620px at 83% 12%, rgba(226, 180, 83, 0.14), transparent 62%),
-      radial-gradient(1100px 800px at 12% 108%, rgba(26, 122, 192, 0.16), transparent 60%),
-      linear-gradient(180deg, var(--navy-2) 0%, var(--navy-1) 46%, var(--navy-0) 100%);
-    color: var(--ink);
+    background: var(--ink);
+    color: var(--text);
     display: flex;
     flex-direction: column;
-    padding: 56px 64px 0;
+    padding: 54px 64px 0;
   }
   svg { display: block; }
 
-  /* ---- decorative beacon + light beams ---- */
+  /* ---- the Beam mark: paper tower, amber lamp, ONE beam wedge off the
+         top-right corner (build/icon.svg geometry, tile removed) ---- */
   .fx { position: absolute; inset: 0; pointer-events: none; }
-  .big-lh { position: absolute; top: 118px; right: 74px; }
 
   /* ---- header ---- */
-  .top { position: relative; display: flex; align-items: center; gap: 14px; }
-  .wordmark { font-weight: 800; font-size: 21px; letter-spacing: 0.2em; color: var(--ink); }
-  .top .ver { margin-left: auto; font-size: 13px; font-weight: 600; letter-spacing: 0.12em; color: var(--slate-dim); text-transform: uppercase; padding-right: 250px; }
+  .top { position: relative; display: flex; align-items: center; gap: 13px; }
+  .wordmark { font-weight: 800; font-size: 20px; letter-spacing: 0.2em; color: var(--text); }
+  .top .ver { margin-left: 18px; font-size: 12.5px; font-weight: 600; letter-spacing: 0.14em; color: var(--dim); text-transform: uppercase; }
 
   /* ---- headline block ---- */
-  .kicker { margin-top: 46px; display: flex; align-items: center; gap: 12px; font-size: 15px; font-weight: 700; letter-spacing: 0.28em; color: var(--beam); }
-  .kicker::after { content: ""; height: 1px; width: 90px; background: linear-gradient(90deg, var(--brass), transparent); }
-  h1 { position: relative; margin-top: 16px; font-size: 71px; line-height: 1.05; font-weight: 900; letter-spacing: -0.015em; max-width: 720px; }
-  h1 .gold { color: var(--beam); }
-  .sub { position: relative; margin-top: 18px; font-size: 18.5px; line-height: 1.5; color: var(--slate); max-width: 770px; font-weight: 400; }
-  .sub b { color: var(--ink); font-weight: 600; }
+  .kickrow { margin-top: 36px; display: flex; align-items: center; gap: 14px; }
+  .kicker { display: flex; align-items: center; gap: 12px; font-size: 15px; font-weight: 700; letter-spacing: 0.28em; color: var(--amber); }
+  .kicker::after { content: ""; height: 1px; width: 84px; background: linear-gradient(90deg, var(--ember), transparent); }
+  .relpill { font-size: 11.5px; font-weight: 700; letter-spacing: 0.09em; color: var(--amber); border: 1px solid var(--ember); background: #211703; padding: 4px 12px; border-radius: 99px; }
+  h1 { position: relative; margin-top: 14px; font-size: 66px; line-height: 1.05; font-weight: 900; letter-spacing: -0.015em; max-width: 720px; color: var(--text); }
+  h1 .gold { color: var(--amber); }
+  .sub { position: relative; margin-top: 14px; font-size: 18.5px; line-height: 1.5; color: var(--muted); max-width: 760px; font-weight: 400; }
+  .sub b { color: var(--text); font-weight: 600; }
 
-  /* ---- hero product card (light steel, like the app's light theme) ---- */
+  /* ---- hero product card (Paper theme, mirrors the real 0.12 Ask screen) ---- */
   .hero {
     position: relative;
-    margin-top: 30px;
-    background: var(--card);
-    border-radius: 18px;
-    box-shadow: 0 30px 70px rgba(2, 8, 14, 0.55), 0 2px 0 rgba(255, 255, 255, 0.14) inset;
-    padding: 16px 22px 15px;
+    margin-top: 22px;
+    background: var(--paper);
+    border-radius: 12px;
+    box-shadow: 0 0 0 1px rgba(236,236,234,0.07), 0 24px 60px rgba(0,0,0,0.55);
+    padding: 14px 20px 13px;
+    color: var(--card-ink);
   }
-  .chrome { display: flex; align-items: center; gap: 7px; padding-bottom: 11px; border-bottom: 1px solid #D5DEE7; }
-  .dot { width: 10px; height: 10px; border-radius: 50%; background: #B7C2CD; }
-  .chrome .title { margin-left: 8px; font-size: 13px; font-weight: 600; color: var(--card-slate); }
-  .chrome .badge { margin-left: auto; font-size: 11.5px; font-weight: 700; letter-spacing: 0.04em; color: #7A5A16; background: var(--beam-fill); border: 1px solid #E3CB8B; padding: 3px 10px; border-radius: 99px; }
-  .qrow { display: flex; justify-content: flex-end; margin-top: 12px; }
-  .q { background: var(--brand); color: #fff; font-size: 15.5px; font-weight: 600; padding: 9px 16px; border-radius: 14px 14px 4px 14px; box-shadow: 0 4px 12px rgba(17, 79, 128, 0.28); }
-  .sql { position: relative; margin-top: 12px; background: #0E1B29; border-radius: 10px; padding: 12px 14px; font-family: "JetBrains Mono", monospace; font-size: 13.5px; line-height: 1.55; color: #C7E2F5; font-weight: 500; }
-  .sql .kw { color: var(--beam); }
-  .sql .lbl { position: absolute; top: -9px; right: 12px; font-family: "Inter", sans-serif; font-size: 10.5px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: #63AFE0; background: #12293F; border: 1px solid #1E4568; padding: 2px 8px; border-radius: 99px; }
-  table { margin-top: 12px; width: 100%; border-collapse: collapse; font-size: 14px; color: var(--card-ink); }
-  th { text-align: left; font-size: 11px; letter-spacing: 0.09em; text-transform: uppercase; color: var(--card-dim); font-weight: 700; padding: 0 10px 6px; border-bottom: 1px solid #C9D4DE; }
-  td { padding: 7px 10px; border-bottom: 1px solid #DCE4EB; font-weight: 600; font-variant-numeric: tabular-nums; }
-  td.pos { color: #116A3E; }
-  tr.hl td { background: rgba(243, 227, 187, 0.55); }
-  tr.hl td:first-child { border-left: 3px solid var(--beam); border-radius: 3px 0 0 3px; }
+  .chrome { display: flex; align-items: center; gap: 8px; padding-bottom: 10px; border-bottom: 1px solid var(--hairline); }
+  .chrome .title { font-size: 13.5px; font-weight: 700; color: var(--card-ink); }
+  .pill { font-size: 11.5px; font-weight: 700; letter-spacing: 0.03em; padding: 3px 10px; border-radius: 99px; }
+  .pill.amber { color: var(--amber-fg-paper); background: var(--amber-tint); border: 1px solid #EAD9AC; }
+  .pill.ghost { color: var(--card-muted); background: var(--paper-2); border: 1px solid var(--hairline-strong); }
+  .chrome .beamlbl { margin-left: auto; font-size: 10.5px; font-weight: 700; letter-spacing: 0.18em; color: var(--card-dim); }
+  .qrow { display: flex; justify-content: flex-end; margin-top: 11px; }
+  .q { background: var(--amber-tint); color: var(--card-ink); font-size: 15px; font-weight: 600; padding: 8px 15px; border-radius: 10px; border: 1px solid #EAD9AC; }
+  .lead { margin-top: 9px; font-size: 16.5px; line-height: 1.45; color: var(--card-ink); }
+  .lead b { font-weight: 700; }
+  .lead .cert { display: inline-block; vertical-align: 1px; margin-left: 8px; font-size: 11px; font-weight: 700; letter-spacing: 0.03em; color: var(--amber-fg-paper); background: var(--amber-tint); border: 1px solid #EAD9AC; border-radius: 99px; padding: 2px 9px; }
+  table { margin-top: 10px; width: 100%; border-collapse: collapse; font-size: 13.5px; color: var(--card-ink); }
+  th { text-align: left; font-size: 10.5px; letter-spacing: 0.09em; text-transform: uppercase; color: var(--card-dim); font-weight: 700; padding: 0 10px 5px; border-bottom: 1px solid var(--hairline-strong); }
+  td { padding: 5px 10px; border-bottom: 1px solid var(--hairline); font-weight: 600; font-variant-numeric: tabular-nums; }
+  tr.hl td { background: var(--amber-tint); }
+  tr.hl td:first-child { border-left: 3px solid var(--amber-deep); }
   tr:last-child td { border-bottom: none; }
-  .answer { margin-top: 10px; font-size: 15.5px; line-height: 1.5; color: var(--card-ink); }
-  .cite { display: inline-block; background: #D4E6F4; color: #114F80; font-weight: 700; font-size: 12px; border-radius: 6px; padding: 1px 7px; transform: translateY(-1px); }
-  .chips { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
-  .chip { display: flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 600; color: var(--card-slate); background: #E0E7EE; border: 1px solid #CBD5DF; padding: 5px 11px; border-radius: 99px; }
-  .chip svg { flex: none; }
-  .verified { display: flex; align-items: center; gap: 7px; margin-top: 12px; padding-top: 10px; border-top: 1px dashed #C9D4DE; font-size: 12.5px; font-weight: 600; color: var(--card-dim); }
-  .verified .ok { color: #116A3E; }
+  /* compact auto-chart strip: the product charts verified rows by default */
+  .chart { display: flex; align-items: flex-end; gap: 26px; margin: 6px 10px 0; padding: 6px 10px 4px; border-top: 1px dashed var(--hairline); }
+  .chart .col { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+  .chart .bar { width: 34px; background: var(--bar); border-radius: 3px 3px 0 0; }
+  .chart .lb { font-size: 10px; font-weight: 600; color: var(--card-dim); }
+  .sql { position: relative; margin-top: 16px; background: var(--paper-3); border: 1px solid var(--hairline); border-radius: 8px; padding: 10px 13px; font-family: "JetBrains Mono", monospace; font-size: 12.5px; line-height: 1.55; color: var(--card-ink); font-weight: 500; }
+  .sql .kw { color: var(--amber-fg-paper); font-weight: 700; }
+  .sql .lbl { position: absolute; top: -9px; right: 12px; font-family: "Inter", sans-serif; font-size: 10px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--card-muted); background: var(--paper); border: 1px solid var(--hairline-strong); padding: 2px 8px; border-radius: 99px; }
+  .fresh { margin-top: 7px; font-size: 12px; font-style: italic; color: var(--card-muted); }
+  .chips { display: flex; gap: 7px; margin-top: 9px; flex-wrap: wrap; }
+  .chip { display: flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 600; color: var(--card-muted); background: var(--paper); border: 1px solid var(--hairline-strong); padding: 4px 11px; border-radius: 99px; }
+  .stamp { display: flex; align-items: center; gap: 12px; margin-top: 9px; padding-top: 8px; border-top: 1px dashed var(--hairline); font-size: 12px; font-weight: 600; color: var(--card-muted); }
+  .stamp .dev { display: flex; align-items: center; gap: 6px; border: 1px solid var(--hairline-strong); border-radius: 99px; padding: 3px 11px; color: var(--card-ink); }
+  .stamp .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--amber-deep); box-shadow: 0 0 6px rgba(232,163,23,0.8); }
 
   /* ---- feature grid ---- */
-  .grid { margin-top: 26px; display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
-  .tile { display: flex; gap: 14px; background: rgba(120, 170, 220, 0.07); border: 1px solid rgba(140, 190, 235, 0.16); border-radius: 15px; padding: 16px 18px; }
-  .tile .ic { flex: none; width: 42px; height: 42px; border-radius: 12px; background: rgba(226, 180, 83, 0.12); border: 1px solid rgba(226, 180, 83, 0.35); display: flex; align-items: center; justify-content: center; }
-  .tile h3 { font-size: 16.5px; font-weight: 700; color: #E7F1FA; letter-spacing: -0.01em; }
-  .tile p { margin-top: 4px; font-size: 13.5px; line-height: 1.48; color: #9FB6CB; }
-  .tile p b { color: #CFE2F1; font-weight: 600; }
+  .grid { margin-top: 19px; display: grid; grid-template-columns: 1fr 1fr; gap: 13px; }
+  .tile { display: flex; gap: 14px; background: var(--ink-2); border: 1px solid var(--line); border-radius: 12px; padding: 15px 17px; }
+  .tile .ic { flex: none; width: 40px; height: 40px; border-radius: 10px; background: #211703; border: 1px solid #553B08; display: flex; align-items: center; justify-content: center; }
+  .tile h3 { font-size: 16px; font-weight: 700; color: var(--text); letter-spacing: -0.01em; }
+  .tile p { margin-top: 4px; font-size: 13px; line-height: 1.48; color: var(--dim); }
+  .tile p b { color: var(--muted); font-weight: 600; }
 
-  /* ---- formats ticker + footer ---- */
-  .formats { margin-top: 22px; text-align: center; font-size: 12.5px; font-weight: 600; letter-spacing: 0.06em; color: #7E97AC; }
-  .formats .sep { color: var(--brass); padding: 0 7px; }
-  .fine { margin-top: 9px; text-align: center; font-size: 10.5px; font-weight: 500; color: #5E7488; }
-  .foot { margin-top: auto; display: flex; align-items: center; gap: 16px; border-top: 1px solid rgba(226, 180, 83, 0.25); margin-left: -64px; margin-right: -64px; padding: 20px 64px 26px; background: rgba(3, 8, 13, 0.45); }
-  .foot .site { display: flex; align-items: center; gap: 10px; font-size: 15px; font-weight: 700; color: var(--ink); }
-  .foot .plat { margin-left: auto; text-align: right; font-size: 13.5px; line-height: 1.4; font-weight: 500; color: var(--slate-dim); }
-  .foot .plat b { color: var(--slate); font-weight: 600; }
-  .cta { flex: none; background: linear-gradient(180deg, #EEC36A, #D9A63E); color: #2B1F08; font-size: 15px; font-weight: 800; letter-spacing: 0.01em; padding: 11px 24px; border-radius: 99px; box-shadow: 0 8px 22px rgba(226, 180, 83, 0.28); white-space: nowrap; }
+  /* ---- new-in-0.12 ticker + footer ---- */
+  .newline { margin-top: 15px; text-align: center; font-size: 12px; font-weight: 700; letter-spacing: 0.07em; color: var(--dim); }
+  .newline .n { color: var(--amber); }
+  .newline .sep { color: var(--ember); padding: 0 7px; }
+  .fine { margin-top: 4px; text-align: center; font-size: 10.5px; font-weight: 500; color: #5E6066; }
+  .foot { margin-top: auto; display: flex; align-items: center; gap: 16px; border-top: 1px solid var(--line); margin-left: -64px; margin-right: -64px; padding: 18px 64px 24px; background: #0A0B0E; }
+  .foot .site { display: flex; align-items: center; gap: 10px; font-size: 15px; font-weight: 700; color: var(--text); }
+  .foot .plat { margin-left: auto; text-align: right; font-size: 13px; line-height: 1.4; font-weight: 500; color: var(--dim); }
+  .foot .plat b { color: var(--muted); font-weight: 600; }
+  .cta { flex: none; background: var(--amber); color: #1B1B1F; font-size: 15px; font-weight: 800; letter-spacing: 0.01em; padding: 11px 24px; border-radius: 99px; white-space: nowrap; }
 </style>
 </head>
 <body>
 <div class="canvas">
 
-  <!-- beams sweeping from the big beacon's lamp -->
+  <!-- the beacon: paper tower + lamp, one amber beam exiting the top-right
+       corner — the app icon's composition at flyer scale -->
   <svg class="fx" width="1080" height="1350" viewBox="0 0 1080 1350" fill="none">
     <defs>
-      <linearGradient id="beamL" x1="880" y1="200" x2="40" y2="240" gradientUnits="userSpaceOnUse">
-        <stop offset="0" stop-color="#FFE49B" stop-opacity="0.34"/>
-        <stop offset="1" stop-color="#FFE49B" stop-opacity="0"/>
+      <linearGradient id="beam" gradientUnits="userSpaceOnUse" x1="905" y1="208" x2="1250" y2="30">
+        <stop offset="0" stop-color="#E8A317"/>
+        <stop offset="1" stop-color="#FFC24D"/>
       </linearGradient>
-      <linearGradient id="beamR" x1="900" y1="200" x2="1080" y2="205" gradientUnits="userSpaceOnUse">
-        <stop offset="0" stop-color="#FFE49B" stop-opacity="0.30"/>
-        <stop offset="1" stop-color="#FFE49B" stop-opacity="0.02"/>
-      </linearGradient>
-      <radialGradient id="lampGlow" cx="0.5" cy="0.5" r="0.5">
-        <stop offset="0" stop-color="#FFE49B" stop-opacity="0.5"/>
-        <stop offset="1" stop-color="#FFE49B" stop-opacity="0"/>
-      </radialGradient>
     </defs>
-    <polygon points="893,196 0,96 0,338" fill="url(#beamL)"/>
-    <polygon points="893,196 1080,158 1080,258" fill="url(#beamR)"/>
-    <circle cx="893" cy="198" r="150" fill="url(#lampGlow)"/>
-  </svg>
-
-  <!-- big beacon, drawn from the app icon (build/icon.svg), night version -->
-  <svg class="big-lh" width="168" height="224" viewBox="0 0 120 160" fill="none">
-    <defs>
-      <clipPath id="towerBig"><polygon points="47,56 73,56 85,146 35,146"/></clipPath>
-      <radialGradient id="lampCore" cx="0.5" cy="0.5" r="0.5">
-        <stop offset="0" stop-color="#FFF3CE"/><stop offset="1" stop-color="#FFE49B"/>
-      </radialGradient>
-    </defs>
-    <circle cx="60" cy="14" r="4.5" fill="#7A1B14"/>
-    <path d="M40,38 Q60,16 80,38 Z" fill="#A4231B"/>
-    <rect x="44" y="38" width="32" height="20" rx="3" fill="#2A2622"/>
-    <rect x="48" y="41" width="24" height="14" rx="2.5" fill="url(#lampCore)"/>
-    <rect x="38" y="58" width="44" height="7" rx="3.5" fill="#5E140F"/>
-    <polygon points="47,65 73,65 85,146 35,146" fill="#FCFBF7"/>
-    <g clip-path="url(#towerBig)">
-      <rect x="30" y="74" width="60" height="17" fill="#C02A20"/>
-      <rect x="30" y="106" width="60" height="17" fill="#C02A20"/>
-      <rect x="28" y="138" width="64" height="17" fill="#C02A20"/>
+    <polygon points="905,208 1420,-160 1420,80" fill="url(#beam)" opacity="0.92"/>
+    <circle cx="905" cy="208" r="17" fill="#FFC24D"/>
+    <g fill="#F4EFE6">
+      <rect x="857" y="236" width="96" height="22" rx="11"/>
+      <polygon points="869,412 941,412 929,262 881,262"/>
+      <rect x="845" y="412" width="120" height="16" rx="8"/>
     </g>
-    <rect x="28" y="146" width="64" height="8" rx="4" fill="#5E140F"/>
   </svg>
 
   <div class="top">
     <!-- small mark -->
-    <svg width="26" height="35" viewBox="0 0 120 160" fill="none">
-      <defs><clipPath id="towerSm"><polygon points="47,56 73,56 85,146 35,146"/></clipPath></defs>
-      <circle cx="60" cy="14" r="5" fill="#A4231B"/>
-      <path d="M40,38 Q60,16 80,38 Z" fill="#A4231B"/>
-      <rect x="44" y="38" width="32" height="20" rx="3" fill="#2A2622"/>
-      <rect x="48" y="41" width="24" height="14" rx="2.5" fill="#FFE49B"/>
-      <rect x="38" y="58" width="44" height="7" rx="3.5" fill="#5E140F"/>
-      <polygon points="47,65 73,65 85,146 35,146" fill="#FCFBF7"/>
-      <g clip-path="url(#towerSm)">
-        <rect x="30" y="74" width="60" height="17" fill="#C02A20"/>
-        <rect x="30" y="106" width="60" height="17" fill="#C02A20"/>
-        <rect x="28" y="138" width="64" height="17" fill="#C02A20"/>
-      </g>
-      <rect x="28" y="146" width="64" height="8" rx="4" fill="#5E140F"/>
+    <svg width="22" height="30" viewBox="0 0 300 400" fill="none">
+      <circle cx="150" cy="38" r="26" fill="#FFC24D"/>
+      <rect x="96" y="78" width="108" height="26" rx="13" fill="#F4EFE6"/>
+      <polygon points="114,110 186,110 172,340 128,340" fill="#F4EFE6"/>
+      <rect x="78" y="340" width="144" height="24" rx="12" fill="#F4EFE6"/>
     </svg>
     <span class="wordmark">LIGHTHOUSE</span>
     <span class="ver">The AI harness for analysts</span>
   </div>
 
-  <div class="kicker">FOR DATA ANALYSTS</div>
+  <div class="kickrow">
+    <div class="kicker">FOR DATA ANALYSTS</div>
+    <span class="relpill">NEW · v0.12 — THE BEAM RELEASE</span>
+  </div>
   <h1>Ask your data.<br><span class="gold">Audit the answer.</span></h1>
-  <p class="sub">Lighthouse is the harness between an AI model and your data: <b>bring any model —
-     or run one on&#8209;device</b>. The harness curates what it reads, runs the math over
-     <b>CSV, Excel &amp; Parquet</b> as <b>one read-only SQL query</b> shown verbatim, and <b>cites every claim</b>.</p>
+  <p class="sub">Lighthouse is the AI harness for analysts: <b>bring any model — or run one
+     on&#8209;device</b>. Beam turns a question into <b>one read-only SQL query</b>, an embedded
+     engine runs it on your machine, and the model never does arithmetic — now with
+     <b>certified answers, plan approval &amp; evidence packs</b>.</p>
 
   <div class="hero">
     <div class="chrome">
-      <span class="dot"></span><span class="dot"></span><span class="dot"></span>
-      <span class="title">Lighthouse — Beam analytics</span>
-      <span class="badge">READ-ONLY SQL · ENGINE-VERIFIED</span>
+      <span class="title">Lighthouse — Ask</span>
+      <span class="pill amber">3 files visible to AI</span>
+      <span class="pill ghost">Private — on this device</span>
+      <span class="beamlbl">BEAM</span>
     </div>
     <div class="qrow"><div class="q">Which region drove Q2 revenue growth?</div></div>
-    <div class="sql"><span class="lbl">SQL · shown verbatim</span><span class="kw">SELECT</span> region, <span class="kw">SUM</span>(revenue) <span class="kw">AS</span> revenue <span class="kw">FROM</span> 'q2_sales.csv'<br><span class="kw">GROUP BY</span> region <span class="kw">ORDER BY</span> revenue <span class="kw">DESC</span>;</div>
+    <p class="lead">EMEA drove the quarter — revenue up <b>18.4% to $4.28M</b>, more added growth
+      than the other regions combined.<span class="cert">✓ Certified · matches your “revenue” metric</span></p>
     <table>
       <tr><th>Region</th><th>Revenue</th><th>vs Q1</th></tr>
-      <tr class="hl"><td>EMEA</td><td>$4.28M</td><td class="pos">+18.4%</td></tr>
-      <tr><td>Americas</td><td>$3.81M</td><td class="pos">+6.1%</td></tr>
-      <tr><td>APAC</td><td>$2.14M</td><td class="pos">+2.9%</td></tr>
+      <tr class="hl"><td>EMEA</td><td>$4,280,000</td><td>+18.4%</td></tr>
+      <tr><td>Americas</td><td>$3,810,000</td><td>+6.1%</td></tr>
+      <tr><td>APAC</td><td>$2,140,000</td><td>+2.9%</td></tr>
     </table>
-    <p class="answer">EMEA drove the quarter — revenue up <b>18.4% to $4.28M</b>, more added growth than
-       the other regions combined. <span class="cite">1</span></p>
-    <div class="chips">
-      <span class="chip"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#45566A" stroke-width="2.4"><path d="M14 3v5h5M6 3h9l5 5v13H6z"/></svg> 1 · q2_sales.csv</span>
-      <span class="chip"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#45566A" stroke-width="2.4"><path d="M4 20l4-1L20 7l-3-3L5 16l-1 4z"/></svg> Edit SQL — re-runs without the model</span>
-      <span class="chip"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#45566A" stroke-width="2.4"><path d="M12 17v5M7 3h10l-2 7 3 4H6l3-4-2-7z"/></svg> Pin — alert on change</span>
+    <div class="chart">
+      <div class="col"><div class="bar" style="height:38px"></div><div class="lb">EMEA</div></div>
+      <div class="col"><div class="bar" style="height:33px"></div><div class="lb">Americas</div></div>
+      <div class="col"><div class="bar" style="height:19px"></div><div class="lb">APAC</div></div>
+      <div class="col" style="margin-left:auto; align-items:flex-end;"><div class="lb" style="font-style:italic">Charts by default — drawn from the verified rows</div></div>
     </div>
-    <div class="verified"><span class="ok">✔</span> Verified by the embedded engine · data fresh as of 09:41</div>
+    <div class="sql"><span class="lbl">Query used · shown verbatim</span><span class="kw">SELECT</span> region, <span class="kw">SUM</span>(revenue) <span class="kw">AS</span> revenue <span class="kw">FROM</span> 'q2_sales.csv' <span class="kw">GROUP BY</span> region <span class="kw">ORDER BY</span> revenue <span class="kw">DESC</span>;</div>
+    <div class="fresh">Computed from: “q2_sales.csv” (saved 2 hours ago)</div>
+    <div class="chips">
+      <span class="chip">Top 10</span>
+      <span class="chip">As %</span>
+      <span class="chip">&lt;/&gt; Edit SQL — re-runs without the model</span>
+      <span class="chip">⌖ Pin — alert on change</span>
+      <span class="chip">Evidence pack</span>
+    </div>
+    <div class="stamp">
+      <span class="dev"><span class="dot"></span> Answered on this device</span>
+      <span>Engine-verified · the model never does arithmetic</span>
+    </div>
   </div>
 
   <div class="grid">
     <div class="tile">
-      <div class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#E2B453" stroke-width="2"><path d="M12 2l8 4v6c0 5-3.5 8.5-8 10-4.5-1.5-8-5-8-10V6l8-4z"/><path d="M8.5 12l2.5 2.5 4.5-5"/></svg></div>
-      <div><h3>Numbers you can verify</h3><p>Analytics run as <b>one read-only SQL SELECT</b>, shown verbatim.
-        Edit and re-run it directly — <b>no model in the loop</b>.</p></div>
+      <div class="ic"><svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="#FFC24D" stroke-width="2"><path d="M12 2l8 4v6c0 5-3.5 8.5-8 10-4.5-1.5-8-5-8-10V6l8-4z"/><path d="M8.5 12l2.5 2.5 4.5-5"/></svg></div>
+      <div><h3>The engine does the math</h3><p>Every analytics answer is <b>one read-only SQL SELECT</b>, shown
+        verbatim. Edit and re-run it — <b>no model in the loop</b>.</p></div>
     </div>
     <div class="tile">
-      <div class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#E2B453" stroke-width="2"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M15.5 15.5L21 21"/><path d="M8 10.5h5M10.5 8v5"/></svg></div>
-      <div><h3>Citations on everything</h3><p>Answers stream with <b>[n] references</b> and related-file cards.
-        Ask about one document and Lighthouse reads <b>all of it</b>.</p></div>
+      <div class="ic"><svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="#FFC24D" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M8 12.5l2.5 2.5L16 9.5"/></svg></div>
+      <div><h3>Certified answers</h3><p>Define a metric once in the <b>local semantic layer</b> — answers that
+        match it carry a certified badge. <b>A verified fact, not a decoration.</b></p></div>
     </div>
     <div class="tile">
-      <div class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#E2B453" stroke-width="2"><path d="M12 17v5M7 3h10l-2 7 3 4H6l3-4-2-7z"/></svg></div>
-      <div><h3>Pinned questions</h3><p>Pin a question and it <b>re-runs deterministically</b> on fresh data —
-        and <b>alerts you when the answer changes</b>.</p></div>
+      <div class="ic"><svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="#FFC24D" stroke-width="2"><rect x="3" y="3" width="8" height="8" rx="1.5"/><rect x="13" y="3" width="8" height="5" rx="1.5"/><rect x="13" y="10" width="8" height="11" rx="1.5"/><rect x="3" y="13" width="8" height="8" rx="1.5"/></svg></div>
+      <div><h3>Boards: a living dashboard</h3><p><b>Pinned questions</b> re-run deterministically, alert on change,
+        and arrange into a <b>local dashboard</b> with freshness badges. No servers.</p></div>
     </div>
     <div class="tile">
-      <div class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#E2B453" stroke-width="2"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/><circle cx="12" cy="10" r="2.6"/></svg></div>
-      <div><h3>Any model. Your rules.</h3><p>Claude, GPT, Gemini &amp; more via <b>your key</b> — or a bundled
-        <b>on-device model</b>. Index, embeddings &amp; OCR never leave your machine.</p></div>
+      <div class="ic"><svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="#FFC24D" stroke-width="2"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/><circle cx="12" cy="10" r="2.6"/></svg></div>
+      <div><h3>Any model. Your rules.</h3><p>Seven providers via <b>your key</b>, switchable mid-chat — or a bundled
+        <b>on-device model</b>. A provenance stamp says exactly what left your machine.</p></div>
     </div>
   </div>
 
-  <div class="formats">READS
-    <span class="sep">◆</span>EXCEL<span class="sep">◆</span>CSV / TSV<span class="sep">◆</span>PARQUET<span class="sep">◆</span>PDF<span class="sep">◆</span>WORD<span class="sep">◆</span>POWERPOINT<span class="sep">◆</span>MARKDOWN<span class="sep">◆</span>SCANS (OCR)
+  <div class="newline"><span class="n">NEW IN 0.12</span>
+    <span class="sep">◆</span>INVESTIGATIONS<span class="sep">◆</span>BOARDS<span class="sep">◆</span>SHAPED VIEWS<span class="sep">◆</span>CERTIFIED ANSWERS<span class="sep">◆</span>EVIDENCE PACKS<span class="sep">◆</span>CLI + MCP
   </div>
   <div class="fine">Screens illustrative — sample data.</div>
 
   <div class="foot">
     <span class="site">
-      <svg width="18" height="24" viewBox="0 0 120 160" fill="none">
-        <circle cx="60" cy="14" r="6" fill="#E2B453"/>
-        <path d="M40,38 Q60,16 80,38 Z" fill="#E2B453"/>
-        <polygon points="47,60 73,60 85,146 35,146" fill="#F3F9FD"/>
-        <rect x="28" y="146" width="64" height="9" rx="4.5" fill="#E2B453"/>
+      <svg width="16" height="22" viewBox="0 0 300 400" fill="none">
+        <circle cx="150" cy="38" r="26" fill="#FFC24D"/>
+        <rect x="96" y="78" width="108" height="26" rx="13" fill="#F4EFE6"/>
+        <polygon points="114,110 186,110 172,340 128,340" fill="#F4EFE6"/>
+        <rect x="78" y="340" width="144" height="24" rx="12" fill="#F4EFE6"/>
       </svg>
       lhvault.app
     </span>
