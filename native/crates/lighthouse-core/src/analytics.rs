@@ -1612,6 +1612,60 @@ pub fn guard_metric_expression(expression: &str, entity: &str) -> Result<Vec<Str
     crate::views::collect_table_names(&sql)
 }
 
+/// Propose a metric definition from an executed analytics answer's SQL
+/// (openspec: add-semantic-layer §6.1 — the "Save as view" precedent, but for a
+/// metric). Returns `(expression, entity)`: the FIRST aggregate projection
+/// expression and the single base table the answer read, parsed with the SAME
+/// `DFParser` the guard and certifier use so the proposal can never disagree
+/// with them. `None` when the SQL is not a single-base-table SELECT carrying an
+/// aggregate projection — an honest "nothing to propose", never a guess (the
+/// caller answers `{available:false}`). The pair is a PROPOSAL only:
+/// `semantic::create_metric` re-guards and derives `reads` on the user's Save.
+/// PARITY: SQL parsing is Rust-only (analytics/DataFusion), so the TS twin
+/// answers `{available:false}` for op:"defineMetric".
+pub fn propose_metric(sql: &str) -> Option<(String, String)> {
+    let select = answer_select(sql)?;
+    let entity = sole_base_table(&select.from)?;
+    let expression = select
+        .projection
+        .iter()
+        .filter_map(select_item_expr_string)
+        .find(|e| looks_like_aggregate(e))?;
+    Some((expression, entity))
+}
+
+/// The lone base table of a SELECT's FROM (`FROM sales`), or `None` for a join,
+/// a subquery/derived table, a table function, or a multi-table FROM — a metric
+/// binds ONE entity, so a compound FROM has no single entity to propose.
+fn sole_base_table(from: &[datafusion::sql::sqlparser::ast::TableWithJoins]) -> Option<String> {
+    use datafusion::sql::sqlparser::ast::TableFactor;
+    let [only] = from else {
+        return None;
+    };
+    if !only.joins.is_empty() {
+        return None;
+    }
+    match &only.relation {
+        TableFactor::Table { name, .. } => Some(name.to_string()),
+        _ => None,
+    }
+}
+
+/// Whether a normalized projection expression reads as an aggregate — a leading
+/// aggregate function call. A heuristic for PROPOSING (the user confirms and the
+/// engine re-guards on Save), keyed off the SAME normalized `Expr::to_string()`
+/// the certifier compares, so `SUM(amount) FILTER (WHERE …)` and
+/// `COUNT(DISTINCT x)` read true while a grouping key like
+/// `substr(order_date, 1, 7)` does not.
+fn looks_like_aggregate(expr: &str) -> bool {
+    const AGGREGATES: &[&str] = &[
+        "SUM(", "COUNT(", "AVG(", "MIN(", "MAX(", "MEDIAN(", "STDDEV(", "STDDEV_", "VAR(",
+        "VARIANCE(", "VAR_", "APPROX_", "ARRAY_AGG(", "BOOL_AND(", "BOOL_OR(",
+    ];
+    let up = expr.trim_start().to_ascii_uppercase();
+    AGGREGATES.iter().any(|a| up.starts_with(a))
+}
+
 // --- Certified answers + trust check (openspec: add-semantic-layer §3/§4) --------
 //
 // CERTIFICATION (§3) is DETERMINISTIC and MODEL-FREE (constitution §14): the
@@ -2975,6 +3029,32 @@ mod tests {
         let second = certified_metrics(sql, std::slice::from_ref(&revenue));
         assert_eq!(first, second);
         assert_eq!(first, vec!["revenue".to_string()]);
+    }
+
+    #[test]
+    fn propose_metric_extracts_the_aggregate_and_entity() {
+        // A grouped answer proposes its aggregate projection + single base table
+        // (the "Define as metric" seam); the grouping key is not the proposal.
+        let (expr, entity) = propose_metric(
+            "SELECT region, SUM(amount) FILTER (WHERE status = 'paid') AS revenue \
+             FROM sales GROUP BY region ORDER BY revenue DESC",
+        )
+        .expect("a single-table aggregate answer proposes a metric");
+        assert_eq!(entity, "sales");
+        // The normalized aggregate expression, alias stripped — re-guardable as-is.
+        assert!(expr.starts_with("SUM(amount)"), "aggregate, not the group key: {expr}");
+        assert!(expr.contains("FILTER"), "the FILTER rides into the definition: {expr}");
+
+        // A scalar aggregate answer proposes just the same.
+        let (expr, entity) =
+            propose_metric("SELECT COUNT(*) AS n FROM orders").expect("scalar aggregate proposes");
+        assert_eq!((expr.as_str(), entity.as_str()), ("COUNT(*)", "orders"));
+
+        // Nothing to propose: no aggregate projection, a join/compound FROM, or
+        // unparseable — an honest None (the caller answers {available:false}).
+        assert!(propose_metric("SELECT region FROM sales GROUP BY region").is_none());
+        assert!(propose_metric("SELECT SUM(a) AS s FROM x JOIN y ON x.id = y.id").is_none());
+        assert!(propose_metric("SELECT SUM(").is_none());
     }
 
     // --- Trust check (openspec: add-semantic-layer §4) --------------------------

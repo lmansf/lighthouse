@@ -32,6 +32,11 @@ import type {
   RagReference,
   RecipeCard,
   RestoreToken,
+  SemanticCards,
+  SemanticMetric,
+  MetricCreateInput,
+  DefineMetricResult,
+  Synonym,
   ShapeViewResult,
   View,
   ViewCreateInput,
@@ -450,6 +455,51 @@ export interface RagService {
    * NOTHING persists until `createView` runs on the user's explicit Save.
    */
   shapeView(source: string, instruction: string, fileIds: string[]): Promise<ShapeViewResult>;
+  /**
+   * The semantic definitions (openspec: add-semantic-layer §6) applicable to the
+   * included set, posture-gated — metrics whose tables are in scope plus their
+   * synonyms, for the SemanticNav. A metric over a file the chat isn't showing
+   * never surfaces (the applicableRecipes rule); a local-only metric is absent on
+   * a cloud ask. PARITY: `list` needs no analytics, so BOTH engines compute the
+   * identical subset (unlike recipes, which the twin returns [] for). Empty when
+   * nothing matches.
+   */
+  applicableSemantics(includedFileIds: string[]): Promise<SemanticCards>;
+  /**
+   * Create a metric (openspec §6.1). The ENGINE owns every rule — name
+   * sanitization, the read-only aggregation guard, reads derivation, the
+   * name-shadow check — and refusals THROW with the engine's human-readable
+   * reason so the dialog shows it verbatim. Nothing persists on refusal.
+   */
+  createMetric(input: MetricCreateInput): Promise<SemanticMetric>;
+  /**
+   * Create a synonym: a colloquial `term` mapped to a canonical column or metric
+   * `canonical`. Unique case-insensitively; refusals throw the engine's reason.
+   */
+  createSynonym(term: string, canonical: string): Promise<Synonym>;
+  /**
+   * Rename a metric — refused (throws, naming the dependent synonyms) while any
+   * synonym maps to it; otherwise a pure store update keeping the id and reads.
+   */
+  renameMetric(id: string, name: string): Promise<SemanticMetric>;
+  /**
+   * Delete a metric. Refused (throws, naming the dependent synonyms) while
+   * synonyms map to it unless `cascade` — sent only after the UI's explicit
+   * confirmation showing that list; cascade removes the metric and its synonyms
+   * in one write. Returns the deleted metric id. Sources are never touched.
+   */
+  deleteMetric(id: string, cascade?: boolean): Promise<string>;
+  /** Delete a synonym by its term (case-insensitive). Throws if unknown. */
+  deleteSynonym(term: string): Promise<void>;
+  /**
+   * Propose a metric from a Beam answer's SQL (openspec §6.1 — the "Save as view"
+   * precedent): the engine parses the executed SQL and proposes an aggregate
+   * expression + entity the "Define as metric" dialog shows before the user names
+   * and saves it (via createMetric). `{available:false}` with an honest reason
+   * when there's no single-table aggregate — and ALWAYS on the web dev twin
+   * (SQL parsing is Rust-only — PARITY).
+   */
+  defineMetric(sql: string, fileIds: string[]): Promise<DefineMetricResult>;
   /**
    * Provider sign-in (0.12.1 §3): status of the generic, registration-gated
    * OAuth device flow. `available` is false on a stock build (no endpoints

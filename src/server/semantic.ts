@@ -338,6 +338,93 @@ export function eligibleForPosture(isCloud: boolean): SemanticSet {
   return { metrics, synonyms, entities, joinHints };
 }
 
+// --- Applicable semantics (openspec: add-semantic-layer §6.1) ----------------------
+
+/**
+ * One metric surfaced for the semantic nav: enough to list, ask about, and
+ * manage it (`id` the rename/delete ops name). `localOnly` drives the per-row
+ * lock badge — a cloud posture's eligible set already excludes local-only
+ * metrics, so it is only ever true on a device ask. KEEP IN SYNC with
+ * `MetricCard` in meta.rs / src/contracts/types.ts.
+ */
+export interface MetricCard {
+  id: string;
+  name: string;
+  expression: string;
+  description: string;
+  entity: string;
+  localOnly: boolean;
+}
+
+/** One synonym surfaced for the semantic nav. KEEP IN SYNC with `SynonymCard`. */
+export interface SynonymCard {
+  term: string;
+  canonical: string;
+}
+
+/** The semantic definitions applicable to the current tables. KEEP IN SYNC. */
+export interface SemanticCards {
+  metrics: MetricCard[];
+  synonyms: SynonymCard[];
+}
+
+/**
+ * The posture-eligible metrics/synonyms whose tables are in the included set —
+ * the nav's card shape (openspec §6.1). PARITY: `list` needs NO analytics (a
+ * metric carries its `reads`), so the twin computes the IDENTICAL subset as
+ * meta.rs::applicable_semantics — only op:"defineMetric" is Rust-only. Metrics
+ * gate on their `reads` intersecting `included`; synonyms ride when their
+ * canonical names a surfaced metric or names no metric at all (a column
+ * synonym). KEEP IN SYNC with meta.rs::applicable_semantics.
+ */
+export function applicableSemantics(included: string[], isCloud: boolean): SemanticCards {
+  const set = eligibleForPosture(isCloud);
+  const inc = new Set(included);
+  const viewRecords = listViews();
+  const metrics: MetricCard[] = set.metrics
+    .filter((m) => metricReadsIncluded(m, inc, viewRecords))
+    .map((m) => ({
+      id: m.id,
+      name: m.name,
+      expression: m.expression,
+      description: m.description,
+      entity: m.entity,
+      localOnly: metricEffectivelyLocalOnly(m.reads),
+    }));
+  const surfaced = new Set(metrics.map((m) => m.name.toLowerCase()));
+  const allMetrics = new Set(set.metrics.map((m) => m.name.toLowerCase()));
+  const synonyms: SynonymCard[] = set.synonyms
+    .filter((s) => {
+      const canon = s.canonical.toLowerCase();
+      return surfaced.has(canon) || !allMetrics.has(canon);
+    })
+    .map((s) => ({ term: s.term, canonical: s.canonical }));
+  return { metrics, synonyms };
+}
+
+/** Whether a metric's transitive source files intersect the included set: its
+ *  own `reads.files`, or any read view whose transitive sources do. */
+function metricReadsIncluded(m: Metric, included: Set<string>, viewRecords: View[]): boolean {
+  if (m.reads.files.some((f) => included.has(f.fileId))) return true;
+  const seen = new Set<string>();
+  return m.reads.views.some((vid) => viewFilesIncluded(vid, viewRecords, included, seen));
+}
+
+/** Whether a view's transitive source files intersect `included` (cycle-tolerant). */
+function viewFilesIncluded(
+  viewId: string,
+  records: View[],
+  included: Set<string>,
+  seen: Set<string>,
+): boolean {
+  if (seen.has(viewId)) return false;
+  seen.add(viewId);
+  const v = records.find((r) => r.id === viewId);
+  if (!v) return false;
+  if (v.reads.files.some((f) => included.has(f.fileId))) return true;
+  return v.reads.views.some((pid) => viewFilesIncluded(pid, records, included, seen));
+}
+
 // --- Resolver (§1.6) ---------------------------------------------------------------
 
 /**

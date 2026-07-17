@@ -66,6 +66,16 @@ import {
   renameView,
   transitiveDependents,
 } from "@/server/views";
+import {
+  applicableSemantics,
+  createMetric,
+  createSynonym,
+  deleteMetric,
+  deleteSynonym,
+  renameMetric,
+} from "@/server/semantic";
+import { modelConfig } from "@/server/profile";
+import { isCloudProvider } from "@/server/synth";
 import type { Cadence } from "@/contracts";
 
 export const runtime = "nodejs";
@@ -602,6 +612,125 @@ export async function POST(req: Request) {
       return NextResponse.json({
         available: false,
         reason: "recipes run in the Rust engine — this dev server can't execute SQL",
+      });
+
+    // Semantic layer (openspec: add-semantic-layer §6.1). PARITY: `list` needs
+    // NO analytics (a metric carries its `reads`), so the twin computes the same
+    // applicable subset as meta.rs and the create/rename/delete lifecycle runs
+    // FOR REAL against the twin store; only op:"defineMetric" below is Rust-only.
+    // Refusals ride back as 400 + {error}, shown verbatim (the views op posture).
+    case "semantic": {
+      if (body.action === "list") {
+        const ids = Array.isArray(body.includedFileIds)
+          ? body.includedFileIds.filter((x: unknown): x is string => typeof x === "string")
+          : [];
+        return NextResponse.json({
+          semantic: applicableSemantics(ids, isCloudProvider(modelConfig())),
+        });
+      }
+      if (body.action === "create-metric") {
+        const raw = body.summarySource;
+        const summarySource =
+          raw === undefined || raw === null || raw === "question"
+            ? "question"
+            : raw === "model"
+              ? "model"
+              : null;
+        if (summarySource === null) {
+          return NextResponse.json(
+            { error: 'summarySource must be "question" or "model"' },
+            { status: 400 },
+          );
+        }
+        const fileIds = Array.isArray(body.fileIds)
+          ? body.fileIds.filter((x: unknown): x is string => typeof x === "string")
+          : [];
+        try {
+          const metric = createMetric(
+            typeof body.name === "string" ? body.name : "",
+            typeof body.expression === "string" ? body.expression : "",
+            typeof body.description === "string" ? body.description : "",
+            typeof body.entity === "string" ? body.entity : "",
+            {
+              text: typeof body.summaryText === "string" ? body.summaryText : "",
+              source: summarySource,
+            },
+            fileIds,
+          );
+          return NextResponse.json({ metric });
+        } catch (err) {
+          return NextResponse.json(
+            { error: err instanceof Error ? err.message : "could not create the metric" },
+            { status: 400 },
+          );
+        }
+      }
+      if (body.action === "create-synonym") {
+        try {
+          const synonym = createSynonym(
+            typeof body.term === "string" ? body.term : "",
+            typeof body.canonical === "string" ? body.canonical : "",
+          );
+          return NextResponse.json({ synonym });
+        } catch (err) {
+          return NextResponse.json(
+            { error: err instanceof Error ? err.message : "could not create the synonym" },
+            { status: 400 },
+          );
+        }
+      }
+      if (body.action === "rename") {
+        if (typeof body.id !== "string" || !body.id) {
+          return NextResponse.json({ error: "id required" }, { status: 400 });
+        }
+        try {
+          const metric = renameMetric(body.id, typeof body.name === "string" ? body.name : "");
+          return NextResponse.json({ metric });
+        } catch (err) {
+          return NextResponse.json(
+            { error: err instanceof Error ? err.message : "could not rename the metric" },
+            { status: 400 },
+          );
+        }
+      }
+      if (body.action === "delete") {
+        try {
+          if (typeof body.id === "string" && body.id) {
+            return NextResponse.json({ deletedId: deleteMetric(body.id, body.cascade === true) });
+          }
+          if (typeof body.term === "string" && body.term) {
+            deleteSynonym(body.term);
+            return NextResponse.json({ ok: true });
+          }
+          return NextResponse.json(
+            { error: "id (metric) or term (synonym) required" },
+            { status: 400 },
+          );
+        } catch (err) {
+          return NextResponse.json(
+            { error: err instanceof Error ? err.message : "could not delete the definition" },
+            { status: 400 },
+          );
+        }
+      }
+      return NextResponse.json(
+        {
+          error:
+            "semantic action must be list, create-metric, create-synonym, rename, or delete",
+        },
+        { status: 400 },
+      );
+    }
+
+    // PARITY: proposing a metric parses the executed SQL (analytics/DataFusion),
+    // Rust-engine-only — this dev twin can't, so op:"defineMetric" is honestly
+    // unavailable (the shapeView posture). The Rust engine proposes an aggregate
+    // expression + entity for the "Define as metric" dialog.
+    case "defineMetric":
+      return NextResponse.json({
+        available: false,
+        reason:
+          "defining a metric from an answer runs in the Rust engine — this dev server can't parse SQL",
       });
 
     // --- Pinned questions (openspec: add-pinned-questions). PARITY: rechecks
