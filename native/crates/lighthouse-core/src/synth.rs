@@ -1089,12 +1089,16 @@ fn live_pipeline(
             if steps.len() == 1 {
                 yield delta(format!(
                     "\n\n*Query used:*\n```sql\n{}\n```\n",
-                    steps[0].sql
+                    crate::sqlfmt::format_sql(&steps[0].sql)
                 ));
             } else {
                 yield delta(format!("\n\n*Queries used ({}):*\n", steps.len()));
                 for (i, s) in steps.iter().enumerate() {
-                    yield delta(format!("{}.\n```sql\n{}\n```\n", i + 1, s.sql));
+                    yield delta(format!(
+                        "{}.\n```sql\n{}\n```\n",
+                        i + 1,
+                        crate::sqlfmt::format_sql(&s.sql)
+                    ));
                 }
             }
             let all_sql = steps
@@ -1670,7 +1674,7 @@ fn live_pipeline(
                             if steps.len() == 1 {
                                 yield delta(format!(
                                     "\n\n*Query used:*\n```sql\n{}\n```\n",
-                                    steps[0].sql
+                                    crate::sqlfmt::format_sql(&steps[0].sql)
                                 ));
                             } else {
                                 yield delta(format!(
@@ -1681,7 +1685,7 @@ fn live_pipeline(
                                     yield delta(format!(
                                         "{}.\n```sql\n{}\n```\n",
                                         i + 1,
-                                        s.sql
+                                        crate::sqlfmt::format_sql(&s.sql)
                                     ));
                                 }
                             }
@@ -1894,7 +1898,11 @@ fn live_pipeline(
                             yield delta(tail);
                         }
                         // Deterministic transparency — never model-generated.
-                        yield delta(format!("\n\n*Query used:*\n```sql\n{sql}\n```\n"));
+                        // Display-formatted (§1); the executed SQL is untouched.
+                        yield delta(format!(
+                            "\n\n*Query used:*\n```sql\n{}\n```\n",
+                            crate::sqlfmt::format_sql(&sql)
+                        ));
                         // …and which file versions it read, so stale-looking
                         // numbers point at the file, not the engine. A query
                         // FROM a saved view expands to its source tables here

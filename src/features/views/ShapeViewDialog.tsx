@@ -42,6 +42,7 @@ import { CheckmarkRegular, ErrorCircleRegular } from "@fluentui/react-icons";
 import dynamic from "next/dynamic";
 import type { ShapeProposal } from "@/contracts";
 import { ragService } from "@/contracts";
+import { formatSql } from "@/lib/sqlFormat";
 
 // The markdown stack loads on demand (the ChatPanel idiom) — only a rendered
 // proposal needs it, never the empty form.
@@ -272,7 +273,7 @@ export function ShapeViewDialog({
                   Proposed query over “{source}” — verified read-only. Nothing is saved
                   until you click Save.
                 </Text>
-                <pre className={styles.sqlBlock}>{phase.proposal.sql}</pre>
+                <pre className={styles.sqlBlock}>{formatSql(phase.proposal.sql)}</pre>
                 {phase.proposal.summary && (
                   <Text size={200} className={styles.quiet}>
                     {phase.proposal.summary}

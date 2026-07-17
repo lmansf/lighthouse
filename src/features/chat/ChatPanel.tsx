@@ -120,6 +120,8 @@ import { quickOpenMatches } from "@/lib/quickOpen";
 import { activeMention, replaceMention, type MentionSpan } from "@/lib/mentionQuery";
 import { emphasize } from "@/features/quickopen/QuickOpen";
 import { AnalyticsChart, standaloneChartSvg } from "@/features/chat/AnalyticsChart";
+import { SqlBlock } from "@/features/chat/SqlBlock";
+import { formatSql } from "@/lib/sqlFormat";
 import { BriefingsPanel } from "@/features/chat/BriefingsPanel";
 import { PinMiniChart } from "@/features/chat/PinMiniChart";
 import { SaveViewDialog } from "@/features/views/SaveViewDialog";
@@ -2010,6 +2012,11 @@ const AnswerMarkdown = memo(function AnswerMarkdown({
           const spec = parseChartSpec(String(children ?? ""));
           if (spec) return <AnalyticsChart spec={spec} />;
         }
+        // §1: the engine pretty-prints its "Query used" SQL; give that fence a
+        // theme-aware highlighter so the disclosure reads like a SQL console.
+        if (className?.split(" ").includes("language-sql")) {
+          return <SqlBlock code={String(children ?? "")} className={className} />;
+        }
         return (
           <code {...props} className={className}>
             {children}
@@ -3449,7 +3456,10 @@ export function ChatPanel() {
   function openSqlEditor(meta: AnalyticsMeta) {
     sqlRunSeq.current += 1; // invalidate any run from a previous dialog
     setSqlEdit(meta);
-    setSqlDraft(meta.sql);
+    // §1: seed the editor with the pretty-printed query so it opens readable;
+    // it is AST-identical to meta.sql and re-parses on run, so what executes is
+    // exactly what the user submits.
+    setSqlDraft(formatSql(meta.sql));
     setSqlOutcome(null);
     setSqlRunning(false);
   }

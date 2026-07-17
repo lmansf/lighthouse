@@ -126,7 +126,12 @@ pub fn render_markdown(report: &Report) -> String {
             out.push_str(s.result_markdown.trim_end());
             out.push('\n');
         }
-        out.push_str(&format!("\n*Query used:*\n```sql\n{}\n```\n", s.sql.trim()));
+        // Display-formatted (§1): the report's SQL is laid out for reading;
+        // the stored/executed `s.sql` is untouched.
+        out.push_str(&format!(
+            "\n*Query used:*\n```sql\n{}\n```\n",
+            crate::sqlfmt::format_sql(&s.sql)
+        ));
     }
 
     if !report.caveats.is_empty() {
@@ -451,7 +456,8 @@ mod tests {
         assert!(a.contains("## Summary"));
         assert!(a.contains("- 2024-10 is a +2.85σ anomaly"));
         assert!(a.contains("## Anomaly scan"));
-        assert!(a.contains("```sql\nSELECT period, total FROM t\n```"));
+        // §1: the report's SQL is display-formatted (clause per line).
+        assert!(a.contains("```sql\nSELECT period, total\nFROM t\n```"), "{a}");
         assert!(a.contains("## Caveats"));
         assert!(a.contains("- Latest month may be partial."));
         // The generation time is formatted from generated_ms (deterministic).

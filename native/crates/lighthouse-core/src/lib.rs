@@ -40,6 +40,7 @@ pub mod semantic;
 pub mod updates;
 pub mod settings;
 pub mod sources;
+pub mod sqlfmt;
 pub mod synth;
 pub mod table_profile;
 pub mod vault;
