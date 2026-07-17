@@ -62,6 +62,7 @@ intents) but degrades as noted:
 | OCR (scanned PDFs, raster images) | `ocr.rs` | image files stay name-match-only |
 | Filesystem watcher (event-driven freshness) | `watch.rs` | poll-style freshness |
 | Extra rich formats: `.doc`, `.pptx`, `.odt`, `.odp`, `.rtf`, images | `extract.rs` `RICH_EXT` | name-match-only (TS extracts pdf/docx/xlsx/csv/md/txt via mammoth/unpdf/xlsx) |
+| Semantic layer: certification, trust reconcile, metric proposal (parse executed SQL) | `analytics.rs` (`certified_metrics`/`reconcile_metric`/`propose_metric`) + `synth.rs` prompt injection | never certifies/reconciles (no analytics branch → no `AnalyticsMeta.certified`/`.trust`); `op:"defineMetric"` answers `{available:false}`. The store/CRUD/`applicableSemantics` list ARE mirrored (`semantic.ts`) — a metric carries its `reads`, so `list` needs no DataFusion |
 
 These live in the **desktop shell** specifically (`lighthouse-desktop`), not
 in `lighthouse-core`, so even the headless Rust server lacks them:
@@ -77,7 +78,9 @@ in `lighthouse-core`, so even the headless Rust server lacks them:
 model download/uninstall marker, SharePoint/OneDrive connectors, licensing,
 experiments, table profiles, structure-aware chunking, meta answers
 (whatsNew/listFiles), profile + sealed secrets store, doc-focus
-(whole-document answers), multi-doc synthesis.
+(whole-document answers), multi-doc synthesis, semantic-layer store + CRUD +
+local-only propagation + `applicableSemantics` list (`semantic.rs` ⇄
+`semantic.ts`; only certify/reconcile/propose above are Rust-only).
 
 **TS-only bits** (the dev server's own plumbing, no Rust mirror needed):
 the Next `app/api/**` route layer (Rust mirror is `lighthouse-server`'s

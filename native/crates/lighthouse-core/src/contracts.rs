@@ -245,12 +245,49 @@ pub struct CtxManifestEntry {
     pub score: f64,
 }
 
+/// The engine's verdict that an answer VERIFIABLY computed a blessed metric
+/// definition (openspec: add-semantic-layer §4). Deterministic and MODEL-FREE:
+/// `certified` is AST-equality of the executed SQL's projection to the metric's
+/// blessed expression; `reconciled` is a numeric re-run of that definition
+/// through the SAME guarded executor (`analytics::reconcile_metric`). `metric`
+/// names the definition; `expected`/`got` carry the re-run and answer figures
+/// on a mismatch (or the reason on an honest degradation). A non-metric answer
+/// is `{certified:false, reconciled:false}` — an honest "not certified", never a
+/// failure. PARITY: reconciliation is Rust-only (analytics/DataFusion); this
+/// wire shape is mirrored in src/contracts/types.ts (`TrustVerdict`), which the
+/// TS twin never populates. KEEP IN SYNC with that mirror.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrustVerdict {
+    pub certified: bool,
+    pub reconciled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metric: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub got: Option<String>,
+}
+
 /// The exact executed SQL of an analytics answer and the vault files it read.
+/// `certified`/`trust` (openspec: add-semantic-layer §3/§4) ride here as
+/// additive-optional (pre-Phase-B cache entries carry neither and stay valid),
+/// so a cached certified answer replays with its ORIGINAL verdict from
+/// `CachedAnswer.analytics` — nothing recomputed. KEEP IN SYNC with the
+/// `AnalyticsMeta` mirror in src/contracts/types.ts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AnalyticsMeta {
     pub sql: String,
     pub file_ids: Vec<String>,
+    /// The metric names the executed SQL verifiably computed (§3) — engine-
+    /// determined by AST-equality, never model text. Absent when none certified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub certified: Option<Vec<String>>,
+    /// The trust verdict for the certified metric (§4): the definition re-run
+    /// and reconciled through the guard. Absent when no metric certified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trust: Option<TrustVerdict>,
 }
 
 /// A previewed analytics plan (openspec: add-beam-loop §4.1), carried on a

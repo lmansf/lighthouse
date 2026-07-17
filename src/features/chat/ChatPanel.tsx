@@ -82,6 +82,7 @@ import {
   ShieldRegular,
   SquareRegular,
   TableRegular,
+  TagRegular,
   ThumbDislikeRegular,
   ThumbLikeRegular,
   WarningRegular,
@@ -118,6 +119,7 @@ import { AnalyticsChart, standaloneChartSvg } from "@/features/chat/AnalyticsCha
 import { BriefingsPanel } from "@/features/chat/BriefingsPanel";
 import { PinMiniChart } from "@/features/chat/PinMiniChart";
 import { SaveViewDialog } from "@/features/views/SaveViewDialog";
+import { DefineMetricDialog } from "@/features/semantic/DefineMetricDialog";
 import { EgressShield } from "@/features/egress/EgressShield";
 import { ProviderSwitch } from "@/features/chat/ProviderSwitch";
 import {
@@ -624,6 +626,17 @@ const useStyles = makeStyles({
     marginTop: tokens.spacingVerticalXXS,
     color: tokens.colorNeutralForeground3,
   },
+  // Certified / trust badges under an analytics answer (openspec:
+  // add-semantic-layer §6.2): a VERIFIED mark, never a decoration — a failed
+  // reconcile is a visible caution, never hidden. Tokens only, both themes free.
+  trustRow: {
+    display: "flex",
+    alignItems: "center",
+    flexWrap: "wrap",
+    gap: tokens.spacingHorizontalXS,
+    marginTop: tokens.spacingVerticalXS,
+  },
+  trustDetail: { color: tokens.colorNeutralForeground3 },
   // The engine's local-only skip note ("(n files skipped — marked private…)",
   // byte-identical across engines) rendered as a distinct inline callout
   // instead of plain italics (0.12.1 §2): a hairline box + small lock in the
@@ -1631,6 +1644,7 @@ function RefineChips({
   onPin,
   pinPending,
   onSaveView,
+  onDefineMetric,
 }: {
   meta: AnalyticsMeta;
   /** The answer markdown — the "Chart it" heuristic reads its GFM table. */
@@ -1655,6 +1669,9 @@ function RefineChips({
   /** Save this answer's SQL as a named view (openspec: add-shaped-views) —
    *  same visibility as Edit SQL: any answer whose meta carries the SQL. */
   onSaveView?: (meta: AnalyticsMeta) => void;
+  /** Define this answer's aggregation as a named metric (openspec:
+   *  add-semantic-layer §6.2) — offered only when the SQL carries an aggregate. */
+  onDefineMetric?: (meta: AnalyticsMeta) => void;
 }) {
   const styles = useStyles();
   // "Chart it": offered only when (a) the answer carries a parseable GFM
@@ -1759,12 +1776,83 @@ function RefineChips({
           Save as view
         </Button>
       )}
+      {onDefineMetric && sqlHasAggregate(meta.sql) && (
+        <Button
+          appearance="subtle"
+          size="small"
+          shape="circular"
+          className={styles.quietChip}
+          icon={<TagRegular />}
+          disabled={disabled}
+          onClick={() => onDefineMetric(meta)}
+        >
+          Define as metric
+        </Button>
+      )}
     </div>
     {/* "Chart it" inline mount: the client-built chart of this answer's own
         table, drawn with the house renderer. Per-turn UI state only — never
         persisted, recomputed from the markdown, zero model/network calls. */}
     {chartShown && tableChart && <AnalyticsChart spec={tableChart} />}
     </>
+  );
+}
+
+/** A cheap client heuristic: does this answer's SQL carry an aggregate the
+ *  "Define as metric" chip could name? Gates the chip so it offers only on
+ *  aggregate answers; the engine's `propose_metric` is authoritative. */
+function sqlHasAggregate(sql: string): boolean {
+  return /\b(sum|count|avg|min|max|median|stddev|var|variance|approx_)\s*\(/i.test(sql);
+}
+
+/**
+ * Certified badge + trust verdict on an analytics answer (openspec:
+ * add-semantic-layer §6.2), rendered from the VERIFIED `AnalyticsMeta.certified`
+ * / `.trust` the engine set — never a decoration. A certified metric shows a
+ * "Certified" affordance; a failed reconcile (the check CAUGHT a mismatch, or
+ * degraded honestly) shows a visible caution with the engine's expected/got,
+ * never hidden. PARITY: certification/reconciliation are Rust-only, so the web
+ * dev twin never populates these and this renders nothing there.
+ */
+function TrustBadges({ meta }: { meta: AnalyticsMeta }) {
+  const styles = useStyles();
+  const trust = meta.trust;
+  const certifiedNames =
+    meta.certified && meta.certified.length > 0
+      ? meta.certified
+      : trust?.certified && trust.metric
+        ? [trust.metric]
+        : [];
+  if (certifiedNames.length === 0) return null;
+  const reconcileFailed = trust?.certified === true && trust.reconciled === false;
+  return (
+    <div className={styles.trustRow}>
+      <Tooltip
+        content="The engine parsed this answer's SQL and confirmed it computes the blessed definition."
+        relationship="description"
+      >
+        <Badge appearance="tint" color="success" icon={<ShieldRegular />}>
+          Certified: {certifiedNames.join(", ")}
+        </Badge>
+      </Tooltip>
+      {trust?.reconciled === true && (
+        <Text size={200} className={styles.trustDetail}>
+          reconciled against its definition
+        </Text>
+      )}
+      {reconcileFailed && (
+        <Badge appearance="tint" color="danger" icon={<WarningRegular />}>
+          Couldn&apos;t reconcile{trust?.metric ? ` ${trust.metric}` : ""}
+        </Badge>
+      )}
+      {reconcileFailed && (trust?.expected || trust?.got) && (
+        <Text size={200} className={styles.trustDetail}>
+          {trust?.expected ? `expected ${trust.expected}` : ""}
+          {trust?.expected && trust?.got ? ", " : ""}
+          {trust?.got ? `got ${trust.got}` : ""}
+        </Text>
+      )}
+    </div>
   );
 }
 
@@ -2264,6 +2352,13 @@ export function ChatPanel() {
     question: string;
   } | null>(null);
   const [viewNotes, setViewNotes] = useState<Record<string, { name?: string }>>({});
+  // "Define as metric" (openspec: add-semantic-layer §6.2): the dialog's target
+  // — the answer's meta + the question that produced it (the Save-as-view idiom).
+  const [defineMetric, setDefineMetric] = useState<{
+    msgId: string;
+    meta: AnalyticsMeta;
+    question: string;
+  } | null>(null);
   // G5: transient "Saved to Lighthouse Notes" note after a manual refresh.
   const [briefingSaved, setBriefingSaved] = useState<string | null>(null);
   // Outcome of a pins-dialog row's "Add to board" (openspec: add-boards).
@@ -2286,6 +2381,7 @@ export function ChatPanel() {
     // notes, so a same-id answer here can never inherit a "Saved view…" line.
     setSaveView(null);
     setViewNotes({});
+    setDefineMetric(null);
   }, [currentId]);
   // Cancels the in-flight ask() when the user presses Stop.
   const abortRef = useRef<AbortController | null>(null);
@@ -3109,6 +3205,22 @@ export function ChatPanel() {
       (prev?.role === "user" ? prev.content : "").trim().replace(/\s+/g, " ").slice(0, 200) ||
       "Saved view";
     setSaveView({ msgId: asstId, meta, question });
+  }
+
+  /**
+   * "Define as metric" (openspec: add-semantic-layer §6.2): open the dialog with
+   * this answer's meta and the question that produced it (the openSaveView
+   * derivation). The engine proposes the aggregation from the answer's own SQL;
+   * the question becomes the metric's summary, labeled "question".
+   */
+  function openDefineMetric(asstId: string, meta: AnalyticsMeta) {
+    const msgs = useChatStore.getState().messages;
+    const idx = msgs.findIndex((x) => x.id === asstId);
+    const prev = idx > 0 ? msgs[idx - 1] : undefined;
+    const question =
+      (prev?.role === "user" ? prev.content : "").trim().replace(/\s+/g, " ").slice(0, 200) ||
+      "Defined metric";
+    setDefineMetric({ msgId: asstId, meta, question });
   }
 
   /**
@@ -4708,6 +4820,12 @@ export function ChatPanel() {
                           {streaming && m.id === lastId && <span className={styles.beaconInline} />}
                         </div>
                       )}
+                      {/* Certified badge + trust verdict (openspec:
+                          add-semantic-layer §6.2): rendered from the engine's
+                          VERIFIED meta, a failed reconcile shown, never hidden. */}
+                      {m.analytics && !m.error && !(streaming && m.id === lastId) && (
+                        <TrustBadges meta={m.analytics} />
+                      )}
                       {streaming && m.id === lastId && draftActive && (
                         <Text size={200} className={styles.draftBadge}>
                           Draft — verifying with the private model…
@@ -4822,6 +4940,7 @@ export function ChatPanel() {
                             onPin={(meta) => void pinAnswer(m.id, meta)}
                             pinPending={pinNotes[m.id]?.pending}
                             onSaveView={(meta) => openSaveView(m.id, meta)}
+                            onDefineMetric={(meta) => openDefineMetric(m.id, meta)}
                           />
                           {pinNotes[m.id]?.ok && (
                             <div className={styles.savedNote}>
@@ -5096,6 +5215,17 @@ export function ChatPanel() {
             setViewNotes((s) => ({ ...s, [target.msgId]: { name: view.name } }));
           }
         }}
+      />
+
+      {/* Define as metric (openspec: add-semantic-layer §6.2): the engine
+          proposes an aggregate expression + entity from this answer's own SQL;
+          the user names it and saves. PARITY: unavailable on the web twin. */}
+      <DefineMetricDialog
+        open={defineMetric !== null}
+        onClose={() => setDefineMetric(null)}
+        sql={defineMetric?.meta.sql ?? ""}
+        fileIds={defineMetric?.meta.fileIds ?? []}
+        question={defineMetric?.question ?? ""}
       />
     </section>
   );

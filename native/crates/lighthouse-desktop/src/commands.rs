@@ -763,6 +763,87 @@ pub async fn rag_op(app: AppHandle, body: Value) -> Result<Value, String> {
             let recipes = lighthouse_core::meta::applicable_recipes(ids, is_cloud).await;
             Ok(json!({ "recipes": recipes }))
         }
+        // Semantic layer (openspec: add-semantic-layer §6.1) — mirrors the
+        // routes.rs arm exactly: `list` returns the posture-eligible definitions
+        // applicable to the included tables (a card shape); create/rename/delete
+        // are the pure store lifecycle (the engine owns every rule; a refusal
+        // rides back as Err(reason)). Only op:"defineMetric" below is Rust-only.
+        Some("semantic") => match body["action"].as_str() {
+            Some("list") => {
+                let ids = string_array(&body["includedFileIds"]);
+                let is_cloud = lighthouse_core::synth::is_cloud_provider(
+                    &lighthouse_core::profile::model_config(),
+                );
+                Ok(json!({ "semantic": lighthouse_core::meta::applicable_semantics(ids, is_cloud) }))
+            }
+            Some("create-metric") => {
+                let summary_source = match body["summarySource"].as_str() {
+                    None | Some("question") => lighthouse_core::views::SummarySource::Question,
+                    Some("model") => lighthouse_core::views::SummarySource::Model,
+                    Some(_) => return Err("summarySource must be \"question\" or \"model\"".into()),
+                };
+                let file_ids = string_array(&body["fileIds"]);
+                let metric = lighthouse_core::semantic::create_metric(
+                    body["name"].as_str().unwrap_or(""),
+                    body["expression"].as_str().unwrap_or(""),
+                    body["description"].as_str().unwrap_or(""),
+                    body["entity"].as_str().unwrap_or(""),
+                    lighthouse_core::views::ViewSummary {
+                        text: body["summaryText"].as_str().unwrap_or("").to_string(),
+                        source: summary_source,
+                    },
+                    &file_ids,
+                )?;
+                Ok(json!({ "metric": metric }))
+            }
+            Some("create-synonym") => {
+                let synonym = lighthouse_core::semantic::create_synonym(
+                    body["term"].as_str().unwrap_or(""),
+                    body["canonical"].as_str().unwrap_or(""),
+                )?;
+                Ok(json!({ "synonym": synonym }))
+            }
+            Some("rename") => {
+                let Some(id) = body["id"].as_str().filter(|s| !s.is_empty()) else {
+                    return Err("id required".into());
+                };
+                let metric =
+                    lighthouse_core::semantic::rename_metric(id, body["name"].as_str().unwrap_or(""))?;
+                Ok(json!({ "metric": metric }))
+            }
+            Some("delete") => {
+                if let Some(id) = body["id"].as_str().filter(|s| !s.is_empty()) {
+                    let cascade = body["cascade"].as_bool().unwrap_or(false);
+                    let deleted = lighthouse_core::semantic::delete_metric(id, cascade)?;
+                    Ok(json!({ "deletedId": deleted }))
+                } else if let Some(term) = body["term"].as_str().filter(|s| !s.is_empty()) {
+                    lighthouse_core::semantic::delete_synonym(term)?;
+                    Ok(json!({ "ok": true }))
+                } else {
+                    Err("id (metric) or term (synonym) required".into())
+                }
+            }
+            _ => Err(
+                "semantic action must be list, create-metric, create-synonym, rename, or delete"
+                    .into(),
+            ),
+        },
+        // Propose a metric from a Beam answer's SQL (openspec §6.1) — mirrors the
+        // routes.rs op: the engine parses the executed SQL and proposes an
+        // aggregate expression + entity for the "Define as metric" dialog. The
+        // twin answers {available:false} (SQL parsing is Rust-only).
+        Some("defineMetric") => {
+            let sql = body["sql"].as_str().unwrap_or("");
+            match lighthouse_core::analytics::propose_metric(sql) {
+                Some((expression, entity)) => {
+                    Ok(json!({ "available": true, "expression": expression, "entity": entity }))
+                }
+                None => Ok(json!({
+                    "available": false,
+                    "reason": "this answer has no single-table aggregate to define as a metric",
+                })),
+            }
+        }
         // Provider sign-in (0.12.1 §3) — mirrors the routes.rs op exactly: a
         // generic RFC 8628 device-authorization client, INERT until a
         // maintainer registers with a vendor and configures all four

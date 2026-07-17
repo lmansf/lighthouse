@@ -7,8 +7,9 @@
  * shareable file ids paired with their `mtimeMs:size` freshness keys — which
  * already folds include flags, local-only marks under a cloud provider, and
  * per-file freshness), the provider AND model id, the sorted attachment id
- * set, and — only when any exist — the posture-eligible saved-view registry
- * (openspec: add-shaped-views). Global-digest tradeoff (v1, pinned in the
+ * set, and — each only when any exist — the posture-eligible saved-view
+ * registry (openspec: add-shaped-views) and semantic registry (openspec:
+ * add-semantic-layer). Global-digest tradeoff (v1, pinned in the
  * design): ANY vault change invalidates every entry — over-invalidation
  * accepted, correctness beats hit rate.
  *
@@ -34,6 +35,7 @@ import type { AnalyticsMeta, ChatChunk, RagReference } from "@/contracts";
 import { appStateDir, readJson, writeJson } from "./config";
 import { shareableFreshnessKeys } from "./vault";
 import { eligibleForPosture } from "./views";
+import { eligibleForPosture as eligibleSemantics } from "./semantic";
 
 /**
  * LRU bound — small enough that the disk envelope stays trivial to rewrite per
@@ -141,6 +143,17 @@ export function candidateDigest(pairs: [string, string][]): string {
  * name + NUL (U+0000) + sql, pairs joined with NUL too (flat
  * n1,NUL,s1,NUL,n2,NUL,s2) — view names are sanitized [a-z0-9_], so the flat
  * NUL join can never be ambiguous.
+ *
+ * `semanticRegistry` (openspec: add-semantic-layer §5.2): the semantic layer as
+ * it could apply to this ask — the posture-eligible definitions as
+ * [kind-prefixed name, value] pairs (`cacheKey` builds and sorts them; the pair
+ * strings are re-sorted here, the `viewRegistry` posture). It joins the key ONLY
+ * when at least one definition exists, and is appended LAST (after "\nv:"), so
+ * every zero-definition key — and every legacy key — stays byte-identical.
+ * Byte layout, KEEP IN SYNC with answer_cache.rs::key_from_parts: "\ns:"
+ * followed by each pair rendered as name + NUL + value, pairs joined with NUL
+ * too — the m:/s:/e:/j: kind prefix keeps the four definition kinds from
+ * colliding.
  */
 export function keyFromParts(
   question: string,
@@ -150,6 +163,7 @@ export function keyFromParts(
   preferredConversationIds: string[],
   candidateDigestHex: string,
   viewRegistry: [string, string][] = [],
+  semanticRegistry: [string, string][] = [],
 ): string {
   const atts = [...new Set(attachmentIds)].sort();
   let material = [
@@ -166,6 +180,10 @@ export function keyFromParts(
   if (viewRegistry.length > 0) {
     const pairs = viewRegistry.map(([name, sql]) => `${name}\u0000${sql}`).sort();
     material += `\nv:${pairs.join("\u0000")}`;
+  }
+  if (semanticRegistry.length > 0) {
+    const pairs = semanticRegistry.map(([name, value]) => `${name}\u0000${value}`).sort();
+    material += `\ns:${pairs.join("\u0000")}`;
   }
   return sha256Hex(material);
 }
@@ -193,6 +211,24 @@ export function cacheKey(
   const views = eligibleForPosture(isCloud)
     .map((v): [string, string] => [v.name, v.sql])
     .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+  // The semantic REGISTRY as it could apply to this ask (openspec:
+  // add-semantic-layer §5.2): every posture-eligible definition of all four
+  // kinds — a cloud ask excludes effectively-local-only metrics/entities and
+  // anything referencing them (`eligibleSemantics`) — as (kind-prefixed name,
+  // value) pairs so the kinds can never collide, sorted. Editing any eligible
+  // definition re-keys dependent entries; zero definitions leaves every key
+  // untouched. PARITY: byte-identical to answer_cache.rs::cache_key's
+  // semantic-registry build (KEEP IN SYNC).
+  const semantics = eligibleSemantics(isCloud);
+  const semanticRegistry: [string, string][] = [
+    ...semantics.metrics.map((m): [string, string] => [`m:${m.name}`, m.expression]),
+    ...semantics.synonyms.map((s): [string, string] => [`s:${s.term}`, s.canonical]),
+    ...semantics.entities.map((e): [string, string] => [`e:${e.name}`, e.table]),
+    ...semantics.joinHints.map((j): [string, string] => [
+      `j:${j.leftEntity}.${j.leftColumn}`,
+      `${j.rightEntity}.${j.rightColumn}`,
+    ]),
+  ].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
   return keyFromParts(
     question,
     providerId,
@@ -201,6 +237,7 @@ export function cacheKey(
     preferredConversationIds,
     digest,
     views,
+    semanticRegistry,
   );
 }
 

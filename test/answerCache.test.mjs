@@ -381,6 +381,52 @@ test("view registry joins the key only when non-empty (byte-pinned layout)", () 
   );
 });
 
+// --- Semantic layer in the key (openspec: add-semantic-layer §5.2) ------------------
+// PARITY: answer_cache.rs::semantic_registry_joins_the_key_only_when_non_empty —
+// the SAME literal materials, so the twins can never drift a byte.
+
+test("semantic registry joins the key only when non-empty (byte-pinned layout)", () => {
+  const { keyFromParts } = cache;
+  const d = "digest";
+
+  // Zero definitions = the legacy key BYTE-FOR-BYTE (the \ns: block is LAST,
+  // after \nv:, so an empty semantic registry — like the omitted argument —
+  // leaves the pre-semantic material untouched).
+  const legacy = keyFromParts("q", "openai", null, [], [], d, [], []);
+  assert.equal(legacy, sha256("q:q\nc:digest\np:openai\nm:\na:"));
+  assert.equal(keyFromParts("q", "openai", null, [], [], d, []), legacy);
+  assert.equal(keyFromParts("q", "openai", null, [], [], d), legacy);
+
+  // One definition re-keys; the definition VALUE is load-bearing.
+  const revenue = ["m:revenue", "SUM(amount)"];
+  const gmv = ["s:gmv", "revenue"];
+  const withSemantic = keyFromParts("q", "openai", null, [], [], d, [], [revenue]);
+  assert.notEqual(withSemantic, legacy);
+  assert.notEqual(
+    keyFromParts("q", "openai", null, [], [], d, [], [["m:revenue", "SUM(qty)"]]),
+    withSemantic,
+    "same name, different value re-keys",
+  );
+
+  // The registry is a SET sorted by kind-prefixed name: order never changes the
+  // key, cross-kind entries can't collide, and the exact byte layout (\ns: +
+  // NUL-joined name/value pairs) is pinned.
+  const ab = keyFromParts("q", "openai", null, [], [], d, [], [revenue, gmv]);
+  assert.equal(keyFromParts("q", "openai", null, [], [], d, [], [gmv, revenue]), ab);
+  assert.equal(
+    ab,
+    sha256("q:q\nc:digest\np:openai\nm:\na:\ns:m:revenue\u0000SUM(amount)\u0000s:gmv\u0000revenue"),
+    "the s: byte layout is pinned",
+  );
+
+  // The s: block is LAST — it composes after a view registry (\nv: precedes \ns:).
+  const totals = ["totals", "SELECT 1"];
+  assert.equal(
+    keyFromParts("q", "openai", null, [], [], d, [totals], [revenue]),
+    sha256("q:q\nc:digest\np:openai\nm:\na:\nv:totals\u0000SELECT 1\ns:m:revenue\u0000SUM(amount)"),
+  );
+});
+
 test("cacheKey folds the view registry by posture (local-only views re-key local asks only)", () => {
   const vault = freshVault();
   cache.resetStore();

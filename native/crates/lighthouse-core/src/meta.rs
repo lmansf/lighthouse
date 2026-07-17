@@ -845,11 +845,196 @@ fn push_recipe_cards(
     }
 }
 
+// --- Applicable semantics (openspec: add-semantic-layer §6.1) ---------------------
+
+/// One metric surfaced for the semantic nav: enough to list it, ask about it,
+/// and manage it (the `id` the rename/delete ops name). `local_only` drives the
+/// per-row lock badge (the ViewsNav idiom) — a cloud posture's eligible set
+/// already excludes local-only metrics, so it is only ever true on a device ask.
+/// KEEP IN SYNC with `MetricCard` in src/contracts/types.ts.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MetricCard {
+    pub id: String,
+    pub name: String,
+    pub expression: String,
+    pub description: String,
+    pub entity: String,
+    pub local_only: bool,
+}
+
+/// One synonym surfaced for the semantic nav. KEEP IN SYNC with `SynonymCard`
+/// in src/contracts/types.ts.
+#[derive(Debug, Clone, Serialize)]
+pub struct SynonymCard {
+    pub term: String,
+    pub canonical: String,
+}
+
+/// The semantic definitions applicable to the current tables, for the nav
+/// (openspec §6.1). KEEP IN SYNC with `SemanticCards` in src/contracts/types.ts.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct SemanticCards {
+    pub metrics: Vec<MetricCard>,
+    pub synonyms: Vec<SynonymCard>,
+}
+
+/// The posture-eligible metrics/synonyms whose tables are in the included set —
+/// the `applicable_recipes` shape for the semantic nav (openspec §6.1). Metrics
+/// gate on their `reads` intersecting `included` (a metric over a file the chat
+/// isn't showing never surfaces, exactly as a recipe/view does); posture gating
+/// comes free from `semantic::eligible_for_posture` (a local-only metric is
+/// absent on a cloud ask). Model-free AND DataFusion-free — a metric carries its
+/// `reads`, so no table registration is needed (unlike `applicable_recipes`, so
+/// this stays a cheap synchronous store read like `op:"views"` list). Synonyms
+/// surface when their canonical names a surfaced metric, or names no metric at
+/// all (a column synonym — kept, it can't be ruled out). PARITY: mirrored in
+/// semantic.ts::applicableSemantics (the twin computes the identical subset — no
+/// analytics needed).
+pub fn applicable_semantics(included: Vec<String>, is_cloud: bool) -> SemanticCards {
+    let set = crate::semantic::eligible_for_posture(is_cloud);
+    let included: HashSet<&str> = included.iter().map(String::as_str).collect();
+    let view_records = crate::views::list();
+    let metrics: Vec<MetricCard> = set
+        .metrics
+        .iter()
+        .filter(|m| metric_reads_included(m, &included, &view_records))
+        .map(|m| MetricCard {
+            id: m.id.clone(),
+            name: m.name.clone(),
+            expression: m.expression.clone(),
+            description: m.description.clone(),
+            entity: m.entity.clone(),
+            local_only: crate::semantic::metric_effectively_local_only(&m.reads),
+        })
+        .collect();
+    // A synonym rides when its canonical names a surfaced metric, OR names no
+    // metric at all (⇒ a column synonym, which we can't table-scope, so keep it);
+    // a synonym for a metric filtered OUT of scope is dropped with its metric.
+    let surfaced: HashSet<String> = metrics.iter().map(|m| m.name.to_lowercase()).collect();
+    let all_metrics: HashSet<String> = set.metrics.iter().map(|m| m.name.to_lowercase()).collect();
+    let synonyms: Vec<SynonymCard> = set
+        .synonyms
+        .iter()
+        .filter(|s| {
+            let canon = s.canonical.to_lowercase();
+            surfaced.contains(&canon) || !all_metrics.contains(&canon)
+        })
+        .map(|s| SynonymCard {
+            term: s.term.clone(),
+            canonical: s.canonical.clone(),
+        })
+        .collect();
+    SemanticCards { metrics, synonyms }
+}
+
+/// Whether a metric's transitive source files intersect the included set: its
+/// own `reads.files`, or any read view whose transitive sources do (the
+/// `register_views`/inspect accumulation, one store lookup per view).
+fn metric_reads_included(
+    m: &crate::semantic::Metric,
+    included: &HashSet<&str>,
+    view_records: &[crate::views::View],
+) -> bool {
+    if m.reads.files.iter().any(|f| included.contains(f.file_id.as_str())) {
+        return true;
+    }
+    let mut seen: Vec<String> = Vec::new();
+    m.reads
+        .views
+        .iter()
+        .any(|vid| view_files_included(vid, view_records, included, &mut seen))
+}
+
+/// Whether a view's transitive source files intersect `included` — the upstream
+/// walk (own `reads.files`, then each parent view), cycle-tolerant via `seen`.
+fn view_files_included(
+    view_id: &str,
+    records: &[crate::views::View],
+    included: &HashSet<&str>,
+    seen: &mut Vec<String>,
+) -> bool {
+    if seen.iter().any(|s| s == view_id) {
+        return false;
+    }
+    seen.push(view_id.to_string());
+    let Some(v) = records.iter().find(|r| r.id == view_id) else {
+        return false;
+    };
+    if v.reads.files.iter().any(|f| included.contains(f.file_id.as_str())) {
+        return true;
+    }
+    v.reads
+        .views
+        .iter()
+        .any(|pid| view_files_included(pid, records, included, seen))
+}
+
 // --- Tests -----------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn metric_applicability_gates_on_included_sources() {
+        // Pure over synthetic records (the `push_recipe_cards` test posture) — no
+        // VAULT_DIR: `applicable_semantics` itself reads the store, so its
+        // applicability gate is what we unit-test here.
+        use crate::semantic::Metric;
+        use crate::views::{FileRead, Reads, SummarySource, View, ViewSummary};
+        let metric = |files: Vec<&str>, views: Vec<&str>| Metric {
+            id: "metric-x".into(),
+            name: "revenue".into(),
+            expression: "SUM(amount)".into(),
+            description: String::new(),
+            entity: "sales".into(),
+            reads: Reads {
+                files: files
+                    .into_iter()
+                    .map(|f| FileRead {
+                        file_id: f.into(),
+                        table_name: "sales".into(),
+                    })
+                    .collect(),
+                views: views.into_iter().map(String::from).collect(),
+            },
+            summary: ViewSummary {
+                text: String::new(),
+                source: SummarySource::Question,
+            },
+            created_ms: 0,
+        };
+        let included: HashSet<&str> = ["sales-csv"].into_iter().collect();
+        let no_views: Vec<View> = Vec::new();
+        // A direct file dependency in the included set surfaces the metric; one
+        // outside it does not (the recipe/view applicability rule).
+        assert!(metric_reads_included(&metric(vec!["sales-csv"], vec![]), &included, &no_views));
+        assert!(!metric_reads_included(&metric(vec!["other-csv"], vec![]), &included, &no_views));
+        // A metric over a VIEW surfaces when that view's transitive source is in.
+        let view = View {
+            id: "view-1".into(),
+            name: "clean_sales".into(),
+            sql: "SELECT * FROM sales".into(),
+            reads: Reads {
+                files: vec![FileRead {
+                    file_id: "sales-csv".into(),
+                    table_name: "sales".into(),
+                }],
+                views: vec![],
+            },
+            summary: ViewSummary {
+                text: String::new(),
+                source: SummarySource::Question,
+            },
+            created_ms: 0,
+        };
+        assert!(metric_reads_included(
+            &metric(vec![], vec!["view-1"]),
+            &included,
+            std::slice::from_ref(&view)
+        ));
+    }
 
     #[test]
     fn applicable_recipes_gate_on_column_kinds() {

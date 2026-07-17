@@ -475,10 +475,40 @@ export interface ChatChunk {
   done: boolean;
 }
 
-/** The exact executed SQL of an analytics answer and the files it read. */
+/**
+ * The engine's verdict that an answer VERIFIABLY computed a blessed metric
+ * definition (openspec: add-semantic-layer §4). Deterministic and MODEL-FREE:
+ * `certified` is AST-equality of the executed SQL's projection to the metric's
+ * blessed expression; `reconciled` is a numeric re-run of that definition through
+ * the same guarded executor. `metric` names the definition; `expected`/`got`
+ * carry the re-run and answer figures on a mismatch (or the reason on an honest
+ * degradation). A non-metric answer is `{certified:false, reconciled:false}` — an
+ * honest "not certified", never a failure. PARITY: certification/reconciliation
+ * are RUST-ONLY (analytics/DataFusion); this dev twin never takes the analytics
+ * branch, so it never populates a verdict — this is the wire shape only. KEEP IN
+ * SYNC with the Rust `TrustVerdict` in contracts.rs.
+ */
+export interface TrustVerdict {
+  certified: boolean;
+  reconciled: boolean;
+  metric?: string;
+  expected?: string;
+  got?: string;
+}
+
+/**
+ * The exact executed SQL of an analytics answer and the files it read.
+ * `certified`/`trust` (openspec: add-semantic-layer §3/§4) ride here as
+ * additive-optional (pre-Phase-B cache entries carry neither and stay valid), so
+ * a cached certified answer replays with its ORIGINAL verdict — nothing
+ * recomputed. PARITY: both are Rust-only (analytics); this twin never populates
+ * them. KEEP IN SYNC with the Rust `AnalyticsMeta` in contracts.rs.
+ */
 export interface AnalyticsMeta {
   sql: string;
   fileIds: string[];
+  certified?: string[];
+  trust?: TrustVerdict;
 }
 
 /**
@@ -871,3 +901,94 @@ export const RECIPE_CUE_PREFIX = "run-recipe:";
 export function runRecipeQuestion(id: string, table: string): string {
   return `${RECIPE_CUE_PREFIX}${id} on ${table}`;
 }
+
+// --- Semantic layer (openspec: add-semantic-layer §6) ------------------------------
+
+/**
+ * A canonical metric (openspec: add-semantic-layer §1): a business name bound to
+ * a guarded, re-runnable aggregation `expression` over a named `entity`. Shape
+ * mirrors the engines' record (semantic.rs ⇄ semantic.ts) exactly; `reads`/
+ * `summary` reuse the view types. Returned by createMetric/renameMetric; the nav
+ * lists the lighter `MetricCard`. KEEP IN SYNC with the Rust `Metric`.
+ */
+export interface SemanticMetric {
+  /** Engine-minted, stable across renames (`metric-` + sha1[..12]). */
+  id: string;
+  /** Sanitized identifier (lowercase [a-z0-9_]), unique among metrics. */
+  name: string;
+  /** The aggregation EXPRESSION — guarded at save, NOT a full statement. */
+  expression: string;
+  description: string;
+  /** The table (or saved view) the expression aggregates over. */
+  entity: string;
+  reads: ViewReads;
+  summary: ViewSummary;
+  createdMs: number;
+}
+
+/** A colloquial term mapped to a canonical column OR metric name. */
+export interface Synonym {
+  term: string;
+  canonical: string;
+}
+
+/**
+ * One metric surfaced for the semantic nav (openspec §6.1): enough to list, ask
+ * about, and manage it. `localOnly` drives the per-row lock badge (the ViewsNav
+ * idiom) — only ever true on a device ask (a cloud posture's eligible set
+ * already excludes local-only metrics). KEEP IN SYNC with the Rust `MetricCard`
+ * in meta.rs and semantic.ts.
+ */
+export interface MetricCard {
+  id: string;
+  name: string;
+  expression: string;
+  description: string;
+  entity: string;
+  localOnly: boolean;
+}
+
+/** One synonym surfaced for the semantic nav. KEEP IN SYNC with the Rust twin. */
+export interface SynonymCard {
+  term: string;
+  canonical: string;
+}
+
+/**
+ * The posture-eligible metrics/synonyms applicable to the current tables — the
+ * semantic nav's data (openspec §6.1). A metric over a file the chat isn't
+ * showing never surfaces (the recipe/view applicability rule), and a local-only
+ * metric is absent on a cloud ask. KEEP IN SYNC with the Rust `SemanticCards`.
+ */
+export interface SemanticCards {
+  metrics: MetricCard[];
+  synonyms: SynonymCard[];
+}
+
+/**
+ * What the client sends to create a metric. The summary rides FLATTENED on the
+ * wire (summaryText + summarySource, the ViewCreateInput idiom); the ENGINE owns
+ * every rule — name sanitization, the guard, reads derivation, the name-shadow
+ * check — so a refusal THROWS with the engine's reason and the dialog shows it
+ * verbatim. `fileIds` are the answer's source files (reads derive from them).
+ */
+export interface MetricCreateInput {
+  name: string;
+  expression: string;
+  description: string;
+  entity: string;
+  summaryText: string;
+  summarySource: ViewSummarySource;
+  fileIds: string[];
+}
+
+/**
+ * What `defineMetric` answers (openspec §6.1): a proposed aggregation expression
+ * + entity parsed from a Beam answer's SQL (the "Save as view" precedent), or
+ * `{available:false}` with an honest reason. PARITY: SQL parsing is Rust-only
+ * (analytics/DataFusion), so the web dev twin ALWAYS answers unavailable — the
+ * "Define as metric" dialog then explains instead of pretending.
+ */
+export type DefineMetricResult =
+  | { available: true; expression: string; entity: string }
+  | { available: false; reason: string };

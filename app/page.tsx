@@ -11,6 +11,7 @@ import { FileInspectorHost } from "@/features/explorer/FileInspector";
 import { InvestigationsNav } from "@/features/investigations/InvestigationsNav";
 import { ViewsNav } from "@/features/views/ViewsNav";
 import { RecipesNav } from "@/features/recipes/RecipesNav";
+import { SemanticNav } from "@/features/semantic/SemanticNav";
 import { ChatPanel } from "@/features/chat/ChatPanel";
 import { VersionBadge } from "@/shell/VersionBadge";
 
@@ -77,6 +78,7 @@ export default function Home() {
       <AppShell
         sidebar={
           <>
+            <SemanticNav />
             <RecipesNav />
             <ViewsNav />
             <InvestigationsNav />

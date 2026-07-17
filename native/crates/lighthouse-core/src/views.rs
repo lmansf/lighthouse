@@ -53,7 +53,9 @@ pub const MAX_VIEW_DEPTH: usize = 3;
 
 /// Names a view can never take (design.md "Names") — SQL keywords that would
 /// make the stored definition ambiguous or unquotable at resolution time.
-const RESERVED_NAMES: [&str; 15] = [
+/// `pub(crate)` so the semantic layer (semantic.rs) reuses the SAME reserved
+/// list for metric/entity names (KEEP IN SYNC with views.ts::RESERVED_NAMES).
+pub(crate) const RESERVED_NAMES: [&str; 15] = [
     "select", "from", "where", "join", "group", "order", "by", "with", "union", "all", "as", "on",
     "limit", "table", "values",
 ];
@@ -216,8 +218,9 @@ fn view_id(name: &str, sql: &str, created_ms: i64) -> String {
 /// file-stem extension strip ("q3.totals" is a dotted name, not a file
 /// name) and WITHOUT the "table" fallback: an empty result is returned
 /// empty and refused by the caller. Capped at 64 chars (design.md "Names").
-/// KEEP IN SYNC with views.ts::normalizeViewName.
-fn normalize_view_name(raw: &str) -> String {
+/// KEEP IN SYNC with views.ts::normalizeViewName. `pub(crate)` so the semantic
+/// layer (semantic.rs) sanitizes metric/entity names with the identical rules.
+pub(crate) fn normalize_view_name(raw: &str) -> String {
     let lower = raw.to_lowercase();
     let mut out = String::with_capacity(lower.len());
     let mut last_us = true; // also trims leading underscores
@@ -321,7 +324,7 @@ fn walk_table_factor(f: &datafusion::sql::sqlparser::ast::TableFactor, w: &mut T
 /// case-insensitively, first-appearance order and casing kept for the
 /// refusal message. PARITY: views.ts::collectTableNames approximates this
 /// with a FROM/JOIN identifier scan.
-fn collect_table_names(sql: &str) -> Result<Vec<String>, String> {
+pub(crate) fn collect_table_names(sql: &str) -> Result<Vec<String>, String> {
     use datafusion::sql::parser::{DFParser, Statement as DFStatement};
     use datafusion::sql::sqlparser::ast::Statement as SqlStatement;
     let stmts = DFParser::parse_sql(sql).map_err(|e| format!("SQL parse error: {e}"))?;

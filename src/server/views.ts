@@ -47,8 +47,12 @@ const STORE_VERSION = 1;
  */
 export const MAX_VIEW_DEPTH = 3;
 
-/** Names a view can never take (design.md "Names"). */
-const RESERVED_NAMES = new Set([
+/**
+ * Names a view can never take (design.md "Names"). Exported so the semantic
+ * layer (semantic.ts) reuses the SAME reserved list for metric/entity names
+ * (KEEP IN SYNC with views.rs::RESERVED_NAMES).
+ */
+export const RESERVED_NAMES = new Set([
   "select", "from", "where", "join", "group", "order", "by", "with", "union",
   "all", "as", "on", "limit", "table", "values",
 ]);

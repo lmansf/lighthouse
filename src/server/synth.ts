@@ -578,6 +578,14 @@ async function* answerPipelineLive(
   //     The twin has no analytics branch (analytics is desktop/Rust-only), so it
   //     emits no ledger — the same reason it emits none of the analytics
   //     provenance footers.
+  // PARITY (openspec: add-semantic-layer §3/§4): the analytics branch ALSO emits
+  //     an engine `*Certified:*` footer (`analytics::certified_metrics`, AST-
+  //     equality) and a trust verdict (`analytics::reconcile_metric`, a guarded
+  //     re-run) on `AnalyticsMeta.certified`/`.trust`. Certification and
+  //     reconciliation are Rust-only (DataFusion), so the twin certifies and
+  //     reconciles nothing and emits no `*Certified:*` line — it only mirrors the
+  //     `certified`/`TrustVerdict` WIRE shape (contracts/types.ts), never
+  //     populated here.
   // PARITY (openspec: add-recipes §2): synth.rs ALSO has a recipe branch BEFORE
   //     its model gate — a `run-recipe:{id} on {table}` cue runs a deterministic
   //     bundle of guarded SELECTs (recipes.rs). Recipes are analytics, so they

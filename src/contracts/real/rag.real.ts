@@ -23,6 +23,11 @@ import type {
   RagReference,
   RecipeCard,
   RestoreToken,
+  SemanticCards,
+  SemanticMetric,
+  MetricCreateInput,
+  DefineMetricResult,
+  Synonym,
   ShapeProposal,
   ShapeViewResult,
   View,
@@ -559,6 +564,101 @@ class RealRagService implements RagService {
       before: typeof p?.before === "string" ? p.before : "",
       after: typeof p?.after === "string" ? p.after : "",
       summary: typeof p?.summary === "string" ? p.summary : "",
+    };
+  }
+
+  /**
+   * Semantic-layer sub-ops (openspec: add-semantic-layer §6). Like viewsOp, the
+   * create/rename/delete surface THROWS the engine's reason (the dialogs catch
+   * and show it verbatim — the engine owns the rules).
+   */
+  private async semanticOp(body: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const r = await fetch("/api/rag", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ op: "semantic", ...body }),
+    });
+    const data = (await r.json().catch(() => ({}))) as Record<string, unknown>;
+    if (!r.ok) {
+      throw new Error(
+        typeof data.error === "string" && data.error ? data.error : `POST /api/rag ${r.status}`,
+      );
+    }
+    return data;
+  }
+
+  async applicableSemantics(includedFileIds: string[]): Promise<SemanticCards> {
+    const res = await this.semanticOp({ action: "list", includedFileIds });
+    const cards = res.semantic as SemanticCards | undefined;
+    return {
+      metrics: Array.isArray(cards?.metrics) ? cards.metrics : [],
+      synonyms: Array.isArray(cards?.synonyms) ? cards.synonyms : [],
+    };
+  }
+
+  async createMetric(input: MetricCreateInput): Promise<SemanticMetric> {
+    // The summary rides FLATTENED on the wire; the engine builds the labeled
+    // record and owns every validation rule.
+    const res = await this.semanticOp({
+      action: "create-metric",
+      name: input.name,
+      expression: input.expression,
+      description: input.description,
+      entity: input.entity,
+      summaryText: input.summaryText,
+      summarySource: input.summarySource,
+      fileIds: input.fileIds,
+    });
+    return res.metric as SemanticMetric;
+  }
+
+  async createSynonym(term: string, canonical: string): Promise<Synonym> {
+    const res = await this.semanticOp({ action: "create-synonym", term, canonical });
+    return res.synonym as Synonym;
+  }
+
+  async renameMetric(id: string, name: string): Promise<SemanticMetric> {
+    const res = await this.semanticOp({ action: "rename", id, name });
+    return res.metric as SemanticMetric;
+  }
+
+  async deleteMetric(id: string, cascade?: boolean): Promise<string> {
+    // `cascade` rides only when true (the privacy-shaped absent-means-no default).
+    const res = await this.semanticOp({ action: "delete", id, ...(cascade ? { cascade: true } : {}) });
+    return typeof res.deletedId === "string" ? res.deletedId : "";
+  }
+
+  async deleteSynonym(term: string): Promise<void> {
+    await this.semanticOp({ action: "delete", term });
+  }
+
+  async defineMetric(sql: string, fileIds: string[]): Promise<DefineMetricResult> {
+    // {available:false} is a normal answer (no aggregate to define / dev twin);
+    // a real refusal would ride back as 400 + {error}, so surface that too.
+    const r = await fetch("/api/rag", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ op: "defineMetric", sql, fileIds }),
+    });
+    const data = (await r.json().catch(() => ({}))) as {
+      available?: boolean;
+      expression?: string;
+      entity?: string;
+      reason?: string;
+      error?: string;
+    };
+    if (!r.ok) {
+      throw new Error(data.error ?? `POST /api/rag ${r.status}`);
+    }
+    if (data.available === true && typeof data.expression === "string" && typeof data.entity === "string") {
+      return { available: true, expression: data.expression, entity: data.entity };
+    }
+    return {
+      available: false,
+      reason:
+        typeof data.reason === "string" && data.reason
+          ? data.reason
+          : "no metric could be defined from this answer",
     };
   }
   // Provider sign-in (0.12.1 §3): the generic, registration-gated device

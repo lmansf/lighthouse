@@ -793,6 +793,107 @@ pub async fn rag_post(headers: HeaderMap, body: Option<Json<Value>>) -> Response
             let recipes = lighthouse_core::meta::applicable_recipes(ids, is_cloud).await;
             return Json(json!({ "recipes": recipes })).into_response();
         }
+        // Semantic layer (openspec: add-semantic-layer §6.1) — the metric/synonym
+        // authoring + nav surface. `list` returns the posture-eligible definitions
+        // applicable to the included tables (a card shape); create/rename/delete
+        // are the pure store lifecycle (the ENGINE owns every rule — a refusal
+        // rides back as 400 + {error}, shown verbatim). PARITY: the TS twin
+        // (route.ts) computes the identical `list` subset from its own store; only
+        // op:"defineMetric" below is Rust-only. commands.rs mirrors this arm.
+        Some("semantic") => match body["action"].as_str() {
+            Some("list") => {
+                let ids = string_array(&body["includedFileIds"]);
+                let is_cloud = lighthouse_core::synth::is_cloud_provider(
+                    &lighthouse_core::profile::model_config(),
+                );
+                Json(json!({ "semantic": lighthouse_core::meta::applicable_semantics(ids, is_cloud) }))
+                    .into_response()
+            }
+            Some("create-metric") => {
+                let summary_source = match body["summarySource"].as_str() {
+                    None | Some("question") => lighthouse_core::views::SummarySource::Question,
+                    Some("model") => lighthouse_core::views::SummarySource::Model,
+                    Some(_) => {
+                        return bad_request("summarySource must be \"question\" or \"model\"")
+                    }
+                };
+                let file_ids = string_array(&body["fileIds"]);
+                match lighthouse_core::semantic::create_metric(
+                    body["name"].as_str().unwrap_or(""),
+                    body["expression"].as_str().unwrap_or(""),
+                    body["description"].as_str().unwrap_or(""),
+                    body["entity"].as_str().unwrap_or(""),
+                    lighthouse_core::views::ViewSummary {
+                        text: body["summaryText"].as_str().unwrap_or("").to_string(),
+                        source: summary_source,
+                    },
+                    &file_ids,
+                ) {
+                    Ok(metric) => Json(json!({ "metric": metric })).into_response(),
+                    Err(e) => bad_request(&e),
+                }
+            }
+            Some("create-synonym") => {
+                match lighthouse_core::semantic::create_synonym(
+                    body["term"].as_str().unwrap_or(""),
+                    body["canonical"].as_str().unwrap_or(""),
+                ) {
+                    Ok(synonym) => Json(json!({ "synonym": synonym })).into_response(),
+                    Err(e) => bad_request(&e),
+                }
+            }
+            Some("rename") => {
+                let Some(id) = body["id"].as_str().filter(|s| !s.is_empty()) else {
+                    return bad_request("id required");
+                };
+                match lighthouse_core::semantic::rename_metric(id, body["name"].as_str().unwrap_or("")) {
+                    Ok(metric) => Json(json!({ "metric": metric })).into_response(),
+                    Err(e) => bad_request(&e),
+                }
+            }
+            // Delete a metric (by `id`, cascading its synonyms on explicit
+            // confirm) or a synonym (by `term`) — the same store lifecycle the
+            // engine owns. `id` wins when both are present.
+            Some("delete") => {
+                if let Some(id) = body["id"].as_str().filter(|s| !s.is_empty()) {
+                    let cascade = body["cascade"].as_bool().unwrap_or(false);
+                    match lighthouse_core::semantic::delete_metric(id, cascade) {
+                        Ok(deleted) => Json(json!({ "deletedId": deleted })).into_response(),
+                        Err(e) => bad_request(&e),
+                    }
+                } else if let Some(term) = body["term"].as_str().filter(|s| !s.is_empty()) {
+                    match lighthouse_core::semantic::delete_synonym(term) {
+                        Ok(()) => Json(json!({ "ok": true })).into_response(),
+                        Err(e) => bad_request(&e),
+                    }
+                } else {
+                    bad_request("id (metric) or term (synonym) required")
+                }
+            }
+            _ => bad_request(
+                "semantic action must be list, create-metric, create-synonym, rename, or delete",
+            ),
+        },
+        // Propose a metric from a Beam answer's SQL (openspec §6.1 — the "Save as
+        // view" precedent): the engine parses the executed SQL and proposes an
+        // aggregate expression + entity for the "Define as metric" dialog; the
+        // user names it and saves via op:"semantic" create-metric. PARITY: SQL
+        // parsing is Rust-only (analytics/DataFusion), so the TS twin answers
+        // {available:false} — the shapeView posture. commands.rs mirrors this.
+        Some("defineMetric") => {
+            let sql = body["sql"].as_str().unwrap_or("");
+            match lighthouse_core::analytics::propose_metric(sql) {
+                Some((expression, entity)) => {
+                    Json(json!({ "available": true, "expression": expression, "entity": entity }))
+                        .into_response()
+                }
+                None => Json(json!({
+                    "available": false,
+                    "reason": "this answer has no single-table aggregate to define as a metric",
+                }))
+                .into_response(),
+            }
+        }
         Some("restore") => {
             let token = &body["token"];
             if !token.is_object() {

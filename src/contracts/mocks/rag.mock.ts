@@ -22,6 +22,11 @@ import type {
   RagReference,
   RecipeCard,
   RestoreToken,
+  SemanticCards,
+  SemanticMetric,
+  MetricCreateInput,
+  DefineMetricResult,
+  Synonym,
   ShapeViewResult,
   View,
   ViewCreateInput,
@@ -1021,6 +1026,130 @@ class MockRagService implements RagService {
       before: "| region | amount |\n| --- | --- |\n| north | $3 |\n| south | $7 |",
       after: "| region | amount |\n| --- | --- |\n| north | 3 |\n| south | 7 |",
       summary: `${source} shaped — ${instruction}`.slice(0, 120),
+    };
+  }
+
+  // Semantic layer (openspec: add-semantic-layer §6): a believable in-memory
+  // metric/synonym store so the SemanticNav + Define-as-metric dialog drive
+  // offline, mirroring the views mock's rules (name normalize, dup refusal,
+  // dependent-synonym refusal/cascade). defineMetric answers {available:false}
+  // to match the twin (SQL parsing is Rust-only — PARITY).
+  private metrics: SemanticMetric[] = [];
+  private synonyms: Synonym[] = [];
+
+  private dependentSynonymTerms(metricName: string): string[] {
+    return this.synonyms
+      .filter((s) => s.canonical.toLowerCase() === metricName.toLowerCase())
+      .map((s) => s.term);
+  }
+
+  async applicableSemantics(includedFileIds: string[]): Promise<SemanticCards> {
+    // Metrics whose pinned source files intersect the included set (the engine's
+    // applicability rule); localOnly is always false in the mock. Synonyms ride
+    // when their canonical names a surfaced metric or names no metric at all.
+    const inc = new Set(includedFileIds);
+    const surfaced = this.metrics.filter((m) => m.reads.files.some((f) => inc.has(f.fileId)));
+    const surfacedNames = new Set(surfaced.map((m) => m.name.toLowerCase()));
+    const allNames = new Set(this.metrics.map((m) => m.name.toLowerCase()));
+    return {
+      metrics: surfaced.map((m) => ({
+        id: m.id,
+        name: m.name,
+        expression: m.expression,
+        description: m.description,
+        entity: m.entity,
+        localOnly: false,
+      })),
+      synonyms: this.synonyms
+        .filter((s) => {
+          const c = s.canonical.toLowerCase();
+          return surfacedNames.has(c) || !allNames.has(c);
+        })
+        .map((s) => ({ ...s })),
+    };
+  }
+
+  async createMetric(input: MetricCreateInput): Promise<SemanticMetric> {
+    const name = this.normalizeViewName(input.name);
+    if (!name) throw new Error("a metric needs a name");
+    if (this.metrics.some((m) => m.name === name)) {
+      throw new Error(`a metric named "${name}" already exists`);
+    }
+    if (!input.expression.trim()) throw new Error("a metric needs an expression");
+    if (!input.entity.trim()) throw new Error("a metric needs an entity");
+    const metric: SemanticMetric = {
+      id: `metric-${(this.metrics.length + 1).toString(16).padStart(12, "0")}`,
+      name,
+      expression: input.expression,
+      description: input.description,
+      entity: input.entity,
+      // Reads derivation is engine work; the mock pins a naive binding.
+      reads: {
+        files: input.fileIds.map((fileId) => ({ fileId, tableName: input.entity })),
+        views: [],
+      },
+      summary: { text: input.summaryText, source: input.summarySource },
+      createdMs: Date.now(),
+    };
+    this.metrics.push(metric);
+    return { ...metric, reads: { files: [...metric.reads.files], views: [] }, summary: { ...metric.summary } };
+  }
+
+  async createSynonym(term: string, canonical: string): Promise<Synonym> {
+    const t = term.trim();
+    const c = canonical.trim();
+    if (!t) throw new Error("a synonym needs a term");
+    if (!c) throw new Error("a synonym needs a canonical name");
+    if (this.synonyms.some((s) => s.term.toLowerCase() === t.toLowerCase())) {
+      throw new Error(`a synonym for "${t}" already exists`);
+    }
+    const synonym: Synonym = { term: t, canonical: c };
+    this.synonyms.push(synonym);
+    return { ...synonym };
+  }
+
+  async renameMetric(id: string, name: string): Promise<SemanticMetric> {
+    const rec = this.metrics.find((m) => m.id === id);
+    if (!rec) throw new Error("metric not found");
+    const deps = this.dependentSynonymTerms(rec.name);
+    if (deps.length > 0) {
+      throw new Error(`"${rec.name}" can't be renamed while synonyms map to it: ${deps.join(", ")}`);
+    }
+    const normalized = this.normalizeViewName(name);
+    if (!normalized) throw new Error("a metric needs a name");
+    if (this.metrics.some((m) => m.id !== id && m.name === normalized)) {
+      throw new Error(`a metric named "${normalized}" already exists`);
+    }
+    rec.name = normalized;
+    return { ...rec, reads: { files: [...rec.reads.files], views: [] }, summary: { ...rec.summary } };
+  }
+
+  async deleteMetric(id: string, cascade?: boolean): Promise<string> {
+    const metric = this.metrics.find((m) => m.id === id);
+    if (!metric) throw new Error("metric not found");
+    const deps = this.dependentSynonymTerms(metric.name);
+    if (deps.length > 0 && !cascade) {
+      throw new Error(`"${metric.name}" can't be deleted while synonyms map to it: ${deps.join(", ")}`);
+    }
+    this.metrics = this.metrics.filter((m) => m.id !== id);
+    this.synonyms = this.synonyms.filter(
+      (s) => s.canonical.toLowerCase() !== metric.name.toLowerCase(),
+    );
+    return metric.id;
+  }
+
+  async deleteSynonym(term: string): Promise<void> {
+    const before = this.synonyms.length;
+    this.synonyms = this.synonyms.filter((s) => s.term.toLowerCase() !== term.toLowerCase());
+    if (this.synonyms.length === before) throw new Error("synonym not found");
+  }
+
+  async defineMetric(_sql: string, _fileIds: string[]): Promise<DefineMetricResult> {
+    // PARITY: proposing a metric parses the executed SQL (Rust-only), so the
+    // mock — like the web dev twin — answers unavailable; the dialog explains.
+    return {
+      available: false,
+      reason: "defining a metric from an answer runs in the Rust engine",
     };
   }
 
