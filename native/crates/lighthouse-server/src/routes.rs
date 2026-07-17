@@ -210,8 +210,69 @@ pub async fn rag_post(headers: HeaderMap, body: Option<Json<Value>>) -> Response
                     Err(e) => bad_request(&e),
                 }
             }
+            // Fork a line of inquiry (openspec: add-automation §4): a fresh
+            // record copying the parent's STRUCTURE only (scope, policy,
+            // conversation refs) — engine-minted id, its own empty notes
+            // folder, same name rule as create. Rejections → 400.
+            Some("fork") => {
+                let Some(id) = body["id"].as_str().filter(|s| !s.is_empty()) else {
+                    return bad_request("id required");
+                };
+                match lighthouse_core::investigations::fork(
+                    id,
+                    body["name"].as_str().unwrap_or(""),
+                ) {
+                    Ok(inv) => Json(json!({
+                        "investigation": lighthouse_core::investigations::view(inv)
+                    }))
+                    .into_response(),
+                    Err(e) => bad_request(&e),
+                }
+            }
+            // Export the investigation to an in-vault markdown note (openspec:
+            // add-automation §4): render its structure + derived membership
+            // (references, never transcripts), then WRITE under its own notes
+            // folder via the exportChat precedent (notes_subdir +
+            // write_artifact — a non-egress, sanitized in-vault write). Render
+            // + folder resolution are engine reads (a validation failure —
+            // unknown id, unusable folder — is a 400, like the list arm's
+            // sync reads); only the write rides spawn_blocking. Titles is None:
+            // the op renders conversation ids (a caller holding titles may
+            // pass its own).
+            Some("export") => {
+                let Some(id) = body["id"].as_str().filter(|s| !s.is_empty()) else {
+                    return bad_request("id required");
+                };
+                let title = body["title"].as_str().unwrap_or("Investigation").to_string();
+                let markdown =
+                    match lighthouse_core::investigations::export_markdown(id, None) {
+                        Ok(md) => md,
+                        Err(e) => return bad_request(&e),
+                    };
+                let subdir = match lighthouse_core::investigations::notes_subdir(id) {
+                    Ok(sub) => sub,
+                    Err(e) => return bad_request(&e),
+                };
+                let written = tokio::task::spawn_blocking(move || {
+                    lighthouse_core::vault::write_artifact(
+                        &subdir,
+                        &title,
+                        "md",
+                        markdown.as_bytes(),
+                    )
+                })
+                .await
+                .map_err(|e| e.to_string())
+                .and_then(|r| r.map_err(|e| e.to_string()));
+                match written {
+                    Ok((id, name)) => {
+                        Json(json!({ "savedId": id, "savedName": name })).into_response()
+                    }
+                    Err(e) => Json(json!({ "error": e })).into_response(),
+                }
+            }
             _ => bad_request(
-                "investigations action must be list, create, rename, setArchived, or addConversationRef",
+                "investigations action must be list, create, rename, setArchived, addConversationRef, fork, or export",
             ),
         },
         // Boards (openspec: add-boards): pin-backed local dashboards. CRUD on

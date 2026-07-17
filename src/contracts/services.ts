@@ -354,6 +354,31 @@ export interface RagService {
     persistAllowed: boolean,
   ): Promise<{ investigation?: Investigation; error?: string }>;
   /**
+   * Fork an investigation into a fresh line of inquiry (openspec:
+   * add-automation §4): a NEW record with its own id, creation time, and empty
+   * notes folder, copying ONLY the parent's STRUCTURE — scope, provider
+   * policy, and conversation refs. Derived membership (pins/notes) is NOT
+   * duplicated. `name` obeys the same rule as create (non-empty, unique
+   * case-insensitively); a rejection comes back as `error` with the engine's
+   * reason, so the branch form can surface it inline.
+   */
+  forkInvestigation(
+    id: string,
+    name: string,
+  ): Promise<{ investigation?: Investigation; error?: string }>;
+  /**
+   * Export an investigation to a standalone markdown note written under its
+   * own notes folder (`Lighthouse Notes/<folder>/`) via the write-artifact
+   * allowlist — a non-egress in-vault write. The markdown REFERENCES the
+   * investigation's structure and derived membership (scope, conversation
+   * ids, pins, notes) and never embeds transcripts. Returns the saved note's
+   * id and name, or an `error`.
+   */
+  exportInvestigation(
+    id: string,
+    title?: string,
+  ): Promise<{ savedId?: string; savedName?: string; error?: string }>;
+  /**
    * Boards (openspec: add-boards): pin-backed local dashboards.
    * `investigationId` filters to that investigation's boards; absent = all
    * boards (the listPins convention). A scope with no persisted board

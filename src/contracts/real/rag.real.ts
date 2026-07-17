@@ -399,6 +399,39 @@ class RealRagService implements RagService {
     });
   }
 
+  async forkInvestigation(
+    id: string,
+    name: string,
+  ): Promise<{ investigation?: Investigation; error?: string }> {
+    return this.investigationsOp({ action: "fork", id, name });
+  }
+
+  async exportInvestigation(
+    id: string,
+    title?: string,
+  ): Promise<{ savedId?: string; savedName?: string; error?: string }> {
+    // The export op returns {savedId, savedName} or {error} (400 on a bad id /
+    // unusable folder, 200 {error} on a write failure — like exportChat); read
+    // the body regardless of status so the reason surfaces inline.
+    const r = await fetch("/api/rag", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        op: "investigations",
+        action: "export",
+        id,
+        ...(title ? { title } : {}),
+      }),
+    });
+    const data = (await r.json().catch(() => ({}))) as {
+      savedId?: string;
+      savedName?: string;
+      error?: string;
+    };
+    if (!r.ok) return { error: data.error ?? `POST /api/rag ${r.status}` };
+    return data;
+  }
+
   /**
    * Mutating boards sub-ops (openspec: add-boards) return validation
    * failures as 400 + {error} (like investigations); read the body instead

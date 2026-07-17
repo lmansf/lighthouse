@@ -61,9 +61,9 @@ jobs:
         run: npm ci
       - name: Static-export the UI (arms IPC mode — no local port in the app)
         run: node scripts/build-ui-static.mjs
-      - name: Build the real desktop binary (release)
+      - name: Build the real desktop binary + the headless CLI (release)
         working-directory: native
-        run: cargo build --release -p lighthouse-desktop --locked
+        run: cargo build --release -p lighthouse-desktop -p lighthouse-cli --locked
       - name: Engine smoke — wire-protocol grounded ask + exhaustive settings round-trip
         # Debug profile on purpose: these validate engine BEHAVIOR (incl.
         # per-OS path handling) — the release-codegen guarantees come from
@@ -112,3 +112,49 @@ jobs:
           code=$?
           echo "boot smoke exit code: $code (0 = grounded answer with references)"
           exit $code
+      - name: Headless smoke — the `lighthouse` CLI answers one grounded ask, zero network
+        # The FIRST smoke with NO webview (openspec: add-automation §5.2): drive one
+        # grounded, on-device ask through the CLI, which goes through
+        # `ask::run_headless_ask` — the same audited chokepoint the app uses — so a
+        # SCRIPTED ask is proven to answer with zero network and cite the vault.
+        # `--vault` redirects BOTH the vault dir and the state root, so it reads this
+        # fixture and writes its audit under it (openspec: add-automation §1.4).
+        shell: bash
+        run: |
+          VAULT="$RUNNER_TEMP/lh-cli-vault"
+          mkdir -p "$VAULT/docs"
+          node -e '
+            const fs = require("fs"), path = require("path");
+            fs.writeFileSync(path.join(process.argv[1], "docs", "smoke-fixture.md"), [
+              "# Smoke fixture",
+              "",
+              "The Q3 revenue target for the smoke test is 42 million dollars.",
+              "This document exists so CI can prove a grounded, zero-network answer.",
+              "",
+            ].join("\n"));
+          ' "$VAULT"
+          BIN="native/target/release/lighthouse"
+          if [ "$RUNNER_OS" = "Windows" ]; then BIN="$BIN.exe"; fi
+          # No key in the env, and --local forces the device path: zero egress.
+          unset LIGHTHOUSE_API_TOKEN ANTHROPIC_API_KEY OPENAI_API_KEY GOOGLE_API_KEY 2>/dev/null || true
+          set +e
+          OUT=$("$BIN" ask "What is the Q3 revenue target for the smoke test?" --vault "$VAULT" --local --json)
+          code=$?
+          set -e
+          echo "headless ask exit: $code"
+          echo "$OUT"
+          if [ "$code" -ne 0 ]; then echo "FAIL: the headless ask did not settle"; exit 1; fi
+          # Grounded (quotes the fixture figure), on-device (origin=device), and cites the file.
+          printf '%s' "$OUT" | node -e '
+            const o = JSON.parse(require("fs").readFileSync(0, "utf8"));
+            const grounded = /42[\s ]?million|\b42\b/.test(o.answer || "");
+            const device = o.provenance && o.provenance.origin === "device";
+            const cited = Array.isArray(o.references) &&
+              o.references.some(r => String((r && (r.fileId || r.file_id)) || "").includes("smoke-fixture"));
+            if (!(grounded && device && cited)) {
+              console.error("FAIL: not grounded/on-device/cited —",
+                JSON.stringify({ grounded, device, cited, provenance: o.provenance }));
+              process.exit(1);
+            }
+            console.log("headless smoke OK: grounded, on-device, cites the fixture");
+          '

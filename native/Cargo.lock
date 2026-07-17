@@ -3798,6 +3798,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "lighthouse-cli"
+version = "0.12.1"
+dependencies = [
+ "futures",
+ "lighthouse-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "lighthouse-core"
 version = "0.12.1"
 dependencies = [
@@ -3866,6 +3878,18 @@ dependencies = [
  "tokio",
  "windows-sys 0.60.2",
  "x11rb",
+]
+
+[[package]]
+name = "lighthouse-mcp"
+version = "0.12.1"
+dependencies = [
+ "futures",
+ "lighthouse-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]

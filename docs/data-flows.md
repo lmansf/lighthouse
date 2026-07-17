@@ -219,6 +219,15 @@ machine**: it is written and read locally, and the only way it moves is the
 user's own "Export CSV" into the vault. The TS dev twin mirrors the record shape
 but omits the HMAC chain (PARITY — it is not a security surface).
 
+The **headless entry points** — the `lighthouse` CLI (`ask`) and the
+`lighthouse-mcp` server (`ask_vault`) — answer through the SAME
+`ask::run_headless_ask` chokepoint the app uses (openspec: add-automation), so a
+scripted or MCP-driven ask is recorded here identically: one audit record with
+the file ids read, the provider, and the per-question egress delta. There is no
+new egress path — a `--local`/local-only ask (and every `list` /
+`run_analytics_sql` read) stays on-device, and the CLI's `export` is a
+non-egress in-vault write.
+
 ## Redirect / effective hosts (for allowlisting)
 
 `github.com` + `api.github.com` → `objects.githubusercontent.com` /

@@ -35,6 +35,8 @@ import { addPin, listPins, removePin } from "@/server/pins";
 import {
   addInvestigationConversationRef,
   createInvestigation,
+  exportMarkdown,
+  forkInvestigation,
   investigationNotesSubdir,
   investigationView,
   investigationsListing,
@@ -245,10 +247,65 @@ export async function POST(req: Request) {
           );
         }
       }
+      // Fork a line of inquiry (openspec: add-automation §4): a fresh record
+      // copying the parent's STRUCTURE only (scope, policy, conversation
+      // refs), engine-minted id, its own empty notes folder, same name rule
+      // as create. PARITY: routes.rs / commands.rs mirror this arm.
+      if (body.action === "fork") {
+        if (typeof body.id !== "string" || !body.id) {
+          return NextResponse.json({ error: "id required" }, { status: 400 });
+        }
+        try {
+          const investigation = forkInvestigation(
+            body.id,
+            typeof body.name === "string" ? body.name : "",
+          );
+          return NextResponse.json({ investigation: investigationView(investigation) });
+        } catch (err) {
+          return NextResponse.json(
+            { error: err instanceof Error ? err.message : "could not fork the investigation" },
+            { status: 400 },
+          );
+        }
+      }
+      // Export to an in-vault markdown note (openspec: add-automation §4):
+      // render structure + derived membership (references, never transcripts),
+      // then WRITE under the investigation's own notes folder via the
+      // exportChat precedent (investigationNotesSubdir + writeArtifact — a
+      // non-egress, sanitized in-vault write). Render + folder resolution are
+      // validation-like (unknown id / unusable folder → 400); the write error
+      // comes back as {error} like exportChat. Titles is omitted: the op
+      // renders conversation ids.
+      if (body.action === "export") {
+        if (typeof body.id !== "string" || !body.id) {
+          return NextResponse.json({ error: "id required" }, { status: 400 });
+        }
+        const title =
+          typeof body.title === "string" && body.title.trim() ? body.title : "Investigation";
+        let markdown: string;
+        let subdir: string;
+        try {
+          markdown = exportMarkdown(body.id);
+          subdir = investigationNotesSubdir(body.id);
+        } catch (err) {
+          return NextResponse.json(
+            { error: err instanceof Error ? err.message : "could not export the investigation" },
+            { status: 400 },
+          );
+        }
+        try {
+          const { id, name } = writeArtifact(subdir, title, "md", Buffer.from(markdown, "utf8"));
+          return NextResponse.json({ savedId: id, savedName: name });
+        } catch (err) {
+          return NextResponse.json({
+            error: err instanceof Error ? err.message : "could not write the export",
+          });
+        }
+      }
       return NextResponse.json(
         {
           error:
-            "investigations action must be list, create, rename, setArchived, or addConversationRef",
+            "investigations action must be list, create, rename, setArchived, addConversationRef, fork, or export",
         },
         { status: 400 },
       );

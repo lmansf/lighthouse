@@ -23,6 +23,7 @@
 
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
@@ -398,6 +399,146 @@ pub fn add_conversation_ref(
     Ok(records[idx].clone())
 }
 
+// --- Fork + export (openspec: add-automation §4) ----------------------------
+
+/// Fork an investigation into a fresh line of inquiry. Under `store_lock`,
+/// load the parent and mint a FRESH record — new `created_ms`, new
+/// `investigation_id(new_name, created_ms)`, new `sanitize_folder_name`
+/// (its own id and its own EMPTY notes folder) — copying ONLY the parent's
+/// STRUCTURE: `scope_file_ids`, `provider_policy` (a fork of a `local-only`
+/// line stays `local-only`), and `conversation_refs`. Derived membership is
+/// DELIBERATELY not duplicated (investigations.rs:4-10): pins carry a single
+/// `investigationId` and notes live in ONE folder (membership = location), so
+/// a fork is a new line seeded with the parent's scope + conversation context,
+/// never a clone of another investigation's members. `new_name` is trimmed,
+/// non-empty, and unique case-insensitively (archived records count) — the
+/// `create` rule; the fork is NOT archived. Fails with a human-readable
+/// reason (blank/duplicate name, missing parent) and persists nothing on
+/// failure. PARITY: investigations.ts::forkInvestigation.
+pub fn fork(id: &str, new_name: &str) -> Result<Investigation, String> {
+    let new_name = new_name.trim();
+    if new_name.is_empty() {
+        return Err("an investigation needs a name".to_string());
+    }
+    let _guard = store_lock();
+    let mut records = list();
+    let Some(parent) = records.iter().find(|r| r.id == id) else {
+        return Err("investigation not found".to_string());
+    };
+    // Snapshot the structure to copy before `records` is mutated below.
+    let scope_file_ids = parent.scope_file_ids.clone();
+    let provider_policy = parent.provider_policy;
+    let conversation_refs = parent.conversation_refs.clone();
+    if name_taken(&records, new_name, None) {
+        return Err(format!("an investigation named \"{new_name}\" already exists"));
+    }
+    let created_ms = now_ms();
+    let inv = Investigation {
+        id: investigation_id(new_name, created_ms),
+        name: new_name.to_string(),
+        created_ms,
+        archived: false,
+        // Structure only — the parent's scope, policy, and conversation
+        // context seed the branch; derived membership (pins/notes) is NOT
+        // duplicated (investigations.rs:4-10).
+        scope_file_ids,
+        provider_policy,
+        conversation_refs,
+        folder_name: sanitize_folder_name(new_name),
+    };
+    records.push(inv.clone());
+    save(&records);
+    Ok(inv)
+}
+
+/// Render an investigation to a standalone markdown document — the exportable
+/// artifact, reusing the `briefings::render_markdown` idiom (`# title`, then
+/// `## ` sections). The document states the investigation's STRUCTURE and
+/// DERIVED membership: name, created time (UTC), archive state, provider
+/// policy, scope files (or "whole vault" when empty), conversation refs, the
+/// derived pin list, and the derived note list. Conversation refs render by
+/// their opaque id — `title (id)` only when the optional `titles` map supplies
+/// a non-empty one — and NO transcript text is ever embedded, because the
+/// engine deliberately never stores transcripts (investigations.rs:9-10): a
+/// ref is a pointer, not content. `Err` when the id is unknown; nothing is
+/// written (this is a PURE render — the WRITE composes `notes_subdir` +
+/// `vault::write_artifact` at the op). KEEP BYTE-IDENTICAL with
+/// investigations.ts::exportMarkdown.
+pub fn export_markdown(
+    id: &str,
+    titles: Option<&HashMap<String, String>>,
+) -> Result<String, String> {
+    let record = list()
+        .into_iter()
+        .find(|r| r.id == id.trim())
+        .ok_or_else(|| "investigation not found".to_string())?;
+    Ok(render_investigation_markdown(&view(record), titles))
+}
+
+/// The byte-pinned render literal (twinned in investigations.ts). Kept pure
+/// (takes an already-derived `InvestigationView`) so the render is testable
+/// without a store and stays byte-identical across the engines.
+fn render_investigation_markdown(
+    view: &InvestigationView,
+    titles: Option<&HashMap<String, String>>,
+) -> String {
+    let record = &view.record;
+    let created = chrono::DateTime::from_timestamp_millis(record.created_ms)
+        .map(|d| d.format("%Y-%m-%d %H:%M UTC").to_string())
+        .unwrap_or_default();
+    let status = if record.archived { "Archived" } else { "Active" };
+    let policy = match record.provider_policy {
+        ProviderPolicy::Default => "default",
+        ProviderPolicy::LocalOnly => "local-only",
+    };
+
+    let mut out = format!("# {}\n", record.name);
+    out.push_str(&format!(
+        "\n- Created: {created}\n- Status: {status}\n- Provider policy: {policy}\n"
+    ));
+
+    out.push_str("\n## Scope\n\n");
+    if record.scope_file_ids.is_empty() {
+        out.push_str("- Whole vault\n");
+    } else {
+        for f in &record.scope_file_ids {
+            out.push_str(&format!("- {f}\n"));
+        }
+    }
+
+    out.push_str("\n## Conversations\n\n");
+    if record.conversation_refs.is_empty() {
+        out.push_str("_No conversations._\n");
+    } else {
+        for c in &record.conversation_refs {
+            match titles.and_then(|m| m.get(c)).filter(|t| !t.is_empty()) {
+                Some(t) => out.push_str(&format!("- {t} ({c})\n")),
+                None => out.push_str(&format!("- {c}\n")),
+            }
+        }
+    }
+
+    out.push_str("\n## Pins\n\n");
+    if view.pin_refs.is_empty() {
+        out.push_str("_No pins._\n");
+    } else {
+        for p in &view.pin_refs {
+            out.push_str(&format!("- {p}\n"));
+        }
+    }
+
+    out.push_str("\n## Notes\n\n");
+    if view.note_refs.is_empty() {
+        out.push_str("_No notes._\n");
+    } else {
+        for n in &view.note_refs {
+            out.push_str(&format!("- {n}\n"));
+        }
+    }
+
+    out
+}
+
 // --- Ask-context resolution (§2) --------------------------------------------
 
 /// The pure scope + policy decision for one ask, over an already-loaded
@@ -540,6 +681,38 @@ mod tests {
                 "{reserved:?}"
             );
         }
+    }
+
+    // PARITY: test/investigations.test.mjs mirrors this render literal
+    // byte-for-byte (a hand-written store yields the identical markdown).
+    #[test]
+    fn export_render_is_byte_stable_and_references_not_transcripts() {
+        // A fixed instant so the created line is deterministic (1_784_106_180_000
+        // ms = 2026-07-15 09:03 UTC, the briefings-note fixture instant).
+        let view = InvestigationView {
+            record: Investigation {
+                id: "inv-branch".into(),
+                name: "Harbor branch".into(),
+                created_ms: 1_784_106_180_000,
+                archived: false,
+                scope_file_ids: vec!["cases/a.md".into(), "cases/b.md".into()],
+                provider_policy: ProviderPolicy::LocalOnly,
+                conversation_refs: vec!["conv-1".into(), "conv-2".into()],
+                folder_name: "Harbor branch".into(),
+            },
+            pin_refs: Vec::new(),
+            note_refs: Vec::new(),
+        };
+        let expected = "# Harbor branch\n\n- Created: 2026-07-15 09:03 UTC\n- Status: Active\n- Provider policy: local-only\n\n## Scope\n\n- cases/a.md\n- cases/b.md\n\n## Conversations\n\n- conv-1\n- conv-2\n\n## Pins\n\n_No pins._\n\n## Notes\n\n_No notes._\n";
+        assert_eq!(render_investigation_markdown(&view, None), expected);
+
+        // A caller-supplied title map only adds legibility (`title (id)`); an
+        // absent or empty entry still renders the bare id. No transcript text.
+        let mut titles = HashMap::new();
+        titles.insert("conv-1".to_string(), "Kickoff".to_string());
+        titles.insert("conv-2".to_string(), String::new()); // empty ⇒ bare id
+        let md = render_investigation_markdown(&view, Some(&titles));
+        assert!(md.contains("\n## Conversations\n\n- Kickoff (conv-1)\n- conv-2\n"), "{md}");
     }
 
     #[test]

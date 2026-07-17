@@ -654,6 +654,50 @@ class MockRagService implements RagService {
     return { investigation: this.investigationViewOf(rec) };
   }
 
+  async forkInvestigation(
+    id: string,
+    name: string,
+  ): Promise<{ investigation?: Investigation; error?: string }> {
+    const trimmed = name.trim();
+    if (!trimmed) return { error: "an investigation needs a name" };
+    const parent = this.investigations.find((i) => i.id === id);
+    if (!parent) return { error: "investigation not found" };
+    if (this.investigationNameTaken(trimmed)) {
+      return { error: `an investigation named "${trimmed}" already exists` };
+    }
+    const investigation: Investigation = {
+      id: `inv-${(this.investigations.length + 1).toString(16).padStart(12, "0")}`,
+      name: trimmed,
+      createdMs: Date.now(),
+      archived: false,
+      // Structure only — derived membership (pins/notes) is NOT duplicated.
+      scopeFileIds: [...parent.scopeFileIds],
+      providerPolicy: parent.providerPolicy,
+      conversationRefs: [...parent.conversationRefs],
+      folderName: this.sanitizeFolderName(trimmed),
+      pinRefs: [],
+      noteRefs: [],
+    };
+    this.investigations.push(investigation);
+    return { investigation: this.investigationViewOf(investigation) };
+  }
+
+  async exportInvestigation(
+    id: string,
+    _title?: string,
+  ): Promise<{ savedId?: string; savedName?: string; error?: string }> {
+    const rec = this.investigations.find((i) => i.id === id);
+    if (!rec) return { error: "investigation not found" };
+    // A plausible in-vault note under the investigation's folder (no real
+    // walk — the mock records the id so investigationViewOf derives it).
+    const savedName = `${rec.name}.md`;
+    const savedId = `Lighthouse Notes/${rec.folderName}/${savedName}`;
+    const notes = this.noteIdsByInvestigation.get(id) ?? [];
+    if (!notes.includes(savedId)) notes.push(savedId);
+    this.noteIdsByInvestigation.set(id, notes);
+    return { savedId, savedName };
+  }
+
   // In-memory boards (openspec: add-boards) so the board panel is
   // exercisable offline. Mirrors the engines' validation and lazy defaults:
   // per-scope case-insensitive name uniqueness, S|M|L size whitelist,
