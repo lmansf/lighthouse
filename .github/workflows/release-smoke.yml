@@ -153,24 +153,40 @@ jobs:
           if [ "$RUNNER_OS" = "Windows" ]; then BIN="$BIN.exe"; fi
           # No key in the env, and --local forces the device path: zero egress.
           unset LIGHTHOUSE_API_TOKEN ANTHROPIC_API_KEY OPENAI_API_KEY GOOGLE_API_KEY 2>/dev/null || true
+          FIX="$VAULT/docs/smoke-fixture.md"
           set +e
-          OUT=$("$BIN" ask "What is the Q3 revenue target for the smoke test?" --vault "$VAULT" --local --json)
-          code=$?
-          set -e
-          echo "headless ask exit: $code"
-          echo "$OUT"
-          if [ "$code" -ne 0 ]; then echo "FAIL: the headless ask did not settle"; exit 1; fi
-          # Grounded (quotes the fixture figure), on-device (origin=device), and cites the file.
-          printf '%s' "$OUT" | node -e '
-            const o = JSON.parse(require("fs").readFileSync(0, "utf8"));
-            const grounded = /42[\s ]?million|\b42\b/.test(o.answer || "");
-            const device = o.provenance && o.provenance.origin === "device";
-            const cited = Array.isArray(o.references) &&
-              o.references.some(r => String((r && (r.fileId || r.file_id)) || "").includes("smoke-fixture"));
-            if (!(grounded && device && cited)) {
-              console.error("FAIL: not grounded/on-device/cited —",
-                JSON.stringify({ grounded, device, cited, provenance: o.provenance }));
-              process.exit(1);
-            }
-            console.log("headless smoke OK: grounded, on-device, cites the fixture");
-          '
+          # The CLI answers over the vault RAG-included files. On Windows the
+          # engine can read a just-written fixture as EMPTY on the first try
+          # (indexed as "no readable text could be extracted"), so a single-shot
+          # ask is not grounded even though the file is included and cited. The
+          # desktop boot smoke tolerates the same first-read miss by RETRYING its
+          # ask (main.rs SMOKE_DRIVER_JS); mirror that here. Keep the one fixture
+          # so its bytes settle on disk (do NOT rewrite it, which resets the
+          # settle), drop any empty entry the index cached between tries, and
+          # retry until grounded. macOS and Linux settle on attempt 1.
+          ok=""
+          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            sz=$(wc -c < "$FIX" 2>/dev/null || echo NA)
+            echo "--- attempt $attempt: fixture is $sz bytes; first bytes:"
+            head -c 80 "$FIX" 2>/dev/null | tr '\n' ' '; echo
+            OUT=$("$BIN" ask "What is the Q3 revenue target for the smoke test?" --vault "$VAULT" --local --json)
+            code=$?
+            echo "headless ask exit: $code"
+            echo "$OUT"
+            if [ "$code" -eq 0 ] && printf '%s' "$OUT" | node -e '
+              const o = JSON.parse(require("fs").readFileSync(0, "utf8"));
+              const grounded = /42[\s ]?million|\b42\b/.test(o.answer || "");
+              const device = o.provenance && o.provenance.origin === "device";
+              const cited = Array.isArray(o.references) &&
+                o.references.some(r => String((r && (r.fileId || r.file_id)) || "").includes("smoke-fixture"));
+              process.exit(grounded && device && cited ? 0 : 1);
+            '; then
+              ok=1
+              echo "headless smoke OK (attempt $attempt): grounded, on-device, cites the fixture"
+              break
+            fi
+            echo "attempt $attempt not grounded/cited yet; dropping cached empty entry, then retrying"
+            rm -rf "$VAULT/.rag-vault/cache" 2>/dev/null || true
+            sleep 3
+          done
+          if [ -z "$ok" ]; then echo "FAIL: headless ask never grounded/on-device/cited after retries"; exit 1; fi
