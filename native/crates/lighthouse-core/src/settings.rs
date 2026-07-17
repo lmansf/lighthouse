@@ -153,6 +153,26 @@ impl DesktopSettings {
             .filter(|w| w.is_finite())
             .map(|w| w.clamp(EXPLORER_WIDTH_MIN, EXPLORER_WIDTH_MAX))
     }
+
+    /// The persisted, validated appearance customization (openspec:
+    /// add-usability-field-patch §3) — the curated accent, density, font scale,
+    /// and theme preset. Only whitelisted keys carrying an in-vocabulary value
+    /// survive; a free-form color or CSS could never be stored. Rides the
+    /// `extra` map under `appearance` (the widgetPos precedent). PARITY:
+    /// src/lib/appearanceSpec.ts::normalizeAppearance + settings.ts::appearance.
+    pub fn appearance(&self) -> serde_json::Map<String, serde_json::Value> {
+        let mut out = serde_json::Map::new();
+        if let Some(obj) = self.extra.get("appearance").and_then(|v| v.as_object()) {
+            for (k, v) in obj {
+                if let Some(s) = v.as_str() {
+                    if valid_appearance_value(k, s) {
+                        out.insert(k.clone(), serde_json::Value::from(s));
+                    }
+                }
+            }
+        }
+        out
+    }
 }
 
 fn settings_file() -> Option<PathBuf> {
@@ -293,6 +313,55 @@ pub fn set_explorer_width(mode: &str, width: f64) -> DesktopSettings {
         if let Some(obj) = entry.as_object_mut() {
             obj.insert(mode.to_string(), serde_json::Value::from(w));
         }
+        write_json(&f, &next);
+    }
+    next
+}
+
+/// Whether `val` is an in-vocabulary value for appearance key `key` (openspec:
+/// add-usability-field-patch §3). The whole enum surface — no free-form color,
+/// no CSS. PARITY: the isThemePreset/isAccent/isDensity/isFontScale guards in
+/// src/lib/appearanceSpec.ts; keep the value sets byte-identical.
+fn valid_appearance_value(key: &str, val: &str) -> bool {
+    match key {
+        "themePreset" => matches!(val, "beam-light" | "beam-dark" | "auto"),
+        "accent" => matches!(val, "amber" | "teal" | "orchid"),
+        "density" => matches!(val, "comfortable" | "compact"),
+        "fontScale" => matches!(val, "s" | "m" | "l"),
+        _ => false,
+    }
+}
+
+/// Merge a validated appearance patch into the settings file (openspec §3) —
+/// only whitelisted keys with an in-vocabulary value are written, so a
+/// free-form color or CSS can never be stored. Merges over any existing
+/// appearance so a single-key change (the directive setting only `accent`)
+/// keeps the rest. Ignores non-object input, leaving the file untouched.
+/// PARITY: src/server/settings.ts::setAppearance.
+pub fn set_appearance(patch: &serde_json::Value) -> DesktopSettings {
+    let Some(f) = settings_file() else {
+        return DesktopSettings::default();
+    };
+    let mut next = read_desktop_settings();
+    let entry = next
+        .extra
+        .entry("appearance".to_string())
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    if !entry.is_object() {
+        *entry = serde_json::Value::Object(serde_json::Map::new());
+    }
+    let mut changed = false;
+    if let (Some(obj), Some(patch_obj)) = (entry.as_object_mut(), patch.as_object()) {
+        for (k, v) in patch_obj {
+            if let Some(s) = v.as_str() {
+                if valid_appearance_value(k, s) {
+                    obj.insert(k.clone(), serde_json::Value::from(s));
+                    changed = true;
+                }
+            }
+        }
+    }
+    if changed {
         write_json(&f, &next);
     }
     next

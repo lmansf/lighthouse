@@ -1439,6 +1439,8 @@ pub fn settings_get(app: AppHandle) -> Value {
             "window": s.explorer_width("window"),
             "widget": s.explorer_width("widget"),
         },
+        // Appearance customization (openspec §3), validated. Mirrors route.ts GET.
+        "appearance": s.appearance(),
     })
 }
 
@@ -1465,6 +1467,9 @@ pub fn settings_set(
     // positional param on write_desktop_settings (which would clobber the
     // sibling mode and trip the settings_test writer tripwire). None = untouched.
     explorer_width: Option<Value>,
+    // Appearance customization (openspec §3): a validated patch through its own
+    // narrow merge-setter (set_appearance), like explorer_width. None = untouched.
+    appearance: Option<Value>,
 ) -> Value {
     // A new summon shortcut must PARSE before anything persists — saving an
     // unregistrable string would strand the user with no hotkey at all.
@@ -1515,6 +1520,13 @@ pub fn settings_set(
     if let Some(ew) = explorer_width.as_ref() {
         if let (Some(mode), Some(width)) = (ew["mode"].as_str(), ew["width"].as_f64()) {
             settings::set_explorer_width(mode, width);
+        }
+    }
+    // Appearance customization (openspec §3): the engine validates against the
+    // whitelist; anything else is dropped.
+    if let Some(ap) = appearance.as_ref() {
+        if ap.is_object() {
+            settings::set_appearance(ap);
         }
     }
     if shortcut_changed && !crate::register_summon_shortcut(&app) {
@@ -1625,6 +1637,7 @@ pub fn settings_set(
             "window": widths.explorer_width("window"),
             "widget": widths.explorer_width("widget"),
         },
+        "appearance": widths.appearance(),
     })
 }
 

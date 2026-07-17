@@ -3,7 +3,14 @@
 import { NextResponse } from "next/server";
 import { isSameOrigin } from "@/server/http";
 import { isDesktopApp } from "@/server/config";
-import { readDesktopSettings, writeDesktopSettings, setExplorerWidth, explorerWidth } from "@/server/settings";
+import {
+  readDesktopSettings,
+  writeDesktopSettings,
+  setExplorerWidth,
+  explorerWidth,
+  setAppearance,
+  appearance,
+} from "@/server/settings";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -22,6 +29,7 @@ export async function GET() {
     briefingNoteHour: s.briefingNoteHour ?? 9, // default 9am (G5)
     tourShown: s.tourShown === true, // first-run tour, once per install
     explorerWidth: { window: explorerWidth(s, "window"), widget: explorerWidth(s, "widget") },
+    appearance: appearance(s),
   });
 }
 
@@ -61,6 +69,12 @@ export async function POST(req: Request) {
   const ew = body.explorerWidth;
   if (ew && (ew.mode === "window" || ew.mode === "widget") && typeof ew.width === "number") {
     setExplorerWidth(ew.mode, ew.width);
+  }
+  // Appearance customization (openspec §3): the normalizer drops anything
+  // outside the whitelist, so nothing but bounded enum values can persist.
+  // Runs before writeDesktopSettings so the returned `s` reflects it.
+  if (body.appearance && typeof body.appearance === "object") {
+    setAppearance(body.appearance);
   }
   const s = writeDesktopSettings(patch);
   return NextResponse.json({

@@ -1634,6 +1634,8 @@ pub async fn settings_get() -> Response {
             "window": s.explorer_width("window"),
             "widget": s.explorer_width("widget"),
         },
+        // Appearance customization (openspec §3), validated. Mirrors route.ts GET.
+        "appearance": s.appearance(),
     }))
     .into_response()
 }
@@ -1674,7 +1676,12 @@ pub async fn settings_post(headers: HeaderMap, body: Option<Json<Value>>) -> Res
     if let (Some(mode), Some(width)) = (ew["mode"].as_str(), ew["width"].as_f64()) {
         settings::set_explorer_width(mode, width);
     }
-    // Re-read so the response reflects the merge above (the writer's `s` doesn't).
+    // Appearance customization (openspec §3): the engine validates against the
+    // whitelist. Mirrors route.ts POST.
+    if body["appearance"].is_object() {
+        settings::set_appearance(&body["appearance"]);
+    }
+    // Re-read so the response reflects the merges above (the writer's `s` doesn't).
     let widths = settings::read_desktop_settings();
     Json(json!({
         "ok": true,
@@ -1697,6 +1704,7 @@ pub async fn settings_post(headers: HeaderMap, body: Option<Json<Value>>) -> Res
             "window": widths.explorer_width("window"),
             "widget": widths.explorer_width("widget"),
         },
+        "appearance": widths.appearance(),
     }))
     .into_response()
 }

@@ -11,6 +11,7 @@
  */
 import fs from "node:fs";
 import { writeJson } from "./config";
+import { normalizeAppearance, type AppearancePatch } from "../lib/appearanceSpec";
 
 export interface DesktopSettings {
   /** The local vault directory (owned by the desktop shell). */
@@ -108,6 +109,14 @@ export interface DesktopSettings {
    * set_explorer_width in settings.rs.
    */
   explorerWidth?: { window?: number; widget?: number };
+  /**
+   * Appearance customization (openspec: add-usability-field-patch §3): the
+   * curated accent, row density, font scale, and theme preset. Whitelisted and
+   * validated by src/lib/appearanceSpec.ts — the SAME normalizer the ask-to-
+   * adjust directive uses, so the two can never drift. PARITY: appearance /
+   * set_appearance in settings.rs.
+   */
+  appearance?: AppearancePatch;
 }
 
 function settingsFile(): string | null {
@@ -169,6 +178,31 @@ export function setExplorerWidth(mode: "window" | "widget", width: number): Desk
     } catch {
       // best-effort, like writeDesktopSettings
     }
+  }
+  return next;
+}
+
+/** The persisted, validated appearance patch (openspec §3): unknown keys and
+ *  out-of-vocabulary values are dropped by the normalizer. PARITY:
+ *  DesktopSettings::appearance in settings.rs. */
+export function appearance(s: DesktopSettings): AppearancePatch {
+  return normalizeAppearance(s.appearance);
+}
+
+/** Merge a validated appearance patch into the settings file — the normalizer
+ *  is the gate, so nothing outside the whitelist (no free-form color, no CSS)
+ *  can ever be stored. Merges over the existing appearance so a single-key
+ *  change (e.g. the directive setting only `accent`) preserves the rest.
+ *  Best-effort write. PARITY: set_appearance in settings.rs. */
+export function setAppearance(patch: unknown): DesktopSettings {
+  const f = settingsFile();
+  if (!f) return {};
+  const next = readDesktopSettings();
+  next.appearance = { ...normalizeAppearance(next.appearance), ...normalizeAppearance(patch) };
+  try {
+    writeJson(f, next);
+  } catch {
+    // best-effort, like writeDesktopSettings
   }
   return next;
 }

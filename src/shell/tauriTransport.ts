@@ -245,6 +245,11 @@ async function route(
             // NOT the positional writer — forwarded verbatim when well-formed,
             // else null (dropped). Mirrors the /api/settings route twin.
             explorerWidth: isExplorerWidthPatch(body.explorerWidth) ? body.explorerWidth : null,
+            // Appearance customization (openspec §3): a permissive object the
+            // engine validates against the whitelist (set_appearance). null when
+            // absent or malformed. Mirrors the /api/settings route twin.
+            appearance:
+              body.appearance && typeof body.appearance === "object" ? body.appearance : null,
           });
     default:
       return json({ error: "unknown route" }, 404);
