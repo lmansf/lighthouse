@@ -13,6 +13,13 @@
 //! §3.5 (detailed in `protocol`): v1 is STDIO ONLY — no listening port, hence no
 //! network-auth surface. A future port MUST bind loopback and adopt `auth.rs`'s
 //! loopback-host allowlist + same-port origin + `LIGHTHOUSE_API_TOKEN`.
+//!
+//! PARITY: this binary is Rust ENTRY PLUMBING (the same category as `ask.rs` and
+//! the `lighthouse` CLI, and the desktop shell / headless server) — it has NO
+//! `src/server` twin. Only the engine functions its tools call (`run_headless_ask`,
+//! `vault::list_nodes`, `investigations::listing`, `analytics::run_direct`) carry
+//! the twin obligation; there is no headless/MCP ask surface in the TS engine (the
+//! app is the only entry). See docs/ts-twin.md.
 
 mod protocol;
 mod tools;

@@ -38,6 +38,12 @@ async fn drive(mut stream: Pin<Box<dyn Stream<Item = ChatChunk> + Send>>) -> Vec
     chunks
 }
 
+/// The full streamed answer — every chunk's `delta` concatenated, as a caller
+/// assembling the visible answer would.
+fn answer_text(chunks: &[ChatChunk]) -> String {
+    chunks.iter().map(|c| c.delta.as_str()).collect()
+}
+
 /// The final chunk's engine-emitted provenance stamp — what a caller READS to
 /// report where the answer was computed and what it cost.
 fn final_meta(chunks: &[ChatChunk]) -> ChunkMeta {
@@ -222,6 +228,72 @@ async fn cache_replay_records_zero_new_cost() {
         after_replay[1].cost.is_none(),
         "a replay records 0 new cost (ask_new_cost None on cached_at)"
     );
+}
+
+// --- §6.1: the model-free ask golden — grounded + deterministic + stamp-agreeing -----
+
+/// §6.1: a model-free `run_headless_ask --local` golden. Over a fixed fixture the
+/// device path yields a GROUNDED answer (it names the vault's files), a DEVICE
+/// provenance whose read-off fields AGREE with the streamed `ChunkMeta` stamp,
+/// and — the guarantee beyond §1.7 — the SAME answer twice. Both runs are LIVE
+/// (the cache is reset between them, so this proves the PIPELINE is deterministic,
+/// not that the cache echoes its own bytes). The meta path bins mtime to "just
+/// now" under 60s, so the freshly-written fixture makes the text byte-stable.
+#[tokio::test]
+async fn headless_local_ask_is_grounded_deterministic_and_stamp_agreeing() {
+    let dir = tempfile::tempdir().unwrap();
+    let aux = tempfile::tempdir().unwrap();
+    let _guard = common::lock_env(dir.path());
+    std::env::remove_var("LIGHTHOUSE_APP_STATE_DIR");
+    std::env::remove_var("LIGHTHOUSE_PROFILE_FILE");
+    std::env::remove_var("LIGHTHOUSE_AUDIT_FILE");
+    enable_audit(&aux.path().join("settings.json"));
+
+    let ids = seed_meta_vault(dir.path());
+    let ask = || {
+        run_headless_ask(
+            META_QUESTION.to_string(),
+            ids.clone(),
+            vec![],
+            AskOpts { local: true, ..AskOpts::default() },
+        )
+    };
+
+    // Run 1 — live (fresh cache).
+    answer_cache::reset_store();
+    let first = drive(ask()).await;
+    let first_meta = final_meta(&first);
+    let first_answer = answer_text(&first);
+
+    // Grounded: the device answer NAMES the fixture's files (not a generic reply).
+    assert!(
+        first_answer.contains("sales.csv") && first_answer.contains("notes.md"),
+        "the grounded answer names the vault's files, got: {first_answer:?}"
+    );
+    // Device provenance, and the stamp's own source count AGREES with what it cited.
+    assert_eq!(first_meta.origin, "device", "--local forces the device origin");
+    assert_eq!(
+        first_meta.source_file_count,
+        cited_files(&first).len(),
+        "the stamp's source_file_count equals the files the answer actually cited"
+    );
+    assert!(first_meta.cached_at.is_none(), "run 1 is live, not a replay");
+
+    // Run 2 — also live (reset the cache so this is NOT a cached-bytes echo).
+    answer_cache::reset_store();
+    let second = drive(ask()).await;
+    let second_meta = final_meta(&second);
+
+    assert!(second_meta.cached_at.is_none(), "run 2 is live too (cache was reset)");
+    // Determinism: the same question over the same fixture yields the SAME answer
+    // and the SAME device provenance both times.
+    assert_eq!(answer_text(&second), first_answer, "the model-free answer is deterministic across runs");
+    assert_eq!(second_meta.origin, first_meta.origin, "origin is stable across runs");
+    assert_eq!(
+        second_meta.source_file_count, first_meta.source_file_count,
+        "the source count is stable across runs"
+    );
+    assert_eq!(sorted(cited_files(&second)), sorted(cited_files(&first)), "the cited file set is stable");
 }
 
 // --- §1.4: the vault ⇒ state-root mapping (the one thing to get exactly right) -------
