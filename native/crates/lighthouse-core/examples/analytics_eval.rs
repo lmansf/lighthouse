@@ -34,11 +34,13 @@ use datafusion::arrow::util::display::array_value_to_string;
 use datafusion::prelude::{CsvReadOptions, SessionContext};
 use futures::StreamExt;
 use lighthouse_core::analytics::{
-    chart_card, extract_sql, guard_sql, register_tables, run_query, sql_question, QueryResult,
-    TableReg,
+    certified_metrics, chart_card, extract_sql, guard_sql, register_tables, run_query,
+    sql_question, QueryResult, TableReg,
 };
 use lighthouse_core::beam::{BeamLoop, Budget, StopReason};
 use lighthouse_core::catalog::ColumnKind;
+use lighthouse_core::semantic::Metric;
+use lighthouse_core::views::{Reads, SummarySource, ViewSummary};
 use lighthouse_core::ledger::assumption_ledger;
 use lighthouse_core::llm::{stream_answer, Ctx, ModelCfg};
 use lighthouse_core::recipes::lookup;
@@ -609,6 +611,51 @@ async fn main() {
                 failures += 1;
                 println!("  FAIL  unreported-usage fallback did not fall back to MaxSteps");
             }
+        }
+    }
+
+    // --- Section 1 (cont.): semantic layer floor (openspec: add-semantic-layer §7.1) ---
+    //
+    // A "certified" mark must be a VERIFIED FACT — the executed SQL's projection is
+    // normalized-AST-equal to a blessed metric's stored definition — never a
+    // decoration or a model claim. Assert the exact certification against a synthetic
+    // blessed metric (revenue = SUM(amount)): an AST-equal projection certifies and
+    // names it; a near-miss (an added FILTER) does NOT. Model-free and deterministic
+    // (removing narration changes no verdict), so it gates CI like the goldens above.
+    // reconcile_metric's re-run/degrade determinism and resolve_metric are covered by
+    // the model-free analytics lib tests (`cargo test --workspace`).
+    println!("\n== semantic layer floor (model-free) ==");
+    {
+        let revenue = Metric {
+            id: "metric-eval".to_string(),
+            name: "revenue".to_string(),
+            expression: "SUM(amount)".to_string(),
+            description: String::new(),
+            entity: "sales".to_string(),
+            reads: Reads { files: vec![], views: vec![] },
+            summary: ViewSummary { text: "revenue".to_string(), source: SummarySource::Question },
+            created_ms: 0,
+        };
+        let defs = [revenue];
+        // An AST-equal projection certifies and names the blessed metric.
+        let hit = certified_metrics("SELECT SUM(amount) AS revenue FROM sales", &defs);
+        if hit == ["revenue"] {
+            println!("  PASS  an AST-equal projection certifies the blessed metric");
+        } else {
+            failures += 1;
+            println!("  FAIL  certify: got {hit:?} (want [\"revenue\"])");
+        }
+        // A near-miss — the same aggregate with an added FILTER — is NOT AST-equal,
+        // so it is NOT certified (the mark can't be earned by an approximate query).
+        let miss = certified_metrics(
+            "SELECT SUM(amount) FILTER (WHERE region = 'north') AS revenue FROM sales",
+            &defs,
+        );
+        if miss.is_empty() {
+            println!("  PASS  a near-miss (added FILTER) is NOT certified");
+        } else {
+            failures += 1;
+            println!("  FAIL  near-miss certify: got {miss:?} (want none)");
         }
     }
 
