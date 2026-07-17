@@ -123,6 +123,36 @@ impl Recipe {
             columns: cols.to_vec(),
         })
     }
+
+    /// The ENGINE-authored chart for this recipe's representative result (plan[0]),
+    /// if any (add-quant-depth §2.3). Only `forecast` draws one — a `band` over its
+    /// actual-then-projected series — built from the executed batches via the
+    /// directive path, so the chart's numbers are the engine's, never the model's.
+    /// Every other recipe returns `None` (they emit no chart). The band kind and
+    /// the bound columns are validated inside `chart_spec_from_batches_directed`;
+    /// an unexpected shape simply yields `None` (no chart, no error).
+    pub fn chart(&self, res: &crate::analytics::QueryResult) -> Option<String> {
+        match self.id {
+            "forecast" => forecast_band_chart(res),
+            _ => None,
+        }
+    }
+}
+
+/// Build the forecast's `band` chart from its representative result (the unified
+/// `period, kind, value, lower, upper` series). The directive names the bound
+/// columns; `chart_spec_from_batches_directed` reads every value from the batches.
+fn forecast_band_chart(res: &crate::analytics::QueryResult) -> Option<String> {
+    let directive = crate::analytics::ChartDirective {
+        kind: crate::analytics::ChartDirectiveKind::Band,
+        label_column: "period".to_string(),
+        series_columns: vec!["value".to_string()],
+        lower_column: Some("lower".to_string()),
+        upper_column: Some("upper".to_string()),
+        title: None,
+        sort: None,
+    };
+    crate::analytics::chart_spec_from_batches_directed(&res.batches, &directive)
 }
 
 /// The concrete columns a recipe run resolved from the catalog. Carries the full

@@ -667,6 +667,26 @@ async fn main() {
                         ],
                     ),
                 );
+                // §2.3: the forecast recipe DRAWS a band chart over its
+                // representative result (plan[0]) — engine-authored, kind "band",
+                // values + bounds straight from the batches (the forecast tail
+                // carries a non-null upper bound).
+                record(&mut failures, "forecast: draws a band chart over the projection", {
+                    let chart = lookup("forecast").unwrap().chart(&steps[0].2);
+                    match chart.as_deref().map(serde_json::from_str::<serde_json::Value>) {
+                        Some(Ok(v))
+                            if v["kind"] == "band"
+                                && v["series"][0]["name"] == "value"
+                                && v["series"][0]["upper"]
+                                    .as_array()
+                                    .map(|a| a.iter().any(|x| !x.is_null()))
+                                    .unwrap_or(false) =>
+                        {
+                            Ok(())
+                        }
+                        other => Err(format!("unexpected forecast chart: {other:?}")),
+                    }
+                });
             }
             Err(e) => {
                 failures += 1;

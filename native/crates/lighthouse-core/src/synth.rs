@@ -1075,6 +1075,15 @@ fn live_pipeline(
             for (s, label) in steps.iter().zip(&labels) {
                 yield delta(format!("\n**{label}**\n\n{}\n", s.result_markdown));
             }
+            // Engine-authored chart (add-quant-depth §2.3): a recipe that declares
+            // one — the forecast band — draws it from the representative result
+            // (plan[0]), the SAME inline `lighthouse-chart` fence the analytics
+            // branch emits. Never model-chosen; every value is the engine's.
+            if let Some(res) = &representative_result {
+                if let Some(chart) = recipe.chart(res) {
+                    yield delta(format!("\n```lighthouse-chart\n{chart}\n```\n"));
+                }
+            }
             // Provenance footer: EVERY executed query in order (the multi-step
             // footer shape), then ONE freshness stamp over the union they read.
             if steps.len() == 1 {
