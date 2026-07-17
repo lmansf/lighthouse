@@ -970,6 +970,97 @@ fn view_files_included(
         .any(|pid| view_files_included(pid, records, included, seen))
 }
 
+// --- Capability map (openspec: add-deep-analysis §3) ------------------------------
+
+/// One analyzable table in the capability map: its display name, the typed
+/// columns (`kind` serializes to "numeric"/"date"/"text"), and whether it has a
+/// Date+Numeric shape (⇒ investigable by deep analysis). KEEP IN SYNC with
+/// `CapabilityTable` in src/contracts/types.ts.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CapabilityTable {
+    pub name: String,
+    pub columns: Vec<catalog::Column>,
+    pub investigable: bool,
+}
+
+/// One "Investigate {table}" suggestion — offered for a Date+Numeric table only,
+/// so it never proposes an investigation that would produce an empty report. KEEP
+/// IN SYNC with `SuggestedInvestigation` in src/contracts/types.ts.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SuggestedInvestigation {
+    pub label: String,
+    pub table: String,
+}
+
+/// The capability map: a single view of what the included vault makes
+/// investigable — the analyzable tables + their columns, the recipes and metrics
+/// that apply, the suggested asks, and one investigation per Date+Numeric table.
+/// KEEP IN SYNC with `CapabilityMap` in src/contracts/types.ts.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CapabilityMap {
+    pub tables: Vec<CapabilityTable>,
+    pub recipes: Vec<RecipeCard>,
+    pub metrics: Vec<MetricCard>,
+    pub suggested_asks: Vec<SuggestedAsk>,
+    pub suggested_investigations: Vec<SuggestedInvestigation>,
+}
+
+/// Aggregate the analyzable surfaces for the included set into one map (openspec:
+/// add-deep-analysis §3). It introduces NO new analysis: the recipes, metrics, and
+/// asks are the existing `applicable_recipes` / `applicable_semantics` /
+/// `suggested_asks_resolved` outputs VERBATIM, so their cloud-posture gating
+/// carries through unchanged (a local-only recipe/metric never appears on a cloud
+/// map). The tables + `suggested_investigations` come from the SAME recent
+/// tabular-file window (`SUGGEST_FILES`) those nav helpers use, so the map is
+/// internally consistent — every listed table is one the recipes/asks were
+/// computed over. `suggested_investigations` is empty when no included table has a
+/// Date+Numeric shape (nothing is investigable), rather than offering an
+/// investigation that would produce an empty report.
+pub async fn capability_map(included: Vec<String>, is_cloud: bool) -> CapabilityMap {
+    // Tables: the recent tabular-file window, typed by the catalog (a CSV date
+    // reads as Date). One investigation per Date+Numeric table. The catalog read
+    // is blocking — kept off the async runtime like the recipe/ask helpers.
+    let table_included = included.clone();
+    let tables: Vec<CapabilityTable> = tokio::task::spawn_blocking(move || {
+        let recent: Vec<(String, String, PathBuf)> =
+            included_files_with_mtime(&table_included, is_cloud)
+                .into_iter()
+                .filter(|(_, name, _, _)| is_tabular(name))
+                .take(SUGGEST_FILES)
+                .map(|(id, name, abs, _)| (id, name, abs))
+                .collect();
+        catalog::columns_for(&recent)
+            .into_iter()
+            .map(|fc| {
+                let investigable = fc.columns.iter().any(|c| c.kind == ColumnKind::Date)
+                    && fc.columns.iter().any(|c| c.kind == ColumnKind::Numeric);
+                CapabilityTable { name: fc.name, columns: fc.columns, investigable }
+            })
+            .collect()
+    })
+    .await
+    .unwrap_or_default();
+
+    let suggested_investigations: Vec<SuggestedInvestigation> = tables
+        .iter()
+        .filter(|t| t.investigable)
+        .map(|t| SuggestedInvestigation {
+            label: format!("Investigate {}", t.name),
+            table: t.name.clone(),
+        })
+        .collect();
+
+    // The existing posture-gated surfaces, reused verbatim (no re-gating).
+    let recipes = applicable_recipes(included.clone(), is_cloud).await;
+    let metrics = applicable_semantics(included.clone(), is_cloud).metrics;
+    let suggested_asks = suggested_asks_resolved(included, is_cloud).await;
+
+    CapabilityMap { tables, recipes, metrics, suggested_asks, suggested_investigations }
+}
+
 // --- Tests -----------------------------------------------------------------------
 
 #[cfg(test)]
