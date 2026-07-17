@@ -1,0 +1,37 @@
+# Tasks — deep analysis ("Investigate X" → structured report) + capability map
+
+## 1. The report model + assembler + renderer (model-free core — do first)
+- [ ] 1.1 NEW `native/crates/lighthouse-core/src/reports.rs`: `Report { title, generated_ms: i64, summary: Vec<String>, sections: Vec<ReportSection>, caveats: Vec<String> }` + `ReportSection { heading, question, result_markdown, sql }`. `pub mod reports;` in `lib.rs`.
+- [ ] 1.2 `assemble(title, generated_ms, sub_analyses, caveats) -> Report` — pure: takes already-executed `(heading, question, QueryResult, sql)` tuples and builds the `Report`. The `summary` is TEMPLATED from each section's top-row key cells (the `insights::scan` headline discipline — engine numbers pulled from `QueryResult` cells, never model text).
+- [ ] 1.3 `render_markdown(&Report) -> String` reusing the `briefings.rs:245` idiom: `# {title}`, a `## Summary` bullet list, a `## {heading}` block per section (the question, the result table, a fenced `Query used` SQL block), a `## Caveats` block. Byte-stable given a fixed `generated_ms` (passed in, never read from the clock).
+- [ ] 1.4 Tests: `assemble` builds the expected sections + a summary whose numbers all appear in the section results; `render_markdown` is byte-stable across two calls; an empty `sub_analyses` renders an honest "nothing to analyze" summary + no sections.
+
+## 2. The `investigate` engine + in-vault write (engine, then write)
+- [ ] 2.1 `investigate(table, included_ids, is_cloud) -> Report`: build the catalog + register the tables (the `insights::scan` pattern — `catalog::columns_for` + `analytics::register_tables` over the included tabular files), resolve the target `table`'s registered SQL name + typed columns.
+- [ ] 2.2 For each `recipes::BUILTINS` whose `.applicable(cols)` holds, resolve params + run the representative query (`plan[0]`) via `analytics::run_query`; collect `(recipe.name, recipe.summary, QueryResult, sql)` as a sub-analysis. A recipe that doesn't resolve or returns no rows is SKIPPED (per the `insights::scan` per-detector skip). Bounded: the fixed ≤7 builtins, one representative query each.
+- [ ] 2.3 Caveats from the last section's assumption ledger (`ledger::assumption_ledger_parts`) + any data-quality finding; then `assemble`. Degradation: no Date+Numeric shape (or no sections) → an honest empty report, never an error.
+- [ ] 2.4 In-vault write (the `exportChat`/briefing precedent): render → a write-artifact allowlist subdir (`investigations::notes_subdir(id)` when an investigation is named, else a `Lighthouse Reports` allowlist entry) + `vault::write_artifact`; return `{savedId, savedName}`. Non-egress, sanitized, never-overwrite.
+- [ ] 2.5 OPTIONAL model narrative (opt-in, never the core): when `is_cloud`/real model AND the caller opts in, ONE bounded `stream_answer` prepends a prose intro over the assembled section summaries (the recipe-narration posture — narrates, supplies no number). The model-free report stands complete without it; the CI floor runs model-free only.
+- [ ] 2.6 Tests (`tests/reports_test.rs` or in `reports.rs`): `investigate` over a fixture Date+Numeric table returns a report whose sections are the applicable recipes' verified results and whose every summary figure appears in a section result; an unanalyzable table returns an empty-sections honest report; the write lands under the allowlist subdir and returns an id.
+
+## 3. The capability map aggregator (engine)
+- [ ] 3.1 `capability_map(included_ids, is_cloud) -> CapabilityMap { tables, recipes, metrics, suggested_asks, suggested_investigations }`: aggregate `catalog::columns_for` (tables + typed columns), `meta::applicable_recipes`, `meta::applicable_semantics` (metrics), `meta::suggested_asks`; derive `suggested_investigations` = one "Investigate {table}" per catalog table with a Date+Numeric shape.
+- [ ] 3.2 Posture: the aggregated lists carry the SAME posture gating their sources apply (a cloud provider drops effectively-local-only recipes/metrics) — reuse the existing `applicable_*` outputs directly, no re-gating. `suggested_investigations` empty when no analyzable table.
+- [ ] 3.3 Tests: `capability_map` over a fixture aggregates the expected tables/recipes/metrics/asks + one investigation per Date+Numeric table; a vault with no analyzable table offers no investigations; cloud posture drops local-only capabilities (matches the underlying `applicable_*`).
+
+## 4. Op surface + UI (engine-before-UI)
+- [ ] 4.1 An `investigate` op (`routes.rs`, `commands.rs`, `app/api/rag/route.ts`): gather the included tabular files, run `investigate(table, …)`, write the report, return `{savedId, savedName}`. PARITY: `route.ts` returns `{available:false}` (Rust-only). commands.rs mirrors routes.rs.
+- [ ] 4.2 A `capabilityMap` op (same three files): return the aggregate. PARITY: `route.ts` returns an empty map.
+- [ ] 4.3 UI: a capability-map gallery surface (a `RecipesNav`-style panel — tables + their recipes/metrics + suggested asks) with an "Investigate {table}" affordance that runs the `investigate` op and opens the written report note. Contract (types + service + real + mock) mirrors `applicableRecipes`. License/gating consistent with the other analytics surfaces; theme-aware.
+- [ ] 4.4 Tests: a UI test for the gallery + the investigate affordance (mock contract → renders tables/recipes + a "nothing investigable" empty state); nav adjacency preserved if a nav entry is added.
+
+## 5. CI + docs
+- [ ] 5.1 A model-free `deep-analysis` floor in `examples/analytics_eval.rs`: `investigate` over a fixture Date+Numeric table yields a report whose sections are the applicable recipes' verified results, whose every figure appears in a `run_query` result (the every-number invariant), and which is byte-identical across two runs (fixed `generated_ms`). Rides the already-gated eval (`native.yml`); `cargo build/test --workspace` picks up `reports.rs` + tests with no workflow edit.
+- [ ] 5.2 `docs/ts-twin.md`: add a Rust-only row for deep analysis (`investigate`) + the capability map (`capability_map`) — Rust-only (DataFusion + recipes); the TS `investigate` op returns `{available:false}` and `capabilityMap` an empty map.
+- [ ] 5.3 `docs/data-flows.md`: note that `investigate` is on-device SQL (the recipe battery) written in-vault (no new egress — the deterministic core uses no model; the optional narrative egresses exactly as any recipe narration); the capability map is pure aggregation.
+
+## 6. Verify + parity + gates + no-bump confirmation
+- [ ] 6.1 Confirm NO `CACHE_VERSION` bump (the report is computed on demand + written in-vault via `write_artifact`; it never becomes a `CachedAnswer` and touches neither `AnalyticsMeta`/`ChunkMeta` nor the extract cache) — `CACHE_VERSION` stays 12, answer-cache `ENVELOPE_V` stays 1. State it explicitly.
+- [ ] 6.2 Confirm NO version bump (H-suite phase; the five stamps do not move) — the A/B/C/D precedent.
+- [ ] 6.3 Parity: deep analysis + capability map are Rust-only; confirm the `route.ts` `{available:false}`/empty degradations + the ts-twin.md row (no `reports.ts`).
+- [ ] 6.4 Full gates: `cd native && cargo build --workspace` (reports compiles in-container); `cargo test --workspace` (reports + investigate + capability-map tests); `npm run test`; `tsc --noEmit`; `next lint`; `analytics_eval`/`chart_eval` floors (incl. the new deep-analysis golden); `node scripts/openspec-validate.mjs --all`. Desktop `commands.rs` arms grep-verified against the in-container `routes.rs` arms.
