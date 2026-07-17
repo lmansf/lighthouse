@@ -948,6 +948,57 @@ export interface MetricCard {
   localOnly: boolean;
 }
 
+// --- Deep analysis + capability map (openspec: add-deep-analysis) -----------------
+
+/** A typed column in the capability map — `kind` mirrors the Rust `ColumnKind`. */
+export type CapabilityColumnKind = "numeric" | "date" | "text";
+
+/**
+ * One analyzable table in the capability map: its display name, typed columns,
+ * and whether it has a Date+Numeric shape (⇒ investigable by deep analysis). KEEP
+ * IN SYNC with `CapabilityTable` in lighthouse-core meta.rs.
+ */
+export interface CapabilityTable {
+  name: string;
+  columns: { name: string; kind: CapabilityColumnKind }[];
+  investigable: boolean;
+}
+
+/**
+ * One "Investigate {table}" suggestion — offered for a Date+Numeric table only,
+ * so it never proposes an investigation that would produce an empty report. KEEP
+ * IN SYNC with `SuggestedInvestigation` in lighthouse-core meta.rs.
+ */
+export interface SuggestedInvestigation {
+  label: string;
+  table: string;
+}
+
+/**
+ * The capability map (openspec: add-deep-analysis §3): a single view of what the
+ * included vault makes investigable — the analyzable tables + their columns, the
+ * recipes and metrics that apply, the suggested asks, and one investigation per
+ * Date+Numeric table. A pure aggregate of the posture-gated `applicable_*`
+ * surfaces (no new analysis). KEEP IN SYNC with `CapabilityMap` in meta.rs.
+ * PARITY: Rust-only — the TS `capabilityMap` op returns an empty map.
+ */
+export interface CapabilityMap {
+  tables: CapabilityTable[];
+  recipes: RecipeCard[];
+  metrics: MetricCard[];
+  suggestedAsks: { label: string; question: string }[];
+  suggestedInvestigations: SuggestedInvestigation[];
+}
+
+/** The honest empty capability map — the TS twin's degradation + a safe default. */
+export const EMPTY_CAPABILITY_MAP: CapabilityMap = {
+  tables: [],
+  recipes: [],
+  metrics: [],
+  suggestedAsks: [],
+  suggestedInvestigations: [],
+};
+
 /** One synonym surfaced for the semantic nav. KEEP IN SYNC with the Rust twin. */
 export interface SynonymCard {
   term: string;

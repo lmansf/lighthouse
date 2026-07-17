@@ -206,6 +206,20 @@ engine numbers — so a scan is pure on-device SQL and touches egress **not at
 all**. No new network path; the band chart the forecast draws rides inline in
 the answer markdown like every other chart.
 
+Deep analysis (`reports.rs` `investigate`, add-deep-analysis) is the same
+posture at a larger grain. "Investigate {table}" runs the applicable recipe
+battery — those same guarded DataFusion SELECTs — and assembles the VERIFIED
+results into a report that is **written into the vault** through the
+write-artifact allowlist (`vault::write_artifact`, the briefing/export note
+precedent): a sanitized, traversal-safe, never-overwrite **local file write**,
+never a network destination. The deterministic core uses **no model**, so it
+egresses **not at all**; the optional prose intro (off by default) would egress
+exactly as any recipe narration does and supplies no number. The **capability
+map** (`meta::capability_map`) is pure aggregation of the already-posture-gated
+`applicable_*` surfaces — it introduces no analysis and no network path, and a
+cloud posture drops a local-only table from the map just as it drops it from
+every other surface.
+
 ## 7. Build/CI-time only — never in the shipped app
 
 `scripts/fetch-local-model.mjs` (build machines): llama.cpp GitHub

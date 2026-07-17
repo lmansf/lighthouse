@@ -669,6 +669,31 @@ export async function POST(req: Request) {
         insights: { findings: [], tablesScanned: 0, tablesAvailable: 0 },
       });
 
+    // Deep analysis (openspec: add-deep-analysis §4.1). PARITY: `investigate`
+    // runs the recipe battery through DataFusion (Rust engine only) and writes an
+    // in-vault report — this dev twin never takes the analytics branch, so it is
+    // honestly unavailable rather than writing a fabricated report.
+    case "investigate":
+      return NextResponse.json({
+        available: false,
+        reason: "deep analysis runs in the Rust engine — this dev server can't execute SQL",
+      });
+
+    // The capability map (openspec: add-deep-analysis §4.2). PARITY: it aggregates
+    // the column catalog + recipe/metric applicability, which live in the Rust
+    // engine only, so the twin returns an EMPTY map (nothing to aggregate) rather
+    // than a partial or fabricated one.
+    case "capabilityMap":
+      return NextResponse.json({
+        map: {
+          tables: [],
+          recipes: [],
+          metrics: [],
+          suggestedAsks: [],
+          suggestedInvestigations: [],
+        },
+      });
+
     // PARITY: recipe EXECUTION runs guarded SELECTs through DataFusion (Rust
     // engine only) — this dev twin never takes the analytics branch, so a direct
     // recipes op is honestly unavailable (the shapeView precedent). On the Rust

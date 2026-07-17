@@ -13,6 +13,7 @@ import { ViewsNav } from "@/features/views/ViewsNav";
 import { RecipesNav } from "@/features/recipes/RecipesNav";
 import { SemanticNav } from "@/features/semantic/SemanticNav";
 import { InsightsNav } from "@/features/insights/InsightsNav";
+import { CapabilityNav } from "@/features/capabilities/CapabilityNav";
 import { ChatPanel } from "@/features/chat/ChatPanel";
 import { VersionBadge } from "@/shell/VersionBadge";
 
@@ -86,6 +87,12 @@ export default function Home() {
                 FileExplorer adjacencies the nav-UI tests pin stay intact. */}
             <InsightsNav />
             <SemanticNav />
+            {/* Capability map (openspec: add-deep-analysis §4.3): a "what can I
+                do with this vault" overview + the Investigate affordance. Placed
+                between SemanticNav and RecipesNav so the InsightsNav→SemanticNav
+                and RecipesNav→ViewsNav→InvestigationsNav→FileExplorer adjacencies
+                the nav-UI tests pin all stay intact. */}
+            <CapabilityNav />
             <RecipesNav />
             <ViewsNav />
             <InvestigationsNav />

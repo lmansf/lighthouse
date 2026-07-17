@@ -875,6 +875,61 @@ pub async fn rag_post(headers: HeaderMap, body: Option<Json<Value>>) -> Response
             let out = lighthouse_core::insights::scan(&files, is_cloud).await;
             return Json(json!({ "insights": out })).into_response();
         }
+        // Deep analysis (openspec: add-deep-analysis §4.1): investigate a table —
+        // run the applicable recipe battery over it and WRITE the assembled report
+        // in-vault (the exportChat/briefing precedent: render → write_artifact, a
+        // non-egress sanitized note), returning the saved artifact's id + name. The
+        // included TABULAR files are gathered server-side (active-included, the
+        // insights precedent), so a stale client can't widen the scan. PARITY:
+        // Rust-only (DataFusion + recipes); route.ts returns {available:false}.
+        // commands.rs mirrors this arm.
+        Some("investigate") => {
+            let Some(table) = body["table"].as_str().map(str::trim).filter(|s| !s.is_empty()) else {
+                return bad_request("investigate needs a table");
+            };
+            let table = table.to_string();
+            let investigation_id = body["investigationId"].as_str().map(String::from);
+            let is_cloud = lighthouse_core::synth::is_cloud_provider(
+                &lighthouse_core::profile::model_config(),
+            );
+            let files: Vec<(String, String, std::path::PathBuf)> =
+                lighthouse_core::vault::active_included_file_ids()
+                    .into_iter()
+                    .filter_map(|id| {
+                        lighthouse_core::vault::doc_path(&id).map(|(name, abs)| (id, name, abs))
+                    })
+                    .filter(|(_, name, _)| lighthouse_core::analytics::is_tabular(name))
+                    .collect();
+            let report = lighthouse_core::reports::investigate(&table, &files, is_cloud).await;
+            // The render + in-vault write is blocking fs — off the async runtime.
+            let written = tokio::task::spawn_blocking(move || {
+                lighthouse_core::reports::write_report(&report, investigation_id.as_deref())
+            })
+            .await
+            .map_err(|e| e.to_string())
+            .and_then(|r| r);
+            return match written {
+                Ok((id, name)) => Json(json!({ "savedId": id, "savedName": name })).into_response(),
+                Err(e) => Json(json!({ "error": e })).into_response(),
+            };
+        }
+        // The capability map (openspec: add-deep-analysis §4.2): aggregate the
+        // analyzable tables + their recipes/metrics/asks + one investigation per
+        // Date+Numeric table for the included set — a single "what can I do" view.
+        // Pure aggregation of the posture-gated applicable_* surfaces (no new
+        // analysis), so its cloud gating is inherited. PARITY: Rust-only; route.ts
+        // returns an empty map. commands.rs mirrors this arm.
+        Some("capabilityMap") => {
+            let ids: Vec<String> = body["includedFileIds"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            let is_cloud = lighthouse_core::synth::is_cloud_provider(
+                &lighthouse_core::profile::model_config(),
+            );
+            let map = lighthouse_core::meta::capability_map(ids, is_cloud).await;
+            return Json(json!({ "map": map })).into_response();
+        }
         // Semantic layer (openspec: add-semantic-layer §6.1) — the metric/synonym
         // authoring + nav surface. `list` returns the posture-eligible definitions
         // applicable to the included tables (a card shape); create/rename/delete
