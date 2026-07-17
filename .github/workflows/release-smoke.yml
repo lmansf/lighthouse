@@ -125,13 +125,29 @@ jobs:
           mkdir -p "$VAULT/docs"
           node -e '
             const fs = require("fs"), path = require("path");
-            fs.writeFileSync(path.join(process.argv[1], "docs", "smoke-fixture.md"), [
+            const vault = process.argv[1];
+            fs.writeFileSync(path.join(vault, "docs", "smoke-fixture.md"), [
               "# Smoke fixture",
               "",
               "The Q3 revenue target for the smoke test is 42 million dollars.",
               "This document exists so CI can prove a grounded, zero-network answer.",
               "",
             ].join("\n"));
+            // The CLI answers over the vault files that are RAG-INCLUDED — the
+            // headless equivalent of the app`s includedFileIds. A fresh vault
+            // defaults to the privacy-preserving "exclude" (profile.rs:
+            // DEFAULT_INCLUSION_FALLBACK), so a bare vault has an empty index and
+            // the ask honestly returns "Nothing relevant is included". The desktop
+            // boot smoke includes the fixture through the /api/rag include op; the
+            // CLI has no include subcommand, so we seed the vault`s profile with the
+            // same "index everything" onboarding choice a real user would make.
+            // `--vault` points profile.json at <vault>/.rag-vault (config.rs:
+            // profile_path falls back to state_dir), and the walk skips that
+            // dot-dir (vault.rs), so only the fixture becomes a node.
+            const stateDir = path.join(vault, ".rag-vault");
+            fs.mkdirSync(stateDir, { recursive: true });
+            fs.writeFileSync(path.join(stateDir, "profile.json"),
+              JSON.stringify({ defaultInclusionChoice: "include" }));
           ' "$VAULT"
           BIN="native/target/release/lighthouse"
           if [ "$RUNNER_OS" = "Windows" ]; then BIN="$BIN.exe"; fi
