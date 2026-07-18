@@ -1199,10 +1199,10 @@ stands after T v2 + G are queued:
 
 | What | Why |
 |---|---|
-| Dormant SharePoint/Microsoft connector, both engines, + explorer teaser | Unfinished cloud plumbing in a no-cloud product; demoted to a teaser in 0.4.5, never shipped in the Rust engine's UI; its interest-vote backend dies with T v2. Keep the SourceConnector seam, archive the implementation |
+| Dormant SharePoint/Microsoft connector | **Resolved 2026-07-15: keep as plumbing.** The connector code in both engines, the SourceConnector seam, and the SHAREPOINT_* env surface stay dormant in-tree for a future SharePoint plugin; nothing is archived, only marked dormant-by-decision |
 | DeepSeek from the built-in roster *(maintainer decision, flagged)* | Instant policy flag for the exact buyer; the shared OpenAI-compatible adapter + BYO endpoint keep the capability for anyone who insists |
 | Cloud-as-peer provider framing | Local/private becomes the hero path; cloud vendors group under an honest "sends excerpts of your included files to the vendor" label — one click away, never hidden, never dark-patterned |
-| Bundled Piper voice *(optional, flagged)* | ~60–90 MB installer diet; the flakiest mirrored asset leaves the default build; read-aloud falls back to OS voices until the user opts in |
+| Bundled Piper TTS | **Resolved 2026-07-15: drop entirely.** Binary, voice, /api/tts, and the piper-specific Linux CI workarounds (#118–#121) all go; read-aloud remains via the OS's Web Speech voices; ~60–90 MB installer diet and the flakiest mirrored asset leaves the supply chain |
 
 **Include** (missing for this persona, beyond queued G1–G6):
 
@@ -1219,14 +1219,14 @@ end-to-end (T v2 sets the posture, P makes it visible and controllable),
 and running it before G means G1's audit + eval cover P2's retrieval
 filtering. If T v2 hasn't run yet, P4's deletions can fold into it.
 
-### Track P prompt
+### Track P prompt (v2 — 2026-07-15, decisions folded in: SharePoint plumbing kept, Piper dropped)
 
 ```
 Lighthouse is now privacy-first analytics for data analysts. Make that
 identity legible in one pass: the private path becomes the hero, privacy
-becomes visible per answer and controllable per file, and the dormant
-cloud plumbing leaves the tree. One PR, one commit per numbered section,
-no version bump. Ground rules: the Rust engine (native/) is the shipping
+becomes visible per answer and controllable per file, and the Piper TTS
+stack leaves the product entirely. One PR, one commit per numbered
+section, no version bump. Ground rules: the Rust engine (native/) is the shipping
 product, the TS engine under src/server is the web-dev twin — shared
 behavior lands in BOTH per the PARITY convention; sections 2 and 3 are
 feature-sized and get OpenSpec changes (proposal, design with Non-goals
@@ -1286,30 +1286,52 @@ test, the native cargo suite, lint, and a live E2E per section.
    existing toggles. Desktop first; the twin renders the same panel
    minus desktop-only fields (PARITY).
 
-4. Remove the dormant cloud connector; finish the focus cut.
-   - Archive-then-delete the SharePoint/Microsoft connector from BOTH
-     engines: src/server/sources/sharepoint.ts and
-     src/server/sources/microsoft/, native/crates/lighthouse-core/src/
-     sources/{microsoft.rs,sharepoint.rs}, the explorer's SharePoint
-     coming-soon teaser (FileExplorer.tsx) and src/lib/comingSoon.ts if
-     nothing else uses it, the SHAREPOINT_* env surface (config.ts,
-     docs), and the /api/connect surface if now empty. KEEP the
-     SourceConnector seam (types.ts, registry.ts, local.ts and their
-     Rust twins) — the extension point survives, the unfinished cloud
-     implementation does not. Archive branch:
-     archive/sharepoint-connector.
-   - Decision to present, not implement (ASK ME): demote the bundled
-     Piper TTS voice to an opt-in download like the chat model (~60–90MB
-     installer diet; removes the flakiest mirrored asset from the
-     default build; read-aloud falls back to OS voices until installed).
-     Estimate the work, await my answer.
+4. Drop Piper TTS entirely; read-aloud survives on OS voices.
+   - Build & supply chain: remove the piper binary and the
+     en_US-lessac-medium voice from scripts/fetch-local-model.mjs
+     (fetch logic, pinned versions, ASSET_SHA256 entries), the
+     resources/tts bundling (tauri.conf.json / package.json
+     extraResources), the voice entries in mirror-hf-assets.yml and the
+     asset-digests workflow, and the piper-specific Linux CI
+     workarounds from PRs #118–#121 (NO_STRIP, $ORIGIN RUNPATH
+     stamping, LD_LIBRARY_PATH for linuxdeploy) — delete each only
+     where piper was its sole reason and verify llama-server bundling
+     still passes without it.
+   - Engines & shell: delete src/server/tts.ts, the /api/tts route,
+     tts.rs, the desktop tts command, and piper spawn/supervision in
+     the shell. Read-aloud STAYS: the UI's existing Web Speech path
+     (src/lib/speech.ts) becomes the only engine — update the
+     capability probe so the client no longer asks the server for a
+     bundled voice, and keep the existing behavior that the controls
+     hide only when the runtime has no speech support at all. Update
+     the read-aloud copy to say it uses the OS's installed voices, on
+     device (no more "bundled neural voice").
+   - Docs & attribution: README's third-party components section
+     (Piper + voice attribution removed or moved to a formerly-bundled
+     note), docs/desktop.md, docs/blueprints/read-aloud.md stamped or
+     updated, installer-size claims refreshed.
 
-Proof gates: grep-clean for sharepoint / SHAREPOINT / msal outside the
-archive branch and history docs; provenance-stamp E2E on both an
-on-device answer and a mocked cloud-provider answer; the local-only E2E
-above; an inspector snapshot test against a fixture vault; full suites
+5. SharePoint stays as plumbing — do NOT remove it. The connector
+   implementation in both engines (src/server/sources/sharepoint.ts +
+   src/server/sources/microsoft/, native/crates/lighthouse-core/src/
+   sources/{microsoft.rs,sharepoint.rs}), the SourceConnector seam, and
+   the SHAREPOINT_* env surface remain in the tree untouched, as
+   dormant plumbing for a future SharePoint plugin. Leave the
+   explorer's coming-soon teaser as is (after cut-the-cord it records
+   interest locally only). The only change permitted here: a one-line
+   comment or doc note marking the connector dormant-by-decision
+   (2026-07-15) so a future cleanup session doesn't remove it.
+
+Proof gates: a case-insensitive grep for piper returns nothing outside
+docs/history; a release-style build fetches no TTS asset and the Linux
+bundle succeeds with the piper workarounds gone; read-aloud E2E in the
+built app speaks via an OS voice where one exists and hides cleanly
+where none does; provenance-stamp E2E on both an on-device answer and a
+mocked cloud-provider answer; the local-only E2E from section 2; an
+inspector snapshot test against a fixture vault; the SharePoint files
+are byte-identical to main (git diff proves the keep); full suites
 green. End with a one-paragraph "what changed for a privacy reviewer"
-summary and the two decisions awaiting my answer.
+summary and the DeepSeek roster decision awaiting my answer.
 ```
 
 ### G7 fragment (append to the §8 Track G prompt when running it)
