@@ -376,3 +376,74 @@ test("promptBlock is null on an empty store and respects the ask posture", () =>
   assert.ok(!cloud.text.includes("private_rev"), cloud.text);
   assert.ok(cloud.text.includes("- public_rev = SUM(amount)"), cloud.text);
 });
+
+// --- §3 env-gated per-kind ablation hook (field-patch-0.12.5) -----------------
+// PARITY: mirrors semantic.rs's Ablation tests. Seeds a full store directly (a
+// joinHint has no CRUD, matching the Rust engine) and checks each gate removes
+// exactly its kind, and that the hook ships INERT with no env var set.
+function seedFullStore(stateDir) {
+  fs.mkdirSync(stateDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(stateDir, "semantic.json"),
+    JSON.stringify({
+      v: 1,
+      metrics: [
+        {
+          id: "metric-x",
+          name: "revenue",
+          expression: "SUM(amount)",
+          description: "",
+          entity: "sales",
+          reads: { files: [], views: [] },
+          summary: { text: "q", source: "question" },
+          createdMs: 1,
+        },
+      ],
+      synonyms: [{ term: "gmv", canonical: "revenue" }],
+      entities: [{ name: "sales", table: "sales", keyColumns: [], description: "" }],
+      joinHints: [
+        { leftEntity: "orders", leftColumn: "rep", rightEntity: "reps", rightColumn: "rep", description: "" },
+      ],
+    }),
+  );
+}
+
+test("§3 per-kind ablation is env-gated and ships inert (PARITY)", () => {
+  const { stateDir } = freshVault();
+  seedFullStore(stateDir);
+  for (const k of ["METRICS", "SYNONYMS", "JOINS"]) delete process.env[`LIGHTHOUSE_ABLATE_${k}`];
+  try {
+    // Inert: no env ⇒ everything eligible (byte-identical to today).
+    let s = semantic.eligibleForPosture(false);
+    assert.deepEqual(
+      [s.metrics.length, s.synonyms.length, s.entities.length, s.joinHints.length],
+      [1, 1, 1, 1],
+      "inert with no env var set",
+    );
+
+    process.env.LIGHTHOUSE_ABLATE_METRICS = "1";
+    s = semantic.eligibleForPosture(false);
+    assert.deepEqual([s.metrics.length, s.synonyms.length, s.joinHints.length], [0, 1, 1], "metrics gated");
+    delete process.env.LIGHTHOUSE_ABLATE_METRICS;
+
+    process.env.LIGHTHOUSE_ABLATE_SYNONYMS = "true";
+    s = semantic.eligibleForPosture(false);
+    assert.deepEqual([s.metrics.length, s.synonyms.length], [1, 0], "synonyms gated");
+    delete process.env.LIGHTHOUSE_ABLATE_SYNONYMS;
+
+    process.env.LIGHTHOUSE_ABLATE_JOINS = "1";
+    s = semantic.eligibleForPosture(false);
+    assert.deepEqual(
+      [s.metrics.length, s.synonyms.length, s.entities.length, s.joinHints.length],
+      [1, 1, 0, 0],
+      "joins gate drops joinHints AND backing entities",
+    );
+
+    // A stray non-truthy value never ablates (the inert-ship guard).
+    process.env.LIGHTHOUSE_ABLATE_JOINS = "0";
+    s = semantic.eligibleForPosture(false);
+    assert.equal(s.joinHints.length, 1, "'0' is OFF");
+  } finally {
+    for (const k of ["METRICS", "SYNONYMS", "JOINS"]) delete process.env[`LIGHTHOUSE_ABLATE_${k}`];
+  }
+});

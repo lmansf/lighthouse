@@ -149,6 +149,72 @@ zero setup. How it ships:
 
 ---
 
+## Phase D — semantic layer (measured)
+
+The semantic layer ships three **hand-authored** business-definition components —
+**metric definitions**, **column synonyms**, and **declared join hints (+ their
+backing entities)**. Phase D asks whether each earns its keep *before* we invest
+in auto-derivation, by MEASURING each component's lift on the analytics + trust
+scorecards instead of guessing. (Auto-derived join hints,
+`analytics::join_hints`, are NOT on trial — only the three manual components are.)
+
+### Method
+
+- **Ablation hook.** An env-gated, per-kind hook lives at
+  `semantic::eligible_for_posture` — the ONE seam every consumer routes through
+  (prompt injection, the curated-join merge, certify/trust, the answer-cache
+  key). `LIGHTHOUSE_ABLATE_METRICS | _SYNONYMS | _JOINS` (`=1`/`true`) each make
+  that kind ineligible for a run — as if the store held none of it (JOINS drops
+  joinHints *and* their backing entities). It ships **INERT**: with no variable
+  set, behavior is byte-identical to today (unit-pinned), so nothing is removed
+  or disabled — this is a measurement instrument, not a shipped setting or UI.
+  Mirrored byte-for-byte in the TS twin (`semantic.ts`).
+- **Fixtures.** `examples/analytics_eval.rs` seeds a realistic *messy* fixture's
+  definitions into the semantic store: abbreviated columns (`amt`, `rgn`) a
+  **synonym** resolves; a recurring `SUM(amt) FILTER (WHERE status='paid')` a
+  **metric** names; an `orders_msy`↔`reps_msy` pair a declared **join** makes
+  authoritative. Model-free checks that route through `eligible_for_posture`
+  depend on each component (commented per check in the eval), so ablating a
+  component measurably drops the pass rate.
+- **Runner.** The eval always prints `SCORECARD total=… passed=… rate=…` (pass
+  or fail). `.github/workflows/ablation.yml` (workflow_dispatch) builds the eval
+  once, runs the baseline plus each ablation without letting a nonzero exit fail
+  the step, and reports the per-component lift table below.
+
+### Decision rule (stated up front)
+
+- A component whose ablation costs **< ~2 points** on the scorecards **AND**
+  shows no qualitative save in transcripts is **REMOVED** — its UI, storage,
+  prompt injection, and docs — because manual authoring of it was not earning
+  its keep. Removal is destructive and stays gated on this table **plus** the
+  owner's sign-off.
+- A component with **real lift** is **KEPT**, and its authoring cost moves off
+  the user via auto-derivation (synonyms proposed from column names/values;
+  metrics mined from recurring usage). Either way, manual authoring becomes
+  optional polish — never a prerequisite for a good answer.
+
+### Results (pending the CI ablation run — no numbers invented)
+
+| component | baseline rate | ablated rate | lift (points) | verdict |
+|---|---|---|---|---|
+| metric definitions          | _tbd_ | _tbd_ | _tbd_ | _tbd_ |
+| column synonyms             | _tbd_ | _tbd_ | _tbd_ | _tbd_ |
+| declared joins (+ entities) | _tbd_ | _tbd_ | _tbd_ | _tbd_ |
+
+**Verdict: pending.** Fill from the `ablation.yml` output, then apply the
+decision rule per component and record the follow-through (auto-derive, or
+removal). Note that the model-free floor measures whether each component is
+*exercised and wired*; the end-to-end answer-quality lift of synonyms/metrics is
+the opt-in provider NL leg's job (`LIGHTHOUSE_EVAL_*`) plus a transcript review.
+
+> The engine-drafted **vault brief** (§3.5) is a new additive deliverable, not
+> part of this study: a deterministic summary of vault composition + the
+> queryable tables in scope, injected as one editable block beside the
+> business-definitions block. It draws only on engine-known facts, never model
+> prose.
+
+---
+
 ## Verification
 
 - Unit fixtures: csv + parquet (written by the test) + the committed xlsx

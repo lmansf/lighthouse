@@ -307,6 +307,55 @@ function entityEffectivelyLocalOnly(table: string): boolean {
   });
 }
 
+// --- Env-gated per-kind ablation hook (openspec: field-patch-0.12.5 §3) ------------
+//
+// PARITY: mirrors semantic.rs's `Ablation`. The MEASUREMENT instrument for the
+// business-definitions study — each hand-authored kind (metric definitions,
+// column synonyms, declared joins = joinHints + their backing entities) can be
+// made ineligible for a run via an environment gate, with NO shipped setting,
+// applied at the ONE posture seam so an ablated kind vanishes from every
+// consumer at once. Ships INERT: with no LIGHTHOUSE_ABLATE_* variable set,
+// `applyAblation` is a no-op and the eligible set is byte-identical to today.
+// A measurement instrument only: NO setting, NO UI, NOT on the wire.
+
+interface Ablation {
+  metrics: boolean;
+  synonyms: boolean;
+  joins: boolean;
+}
+
+/**
+ * A gate is ON only for exactly `1`/`true` (trimmed, case-insensitive); any
+ * other value — including empty, `0`, `false` — is OFF, so a stray or blank
+ * variable can never silently ablate. KEEP IN SYNC with semantic.rs::ablate_flag.
+ */
+function ablateFlag(value: string | undefined): boolean {
+  const v = value?.trim().toLowerCase();
+  return v === "1" || v === "true";
+}
+
+function ablationFromEnv(): Ablation {
+  return {
+    metrics: ablateFlag(process.env.LIGHTHOUSE_ABLATE_METRICS),
+    synonyms: ablateFlag(process.env.LIGHTHOUSE_ABLATE_SYNONYMS),
+    joins: ablateFlag(process.env.LIGHTHOUSE_ABLATE_JOINS),
+  };
+}
+
+/**
+ * Zero out the ablated kinds in place, as if the store held none of that kind.
+ * JOINS drops joinHints AND the backing entities together (a curated join
+ * renders through its entities). KEEP IN SYNC with semantic.rs::Ablation::apply.
+ */
+function applyAblation(a: Ablation, set: SemanticSet): void {
+  if (a.metrics) set.metrics = [];
+  if (a.synonyms) set.synonyms = [];
+  if (a.joins) {
+    set.joinHints = [];
+    set.entities = [];
+  }
+}
+
 /**
  * The definitions usable under an ask's posture (§1.4) — the ONE gate that
  * governs §2 prompt injection AND the §3/§5 cache key. Device: everything.
@@ -316,6 +365,10 @@ function entityEffectivelyLocalOnly(table: string): boolean {
  */
 export function eligibleForPosture(isCloud: boolean): SemanticSet {
   const store = listSemantic();
+  // §3 ablation hook (openspec: field-patch-0.12.5): inert with no env var set,
+  // so this is byte-identical to today unless a LIGHTHOUSE_ABLATE_* gate is on.
+  // `listSemantic` returned a fresh clone, so mutating it never touches the store.
+  applyAblation(ablationFromEnv(), store);
   if (!isCloud) return store;
   const droppedMetrics = new Set<string>();
   const metrics = store.metrics.filter((m) => {

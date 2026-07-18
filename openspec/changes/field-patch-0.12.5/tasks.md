@@ -46,25 +46,32 @@ per section; the full suite + smoke + floors before the bump.
       chart; a definitions-free prose ask → none. Before/after screenshots.
 
 ## §3 — Business definitions: measure, then decide (commit 3)
-- [ ] 3.1 Add env-gated per-kind ablation at `semantic.rs::eligible_for_posture`
+- [x] 3.1 Add env-gated per-kind ablation at `semantic.rs::eligible_for_posture`
       (`LIGHTHOUSE_ABLATE_METRICS|SYNONYMS|JOINS`), ships inert (no user setting).
-- [ ] 3.2 Ablation harness: run `analytics_eval.rs` scorecards (analytics +
-      trust) on fixture vaults + a realistic messy fixture, each component on/off;
-      capture per-component pass rates.
+      TS twin mirrored (PARITY); inert-ship unit-pinned in both engines.
+- [x] 3.2 Ablation harness: `analytics_eval.rs` seeds a realistic messy fixture
+      into the semantic store with per-component dependent checks + an always-on
+      `SCORECARD … rate=` line; `.github/workflows/ablation.yml` (dispatch) runs
+      baseline + each component ablated and prints the per-component lift table.
 - [ ] 3.3 Record the ablation table + a one-paragraph plain-language verdict in
-      `docs/analytics-beam.md` (new "Phase D — semantic layer" section).
+      `docs/analytics-beam.md` (new "Phase D — semantic layer" section). — Phase D
+      scaffold (method + decision rule + PLACEHOLDER table) landed; the numbers +
+      verdict are pending the CI ablation run.
 - [ ] 3.4 Apply the decision rule per component:
       - REMOVE (if < ~2 pts and no qualitative save): delete UI + storage +
         prompt injection + docs; grep-proof no dead references remain.
       - KEEP + auto-derive (if real lift): synonyms → deterministic *proposals*
         from column names/values; metrics → mined from usage via
         `propose_metric` as one-click "save as metric" proposals.
-- [ ] 3.5 Build the engine-drafted **vault brief** (new): pre-draft from vault
-      composition / dominant tables / date ranges; editable; injected as one
-      `Ctx` beside the business-definitions block. TS twin mirrors.
+- [x] 3.5 Build the engine-drafted **vault brief** (new): deterministic draft
+      from vault composition + queryable tables (date-range render supported;
+      live enrichment a follow-on), injected as one `Ctx` beside the business-
+      definitions block. TS twin mirrors byte-for-byte (`vaultBrief.ts`).
 - [ ] 3.6 Tests: auto-derivation proposal unit tests (conservative thresholds,
       NO false-positive synonym merges); scorecards-after ≥ scorecards-before;
-      brief-draft determinism.
+      brief-draft determinism. — brief-draft determinism + composition pinned in
+      both engines; per-component ablation checks landed; auto-derivation
+      proposals pending the §3.4 verdict.
 
 ## §4 — Housekeeping (commit 4)
 - [ ] 4.1 Triage remaining moderate Dependabot alerts: `npm audit`/`cargo audit`

@@ -1393,7 +1393,8 @@ fn live_pipeline(
                         .map(|r| Ctx { name: r.file_name.clone(), text: r.card.clone(), score: 1.0 })
                         .collect();
                     // Deterministic prompt order: file cards, view cards, the
-                    // semantic business-definitions block, then join hints.
+                    // semantic business-definitions block, the vault brief, then
+                    // join hints.
                     sql_ctxs.extend(view_regs.iter().map(|v| Ctx {
                         name: v.name.clone(),
                         text: v.card.clone(),
@@ -1417,6 +1418,19 @@ fn live_pipeline(
                         } else {
                             false
                         };
+                    // The vault brief (openspec: field-patch-0.12.5 §3.5): a
+                    // deterministic, engine-drafted summary of the vault being
+                    // answered over — file composition + the queryable tables in
+                    // scope — injected as ONE editable block beside the business-
+                    // definitions block. Additive and NOT part of the §3 ablation
+                    // (it is the auto-derive deliverable, not a component on
+                    // trial); it draws only on engine-known facts, never model
+                    // prose. Empty facts ⇒ None ⇒ nothing pushed. PARITY: Rust-only
+                    // injection (the TS twin has no analytics branch);
+                    // vaultBrief.ts::renderBrief mirrors the renderer.
+                    if let Some(brief) = crate::vault_brief::draft_brief(&regs) {
+                        sql_ctxs.push(brief);
+                    }
                     // Curated join hints WIN over the heuristic ones for the same
                     // table pair (§2.4): the curated hint renders in the block
                     // above, so drop the heuristic line for that pair. Zero

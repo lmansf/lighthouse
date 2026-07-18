@@ -317,6 +317,83 @@ fn entity_effectively_local_only(table: &str) -> bool {
     })
 }
 
+// --- Env-gated per-kind ablation hook (openspec: field-patch-0.12.5 §3) -------------
+//
+// The MEASUREMENT instrument for "do the manual business-definition components
+// earn their keep?": each of the three hand-authored kinds — metric
+// definitions, column synonyms, and declared joins (joinHints + their backing
+// entities) — can be made INELIGIBLE for a run via an environment gate, WITHOUT
+// a shipped setting, so the analytics + trust scorecards can be scored with each
+// component on and off and its per-component lift measured (docs/analytics-beam
+// Phase D + `.github/workflows/ablation.yml`).
+//
+// Applied INSIDE `eligible_for_posture` — the ONE seam every consumer routes
+// through (§2 prompt injection, the §2.4 curated-join merge, the §3/§4
+// certify/trust path, and the §5 answer-cache key) — so an ablated kind vanishes
+// from ALL of them at once, exactly as if the store held none of it.
+//
+// Ships INERT: with no `LIGHTHOUSE_ABLATE_*` variable set, `Ablation::from_env`
+// is all-false, `any()` is false, and `apply` is a byte-for-byte no-op — every
+// eligible set is identical to today (pinned by `ablation_ships_inert_with_no_env`).
+// This is a measurement instrument ONLY: NO settings field, NO UI, NOT on the
+// wire. KEEP IN SYNC with semantic.ts::ablationFromEnv / applyAblation.
+
+/// A per-kind ablation mask read from the environment.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Ablation {
+    metrics: bool,
+    synonyms: bool,
+    joins: bool,
+}
+
+/// A gate is ON only for exactly `1` or `true` (trimmed, case-insensitive); any
+/// other value — including empty, `0`, `false` — is OFF, so a stray or blank
+/// variable can never silently ablate a component. KEEP IN SYNC with
+/// semantic.ts::ablateFlag.
+fn ablate_flag(value: Option<String>) -> bool {
+    match value {
+        Some(v) => {
+            let v = v.trim().to_ascii_lowercase();
+            v == "1" || v == "true"
+        }
+        None => false,
+    }
+}
+
+impl Ablation {
+    fn from_env() -> Self {
+        Ablation {
+            metrics: ablate_flag(std::env::var("LIGHTHOUSE_ABLATE_METRICS").ok()),
+            synonyms: ablate_flag(std::env::var("LIGHTHOUSE_ABLATE_SYNONYMS").ok()),
+            joins: ablate_flag(std::env::var("LIGHTHOUSE_ABLATE_JOINS").ok()),
+        }
+    }
+
+    /// Whether ANY kind is ablated — the inert-ship guard: `false` ⇒ `apply` is a
+    /// no-op and the eligible set is byte-identical to today.
+    fn any(self) -> bool {
+        self.metrics || self.synonyms || self.joins
+    }
+
+    /// Zero out the ablated kinds IN PLACE, as if the store held none of that
+    /// kind. JOINS drops joinHints AND their backing entities together: a curated
+    /// join renders through its entities' tables (`curated_join_pairs`), so
+    /// without the entities the pair could not resolve — the two are ONE component
+    /// for the study (openspec §3).
+    fn apply(self, set: &mut SemanticSet) {
+        if self.metrics {
+            set.metrics.clear();
+        }
+        if self.synonyms {
+            set.synonyms.clear();
+        }
+        if self.joins {
+            set.join_hints.clear();
+            set.entities.clear();
+        }
+    }
+}
+
 /// The definitions usable under an ask's posture (§1.4) — the ONE gate that
 /// governs §2 prompt injection AND the §3/§5 cache key. On a device ask every
 /// definition is eligible (marks are inert locally). A cloud ask drops the
@@ -326,7 +403,17 @@ fn entity_effectively_local_only(table: &str) -> bool {
 /// a private table's meaning can never ride a view of itself into a vendor
 /// prompt. KEEP IN SYNC with semantic.ts::eligibleForPosture.
 pub fn eligible_for_posture(is_cloud: bool) -> SemanticSet {
-    let store = list();
+    let mut store = list();
+    // openspec field-patch-0.12.5 §3: the env-gated per-kind ablation — the
+    // measurement instrument, applied at this single seam. Ships INERT — with no
+    // LIGHTHOUSE_ABLATE_* gate set, `any()` is false and `apply` is never even
+    // reached, so the eligible set is byte-identical to today; when a gate is
+    // set, that kind is removed here and vanishes from prompt injection, curated
+    // joins, certify/trust, and the cache key at once.
+    let ablation = Ablation::from_env();
+    if ablation.any() {
+        ablation.apply(&mut store);
+    }
     if !is_cloud {
         return store;
     }
@@ -1188,5 +1275,76 @@ mod tests {
             crate::analytics::guard_sql(sql)
                 .unwrap_or_else(|e| panic!("semantic few-shot for {q:?} rejected: {e}"));
         }
+    }
+
+    // --- §3 env-gated per-kind ablation hook ----------------------------------
+    //
+    // Pure tests over `Ablation` — the seam's own filtering (through
+    // `eligible_for_posture` over a real store) is exercised by the analytics_eval
+    // semantic-store floor, which is where ablation is MEASURED.
+
+    fn full_set() -> SemanticSet {
+        SemanticSet {
+            metrics: vec![metric("revenue", "SUM(amount)", "", 1)],
+            synonyms: vec![Synonym { term: "gmv".into(), canonical: "revenue".into() }],
+            entities: vec![Entity {
+                name: "sales".into(),
+                table: "sales".into(),
+                key_columns: vec![],
+                description: String::new(),
+            }],
+            join_hints: vec![JoinHint {
+                left_entity: "orders".into(),
+                left_column: "rep".into(),
+                right_entity: "reps".into(),
+                right_column: "rep".into(),
+                description: String::new(),
+            }],
+        }
+    }
+
+    #[test]
+    fn ablate_flag_treats_only_1_and_true_as_on() {
+        assert!(ablate_flag(Some("1".into())));
+        assert!(ablate_flag(Some("true".into())));
+        assert!(ablate_flag(Some("TRUE".into())));
+        assert!(ablate_flag(Some("  true  ".into())));
+        for off in ["", " ", "0", "false", "no", "yes", "2", "on"] {
+            assert!(!ablate_flag(Some(off.into())), "{off:?} must be OFF");
+        }
+        assert!(!ablate_flag(None), "unset is OFF");
+    }
+
+    #[test]
+    fn ablation_ships_inert_with_no_env() {
+        // The inert-ship proof: in a clean environment (no LIGHTHOUSE_ABLATE_*)
+        // nothing is ablated, and applying the empty mask is a byte-for-byte
+        // no-op — so every eligible set is identical to today. (The ablation runner
+        // sets the env vars in a SEPARATE process; no unit test mutates them, so
+        // this `from_env` read is stable.)
+        assert!(!Ablation::from_env().any(), "no ablation env ⇒ nothing ablated");
+        let mut set = full_set();
+        Ablation::default().apply(&mut set);
+        assert_eq!(set, full_set(), "the empty mask leaves every kind untouched");
+    }
+
+    #[test]
+    fn each_gate_removes_exactly_its_kind() {
+        // metrics only
+        let mut m = full_set();
+        Ablation { metrics: true, ..Default::default() }.apply(&mut m);
+        assert!(m.metrics.is_empty(), "metrics ablated");
+        assert_eq!((m.synonyms.len(), m.entities.len(), m.join_hints.len()), (1, 1, 1));
+        // synonyms only
+        let mut s = full_set();
+        Ablation { synonyms: true, ..Default::default() }.apply(&mut s);
+        assert!(s.synonyms.is_empty(), "synonyms ablated");
+        assert_eq!((s.metrics.len(), s.entities.len(), s.join_hints.len()), (1, 1, 1));
+        // joins drops joinHints AND the backing entities together
+        let mut j = full_set();
+        Ablation { joins: true, ..Default::default() }.apply(&mut j);
+        assert!(j.join_hints.is_empty(), "joinHints ablated");
+        assert!(j.entities.is_empty(), "backing entities ablated with joins");
+        assert_eq!((j.metrics.len(), j.synonyms.len()), (1, 1));
     }
 }

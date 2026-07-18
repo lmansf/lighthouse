@@ -39,7 +39,7 @@ use lighthouse_core::analytics::{
 };
 use lighthouse_core::beam::{BeamLoop, Budget, StopReason};
 use lighthouse_core::catalog::ColumnKind;
-use lighthouse_core::semantic::Metric;
+use lighthouse_core::semantic::{Entity, JoinHint, Metric, SemanticSet, Synonym};
 use lighthouse_core::views::{Reads, SummarySource, ViewSummary};
 use lighthouse_core::ledger::assumption_ledger;
 use lighthouse_core::llm::{stream_answer, Ctx, ModelCfg};
@@ -216,6 +216,30 @@ d,amount
 2024-04-15,300
 ";
 
+// --- Messy fixture for the semantic-store ablation floor (openspec:
+//     field-patch-0.12.5 §3) --------------------------------------------------
+//
+// Deliberately MESSY so each hand-authored business-definition component has
+// something real to do: abbreviated columns (`rgn`, `amt`) a SYNONYM resolves, a
+// recurring FILTERed aggregation a METRIC names, and an orders↔reps pair a
+// declared JOIN hint makes authoritative. Seeded into the semantic store and
+// registered as tables so ablating each component MEASURABLY drops the pass rate.
+//
+// Paid rows: 1200 + 300 + 700 = 2200 (the pending row excluded).
+const MESSY_ORDERS_CSV: &str = "\
+rgn,rep_id,amt,status
+NE,r1,1200,paid
+NE,r1,300,paid
+NW,r2,500,pending
+SE,r3,700,paid
+";
+const MESSY_REPS_CSV: &str = "\
+rep_id,rep_name
+r1,Alice
+r2,Bob
+r3,Cara
+";
+
 #[tokio::main]
 async fn main() {
     let dir = std::env::temp_dir().join(format!("lh-analytics-eval-{}", std::process::id()));
@@ -227,7 +251,7 @@ async fn main() {
         files.push((name.to_string(), name.to_string(), path));
     }
 
-    let mut failures = 0usize;
+    let mut card = Scorecard::default();
 
     // --- Section 1: model-free golden floor (always enforced) -------------
     println!("== model-free executor floor ==");
@@ -246,10 +270,10 @@ async fn main() {
         Ok(df) => {
             ctx.register_table("clean_sales", df.into_view())
                 .expect("register shaped view");
-            println!("  PASS  shaped view registered virtually (guarded, into_view)");
+            pass(&mut card, "shaped view registered virtually (guarded, into_view)");
         }
         Err(e) => {
-            failures += 1;
+            card.failed += 1;
             println!("  FAIL  shaped view failed to register: {e}");
         }
     }
@@ -258,9 +282,9 @@ async fn main() {
             .await
             .and_then(|r| (g.check)(&r).map(|_| ()))
         {
-            Ok(()) => println!("  PASS  {}", g.what),
+            Ok(()) => pass(&mut card, g.what),
             Err(e) => {
-                failures += 1;
+                card.failed += 1;
                 println!("  FAIL  {}\n        {e}", g.what);
             }
         }
@@ -280,17 +304,17 @@ async fn main() {
             .unwrap();
         match run_query(&bctx, "SELECT id, v FROM big").await {
             Ok(r) if r.truncated && r.total == Some(250) => {
-                println!("  PASS  truncated result reports true total 250 (not the 200 cap)");
+                pass(&mut card, "truncated result reports true total 250 (not the 200 cap)");
             }
             Ok(r) => {
-                failures += 1;
+                card.failed += 1;
                 println!(
                     "  FAIL  truncation: truncated={} total={:?} (want true 250)",
                     r.truncated, r.total
                 );
             }
             Err(e) => {
-                failures += 1;
+                card.failed += 1;
                 println!("  FAIL  truncation query errored: {e}");
             }
         }
@@ -302,9 +326,9 @@ async fn main() {
         "WITH t AS (INSERT INTO x VALUES (1) RETURNING *) SELECT * FROM t",
     ] {
         if guard_sql(bad).is_err() {
-            println!("  PASS  guard rejects: {bad}");
+            pass(&mut card, &format!("guard rejects: {bad}"));
         } else {
-            failures += 1;
+            card.failed += 1;
             println!("  FAIL  guard ADMITTED a write: {bad}");
         }
     }
@@ -316,7 +340,7 @@ async fn main() {
     // real executor uses — then the exact engine-computed numbers are asserted
     // against the cell strings DataFusion renders (ryu floats, integer counts).
     // Model-free and deterministic, so this gates CI exactly like the goldens
-    // above: a mismatch bumps `failures` and the process exits non-zero.
+    // above: a mismatch bumps the scorecard's `failed` and the process exits non-zero.
     println!("\n== recipe goldens (model-free) ==");
     {
         // Explicit schemas mirror the REAL CSV path: the date column is Date32
@@ -391,7 +415,7 @@ async fn main() {
         match run_recipe(&rctx, "variance-vs-last-period", "recipe_sales", &sales_cols).await {
             Ok(steps) => {
                 record(
-                    &mut failures,
+                    &mut card,
                     "variance: current 300 / prior 100 / delta 200 / +200.0%",
                     assert_row(
                         &steps[0].2,
@@ -406,7 +430,7 @@ async fn main() {
                     ),
                 );
                 record(
-                    &mut failures,
+                    &mut card,
                     "variance: monthly totals Feb=100, Mar=300",
                     assert_keyed(&steps[1].2, "period", "2024-02", &[("total", "100.0")])
                         .and_then(|_| {
@@ -443,7 +467,7 @@ async fn main() {
                     &steps[1].2,
                 );
                 record(
-                    &mut failures,
+                    &mut card,
                     "ledger snapshot (monthly-totals template) byte-identical",
                     match got.as_deref() {
                         Some(l) if l == expected => Ok(()),
@@ -452,7 +476,7 @@ async fn main() {
                 );
             }
             Err(e) => {
-                failures += 1;
+                card.failed += 1;
                 println!("  FAIL  variance-vs-last-period — {e}");
             }
         }
@@ -461,7 +485,7 @@ async fn main() {
         match run_recipe(&rctx, "cohort-breakdown", "recipe_sales", &sales_cols).await {
             Ok(steps) => {
                 record(
-                    &mut failures,
+                    &mut card,
                     "cohort: South leads with 240 (60.0% of total)",
                     assert_row(
                         &steps[0].2,
@@ -473,7 +497,7 @@ async fn main() {
                     ),
                 );
                 record(
-                    &mut failures,
+                    &mut card,
                     "cohort: North 160 (40.0% of total)",
                     assert_keyed(
                         &steps[0].2,
@@ -484,7 +508,7 @@ async fn main() {
                 );
             }
             Err(e) => {
-                failures += 1;
+                card.failed += 1;
                 println!("  FAIL  cohort-breakdown — {e}");
             }
         }
@@ -494,7 +518,7 @@ async fn main() {
         match run_recipe(&rctx, "data-quality-audit", "recipe_sales", &sales_cols).await {
             Ok(steps) => {
                 record(
-                    &mut failures,
+                    &mut card,
                     "dq: amount reports exactly 1 null (16.7%)",
                     assert_keyed(
                         &steps[0].2,
@@ -504,7 +528,7 @@ async fn main() {
                     ),
                 );
                 record(
-                    &mut failures,
+                    &mut card,
                     "dq: order_id flags exactly 1 duplicate value",
                     assert_keyed(
                         &steps[0].2,
@@ -514,7 +538,7 @@ async fn main() {
                     ),
                 );
                 record(
-                    &mut failures,
+                    &mut card,
                     "dq: region's repeated values counted (4 duplicates)",
                     assert_keyed(
                         &steps[0].2,
@@ -524,7 +548,7 @@ async fn main() {
                     ),
                 );
                 record(
-                    &mut failures,
+                    &mut card,
                     "dq: an IQR-outlier scan over the numeric column is planned + runs",
                     if steps.iter().any(|(l, _, _)| l.contains("IQR outliers in amount")) {
                         Ok(())
@@ -534,7 +558,7 @@ async fn main() {
                 );
             }
             Err(e) => {
-                failures += 1;
+                card.failed += 1;
                 println!("  FAIL  data-quality-audit — {e}");
             }
         }
@@ -544,7 +568,7 @@ async fn main() {
         match run_recipe(&rctx, "anomaly-scan", "recipe_trend", &trend_cols).await {
             Ok(steps) => {
                 record(
-                    &mut failures,
+                    &mut card,
                     "anomaly: Oct (total 400) flagged at z = +2.85",
                     assert_row(
                         &steps[0].2,
@@ -556,7 +580,7 @@ async fn main() {
                     ),
                 );
                 record(
-                    &mut failures,
+                    &mut card,
                     "anomaly: exactly one period beyond the 2σ fence",
                     match grid(&steps[0].2).1.len() {
                         1 => Ok(()),
@@ -565,7 +589,7 @@ async fn main() {
                 );
             }
             Err(e) => {
-                failures += 1;
+                card.failed += 1;
                 println!("  FAIL  anomaly-scan — {e}");
             }
         }
@@ -575,7 +599,7 @@ async fn main() {
         match run_recipe(&rctx, "top-movers", "recipe_sales", &sales_cols).await {
             Ok(steps) => {
                 record(
-                    &mut failures,
+                    &mut card,
                     "top-movers: South is the biggest mover (+160, +400.0%)",
                     assert_row(
                         &steps[0].2,
@@ -589,7 +613,7 @@ async fn main() {
                     ),
                 );
                 record(
-                    &mut failures,
+                    &mut card,
                     "top-movers: North second (+40, +66.7%)",
                     assert_keyed(
                         &steps[0].2,
@@ -600,7 +624,7 @@ async fn main() {
                 );
             }
             Err(e) => {
-                failures += 1;
+                card.failed += 1;
                 println!("  FAIL  top-movers — {e}");
             }
         }
@@ -615,7 +639,7 @@ async fn main() {
                     [("2024-06", "600.0"), ("2024-07", "700.0"), ("2024-08", "800.0")]
                 {
                     record(
-                        &mut failures,
+                        &mut card,
                         &format!("forecast: {period} projects {v} with a collapsed band"),
                         assert_keyed(
                             &steps[0].2,
@@ -627,7 +651,7 @@ async fn main() {
                 }
                 // σ = 0 ⇒ lower == upper on every forecast row, and there are
                 // exactly three (the horizon), independent of the value literals.
-                record(&mut failures, "forecast: σ=0 collapses the band on all 3 horizon rows", {
+                record(&mut card, "forecast: σ=0 collapses the band on all 3 horizon rows", {
                     let (cols, rows) = grid(&steps[0].2);
                     let fc: Vec<&Vec<String>> = rows
                         .iter()
@@ -644,7 +668,7 @@ async fn main() {
                 // A history row is 'actual' with the actual y and a NULL band
                 // (rendered as an empty cell).
                 record(
-                    &mut failures,
+                    &mut card,
                     "forecast: history row is actual with a null band",
                     assert_keyed(
                         &steps[0].2,
@@ -655,7 +679,7 @@ async fn main() {
                 );
                 // The fit summary the narration cites the trend rate from.
                 record(
-                    &mut failures,
+                    &mut card,
                     "forecast: fit summary slope=100.0 intercept=0.0 sigma=0.0 n=5",
                     assert_row(
                         &steps[1].2,
@@ -671,7 +695,7 @@ async fn main() {
                 // representative result (plan[0]) — engine-authored, kind "band",
                 // values + bounds straight from the batches (the forecast tail
                 // carries a non-null upper bound).
-                record(&mut failures, "forecast: draws a band chart over the projection", {
+                record(&mut card, "forecast: draws a band chart over the projection", {
                     let chart = lookup("forecast").unwrap().chart(&steps[0].2);
                     match chart.as_deref().map(serde_json::from_str::<serde_json::Value>) {
                         Some(Ok(v))
@@ -689,7 +713,7 @@ async fn main() {
                 });
             }
             Err(e) => {
-                failures += 1;
+                card.failed += 1;
                 println!("  FAIL  forecast (line) — {e}");
             }
         }
@@ -698,7 +722,7 @@ async fn main() {
         // gated in SQL — the recipe degrades to a plain series, never an error.
         match run_recipe(&rctx, "forecast", "forecast_short", &trend_cols).await {
             Ok(steps) => {
-                record(&mut failures, "forecast: n<3 emits zero forecast rows (history only)", {
+                record(&mut card, "forecast: n<3 emits zero forecast rows (history only)", {
                     let (cols, rows) = grid(&steps[0].2);
                     let forecasts =
                         rows.iter().filter(|r| cell(&cols, r, "kind") == "forecast").count();
@@ -712,7 +736,7 @@ async fn main() {
                 });
             }
             Err(e) => {
-                failures += 1;
+                card.failed += 1;
                 println!("  FAIL  forecast (short) — {e}");
             }
         }
@@ -723,7 +747,7 @@ async fn main() {
         match run_recipe(&rctx, "changepoint-scan", "changepoint_step", &trend_cols).await {
             Ok(steps) => {
                 record(
-                    &mut failures,
+                    &mut card,
                     "changepoint: step located at 2024-04 (100 -> 500, delta 400, mag 1.87)",
                     assert_row(
                         &steps[0].2,
@@ -738,7 +762,7 @@ async fn main() {
                 );
             }
             Err(e) => {
-                failures += 1;
+                card.failed += 1;
                 println!("  FAIL  changepoint (step) — {e}");
             }
         }
@@ -749,7 +773,7 @@ async fn main() {
         match run_recipe(&rctx, "changepoint-scan", "changepoint_flat", &trend_cols).await {
             Ok(steps) => {
                 record(
-                    &mut failures,
+                    &mut card,
                     "changepoint: flat series => magnitude 0.0 (no material shift)",
                     assert_row(
                         &steps[0].2,
@@ -763,7 +787,7 @@ async fn main() {
                 );
             }
             Err(e) => {
-                failures += 1;
+                card.failed += 1;
                 println!("  FAIL  changepoint (flat) — {e}");
             }
         }
@@ -784,7 +808,7 @@ async fn main() {
         let mut report =
             lighthouse_core::reports::investigate("recipe_sales.csv", &inv_files, false).await;
         record(
-            &mut failures,
+            &mut card,
             "deep-analysis: a Date+Numeric table yields multiple sections",
             if report.sections.len() >= 3 {
                 Ok(())
@@ -796,7 +820,7 @@ async fn main() {
         let recipe_names: std::collections::HashSet<&str> =
             lighthouse_core::recipes::BUILTINS.iter().map(|r| r.name).collect();
         record(
-            &mut failures,
+            &mut card,
             "deep-analysis: every section is a built-in recipe's verified result",
             if report
                 .sections
@@ -810,7 +834,7 @@ async fn main() {
         );
         // Each section carries its exact SQL + a non-empty evidence table.
         record(
-            &mut failures,
+            &mut card,
             "deep-analysis: every section carries its SQL + evidence",
             if report
                 .sections
@@ -838,7 +862,7 @@ async fn main() {
             .filter(|tok| !evidence.contains(tok))
             .collect();
         record(
-            &mut failures,
+            &mut card,
             "deep-analysis: every summary figure appears in a section result",
             if ungrounded.is_empty() {
                 Ok(())
@@ -852,7 +876,7 @@ async fn main() {
         report.generated_ms = 1_700_000_000_000;
         report2.generated_ms = 1_700_000_000_000;
         record(
-            &mut failures,
+            &mut card,
             "deep-analysis: the rendered report is byte-identical across two runs",
             if lighthouse_core::reports::render_markdown(&report)
                 == lighthouse_core::reports::render_markdown(&report2)
@@ -874,7 +898,7 @@ async fn main() {
     // record an advancing step or a non-advance — over scripted outcomes, and
     // assert the exact steps executed and the stop reason. Model-free and
     // deterministic (no wall-clock arm exercised), so it gates CI like the goldens
-    // above: a mismatch bumps `failures` and the process exits non-zero.
+    // above: a mismatch bumps the scorecard's `failed` and the process exits non-zero.
     println!("\n== beam loop budget floor (model-free) ==");
     {
         let far = Instant::now() + Duration::from_secs(600);
@@ -892,9 +916,9 @@ async fn main() {
                 steps += 1;
             };
             if steps == 3 && reason == StopReason::MaxSteps {
-                println!("  PASS  max_steps=3 runs exactly 3 steps then stops (MaxSteps)");
+                pass(&mut card, "max_steps=3 runs exactly 3 steps then stops (MaxSteps)");
             } else {
-                failures += 1;
+                card.failed += 1;
                 println!(
                     "  FAIL  max_steps: ran {steps} steps, stopped {reason:?} (want 3 / MaxSteps)"
                 );
@@ -909,9 +933,9 @@ async fn main() {
             let tripped = beam.record_non_advance() || beam.record_non_advance();
             let reason = beam.stop_before_step(1, None);
             if tripped && reason == Some(StopReason::NoProgress) {
-                println!("  PASS  two non-advancing replies halt the loop (NoProgress) after 1 step");
+                pass(&mut card, "two non-advancing replies halt the loop (NoProgress) after 1 step");
             } else {
-                failures += 1;
+                card.failed += 1;
                 println!(
                     "  FAIL  no-progress: tripped={tripped} reason={reason:?} (want true / NoProgress)"
                 );
@@ -925,9 +949,9 @@ async fn main() {
             let q = "SELECT region, SUM(amount) FROM sales GROUP BY region";
             beam.record_step(q.into());
             if beam.is_repeat_sql(q) && !beam.is_repeat_sql("SELECT COUNT(*) FROM sales") {
-                println!("  PASS  repeat-SQL guard flags a byte-identical replan, not a fresh one");
+                pass(&mut card, "repeat-SQL guard flags a byte-identical replan, not a fresh one");
             } else {
-                failures += 1;
+                card.failed += 1;
                 println!("  FAIL  repeat-SQL guard misclassified a planned query");
             }
         }
@@ -937,9 +961,9 @@ async fn main() {
         {
             let beam = BeamLoop::new(Budget::new(2, far, Some(1_000)));
             if beam.stop_before_step(2, None) == Some(StopReason::MaxSteps) {
-                println!("  PASS  unreported usage never binds the ceiling; max_steps still stops");
+                pass(&mut card, "unreported usage never binds the ceiling; max_steps still stops");
             } else {
-                failures += 1;
+                card.failed += 1;
                 println!("  FAIL  unreported-usage fallback did not fall back to MaxSteps");
             }
         }
@@ -971,9 +995,9 @@ async fn main() {
         // An AST-equal projection certifies and names the blessed metric.
         let hit = certified_metrics("SELECT SUM(amount) AS revenue FROM sales", &defs);
         if hit == ["revenue"] {
-            println!("  PASS  an AST-equal projection certifies the blessed metric");
+            pass(&mut card, "an AST-equal projection certifies the blessed metric");
         } else {
-            failures += 1;
+            card.failed += 1;
             println!("  FAIL  certify: got {hit:?} (want [\"revenue\"])");
         }
         // A near-miss — the same aggregate with an added FILTER — is NOT AST-equal,
@@ -983,11 +1007,145 @@ async fn main() {
             &defs,
         );
         if miss.is_empty() {
-            println!("  PASS  a near-miss (added FILTER) is NOT certified");
+            pass(&mut card, "a near-miss (added FILTER) is NOT certified");
         } else {
-            failures += 1;
+            card.failed += 1;
             println!("  FAIL  near-miss certify: got {miss:?} (want none)");
         }
+    }
+
+    // --- Section 1 (cont.): semantic STORE ablation floor (openspec:
+    //     field-patch-0.12.5 §3) ---
+    //
+    // The MEASUREMENT floor. Seeds a realistic MESSY fixture's definitions into
+    // the REAL semantic store, then adds model-free checks that route through
+    // `semantic::eligible_for_posture` — the seam the LIGHTHOUSE_ABLATE_* gates
+    // act on. Each of the three hand-authored components has dependent checks that
+    // PASS with the component present and FAIL when its gate removes it, so an
+    // ablation run MEASURABLY drops the rate (docs/analytics-beam Phase D +
+    // `.github/workflows/ablation.yml`). Without these the study is meaningless:
+    // the eval reads no store today.
+    //
+    // WHICH CHECK DEPENDS ON WHICH COMPONENT (audited — never fabricated):
+    //   [metrics]  "net_revenue certifies…" + "…is injected" — certification AND
+    //              prompt injection both need the metric eligible; ABLATE_METRICS
+    //              empties metrics ⇒ both fail.
+    //   [synonyms] "amount→amt / region→rgn injected" — synonyms are prompt-
+    //              injection-only (there is no engine synonym resolver), so their
+    //              presence in the business-definitions block IS their measurable
+    //              contribution; ABLATE_SYNONYMS ⇒ both fail. (The end-to-end lift
+    //              of a model actually using the abbreviation is the opt-in
+    //              provider leg's job, not this model-free floor.)
+    //   [joins]    "declared join is a curated pair" + "…rendered" —
+    //              curated_join_pairs AND the block's curated section both need the
+    //              joinHint (+ backing entities) eligible; ABLATE_JOINS ⇒ both fail.
+    // (Component-independent sanity: the paid total 2200 is a genuine verified
+    // answer regardless of ablation — execution never consults the store.)
+    println!("\n== semantic store ablation floor (model-free) ==");
+    {
+        // Isolate the store under the eval's temp dir (never the user's state).
+        let sem_vault = dir.join("semantic-vault");
+        let _ = fs::create_dir_all(&sem_vault);
+        std::env::set_var("VAULT_DIR", &sem_vault);
+        seed_messy_semantic_store();
+
+        // Register the messy tables for a genuine verified answer.
+        let mctx = SessionContext::new();
+        for (name, body) in [("orders_msy", MESSY_ORDERS_CSV), ("reps_msy", MESSY_REPS_CSV)] {
+            let path = sem_vault.join(format!("{name}.csv"));
+            fs::write(&path, body).expect("write messy fixture");
+            mctx.register_csv(name, path.to_str().unwrap(), CsvReadOptions::new())
+                .await
+                .expect("register messy fixture");
+        }
+
+        // Sanity (component-independent): paid revenue is a real, verified 2200.
+        record(
+            &mut card,
+            "messy: paid revenue is a verified 2200",
+            run_query(&mctx, "SELECT SUM(amt) AS paid FROM orders_msy WHERE status = 'paid'")
+                .await
+                .and_then(|r| contains(&r, &["2200"])),
+        );
+
+        // The posture-eligible set + rendered block, AFTER the ablation hook.
+        let eligible = lighthouse_core::semantic::eligible_for_posture(false);
+        let block = lighthouse_core::semantic::prompt_block(false)
+            .map(|c| c.text)
+            .unwrap_or_default();
+
+        // [metrics] The metric names the recurring FILTERed sum; a SQL computing
+        // exactly it certifies BY NAME over the eligible metrics (model-free).
+        let metric_sql =
+            "SELECT SUM(amt) FILTER (WHERE status = 'paid') AS net_revenue FROM orders_msy";
+        let certified = certified_metrics(metric_sql, &eligible.metrics);
+        record(
+            &mut card,
+            "[metrics] net_revenue certifies the recurring FILTERed sum",
+            if certified == ["net_revenue"] {
+                Ok(())
+            } else {
+                Err(format!(
+                    "certified {certified:?} (want [net_revenue]); ABLATE_METRICS removes it"
+                ))
+            },
+        );
+        record(
+            &mut card,
+            "[metrics] the metric definition is injected into the block",
+            if block.contains("- net_revenue = SUM(amt) FILTER (WHERE status = 'paid')") {
+                Ok(())
+            } else {
+                Err("metric line absent from the business-definitions block".to_string())
+            },
+        );
+
+        // [synonyms] The abbreviation mappings ride into the block so the model
+        // can resolve `amt`/`rgn` (synonyms are prompt-injection-only).
+        record(
+            &mut card,
+            "[synonyms] amount → amt is injected as a synonym",
+            if block.contains("- amount → amt") {
+                Ok(())
+            } else {
+                Err("synonym amount→amt absent; ABLATE_SYNONYMS removes it".to_string())
+            },
+        );
+        record(
+            &mut card,
+            "[synonyms] region → rgn is injected as a synonym",
+            if block.contains("- region → rgn") {
+                Ok(())
+            } else {
+                Err("synonym region→rgn absent; ABLATE_SYNONYMS removes it".to_string())
+            },
+        );
+
+        // [joins] The declared join is authoritative for the orders↔reps pair.
+        let pairs = lighthouse_core::semantic::curated_join_pairs(false);
+        let has_pair = pairs.iter().any(|(a, b)| {
+            (a == "orders_msy" && b == "reps_msy") || (a == "reps_msy" && b == "orders_msy")
+        });
+        record(
+            &mut card,
+            "[joins] declared orders_msy↔reps_msy join is a curated pair",
+            if has_pair {
+                Ok(())
+            } else {
+                Err(format!(
+                    "curated pairs {pairs:?} miss the join; ABLATE_JOINS removes joinHints + entities"
+                ))
+            },
+        );
+        record(
+            &mut card,
+            "[joins] the curated join section is rendered into the block",
+            if block.contains("Curated join hints (authoritative") {
+                Ok(())
+            } else {
+                Err("curated join section absent from the block".to_string())
+            },
+        );
     }
 
     // --- Section 2: provider NL scorecard (opt-in; never a CI gate) -------
@@ -1014,14 +1172,14 @@ async fn main() {
             for (q, expect) in nl {
                 match nl_answer(&ctx, &cfg, &sql_ctxs, q).await {
                     Ok((_, res)) => match contains(&res, expect) {
-                        Ok(()) => println!("  PASS  {q:?}"),
+                        Ok(()) => pass(&mut card, &format!("{q:?}")),
                         Err(e) => {
-                            failures += 1;
+                            card.failed += 1;
                             println!("  FAIL  {q:?}\n        {e}");
                         }
                     },
                     Err(e) => {
-                        failures += 1;
+                        card.failed += 1;
                         println!("  FAIL  {q:?} — {e}");
                     }
                 }
@@ -1036,18 +1194,16 @@ async fn main() {
                     let narration = narrate(&cfg, &sql_ctxs, q, &sql, &res).await;
                     match first_line_leads_with(&narration, "385") {
                         Ok(()) => {
-                            println!(
-                                "  PASS  narration leads with the number (385 on the first line)"
-                            );
+                            pass(&mut card, "narration leads with the number (385 on the first line)");
                         }
                         Err(e) => {
-                            failures += 1;
+                            card.failed += 1;
                             println!("  FAIL  narration leads with the number\n        {e}");
                         }
                     }
                 }
                 Err(e) => {
-                    failures += 1;
+                    card.failed += 1;
                     println!("  FAIL  narration leads with the number — setup: {e}");
                 }
             }
@@ -1055,11 +1211,20 @@ async fn main() {
     }
 
     let _ = fs::remove_dir_all(&dir);
-    if failures == 0 {
-        println!("\nanalytics_eval: all checks passed");
+    // ALWAYS print the machine-readable scorecard line (openspec:
+    // field-patch-0.12.5 §3), pass or fail, so the ablation runner can capture
+    // the rate even when an ablated component drives failures.
+    println!(
+        "\nSCORECARD total={} passed={} rate={:.3}",
+        card.total(),
+        card.passed,
+        card.rate()
+    );
+    if card.failed == 0 {
+        println!("analytics_eval: all checks passed");
         exit(0);
     }
-    eprintln!("\nanalytics_eval: {failures} check(s) FAILED");
+    eprintln!("analytics_eval: {} check(s) FAILED", card.failed);
     exit(1);
 }
 
@@ -1248,16 +1413,54 @@ fn check_cells(cols: &[String], row: &[String], want: &[(&str, &str)]) -> Result
     Ok(())
 }
 
-/// Record a golden check into the failure counter, printing PASS/FAIL like the
-/// rest of Section 1.
-fn record(failures: &mut usize, what: &str, r: Result<(), String>) {
+/// The running scorecard: every check lands as a PASS or a FAIL, so the
+/// always-printed `SCORECARD total=… passed=… rate=…` line (openspec:
+/// field-patch-0.12.5 §3) is exact whether the run passes or fails — an ablation
+/// runner captures the rate even when a component is ablated. `failed` still
+/// drives the exit code, so the CI gate is unchanged.
+#[derive(Default)]
+struct Scorecard {
+    passed: usize,
+    failed: usize,
+}
+
+impl Scorecard {
+    /// Total checks = passed + failed, so the two counters are always consistent
+    /// (no site can bump one without the other being part of the sum).
+    fn total(&self) -> usize {
+        self.passed + self.failed
+    }
+    /// Pass rate in [0, 1]; an empty scorecard is vacuously 1.0.
+    fn rate(&self) -> f64 {
+        let t = self.total();
+        if t == 0 {
+            1.0
+        } else {
+            self.passed as f64 / t as f64
+        }
+    }
+}
+
+/// Record a check into the scorecard, printing PASS/FAIL like the rest of
+/// Section 1.
+fn record(card: &mut Scorecard, what: &str, r: Result<(), String>) {
     match r {
-        Ok(()) => println!("  PASS  {what}"),
+        Ok(()) => {
+            card.passed += 1;
+            println!("  PASS  {what}");
+        }
         Err(e) => {
-            *failures += 1;
+            card.failed += 1;
             println!("  FAIL  {what}\n        {e}");
         }
     }
+}
+
+/// A PASS with a side effect in the arm (where converting to `record` would drop
+/// the effect) — counts exactly like a `record` Ok.
+fn pass(card: &mut Scorecard, what: &str) {
+    card.passed += 1;
+    println!("  PASS  {what}");
 }
 
 /// The numeric-ish tokens in a report summary line — a whitespace/punctuation
@@ -1273,4 +1476,59 @@ fn numeric_tokens(line: &str) -> Vec<String> {
             (t.len() >= 2 && t.chars().any(|c| c.is_ascii_digit())).then(|| t.to_string())
         })
         .collect()
+}
+
+// --- Semantic-store ablation floor helper (openspec: field-patch-0.12.5 §3) --------
+
+/// Seed the MESSY fixture's business definitions directly into the semantic
+/// store at `state_dir()/semantic.json` (the v1 envelope both engines read).
+/// Written whole (a joinHint has no CRUD in either engine) via the real
+/// `SemanticSet` serialization + a `v: 1` stamp, so `eligible_for_posture`'s
+/// ablation hook governs it exactly as it governs a user's store. The caller
+/// must have pointed `VAULT_DIR` at an isolated temp dir first.
+fn seed_messy_semantic_store() {
+    let set = SemanticSet {
+        metrics: vec![Metric {
+            id: "metric-msy".to_string(),
+            name: "net_revenue".to_string(),
+            expression: "SUM(amt) FILTER (WHERE status = 'paid')".to_string(),
+            description: "paid revenue".to_string(),
+            entity: "orders_msy".to_string(),
+            reads: Reads { files: vec![], views: vec![] },
+            summary: ViewSummary { text: "net revenue".to_string(), source: SummarySource::Question },
+            created_ms: 1,
+        }],
+        synonyms: vec![
+            Synonym { term: "amount".to_string(), canonical: "amt".to_string() },
+            Synonym { term: "region".to_string(), canonical: "rgn".to_string() },
+        ],
+        entities: vec![
+            Entity {
+                name: "orders_msy".to_string(),
+                table: "orders_msy".to_string(),
+                key_columns: vec!["rep_id".to_string()],
+                description: "orders ledger".to_string(),
+            },
+            Entity {
+                name: "reps_msy".to_string(),
+                table: "reps_msy".to_string(),
+                key_columns: vec!["rep_id".to_string()],
+                description: "sales reps".to_string(),
+            },
+        ],
+        join_hints: vec![JoinHint {
+            left_entity: "orders_msy".to_string(),
+            left_column: "rep_id".to_string(),
+            right_entity: "reps_msy".to_string(),
+            right_column: "rep_id".to_string(),
+            description: "each order's rep".to_string(),
+        }],
+    };
+    let mut value = serde_json::to_value(&set).expect("serialize the semantic set");
+    value
+        .as_object_mut()
+        .expect("set serializes as an object")
+        .insert("v".to_string(), serde_json::json!(1));
+    let path = lighthouse_core::config::state_dir().join("semantic.json");
+    fs::write(&path, serde_json::to_string_pretty(&value).unwrap()).expect("write semantic store");
 }
