@@ -1915,13 +1915,27 @@ the 0.12.0 Beam token system.
    current investigation; a compact header shows name · scope size ·
    policy badge.
 
+6. Chat scroll: read from the top (owner-reported, 2026-07-15). Today
+   the transcript auto-scrolls to the bottom as an answer lands, so a
+   long Related-files list hides the response text. New behavior: when
+   an answer begins streaming, anchor the TOP of that assistant message
+   to the top of the chat viewport and HOLD there — do not follow the
+   stream to the bottom. Any manual scroll by the user cancels the hold
+   for that answer (never fight the user). Reference cards render below
+   the answer text and must never displace the anchored start. Honor
+   prefers-reduced-motion (instant jump, no smooth animation). Main
+   window transcript only; the widget pill is unaffected.
+
 Gates: unit tests for the store (versioning, history-off persistence
 rules); parity tests for scoping (same fixture vault → identical
 candidate sets both engines); E2E: create an investigation scoped to two
 files → ask → answer cites only those; mark it local-only with a cloud
 provider configured (mocked) → the ask runs private and the stamp says
-on-device; archive → nothing deleted; suites + smoke + eval/chart floors
-green. `openspec validate --all` green.
+on-device; archive → nothing deleted; scroll E2E: an answer citing many
+files renders with its FIRST line visible at the viewport top (not
+scrolled past), and a manual scroll during streaming is not overridden;
+suites + smoke + eval/chart floors green. `openspec validate --all`
+green.
 ```
 
 ### H2 prompt — Boards
