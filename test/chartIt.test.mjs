@@ -37,7 +37,7 @@ test("the chip is offered from the real parsers: table → heuristic → validat
   // (b) …through the client heuristic (which round-trips parseChartSpec)…
   assert.match(refineRegion, /chartSpecFromTable\(table\)/);
   // (c) …and never when the engine already charted this answer.
-  assert.match(refineRegion, /if \(hasEngineChartFence\(content\)\) return null;/);
+  assert.match(refineRegion, /if \(metaChart \|\| hasEngineChartFence\(content\)\) return null;/);
   // Invalid/absent spec hides the chip entirely.
   assert.match(refineRegion, /\{tableChart && \(\s*<Button/);
 });
@@ -92,7 +92,7 @@ test("ANY tabular answer gets the chip: a standalone mount covers answers withou
     chat.indexOf("/** True when a hast <pre>"),
   );
   assert.ok(rowRegion.length > 0, "ChartItRow found");
-  assert.match(rowRegion, /if \(hasEngineChartFence\(content\)\) return null;/);
+  assert.match(rowRegion, /if \(metaChart \|\| hasEngineChartFence\(content\)\) return null;/);
   assert.match(rowRegion, /parseMarkdownTable\(content\)/);
   assert.match(rowRegion, /chartSpecFromTable\(table\)/);
   assert.match(rowRegion, /<AnalyticsChart spec=\{tableChart\} \/>/);
