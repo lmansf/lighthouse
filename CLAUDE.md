@@ -13,7 +13,8 @@ releases.
 - Version stamps live in FIVE files and must move together:
   `package.json`, `package-lock.json` (×2 stamps), `native/Cargo.toml`
   (workspace version), `native/crates/lighthouse-desktop/tauri.conf.json`,
-  and `native/Cargo.lock` (×3 lighthouse crates).
+  and `native/Cargo.lock` (every `lighthouse-*` crate — FIVE as of 0.12.6;
+  the workspace grew past the original three, so bump by pattern, not count).
 - Pipeline: bump → PR → squash-merge to main → `desktop-release.yml`
   (workflow_dispatch on main; empty `release_tag` derives v<version> from
   package.json; runs JS checks + the 3-OS `release-smoke.yml` gate, creates
