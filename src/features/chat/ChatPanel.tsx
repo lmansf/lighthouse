@@ -122,6 +122,7 @@ import { emphasize } from "@/features/quickopen/QuickOpen";
 import { AnalyticsChart, standaloneChartSvg } from "@/features/chat/AnalyticsChart";
 import { SqlBlock } from "@/features/chat/SqlBlock";
 import { formatSql } from "@/lib/sqlFormat";
+import { safeMarkdownPrefix, splitMarkdownBlocks } from "@/lib/streamingMarkdown";
 import { BriefingsPanel } from "@/features/chat/BriefingsPanel";
 import { PinMiniChart } from "@/features/chat/PinMiniChart";
 import { SaveViewDialog } from "@/features/views/SaveViewDialog";
@@ -507,13 +508,6 @@ const useStyles = makeStyles({
       marginBottom: tokens.spacingVerticalXXS,
       fontVariantNumeric: "tabular-nums",
     },
-  },
-  // The streaming turn's plain-text surface: preserve the model's newlines and
-  // wrap long tokens, but do no markdown work until the answer settles. Sits
-  // inside `.answer`, so it inherits the same font size and line height.
-  streamingText: {
-    whiteSpace: "pre-wrap",
-    wordBreak: "break-word",
   },
   // [n] citation markers rendered as clickable superscript chips that jump to
   // the matching reference card below the answer.
@@ -2053,27 +2047,58 @@ const AnswerMarkdown = memo(function AnswerMarkdown({
   );
 });
 
+/** One settled (or the final in-progress) markdown block of a streaming turn.
+ *  Memoized on its content so a completed block parses exactly ONCE — only the
+ *  last, still-growing block re-parses per frame. */
+const StreamBlock = memo(function StreamBlock({
+  content,
+  turnId,
+  onCite,
+}: {
+  content: string;
+  turnId: string;
+  onCite: (turnId: string, n: number) => void;
+}) {
+  return <AnswerMarkdown content={content} turnId={turnId} onCite={onCite} />;
+});
+
 /**
- * The in-flight (streaming) turn, rendered as plain pre-wrapped text rather than
- * re-running the full markdown pipeline. Re-parsing the growing answer on every
- * flush was O(N²) (remark parse → gfm tables → citation walk → hast → React,
- * over the WHOLE accumulated answer each time); a long tabular answer paid for
- * it dearly. Plain text while streaming makes each flush a cheap text update;
- * the turn does ONE full markdown parse (AnswerMarkdown) the instant it settles,
- * so the final rendered answer and its citations are byte-identical to before.
- * Memoized on content so it only updates when the buffered text actually grows.
+ * The in-flight (streaming) turn, rendered PROGRESSIVELY (patch section 2). Each
+ * COMPLETED markdown block renders as markdown the moment it settles; the final,
+ * still-growing block is shown only up to a SAFE prefix (safeMarkdownPrefix)
+ * that holds back an unterminated code fence, a half-typed table row, or an
+ * unclosed bold/code-span/link, so raw markup never flashes and a table never
+ * renders torn. Blocks are memoized (StreamBlock), so this does NOT reintroduce
+ * the quadratic whole-answer re-parse the old plain-text path avoided: a settled
+ * block parses once and only the growing block re-parses per flush. On settle
+ * the turn renders through the normal AnswerMarkdown path (transcript branch
+ * below), so the final output is byte-identical to before. It keeps the
+ * per-flush cadence so the anchored read-from-the-top hold (the messages effect)
+ * re-anchors as blocks mount and grow.
  */
 const StreamingAnswer = memo(function StreamingAnswer({
   content,
   className,
+  turnId,
+  onCite,
 }: {
   content: string;
-  className: string;
+  className?: string;
+  turnId: string;
+  onCite: (turnId: string, n: number) => void;
 }) {
-  // Same belt-and-braces strip as AnswerMarkdown — a chart-request fence
-  // (even a still-open one, via the regex's `$` arm) never shows mid-stream.
+  const blocks = useMemo(() => {
+    // Same belt-and-braces strip as AnswerMarkdown (a still-open request fence
+    // never shows), then split the safe prefix into independently-parsed blocks.
+    const clean = stripAppearanceRequestFences(stripChartRequestFences(content));
+    return splitMarkdownBlocks(safeMarkdownPrefix(clean));
+  }, [content]);
   return (
-    <div className={className}>{stripAppearanceRequestFences(stripChartRequestFences(content))}</div>
+    <div className={className}>
+      {blocks.map((b, i) => (
+        <StreamBlock key={i} content={b} turnId={turnId} onCite={onCite} />
+      ))}
+    </div>
   );
 });
 
@@ -4964,9 +4989,15 @@ export function ChatPanel() {
                       {m.content && (
                         <div className={styles.answer}>
                           {streaming && m.id === lastId ? (
-                            // The live turn renders as cheap plain text; it does
-                            // the one full markdown parse when it settles below.
-                            <StreamingAnswer content={m.content} className={styles.streamingText} />
+                            // §2: the live turn renders progressively — completed
+                            // blocks as markdown, the growing block held to a safe
+                            // prefix — then re-renders through AnswerMarkdown once
+                            // it settles (byte-identical final).
+                            <StreamingAnswer
+                              content={m.content}
+                              turnId={m.id}
+                              onCite={handleCitationClick}
+                            />
                           ) : (
                             <AnswerMarkdown
                               content={m.content}
