@@ -12,7 +12,19 @@ import { register } from "node:module";
 
 register("./_ts-extensionless-hook.mjs", import.meta.url);
 
-const { crossDocCue, rankDocsFromHits } = await import("../src/server/synth.ts");
+const { crossDocCue, rankDocsFromHits, multiFileSpan } = await import("../src/server/synth.ts");
+
+// §3 cross-file span trigger. References are one-per-source, score-descending
+// and normalized to the top = 1.0. KEEP ALIGNED with the Rust twin
+// (lighthouse-core/src/synth.rs::multi_file_span, SECONDARY_FILE_MIN = 0.6).
+test("span: two comparably-relevant sources trigger synthesis", () => {
+  const ref = (score) => ({ fileId: `x${score}`, name: `f${score}`, snippet: "", score });
+  assert.equal(multiFileSpan([ref(1.0), ref(0.7)]), true, "2nd within reach → cross-file");
+  assert.equal(multiFileSpan([ref(1.0), ref(0.6)]), true, "boundary (>= 0.6) triggers");
+  assert.equal(multiFileSpan([ref(1.0), ref(0.4)]), false, "weak 2nd → single-doc focus");
+  assert.equal(multiFileSpan([ref(1.0)]), false, "single source never spans");
+  assert.equal(multiFileSpan([]), false, "no sources");
+});
 
 test("cue: comparison words trigger", () => {
   assert.equal(crossDocCue("Compare the Q3 report with the Q2 report"), true);

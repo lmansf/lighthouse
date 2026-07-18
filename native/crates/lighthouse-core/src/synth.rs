@@ -73,6 +73,25 @@ pub fn cross_doc_cue(question: &str) -> bool {
     norm.split(' ').any(|t| CUE_WORDS.contains(&t))
 }
 
+/// The second-ranked source must score at least this fraction of the top
+/// (references are normalized to the top = 1.0) for the ask to count as
+/// genuinely cross-file. Deliberately high so an incidental tail hit never
+/// trips the cross-file route. PARITY: keep identical to src/server/synth.ts.
+const SECONDARY_FILE_MIN: f64 = 0.6;
+
+/// §3 cross-file span: the initial retrieval surfaced at least two distinct
+/// sources whose relevance is COMPARABLE — the second-best scores within reach
+/// of the best. When true, the pipeline SKIPS the whole-file focus read (which
+/// would single-source the dominant file) and lets the single-shot path answer:
+/// that one model call already sees BOTH files' top chunks, so the answer
+/// INTEGRATES them at no extra cost. Conservative by construction: a single
+/// dominant file (the second source weak) falls through to whole-file focus.
+/// `refs` are one-per-source and score-descending. Pure; mirrors
+/// src/server/synth.ts::multiFileSpan.
+pub fn multi_file_span(refs: &[RagReference]) -> bool {
+    refs.len() >= MIN_MAP_DOCS && refs[MIN_MAP_DOCS - 1].score >= SECONDARY_FILE_MIN
+}
+
 /// G6: how much a recall cue lifts past-conversation candidates before ranking
 /// (applied in `vault::retrieve`). Keep identical in the TS twin.
 pub const CONV_BOOST: f64 = 1.5;
@@ -2246,7 +2265,15 @@ fn live_pipeline(
         //     per segment). Multi-doc asks never reach here (returned above
         //     or guarded by the cue); tabular files stay on the
         //     analytics/table-profile paths. ---
-        if has_real_model(&cfg) && attachment_file_ids.len() <= 1 && !cross_doc_cue(&question) {
+        // §3 cross-file span: when a SECOND file is comparably relevant, skip the
+        // whole-file focus read (which would single-source the dominant file) and
+        // fall through to the single-shot path — that one model call already sees
+        // BOTH files' top chunks, so the answer integrates them (no extra calls).
+        if has_real_model(&cfg)
+            && attachment_file_ids.len() <= 1
+            && !cross_doc_cue(&question)
+            && !multi_file_span(&initial.references)
+        {
             // Doc-focus reads the WHOLE target file into the prompt, so both of
             // its bypasser entrypoints are filtered here at their own choke
             // point: a lone local-only attachment is dropped, and named-file
@@ -2531,6 +2558,18 @@ mod tests {
 
     fn vctx(name: &str, text: &str, score: f64, kind: crate::contracts::SourceKind) -> vault::Context {
         vault::Context { name: name.into(), text: text.into(), score, kind }
+    }
+
+    #[test]
+    fn multi_file_span_needs_two_comparable_sources() {
+        // §3: two comparably-relevant sources route to synthesis; a weak second
+        // source (or a single source) falls through to whole-file focus. KEEP
+        // ALIGNED with the TS twin test (test/synth.cues.test.mjs).
+        assert!(multi_file_span(&[r("a", "a", 1.0), r("b", "b", 0.7)]));
+        assert!(multi_file_span(&[r("a", "a", 1.0), r("b", "b", 0.6)])); // boundary
+        assert!(!multi_file_span(&[r("a", "a", 1.0), r("b", "b", 0.4)])); // weak 2nd
+        assert!(!multi_file_span(&[r("a", "a", 1.0)])); // single source
+        assert!(!multi_file_span(&[]));
     }
 
     #[test]

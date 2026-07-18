@@ -95,6 +95,25 @@ export function crossDocCue(question: string): boolean {
   return norm.split(" ").some((t) => CUE_WORDS.has(t));
 }
 
+/** The second-ranked source must score at least this fraction of the top for
+ *  the ask to count as genuinely cross-file. PARITY: lighthouse-core
+ *  synth::SECONDARY_FILE_MIN. */
+const SECONDARY_FILE_MIN = 0.6;
+
+/**
+ * §3 cross-file span: the initial retrieval surfaced at least two distinct
+ * sources whose relevance is COMPARABLE — the second-best scores within reach of
+ * the best. When true, the pipeline SKIPS the whole-file focus read (which would
+ * single-source the dominant file) and lets the single-shot path answer: that
+ * one model call already sees BOTH files' top chunks, so the answer INTEGRATES
+ * them at no extra cost. Conservative: a single dominant file (weak second
+ * source) falls through to whole-file focus. `refs` are one-per-source,
+ * score-descending. PARITY: lighthouse-core synth::multi_file_span.
+ */
+export function multiFileSpan(refs: RagReference[]): boolean {
+  return refs.length >= MIN_MAP_DOCS && refs[MIN_MAP_DOCS - 1].score >= SECONDARY_FILE_MIN;
+}
+
 /**
  * G6: the synthesis prompt label for a retrieved context. A past-conversation
  * note is announced as such so the model knows the block is the user's OWN
@@ -726,7 +745,16 @@ async function* answerPipelineLive(
   //     here (returned above or guarded by the cue); tabular files stay on
   //     the table-profile path (analytics is desktop-only). KEEP IN SYNC with
   //     synth.rs. ---
-  if (hasRealModel(cfg) && attachmentFileIds.length <= 1 && !crossDocCue(question)) {
+  // §3 cross-file span: when a SECOND file is comparably relevant, skip the
+  // whole-file focus read (which would single-source the dominant file) and fall
+  // through to single-shot — that one model call already sees BOTH files' top
+  // chunks, so the answer integrates them (no extra calls). Mirrors synth.rs.
+  if (
+    hasRealModel(cfg) &&
+    attachmentFileIds.length <= 1 &&
+    !crossDocCue(question) &&
+    !multiFileSpan(initial.references)
+  ) {
     // Doc-focus reads the WHOLE target file into the prompt, so both of its
     // bypasser entrypoints are filtered here at their own choke point: a lone
     // local-only attachment is dropped, and named-file lookup runs over the

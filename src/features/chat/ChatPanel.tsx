@@ -74,6 +74,7 @@ import {
   HistoryRegular,
   LockClosedRegular,
   OpenRegular,
+  SparkleRegular,
   PinRegular,
   PlayRegular,
   SaveRegular,
@@ -791,6 +792,67 @@ const useStyles = makeStyles({
   },
   openIcon: { opacity: 0, transition: "opacity 120ms ease", color: tokens.colorNeutralForeground3 },
   refMeta: { display: "flex", flexDirection: "column", flex: 1, minWidth: 0 },
+  // §3: related files as compact GitHub-tag-style chips on a wrapping row.
+  refChipRow: {
+    display: "flex",
+    flexWrap: "wrap",
+    alignItems: "center",
+    gap: tokens.spacingHorizontalXS,
+    marginTop: tokens.spacingVerticalXS,
+  },
+  refChip: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: tokens.spacingHorizontalXXS,
+    maxWidth: "100%",
+    ...shorthands.padding("2px", tokens.spacingHorizontalSNudge),
+    ...shorthands.border("1px", "solid", tokens.colorNeutralStroke2),
+    ...shorthands.borderRadius(tokens.borderRadiusCircular),
+    backgroundColor: tokens.colorNeutralBackground3,
+    color: tokens.colorNeutralForeground1,
+    fontSize: tokens.fontSizeBase200,
+    lineHeight: tokens.lineHeightBase200,
+    cursor: "pointer",
+    transition: "background-color 120ms ease",
+    ":hover": { backgroundColor: tokens.colorNeutralBackground3Hover },
+    ":hover .open-affordance": { opacity: 1 },
+    ":focus-within .open-affordance": { opacity: 1 },
+  },
+  refChipName: { fontWeight: tokens.fontWeightSemibold, whiteSpace: "nowrap" },
+  refChipPct: { color: tokens.colorNeutralForeground3, fontVariantNumeric: "tabular-nums" },
+  refChipOpen: {
+    opacity: 0,
+    transition: "opacity 120ms ease",
+    color: tokens.colorNeutralForeground3,
+    display: "inline-flex",
+    cursor: "pointer",
+    marginInlineStart: "2px",
+  },
+  // The "Synthesize" affordance and the "+N more" overflow toggle: same chip
+  // shape, but accent-tinted (synthesize) / plain (more).
+  synthChip: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: tokens.spacingHorizontalXXS,
+    ...shorthands.padding("2px", tokens.spacingHorizontalSNudge),
+    ...shorthands.border("1px", "solid", tokens.colorBrandStroke1),
+    ...shorthands.borderRadius(tokens.borderRadiusCircular),
+    backgroundColor: tokens.colorBrandBackground2,
+    color: tokens.colorBrandForeground2,
+    fontSize: tokens.fontSizeBase200,
+    fontWeight: tokens.fontWeightSemibold,
+    cursor: "pointer",
+    ":hover": { backgroundColor: tokens.colorBrandBackground2Hover },
+  },
+  moreChip: {
+    ...shorthands.padding("2px", tokens.spacingHorizontalSNudge),
+    ...shorthands.border("1px", "dashed", tokens.colorNeutralStroke2),
+    ...shorthands.borderRadius(tokens.borderRadiusCircular),
+    backgroundColor: "transparent",
+    color: tokens.colorNeutralForeground2,
+    fontSize: tokens.fontSizeBase200,
+    cursor: "pointer",
+  },
   composer: {
     display: "flex",
     // The textarea grows downward as the draft gets longer; keep the send
@@ -2102,14 +2164,30 @@ const StreamingAnswer = memo(function StreamingAnswer({
   );
 });
 
+/** Related-file chips collapse past this count behind a "+N more" toggle. */
+const REF_CHIPS_COLLAPSED = 6;
+
+/** Middle-truncate a filename so the base AND the extension stay legible —
+ *  "quarterly-revenue-by-region.csv" → "quarterly-r…egion.csv". */
+function middleTruncateName(name: string, max = 24): string {
+  if (name.length <= max) return name;
+  const dot = name.lastIndexOf(".");
+  const ext = dot > 0 && name.length - dot <= 6 ? name.slice(dot) : "";
+  const stem = ext ? name.slice(0, name.length - ext.length) : name;
+  const keep = Math.max(6, max - ext.length - 1);
+  const head = Math.ceil(keep * 0.55);
+  const tail = keep - head;
+  return `${stem.slice(0, head)}…${tail > 0 ? stem.slice(stem.length - tail) : ""}${ext}`;
+}
+
 /**
- * The "Related files" cards under an answer. Hoisted to module scope: it used to
- * be declared *inside* ChatPanel, so it got a fresh component identity on every
- * render and React tore down and rebuilt every reference card (Card + two
- * Badges + icon + two Texts, ×3–8 per turn) on every streamed token AND every
- * composer keystroke. As a stable, memoized component the cards only re-render
- * when that turn's references, the desktop capability, or the citation-flash
- * target actually change.
+ * The "Related files" chips under an answer (§3): compact GitHub-tag-style chips
+ * on a wrapping row — "name.ext · 87%", middle-truncated names, full name in the
+ * tooltip, same click behaviors as the old cards (preview primary, open-in-app
+ * secondary). Overflow past REF_CHIPS_COLLAPSED collapses behind "+N more", and
+ * a "Synthesize" chip re-asks the question drawing on all the files together.
+ * Hoisted + memoized so the chips only re-render when that turn's references,
+ * the desktop capability, or the citation-flash target change.
  */
 const References = memo(function References({
   turnId,
@@ -2118,6 +2196,7 @@ const References = memo(function References({
   flashCite,
   onOpen,
   onPreview,
+  onSynthesize,
 }: {
   turnId: string;
   references: RagReference[];
@@ -2126,84 +2205,99 @@ const References = memo(function References({
   /** Secondary action (desktop only): hand the file to its OS app. */
   onOpen: (fileId: string) => void;
   /** Primary action: open the in-app preview ON the cited chunk (time-savers
-   *  feature 4) — works on the web twin too, so cards are always interactive. */
+   *  feature 4) — works on the web twin too, so chips are always interactive. */
   onPreview: (turnId: string, r: RagReference) => void;
+  /** §3: re-ask this turn's question scoped to its own source files. */
+  onSynthesize?: (turnId: string, refs: RagReference[]) => void;
 }) {
   const styles = useStyles();
+  const [expanded, setExpanded] = useState(false);
+  // A citation jumping to a hidden chip force-expands the row so its anchor
+  // exists and is visible.
+  const forceExpand = expanded || (flashCite?.startsWith(`${turnId}:`) ?? false);
+  const overflow = !forceExpand && references.length > REF_CHIPS_COLLAPSED;
+  const shown = overflow ? references.slice(0, REF_CHIPS_COLLAPSED - 1) : references;
+  const hidden = references.length - shown.length;
+  const fileCount = references.filter((r) => r.kind !== "conversation").length;
   return (
     <div className={styles.refs}>
       <Text weight="semibold" size={200}>
         Related files
       </Text>
-      {references.map((r, i) => (
-        <Card
-          key={r.fileId}
-          // Anchor for the [n] citation chips in the answer above.
-          id={citeCardId(turnId, i + 1)}
-          className={mergeClasses(
-            styles.refCard,
-            styles.refCardInteractive,
-            flashCite === `${turnId}:${i + 1}` && styles.refCardFlash,
-          )}
-          appearance="filled-alternative"
-          role="button"
-          tabIndex={0}
-          title={
-            r.kind === "conversation"
-              ? "Preview the cited passage from this past conversation"
-              : `Preview the cited passage from ${r.name}`
-          }
-          onClick={() => onPreview(turnId, r)}
-          onKeyDown={(e: KeyboardEvent) => {
-            // Card-level keys only: Enter on the inner open-in-app button must
-            // not ALSO fire the preview.
-            if (e.target !== e.currentTarget) return;
-            if (e.key === "Enter" || e.key === " ") {
-              e.preventDefault();
-              onPreview(turnId, r);
+      <div className={styles.refChipRow}>
+        {shown.map((r, i) => (
+          <span
+            key={r.fileId}
+            // Anchor for the [n] citation chips in the answer above (index is
+            // stable — `shown` is always a prefix of `references`).
+            id={citeCardId(turnId, i + 1)}
+            className={mergeClasses(
+              styles.refChip,
+              flashCite === `${turnId}:${i + 1}` && styles.refCardFlash,
+            )}
+            role="button"
+            tabIndex={0}
+            title={
+              r.kind === "conversation"
+                ? "Preview the cited passage from this past conversation"
+                : r.name
             }
-          }}
-        >
-          {/* Number matches the [n] markers in the answer text. */}
-          <Badge appearance="tint" shape="circular" size="small">
-            {i + 1}
-          </Badge>
-          {/* G6: a past-conversation note gets a chat glyph; files keep the doc. */}
-          {r.kind === "conversation" ? (
-            <ChatRegular fontSize={24} />
-          ) : (
-            <DocumentRegular fontSize={24} />
-          )}
-          <div className={styles.refMeta}>
-            <Text weight="semibold" truncate>
-              {r.name}
-            </Text>
-            <Text size={200} className={styles.empty}>
-              {r.snippet}
-            </Text>
-          </div>
-          {/* "Open in app" stays as the SECONDARY action on the card. */}
-          {desktop && (
-            <Button
-              size="small"
-              appearance="subtle"
-              className={`${styles.openIcon} open-affordance`}
-              icon={<OpenRegular fontSize={18} />}
-              aria-label={
-                r.kind === "conversation"
-                  ? "Open the conversation note in its app"
-                  : `Open ${r.name} in its app`
+            onClick={() => onPreview(turnId, r)}
+            onKeyDown={(e: KeyboardEvent) => {
+              if (e.target !== e.currentTarget) return;
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                onPreview(turnId, r);
               }
-              title="Open in app"
-              onClick={(e) => {
-                e.stopPropagation();
-                void onOpen(r.fileId);
-              }}
-            />
-          )}
-          <Badge appearance="outline">{Math.round(r.score * 100)}%</Badge>
-        </Card>
-      ))}
+            }}
+          >
+            <Badge appearance="tint" shape="circular" size="tiny">
+              {i + 1}
+            </Badge>
+            {r.kind === "conversation" ? (
+              <ChatRegular fontSize={14} />
+            ) : (
+              <DocumentRegular fontSize={14} />
+            )}
+            <span className={styles.refChipName}>{middleTruncateName(r.name)}</span>
+            <span className={styles.refChipPct}>· {Math.round(r.score * 100)}%</span>
+            {desktop && (
+              <span
+                role="button"
+                tabIndex={-1}
+                className={`${styles.refChipOpen} open-affordance`}
+                aria-label={
+                  r.kind === "conversation"
+                    ? "Open the conversation note in its app"
+                    : `Open ${r.name} in its app`
+                }
+                title="Open in app"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void onOpen(r.fileId);
+                }}
+              >
+                <OpenRegular fontSize={14} />
+              </span>
+            )}
+          </span>
+        ))}
+        {overflow && (
+          <button type="button" className={styles.moreChip} onClick={() => setExpanded(true)}>
+            +{hidden} more
+          </button>
+        )}
+        {onSynthesize && fileCount >= 2 && (
+          <button
+            type="button"
+            className={styles.synthChip}
+            title="Re-ask this question drawing on all of these files together"
+            onClick={() => onSynthesize(turnId, references)}
+          >
+            <SparkleRegular fontSize={14} /> Synthesize
+          </button>
+        )}
+      </div>
     </div>
   );
 });
@@ -2876,7 +2970,10 @@ export function ChatPanel() {
     setMessages((m) => m.map((x) => (x.id === asstId ? { ...x, stopped: true } : x)));
   }
 
-  async function sendQuestion(q: string, opts?: { bypassCache?: boolean }) {
+  async function sendQuestion(
+    q: string,
+    opts?: { bypassCache?: boolean; attachmentsOverride?: { id: string }[] },
+  ) {
     if (!q || streaming) return;
     // Warm the split markdown chunk now, while the answer streams as plain text,
     // so it's ready the instant the turn settles into a full markdown render.
@@ -2902,7 +2999,9 @@ export function ChatPanel() {
       .getState()
       .messages.filter((m) => !m.error && m.content)
       .map((m) => ({ role: m.role, content: m.content }));
-    const attachmentIds = attachments.map((a) => a.id);
+    // §3 "Synthesize": a one-shot attachment scope (the answer's own source
+    // files) overrides the composer pills without disturbing them.
+    const attachmentIds = (opts?.attachmentsOverride ?? attachments).map((a) => a.id);
     const userMsg: TranscriptMessage = { id: `u${++idSeq.current}`, role: "user", content: q };
     const asstId = `a${++idSeq.current}`;
     const asstMsg: TranscriptMessage = {
@@ -3457,6 +3556,26 @@ export function ChatPanel() {
     }
   }
 
+  /** §3 Synthesize: re-ask the SAME question scoped to an answer's own source
+   *  files, so the response INTEGRATES all of them (>= 2 attachments routes
+   *  through the multi-doc synthesis pipeline). One-shot — the composer's
+   *  attachment pills are left untouched. */
+  function synthesizeAcross(turnId: string, refs: RagReference[]) {
+    const fileRefs = refs.filter((r) => r.kind !== "conversation");
+    if (fileRefs.length < 2 || streaming) return;
+    const msgs = useChatStore.getState().messages;
+    const idx = msgs.findIndex((m) => m.id === turnId);
+    let question = "";
+    for (let i = idx - 1; i >= 0; i--) {
+      if (msgs[i].role === "user") {
+        question = msgs[i].content;
+        break;
+      }
+    }
+    if (!question) return;
+    void sendQuestion(question, { attachmentsOverride: fileRefs.map((r) => ({ id: r.fileId })) });
+  }
+
   /** Ask a pinned/changed question again — the fresh answer is the drill-down. */
   function askPinned(question: string, pinId?: string) {
     if (streaming) return;
@@ -3710,6 +3829,16 @@ export function ChatPanel() {
       body: JSON.stringify({ nodeId: fileId }),
     }).catch(() => {});
   }, []);
+
+  // §3: a STABLE identity for the memoized <References>' Synthesize handler, so
+  // the chips don't re-render per streamed token; it always calls the latest
+  // synthesizeAcross closure (which reads live state and sendQuestion).
+  const synthesizeRef = useRef(synthesizeAcross);
+  synthesizeRef.current = synthesizeAcross;
+  const onSynthesizeStable = useCallback(
+    (t: string, refs: RagReference[]) => synthesizeRef.current(t, refs),
+    [],
+  );
 
   // --- Ask type-ahead (time-savers): local autocomplete over past asks. ---
   // Every past user ask, stamped with its conversation's updatedAt (messages
@@ -5247,6 +5376,7 @@ export function ChatPanel() {
                           flashCite={flashCite}
                           onOpen={openFile}
                           onPreview={openPreview}
+                          onSynthesize={onSynthesizeStable}
                         />
                       )}
                       {/* Honesty note: files were visible, yet nothing matched. */}
