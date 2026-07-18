@@ -2219,6 +2219,58 @@ registration; billing note visible in both surfaces per vendor; suites +
 smoke green; five stamps agree. End with the vendor-auth findings table
 and the maintainer checklist.
 ```
+
+---
+
+## 17. Standout research: Genie One, harnesses, analyst tools (2026-07-15)
+
+Web-researched (Databricks docs/release notes, harness landscape,
+analyst-tool comparisons). Three canons, then the standout set.
+
+**Genie One (Databricks) 2026:** instructions + example SQL + semantic
+expressions per space; Unity Catalog Metrics (governed semantics);
+**Benchmarks** — author-curated test questions with expected answers,
+run to score the space; Ask-for-Review; **Deep Research** (experimental
+multi-step analysis); **Managed MCP Server** (any agent can ask a Genie
+space); Tableau/Power BI import. → Lighthouse equivalents: H6 covers
+instructions/metrics; benchmarks, certified answers, MCP server, and
+deep analysis were NOT yet on our map.
+
+**Harness canon (Claude Code, opencode, pi):** hooks with a pre-tool
+security checkpoint; plan mode (propose before execute); automatic
+checkpoints/rewind; subagents with isolated contexts; MCP everywhere;
+AGENTS.md-style workspace context; permission systems, cost limits and
+**cost tracking**. → Lighthouse: policy layer ≈ permissions; H5 loop
+planned; missing: plan-before-run, per-answer cost meter, MCP.
+
+**Analyst-tool canon (ThoughtSpot Spotter/SpotIQ, Power BI Copilot,
+Hex):** the 2024→2026 shift is governance — leaders route every AI query
+through a **semantic layer** so answers match the official dashboard;
+SpotIQ-style **proactive anomaly/trend surfacing**; notable gap: Power
+BI Copilot still can't do forecasting or anomaly detection from natural
+language. → Lighthouse: Beam's engine-verified numbers ARE the
+governance story; missing: quant depth (forecast/anomaly), proactive
+insights.
+
+### The standout set (new, constitution-fit, exploits local-first)
+
+| # | Feature | Why it stands out | Lands in |
+|---|---|---|---|
+| S1 | **Local MCP server** — the vault as a governed data plane: guarded tools (ask, run_select, schema, search) exposed over MCP to any agent on the machine, with policy/egress/audit applied | Genie ships this managed in the cloud; nobody ships it local-first. Every harness speaks MCP — Lighthouse becomes infrastructure for the analyst's whole toolchain | **H7** (amend: automation = CLI + RPC + MCP server) |
+| S2 | **Trust check (local Benchmarks)** — analyst-authored golden questions with expected results, one-click scorecard over their own vault; doubles as a regression guard when models/files change | Genie's benchmarks, localized; the user-facing face of our eval-floor culture; no desktop tool has it | **H6** |
+| S3 | **Certified answers** — owner-approved question→SQL pairs served deterministically with a Certified badge, zero model; shareable in skill packages | Genie's trusted assets + our opinion 7 (deterministic before model) = instant, provable answers to the questions that matter most | **H6** |
+| S4 | **Quant depth: engine forecasting + anomaly/trend stats** — seasonal-naive/Holt-Winters forecasts with uncertainty bands, IQR/z-score anomalies, changepoints; method + parameters in the assumption ledger; model narrates, never computes | Power BI Copilot can't do this from NL; the constitution makes ours trustworthy by construction | **new H8** |
+| S5 | **Proactive insight briefings** — opt-in scheduled anomaly/trend scan over included tabular data, feeding the existing briefing note; quiet, deterministic | SpotIQ's value, watchful-not-chatty posture | **H8** (with S4) |
+| S6 | **Plan-before-run** — the H5 loop shows its tool plan for approval (toggle; default on for cloud providers) | Harness plan mode, applied to analysis; pairs with the audit story | **H5** (amend) |
+| S7 | **Per-answer cost meter** — tokens + estimated cost beside the provenance stamp for cloud answers; "on-device · $0" for local | Harness-grade cost transparency; completes the 0.12.1 billing-clarity story; quietly markets the private path every single answer | **H5** (amend; or next 0.12.x patch) |
+| S8 | **Deep analysis mode** — "investigate X": bounded loop + recipes fan out, produce a structured report document in the vault with every query listed | Genie Deep Research, on-device; the capstone once H4+H5 exist | **H9** (after H5) |
+
+H6's scope formally elevates to a **local semantic layer** (metric
+definitions + join relationships + synonyms + the brief) — the research
+shows semantic routing is THE 2026 accuracy answer, and ours ships
+inside the product with zero cloud. Queue: 0.12.1 → H1–H4 → H5 (+S6,
+S7) → H6 (+S2, S3) → H7 (+S1) → H8 (S4+S5) → H9 (S8). Prompts written
+per session when reached, as with H1–H4.
 ```
 
 ---
