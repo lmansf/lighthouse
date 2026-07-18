@@ -40,6 +40,23 @@
 # upstream deprecated wholesale) and of DataFusion/ring/idna (paste, instant,
 # proc-macro-error, spin, unic-*). No drop-in replacement we control; no known
 # exploit path in our usage. Left visible in CI output on purpose.
+#
+# §4 re-triage 2026-07-18 (0.12.5): npm audit --omit=dev clean (0 vulns);
+# cargo audit exits 0 with the four ignores above (no new High/Critical). The
+# non-failing warning surface is unchanged — 20 allowed warnings:
+#   * gtk-rs GTK3 stack (Linux desktop shell only, deprecated upstream):
+#     atk/atk-sys, gdk/gdk-sys/gdkwayland-sys/gdkx11/gdkx11-sys,
+#     gtk/gtk-sys/gtk3-macros @0.18.2 (RUSTSEC-2024-041x, unmaintained),
+#     glib 0.18.5 (RUSTSEC-2024-0429, unsound VariantStrIter — a code path
+#     Lighthouse never calls);
+#   * transitive elsewhere: instant 0.1.13 (RUSTSEC-2024-0384), paste 1.0.15
+#     (RUSTSEC-2024-0436), proc-macro-error 1.0.4 (RUSTSEC-2024-0370),
+#     unic-* 0.9.0 (RUSTSEC-2025-0075/-0080/-0081/-0098/-0100), spin 0.9.8
+#     (yanked).
+# None is a shipped-code vulnerability and none has a semver-compatible fix in
+# the pinned tree; each rides on an upstream (Tauri GTK4 migration, DataFusion,
+# ring) we don't pin directly. No new ignore added — deliberately left as
+# visible warnings, re-checked by the weekly scheduled run.
 
 [advisories]
 # Mirrors the workflow's --ignore flags. (Retained for tooling that DOES read

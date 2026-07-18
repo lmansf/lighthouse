@@ -89,9 +89,16 @@ per section; the full suite + smoke + floors before the bump.
       both engines.
 
 ## §4 — Housekeeping (commit 4)
-- [ ] 4.1 Triage remaining moderate Dependabot alerts: `npm audit`/`cargo audit`
+- [x] 4.1 Triage remaining moderate Dependabot alerts: `npm audit`/`cargo audit`
       review; fix by update or justify via the allowlist (`native/audit.toml`
-      dated rationale). No blanket disables.
+      dated rationale). No blanket disables. — 2026-07-18 re-triage: npm
+      `--omit=dev` clean (0 vulns); cargo audit exits 0 with the four documented
+      ignores (no new High/Critical). The 20 non-failing warnings (gtk-rs GTK3
+      stack, glib unsound, instant/paste/proc-macro-error/spin/unic-*) are all
+      transitive with no semver-compatible fix in the pinned tree; dated,
+      per-crate rationale added to `native/audit.toml`; no new ignore (no blanket
+      disable). Fixed a stale path ref in `supply-chain.yml`
+      (`native/.cargo/audit.toml` → `native/audit.toml`).
 
 ## §5 — Release (commit 5)
 - [ ] 5.1 Five-stamp bump `0.12.4 → 0.12.5` (package.json, package-lock ×2,
