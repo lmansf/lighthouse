@@ -2269,8 +2269,150 @@ H6's scope formally elevates to a **local semantic layer** (metric
 definitions + join relationships + synonyms + the brief) — the research
 shows semantic routing is THE 2026 accuracy answer, and ours ships
 inside the product with zero cloud. Queue: 0.12.1 → H1–H4 → H5 (+S6,
-S7) → H6 (+S2, S3) → H7 (+S1) → H8 (S4+S5) → H9 (S8). Prompts written
-per session when reached, as with H1–H4.
+S7) → H6 (+S2, S3) → H7 (+S1) → H8 (S4+S5) → H9 (S8).
+
+---
+
+## 18. Standout addendum prompt — H5–H9 with S1–S8 built in
+
+One phased batch replacing the individual H5–H7 prompts; runs after the
+H1–H4 sessions land. Master-prompt style: one PR per phase, phases land
+independently, stop cleanly between them.
+
+### Addendum prompt
+
+```
+Lighthouse standout batch: the harness core (H5–H9) with the eight
+standout features from the 2026 research built in from day one. Prereq:
+the H1–H4 suite (investigations, boards, shaped views, recipes +
+assumption ledger) is merged. Work in five phases, in order; one PR per
+phase; each phase lands independently — stop cleanly between phases and
+report. No version bumps (releases cut separately).
+
+Ground rules: the Rust engine (native/) ships; TS twin per
+docs/ts-twin.md and the PARITY convention (Beam-dependent capabilities
+stay Rust-only with stubs). UI through the Beam tokens. Feature-sized
+capabilities get OpenSpec changes (proposal, design with Non-goals
+pinned, spec deltas, tasks; `openspec validate --all` green). The §14
+constitution is the review standard — especially: every number
+engine-computed; deterministic before model; egress explicit; no
+arbitrary code execution. Gates every phase: npm test, cargo suite,
+lint, release smoke, all eval/chart floors green, live E2E per feature.
+
+PHASE A — H5: the Beam loop (OpenSpec: add-beam-loop) + S6 + S7.
+- The loop: a bounded agentic loop over universal TEXT-PROTOCOL tools
+  (the chart-directive pattern — works on all providers, no
+  per-vendor function calling): get_schema, sample_rows, run_select
+  (the same single-SELECT guard), search_vault, read_chunk,
+  run_recipe. Per-provider step caps (local model gets fewer; respect
+  the 6144 window). Every call is engine-validated, listed in the
+  answer's plan footer, and audit-logged. Absent/invalid tool use
+  degrades to today's single-shot path. This absorbs and generalizes
+  the analytics multi-step branch.
+- S6 plan-before-run: before executing, the loop presents its tool
+  plan inline for approval (Approve / Cancel; plan editing is a
+  design follow-on, not v1). Preference toggle "Review plans before
+  running" — default ON when a cloud provider is active, OFF for the
+  private model.
+- S7 cost meter: beside the provenance stamp, cloud answers show
+  tokens used + estimated cost (static per-vendor price table in the
+  repo, documented source, easy to update); local answers show
+  "on-device · $0". The session shield shows the running total.
+  Nothing transmitted.
+- Context transparency: a per-answer "view what was sent" action
+  showing the exact assembled context, locally.
+- Gates: loop E2E on a mocked cloud provider AND the local path (caps
+  honored, footer lists every call); plan approval E2E (cancel
+  executes nothing); cost stamp matches mocked usage; single-shot
+  degradation proven; floors green.
+
+PHASE B — H6: the local semantic layer (OpenSpec: add-semantic-layer)
++ S2 + S3.
+- The layer: a vault brief (bounded, user-editable, injected
+  transparently); metric definitions (named, vetted SQL expressions
+  with descriptions — consumed by Beam prompts and recipes); join
+  relationships and column synonyms; all stored versioned in the
+  vault state dir, all visible in the Library. Declarative skill
+  packages (recipe definitions, ask templates, glossary entries) —
+  file-based, shareable, applicability-gated, NO code execution.
+- S3 certified answers: an owner action on any Beam answer certifies
+  its question→SQL pair. A CONSERVATIVE deterministic matcher
+  (normalized-question similarity with a high threshold — false
+  certify-hits are worse than misses) serves matching asks
+  engine-only, instantly, with a "Certified" badge + freshness;
+  everything else falls through to the normal path. Certified pairs
+  live in the semantic layer and travel in skill packages.
+- S2 trust check: benchmark sets — questions with expected results
+  (a result digest, or a certified SQL whose output is the
+  expectation). One-click run produces a scorecard (pass/fail/diff
+  per question) with history; prompted suggestions to re-run after a
+  provider/model change. Entirely local.
+- Gates: prompt-injection budget tests (the layer's contribution
+  respects the local window); matcher conservatism unit tests;
+  benchmark E2E (author two questions, run, break one by editing the
+  fixture, re-run shows the regression); floors green.
+
+PHASE C — H7: automation + the MCP server (S1).
+- CLI: a `lighthouse` binary (new small crate over lighthouse-core):
+  `ask`, `recipe run`, `board export`, `benchmark run` — `--json`,
+  meaningful exit codes, headless, same policy/audit/egress rules.
+- S1 MCP server: `lighthouse mcp` runs a Model Context Protocol
+  server over STDIO — no TCP port, preserving the no-port posture
+  (an optional loopback+token HTTP transport may be designed but is
+  not v1). Tools exposed: ask (grounded answer + references +
+  provenance meta), run_select (same guard), get_schema, search_vault,
+  list_included. OPT-IN: default off; enabled in Preferences; the
+  managed policy layer can force it off. Local-only marks,
+  investigation scoping, egress rules, and the audit log all apply —
+  audit records carry origin=mcp.
+- Investigation branching (branch at any answer, keep both) and
+  investigation export/share, per §15.
+- Docs: docs/automation.md (CLI + RPC + MCP, with a Claude
+  Code/opencode connection example); docs/data-flows.md unchanged
+  (stdio is not network egress — state that explicitly).
+- Gates: scripted MCP client E2E (initialize → list tools → ask →
+  grounded answer with references; DML through run_select rejected;
+  disabled state refuses); CLI E2E with --json asserted; branching
+  E2E; zero-network proof for the stdio path.
+
+PHASE D — H8: quant depth (S4) + proactive insights (S5) (OpenSpec:
+add-quant-depth).
+- S4: engine-computed statistics the model may request via the loop
+  or NL cues (forecast/project/expected/unusual/spike): forecasting
+  (seasonal-naive and Holt-Winters, uncertainty bands, minimum-history
+  checks with an HONEST refusal when data is insufficient), windowed
+  anomaly detection (IQR/z-score), changepoints. Results are tables +
+  a new band-area chart kind (engine-built, both themes). Method,
+  parameters, and training window land in the assumption ledger; the
+  model narrates, never computes.
+- S5: an opt-in scheduled scan (reuse the briefing scheduler — do not
+  duplicate it) over included tabular data, feeding an "Insights"
+  section of the existing briefing note. Deterministic thresholds,
+  quiet by design (watchful, not chatty).
+- Gates: golden fixtures per method (known series → expected
+  forecast/anomalies/changepoints), refusal-case tests, band-chart
+  fixtures, briefing E2E with a seeded anomaly; floors green.
+
+PHASE E — H9: deep analysis (S8).
+- "Investigate X": a mode that composes everything — the loop plans
+  (plan-before-run applies), fans out across bounded steps and
+  applicable recipes, and synthesizes a structured REPORT document
+  into the vault (question, findings, every executed query, charts,
+  assumption ledger, references), linked to the current
+  investigation. Depth is provider-gated (cloud richer, local
+  bounded); cancellable at any point with a partial report saved.
+- Gates: E2E on a fixture investigation → report doc contains every
+  query and renders; caps enforced; cancel mid-run leaves a valid
+  partial; all floors green.
+
+After each phase: gates green, PR opened, short status (shipped /
+blocked / deferred with reasons). Housekeeping: if the Dependabot
+alerts on main are still open, triage them in Phase A. End the batch
+with a one-page capability map: what an analyst and what an external
+agent can now do against a Lighthouse vault, and what left the machine
+at each step (the answer should still be: nothing, unless they chose a
+cloud model).
+```
 ```
 
 ---
