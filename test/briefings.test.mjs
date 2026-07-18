@@ -112,6 +112,18 @@ test("composeBriefingNote matches the Rust golden output byte-for-byte", () => {
   assert.equal(md, expected);
 });
 
+test("composeBriefingNote escapes cells backslash-first (parity with Rust esc_cell)", () => {
+  // Same fixture as briefings.rs::tests::compose_note_escapes_cells_backslash_first —
+  // backslash escaped FIRST, then pipe; \r\n flattens to spaces (§22.5).
+  const md = composeBriefingNote(
+    [{ question: "Cost of A|B \\ C", before: "1\r\n2", after: "3|4\\5" }],
+    1784106180000,
+  );
+  assert.ok(md.includes("## Cost of A\\|B \\\\ C"), `question not escaped:\n${md}`);
+  assert.ok(md.includes("| Before | 1  2 |"), `newline tore the row:\n${md}`);
+  assert.ok(md.includes("| Now | 3\\|4\\\\5 |"), `value not escaped:\n${md}`);
+});
+
 test("composeBriefingNote empty set is a coherent note", () => {
   const md = composeBriefingNote([], 1784106180000);
   assert.ok(md.startsWith("# Lighthouse Briefing\n"));

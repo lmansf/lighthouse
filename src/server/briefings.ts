@@ -171,9 +171,14 @@ export interface NoteChange {
   after: string;
 }
 
-/** Escape a cell for a GFM table row (only the pipe can break a row). */
+/**
+ * Escape a cell for a GFM table row: backslash FIRST (or the escapes just
+ * added get re-escaped), then pipe; newlines flatten to a space so a
+ * multi-line value cannot tear the row. KEEP IN SYNC with
+ * lighthouse-core::briefings::esc_cell.
+ */
 function escNoteCell(s: string): string {
-  return s.replace(/\|/g, "\\|");
+  return s.replace(/\\/g, "\\\\").replace(/\|/g, "\\|").replace(/[\n\r]/g, " ");
 }
 
 /**

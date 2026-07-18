@@ -2986,8 +2986,14 @@ pub fn batches_to_markdown(
     };
     let schema = first.schema();
     let ncols = schema.fields().len().min(max_cols);
+    // Backslash FIRST (or the escapes just added get re-escaped), then pipe;
+    // newlines (either flavor) flatten to a space so a multi-line value cannot
+    // tear the row. Same model as pdf_tables::escape_cell / briefings::esc_cell.
     let cell = |s: String| -> String {
-        let s = s.replace('|', "\\|").replace('\n', " ");
+        let s = s
+            .replace('\\', "\\\\")
+            .replace('|', "\\|")
+            .replace(['\n', '\r'], " ");
         if s.chars().count() > MAX_CELL_CHARS {
             format!(
                 "{}…",
@@ -3008,7 +3014,13 @@ pub fn batches_to_markdown(
             .collect::<Vec<_>>()
             .join(" | ")
     ));
-    lines.push(format!("|{}|", " --- |".repeat(ncols)));
+    // The pdf_tables idiom: `| --- | --- |`, one cell per column. The previous
+    // `"|{}|"` wrap around " --- |".repeat(n) doubled the trailing pipe
+    // ("| --- | --- ||"), which reads as an EXTRA empty delimiter cell — a
+    // header/delimiter count mismatch that makes GFM reject the whole table
+    // and render it as raw pipes (§22.5; run_direct shows this markdown
+    // verbatim to humans).
+    lines.push(format!("| {} |", vec!["---"; ncols].join(" | ")));
     let mut shown = 0;
     let mut more = false;
     'outer: for b in batches {
@@ -3630,6 +3642,36 @@ mod tests {
         let (bytes, rows) = batches_to_csv(&[b], 1);
         assert_eq!(rows, 1);
         assert_eq!(String::from_utf8(bytes).unwrap().lines().count(), 2);
+    }
+
+    #[test]
+    fn markdown_cells_escape_backslash_first_and_flatten_newlines() {
+        // Same escaping model as pdf_tables::escape_cell (§22.5): backslash
+        // BEFORE pipe (or the escapes just added get re-escaped), \n and \r
+        // flatten to spaces so a multi-line value cannot tear its row.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("path|col", DataType::Utf8, false),
+            Field::new("total", DataType::Float64, true),
+        ]));
+        let b = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["C:\\dir\\file", "a|b", "line\r\nbreak"])),
+                Arc::new(Float64Array::from(vec![Some(1.0), Some(2.0), None])),
+            ],
+        )
+        .unwrap();
+        let (md, shown, more) = batches_to_markdown(&[b], 10, 10);
+        assert_eq!(shown, 3);
+        assert!(!more);
+        let mut lines = md.lines();
+        assert_eq!(lines.next(), Some("| path\\|col | total |"));
+        assert_eq!(lines.next(), Some("| --- | --- |"));
+        assert_eq!(lines.next(), Some("| C:\\\\dir\\\\file | 1.0 |"));
+        assert_eq!(lines.next(), Some("| a\\|b | 2.0 |"));
+        // \r\n → two spaces; the NULL renders as an empty cell.
+        assert_eq!(lines.next(), Some("| line  break |  |"));
+        assert_eq!(lines.next(), None);
     }
 
     fn batch(labels: &[&str], values: &[f64]) -> RecordBatch {
