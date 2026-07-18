@@ -210,7 +210,9 @@ fn build_prompt(question: &str, contexts: &[Ctx]) -> String {
 /// blocking client the same way; this is the async twin.
 fn http_client() -> &'static reqwest::Client {
     static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
-    CLIENT.get_or_init(reqwest::Client::new)
+    // Off-mobile this is `Client::new()`; on iOS/Android it carries the
+    // platform-verifier TLS roots (add-mobile-apps §1.2). See mobile_tls.
+    CLIENT.get_or_init(crate::mobile_tls::async_client)
 }
 
 /// Prior turns with empty content dropped and the sequence trimmed to begin
