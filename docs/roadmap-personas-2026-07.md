@@ -1681,6 +1681,137 @@ complete, land what's green and report where you stopped. End with a
 short "minutes saved" summary mapping each landed feature to the wait it
 removes.
 ```
+
+---
+
+## 13. 0.12.0 — the Beam release (rebrand + release prompt)
+
+Runs after the time-savers batch. The owner has explicitly approved the
+**minor bump to 0.12.0** under the CLAUDE.md versioning-policy exception:
+this is the Beam launch — a substantial visual rebrand plus everything
+shipped since 0.11.3. Full queue: T-final → P-final → G-final v2 →
+time-savers → **0.12.0**.
+
+### 0.12.0 prompt
+
+```
+Ship Lighthouse 0.12.0 — the Beam release: a full visual rebrand centered
+on Beam (the ask-your-data analytics engine) plus the release mechanics.
+Versioning note: CLAUDE.md pins releases to 0.11.x patches, but its
+exception clause applies — the OWNER HAS EXPLICITLY APPROVED the minor
+bump to 0.12.0 for this release (2026-07-15). Prereqs: T-final, P-final,
+G-final, and the time-savers batch are merged.
+
+One PR, one commit per numbered section, version bump last. Hard
+constraints: this is a UI/brand pass — do NOT change engine behavior,
+prompt strings, or labels (byte-identical parity and the eval/prompt
+snapshots must not budge); restyle through the existing Fluent v9 token
+seam (src/shell/theme.ts is the single source) and targeted component
+styles — do NOT swap component libraries. Reference Apple's design
+philosophy (clarity, deference, depth; content first; restraint), never
+Apple's assets: no SF fonts (platform-licensed), no Apple trademarks.
+Gates: npm test, cargo suite, lint, release smoke, eval + chart floors
+green, the repo's WCAG-AA contrast script clean on EVERY new pairing in
+BOTH themes, reduce-motion respected, and screenshots of every surface in
+both themes attached to the PR.
+
+1. The Beam identity (design system, implemented as tokens).
+   - Principles: content is the interface — chrome recedes, the user's
+     data and answers carry the visual weight; one accent, used
+     sparingly; depth via soft elevation, not decoration; motion only
+     with purpose.
+   - Palette (starting values — tune under the contrast gate, keep the
+     relationships): replace the Forerunner steel/blue entirely.
+     Light "Paper": canvas #FAFAF8, raised surfaces #F4F4F1, hairlines
+     #E7E7E2, ink text #1B1B1F, secondary #5A5A60.
+     Dark "Ink": canvas #0E0F12, surfaces #16181C, hairlines #26282E,
+     text #ECECEA, secondary #A2A2A8.
+     The Beam accent: warm amber — #E8A317 on light, #FFC24D on dark —
+     for primary actions, focus, included/active marks, links may stay a
+     quiet blue if amber fails AA on small text (contrast script
+     decides). Destructive red unchanged. No other hues.
+   - The signature: a single subtle "beam sweep" gradient (dark ink →
+     amber light) reserved for HERO moments only — app icon, onboarding
+     and tour headers, empty states, the About panel. Never behind
+     content, tables, or text.
+   - Typography: the system UI stack (-apple-system, "Segoe UI
+     Variable", "Segoe UI", system-ui, …) so each OS feels native at
+     zero bundle cost; a tightened scale (display / title / body /
+     caption — kill in-between sizes); TABULAR NUMERALS
+     (font-variant-numeric: tabular-nums) everywhere numbers align:
+     result tables, charts, axis labels, freshness stamps.
+   - Space & shape: a consistent 8px spacing grid; one radius scale
+     (large surfaces 12, cards 10, controls 8); elevation = soft
+     shadow + hairline, two levels max; no glassmorphism.
+   - Motion: 150–200ms ease-out for state changes, one considered
+     entrance for answers streaming in; DELETE the legacy sidebar water
+     animation (it predates the power-conserve work and opposes it);
+     prefers-reduced-motion disables all nonessential motion.
+
+2. Surface-by-surface application.
+   - Shell & explorer: quieter sidebar (paper surface, hairline
+     separators), the visibility eye and local-only lock become the
+     amber-accented marks, selection states calm.
+   - Chat — the hero surface: answers read like documents on paper; the
+     ask box is the focal point (Spotlight-calm, generous radius); Beam
+     answers get the flagship treatment — result table and chart on one
+     elevated card, tabular numerals, the SQL in a quiet "Query used"
+     disclosure, the provenance stamp as a small badge (amber dot =
+     on-device, neutral = named vendor), evidence-pack/save chips as
+     quiet secondary actions.
+   - Widget: explicitly Spotlight-grade — centered pill, large radius,
+     soft shadow, instant focus, same amber focus ring; the answer pill
+     inherits the card treatment compactly.
+   - Onboarding + first-run tour: the beam-sweep hero header, one idea
+     per step, plain words; tour popovers restyled to the new tokens.
+   - Settings, dialogs, empty states, toasts: tokens only — verify
+     nothing still reads Forerunner steel; empty states may use the
+     beam signature.
+3. Brand assets: redesign the app icon — a geometric lighthouse-beam
+   mark (ink field, single amber beam sweep, squircle-friendly
+   silhouette), regenerated through the existing pipelines
+   (scripts/gen-icons.mjs for all platform sizes, gen-installer-art.mjs
+   for NSIS art); monochrome template tray icons (macOS template-image
+   style, correct on light/dark menubars); refresh README badges/
+   screenshots and docs/launch-copy.md hero art references.
+
+4. Copy pass (Apple tone: clear, human, unboastful — and honest per
+   house rules). Surface "Beam" as the analytics name where users see
+   it (the answer card's provenance footer already names it; the tour's
+   analytics step; the About panel). Rewrite docs/launch-copy.md around
+   the Beam story: private analytics on your own machine — verified
+   numbers, the SQL shown, nothing leaves unless you choose. UI
+   microcopy sweep: shorter, plainer, no exclamation marks; keep every
+   honesty behavior (skip notes, truncation footers, freshness stamps)
+   verbatim in meaning.
+
+5. Release 0.12.0 (mechanics per CLAUDE.md — five stamps move
+   together): bump package.json, package-lock.json (both stamps),
+   native/Cargo.toml workspace version,
+   native/crates/lighthouse-desktop/tauri.conf.json, and
+   native/Cargo.lock (three lighthouse crates). Write the release notes:
+   lead with Beam (chart intelligence, evidence packs, verified
+   answers), then the trust story (always unlocked, no accounts, no
+   telemetry, provenance stamps, local-only marks, inspector), the
+   time-savers, the rebrand — honest changelog since 0.11.3 including
+   removals (TTS, licensing). After squash-merge to main: dispatch
+   desktop-release.yml with empty release_tag (derives v0.12.0), watch
+   the JS checks + 3-OS release-smoke gate + native bundles + manifest
+   regeneration through to the draft release; if signing secrets have
+   been provisioned they engage automatically — note signed/unsigned
+   status in the report. Then STOP and report with the draft-release
+   link and the prepared publish-release.yml inputs (release_tag +
+   body) — publishing the draft public is the owner's click.
+
+Proof gates: contrast script zero violations both themes; a screenshot
+matrix (main window, explorer, chat with a Beam answer card, widget,
+onboarding, tour, settings — light and dark) attached to the PR;
+`git grep -i forerunner` returns only history/roadmap docs; the water
+animation is gone; engine prompt/label snapshots byte-identical; suites,
+smoke, eval + chart floors green; the five version stamps agree. End
+with the draft-release link, signed/unsigned status, and the release
+notes body ready for publish-release.yml.
+```
 ```
 
 ---
