@@ -65,7 +65,12 @@ const CORPUS: &[&str] = &[
     "SELECT a FROM t WHERE b IN (1, 2, 3) AND c BETWEEN 10 AND 20",
     "SELECT AVG(price), MIN(price), MAX(price), STDDEV(price) FROM products WHERE category = 'widgets'",
     "SELECT a.x, b.y, c.z FROM a LEFT JOIN b ON a.id = b.a_id LEFT JOIN c ON b.id = c.b_id WHERE a.active",
-    "SELECT 1.5e-3 AS tiny, 1_000_000 AS big, -42 AS neg FROM dual",
+    // Numeric literals: scientific notation, a big integer, and a negative.
+    // No `_` digit separators — DFParser/DataFusion doesn't lex them (it reads
+    // `1_000_000` as `1` + implicit-alias `_000_000`), so the engine can never
+    // emit one; the formatter tokenizes them, but they aren't valid SQL to
+    // check AST-preservation against.
+    "SELECT 1.5e-3 AS tiny, 1000000 AS big, -42 AS neg FROM dual",
 ];
 
 #[test]
