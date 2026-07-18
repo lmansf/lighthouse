@@ -127,6 +127,54 @@ fn local_llm_model() -> String {
 /// (covers a one-time cold load + CPU prefill of the bundled model).
 const LOCAL_CONNECT_TIMEOUT_MS: u64 = 120_000;
 
+/// Health of the local chat server (§22.4 queue-not-fail), probed via
+/// llama-server's `/health` on the same origin as `local_llm_url()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalHealth {
+    /// Listening and past model load — an ask will stream.
+    Ready,
+    /// Listening but still loading the model (llama-server answers 503).
+    Loading,
+    /// Nothing is listening (server not spawned yet, or no server at all).
+    Down,
+}
+
+/// `/health` on the same origin as the chat-completions URL. Pure so the
+/// derivation is testable; falls back to the default llama-server origin on an
+/// unparseable override.
+fn health_url_for(chat_url: &str) -> String {
+    match reqwest::Url::parse(chat_url) {
+        Ok(u) => {
+            let mut base = format!("{}://{}", u.scheme(), u.host_str().unwrap_or("127.0.0.1"));
+            if let Some(p) = u.port() {
+                base.push_str(&format!(":{p}"));
+            }
+            format!("{base}/health")
+        }
+        Err(_) => "http://127.0.0.1:8080/health".to_string(),
+    }
+}
+
+/// One cheap health probe. Status mapping is deliberate: 503 is llama-server's
+/// "loading model" answer → `Loading`; ANY other HTTP response (200 ready, but
+/// also 404 from Ollama/LM Studio, which have no `/health`) means a server IS
+/// listening and must count as `Ready` — a probe the backend can never satisfy
+/// must not hold the ask hostage. Connect errors/timeouts → `Down`.
+/// KEEP IN SYNC with llm.ts::localHealth.
+pub async fn local_health() -> LocalHealth {
+    let client = http_client();
+    match client
+        .get(health_url_for(&local_llm_url()))
+        .timeout(Duration::from_millis(1500))
+        .send()
+        .await
+    {
+        Ok(r) if r.status().as_u16() == 503 => LocalHealth::Loading,
+        Ok(_) => LocalHealth::Ready,
+        Err(_) => LocalHealth::Down,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Ctx {
     pub name: String,
@@ -1262,6 +1310,21 @@ mod tests {
 
     fn ctx(name: &str, chars: usize, score: f64) -> Ctx {
         Ctx { name: name.into(), text: "x".repeat(chars), score }
+    }
+
+    // §22.4: /health derives from the chat URL's origin, whatever the path.
+    #[test]
+    fn health_url_derives_from_the_chat_completions_origin() {
+        assert_eq!(
+            health_url_for("http://127.0.0.1:8080/v1/chat/completions"),
+            "http://127.0.0.1:8080/health"
+        );
+        assert_eq!(
+            health_url_for("http://127.0.0.1:11434/v1/chat/completions"),
+            "http://127.0.0.1:11434/health"
+        );
+        // Unparseable override → the default llama-server origin.
+        assert_eq!(health_url_for("not a url"), "http://127.0.0.1:8080/health");
     }
 
     #[test]

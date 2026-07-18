@@ -1358,8 +1358,39 @@ pub async fn model_status(app: AppHandle) -> Value {
 }
 
 #[tauri::command]
-pub async fn model_download() -> Value {
-    serde_json::to_value(local_model::start_download()).unwrap_or_else(|_| json!({}))
+pub async fn model_download(app: AppHandle) -> Value {
+    let v = serde_json::to_value(local_model::start_download()).unwrap_or_else(|_| json!({}));
+    // §22.4 eager warm: don't leave a freshly downloaded model cold until the
+    // next reconcile tick discovers it — watch this download and start the
+    // chat server (whose existing spawn path health-polls and then warms) the
+    // moment the file lands. One watcher at a time; start_local_llm itself
+    // enforces the safe-mode gate, and a suspended (hidden/passive) app defers
+    // to reconcile's normal resume behavior instead of warming from the
+    // background.
+    static WATCHING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !WATCHING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        tauri::async_runtime::spawn(async move {
+            // Bound ≈ the slowest plausible multi-GB fetch; the 1 s poll
+            // matches the UI's own download-progress poll.
+            for _ in 0..(3 * 60 * 60) {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                match local_model::model_status().status.as_str() {
+                    "downloading" => continue,
+                    "ready" => {
+                        if let Some(sup) = app.try_state::<crate::supervise::Supervisor>() {
+                            if !sup.is_suspended() {
+                                sup.start_local_llm(&app);
+                            }
+                        }
+                        break;
+                    }
+                    _ => break, // error / uninstalled / absent — nothing to warm
+                }
+            }
+            WATCHING.store(false, std::sync::atomic::Ordering::SeqCst);
+        });
+    }
+    v
 }
 
 #[tauri::command]

@@ -29,8 +29,11 @@ import {
   fullDocCharBudget,
   docSegmentCharBudget,
   maxDocSegments,
+  localHealth,
+  type LocalHealth,
   type Ctx,
 } from "./llm";
+import { isInstalled as isModelInstalled } from "./localModel";
 import { readDesktopSettings } from "./settings";
 import { metaIntent, renderMeta } from "./meta";
 import { isProfileable, profileChart, tableProfile } from "./tableProfile";
@@ -287,6 +290,53 @@ const progress = (label: string, step: number, total: number): ChatChunk => ({
   progress: { label, step, total },
   done: false,
 });
+
+/** §22.4 queue-not-fail bounds. KEEP IN SYNC with synth.rs. */
+const LOCAL_WARM_POLL_MS = 1_500;
+const LOCAL_SPAWN_GRACE_MS = 20_000;
+const LOCAL_WARM_WAIT_MS = 300_000;
+
+/** §22.4: one step of the warm-wait state machine, pure for tests.
+ *  "proceed" means stop waiting and let the ask run — either the server is
+ *  ready, or waiting can no longer help (no installed model to spawn, grace or
+ *  budget exhausted) and the existing unavailable→passages path is the honest
+ *  outcome. KEEP IN SYNC with synth.rs::warm_wait_verdict. */
+export function warmWaitVerdict(
+  health: LocalHealth,
+  installed: boolean,
+  waitedMs: number,
+): "proceed" | "wait" {
+  if (health === "ready") return "proceed";
+  if (waitedMs >= LOCAL_WARM_WAIT_MS) return "proceed";
+  if (health === "loading") return "wait";
+  return installed && waitedMs < LOCAL_SPAWN_GRACE_MS ? "wait" : "proceed";
+}
+
+/** The user-visible warming status. KEEP IN SYNC (byte-identical) with
+ *  synth.rs::warming_label. */
+export function warmingLabel(waitedMs: number): string {
+  return waitedMs === 0
+    ? "Private model warming up…"
+    : `Private model warming up… (${Math.floor(waitedMs / 1000)}s)`;
+}
+
+/** §22.4 queue-not-fail: when the PRIVATE model is the active provider but its
+ *  server is still starting (fresh install, cold launch) or loading, yield
+ *  "warming up" progress chunks until it is healthy — then return, letting the
+ *  ask run instead of racing into the "Local model unavailable → passages"
+ *  fallback. Any other provider (or a healthy server) returns immediately.
+ *  KEEP IN SYNC with synth.rs::local_warm_wait. */
+async function* localWarmWait(cfg: ModelCfg): AsyncGenerator<ChatChunk> {
+  if (cfg.providerId !== "local") return;
+  const installed = isModelInstalled();
+  let waited = 0;
+  for (;;) {
+    if (warmWaitVerdict(await localHealth(), installed, waited) === "proceed") return;
+    yield progress(warmingLabel(waited), 1, 1);
+    await new Promise((r) => setTimeout(r, LOCAL_WARM_POLL_MS));
+    waited += LOCAL_WARM_POLL_MS;
+  }
+}
 
 /**
  * The provenance origin for this answer's stamp: `"device"` for the local model
@@ -650,6 +700,17 @@ async function* answerPipelineLive(
   //     degrades like any analytics ask, never a fabricated number), surfaces
   //     recipe VISIBILITY as `applicableRecipes` → [], and answers
   //     `{available:false}` on op:"recipes".
+
+  // --- §22.4 queue-not-fail (model warm start): every deterministic emission
+  //     is behind us (meta answers returned; the G2 extractive draft already
+  //     streamed), so nothing instant ever waited. From here every branch talks
+  //     to the model — if the PRIVATE model's server is still starting or
+  //     loading (fresh install, cold launch), hold here with "warming up"
+  //     progress chunks rather than racing streamAnswer into the
+  //     "Local model unavailable → passages" fallback. Bounded: a server that
+  //     never comes up proceeds into today's fallback path. KEEP IN SYNC with
+  //     synth.rs (local_warm_wait). ---
+  yield* localWarmWait(cfg);
 
   // --- Decide: synthesis or single-shot ---
   let docs: DocCandidate[] = [];

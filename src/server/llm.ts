@@ -175,6 +175,41 @@ const LOCAL_LLM_MODEL = process.env.LIGHTHOUSE_LOCAL_LLM_MODEL?.trim() || "";
 // isn't dropped to the passage fallback while the model is still warming up.
 const LOCAL_CONNECT_TIMEOUT_MS = 120_000;
 
+/** Health of the local chat server (§22.4 queue-not-fail). KEEP IN SYNC with
+ *  llm.rs::LocalHealth. */
+export type LocalHealth = "ready" | "loading" | "down";
+
+/** `/health` on the same origin as the chat-completions URL. Pure for tests;
+ *  falls back to the default llama-server origin on an unparseable override.
+ *  KEEP IN SYNC with llm.rs::health_url_for. */
+export function healthUrlFor(chatUrl: string): string {
+  try {
+    const u = new URL(chatUrl);
+    return `${u.origin}/health`;
+  } catch {
+    return "http://127.0.0.1:8080/health";
+  }
+}
+
+/** One cheap health probe. 503 is llama-server's "loading model" answer →
+ *  "loading"; ANY other HTTP response (200 ready, but also 404 from Ollama /
+ *  LM Studio, which have no /health) means a server IS listening and counts as
+ *  "ready" — a probe the backend can never satisfy must not hold the ask
+ *  hostage. Connect errors/timeouts → "down". KEEP IN SYNC with
+ *  llm.rs::local_health. */
+export async function localHealth(): Promise<LocalHealth> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 1_500);
+  try {
+    const res = await fetch(healthUrlFor(LOCAL_LLM_URL), { signal: controller.signal });
+    return res.status === 503 ? "loading" : "ready";
+  } catch {
+    return "down";
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export interface Ctx {
   name: string;
   text: string;
