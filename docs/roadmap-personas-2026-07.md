@@ -1202,7 +1202,7 @@ stands after T v2 + G are queued:
 | Dormant SharePoint/Microsoft connector | **Resolved 2026-07-15: keep as plumbing.** The connector code in both engines, the SourceConnector seam, and the SHAREPOINT_* env surface stay dormant in-tree for a future SharePoint plugin; nothing is archived, only marked dormant-by-decision |
 | DeepSeek from the built-in roster *(maintainer decision, flagged)* | Instant policy flag for the exact buyer; the shared OpenAI-compatible adapter + BYO endpoint keep the capability for anyone who insists |
 | Cloud-as-peer provider framing | Local/private becomes the hero path; cloud vendors group under an honest "sends excerpts of your included files to the vendor" label — one click away, never hidden, never dark-patterned |
-| Bundled Piper TTS | **Resolved 2026-07-15: drop entirely.** Binary, voice, /api/tts, and the piper-specific Linux CI workarounds (#118–#121) all go; read-aloud remains via the OS's Web Speech voices; ~60–90 MB installer diet and the flakiest mirrored asset leaves the supply chain |
+| Text-to-speech, entirely | **Resolved 2026-07-15: remove it all.** Piper binary, voice, /api/tts, supervision, the piper-specific Linux CI workarounds (#118–#121), AND the Web Speech read-aloud path — the feature leaves the product; ~60–90 MB installer diet and the flakiest mirrored asset leaves the supply chain |
 
 **Include** (missing for this persona, beyond queued G1–G6):
 
@@ -1219,13 +1219,13 @@ end-to-end (T v2 sets the posture, P makes it visible and controllable),
 and running it before G means G1's audit + eval cover P2's retrieval
 filtering. If T v2 hasn't run yet, P4's deletions can fold into it.
 
-### Track P prompt (v2 — 2026-07-15, decisions folded in: SharePoint plumbing kept, Piper dropped)
+### Track P prompt (v3 — 2026-07-15: SharePoint plumbing kept, text-to-speech removed entirely)
 
 ```
 Lighthouse is now privacy-first analytics for data analysts. Make that
 identity legible in one pass: the private path becomes the hero, privacy
-becomes visible per answer and controllable per file, and the Piper TTS
-stack leaves the product entirely. One PR, one commit per numbered
+becomes visible per answer and controllable per file, and text-to-speech
+leaves the product entirely. One PR, one commit per numbered
 section, no version bump. Ground rules: the Rust engine (native/) is the shipping
 product, the TS engine under src/server is the web-dev twin — shared
 behavior lands in BOTH per the PARITY convention; sections 2 and 3 are
@@ -1286,7 +1286,7 @@ test, the native cargo suite, lint, and a live E2E per section.
    existing toggles. Desktop first; the twin renders the same panel
    minus desktop-only fields (PARITY).
 
-4. Drop Piper TTS entirely; read-aloud survives on OS voices.
+4. Remove text-to-speech entirely — Piper AND the Web Speech fallback.
    - Build & supply chain: remove the piper binary and the
      en_US-lessac-medium voice from scripts/fetch-local-model.mjs
      (fetch logic, pinned versions, ASSET_SHA256 entries), the
@@ -1298,18 +1298,19 @@ test, the native cargo suite, lint, and a live E2E per section.
      where piper was its sole reason and verify llama-server bundling
      still passes without it.
    - Engines & shell: delete src/server/tts.ts, the /api/tts route,
-     tts.rs, the desktop tts command, and piper spawn/supervision in
-     the shell. Read-aloud STAYS: the UI's existing Web Speech path
-     (src/lib/speech.ts) becomes the only engine — update the
-     capability probe so the client no longer asks the server for a
-     bundled voice, and keep the existing behavior that the controls
-     hide only when the runtime has no speech support at all. Update
-     the read-aloud copy to say it uses the OS's installed voices, on
-     device (no more "bundled neural voice").
-   - Docs & attribution: README's third-party components section
-     (Piper + voice attribution removed or moved to a formerly-bundled
-     note), docs/desktop.md, docs/blueprints/read-aloud.md stamped or
-     updated, installer-size claims refreshed.
+     tts.rs, the desktop tts command, piper spawn/supervision in the
+     shell, and the TTS capability probe end to end.
+   - UI: delete the read-aloud feature — the chat-header "Read aloud"
+     switch and its persisted preference, the per-answer play/stop
+     buttons, src/lib/speech.ts, and the speech-fallback test suite.
+     Grep for speechSynthesis / SpeechSynthesisUtterance to catch
+     stragglers. Leave dictation untouched: the widget's hotkey
+     dictation is OS-level input, unrelated to TTS.
+   - Docs & attribution: remove the read-aloud paragraphs from README
+     and docs/launch-copy.md if present; delete or stamp
+     docs/blueprints/read-aloud.md; drop the Piper + voice attribution
+     from the third-party components section; refresh docs/desktop.md
+     and installer-size claims.
 
 5. SharePoint stays as plumbing — do NOT remove it. The connector
    implementation in both engines (src/server/sources/sharepoint.ts +
@@ -1322,12 +1323,12 @@ test, the native cargo suite, lint, and a live E2E per section.
    comment or doc note marking the connector dormant-by-decision
    (2026-07-15) so a future cleanup session doesn't remove it.
 
-Proof gates: a case-insensitive grep for piper returns nothing outside
-docs/history; a release-style build fetches no TTS asset and the Linux
-bundle succeeds with the piper workarounds gone; read-aloud E2E in the
-built app speaks via an OS voice where one exists and hides cleanly
-where none does; provenance-stamp E2E on both an on-device answer and a
-mocked cloud-provider answer; the local-only E2E from section 2; an
+Proof gates: case-insensitive greps for piper, speechSynthesis, and
+"read aloud" return nothing outside docs/history; a release-style build
+fetches no TTS asset and the Linux bundle succeeds with the piper
+workarounds gone; the built app renders chat answers with no speak
+controls anywhere; provenance-stamp E2E on both an on-device answer and
+a mocked cloud-provider answer; the local-only E2E from section 2; an
 inspector snapshot test against a fixture vault; the SharePoint files
 are byte-identical to main (git diff proves the keep); full suites
 green. End with a one-paragraph "what changed for a privacy reviewer"
