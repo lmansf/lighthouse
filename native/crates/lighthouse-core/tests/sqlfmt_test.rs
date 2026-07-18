@@ -3,16 +3,46 @@
 //! For every statement the engine could show, `format_sql(sql)` must parse to
 //! the identical AST as `sql` — same parser the guard/executor uses
 //! (`DFParser`), so the formatted text and the executed text can never mean
-//! different things. We compare the parsed statements' `Debug` form, which
-//! encodes the full AST and discards whitespace, so equality here IS
-//! AST-equivalence.
+//! different things. We compare the parsed statements' `Debug` form with the
+//! source SPANS stripped: sqlparser records each token's byte position
+//! (`Span(Location(line,col)..)`) in the AST, and those positions necessarily
+//! move when the pretty-printer reflows whitespace — so a raw `Debug` compare
+//! would flag a correct whitespace-only reformat as an AST change. With the
+//! spans normalized away, equality here IS AST-equivalence (a real structural
+//! change still differs in non-span content).
 
 use lighthouse_core::sqlfmt::format_sql;
 
 fn ast_debug(sql: &str) -> String {
     let stmts = datafusion::sql::parser::DFParser::parse_sql(sql)
         .unwrap_or_else(|e| panic!("parse failed for {sql:?}: {e}"));
-    format!("{stmts:?}")
+    strip_spans(&format!("{stmts:?}"))
+}
+
+/// Drop every `Span(Location(l,c)..Location(l,c))` sub-string from a parsed
+/// statement's `Debug` output. Spans are the byte positions of tokens — exactly
+/// what a whitespace reflow changes — so removing them makes the compare
+/// structural rather than positional.
+fn strip_spans(debug: &str) -> String {
+    let mut out = String::with_capacity(debug.len());
+    let mut rest = debug;
+    while let Some(i) = rest.find("Span(Location(") {
+        out.push_str(&rest[..i]);
+        let after = &rest[i..];
+        match after.find("))") {
+            Some(j) => {
+                out.push_str("Span(_)");
+                rest = &after[j + 2..];
+            }
+            None => {
+                out.push_str(after);
+                rest = "";
+                break;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// A corpus spanning the shapes the analytics engine actually emits (the
