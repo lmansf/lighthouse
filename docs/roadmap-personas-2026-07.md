@@ -2413,6 +2413,121 @@ agent can now do against a Lighthouse vault, and what left the machine
 at each step (the answer should still be: nothing, unless they chose a
 cloud model).
 ```
+
+---
+
+## 19. Field patch: sidebar, attach, customization, report export
+
+Owner notes after the standout batch (2026-07-15). One patch session.
+
+### Prompt
+
+```
+Lighthouse field patch — four owner-reported items: readable file names,
+working drag-to-attach + direct file references, a real customization
+surface (including asking the assistant to adjust it), and exportable
+reports. One PR, one commit per numbered section, five-stamp bump to the
+next patch version on the current line at the end. Ground rules: Rust
+engine ships, TS twin per docs/ts-twin.md and PARITY; UI through the
+Beam tokens; the §14 constitution is the review standard (no arbitrary
+code or CSS execution; nothing leaves the machine). Gates: npm test,
+cargo suite, lint, release smoke, all eval/chart floors green, live E2E
+per section, and before/after screenshots for every visual change.
+
+1. Resizable explorer ("can't see file names").
+   - A drag handle on the explorer/chat divider: resize with pointer or
+     keyboard (arrow keys when focused), width persisted per window
+     mode in the app-state dir, sensible min/max bounds. Double-click
+     the handle to auto-fit the widest visible file name; the existing
+     collapse-to-rail behavior is preserved alongside.
+   - Truncated rows get a tooltip with the full name and path (verify
+     against the virtualized tree — no per-row mount regressions; the
+     0.8.1 windowing must keep its performance).
+   - E2E: resize, relaunch, width persists; auto-fit makes a long
+     fixture name fully visible.
+
+2. Attach files directly ("drag and drop doesn't work; let me reference
+   files I know").
+   - Regression first: drag-from-explorer-to-chat attach shipped in the
+     Electron era (custom drag MIME) — reproduce in the BUILT Tauri
+     app, root-cause why it no longer attaches (webview drag handling,
+     the virtualized tree, or the rebrand are the suspects), and fix it
+     for BOTH regular vault files and linked (extN) nodes. Dropping a
+     folder shows a friendly hint (files attach; folders don't in v1).
+     OS-file drop onto chat keeps its existing link-first behavior —
+     don't regress it.
+   - Direct references: typing @ in the ask box opens an inline fuzzy
+     file picker (reuse the quick-open matcher), Enter inserts the file
+     as a removable attachment pill; multiple @-mentions per ask; works
+     in the widget ask row if the component shares cleanly (else note
+     it). Attachment scoping semantics are unchanged — pills scope the
+     question exactly as today.
+   - E2E: drag a LINKED file onto chat → pill appears → answer cites
+     it; @-mention a file by fragment → same; folder drop → hint.
+
+3. Customization ("themes, background image, and asking for changes").
+   - Appearance section in Preferences, all keys engine-validated and
+     stored in the app-state dir: theme preset (Beam Light / Beam Dark
+     / Auto-follow-OS), accent color (a curated set — every choice must
+     pass the repo's WCAG-AA contrast script against both themes; no
+     free-form color in v1), density (comfortable / compact), font
+     scale (S/M/L), and a background image: user-uploaded, copied into
+     the app-state dir (never leaves the machine, downscaled to a
+     sane budget), shown ONLY behind the canvas/chrome — content
+     surfaces (cards, chat, explorer rows, dialogs) stay opaque tokens
+     so readability and AA hold regardless of image; a bounded scrim
+     slider; one-click reset to default.
+   - Research step (small, in the OpenSpec design doc): survey the
+     customization axes considered — say what was REJECTED and why
+     (arbitrary custom CSS: support burden + injection surface;
+     free-form accent colors: contrast risk; per-surface images:
+     readability) so the boundary is a recorded decision.
+   - Ask-to-adjust: appearance intents ("make it darker", "compact
+     mode", "blue accent", "use my mountain photo") route through the
+     established fenced-directive pattern — the model emits an
+     appearance directive that maps ONLY onto the whitelisted keys
+     above; the engine validates every key and value (enums, ranges,
+     contrast) and applies with an inline "Applied — Undo" chip.
+     Invalid or out-of-vocabulary requests get a polite explanation
+     and no change. Works on every provider (text protocol); no
+     directive → a normal answer pointing at Preferences. This is a
+     settings patch, never code.
+   - E2E: switch preset + accent via Preferences; upload a background
+     and verify content surfaces remain opaque (contrast script run
+     with image active); "make it compact" via a mocked provider
+     applies density and Undo reverts it; an out-of-vocabulary ask
+     ("rotate the sidebar 90 degrees") changes nothing.
+
+4. Exportable reports.
+   - Every report-shaped document — deep-analysis reports, briefings,
+     evidence packs, board exports, Lighthouse Notes — gains an Export
+     menu: (a) self-contained HTML: inline styles + charts as inline
+     SVG, tabular numerals, light or dark chosen at export, ZERO
+     external references; (b) PDF: verify what the Tauri/wry runtime
+     actually offers for print-to-PDF — use a direct API if one
+     exists, otherwise open the exported HTML with the system print
+     dialog and a "Save as PDF" pointer, and STATE honestly in the PR
+     which path shipped; (c) raw markdown copy/save. Sanitized file
+     names, everything local.
+   - E2E: export a fixture report to HTML → grep proves no external
+     URLs, charts render; markdown export round-trips; the PDF path
+     (whichever shipped) is exercised.
+
+5. Housekeeping: if the moderate Dependabot alerts on main are still
+   open, triage via the supply-chain allowlist flow — fix or justify.
+
+6. Release: five-stamp bump to the next patch version on the current
+   line; release notes lead with drag-to-attach restored and the
+   customization surface; squash-merge, dispatch desktop-release.yml,
+   watch to the draft, STOP and report the draft link + publish inputs.
+
+Proof gates: all section E2Es green against the built app; screenshots
+(sidebar resized, @-mention picker, each theme preset, background image
+with scrim, export dialog) attached to the PR; contrast script clean
+including the background-image case; suites + smoke + floors green;
+stamps agree. End with the customization-axes decision table and the
+honest note on which PDF path shipped.
+```
 ```
 
 ---
