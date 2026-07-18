@@ -22,10 +22,16 @@
   build. iOS staticlib slice 7.2 MB (< 80 MB); Android cdylib 16 KB-aligned
   (`0x4000`). See `SPIKE-REPORT.md` (incl. the DCE caveat on the bare-cdylib
   size). 1.2–1.4 remain DEFERRED (need device lanes + §0 enrollments).
-- [ ] 1.2 Swap TLS root discovery to `rustls-platform-verifier` behind a
+- [~] 1.2 Swap TLS root discovery to `rustls-platform-verifier` behind a
   mobile-target cfg in `native/Cargo.toml` + the reqwest client constructors
   (`llm.rs`, `embed.rs`, `local_model.rs`, `updates.rs` call sites); prove a
   live HTTPS provider models-list call from simulator and emulator.
+  — **1.2a COMPILE-PASS** (`mobile-spike.yml` run #3, `2724ab4`): the swap
+  (`rustls-platform-verifier` 0.5.3 via `BuilderVerifierExt` + explicit ring
+  provider, wired into `llm.rs` through `src/mobile_tls.rs`, cfg-gated to
+  ios/android) compiles + links on both triples; host build byte-identical.
+  1.2b (widen to the other clients + a live handshake from a booted device)
+  stays DEFERRED — device lane not stood up.
 - [ ] 1.3 Scaffold a throwaway Tauri mobile app linking the lib crate; port
   `SMOKE_DRIVER_JS` and prove the zero-network extractive ask answers on iOS
   simulator and Android emulator (fixture vault seeded via
