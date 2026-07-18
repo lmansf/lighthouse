@@ -101,14 +101,21 @@ per section; the full suite + smoke + floors before the bump.
       (`native/.cargo/audit.toml` → `native/audit.toml`).
 
 ## §5 — Release (commit 5)
-- [ ] 5.1 Five-stamp bump `0.12.4 → 0.12.5` (package.json, package-lock ×2,
+- [x] 5.1 Five-stamp bump `0.12.4 → 0.12.5` (package.json, package-lock ×2,
       native/Cargo.toml, tauri.conf.json, native/Cargo.lock ×5 lighthouse crates;
-      leave hashbrown/ocrs/pbkdf2 alone). No `CACHE_VERSION` change.
-- [ ] 5.2 Proof gates: `npm test`, cargo suite, lint, release-smoke, eval/chart +
-      visual-coverage floors, contrast gate — all green; stamps agree.
+      leave hashbrown/ocrs/pbkdf2 alone). No `CACHE_VERSION` change. — Done: 10
+      stamps across 5 files; `hkdf 0.12.4` + `parking_lot 0.12.5` (coincidental
+      dep versions) left untouched; `cargo metadata --locked` clean.
+- [x] 5.2 Proof gates: `npm test`, cargo suite, lint, release-smoke, eval/chart +
+      visual-coverage floors, contrast gate — all green; stamps agree. — Local:
+      tsc + 521 node tests + lint green; cargo core suite (308 unit + all
+      integration) green; chart_eval all-pass incl. §2 visual floor (both
+      directions); analytics_eval SCORECARD 46/46; server/cli/mcp compile clean.
+      release-smoke + contrast gate run in CI on the PR.
 - [ ] 5.3 One PR (all five commits). Squash-merge → dispatch desktop-release.yml
-      → watch to the v0.12.5 draft → STOP and report the draft link + publish
-      inputs. Do NOT publish.
+      → watch to the v0.12.5 draft → **PUBLISH to latest + verify** (owner
+      authorized publish: "in step 3, you can publish"). Enforce the all-features
+      + floors-green bar before the flip.
 
 ## Report (close-out)
 - [ ] R.1 Per-component ablation table + one-paragraph verdict on business
