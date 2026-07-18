@@ -12,7 +12,39 @@ import { register } from "node:module";
 
 register("./_ts-extensionless-hook.mjs", import.meta.url);
 
-const { crossDocCue, rankDocsFromHits } = await import("../src/server/synth.ts");
+const { crossDocCue, rankDocsFromHits, multiFileSpan, reliabilityBlocks } = await import(
+  "../src/server/synth.ts"
+);
+
+// §4 small-model reliability: deterministic assist blocks, ONLY for the bundled
+// local model. KEEP the strings byte-identical to the Rust twin
+// (lighthouse-core synth::reliability_blocks — asserted there too).
+test("reliability blocks fire only for the local model", () => {
+  const ids = ["a.csv", "b.md"];
+  const local = { providerId: "local", modelId: null, apiKey: null };
+  const cloud = { providerId: "openai", modelId: "gpt", apiKey: "k" };
+  const keyless = { providerId: null, modelId: null, apiKey: null };
+  assert.equal(reliabilityBlocks("total sales", cloud, ids).length, 0, "cloud pays nothing");
+  assert.equal(reliabilityBlocks("total sales", keyless, ids).length, 0, "extractive pays nothing");
+  const blocks = reliabilityBlocks("total sales", local, ids);
+  assert.equal(blocks.length, 1);
+  assert.ok(blocks[0].text.includes("2 file(s) available"), blocks[0].text);
+  assert.ok(blocks[0].text.includes("never tell the user that a file or a column"));
+  assert.equal(blocks[0].score, 1);
+  assert.equal(reliabilityBlocks("hi", local, []).length, 0, "no files, no block");
+});
+
+// §3 cross-file span trigger. References are one-per-source, score-descending
+// and normalized to the top = 1.0. KEEP ALIGNED with the Rust twin
+// (lighthouse-core/src/synth.rs::multi_file_span, SECONDARY_FILE_MIN = 0.6).
+test("span: two comparably-relevant sources trigger synthesis", () => {
+  const ref = (score) => ({ fileId: `x${score}`, name: `f${score}`, snippet: "", score });
+  assert.equal(multiFileSpan([ref(1.0), ref(0.7)]), true, "2nd within reach → cross-file");
+  assert.equal(multiFileSpan([ref(1.0), ref(0.6)]), true, "boundary (>= 0.6) triggers");
+  assert.equal(multiFileSpan([ref(1.0), ref(0.4)]), false, "weak 2nd → single-doc focus");
+  assert.equal(multiFileSpan([ref(1.0)]), false, "single source never spans");
+  assert.equal(multiFileSpan([]), false, "no sources");
+});
 
 test("cue: comparison words trigger", () => {
   assert.equal(crossDocCue("Compare the Q3 report with the Q2 report"), true);

@@ -95,6 +95,63 @@ export function crossDocCue(question: string): boolean {
   return norm.split(" ").some((t) => CUE_WORDS.has(t));
 }
 
+/** The second-ranked source must score at least this fraction of the top for
+ *  the ask to count as genuinely cross-file. PARITY: lighthouse-core
+ *  synth::SECONDARY_FILE_MIN. */
+const SECONDARY_FILE_MIN = 0.6;
+
+/**
+ * §3 cross-file span: the initial retrieval surfaced at least two distinct
+ * sources whose relevance is COMPARABLE — the second-best scores within reach of
+ * the best. When true, the pipeline SKIPS the whole-file focus read (which would
+ * single-source the dominant file) and lets the single-shot path answer: that
+ * one model call already sees BOTH files' top chunks, so the answer INTEGRATES
+ * them at no extra cost. Conservative: a single dominant file (weak second
+ * source) falls through to whole-file focus. `refs` are one-per-source,
+ * score-descending. PARITY: lighthouse-core synth::multi_file_span.
+ */
+export function multiFileSpan(refs: RagReference[]): boolean {
+  return refs.length >= MIN_MAP_DOCS && refs[MIN_MAP_DOCS - 1].score >= SECONDARY_FILE_MIN;
+}
+
+/**
+ * §4 small-model reliability: deterministic assist blocks injected into the
+ * context ONLY for the small bundled local model (providerId "local"). Weak
+ * local models were denying files that plainly exist; these blocks assert,
+ * deterministically, that they do. Cloud models are capable enough and never pay
+ * these tokens; the keyless extractive fallback calls no model, so both are
+ * excluded. A high score keeps them ahead of the retrieved chunks.
+ *
+ * PARITY: byte-identical text to lighthouse-core synth::reliability_blocks. (A
+ * per-column catalog assist is Rust-only — the catalog is Rust-only — but the
+ * preamble + the schema cards cover column denial here too.)
+ */
+export function reliabilityBlocks(
+  question: string,
+  cfg: ModelCfg,
+  includedFileIds: string[],
+): Ctx[] {
+  if (cfg.providerId !== "local") return [];
+  const n = includedFileIds.length;
+  if (n === 0) return [];
+  const preamble = [
+    `You currently have ${n} file(s) available to answer from in this vault.`,
+    "Each appears below as a numbered context block, and the tabular ones can be queried as tables (their columns are listed in the schema cards).",
+    "Everything shown to you here IS available — never tell the user that a file or a column that appears in your context is missing or that you cannot access it.",
+    "If something you'd need is genuinely not present, say what's missing, but do not deny that a listed file or column exists.",
+  ].join(" ");
+  const out: Ctx[] = [{ name: "what you can see", text: preamble, score: 1 }];
+  const named = namedFileTarget(question, includedFileIds);
+  if (named) {
+    out.push({
+      name: "confirmed available",
+      text: `The file "${named[1]}" IS available to you right now — use it to answer; never say it is missing or that you cannot open it.`,
+      score: 1,
+    });
+  }
+  return out;
+}
+
 /**
  * G6: the synthesis prompt label for a retrieved context. A past-conversation
  * note is announced as such so the model knows the block is the user's OWN
@@ -726,7 +783,16 @@ async function* answerPipelineLive(
   //     here (returned above or guarded by the cue); tabular files stay on
   //     the table-profile path (analytics is desktop-only). KEEP IN SYNC with
   //     synth.rs. ---
-  if (hasRealModel(cfg) && attachmentFileIds.length <= 1 && !crossDocCue(question)) {
+  // §3 cross-file span: when a SECOND file is comparably relevant, skip the
+  // whole-file focus read (which would single-source the dominant file) and fall
+  // through to single-shot — that one model call already sees BOTH files' top
+  // chunks, so the answer integrates them (no extra calls). Mirrors synth.rs.
+  if (
+    hasRealModel(cfg) &&
+    attachmentFileIds.length <= 1 &&
+    !crossDocCue(question) &&
+    !multiFileSpan(initial.references)
+  ) {
     // Doc-focus reads the WHOLE target file into the prompt, so both of its
     // bypasser entrypoints are filtered here at their own choke point: a lone
     // local-only attachment is dropped, and named-file lookup runs over the
@@ -864,6 +930,9 @@ async function* answerPipelineLive(
     }
   }
 
+  // §4: small-model handholding leads the context so a weak local model stops
+  // denying files that exist (no-op for cloud/keyless — see reliabilityBlocks).
+  contexts.unshift(...reliabilityBlocks(question, cfg, includedFileIds));
   for await (const delta of streamAnswer(question, contexts, cfg, history)) {
     yield { delta, done: false };
   }

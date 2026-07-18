@@ -73,6 +73,72 @@ pub fn cross_doc_cue(question: &str) -> bool {
     norm.split(' ').any(|t| CUE_WORDS.contains(&t))
 }
 
+/// The second-ranked source must score at least this fraction of the top
+/// (references are normalized to the top = 1.0) for the ask to count as
+/// genuinely cross-file. Deliberately high so an incidental tail hit never
+/// trips the cross-file route. PARITY: keep identical to src/server/synth.ts.
+const SECONDARY_FILE_MIN: f64 = 0.6;
+
+/// §3 cross-file span: the initial retrieval surfaced at least two distinct
+/// sources whose relevance is COMPARABLE — the second-best scores within reach
+/// of the best. When true, the pipeline SKIPS the whole-file focus read (which
+/// would single-source the dominant file) and lets the single-shot path answer:
+/// that one model call already sees BOTH files' top chunks, so the answer
+/// INTEGRATES them at no extra cost. Conservative by construction: a single
+/// dominant file (the second source weak) falls through to whole-file focus.
+/// `refs` are one-per-source and score-descending. Pure; mirrors
+/// src/server/synth.ts::multiFileSpan.
+pub fn multi_file_span(refs: &[RagReference]) -> bool {
+    refs.len() >= MIN_MAP_DOCS && refs[MIN_MAP_DOCS - 1].score >= SECONDARY_FILE_MIN
+}
+
+/// §4 small-model reliability: deterministic assist blocks injected into the
+/// context ONLY for the small bundled local model (`provider_id == "local"`).
+/// Weak local models were denying files (and columns) that plainly exist; these
+/// blocks assert, deterministically, that they do. Cloud models are capable
+/// enough and never pay these tokens, and the keyless extractive fallback calls
+/// no model at all — both are excluded by the provider check. A HIGH score
+/// protects the blocks from the drop-lowest-first local context clamp
+/// (`llm::clamp_local_contexts`), and routing them through the normal context
+/// list means they are budgeted against the 6144 window automatically.
+///
+/// Two blocks: a capability preamble (how many files you can see; you can query
+/// the tabular ones; never claim a LISTED file/column is unavailable — the
+/// schema cards on the analytics path list the columns), and, when the question
+/// NAMES an included file, a hard existence assertion for it.
+///
+/// PARITY: mirrored byte-for-byte by src/server/synth.ts::reliabilityBlocks.
+/// (A per-column catalog assist is a Rust-only follow-on — the schema cards +
+/// this preamble already cover column denial, and the catalog is Rust-only.)
+pub fn reliability_blocks(question: &str, cfg: &ModelCfg, included_file_ids: &[String]) -> Vec<Ctx> {
+    if cfg.provider_id.as_deref() != Some("local") {
+        return Vec::new();
+    }
+    let n = included_file_ids.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    // Built from joined sentence parts so the TS twin is byte-identical.
+    let preamble = [
+        format!("You currently have {n} file(s) available to answer from in this vault."),
+        "Each appears below as a numbered context block, and the tabular ones can be queried as tables (their columns are listed in the schema cards).".to_string(),
+        "Everything shown to you here IS available — never tell the user that a file or a column that appears in your context is missing or that you cannot access it.".to_string(),
+        "If something you'd need is genuinely not present, say what's missing, but do not deny that a listed file or column exists.".to_string(),
+    ]
+    .join(" ");
+    let mut out = vec![Ctx { name: "what you can see".to_string(), text: preamble, score: 1.0 }];
+    if let Some((_, name)) = vault::named_file_target(question, included_file_ids) {
+        out.push(Ctx {
+            name: "confirmed available".to_string(),
+            text: format!(
+                "The file \"{name}\" IS available to you right now — use it to answer; never say it is missing or that you cannot open it."
+            ),
+            score: 1.0,
+        });
+    }
+    out
+}
+
 /// G6: how much a recall cue lifts past-conversation candidates before ranking
 /// (applied in `vault::retrieve`). Keep identical in the TS twin.
 pub const CONV_BOOST: f64 = 1.5;
@@ -1089,12 +1155,16 @@ fn live_pipeline(
             if steps.len() == 1 {
                 yield delta(format!(
                     "\n\n*Query used:*\n```sql\n{}\n```\n",
-                    steps[0].sql
+                    crate::sqlfmt::format_sql(&steps[0].sql)
                 ));
             } else {
                 yield delta(format!("\n\n*Queries used ({}):*\n", steps.len()));
                 for (i, s) in steps.iter().enumerate() {
-                    yield delta(format!("{}.\n```sql\n{}\n```\n", i + 1, s.sql));
+                    yield delta(format!(
+                        "{}.\n```sql\n{}\n```\n",
+                        i + 1,
+                        crate::sqlfmt::format_sql(&s.sql)
+                    ));
                 }
             }
             let all_sql = steps
@@ -1670,7 +1740,7 @@ fn live_pipeline(
                             if steps.len() == 1 {
                                 yield delta(format!(
                                     "\n\n*Query used:*\n```sql\n{}\n```\n",
-                                    steps[0].sql
+                                    crate::sqlfmt::format_sql(&steps[0].sql)
                                 ));
                             } else {
                                 yield delta(format!(
@@ -1681,7 +1751,7 @@ fn live_pipeline(
                                     yield delta(format!(
                                         "{}.\n```sql\n{}\n```\n",
                                         i + 1,
-                                        s.sql
+                                        crate::sqlfmt::format_sql(&s.sql)
                                     ));
                                 }
                             }
@@ -1894,7 +1964,11 @@ fn live_pipeline(
                             yield delta(tail);
                         }
                         // Deterministic transparency — never model-generated.
-                        yield delta(format!("\n\n*Query used:*\n```sql\n{sql}\n```\n"));
+                        // Display-formatted (§1); the executed SQL is untouched.
+                        yield delta(format!(
+                            "\n\n*Query used:*\n```sql\n{}\n```\n",
+                            crate::sqlfmt::format_sql(&sql)
+                        ));
                         // …and which file versions it read, so stale-looking
                         // numbers point at the file, not the engine. A query
                         // FROM a saved view expands to its source tables here
@@ -2238,7 +2312,15 @@ fn live_pipeline(
         //     per segment). Multi-doc asks never reach here (returned above
         //     or guarded by the cue); tabular files stay on the
         //     analytics/table-profile paths. ---
-        if has_real_model(&cfg) && attachment_file_ids.len() <= 1 && !cross_doc_cue(&question) {
+        // §3 cross-file span: when a SECOND file is comparably relevant, skip the
+        // whole-file focus read (which would single-source the dominant file) and
+        // fall through to the single-shot path — that one model call already sees
+        // BOTH files' top chunks, so the answer integrates them (no extra calls).
+        if has_real_model(&cfg)
+            && attachment_file_ids.len() <= 1
+            && !cross_doc_cue(&question)
+            && !multi_file_span(&initial.references)
+        {
             // Doc-focus reads the WHOLE target file into the prompt, so both of
             // its bypasser entrypoints are filtered here at their own choke
             // point: a lone local-only attachment is dropped, and named-file
@@ -2470,6 +2552,12 @@ fn live_pipeline(
             }
         }
 
+        // §4: small-model handholding leads the context (high score survives the
+        // local clamp) so a weak local model stops denying files that exist.
+        let assists = reliability_blocks(&question, &cfg, &included_file_ids);
+        if !assists.is_empty() {
+            contexts.splice(0..0, assists);
+        }
         let excerpt_count = contexts.len();
         // `cfg.clone()` (not a move) keeps `cfg` alive for the cost meter below —
         // the sink only carries this call's usage once the stream has drained.
@@ -2523,6 +2611,46 @@ mod tests {
 
     fn vctx(name: &str, text: &str, score: f64, kind: crate::contracts::SourceKind) -> vault::Context {
         vault::Context { name: name.into(), text: text.into(), score, kind }
+    }
+
+    #[test]
+    fn multi_file_span_needs_two_comparable_sources() {
+        // §3: two comparably-relevant sources route to synthesis; a weak second
+        // source (or a single source) falls through to whole-file focus. KEEP
+        // ALIGNED with the TS twin test (test/synth.cues.test.mjs).
+        assert!(multi_file_span(&[r("a", "a", 1.0), r("b", "b", 0.7)]));
+        assert!(multi_file_span(&[r("a", "a", 1.0), r("b", "b", 0.6)])); // boundary
+        assert!(!multi_file_span(&[r("a", "a", 1.0), r("b", "b", 0.4)])); // weak 2nd
+        assert!(!multi_file_span(&[r("a", "a", 1.0)])); // single source
+        assert!(!multi_file_span(&[]));
+    }
+
+    #[test]
+    fn reliability_blocks_only_for_the_local_model() {
+        let ids = vec!["a.csv".to_string(), "b.md".to_string()];
+        let local = ModelCfg { provider_id: Some("local".into()), ..Default::default() };
+        let cloud = ModelCfg { provider_id: Some("openai".into()), ..Default::default() };
+        let keyless = ModelCfg::default(); // extractive fallback — no model runs
+
+        // Cloud + keyless pay nothing.
+        assert!(reliability_blocks("total sales", &cloud, &ids).is_empty());
+        assert!(reliability_blocks("total sales", &keyless, &ids).is_empty());
+
+        // Local gets the capability preamble (with the file count), high-scored so
+        // the local context clamp can't drop it. (named_file_target reads the vault,
+        // which is empty in a unit test, so only the preamble asserts here.)
+        let blocks = reliability_blocks("total sales", &local, &ids);
+        assert_eq!(blocks.len(), 1);
+        assert!(blocks[0].text.contains("2 file(s) available"), "{}", blocks[0].text);
+        assert!(
+            blocks[0].text.contains("never tell the user that a file or a column"),
+            "{}",
+            blocks[0].text
+        );
+        assert_eq!(blocks[0].score, 1.0);
+
+        // No files → nothing to assert.
+        assert!(reliability_blocks("hi", &local, &[]).is_empty());
     }
 
     #[test]

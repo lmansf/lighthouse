@@ -148,7 +148,8 @@ test("ShapeViewDialog: propose → review → explicit Save; cancel keeps nothin
   assert.match(shapeDialog, /ragService\.shapeView\(source, instruction\.trim\(\), fileIds\)/);
   // The proposal renders the SQL as a code block and BOTH engine-rendered
   // samples as labeled markdown tables (the shared markdown renderer).
-  assert.match(shapeDialog, /<pre className=\{styles\.sqlBlock\}>\{phase\.proposal\.sql\}<\/pre>/);
+  // §1: the proposed view SQL is display-formatted (pretty-printed) in the block.
+  assert.match(shapeDialog, /<pre className=\{styles\.sqlBlock\}>\{formatSql\(phase\.proposal\.sql\)\}<\/pre>/);
   assert.match(shapeDialog, /Before — first rows of \{source\}/);
   assert.match(shapeDialog, /After — first rows of the shaped result/);
   assert.equal(

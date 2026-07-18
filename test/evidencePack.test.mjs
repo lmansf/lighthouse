@@ -13,6 +13,7 @@ register("./_ts-extensionless-hook.mjs", import.meta.url);
 
 const { composeEvidencePack, composeBoardPack, answerMarkdownToHtml, provenanceStampText } =
   await import("../src/lib/evidencePack.ts");
+const { formatSql } = await import("../src/lib/sqlFormat.ts");
 
 // A realistic settled analytics answer: narrative (bold + citation), the
 // result table, the deterministic "Query used" fence, freshness line, the
@@ -334,8 +335,9 @@ test("board pack: both card sections, freshness stamps, inline SVG, ONE Queries 
   assert.equal(html.match(/>Queries</g).length, 1);
   const appendix = html.indexOf(">Queries<");
   assert.ok(appendix > stored);
-  assert.ok(html.indexOf(BOARD_SQL_LIVE) > appendix);
-  assert.ok(html.indexOf(BOARD_SQL_STORED) > appendix);
+  // §1: the appendix lists each card's SQL, pretty-printed for reading.
+  assert.ok(html.indexOf(formatSql(BOARD_SQL_LIVE), appendix) !== -1);
+  assert.ok(html.indexOf(formatSql(BOARD_SQL_STORED), appendix) !== -1);
   // …the live card's engine footer verbatim (emphasis marks are syntax)…
   assert.ok(html.includes("Showing the first 3 of 8 rows."));
   // …and the stored card's entry repeats its stored stamp in place of a

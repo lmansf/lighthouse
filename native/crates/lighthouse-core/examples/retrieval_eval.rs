@@ -72,6 +72,16 @@ const CORPUS: &[(&str, &str)] = &[
         "mortgage-calc.md",
         "Mortgage amortization table notes: early payments are mostly interest; extra principal in year one shortens the loan the most.",
     ),
+    // --- cross-file span targets (§3): the answer to "staff and payroll
+    //     across the offices" lives HALF in each file, so both must surface. ---
+    (
+        "office-london.md",
+        "The London office has 40 people on staff. Monthly payroll for the London site is 320,000 pounds, up slightly this year.",
+    ),
+    (
+        "office-berlin.md",
+        "The Berlin office has 25 people on staff. Monthly payroll for the Berlin site is 180,000 euros, flat versus last year.",
+    ),
     // --- fillers (ranking noise) ------------------------------------------
     ("meeting-notes-jan.md", "Discussed roadmap priorities and the hiring plan; action items assigned to owners with dates."),
     ("design-principles.md", "Prefer clarity over cleverness. Small reversible steps. Make the default path the safe path."),
@@ -93,6 +103,18 @@ const GOLDEN: &[Golden] = &[
     Golden { query: "playwright test flakiness", expect: "playwright-debugging.md", class: "keyword" },
     Golden { query: "mortgage amortization table", expect: "mortgage-calc.md", class: "keyword" },
 ];
+
+/// §3 cross-file span floor: a question whose answer requires BOTH files. Both
+/// must surface in the top-K references, or the answer can only single-source.
+struct Span {
+    query: &'static str,
+    expect: [&'static str; 2],
+}
+
+const SPAN: &[Span] = &[Span {
+    query: "total staff and payroll across the offices",
+    expect: ["office-london.md", "office-berlin.md"],
+}];
 
 const K: usize = 5;
 
@@ -135,6 +157,14 @@ fn rank_of(query: &str, ids: &[String], expect: &str) -> Option<usize> {
         .iter()
         .position(|reference| reference.name == expect)
         .map(|p| p + 1)
+}
+
+/// §3: do BOTH expected files surface in the top-K references? A single-sourcing
+/// retriever fails this — only one half of the answer is available.
+fn both_cited(query: &str, ids: &[String], expect: &[&str; 2]) -> bool {
+    let r = vault::retrieve(query, ids, K, &[], &[], false, &[]);
+    let names: Vec<&str> = r.references.iter().map(|x| x.name.as_str()).collect();
+    expect.iter().all(|e| names.contains(e))
 }
 
 fn run_mode(label: &str, ids: &[String], detail: bool) -> (Agg, Agg, Agg) {
@@ -245,6 +275,25 @@ fn main() {
             "hybrid keyword hit@3 ({}) regressed more than one question vs lexical ({})",
             hy_kw.hit3, lex_kw.hit3
         ));
+    }
+    // §3 cross-file span: a two-file question must surface BOTH halves, or the
+    // answer can only single-source. This is what makes cross-file synthesis
+    // possible at all — the router (synth::multi_file_span) needs two files in
+    // the references to fire.
+    println!("\n== cross-file span (§3) ==");
+    for s in SPAN {
+        let ok = both_cited(s.query, &ids, &s.expect);
+        println!(
+            "  {:<44} → both cited: {}",
+            s.query,
+            if ok { "yes" } else { "NO" }
+        );
+        if !ok {
+            failures.push(format!(
+                "cross-file span '{}' did not surface both {:?} in top-{K}",
+                s.query, s.expect
+            ));
+        }
     }
 
     let _ = fs::remove_dir_all(&dir);

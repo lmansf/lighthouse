@@ -26,6 +26,7 @@
 // without a DOM or bundler. providers.ts is a plain constant table.
 import { MODEL_PROVIDERS } from "../contracts/mocks/providers";
 import type { AnalyticsMeta, ChatChunk, RagReference } from "../contracts/types";
+import { formatSql } from "./sqlFormat";
 
 /** The provenance stamp payload of a settled answer (ChatChunk's final meta). */
 export type ProvenanceMeta = NonNullable<ChatChunk["meta"]>;
@@ -379,9 +380,11 @@ export function composeEvidencePack(input: EvidencePackInput): string {
   }
 
   // (d) The exact SQL the engine executed (structured provenance, not text).
+  //     Pretty-printed for reading (§1); AST-identical to what ran, so it stays
+  //     faithful provenance the analyst can copy and re-run.
   parts.push(`<section>`);
   parts.push(`<h2>Query used</h2>`);
-  parts.push(`<pre><code>${escapeHtml(analytics.sql)}</code></pre>`);
+  parts.push(`<pre><code>${escapeHtml(formatSql(analytics.sql))}</code></pre>`);
   parts.push(`</section>`);
 
   // (e) Provenance: the engine's freshness line verbatim + the files read.
@@ -516,7 +519,7 @@ export function composeBoardPack(input: BoardPackInput): string {
     parts.push(`<h2>Queries</h2>`);
     for (const c of cards) {
       parts.push(`<h3>${escapeHtml(c.question)}</h3>`);
-      parts.push(`<pre><code>${escapeHtml(c.sql)}</code></pre>`);
+      parts.push(`<pre><code>${escapeHtml(formatSql(c.sql))}</code></pre>`);
       if (c.footer && c.footer.trim()) {
         parts.push(answerMarkdownToHtml(c.footer));
       } else if (!c.live) {

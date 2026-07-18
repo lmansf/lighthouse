@@ -5099,7 +5099,12 @@ pub fn last_query_used(history: &[ChatTurn]) -> Option<String> {
             rest = &after[end + 3..];
         }
         if let Some(sql) = last {
-            return Some(sql.chars().take(PRIOR_SQL_MAX_CHARS).collect());
+            // The fence is now display-formatted (§1), so collapse it back to a
+            // single line before it rides into a refinement prompt: the
+            // model-facing prior SQL stays byte-stable and inside the char
+            // budget, and pretty-printing the display never drifts the prompt.
+            let flat: String = sql.split_whitespace().collect::<Vec<_>>().join(" ");
+            return Some(flat.chars().take(PRIOR_SQL_MAX_CHARS).collect());
         }
     }
     None
@@ -5398,7 +5403,12 @@ fn direct_footer(
     skipped: usize,
     res: &QueryResult,
 ) -> String {
-    let mut footer = format!("*Query used:*\n```sql\n{sql}\n```\n");
+    // Display-formatted (§1): the fence is laid out for reading. The executed
+    // SQL (`meta.sql`, and the `sql` this footer describes) is untouched.
+    let mut footer = format!(
+        "*Query used:*\n```sql\n{}\n```\n",
+        crate::sqlfmt::format_sql(sql)
+    );
     // A query FROM a saved view still names its SOURCE files here — the
     // expansion is freshness-only and never renders (openspec:
     // add-shaped-views §2).
