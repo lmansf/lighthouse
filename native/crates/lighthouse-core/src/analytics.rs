@@ -2824,11 +2824,11 @@ pub fn decide_chart(batches: &[RecordBatch], narration: &str) -> Option<String> 
 /// Version stamp for the chart card. The full text is snapshot-pinned in a
 /// unit test, so any edit (and the version bump that should ride with a
 /// behavioral one) is a reviewed diff.
-pub const CHART_CARD_VERSION: &str = "v2";
-/// Card budget: ~215 tokens (v2's advisory "none" line bought ~56 chars).
-/// Asserted by `chart_card_stays_inside_budget` and re-checked by the
-/// chart_eval floor.
-pub const CHART_CARD_MAX_CHARS: usize = 860;
+pub const CHART_CARD_VERSION: &str = "v3";
+/// Card budget: ~235 tokens (v3's "visual is the default" framing bought ~64
+/// chars over v2). Asserted by `chart_card_stays_inside_budget` (worst case: 24
+/// long columns, the list clipped) and re-checked by the chart_eval floor.
+pub const CHART_CARD_MAX_CHARS: usize = 940;
 /// Cap on the interpolated column list — a 24-column result must not blow the
 /// card budget; the full header already rides in the result block itself.
 const CHART_CARD_COLS_CHARS: usize = 96;
@@ -2891,12 +2891,13 @@ pub fn chart_card(batches: &[RecordBatch]) -> Option<String> {
     }
     Some(format!(
         "Chart options ({CHART_CARD_VERSION}) — result columns: {listed}.\n\
-         End the answer with at most ONE fenced request to choose this answer's chart; \
-         the app builds it from the verified result (a request can never supply values):\n\
+         This result has a chartable shape, so a visual is the DEFAULT: end the answer \
+         with at most ONE fenced request to choose this answer's chart; the app builds \
+         it from the verified result (a request can never supply values):\n\
          {CHART_DIRECTIVE_FENCE}\n{}\n```\n\
          kind: bar = categories; line = trend, 2-3 series; area = trend, 1 series; \
-         none = you think nothing here is comparable (single number, id/SKU/code labels) — \
-         the app still charts results whose shape fits. \
+         none = suppress the chart with a stated reason (a single number, id/SKU/code \
+         labels) — the app still charts any result whose shape clearly fits. \
          series_columns: 1-3 numeric columns; title and sort (asc|desc, by first series) optional.\n\
          Examples: {} → {} · {} → {}",
         CHART_CARD_EXAMPLES[1].directive,
@@ -4441,12 +4442,12 @@ mod tests {
     #[test]
     fn chart_card_snapshot_is_pinned() {
         let card = chart_card(&[batch(&["NE", "NW"], &[150.0, 200.0])]).unwrap();
-        let expected = "Chart options (v2) — result columns: label (text), total (numeric).\n\
-            End the answer with at most ONE fenced request to choose this answer's chart; the app builds it from the verified result (a request can never supply values):\n\
+        let expected = "Chart options (v3) — result columns: label (text), total (numeric).\n\
+            This result has a chartable shape, so a visual is the DEFAULT: end the answer with at most ONE fenced request to choose this answer's chart; the app builds it from the verified result (a request can never supply values):\n\
             ```lighthouse-chart-request\n\
             {\"kind\":\"bar\",\"label_column\":\"region\",\"series_columns\":[\"revenue\"],\"title\":\"Revenue by region\",\"sort\":\"desc\"}\n\
             ```\n\
-            kind: bar = categories; line = trend, 2-3 series; area = trend, 1 series; none = you think nothing here is comparable (single number, id/SKU/code labels) — the app still charts results whose shape fits. series_columns: 1-3 numeric columns; title and sort (asc|desc, by first series) optional.\n\
+            kind: bar = categories; line = trend, 2-3 series; area = trend, 1 series; none = suppress the chart with a stated reason (a single number, id/SKU/code labels) — the app still charts any result whose shape clearly fits. series_columns: 1-3 numeric columns; title and sort (asc|desc, by first series) optional.\n\
             Examples: (month, total) → {\"kind\":\"area\",\"label_column\":\"month\",\"series_columns\":[\"total\"]} · (store_id, revenue) → {\"kind\":\"none\"}";
         assert_eq!(card, expected);
     }

@@ -15,8 +15,11 @@
 
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::Arc;
 
-use datafusion::arrow::datatypes::DataType;
+use datafusion::arrow::array::{ArrayRef, Float64Array, StringArray};
+use datafusion::arrow::datatypes::{DataType, Field, Schema};
+use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::prelude::SessionContext;
 use serde::Serialize;
 
@@ -152,8 +155,9 @@ fn vault_tail_ok(tail: &str) -> bool {
 }
 
 fn list_files_intent(q: &str) -> Option<MetaIntent> {
-    // "what|which <kind> do i have [in my vault]"
-    for lead in ["what ", "which "] {
+    // "what|which|how many <kind> do i have [in my vault]" — "how many" is the
+    // count phrasing that §2 answers with a stat tile. KEEP IN SYNC with meta.ts.
+    for lead in ["what ", "which ", "how many "] {
         if let Some(rest) = q.strip_prefix(lead) {
             let (kind_word, after) = rest.split_once(' ').unwrap_or((rest, ""));
             if let Some(kind) = kind_of_word(kind_word) {
@@ -404,11 +408,21 @@ fn list_files(included: &[String], kind: Option<KindFilter>, now_ms: i64, is_clo
     if scoped.len() > LIST_FILES_MAX {
         lines.push(format!("- …and {} more.", scoped.len() - LIST_FILES_MAX));
     }
-    Ok(MetaAnswer { markdown: lines.join("\n"), references })
+    // §2 visual-first: the count IS engine-verified quantitative data, so it
+    // renders a visual by default — a single kind's count as a stat tile, the
+    // whole-vault breakdown as a compact bar. Built from the structured file
+    // inventory (kind counts), never from the prose count line.
+    let mut markdown = lines.join("\n");
+    if let Some(visual) = list_files_visual(kind, scoped.len(), &files, noun) {
+        markdown.push_str("\n\n");
+        markdown.push_str(&visual);
+    }
+    Ok(MetaAnswer { markdown, references })
 }
 
-/// "5 spreadsheets, 3 documents, 2 PDFs" — only non-zero buckets, biggest first.
-fn count_line(files: &[(String, String, PathBuf, i64)]) -> String {
+/// Kind counts (spreadsheet / document / PDF / file) over the inventory, biggest
+/// first — the structured form both `count_line` and the §2 count visual read.
+fn kind_counts(files: &[(String, String, PathBuf, i64)]) -> Vec<(&'static str, usize)> {
     let mut counts: Vec<(&'static str, usize)> = Vec::new();
     for (_, name, _, _) in files {
         let label = kind_label(name);
@@ -419,13 +433,86 @@ fn count_line(files: &[(String, String, PathBuf, i64)]) -> String {
     }
     counts.sort_by(|a, b| b.1.cmp(&a.1));
     counts
+}
+
+/// "5 spreadsheets, 3 documents, 2 PDFs" — only non-zero buckets, biggest first.
+fn count_line(files: &[(String, String, PathBuf, i64)]) -> String {
+    kind_counts(files)
         .iter()
-        .map(|(label, n)| {
-            let plural = if *n == 1 { "" } else { "s" };
-            format!("{n} {label}{plural}")
-        })
+        .map(|&(label, n)| plural(label, n))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// "1 PDF" / "3 PDFs" — the count line's own pluralization, reused for the
+/// visual labels so the tile/bar reads exactly like the prose. KEEP IN SYNC
+/// with meta.ts (`plural`).
+fn plural(label: &str, n: usize) -> String {
+    let s = if n == 1 { "" } else { "s" };
+    format!("{n} {label}{s}")
+}
+
+/// The bare plural noun ("PDFs", "spreadsheets") for a bar x-label / a stat
+/// caption — the count-prefixed form is `plural`. KEEP IN SYNC with meta.ts.
+fn plural_noun(label: &str, n: usize) -> String {
+    if n == 1 { label.to_string() } else { format!("{label}s") }
+}
+
+/// A `lighthouse-stat` fence: an inline stat tile carrying ONE engine number and
+/// its caption (StatValue shape). Fixed key order for byte-parity with the TS
+/// twin; the caption is an engine noun, so no escaping is needed. KEEP IN SYNC
+/// with meta.ts (`statFence`).
+fn stat_fence(value: usize, label: &str) -> String {
+    format!("```lighthouse-stat\n{{\"raw\":\"{value}\",\"value\":{value},\"label\":\"{label}\"}}\n```")
+}
+
+/// The by-kind counts as a bar chart spec, or None with fewer than two kinds
+/// (a single number is a tile, not a bar). Routed through the SAME emitter the
+/// analytics path uses — a two-column `RecordBatch` (kind label × count) fed to
+/// `chart_spec_from_batches` — so the visual is provably built from catalog
+/// counts, never from prose. PARITY: meta.ts::countsBarSpec mirrors the
+/// decision (JSON differs only in float formatting).
+pub fn counts_bar_spec(counts: &[(&str, usize)]) -> Option<String> {
+    if counts.len() < 2 {
+        return None;
+    }
+    let labels: Vec<String> = counts.iter().map(|&(l, n)| plural_noun(l, n)).collect();
+    let values: Vec<f64> = counts.iter().map(|&(_, n)| n as f64).collect();
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("kind", DataType::Utf8, false),
+        Field::new("files", DataType::Float64, true),
+    ]));
+    let columns: Vec<ArrayRef> = vec![
+        Arc::new(StringArray::from(
+            labels.iter().map(|s| s.as_str()).collect::<Vec<&str>>(),
+        )),
+        Arc::new(Float64Array::from(values)),
+    ];
+    let batch = RecordBatch::try_new(schema, columns).ok()?;
+    crate::analytics::chart_spec_from_batches(&[batch])
+}
+
+/// The visual a ListFiles answer carries by default: a single kind's count as a
+/// stat tile, the whole-vault composition as a compact bar (falling back to a
+/// total tile when there is only one kind). None only when there is genuinely
+/// nothing to show. KEEP IN SYNC with meta.ts (`listFilesVisual`).
+fn list_files_visual(
+    kind: Option<KindFilter>,
+    scoped_len: usize,
+    files: &[(String, String, PathBuf, i64)],
+    noun: &str,
+) -> Option<String> {
+    match kind {
+        // A single asked-for kind → one number → a stat tile.
+        Some(_) => Some(stat_fence(scoped_len, &plural_noun(noun, scoped_len))),
+        // The whole vault → the by-kind breakdown as a bar, else a total tile.
+        None => {
+            let counts = kind_counts(files);
+            counts_bar_spec(&counts)
+                .map(|spec| format!("```lighthouse-chart\n{spec}\n```"))
+                .or_else(|| Some(stat_fence(files.len(), &plural_noun("file", files.len()))))
+        }
+    }
 }
 
 fn find_column(included: &[String], raw_name: &str, is_cloud: bool) -> Result<MetaAnswer, String> {
@@ -1198,6 +1285,15 @@ mod tests {
             meta_intent("show me all my pdfs"),
             Some(MetaIntent::ListFiles { kind: Some(KindFilter::Pdfs) })
         );
+        // "how many" is the count phrasing §2 answers with a stat tile.
+        assert_eq!(
+            meta_intent("how many pdfs do i have"),
+            Some(MetaIntent::ListFiles { kind: Some(KindFilter::Pdfs) })
+        );
+        assert_eq!(
+            meta_intent("How many files do I have?"),
+            Some(MetaIntent::ListFiles { kind: None })
+        );
         assert_eq!(
             meta_intent("Which files have an employee id column?"),
             Some(MetaIntent::FindColumn { name: "employee id".into() })
@@ -1243,6 +1339,27 @@ mod tests {
             meta_intent("which files have a column \"unit price\""),
             Some(MetaIntent::FindColumn { name: "unit price".into() })
         );
+    }
+
+    #[test]
+    fn count_visual_comes_from_the_inventory_not_prose() {
+        // A single kind → a stat tile carrying the engine count, fixed key order
+        // for byte-parity with the TS twin.
+        assert_eq!(
+            stat_fence(3, "PDFs"),
+            "```lighthouse-stat\n{\"raw\":\"3\",\"value\":3,\"label\":\"PDFs\"}\n```"
+        );
+        // Two+ kinds → a bar over the by-kind counts, materialized by the SAME
+        // emitter the analytics path uses (a RecordBatch → chart_spec_from_batches).
+        let bar = counts_bar_spec(&[("spreadsheet", 5), ("document", 3), ("PDF", 2)]).expect("bar");
+        let v: serde_json::Value = serde_json::from_str(&bar).unwrap();
+        assert_eq!(v["kind"], "bar");
+        assert_eq!(v["x"], serde_json::json!(["spreadsheets", "documents", "PDFs"]));
+        assert_eq!(v["series"][0]["values"], serde_json::json!([5.0, 3.0, 2.0]));
+        // CONSTITUTION guard: a single count is a tile, never a one-bar chart —
+        // and there is no path that turns a prose number into either.
+        assert_eq!(counts_bar_spec(&[("spreadsheet", 5)]), None);
+        assert_eq!(counts_bar_spec(&[]), None);
     }
 
     #[test]

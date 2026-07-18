@@ -24,7 +24,7 @@ const vault = path.join(home, "vault");
 mkdirSync(vault, { recursive: true });
 process.env.VAULT_DIR = vault;
 
-const { metaIntent, renderMeta, savedAgeLabel } = await import("../src/server/meta.ts");
+const { metaIntent, renderMeta, savedAgeLabel, countsBarSpec } = await import("../src/server/meta.ts");
 const { setIncluded } = await import("../src/server/vault.ts");
 
 test("cue table positives (mirrors meta.rs::cue_table_positives)", () => {
@@ -43,6 +43,9 @@ test("cue table positives (mirrors meta.rs::cue_table_positives)", () => {
   });
   assert.deepEqual(metaIntent("list my documents"), { kind: "listFiles", filter: "documents" });
   assert.deepEqual(metaIntent("show me all my pdfs"), { kind: "listFiles", filter: "pdfs" });
+  // "how many" is the count phrasing §2 answers with a stat tile.
+  assert.deepEqual(metaIntent("how many pdfs do i have"), { kind: "listFiles", filter: "pdfs" });
+  assert.deepEqual(metaIntent("How many files do I have?"), { kind: "listFiles", filter: null });
   assert.deepEqual(metaIntent("Which files have an employee id column?"), {
     kind: "findColumn",
     name: "employee id",
@@ -102,10 +105,35 @@ test("whatsNew + listFiles render from the walk; findColumn falls through (PARIT
   assert.match(sheets.markdown, /\*\*1 spreadsheet\*\*/);
   assert.doesNotMatch(sheets.markdown, /notes\.md/);
   assert.equal(sheets.references.length, 1);
+  // §2: a single kind's count renders an inline stat tile from the inventory.
+  assert.match(sheets.markdown, /```lighthouse-stat\n\{"raw":"1","value":1,"label":"spreadsheet"\}\n```/);
+
+  // The whole-vault list (2 kinds: a spreadsheet + a document) renders a bar.
+  const all = renderMeta({ kind: "listFiles", filter: null }, included, now);
+  assert.ok(all, "listFiles (all) renders");
+  assert.match(all.markdown, /```lighthouse-chart/);
 
   // PARITY: the catalog is desktop-only — the TS twin must fall through.
   assert.equal(renderMeta({ kind: "findColumn", name: "region" }, included, now), null);
 
   // No included files ⇒ null (the pipeline's fall-through contract).
   assert.equal(renderMeta({ kind: "whatsNew", windowMs: null }, [], now), null);
+});
+
+test("countsBarSpec charts the by-kind counts, and only from counts (§2)", () => {
+  // Two+ kinds → a bar over the by-kind counts, x-labels pluralized.
+  const bar = countsBarSpec([
+    ["spreadsheet", 5],
+    ["document", 3],
+    ["PDF", 2],
+  ]);
+  assert.ok(bar, "two kinds chart");
+  const spec = JSON.parse(bar);
+  assert.equal(spec.kind, "bar");
+  assert.deepEqual(spec.x, ["spreadsheets", "documents", "PDFs"]);
+  assert.deepEqual(spec.series[0].values, [5, 3, 2]);
+  // CONSTITUTION guard: a single count is a tile, never a one-bar chart — and
+  // there is no path that turns a prose number into either.
+  assert.equal(countsBarSpec([["spreadsheet", 5]]), null);
+  assert.equal(countsBarSpec([]), null);
 });
