@@ -92,6 +92,53 @@ pub fn multi_file_span(refs: &[RagReference]) -> bool {
     refs.len() >= MIN_MAP_DOCS && refs[MIN_MAP_DOCS - 1].score >= SECONDARY_FILE_MIN
 }
 
+/// §4 small-model reliability: deterministic assist blocks injected into the
+/// context ONLY for the small bundled local model (`provider_id == "local"`).
+/// Weak local models were denying files (and columns) that plainly exist; these
+/// blocks assert, deterministically, that they do. Cloud models are capable
+/// enough and never pay these tokens, and the keyless extractive fallback calls
+/// no model at all — both are excluded by the provider check. A HIGH score
+/// protects the blocks from the drop-lowest-first local context clamp
+/// (`llm::clamp_local_contexts`), and routing them through the normal context
+/// list means they are budgeted against the 6144 window automatically.
+///
+/// Two blocks: a capability preamble (how many files you can see; you can query
+/// the tabular ones; never claim a LISTED file/column is unavailable — the
+/// schema cards on the analytics path list the columns), and, when the question
+/// NAMES an included file, a hard existence assertion for it.
+///
+/// PARITY: mirrored byte-for-byte by src/server/synth.ts::reliabilityBlocks.
+/// (A per-column catalog assist is a Rust-only follow-on — the schema cards +
+/// this preamble already cover column denial, and the catalog is Rust-only.)
+pub fn reliability_blocks(question: &str, cfg: &ModelCfg, included_file_ids: &[String]) -> Vec<Ctx> {
+    if cfg.provider_id.as_deref() != Some("local") {
+        return Vec::new();
+    }
+    let n = included_file_ids.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    // Built from joined sentence parts so the TS twin is byte-identical.
+    let preamble = [
+        format!("You currently have {n} file(s) available to answer from in this vault."),
+        "Each appears below as a numbered context block, and the tabular ones can be queried as tables (their columns are listed in the schema cards).".to_string(),
+        "Everything shown to you here IS available — never tell the user that a file or a column that appears in your context is missing or that you cannot access it.".to_string(),
+        "If something you'd need is genuinely not present, say what's missing, but do not deny that a listed file or column exists.".to_string(),
+    ]
+    .join(" ");
+    let mut out = vec![Ctx { name: "what you can see".to_string(), text: preamble, score: 1.0 }];
+    if let Some((_, name)) = vault::named_file_target(question, included_file_ids) {
+        out.push(Ctx {
+            name: "confirmed available".to_string(),
+            text: format!(
+                "The file \"{name}\" IS available to you right now — use it to answer; never say it is missing or that you cannot open it."
+            ),
+            score: 1.0,
+        });
+    }
+    out
+}
+
 /// G6: how much a recall cue lifts past-conversation candidates before ranking
 /// (applied in `vault::retrieve`). Keep identical in the TS twin.
 pub const CONV_BOOST: f64 = 1.5;
@@ -2505,6 +2552,12 @@ fn live_pipeline(
             }
         }
 
+        // §4: small-model handholding leads the context (high score survives the
+        // local clamp) so a weak local model stops denying files that exist.
+        let assists = reliability_blocks(&question, &cfg, &included_file_ids);
+        if !assists.is_empty() {
+            contexts.splice(0..0, assists);
+        }
         let excerpt_count = contexts.len();
         // `cfg.clone()` (not a move) keeps `cfg` alive for the cost meter below —
         // the sink only carries this call's usage once the stream has drained.
@@ -2570,6 +2623,34 @@ mod tests {
         assert!(!multi_file_span(&[r("a", "a", 1.0), r("b", "b", 0.4)])); // weak 2nd
         assert!(!multi_file_span(&[r("a", "a", 1.0)])); // single source
         assert!(!multi_file_span(&[]));
+    }
+
+    #[test]
+    fn reliability_blocks_only_for_the_local_model() {
+        let ids = vec!["a.csv".to_string(), "b.md".to_string()];
+        let local = ModelCfg { provider_id: Some("local".into()), ..Default::default() };
+        let cloud = ModelCfg { provider_id: Some("openai".into()), ..Default::default() };
+        let keyless = ModelCfg::default(); // extractive fallback — no model runs
+
+        // Cloud + keyless pay nothing.
+        assert!(reliability_blocks("total sales", &cloud, &ids).is_empty());
+        assert!(reliability_blocks("total sales", &keyless, &ids).is_empty());
+
+        // Local gets the capability preamble (with the file count), high-scored so
+        // the local context clamp can't drop it. (named_file_target reads the vault,
+        // which is empty in a unit test, so only the preamble asserts here.)
+        let blocks = reliability_blocks("total sales", &local, &ids);
+        assert_eq!(blocks.len(), 1);
+        assert!(blocks[0].text.contains("2 file(s) available"), "{}", blocks[0].text);
+        assert!(
+            blocks[0].text.contains("never tell the user that a file or a column"),
+            "{}",
+            blocks[0].text
+        );
+        assert_eq!(blocks[0].score, 1.0);
+
+        // No files → nothing to assert.
+        assert!(reliability_blocks("hi", &local, &[]).is_empty());
     }
 
     #[test]

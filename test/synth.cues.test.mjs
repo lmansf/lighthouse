@@ -12,7 +12,27 @@ import { register } from "node:module";
 
 register("./_ts-extensionless-hook.mjs", import.meta.url);
 
-const { crossDocCue, rankDocsFromHits, multiFileSpan } = await import("../src/server/synth.ts");
+const { crossDocCue, rankDocsFromHits, multiFileSpan, reliabilityBlocks } = await import(
+  "../src/server/synth.ts"
+);
+
+// §4 small-model reliability: deterministic assist blocks, ONLY for the bundled
+// local model. KEEP the strings byte-identical to the Rust twin
+// (lighthouse-core synth::reliability_blocks — asserted there too).
+test("reliability blocks fire only for the local model", () => {
+  const ids = ["a.csv", "b.md"];
+  const local = { providerId: "local", modelId: null, apiKey: null };
+  const cloud = { providerId: "openai", modelId: "gpt", apiKey: "k" };
+  const keyless = { providerId: null, modelId: null, apiKey: null };
+  assert.equal(reliabilityBlocks("total sales", cloud, ids).length, 0, "cloud pays nothing");
+  assert.equal(reliabilityBlocks("total sales", keyless, ids).length, 0, "extractive pays nothing");
+  const blocks = reliabilityBlocks("total sales", local, ids);
+  assert.equal(blocks.length, 1);
+  assert.ok(blocks[0].text.includes("2 file(s) available"), blocks[0].text);
+  assert.ok(blocks[0].text.includes("never tell the user that a file or a column"));
+  assert.equal(blocks[0].score, 1);
+  assert.equal(reliabilityBlocks("hi", local, []).length, 0, "no files, no block");
+});
 
 // §3 cross-file span trigger. References are one-per-source, score-descending
 // and normalized to the top = 1.0. KEEP ALIGNED with the Rust twin

@@ -115,6 +115,44 @@ export function multiFileSpan(refs: RagReference[]): boolean {
 }
 
 /**
+ * §4 small-model reliability: deterministic assist blocks injected into the
+ * context ONLY for the small bundled local model (providerId "local"). Weak
+ * local models were denying files that plainly exist; these blocks assert,
+ * deterministically, that they do. Cloud models are capable enough and never pay
+ * these tokens; the keyless extractive fallback calls no model, so both are
+ * excluded. A high score keeps them ahead of the retrieved chunks.
+ *
+ * PARITY: byte-identical text to lighthouse-core synth::reliability_blocks. (A
+ * per-column catalog assist is Rust-only — the catalog is Rust-only — but the
+ * preamble + the schema cards cover column denial here too.)
+ */
+export function reliabilityBlocks(
+  question: string,
+  cfg: ModelCfg,
+  includedFileIds: string[],
+): Ctx[] {
+  if (cfg.providerId !== "local") return [];
+  const n = includedFileIds.length;
+  if (n === 0) return [];
+  const preamble = [
+    `You currently have ${n} file(s) available to answer from in this vault.`,
+    "Each appears below as a numbered context block, and the tabular ones can be queried as tables (their columns are listed in the schema cards).",
+    "Everything shown to you here IS available — never tell the user that a file or a column that appears in your context is missing or that you cannot access it.",
+    "If something you'd need is genuinely not present, say what's missing, but do not deny that a listed file or column exists.",
+  ].join(" ");
+  const out: Ctx[] = [{ name: "what you can see", text: preamble, score: 1 }];
+  const named = namedFileTarget(question, includedFileIds);
+  if (named) {
+    out.push({
+      name: "confirmed available",
+      text: `The file "${named[1]}" IS available to you right now — use it to answer; never say it is missing or that you cannot open it.`,
+      score: 1,
+    });
+  }
+  return out;
+}
+
+/**
  * G6: the synthesis prompt label for a retrieved context. A past-conversation
  * note is announced as such so the model knows the block is the user's OWN
  * earlier chat (not a source document); ordinary files keep their name. This is
@@ -892,6 +930,9 @@ async function* answerPipelineLive(
     }
   }
 
+  // §4: small-model handholding leads the context so a weak local model stops
+  // denying files that exist (no-op for cloud/keyless — see reliabilityBlocks).
+  contexts.unshift(...reliabilityBlocks(question, cfg, includedFileIds));
   for await (const delta of streamAnswer(question, contexts, cfg, history)) {
     yield { delta, done: false };
   }
