@@ -1080,7 +1080,12 @@ hosted-project sunset plan (old installs poll the license function; a dead
 endpoint never wipes — lock-not-wipe holds — but they'd eventually lock, so
 keep the function up patched always-valid for a window).
 
-### Track T v2 prompt — "cut the cord"
+*Addendum 2026-07-15:* first run gains a **skippable, once-per-install
+"take a tour"** (prompt section 7) — the orientation role the welcome/
+registration screen used to play, without the account. Sign-in/email was
+already removed by section 3; the tour completes that rework.
+
+### Track T v2 prompt — "cut the cord" (updated 2026-07-15: first-run tour added as section 7)
 
 ```
 Cut Lighthouse's cloud cord: remove all automatic data collection, the
@@ -1130,7 +1135,8 @@ gates at the end.
      sign-out, and the account card. The app is simply always unlocked.
    - Onboarding: remove the email/registration step entirely; first run
      becomes vault choice → window/widget mode → model pick → default
-     inclusion. Drive the full first-run E2E afterward.
+     inclusion, then hands off to the first-run tour (section 7). Drive
+     the full first-run E2E afterward.
    - Repo: move supabase/ and docs/registration.md to the archive branch;
      delete .env.production (or reduce it to a documented empty stub) and
      every LICENSE_API_URL / SUPABASE_ANON_KEY / CHECKOUT_API_URL /
@@ -1171,6 +1177,33 @@ gates at the end.
    .github/workflows/release.yml — it still auto-fires legacy Electron
    builds on every v* tag; the shipping pipeline is desktop-release.yml.
 
+7. First-run tour — skippable, once per install (it takes over the
+   orientation role the deleted welcome/registration screen played).
+   After onboarding completes (section 3's flow) and the main window
+   first renders, offer a "Take a tour" walkthrough:
+   - Five short steps anchored to the real UI (Fluent TeachingPopover or
+     equivalent; a plain centered overlay is the acceptable fallback):
+     (1) the explorer — add files and control exactly what the AI can
+     see; (2) the chat — ask and get grounded, cited answers; (3)
+     analytics — ask aggregate questions of your spreadsheets and get
+     verified numbers with the SQL shown; (4) the model picker — private
+     on-device vs cloud; (5) the settings gear — Preferences, AI models,
+     Send feedback. Every step shows Next and "Skip tour"; Esc
+     dismisses; fully keyboard navigable; correct in both themes.
+   - Show-once semantics: a tour_shown flag in the install-global
+     app-state dir — NOT the vault, so switching vaults never re-shows
+     it. Set the flag the moment the tour first appears, whether it is
+     completed or skipped. A wiped app-state dir (fresh install) shows
+     it again; nothing else does.
+   - Widget-mode installs: never interrupt the widget — the tour waits
+     for the first time the main window opens; the widget keeps its
+     existing one-line summon hint.
+   - Re-entry: a "Take the tour" item on the help surface — fold or
+     replace src/features/help/QuickStart.tsx so there is ONE
+     orientation surface, not two. Manual re-entry ignores the flag.
+   - TS twin: same component and flag semantics over the settings
+     round-trip (PARITY note where the app-state dir differs).
+
 Proof gates, beyond the suites: (a) grep-clean — supabase,
 LICENSE_API_URL, PAID_ENABLED, usage capture, experiment, data-log,
 pingLaunch, model_selected, submitNotify appear nowhere outside the
@@ -1179,9 +1212,13 @@ first-run onboarding through to a grounded answer with outbound traffic
 observed (mock fetch layer or local proxy) — zero requests except those in
 docs/data-flows.md; (c) the feedback dialog produces a correct mailto: URL
 and a correct prefilled issue URL (assert both strings in a unit test);
-(d) the settings gear still opens Preferences and AI models; (e) full
-suites green. End with the maintainer checklist: Supabase project sunset
-plan, the feedback email address, Stripe account cleanup — and a
+(d) the settings gear still opens Preferences and AI models; (e)
+first-run tour E2E: fresh app state → the tour appears exactly once,
+"Skip tour" dismisses it permanently, relaunch and vault switches never
+re-show it, the help-menu re-entry opens it on demand, and completing
+onboarding in widget mode defers it to the first main-window open; (f)
+full suites green. End with the maintainer checklist: Supabase project
+sunset plan, the feedback email address, Stripe account cleanup — and a
 one-paragraph summary of what a privacy reviewer would now find.
 ```
 
