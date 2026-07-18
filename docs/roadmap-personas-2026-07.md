@@ -1263,8 +1263,12 @@ tree (not just commit messages):
 2. **P-final** — privacy-first analyst pass (provider reframe + per-answer
    stamp reusing the egress registry, local-only marks, inspector, TTS
    removal, SharePoint keep).
-3. **G-final** — small verify-and-close: lift any real registration caps
-   left, add evidence-pack export.
+3. **G-final** — Beam close-out: lift any real registration caps left,
+   evidence-pack export, and **chart intelligence** — a universal
+   plain-text chart directive + guidance card any provider (and the local
+   model) can use, with a chart eval floor. Not provider function-calling:
+   protocols fragment across vendors, the local 7B's tool-calling is
+   unreliable, and chart data must keep coming from engine batches only.
 4. In parallel, maintainer-side: provision signing certs per
    `docs/signing.md` + `docs/maintainer-provisioning.md`.
 
@@ -1453,12 +1457,16 @@ byte-identical; suites + release smoke green. End with a "what changed
 for a privacy reviewer" paragraph. No decisions remain open.
 ```
 
-### G-final prompt (small)
+### G-final prompt (v2 — Beam close-out: caps, evidence pack, chart intelligence)
 
 ```
-Close out Beam's scale and artifact gaps — verify first, build only what's
-missing. One PR. Ground rules per docs/ts-twin.md; Beam analytics is
-Rust-only (established PARITY decision).
+Close out Beam — scale, artifacts, and chart intelligence. One PR, one
+commit per numbered section. Ground rules per docs/ts-twin.md; Beam
+analytics is Rust-only (established PARITY decision); shared chart-spec
+parsing lives in src/lib/chartSpec.ts. Section 3 is feature-sized:
+OpenSpec change add-chart-directive (proposal, design with Non-goals
+pinned, spec deltas, tasks; `openspec validate --all` green). Prereqs:
+T-final and P-final are merged.
 
 1. Registration caps — verify, then lift only what's real: CSV/TSV/
    Parquet already register by path (DataFusion streams; MAX_XLSX_ROWS
@@ -1477,8 +1485,52 @@ Rust-only (established PARITY decision).
    machinery, chip alongside Save-as-CSV. Check none of it already
    shipped in 0.11.2's presentation polish before building.
 
-Gates: cargo + npm suites, the 0.11.2 eval floor stays green, E2E for the
-export chip, release smoke green.
+3. Chart intelligence (OpenSpec: add-chart-directive) — one universal
+   mechanism that lets ANY model choose the right chart without ever
+   owning the numbers.
+   - Why this shape (pin it in the design): no per-provider
+     function-calling — the seven vendors speak different tool
+     protocols, the local 7B's tool-calling is unreliable, and chart
+     data must keep coming from engine batches, never model text. A
+     plain-text directive is the one mechanism every provider shares;
+     the extractive fallback has no model and keeps the heuristic.
+   - The chart card (the guidance "skill"): a compact, versioned prompt
+     block (~200 tokens — respect the local 6144-token window) injected
+     ONLY when an analytics result table is in context: the available
+     kinds (bar, line, area), when each fits and when NONE fits (single
+     number, >3 series, unordered long tables, identifier columns), the
+     directive syntax, and 3–4 few-shot examples — unit-tested like the
+     NL→SQL few-shots (a test rejects any example the validator would
+     not accept).
+   - The directive (the universal "tool"): the model may emit at most
+     one fenced lighthouse-chart-request block naming {kind | "none",
+     label_column, series_columns (≤3), title, sort?}. The engine
+     validates every named column against the ACTUAL result batches and
+     builds the spec FROM THE BATCHES — values appearing in the
+     directive are never copied into the chart. Invalid or absent
+     directive → today's deterministic heuristic, unchanged. "none"
+     suppresses the auto-chart. The fence is stripped from displayed
+     prose (reuse the widget's existing fence-stripping machinery).
+   - Awareness: extend 0.11.3's SYSTEM_PROMPT line so narration
+     references the chart only when one will render — the directive
+     makes that knowable, so "the chart below shows…" is always true.
+   - Quality floor: golden fixtures (result table → expected kind and
+     columns) covering the misfire classes the audit finds (date-ish
+     labels, top-N candidates, single-value results, ID columns);
+     directive-validator tests (unknown column, 4+ series, fabricated
+     values ignored); a chart scorecard alongside the 0.11.2 eval
+     harness so prompt drift is a reviewed diff. Where fixtures show the
+     deterministic emitter itself misfiring, improve it — it remains the
+     no-model and fallback path.
+   - Parity: directive parsing/validation and rendering rules in
+     src/lib/chartSpec.ts (node-tested) mirror the Rust emitter;
+     analytics stays Rust-only.
+
+Gates: cargo + npm suites; the 0.11.2 eval floor AND the new chart floor
+green; E2E: an analytics ask with a valid directive renders that chart,
+an invalid directive falls back to the heuristic chart, "none" renders no
+chart — all with numbers byte-identical to the result table; existing
+bar/line/area fixtures unchanged; release smoke green.
 ```
 ```
 
