@@ -12,11 +12,16 @@
   account) — absent secrets must skip lanes loudly, never half-sign.
 
 ## 1. De-risking spike (timeboxed ~1 month; go/no-go for everything below)
-- [ ] 1.1 Cross-compile `lighthouse-core` for `aarch64-apple-ios` and
+- [x] 1.1 Cross-compile `lighthouse-core` for `aarch64-apple-ios` and
   `aarch64-linux-android`: resolve DataFusion 54 + parquet codec and
   `notify`/kqueue build issues; measure per-arch release-library size against
   the < ~80 MB budget; verify 16 KB page alignment on the Android cdylib.
   VERIFY: both `cargo build --target` invocations green in a scratch CI lane.
+  — **PASS** (`mobile-spike.yml` run #2, `de097f8`): both triples cross-compile
+  with NO source changes; DataFusion/parquet/arrow, ring asm, and notify all
+  build. iOS staticlib slice 7.2 MB (< 80 MB); Android cdylib 16 KB-aligned
+  (`0x4000`). See `SPIKE-REPORT.md` (incl. the DCE caveat on the bare-cdylib
+  size). 1.2–1.4 remain DEFERRED (need device lanes + §0 enrollments).
 - [ ] 1.2 Swap TLS root discovery to `rustls-platform-verifier` behind a
   mobile-target cfg in `native/Cargo.toml` + the reqwest client constructors
   (`llm.rs`, `embed.rs`, `local_model.rs`, `updates.rs` call sites); prove a
