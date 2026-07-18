@@ -2101,7 +2101,7 @@ const AnswerMarkdown = memo(function AnswerMarkdown({
           // §22.6: never dump raw spec text — one quiet line says why. (Reached
           // only by a legacy saved chat whose persisted fence no longer
           // validates; new-era specs are engine-validated before they ship.)
-          return <em className="lh-card-note">Chart couldn't be drawn — its saved spec didn't validate.</em>;
+          return <em className="lh-card-note">Chart couldn&apos;t be drawn — its saved spec didn&apos;t validate.</em>;
         }
         // §2: a single verified number renders as an inline stat tile (the
         // engine emits the fence from a count/single-value result; a malformed
