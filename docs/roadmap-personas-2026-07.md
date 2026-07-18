@@ -1184,3 +1184,146 @@ suites green. End with the maintainer checklist: Supabase project sunset
 plan, the feedback email address, Stripe account cleanup — and a
 one-paragraph summary of what a privacy reviewer would now find.
 ```
+
+---
+
+## 10. Privacy-first for data analysts: the include/remove pass (Track P)
+
+Product identity settled: **privacy-first analytics for data analysts** —
+the analyst whose spreadsheets can't leave the machine (finance, health,
+HR, legal, gov). The test for every surface: *does it help this person
+trust and interrogate their own data on-device?* Applied to the tree as it
+stands after T v2 + G are queued:
+
+**Remove / demote** (dilutes the thesis):
+
+| What | Why |
+|---|---|
+| Dormant SharePoint/Microsoft connector, both engines, + explorer teaser | Unfinished cloud plumbing in a no-cloud product; demoted to a teaser in 0.4.5, never shipped in the Rust engine's UI; its interest-vote backend dies with T v2. Keep the SourceConnector seam, archive the implementation |
+| DeepSeek from the built-in roster *(maintainer decision, flagged)* | Instant policy flag for the exact buyer; the shared OpenAI-compatible adapter + BYO endpoint keep the capability for anyone who insists |
+| Cloud-as-peer provider framing | Local/private becomes the hero path; cloud vendors group under an honest "sends excerpts of your included files to the vendor" label — one click away, never hidden, never dark-patterned |
+| Bundled Piper voice *(optional, flagged)* | ~60–90 MB installer diet; the flakiest mirrored asset leaves the default build; read-aloud falls back to OS voices until the user opts in |
+
+**Include** (missing for this persona, beyond queued G1–G6):
+
+| What | Why |
+|---|---|
+| Per-answer privacy provenance | "Answered on this device" / "Answered via <vendor> — N excerpts from M files sent" stamped under every answer, engine-computed at prompt assembly. Turns the architecture into a visible, per-interaction feature |
+| Local-only file marks | Per-file/folder "private — this device only" flag, engine-enforced: cloud providers never see those files (retrieval, attachments, analytics, catalog), with an honest skip note in answers. THE control for mixed-sensitivity vaults |
+| "What the AI sees" inspector | Per-file panel: extraction preview, chunking mode, detected columns, freshness, plain-language visibility state, test-search scoped to the file. Trust (see exactly what could leave) + retrieval debugging (why did my ask miss) in one surface |
+| Big-table streaming registration *(→ G7, amends Genie v3)* | CSV/TSV/Parquet register by path and stream through DataFusion — the 100k in-memory row cap stops applying to those formats; workbooks keep their caps with G1's truncation honesty |
+| Evidence-pack export *(fold into G4)* | One self-contained file per analytics answer: question, narrative, table, chart, SQL, provenance + freshness, timestamp — what an analyst pastes into a review thread |
+
+**Order: T v2 → P → G.** P is one session; it completes the privacy story
+end-to-end (T v2 sets the posture, P makes it visible and controllable),
+and running it before G means G1's audit + eval cover P2's retrieval
+filtering. If T v2 hasn't run yet, P4's deletions can fold into it.
+
+### Track P prompt
+
+```
+Lighthouse is now privacy-first analytics for data analysts. Make that
+identity legible in one pass: the private path becomes the hero, privacy
+becomes visible per answer and controllable per file, and the dormant
+cloud plumbing leaves the tree. One PR, one commit per numbered section,
+no version bump. Ground rules: the Rust engine (native/) is the shipping
+product, the TS engine under src/server is the web-dev twin — shared
+behavior lands in BOTH per the PARITY convention; sections 2 and 3 are
+feature-sized and get OpenSpec changes (proposal, design with Non-goals
+pinned, spec deltas, tasks; `openspec validate --all` green). Gates: npm
+test, the native cargo suite, lint, and a live E2E per section.
+
+1. Private-first provider experience + per-answer provenance.
+   - Reframe onboarding's model step and the AI-models dialog: "Private —
+     runs on this device" (the local model) is the hero option with its
+     install affordance; cloud vendors group under "Cloud models — sends
+     excerpts of your included files to <vendor> to answer", with the
+     vendor named per row. No dark patterns: cloud stays one click away,
+     just honestly labeled.
+   - Per-answer provenance stamp, engine-emitted (never model text): the
+     final ChatChunk gains meta {origin: "device" | provider id, excerpt
+     count, source file count}; the UI renders "Answered on this device"
+     or "Answered via <vendor> — N excerpts from M files sent" under each
+     answer, and the widget pill shows the same line compactly. A small
+     header shield summarizes the session ("All local" / "N cloud
+     calls"). Compute the stamp where the prompt is assembled so it
+     counts what was actually sent, not what was retrieved. Both engines.
+   - Provider roster decision (ASK ME before wiring): recommend dropping
+     DeepSeek from the built-in roster — a policy flag for the target
+     buyer; the shared OpenAI-compatible adapter and BYO endpoint remain,
+     so nothing is lost architecturally. Roster lives in
+     src/contracts/mocks/providers.ts + llm.ts / llm.rs. Present the
+     tradeoff, await my answer, implement accordingly.
+
+2. Local-only file marks (OpenSpec: add-local-only-marks). A second
+   per-node flag alongside inclusion: "Private — this device only".
+   Semantics mirror the existing inclusion model (explicit flag,
+   ancestor-wins: marking a folder covers descendants). Enforce in the
+   ENGINE at the choke points that assemble model context: when the
+   active provider is a cloud vendor, local-only nodes are excluded from
+   retrieval candidates, attachments, analytics registration, and
+   catalog/meta answers — column names are sensitive too; when the
+   provider is the local model or the extractive fallback they
+   participate normally. Answers note exclusions honestly ("2 files
+   skipped — marked private; switch to the private model to include
+   them"). Explorer: a lock toggle on rows and in selection mode,
+   visually distinct from the visibility eye; state persists in
+   state.json (versioned, migration-safe for existing vaults). Parity
+   tests: same fixture vault + cloud provider → identical candidate sets
+   in both engines. E2E: mark a file, ask with a cloud provider
+   configured (mocked endpoint), assert the file's content cannot appear
+   in the outbound prompt and the skip note renders.
+
+3. "What the AI sees" inspector (OpenSpec: add-file-inspector). From an
+   explorer row menu, a read-only panel per file: extraction preview
+   (the first N chars of exactly what the index holds, OCR-derived text
+   flagged as such), chunk count + chunking mode (prose/tabular),
+   detected columns + kinds for tabular files (the catalog computes
+   this), index freshness (mtime/size key, last extracted), inclusion +
+   local-only state in plain language ("Visible to AI · private-model
+   only"), and a test-search box scoped to this file showing top
+   matching chunks with scores. No mutations from this panel beyond the
+   existing toggles. Desktop first; the twin renders the same panel
+   minus desktop-only fields (PARITY).
+
+4. Remove the dormant cloud connector; finish the focus cut.
+   - Archive-then-delete the SharePoint/Microsoft connector from BOTH
+     engines: src/server/sources/sharepoint.ts and
+     src/server/sources/microsoft/, native/crates/lighthouse-core/src/
+     sources/{microsoft.rs,sharepoint.rs}, the explorer's SharePoint
+     coming-soon teaser (FileExplorer.tsx) and src/lib/comingSoon.ts if
+     nothing else uses it, the SHAREPOINT_* env surface (config.ts,
+     docs), and the /api/connect surface if now empty. KEEP the
+     SourceConnector seam (types.ts, registry.ts, local.ts and their
+     Rust twins) — the extension point survives, the unfinished cloud
+     implementation does not. Archive branch:
+     archive/sharepoint-connector.
+   - Decision to present, not implement (ASK ME): demote the bundled
+     Piper TTS voice to an opt-in download like the chat model (~60–90MB
+     installer diet; removes the flakiest mirrored asset from the
+     default build; read-aloud falls back to OS voices until installed).
+     Estimate the work, await my answer.
+
+Proof gates: grep-clean for sharepoint / SHAREPOINT / msal outside the
+archive branch and history docs; provenance-stamp E2E on both an
+on-device answer and a mocked cloud-provider answer; the local-only E2E
+above; an inspector snapshot test against a fixture vault; full suites
+green. End with a one-paragraph "what changed for a privacy reviewer"
+summary and the two decisions awaiting my answer.
+```
+
+### G7 fragment (append to the §8 Track G prompt when running it)
+
+```
+G7 — Big-table streaming registration (amends add-tabular-scale).
+    CSV/TSV/Parquet files register by path so DataFusion streams them —
+    the per-file row cap stops applying to those formats (it exists to
+    bound in-memory tables); workbook (xlsx/xls) registration keeps its
+    materialized caps. Freshness footers and G1's truncation honesty
+    stay accurate on both paths. Fixtures: a >100k-row CSV answering an
+    aggregate correctly with no truncation note; a capped workbook still
+    noting its cap. Also fold into G4: an evidence-pack export — one
+    self-contained file per analytics answer (question, narrative,
+    result table, chart, SQL, file provenance + freshness, timestamp)
+    via the existing artifacts machinery.
+```
