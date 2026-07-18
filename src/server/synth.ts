@@ -291,6 +291,23 @@ const progress = (label: string, step: number, total: number): ChatChunk => ({
   done: false,
 });
 
+/** §22.6: split the first engine-composed ```lighthouse-chart fence out of
+ *  deterministic answer markdown (meta answers embed one), returning
+ *  [markdown without the fence, spec | null] for the final chunk's meta
+ *  channel. Line-exact — only a fence whose opener is the whole line matches.
+ *  KEEP IN SYNC with synth.rs::extract_chart_fence. Exported for tests. */
+export function extractChartFence(md: string): [string, string | null] {
+  const lines = md.split("\n");
+  const start = lines.findIndex((l) => l.trimEnd() === "```lighthouse-chart");
+  if (start === -1) return [md, null];
+  const endRel = lines.slice(start + 1).findIndex((l) => l.trimEnd() === "```");
+  if (endRel === -1) return [md, null]; // unclosed: not ours — leave untouched
+  const end = start + 1 + endRel;
+  const spec = lines.slice(start + 1, end).join("\n");
+  const rest = [...lines.slice(0, start), ...lines.slice(end + 1)];
+  return [rest.join("\n"), spec];
+}
+
 /** §22.4 queue-not-fail bounds. KEEP IN SYNC with synth.rs. */
 const LOCAL_WARM_POLL_MS = 1_500;
 const LOCAL_SPAWN_GRACE_MS = 20_000;
@@ -394,6 +411,7 @@ function finalChunk(
   excerptCount: number,
   origin: string,
   manifest: ManifestEntry[] = [],
+  chart?: string,
 ): ChatChunk {
   return {
     delta: "",
@@ -404,6 +422,8 @@ function finalChunk(
       sourceFileCount: references.length,
       cost: { inputTokens: 0, outputTokens: 0, totalTokens: 0, reported: false },
       ...(manifest.length ? { manifest } : {}),
+      // §22.6: the chart spec rides meta, never the streamed text.
+      ...(chart ? { chart } : {}),
     },
     done: true,
   };
@@ -645,10 +665,13 @@ async function* answerPipelineLive(
     if (intent) {
       const ans = renderMeta(intent, includedFileIds, Date.now(), isCloud);
       if (ans) {
-        yield { delta: ans.markdown, done: false };
+        // §22.6: the meta answer's engine-composed chart fence moves onto the
+        // meta channel like every other chart — text arrives fence-free.
+        const [md, metaChart] = extractChartFence(ans.markdown);
+        yield { delta: md, done: false };
         // Model-free deterministic answer: zero excerpts handed to a model,
         // files behind it are the cited references.
-        yield finalChunk(ans.references, 0, origin);
+        yield finalChunk(ans.references, 0, origin, [], metaChart ?? undefined);
         return;
       }
     }
@@ -1004,10 +1027,8 @@ async function* answerPipelineLive(
     yield { delta, done: false };
   }
   // §2 visual-first: the profiled table's chart, drawn from the engine's own
-  // aggregates (see profileChartSpec above) — the same inline `lighthouse-chart`
-  // fence the analytics branch emits. KEEP IN SYNC with synth.rs.
-  if (profileChartSpec) {
-    yield { delta: `\n\`\`\`lighthouse-chart\n${profileChartSpec}\n\`\`\`\n`, done: false };
-  }
-  yield finalChunk(initial.references, contexts.length, origin, manifest);
+  // aggregates (see profileChartSpec above). §22.6: the spec rides the final
+  // chunk's meta, never the streamed text a model could mangle. KEEP IN SYNC
+  // with synth.rs.
+  yield finalChunk(initial.references, contexts.length, origin, manifest, profileChartSpec ?? undefined);
 }

@@ -177,6 +177,16 @@ pub struct ChunkMeta {
     /// src/contracts/types.ts.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub manifest: Option<Vec<CtxManifestEntry>>,
+    /// §22.6: the engine-validated chart spec (JSON) for this answer, moved OFF
+    /// the streamed markdown — specs no longer travel as ```lighthouse-chart
+    /// fences a model could mangle; the renderer draws from THIS field, and a
+    /// fence in answer text is legacy-only (old saved chats). Engine-built from
+    /// query batches / profiled tables, never model text. Rides `ChunkMeta` so
+    /// the answer cache replays it automatically. `#[serde(default)]` keeps
+    /// pre-§22.6 cached entries (no field) valid. KEEP IN SYNC with the
+    /// ChatChunk["meta"]["chart"] field in src/contracts/types.ts.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub chart: Option<String>,
 }
 
 /// The cost meter for one answer (openspec: add-beam-loop §3.1), stamped on the

@@ -470,6 +470,12 @@ export interface ChatChunk {
       localOnly?: boolean;
       score: number;
     }[];
+    /** §22.6: the engine-validated chart spec (JSON) for this answer, moved
+     *  OFF the streamed markdown — the renderer draws from THIS field; a
+     *  ```lighthouse-chart fence in answer text is legacy-only (old saved
+     *  chats). Engine-built from query batches / profiled tables, never model
+     *  text. KEEP IN SYNC with contracts.rs ChunkMeta::chart. */
+    chart?: string;
   };
   /** True on the last chunk of a response. */
   done: boolean;

@@ -46,6 +46,7 @@ fn entry(text: &str) -> CachedAnswer {
             cached_at: None,
             cost: None,
             manifest: None,
+            chart: None,
         },
     }
 }

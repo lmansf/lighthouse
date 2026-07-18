@@ -470,6 +470,29 @@ fn local_warm_wait(cfg: &ModelCfg) -> Pin<Box<dyn Stream<Item = ChatChunk> + Sen
     })
 }
 
+/// §22.6: split the first engine-composed ```lighthouse-chart fence out of
+/// deterministic answer markdown (meta answers embed one for tile/breakdown
+/// results), returning (markdown without the fence, the spec) for the final
+/// chunk's meta channel. Line-exact: only a fence whose opener is the entire
+/// line matches — model-ish partial fences pass through untouched (and are
+/// then stripped by the renderer's new-era defense, never drawn). KEEP IN
+/// SYNC with synth.ts::extractChartFence.
+fn extract_chart_fence(md: &str) -> (String, Option<String>) {
+    let lines: Vec<&str> = md.split('\n').collect();
+    let Some(start) = lines.iter().position(|l| l.trim_end() == "```lighthouse-chart") else {
+        return (md.to_string(), None);
+    };
+    let Some(end_rel) = lines[start + 1..].iter().position(|l| l.trim_end() == "```") else {
+        return (md.to_string(), None); // unclosed: not ours — leave untouched
+    };
+    let end = start + 1 + end_rel;
+    let spec = lines[start + 1..end].join("\n");
+    let mut rest: Vec<&str> = Vec::with_capacity(lines.len());
+    rest.extend_from_slice(&lines[..start]);
+    rest.extend_from_slice(&lines[end + 1..]);
+    (rest.join("\n"), Some(spec))
+}
+
 fn progress(label: String, step: usize, total: usize) -> ChatChunk {
     ChatChunk {
         delta: String::new(),
@@ -566,6 +589,9 @@ fn final_chunk(
             cached_at: None,
             cost: Some(cost),
             manifest: (!manifest.is_empty()).then_some(manifest),
+            // §22.6: branches that chart set this AFTER building the chunk
+            // (the mutate-after pattern `done.analytics` already uses).
+            chart: None,
         }),
         done: true,
     }
@@ -604,6 +630,8 @@ fn plan_chunk(
             // The planning context the previewed SQL was written from (schema /
             // view cards + join hints) — metadata only, the same gated set.
             manifest: (!manifest.is_empty()).then_some(manifest),
+            // A plan preview draws nothing — charts belong to executed answers.
+            chart: None,
         }),
         done: true,
     }
@@ -1227,13 +1255,11 @@ fn live_pipeline(
             }
             // Engine-authored chart (add-quant-depth §2.3): a recipe that declares
             // one — the forecast band — draws it from the representative result
-            // (plan[0]), the SAME inline `lighthouse-chart` fence the analytics
-            // branch emits. Never model-chosen; every value is the engine's.
-            if let Some(res) = &representative_result {
-                if let Some(chart) = recipe.chart(res) {
-                    yield delta(format!("\n```lighthouse-chart\n{chart}\n```\n"));
-                }
-            }
+            // (plan[0]). §22.6: the spec rides the final chunk's meta, never the
+            // streamed text (fences were the model-mangleable channel). Never
+            // model-chosen; every value is the engine's.
+            let recipe_chart: Option<String> =
+                representative_result.as_ref().and_then(|res| recipe.chart(res));
             // Provenance footer: EVERY executed query in order (the multi-step
             // footer shape), then ONE freshness stamp over the union they read.
             if steps.len() == 1 {
@@ -1311,6 +1337,9 @@ fn live_pipeline(
                 certified: (!certified.is_empty()).then(|| certified.clone()),
                 trust,
             });
+            if let Some(m) = done.meta.as_mut() {
+                m.chart = recipe_chart;
+            }
             yield done;
             return;
         }
@@ -1413,13 +1442,21 @@ fn live_pipeline(
                 .ok()
                 .and_then(|r| r.ok());
                 if let Some(ans) = rendered {
-                    yield delta(ans.markdown);
+                    // §22.6: a meta answer's engine-composed chart fence moves
+                    // onto the meta channel like every other chart — the text
+                    // itself must arrive fence-free (live turns strip fences).
+                    let (md, meta_chart) = extract_chart_fence(&ans.markdown);
+                    yield delta(md);
                     // Model-free deterministic answer: zero excerpts handed to a
                     // model, files behind it are the cited references, and the
                     // cost meter is "not reported" (no model call, so no tokens).
                     // No context was assembled for a model, so the manifest is
                     // empty (§5).
-                    yield final_chunk(ans.references, 0, &origin, cost_meta(&cfg, sink.total()), Vec::new());
+                    let mut done = final_chunk(ans.references, 0, &origin, cost_meta(&cfg, sink.total()), Vec::new());
+                    if let Some(m) = done.meta.as_mut() {
+                        m.chart = meta_chart;
+                    }
+                    yield done;
                     return;
                 }
             }
@@ -1915,10 +1952,8 @@ fn live_pipeline(
                             // a materializing directive can't run here anyway
                             // (steps carry markdown, not batches). last_chart
                             // comes from run_query, which never charts a
-                            // truncated result.
-                            if let Some(chart) = &last_chart {
-                                yield delta(format!("\n```lighthouse-chart\n{chart}\n```\n"));
-                            }
+                            // truncated result. §22.6: it rides the final
+                            // chunk's meta below, never the streamed text.
                             // Cost meter (openspec: add-beam-loop §3.1): the ask's
                             // summed provider-reported usage — Some(total) when a
                             // provider reported, or None when none did (§1.4,
@@ -1946,6 +1981,9 @@ fn live_pipeline(
                                 ),
                                 _ => None,
                             };
+                            if let Some(m) = done.meta.as_mut() {
+                                m.chart = last_chart.clone();
+                            }
                             done.analytics = Some(AnalyticsMeta {
                                 sql: last_sql,
                                 file_ids: meta_ids,
@@ -2163,9 +2201,8 @@ fn live_pipeline(
                         } else {
                             crate::analytics::decide_chart(&res.batches, scrub.full_text())
                         };
-                        if let Some(chart) = &chart {
-                            yield delta(format!("\n```lighthouse-chart\n{chart}\n```\n"));
-                        }
+                        // §22.6: the spec rides the final chunk's meta below —
+                        // never the streamed text a model could mangle.
                         // Citations + structured provenance (chips/save/pins).
                         let (refs, meta_ids) = analytics_refs(&regs);
                         let mut done = final_chunk(
@@ -2195,6 +2232,9 @@ fn live_pipeline(
                             certified: (!certified.is_empty()).then(|| certified.clone()),
                             trust,
                         });
+                        if let Some(m) = done.meta.as_mut() {
+                            m.chart = chart;
+                        }
                         yield done;
                         return;
                     }
@@ -2700,18 +2740,19 @@ fn live_pipeline(
         }
         // §2 visual-first: the profiled table's chart, drawn from the engine's
         // own aggregates (see profile_chart_spec above). Deterministic engine
-        // output after the narration — the same inline `lighthouse-chart` fence
-        // the analytics branch emits.
-        if let Some(chart) = &profile_chart_spec {
-            yield delta(format!("\n```lighthouse-chart\n{chart}\n```\n"));
-        }
-        yield final_chunk(
+        // output — §22.6: it rides the final chunk's meta, never the streamed
+        // text a model could mangle.
+        let mut done = final_chunk(
             initial.references,
             excerpt_count,
             &origin,
             cost_meta(&cfg, sink.total()),
             manifest,
         );
+        if let Some(m) = done.meta.as_mut() {
+            m.chart = profile_chart_spec.clone();
+        }
+        yield done;
     })
 }
 
@@ -3133,5 +3174,24 @@ mod tests {
         assert_eq!(warming_label(0), "Private model warming up…");
         assert_eq!(warming_label(4_500), "Private model warming up… (4s)");
         assert_eq!(warming_label(61_000), "Private model warming up… (61s)");
+    }
+
+    // §22.6: the meta-answer fence extractor (twin: synth.ts::extractChartFence).
+    #[test]
+    fn extract_chart_fence_splits_an_engine_fence_out() {
+        let md = "You have 12 files.\n```lighthouse-chart\n{\"kind\":\"bar\"}\n```\nMore text.";
+        let (rest, spec) = extract_chart_fence(md);
+        assert_eq!(spec.as_deref(), Some("{\"kind\":\"bar\"}"));
+        assert_eq!(rest, "You have 12 files.\nMore text.");
+    }
+
+    #[test]
+    fn extract_chart_fence_leaves_fenceless_and_unclosed_input_alone() {
+        assert_eq!(extract_chart_fence("plain answer"), ("plain answer".to_string(), None));
+        let unclosed = "text\n```lighthouse-chart\n{\"kind\":";
+        assert_eq!(extract_chart_fence(unclosed), (unclosed.to_string(), None));
+        // A stat fence is a different lang — untouched.
+        let stat = "```lighthouse-stat\n{}\n```";
+        assert_eq!(extract_chart_fence(stat), (stat.to_string(), None));
     }
 }

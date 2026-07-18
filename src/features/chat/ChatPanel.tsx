@@ -95,7 +95,7 @@ import type { AnalyticsMeta, ChangedPin, ChatTurn, Pin, RagReference, RecipeCard
 import { chatService, MODEL_PROVIDERS, ragService, runRecipeQuestion } from "@/contracts";
 import { useRagStore } from "@/stores/useRagStore";
 import { useAuthStore } from "@/stores/useAuthStore";
-import { parseChartSpec, stripChartRequestFences, tableToCsv } from "@/lib/chartSpec";
+import { parseChartSpec, stripChartRequestFences, stripChartFences, tableToCsv } from "@/lib/chartSpec";
 import { parseStatSpec } from "@/lib/statSpec";
 import { stripAppearanceRequestFences } from "@/lib/appearanceSpec";
 import {
@@ -1316,11 +1316,30 @@ function isFooterish(node: MdNode): boolean {
  * Prose-only answers (no disclosure, no chart) are left completely alone, so
  * an ordinary markdown table in a document summary renders as before.
  */
-function remarkAnswerCard() {
+function remarkAnswerCard(options?: { chart?: string }) {
   return (tree: unknown) => {
     const root = tree as MdNode;
     const children = root.children;
     if (!children) return;
+
+    // §22.6: the engine's validated chart spec now arrives on the final
+    // chunk's meta, not as a fence in the text. Re-materialize it HERE as a
+    // synthetic code node so the whole downstream path — card anchoring, the
+    // code-override renderer, styling — behaves byte-identically to the fence
+    // era. Placed before the SQL disclosure (the fence's historic position);
+    // appended when there is no disclosure.
+    if (options?.chart) {
+      const chartNode: MdNode = {
+        type: "code",
+        lang: "lighthouse-chart",
+        value: options.chart,
+      } as MdNode;
+      // This runs BEFORE step 1 folds the disclosure, so anchor on the raw
+      // "*Query used:*" label paragraph, not the not-yet-created details node.
+      const beforeLabel = children.findIndex((n) => isQueryLabel(n));
+      if (beforeLabel >= 0) children.splice(beforeLabel, 0, chartNode);
+      else children.push(chartNode);
+    }
 
     // 1) Fold the SQL fence(s) behind their engine-written label. The plural
     //    numbered form interleaves list artifacts between fences; they ride
@@ -1708,6 +1727,7 @@ const REFINE_CHIPS: { label: string; ask: string }[] = [
 function RefineChips({
   meta,
   content,
+  metaChart,
   isLast,
   disabled,
   onAsk,
@@ -1726,6 +1746,9 @@ function RefineChips({
   meta: AnalyticsMeta;
   /** The answer markdown — the "Chart it" heuristic reads its GFM table. */
   content: string;
+  /** §22.6: the engine chart from the final chunk's meta — when present the
+   *  answer is already charted, so "Chart it" must not double-offer. */
+  metaChart?: string;
   isLast: boolean;
   disabled: boolean;
   onAsk: (q: string) => void;
@@ -1753,13 +1776,14 @@ function RefineChips({
   const styles = useStyles();
   // "Chart it": offered only when (a) the answer carries a parseable GFM
   // table, (b) the client heuristic builds a spec the REAL parser accepts,
-  // and (c) the engine didn't already chart this answer. Pure computation
-  // over the displayed markdown — no rag/chat service is ever consulted.
+  // and (c) the engine didn't already chart this answer — meta chart (§22.6)
+  // or legacy fence. Pure computation over the displayed markdown — no
+  // rag/chat service is ever consulted.
   const tableChart = useMemo(() => {
-    if (hasEngineChartFence(content)) return null;
+    if (metaChart || hasEngineChartFence(content)) return null;
     const table = parseMarkdownTable(content);
     return table ? chartSpecFromTable(table) : null;
-  }, [content]);
+  }, [content, metaChart]);
   // Quiet secondary actions (Beam): subtle + hairline, never a filled chip —
   // the answer stays the loudest thing on the card.
   return (
@@ -1942,19 +1966,22 @@ function TrustBadges({ meta }: { meta: AnalyticsMeta }) {
  */
 function ChartItRow({
   content,
+  metaChart,
   chartShown,
   onToggleChart,
 }: {
   content: string;
+  /** §22.6: engine chart on the final chunk's meta — already charted. */
+  metaChart?: string;
   chartShown: boolean;
   onToggleChart: () => void;
 }) {
   const styles = useStyles();
   const tableChart = useMemo(() => {
-    if (hasEngineChartFence(content)) return null;
+    if (metaChart || hasEngineChartFence(content)) return null;
     const table = parseMarkdownTable(content);
     return table ? chartSpecFromTable(table) : null;
-  }, [content]);
+  }, [content, metaChart]);
   if (!tableChart) return null;
   return (
     <>
@@ -2001,19 +2028,33 @@ const AnswerMarkdown = memo(function AnswerMarkdown({
   content,
   turnId,
   onCite,
+  metaChart,
+  legacyFences = true,
 }: {
   content: string;
   turnId: string;
   onCite: (turnId: string, n: number) => void;
+  /** §22.6: the engine-validated chart spec from the final chunk's meta —
+   *  re-materialized as a synthetic AST node inside remarkAnswerCard. */
+  metaChart?: string;
+  /** §22.6: false for NEW-ERA turns (the final chunk carried `meta`), where a
+   *  chart fence in TEXT can only be model-injected and is stripped, never
+   *  rendered. True (default) only for legacy saved chats with no meta, which
+   *  still render their persisted engine fence. */
+  legacyFences?: boolean;
 }) {
   const styles = useStyles();
   // Belt-and-braces (chart-directive): the engine already withholds
   // lighthouse-chart-request fences from streamed deltas; displayed prose
-  // strips any residue too. ```lighthouse-chart fences are NOT stripped here —
-  // they render as charts below.
+  // strips any residue too. On legacy turns, plain ```lighthouse-chart fences
+  // are NOT stripped — they render as charts below; on new-era turns EVERY
+  // chart fence is stripped (the real spec rides `metaChart`).
   const cleaned = useMemo(
-    () => stripAppearanceRequestFences(stripChartRequestFences(content)),
-    [content],
+    () =>
+      stripAppearanceRequestFences(
+        legacyFences ? stripChartRequestFences(content) : stripChartFences(content),
+      ),
+    [content, legacyFences],
   );
   // G4: a truncated analytics result carries the G1 "first N of M rows" footer.
   // The footer ALWAYS stays in the body (a deterministic, never-model-generated
@@ -2074,6 +2115,10 @@ const AnswerMarkdown = memo(function AnswerMarkdown({
         if (className?.split(" ").includes(CHART_LANG)) {
           const spec = parseChartSpec(String(children ?? ""));
           if (spec) return <AnalyticsChart spec={spec} />;
+          // §22.6: never dump raw spec text — one quiet line says why. (Reached
+          // only by a legacy saved chat whose persisted fence no longer
+          // validates; new-era specs are engine-validated before they ship.)
+          return <em className="lh-card-note">Chart couldn't be drawn — its saved spec didn't validate.</em>;
         }
         // §2: a single verified number renders as an inline stat tile (the
         // engine emits the fence from a count/single-value result; a malformed
@@ -2118,7 +2163,7 @@ const AnswerMarkdown = memo(function AnswerMarkdown({
     <MarkdownView
       content={cleaned}
       components={components}
-      remarkPlugins={[remarkCitations, remarkAnswerCard]}
+      remarkPlugins={[remarkCitations, [remarkAnswerCard, { chart: metaChart }]]}
     />
   );
 });
@@ -2135,7 +2180,9 @@ const StreamBlock = memo(function StreamBlock({
   turnId: string;
   onCite: (turnId: string, n: number) => void;
 }) {
-  return <AnswerMarkdown content={content} turnId={turnId} onCite={onCite} />;
+  // A live turn is always new-era (§22.6): any chart fence in its text is
+  // model-injected and must not render; the real spec arrives on settle.
+  return <AnswerMarkdown content={content} turnId={turnId} onCite={onCite} legacyFences={false} />;
 });
 
 /**
@@ -2166,7 +2213,9 @@ const StreamingAnswer = memo(function StreamingAnswer({
   const blocks = useMemo(() => {
     // Same belt-and-braces strip as AnswerMarkdown (a still-open request fence
     // never shows), then split the safe prefix into independently-parsed blocks.
-    const clean = stripAppearanceRequestFences(stripChartRequestFences(content));
+    // §22.6: live turns are new-era — strip EVERY chart fence (a fence here
+    // can only be model-injected; the engine's spec rides the final chunk).
+    const clean = stripAppearanceRequestFences(stripChartFences(content));
     return splitMarkdownBlocks(safeMarkdownPrefix(clean));
   }, [content]);
   return (
@@ -2603,6 +2652,12 @@ export function ChatPanel() {
   const idSeq = useRef(
     messages.reduce((max, m) => Math.max(max, Number(m.id.slice(1)) || 0), 0),
   );
+  // §22.6: assistant turns created in THIS session. Live turns never render
+  // chart fences from answer text (the engine's spec rides `meta.chart`;
+  // a text fence can only be model-injected); hydrated saved chats — absent
+  // from this set — keep the legacy fence-rendering path for their persisted
+  // engine charts.
+  const liveTurnIds = useRef<Set<string>>(new Set());
   // Re-seed the id counter when the active conversation changes (open / undo /
   // delete), so new turns never collide with ids already in the loaded
   // transcript. Read from the store so we see the just-switched messages.
@@ -3018,6 +3073,10 @@ export function ChatPanel() {
     const attachmentIds = (opts?.attachmentsOverride ?? attachments).map((a) => a.id);
     const userMsg: TranscriptMessage = { id: `u${++idSeq.current}`, role: "user", content: q };
     const asstId = `a${++idSeq.current}`;
+    // §22.6: turns born in THIS session never render chart fences from text —
+    // the engine's spec arrives on meta, so any fence in a live answer is
+    // model-injected. Hydrated (saved/legacy) turns keep fence rendering.
+    liveTurnIds.current.add(asstId);
     const asstMsg: TranscriptMessage = {
       id: asstId,
       role: "assistant",
@@ -5146,6 +5205,8 @@ export function ChatPanel() {
                               content={m.content}
                               turnId={m.id}
                               onCite={handleCitationClick}
+                              metaChart={m.meta?.chart}
+                              legacyFences={!liveTurnIds.current.has(m.id)}
                             />
                           )}
                           {streaming && m.id === lastId && <span className={styles.beaconInline} />}
@@ -5252,6 +5313,7 @@ export function ChatPanel() {
                           <RefineChips
                             meta={m.analytics}
                             content={m.content}
+                            metaChart={m.meta?.chart}
                             isLast={m.id === lastId}
                             disabled={streaming}
                             onAsk={(q) => void sendQuestion(q)}
@@ -5376,6 +5438,7 @@ export function ChatPanel() {
                       {!m.analytics && !m.error && !(streaming && m.id === lastId) && (
                         <ChartItRow
                           content={m.content}
+                          metaChart={m.meta?.chart}
                           chartShown={!!inlineCharts[m.id]}
                           onToggleChart={() =>
                             setInlineCharts((prev) => ({ ...prev, [m.id]: !prev[m.id] }))
