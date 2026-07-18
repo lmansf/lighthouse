@@ -2112,6 +2112,104 @@ harness. Its capability set, mapped to the analyst domain:
 
 Queue: … → 0.12.0 → H1–H4 → **H5 → H6 → H7** (H7 may run any time after
 H1 if automation demand shows up first).
+
+---
+
+## 16. 0.12.1 — field-report patch (owner notes on 0.12.0)
+
+Four owner notes from using 0.12.0, wrapped as one patch session. Runs
+before H1.
+
+### 0.12.1 prompt
+
+```
+Lighthouse 0.12.1 — field-report patch. Four owner notes from 0.12.0,
+one commit per numbered section, five-stamp version bump last (patch on
+the 0.12.x line per CLAUDE.md — no approval needed). Ground rules: Rust
+engine ships, TS twin per docs/ts-twin.md and the PARITY convention; UI
+through the Beam tokens; no new egress except the documented auth
+endpoints in section 3. Gates: npm test, cargo suite, lint, release
+smoke, eval + chart floors green, live E2E per section.
+
+1. Charts by default ("graphs are still hard to summon").
+   - Flip the policy: whenever a Beam result is chartable, the engine
+     EMITS the chart by default — the model's chart directive refines
+     kind/columns/title but may no longer suppress a chartable result
+     ("none" is honored only for genuinely non-chartable shapes: single
+     value, single row, no numeric series). Update the chart card
+     guidance to match.
+   - Widen chartability honestly: results beyond the row bound chart as
+     top-N + an engine-computed "other" bucket (labeled as such in the
+     subtitle — never silently truncated); date-ish labels prefer
+     line/area as today.
+   - "Chart it" chip on ANY tabular answer (Beam or not): renders
+     client-side from the verified result table already in the answer —
+     zero model calls, the numbers are already on screen.
+   - Eval: add a chart-coverage floor — the chartable fixture set must
+     render a chart in ≥ the recorded baseline; existing chart fixtures
+     stay byte-identical where their inputs are unchanged.
+
+2. Make "Private — this device only" legible ("does that do anything?").
+   - First verify the enforcement E2E still holds (marked file content
+     cannot reach a mocked cloud endpoint). Then make it visible:
+   - The lock toggle gets two visual states: ENFORCING (a cloud provider
+     is active — the file is being hidden right now) and DORMANT (the
+     private model is active — nothing to hide from; tooltip says so:
+     "Hidden from cloud models. The private model can always read it.")
+   - The session shield/header gains a count while a cloud provider is
+     active: "N files hidden from cloud models" — clicking filters the
+     explorer to them.
+   - The skip note in answers ("2 files skipped — marked private…")
+     becomes visually distinct rather than plain text; inspector and
+     tour copy updated to the same plain language.
+
+3. Provider sign-in as an alternative to API keys.
+   - Research first, from vendor docs, the CURRENT third-party auth
+     programs: Anthropic ("Sign in with Claude"), OpenAI ("Sign in with
+     ChatGPT"), Google (OAuth for Gemini). For each: is a
+     device-code/PKCE public-client flow available without vendor
+     approval? Record findings in the PR.
+   - Where supported today: a "Sign in" button beside "Use API key" on
+     the provider row — PKCE/device-code flow in the OS browser, tokens
+     in the existing sealed secrets store (keychain backend when
+     enabled), refresh + sign-out handled, no embedded client secrets.
+     API key remains the default path and is unchanged.
+   - Where registration/approval is required: build the flow fail-closed
+     behind the missing client id and END with a maintainer checklist of
+     exactly what to register (the code-signing pattern). Do not fake
+     availability.
+   - Auth endpoints join the egress registry and docs/data-flows.md;
+     provenance stamps are unaffected (same vendor, same egress class).
+
+4. Billing-clarity warning (the Pi-style credits note).
+   - Inline, per-auth-method notes in the model picker and AI-models
+     dialog — plain copy, not a modal, always visible at selection/entry:
+     API key → "API keys bill per use to your <vendor> developer
+     account. Chat subscriptions (ChatGPT Plus, Claude Pro, …) do NOT
+     cover API-key usage." Sign-in (where offered) → "Usage draws on
+     your <vendor> account/subscription per their terms."
+   - Static copy, no telemetry, no nagging; one string per vendor so
+     the wording can name the right products.
+
+5. Housekeeping: if the three moderate Dependabot alerts on main are
+   still open, triage them through the supply-chain workflow's
+   allowlist flow — fix or justify each.
+
+6. Release: bump 0.12.0 → 0.12.1 across the five stamps (package.json,
+   package-lock.json ×2, native/Cargo.toml, tauri.conf.json,
+   native/Cargo.lock ×3 crates); release notes lead with charts-by-
+   default and the privacy-lock clarity; squash-merge, dispatch
+   desktop-release.yml (empty release_tag derives v0.12.1), watch it to
+   the draft, STOP and report the draft link + publish inputs.
+
+Proof gates: chart-coverage floor green with the new default; the
+enforcement E2E and the two lock states verified against the built app;
+sign-in E2E for at least one vendor (mocked token endpoint) or the
+fail-closed scaffold + checklist if none is implementable without
+registration; billing note visible in both surfaces per vendor; suites +
+smoke green; five stamps agree. End with the vendor-auth findings table
+and the maintainer checklist.
+```
 ```
 
 ---
