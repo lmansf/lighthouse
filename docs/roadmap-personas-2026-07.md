@@ -1200,7 +1200,7 @@ stands after T v2 + G are queued:
 | What | Why |
 |---|---|
 | Dormant SharePoint/Microsoft connector | **Resolved 2026-07-15: keep as plumbing.** The connector code in both engines, the SourceConnector seam, and the SHAREPOINT_* env surface stay dormant in-tree for a future SharePoint plugin; nothing is archived, only marked dormant-by-decision |
-| DeepSeek from the built-in roster *(maintainer decision, flagged)* | Instant policy flag for the exact buyer; the shared OpenAI-compatible adapter + BYO endpoint keep the capability for anyone who insists |
+| DeepSeek from the built-in roster | **Resolved 2026-07-15: keep it.** DeepSeek stays a selectable provider; the private-first framing and the per-vendor "sends excerpts to <vendor>" labeling carry the trust story |
 | Cloud-as-peer provider framing | Local/private becomes the hero path; cloud vendors group under an honest "sends excerpts of your included files to the vendor" label — one click away, never hidden, never dark-patterned |
 | Text-to-speech, entirely | **Resolved 2026-07-15: remove it all.** Piper binary, voice, /api/tts, supervision, the piper-specific Linux CI workarounds (#118–#121), AND the Web Speech read-aloud path — the feature leaves the product; ~60–90 MB installer diet and the flakiest mirrored asset leaves the supply chain |
 
@@ -1219,7 +1219,7 @@ end-to-end (T v2 sets the posture, P makes it visible and controllable),
 and running it before G means G1's audit + eval cover P2's retrieval
 filtering. If T v2 hasn't run yet, P4's deletions can fold into it.
 
-### Track P prompt (v3 — 2026-07-15: SharePoint plumbing kept, text-to-speech removed entirely)
+### Track P prompt (v4 — 2026-07-15: all decisions resolved — SharePoint plumbing kept, TTS removed, DeepSeek kept)
 
 ```
 Lighthouse is now privacy-first analytics for data analysts. Make that
@@ -1248,12 +1248,11 @@ test, the native cargo suite, lint, and a live E2E per section.
      header shield summarizes the session ("All local" / "N cloud
      calls"). Compute the stamp where the prompt is assembled so it
      counts what was actually sent, not what was retrieved. Both engines.
-   - Provider roster decision (ASK ME before wiring): recommend dropping
-     DeepSeek from the built-in roster — a policy flag for the target
-     buyer; the shared OpenAI-compatible adapter and BYO endpoint remain,
-     so nothing is lost architecturally. Roster lives in
-     src/contracts/mocks/providers.ts + llm.ts / llm.rs. Present the
-     tradeoff, await my answer, implement accordingly.
+   - Provider roster: unchanged — all seven providers stay, DeepSeek
+     included (decided 2026-07-15). The honest per-vendor labeling above
+     is the trust story; make sure every cloud row (DeepSeek included)
+     names its vendor in the "sends excerpts to <vendor>" line. No
+     roster edits in src/contracts/mocks/providers.ts / llm.ts / llm.rs.
 
 2. Local-only file marks (OpenSpec: add-local-only-marks). A second
    per-node flag alongside inclusion: "Private — this device only".
@@ -1332,7 +1331,7 @@ a mocked cloud-provider answer; the local-only E2E from section 2; an
 inspector snapshot test against a fixture vault; the SharePoint files
 are byte-identical to main (git diff proves the keep); full suites
 green. End with a one-paragraph "what changed for a privacy reviewer"
-summary and the DeepSeek roster decision awaiting my answer.
+summary. No decisions remain open — run start to finish.
 ```
 
 ### G7 fragment (append to the §8 Track G prompt when running it)
