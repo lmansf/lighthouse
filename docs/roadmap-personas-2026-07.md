@@ -2191,9 +2191,18 @@ smoke, eval + chart floors green, live E2E per section.
    - Static copy, no telemetry, no nagging; one string per vendor so
      the wording can name the right products.
 
-5. Housekeeping: if the three moderate Dependabot alerts on main are
-   still open, triage them through the supply-chain workflow's
-   allowlist flow — fix or justify each.
+5. Housekeeping.
+   - If the three moderate Dependabot alerts on main are still open,
+     triage them through the supply-chain workflow's allowlist flow —
+     fix or justify each.
+   - Paid-notify verification (owner note, 2026-07-15): the "Get
+     notified when purchasing opens" button was removed with licensing
+     in the cut-the-cord pass — CONFIRM in the built app that no
+     paid/subscribe/notify-me affordance survives anywhere (grep for
+     wording variants + a UI sweep of onboarding, settings, empty
+     states); delete any straggler found. Add to the maintainer
+     checklist: the lhvault.app site copy is outside this repo and
+     still needs its pricing/"get notified" mentions scrubbed.
 
 6. Release: bump 0.12.0 → 0.12.1 across the five stamps (package.json,
    package-lock.json ×2, native/Cargo.toml, tauri.conf.json,
