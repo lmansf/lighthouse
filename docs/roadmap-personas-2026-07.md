@@ -1871,8 +1871,191 @@ floors green; and the constitution above is the review standard — a
 feature that bends an opinion doesn't ship.
 
 Full queue: T-final → P-final → G-final v2 → time-savers → 0.12.0 →
-H1–H4. Session prompts for H1–H4 to be written when each is reached (the
-thesis here is their spec seed).
+H1–H4. Housekeeping (2026-07-15): GitHub reports **3 moderate Dependabot
+alerts** on main — append to whichever session runs next: *"Also: triage
+the three moderate Dependabot alerts through the supply-chain workflow's
+allowlist flow — fix or justify each."*
+
+### H1 prompt — Investigations
+
+```
+Lighthouse suite, surface 1 of 4: Investigations (OpenSpec:
+add-investigations). Analysis lives in named investigations, not loose
+chats. Prereqs: 0.12.0 is shipped. One PR, one commit per numbered
+section, no version bump. Constitution clauses in force (see
+docs/roadmap-personas-2026-07.md §14): sources immutable, private by
+architecture, deterministic before model. Ground rules: Rust engine
+ships, TS twin per docs/ts-twin.md with PARITY convention; UI through
+the 0.12.0 Beam token system.
+
+1. The object. Investigation = {id, name, created, optional file scope
+   (vault node ids), provider policy: "default" | "local-only",
+   conversation refs, pin refs, note refs}. Stored vault-scoped
+   (.rag-vault/investigations.json, versioned, atomic writes) — an
+   investigation is about THIS vault's files. Chat-history posture wins:
+   with "Save chats" off, an investigation persists structure (name,
+   scope, pins, notes) but never transcripts.
+2. Scoping. An investigation with a file scope scopes every ask in it —
+   reuse the existing attachment-scoping machinery (explicit file set
+   bypassing the global included set); empty scope = whole vault. The
+   scope shows as a pill on the ask box; local-only marks still apply
+   within scope per provider.
+3. Provider policy. A "local-only" investigation forces the private
+   model / extractive path for every ask inside it, ENGINE-enforced at
+   the same chokepoints as the managed policy layer (not just UI), even
+   when the profile's active provider is cloud. Provenance stamps stay
+   accurate for free.
+4. Belonging. Pins gain an optional investigation id (existing global
+   pins remain uncategorized); exported notes land under the
+   investigation's folder in Lighthouse Notes/; cross-conversation
+   recall prefers the current investigation's notes before global ones.
+5. UI. Left nav gains Investigations (create, rename, archive — archive
+   hides, never deletes); switching investigations switches chat context
+   + scope pill + provider enforcement; "New chat" stays within the
+   current investigation; a compact header shows name · scope size ·
+   policy badge.
+
+Gates: unit tests for the store (versioning, history-off persistence
+rules); parity tests for scoping (same fixture vault → identical
+candidate sets both engines); E2E: create an investigation scoped to two
+files → ask → answer cites only those; mark it local-only with a cloud
+provider configured (mocked) → the ask runs private and the stamp says
+on-device; archive → nothing deleted; suites + smoke + eval/chart floors
+green. `openspec validate --all` green.
+```
+
+### H2 prompt — Boards
+
+```
+Lighthouse suite, surface 2 of 4: Boards (OpenSpec: add-boards). Pinned
+questions arranged as a living, local dashboard. Prereqs: H1 merged. One
+PR, one commit per numbered section, no version bump. Constitution:
+deterministic before model — board cards show ENGINE results only; the
+model is never consulted to refresh a card (drill-in gives the full
+narrated answer). Rust-first like Beam; twin per PARITY.
+
+1. The object. Board = {id, name, investigation id (or global), ordered
+   card refs}; card ref = pin id + size (S/M/L). Stored beside pins in
+   the state dir, versioned. One default board per investigation plus a
+   global "My board".
+2. Cards. A card renders its pin's latest deterministic result: chartable
+   → the existing chart card; single value → a stat tile (large tabular
+   numeral + delta vs previous digest); table → compact top rows.
+   Freshness line and a diff badge when the last watcher recheck changed
+   the digest; click → drill into the full answer (through the answer
+   cache / normal ask path).
+3. Refresh. NO new scheduler: boards subscribe to the existing
+   watcher-driven pin recheck; a manual "Refresh all" re-runs the pins'
+   stored SQL through the guard. Respect power-conserve states.
+4. Layout. A responsive grid with drag-to-reorder and three card sizes —
+   deliberately NOT a free-form canvas (pin restraint in the design's
+   Non-goals). 0.12.0 card treatment throughout; both themes.
+5. Sharing. "Export board" writes a single evidence-pack-style file
+   (title, cards as tables/charts, freshness stamps, SQL appendix) via
+   the existing artifacts machinery.
+
+Gates: E2E — pin two questions in an investigation, arrange the board,
+modify the underlying fixture CSV, watcher recheck updates the card and
+shows the diff badge with ZERO model calls (mocked provider proves it);
+drill-in produces the narrated answer; export produces the file; twin
+renders boards with on-demand recheck (PARITY: no watcher); suites +
+smoke + floors green; `openspec validate --all` green.
+```
+
+### H3 prompt — Shaped views
+
+```
+Lighthouse suite, surface 3 of 4: Shaped views (OpenSpec:
+add-shaped-views). Non-destructive data prep the opinionated way:
+transforms are stored, guarded SELECT definitions — never edits to
+files. Prereqs: H2 merged. One PR, one commit per numbered section, no
+version bump. Constitution: sources immutable; everything reproducible;
+show your work. Beam/analytics is Rust-only; twin gets CRUD visibility
+with PARITY stubs on execution.
+
+1. The object. View = {name (sanitized, unique), definition: ONE guarded
+   SELECT over registered sources and/or other views, created, plain-
+   language summary}. Stored in .rag-vault/views.json (versioned, atomic).
+   Views are VIRTUAL — registered into the SessionContext at ask time,
+   always computed from current data; no materialized copies (pin
+   materialize-to-cache as a design follow-on, not v1). View-over-view
+   allowed as a DAG only: cycle detection + a small depth cap, rejected
+   at save time.
+2. Creation flows. (a) "Save as view" chip on any Beam answer — the
+   answer's SQL becomes the definition. (b) Shaping ask: "clean this
+   table" / "join X to Y" → the model proposes ONE transform SELECT
+   (casts, trims, splits, dedupe, filters, joins); the user sees the SQL
+   plus an engine-rendered before/after sample (first N rows of source
+   and result) before saving. Nothing is saved without the click; files
+   are never modified.
+3. Guard + registry. View definitions pass the SAME single-SELECT guard
+   as ad-hoc analytics; the registry resolves view names during
+   registration, counts a view against the table slots, and surfaces
+   freshness from the underlying files' digests.
+4. Visibility. Views appear in the catalog (columns + kinds), in a
+   Library section of the nav, and in suggested asks; the inspector
+   works on a view — showing its definition, its plain-language summary
+   (engine-derived from the SQL where feasible; if model-stated, stored
+   and labeled as such), and the sources it reads. Local-only marks
+   propagate: a view over a marked file is itself local-only.
+5. Lifecycle. Rename updates dependents or is refused with the list;
+   delete is refused while dependents exist (or cascades with explicit
+   confirmation); deleting a view never touches sources.
+
+Gates: unit tests — guard on definitions, cycle/depth rejection,
+local-only propagation, dependent-delete rules; E2E: messy fixture CSV
+(bad types, duplicates) → shaping ask → before/after sample → save →
+Beam question against the view returns verified numbers → delete the
+view → source file byte-identical; eval floor gains one view-backed
+case; suites + smoke green; `openspec validate --all` green.
+```
+
+### H4 prompt — Recipes + assumption ledger
+
+```
+Lighthouse suite, surface 4 of 4: Recipes and the assumption ledger
+(OpenSpec: add-recipes). Named, parameterized, eval-floored playbooks —
+and every Beam answer starts showing its assumptions. Prereqs: H3
+merged. One PR, one commit per numbered section, no version bump.
+Constitution: deterministic before model (recipes PLAN without a model —
+parameters fill vetted templates; the model only narrates, and narration
+is skippable); every number engine-computed; show your work.
+
+1. The recipe engine. Recipe = {id, name, applicability predicate over
+   the catalog (needs a date column / numeric / categorical), parameters
+   (table/view, date column, metric, period, group), a bounded plan of
+   N guarded SELECT templates, a narration prompt}. Plans execute
+   through the existing multi-step machinery; because planning is
+   deterministic, recipes run on EVERY provider including the local
+   model and the extractive path (results tables render even with no
+   narration). Provenance footer lists every executed query.
+2. Built-ins v1 (each with golden fixtures): variance-vs-last-period,
+   cohort breakdown, data-quality audit (nulls, duplicates, type
+   anomalies, outlier counts per column), anomaly scan (windowed
+   z-score/IQR over a dated metric), top-movers. No user-authored
+   recipes in v1 (pin in Non-goals; the format is the seam for later).
+3. Surfaces. A Library gallery with applicability-filtered recipes
+   ("runnable on sales_all"); one-tap chips in the chat empty state when
+   a tabular context matches; recipe results pin and board like any
+   answer; evidence packs include the full plan.
+4. The assumption ledger (all Beam answers, not just recipes). An
+   "Assumptions" disclosure on every analytics answer, ENGINE-derived
+   only — never model text: date column used, period boundaries, rows
+   considered (with any cap honestly stated), null handling implied by
+   the aggregates, filters applied, group-by columns, and for recipes
+   the filled parameters. Derive ad-hoc entries by inspecting the
+   executed SQL; recipes populate richly. Rides the same answer meta as
+   the provenance stamp.
+5. Eval. Per-recipe golden fixtures wired into the existing harness;
+   assumption-ledger snapshot tests; the chart card learns nothing new
+   (recipes emit ordinary result tables — the chart directive applies).
+
+Gates: every recipe's fixtures green on the eval floor; E2E: run the
+variance recipe on a dated fixture via the LOCAL path (no model
+narration) → verified tables + assumptions render; run via a mocked
+cloud provider → narrated, stamp accurate; pin the result to a board;
+suites + smoke + all floors green; `openspec validate --all` green.
+```
 ```
 
 ---
