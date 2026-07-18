@@ -14,8 +14,9 @@
 mod common;
 
 use lighthouse_core::settings::{
-    read_desktop_settings, set_explorer_width, set_openai_auth_method, write_desktop_settings,
-    DesktopSettings, EXPLORER_WIDTH_MAX, EXPLORER_WIDTH_MIN,
+    read_desktop_settings, set_explorer_width, set_flyout_width, set_open_flyout,
+    set_openai_auth_method, write_desktop_settings, DesktopSettings, EXPLORER_WIDTH_MAX,
+    EXPLORER_WIDTH_MIN, FLYOUT_WIDTH_MAX, FLYOUT_WIDTH_MIN,
 };
 
 #[test]
@@ -282,4 +283,92 @@ fn explorer_width_persists_per_mode_and_clamps() {
     std::env::remove_var("LIGHTHOUSE_SETTINGS_FILE");
     assert_eq!(s.explorer_width("window"), Some(EXPLORER_WIDTH_MAX));
     assert_eq!(s.explorer_width("widget"), Some(EXPLORER_WIDTH_MIN));
+}
+
+// Sectioned-sidebar flyout (openspec: field-patch-0.12.5 §1): the flyout width
+// is a per-window-mode value hand-persisted through the `extra` map (the
+// explorerWidth/widgetPos precedent) with its own narrow read-modify-write
+// setter, and the open-section id is a single string with its own setter that
+// CLEARS on blank. Both must round-trip, clamp/validate, ignore junk, and
+// preserve every shell-owned key — exactly like the explorer-width setter.
+#[test]
+fn flyout_width_and_open_section_persist_and_clamp() {
+    let vault = tempfile::tempdir().expect("tempdir");
+    let _guard = common::lock_env(vault.path());
+    let file = vault.path().join("settings-flyout-test.json");
+    std::fs::write(&file, r#"{"vaultDir":"/somewhere/vault","widgetPos":[7,9]}"#)
+        .expect("seed settings file");
+    std::env::set_var("LIGHTHOUSE_SETTINGS_FILE", &file);
+
+    // Unset ⇒ None for both modes and no open section.
+    assert_eq!(read_desktop_settings().flyout_width("window"), None);
+    assert_eq!(read_desktop_settings().flyout_width("widget"), None);
+    assert_eq!(read_desktop_settings().open_flyout(), None);
+
+    // Per-mode round-trip, merge (not clobber), clamp at write.
+    set_flyout_width("window", 360.0);
+    assert_eq!(read_desktop_settings().flyout_width("window"), Some(360.0));
+    assert_eq!(read_desktop_settings().flyout_width("widget"), None);
+    set_flyout_width("widget", 300.0);
+    let s = read_desktop_settings();
+    assert_eq!(s.flyout_width("widget"), Some(300.0));
+    assert_eq!(s.flyout_width("window"), Some(360.0));
+    set_flyout_width("window", 100_000.0);
+    assert_eq!(
+        read_desktop_settings().flyout_width("window"),
+        Some(FLYOUT_WIDTH_MAX)
+    );
+    set_flyout_width("window", 1.0);
+    assert_eq!(
+        read_desktop_settings().flyout_width("window"),
+        Some(FLYOUT_WIDTH_MIN)
+    );
+
+    // Unknown mode / non-finite width leave the file untouched.
+    set_flyout_width("sidebar", 300.0);
+    set_flyout_width("window", f64::NAN);
+    let s = read_desktop_settings();
+    assert_eq!(s.flyout_width("window"), Some(FLYOUT_WIDTH_MIN)); // unchanged
+    assert_eq!(s.flyout_width("widget"), Some(300.0)); // unchanged
+    assert_eq!(
+        s.extra.get("flyoutWidth").and_then(|v| v.get("sidebar")),
+        None
+    );
+
+    // The open-section id round-trips, and a blank id CLEARS it.
+    set_open_flyout("insights");
+    assert_eq!(
+        read_desktop_settings().open_flyout().as_deref(),
+        Some("insights")
+    );
+    set_open_flyout("library");
+    assert_eq!(
+        read_desktop_settings().open_flyout().as_deref(),
+        Some("library")
+    );
+    set_open_flyout("   "); // blank clears
+    assert_eq!(read_desktop_settings().open_flyout(), None);
+    assert_eq!(read_desktop_settings().extra.get("openFlyout"), None);
+
+    // Clamp at READ too: a hand-written out-of-range file is bounded on the way out.
+    std::fs::write(
+        &file,
+        r#"{"flyoutWidth":{"window":9999,"widget":1},"openFlyout":"recipes"}"#,
+    )
+    .expect("rewrite settings file");
+    let s = read_desktop_settings();
+    // The narrow read-modify-writes preserved shell-owned + unmodeled keys.
+    std::fs::write(&file, r#"{"vaultDir":"/somewhere/vault","widgetPos":[7,9]}"#)
+        .expect("reseed");
+    set_flyout_width("window", 400.0);
+    set_open_flyout("semantic");
+    let seeded = read_desktop_settings();
+    std::env::remove_var("LIGHTHOUSE_SETTINGS_FILE");
+    assert_eq!(s.flyout_width("window"), Some(FLYOUT_WIDTH_MAX));
+    assert_eq!(s.flyout_width("widget"), Some(FLYOUT_WIDTH_MIN));
+    assert_eq!(s.open_flyout().as_deref(), Some("recipes"));
+    assert_eq!(seeded.vault_dir.as_deref(), Some("/somewhere/vault"));
+    assert_eq!(seeded.extra.get("widgetPos"), Some(&serde_json::json!([7, 9])));
+    assert_eq!(seeded.flyout_width("window"), Some(400.0));
+    assert_eq!(seeded.open_flyout().as_deref(), Some("semantic"));
 }

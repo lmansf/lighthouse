@@ -101,13 +101,25 @@ test("the scope pill sits above the composer and shows the LIVE file count", () 
   );
 });
 
-test("the nav mounts above the explorer as a sidebar fragment — no Sidebar API change", () => {
-  const page = read("app/page.tsx");
+test("the nav is a section in the sidebar registry — the Sidebar stays feature-agnostic", () => {
+  // Sectioned sidebar (openspec: field-patch-0.12.5 §1): InvestigationsNav is now
+  // the last section row (its flyout opens below the Files-tree anchor), listed
+  // in the registry rather than stacked in app/page.tsx.
+  const registry = read("src/shell/sidebarSections.tsx");
   assert.match(
-    page,
-    /<InvestigationsNav \/>\s*\n\s*<FileExplorer \/>/,
-    "InvestigationsNav renders directly above FileExplorer",
+    registry,
+    /import \{ InvestigationsNav \} from "@\/features\/investigations\/InvestigationsNav";/,
+    "the registry imports the nav",
   );
+  assert.match(
+    registry,
+    /id: "investigations"[\s\S]*Component: InvestigationsNav/,
+    "Investigations is a registered section rendering InvestigationsNav",
+  );
+  // It is the last row (nothing follows it in SIDEBAR_SECTIONS).
+  assert.match(registry, /Component: ViewsNav[\s\S]*Component: InvestigationsNav\b[\s\S]*\];/);
+  // The Sidebar itself stays feature-agnostic — the rail content comes from the
+  // registry, so Sidebar.tsx never names any one section.
   assert.doesNotMatch(
     read("src/shell/Sidebar.tsx"),
     /Investigation/,

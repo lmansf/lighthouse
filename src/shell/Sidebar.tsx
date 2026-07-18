@@ -75,6 +75,15 @@ const useStyles = makeStyles({
     ...shorthands.padding(0, tokens.spacingHorizontalM),
   },
   bodyHidden: { display: "none" },
+  // The section rail (openspec: field-patch-0.12.5 §1): the header-only rows for
+  // the six non-file sections, pinned below the Files tree. Fixed-height block
+  // (the tree flexes above it); a hairline separates it from the tree. Hidden
+  // with the body while collapsed.
+  rail: {
+    flexShrink: 0,
+    ...shorthands.padding(tokens.spacingVerticalS, tokens.spacingHorizontalS),
+    ...shorthands.borderTop("1px", "solid", tokens.colorNeutralStroke2),
+  },
   footer: {
     display: "flex",
     alignItems: "center",
@@ -91,8 +100,14 @@ const useStyles = makeStyles({
 interface SidebarProps {
   collapsed: boolean;
   onToggleCollapsed: () => void;
-  /** The sidebar body — the file explorer. Hidden while collapsed. */
+  /** The sidebar body — the file explorer (the top anchor). Hidden while collapsed. */
   children: React.ReactNode;
+  /**
+   * The section rail (openspec: field-patch-0.12.5 §1) — header-only rows for the
+   * non-file sections, rendered directly below the file tree and hidden with the
+   * body while collapsed. Optional so the widget/explorer windows can omit it.
+   */
+  rail?: React.ReactNode;
   /**
    * Expanded width in px (openspec: add-usability-field-patch §1). Applied as
    * the `--sidebar-w` inline var; ignored while collapsed. Undefined ⇒ the
@@ -114,6 +129,7 @@ export function Sidebar({
   collapsed,
   onToggleCollapsed,
   children,
+  rail,
   width,
   resizing,
 }: SidebarProps) {
@@ -167,6 +183,9 @@ export function Sidebar({
         )}
       </div>
       <div className={mergeClasses(styles.body, collapsed && styles.bodyHidden)}>{children}</div>
+      {/* Section rail (openspec §1): the non-file sections as header rows below
+          the tree. Hidden with the body while collapsed, so collapse hides it. */}
+      {!collapsed && rail ? <div className={styles.rail}>{rail}</div> : null}
       {/* Above Settings: the one-line "new version" nudge (desktop only), a
           compact dot in the collapsed rail so it isn't hidden just because the
           sidebar is thin. */}

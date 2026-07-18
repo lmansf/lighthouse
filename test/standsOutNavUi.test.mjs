@@ -21,6 +21,7 @@ const read = (p) => readFileSync(path.join(ROOT, p), "utf8");
 
 const nav = read("src/features/insights/InsightsNav.tsx");
 const page = read("app/page.tsx");
+const registry = read("src/shell/sidebarSections.tsx");
 
 // --- Mock contract the panel leans on ----------------------------------------
 
@@ -119,13 +120,20 @@ test("InsightsNav never invokes the model — it only presents the engine's scan
   assert.doesNotMatch(nav, /ask-question/, "the proactive panel needs no ask — it shows unprompted");
 });
 
-// --- Proactive mount: top of the nav group, pinned adjacencies preserved -----
-
-test("InsightsNav mounts at the top of the analytics nav group, above SemanticNav", () => {
-  assert.match(page, /import \{ InsightsNav \} from "@\/features\/insights\/InsightsNav";/);
-  assert.match(page, /<InsightsNav \/>\s*\n\s*<SemanticNav \/>/, "What stands out leads the nav group");
-  // The nav-UI adjacency invariants must all survive the insertion above them.
-  assert.match(page, /<RecipesNav \/>\s*\n\s*<ViewsNav \/>/, "Recipes stays with Library");
-  assert.match(page, /<ViewsNav \/>\s*\n\s*<InvestigationsNav \/>/, "Library stays with Investigations");
-  assert.match(page, /<InvestigationsNav \/>\s*\n\s*<FileExplorer \/>/, "Investigations stays above the tree");
+// --- Sectioned sidebar (openspec: field-patch-0.12.5 §1): the six sections moved
+// out of app/page.tsx into the SectionRail registry; the Files tree is the top
+// anchor. InsightsNav ("What stands out") leads the registry, above SemanticNav.
+test("InsightsNav leads the sidebar section registry, above SemanticNav", () => {
+  assert.match(registry, /import \{ InsightsNav \} from "@\/features\/insights\/InsightsNav";/);
+  // First in SIDEBAR_SECTIONS, immediately above Business definitions.
+  assert.match(registry, /Component: InsightsNav[\s\S]*Component: SemanticNav/, "What stands out leads");
+  // The full top-to-bottom order the rail renders (the new pinned adjacency).
+  assert.match(
+    registry,
+    /Component: InsightsNav[\s\S]*Component: SemanticNav[\s\S]*Component: CapabilityNav[\s\S]*Component: RecipesNav[\s\S]*Component: ViewsNav[\s\S]*Component: InvestigationsNav/,
+    "insights → semantic → capabilities → recipes → library → investigations",
+  );
+  // The Files tree is now the sidebar anchor; the sections no longer stack in page.
+  assert.match(page, /sidebar=\{<FileExplorer \/>\}/, "the file tree anchors the sidebar");
+  assert.doesNotMatch(page, /<InsightsNav \/>/, "the section moved to the rail registry");
 });
