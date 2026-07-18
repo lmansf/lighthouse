@@ -2056,6 +2056,48 @@ narration) → verified tables + assumptions render; run via a mocked
 cloud provider → narrated, stamp accurate; pin the result to a board;
 suites + smoke + all floors green; `openspec validate --all` green.
 ```
+
+---
+
+## 15. Harness gap map — what Pi does that Lighthouse doesn't (2026-07-15)
+
+Reference: Pi (pi.dev, badlogic/pi-mono) — a minimal, opinionated coding
+harness. Its capability set, mapped to the analyst domain:
+
+| Pi capability | Lighthouse today | Verdict |
+|---|---|---|
+| **The agent loop** — model calls tools (read/write/edit/bash) until done | Single-shot ask + a bounded analytics-only multi-step, remote-gated | **Adopt as H5** — a bounded, auditable "Beam loop" over analytical tools, via the universal text protocol (the chart-directive pattern generalized), so it runs on every provider |
+| **Headless modes** — print/JSON, RPC, SDK | GUI only; the engine is already a library crate and a 13-route server | **Adopt as H7** — a `lighthouse` CLI (ask / recipe / board export, `--json`, exit codes) + a documented local RPC mode; enables cron briefings, scripts, CI on the analyst's machine |
+| **Tree sessions** — rewind to any message, branch, share | Linear chats; investigations (H1) group but don't branch | **Adopt in H7** — branch an investigation at any answer ("same analysis, exclude cancelled"), keep both; share = investigation export |
+| **Skills** — on-demand capability packages, progressive disclosure | Recipes are built-in only (H4 non-goal); chart card is one hardcoded skill | **Adopt as H6** — user-authored, DECLARATIVE skill packages (recipe definitions, ask templates, glossary entries), file-based and shareable, injected only when applicable |
+| **Workspace context** — project instructions the agent always knows | Nothing — the model never knows "fiscal year starts Feb" or what "revenue" means here | **Adopt as H6's core** — a vault-level analyst brief + **metric definitions** (named, vetted SQL expressions Beam consults — the governed-metrics idea, local) |
+| **Context transparency** — the full message log is inspectable | Egress counts + audit log; not the assembled prompt itself | **Adopt (small, fold into H5)** — per-answer "view what was sent": the exact context, locally viewable; the ultimate show-your-work |
+| **Extensions** — arbitrary TypeScript: custom tools, UI, sub-agents | None | **REJECT for v1** (constitution): arbitrary code execution in a privacy product is the one door we keep shut; the declarative seams (skills, recipes, connector plugins like SharePoint) are the sanctioned extension points |
+| **Model switching mid-session** | Quick provider switch (time-savers) | Covered; role-based routing (small model writes SQL, chosen model narrates) noted as a later option, not scheduled |
+| Prompt templates / themes | Suggested asks; 0.12.0 tokens | Covered / fold templates into H6 skills |
+
+**New surfaces, scoped** (prompts to be written when reached, like H1–H4):
+
+- **H5 — The Beam loop.** A bounded agentic loop (per-provider step caps;
+  local models get fewer) over universal text-protocol tools:
+  `get_schema`, `sample_rows`, `run_select` (same guard), `search_vault`,
+  `read_chunk`, `run_recipe`. Every call is validated engine-side, listed
+  in the answer's plan footer, and audit-logged; the loop degrades to
+  today's single-shot when the model doesn't play. Generalizes — and
+  eventually absorbs — the analytics multi-step.
+- **H6 — Skills & the workspace brain.** The vault analyst brief
+  (bounded, user-editable, always shown when injected); metric
+  definitions as vetted SQL snippets consumed by Beam and recipes;
+  declarative skill packages (recipes + templates + glossary) shareable
+  as files. No code execution — progressive disclosure via the H4
+  applicability predicates.
+- **H7 — Automation & branching.** The headless CLI + documented local
+  RPC mode (the SDK seam — `lighthouse-core` and `lighthouse-server`
+  already exist as crates); investigation branch/rewind; investigation
+  export/share. Independent of H5/H6 — can interleave after H1.
+
+Queue: … → 0.12.0 → H1–H4 → **H5 → H6 → H7** (H7 may run any time after
+H1 if automation demand shows up first).
 ```
 
 ---
