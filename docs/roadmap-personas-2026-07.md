@@ -611,3 +611,196 @@ finish in parallel). The S and A tracks are independent of each other and can
 interleave; within each, the listed order front-loads the items later ones
 build on (S1's policy keys are consumed by S2/S3/S4; A1's latency win makes
 A2–A5 feel like different features on the private path).
+
+---
+
+## 7. Master prompt — the whole plan as one copyable session prompt
+
+The per-workstream prompts in §5 are the fine-grained option. The prompt below
+condenses the entire game plan into a single self-contained instruction for
+one (long) session or a small series of sessions — phases land independently,
+so it degrades gracefully if stopped early.
+
+```
+Harden and extend Lighthouse for its two target users — the data analyst and
+the IT security director. The full analysis behind this plan is in
+docs/roadmap-personas-2026-07.md (on branch claude/repo-analysis-roadmap-mwqgl0
+if not yet merged); read it if present, but this prompt stands alone.
+
+Work in three phases, in order. The app must build and pass every gate at the
+end of each phase; open one PR per phase for review and stop short of merging
+or tagging. No version bumps — those happen at ship time.
+
+Ground rules, non-negotiable:
+- The Rust engine (native/) is the shipping product; the TS engine under
+  src/server is the web-dev twin. Any change to shared behavior lands in BOTH
+  engines with byte-identical prompts/labels, or carries an explicit PARITY
+  comment stating the divergence — follow the existing convention.
+- Feature-sized changes go through OpenSpec (openspec/changes/<id>/ with
+  proposal, design with Non-goals pinned, spec deltas, tasks;
+  `openspec validate --all` green) before implementation. Fixes and chores go
+  straight to commits.
+- Never weaken the local-first invariants: default-excluded inclusion,
+  lock-never-wipe licensing, the read-only single-SELECT analytics guard,
+  opt-in telemetry and chat history, 0600 atomic state writes, and no new
+  network egress without documenting it in docs/data-flows.md.
+- Gates per phase: npm test (tsc + node suites), the native cargo test suite,
+  lint, and a live end-to-end check of each user-visible change against the
+  real built app (headless Xvfb where needed, per the repo's practice).
+- Anything requiring accounts, certificates, or payments: implement
+  fail-closed scaffolding, document exactly what the maintainer must
+  provision, and move on. Where a product decision is genuinely the
+  maintainer's (marked below), ask; otherwise decide and record the rationale.
+
+PHASE 0 — FOUNDATION (de-risks everything after)
+
+0.1 Retire the Electron distribution. Archive the current state to a branch
+    archive/electron-shell, then delete electron/, .github/workflows/release.yml
+    (it still triggers on every v* tag and builds legacy Electron installers —
+    the shipping pipeline is desktop-release.yml), the
+    electron/electron-builder/electron-updater dependencies, and the
+    electron/dist/dist:nomodel/release npm scripts. Keep the Next web-dev flow
+    working. Write docs/ts-twin.md defining the TS engine's role (web dev +
+    parity oracle) and the canonical list of Rust-only capabilities; sweep all
+    PARITY markers and correct any stale ones.
+
+0.2 Pre-tag release smoke. A workflow job on all three OS runners that builds
+    the real bundle (build-ui-static + cargo build --release -p
+    lighthouse-desktop), boots it headlessly, drives one ask over a fixture
+    vault via the extractive fallback (no network, no model download), asserts
+    a grounded answer with a reference arrives, and round-trips every field of
+    the desktop settings struct — a missing field must fail CI, not surface as
+    a field report (see PR #141). Make desktop-release.yml require this job.
+
+0.3 Signing, to the edge of what's possible without certs. Wire Windows
+    Authenticode and macOS Developer-ID signing + notarization into
+    desktop-release.yml gated on secrets (absent secrets → cleanly unsigned
+    build, never half-signed). Generate tauri-plugin-updater signed manifests
+    and implement updater Phase B (download + verify + install-on-consent)
+    active only when a manifest key exists, keeping notify-only as the
+    fallback. End with a checklist of exactly which certificates/accounts the
+    maintainer must provision.
+
+0.4 Docs truth pass. README still describes the retired sandy-beach theme and
+    Electron-era run instructions — rewrite it to match the shipping product
+    (0.11.0, Tauri, Forerunner steel/blue). Create docs/data-flows.md
+    enumerating every possible egress — the six cloud-provider hosts, the
+    Supabase license/telemetry functions, the GitHub releases feed, HF +
+    mirror asset hosts — with when each fires, what it carries, and how to
+    disable it. This document is written for a security reviewer.
+
+PHASE 1 — IT SECURITY DIRECTOR
+
+1.1 Managed policy layer (OpenSpec: add-managed-policy). A machine-scope,
+    read-only policy.json (/etc/lighthouse/, %ProgramData%\Lighthouse\,
+    /Library/Application Support/Lighthouse/) overriding user preferences.
+    V1 keys: allowedProviders (subset of the seven), forceLocalOnly,
+    telemetry:"off", chatHistory:"off", widgetHotkeys:"off" (the summon
+    keyboard hook is then never installed), ocr:"off", notifications:"off",
+    auditLog:"on", vaultRoots (path-prefix allowlist). Enforce in the engine —
+    reject server-side, not just in the UI; affected controls show a
+    "Managed by your organization" lock state. Write
+    docs/managed-deployment.md with an example policy and MDM/GPO notes.
+    TS twin: parse + enforce provider/telemetry/history; hook/OCR keys are
+    desktop-only (PARITY).
+
+1.2 Egress transparency panel. An in-memory session registry that every
+    outbound HTTP call site reports through (llm.rs, license.rs, the
+    usage/experiment clients, model/asset downloads — find them by grepping
+    for reqwest/fetch). A header shield reads "All local" or "N requests to
+    <host>"; clicking opens the per-destination list (purpose + count + last
+    time — never content). The widget pill footer gets the one-line summary.
+
+1.3 Local audit log (OpenSpec: add-audit-log). Append-only JSONL in the
+    app-state dir, one record per answered question, written at the synthesis
+    choke point (synth.rs / synth.ts — so the widget and main window are both
+    covered): timestamp, question sha256 (verbatim text only under a policy
+    key), file ids read, provider used, egress none|host (from 1.2's
+    registry), local servers touched, artifacts written, and a per-record
+    HMAC chained to the previous record (key in the existing secrets store)
+    so tampering is detectable. Off by default, on by preference or policy.
+    Viewer dialog under the settings gear + CSV export.
+
+1.4 Keys, SBOM, disclosure. Move the sealing secret from secret.key-on-disk
+    (native/crates/lighthouse-core/src/secrets.rs — see its honest
+    threat-model comment) into the OS keychain via the keyring crate, with
+    the file fallback for headless Linux and transparent migration; update
+    the comment to match. Generate CycloneDX SBOMs for the npm tree and the
+    Cargo workspace and attach both to every release. Add cargo audit +
+    npm audit CI gates with a justified allowlist file. Evaluate replacing
+    the CDN-tarball xlsx dependency with a registry or vendored pinned copy,
+    and do it if compatible. Write SECURITY.md (disclosure contact, response
+    SLO) and docs/edr-whitelisting.md describing exactly what the Whisper
+    summon hook does per platform (keyboard hook / event monitor / raw
+    input), that it is opt-in, and how policy disables it.
+
+1.5 Offline activation. Accept an Ed25519-signed license file (public key
+    baked into the app; small issue-tooling script) as an alternative to the
+    hosted Edge Function check — entitlement and expiry verified with zero
+    network, never destructive on failure (matches the lock-not-wipe
+    posture). The hosted path stays default. Document the licensing data
+    flow honestly in docs/data-flows.md and the NSIS silent-install flags in
+    docs/managed-deployment.md.
+
+PHASE 2 — DATA ANALYST
+
+2.1 Fast private answers. Probe for a usable GPU (the Vulkan/Metal offload
+    machinery from 0.6.0 exists — read local_model.rs and the shell
+    supervisor first), default the offload layers accordingly with a visible
+    "GPU: on (N layers)" line in the AI-models dialog and a clean CPU
+    fallback on the known crash class. Then: stream the existing extractive
+    answer immediately as "Draft — verifying with the private model…" and
+    replace it in place when the local model's grounded answer lands
+    (orchestration in synth.rs + one UI state; the final answer's citations
+    are authoritative; Preferences toggle, default on). Target: first
+    visible token < 2 s on the private path.
+
+2.2 PDF tables (OpenSpec: add-pdf-tables). Text-layer PDFs only (scanned
+    PDFs already OCR to prose). Cluster positioned text runs into columns by
+    x-alignment across consecutive lines (≥3 aligned rows × ≥2 columns; a
+    pure, unit-tested heuristic in the spirit of detect_header_row). Emit
+    each detected table as header-carrying rows so it flows through the
+    existing tabular chunking, and register detected tables in analytics
+    like workbook sheets under the existing caps. Cache version bump in BOTH
+    engines. Fixtures must include a two-column prose PDF that must NOT
+    false-positive, plus a clean financial table and a ragged one.
+
+2.3 Briefings (OpenSpec: add-briefings). When pinned questions change — at
+    most once per user-set daily time, plus on demand from the pins dialog —
+    write/refresh "Lighthouse Briefing.md" under Lighthouse Notes/ via the
+    existing sanitized vault-write helper: per changed pin a compact
+    before→after table and the freshness footer, deterministic, zero model
+    calls. Fire one OS notification (Tauri notification plugin) respecting
+    the power-conserve activity states (never wake from hidden) and the
+    notifications policy. Build the scheduler beside the existing debounced
+    pin recheck — do not duplicate it. TS twin: on-demand note only (PARITY).
+
+2.4 Richer results. New engine-built chart kinds — stacked/grouped bar,
+    area, scatter — with matching theme-aware hand-rolled SVG in the
+    existing renderer; axis formatting (thousands separators, compact
+    notation, date ticks by granularity, zero-baseline rule for bars);
+    in-chat result tables sortable by header click with a truncation footer
+    at the 200-row cap; changed-pin alerts embed a before/after mini-chart
+    when chartable. The trust invariant stands: specs are built from query
+    batches, never model text; existing bar/line fixtures stay
+    byte-identical.
+
+2.5 Cross-conversation recall (OpenSpec: add-conversation-recall). With
+    "Save chats on this device" on, auto-export each conversation to
+    Lighthouse Notes/Chats/ as markdown (frontmatter: date, title, provider,
+    cited file ids) reusing exportChat. Chunks retrieved from that folder
+    carry a conversation source kind: the synthesis prompt labels them
+    "from your past Lighthouse conversation (date)" and references render
+    with a chat glyph opening the note. A "what did I ask/conclude about X?"
+    meta cue prefers conversation-kind chunks. Zero notes are written while
+    history is off or policy-disabled.
+
+REPORT, DON'T IMPLEMENT (maintainer decisions — end with a recommendation on
+each): the trial policy (today it is infinitely repeatable), opening
+PAID_ENABLED, and team/seat management. State the hard rule in the report:
+paid must not open while installers are unsigned.
+
+After each phase: gates green, PR opened, and a short status summary —
+shipped / blocked-on-maintainer / deferred, with reasons. If a phase can't
+complete, land what's green and report precisely where you stopped.
+```
