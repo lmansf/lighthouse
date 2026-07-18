@@ -1812,6 +1812,67 @@ smoke, eval + chart floors green; the five version stamps agree. End
 with the draft-release link, signed/unsigned status, and the release
 notes body ready for publish-release.yml.
 ```
+
+---
+
+## 14. Post-0.12.0 thesis: the analyst's harness (2026-07-15)
+
+Owner direction: Lighthouse is a **highly opinionated analytical AI
+harness** — privacy features and file RAG built in, a suite for the
+analyst. Not a chatbot with features; a methodology with a product around
+it. This section makes "opinionated" explicit and sequences the suite.
+
+### The constitution (the opinions, as product law)
+
+1. **The model never does arithmetic.** Every number is engine-computed;
+   the model plans and narrates. *(shipped — Beam's founding invariant)*
+2. **Sources are immutable.** Analysis never edits a user file; shaping
+   produces named views, removal goes to trash. *(shipped stance; views
+   are new)*
+3. **Everything is reproducible.** Every answer carries its exact
+   SQL/plan and can re-run against current data. *(shipped: Query used,
+   Edit SQL, pins; recipes extend it)*
+4. **Show your work by default.** SQL, provenance, freshness,
+   truncation, and — new — the *assumptions* (which date column, which
+   filter, how nulls were treated) are visible, not optional. *(mostly
+   shipped; assumption ledger is new)*
+5. **Private by architecture.** On-device is the default path; egress is
+   explicit, per-answer stamped, and per-file lockable. *(shipped +
+   P-final)*
+6. **Watchful, not chatty.** The harness monitors what you pinned and
+   briefs you; it never nags or upsells. *(shipped: pins/briefings;
+   boards extend it)*
+7. **Deterministic before model.** Anything answerable without a model
+   is answered without one. *(shipped: meta-answers, catalog, guarded
+   re-runs)*
+
+### The suite: four surfaces, each built on shipped machinery
+
+| Surface | What it is | Built on |
+|---|---|---|
+| **H1 Investigations** | Analysis lives in named investigations, not loose chats: questions, answers, notes, pinned metrics, and the files in scope, grouped and resumable; per-investigation provider policy ("this one is local-only") | conversations, recall, notes export, local-only enforcement |
+| **H2 Boards** | Pinned questions arranged as a living local dashboard: cards auto-refresh via the existing watcher, diff badges on change, one-click drill back into the question | pins, briefings, chart cards, 0.12.0 card treatment |
+| **H3 Shaped views** | Deterministic, non-destructive data prep: model-proposed, engine-executed transforms (types, dedupe, splits, joins) saved as named views that become queryable tables — source files never touched | Beam registration, the SQL guard (extended to vetted view definitions), catalog |
+| **H4 Recipes** | Named, parameterized, eval-floored playbooks — "variance vs last period", "cohort breakdown", "data-quality audit", "anomaly scan" — each a bounded multi-query plan with narration | multi-step analytics, few-shot pattern, eval harness |
+
+Assumption ledger (opinion 4) rides with H4; navigation reframes to
+Ask / Investigations / Boards / Data / Library as the surfaces land.
+
+### Sequencing and guardrails
+
+**H1 → H2 → H3 → H4**, one OpenSpec'd session each, after 0.12.0. H2 is
+the fastest visible win (boards are ~80% built already); H1 goes first
+because boards, views, and recipes all want an investigation to belong
+to. Guardrails learned from this repo's own history: each surface ships
+only what its underlying machinery already proves (no widget-era
+surface-before-core); all four are engine-first and Rust-only like Beam
+(PARITY-stubbed twin); every one lands with fixtures and keeps the eval
+floors green; and the constitution above is the review standard — a
+feature that bends an opinion doesn't ship.
+
+Full queue: T-final → P-final → G-final v2 → time-savers → 0.12.0 →
+H1–H4. Session prompts for H1–H4 to be written when each is reached (the
+thesis here is their spec seed).
 ```
 
 ---
