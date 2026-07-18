@@ -1563,10 +1563,124 @@ skips).
 | ★7 | **Lead-with-the-number answer style** | Long narrations bury the figure the analyst asked for | SYSTEM_PROMPT nudge: first line = the answer figure/sentence, detail after; eval-floor snapshot so drift is reviewed | XS |
 | ★8 | **Quick provider switch in chat header** | Comparing private vs cloud costs a settings round-trip each time | Header dropdown of configured providers; provenance stamp (🔄) already tells them what each answer used | S |
 
-Natural grouping: ★1+★4 (ask-path speed), ★3+★6 (navigation), ★5 (curation),
-★2 (first-day), ★7+★8 (chat polish) — one "time-savers" session could take
-★2/★3/★4/★6/★7/★8 (all S/XS) and leave ★1 and ★5 as their own OpenSpec
-changes. Sequence after G-final; ★3 depends on P-final's inspector.
+Maintainer call (2026-07-15): all eight in **one batch session** (Genie-v2
+style — one commit per feature, OpenSpec for the two heavy ones). Runs
+after G-final; ★3 depends on P-final's inspector.
+
+### Time-savers batch prompt
+
+```
+Time-savers batch: eight features that cut minutes out of a Lighthouse
+analyst's day. House style of the Genie v2 batch (#129): one commit per
+numbered feature; features 1 and 6 are OpenSpec changes (proposal, design
+with Non-goals pinned, spec deltas, tasks; `openspec validate --all`
+green); the rest go straight to implementation. One PR, no version bump.
+Prereqs: T-final, P-final, and G-final are merged — this session builds
+on the inspector, the provenance stamp, and the chart card.
+
+Ground rules: the Rust engine (native/) ships, the TS engine is the
+web-dev twin per docs/ts-twin.md — shared behavior lands in BOTH per the
+PARITY convention. Privacy posture is inviolable: nothing new leaves the
+machine (docs/data-flows.md must not grow), and nothing persists chat
+content to disk while "Save chats on this device" is off. Gates: npm
+test, cargo suite, lint, release smoke, the 0.11.2 eval floor and the
+chart floor stay green, plus a live E2E per feature.
+
+1. Answer cache with freshness stamp (OpenSpec: add-answer-cache).
+   Re-asking an unchanged question must be instant.
+   - Key: normalized question + the digest of the provider-effective
+     candidate set (include flags, local-only marks, and index freshness
+     — the same keys retrieval already uses) + provider id + attachment
+     set. Any of those changing is a different key; a vault change
+     invalidates (global digest is acceptable v1 — state the tradeoff in
+     the design).
+   - Hit: replay the stored answer verbatim — text, references, chart
+     spec, provenance stamp — with a visible "From cache · same data as
+     HH:MM · Re-run" line; Re-run bypasses and refreshes the entry. Miss
+     or any doubt: run live. Beam answers are the anchor case
+     (deterministic SQL over unchanged data); general RAG answers replay
+     with the same stamp semantics.
+   - Store: bounded LRU in the install-global app-state dir, never the
+     vault; while chat history is OFF the cache is in-memory-only for
+     the session (this is chat content — the posture wins over the
+     optimization).
+   - Tests: key composition (provider / marks / attachments / index
+     change each change the key), history-off writes nothing to disk;
+     E2E: ask → re-ask hits instantly with zero model calls (mocked
+     provider proves it) → touch a source file → re-ask runs live.
+
+2. Ask type-ahead from history. Local autocomplete in the ask box over
+   past asks (recent-chats store + pinned questions): fuzzy prefix
+   match, ranked by recency + frequency; ArrowUp on an empty box recalls
+   the last ask shell-style; Esc dismisses; fully keyboard navigable.
+   Respects history-off (then session asks + pins only). Reuse in the
+   widget ask row if the component shares cleanly; otherwise main window
+   only with a note. Pairs with feature 1: a repeated ask should be
+   instant end-to-end (assert in the E2E).
+
+3. Background model pre-download during onboarding. When the private
+   model is chosen (or shown) at the model step, offer "Start the
+   download now (~4.2 GB) while you finish setting up" — it proceeds
+   through the tour and curation using the existing progress/supervision
+   states, never blocks onboarding, and is pausable/cancelable from the
+   AI models dialog. Verify the downloader resumes a partial .part
+   (Range) — add resume if missing. Surface the GPU-probe note ("your
+   GPU will accelerate this") where it exists. E2E with a mocked model
+   host: opt in at onboarding → finish tour → model reaches ready with
+   no user wait at first ask.
+
+4. Citation → in-app preview. Citation chips and related-file cards
+   open the (P-final) inspector scrolled to the cited chunk,
+   highlighted, with prev/next-chunk navigation — "Open in app" remains
+   as the secondary action. Thread whatever chunk identity the
+   references need through the existing reference metadata (per-file
+   best chunk already exists engine-side). Widget behavior is unchanged
+   except the main-window handoff lands on the preview. E2E: ask →
+   click citation → inspector shows the exact cited chunk highlighted.
+
+5. Ctrl/Cmd+P quick-open. A fuzzy finder over the already-walked tree
+   (name + path, subsequence match, ranked), opened by the shortcut
+   from anywhere in the main window: Enter reveals the file in the
+   explorer, Ctrl+Enter attaches it to the chat, and the row shows the
+   file's visibility/local-only state at a glance. Keyboard-first, both
+   themes, zero network. E2E: summon, type a fragment, attach.
+
+6. Bulk curation rules (OpenSpec: add-curation-rules). Deterministic
+   per-folder rules so big-vault curation stops being file-by-file:
+   {scope folder, predicate: file kind / extension list / glob, action:
+   include | exclude | local-only | clear}. Requirements the design must
+   satisfy: rules cover FUTURE arrivals (applied at scan), an explicit
+   per-node user toggle always wins over a rule, ancestor-exclusion
+   semantics are never overridden, removal behavior is defined and
+   non-surprising, and the inspector's plain-language state says when a
+   rule set the flag ("included by rule 'spreadsheets in /reports'").
+   UI: "Rules for this folder…" on folder rows + a list in Preferences.
+   Both engines, parity tests on rule evaluation; E2E: create a rule,
+   drop a new matching file into the vault, watch it arrive with the
+   rule's flags.
+
+7. Lead-with-the-number answer style. Extend the shared SYSTEM_PROMPT
+   (byte-identical in both engines) so the FIRST line of an answer is
+   the figure or direct sentence the user asked for, elaboration after;
+   must compose with the chart-awareness line from G-final and stay
+   within a small token delta (the local 6144 window is the budget).
+   Update prompt snapshot tests as a reviewed diff; add an eval-floor
+   case asserting a numeric Beam ask leads with the number.
+
+8. Quick provider switch in the chat header. A compact dropdown of
+   configured providers (keyed vendors + the private model when ready)
+   plus "Manage…" opening the AI models dialog; switching uses the
+   existing selectModel flow, applies from the next ask, and the
+   provenance stamp + local-only enforcement follow automatically (they
+   key off the active provider — assert both in the E2E: switch to a
+   cloud provider → marked files skip + stamp names the vendor; switch
+   back to private → they return).
+
+After each feature: one commit, a one-line status. If a feature can't
+complete, land what's green and report where you stopped. End with a
+short "minutes saved" summary mapping each landed feature to the wait it
+removes.
+```
 ```
 
 ---
