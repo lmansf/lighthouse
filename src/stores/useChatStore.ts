@@ -134,6 +134,27 @@ export function conversationsForContext(
   return conversations.filter((c) => (c.investigationId ?? null) === currentInvestigationId);
 }
 
+/**
+ * The "All chats" listing (§22.2): every conversation, with the CURRENT
+ * context's own listed first — the History section's toggle view. Membership
+ * stays exact (conversationsForContext above); this only widens the view
+ * without letting another context's chats shuffle in ahead of the ones that
+ * belong here. Each partition comes back newest-first (the store list carries
+ * no guaranteed order), so callers can render it as returned. Exported for
+ * unit tests (test/historyNavUi.test.mjs).
+ */
+export function conversationsAllContexts(
+  conversations: Conversation[],
+  currentInvestigationId: string | null,
+): Conversation[] {
+  const byRecency = (a: Conversation, b: Conversation) => b.updatedAt - a.updatedAt;
+  // conversationsForContext returns a fresh array — sorting in place is safe.
+  const own = conversationsForContext(conversations, currentInvestigationId).sort(byRecency);
+  const ownIds = new Set(own.map((c) => c.id));
+  const others = conversations.filter((c) => !ownIds.has(c.id)).sort(byRecency);
+  return [...own, ...others];
+}
+
 /** Read the persisted current-investigation pointer (null = global context). */
 function loadCurrentInvestigation(): string | null {
   if (typeof window === "undefined") return null;

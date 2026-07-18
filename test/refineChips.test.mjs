@@ -41,3 +41,29 @@ test("As % needs at least two rows to apportion", () => {
   assert.equal(refineEligibility(table(["only"])).asPercent, false);
   assert.equal(refineEligibility(table(["a", "b"])).asPercent, true);
 });
+
+// --- §22.3 wiring: the ChatPanel gates each canned chip through this module ---
+// (structural pin — the JSX can't load in node; the chartIt.test.mjs style).
+test("RefineChips renders only chips whose eligibility holds for the answer's own table", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { fileURLToPath } = await import("node:url");
+  const path = await import("node:path");
+  const chat = readFileSync(
+    path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src/features/chat/ChatPanel.tsx"),
+    "utf8",
+  );
+  assert.match(
+    chat,
+    /const refine = useMemo\(\(\) => refineEligibility\(parseMarkdownTable\(content\)\), \[content\]\);/,
+    "eligibility = this lib over the answer's parsed table (pure, no service)",
+  );
+  assert.match(
+    chat,
+    /REFINE_CHIPS\.filter\(\(c\) => c\.applies\(refine\)\)\.map\(/,
+    "an ineligible chip does not render",
+  );
+  // Each canned chip maps to its own eligibility axis.
+  assert.match(chat, /applies: \(e\) => e\.topN/);
+  assert.match(chat, /applies: \(e\) => e\.monthly/);
+  assert.match(chat, /applies: \(e\) => e\.asPercent/);
+});
