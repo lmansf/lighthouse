@@ -9,8 +9,9 @@ import {
   createDOMRenderer,
   renderToStyleElements,
 } from "@fluentui/react-components";
-import { darkLighthouseTheme, lighthouseTheme } from "@/shell/theme";
+import { themeFor } from "@/shell/theme";
 import { useThemeStore } from "@/stores/useThemeStore";
+import { useAppearanceStore } from "@/stores/useAppearanceStore";
 import { installTauriTransport } from "@/shell/tauriTransport";
 
 /**
@@ -26,6 +27,11 @@ export function Providers({ children }: { children: React.ReactNode }) {
   useState(() => installTauriTransport());
   const [renderer] = useState(() => createDOMRenderer());
   const resolved = useThemeStore((s) => s.resolved);
+  // Appearance customization (openspec §3): accent + density + font scale ride
+  // the resolved mode into themeFor, which returns an AA-validated Fluent theme.
+  const accent = useAppearanceStore((s) => s.accent);
+  const density = useAppearanceStore((s) => s.density);
+  const fontScale = useAppearanceStore((s) => s.fontScale);
 
   // Mirror the resolved theme onto <html> so surfaces Fluent doesn't own
   // follow along: globals.css keys the body off it, and `color-scheme` makes
@@ -65,7 +71,7 @@ export function Providers({ children }: { children: React.ReactNode }) {
   return (
     <RendererProvider renderer={renderer}>
       <SSRProvider>
-        <FluentProvider theme={resolved === "dark" ? darkLighthouseTheme : lighthouseTheme}>
+        <FluentProvider theme={themeFor(resolved, accent, density, fontScale)}>
           {children}
         </FluentProvider>
       </SSRProvider>

@@ -131,7 +131,10 @@ function rowIcon(c: QuickOpenCandidate, className: string) {
 
 /** Name with the matched characters subtly emphasized (indices from the
  *  ranker's greedy scan — contiguous runs render as single spans). */
-function emphasize(name: string, hits: number[], hitClass: string): React.ReactNode {
+/** Wrap the matched query characters of `name` (indices in `hits`) in
+ *  `hitClass` spans for subtle emphasis. Exported so the composer's @-mention
+ *  picker (openspec §2) highlights hits the same way quick-open does. */
+export function emphasize(name: string, hits: number[], hitClass: string): React.ReactNode {
   if (hits.length === 0) return name;
   const hitSet = new Set(hits);
   const out: React.ReactNode[] = [];

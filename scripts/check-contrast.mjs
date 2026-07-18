@@ -109,10 +109,36 @@ const checksFor = (P) => [
   ["chart series 3 (neutral ink) vs bg1", P.fg2, P.bg1, 3],
 ];
 
+// ---------------------------------------------------------------------------
+// Curated accents (openspec: add-usability-field-patch §3) — the alternative
+// brand hues. Each is the brand-token SET only; it inherits the shared neutrals
+// + link, so the SAME pairings amber clears are re-checked with the accent's
+// values. Mirrors ACCENT_THEMES in src/shell/theme.ts — keep the two in sync.
+// (amber is the base themes above, already checked.)
+// ---------------------------------------------------------------------------
+const ACCENTS = {
+  teal: {
+    paper: { brand: "#12A594", brandHover: "#17B8A6", brandPressed: "#14AE9E", brandTint: "#E8F7F4",
+      brandTintHover: "#D3F0EB", mark: "#0B7A6F", brandText: "#0A6A60", compound: "#0E9184",
+      compoundHover: "#0B7A6F", compoundPressed: "#095F57", focus: "#0B7A6F" },
+    ink: { brand: "#2CD4C0", brandHover: "#53E0D0", brandPressed: "#24B4A3", brandTint: "#08211E",
+      brandTintHover: "#0B4A43", mark: "#2CD4C0", brandText: "#53E0D0", compound: "#2CD4C0",
+      compoundHover: "#53E0D0", compoundPressed: "#22B0A0", focus: "#2CD4C0" },
+  },
+  orchid: {
+    paper: { brand: "#C264C6", brandHover: "#CE7BD2", brandPressed: "#C972CD", brandTint: "#F9ECFA",
+      brandTintHover: "#F1D9F2", mark: "#943F98", brandText: "#833A87", compound: "#B453B8",
+      compoundHover: "#9C3FA0", compoundPressed: "#823585", focus: "#943F98" },
+    ink: { brand: "#E29BE6", brandHover: "#ECB6EF", brandPressed: "#D486D8", brandTint: "#241026",
+      brandTintHover: "#4A2A4D", mark: "#E29BE6", brandText: "#ECB6EF", compound: "#E29BE6",
+      compoundHover: "#ECB6EF", compoundPressed: "#D07FD4", focus: "#E29BE6" },
+  },
+};
+
 let allPass = true;
 let total = 0;
-for (const [name, P] of [["Paper (light)", PAPER], ["Ink (dark)", INK]]) {
-  console.log(`\n== ${name} ==`);
+const runChecks = (heading, P) => {
+  console.log(`\n== ${heading} ==`);
   for (const [label, fg, bg, min] of checksFor(P)) {
     const r = ratio(fg, bg);
     const pass = r >= min;
@@ -120,6 +146,12 @@ for (const [name, P] of [["Paper (light)", PAPER], ["Ink (dark)", INK]]) {
     total += 1;
     console.log(`${pass ? "PASS" : "FAIL"}  ${r.toFixed(2).padStart(5)} (min ${min})  ${label}`);
   }
+};
+runChecks("Paper (light)", PAPER);
+runChecks("Ink (dark)", INK);
+for (const [name, v] of Object.entries(ACCENTS)) {
+  runChecks(`${name} accent · Paper`, { ...PAPER, ...v.paper });
+  runChecks(`${name} accent · Ink`, { ...INK, ...v.ink });
 }
 console.log(
   allPass

@@ -60,6 +60,7 @@ import { START_TOUR_EVENT } from "@/features/help/FirstRunTour";
 import { showWidget, summonHotkey, prettyShortcut, modKey } from "@/features/onboarding/ModeChooser";
 import { useAuthStore } from "@/stores/useAuthStore";
 import { useThemeStore } from "@/stores/useThemeStore";
+import { useAppearanceStore } from "@/stores/useAppearanceStore";
 import { useChatStore } from "@/stores/useChatStore";
 import { useRagStore } from "@/stores/useRagStore";
 import { BEAM_SWEEP } from "@/shell/theme";
@@ -941,6 +942,12 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
   const setDefaultInclusion = useAuthStore((s) => s.setDefaultInclusion);
   const themeMode = useThemeStore((s) => s.mode);
   const setThemeMode = useThemeStore((s) => s.setMode);
+  // Appearance customization (openspec §3): accent + density + font scale, all
+  // applied live through the theme (AA-validated) — no save step, like the mode.
+  const accent = useAppearanceStore((s) => s.accent);
+  const density = useAppearanceStore((s) => s.density);
+  const fontScale = useAppearanceStore((s) => s.fontScale);
+  const setAppearance = useAppearanceStore((s) => s.set);
   // Chat-history persistence is a client-side, per-device choice (localStorage,
   // not a server setting) — it lives in the chat store, off by default.
   const saveChats = useChatStore((s) => s.persistEnabled);
@@ -1268,6 +1275,41 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
                   <Radio value="light" label="Light" />
                   <Radio value="dark" label="Dark" />
                   <Radio value="system" label="Match system" />
+                </RadioGroup>
+              </Field>
+
+              {/* Accent, density, font scale (openspec §3): each applies live via
+                  the theme; accents are AA-validated on both themes. */}
+              <Field label="Accent">
+                <RadioGroup
+                  layout="horizontal"
+                  value={accent}
+                  onChange={(_, d) => setAppearance({ accent: d.value as typeof accent })}
+                >
+                  <Radio value="amber" label="Amber" />
+                  <Radio value="teal" label="Teal" />
+                  <Radio value="orchid" label="Orchid" />
+                </RadioGroup>
+              </Field>
+              <Field label="Density">
+                <RadioGroup
+                  layout="horizontal"
+                  value={density}
+                  onChange={(_, d) => setAppearance({ density: d.value as typeof density })}
+                >
+                  <Radio value="comfortable" label="Comfortable" />
+                  <Radio value="compact" label="Compact" />
+                </RadioGroup>
+              </Field>
+              <Field label="Text size">
+                <RadioGroup
+                  layout="horizontal"
+                  value={fontScale}
+                  onChange={(_, d) => setAppearance({ fontScale: d.value as typeof fontScale })}
+                >
+                  <Radio value="s" label="Small" />
+                  <Radio value="m" label="Medium" />
+                  <Radio value="l" label="Large" />
                 </RadioGroup>
               </Field>
 

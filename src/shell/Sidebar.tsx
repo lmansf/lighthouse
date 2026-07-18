@@ -20,7 +20,13 @@ const useStyles = makeStyles({
     display: "flex",
     flexDirection: "column",
     height: "100%",
-    width: `${LAYOUT.sidebarWidth}px`,
+    // The expanded width rides an inline CSS var (openspec:
+    // add-usability-field-patch §1) so the drag handle can size it live —
+    // Griffel makeStyles is build-time atomic, so a dynamic width can't live
+    // here. The fallback is the layout default until the user drags. The
+    // `collapsed` class overrides this to the thin rail (last-wins in the
+    // merge), and the inline var is simply ignored while collapsed.
+    width: `var(--sidebar-w, ${LAYOUT.sidebarWidth}px)`,
     flexShrink: 0,
     backgroundColor: tokens.colorNeutralBackground2,
     ...shorthands.borderRight("1px", "solid", tokens.colorNeutralStroke2),
@@ -87,6 +93,15 @@ interface SidebarProps {
   onToggleCollapsed: () => void;
   /** The sidebar body — the file explorer. Hidden while collapsed. */
   children: React.ReactNode;
+  /**
+   * Expanded width in px (openspec: add-usability-field-patch §1). Applied as
+   * the `--sidebar-w` inline var; ignored while collapsed. Undefined ⇒ the
+   * makeStyles default.
+   */
+  width?: number;
+  /** True while a live drag is resizing the sidebar — suppresses the width
+   *  transition so the edge tracks the cursor instead of easing behind it. */
+  resizing?: boolean;
 }
 
 /**
@@ -95,13 +110,33 @@ interface SidebarProps {
  * bottom-left.
  * Collapsed, it shrinks to a thin icon rail that still exposes expand + settings.
  */
-export function Sidebar({ collapsed, onToggleCollapsed, children }: SidebarProps) {
+export function Sidebar({
+  collapsed,
+  onToggleCollapsed,
+  children,
+  width,
+  resizing,
+}: SidebarProps) {
   const styles = useStyles();
 
   const toggleHint = `(${modKey()}+B)`;
 
   return (
-    <div className={mergeClasses(styles.sidebar, collapsed && styles.collapsed)}>
+    <div
+      className={mergeClasses(styles.sidebar, collapsed && styles.collapsed)}
+      style={
+        collapsed
+          ? undefined
+          : // The live width (openspec §1). Inline style wins over the atomic
+            // class, so suppressing the transition here keeps the edge glued to
+            // the cursor mid-drag; off-drag it falls back to the eased makeStyles
+            // transition (collapse animation intact).
+            ({
+              ...(width ? { "--sidebar-w": `${width}px` } : {}),
+              ...(resizing ? { transitionProperty: "none" } : {}),
+            } as React.CSSProperties)
+      }
+    >
       <div className={mergeClasses(styles.header, collapsed && styles.headerCollapsed)}>
         {collapsed ? (
           <Tooltip content={`Expand files ${toggleHint}`} relationship="label">

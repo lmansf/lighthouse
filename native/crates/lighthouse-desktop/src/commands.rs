@@ -1433,6 +1433,14 @@ pub fn settings_get(app: AppHandle) -> Value {
         "briefingNotify": s.briefing_notify != Some(false), // default on (G5)
         "briefingNoteHour": s.briefing_note_hour.unwrap_or(9), // default 9am (G5)
         "tourShown": s.tour_shown == Some(true), // first-run tour, once per install
+        // Resizable explorer width per window mode (openspec §1), clamped at
+        // read; null when unset. Mirrors app/api/settings/route.ts GET.
+        "explorerWidth": {
+            "window": s.explorer_width("window"),
+            "widget": s.explorer_width("widget"),
+        },
+        // Appearance customization (openspec §3), validated. Mirrors route.ts GET.
+        "appearance": s.appearance(),
     })
 }
 
@@ -1454,6 +1462,14 @@ pub fn settings_set(
     briefing_note_hour: Option<i64>,
     tour_shown: Option<bool>,
     beam_max_steps: Option<i64>,
+    // Resizable explorer width (openspec §1): {mode,width} for one window mode.
+    // It rides its OWN narrow merge-setter (set_explorer_width) — NOT a new
+    // positional param on write_desktop_settings (which would clobber the
+    // sibling mode and trip the settings_test writer tripwire). None = untouched.
+    explorer_width: Option<Value>,
+    // Appearance customization (openspec §3): a validated patch through its own
+    // narrow merge-setter (set_appearance), like explorer_width. None = untouched.
+    appearance: Option<Value>,
 ) -> Value {
     // A new summon shortcut must PARSE before anything persists — saving an
     // unregistrable string would strand the user with no hotkey at all.
@@ -1497,6 +1513,22 @@ pub fn settings_set(
         tour_shown,
         beam_max_steps,
     );
+    // Resizable explorer width (openspec §1): applied through its own narrow
+    // merge-setter (set_explorer_width) so a "window" width never clobbers a
+    // "widget" one — NOT the positional writer above. None = untouched; the
+    // engine clamps + validates the mode.
+    if let Some(ew) = explorer_width.as_ref() {
+        if let (Some(mode), Some(width)) = (ew["mode"].as_str(), ew["width"].as_f64()) {
+            settings::set_explorer_width(mode, width);
+        }
+    }
+    // Appearance customization (openspec §3): the engine validates against the
+    // whitelist; anything else is dropped.
+    if let Some(ap) = appearance.as_ref() {
+        if ap.is_object() {
+            settings::set_appearance(ap);
+        }
+    }
     if shortcut_changed && !crate::register_summon_shortcut(&app) {
         // The new chord didn't register — restore the previous one so the
         // summon hotkey keeps working, and report the failure to the UI.
@@ -1580,6 +1612,10 @@ pub fn settings_set(
         .try_state::<crate::HotkeyOk>()
         .map(|h| h.0.load(std::sync::atomic::Ordering::Relaxed))
         .unwrap_or(false);
+    // Re-read so the response reflects any explorer-width merge above (which the
+    // positional writer's returned `s` doesn't know about); the boolean fields
+    // are unaffected either way.
+    let widths = settings::read_desktop_settings();
     json!({
         "ok": true,
         "runOnStartup": s.run_on_startup != Some(false),
@@ -1597,6 +1633,11 @@ pub fn settings_set(
         "draftAnswers": s.draft_answers != Some(false),
         "briefingNotify": s.briefing_notify != Some(false),
         "briefingNoteHour": s.briefing_note_hour.unwrap_or(9),
+        "explorerWidth": {
+            "window": widths.explorer_width("window"),
+            "widget": widths.explorer_width("widget"),
+        },
+        "appearance": widths.appearance(),
     })
 }
 

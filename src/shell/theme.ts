@@ -4,6 +4,7 @@ import {
   type BrandVariants,
   type Theme,
 } from "@fluentui/react-components";
+import type { Accent, Density, FontScale } from "@/lib/appearanceSpec";
 
 /**
  * The Beam identity (0.12.0) - Lighthouse's visual language, in two themes:
@@ -213,6 +214,132 @@ export const darkLighthouseTheme: Theme = {
 };
 
 /**
+ * Curated accents (openspec: add-usability-field-patch §3). Amber is the Beam
+ * default (the themes above); teal and orchid are alternative brand hues, each
+ * a full set of brand-token overrides whose values PASS scripts/check-contrast
+ * on BOTH themes (the same pairings amber clears — button text on fill, brand
+ * text on tint, marks/focus vs canvas). NO free-form color: the enum is the
+ * whole surface (src/lib/appearanceSpec.ts). Hover/pressed LIGHTEN on the paper
+ * fills (dark ink text needs more luminance, not less — the amber theme has the
+ * headroom to darken; these hues do not).
+ */
+type BrandTokens = {
+  colorBrandBackground: string;
+  colorBrandBackgroundHover: string;
+  colorBrandBackgroundPressed: string;
+  colorBrandBackgroundSelected: string;
+  colorBrandBackground2: string;
+  colorBrandBackground2Hover: string;
+  colorBrandForeground1: string;
+  colorBrandForeground2: string;
+  colorBrandStroke1: string;
+  colorCompoundBrandBackground: string;
+  colorCompoundBrandBackgroundHover: string;
+  colorCompoundBrandBackgroundPressed: string;
+  colorCompoundBrandForeground1: string;
+  colorCompoundBrandStroke: string;
+  colorStrokeFocus2: string;
+};
+const brandTokens = (a: {
+  brand: string;
+  brandHover: string;
+  brandPressed: string;
+  mark: string;
+  brandText: string;
+  brandTint: string;
+  brandTintHover: string;
+  compound: string;
+  compoundHover: string;
+  compoundPressed: string;
+  focus: string;
+}): BrandTokens => ({
+  colorBrandBackground: a.brand,
+  colorBrandBackgroundHover: a.brandHover,
+  colorBrandBackgroundPressed: a.brandPressed,
+  colorBrandBackgroundSelected: a.brandHover,
+  colorBrandBackground2: a.brandTint,
+  colorBrandBackground2Hover: a.brandTintHover,
+  colorBrandForeground1: a.mark,
+  colorBrandForeground2: a.brandText,
+  colorBrandStroke1: a.mark,
+  colorCompoundBrandBackground: a.compound,
+  colorCompoundBrandBackgroundHover: a.compoundHover,
+  colorCompoundBrandBackgroundPressed: a.compoundPressed,
+  colorCompoundBrandForeground1: a.mark,
+  colorCompoundBrandStroke: a.mark,
+  colorStrokeFocus2: a.focus,
+});
+
+// Validated by scripts/check-contrast.mjs (accent section). Keep the two in sync.
+const ACCENT_THEMES: Record<Exclude<Accent, "amber">, { light: BrandTokens; dark: BrandTokens }> = {
+  teal: {
+    light: brandTokens({
+      brand: "#12A594", brandHover: "#17B8A6", brandPressed: "#14AE9E", mark: "#0B7A6F",
+      brandText: "#0A6A60", brandTint: "#E8F7F4", brandTintHover: "#D3F0EB", compound: "#0E9184",
+      compoundHover: "#0B7A6F", compoundPressed: "#095F57", focus: "#0B7A6F",
+    }),
+    dark: brandTokens({
+      brand: "#2CD4C0", brandHover: "#53E0D0", brandPressed: "#24B4A3", mark: "#2CD4C0",
+      brandText: "#53E0D0", brandTint: "#08211E", brandTintHover: "#0B4A43", compound: "#2CD4C0",
+      compoundHover: "#53E0D0", compoundPressed: "#22B0A0", focus: "#2CD4C0",
+    }),
+  },
+  orchid: {
+    light: brandTokens({
+      brand: "#C264C6", brandHover: "#CE7BD2", brandPressed: "#C972CD", mark: "#943F98",
+      brandText: "#833A87", brandTint: "#F9ECFA", brandTintHover: "#F1D9F2", compound: "#B453B8",
+      compoundHover: "#9C3FA0", compoundPressed: "#823585", focus: "#943F98",
+    }),
+    dark: brandTokens({
+      brand: "#E29BE6", brandHover: "#ECB6EF", brandPressed: "#D486D8", mark: "#E29BE6",
+      brandText: "#ECB6EF", brandTint: "#241026", brandTintHover: "#4A2A4D", compound: "#E29BE6",
+      compoundHover: "#ECB6EF", compoundPressed: "#D07FD4", focus: "#E29BE6",
+    }),
+  },
+};
+
+/** Scale a theme's text (font size + line height) and/or vertical spacing tokens
+ *  by a factor — the mechanism behind fontScale (openspec §3) and density.
+ *  Non-px and zero values pass through untouched. */
+function scaleTheme(theme: Theme, fontFactor: number, spaceFactor: number): Theme {
+  if (fontFactor === 1 && spaceFactor === 1) return theme;
+  const next: Record<string, string> = { ...(theme as unknown as Record<string, string>) };
+  const scalePx = (v: string, f: number): string => {
+    if (typeof v !== "string" || !v.endsWith("px")) return v;
+    const n = parseFloat(v);
+    if (!Number.isFinite(n) || n === 0) return v;
+    return `${Math.round(n * f * 100) / 100}px`;
+  };
+  for (const key of Object.keys(next)) {
+    if (/^(fontSizeBase|fontSizeHero|lineHeightBase)/.test(key)) next[key] = scalePx(next[key], fontFactor);
+    else if (/^spacingVertical/.test(key)) next[key] = scalePx(next[key], spaceFactor);
+  }
+  return next as unknown as Theme;
+}
+
+const FONT_FACTOR: Record<FontScale, number> = { s: 0.92, m: 1, l: 1.12 };
+const SPACE_FACTOR: Record<Density, number> = { comfortable: 1, compact: 0.82 };
+
+/**
+ * The Fluent theme for a resolved light/dark mode plus the user's appearance
+ * choices (openspec §3). Accent swaps the brand tokens (amber = the base
+ * themes); fontScale/density scale the text + spacing tokens. Every result
+ * still clears the contrast gate — accents are AA-validated and scaling never
+ * touches a color. app/providers.tsx calls this.
+ */
+export function themeFor(
+  resolved: "light" | "dark",
+  accent: Accent = "amber",
+  density: Density = "comfortable",
+  fontScale: FontScale = "m",
+): Theme {
+  const base = resolved === "dark" ? darkLighthouseTheme : lighthouseTheme;
+  const withAccent =
+    accent === "amber" ? base : { ...base, ...ACCENT_THEMES[accent][resolved] };
+  return scaleTheme(withAccent, FONT_FACTOR[fontScale], SPACE_FACTOR[density]);
+}
+
+/**
  * The beam sweep - Beam's one signature gradient: dark ink warming through
  * ember into the lit amber head. Reserved for HERO moments only (onboarding
  * and tour headers, empty states, About, the hero beacon) and never placed
@@ -237,9 +364,18 @@ export const ACCENTS = {
 
 /** Layout constants shared across the shell. */
 export const LAYOUT = {
-  /** Width of the expanded file sidebar. */
+  /** Width of the expanded file sidebar (the default until the user drags it). */
   sidebarWidth: 360,
   /** Width of the collapsed sidebar (thin icon rail). */
   sidebarCollapsedWidth: 48,
   headerHeight: 56,
+  /**
+   * Resizable-explorer drag bounds (openspec: add-usability-field-patch §1).
+   * A client-safe mirror of the engine's clamp — the authoritative copy lives
+   * in `src/server/settings.ts` (EXPLORER_WIDTH_MIN/MAX) and `settings.rs`, but
+   * those pull `node:fs`, so a "use client" surface can't import them. Keep the
+   * three in sync. PARITY: EXPLORER_WIDTH_MIN / EXPLORER_WIDTH_MAX.
+   */
+  sidebarMinWidth: 200,
+  sidebarMaxWidth: 720,
 } as const;

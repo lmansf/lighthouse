@@ -295,6 +295,47 @@ function packDocument(title: string, body: string): string {
   ].join("\n");
 }
 
+/** Input to `composeReportHtml` (openspec: add-usability-field-patch §4). */
+export interface ReportInput {
+  /** Document title (the <h1> and <title>). */
+  title: string;
+  /** The report body as markdown (headings, lists, tables, honesty footers). */
+  markdown: string;
+  /** Charts as ALREADY-INLINE SVG strings (standaloneChartSvg) — never a URL,
+   *  so the document stays self-contained. */
+  charts?: string[];
+  /** When it was exported, for the header stamp. Omit to skip the stamp. */
+  generatedAt?: number;
+}
+
+/**
+ * Compose ANY report-shaped document (deep-analysis reports, briefings, evidence
+ * packs, board exports, Notes/transcripts) into one self-contained HTML string
+ * (openspec: add-usability-field-patch §4). Reuses the packs' shell — the same
+ * inlined PACK_CSS and the same `packDocument` wrapper — so the offline
+ * invariant (NO external resource of any kind) lives in one place. Charts are
+ * baked in as inline SVG. Same inputs, same bytes.
+ */
+export function composeReportHtml(input: ReportInput): string {
+  const { title, markdown, charts = [], generatedAt } = input;
+  const parts: string[] = [];
+  parts.push(`<header>`);
+  parts.push(`<h1>${escapeHtml(title)}</h1>`);
+  if (generatedAt !== undefined) {
+    parts.push(`<p class="generated">Generated ${escapeHtml(formatUtc(generatedAt))}</p>`);
+  }
+  parts.push(`</header>`);
+  parts.push(`<section>`);
+  parts.push(answerMarkdownToHtml(markdown));
+  parts.push(`</section>`);
+  for (const svg of charts) {
+    if (svg && svg.trim()) {
+      parts.push(`<figure class="chart">${svg}</figure>`);
+    }
+  }
+  return packDocument(title, parts.join("\n"));
+}
+
 /**
  * Compose one self-contained evidence-pack HTML document from a settled
  * analytics answer. Every section is derived from the inputs alone — same
