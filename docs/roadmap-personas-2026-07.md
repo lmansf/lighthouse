@@ -1050,3 +1050,137 @@ suite stays green through G2–G6. After each feature: one commit, a one-line
 status. If a feature can't complete, land what's green and report where you
 stopped.
 ```
+
+---
+
+## 9. Cutting the cord: no Supabase, no accounts (supersedes §8 Track T)
+
+Maintainer question: with data collection dropped and no paid accounts, is
+Supabase needed at all? **No.** The full dependency inventory:
+
+| Supabase piece | Serves | Disposition |
+|---|---|---|
+| `license` fn + trial/contact tables | Repeatable 14-day trial, sign-in, lock | Gates nothing of value (`PAID_ENABLED=0`, trial repeatable). Delete — app always unlocked |
+| `create-checkout`, `stripe-webhook` fns | $14.99/mo checkout | Dead with paid. Delete |
+| `click_events`, `experiments_events`, `experiment_assignments`, `assign` op | Telemetry & A/B | Already deleted by Track T |
+| `bug_reports`, `feature_interest`, `coming_soon_leaderboard` | Explicit feedback | Replace with a **zero-backend** channel: compose locally, hand off via prefilled `mailto:` or GitHub-issue URL — the app never transmits |
+
+Gains: the app's complete egress list drops to three items (chosen cloud
+provider, update check, pinned asset downloads); ~2–3k lines of licensing
+code across both engines removed; the sign-in bug class (#111, 0.11.0's
+vault-switch fix) becomes structurally impossible; onboarding loses the
+email step; the shipped anon key and login-time license check vanish.
+Losses, accepted: centralized feedback inbox (→ email/GitHub issues), the
+notify-me list (data collection anyway), the trial lever. Door left open:
+if paid returns it returns as **offline signed license files + a Stripe
+payment link** — no accounts, no Supabase.
+
+Maintainer inputs the prompt flags: the feedback email address, and the
+hosted-project sunset plan (old installs poll the license function; a dead
+endpoint never wipes — lock-not-wipe holds — but they'd eventually lock, so
+keep the function up patched always-valid for a window).
+
+### Track T v2 prompt — "cut the cord"
+
+```
+Cut Lighthouse's cloud cord: remove all automatic data collection, the
+entire licensing/accounts system, and the Supabase backend; replace the
+Experiments dashboard with a zero-backend feedback channel; and make the
+docs tell the truth about the shipping product. After this PR the complete
+egress list is: the cloud model the user configured, the update check, and
+pinned asset downloads. Feedback leaves via the user's own mail client or
+browser — never sent by the app itself.
+
+One PR, one commit per numbered section below so review and partial landing
+stay clean. No version bump. Ground rules: the Rust engine (native/) is the
+shipping product and the TS engine under src/server is its web-dev twin —
+changes land in BOTH engines per the existing PARITY convention. Gates: npm
+test (tsc + node suites), the native cargo suite, lint, plus the proof
+gates at the end.
+
+1. Telemetry — delete, both engines: src/server/usage.ts and
+   src/features/usage/useUsageCapture.ts; every data-log / data-log-type
+   attribute (grep — ~15 components); the launch ping and account-email
+   event attachment (license.ts / profile.ts); the model_selected event;
+   the counts-only vault presence telemetry (vault.ts / vault.rs);
+   usage.rs plus its lib.rs/routes/commands wiring; the /api/usage route;
+   the onboarding "share usage analytics" checkbox and usageLoggingOptOut
+   plumbing.
+
+2. Experiments — delete, both engines: experiment.ts / experiment.rs, the
+   server-balanced assign call, the local-hash fallback, pilot overrides,
+   experiments.json state. Default inclusion has been an explicit user
+   setting since #99 — verify no variant consumer remains and migrate any
+   straggler. Delete src/features/experiments/ExperimentsDialog.tsx and
+   the "Experiments" gear-menu item. Move docs/experiments/ to the archive
+   branch.
+
+3. Licensing, accounts, Supabase — delete:
+   - Engines: license.ts (~600 lines) / license.rs (~900 lines), the
+     /api/license and /api/register routes and their Rust twins,
+     identity/contact/launch state files (stop writing them; clean stale
+     ones from the app-state dir on boot), the LICENSE_ENFORCE /
+     LICENSE_SECRET local-dev mode, and the Stripe checkout path
+     (submitNotify, CHECKOUT_API_URL).
+   - UI: src/features/license/LicenseGate.tsx is the largest feature file
+     and hosts surfaces that must SURVIVE — first extract the settings
+     gear menu, Preferences dialog, and AI models dialog into a new
+     src/features/settings/, then delete the gate overlay,
+     trial/registration/purchase/activate/notify-me dialogs, GraceBanner,
+     sign-out, and the account card. The app is simply always unlocked.
+   - Onboarding: remove the email/registration step entirely; first run
+     becomes vault choice → window/widget mode → model pick → default
+     inclusion. Drive the full first-run E2E afterward.
+   - Repo: move supabase/ and docs/registration.md to the archive branch;
+     delete .env.production (or reduce it to a documented empty stub) and
+     every LICENSE_API_URL / SUPABASE_ANON_KEY / CHECKOUT_API_URL /
+     PAID_ENABLED reference (README, .env.local.example, installer
+     config, rewrite-scope appendix note).
+   - Compatibility: old installs poll the hosted license function. Verify
+     from the old code's own behavior that a dead endpoint degrades to
+     grace/lock — never a wipe — and put the sunset recommendation in the
+     final checklist (keep the function up, patched always-valid, for a
+     window). Report it; don't deploy anything.
+
+4. Feedback goes zero-backend: rework BugReport.tsx, FeedbackNudge.tsx,
+   and FeatureInterestVote.tsx into one "Send feedback" flow (gear-menu
+   item in the old Experiments slot + the existing FAB): the dialog
+   composes the report locally — message, app version, OS, optional
+   off-by-default shell.log excerpt rendered in full for review — then
+   offers two explicit handoffs: "Email us" (mailto: with prefilled
+   subject/body — ASK ME for the address before wiring it) and "Open a
+   GitHub issue" (prefilled github.com/lmansf/lighthouse/issues/new with
+   title/body params, labeled as public). The app itself transmits
+   nothing; /api/event dies with the interest-vote backend and the
+   coming-soon teaser keeps only a local thank-you.
+
+5. Docs & branding truth: README — fix the theme description (Forerunner
+   steel/blue since #53, not sandy-beach) and the Run-it section (the
+   Tauri desktop app is the product), delete the Pricing & trial section,
+   add a short privacy paragraph stating the posture above. New
+   docs/data-flows.md: exactly three app egresses plus the two
+   user-initiated feedback handoffs, when each fires, what it carries, how
+   to turn it off — written for a skeptical reviewer. Stamp or fix
+   docs/desktop.md and ARCHITECTURE.md (pre-Tauri). Record the naming debt
+   (npm package / userData dir stay rag-vault for upgrade safety). Add a
+   one-paragraph decision record: if paid ever returns, it returns as
+   offline signed license files + a Stripe payment link — no accounts, no
+   Supabase.
+
+6. The repo builds only what it ships: archive-then-delete
+   .github/workflows/release.yml — it still auto-fires legacy Electron
+   builds on every v* tag; the shipping pipeline is desktop-release.yml.
+
+Proof gates, beyond the suites: (a) grep-clean — supabase,
+LICENSE_API_URL, PAID_ENABLED, usage capture, experiment, data-log,
+pingLaunch, model_selected, submitNotify appear nowhere outside the
+archive branch and history/roadmap docs; (b) built-app run: fresh
+first-run onboarding through to a grounded answer with outbound traffic
+observed (mock fetch layer or local proxy) — zero requests except those in
+docs/data-flows.md; (c) the feedback dialog produces a correct mailto: URL
+and a correct prefilled issue URL (assert both strings in a unit test);
+(d) the settings gear still opens Preferences and AI models; (e) full
+suites green. End with the maintainer checklist: Supabase project sunset
+plan, the feedback email address, Stripe account cleanup — and a
+one-paragraph summary of what a privacy reviewer would now find.
+```
