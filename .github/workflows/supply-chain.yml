@@ -8,8 +8,9 @@
 #
 # Triaging a finding:
 #   - npm: raise the floor with `--audit-level=critical`, or update the dep.
-#   - cargo: add an ignore with a rationale in native/.cargo/audit.toml
-#     ([advisories] ignore = ["RUSTSEC-YYYY-NNNN"]) — never a blanket disable.
+#   - cargo: add an ignore with a rationale in native/audit.toml
+#     ([advisories] ignore = ["RUSTSEC-YYYY-NNNN"]) and mirror it into the
+#     --ignore flags on the Audit step below — never a blanket disable.
 name: supply-chain
 
 on:

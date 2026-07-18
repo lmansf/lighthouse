@@ -1310,30 +1310,17 @@ fn is_generic_join_col(c: &str) -> bool {
             .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
 }
 
+/// Auto-derived join hints: every pair of registered tables that shares a
+/// non-generic column becomes a `- t1.col = t2.col` line, capped at
+/// `MAX_JOIN_HINTS`. Purely heuristic and self-contained — the declared/curated
+/// join hints (which used to suppress a pair here) were removed in
+/// field-patch-0.12.5 §3, so this is the ONLY join-hint source. PARITY: Rust-only
+/// (the twin has no analytics branch).
 pub fn join_hints(regs: &[TableReg]) -> Option<String> {
-    join_hints_excluding(regs, &[])
-}
-
-/// `join_hints`, but skipping any table pair a curated semantic join hint
-/// already names (openspec: add-semantic-layer §2.4). The curated hint WINS: it
-/// renders in the business-definitions block (semantic.rs), so the heuristic
-/// card must not also emit a line for that pair. `excluded` holds the
-/// posture-eligible curated pairs from `semantic::curated_join_pairs` as
-/// (table, table) — order-insensitive, lowercased. An EMPTY slice reproduces
-/// `join_hints` byte-for-byte, so a zero-curated-hint vault leaves the prompt
-/// unchanged. PARITY: Rust-only (the twin has no analytics branch).
-pub fn join_hints_excluding(regs: &[TableReg], excluded: &[(String, String)]) -> Option<String> {
-    let excluded: std::collections::HashSet<(String, String)> =
-        excluded.iter().map(|(a, b)| norm_pair(a, b)).collect();
     let mut lines: Vec<String> = Vec::new();
     'outer: for i in 0..regs.len() {
         for j in i + 1..regs.len() {
             if regs[i].table == regs[j].table {
-                continue;
-            }
-            // A curated hint already names this pair — it renders in the block,
-            // and it wins, so drop the heuristic line entirely for the pair.
-            if !excluded.is_empty() && excluded.contains(&norm_pair(&regs[i].table, &regs[j].table)) {
                 continue;
             }
             for c in &regs[i].columns {
@@ -1360,16 +1347,6 @@ pub fn join_hints_excluding(regs: &[TableReg], excluded: &[(String, String)]) ->
             "Join hints (columns shared across tables — use when combining them):\n{}",
             lines.join("\n")
         ))
-    }
-}
-
-/// An unordered, lowercased table-name pair key (so `(a,b)` and `(b,a)` match).
-fn norm_pair(a: &str, b: &str) -> (String, String) {
-    let (a, b) = (a.to_lowercase(), b.to_lowercase());
-    if a <= b {
-        (a, b)
-    } else {
-        (b, a)
     }
 }
 
@@ -2824,11 +2801,11 @@ pub fn decide_chart(batches: &[RecordBatch], narration: &str) -> Option<String> 
 /// Version stamp for the chart card. The full text is snapshot-pinned in a
 /// unit test, so any edit (and the version bump that should ride with a
 /// behavioral one) is a reviewed diff.
-pub const CHART_CARD_VERSION: &str = "v2";
-/// Card budget: ~215 tokens (v2's advisory "none" line bought ~56 chars).
-/// Asserted by `chart_card_stays_inside_budget` and re-checked by the
-/// chart_eval floor.
-pub const CHART_CARD_MAX_CHARS: usize = 860;
+pub const CHART_CARD_VERSION: &str = "v3";
+/// Card budget: ~235 tokens (v3's "visual is the default" framing bought ~64
+/// chars over v2). Asserted by `chart_card_stays_inside_budget` (worst case: 24
+/// long columns, the list clipped) and re-checked by the chart_eval floor.
+pub const CHART_CARD_MAX_CHARS: usize = 940;
 /// Cap on the interpolated column list — a 24-column result must not blow the
 /// card budget; the full header already rides in the result block itself.
 const CHART_CARD_COLS_CHARS: usize = 96;
@@ -2891,12 +2868,13 @@ pub fn chart_card(batches: &[RecordBatch]) -> Option<String> {
     }
     Some(format!(
         "Chart options ({CHART_CARD_VERSION}) — result columns: {listed}.\n\
-         End the answer with at most ONE fenced request to choose this answer's chart; \
-         the app builds it from the verified result (a request can never supply values):\n\
+         This result has a chartable shape, so a visual is the DEFAULT: end the answer \
+         with at most ONE fenced request to choose this answer's chart; the app builds \
+         it from the verified result (a request can never supply values):\n\
          {CHART_DIRECTIVE_FENCE}\n{}\n```\n\
          kind: bar = categories; line = trend, 2-3 series; area = trend, 1 series; \
-         none = you think nothing here is comparable (single number, id/SKU/code labels) — \
-         the app still charts results whose shape fits. \
+         none = suppress the chart with a stated reason (a single number, id/SKU/code \
+         labels) — the app still charts any result whose shape clearly fits. \
          series_columns: 1-3 numeric columns; title and sort (asc|desc, by first series) optional.\n\
          Examples: {} → {} · {} → {}",
         CHART_CARD_EXAMPLES[1].directive,
@@ -4441,12 +4419,12 @@ mod tests {
     #[test]
     fn chart_card_snapshot_is_pinned() {
         let card = chart_card(&[batch(&["NE", "NW"], &[150.0, 200.0])]).unwrap();
-        let expected = "Chart options (v2) — result columns: label (text), total (numeric).\n\
-            End the answer with at most ONE fenced request to choose this answer's chart; the app builds it from the verified result (a request can never supply values):\n\
+        let expected = "Chart options (v3) — result columns: label (text), total (numeric).\n\
+            This result has a chartable shape, so a visual is the DEFAULT: end the answer with at most ONE fenced request to choose this answer's chart; the app builds it from the verified result (a request can never supply values):\n\
             ```lighthouse-chart-request\n\
             {\"kind\":\"bar\",\"label_column\":\"region\",\"series_columns\":[\"revenue\"],\"title\":\"Revenue by region\",\"sort\":\"desc\"}\n\
             ```\n\
-            kind: bar = categories; line = trend, 2-3 series; area = trend, 1 series; none = you think nothing here is comparable (single number, id/SKU/code labels) — the app still charts results whose shape fits. series_columns: 1-3 numeric columns; title and sort (asc|desc, by first series) optional.\n\
+            kind: bar = categories; line = trend, 2-3 series; area = trend, 1 series; none = suppress the chart with a stated reason (a single number, id/SKU/code labels) — the app still charts any result whose shape clearly fits. series_columns: 1-3 numeric columns; title and sort (asc|desc, by first series) optional.\n\
             Examples: (month, total) → {\"kind\":\"area\",\"label_column\":\"month\",\"series_columns\":[\"total\"]} · (store_id, revenue) → {\"kind\":\"none\"}";
         assert_eq!(card, expected);
     }
@@ -4868,10 +4846,11 @@ mod tests {
     }
 
     #[test]
-    fn join_hints_excluding_wins_the_pair_and_is_byte_identical_when_empty() {
-        // openspec: add-semantic-layer §2.4 — a curated hint over the (orders,
-        // reps) pair suppresses the heuristic line for that pair, while other
-        // pairs still hint. An EMPTY exclusion set reproduces `join_hints`.
+    fn join_hints_emit_a_line_per_shared_non_generic_column() {
+        // Every table pair that shares a non-generic column hints; a pair sharing
+        // only a generic column (id) does not. (The declared/curated join hints
+        // that used to suppress a pair here were removed in field-patch-0.12.5 §3
+        // — `join_hints` is now the sole, self-contained source.)
         let reg = |table: &str, cols: &[&str]| TableReg {
             table: table.into(),
             file_id: table.into(),
@@ -4887,24 +4866,13 @@ mod tests {
             reg("reps", &["rep", "team"]),
             reg("regions", &["region", "label"]),
         ];
-        // Baseline: both shared-column pairs hint.
+        // Both shared-column pairs hint.
         let base = join_hints(&regs).expect("hints");
         assert!(base.contains("- orders.rep = reps.rep"), "{base}");
         assert!(base.contains("- orders.region = regions.region"), "{base}");
-        // The empty exclusion is byte-identical to `join_hints`.
-        assert_eq!(join_hints_excluding(&regs, &[]), Some(base.clone()));
 
-        // Excluding (orders, reps) drops ONLY that pair's line; order-insensitive.
-        let merged = join_hints_excluding(&regs, &[("reps".into(), "orders".into())]).expect("hints");
-        assert!(!merged.contains("orders.rep = reps.rep"), "curated pair suppressed: {merged}");
-        assert!(merged.contains("- orders.region = regions.region"), "other pairs remain: {merged}");
-
-        // Excluding every hinted pair collapses the card to None.
-        assert!(join_hints_excluding(
-            &regs,
-            &[("orders".into(), "reps".into()), ("orders".into(), "regions".into())],
-        )
-        .is_none());
+        // Two tables sharing only a generic `id` column produce no card.
+        assert!(join_hints(&[reg("a", &["id"]), reg("b", &["id"])]).is_none());
     }
 
     #[tokio::test]

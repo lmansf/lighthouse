@@ -23,6 +23,7 @@ const read = (p) => readFileSync(path.join(ROOT, p), "utf8");
 
 const nav = read("src/features/recipes/RecipesNav.tsx");
 const page = read("app/page.tsx");
+const registry = read("src/shell/sidebarSections.tsx");
 const chat = read("src/features/chat/ChatPanel.tsx");
 
 // --- The run-recipe seam: the EXISTING ask event carries a recipe cue --------
@@ -94,12 +95,16 @@ test("RecipesNav renders the honest empty state and never crashes on []", () => 
   );
 });
 
-test("RecipesNav mounts beside ViewsNav/InvestigationsNav — adjacencies preserved", () => {
-  assert.match(page, /import \{ RecipesNav \} from "@\/features\/recipes\/RecipesNav";/);
-  assert.match(page, /<RecipesNav \/>\s*\n\s*<ViewsNav \/>/, "Recipes sits with the Library navs");
-  // The prior invariants must survive: Library above Investigations above the tree.
-  assert.match(page, /<ViewsNav \/>\s*\n\s*<InvestigationsNav \/>/);
-  assert.match(page, /<InvestigationsNav \/>\s*\n\s*<FileExplorer \/>/);
+test("RecipesNav sits between Capabilities and Library in the section registry", () => {
+  // Sectioned sidebar (openspec: field-patch-0.12.5 §1): the sections live in the
+  // registry now, not stacked in app/page.tsx.
+  assert.match(registry, /import \{ RecipesNav \} from "@\/features\/recipes\/RecipesNav";/);
+  assert.match(registry, /Component: CapabilityNav[\s\S]*Component: RecipesNav[\s\S]*Component: ViewsNav/, "Recipes sits between Capabilities and Library");
+  // Library (ViewsNav) still leads Investigations, which is now last in the rail.
+  assert.match(registry, /Component: ViewsNav[\s\S]*Component: InvestigationsNav/);
+  // The Files tree anchors the sidebar; the sections are no longer in page.
+  assert.match(page, /sidebar=\{<FileExplorer \/>\}/, "the file tree anchors the sidebar");
+  assert.doesNotMatch(page, /<RecipesNav \/>/, "the section moved to the rail registry");
 });
 
 // --- Chat empty-state recipe chips -------------------------------------------

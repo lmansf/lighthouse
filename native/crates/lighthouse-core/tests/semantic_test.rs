@@ -79,27 +79,22 @@ fn metric_round_trips_byte_stable_with_derived_reads() {
     assert_eq!(listed.metrics.len(), 1);
     assert_eq!(listed.metrics[0], created, "round trip preserves the record");
 
-    // Synonym + entity + join hint persist beside the metric.
+    // Synonym persists beside the metric.
     semantic::create_synonym("GMV", "net_revenue").expect("synonym");
-    semantic::create_entity("sales", "sales", &["region".to_string()], "the ledger")
-        .expect("entity");
     let store = semantic::list();
     assert_eq!(store.synonyms, vec![semantic::Synonym {
         term: "GMV".to_string(),
         canonical: "net_revenue".to_string(),
     }]);
-    assert_eq!(store.entities[0].key_columns, vec!["region".to_string()]);
 
-    // The on-disk envelope is the byte contract with the TS twin: v1, the four
-    // record arrays in order (`joinHints` camelCase), 2-space pretty, camelCase
-    // record keys (the view types' fileId/tableName reused), summary source a
-    // bare lowercase string.
+    // The on-disk envelope is the byte contract with the TS twin: v1, the two
+    // record arrays in order, 2-space pretty, camelCase record keys (the view
+    // types' fileId/tableName reused), summary source a bare lowercase string.
+    // (The removed declared-join machinery leaves NO entities/joinHints keys.)
     let raw = std::fs::read_to_string(vault.path().join(".rag-vault/semantic.json")).unwrap();
     assert!(raw.starts_with("{\n  \"v\": 1,\n  \"metrics\": ["), "{raw}");
     for (a, b) in [
         ("\"metrics\"", "\"synonyms\""),
-        ("\"synonyms\"", "\"entities\""),
-        ("\"entities\"", "\"joinHints\""),
         ("\"id\"", "\"name\""),
         ("\"name\"", "\"expression\""),
         ("\"expression\"", "\"description\""),
@@ -114,7 +109,8 @@ fn metric_round_trips_byte_stable_with_derived_reads() {
         assert!(ia.is_some() && ia < ib, "{a} must precede {b} in:\n{raw}");
     }
     assert!(raw.contains("\"source\": \"question\""), "{raw}");
-    assert!(raw.contains("\"keyColumns\": ["), "entity keyColumns is camelCase: {raw}");
+    assert!(!raw.contains("joinHints"), "no joinHints key: {raw}");
+    assert!(!raw.contains("entities"), "no entities key: {raw}");
 }
 
 #[test]
@@ -330,9 +326,9 @@ fn metric_lifecycle_refuses_or_cascades_against_dependent_synonyms() {
     assert_eq!(semantic::delete_metric("metric-nope", true).unwrap_err(), "metric not found");
 }
 
-/// A metric/entity over an effectively-local-only source is visible on a device
-/// ask and excluded from every cloud surface; a synonym naming a dropped metric
-/// and a join hint touching a dropped entity drop with it.
+/// A metric over an effectively-local-only source is visible on a device ask and
+/// excluded from every cloud surface; a synonym naming a dropped metric drops
+/// with it.
 #[test]
 fn local_only_definitions_are_ineligible_on_cloud_asks() {
     let vault = tempfile::tempdir().unwrap();
@@ -366,8 +362,6 @@ fn local_only_definitions_are_ineligible_on_cloud_asks() {
     .expect("creates");
     semantic::create_synonym("pgmv", "private_rev").expect("synonym on the private metric");
     semantic::create_synonym("pubgmv", "public_rev").expect("synonym on the public metric");
-    semantic::create_entity("priv_ent", "private", &[], "").expect("entity over the private table");
-    semantic::create_entity("pub_ent", "public", &[], "").expect("entity over the public table");
 
     // The propagation predicate itself.
     assert!(semantic::metric_effectively_local_only(&private_metric.reads));
@@ -377,10 +371,9 @@ fn local_only_definitions_are_ineligible_on_cloud_asks() {
     let local = semantic::eligible_for_posture(false);
     assert_eq!(local.metrics.len(), 2);
     assert_eq!(local.synonyms.len(), 2);
-    assert_eq!(local.entities.len(), 2);
 
-    // Cloud posture: the private metric, its synonym, and the private entity
-    // are all dropped; the public ones remain.
+    // Cloud posture: the private metric and its synonym are both dropped; the
+    // public ones remain.
     let cloud = semantic::eligible_for_posture(true);
     assert_eq!(
         cloud.metrics.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(),
@@ -391,11 +384,6 @@ fn local_only_definitions_are_ineligible_on_cloud_asks() {
         cloud.synonyms.iter().map(|s| s.term.as_str()).collect::<Vec<_>>(),
         vec!["pubgmv"],
         "the synonym naming the dropped metric drops with it"
-    );
-    assert_eq!(
-        cloud.entities.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
-        vec!["pub_ent"],
-        "the entity over the local-only table drops on cloud"
     );
 }
 
@@ -494,8 +482,9 @@ fn prompt_block_respects_the_ask_posture() {
 }
 
 /// The byte-identical-prompt invariant (openspec §2.2/§2.6): with ZERO
-/// definitions, `prompt_block` is `None`, `curated_join_pairs` is empty, and the
-/// assembled planning ctxs are byte-for-byte the pre-semantic-layer baseline.
+/// definitions, `prompt_block` is `None` and the assembled planning ctxs are
+/// byte-for-byte the pre-semantic-layer baseline. (The curated-join merge was
+/// removed in field-patch-0.12.5 §3, so `join_hints` is now the sole source.)
 #[test]
 fn empty_store_keeps_the_planning_ctxs_byte_identical() {
     let vault = tempfile::tempdir().unwrap();
@@ -503,8 +492,6 @@ fn empty_store_keeps_the_planning_ctxs_byte_identical() {
     // No semantic.json exists → the store is empty for the session.
     assert!(semantic::prompt_block(false).is_none());
     assert!(semantic::prompt_block(true).is_none());
-    assert!(semantic::curated_join_pairs(false).is_empty());
-    assert!(semantic::curated_join_pairs(true).is_empty());
 
     // Two tables share a non-generic column so join hints emit a line.
     let regs = vec![
@@ -527,8 +514,7 @@ fn empty_store_keeps_the_planning_ctxs_byte_identical() {
     if let Some(b) = semantic::prompt_block(false) {
         with_semantic.push((b.name, b.text, b.score));
     }
-    let pairs = semantic::curated_join_pairs(false);
-    if let Some(h) = lighthouse_core::analytics::join_hints_excluding(&regs, &pairs) {
+    if let Some(h) = lighthouse_core::analytics::join_hints(&regs) {
         with_semantic.push(("join hints".to_string(), h, 0.0));
     }
     assert_eq!(

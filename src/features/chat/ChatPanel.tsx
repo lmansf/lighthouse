@@ -96,6 +96,7 @@ import { chatService, MODEL_PROVIDERS, ragService, runRecipeQuestion } from "@/c
 import { useRagStore } from "@/stores/useRagStore";
 import { useAuthStore } from "@/stores/useAuthStore";
 import { parseChartSpec, stripChartRequestFences, tableToCsv } from "@/lib/chartSpec";
+import { parseStatSpec } from "@/lib/statSpec";
 import { stripAppearanceRequestFences } from "@/lib/appearanceSpec";
 import {
   cloudProviderActive,
@@ -121,6 +122,7 @@ import { quickOpenMatches } from "@/lib/quickOpen";
 import { activeMention, replaceMention, type MentionSpan } from "@/lib/mentionQuery";
 import { emphasize } from "@/features/quickopen/QuickOpen";
 import { AnalyticsChart, standaloneChartSvg } from "@/features/chat/AnalyticsChart";
+import { StatTile } from "@/features/chat/StatTile";
 import { SqlBlock } from "@/features/chat/SqlBlock";
 import { formatSql } from "@/lib/sqlFormat";
 import { safeMarkdownPrefix, splitMarkdownBlocks } from "@/lib/streamingMarkdown";
@@ -1496,6 +1498,8 @@ function formatRelativeTime(ts: number): string {
 
 /** The fence language the analytics engine uses for verified chart specs. */
 const CHART_LANG = "language-lighthouse-chart";
+/** The fence language the engine uses for a single verified number (§2). */
+const STAT_LANG = "language-lighthouse-stat";
 
 /** All text under a hast node — cell contents may nest strong/em/code. */
 function hastText(node: unknown): string {
@@ -1970,14 +1974,17 @@ function ChartItRow({
   );
 }
 
-/** True when a hast <pre> wraps exactly a lighthouse-chart code fence. */
+/** True when a hast <pre> wraps exactly a lighthouse-chart / -stat code fence —
+ *  either becomes a figure/tile, so the enclosing <pre> is unwrapped. */
 function isChartPre(node: unknown): boolean {
   const child = (node as { children?: unknown[] })?.children?.[0] as
     | { tagName?: string; properties?: { className?: unknown } }
     | undefined;
   const cls = child?.properties?.className;
   return (
-    child?.tagName === "code" && Array.isArray(cls) && cls.includes(CHART_LANG)
+    child?.tagName === "code" &&
+    Array.isArray(cls) &&
+    (cls.includes(CHART_LANG) || cls.includes(STAT_LANG))
   );
 }
 
@@ -2067,6 +2074,13 @@ const AnswerMarkdown = memo(function AnswerMarkdown({
         if (className?.split(" ").includes(CHART_LANG)) {
           const spec = parseChartSpec(String(children ?? ""));
           if (spec) return <AnalyticsChart spec={spec} />;
+        }
+        // §2: a single verified number renders as an inline stat tile (the
+        // engine emits the fence from a count/single-value result; a malformed
+        // spec falls through to a visible code block, never a broken tile).
+        if (className?.split(" ").includes(STAT_LANG)) {
+          const stat = parseStatSpec(String(children ?? ""));
+          if (stat) return <StatTile spec={stat} />;
         }
         // §1: the engine pretty-prints its "Query used" SQL; give that fence a
         // theme-aware highlighter so the disclosure reads like a SQL console.

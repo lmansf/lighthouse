@@ -14,7 +14,7 @@ use crate::contracts::{
     PlanPreview, RagReference,
 };
 use crate::llm::{self, Ctx, ModelCfg};
-use crate::table_profile::{is_profileable, table_profile};
+use crate::table_profile::{is_profileable, profile_chart, table_profile};
 use crate::{sources, vault};
 
 /// Budgets — mirrored in src/server/synth.ts.
@@ -1393,7 +1393,8 @@ fn live_pipeline(
                         .map(|r| Ctx { name: r.file_name.clone(), text: r.card.clone(), score: 1.0 })
                         .collect();
                     // Deterministic prompt order: file cards, view cards, the
-                    // semantic business-definitions block, then join hints.
+                    // semantic business-definitions block, the vault brief, then
+                    // join hints.
                     sql_ctxs.extend(view_regs.iter().map(|v| Ctx {
                         name: v.name.clone(),
                         text: v.card.clone(),
@@ -1401,9 +1402,9 @@ fn live_pipeline(
                     }));
                     // The semantic layer's business-definitions block (openspec:
                     // add-semantic-layer §2.2): posture-eligible metrics,
-                    // synonyms, entities, curated join hints, and metric-
-                    // expansion examples, rendered deterministically and
-                    // count-capped. Pushed here so BOTH the single-query and
+                    // synonyms, and metric-expansion examples, rendered
+                    // deterministically and count-capped. Pushed here so BOTH the
+                    // single-query and
                     // multi-step paths (each consumes `sql_ctxs`) see it. Zero
                     // eligible definitions ⇒ None ⇒ NOT pushed ⇒ every prompt
                     // string below is byte-identical to the pre-semantic-layer
@@ -1417,15 +1418,24 @@ fn live_pipeline(
                         } else {
                             false
                         };
-                    // Curated join hints WIN over the heuristic ones for the same
-                    // table pair (§2.4): the curated hint renders in the block
-                    // above, so drop the heuristic line for that pair. Zero
-                    // curated hints ⇒ empty exclude ⇒ `join_hints_excluding`
-                    // reproduces `join_hints` byte-for-byte.
-                    let curated_pairs = crate::semantic::curated_join_pairs(is_cloud);
-                    if let Some(hints) =
-                        crate::analytics::join_hints_excluding(&regs, &curated_pairs)
-                    {
+                    // The vault brief (openspec: field-patch-0.12.5 §3.5): a
+                    // deterministic, engine-drafted summary of the vault being
+                    // answered over — file composition + the queryable tables in
+                    // scope — injected as ONE editable block beside the business-
+                    // definitions block. Additive and NOT part of the §3 ablation
+                    // (it is the auto-derive deliverable, not a component on
+                    // trial); it draws only on engine-known facts, never model
+                    // prose. Empty facts ⇒ None ⇒ nothing pushed. PARITY: Rust-only
+                    // injection (the TS twin has no analytics branch);
+                    // vaultBrief.ts::renderBrief mirrors the renderer.
+                    if let Some(brief) = crate::vault_brief::draft_brief(&regs) {
+                        sql_ctxs.push(brief);
+                    }
+                    // Auto-derived join hints (columns shared across registered
+                    // tables). The declared/curated join hints that used to win
+                    // over these for a pair were removed in field-patch-0.12.5 §3
+                    // (no authoring UI), so this is now the sole join-hint source.
+                    if let Some(hints) = crate::analytics::join_hints(&regs) {
                         sql_ctxs.push(Ctx {
                             name: "join hints".to_string(),
                             text: hints,
@@ -2528,6 +2538,11 @@ fn live_pipeline(
         let mut manifest = retrieval_manifest(&initial.contexts, &initial.references);
         let mut profiled = 0;
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // §2 visual-first: the first profiled table also renders a chart, built
+        // from the profile's OWN aggregates by the same emitter the analytics
+        // path uses — emitted as a deterministic `lighthouse-chart` fence after
+        // the narration, never from the model's text.
+        let mut profile_chart_spec: Option<String> = None;
         for r in &initial.references {
             if profiled >= 2 {
                 break;
@@ -2536,9 +2551,10 @@ fn live_pipeline(
                 continue;
             }
             seen.insert(r.file_id.clone());
-            if let Some(p) =
-                vault::doc_text(&r.file_id, None).and_then(|(_, full)| table_profile(&r.name, &full))
-            {
+            let Some((_, full)) = vault::doc_text(&r.file_id, None) else {
+                continue;
+            };
+            if let Some(p) = table_profile(&r.name, &full) {
                 let pname = format!("{} — table profile", r.name);
                 manifest.push(manifest_entry(
                     "schema-card",
@@ -2549,6 +2565,9 @@ fn live_pipeline(
                 ));
                 contexts.push(Ctx { name: pname, text: p, score: 0.0 });
                 profiled += 1;
+                if profile_chart_spec.is_none() {
+                    profile_chart_spec = profile_chart(&r.name, &full);
+                }
             }
         }
 
@@ -2565,6 +2584,13 @@ fn live_pipeline(
             llm::stream_answer(question, contexts, cfg.clone(), history, Some(sink.clone()));
         while let Some(d) = answer.next().await {
             yield delta(d);
+        }
+        // §2 visual-first: the profiled table's chart, drawn from the engine's
+        // own aggregates (see profile_chart_spec above). Deterministic engine
+        // output after the narration — the same inline `lighthouse-chart` fence
+        // the analytics branch emits.
+        if let Some(chart) = &profile_chart_spec {
+            yield delta(format!("\n```lighthouse-chart\n{chart}\n```\n"));
         }
         yield final_chunk(
             initial.references,

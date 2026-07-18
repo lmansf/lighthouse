@@ -8,6 +8,10 @@ import {
   writeDesktopSettings,
   setExplorerWidth,
   explorerWidth,
+  setFlyoutWidth,
+  flyoutWidth,
+  setOpenFlyout,
+  openFlyout,
   setAppearance,
   appearance,
 } from "@/server/settings";
@@ -29,6 +33,10 @@ export async function GET() {
     briefingNoteHour: s.briefingNoteHour ?? 9, // default 9am (G5)
     tourShown: s.tourShown === true, // first-run tour, once per install
     explorerWidth: { window: explorerWidth(s, "window"), widget: explorerWidth(s, "widget") },
+    // Sectioned-sidebar flyout (openspec: field-patch-0.12.5 §1): per-mode width
+    // + the open-section id, the explorerWidth precedent.
+    flyoutWidth: { window: flyoutWidth(s, "window"), widget: flyoutWidth(s, "widget") },
+    openFlyout: openFlyout(s),
     appearance: appearance(s),
   });
 }
@@ -70,6 +78,18 @@ export async function POST(req: Request) {
   if (ew && (ew.mode === "window" || ew.mode === "widget") && typeof ew.width === "number") {
     setExplorerWidth(ew.mode, ew.width);
   }
+  // Sectioned-sidebar flyout width (openspec: field-patch-0.12.5 §1) — the same
+  // per-mode read-modify-write as explorerWidth, outside the patch spread so it
+  // never drops the sibling mode.
+  const fw = body.flyoutWidth;
+  if (fw && (fw.mode === "window" || fw.mode === "widget") && typeof fw.width === "number") {
+    setFlyoutWidth(fw.mode, fw.width);
+  }
+  // The open-section id (openspec §1): a string sets it; "" clears it (flyout
+  // closed). Its own narrow setter, like the auth-method choice.
+  if (typeof body.openFlyout === "string") {
+    setOpenFlyout(body.openFlyout);
+  }
   // Appearance customization (openspec §3): the normalizer drops anything
   // outside the whitelist, so nothing but bounded enum values can persist.
   // Runs before writeDesktopSettings so the returned `s` reflects it.
@@ -89,5 +109,7 @@ export async function POST(req: Request) {
     briefingNoteHour: s.briefingNoteHour ?? 9,
     tourShown: s.tourShown === true,
     explorerWidth: { window: explorerWidth(s, "window"), widget: explorerWidth(s, "widget") },
+    flyoutWidth: { window: flyoutWidth(s, "window"), widget: flyoutWidth(s, "widget") },
+    openFlyout: openFlyout(s),
   });
 }

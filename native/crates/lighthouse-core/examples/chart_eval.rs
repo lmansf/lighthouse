@@ -37,6 +37,8 @@ use lighthouse_core::analytics::{
     CHART_CARD_MAX_CHARS,
 };
 use lighthouse_core::llm::{stream_answer, Ctx, ModelCfg};
+use lighthouse_core::meta::counts_bar_spec;
+use lighthouse_core::table_profile::profile_chart;
 
 /// A fixture written to the temp dir: (table name, CSV body).
 const FIXTURES: &[(&str, &str)] = &[
@@ -136,6 +138,14 @@ const GOLDEN: &[Golden] = &[
 /// pre-flip heuristic declined it outright. A drop below this floor is a red
 /// build.
 const CHART_COVERAGE_BASELINE: usize = 6;
+
+/// Section-1d visual-coverage floor (field-patch-0.12.5 §2): the count of
+/// data-bearing answer classes — an analytics chart, a profiled-table chart, a
+/// meta/count bar — that must each render a visual. Recorded from the actual run
+/// (three of three). A drop below this is a red build; the pure-prose fixture
+/// is gated the OTHER direction (it must grow no visual), so the floor can never
+/// be met by charting narration.
+const VISUAL_COVERAGE_BASELINE: usize = 3;
 
 fn kind_of(spec: &Option<String>) -> Option<String> {
     spec.as_deref().and_then(|s| {
@@ -432,6 +442,79 @@ async fn main() {
             } else {
                 Err(format!("forwarded prose: {out:?}"))
             }
+        },
+    );
+
+    // --- Section 1d: visual-coverage floor (field-patch-0.12.5 §2) --------
+    // Charts by default reach beyond query batches: a profiled document table
+    // and a meta/count answer are engine-verified quantitative surfaces too, so
+    // each renders a visual. This floor spans the four answer classes the §2
+    // proposal names and is GATED BOTH DIRECTIONS — coverage over the three
+    // data-bearing fixtures must not regress, AND the pure-prose fixture must
+    // grow NO visual (a number that lives only in narration is never chartable).
+    println!("\n== visual-coverage floor (§2) ==");
+    let sales_csv = "Date,Region,Sales\n2016-01-05,NE,100.50\n2016-03-10,NW,200\n2016-11-20,NE,49.50\n2017-02-14,SE,300\n2017-06-30,NE,150.25\n2017-09-01,NW,174.75\n";
+    let mut visuals = 0usize;
+
+    // (1) analytics answer → a chart straight from the verified batches.
+    let analytics_visual = topn.chart.is_some();
+    if analytics_visual {
+        visuals += 1;
+    }
+    check(
+        "§2 analytics answer renders a chart",
+        if analytics_visual { Ok(()) } else { Err("no chart on a chartable result".into()) },
+    );
+
+    // (2) a synthesis answer over a profiled table → a chart from the profile's
+    //     OWN aggregates (the region bar), never the rendered [TABLE PROFILE].
+    let profile_visual = profile_chart("sales.csv", sales_csv);
+    if profile_visual.is_some() {
+        visuals += 1;
+    }
+    check(
+        "§2 profiled-table answer renders a chart",
+        match kind_of(&profile_visual) {
+            Some(k) if k == "bar" => Ok(()),
+            other => Err(format!("expected a bar from the profile, got {other:?}")),
+        },
+    );
+
+    // (3) a meta/count answer → a by-kind bar from the file inventory counts,
+    //     through the SAME emitter (a RecordBatch), never the prose count line.
+    let meta_visual = counts_bar_spec(&[("spreadsheet", 5), ("document", 3), ("PDF", 2)]);
+    if meta_visual.is_some() {
+        visuals += 1;
+    }
+    check(
+        "§2 meta/count answer renders a bar",
+        match kind_of(&meta_visual) {
+            Some(k) if k == "bar" => Ok(()),
+            other => Err(format!("expected a bar from the counts, got {other:?}")),
+        },
+    );
+
+    // (4) a pure-prose answer → NO visual. A CSV of prose profiles no aggregate;
+    //     a number that only appears in narration is never chartable.
+    let prose_visual = profile_chart("notes.csv", "just some prose\nwith a number 42 in it\nbut no table");
+    check(
+        "§2 pure-prose answer grows NO visual (ceiling on false positives)",
+        if prose_visual.is_none() {
+            Ok(())
+        } else {
+            Err(format!("prose charted a visual: {prose_visual:?}"))
+        },
+    );
+
+    // The floor, gated: every data-bearing class must render a visual.
+    check(
+        "§2 visual-coverage floor: data-bearing fixtures each render a visual",
+        if visuals >= VISUAL_COVERAGE_BASELINE {
+            Ok(())
+        } else {
+            Err(format!(
+                "only {visuals} of 3 data-bearing fixtures rendered a visual (floor {VISUAL_COVERAGE_BASELINE})"
+            ))
         },
     );
 

@@ -110,6 +110,22 @@ export interface DesktopSettings {
    */
   explorerWidth?: { window?: number; widget?: number };
   /**
+   * Sectioned-sidebar flyout width per window mode (openspec: field-patch-0.12.5
+   * §1), clamped to [FLYOUT_WIDTH_MIN, FLYOUT_WIDTH_MAX] at write AND read. The
+   * exact `explorerWidth` shape and read-modify-write idiom — its own key,
+   * per-mode merge so a "window" width never clobbers a "widget" one. PARITY:
+   * flyout_width / set_flyout_width in settings.rs.
+   */
+  flyoutWidth?: { window?: number; widget?: number };
+  /**
+   * Which sidebar section's flyout is open (openspec: field-patch-0.12.5 §1) —
+   * the section id (e.g. "insights"), or absent when the flyout is closed. One
+   * open at a time. Persisted so a relaunch reopens the same drawer. Written by
+   * its own narrow setter (`setOpenFlyout`), never the positional writer.
+   * PARITY: open_flyout / set_open_flyout in settings.rs.
+   */
+  openFlyout?: string;
+  /**
    * Appearance customization (openspec: add-usability-field-patch §3): the
    * curated accent, row density, font scale, and theme preset. Whitelisted and
    * validated by src/lib/appearanceSpec.ts — the SAME normalizer the ask-to-
@@ -178,6 +194,73 @@ export function setExplorerWidth(mode: "window" | "widget", width: number): Desk
     } catch {
       // best-effort, like writeDesktopSettings
     }
+  }
+  return next;
+}
+
+/**
+ * Sectioned-sidebar flyout width bounds (openspec: field-patch-0.12.5 §1).
+ * PARITY: FLYOUT_WIDTH_MIN/MAX in settings.rs; mirrored client-side as
+ * LAYOUT.flyoutMinWidth/flyoutMaxWidth (src/shell/theme.ts) and FLYOUT_MIN/MAX
+ * (src/stores/sidebarFlyoutReducer.ts) — keep the four in sync.
+ */
+export const FLYOUT_WIDTH_MIN = 280;
+export const FLYOUT_WIDTH_MAX = 680;
+
+const clampFlyoutWidth = (w: number): number =>
+  Math.min(FLYOUT_WIDTH_MAX, Math.max(FLYOUT_WIDTH_MIN, w));
+
+/** The persisted flyout width for `mode`, clamped to the bounds, or null when
+ * unset/unparseable. The exact `explorerWidth` reader. PARITY:
+ * DesktopSettings::flyout_width in settings.rs. */
+export function flyoutWidth(s: DesktopSettings, mode: "window" | "widget"): number | null {
+  const w = s.flyoutWidth?.[mode];
+  return typeof w === "number" && Number.isFinite(w) ? clampFlyoutWidth(w) : null;
+}
+
+/** Persist the flyout width for one window mode without disturbing the sibling
+ * mode — the `setExplorerWidth` read-modify-write, clamped at write. An unknown
+ * mode or a non-finite width leaves the file untouched. PARITY:
+ * set_flyout_width in settings.rs. */
+export function setFlyoutWidth(mode: "window" | "widget", width: number): DesktopSettings {
+  const f = settingsFile();
+  if (!f) return {};
+  const next = readDesktopSettings();
+  if ((mode === "window" || mode === "widget") && Number.isFinite(width)) {
+    next.flyoutWidth = { ...(next.flyoutWidth ?? {}), [mode]: clampFlyoutWidth(width) };
+    try {
+      writeJson(f, next);
+    } catch {
+      // best-effort, like writeDesktopSettings
+    }
+  }
+  return next;
+}
+
+/** The persisted open-section id, or null when the flyout is closed/unset.
+ * PARITY: DesktopSettings::open_flyout in settings.rs. */
+export function openFlyout(s: DesktopSettings): string | null {
+  const v = s.openFlyout;
+  return typeof v === "string" && v.trim().length > 0 ? v.trim() : null;
+}
+
+/** Persist which section's flyout is open (openspec §1) without disturbing any
+ * other key — the narrow read-modify-write beside the positional writer. A
+ * non-empty id sets it; an empty/blank id (or a non-string) CLEARS it (the
+ * flyout is closed), removing the key entirely so the file stays tidy. The
+ * caller (client) validates the id against the section registry before it ever
+ * reaches here. PARITY: set_open_flyout in settings.rs. */
+export function setOpenFlyout(id: unknown): DesktopSettings {
+  const f = settingsFile();
+  if (!f) return {};
+  const next = readDesktopSettings();
+  const clean = typeof id === "string" ? id.trim() : "";
+  if (clean.length > 0) next.openFlyout = clean;
+  else delete next.openFlyout;
+  try {
+    writeJson(f, next);
+  } catch {
+    // best-effort, like writeDesktopSettings
   }
   return next;
 }

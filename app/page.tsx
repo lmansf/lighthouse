@@ -8,12 +8,10 @@ import { FileExplorer } from "@/features/explorer/FileExplorer";
 // Static import (no dynamic gain): FileExplorer already pulls FileInspector
 // into the first-paint graph, so the host adds only its own few lines.
 import { FileInspectorHost } from "@/features/explorer/FileInspector";
-import { InvestigationsNav } from "@/features/investigations/InvestigationsNav";
-import { ViewsNav } from "@/features/views/ViewsNav";
-import { RecipesNav } from "@/features/recipes/RecipesNav";
-import { SemanticNav } from "@/features/semantic/SemanticNav";
-import { InsightsNav } from "@/features/insights/InsightsNav";
-import { CapabilityNav } from "@/features/capabilities/CapabilityNav";
+// The six non-file sections (Insights, Semantic, Capabilities, Recipes, Library,
+// Investigations) are no longer stacked here — they live in the sidebar section
+// registry (src/shell/sidebarSections.tsx) and open as flyout panels from the
+// SectionRail below the file tree (openspec: field-patch-0.12.5 §1).
 import { ChatPanel } from "@/features/chat/ChatPanel";
 import { VersionBadge } from "@/shell/VersionBadge";
 
@@ -74,33 +72,14 @@ export default function Home() {
       </div>
     );
   } else {
-    // Investigations mount ABOVE the file tree as a sidebar fragment
-    // (openspec: add-investigations design) — no Sidebar API change.
+    // Sectioned sidebar (openspec: field-patch-0.12.5 §1): the Files tree is the
+    // TOP anchor of the sidebar and the only thing in its body. The six other
+    // sections (Insights, Semantic, Capabilities, Recipes, Library,
+    // Investigations) are now header-only rows in the SectionRail — rendered by
+    // AppShell below the tree — each sliding out its full UI in the flyout panel.
+    // Their order + identity live in src/shell/sidebarSections.tsx.
     shell = (
-      <AppShell
-        sidebar={
-          <>
-            {/* Proactive "What stands out" panel (openspec: add-quant-depth §5):
-                the one surface that shows a finding WITHOUT the user asking, so
-                it sits at the TOP of the analytics nav group. Placed above
-                SemanticNav — the RecipesNav→ViewsNav→InvestigationsNav→
-                FileExplorer adjacencies the nav-UI tests pin stay intact. */}
-            <InsightsNav />
-            <SemanticNav />
-            {/* Capability map (openspec: add-deep-analysis §4.3): a "what can I
-                do with this vault" overview + the Investigate affordance. Placed
-                between SemanticNav and RecipesNav so the InsightsNav→SemanticNav
-                and RecipesNav→ViewsNav→InvestigationsNav→FileExplorer adjacencies
-                the nav-UI tests pin all stay intact. */}
-            <CapabilityNav />
-            <RecipesNav />
-            <ViewsNav />
-            <InvestigationsNav />
-            <FileExplorer />
-          </>
-        }
-        main={<ChatPanel />}
-      />
+      <AppShell sidebar={<FileExplorer />} main={<ChatPanel />} />
     );
   }
 

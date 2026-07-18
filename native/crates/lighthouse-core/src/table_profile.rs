@@ -4,6 +4,20 @@
 //! the same input both engines MUST produce byte-identical output; the parity
 //! fixture in the unit test below is the same one test/tableProfile.test.mjs
 //! pins on the TS side.
+//!
+//! §2 (visual-first answers): a profiled table is also a CHARTABLE surface. Its
+//! already-computed group-by / per-year aggregates route back through the SAME
+//! deterministic emitter the analytics path uses (`chart_spec_from_batches`) via
+//! a small in-process RecordBatch built from the profile's own summed values —
+//! never re-parsed from the rendered `[TABLE PROFILE]` text. The TS twin mirrors
+//! the decision (`tableProfile.ts::profileChart`); see the constitution note on
+//! `profile_chart`.
+
+use std::sync::Arc;
+
+use datafusion::arrow::array::{ArrayRef, Float64Array, StringArray};
+use datafusion::arrow::datatypes::{DataType, Field, Schema};
+use datafusion::arrow::record_batch::RecordBatch;
 
 const MAX_PROFILE_CHARS: usize = 1200;
 const MAX_GROUP_KEYS: usize = 8;
@@ -163,9 +177,22 @@ enum Kind {
     Text,
 }
 
-/// Build the profile text for a delimiter file, or None when the content does
-/// not look like a table. Byte-identical to the TS tableProfile().
-pub fn table_profile(name: &str, text: &str) -> Option<String> {
+/// A profiled column: its display name, inferred kind, and the raw cell strings
+/// (one per data row). Module-private structured form so both the text renderer
+/// and the §2 chart builder read the SAME engine-typed columns — a visual is
+/// never derived from the rendered `[TABLE PROFILE]` string, only from this.
+struct Col {
+    name: String,
+    kind: Kind,
+    values: Vec<String>,
+}
+
+/// Parse a delimiter file into typed, column-major `Col`s, or None when the
+/// content does not look like a table (same gates as the profile: header + ≥2
+/// data rows, no empty header). Type inference is ≥80% of non-empty values.
+/// Shared by `table_profile` (text) and `profile_aggregates` (chartable) so the
+/// two can never disagree about a column's kind or values.
+fn profile_cols(name: &str, text: &str) -> Option<Vec<Col>> {
     let delim = if name.to_lowercase().ends_with(".tsv") { '\t' } else { ',' };
     let rows: Vec<Vec<String>> = parse_delimited(text, delim)
         .into_iter()
@@ -187,11 +214,6 @@ pub fn table_profile(name: &str, text: &str) -> Option<String> {
     }
 
     // Column-major with type inference (≥80% of non-empty values).
-    struct Col {
-        name: String,
-        kind: Kind,
-        values: Vec<String>,
-    }
     let cols: Vec<Col> = header
         .iter()
         .enumerate()
@@ -213,13 +235,22 @@ pub fn table_profile(name: &str, text: &str) -> Option<String> {
             Col { name: h.clone(), kind, values }
         })
         .collect();
+    Some(cols)
+}
+
+/// Build the profile text for a delimiter file, or None when the content does
+/// not look like a table. Byte-identical to the TS tableProfile().
+pub fn table_profile(name: &str, text: &str) -> Option<String> {
+    let cols = profile_cols(name, text)?;
+    // The data-row count == every column's value count (one cell per row).
+    let data_len = cols.first().map_or(0, |c| c.values.len());
 
     let num_cols: Vec<&Col> = cols.iter().filter(|c| c.kind == Kind::Number).collect();
     let mut lines: Vec<String> = Vec::new();
     lines.push(format!(
         "[TABLE PROFILE — computed exactly by Lighthouse from {name}; these statistics are authoritative]"
     ));
-    lines.push(format!("rows: {} (excluding header)", data.len()));
+    lines.push(format!("rows: {data_len} (excluding header)"));
 
     let col_descs: Vec<String> = cols
         .iter()
@@ -335,6 +366,148 @@ pub fn is_profileable(name: &str) -> bool {
     n.ends_with(".csv") || n.ends_with(".tsv")
 }
 
+// --- Chartable aggregates (openspec: field-patch-0.12.5 §2) -----------------------
+//
+// A profiled table's group-by sums and per-year rollups are exactly the shape
+// the chart emitter draws. We surface them as structured label→value pairs (from
+// the profile's OWN summation, computed here from the engine-typed columns) and
+// hand the best one to `chart_spec_from_batches` through a tiny RecordBatch — so
+// a profiled document table renders a chart by default, built by the same
+// deterministic path an analytics query is, and never from the rendered text.
+
+/// One already-computed aggregate from the profile: a categorical group-by or a
+/// per-year rollup, as aligned label/value pairs. Every value is a sum the
+/// engine computed over the file's cells — NEVER a number lifted from prose.
+struct ProfileAggregate {
+    /// The grouping (label) column name — a text column, or the date column.
+    by: String,
+    /// The summed numeric column name (the series name).
+    value: String,
+    /// Group keys / years, in the SAME order the profile text lists them.
+    labels: Vec<String>,
+    /// The per-key sums, aligned with `labels`.
+    values: Vec<f64>,
+}
+
+/// The aggregates the profile text lists, in the SAME order (per-year rollups
+/// first, then group-by sums), recomputed from the engine-typed `cols`. Kept in
+/// lock-step with `table_profile`'s rendering loops so a chart is only ever
+/// offered for an aggregate the profile itself reports.
+fn profile_aggregates(cols: &[Col]) -> Vec<ProfileAggregate> {
+    let num_cols: Vec<&Col> = cols.iter().filter(|c| c.kind == Kind::Number).collect();
+    let mut out: Vec<ProfileAggregate> = Vec::new();
+
+    // Per-year rollups: every date column × the first numeric columns.
+    for dc in cols.iter().filter(|c| c.kind == Kind::Date) {
+        for nc in num_cols.iter().take(MAX_GROUP_COLS) {
+            let mut by_year: Vec<(i64, f64)> = Vec::new();
+            for i in 0..dc.values.len() {
+                let (Some(y), Some(n)) = (
+                    year_of(&dc.values[i]),
+                    nc.values.get(i).and_then(|v| num_of(v)),
+                ) else {
+                    continue;
+                };
+                match by_year.iter_mut().find(|(yy, _)| *yy == y) {
+                    Some((_, s)) => *s += n,
+                    None => by_year.push((y, n)),
+                }
+            }
+            if by_year.len() < 2 || by_year.len() > MAX_YEARS {
+                continue;
+            }
+            by_year.sort_by_key(|(y, _)| *y);
+            out.push(ProfileAggregate {
+                by: dc.name.clone(),
+                value: nc.name.clone(),
+                labels: by_year.iter().map(|(y, _)| y.to_string()).collect(),
+                values: by_year.iter().map(|(_, s)| *s).collect(),
+            });
+        }
+    }
+
+    // Group-by sums: low-cardinality text columns × the first numeric columns.
+    for tc in cols.iter().filter(|c| c.kind == Kind::Text) {
+        let distinct: std::collections::HashSet<&String> =
+            tc.values.iter().filter(|v| !v.is_empty()).collect();
+        if distinct.len() < 2 || distinct.len() > MAX_GROUP_KEYS {
+            continue;
+        }
+        for nc in num_cols.iter().take(MAX_GROUP_COLS) {
+            let mut by_key: Vec<(String, f64)> = Vec::new();
+            for i in 0..tc.values.len() {
+                let k = &tc.values[i];
+                let Some(n) = nc.values.get(i).and_then(|v| num_of(v)) else {
+                    continue;
+                };
+                if k.is_empty() {
+                    continue;
+                }
+                match by_key.iter_mut().find(|(kk, _)| kk == k) {
+                    Some((_, s)) => *s += n,
+                    None => by_key.push((k.clone(), n)),
+                }
+            }
+            if by_key.len() < 2 {
+                continue;
+            }
+            by_key.sort_by(|a, b| a.0.cmp(&b.0));
+            out.push(ProfileAggregate {
+                by: tc.name.clone(),
+                value: nc.name.clone(),
+                labels: by_key.iter().map(|(k, _)| k.clone()).collect(),
+                values: by_key.iter().map(|(_, s)| *s).collect(),
+            });
+        }
+    }
+    out
+}
+
+/// The richest aggregate to chart: the one with the most distinct labels (a
+/// wider comparison reads better than a two-point one), ties resolved by the
+/// profile's own order (per-year rollups precede group-bys). None when the
+/// profile reports no chartable aggregate.
+fn best_aggregate(aggs: Vec<ProfileAggregate>) -> Option<ProfileAggregate> {
+    let mut best: Option<ProfileAggregate> = None;
+    for a in aggs {
+        if best.as_ref().map_or(true, |b| a.labels.len() > b.labels.len()) {
+            best = Some(a);
+        }
+    }
+    best
+}
+
+/// An engine-built chart spec for a profiled table, or None when the content
+/// is not a chartable table.
+///
+/// CONSTITUTION (§14): the chart is materialized ONLY from the profile's own
+/// aggregated values — a two-column `RecordBatch` fed to the SAME
+/// `chart_spec_from_batches` the analytics path uses. A number that appears only
+/// in narration is never chartable: this function reads the file's cells, sums
+/// them itself, and never inspects the rendered `[TABLE PROFILE]` string. Kind
+/// (bar for categories, area/line for a per-year trend) is the emitter's call,
+/// so the profiled-table chart obeys every heuristic (temporal detection,
+/// id-like decline, the ≥2-finite floor) the query path does. PARITY:
+/// tableProfile.ts::profileChart mirrors the decision; the JSON differs only in
+/// float formatting (serde_json prints a trailing `.0`, JSON.stringify does
+/// not — both parse identically through parseChartSpec).
+pub fn profile_chart(name: &str, text: &str) -> Option<String> {
+    let cols = profile_cols(name, text)?;
+    let agg = best_aggregate(profile_aggregates(&cols))?;
+    let schema = Arc::new(Schema::new(vec![
+        Field::new(&agg.by, DataType::Utf8, false),
+        Field::new(&agg.value, DataType::Float64, true),
+    ]));
+    let columns: Vec<ArrayRef> = vec![
+        Arc::new(StringArray::from(
+            agg.labels.iter().map(|s| s.as_str()).collect::<Vec<&str>>(),
+        )),
+        Arc::new(Float64Array::from(agg.values.clone())),
+    ];
+    let batch = RecordBatch::try_new(schema, columns).ok()?;
+    crate::analytics::chart_spec_from_batches(&[batch])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -405,5 +578,61 @@ mod tests {
         assert_eq!(fmt_num(-0.375), "-0.38"); // Math.round would give -0.37
         assert_eq!(fmt_num(0.125), "0.13");
         assert_eq!(fmt_num(-300.0), "-300");
+    }
+
+    // --- Chartable aggregates (§2 visual-first) --------------------------------
+
+    fn spec_of(name: &str, csv: &str) -> Option<serde_json::Value> {
+        profile_chart(name, csv).map(|s| serde_json::from_str(&s).unwrap())
+    }
+
+    #[test]
+    fn profile_chart_prefers_the_widest_group_by() {
+        // The parity fixture profiles BOTH a 2-year rollup and a 3-region
+        // group-by; the wider comparison (regions) wins and charts as a bar
+        // whose values are the profile's OWN sums — NE 300.25 · NW 374.75 · SE 300.
+        let csv = [
+            "Date,Region,Sales",
+            "2016-01-05,NE,100.50",
+            "2016-03-10,NW,200",
+            "2016-11-20,NE,49.50",
+            "2017-02-14,SE,300",
+            "2017-06-30,NE,150.25",
+            "2017-09-01,NW,174.75",
+        ]
+        .join("\n");
+        let v = spec_of("sales.csv", &csv).expect("a profiled table charts");
+        assert_eq!(v["kind"], "bar");
+        assert_eq!(v["x"], serde_json::json!(["NE", "NW", "SE"]));
+        assert_eq!(v["series"][0]["name"], "Sales");
+        assert_eq!(v["series"][0]["values"], serde_json::json!([300.25, 374.75, 300.0]));
+    }
+
+    #[test]
+    fn profile_chart_of_a_dated_series_is_a_trend() {
+        // No text column ⇒ the only aggregate is the per-year rollup, which the
+        // emitter reads as temporal and draws as an area (a single metric).
+        let csv = "Date,Sales\n2016-01-05,100\n2017-02-14,300\n2016-03-10,200\n2017-06-30,150\n";
+        let v = spec_of("trend.csv", csv).expect("a dated table charts");
+        assert_eq!(v["kind"], "area");
+        assert_eq!(v["x"], serde_json::json!(["2016", "2017"]));
+        assert_eq!(v["series"][0]["values"], serde_json::json!([300.0, 450.0]));
+    }
+
+    #[test]
+    fn prose_and_thin_tables_grow_no_chart() {
+        // CONSTITUTION guard: a number that lives only in prose is not chartable.
+        // Non-table content, a single-column list, and a 1-data-row table all
+        // decline — the profiler finds no aggregate, so nothing is drawn.
+        assert_eq!(profile_chart("notes.csv", "just some prose\nwithout any structure"), None);
+        assert_eq!(profile_chart("one.csv", "header\n1\n2\n3"), None);
+        assert_eq!(profile_chart("tiny.csv", "a,b\n1,2"), None);
+        // A two-column table whose only groupable column is high-cardinality
+        // (every key distinct) reports no group-by ⇒ no chart.
+        let mut rows = vec!["Id,Val".to_string()];
+        for i in 0..20 {
+            rows.push(format!("id-{i},{i}"));
+        }
+        assert_eq!(profile_chart("ids.csv", &rows.join("\n")), None);
     }
 }

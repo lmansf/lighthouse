@@ -44,5 +44,6 @@ pub mod sqlfmt;
 pub mod synth;
 pub mod table_profile;
 pub mod vault;
+pub mod vault_brief;
 pub mod views;
 pub mod watch;

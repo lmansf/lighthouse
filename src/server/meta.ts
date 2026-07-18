@@ -14,6 +14,8 @@ import fs from "node:fs";
 import path from "node:path";
 import type { RagReference } from "@/contracts";
 import { shareableFileIds, resolveNodePath } from "./vault";
+// Relative (not @/) so the node test hook resolves it — see tableProfile.ts.
+import { chartSpecFromTable } from "../lib/chartFromTable";
 
 /** Most files a WhatsNew answer lists. */
 const WHATS_NEW_MAX = 15;
@@ -113,8 +115,9 @@ function vaultTailOk(tail: string): boolean {
 }
 
 function listFilesIntent(q: string): MetaIntent | null {
-  // "what|which <kind> do i have [in my vault]"
-  for (const lead of ["what ", "which "]) {
+  // "what|which|how many <kind> do i have [in my vault]" — "how many" is the
+  // count phrasing §2 answers with a stat tile. KEEP IN SYNC with meta.rs.
+  for (const lead of ["what ", "which ", "how many "]) {
     if (!q.startsWith(lead)) continue;
     const rest = q.slice(lead.length);
     const sp = rest.indexOf(" ");
@@ -303,17 +306,77 @@ function whatsNew(included: string[], windowMs: number | null, nowMs: number, is
   return { markdown: lines.join("\n"), references };
 }
 
-/** "5 spreadsheets, 3 documents" — only non-zero buckets, biggest first. */
-function countLine(files: WalkedFile[]): string {
+/** Kind counts (spreadsheet / document / PDF / file) over the inventory, biggest
+ *  first — the structured form both `countLine` and the §2 count visual read.
+ *  KEEP IN SYNC with meta.rs::kind_counts. */
+function kindCounts(files: WalkedFile[]): [string, number][] {
   const counts = new Map<string, number>();
   for (const f of files) {
     const label = kindLabel(f.name);
     counts.set(label, (counts.get(label) ?? 0) + 1);
   }
-  return [...counts.entries()]
-    .sort((a, b) => b[1] - a[1])
-    .map(([label, n]) => `${n} ${label}${n === 1 ? "" : "s"}`)
+  return [...counts.entries()].sort((a, b) => b[1] - a[1]);
+}
+
+/** "5 spreadsheets, 3 documents" — only non-zero buckets, biggest first. */
+function countLine(files: WalkedFile[]): string {
+  return kindCounts(files)
+    .map(([label, n]) => plural(label, n))
     .join(", ");
+}
+
+/** "1 PDF" / "3 PDFs" — the count line's own pluralization, reused for the
+ *  visual labels. KEEP IN SYNC with meta.rs::plural. */
+function plural(label: string, n: number): string {
+  return `${n} ${label}${n === 1 ? "" : "s"}`;
+}
+
+/** The bare plural noun ("PDFs", "spreadsheets") for a bar x-label / a stat
+ *  caption. KEEP IN SYNC with meta.rs::plural_noun. */
+function pluralNoun(label: string, n: number): string {
+  return n === 1 ? label : `${label}s`;
+}
+
+/** A `lighthouse-stat` fence: an inline stat tile carrying ONE engine number and
+ *  its caption (StatValue shape). Fixed key order for byte-parity with the Rust
+ *  twin; the caption is an engine noun, so no escaping is needed. KEEP IN SYNC
+ *  with meta.rs::stat_fence. */
+function statFence(value: number, label: string): string {
+  return `\`\`\`lighthouse-stat\n{"raw":"${value}","value":${value},"label":"${label}"}\n\`\`\``;
+}
+
+/** The by-kind counts as a bar chart spec (fence body), or null with fewer than
+ *  two kinds (a single number is a tile, not a bar). Built from the SAME client
+ *  heuristic the "Chart it" chip uses, over the structured counts — never the
+ *  prose count line. PARITY: meta.rs::counts_bar_spec (JSON differs only in
+ *  float formatting). */
+export function countsBarSpec(counts: [string, number][]): string | null {
+  if (counts.length < 2) return null;
+  const spec = chartSpecFromTable({
+    header: ["kind", "files"],
+    rows: counts.map(([label, n]) => [pluralNoun(label, n), String(n)]),
+  });
+  return spec ? JSON.stringify(spec) : null;
+}
+
+/** The visual a ListFiles answer carries by default: a single kind's count as a
+ *  stat tile, the whole-vault composition as a compact bar (falling back to a
+ *  total tile when there is only one kind). KEEP IN SYNC with
+ *  meta.rs::list_files_visual. */
+function listFilesVisual(
+  filter: KindFilter | null,
+  scopedLen: number,
+  files: WalkedFile[],
+  noun: string,
+): string | null {
+  if (filter !== null) {
+    // A single asked-for kind → one number → a stat tile.
+    return statFence(scopedLen, pluralNoun(noun, scopedLen));
+  }
+  // The whole vault → the by-kind breakdown as a bar, else a total tile.
+  const bar = countsBarSpec(kindCounts(files));
+  if (bar) return `\`\`\`lighthouse-chart\n${bar}\n\`\`\``;
+  return statFence(files.length, pluralNoun("file", files.length));
 }
 
 function listFiles(included: string[], filter: KindFilter | null, nowMs: number, isCloud: boolean): MetaAnswer | null {
@@ -339,7 +402,14 @@ function listFiles(included: string[], filter: KindFilter | null, nowMs: number,
     references.push(reference(f, `${kindLabel(f.name)} · saved ${age}`, i));
   });
   if (scoped.length > LIST_FILES_MAX) lines.push(`- …and ${scoped.length - LIST_FILES_MAX} more.`);
-  return { markdown: lines.join("\n"), references };
+  // §2 visual-first: the count IS engine-verified quantitative data, so it
+  // renders a visual by default — a single kind's count as a stat tile, the
+  // whole-vault breakdown as a compact bar. Built from the structured inventory,
+  // never from the prose count line.
+  let markdown = lines.join("\n");
+  const visual = listFilesVisual(filter, scoped.length, files, noun);
+  if (visual) markdown += `\n\n${visual}`;
+  return { markdown, references };
 }
 
 /**

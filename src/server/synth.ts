@@ -33,7 +33,7 @@ import {
 } from "./llm";
 import { readDesktopSettings } from "./settings";
 import { metaIntent, renderMeta } from "./meta";
-import { isProfileable, tableProfile } from "./tableProfile";
+import { isProfileable, profileChart, tableProfile } from "./tableProfile";
 import {
   cacheKey,
   insert as cacheInsert,
@@ -916,6 +916,11 @@ async function* answerPipelineLive(
   const manifest: ManifestEntry[] = retrievalManifest(initial.contexts, initial.references);
   let profiled = 0;
   const seen = new Set<string>();
+  // §2 visual-first: the first profiled table also renders a chart, built from
+  // the profile's OWN aggregates — emitted as a deterministic `lighthouse-chart`
+  // fence after the narration, never from the model's text. KEEP IN SYNC with
+  // synth.rs.
+  let profileChartSpec: string | null = null;
   for (const r of initial.references) {
     if (profiled >= 2) break;
     if (seen.has(r.fileId) || !isProfileable(r.name)) continue;
@@ -927,6 +932,7 @@ async function* answerPipelineLive(
       manifest.push({ name: pname, kind: "schema-card", chars: profile.length, fileId: r.fileId, score: 0 });
       contexts.push({ name: pname, text: profile, score: 0 });
       profiled += 1;
+      if (profileChartSpec === null && full) profileChartSpec = profileChart(r.name, full.text);
     }
   }
 
@@ -935,6 +941,12 @@ async function* answerPipelineLive(
   contexts.unshift(...reliabilityBlocks(question, cfg, includedFileIds));
   for await (const delta of streamAnswer(question, contexts, cfg, history)) {
     yield { delta, done: false };
+  }
+  // §2 visual-first: the profiled table's chart, drawn from the engine's own
+  // aggregates (see profileChartSpec above) — the same inline `lighthouse-chart`
+  // fence the analytics branch emits. KEEP IN SYNC with synth.rs.
+  if (profileChartSpec) {
+    yield { delta: `\n\`\`\`lighthouse-chart\n${profileChartSpec}\n\`\`\`\n`, done: false };
   }
   yield finalChunk(initial.references, contexts.length, origin, manifest);
 }

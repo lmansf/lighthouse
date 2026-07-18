@@ -3,8 +3,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { makeStyles, mergeClasses, tokens } from "@fluentui/react-components";
 import { Sidebar } from "./Sidebar";
+import { SectionRail } from "./SectionRail";
+import { SectionFlyout } from "./SectionFlyout";
+import { sectionById } from "./sidebarSections";
 import { LAYOUT } from "./theme";
 import { useVaultTree } from "./useVaultTree";
+import { useSidebarFlyout } from "@/stores/useSidebarFlyout";
 import { StartupPrompt } from "@/features/startup/StartupPrompt";
 
 const useStyles = makeStyles({
@@ -182,6 +186,21 @@ export function AppShell({ sidebar, main }: AppShellProps) {
         if (typeof server === "number") setWidth(server);
         else if (typeof cached === "number") setWidth(cached);
         else setWidth(LAYOUT.sidebarWidth);
+        // Reconcile the section flyout (openspec: field-patch-0.12.5 §1) against
+        // the authoritative per-mode settings file: teach the store the mode, and
+        // let the server's width + a VALID open-section id win over the cache. An
+        // unknown/removed section id is dropped here (registry-checked), never
+        // reopening a ghost drawer. Absent server values keep the cache hydrate.
+        const flyoutHydrate: {
+          mode: UiMode;
+          flyoutWidth?: number;
+          openSection?: string;
+        } = { mode: m };
+        const sfw = d?.flyoutWidth?.[m];
+        if (typeof sfw === "number") flyoutHydrate.flyoutWidth = sfw;
+        const sof = d?.openFlyout;
+        if (typeof sof === "string" && sectionById(sof)) flyoutHydrate.openSection = sof;
+        useSidebarFlyout.getState().hydrate(flyoutHydrate);
       })
       .catch(() => {
         /* offline / web build — the synchronous cache hydration stands */
@@ -310,6 +329,7 @@ export function AppShell({ sidebar, main }: AppShellProps) {
       <Sidebar
         collapsed={collapsed}
         onToggleCollapsed={() => setCollapsed((c) => !c)}
+        rail={<SectionRail />}
         width={width}
         resizing={resizing}
       >
@@ -335,6 +355,10 @@ export function AppShell({ sidebar, main }: AppShellProps) {
           onKeyDown={onHandleKeyDown}
         />
       )}
+      {/* The section flyout (openspec: field-patch-0.12.5 §1) sits between the
+          sidebar and main. It renders null unless a section is open; hidden with
+          the rail while the sidebar is collapsed. */}
+      {!collapsed && <SectionFlyout />}
       <div className={styles.main}>{main}</div>
       <StartupPrompt />
     </main>

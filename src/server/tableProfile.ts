@@ -8,7 +8,18 @@
  * as computed-by-Lighthouse. The Rust twin (lighthouse-core/src/table_profile.rs)
  * must produce byte-identical output for the same input; the shared fixture in
  * test/tableProfile.test.mjs and the core unit test pin that parity.
+ *
+ * §2 (visual-first answers): a profiled table is also a CHARTABLE surface. Its
+ * already-computed group-by / per-year aggregates route back through the client
+ * chart heuristic (chartFromTable — the same one the "Chart it" chip uses) as a
+ * tiny table of the profile's OWN summed values; see `profileChart`. PARITY:
+ * lighthouse-core table_profile.rs::profile_chart mirrors the decision (the Rust
+ * side feeds a RecordBatch to chart_spec_from_batches; the JSON differs only in
+ * float formatting). A relative import keeps this node-testable (the test hook
+ * resolves `../lib/…`, not the `@/` alias).
  */
+
+import { chartSpecFromTable } from "../lib/chartFromTable";
 
 /** Bounds — keep profiles compact enough to ride along as one context block. */
 const MAX_PROFILE_CHARS = 1200;
@@ -102,10 +113,12 @@ interface Col {
 }
 
 /**
- * Build the profile text for a delimiter file, or null when the content does
- * not look like a table (no header, <2 rows, or a lone column of prose).
+ * Parse a delimiter file into typed, column-major `Col`s, or null when the
+ * content does not look like a table (same gates as the profile). Shared by
+ * `tableProfile` (text) and `profileAggregates` (chartable) so the two can never
+ * disagree about a column's kind or values. Mirrors table_profile.rs::profile_cols.
  */
-export function tableProfile(name: string, text: string): string | null {
+function profileCols(name: string, text: string): Col[] | null {
   const delim = name.toLowerCase().endsWith(".tsv") ? "\t" : ",";
   const rows = parseDelimited(text, delim).filter((r) => !(r.length === 1 && r[0].trim() === ""));
   if (rows.length < 3) return null; // header + at least two data rows
@@ -116,7 +129,7 @@ export function tableProfile(name: string, text: string): string | null {
 
   // Column-major with type inference: a column is numeric/date when ≥80% of its
   // non-empty values parse as such (real data has stray blanks and totals rows).
-  const cols: Col[] = header.map((h, i) => {
+  return header.map((h, i) => {
     const values = data.map((r) => (r[i] ?? "").trim());
     const nonEmpty = values.filter((v) => v !== "");
     const nums = nonEmpty.filter((v) => numOf(v) !== null).length;
@@ -126,13 +139,24 @@ export function tableProfile(name: string, text: string): string | null {
     else if (nonEmpty.length > 0 && nums >= nonEmpty.length * 0.8) kind = "number";
     return { name: h, kind, values };
   });
+}
+
+/**
+ * Build the profile text for a delimiter file, or null when the content does
+ * not look like a table (no header, <2 rows, or a lone column of prose).
+ */
+export function tableProfile(name: string, text: string): string | null {
+  const cols = profileCols(name, text);
+  if (!cols) return null;
+  // The data-row count == every column's value count (one cell per row).
+  const dataLen = cols[0]?.values.length ?? 0;
 
   const numCols = cols.filter((c) => c.kind === "number");
   const lines: string[] = [];
   lines.push(
     `[TABLE PROFILE — computed exactly by Lighthouse from ${name}; these statistics are authoritative]`,
   );
-  lines.push(`rows: ${data.length} (excluding header)`);
+  lines.push(`rows: ${dataLen} (excluding header)`);
 
   // Per-column summary line.
   const colDescs = cols.map((c) => {
@@ -200,4 +224,105 @@ export function tableProfile(name: string, text: string): string | null {
 export function isProfileable(name: string): boolean {
   const n = name.toLowerCase();
   return n.endsWith(".csv") || n.endsWith(".tsv");
+}
+
+// --- Chartable aggregates (openspec: field-patch-0.12.5 §2) -----------------------
+
+/** One already-computed aggregate from the profile: a categorical group-by or a
+ *  per-year rollup, as aligned label/value pairs. Every value is a sum the
+ *  engine computed over the file's cells — NEVER a number lifted from prose.
+ *  Mirrors table_profile.rs::ProfileAggregate. */
+interface ProfileAggregate {
+  by: string;
+  value: string;
+  labels: string[];
+  values: number[];
+}
+
+/** The aggregates the profile text lists, in the SAME order (per-year rollups
+ *  first, then group-by sums), recomputed from the engine-typed `cols`. Kept in
+ *  lock-step with `tableProfile`'s rendering loops. Mirrors profile_aggregates. */
+function profileAggregates(cols: Col[]): ProfileAggregate[] {
+  const numCols = cols.filter((c) => c.kind === "number");
+  const out: ProfileAggregate[] = [];
+
+  // Per-year rollups: every date column × the first numeric columns.
+  for (const dc of cols.filter((c) => c.kind === "date")) {
+    for (const nc of numCols.slice(0, MAX_GROUP_COLS)) {
+      const byYear = new Map<number, number>();
+      for (let i = 0; i < dc.values.length; i += 1) {
+        const y = yearOf(dc.values[i]);
+        const n = numOf(nc.values[i] ?? "");
+        if (y !== null && n !== null) byYear.set(y, (byYear.get(y) ?? 0) + n);
+      }
+      if (byYear.size < 2 || byYear.size > MAX_YEARS) continue;
+      const entries = [...byYear.entries()].sort((a, b) => a[0] - b[0]);
+      out.push({
+        by: dc.name,
+        value: nc.name,
+        labels: entries.map(([y]) => String(y)),
+        values: entries.map(([, s]) => s),
+      });
+    }
+  }
+
+  // Group-by sums: low-cardinality text columns × the first numeric columns.
+  for (const tc of cols.filter((c) => c.kind === "text")) {
+    const distinct = new Set(tc.values.filter((v) => v !== ""));
+    if (distinct.size < 2 || distinct.size > MAX_GROUP_KEYS) continue;
+    for (const nc of numCols.slice(0, MAX_GROUP_COLS)) {
+      const byKey = new Map<string, number>();
+      for (let i = 0; i < tc.values.length; i += 1) {
+        const k = tc.values[i];
+        const n = numOf(nc.values[i] ?? "");
+        if (k !== "" && n !== null) byKey.set(k, (byKey.get(k) ?? 0) + n);
+      }
+      if (byKey.size < 2) continue;
+      const entries = [...byKey.entries()].sort((a, b) =>
+        a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0,
+      );
+      out.push({
+        by: tc.name,
+        value: nc.name,
+        labels: entries.map(([k]) => k),
+        values: entries.map(([, s]) => s),
+      });
+    }
+  }
+  return out;
+}
+
+/** The richest aggregate to chart: the one with the most distinct labels, ties
+ *  resolved by the profile's own order (rollups precede group-bys). Mirrors
+ *  table_profile.rs::best_aggregate. */
+function bestAggregate(aggs: ProfileAggregate[]): ProfileAggregate | null {
+  let best: ProfileAggregate | null = null;
+  for (const a of aggs) {
+    if (best === null || a.labels.length > best.labels.length) best = a;
+  }
+  return best;
+}
+
+/**
+ * An engine-built chart spec (the fence body JSON) for a profiled table, or null
+ * when the content is not a chartable table.
+ *
+ * CONSTITUTION (§14): materialized ONLY from the profile's own aggregated values
+ * — the best aggregate becomes a tiny table of the engine's OWN sums, fed to the
+ * SAME `chartSpecFromTable` heuristic the "Chart it" chip uses (which round-trips
+ * through the real parser). A number that appears only in narration is never
+ * chartable: this reads the file's cells and sums them itself. PARITY:
+ * table_profile.rs::profile_chart mirrors the decision; the Rust JSON prints a
+ * trailing `.0` on integral floats, this does not — both parse identically.
+ */
+export function profileChart(name: string, text: string): string | null {
+  const cols = profileCols(name, text);
+  if (!cols) return null;
+  const agg = bestAggregate(profileAggregates(cols));
+  if (!agg) return null;
+  const spec = chartSpecFromTable({
+    header: [agg.by, agg.value],
+    rows: agg.labels.map((l, i) => [l, String(agg.values[i])]),
+  });
+  return spec ? JSON.stringify(spec) : null;
 }

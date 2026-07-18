@@ -13,7 +13,7 @@ import { register } from "node:module";
 
 register("./_ts-extensionless-hook.mjs", import.meta.url);
 
-const { tableProfile, parseDelimited, isProfileable, fmtNum } = await import(
+const { tableProfile, parseDelimited, isProfileable, fmtNum, profileChart } = await import(
   "../src/server/tableProfile.ts"
 );
 
@@ -100,4 +100,35 @@ test("isProfileable gates by extension", () => {
   assert.equal(isProfileable("b.TSV"), true);
   assert.equal(isProfileable("c.xlsx"), false);
   assert.equal(isProfileable("d.md"), false);
+});
+
+// --- §2 chartable aggregates (mirrors table_profile.rs) --------------------
+
+test("profileChart prefers the widest group-by (the region bar)", () => {
+  // The parity fixture profiles a 2-year rollup AND a 3-region group-by; the
+  // wider comparison wins and charts as a bar of the profile's OWN sums.
+  const spec = JSON.parse(profileChart("sales.csv", SALES_CSV));
+  assert.equal(spec.kind, "bar");
+  assert.deepEqual(spec.x, ["NE", "NW", "SE"]);
+  assert.equal(spec.series[0].name, "Sales");
+  assert.deepEqual(spec.series[0].values, [300.25, 374.75, 300]);
+});
+
+test("profileChart of a dated series is a trend (area)", () => {
+  const csv = "Date,Sales\n2016-01-05,100\n2017-02-14,300\n2016-03-10,200\n2017-06-30,150\n";
+  const spec = JSON.parse(profileChart("trend.csv", csv));
+  assert.equal(spec.kind, "area");
+  assert.deepEqual(spec.x, ["2016", "2017"]);
+  assert.deepEqual(spec.series[0].values, [300, 450]);
+});
+
+test("prose and thin tables grow NO chart (constitution guard)", () => {
+  // A number that lives only in prose is not chartable — the profiler finds no
+  // aggregate, so nothing is drawn.
+  assert.equal(profileChart("notes.csv", "just some prose\nwithout any structure"), null);
+  assert.equal(profileChart("one.csv", "header\n1\n2\n3"), null);
+  assert.equal(profileChart("tiny.csv", "a,b\n1,2"), null);
+  const rows = ["Id,Val"];
+  for (let i = 0; i < 20; i += 1) rows.push(`id-${i},${i}`);
+  assert.equal(profileChart("ids.csv", rows.join("\n")), null);
 });

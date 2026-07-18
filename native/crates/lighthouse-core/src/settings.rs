@@ -31,6 +31,13 @@ pub const BEAM_MAX_STEPS_CEILING: usize = 12;
 pub const EXPLORER_WIDTH_MIN: f64 = 200.0;
 pub const EXPLORER_WIDTH_MAX: f64 = 720.0;
 
+/// Sectioned-sidebar flyout width bounds (openspec: field-patch-0.12.5 §1). The
+/// second panel that slides out of a section header persists its width per window
+/// mode, clamped to these bounds at BOTH write and read — the `explorerWidth`
+/// precedent. PARITY: mirrored as FLYOUT_WIDTH_MIN/MAX in src/server/settings.ts.
+pub const FLYOUT_WIDTH_MIN: f64 = 280.0;
+pub const FLYOUT_WIDTH_MAX: f64 = 680.0;
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DesktopSettings {
@@ -152,6 +159,33 @@ impl DesktopSettings {
             .and_then(|v| v.as_f64())
             .filter(|w| w.is_finite())
             .map(|w| w.clamp(EXPLORER_WIDTH_MIN, EXPLORER_WIDTH_MAX))
+    }
+
+    /// The persisted sectioned-sidebar flyout width for `mode` (openspec:
+    /// field-patch-0.12.5 §1), clamped to `[FLYOUT_WIDTH_MIN, FLYOUT_WIDTH_MAX]`.
+    /// Rides the `extra` map under `flyoutWidth`, keyed by mode — the exact
+    /// `explorer_width` shape. `None` when unset or unparseable. PARITY:
+    /// src/server/settings.ts::flyoutWidth.
+    pub fn flyout_width(&self, mode: &str) -> Option<f64> {
+        self.extra
+            .get("flyoutWidth")
+            .and_then(|v| v.get(mode))
+            .and_then(|v| v.as_f64())
+            .filter(|w| w.is_finite())
+            .map(|w| w.clamp(FLYOUT_WIDTH_MIN, FLYOUT_WIDTH_MAX))
+    }
+
+    /// The persisted open-section id (openspec: field-patch-0.12.5 §1) — which
+    /// sidebar section's flyout is open — or `None` when closed/unset. Rides the
+    /// `extra` map under `openFlyout` (the widgetPos precedent). A blank string
+    /// reads as `None`. PARITY: src/server/settings.ts::openFlyout.
+    pub fn open_flyout(&self) -> Option<String> {
+        self.extra
+            .get("openFlyout")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
     }
 
     /// The persisted, validated appearance customization (openspec:
@@ -315,6 +349,56 @@ pub fn set_explorer_width(mode: &str, width: f64) -> DesktopSettings {
         }
         write_json(&f, &next);
     }
+    next
+}
+
+/// Persist the sectioned-sidebar flyout width for one window mode (openspec:
+/// field-patch-0.12.5 §1) without disturbing any other key — the
+/// `set_explorer_width` read-modify-write. The width rides the `extra` map under
+/// `flyoutWidth` keyed by mode, clamped to `[FLYOUT_WIDTH_MIN, FLYOUT_WIDTH_MAX]`
+/// at write (and again at read, in `flyout_width`). An unknown mode or a
+/// non-finite width is ignored. PARITY: src/server/settings.ts::setFlyoutWidth.
+pub fn set_flyout_width(mode: &str, width: f64) -> DesktopSettings {
+    let Some(f) = settings_file() else {
+        return DesktopSettings::default();
+    };
+    let mut next = read_desktop_settings();
+    if matches!(mode, "window" | "widget") && width.is_finite() {
+        let w = width.clamp(FLYOUT_WIDTH_MIN, FLYOUT_WIDTH_MAX);
+        let entry = next
+            .extra
+            .entry("flyoutWidth".to_string())
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+        if !entry.is_object() {
+            *entry = serde_json::Value::Object(serde_json::Map::new());
+        }
+        if let Some(obj) = entry.as_object_mut() {
+            obj.insert(mode.to_string(), serde_json::Value::from(w));
+        }
+        write_json(&f, &next);
+    }
+    next
+}
+
+/// Persist which sidebar section's flyout is open (openspec: field-patch-0.12.5
+/// §1) without disturbing any other key — the narrow read-modify-write. A
+/// non-empty id sets `openFlyout` in the `extra` map; a blank id CLEARS it (the
+/// flyout is closed), removing the key so the file stays tidy. The client
+/// validates the id against the section registry before it ever reaches here.
+/// PARITY: src/server/settings.ts::setOpenFlyout.
+pub fn set_open_flyout(id: &str) -> DesktopSettings {
+    let Some(f) = settings_file() else {
+        return DesktopSettings::default();
+    };
+    let mut next = read_desktop_settings();
+    let clean = id.trim();
+    if clean.is_empty() {
+        next.extra.remove("openFlyout");
+    } else {
+        next.extra
+            .insert("openFlyout".to_string(), serde_json::Value::from(clean));
+    }
+    write_json(&f, &next);
     next
 }
 

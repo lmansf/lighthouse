@@ -1,0 +1,68 @@
+# Manual MEASUREMENT run for openspec field-patch-0.12.5 §3 ("business
+# definitions: measure, then decide"). Scores the analytics + trust scorecards
+# (analytics_eval) with each hand-authored business-definition component ablated
+# on/off and prints the per-component lift. NEVER a gate — the removal decision
+# is the owner's, informed by this table (docs/analytics-beam.md Phase D).
+#
+# The env-gated ablation hook (semantic::eligible_for_posture) ships INERT, so
+# BASELINE is a plain run; each LIGHTHOUSE_ABLATE_* run removes one component.
+# analytics_eval ALWAYS prints `SCORECARD total=… passed=… rate=…`, so a run is
+# captured even when ablation drives failures (the `|| true` keeps the nonzero
+# exit from failing the step; the rate is grepped from stdout afterwards).
+name: ablation
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  ablate:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: native
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native
+      - name: System deps (webkit2gtk + gtk for the workspace build)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev patchelf
+      # Build the eval ONCE; every sweep run below reuses the built binary.
+      - name: Build analytics_eval
+        run: cargo build -p lighthouse-core --example analytics_eval --locked
+      - name: Ablation sweep (baseline + per-component) with the messy fixture
+        run: |
+          set -uo pipefail
+
+          # Run the eval under an optional env assignment ($1, e.g.
+          # "LIGHTHOUSE_ABLATE_METRICS=1"), NEVER failing the step on the
+          # nonzero exit ablation causes, and echo just the SCORECARD rate.
+          rate_under() {
+            local out
+            out="$(env ${1:-} cargo run -q -p lighthouse-core --example analytics_eval --locked 2>&1 || true)"
+            echo "$out" | grep -oE 'rate=[0-9.]+' | tail -n1 | cut -d= -f2
+          }
+          points() { awk "BEGIN { printf \"%.1f\", ($1 - $2) * 100 }"; }
+
+          BASE=$(rate_under "")
+          M=$(rate_under "LIGHTHOUSE_ABLATE_METRICS=1")
+          S=$(rate_under "LIGHTHOUSE_ABLATE_SYNONYMS=1")
+
+          {
+            echo "## Business-definitions ablation (analytics_eval)"
+            echo ""
+            echo "Decision rule: lift < ~2 points AND no qualitative save ⇒ REMOVE; else KEEP + auto-derive."
+            echo ""
+            echo "(Declared joins + backing entities were REMOVED in field-patch-0.12.5 §3 —"
+            echo "no authoring UI, and auto-derived join hints cover join inference — so there"
+            echo "is no JOINS ablation row anymore.)"
+            echo ""
+            echo "| component | baseline rate | ablated rate | lift (points) |"
+            echo "|---|---|---|---|"
+            echo "| metrics  | $BASE | $M | $(points "$BASE" "$M") |"
+            echo "| synonyms | $BASE | $S | $(points "$BASE" "$S") |"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
