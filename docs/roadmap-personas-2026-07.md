@@ -1220,6 +1220,266 @@ onboarding in widget mode defers it to the first main-window open; (f)
 full suites green. End with the maintainer checklist: Supabase project
 sunset plan, the feedback email address, Stripe account cleanup — and a
 one-paragraph summary of what a privacy reviewer would now find.
+
+---
+
+## 11. State check 2026-07-15 (v0.11.3) — what landed, what remains, final run order
+
+Main moved from 0.11.0 to **0.11.3** via PRs #143–#150. Verified against the
+tree (not just commit messages):
+
+**Landed — do not re-run:**
+
+| Work | Evidence |
+|---|---|
+| §7 Phase 0: Electron retired, TS-twin doc, release smoke, signing wiring, docs truth | `electron/` + `release.yml` gone; `check.yml`, `release-smoke.yml`, `docs/ts-twin.md`, `docs/signing.md`, `docs/data-flows.md`; README theme fixed |
+| §7 Phase 1 (security wave, ran despite deprioritization) | `policy.rs` (S1), `egress.rs` + `src/features/egress` session shield/panel (S3), `audit.rs` (S2), `SECURITY.md` + `supply-chain.yml` + EDR/xlsx docs (S4), offline activation (S5) |
+| §7 Phase 2 / §8 Track G (analyst): eval floor, fast private answers, PDF tables, presentation polish, briefings, recall | `pdf_tables.rs`, `briefings.rs`, charts polish + truncation honesty in `analytics.rs` (0.11.2, PR #148) |
+| §8-era Track T: ambient telemetry + experiments deleted, explicit feedback channel, Edge ops trimmed | `usage.rs`/`experiment.rs`/ExperimentsDialog gone; `docs/server-decommission.md` (0.11.1, PR #147) |
+| Rename: analytics feature is now **Beam** | `docs/analytics-beam.md` (PR #149) |
+| G7's worry largely pre-satisfied | row cap is `MAX_XLSX_ROWS` (workbooks only — CSV/parquet register by path and stream); honesty footers ("row cap: N older file(s) NOT included") |
+
+**Remains (verified still in tree / absent):**
+
+- Licensing, accounts, Supabase: `supabase/`, `license.rs`/`license.ts`,
+  `.env.production`, README Pricing & trial, the onboarding welcome/email
+  slide, gear menu still inside `LicenseGate.tsx` — §9's core cut not run.
+  New wrinkle: **offline activation (S5) landed after the no-accounts
+  decision** — archive it as the future-paid machinery, don't just delete.
+- Feedback still posts to the backend — no mailto/GitHub handoff yet.
+- First-run tour: absent.
+- Per-answer provenance stamp: absent (only the session-level egress shield
+  exists); provider picker still cloud-as-peer.
+- Local-only marks, file inspector: absent.
+- TTS: `tts.rs`, `resources/tts`, piper in the fetch script — still present.
+- Evidence-pack export: absent.
+- Code signing: wiring done, **certificates still unprovisioned**
+  (`docs/maintainer-provisioning.md`) — maintainer-side, no session needed.
+
+**Final run order** (prompts below supersede §7–§10 where they overlap):
+
+1. **T-final** — cut the cord remainder + tour (licensing/Supabase/email
+   removal, zero-backend feedback, first-run tour, doc deltas).
+2. **P-final** — privacy-first analyst pass (provider reframe + per-answer
+   stamp reusing the egress registry, local-only marks, inspector, TTS
+   removal, SharePoint keep).
+3. **G-final** — small verify-and-close: lift any real registration caps
+   left, add evidence-pack export.
+4. In parallel, maintainer-side: provision signing certs per
+   `docs/signing.md` + `docs/maintainer-provisioning.md`.
+
+### T-final prompt
+
+```
+Finish cutting Lighthouse's cloud cord. The 0.11.1 privacy release already
+deleted ambient telemetry and experiments; this session removes what's
+left: licensing, accounts, the Supabase backend, and the onboarding email
+step — replaced by an always-unlocked app, a zero-backend feedback
+channel, and a skippable once-per-install first-run tour. After this PR
+the complete egress list is: the cloud model the user configured, the
+update check, and pinned asset downloads.
+
+One PR, one commit per numbered section. No version bump. Ground rules:
+the Rust engine (native/) ships, the TS engine under src/server is the
+web-dev twin (see docs/ts-twin.md) — changes land in BOTH per the PARITY
+convention. Gates: npm test, the cargo suite, lint, the release-smoke
+workflow, plus the proof gates at the end.
+
+1. Licensing, accounts, Supabase — remove:
+   - Engines: license.rs / license.ts (including the recently added
+     offline-activation path — archive, don't discard: it is exactly the
+     designed future-paid mechanism), the /api/license and /api/register
+     routes and Rust twins, identity/contact/launch state files (stop
+     writing; clean stale ones on boot), LICENSE_ENFORCE/LICENSE_SECRET
+     local-dev mode, the Stripe checkout path.
+   - UI: extract the settings gear menu, Preferences dialog, and AI
+     models dialog out of src/features/license/LicenseGate.tsx into
+     src/features/settings/, then delete the gate overlay,
+     trial/registration/purchase/activate/notify dialogs, GraceBanner,
+     sign-out, and the account card. The app is always unlocked.
+   - Onboarding: delete the welcome/email slide (OnboardingPanel.tsx —
+     the local auth service only ever used the email); first run becomes
+     vault choice → window/widget mode → model pick → default inclusion,
+     handing off to the tour (section 3).
+   - Repo: move supabase/ and docs/registration.md to an archive branch
+     (archive/licensing-supabase, which also holds the offline-activation
+     code); delete .env.production; purge LICENSE_API_URL /
+     SUPABASE_ANON_KEY / CHECKOUT_API_URL / PAID_ENABLED references.
+   - Interactions with the security wave (all three stay): policy.rs,
+     audit.rs, egress.rs. Remove only their license-check call-site
+     instrumentation and any license-related policy keys, with a PARITY
+     sweep. Update docs/maintainer-provisioning.md: the three product
+     decisions (trial length, PAID_ENABLED, seats) are resolved —
+     no accounts, no trial, paid-if-ever returns via the archived signed
+     license files + a payment link; signing remains the one open item.
+   - Compatibility: extend docs/server-decommission.md into the full
+     sunset plan (old installs poll the license function; verify from the
+     old code that a dead endpoint degrades to grace/lock, never a wipe;
+     recommend keeping the function up patched always-valid for a
+     window). Report; don't deploy.
+
+2. Feedback goes zero-backend: the 0.11.1 channel still posts to the
+   backend. Rework it so the dialog composes everything locally —
+   message, app version, OS, optional off-by-default shell.log excerpt
+   rendered in full — then offers two explicit handoffs: "Email us"
+   (mailto: with prefilled subject/body — ASK ME for the address) and
+   "Open a GitHub issue" (prefilled lmansf/lighthouse/issues/new, labeled
+   public). The app transmits nothing; the remaining explicit-submission
+   Edge ops and their client code are deleted; the egress registry
+   reflects that feedback is not an app egress.
+
+3. First-run tour — skippable, once per install. After onboarding
+   completes and the main window first renders: five short steps anchored
+   to the real UI (Fluent TeachingPopover or equivalent; centered overlay
+   fallback) — (1) explorer: add files, control what the AI sees;
+   (2) chat: grounded, cited answers; (3) Beam analytics: verified
+   numbers, SQL shown; (4) model picker: private on-device vs cloud;
+   (5) settings gear: Preferences, AI models, Send feedback. Every step
+   has Next / "Skip tour"; Esc dismisses; keyboard navigable; both
+   themes. Show-once: a tour_shown flag in the install-global app-state
+   dir (never the vault — vault switches must not re-show); set on first
+   appearance, completed or skipped; only a wiped app-state dir shows it
+   again. Widget-mode installs: never interrupt the widget — defer to the
+   first main-window open. Re-entry: "Take the tour" on the help surface,
+   folding src/features/help/QuickStart.tsx into ONE orientation surface;
+   manual re-entry ignores the flag. TS twin: same flag semantics
+   (PARITY note where the app-state dir differs).
+
+4. Docs truth deltas: README — delete the Pricing & trial section, update
+   the privacy paragraph to the new posture; docs/data-flows.md — remove
+   the license/trial check entry (leaving exactly: chosen provider,
+   update check, asset downloads, plus the user-initiated feedback
+   handoffs); add the decision record (paid-if-ever = archived signed
+   license files + payment link, no accounts, no Supabase).
+
+Proof gates: (a) grep-clean — supabase, LICENSE_API_URL, PAID_ENABLED,
+submitNotify, TRIAL_DAYS nowhere outside archive branches and
+history/roadmap docs; (b) built-app run: fresh first-run through
+onboarding → tour → a grounded answer with outbound traffic observed —
+zero requests beyond docs/data-flows.md; (c) feedback dialog produces
+correct mailto: and issue URLs (unit-tested strings); (d) the extracted
+settings gear still opens Preferences and AI models; (e) tour E2E: shows
+exactly once, Skip is permanent, relaunch + vault switch never re-show,
+help re-entry works, widget mode defers to first main-window open;
+(f) suites + release smoke green. End with the maintainer checklist
+(Supabase sunset, feedback address, Stripe cleanup) and a one-paragraph
+"what a privacy reviewer now finds".
+```
+
+### P-final prompt
+
+```
+Make Lighthouse's privacy-first identity legible per answer and per file.
+Prereq: the cut-the-cord PR (always-unlocked, no accounts) is merged. One
+PR, one commit per numbered section, no version bump. Ground rules: Rust
+engine ships, TS twin per docs/ts-twin.md and PARITY convention; sections
+2 and 3 get OpenSpec changes (proposal, design with Non-goals pinned,
+spec deltas, tasks; validate green). The analytics feature is named Beam
+(docs/analytics-beam.md). Gates: npm test, cargo suite, lint,
+release-smoke, live E2E per section.
+
+1. Private-first provider experience + per-answer provenance.
+   - Reframe onboarding's model step and the AI-models dialog: "Private —
+     runs on this device" is the hero option with its install affordance;
+     cloud vendors group under "Cloud models — sends excerpts of your
+     included files to <vendor> to answer", vendor named per row. All
+     seven providers stay, DeepSeek included (decided 2026-07-15). No
+     dark patterns — cloud is one click away, honestly labeled.
+   - Per-answer provenance stamp, engine-emitted (never model text):
+     REUSE the existing session egress registry (egress.rs /
+     src/features/egress) — do not build a parallel one. The final
+     ChatChunk gains meta {origin: "device" | provider id, excerpt count,
+     source file count}, computed where the prompt is assembled so it
+     counts what was actually sent; the UI renders "Answered on this
+     device" or "Answered via <vendor> — N excerpts from M files sent"
+     under each answer; the widget pill shows it compactly. The session
+     shield already exists — extend it, don't duplicate. When the audit
+     log is enabled, the stamp and the audit record must agree (assert in
+     a test).
+
+2. Local-only file marks (OpenSpec: add-local-only-marks). A second
+   per-node flag alongside inclusion: "Private — this device only";
+   explicit flag, ancestor-wins, persisted in state.json (versioned,
+   migration-safe). Enforce in the ENGINE at the context-assembly choke
+   points: with a cloud provider active, local-only nodes are excluded
+   from retrieval, attachments, Beam analytics registration, and
+   catalog/meta answers — column names are sensitive too; with the local
+   model or extractive fallback they participate normally. Answers note
+   exclusions honestly ("2 files skipped — marked private; switch to the
+   private model to include them"). Explorer: a lock toggle distinct from
+   the visibility eye, in rows and selection mode; add the lock to the
+   first-run tour's explorer step copy. Parity tests: same fixture vault
+   + cloud provider → identical candidate sets in both engines. E2E: mark
+   a file, ask via a mocked cloud endpoint, assert its content cannot
+   appear in the outbound prompt and the skip note renders.
+
+3. "What the AI sees" inspector (OpenSpec: add-file-inspector). From an
+   explorer row menu, a read-only per-file panel: extraction preview
+   (exactly what the index holds, OCR-derived text flagged), chunk count
+   + chunking mode, detected columns + kinds (catalog), index freshness,
+   inclusion + local-only state in plain language, and a test-search box
+   scoped to this file showing top chunks with scores. No mutations
+   beyond the existing toggles. Desktop first; twin renders the same
+   panel minus desktop-only fields (PARITY).
+
+4. Remove text-to-speech entirely — Piper AND Web Speech.
+   - Build/supply chain: piper + voice out of scripts/fetch-local-model.mjs
+     (fetch, pins, ASSET_SHA256), resources/tts bundling, mirror-hf-assets
+     and asset-digests entries, and the piper-specific Linux CI
+     workarounds (#118–#121: NO_STRIP, RUNPATH stamping, LD_LIBRARY_PATH)
+     — delete each only where piper was its sole reason; verify
+     llama-server bundling still passes.
+   - Engines/shell: delete tts.rs, src/server/tts.ts, /api/tts, the
+     desktop tts command, piper supervision, the capability probe.
+   - UI: delete read-aloud — the chat-header switch + preference,
+     per-answer play/stop, src/lib/speech.ts, the speech test suite; grep
+     speechSynthesis for stragglers. Dictation is OS-level input —
+     untouched.
+   - Docs: read-aloud paragraphs out of README/launch-copy, blueprint
+     stamped, Piper attribution dropped, installer-size claims refreshed.
+
+5. SharePoint stays as plumbing — do NOT remove it (decision 2026-07-15).
+   Connector code in both engines, the SourceConnector seam, and the
+   SHAREPOINT_* env surface remain untouched; only add a one-line
+   dormant-by-decision note so future cleanup sessions keep their hands
+   off. Gate: SharePoint files byte-identical to main.
+
+Proof gates: greps for piper, speechSynthesis, "read aloud" clean outside
+docs/history; a release-style build fetches no TTS asset and Linux
+bundles without the piper workarounds; provenance-stamp E2E on-device and
+via a mocked cloud provider (stamp agrees with the egress registry and
+audit record); the local-only E2E; inspector snapshot test; SharePoint
+byte-identical; suites + release smoke green. End with a "what changed
+for a privacy reviewer" paragraph. No decisions remain open.
+```
+
+### G-final prompt (small)
+
+```
+Close out Beam's scale and artifact gaps — verify first, build only what's
+missing. One PR. Ground rules per docs/ts-twin.md; Beam analytics is
+Rust-only (established PARITY decision).
+
+1. Registration caps — verify, then lift only what's real: CSV/TSV/
+   Parquet already register by path (DataFusion streams; MAX_XLSX_ROWS
+   applies to workbooks only) and 0.11.2 added cap-honesty footers.
+   Audit what caps actually bind today (file-count per ask, union-group
+   member caps, workbook rows) against an analyst's "sum a year of big
+   monthlies" ask; raise or remove any cap whose only reason was memory
+   that streaming already solved; keep workbook caps with their honest
+   footers. Fixtures: a >100k-row CSV aggregates correctly with no
+   truncation note; a capped workbook still notes its cap. If nothing
+   binds, close with a short report instead of inventing work.
+
+2. Evidence-pack export: on Beam analytics answers, one self-contained
+   file (question, narrative, result table, chart, the SQL, file
+   provenance + freshness, timestamp) written via the existing artifacts
+   machinery, chip alongside Save-as-CSV. Check none of it already
+   shipped in 0.11.2's presentation polish before building.
+
+Gates: cargo + npm suites, the 0.11.2 eval floor stays green, E2E for the
+export chip, release smoke green.
+```
 ```
 
 ---
