@@ -1532,6 +1532,41 @@ an invalid directive falls back to the heuristic chart, "none" renders no
 chart — all with numbers byte-identical to the result table; existing
 bar/line/area fixtures unchanged; release smoke green.
 ```
+
+---
+
+## 12. Time-savings catalog (2026-07-15)
+
+Where a privacy-first analyst's minutes actually go, and what saves them.
+Status: ✅ shipped · 🔄 in flight (T/P/G-final) · ★ proposed (new).
+
+**Already banked or in flight** — first-token latency (speculative decoding,
+GPU offload, prompt-prefix caching, extractive fast-draft ✅), iteration
+(refinement chips, Edit SQL, conversational refinement ✅), recurring
+questions (pins, briefings ✅), zero-friction ask (widget summon, dictation,
+suggested asks ✅), skimmability (chart intelligence 🔄 G-final), sharing
+(evidence pack 🔄 G-final), onboarding friction (email step gone, tour 🔄
+T-final), verification time (SQL shown ✅; per-answer provenance 🔄 P-final —
+trust features are time features: every stamp is a manual check the user
+skips).
+
+**Proposed — ranked by minutes-saved-per-week ÷ effort:**
+
+| # | Time-saver | Where the time goes today | Sketch | Effort |
+|---|---|---|---|---|
+| ★1 | **Answer cache with freshness stamp** | Re-asking anything repeats full retrieval + model narration (the slowest path — a minute on local) even when nothing changed | Key: (normalized question, included-set + index digest, provider). Hit → instant replay stamped "same data as 14:05 · Re-run". Sound for Beam answers (deterministic SQL over unchanged data); general RAG answers replay with the stamp. Invalidate on any index change — the freshness keys exist | M |
+| ★2 | **Background model pre-download during onboarding** | The 4.2 GB private-model download is the single biggest first-day wait, discovered only when the user first asks | Opt-in at the model step ("start downloading now, ~4 GB"), runs through tour + curation; resumable `.part`; hardware-aware note from the existing GPU probe. First private ask finds it ready | S–M |
+| ★3 | **Citation → in-app preview** | Clicking a citation opens the native app, then the user hunts for the passage | Deep-link the P-final inspector: citation click opens it scrolled to the cited chunk, highlighted; "open in app" stays one click further | S (after P-final) |
+| ★4 | **Ask type-ahead from history** | Analysts re-type near-identical questions daily | Local autocomplete over past asks (chat history + pins), ↑↑ recall in the ask box; pairs with ★1 so a repeated ask is instant end-to-end | S |
+| ★5 | **Bulk curation rules** | Big-vault curation is file-by-file; the second axis (local-only 🔄) doubles it | Deterministic rules on folders: "include all spreadsheets here", "mark this tree local-only", applied to future arrivals too; shown in the inspector's plain-language state | M |
+| ★6 | **Ctrl+P quick-open** | Finding one file in a deep tree via scrolling | Fuzzy name finder over the walked tree (it's already in memory); Enter reveals, Ctrl+Enter attaches to chat | S |
+| ★7 | **Lead-with-the-number answer style** | Long narrations bury the figure the analyst asked for | SYSTEM_PROMPT nudge: first line = the answer figure/sentence, detail after; eval-floor snapshot so drift is reviewed | XS |
+| ★8 | **Quick provider switch in chat header** | Comparing private vs cloud costs a settings round-trip each time | Header dropdown of configured providers; provenance stamp (🔄) already tells them what each answer used | S |
+
+Natural grouping: ★1+★4 (ask-path speed), ★3+★6 (navigation), ★5 (curation),
+★2 (first-day), ★7+★8 (chat polish) — one "time-savers" session could take
+★2/★3/★4/★6/★7/★8 (all S/XS) and leave ★1 and ★5 as their own OpenSpec
+changes. Sequence after G-final; ★3 depends on P-final's inspector.
 ```
 
 ---
