@@ -2688,6 +2688,119 @@ host; tour E2E still green with new content; suites + smoke + all
 floors green; stamps agree. End with the model comparison table and
 the small-model reliability before/after numbers.
 ```
+
+---
+
+## 21. Patch: sectioned sidebar, visual-first answers, definitions ROI
+
+Three owner notes (2026-07-15). The definitions item is
+measure-then-decide by design: the session quantifies the lift before
+keeping, removing, or automating anything.
+
+### Prompt
+
+```
+Lighthouse 0.12.x patch — three owner notes: a sectioned sidebar with
+flyout panels, visual-first answers, and a measured verdict on business
+definitions. One PR, one commit per numbered section, five-stamp bump
+to the next patch version last. Ground rules: Rust engine ships, TS
+twin per docs/ts-twin.md and PARITY; Beam tokens; the §14 constitution
+is the review standard — visuals render ONLY from engine-verified data.
+Gates: npm test, cargo suite, lint, release smoke, all eval/chart
+floors green, live E2E per section, before/after screenshots for
+visual changes.
+
+1. Sectioned sidebar with flyout panels.
+   - Reorder the left sidebar: the Files tree stays first and anchors
+     the panel; everything else — the synonyms/metrics material (vault
+     brief, metric definitions, synonyms, join relationships) plus any
+     other non-file sections currently inlined (Library, skills,
+     certified answers, benchmarks) — moves BELOW the folders section
+     as header-only rows.
+   - Clicking a section header slides out a SECOND left panel with
+     that section's full UI (the file section is the model for how a
+     section should feel). One flyout open at a time; re-click, Esc,
+     or click-outside closes; open state and flyout width persist in
+     the app-state dir (reuse the resize-handle machinery from the
+     field patch); long lists virtualize like the file tree.
+   - Fully keyboard navigable (headers focusable, Enter opens, arrows
+     move between sections); both themes; the explorer's
+     virtualization performance must not regress (measure row mounts
+     before/after). If the walkthrough references the sidebar, its
+     copy stays accurate.
+   - E2E: open Metrics flyout → edit a metric → close → state
+     persisted; relaunch keeps widths; file tree unaffected.
+
+2. Visual-first answers ("always make a visual; skip only when there
+   is no graph to make").
+   - Broaden the visual vocabulary beyond Beam charts, all
+     engine-built: single verified number → stat tile in the chat
+     answer (the boards tile, inline); counts/breakdowns from
+     meta/catalog answers → compact bar or tile row; document tables
+     already profiled by the engine (table_profile) → chartable via
+     the same emitter + lint gate; dated series → line/band as today.
+   - Policy: every answer whose content includes engine-verified
+     quantitative data SHOULD render a visual by default; the ONLY
+     skip is genuinely non-visual content (pure prose answers,
+     single-fact lookups where a tile adds nothing — the lint gate's
+     "suppress with a stated reason" applies). The chart directive
+     and guidance card update to encourage requesting a visual
+     whenever data supports one; the deterministic emitter remains
+     the fallback and floor.
+   - Hard boundary (constitution): visuals ONLY from query batches,
+     catalog data, or engine-profiled tables — never from model
+     prose. A number that appears only in narration is not chartable.
+   - Eval: a visual-coverage floor over a fixture set spanning answer
+     types (analytics, meta, synthesis-with-profiled-table, pure
+     prose) — coverage ≥ the recorded baseline, and the pure-prose
+     fixture must NOT grow a visual (both directions gated).
+   - E2E: a "how many PDFs do I have" ask renders a tile; a synthesis
+     answer over a fixture doc with a profiled table renders its
+     chart; a definitions-free prose ask renders none.
+
+3. Business definitions: measure, then decide ("do they really do
+   anything?").
+   - Measure the lift of each manually-authored semantic-layer
+     component SEPARATELY — the vault brief, metric definitions,
+     column synonyms, declared join relationships (auto-derived join
+     hints predate these and are not on trial) — by running the
+     analytics + trust-check scorecards on the fixture vaults, and on
+     a realistic messy fixture, with each component ablated
+     (on/off). Record pass rates, per-component, in the PR.
+   - Decision rule (stated up front): a component with negligible
+     lift (< ~2 points on the scorecards and no qualitative save in
+     the transcripts) is REMOVED — UI, storage, prompt injection,
+     docs; a component with real lift is KEPT but the authoring cost
+     moves off the user: auto-derive it —
+     synonyms: deterministic derivation from column names/values
+     (abbreviation expansion, fuzzy stems) proposed, not silently
+     applied; metric definitions: mined from usage — expressions that
+     recur across certified answers / saved SQL / frequent asks
+     surface as one-click "save as metric" proposals; the brief:
+     replaced or pre-drafted from what the engine already knows
+     (vault composition, dominant tables, date ranges), editable.
+   - Whatever the verdict, the end state is: manual authoring becomes
+     OPTIONAL polish, never required for good answers; the measured
+     numbers and the decision land in docs/analytics-beam.md.
+   - Gates: the ablation table committed; removed components leave no
+     dead UI or prompt text (grep-proof); auto-derivation proposals
+     have unit tests (no false-positive synonym merges — conservative
+     thresholds); scorecards after the change ≥ scorecards before.
+
+4. Housekeeping: remaining moderate Dependabot alerts — triage via
+   the supply-chain allowlist flow, fix or justify.
+
+5. Release: five-stamp bump to the next patch on the 0.12.x line;
+   release notes lead with the sidebar and visual-first answers;
+   squash-merge, dispatch desktop-release.yml, watch to the draft,
+   STOP and report the draft link + publish inputs.
+
+Proof gates: sidebar E2Es + no virtualization regression; the
+visual-coverage floor green in BOTH directions; the ablation table +
+decision recorded with scorecards not degraded; suites + smoke + all
+floors green; stamps agree. End with the per-component ablation table
+and a one-paragraph plain-language verdict on business definitions.
+```
 ```
 
 ---
