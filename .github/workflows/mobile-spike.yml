@@ -1,0 +1,123 @@
+# THROWAWAY spike lane (add-mobile-apps §1 de-risking) — NOT a shipping gate.
+#
+# Sole purpose: get an honest go/no-go on whether `lighthouse-core` (DataFusion
+# 54 + parquet/arrow, the pure-Rust extraction stack, ring+rustls, notify) even
+# cross-compiles for the two mobile triples, with real per-arch library size and
+# Android 16 KB page-alignment numbers. The dev container can build neither
+# triple (no Xcode iOS SDK, no NDK), so the actual builds run here on real
+# runners; the SPIKE-REPORT records what THIS lane observed, never a guess.
+#
+# Job conclusion IS the signal: green = the triple compiled (size/alignment in
+# the step summary); red = it did not (the compiler error is the no-go evidence).
+# Delete this file and the aarch64 targets when the spike closes.
+name: mobile-spike
+
+on:
+  workflow_dispatch: {}
+  # Also auto-run on the spike branch when the engine or this lane changes, so
+  # the go/no-go fires without depending on dispatch-by-ref for a workflow that
+  # isn't on the default branch. Path-filtered so doc-only commits don't burn
+  # macOS minutes.
+  push:
+    branches: [mobile/s1-spike]
+    paths:
+      - ".github/workflows/mobile-spike.yml"
+      - "native/Cargo.toml"
+      - "native/Cargo.lock"
+      - "native/crates/lighthouse-core/**"
+
+permissions:
+  contents: read
+
+jobs:
+  # ── Criterion 1.1a: aarch64-apple-ios ──────────────────────────────────────
+  # macos-latest carries the iOS SDK; a bare `cargo rustc --crate-type staticlib`
+  # links the whole graph for the device triple (the real go/no-go) and yields a
+  # .a whose size proxies the < ~80 MB per-arch library budget.
+  ios-core:
+    name: core → aarch64-apple-ios
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native
+      - name: Cross-compile lighthouse-core (staticlib) for aarch64-apple-ios
+        working-directory: native
+        run: |
+          set -euo pipefail
+          cargo rustc -p lighthouse-core --target aarch64-apple-ios --release --crate-type staticlib 2>&1 | tee /tmp/ios-build.log
+      - name: Measure library size (budget < ~80 MB)
+        if: success()
+        working-directory: native
+        run: |
+          set -euo pipefail
+          LIB=$(ls -1 target/aarch64-apple-ios/release/liblighthouse_core.a | head -1)
+          BYTES=$(stat -f%z "$LIB")
+          MB=$(echo "scale=1; $BYTES/1048576" | bc)
+          # Emit to BOTH the step summary (human) and stdout (so get_job_logs can read it).
+          echo "SPIKE_RESULT ios compiled=yes staticlib=${LIB##*/} size_mb=${MB} bytes=${BYTES} budget_mb=80"
+          echo "## iOS (aarch64-apple-ios) — COMPILED ✅" >> "$GITHUB_STEP_SUMMARY"
+          echo "- staticlib: \`$LIB\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- size: **${MB} MB** (${BYTES} bytes) — budget < ~80 MB" >> "$GITHUB_STEP_SUMMARY"
+
+  # ── Criterion 1.1b: aarch64-linux-android ──────────────────────────────────
+  # ubuntu-latest ships an NDK; a cdylib build lets us both size the artifact and
+  # read the ELF LOAD-segment alignment. Android 15+ requires 16 KB (0x4000)
+  # page alignment, forced here via the NDK linker's max-page-size flag.
+  android-core:
+    name: core → aarch64-linux-android
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native
+      - name: Resolve NDK toolchain
+        run: |
+          set -euo pipefail
+          NDK="${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_ROOT}"
+          echo "NDK at: $NDK"
+          BIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          echo "CC_aarch64_linux_android=$BIN/aarch64-linux-android24-clang" >> "$GITHUB_ENV"
+          echo "AR_aarch64_linux_android=$BIN/llvm-ar" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$BIN/aarch64-linux-android24-clang" >> "$GITHUB_ENV"
+          echo "NDK_BIN=$BIN" >> "$GITHUB_ENV"
+      - name: Cross-compile lighthouse-core (cdylib, 16 KB-aligned) for aarch64-linux-android
+        working-directory: native
+        env:
+          # Force 16 KB max page size so the cdylib is Android-15-ready.
+          RUSTFLAGS: "-C link-arg=-Wl,-z,max-page-size=16384"
+        run: |
+          set -euo pipefail
+          cargo rustc -p lighthouse-core --target aarch64-linux-android --release --crate-type cdylib 2>&1 | tee /tmp/android-build.log
+      - name: Measure size + verify 16 KB page alignment
+        if: success()
+        working-directory: native
+        run: |
+          set -euo pipefail
+          SO=$(ls -1 target/aarch64-linux-android/release/liblighthouse_core.so | head -1)
+          BYTES=$(stat -c%s "$SO")
+          MB=$(echo "scale=1; $BYTES/1048576" | bc)
+          echo "## Android (aarch64-linux-android) — COMPILED ✅" >> "$GITHUB_STEP_SUMMARY"
+          echo "- cdylib: \`$SO\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- size: **${MB} MB** (${BYTES} bytes) — budget < ~80 MB" >> "$GITHUB_STEP_SUMMARY"
+          # Smallest LOAD-segment alignment must be >= 0x4000 (16 KB).
+          ALIGNS=$("$NDK_BIN/llvm-readelf" -l "$SO" | awk '/LOAD/ {print $NF}' | sort -u)
+          ALIGN_CSV=$(echo $ALIGNS | tr '\n' ',')
+          if echo "$ALIGNS" | grep -qx "0x4000"; then ALIGN_VERDICT=PASS; else ALIGN_VERDICT=CHECK; fi
+          # Emit to BOTH the step summary (human) and stdout (so get_job_logs can read it).
+          echo "SPIKE_RESULT android compiled=yes cdylib=${SO##*/} size_mb=${MB} bytes=${BYTES} budget_mb=80 load_aligns=${ALIGN_CSV} align16k=${ALIGN_VERDICT}"
+          echo "## Android (aarch64-linux-android) — COMPILED ✅" >> "$GITHUB_STEP_SUMMARY"
+          echo "- cdylib: \`$SO\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- size: **${MB} MB** (${BYTES} bytes) — budget < ~80 MB" >> "$GITHUB_STEP_SUMMARY"
+          echo "- LOAD alignments: \`${ALIGN_CSV}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- 16 KB page alignment: **${ALIGN_VERDICT}** (want 0x4000)" >> "$GITHUB_STEP_SUMMARY"
