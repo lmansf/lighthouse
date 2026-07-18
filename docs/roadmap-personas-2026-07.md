@@ -2528,6 +2528,166 @@ including the background-image case; suites + smoke + floors green;
 stamps agree. End with the customization-axes decision table and the
 honest note on which PDF path shipped.
 ```
+
+---
+
+## 20. Fresh 0.12.x patch: polish, small-model reliability, Private+ model
+
+Nine owner notes (2026-07-15). Interpretation recorded: "synthesize
+results of the files" = answers must integrate across multiple relevant
+files (not single-source) + a Synthesize action on the related-files
+row. Owner has explicitly lifted the western-model constraint for the
+new private model.
+
+### Prompt
+
+```
+Lighthouse 0.12.x patch — nine owner notes: readable SQL, smooth
+streaming markdown, sleek related-file chips, cross-file synthesis,
+small-model reliability, smarter default-visible charts, a beefier
+Private+ local model, and a refreshed walkthrough. One PR, one commit
+per numbered section, five-stamp bump to the next patch version last.
+Ground rules: Rust engine ships, TS twin per docs/ts-twin.md and PARITY
+(byte-identical prompts where shared); Beam tokens for UI; the §14
+constitution is the review standard. Gates: npm test, cargo suite,
+lint, release smoke, all eval/chart floors green, live E2E per section,
+before/after screenshots for visual changes.
+
+1. Human-readable SQL. The "Query used" SQL currently renders as one
+   line. Add a deterministic pretty-printer in the engine (keywords on
+   new lines, indented clauses, one column per line past a width
+   threshold) applied wherever SQL is displayed — answers, Edit SQL
+   dialog, view definitions, evidence packs. The formatted text must
+   parse to the SAME statement (unit test: format → parse → identical
+   AST; the executed SQL itself is untouched). Style the block: a
+   small hand-rolled, theme-aware SQL tokenizer (keywords, strings,
+   numbers, identifiers) in the renderer — no new dependencies.
+   Update prompt/eval snapshots ONLY where they assert display text,
+   never where they assert executed SQL.
+
+2. Smooth streaming markdown. While an answer streams, raw markdown
+   syntax is visible until the parse settles. Make rendering
+   progressive: parse and render per completed block, memoize settled
+   blocks (the known cost — the whole accumulated answer re-parses per
+   chunk, see the ChatPanel note — must go), and hold back trailing
+   incomplete constructs (unterminated bold/links/table rows/fences)
+   until their terminator arrives so nothing flashes as raw syntax.
+   No layout jumping: the anchored-scroll behavior from H1 §6 must
+   still hold. E2E: stream a fixture answer with headings, a table,
+   bold, and a chart fence — at no point does raw markup or a torn
+   table render; final output byte-identical to today's.
+
+3. Sleek related files + synthesis.
+   - Related files become compact chips, GitHub-tag style:
+     "name.ext · 87%" — score as a percentage, middle-truncated names,
+     full path in the tooltip, same click behaviors (preview primary,
+     open-in-app secondary). Row wraps; overflow collapses behind
+     "+N more".
+   - Synthesis: when retrieval returns multiple relevant files, the
+     answer must INTEGRATE them, not single-source. Audit why
+     single-sourcing happens (per-file candidate caps, rank
+     concentration, prompt wording) and fix in both engines; add an
+     eval-floor case (a question whose answer requires two fixture
+     files → both cited). Add a "Synthesize" chip on the related-files
+     row that re-asks the question scoped to those files through the
+     existing multi-doc synthesis pipeline.
+
+4. Small-model reliability ("weaker models deny files/columns that
+   exist"). Target: the bundled private instruct model handles this.
+   - Deterministic assists first (opinion 7): when a question names a
+     column or file, verify existence against the catalog BEFORE the
+     model runs; when confirmed, inject a hard assertion into the
+     context ("The file sales.csv IS available and HAS the column
+     region — use it") sized for the 6144 window. Route pure
+     existence questions ("do I have…", "is there a column…") to the
+     deterministic meta/catalog path entirely — no model.
+   - System-prompt handholding for the small-model class: a compact
+     capability preamble (you can see these N files; you can query
+     tables; never claim a listed file or column is unavailable),
+     applied per provider class so big models don't pay the tokens.
+   - Evals: prompt-content tests asserting the inventory/assertion
+     blocks are present in the assembled context; extend the local
+     scorecard (examples/) with the reported failure cases (file
+     denial, column denial) and record before/after pass rates with
+     the bundled model in the PR.
+
+5. Charts: visible by default, chosen intelligently, critiqued.
+   - Render by default: when a chart is generated it SHOWS — the
+     "Chart it" chip is only for tables that didn't auto-chart.
+     Verify the charts-by-default policy from the 0.12.1 scope is
+     actually live in the built app; fix whatever regressed or was
+     shipped chip-first.
+   - Smarter selection: time/trend → line or band-area; category
+     totals → bar (sorted descending unless labels are ordinal);
+     shares → stacked or 100% bar where supported; never a lone bar
+     for a single value (stat tile instead). Tighten the emitter and
+     the chart-card guidance together.
+   - Uniqueness: apply the Beam identity to charts — accent-derived
+     series palette (contrast-checked both themes), engine-generated
+     title + one-line subtitle from the question and filled
+     parameters, tabular-numeral axes. Distinct, not decorated.
+   - Critique gate (deterministic, engine-side, pre-render): a chart
+     lint that fixes or rejects — unsorted comparison bars (sort),
+     too many series (top-N + other), illegible label counts
+     (rotate/aggregate), single-point lines (suppress), axis
+     truncation (zero-baseline rule). A suppressed chart states why
+     in one quiet line. Every lint rule has fixture tests; the chart
+     eval floor gains the misfire cases.
+
+6. Private+ model (owner has lifted the western-model constraint;
+   Chinese and all other open models welcome).
+   - Research CURRENT open models (July 2026) for the best analytical
+     performer under these HARD constraints: runs comfortably in
+     8 GB RAM (model file ≤ ~5.5 GB quantized, runtime RSS ≤ ~7 GB
+     with context — this, not the 50 GB disk, is the binding limit,
+     so expect the 7–9B dense class or a small MoE that genuinely
+     fits), llama.cpp-compatible GGUF, license permits commercial
+     use + our fetch-at-runtime distribution. Candidates to evaluate,
+     not assume: latest Qwen instruct line, DeepSeek distills, GLM,
+     Ministral, Gemma, and anything newer. Target is honest:
+     over-perform on ANALYTICAL work (SQL writing, table narration,
+     synthesis) as measured by OUR scorecards — not general frontier
+     parity.
+   - Selection by measurement: run the repo's analytics + retrieval
+     scorecards against the top 2–3 candidates locally; pick the
+     winner; record the comparison table (scores, latency, RSS) in
+     the PR and docs/local-inference.md.
+   - Ship it as "Private+ (more capable)" beside the existing private
+     model in the picker: same opt-in download machinery (pinned
+     digests, mirror-first, GGUF magic validation, uninstall), its
+     own RAM guidance line, honest speed/quality copy. The existing
+     model stays; if Private+ beats it on the scorecard at acceptable
+     latency, mark Private+ "Recommended". Both engines' provider
+     plumbing unchanged (same llama-server path).
+7. Walkthrough refresh (do this LAST so it reflects this patch).
+   Update the first-run tour + help surface for what users need and
+   look for most: attach and reference files (drag + @), ask → Beam
+   answer anatomy (verified table, chart, SQL disclosure, provenance
+   stamp, assumptions), pins → boards → briefings, the privacy story
+   (local-only lock, egress shield, private models incl. Private+),
+   customization, and where feedback lives. Keep it five-ish steps,
+   skippable, once-per-install semantics unchanged; the "Take the
+   tour" re-entry shows the new content for existing installs (the
+   tour_shown flag is NOT reset — returning users find it in Help).
+
+8. Housekeeping: the remaining moderate Dependabot alerts — triage
+   via the supply-chain allowlist flow, fix or justify.
+
+9. Release: five-stamp bump to the next patch on the 0.12.x line;
+   release notes lead with charts-visible-by-default, smooth
+   streaming, and Private+; squash-merge, dispatch
+   desktop-release.yml, watch to the draft, STOP and report the
+   draft link + publish inputs.
+
+Proof gates: SQL AST-equivalence tests; streaming E2E with no raw
+markup flash; two-file synthesis eval case green; small-model
+before/after pass rates recorded; chart lint fixtures + coverage floor
+green with charts visible by default in the built app; Private+
+comparison table committed and the download E2E green against a mocked
+host; tour E2E still green with new content; suites + smoke + all
+floors green; stamps agree. End with the model comparison table and
+the small-model reliability before/after numbers.
+```
 ```
 
 ---
