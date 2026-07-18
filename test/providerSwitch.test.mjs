@@ -190,6 +190,10 @@ test("a header switch re-points provenance, local-only enforcement, and the cach
       return sseResponse(CLOUD_TEXT);
     }
     if (u.includes("127.0.0.1:8080")) {
+      // §22.4: the warm-start health probe (GET /health) precedes the ask —
+      // answer "ready" and keep it OUT of the outbound count, which pins the
+      // number of MODEL calls, not probes.
+      if (u.endsWith("/health")) return new Response("{}", { status: 200 });
       outbound.local.push(body);
       return sseResponse(LOCAL_TEXT);
     }

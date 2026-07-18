@@ -266,9 +266,12 @@ pub fn render_markdown(report: &BriefingReport) -> String {
 // before/after summary. The desktop shell writes it on pin change at most once
 // per user-set daily hour; the pins dialog can refresh it on demand.
 
-/// Escape a cell for a GFM table row (only the pipe can break a row).
+/// Escape a cell for a GFM table row: backslash FIRST (or the escapes just
+/// added get re-escaped), then pipe; newlines flatten to a space so a
+/// multi-line value cannot tear the row. Same model as pdf_tables::escape_cell.
+/// KEEP IN SYNC with src/server/briefings.ts::escNoteCell.
 fn esc_cell(s: &str) -> String {
-    s.replace('|', "\\|")
+    s.replace('\\', "\\\\").replace('|', "\\|").replace(['\n', '\r'], " ")
 }
 
 /// Render the "Lighthouse Briefing" note from the pins that changed since the
@@ -510,6 +513,20 @@ mod tests {
         // Deterministic UTC footer + the "no AI" honesty line.
         assert!(md.contains("*As of 2026-07-15 09:03 UTC."));
         assert!(md.contains("no AI"));
+    }
+
+    #[test]
+    fn compose_note_escapes_cells_backslash_first() {
+        // Backslash-first + newline-strip escaping (§22.5). The SAME fixture is
+        // byte-pinned in test/briefings.test.mjs so the TS twin stays in parity.
+        let md = compose_briefing_note(
+            &[changed("p1", "Cost of A|B \\ C", Some("1\r\n2"), "3|4\\5")],
+            1_784_106_180_000,
+        );
+        assert!(md.contains("## Cost of A\\|B \\\\ C"), "question not escaped: {md}");
+        // \r\n flattens to two spaces — the row survives a multi-line value.
+        assert!(md.contains("| Before | 1  2 |"), "newline tore the row: {md}");
+        assert!(md.contains("| Now | 3\\|4\\\\5 |"), "value not escaped: {md}");
     }
 
     #[test]

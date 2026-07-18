@@ -12,22 +12,24 @@
  * detects the cue BEFORE the model gate and plans the recipe deterministically.
  * No new event, no new streaming op.
  *
- * The ENGINE owns applicability — this nav only renders what
- * `ragService.applicableRecipes(includedFileIds)` returns, refetched when the
- * included set changes (the ChatPanel suggestedAsks lifecycle) and on the
- * shared `lighthouse:views-changed` signal (a saved view is a table too, so it
- * can add or drop a recipe — the ViewsNav refresh seam). PARITY: the web dev
- * twin returns the file-derived subset it can compute statically, or [] —
- * the gallery renders that honest subset and never crashes on [].
+ * The ENGINE owns applicability — this nav only renders what the engine's
+ * applicableRecipes returns, consumed through the SHARED useValidatedChips
+ * hook (§22.3): one preloaded, stale-while-revalidate cache with the
+ * ChatPanel's empty-state chips, re-keyed on the included set, the provider,
+ * the investigation, and the `lighthouse:views-changed` signal (a saved view
+ * is a table too, so it can add or drop a recipe). PARITY: the web dev twin
+ * returns the file-derived subset it can compute statically, or [] — the
+ * gallery renders that honest subset and never crashes on [].
  *
  * Beam treatment: Fluent tokens only (the ViewsNav/InvestigationsNav palette),
  * both light + dark themes free; no hand-picked colors.
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo } from "react";
 import { Text, makeStyles, shorthands, tokens } from "@fluentui/react-components";
 import type { RecipeCard } from "@/contracts";
-import { ragService, runRecipeQuestion } from "@/contracts";
+import { runRecipeQuestion } from "@/contracts";
+import { useValidatedChips } from "@/features/chat/useValidatedChips";
 import { useRagStore } from "@/stores/useRagStore";
 
 const useStyles = makeStyles({
@@ -98,51 +100,12 @@ export function RecipesNav() {
     () => nodes.filter((n) => n.kind === "file" && n.ragIncluded).map((n) => n.id),
     [nodes],
   );
-  // Key by VALUE, not array identity: the vault poll rebuilds `nodes` every few
-  // seconds even when nothing changed, and a per-tick engine round-trip for the
-  // recipe list would be pure waste (the ChatPanel suggestedAsks precedent).
-  const includedKey = useMemo(() => includedFileIds.join("\n"), [includedFileIds]);
-
-  const [recipes, setRecipes] = useState<RecipeCard[]>([]);
-  const [loaded, setLoaded] = useState(false);
-  // A saved/renamed/deleted view re-reads the list (a view is a table too); the
-  // nonce re-arms the fetch effect below without re-subscribing the listener.
-  const [viewsNonce, setViewsNonce] = useState(0);
-
-  useEffect(() => {
-    const onChanged = () => setViewsNonce((n) => n + 1);
-    window.addEventListener("lighthouse:views-changed", onChanged);
-    return () => window.removeEventListener("lighthouse:views-changed", onChanged);
-  }, []);
-
-  // Fetch on mount, whenever the included set changes, and on a views-changed
-  // nonce bump — the suggestedAsks lifecycle. Nothing included ⇒ [] (the same
-  // no-tabular-context behavior as the twin's file-derived subset).
-  useEffect(() => {
-    if (!includedKey) {
-      setRecipes([]);
-      setLoaded(true);
-      return;
-    }
-    let cancelled = false;
-    ragService
-      .applicableRecipes(includedKey.split("\n"))
-      .then((rs) => {
-        if (!cancelled) {
-          setRecipes(Array.isArray(rs) ? rs : []);
-          setLoaded(true);
-        }
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setRecipes([]);
-          setLoaded(true);
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [includedKey, viewsNonce]);
+  // §22.3: the shared validated-chips source — the hook keys by VALUE
+  // internally (the vault poll's no-op `nodes` rebuilds cost nothing), listens
+  // to `lighthouse:views-changed` itself, and serves the module-cached set
+  // instantly while revalidating, so this gallery and the chat's empty-state
+  // chips can never disagree.
+  const { recipes } = useValidatedChips(includedFileIds);
 
   return (
     <nav aria-label="Recipes" className={styles.section}>
@@ -171,7 +134,11 @@ export function RecipesNav() {
         </button>
       ))}
 
-      {loaded && recipes.length === 0 && (
+      {/* The hook exposes no in-flight flag (it serves the cache instantly and
+          revalidates behind it), so the note gates on the list alone — its
+          copy is forward-looking either way, and a first-visit revalidation
+          replaces it the moment recipes land. */}
+      {recipes.length === 0 && (
         <Text size={200} className={styles.note}>
           Recipes appear here when your files have the right columns — a date, a number, a category.
         </Text>

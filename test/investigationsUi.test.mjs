@@ -58,7 +58,7 @@ test("belonging rides the actions: pin and note export both carry the current in
   );
 });
 
-test("policy surfaces: provider switch disabled inside local-only, on-device badge in both headers", () => {
+test("policy surfaces: provider switch disabled inside local-only, on-device promise in both headers", () => {
   assert.match(
     chat,
     /disabledReason=\{\s*investigationLocalOnly \? "This investigation always answers on-device" : undefined\s*\}/,
@@ -70,15 +70,26 @@ test("policy surfaces: provider switch disabled inside local-only, on-device bad
     /disabledFocusable=\{disabledReason !== undefined\}/,
     "the trigger stays focusable so the reason is announced and hoverable",
   );
-  // One badge definition, rendered in the conversation headerMeta AND the hero
-  // context row (outside the visible-files branch, so it can't vanish with it).
-  assert.equal(
-    (chat.match(/\{onDeviceBadge\}/g) ?? []).length,
-    2,
-    "the on-device badge renders in both headers",
+  // §22.2 (declutter): the standalone On-device badge collapsed into the
+  // EgressShield status popover. One shield definition carries the policy flag,
+  // mounted in the conversation headerMeta AND the hero (outside the
+  // visible-files branch, so the promise can't vanish with it).
+  assert.match(
+    chat,
+    /onDeviceLocalOnly=\{investigationLocalOnly\}/,
+    "the shield receives the local-only policy flag",
   );
-  assert.match(chat, /\{onDeviceBadge\}\s*\n\s*<Badge appearance="tint">\{visibleBadgeText\}<\/Badge>/,
-    "conversation header: beside the visible-files badge");
+  assert.equal(
+    (chat.match(/\{statusShield\}/g) ?? []).length,
+    2,
+    "the status shield renders in both headers",
+  );
+  const shield = read("src/features/egress/EgressShield.tsx");
+  assert.match(
+    shield,
+    /This investigation always answers on this device\./,
+    "the shield dialog states the on-device promise",
+  );
 });
 
 test("the scope pill sits above the composer and shows the LIVE file count", () => {
@@ -93,11 +104,12 @@ test("the scope pill sits above the composer and shows the LIVE file count", () 
     "dangling scope ids are not counted",
   );
   assert.match(chat, /\{scopePill\}\s*\n\s*\{attachmentBar\}/, "pill rides the attachBar slot");
-  // The history drawer filters to the current context via the pure helper.
+  // §22.2: the history list moved from the ChatPanel drawer to the sidebar
+  // History section — the context filtering via the pure helper moved with it.
   assert.match(
-    chat,
+    read("src/features/chat/HistoryNav.tsx"),
     /conversationsForContext\(conversations, currentInvestigationId\)/,
-    "the drawer list is context-filtered",
+    "the History section list is context-filtered",
   );
 });
 

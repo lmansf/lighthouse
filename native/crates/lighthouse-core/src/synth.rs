@@ -396,6 +396,103 @@ pub fn local_only_skip_note(n: usize) -> String {
     )
 }
 
+/// §22.4 queue-not-fail bounds. A fresh install's cold load is the long pole
+/// (mmap + prefill of a ~4 GB model), so the loading wait is generous; the
+/// spawn grace only needs to outlive one supervisor reconcile tick (3 s) plus
+/// process start. KEEP IN SYNC with synth.ts.
+const LOCAL_WARM_POLL_MS: u64 = 1_500;
+const LOCAL_SPAWN_GRACE_MS: u64 = 20_000;
+const LOCAL_WARM_WAIT_MS: u64 = 300_000;
+
+/// §22.4: one step of the warm-wait state machine, pure for tests.
+/// `Proceed` means "stop waiting and let the ask run" — either the server is
+/// ready, or waiting can no longer help (no installed model to spawn, grace or
+/// budget exhausted) and the existing unavailable→passages path is the honest
+/// outcome. KEEP IN SYNC with synth.ts::warmWaitVerdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WarmStep {
+    Proceed,
+    Wait,
+}
+
+pub(crate) fn warm_wait_verdict(
+    health: llm::LocalHealth,
+    installed: bool,
+    waited_ms: u64,
+) -> WarmStep {
+    match health {
+        llm::LocalHealth::Ready => WarmStep::Proceed,
+        _ if waited_ms >= LOCAL_WARM_WAIT_MS => WarmStep::Proceed,
+        llm::LocalHealth::Loading => WarmStep::Wait,
+        llm::LocalHealth::Down if installed && waited_ms < LOCAL_SPAWN_GRACE_MS => WarmStep::Wait,
+        llm::LocalHealth::Down => WarmStep::Proceed,
+    }
+}
+
+/// The user-visible warming status. KEEP IN SYNC (byte-identical) with
+/// synth.ts::warmingLabel.
+fn warming_label(waited_ms: u64) -> String {
+    if waited_ms == 0 {
+        "Private model warming up…".to_string()
+    } else {
+        format!("Private model warming up… ({}s)", waited_ms / 1000)
+    }
+}
+
+/// §22.4 queue-not-fail: when the PRIVATE model is the active provider but its
+/// server is still starting (fresh install, cold launch) or loading, this
+/// stream yields "warming up" progress chunks until the server is healthy —
+/// then ends, letting the ask run instead of racing into the
+/// "Local model unavailable → passages" fallback. For any other provider (or a
+/// healthy server) it ends immediately. Cancellation is inherited: dropping
+/// the outer answer stream drops this stream mid-sleep.
+fn local_warm_wait(cfg: &ModelCfg) -> Pin<Box<dyn Stream<Item = ChatChunk> + Send>> {
+    let is_local = cfg.provider_id.as_deref() == Some("local");
+    Box::pin(async_stream::stream! {
+        if !is_local {
+            return;
+        }
+        // Waiting for a spawn only makes sense when the desktop supervisor has
+        // a model to spawn (≤ one reconcile tick away). A BYO endpoint that is
+        // simply absent (Ollama not running, web twin) keeps today's immediate
+        // fallback via the Down arm of the verdict.
+        let installed = crate::local_model::find_installed_model().is_some();
+        let mut waited: u64 = 0;
+        loop {
+            match warm_wait_verdict(llm::local_health().await, installed, waited) {
+                WarmStep::Proceed => return,
+                WarmStep::Wait => {}
+            }
+            yield progress(warming_label(waited), 1, 1);
+            tokio::time::sleep(std::time::Duration::from_millis(LOCAL_WARM_POLL_MS)).await;
+            waited += LOCAL_WARM_POLL_MS;
+        }
+    })
+}
+
+/// §22.6: split the first engine-composed ```lighthouse-chart fence out of
+/// deterministic answer markdown (meta answers embed one for tile/breakdown
+/// results), returning (markdown without the fence, the spec) for the final
+/// chunk's meta channel. Line-exact: only a fence whose opener is the entire
+/// line matches — model-ish partial fences pass through untouched (and are
+/// then stripped by the renderer's new-era defense, never drawn). KEEP IN
+/// SYNC with synth.ts::extractChartFence.
+fn extract_chart_fence(md: &str) -> (String, Option<String>) {
+    let lines: Vec<&str> = md.split('\n').collect();
+    let Some(start) = lines.iter().position(|l| l.trim_end() == "```lighthouse-chart") else {
+        return (md.to_string(), None);
+    };
+    let Some(end_rel) = lines[start + 1..].iter().position(|l| l.trim_end() == "```") else {
+        return (md.to_string(), None); // unclosed: not ours — leave untouched
+    };
+    let end = start + 1 + end_rel;
+    let spec = lines[start + 1..end].join("\n");
+    let mut rest: Vec<&str> = Vec::with_capacity(lines.len());
+    rest.extend_from_slice(&lines[..start]);
+    rest.extend_from_slice(&lines[end + 1..]);
+    (rest.join("\n"), Some(spec))
+}
+
 fn progress(label: String, step: usize, total: usize) -> ChatChunk {
     ChatChunk {
         delta: String::new(),
@@ -492,6 +589,9 @@ fn final_chunk(
             cached_at: None,
             cost: Some(cost),
             manifest: (!manifest.is_empty()).then_some(manifest),
+            // §22.6: branches that chart set this AFTER building the chunk
+            // (the mutate-after pattern `done.analytics` already uses).
+            chart: None,
         }),
         done: true,
     }
@@ -530,6 +630,8 @@ fn plan_chunk(
             // The planning context the previewed SQL was written from (schema /
             // view cards + join hints) — metadata only, the same gated set.
             manifest: (!manifest.is_empty()).then_some(manifest),
+            // A plan preview draws nothing — charts belong to executed answers.
+            chart: None,
         }),
         done: true,
     }
@@ -1097,6 +1199,16 @@ fn live_pipeline(
             // extractive path narrates nothing, so it stays empty.
             let mut manifest: Vec<CtxManifestEntry> = Vec::new();
             if has_real_model(&cfg) {
+                // §22.4 queue-not-fail: the deterministic tables above already
+                // streamed — hold ONLY the narration while a freshly installed
+                // or cold-launched private model finishes loading, instead of
+                // letting stream_answer fail into the "unavailable" note.
+                {
+                    let mut w = local_warm_wait(&cfg);
+                    while let Some(c) = w.next().await {
+                        yield c;
+                    }
+                }
                 yield progress("Summarizing results…".to_string(), 4, 4);
                 let mut ctxs: Vec<Ctx> = steps
                     .iter()
@@ -1143,13 +1255,11 @@ fn live_pipeline(
             }
             // Engine-authored chart (add-quant-depth §2.3): a recipe that declares
             // one — the forecast band — draws it from the representative result
-            // (plan[0]), the SAME inline `lighthouse-chart` fence the analytics
-            // branch emits. Never model-chosen; every value is the engine's.
-            if let Some(res) = &representative_result {
-                if let Some(chart) = recipe.chart(res) {
-                    yield delta(format!("\n```lighthouse-chart\n{chart}\n```\n"));
-                }
-            }
+            // (plan[0]). §22.6: the spec rides the final chunk's meta, never the
+            // streamed text (fences were the model-mangleable channel). Never
+            // model-chosen; every value is the engine's.
+            let recipe_chart: Option<String> =
+                representative_result.as_ref().and_then(|res| recipe.chart(res));
             // Provenance footer: EVERY executed query in order (the multi-step
             // footer shape), then ONE freshness stamp over the union they read.
             if steps.len() == 1 {
@@ -1227,6 +1337,9 @@ fn live_pipeline(
                 certified: (!certified.is_empty()).then(|| certified.clone()),
                 trust,
             });
+            if let Some(m) = done.meta.as_mut() {
+                m.chart = recipe_chart;
+            }
             yield done;
             return;
         }
@@ -1329,13 +1442,21 @@ fn live_pipeline(
                 .ok()
                 .and_then(|r| r.ok());
                 if let Some(ans) = rendered {
-                    yield delta(ans.markdown);
+                    // §22.6: a meta answer's engine-composed chart fence moves
+                    // onto the meta channel like every other chart — the text
+                    // itself must arrive fence-free (live turns strip fences).
+                    let (md, meta_chart) = extract_chart_fence(&ans.markdown);
+                    yield delta(md);
                     // Model-free deterministic answer: zero excerpts handed to a
                     // model, files behind it are the cited references, and the
                     // cost meter is "not reported" (no model call, so no tokens).
                     // No context was assembled for a model, so the manifest is
                     // empty (§5).
-                    yield final_chunk(ans.references, 0, &origin, cost_meta(&cfg, sink.total()), Vec::new());
+                    let mut done = final_chunk(ans.references, 0, &origin, cost_meta(&cfg, sink.total()), Vec::new());
+                    if let Some(m) = done.meta.as_mut() {
+                        m.chart = meta_chart;
+                    }
+                    yield done;
                     return;
                 }
             }
@@ -1346,6 +1467,18 @@ fn live_pipeline(
         //     narrates the verified result. Any failure falls through silently
         //     to the paths below — analytics can only add capability. ---
         if has_real_model(&cfg) && crate::analytics::analytics_cue(&question) {
+            // §22.4 queue-not-fail: this branch is about to ask the model to
+            // write SQL — if the PRIVATE model's server is still starting or
+            // loading (fresh install, cold launch), wait with "warming up"
+            // progress chunks instead of racing into the unavailable fallback.
+            // Bounded; deterministic stages above never waited.
+            // KEEP IN SYNC with synth.ts (localWarmWait).
+            {
+                let mut w = local_warm_wait(&cfg);
+                while let Some(c) = w.next().await {
+                    yield c;
+                }
+            }
             // Shareable candidate gather: on the cloud path both branches drop
             // effectively-local-only ids, so a private table's schema card
             // (column names + sample rows) is never built for a vendor prompt.
@@ -1819,10 +1952,8 @@ fn live_pipeline(
                             // a materializing directive can't run here anyway
                             // (steps carry markdown, not batches). last_chart
                             // comes from run_query, which never charts a
-                            // truncated result.
-                            if let Some(chart) = &last_chart {
-                                yield delta(format!("\n```lighthouse-chart\n{chart}\n```\n"));
-                            }
+                            // truncated result. §22.6: it rides the final
+                            // chunk's meta below, never the streamed text.
                             // Cost meter (openspec: add-beam-loop §3.1): the ask's
                             // summed provider-reported usage — Some(total) when a
                             // provider reported, or None when none did (§1.4,
@@ -1850,6 +1981,9 @@ fn live_pipeline(
                                 ),
                                 _ => None,
                             };
+                            if let Some(m) = done.meta.as_mut() {
+                                m.chart = last_chart.clone();
+                            }
                             done.analytics = Some(AnalyticsMeta {
                                 sql: last_sql,
                                 file_ids: meta_ids,
@@ -2067,9 +2201,8 @@ fn live_pipeline(
                         } else {
                             crate::analytics::decide_chart(&res.batches, scrub.full_text())
                         };
-                        if let Some(chart) = &chart {
-                            yield delta(format!("\n```lighthouse-chart\n{chart}\n```\n"));
-                        }
+                        // §22.6: the spec rides the final chunk's meta below —
+                        // never the streamed text a model could mangle.
                         // Citations + structured provenance (chips/save/pins).
                         let (refs, meta_ids) = analytics_refs(&regs);
                         let mut done = final_chunk(
@@ -2099,6 +2232,9 @@ fn live_pipeline(
                             certified: (!certified.is_empty()).then(|| certified.clone()),
                             trust,
                         });
+                        if let Some(m) = done.meta.as_mut() {
+                            m.chart = chart;
+                        }
                         yield done;
                         return;
                     }
@@ -2127,6 +2263,23 @@ fn live_pipeline(
             let text = llm::draft_answer(&question, &ctxs);
             if !text.trim().is_empty() {
                 yield draft_chunk(text);
+            }
+        }
+
+        // --- §22.4 queue-not-fail (model warm start): every deterministic
+        //     emission is behind us (meta answers returned; recipe tables and
+        //     the G2 extractive draft already streamed), so nothing instant
+        //     ever waited. From here every branch talks to the model — if the
+        //     PRIVATE model's server is still starting or loading (fresh
+        //     install, cold launch), hold here with "warming up" progress
+        //     chunks rather than racing stream_answer into the
+        //     "Local model unavailable → passages" fallback. Bounded: a server
+        //     that never comes up proceeds into today's fallback path.
+        //     KEEP IN SYNC with synth.ts (localWarmWait). ---
+        {
+            let mut w = local_warm_wait(&cfg);
+            while let Some(c) = w.next().await {
+                yield c;
             }
         }
 
@@ -2587,18 +2740,19 @@ fn live_pipeline(
         }
         // §2 visual-first: the profiled table's chart, drawn from the engine's
         // own aggregates (see profile_chart_spec above). Deterministic engine
-        // output after the narration — the same inline `lighthouse-chart` fence
-        // the analytics branch emits.
-        if let Some(chart) = &profile_chart_spec {
-            yield delta(format!("\n```lighthouse-chart\n{chart}\n```\n"));
-        }
-        yield final_chunk(
+        // output — §22.6: it rides the final chunk's meta, never the streamed
+        // text a model could mangle.
+        let mut done = final_chunk(
             initial.references,
             excerpt_count,
             &origin,
             cost_meta(&cfg, sink.total()),
             manifest,
         );
+        if let Some(m) = done.meta.as_mut() {
+            m.chart = profile_chart_spec.clone();
+        }
+        yield done;
     })
 }
 
@@ -2977,5 +3131,67 @@ mod tests {
         // Fits already → untouched.
         let (all, total) = sample_segments(segs.clone(), 23);
         assert_eq!((all.len(), total), (23, 23));
+    }
+
+    // §22.4 queue-not-fail: the warm-wait state machine, exhaustively.
+    #[test]
+    fn warm_wait_ready_always_proceeds() {
+        use crate::llm::LocalHealth::*;
+        for waited in [0, LOCAL_SPAWN_GRACE_MS, LOCAL_WARM_WAIT_MS] {
+            for installed in [true, false] {
+                assert_eq!(warm_wait_verdict(Ready, installed, waited), WarmStep::Proceed);
+            }
+        }
+    }
+
+    #[test]
+    fn warm_wait_loading_waits_until_the_budget_then_proceeds() {
+        use crate::llm::LocalHealth::*;
+        assert_eq!(warm_wait_verdict(Loading, true, 0), WarmStep::Wait);
+        assert_eq!(warm_wait_verdict(Loading, false, 0), WarmStep::Wait);
+        assert_eq!(
+            warm_wait_verdict(Loading, true, LOCAL_WARM_WAIT_MS - 1),
+            WarmStep::Wait
+        );
+        assert_eq!(warm_wait_verdict(Loading, true, LOCAL_WARM_WAIT_MS), WarmStep::Proceed);
+    }
+
+    #[test]
+    fn warm_wait_down_waits_only_for_an_installed_model_within_grace() {
+        use crate::llm::LocalHealth::*;
+        // Installed → the supervisor will spawn within a reconcile tick: wait.
+        assert_eq!(warm_wait_verdict(Down, true, 0), WarmStep::Wait);
+        assert_eq!(warm_wait_verdict(Down, true, LOCAL_SPAWN_GRACE_MS - 1), WarmStep::Wait);
+        // Grace exhausted → the old immediate-fallback behavior returns.
+        assert_eq!(warm_wait_verdict(Down, true, LOCAL_SPAWN_GRACE_MS), WarmStep::Proceed);
+        // No installed model (BYO endpoint absent, web twin) → never wait.
+        assert_eq!(warm_wait_verdict(Down, false, 0), WarmStep::Proceed);
+    }
+
+    // Byte-pinned twin label (synth.ts::warmingLabel).
+    #[test]
+    fn warming_label_matches_the_twin() {
+        assert_eq!(warming_label(0), "Private model warming up…");
+        assert_eq!(warming_label(4_500), "Private model warming up… (4s)");
+        assert_eq!(warming_label(61_000), "Private model warming up… (61s)");
+    }
+
+    // §22.6: the meta-answer fence extractor (twin: synth.ts::extractChartFence).
+    #[test]
+    fn extract_chart_fence_splits_an_engine_fence_out() {
+        let md = "You have 12 files.\n```lighthouse-chart\n{\"kind\":\"bar\"}\n```\nMore text.";
+        let (rest, spec) = extract_chart_fence(md);
+        assert_eq!(spec.as_deref(), Some("{\"kind\":\"bar\"}"));
+        assert_eq!(rest, "You have 12 files.\nMore text.");
+    }
+
+    #[test]
+    fn extract_chart_fence_leaves_fenceless_and_unclosed_input_alone() {
+        assert_eq!(extract_chart_fence("plain answer"), ("plain answer".to_string(), None));
+        let unclosed = "text\n```lighthouse-chart\n{\"kind\":";
+        assert_eq!(extract_chart_fence(unclosed), (unclosed.to_string(), None));
+        // A stat fence is a different lang — untouched.
+        let stat = "```lighthouse-stat\n{}\n```";
+        assert_eq!(extract_chart_fence(stat), (stat.to_string(), None));
     }
 }

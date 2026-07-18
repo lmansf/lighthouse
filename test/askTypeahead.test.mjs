@@ -10,7 +10,7 @@ import { register } from "node:module";
 
 register("./_ts-extensionless-hook.mjs", import.meta.url);
 
-const { askSuggestions, lastAsk, ASK_SUGGESTION_LIMIT } = await import(
+const { askSuggestions, lastAsk, ghostCompletion, ASK_SUGGESTION_LIMIT } = await import(
   "../src/lib/askTypeahead.ts"
 );
 
@@ -158,4 +158,58 @@ test("deterministic: identical inputs give identical output; score ties break by
     a.map((s) => s.text),
     ["alpha question", "beta question"],
   );
+});
+
+// --- §22.1 ghost autocomplete (ghostCompletion) ------------------------------
+
+test("ghost completes a caseless literal prefix, preserving source casing", () => {
+  const out = ghostCompletion(
+    "total sales",
+    { history: [{ text: "Total Sales by Region", ts: 1_000 }], pins: [] },
+    { now: 2_000 },
+  );
+  assert.equal(out, " by Region");
+});
+
+test("ghost needs at least three typed characters", () => {
+  const sources = { history: [{ text: "total sales by region", ts: 1_000 }] };
+  assert.equal(ghostCompletion("to", sources, { now: 2_000 }), null);
+  assert.equal(ghostCompletion("tot", sources, { now: 2_000 }), "al sales by region");
+});
+
+test("ghost prefers the fresher history hit; exact match ghosts nothing", () => {
+  const now = 10_000_000_000;
+  const sources = {
+    history: [
+      { text: "total sales by region", ts: now - 100 },
+      { text: "total sales by store", ts: now - 90 * 24 * 3600 * 1000 },
+    ],
+  };
+  assert.equal(ghostCompletion("total sales by ", sources, { now }), "region");
+  assert.equal(ghostCompletion("total sales by region", sources, { now }), null);
+});
+
+test("ghost draws on pins and extras (curated, recency-neutral)", () => {
+  const now = 10_000_000_000;
+  assert.equal(
+    ghostCompletion("open p1", { history: [], pins: ["open P1 tickets by priority"] }, { now }),
+    " tickets by priority",
+  );
+  assert.equal(
+    ghostCompletion(
+      "monthly tr",
+      { history: [], extras: ["Monthly trend of amount"] },
+      { now },
+    ),
+    "end of amount",
+  );
+});
+
+test("ghost is deterministic on ties (lexicographic text)", () => {
+  const now = 5_000;
+  const sources = {
+    history: [],
+    pins: ["show all pdfs", "show all parquet files"],
+  };
+  assert.equal(ghostCompletion("show all p", sources, { now }), "arquet files");
 });

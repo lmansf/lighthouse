@@ -32,18 +32,12 @@ import {
   DialogSurface,
   DialogTitle,
   Divider,
-  DrawerBody,
-  DrawerHeader,
-  DrawerHeaderTitle,
-  Input,
   Link,
-  OverlayDrawer,
   Popover,
   PopoverSurface,
   PopoverTrigger,
   SearchBox,
   Spinner,
-  Switch,
   Text,
   Textarea,
   Title3,
@@ -91,17 +85,16 @@ import {
 import dynamic from "next/dynamic";
 import { type Components } from "react-markdown";
 import type { DragEvent } from "react";
-import type { AnalyticsMeta, ChangedPin, ChatTurn, Pin, RagReference, RecipeCard } from "@/contracts";
+import type { AnalyticsMeta, ChangedPin, ChatTurn, Pin, RagReference } from "@/contracts";
 import { chatService, MODEL_PROVIDERS, ragService, runRecipeQuestion } from "@/contracts";
 import { useRagStore } from "@/stores/useRagStore";
 import { useAuthStore } from "@/stores/useAuthStore";
-import { parseChartSpec, stripChartRequestFences, tableToCsv } from "@/lib/chartSpec";
+import { parseChartSpec, stripChartRequestFences, stripChartFences, tableToCsv } from "@/lib/chartSpec";
 import { parseStatSpec } from "@/lib/statSpec";
 import { stripAppearanceRequestFences } from "@/lib/appearanceSpec";
 import {
   cloudProviderActive,
   hiddenFromCloudCount,
-  hiddenFromCloudLabel,
   LOCAL_ONLY_SKIP_NOTE_RE,
 } from "@/lib/privacyState";
 import { chartSpecFromTable, hasEngineChartFence } from "@/lib/chartFromTable";
@@ -117,7 +110,7 @@ import { addPinToCurrentBoard } from "@/features/boards/boardScope";
 import { citationQuery, requestFileInspect } from "@/lib/citePreview";
 import { composeEvidencePack, provenanceStampText } from "@/lib/evidencePack";
 import { recallRelated, type RecallHit } from "@/lib/recall";
-import { askSuggestions, lastAsk, type AskHistoryItem } from "@/lib/askTypeahead";
+import { askSuggestions, ghostCompletion, lastAsk, type AskHistoryItem } from "@/lib/askTypeahead";
 import { quickOpenMatches } from "@/lib/quickOpen";
 import { activeMention, replaceMention, type MentionSpan } from "@/lib/mentionQuery";
 import { emphasize } from "@/features/quickopen/QuickOpen";
@@ -132,11 +125,9 @@ import { SaveViewDialog } from "@/features/views/SaveViewDialog";
 import { DefineMetricDialog } from "@/features/semantic/DefineMetricDialog";
 import { EgressShield } from "@/features/egress/EgressShield";
 import { ProviderSwitch } from "@/features/chat/ProviderSwitch";
-import {
-  conversationsForContext,
-  useChatStore,
-  type TranscriptMessage,
-} from "@/stores/useChatStore";
+import { useChatStore, type TranscriptMessage } from "@/stores/useChatStore";
+import { useValidatedChips } from "@/features/chat/useValidatedChips";
+import { refineEligibility, type RefineEligibility } from "@/lib/refineChips";
 import { useInvestigationsStore } from "@/stores/useInvestigationsStore";
 import { chatHistoryLocked } from "@/stores/managedLocks";
 import { modKey } from "@/features/onboarding/ModeChooser";
@@ -179,6 +170,11 @@ export function computeAnchorScrollTop(
 // the Textarea's vertical padding. Beyond this the textarea scrolls internally.
 const COMPOSER_MAX_HEIGHT = 132;
 
+// §22.1 ghost autocomplete: how long the draft must sit still before the ghost
+// re-ranks. Under a typical inter-keystroke gap it renders once per pause, not
+// per key — the "never flickers" half of the feature.
+const GHOST_DEBOUNCE_MS = 120;
+
 const useStyles = makeStyles({
   panel: {
     position: "relative",
@@ -192,9 +188,6 @@ const useStyles = makeStyles({
     transitionProperty: "border-color, background-color",
     transitionDuration: tokens.durationFaster,
   },
-  // Top-right History affordance for the empty (pre-conversation) hero, so past
-  // chats are reachable even before the main header exists.
-  heroHistory: { position: "absolute", top: tokens.spacingVerticalM, right: tokens.spacingHorizontalM },
   // Highlight while a file is being dragged over the chat (from the explorer or
   // the OS), mirroring the explorer's drop affordance.
   panelDropping: {
@@ -656,13 +649,6 @@ const useStyles = makeStyles({
     fontStyle: "normal",
   },
   skipNoteIcon: { flexShrink: 0, marginTop: "3px", color: tokens.colorNeutralForeground3 },
-  // "{n} files hidden from cloud models" in the header, beside the egress
-  // shield — a quiet trigger sized like the shield's (subtle, no bulk).
-  hiddenFromCloud: {
-    minWidth: "auto",
-    ...shorthands.padding(0, tokens.spacingHorizontalXS),
-    color: tokens.colorNeutralForeground3,
-  },
   // --- Pinned questions: the changed-pins alert banner and the dialog. ---
   pinBanner: {
     display: "flex",
@@ -898,6 +884,38 @@ const useStyles = makeStyles({
       maxHeight: `${COMPOSER_MAX_HEIGHT}px`,
     },
   },
+  // --- §22.1 ghost autocomplete: the inline greyed continuation. ---
+  // The wrap hosts an aria-hidden MIRROR behind the (transparent-background)
+  // textarea: it repeats the typed draft invisibly so the grey suffix starts
+  // exactly at the caret — wrapping included, because the mirror pins the SAME
+  // text metrics + padding Fluent's medium textarea slot uses
+  // (typographyStyles.body1; spacingVerticalSNudge / MNudge+XXS). overflow
+  // hidden means an internally-scrolled draft merely clips the ghost (never
+  // misdraws it), and pointer-events stay with the field.
+  ghostWrap: { position: "relative", display: "flex", flexGrow: 1, minWidth: 0 },
+  ghostMirror: {
+    position: "absolute",
+    top: "0",
+    right: "0",
+    bottom: "0",
+    left: "0",
+    overflow: "hidden",
+    pointerEvents: "none",
+    whiteSpace: "pre-wrap",
+    overflowWrap: "break-word",
+    fontFamily: tokens.fontFamilyBase,
+    fontSize: tokens.fontSizeBase300,
+    lineHeight: tokens.lineHeightBase300,
+    fontWeight: tokens.fontWeightRegular,
+    ...shorthands.padding(
+      tokens.spacingVerticalSNudge,
+      `calc(${tokens.spacingHorizontalMNudge} + ${tokens.spacingHorizontalXXS})`,
+    ),
+  },
+  // The typed prefix is repeated INVISIBLY (it only positions the suffix);
+  // the suffix reads as a quiet hint in the placeholder grey.
+  ghostTyped: { color: "transparent" },
+  ghostSuffix: { color: tokens.colorNeutralForeground4 },
   // Faint guidance under the composer: keyboard hint + where answers come from.
   composerMeta: {
     display: "flex",
@@ -993,62 +1011,6 @@ const useStyles = makeStyles({
     backgroundColor: tokens.colorNeutralBackground3,
     color: tokens.colorNeutralForeground2,
   },
-
-  // --- Recent-chats drawer ---
-  historyDrawer: { width: "min(380px, 90vw)" },
-  // Opt-in persistence control at the top of the drawer: a switch plus a hint
-  // line that spells out where chats live and when they expire.
-  histPersist: {
-    display: "flex",
-    flexDirection: "column",
-    gap: tokens.spacingVerticalXS,
-    ...shorthands.padding(tokens.spacingVerticalS, tokens.spacingHorizontalM),
-    marginBottom: tokens.spacingVerticalM,
-    borderRadius: tokens.borderRadiusMedium,
-    backgroundColor: tokens.colorNeutralBackground2,
-  },
-  histPersistHint: { color: tokens.colorNeutralForeground3 },
-  histSearch: { width: "100%", marginBottom: tokens.spacingVerticalM },
-  histList: { display: "flex", flexDirection: "column", gap: tokens.spacingVerticalXXS },
-  histEmpty: {
-    color: tokens.colorNeutralForeground3,
-    textAlign: "center",
-    ...shorthands.padding(tokens.spacingVerticalXXL, tokens.spacingHorizontalL),
-  },
-  histRow: {
-    display: "flex",
-    alignItems: "center",
-    gap: tokens.spacingHorizontalXS,
-    ...shorthands.padding(tokens.spacingVerticalXS, tokens.spacingHorizontalS),
-    borderRadius: tokens.borderRadiusMedium,
-    ":hover": { backgroundColor: tokens.colorNeutralBackground2Hover },
-    ":hover .hist-actions": { opacity: 1 },
-  },
-  histRowActive: { backgroundColor: tokens.colorBrandBackground2 },
-  histRowMain: {
-    display: "flex",
-    flexDirection: "column",
-    flex: 1,
-    minWidth: 0,
-    ...shorthands.padding("2px", "0"),
-    cursor: "pointer",
-    ...shorthands.border("none"),
-    backgroundColor: "transparent",
-    textAlign: "left",
-    color: "inherit",
-  },
-  histTitle: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
-  histTime: { color: tokens.colorNeutralForeground3 },
-  histActions: { display: "flex", gap: "0", opacity: 0, transition: "opacity 120ms ease" },
-  histEditRow: { display: "flex", alignItems: "center", gap: tokens.spacingHorizontalXS, flex: 1 },
-  histConfirm: {
-    display: "flex",
-    alignItems: "center",
-    gap: tokens.spacingHorizontalXS,
-    flex: 1,
-    flexWrap: "wrap",
-  },
-  histConfirmText: { color: tokens.colorStatusDangerForeground1, flex: 1, minWidth: "100px" },
 
   // --- Inline question editor (the edit-your-question pencil) ---
   questionRow: {
@@ -1316,11 +1278,30 @@ function isFooterish(node: MdNode): boolean {
  * Prose-only answers (no disclosure, no chart) are left completely alone, so
  * an ordinary markdown table in a document summary renders as before.
  */
-function remarkAnswerCard() {
+function remarkAnswerCard(options?: { chart?: string }) {
   return (tree: unknown) => {
     const root = tree as MdNode;
     const children = root.children;
     if (!children) return;
+
+    // §22.6: the engine's validated chart spec now arrives on the final
+    // chunk's meta, not as a fence in the text. Re-materialize it HERE as a
+    // synthetic code node so the whole downstream path — card anchoring, the
+    // code-override renderer, styling — behaves byte-identically to the fence
+    // era. Placed before the SQL disclosure (the fence's historic position);
+    // appended when there is no disclosure.
+    if (options?.chart) {
+      const chartNode: MdNode = {
+        type: "code",
+        lang: "lighthouse-chart",
+        value: options.chart,
+      } as MdNode;
+      // This runs BEFORE step 1 folds the disclosure, so anchor on the raw
+      // "*Query used:*" label paragraph, not the not-yet-created details node.
+      const beforeLabel = children.findIndex((n) => isQueryLabel(n));
+      if (beforeLabel >= 0) children.splice(beforeLabel, 0, chartNode);
+      else children.push(chartNode);
+    }
 
     // 1) Fold the SQL fence(s) behind their engine-written label. The plural
     //    numbered form interleaves list artifacts between fences; they ride
@@ -1686,14 +1667,30 @@ function SortableTable({
  * Canned refinement follow-ups for analytics answers. These ride the normal
  * ask path — the engine sees the conversation's prior "Query used" fence and
  * adapts that SQL — so the client never rewrites SQL itself (design:
- * add-analytics-refinement, decision 4).
+ * add-analytics-refinement, decision 4). §22.3: each chip carries its
+ * eligibility read against refineEligibility(answer's own table) — a chip
+ * that cannot succeed ("Monthly" on an undated result, "Top 10" on 4 rows,
+ * "As %" on one) does not render.
  */
-const REFINE_CHIPS: { label: string; ask: string }[] = [
-  { label: "Top 10", ask: "Refine the previous result: only the top 10 rows." },
-  { label: "Monthly", ask: "Refine the previous result: break it down by month." },
+const REFINE_CHIPS: {
+  label: string;
+  ask: string;
+  applies: (e: RefineEligibility) => boolean;
+}[] = [
+  {
+    label: "Top 10",
+    ask: "Refine the previous result: only the top 10 rows.",
+    applies: (e) => e.topN,
+  },
+  {
+    label: "Monthly",
+    ask: "Refine the previous result: break it down by month.",
+    applies: (e) => e.monthly,
+  },
   {
     label: "As %",
     ask: "Refine the previous result: show each row as a percentage of the total.",
+    applies: (e) => e.asPercent,
   },
 ];
 
@@ -1708,6 +1705,7 @@ const REFINE_CHIPS: { label: string; ask: string }[] = [
 function RefineChips({
   meta,
   content,
+  metaChart,
   isLast,
   disabled,
   onAsk,
@@ -1726,6 +1724,9 @@ function RefineChips({
   meta: AnalyticsMeta;
   /** The answer markdown — the "Chart it" heuristic reads its GFM table. */
   content: string;
+  /** §22.6: the engine chart from the final chunk's meta — when present the
+   *  answer is already charted, so "Chart it" must not double-offer. */
+  metaChart?: string;
   isLast: boolean;
   disabled: boolean;
   onAsk: (q: string) => void;
@@ -1753,20 +1754,26 @@ function RefineChips({
   const styles = useStyles();
   // "Chart it": offered only when (a) the answer carries a parseable GFM
   // table, (b) the client heuristic builds a spec the REAL parser accepts,
-  // and (c) the engine didn't already chart this answer. Pure computation
-  // over the displayed markdown — no rag/chat service is ever consulted.
+  // and (c) the engine didn't already chart this answer — meta chart (§22.6)
+  // or legacy fence. Pure computation over the displayed markdown — no
+  // rag/chat service is ever consulted.
   const tableChart = useMemo(() => {
-    if (hasEngineChartFence(content)) return null;
+    if (metaChart || hasEngineChartFence(content)) return null;
     const table = parseMarkdownTable(content);
     return table ? chartSpecFromTable(table) : null;
-  }, [content]);
+  }, [content, metaChart]);
+  // §22.3: gate each canned chip on the answer's OWN result table — pure
+  // computation (refineEligibility over the parsed GFM table), no service.
+  // A prose-only answer parses to null and keeps every chip (unknown shape
+  // is not known-bad — see src/lib/refineChips.ts).
+  const refine = useMemo(() => refineEligibility(parseMarkdownTable(content)), [content]);
   // Quiet secondary actions (Beam): subtle + hairline, never a filled chip —
   // the answer stays the loudest thing on the card.
   return (
     <>
     <div className={styles.refineRow}>
       {isLast &&
-        REFINE_CHIPS.map((c) => (
+        REFINE_CHIPS.filter((c) => c.applies(refine)).map((c) => (
           <Button
             key={c.label}
             appearance="subtle"
@@ -1942,19 +1949,22 @@ function TrustBadges({ meta }: { meta: AnalyticsMeta }) {
  */
 function ChartItRow({
   content,
+  metaChart,
   chartShown,
   onToggleChart,
 }: {
   content: string;
+  /** §22.6: engine chart on the final chunk's meta — already charted. */
+  metaChart?: string;
   chartShown: boolean;
   onToggleChart: () => void;
 }) {
   const styles = useStyles();
   const tableChart = useMemo(() => {
-    if (hasEngineChartFence(content)) return null;
+    if (metaChart || hasEngineChartFence(content)) return null;
     const table = parseMarkdownTable(content);
     return table ? chartSpecFromTable(table) : null;
-  }, [content]);
+  }, [content, metaChart]);
   if (!tableChart) return null;
   return (
     <>
@@ -2001,19 +2011,33 @@ const AnswerMarkdown = memo(function AnswerMarkdown({
   content,
   turnId,
   onCite,
+  metaChart,
+  legacyFences = true,
 }: {
   content: string;
   turnId: string;
   onCite: (turnId: string, n: number) => void;
+  /** §22.6: the engine-validated chart spec from the final chunk's meta —
+   *  re-materialized as a synthetic AST node inside remarkAnswerCard. */
+  metaChart?: string;
+  /** §22.6: false for NEW-ERA turns (the final chunk carried `meta`), where a
+   *  chart fence in TEXT can only be model-injected and is stripped, never
+   *  rendered. True (default) only for legacy saved chats with no meta, which
+   *  still render their persisted engine fence. */
+  legacyFences?: boolean;
 }) {
   const styles = useStyles();
   // Belt-and-braces (chart-directive): the engine already withholds
   // lighthouse-chart-request fences from streamed deltas; displayed prose
-  // strips any residue too. ```lighthouse-chart fences are NOT stripped here —
-  // they render as charts below.
+  // strips any residue too. On legacy turns, plain ```lighthouse-chart fences
+  // are NOT stripped — they render as charts below; on new-era turns EVERY
+  // chart fence is stripped (the real spec rides `metaChart`).
   const cleaned = useMemo(
-    () => stripAppearanceRequestFences(stripChartRequestFences(content)),
-    [content],
+    () =>
+      stripAppearanceRequestFences(
+        legacyFences ? stripChartRequestFences(content) : stripChartFences(content),
+      ),
+    [content, legacyFences],
   );
   // G4: a truncated analytics result carries the G1 "first N of M rows" footer.
   // The footer ALWAYS stays in the body (a deterministic, never-model-generated
@@ -2074,6 +2098,10 @@ const AnswerMarkdown = memo(function AnswerMarkdown({
         if (className?.split(" ").includes(CHART_LANG)) {
           const spec = parseChartSpec(String(children ?? ""));
           if (spec) return <AnalyticsChart spec={spec} />;
+          // §22.6: never dump raw spec text — one quiet line says why. (Reached
+          // only by a legacy saved chat whose persisted fence no longer
+          // validates; new-era specs are engine-validated before they ship.)
+          return <em className="lh-card-note">Chart couldn't be drawn — its saved spec didn't validate.</em>;
         }
         // §2: a single verified number renders as an inline stat tile (the
         // engine emits the fence from a count/single-value result; a malformed
@@ -2118,7 +2146,7 @@ const AnswerMarkdown = memo(function AnswerMarkdown({
     <MarkdownView
       content={cleaned}
       components={components}
-      remarkPlugins={[remarkCitations, remarkAnswerCard]}
+      remarkPlugins={[remarkCitations, [remarkAnswerCard, { chart: metaChart }]]}
     />
   );
 });
@@ -2135,7 +2163,9 @@ const StreamBlock = memo(function StreamBlock({
   turnId: string;
   onCite: (turnId: string, n: number) => void;
 }) {
-  return <AnswerMarkdown content={content} turnId={turnId} onCite={onCite} />;
+  // A live turn is always new-era (§22.6): any chart fence in its text is
+  // model-injected and must not render; the real spec arrives on settle.
+  return <AnswerMarkdown content={content} turnId={turnId} onCite={onCite} legacyFences={false} />;
 });
 
 /**
@@ -2166,7 +2196,9 @@ const StreamingAnswer = memo(function StreamingAnswer({
   const blocks = useMemo(() => {
     // Same belt-and-braces strip as AnswerMarkdown (a still-open request fence
     // never shows), then split the safe prefix into independently-parsed blocks.
-    const clean = stripAppearanceRequestFences(stripChartRequestFences(content));
+    // §22.6: live turns are new-era — strip EVERY chart fence (a fence here
+    // can only be model-injected; the engine's spec rides the final chunk).
+    const clean = stripAppearanceRequestFences(stripChartFences(content));
     return splitMarkdownBlocks(safeMarkdownPrefix(clean));
   }, [content]);
   return (
@@ -2416,10 +2448,7 @@ export function ChatPanel() {
   const newConversation = useChatStore((s) => s.newConversation);
   const undoNewConversation = useChatStore((s) => s.undoNewConversation);
   const openConversation = useChatStore((s) => s.openConversation);
-  const renameConversation = useChatStore((s) => s.renameConversation);
-  const deleteConversation = useChatStore((s) => s.deleteConversation);
   const historyPersistEnabled = useChatStore((s) => s.persistEnabled);
-  const setHistoryPersist = useChatStore((s) => s.setPersistEnabled);
   const [streaming, setStreaming] = useState(false);
   // Pre-answer stage note from the engine ("Reading q3.csv (2/5)…") — shown in
   // the loader while multi-document synthesis works; cleared on the first token.
@@ -2433,12 +2462,8 @@ export function ChatPanel() {
   // race two writes for the same conversation.
   const exportNoteRef = useRef(false);
 
-  // Recent-chats drawer + its inline rename/delete affordances.
-  const [historyOpen, setHistoryOpen] = useState(false);
-  const [histSearch, setHistSearch] = useState("");
-  const [renamingId, setRenamingId] = useState<string | null>(null);
-  const [renameText, setRenameText] = useState("");
-  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  // Recent chats moved to the sidebar History section (§22.2 — HistoryNav
+  // owns its own search/rename/delete state; nothing drawer-shaped lives here).
   // "Started a new chat — Undo" strip, auto-dismissed after a few seconds.
   const [showUndo, setShowUndo] = useState(false);
   const undoTimer = useRef<number | null>(null);
@@ -2548,6 +2573,12 @@ export function ChatPanel() {
     setSaveView(null);
     setViewNotes({});
     setDefineMetric(null);
+    // §22.2: conversations can now be opened from OUTSIDE this panel (the
+    // sidebar History section) — the in-place question editor is keyed by
+    // message id like the notes above, so close it on any switch. (The old
+    // drawer's openChat did this inline; the effect covers every path.)
+    setEditingId(null);
+    setEditText("");
   }, [currentId]);
   // Cancels the in-flight ask() when the user presses Stop.
   const abortRef = useRef<AbortController | null>(null);
@@ -2603,6 +2634,12 @@ export function ChatPanel() {
   const idSeq = useRef(
     messages.reduce((max, m) => Math.max(max, Number(m.id.slice(1)) || 0), 0),
   );
+  // §22.6: assistant turns created in THIS session. Live turns never render
+  // chart fences from answer text (the engine's spec rides `meta.chart`;
+  // a text fence can only be model-injected); hydrated saved chats — absent
+  // from this set — keep the legacy fence-rendering path for their persisted
+  // engine charts.
+  const liveTurnIds = useRef<Set<string>>(new Set());
   // Re-seed the id counter when the active conversation changes (open / undo /
   // delete), so new turns never collide with ids already in the loaded
   // transcript. Read from the store so we see the just-switched messages.
@@ -3018,6 +3055,10 @@ export function ChatPanel() {
     const attachmentIds = (opts?.attachmentsOverride ?? attachments).map((a) => a.id);
     const userMsg: TranscriptMessage = { id: `u${++idSeq.current}`, role: "user", content: q };
     const asstId = `a${++idSeq.current}`;
+    // §22.6: turns born in THIS session never render chart fences from text —
+    // the engine's spec arrives on meta, so any fence in a live answer is
+    // model-injected. Hydrated (saved/legacy) turns keep fence rendering.
+    liveTurnIds.current.add(asstId);
     const asstMsg: TranscriptMessage = {
       id: asstId,
       role: "assistant",
@@ -3698,20 +3739,6 @@ export function ChatPanel() {
     undoNewConversation();
   }
 
-  /** Open a past conversation from the recent-chats drawer. */
-  function openChat(id: string) {
-    if (streaming || id === currentId) {
-      setHistoryOpen(false);
-      return;
-    }
-    openConversation(id);
-    setHistoryOpen(false);
-    setShowUndo(false);
-    setQuestion("");
-    setAttachments([]);
-    setEditingId(null);
-  }
-
   /** Begin editing a past question in place (pencil affordance). */
   function startEdit(userId: string, current: string) {
     if (streaming) return;
@@ -3758,14 +3785,6 @@ export function ChatPanel() {
       else next[id] = rating;
       return next;
     });
-  }
-
-  /** Commit an inline rename from the recent-chats drawer. */
-  function commitRename(id: string) {
-    const t = renameText.trim();
-    if (t) renameConversation(id, t);
-    setRenamingId(null);
-    setRenameText("");
   }
 
   /** Copy an answer's Markdown (minus [n] markers); the icon flips to a check. */
@@ -3911,6 +3930,58 @@ export function ChatPanel() {
     return lastAsk({ history: session }) ?? lastAsk({ history: askHistoryItems });
   }, [messages, askHistoryItems]);
 
+  // --- §22.3: validated, PRELOADED suggestion chips (asks + recipes) — the
+  // one shared hook (also RecipesNav's source, same module cache). It re-keys
+  // on the included set, provider, investigation, and the views nonce, so a
+  // posture flip can never serve another posture's chips. The hero keeps its
+  // old visual caps (4 asks, 3 recipes) at the consumption site. ---
+  const validatedChips = useValidatedChips(includedFileIds);
+  const engineAsks = useMemo(() => validatedChips.asks.slice(0, 4), [validatedChips.asks]);
+  const recipeChips = useMemo(() => validatedChips.recipes.slice(0, 3), [validatedChips.recipes]);
+
+  // --- §22.1 ghost autocomplete: the single best inline continuation of the
+  //     draft, greyed after the caret; Right Arrow at the end accepts it. ---
+  // Completion-only extras: the engine's validated suggested asks (ALL of
+  // them, not just the hero's four) feed the GHOST, never the dropdown
+  // (whose rows stay history/pin labeled).
+  const ghostExtras = useMemo(
+    () => validatedChips.asks.map((a) => a.question),
+    [validatedChips.asks],
+  );
+  // ~120ms debounced draft: the ghost re-ranks only after a typing pause (and
+  // hides while draft ≠ debounced), so it never flickers per keystroke.
+  const [ghostDraft, setGhostDraft] = useState("");
+  useEffect(() => {
+    const t = window.setTimeout(() => setGhostDraft(question), GHOST_DEBOUNCE_MS);
+    return () => window.clearTimeout(t);
+  }, [question]);
+  // Esc parks the ghost for exactly this draft; any edit revives it.
+  const [ghostDismissed, setGhostDismissed] = useState<string | null>(null);
+  // IME composition suppresses the ghost — a half-composed draft must not
+  // grow a tail. Tracked from the textarea's own composition events.
+  const [composing, setComposing] = useState(false);
+  const ghostSuggested = useMemo(
+    () =>
+      ghostCompletion(ghostDraft, {
+        history: askHistoryItems,
+        pins: pinQuestions,
+        extras: ghostExtras,
+      }),
+    [ghostDraft, askHistoryItems, pinQuestions, ghostExtras],
+  );
+  // Visible only when nothing else owns the slot: the @-mention picker and the
+  // type-ahead popover win (their key claims would fight the arrow), IME
+  // composition hides it, and the ranker itself gates GHOST_MIN_CHARS.
+  const ghostText =
+    ghostSuggested !== null &&
+    ghostDraft === question &&
+    !mentionShown &&
+    !suggestsShown &&
+    !composing &&
+    ghostDismissed !== question
+      ? ghostSuggested
+      : null;
+
   function handleComposerKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
     // @-mention picker owns the keys while it's up — a mention resolves to an
     // attachment before the ask type-ahead or send ever see the key. Enter/Tab
@@ -3970,6 +4041,27 @@ export function ChatPanel() {
         acceptSuggestion(askSuggests[suggestSel].text);
         return;
       }
+    }
+    // §22.1 ghost: Right Arrow ACCEPTS the inline continuation — but only from
+    // a collapsed caret at the very END of the draft, so → anywhere else keeps
+    // moving the caret and a text selection collapses normally. The pickers
+    // above keep their precedence for free: while either is open there IS no
+    // ghost (ghostText gates on mentionShown/suggestsShown), and Tab is left
+    // entirely to the type-ahead above.
+    if (e.key === "ArrowRight" && ghostText !== null) {
+      const el = e.currentTarget;
+      if (el.selectionStart === el.selectionEnd && el.selectionEnd === el.value.length) {
+        e.preventDefault();
+        applySuggestion(question + ghostText);
+        return;
+      }
+    }
+    // Esc with a ghost showing parks it for THIS draft (any edit revives it).
+    // Reachable only when no picker is open — each picker claims Esc first.
+    if (e.key === "Escape" && ghostText !== null) {
+      e.preventDefault();
+      setGhostDismissed(question);
+      return;
     }
     // Enter sends; Shift+Enter inserts a newline. `isComposing` guards IME
     // composition (e.g. Japanese input), where Enter commits the composition
@@ -4035,61 +4127,10 @@ export function ChatPanel() {
     });
   }
 
-  // Engine-derived example questions for the empty state — each names real
-  // columns of a real included tabular file, so tapping one is guaranteed
-  // answerable by the analytics path. Fetched when the empty state shows (and
-  // when the included set changes); empty (or a fetch failure) keeps the
-  // static suggestions below. openspec: add-vault-meta-answers.
-  const [engineAsks, setEngineAsks] = useState<{ label: string; question: string }[]>([]);
-  const emptyState = messages.length === 0;
-  // Keyed by VALUE, not array identity: the vault poll rebuilds `nodes` (and
-  // so `includedFileIds`) every few seconds even when nothing changed, and a
-  // per-tick engine round-trip for suggestions would be pure waste.
-  const includedKey = useMemo(() => includedFileIds.join("\n"), [includedFileIds]);
-  useEffect(() => {
-    if (!emptyState || !includedKey) {
-      setEngineAsks([]);
-      return;
-    }
-    let cancelled = false;
-    ragService
-      .suggestedAsks(includedKey.split("\n"))
-      .then((asks) => {
-        if (!cancelled) setEngineAsks(Array.isArray(asks) ? asks.slice(0, 4) : []);
-      })
-      .catch(() => {
-        if (!cancelled) setEngineAsks([]);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [emptyState, includedKey]);
-
-  // Applicable recipes for the empty state (openspec: add-recipes §3.1): the
-  // one-tap runnable analyses for the included set, rendered BESIDE the
-  // suggested asks. Same lifecycle as engineAsks — fetched when the empty state
-  // shows and when the included set changes; [] on the web dev twin (recipes
-  // are Rust-engine-only). Tapping one seeds the recipe-cued question through
-  // the SAME sendQuestion seam the suggested-ask chips use.
-  const [recipeChips, setRecipeChips] = useState<RecipeCard[]>([]);
-  useEffect(() => {
-    if (!emptyState || !includedKey) {
-      setRecipeChips([]);
-      return;
-    }
-    let cancelled = false;
-    ragService
-      .applicableRecipes(includedKey.split("\n"))
-      .then((rs) => {
-        if (!cancelled) setRecipeChips(Array.isArray(rs) ? rs.slice(0, 3) : []);
-      })
-      .catch(() => {
-        if (!cancelled) setRecipeChips([]);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [emptyState, includedKey]);
+  // The empty-state suggestion chips (engine asks + applicable recipes) come
+  // from useValidatedChips above (§22.3) — preloaded, validated per posture,
+  // and shared with RecipesNav; the two per-surface fetch effects that lived
+  // here are gone. openspec: add-vault-meta-answers / add-recipes §3.1.
 
   // Up to 3 starter prompts built from the user's actual included file names.
   const suggestions = useMemo(() => {
@@ -4117,18 +4158,6 @@ export function ChatPanel() {
     return recallRelated(question, conversations, { currentId });
   }, [historyPersistEnabled, question, conversations, currentId]);
 
-  // Recent conversations for the history drawer: real (non-empty) chats IN
-  // THE CURRENT CONTEXT (openspec: add-investigations — an investigation's
-  // chats live in it; the global view shows only unassigned ones, see
-  // conversationsForContext), newest first, filtered by the search box.
-  const recentChats = useMemo(() => {
-    const q = histSearch.trim().toLowerCase();
-    return conversationsForContext(conversations, currentInvestigationId)
-      .filter((c) => c.messages.length > 0)
-      .filter((c) => !q || c.title.toLowerCase().includes(q))
-      .sort((a, b) => b.updatedAt - a.updatedAt);
-  }, [conversations, histSearch, currentInvestigationId]);
-
   // Vault files offered by the attach picker: files not already attached,
   // filtered by the picker's search, capped so the list stays snappy.
   const attachableFiles = useMemo(() => {
@@ -4140,21 +4169,27 @@ export function ChatPanel() {
       .slice(0, 50);
   }, [nodes, attachments, attachSearch]);
 
-  const visibleBadgeText = `${includedFileIds.length} ${
-    includedFileIds.length === 1 ? "file" : "files"
-  } visible to AI`;
-
-  // Policy badge (openspec: add-investigations §4.2): a local-only
-  // investigation's on-device promise, in the provenance convention (amber
-  // tint = on-device). Rendered in BOTH headers; the ENGINE enforces the
-  // policy at the model-config chokepoint — this badge only tells the truth.
-  const onDeviceBadge = investigationLocalOnly ? (
-    <Tooltip content="This investigation always answers on-device" relationship="description">
-      <Badge appearance="tint" icon={<ShieldRegular />}>
-        On-device
-      </Badge>
-    </Tooltip>
-  ) : null;
+  // §22.2: the header's separate diagnostics (visible-files badge, On-device
+  // badge, hidden-from-cloud button) collapsed into the EgressShield's status
+  // popover — ONE quiet chip in both header paths. The shield receives the
+  // same data those surfaces read; the ENGINE still enforces the local-only
+  // policy at the model-config chokepoint — the popover only tells the truth.
+  const revealHiddenFromCloud = useCallback(() => {
+    // The click hands off to the explorer via the filter event; the detail-less
+    // reveal-node ping rides along so a collapsed sidebar opens (AppShell
+    // listens by event NAME alone, and the explorer's reveal handler ignores a
+    // dispatch without an id).
+    window.dispatchEvent(new CustomEvent("lighthouse:filter-local-only"));
+    window.dispatchEvent(new CustomEvent("lighthouse:reveal-node"));
+  }, []);
+  const statusShield = (
+    <EgressShield
+      visibleCount={includedFileIds.length}
+      hiddenFromCloud={cloudActive ? hiddenFromCloud : 0}
+      onRevealHidden={revealHiddenFromCloud}
+      onDeviceLocalOnly={investigationLocalOnly}
+    />
+  );
 
   // Scope pill (openspec: add-investigations §4.2), the attachBar register: a
   // quiet reminder that asks here read only the investigation's files. Hidden
@@ -4451,40 +4486,57 @@ export function ChatPanel() {
         )}
         <div className={styles.composer} data-tour="chat">
           {attachButton}
-          <Textarea
-            ref={composerRef}
-            className={styles.composerField}
-            resize="none"
-            rows={1}
-            value={question}
-            placeholder={attachments.length > 0 ? "Ask about the attached files…" : placeholder}
-            aria-activedescendant={
-              mentionShown
-                ? `mention-opt-${mentionSelClamped}`
-                : suggestsShown && suggestSel >= 0
-                  ? `ask-suggest-${suggestSel}`
-                  : undefined
-            }
-            onChange={(_, d) => {
-              setQuestion(d.value);
-              // Typing (re)filters and reopens; the highlight restarts unset so
-              // Enter keeps sending until the user arrows into the list.
-              setSuggestIndex(-1);
-              setSuggestOpen(d.value.trim().length > 0);
-              // Re-detect the @-mention token once the value settles; typing
-              // resets its highlight to the top row (so Enter picks it).
-              setMentionSel(0);
-              requestAnimationFrame(refreshMention);
-            }}
-            onSelect={refreshMention}
-            onBlur={() => {
-              setSuggestOpen(false);
-              // Close the picker after a row click can land — rows keep focus via
-              // onMouseDown preventDefault, so a real blur means "left the field".
-              requestAnimationFrame(() => setMention(null));
-            }}
-            onKeyDown={handleComposerKeyDown}
-          />
+          <div className={styles.ghostWrap}>
+            {/* §22.1: the ghost mirror sits BEHIND the transparent textarea
+                (the field's own relative root paints over it), repeating the
+                typed draft invisibly so the grey suffix lands exactly after
+                the caret, line wraps included. aria-hidden + pointer-events
+                none: it is pure paint — keys, clicks, and AT all see only the
+                textarea. */}
+            {ghostText !== null && (
+              <div aria-hidden="true" className={styles.ghostMirror}>
+                <span className={styles.ghostTyped}>{question}</span>
+                <span className={styles.ghostSuffix}>{ghostText}</span>
+              </div>
+            )}
+            <Textarea
+              ref={composerRef}
+              className={styles.composerField}
+              resize="none"
+              rows={1}
+              value={question}
+              placeholder={attachments.length > 0 ? "Ask about the attached files…" : placeholder}
+              aria-activedescendant={
+                mentionShown
+                  ? `mention-opt-${mentionSelClamped}`
+                  : suggestsShown && suggestSel >= 0
+                    ? `ask-suggest-${suggestSel}`
+                    : undefined
+              }
+              onChange={(_, d) => {
+                setQuestion(d.value);
+                // Typing (re)filters and reopens; the highlight restarts unset so
+                // Enter keeps sending until the user arrows into the list.
+                setSuggestIndex(-1);
+                setSuggestOpen(d.value.trim().length > 0);
+                // Re-detect the @-mention token once the value settles; typing
+                // resets its highlight to the top row (so Enter picks it).
+                setMentionSel(0);
+                requestAnimationFrame(refreshMention);
+              }}
+              onSelect={refreshMention}
+              // §22.1: no ghost while an IME composition is in flight.
+              onCompositionStart={() => setComposing(true)}
+              onCompositionEnd={() => setComposing(false)}
+              onBlur={() => {
+                setSuggestOpen(false);
+                // Close the picker after a row click can land — rows keep focus via
+                // onMouseDown preventDefault, so a real blur means "left the field".
+                requestAnimationFrame(() => setMention(null));
+              }}
+              onKeyDown={handleComposerKeyDown}
+            />
+          </div>
           {streaming ? (
             <Button appearance="secondary" icon={<SquareRegular />} onClick={stopStreaming}>
               Stop
@@ -4500,6 +4552,7 @@ export function ChatPanel() {
         <Text size={200} className={styles.metaLine}>
           Enter to send · Shift+Enter for a new line
           {lastAskText ? " · ↑ to recall your last question" : ""}
+          {ghostText !== null ? " · → to complete" : ""}
         </Text>
         <Text size={200} className={styles.metaLine} data-tour="models">
           {provenance}
@@ -4669,201 +4722,6 @@ export function ChatPanel() {
     </Dialog>
   );
 
-  const historyButton = (
-    <Button
-      appearance="subtle"
-      icon={<HistoryRegular />}
-      onClick={() => setHistoryOpen(true)}
-      title="Recent chats"
-    >
-      History
-    </Button>
-  );
-
-  const historyDrawer = (
-    <OverlayDrawer
-      position="start"
-      open={historyOpen}
-      onOpenChange={(_, d) => {
-        setHistoryOpen(d.open);
-        if (!d.open) {
-          setRenamingId(null);
-          setConfirmDeleteId(null);
-          setHistSearch("");
-        }
-      }}
-      className={styles.historyDrawer}
-    >
-      <DrawerHeader>
-        <DrawerHeaderTitle
-          action={
-            <Button
-              appearance="subtle"
-              aria-label="Close"
-              icon={<DismissRegular />}
-              onClick={() => setHistoryOpen(false)}
-            />
-          }
-        >
-          Recent chats
-        </DrawerHeaderTitle>
-      </DrawerHeader>
-      <DrawerBody>
-        {/* Saving is opt-in: off by default, kept on this device when on, and
-            auto-cleared after two weeks. */}
-        <div className={styles.histPersist}>
-          <Switch
-            checked={historyPersistEnabled}
-            onChange={(_, d) => setHistoryPersist(Boolean(d.checked))}
-            label="Save chats on this device"
-          />
-          <Text size={200} className={styles.histPersistHint}>
-            {historyPersistEnabled
-              ? "Kept on this device and cleared automatically after two weeks. Delete any chat with its trash icon."
-              : "Chats aren't being saved — they clear when you close the app. Turn this on to keep them here."}
-          </Text>
-        </div>
-        <Button
-          appearance="secondary"
-          icon={<AddRegular />}
-          disabled={streaming || messages.length === 0}
-          onClick={() => {
-            newChat();
-            setHistoryOpen(false);
-          }}
-          style={{ width: "100%", marginBottom: tokens.spacingVerticalM }}
-        >
-          New chat
-        </Button>
-        <SearchBox
-          className={styles.histSearch}
-          placeholder="Search chats…"
-          value={histSearch}
-          onChange={(_, d) => setHistSearch(d.value)}
-        />
-        {recentChats.length === 0 ? (
-          <Text className={styles.histEmpty}>
-            {histSearch
-              ? "No chats match your search."
-              : historyPersistEnabled
-                ? "Your saved chats will appear here."
-                : "Chats from this session will appear here."}
-          </Text>
-        ) : (
-          <div className={styles.histList}>
-            {recentChats.map((c) => {
-              const active = c.id === currentId;
-              if (renamingId === c.id) {
-                return (
-                  <div key={c.id} className={styles.histRow}>
-                    <div className={styles.histEditRow}>
-                      <Input
-                        value={renameText}
-                        onChange={(_, d) => setRenameText(d.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter") commitRename(c.id);
-                          if (e.key === "Escape") setRenamingId(null);
-                        }}
-                        autoFocus
-                        style={{ flex: 1 }}
-                      />
-                      <Button
-                        size="small"
-                        appearance="primary"
-                        icon={<CheckmarkRegular />}
-                        aria-label="Save name"
-                        onClick={() => commitRename(c.id)}
-                      />
-                      <Button
-                        size="small"
-                        appearance="subtle"
-                        icon={<DismissRegular />}
-                        aria-label="Cancel rename"
-                        onClick={() => setRenamingId(null)}
-                      />
-                    </div>
-                  </div>
-                );
-              }
-              if (confirmDeleteId === c.id) {
-                return (
-                  <div key={c.id} className={styles.histRow}>
-                    <div className={styles.histConfirm}>
-                      <Text size={200} className={styles.histConfirmText}>
-                        Delete this chat?
-                      </Text>
-                      <Button
-                        size="small"
-                        appearance="primary"
-                        onClick={() => {
-                          deleteConversation(c.id);
-                          setConfirmDeleteId(null);
-                        }}
-                      >
-                        Delete
-                      </Button>
-                      <Button
-                        size="small"
-                        appearance="subtle"
-                        onClick={() => setConfirmDeleteId(null)}
-                      >
-                        Cancel
-                      </Button>
-                    </div>
-                  </div>
-                );
-              }
-              return (
-                <div
-                  key={c.id}
-                  className={mergeClasses(styles.histRow, active && styles.histRowActive)}
-                >
-                  <button
-                    type="button"
-                    className={styles.histRowMain}
-                    onClick={() => openChat(c.id)}
-                    disabled={streaming}
-                  >
-                    <Text
-                      size={300}
-                      weight={active ? "semibold" : "regular"}
-                      className={styles.histTitle}
-                    >
-                      {c.title}
-                    </Text>
-                    <Text size={200} className={styles.histTime}>
-                      {formatRelativeTime(c.updatedAt)}
-                    </Text>
-                  </button>
-                  <div className={mergeClasses(styles.histActions, "hist-actions")}>
-                    <Button
-                      size="small"
-                      appearance="subtle"
-                      icon={<EditRegular />}
-                      aria-label="Rename chat"
-                      onClick={() => {
-                        setRenamingId(c.id);
-                        setRenameText(c.title);
-                        setConfirmDeleteId(null);
-                      }}
-                    />
-                    <Button
-                      size="small"
-                      appearance="subtle"
-                      icon={<DeleteRegular />}
-                      aria-label="Delete chat"
-                      onClick={() => setConfirmDeleteId(c.id)}
-                    />
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        )}
-      </DrawerBody>
-    </OverlayDrawer>
-  );
-
   // Before the first question, center the prompt in the rail (Google-style).
   if (messages.length === 0 && !streaming) {
     return (
@@ -4872,29 +4730,30 @@ export function ChatPanel() {
         className={mergeClasses(styles.panel, dropping ? styles.panelDropping : undefined)}
         {...dropHandlers}
       >
-        {historyDrawer}
         {pinsDialog}
         {pinAlertBanner}
-        {recentChats.length > 0 && <div className={styles.heroHistory}>{historyButton}</div>}
         <div className={styles.hero}>
           <span className={styles.beacon} />
           <Title3 data-tour="beam">
             {currentInvestigation ? currentInvestigation.name : "Ask Lighthouse"}
           </Title3>
           {/* Hero context line (openspec: add-investigations §4.2): name is the
-              title above; this row carries scope size + the policy badge. It
-              lives OUTSIDE the visible-files branch so the on-device promise
-              never disappears with the badge when no files are visible yet. */}
+              title above; this row carries the scope size. */}
           {currentInvestigation && (
             <div className={styles.heroInvRow}>
               <Text size={200}>{scopeLabel}</Text>
-              {onDeviceBadge}
             </div>
           )}
           <Text className={styles.heroHint}>
             Answers use only the files visible to AI. Drop a file from the explorer
             here to ask about that file alone.
           </Text>
+          {/* §22.2: the one status popover (visible-files count, on-device
+              policy, hidden-from-cloud, egress) — OUTSIDE the visible-files
+              branch so the on-device promise never disappears with it when no
+              files are visible yet. Past chats live in the sidebar History
+              section now (HistoryNav); the hero carries no History button. */}
+          {statusShield}
           {includedFileIds.length === 0 && attachments.length === 0 ? (
             // Pre-flight: nothing is visible to AI yet. Inform gently and offer
             // the fix, but never block asking.
@@ -4913,52 +4772,49 @@ export function ChatPanel() {
               </Button>
             </div>
           ) : (
-            <>
-              <Badge appearance="tint">{visibleBadgeText}</Badge>
-              <div className={styles.suggestRow}>
-                {engineAsks.length > 0
-                  ? // Catalog-derived asks submit immediately — every one is a
-                    // real, answerable question about a real included file.
-                    engineAsks.map((s) => (
-                      <Button
-                        key={s.label}
-                        appearance="secondary"
-                        size="small"
-                        shape="circular"
-                        onClick={() => void sendQuestion(s.question)}
-                      >
-                        {s.label}
-                      </Button>
-                    ))
-                  : suggestions.map((s) => (
-                      <Button
-                        key={s.label}
-                        appearance="secondary"
-                        size="small"
-                        shape="circular"
-                        onClick={() => applySuggestion(s.fill)}
-                      >
-                        {s.label}
-                      </Button>
-                    ))}
-                {/* Applicable-recipe chips (openspec: add-recipes §3.1), beside
-                    the suggested asks and styled identically. Each submits its
-                    recipe-cued question immediately — the engine plans it
-                    model-free before the model gate. */}
-                {recipeChips.map((r) => (
-                  <Button
-                    key={`recipe:${r.id}:${r.table}`}
-                    appearance="secondary"
-                    size="small"
-                    shape="circular"
-                    title={r.summary}
-                    onClick={() => void sendQuestion(runRecipeQuestion(r.id, r.table))}
-                  >
-                    {r.name}
-                  </Button>
-                ))}
-              </div>
-            </>
+            <div className={styles.suggestRow}>
+              {engineAsks.length > 0
+                ? // Catalog-derived asks submit immediately — every one is a
+                  // real, answerable question about a real included file.
+                  engineAsks.map((s) => (
+                    <Button
+                      key={s.label}
+                      appearance="secondary"
+                      size="small"
+                      shape="circular"
+                      onClick={() => void sendQuestion(s.question)}
+                    >
+                      {s.label}
+                    </Button>
+                  ))
+                : suggestions.map((s) => (
+                    <Button
+                      key={s.label}
+                      appearance="secondary"
+                      size="small"
+                      shape="circular"
+                      onClick={() => applySuggestion(s.fill)}
+                    >
+                      {s.label}
+                    </Button>
+                  ))}
+              {/* Applicable-recipe chips (openspec: add-recipes §3.1), beside
+                  the suggested asks and styled identically. Each submits its
+                  recipe-cued question immediately — the engine plans it
+                  model-free before the model gate. */}
+              {recipeChips.map((r) => (
+                <Button
+                  key={`recipe:${r.id}:${r.table}`}
+                  appearance="secondary"
+                  size="small"
+                  shape="circular"
+                  title={r.summary}
+                  onClick={() => void sendQuestion(runRecipeQuestion(r.id, r.table))}
+                >
+                  {r.name}
+                </Button>
+              ))}
+            </div>
           )}
           <div className={styles.heroComposer}>{composer("Ask about the files visible to AI…")}</div>
         </div>
@@ -4974,7 +4830,6 @@ export function ChatPanel() {
       className={mergeClasses(styles.panel, dropping ? styles.panelDropping : undefined)}
       {...dropHandlers}
     >
-      {historyDrawer}
       {pinsDialog}
       <div className={styles.conversation}>
         {pinAlertBanner}
@@ -5004,34 +4859,13 @@ export function ChatPanel() {
                 investigationLocalOnly ? "This investigation always answers on-device" : undefined
               }
             />
-            {onDeviceBadge}
-            <Badge appearance="tint">{visibleBadgeText}</Badge>
-            <EgressShield />
-            {/* "{n} files hidden from cloud models" (0.12.1 §2): beside the
-                egress shield — the two "what leaves this machine" surfaces sit
-                together. Cloud provider active + a non-empty withheld set
-                only. Clicking flips the explorer's "Hidden from cloud" filter
-                on (the explorer listens for the event and shows the toggle, so
-                the filter is visible and clearable in place); the detail-less
-                reveal-node ping only un-collapses the sidebar — AppShell
-                listens for the event name alone, and the explorer's own
-                reveal handler ignores it without an id. */}
-            {cloudActive && hiddenFromCloud > 0 && (
-              <Button
-                appearance="subtle"
-                size="small"
-                className={styles.hiddenFromCloud}
-                icon={<LockClosedRegular />}
-                aria-label={`${hiddenFromCloudLabel(hiddenFromCloud)} — show them in the file list`}
-                onClick={() => {
-                  window.dispatchEvent(new CustomEvent("lighthouse:filter-local-only"));
-                  window.dispatchEvent(new CustomEvent("lighthouse:reveal-node"));
-                }}
-              >
-                {hiddenFromCloudLabel(hiddenFromCloud)}
-              </Button>
-            )}
-            {historyButton}
+            {/* §22.2: the ONE status popover — the egress shield's dialog now
+                carries the visible-files count, the on-device policy line, and
+                the hidden-from-cloud reveal (0.12.1 §2 — its click still flips
+                the explorer's "Hidden from cloud" filter via the same events).
+                History moved to the sidebar section; Save-to-note and New chat
+                stay as the header's quiet actions. */}
+            {statusShield}
             <Tooltip content="Save this chat as a note in your vault" relationship="label">
               <Button
                 appearance="subtle"
@@ -5146,6 +4980,8 @@ export function ChatPanel() {
                               content={m.content}
                               turnId={m.id}
                               onCite={handleCitationClick}
+                              metaChart={m.meta?.chart}
+                              legacyFences={!liveTurnIds.current.has(m.id)}
                             />
                           )}
                           {streaming && m.id === lastId && <span className={styles.beaconInline} />}
@@ -5252,6 +5088,7 @@ export function ChatPanel() {
                           <RefineChips
                             meta={m.analytics}
                             content={m.content}
+                            metaChart={m.meta?.chart}
                             isLast={m.id === lastId}
                             disabled={streaming}
                             onAsk={(q) => void sendQuestion(q)}
@@ -5376,6 +5213,7 @@ export function ChatPanel() {
                       {!m.analytics && !m.error && !(streaming && m.id === lastId) && (
                         <ChartItRow
                           content={m.content}
+                          metaChart={m.meta?.chart}
                           chartShown={!!inlineCharts[m.id]}
                           onToggleChart={() =>
                             setInlineCharts((prev) => ({ ...prev, [m.id]: !prev[m.id] }))

@@ -304,6 +304,18 @@ export function stripChartRequestFences(text: string): string {
   return text.replace(/```lighthouse-chart-request[\s\S]*?(```|$)/g, "");
 }
 
+/**
+ * §22.6: strip EVERY lighthouse-chart fence (`-request` or not), unterminated
+ * tails included. Since the engine's validated spec now rides the final
+ * chunk's `meta.chart` (never the streamed text), any chart fence appearing in
+ * a NEW answer's text can only be model-injected — fabricated, echoed from
+ * history, or mangled — and must never render. Legacy saved chats (no `meta`)
+ * keep the old fence-parsing path and do NOT go through this.
+ */
+export function stripChartFences(text: string): string {
+  return text.replace(/```lighthouse-chart(?:-request)?[\s\S]*?(```|$)/g, "");
+}
+
 /** Thousands-grouped exact value ("1200" → "1,200", "0.25" → "0.25"), for
  *  tooltips and small-integer axes. PARITY: matches lighthouse-core `commafy`. */
 export function formatGrouped(v: number): string {

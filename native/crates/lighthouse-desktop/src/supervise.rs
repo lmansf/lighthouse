@@ -170,6 +170,13 @@ impl Supervisor {
         if guard.is_some() {
             return; // already running
         }
+        // §22.4: never spawn (and so never health-poll/warm) the chat model in
+        // safe mode — the embed server below has always had this gate; the chat
+        // server is the heavier of the two and safe mode exists precisely to
+        // keep heavyweight subsystems down while diagnosing a bad boot.
+        if crate::boot_guard::safe_mode() {
+            return;
+        }
         let bin = llm_root().join(if cfg!(windows) {
             "llama-server.exe"
         } else {

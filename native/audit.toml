@@ -58,6 +58,14 @@
 # ring) we don't pin directly. No new ignore added — deliberately left as
 # visible warnings, re-checked by the weekly scheduled run.
 
+# §5 re-triage 2026-07-18 (0.12.5 → 0.12.6 patch session): `npm audit` reports
+# 0 vulnerabilities INCLUDING dev deps (the earlier dev-toolchain advisories
+# were resolved by routine updates). GitHub's remaining "2 moderate" Dependabot
+# alerts therefore map to the cargo side — the already-triaged RUSTSEC ignores
+# above (Dependabot counts them regardless of our documented cargo-audit
+# rationale; its alert list is not gate-aware). No new advisory, no new ignore;
+# remediation path unchanged — the dedicated 3-OS-tested dependency-bump PR
+# (crossbeam-epoch clean-update + lopdf major bump) retires two of the four.
 [advisories]
 # Mirrors the workflow's --ignore flags. (Retained for tooling that DOES read
 # audit.toml; the pinned cargo-audit passes these on the command line instead.)

@@ -61,10 +61,18 @@ test("applicableRecipes returns a file-derived subset for an included tabular fi
 
 // --- Recipes gallery: list, run seam, empty state, mount ---------------------
 
-test("RecipesNav lists applicableRecipes with a 'runnable on {table}' line", () => {
+test("RecipesNav lists the engine's applicable recipes with a 'runnable on {table}' line", () => {
   assert.match(nav, /aria-label="Recipes"/, "the section is a titled nav (accessible)");
   assert.match(nav, /useRagStore/, "it subscribes the shared vault session store");
-  assert.match(nav, /\.applicableRecipes\(includedKey\.split\("\\n"\)\)/, "the list comes from the engine");
+  // §22.3: the fetch moved into the SHARED useValidatedChips hook (one
+  // preloaded cache with the chat's empty-state chips); the engine op is
+  // called there, and the nav only consumes it.
+  assert.match(nav, /useValidatedChips\(includedFileIds\)/, "the list comes through the shared hook");
+  assert.match(
+    read("src/features/chat/useValidatedChips.ts"),
+    /ragService\.applicableRecipes\(includedFileIds\)/,
+    "…which calls the engine's applicableRecipes",
+  );
   assert.match(nav, /recipes\.map\(/, "one row per applicable recipe");
   assert.match(nav, /runnable on \{r\.table\}/, "the subdued line names the table it runs on");
 });
@@ -80,15 +88,27 @@ test("clicking a RecipesNav row runs the recipe through the EXISTING ask seam", 
 });
 
 test("RecipesNav refreshes when the included set changes and on views-changed", () => {
-  // The included set is the primary applicability signal (keyed by value to
-  // skip the vault poll's no-op rebuilds), plus the ViewsNav refresh seam.
-  assert.match(nav, /includedFileIds\.join\("\\n"\)/, "keyed by the included-file VALUE, not identity");
-  assert.match(nav, /\[includedKey, viewsNonce\]/, "the fetch re-arms on the included set + views-changed");
-  assert.match(nav, /addEventListener\("lighthouse:views-changed"/, "a saved view can add/drop a recipe");
+  // §22.3: both signals live in the shared hook now — the included set is
+  // folded by VALUE into the cache key (so the vault poll's no-op `nodes`
+  // rebuilds cost nothing), and the views-changed listener bumps its nonce.
+  const hook = read("src/features/chat/useValidatedChips.ts");
+  // (Separator-agnostic on purpose: the hook's key joins the ids with a
+  // non-printing sentinel byte that can't appear in an id.)
+  assert.match(
+    hook,
+    /const key = `\$\{includedFileIds\.join\(/,
+    "keyed by the included-file VALUE, not identity",
+  );
+  assert.match(hook, /addEventListener\("lighthouse:views-changed"/, "a saved view can add/drop a recipe");
+  assert.match(nav, /useValidatedChips\(includedFileIds\)/, "the nav rides those signals via the hook");
 });
 
 test("RecipesNav renders the honest empty state and never crashes on []", () => {
-  assert.match(nav, /loaded && recipes\.length === 0/, "the empty state is gated on a completed load");
+  // §22.3: the hook serves its module cache instantly and revalidates behind
+  // it, exposing no in-flight flag — so the note gates on the list alone. Its
+  // copy is forward-looking either way ("appear here when…"), and a
+  // first-visit revalidation replaces it as soon as recipes land.
+  assert.match(nav, /recipes\.length === 0/, "the empty note renders only with no recipes");
   assert.ok(
     nav.includes("Recipes appear here when your files have the right columns"),
     "quiet empty-state copy in the ViewsNav register",
@@ -109,10 +129,19 @@ test("RecipesNav sits between Capabilities and Library in the section registry",
 
 // --- Chat empty-state recipe chips -------------------------------------------
 
-test("ChatPanel fetches applicable recipes for the empty state, same lifecycle as suggestedAsks", () => {
-  assert.match(chat, /const \[recipeChips, setRecipeChips\]/, "empty-state recipe chips are state");
-  assert.match(chat, /\.applicableRecipes\(includedKey\.split\("\\n"\)\)/, "keyed on the included set");
-  assert.match(chat, /\}, \[emptyState, includedKey\]\);/, "gated to the empty state like engineAsks");
+test("ChatPanel sources its empty-state recipe chips from the shared validated hook", () => {
+  // §22.3: the two per-surface fetch effects are gone — one hook (shared
+  // module cache with RecipesNav) feeds asks AND recipes, re-keyed on the
+  // included set / provider / investigation / views nonce, so a posture flip
+  // can never serve stale chips. The hero keeps its old visual caps.
+  assert.match(chat, /const validatedChips = useValidatedChips\(includedFileIds\);/);
+  assert.match(chat, /validatedChips\.recipes\.slice\(0, 3\)/, "recipes keep the 3-chip hero cap");
+  assert.match(chat, /validatedChips\.asks\.slice\(0, 4\)/, "asks keep the 4-chip hero cap");
+  assert.doesNotMatch(
+    chat,
+    /ragService\s*\n?\s*\.applicableRecipes|ragService\s*\n?\s*\.suggestedAsks/,
+    "no separate ChatPanel fetch remains — the hook is the one source",
+  );
 });
 
 test("a recipe chip submits its recipe-cued question through the sendQuestion seam", () => {

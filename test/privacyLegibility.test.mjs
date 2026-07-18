@@ -142,13 +142,19 @@ test("inspector pill: marked files say enforcing vs dormant; unmarked unchanged"
   assert.match(inspector, /\{included \? "Included" : "Hidden"\} by rule/);
 });
 
-// --- B. Header count beside the egress shield ------------------------------------
+// --- B. Header count inside the egress shield's status popover -------------------
+// §22.2 (declutter the top bar): the standalone header button collapsed INTO
+// the EgressShield dialog — same copy, same events, one popover. The exact
+// label still comes from the one pure helper; the ChatPanel computes the
+// count and gates it on the provider rule, the shield renders it.
 
-test("header count: exact copy, cloud-only visibility, mounts beside EgressShield", () => {
+test("header count: exact copy, cloud-only visibility, renders inside EgressShield", () => {
   // Copy comes from the one pure helper — both plural forms pinned for real.
   assert.equal(hiddenFromCloudLabel(1), "1 file hidden from cloud models");
   assert.equal(hiddenFromCloudLabel(3), "3 files hidden from cloud models");
-  assert.match(chat, /hiddenFromCloudLabel\(hiddenFromCloud\)/, "the header renders the helper");
+  const shield = read("src/features/egress/EgressShield.tsx");
+  assert.match(shield, /from "@\/lib\/privacyState"/, "the shield imports the one helper");
+  assert.match(shield, /hiddenFromCloudLabel\(withheld\)/, "the shield renders the helper's copy");
   assert.match(
     chat,
     /const hiddenFromCloud = useMemo\(\(\) => hiddenFromCloudCount\(nodes\), \[nodes\]\)/,
@@ -156,13 +162,13 @@ test("header count: exact copy, cloud-only visibility, mounts beside EgressShiel
   );
   assert.match(
     chat,
-    /\{cloudActive && hiddenFromCloud > 0 && \(/,
-    "visible ONLY while a cloud provider is active and the withheld set is non-empty",
+    /hiddenFromCloud=\{cloudActive \? hiddenFromCloud : 0\}/,
+    "the owner passes the count ONLY while a cloud provider is active",
   );
   assert.match(
-    chat,
-    /<EgressShield \/>[\s\S]{0,1400}hiddenFromCloudLabel\(hiddenFromCloud\)/,
-    "the control sits beside the egress shield in the header",
+    shield,
+    /\{withheld > 0 && \(/,
+    "the shield hides the section entirely at zero",
   );
 });
 

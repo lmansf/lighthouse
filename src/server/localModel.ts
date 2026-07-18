@@ -82,6 +82,13 @@ function searchDirs(): string[] {
  * "Installed", and llama-server is never handed junk). Must match main.js
  * `findModel()`.
  */
+/** §22.4: whether a private model is installed on disk — the warm-wait only
+ *  holds for a server the supervisor can actually spawn. KEEP IN SYNC with
+ *  local_model.rs::find_installed_model (the Rust wait's `installed` input). */
+export function isInstalled(): boolean {
+  return installedModel() !== null;
+}
+
 function installedModel(): string | null {
   for (const dir of searchDirs()) {
     try {

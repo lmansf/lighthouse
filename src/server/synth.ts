@@ -29,8 +29,11 @@ import {
   fullDocCharBudget,
   docSegmentCharBudget,
   maxDocSegments,
+  localHealth,
+  type LocalHealth,
   type Ctx,
 } from "./llm";
+import { isInstalled as isModelInstalled } from "./localModel";
 import { readDesktopSettings } from "./settings";
 import { metaIntent, renderMeta } from "./meta";
 import { isProfileable, profileChart, tableProfile } from "./tableProfile";
@@ -288,6 +291,70 @@ const progress = (label: string, step: number, total: number): ChatChunk => ({
   done: false,
 });
 
+/** §22.6: split the first engine-composed ```lighthouse-chart fence out of
+ *  deterministic answer markdown (meta answers embed one), returning
+ *  [markdown without the fence, spec | null] for the final chunk's meta
+ *  channel. Line-exact — only a fence whose opener is the whole line matches.
+ *  KEEP IN SYNC with synth.rs::extract_chart_fence. Exported for tests. */
+export function extractChartFence(md: string): [string, string | null] {
+  const lines = md.split("\n");
+  const start = lines.findIndex((l) => l.trimEnd() === "```lighthouse-chart");
+  if (start === -1) return [md, null];
+  const endRel = lines.slice(start + 1).findIndex((l) => l.trimEnd() === "```");
+  if (endRel === -1) return [md, null]; // unclosed: not ours — leave untouched
+  const end = start + 1 + endRel;
+  const spec = lines.slice(start + 1, end).join("\n");
+  const rest = [...lines.slice(0, start), ...lines.slice(end + 1)];
+  return [rest.join("\n"), spec];
+}
+
+/** §22.4 queue-not-fail bounds. KEEP IN SYNC with synth.rs. */
+const LOCAL_WARM_POLL_MS = 1_500;
+const LOCAL_SPAWN_GRACE_MS = 20_000;
+const LOCAL_WARM_WAIT_MS = 300_000;
+
+/** §22.4: one step of the warm-wait state machine, pure for tests.
+ *  "proceed" means stop waiting and let the ask run — either the server is
+ *  ready, or waiting can no longer help (no installed model to spawn, grace or
+ *  budget exhausted) and the existing unavailable→passages path is the honest
+ *  outcome. KEEP IN SYNC with synth.rs::warm_wait_verdict. */
+export function warmWaitVerdict(
+  health: LocalHealth,
+  installed: boolean,
+  waitedMs: number,
+): "proceed" | "wait" {
+  if (health === "ready") return "proceed";
+  if (waitedMs >= LOCAL_WARM_WAIT_MS) return "proceed";
+  if (health === "loading") return "wait";
+  return installed && waitedMs < LOCAL_SPAWN_GRACE_MS ? "wait" : "proceed";
+}
+
+/** The user-visible warming status. KEEP IN SYNC (byte-identical) with
+ *  synth.rs::warming_label. */
+export function warmingLabel(waitedMs: number): string {
+  return waitedMs === 0
+    ? "Private model warming up…"
+    : `Private model warming up… (${Math.floor(waitedMs / 1000)}s)`;
+}
+
+/** §22.4 queue-not-fail: when the PRIVATE model is the active provider but its
+ *  server is still starting (fresh install, cold launch) or loading, yield
+ *  "warming up" progress chunks until it is healthy — then return, letting the
+ *  ask run instead of racing into the "Local model unavailable → passages"
+ *  fallback. Any other provider (or a healthy server) returns immediately.
+ *  KEEP IN SYNC with synth.rs::local_warm_wait. */
+async function* localWarmWait(cfg: ModelCfg): AsyncGenerator<ChatChunk> {
+  if (cfg.providerId !== "local") return;
+  const installed = isModelInstalled();
+  let waited = 0;
+  for (;;) {
+    if (warmWaitVerdict(await localHealth(), installed, waited) === "proceed") return;
+    yield progress(warmingLabel(waited), 1, 1);
+    await new Promise((r) => setTimeout(r, LOCAL_WARM_POLL_MS));
+    waited += LOCAL_WARM_POLL_MS;
+  }
+}
+
 /**
  * The provenance origin for this answer's stamp: `"device"` for the local model
  * or the model-free/extractive fallback (no provider configured), else the cloud
@@ -344,6 +411,7 @@ function finalChunk(
   excerptCount: number,
   origin: string,
   manifest: ManifestEntry[] = [],
+  chart?: string,
 ): ChatChunk {
   return {
     delta: "",
@@ -354,6 +422,8 @@ function finalChunk(
       sourceFileCount: references.length,
       cost: { inputTokens: 0, outputTokens: 0, totalTokens: 0, reported: false },
       ...(manifest.length ? { manifest } : {}),
+      // §22.6: the chart spec rides meta, never the streamed text.
+      ...(chart ? { chart } : {}),
     },
     done: true,
   };
@@ -595,10 +665,13 @@ async function* answerPipelineLive(
     if (intent) {
       const ans = renderMeta(intent, includedFileIds, Date.now(), isCloud);
       if (ans) {
-        yield { delta: ans.markdown, done: false };
+        // §22.6: the meta answer's engine-composed chart fence moves onto the
+        // meta channel like every other chart — text arrives fence-free.
+        const [md, metaChart] = extractChartFence(ans.markdown);
+        yield { delta: md, done: false };
         // Model-free deterministic answer: zero excerpts handed to a model,
         // files behind it are the cited references.
-        yield finalChunk(ans.references, 0, origin);
+        yield finalChunk(ans.references, 0, origin, [], metaChart ?? undefined);
         return;
       }
     }
@@ -650,6 +723,17 @@ async function* answerPipelineLive(
   //     degrades like any analytics ask, never a fabricated number), surfaces
   //     recipe VISIBILITY as `applicableRecipes` → [], and answers
   //     `{available:false}` on op:"recipes".
+
+  // --- §22.4 queue-not-fail (model warm start): every deterministic emission
+  //     is behind us (meta answers returned; the G2 extractive draft already
+  //     streamed), so nothing instant ever waited. From here every branch talks
+  //     to the model — if the PRIVATE model's server is still starting or
+  //     loading (fresh install, cold launch), hold here with "warming up"
+  //     progress chunks rather than racing streamAnswer into the
+  //     "Local model unavailable → passages" fallback. Bounded: a server that
+  //     never comes up proceeds into today's fallback path. KEEP IN SYNC with
+  //     synth.rs (local_warm_wait). ---
+  yield* localWarmWait(cfg);
 
   // --- Decide: synthesis or single-shot ---
   let docs: DocCandidate[] = [];
@@ -943,10 +1027,8 @@ async function* answerPipelineLive(
     yield { delta, done: false };
   }
   // §2 visual-first: the profiled table's chart, drawn from the engine's own
-  // aggregates (see profileChartSpec above) — the same inline `lighthouse-chart`
-  // fence the analytics branch emits. KEEP IN SYNC with synth.rs.
-  if (profileChartSpec) {
-    yield { delta: `\n\`\`\`lighthouse-chart\n${profileChartSpec}\n\`\`\`\n`, done: false };
-  }
-  yield finalChunk(initial.references, contexts.length, origin, manifest);
+  // aggregates (see profileChartSpec above). §22.6: the spec rides the final
+  // chunk's meta, never the streamed text a model could mangle. KEEP IN SYNC
+  // with synth.rs.
+  yield finalChunk(initial.references, contexts.length, origin, manifest, profileChartSpec ?? undefined);
 }

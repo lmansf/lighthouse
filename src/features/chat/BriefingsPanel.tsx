@@ -22,10 +22,13 @@ import {
   tokens,
 } from "@fluentui/react-components";
 import { DismissRegular } from "@fluentui/react-icons";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
+import dynamic from "next/dynamic";
 import { ragService } from "@/contracts";
 import type { Briefing, BriefingReport, Cadence, Pin } from "@/contracts";
+
+// The ONE configured markdown renderer (remark-gfm applied inside), loaded on
+// demand (the ChatPanel idiom) — only a composed report ever needs it.
+const MarkdownView = dynamic(() => import("@/shell/MarkdownView"), { ssr: false });
 
 /** Cadence choices for the create form, in the order the Dropdown lists them. */
 const CADENCE_OPTIONS: { value: Cadence; label: string }[] = [
@@ -299,7 +302,7 @@ export function BriefingsPanel({ pins }: { pins: Pin[] }) {
                 </Text>
               ) : s.markdown.trim() ? (
                 <div className={styles.markdown}>
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{s.markdown}</ReactMarkdown>
+                  <MarkdownView content={s.markdown} />
                 </div>
               ) : (
                 <Text size={200} italic className={styles.muted}>

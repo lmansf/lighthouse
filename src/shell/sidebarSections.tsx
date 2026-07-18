@@ -2,13 +2,14 @@
 
 /**
  * Sectioned-sidebar registry (openspec: field-patch-0.12.5 §1). The Files tree
- * anchors the sidebar; these six sections become header-only rows (the
+ * anchors the sidebar; these sections become header-only rows (the
  * SectionRail) that each slide out a second panel (the SectionFlyout) holding the
  * section's full, existing UI. This registry is the single source of truth for
  * the rows' identity, order, label, icon, and which component the flyout mounts —
  * so the rail and the flyout can never drift out of step.
  *
- * Order is top-to-bottom exactly as the spec pins it: insights, semantic,
+ * Order is top-to-bottom exactly as the spec pins it: history (§22.2 — recent
+ * chats moved here from the ChatPanel header), then insights, semantic,
  * capabilities, recipes, library (the Views nav), investigations. Each label
  * matches the section's own `aria-label` so the rail row and the panel it opens
  * read identically.
@@ -19,6 +20,7 @@
  */
 import type { ComponentType } from "react";
 import {
+  HistoryRegular,
   LightbulbRegular,
   BookRegular,
   WandRegular,
@@ -27,6 +29,7 @@ import {
   FolderSearchRegular,
   type FluentIcon,
 } from "@fluentui/react-icons";
+import { HistoryNav } from "@/features/chat/HistoryNav";
 import { InsightsNav } from "@/features/insights/InsightsNav";
 import { SemanticNav } from "@/features/semantic/SemanticNav";
 import { CapabilityNav } from "@/features/capabilities/CapabilityNav";
@@ -46,10 +49,13 @@ export interface SidebarSection {
 }
 
 /**
- * The six non-file sections, top-to-bottom. The order is asserted by the nav-UI
+ * The non-file sections, top-to-bottom. The order is asserted by the nav-UI
  * tests (they moved here from app/page.tsx when the tree became the anchor).
+ * History leads (§22.2 — recent chats moved out of the ChatPanel header);
+ * the original six keep their pinned relative order beneath it.
  */
 export const SIDEBAR_SECTIONS: SidebarSection[] = [
+  { id: "history", label: "History", icon: HistoryRegular, Component: HistoryNav },
   { id: "insights", label: "What stands out", icon: LightbulbRegular, Component: InsightsNav },
   { id: "semantic", label: "Business definitions", icon: BookRegular, Component: SemanticNav },
   { id: "capabilities", label: "What you can do", icon: WandRegular, Component: CapabilityNav },

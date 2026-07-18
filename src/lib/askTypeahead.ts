@@ -189,6 +189,55 @@ export function askSuggestions(
   return out.slice(0, Math.max(0, limit));
 }
 
+/** §22.1 ghost autocomplete: extra completion-only sources beside history and
+ *  pins — engine suggested asks and certified questions. They feed the GHOST
+ *  only, never the dropdown (whose rows stay history/pin labeled). */
+export interface GhostSources extends AskSources {
+  extras?: readonly string[];
+}
+
+/** Below this many typed characters no ghost renders — a one-letter prefix
+ *  completes to near-random asks and reads as flicker, not help. */
+export const GHOST_MIN_CHARS = 3;
+
+/**
+ * §22.1: the single best INLINE continuation of `draft`, or null. Strictly a
+ * caseless literal prefix match — the ghost splices verbatim after the caret,
+ * so token normalization (which reorders/strips) can't apply here. Candidates
+ * rank by the same recency half-life + frequency saturation as the dropdown;
+ * pins and extras count as curated (recency-neutral). The returned string is
+ * the SUFFIX to render greyed after the caret (source casing preserved).
+ * Deterministic for identical inputs (inject `now`).
+ */
+export function ghostCompletion(
+  draft: string,
+  sources: GhostSources,
+  opts: AskSuggestOptions = {},
+): string | null {
+  if (draft.trim().length < GHOST_MIN_CHARS) return null;
+  const q = draft.toLowerCase();
+  const now = opts.now ?? Date.now();
+  type Candidate = { suffix: string; score: number; text: string };
+  const better = (cur: Candidate | null, text: string, score: number): Candidate | null => {
+    if (text.length <= draft.length) return cur; // nothing left to complete
+    if (!text.toLowerCase().startsWith(q)) return cur;
+    const suffix = text.slice(draft.length);
+    if (!cur || score > cur.score || (score === cur.score && text < cur.text)) {
+      return { suffix, score, text };
+    }
+    return cur;
+  };
+  let best: Candidate | null = null;
+  for (const h of sources.history) {
+    best = better(best, h.text.trim(), 1 + recencyScore(h.ts, now) + frequencyScore(h.count ?? 1));
+  }
+  // Curated sources: no timestamps — a flat score below a fresh history hit
+  // but above a stale one, so "what you asked recently" wins ties naturally.
+  for (const p of sources.pins ?? []) best = better(best, p.trim(), 1.5);
+  for (const e of sources.extras ?? []) best = better(best, e.trim(), 1.4);
+  return best ? best.suffix : null;
+}
+
 /**
  * The most recent past ask — the ArrowUp-on-empty-box shell-style recall.
  * Newest `ts` wins; ties go to the LATER array entry (so an in-order transcript
