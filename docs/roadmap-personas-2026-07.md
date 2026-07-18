@@ -2801,6 +2801,149 @@ decision recorded with scorecards not degraded; suites + smoke + all
 floors green; stamps agree. End with the per-component ablation table
 and a one-paragraph plain-language verdict on business definitions.
 ```
+
+---
+
+## 22. Patch: ghost autocomplete, header declutter, validated chips, warm start, markdown & chart reliability
+
+Six owner notes (2026-07-15). Chart breakage is a third-time report —
+this prompt mandates the structural fix (spec delivery moves off
+markdown fences onto the answer-metadata channel) rather than another
+round of linting.
+
+### Prompt
+
+```
+Lighthouse 0.12.x patch — six owner notes: inline ghost autocomplete,
+a decluttered header with History as a sidebar section, validated
+suggestion chips, model warm start, markdown reliability, and a
+root-caused chart pipeline. One PR, one commit per numbered section,
+five-stamp bump last. Ground rules: Rust engine ships, TS twin per
+docs/ts-twin.md and PARITY; Beam tokens; §14 constitution is the
+review standard. Gates: npm test, cargo suite, lint, release smoke,
+all eval/chart floors green, live E2E per section, screenshots for
+visual changes.
+
+1. Ghost autocomplete in the ask box. An inline, greyed completion
+   suggestion after the caret — accepted with the RIGHT ARROW key
+   when the caret is at end-of-input (→ elsewhere moves the caret
+   normally; Esc dismisses; Tab must not conflict with focus order).
+   Source is deterministic and local: the existing type-ahead corpus
+   (past asks, pins, certified questions, suggested asks), best
+   single continuation by recency + frequency. No model calls, no
+   flicker (debounced), correct in both themes and the widget ask
+   row if the component shares. E2E: type a prefix of a past ask →
+   ghost appears → right arrow completes it → ask runs.
+
+2. Declutter the top bar; History becomes a sidebar section.
+   - Audit every element in the top info bar (vault/scope, model,
+     requests/egress, cost, etc.). Keep inline only what changes the
+     next ask: the investigation/scope pill and the provider. The
+     diagnostics (egress shield counts, session cost, request
+     totals) collapse into ONE compact status popover — a single
+     shield chip opens it; nothing is lost, it just stops shouting.
+   - Chat history moves out of its drawer into the sectioned sidebar
+     (§21 architecture): a History section header opening a flyout
+     that lists conversations ChatGPT-style — titled, grouped by
+     date, existing search/rename/delete intact, current chat
+     highlighted, investigation-scoped listing first with an
+     all-chats toggle. The old drawer entry point is removed.
+   - E2E + screenshots: header before/after; open History flyout →
+     switch chats → rename → delete; nothing else in the header
+     regressed (provenance stamps and the shield popover still
+     reachable).
+
+3. Suggestion chips must be pre-validated ("never recommend analysis
+   that isn't available").
+   - Every chip — suggested asks, recipe chips, refinement chips —
+     passes a dry-run validation BEFORE rendering: referenced files
+     exist, are included, and are visible to the CURRENT provider
+     (local-only marks!); named columns exist with compatible kinds
+     in the catalog; recipe applicability predicates hold; any
+     templated SQL parses through the guard. A chip that cannot
+     succeed is not shown.
+   - Preload: compute chip validation in the background on vault
+     change / provider change / investigation switch (reuse the
+     watcher + catalog — no new scheduler), cache the results, and
+     render chips instantly from cache. Measure and record
+     empty-state chip latency before/after.
+   - Gate: an E2E that clicks EVERY rendered chip on a fixture vault
+     and asserts zero engine errors ("column not found" class); a
+     fixture where a column is local-only-blocked under a cloud
+     provider must hide the chip that needs it, and show it again
+     under the private model.
+
+4. Model warm start ("first ask fails because it's still loading").
+   - Never fail an ask because the model is warming: if llama-server
+     is starting, QUEUE the ask with a visible "Private model
+     warming up…" status and run it when healthy — a first ask may
+     be slow but must never error or fall back silently.
+   - Warm ahead of time: immediately after a model install
+     completes, and on app launch when a model is installed, start
+     llama-server eagerly and run a tiny warm-up completion so the
+     mmap/page cache and prompt-prefix cache are hot (the 0.6.0-era
+     boot warm-up exists — find out why it isn't covering the
+     reported case: install-then-first-ask, launch-then-fast-ask,
+     GPU init). Respect power-conserve states (warm on active
+     launch, not from hidden) and safe mode (never warm there).
+   - E2E with a mocked/small model: install → first ask succeeds
+     with the warming status and no error; relaunch → first ask
+     finds the server already healthy. Record first-ask latency
+     before/after in the PR.
+
+5. Markdown reliability ("some results look bad").
+   - Build a markdown torture fixture suite from real failure
+     classes: GFM tables with ragged/escaped-pipe cells, nested
+     lists, bold/links spanning chunks, headings after tables, long
+     code fences, mixed indentation — rendered as golden snapshots
+     in both themes. Fix every failure found: renderer robustness
+     first (malformed input degrades gracefully, never raw syntax
+     soup), then safe engine-side normalizations ONLY where meaning
+     cannot change (escaping pipes in engine-built table cells,
+     closing engine-emitted fences). The §20 progressive streaming
+     invariants still hold (no raw-markup flash, no torn tables).
+   - The torture suite becomes a floor: rendering regressions fail
+     CI.
+
+6. Charts: root-cause, then make the pipeline structural.
+   - Diagnose FIRST, in the built app, against the local model and a
+     mocked cloud provider: instrument the chart pipeline end to end
+     (emitted? directive parsed? lint verdict? renderer outcome?) and
+     record which stage loses the reported failures — including why
+     charts-by-default STILL isn't holding (third report; find what
+     actually ships vs. what the 0.12.1/§20 scopes specified).
+   - Structural fix: chart specs move OFF markdown fences and onto
+     the answer-metadata channel (the final-chunk meta that already
+     carries references, provenance, and assumptions). The engine
+     attaches the validated spec as data; the renderer draws from
+     meta; fences are no longer emitted (parse-and-strip any legacy
+     fence for old saved chats). This deletes the model-mangled-fence
+     failure class and the raw-JSON-in-chat symptom permanently.
+   - A chart that fails lint or rendering shows ONE quiet line
+     stating why — never raw spec text, never silence. Charts render
+     by default per the standing policy; the "Chart it" chip remains
+     only for tables that didn't auto-chart.
+   - Gates: the instrumentation findings summarized in the PR; chart
+     E2E on the built app (local + mocked cloud): a chartable ask
+     renders a chart with zero fence content in the transcript; a
+     legacy saved chat with a fence still renders; the chart
+     coverage floor holds; widget pill unaffected.
+
+7. Housekeeping: remaining moderate Dependabot alerts — triage via
+   the supply-chain allowlist flow, fix or justify.
+
+8. Release: five-stamp bump to the next patch on the 0.12.x line;
+   release notes lead with "charts that always show up" and the
+   cleaner header; squash-merge, dispatch desktop-release.yml, watch
+   to the draft, STOP and report the draft link + publish inputs.
+
+Proof gates: every section E2E green against the built app; the
+markdown torture floor and chart coverage floor green; chip-click E2E
+zero errors; warm-start latency numbers recorded; header/History
+screenshots attached; suites + smoke + all floors green; stamps agree.
+End with the chart-pipeline diagnosis summary (what was actually
+breaking) and the warm-start before/after numbers.
+```
 ```
 
 ---
