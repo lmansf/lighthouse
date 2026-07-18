@@ -52,7 +52,7 @@ import {
   MoreHorizontalRegular,
   RenameRegular,
 } from "@fluentui/react-icons";
-import type { MetricCard, SynonymCard } from "@/contracts";
+import type { MetricCard, SuggestedMetric, SynonymCard } from "@/contracts";
 import { ragService } from "@/contracts";
 import { useRagStore } from "@/stores/useRagStore";
 
@@ -191,6 +191,10 @@ export function SemanticNav() {
 
   const [metrics, setMetrics] = useState<MetricCard[]>([]);
   const [synonyms, setSynonyms] = useState<SynonymCard[]>([]);
+  // §3.4 auto-derived PROPOSALS — the Suggested affordance. Never stored until
+  // the user accepts (synonyms one-click; metrics prefill the New metric dialog).
+  const [suggestedSynonyms, setSuggestedSynonyms] = useState<SynonymCard[]>([]);
+  const [suggestedMetrics, setSuggestedMetrics] = useState<SuggestedMetric[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [navError, setNavError] = useState<string | null>(null);
   const [nonce, setNonce] = useState(0);
@@ -215,6 +219,8 @@ export function SemanticNav() {
         if (!cancelled) {
           setMetrics(Array.isArray(cards.metrics) ? cards.metrics : []);
           setSynonyms(Array.isArray(cards.synonyms) ? cards.synonyms : []);
+          setSuggestedSynonyms(Array.isArray(cards.suggestedSynonyms) ? cards.suggestedSynonyms : []);
+          setSuggestedMetrics(Array.isArray(cards.suggestedMetrics) ? cards.suggestedMetrics : []);
           setLoaded(true);
         }
       })
@@ -222,6 +228,8 @@ export function SemanticNav() {
         if (!cancelled) {
           setMetrics([]);
           setSynonyms([]);
+          setSuggestedSynonyms([]);
+          setSuggestedMetrics([]);
           setLoaded(true);
         }
       });
@@ -357,6 +365,33 @@ export function SemanticNav() {
     }
   }
 
+  // Accept a suggested synonym in one click — it routes through the SAME guarded
+  // createSynonym as the manual flow; nothing was stored until now.
+  async function acceptSuggestedSynonym(term: string, canonical: string) {
+    setNavError(null);
+    try {
+      await ragService.createSynonym(term, canonical);
+      refresh();
+      broadcastSemanticChanged();
+    } catch (err) {
+      setNavError(err instanceof Error ? err.message : "the synonym could not be added");
+    }
+  }
+
+  // Accept a suggested metric: prefill the manual New metric dialog with the
+  // mined expression + entity so the user only has to NAME it (the manual create
+  // flow is untouched — the guard still runs on Create).
+  function acceptSuggestedMetric(p: SuggestedMetric) {
+    setNewMetric({
+      name: "",
+      expression: p.expression,
+      entity: p.entity,
+      description: "",
+      busy: false,
+      error: null,
+    });
+  }
+
   const cascade = (delMetric?.dependents.length ?? 0) > 0;
 
   return (
@@ -435,6 +470,58 @@ export function SemanticNav() {
             aria-label={`Delete synonym ${s.term}`}
             className={styles.rowMenuBtn}
             onClick={() => void deleteSynonym(s.term)}
+          />
+        </div>
+      ))}
+
+      {/* Suggested (openspec: field-patch-0.12.5 §3.4) — auto-derived proposals
+          the user accepts one-by-one; the manual create flow above is untouched. */}
+      {(suggestedSynonyms.length > 0 || suggestedMetrics.length > 0) && (
+        <Text size={200} className={styles.subHeader}>
+          Suggested
+        </Text>
+      )}
+      {suggestedMetrics.map((p) => (
+        <div key={`sm-${p.entity}-${p.expression}`} className={styles.row}>
+          <div
+            className={styles.rowButton}
+            title={`${p.expression} over ${p.entity} — seen ${p.occurrences}×${p.certified ? ", certified" : ""}`}
+          >
+            <div className={styles.rowMain}>
+              <Text size={300} className={styles.rowName}>
+                {p.expression}
+              </Text>
+              <Text size={200} className={styles.rowCaption}>
+                over {p.entity} · seen {p.occurrences}×{p.certified ? " · certified" : ""}
+              </Text>
+            </div>
+          </div>
+          <Button
+            appearance="subtle"
+            size="small"
+            icon={<AddRegular />}
+            aria-label={`Save ${p.expression} as a metric`}
+            className={styles.rowMenuBtn}
+            onClick={() => acceptSuggestedMetric(p)}
+          >
+            Save as metric
+          </Button>
+        </div>
+      ))}
+      {suggestedSynonyms.map((s) => (
+        <div key={`ss-${s.term}`} className={styles.row}>
+          <div className={styles.rowButton} title={`${s.term} → ${s.canonical}`}>
+            <Text size={300} className={styles.rowName}>
+              {s.term} → {s.canonical}
+            </Text>
+          </div>
+          <Button
+            appearance="subtle"
+            size="small"
+            icon={<AddRegular />}
+            aria-label={`Add synonym ${s.term}`}
+            className={styles.rowMenuBtn}
+            onClick={() => void acceptSuggestedSynonym(s.term, s.canonical)}
           />
         </div>
       ))}

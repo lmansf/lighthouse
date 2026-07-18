@@ -66,20 +66,17 @@ test("metric round trip is byte-stable with derived reads", () => {
   // Re-read from disk: the identical record returns.
   assert.deepEqual(semantic.listSemantic().metrics[0], created);
 
-  // Synonym + entity persist beside the metric.
+  // Synonym persists beside the metric.
   semantic.createSynonym("GMV", "net_revenue");
-  semantic.createEntity("sales", "sales", ["region"], "the ledger");
   const store = semantic.listSemantic();
   assert.deepEqual(store.synonyms, [{ term: "GMV", canonical: "net_revenue" }]);
-  assert.deepEqual(store.entities[0].keyColumns, ["region"]);
 
-  // The on-disk envelope is the byte contract with the Rust engine.
+  // The on-disk envelope is the byte contract with the Rust engine. (No
+  // entities/joinHints keys — removed in field-patch-0.12.5 §3.)
   const raw = fs.readFileSync(path.join(stateDir, "semantic.json"), "utf8");
   assert.ok(raw.startsWith('{\n  "v": 1,\n  "metrics": ['), raw);
   for (const [a, b] of [
     ['"metrics"', '"synonyms"'],
-    ['"synonyms"', '"entities"'],
-    ['"entities"', '"joinHints"'],
     ['"id"', '"name"'],
     ['"name"', '"expression"'],
     ['"expression"', '"description"'],
@@ -93,7 +90,8 @@ test("metric round trip is byte-stable with derived reads", () => {
     assert.ok(raw.indexOf(a) !== -1 && raw.indexOf(a) < raw.indexOf(b), `${a} precedes ${b}`);
   }
   assert.ok(raw.includes('"source": "question"'), raw);
-  assert.ok(raw.includes('"keyColumns": ['), raw);
+  assert.ok(!raw.includes("joinHints"), "no joinHints key");
+  assert.ok(!raw.includes("entities"), "no entities key");
 });
 
 test("unknown envelope version and corrupt json load empty and bak on write", () => {
@@ -260,8 +258,6 @@ test("local-only definitions are ineligible on cloud asks", () => {
   const pub = semantic.createMetric("public_rev", "SUM(amount)", "", "public", summary("q"), ["public.csv"]);
   semantic.createSynonym("pgmv", "private_rev");
   semantic.createSynonym("pubgmv", "public_rev");
-  semantic.createEntity("priv_ent", "private", [], "");
-  semantic.createEntity("pub_ent", "public", [], "");
 
   assert.ok(semantic.metricEffectivelyLocalOnly(priv.reads));
   assert.ok(!semantic.metricEffectivelyLocalOnly(pub.reads));
@@ -270,13 +266,11 @@ test("local-only definitions are ineligible on cloud asks", () => {
   const local = semantic.eligibleForPosture(false);
   assert.equal(local.metrics.length, 2);
   assert.equal(local.synonyms.length, 2);
-  assert.equal(local.entities.length, 2);
 
-  // Cloud posture: the private metric, its synonym, and the private entity drop.
+  // Cloud posture: the private metric and its synonym drop.
   const cloud = semantic.eligibleForPosture(true);
   assert.deepEqual(cloud.metrics.map((m) => m.name), ["public_rev"]);
   assert.deepEqual(cloud.synonyms.map((s) => s.term), ["pubgmv"]);
-  assert.deepEqual(cloud.entities.map((e) => e.name), ["pub_ent"]);
 
   // Unmarking flows straight through (state is read per call, never cached).
   vault.setLocalOnly("private.csv", false);
@@ -319,12 +313,6 @@ test("renderBlock pins the business-definitions block byte-for-byte (PARITY)", (
       },
     ],
     synonyms: [{ term: "GMV", canonical: "revenue" }],
-    entities: [
-      { name: "sales", table: "sales", keyColumns: ["region", "product"], description: "the sales ledger" },
-    ],
-    joinHints: [
-      { leftEntity: "orders", leftColumn: "rep", rightEntity: "reps", rightColumn: "rep", description: "each order's owner" },
-    ],
   };
   const block = semantic.renderBlock(set);
   assert.equal(block.name, "business definitions");
@@ -337,12 +325,6 @@ test("renderBlock pins the business-definitions block byte-for-byte (PARITY)", (
     "Synonyms (term → canonical column or metric):",
     "- GMV → revenue",
     "",
-    "Entities (name: table (key columns) — description):",
-    "- sales: sales (region, product) — the sales ledger",
-    "",
-    "Curated join hints (authoritative — prefer over inferred joins):",
-    "- orders.rep = reps.rep — each order's owner",
-    "",
     "Examples (a defined term expands to its metric definition):",
     "Q: revenue by region",
     "SQL: SELECT region, SUM(amount) FILTER (WHERE status = 'paid') AS revenue FROM sales GROUP BY region ORDER BY revenue DESC",
@@ -351,7 +333,7 @@ test("renderBlock pins the business-definitions block byte-for-byte (PARITY)", (
   ].join("\n");
   assert.equal(block.text, expected);
   // An empty set renders nothing (the byte-identical-prompt invariant).
-  assert.equal(semantic.renderBlock({ metrics: [], synonyms: [], entities: [], joinHints: [] }), null);
+  assert.equal(semantic.renderBlock({ metrics: [], synonyms: [] }), null);
 });
 
 test("promptBlock is null on an empty store and respects the ask posture", () => {
@@ -378,9 +360,11 @@ test("promptBlock is null on an empty store and respects the ask posture", () =>
 });
 
 // --- §3 env-gated per-kind ablation hook (field-patch-0.12.5) -----------------
-// PARITY: mirrors semantic.rs's Ablation tests. Seeds a full store directly (a
-// joinHint has no CRUD, matching the Rust engine) and checks each gate removes
-// exactly its kind, and that the hook ships INERT with no env var set.
+// PARITY: mirrors semantic.rs's Ablation tests. Seeds a full store directly and
+// checks each gate removes exactly its kind, and that the hook ships INERT with
+// no env var set. The seed carries LEGACY entities/joinHints keys to also pin
+// backward compatibility: the loader ignores them (never errors), and only the
+// two surviving kinds (metrics + synonyms) can be ablated.
 function seedFullStore(stateDir) {
   fs.mkdirSync(stateDir, { recursive: true });
   fs.writeFileSync(
@@ -400,6 +384,7 @@ function seedFullStore(stateDir) {
         },
       ],
       synonyms: [{ term: "gmv", canonical: "revenue" }],
+      // Legacy keys from an older engine — must load cleanly and be dropped.
       entities: [{ name: "sales", table: "sales", keyColumns: [], description: "" }],
       joinHints: [
         { leftEntity: "orders", leftColumn: "rep", rightEntity: "reps", rightColumn: "rep", description: "" },
@@ -408,22 +393,24 @@ function seedFullStore(stateDir) {
   );
 }
 
-test("§3 per-kind ablation is env-gated and ships inert (PARITY)", () => {
+test("§3 per-kind ablation is env-gated and ships inert; legacy keys drop (PARITY)", () => {
   const { stateDir } = freshVault();
   seedFullStore(stateDir);
   for (const k of ["METRICS", "SYNONYMS", "JOINS"]) delete process.env[`LIGHTHOUSE_ABLATE_${k}`];
   try {
-    // Inert: no env ⇒ everything eligible (byte-identical to today).
+    // Inert: no env ⇒ everything eligible (byte-identical to today). The legacy
+    // entities/joinHints keys are ignored — the set has only metrics + synonyms.
     let s = semantic.eligibleForPosture(false);
     assert.deepEqual(
-      [s.metrics.length, s.synonyms.length, s.entities.length, s.joinHints.length],
-      [1, 1, 1, 1],
-      "inert with no env var set",
+      [s.metrics.length, s.synonyms.length],
+      [1, 1],
+      "inert with no env var set; legacy keys dropped",
     );
+    assert.ok(!("entities" in s) && !("joinHints" in s), "no entities/joinHints on the set");
 
     process.env.LIGHTHOUSE_ABLATE_METRICS = "1";
     s = semantic.eligibleForPosture(false);
-    assert.deepEqual([s.metrics.length, s.synonyms.length, s.joinHints.length], [0, 1, 1], "metrics gated");
+    assert.deepEqual([s.metrics.length, s.synonyms.length], [0, 1], "metrics gated");
     delete process.env.LIGHTHOUSE_ABLATE_METRICS;
 
     process.env.LIGHTHOUSE_ABLATE_SYNONYMS = "true";
@@ -431,19 +418,52 @@ test("§3 per-kind ablation is env-gated and ships inert (PARITY)", () => {
     assert.deepEqual([s.metrics.length, s.synonyms.length], [1, 0], "synonyms gated");
     delete process.env.LIGHTHOUSE_ABLATE_SYNONYMS;
 
-    process.env.LIGHTHOUSE_ABLATE_JOINS = "1";
+    // A stray non-truthy value never ablates (the inert-ship guard). The removed
+    // JOINS gate is gone — LIGHTHOUSE_ABLATE_JOINS is now a no-op.
+    process.env.LIGHTHOUSE_ABLATE_SYNONYMS = "0";
     s = semantic.eligibleForPosture(false);
-    assert.deepEqual(
-      [s.metrics.length, s.synonyms.length, s.entities.length, s.joinHints.length],
-      [1, 1, 0, 0],
-      "joins gate drops joinHints AND backing entities",
-    );
-
-    // A stray non-truthy value never ablates (the inert-ship guard).
-    process.env.LIGHTHOUSE_ABLATE_JOINS = "0";
-    s = semantic.eligibleForPosture(false);
-    assert.equal(s.joinHints.length, 1, "'0' is OFF");
+    assert.equal(s.synonyms.length, 1, "'0' is OFF");
   } finally {
     for (const k of ["METRICS", "SYNONYMS", "JOINS"]) delete process.env[`LIGHTHOUSE_ABLATE_${k}`];
   }
+});
+
+// --- §3.4 auto-derived synonym proposals (PARITY with semantic.rs) ------------
+test("proposeSynonyms fires only on the abbreviation dictionary, no false merges", () => {
+  // The obvious ones: a column that is a known abbrev proposes the full form as
+  // the term (and vice-versa), so either spelling resolves.
+  const out = semantic.proposeSynonyms(["amt", "qty", "region"], []);
+  assert.ok(
+    out.some((s) => s.term === "amount" && s.canonical === "amt"),
+    `amt → amount: ${JSON.stringify(out)}`,
+  );
+  assert.ok(
+    out.some((s) => s.term === "quantity" && s.canonical === "qty"),
+    `qty → quantity: ${JSON.stringify(out)}`,
+  );
+  assert.ok(
+    out.some((s) => s.term === "rgn" && s.canonical === "region"),
+    `region → rgn: ${JSON.stringify(out)}`,
+  );
+
+  // No false-positive merges: columns that merely SHARE A STEM with a dictionary
+  // word (region↔regularization, amount↔amortization) or resemble an
+  // abbreviation without being one (quant) are NEVER proposed. Only EXACT
+  // dictionary matches fire.
+  assert.deepEqual(
+    semantic.proposeSynonyms(["regularization", "amortization", "quant", "customer_segment"], []),
+    [],
+    "no stem/substring merge ever proposed",
+  );
+
+  // Both forms present as columns ⇒ ambiguous ⇒ propose neither direction.
+  assert.deepEqual(semantic.proposeSynonyms(["amount", "amt"], []), [], "both forms present ⇒ skip");
+
+  // A term an existing synonym already owns is not re-proposed; deduped by term.
+  assert.deepEqual(
+    semantic.proposeSynonyms(["amt"], [{ term: "amount", canonical: "amt" }]),
+    [],
+    "existing synonym term is not re-proposed",
+  );
+  assert.equal(semantic.proposeSynonyms(["amt", "amt"], []).length, 1, "deduped by term");
 });

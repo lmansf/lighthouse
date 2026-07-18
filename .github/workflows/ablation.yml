@@ -51,16 +51,18 @@ jobs:
           BASE=$(rate_under "")
           M=$(rate_under "LIGHTHOUSE_ABLATE_METRICS=1")
           S=$(rate_under "LIGHTHOUSE_ABLATE_SYNONYMS=1")
-          J=$(rate_under "LIGHTHOUSE_ABLATE_JOINS=1")
 
           {
             echo "## Business-definitions ablation (analytics_eval)"
             echo ""
             echo "Decision rule: lift < ~2 points AND no qualitative save ⇒ REMOVE; else KEEP + auto-derive."
             echo ""
+            echo "(Declared joins + backing entities were REMOVED in field-patch-0.12.5 §3 —"
+            echo "no authoring UI, and auto-derived join hints cover join inference — so there"
+            echo "is no JOINS ablation row anymore.)"
+            echo ""
             echo "| component | baseline rate | ablated rate | lift (points) |"
             echo "|---|---|---|---|"
-            echo "| metrics                    | $BASE | $M | $(points "$BASE" "$M") |"
-            echo "| synonyms                   | $BASE | $S | $(points "$BASE" "$S") |"
-            echo "| joins (+ backing entities) | $BASE | $J | $(points "$BASE" "$J") |"
+            echo "| metrics  | $BASE | $M | $(points "$BASE" "$M") |"
+            echo "| synonyms | $BASE | $S | $(points "$BASE" "$S") |"
           } | tee -a "$GITHUB_STEP_SUMMARY"

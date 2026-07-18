@@ -212,22 +212,18 @@ export function cacheKey(
     .map((v): [string, string] => [v.name, v.sql])
     .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
   // The semantic REGISTRY as it could apply to this ask (openspec:
-  // add-semantic-layer §5.2): every posture-eligible definition of all four
-  // kinds — a cloud ask excludes effectively-local-only metrics/entities and
-  // anything referencing them (`eligibleSemantics`) — as (kind-prefixed name,
-  // value) pairs so the kinds can never collide, sorted. Editing any eligible
+  // add-semantic-layer §5.2): every posture-eligible definition of the two
+  // kinds — a cloud ask excludes effectively-local-only metrics and any synonym
+  // referencing them (`eligibleSemantics`) — as (kind-prefixed name, value)
+  // pairs so the kinds can never collide, sorted. Editing any eligible
   // definition re-keys dependent entries; zero definitions leaves every key
   // untouched. PARITY: byte-identical to answer_cache.rs::cache_key's
-  // semantic-registry build (KEEP IN SYNC).
+  // semantic-registry build (KEEP IN SYNC). (The e:/j: chains were removed with
+  // the declared-join component in field-patch-0.12.5 §3.)
   const semantics = eligibleSemantics(isCloud);
   const semanticRegistry: [string, string][] = [
     ...semantics.metrics.map((m): [string, string] => [`m:${m.name}`, m.expression]),
     ...semantics.synonyms.map((s): [string, string] => [`s:${s.term}`, s.canonical]),
-    ...semantics.entities.map((e): [string, string] => [`e:${e.name}`, e.table]),
-    ...semantics.joinHints.map((j): [string, string] => [
-      `j:${j.leftEntity}.${j.leftColumn}`,
-      `${j.rightEntity}.${j.rightColumn}`,
-    ]),
   ].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
   return keyFromParts(
     question,

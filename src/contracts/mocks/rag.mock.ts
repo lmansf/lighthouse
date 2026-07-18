@@ -1204,6 +1204,10 @@ class MockRagService implements RagService {
           return surfacedNames.has(c) || !allNames.has(c);
         })
         .map((s) => ({ ...s })),
+      // §3.4 auto-derived proposals: the offline mock has no column catalog or
+      // SQL-mining engine, so it surfaces none (the Rust engine fills these).
+      suggestedSynonyms: [],
+      suggestedMetrics: [],
     };
   }
 

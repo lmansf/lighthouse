@@ -53,25 +53,40 @@ per section; the full suite + smoke + floors before the bump.
       into the semantic store with per-component dependent checks + an always-on
       `SCORECARD … rate=` line; `.github/workflows/ablation.yml` (dispatch) runs
       baseline + each component ablated and prints the per-component lift table.
-- [ ] 3.3 Record the ablation table + a one-paragraph plain-language verdict in
+- [x] 3.3 Record the ablation table + a one-paragraph plain-language verdict in
       `docs/analytics-beam.md` (new "Phase D — semantic layer" section). — Phase D
-      scaffold (method + decision rule + PLACEHOLDER table) landed; the numbers +
-      verdict are pending the CI ablation run.
-- [ ] 3.4 Apply the decision rule per component:
-      - REMOVE (if < ~2 pts and no qualitative save): delete UI + storage +
-        prompt injection + docs; grep-proof no dead references remain.
-      - KEEP + auto-derive (if real lift): synonyms → deterministic *proposals*
-        from column names/values; metrics → mined from usage via
-        `propose_metric` as one-click "save as metric" proposals.
+      results table (metrics 48→46, synonyms 48→46; joins row removed) + the
+      plain-language verdict landed with the §3.4 decision.
+- [x] 3.4 Apply the decision rule per component:
+      - REMOVE — declared join hints + backing entities: deleted from both engines
+        (structs, CRUD, `curated_join_pairs`, the JOINS ablation gate, the
+        curated-join prompt section, the answer-cache registry chains, the eval's
+        joins checks + `ablation.yml` joins run + Phase D joins row). Store loads
+        an old `semantic.json` with `entities`/`joinHints` keys tolerantly (serde
+        ignores unknown keys; a mirrored TS check + a test pin it). Grep-proof: no
+        dead references remain.
+      - KEEP + auto-derive — metrics + synonyms: synonyms proposed deterministically
+        from the included columns' known abbreviations
+        (`semantic::propose_synonyms` / `proposeSynonyms`, conservative curated
+        dictionary, no false-positive merges); metrics mined from recurring usage
+        (`semantic::propose_metrics` over views/pins/answer_cache via
+        `analytics::propose_metric`, threshold ≥ 2 or one certified). Surfaced in
+        SemanticNav's "Suggested" list; accepted one-by-one through the guarded
+        create path. Nothing auto-applied.
 - [x] 3.5 Build the engine-drafted **vault brief** (new): deterministic draft
       from vault composition + queryable tables (date-range render supported;
       live enrichment a follow-on), injected as one `Ctx` beside the business-
       definitions block. TS twin mirrors byte-for-byte (`vaultBrief.ts`).
-- [ ] 3.6 Tests: auto-derivation proposal unit tests (conservative thresholds,
+- [x] 3.6 Tests: auto-derivation proposal unit tests (conservative thresholds,
       NO false-positive synonym merges); scorecards-after ≥ scorecards-before;
       brief-draft determinism. — brief-draft determinism + composition pinned in
-      both engines; per-component ablation checks landed; auto-derivation
-      proposals pending the §3.4 verdict.
+      both engines; per-component ablation checks landed. Auto-derivation now
+      covered: `propose_synonyms` pins the obvious hits AND the no-false-positive
+      cases (region↔regularization, amount↔amortization, both-forms-present,
+      existing-synonym) in Rust + the TS twin; `propose_metrics_from_usage` pins
+      the ≥2-or-certified threshold, occurrence tally/sort, and already-defined
+      dedupe. Backward-compat load of legacy `entities`/`joinHints` keys pinned in
+      both engines.
 
 ## §4 — Housekeeping (commit 4)
 - [ ] 4.1 Triage remaining moderate Dependabot alerts: `npm audit`/`cargo audit`

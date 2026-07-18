@@ -231,9 +231,9 @@ pub fn cache_key(
         .collect();
     views.sort();
     // The semantic REGISTRY as it could apply to this ask (openspec:
-    // add-semantic-layer §5.2): every posture-eligible definition of all four
-    // kinds — a cloud ask excludes the effectively-local-only metrics/entities
-    // and anything that references them (`eligible_for_posture`) — rendered as
+    // add-semantic-layer §5.2): every posture-eligible definition of the two
+    // kinds — a cloud ask excludes the effectively-local-only metrics and any
+    // synonym that references them (`eligible_for_posture`) — rendered as
     // (kind-prefixed name, value) pairs so the kinds can never collide, sorted.
     // The DEFINITIONS are the material, so editing any posture-eligible
     // definition invalidates dependent entries, a cloud ask never keys on a
@@ -249,18 +249,6 @@ pub fn cache_key(
                 .into_iter()
                 .map(|s| (format!("s:{}", s.term), s.canonical)),
         )
-        .chain(
-            semantics
-                .entities
-                .into_iter()
-                .map(|e| (format!("e:{}", e.name), e.table)),
-        )
-        .chain(semantics.join_hints.into_iter().map(|j| {
-            (
-                format!("j:{}.{}", j.left_entity, j.left_column),
-                format!("{}.{}", j.right_entity, j.right_column),
-            )
-        }))
         .collect();
     semantic_registry.sort();
     key_from_parts(
@@ -363,6 +351,24 @@ pub fn reset_store() {
     let mut store = STORE.lock().unwrap_or_else(|p| p.into_inner());
     store.entries.clear();
     store.disk_loaded = false;
+}
+
+/// The executed SQL of every analytics answer currently in memory, each paired
+/// with whether it certified a metric — a source for metric-proposal mining
+/// (openspec: field-patch-0.12.5 §3.4, `semantic::propose_metrics`). Reads the
+/// in-session entries under the store lock (no forced disk load); a certified
+/// answer qualifies a mined expression even at a single occurrence.
+pub fn mined_analytics_sqls() -> Vec<(String, bool)> {
+    let store = STORE.lock().unwrap_or_else(|p| p.into_inner());
+    store
+        .entries
+        .iter()
+        .filter_map(|e| {
+            e.analytics
+                .as_ref()
+                .map(|a| (a.sql.clone(), a.certified.is_some()))
+        })
+        .collect()
 }
 
 #[cfg(test)]

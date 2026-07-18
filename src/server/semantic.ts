@@ -1,11 +1,13 @@
 /**
  * The semantic layer, TS twin (openspec: add-semantic-layer §1). KEEP IN SYNC
  * with native semantic.rs: same record shapes (camelCase on the wire), the
- * same versioned envelope `{v: 1, metrics, synonyms, entities, joinHints}`
- * written with the shared atomic writer, the same id minting, the same
- * validation and error strings, the same CRUD/lifecycle (metric rename/delete
- * refuse or cascade against dependent synonyms), and the same local-only
- * propagation.
+ * same versioned envelope `{v: 1, metrics, synonyms}` written with the shared
+ * atomic writer, the same id minting, the same validation and error strings,
+ * the same CRUD/lifecycle (metric rename/delete refuse or cascade against
+ * dependent synonyms), and the same local-only propagation. (Declared join
+ * hints + their backing entities were removed in field-patch-0.12.5 §3 for
+ * having no authoring UI; a v1 file that still carries `entities`/`joinHints`
+ * keys loads cleanly — the keys are ignored and dropped on the next write.)
  *
  * A METRIC names a messy DEFINITION once — `{id, name, expression,
  * description, entity, reads, summary, createdMs}` — with the same store
@@ -33,7 +35,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { stateDir, writeJson } from "./config";
-import { activeIncludedFileIds, listNodes, localOnlySubset } from "./vault";
+import { listNodes, localOnlySubset } from "./vault";
 import {
   RESERVED_NAMES,
   collectTableNames,
@@ -90,29 +92,10 @@ export interface Synonym {
   canonical: string;
 }
 
-/** A named entity: a name bound to a table, its key columns, a description. */
-export interface Entity {
-  name: string;
-  table: string;
-  keyColumns: string[];
-  description: string;
-}
-
-/** A curated join hint: how two entities relate. */
-export interface JoinHint {
-  leftEntity: string;
-  leftColumn: string;
-  rightEntity: string;
-  rightColumn: string;
-  description: string;
-}
-
-/** The four record kinds — the full store, or the posture-eligible subset. */
+/** The two record kinds — the full store, or the posture-eligible subset. */
 export interface SemanticSet {
   metrics: Metric[];
   synonyms: Synonym[];
-  entities: Entity[];
-  joinHints: JoinHint[];
 }
 
 // --- Store (versioned envelope, bak-on-write — the views.ts posture) ---------------
@@ -122,7 +105,7 @@ function semanticPath(): string {
 }
 
 function emptySet(): SemanticSet {
-  return { metrics: [], synonyms: [], entities: [], joinHints: [] };
+  return { metrics: [], synonyms: [] };
 }
 
 /**
@@ -130,6 +113,8 @@ function emptySet(): SemanticSet {
  * (unknown/missing version, or unparseable JSON — the two read identically).
  * PARITY: this twin trusts the arrays wholesale once the envelope checks pass;
  * the Rust engine's serde also rejects records with malformed required fields.
+ * A legacy file that still carries `entities`/`joinHints` keys loads cleanly —
+ * the keys are ignored (never required), mirroring serde's unknown-field posture.
  */
 function parseStore(text: string): SemanticSet | null {
   try {
@@ -138,15 +123,11 @@ function parseStore(text: string): SemanticSet | null {
       parsed &&
       parsed.v === STORE_VERSION &&
       Array.isArray(parsed.metrics) &&
-      Array.isArray(parsed.synonyms) &&
-      Array.isArray(parsed.entities) &&
-      Array.isArray(parsed.joinHints)
+      Array.isArray(parsed.synonyms)
     ) {
       return {
         metrics: parsed.metrics,
         synonyms: parsed.synonyms,
-        entities: parsed.entities,
-        joinHints: parsed.joinHints,
       };
     }
   } catch {
@@ -195,13 +176,12 @@ function save(set: SemanticSet): void {
       }
     }
   }
-  // Key order is the byte contract with the Rust engine.
+  // Key order is the byte contract with the Rust engine. (No entities/joinHints
+  // keys — the declared-join machinery was removed in field-patch-0.12.5 §3.)
   writeJson(target, {
     v: STORE_VERSION,
     metrics: set.metrics,
     synonyms: set.synonyms,
-    entities: set.entities,
-    joinHints: set.joinHints,
   });
 }
 
@@ -217,8 +197,6 @@ function cloneSet(set: SemanticSet): SemanticSet {
   return {
     metrics: set.metrics.map(cloneMetric),
     synonyms: set.synonyms.map((s) => ({ ...s })),
-    entities: set.entities.map((e) => ({ ...e, keyColumns: [...e.keyColumns] })),
-    joinHints: set.joinHints.map((j) => ({ ...j })),
   };
 }
 
@@ -282,46 +260,21 @@ function isRegistrable(name: string): boolean {
   return n.endsWith(".pdf") || TABULAR_EXT.some((e) => n.endsWith(e));
 }
 
-/**
- * Whether an entity's table is effectively local-only: its `table` resolves to
- * a saved view that is local-only, or to a current file that is. Entities carry
- * no stored `reads`, so eligibility resolves the table at ask time. KEEP IN
- * SYNC with semantic.rs::entity_effectively_local_only.
- */
-function entityEffectivelyLocalOnly(table: string): boolean {
-  const t = table.trim().toLowerCase();
-  if (!t) return false;
-  const viewRecords = listViews();
-  const v = viewRecords.find((r) => r.name.toLowerCase() === t);
-  if (v) return viewEffectivelyLocalOnly(v, viewRecords);
-  const byId = new Map<string, string>();
-  for (const n of listNodes()) if (n.kind === "file") byId.set(n.id, n.name);
-  return activeIncludedFileIds().some((id) => {
-    const name = byId.get(id);
-    return (
-      !!name &&
-      isRegistrable(name) &&
-      sanitizeTableName(name) === t &&
-      localOnlySubset([id], true).length > 0
-    );
-  });
-}
-
 // --- Env-gated per-kind ablation hook (openspec: field-patch-0.12.5 §3) ------------
 //
 // PARITY: mirrors semantic.rs's `Ablation`. The MEASUREMENT instrument for the
-// business-definitions study — each hand-authored kind (metric definitions,
-// column synonyms, declared joins = joinHints + their backing entities) can be
-// made ineligible for a run via an environment gate, with NO shipped setting,
-// applied at the ONE posture seam so an ablated kind vanishes from every
-// consumer at once. Ships INERT: with no LIGHTHOUSE_ABLATE_* variable set,
-// `applyAblation` is a no-op and the eligible set is byte-identical to today.
-// A measurement instrument only: NO setting, NO UI, NOT on the wire.
+// business-definitions study — each surviving hand-authored kind (metric
+// definitions, column synonyms) can be made ineligible for a run via an
+// environment gate, with NO shipped setting, applied at the ONE posture seam so
+// an ablated kind vanishes from every consumer at once. Ships INERT: with no
+// LIGHTHOUSE_ABLATE_* variable set, `applyAblation` is a no-op and the eligible
+// set is byte-identical to today. A measurement instrument only: NO setting, NO
+// UI, NOT on the wire. (The declared joins — joinHints + backing entities — were
+// removed in field-patch-0.12.5 §3, so the JOINS gate is gone.)
 
 interface Ablation {
   metrics: boolean;
   synonyms: boolean;
-  joins: boolean;
 }
 
 /**
@@ -338,29 +291,22 @@ function ablationFromEnv(): Ablation {
   return {
     metrics: ablateFlag(process.env.LIGHTHOUSE_ABLATE_METRICS),
     synonyms: ablateFlag(process.env.LIGHTHOUSE_ABLATE_SYNONYMS),
-    joins: ablateFlag(process.env.LIGHTHOUSE_ABLATE_JOINS),
   };
 }
 
 /**
  * Zero out the ablated kinds in place, as if the store held none of that kind.
- * JOINS drops joinHints AND the backing entities together (a curated join
- * renders through its entities). KEEP IN SYNC with semantic.rs::Ablation::apply.
+ * KEEP IN SYNC with semantic.rs::Ablation::apply.
  */
 function applyAblation(a: Ablation, set: SemanticSet): void {
   if (a.metrics) set.metrics = [];
   if (a.synonyms) set.synonyms = [];
-  if (a.joins) {
-    set.joinHints = [];
-    set.entities = [];
-  }
 }
 
 /**
  * The definitions usable under an ask's posture (§1.4) — the ONE gate that
  * governs §2 prompt injection AND the §3/§5 cache key. Device: everything.
- * Cloud: drop local-only metrics + entities over local-only tables, then any
- * synonym naming a dropped metric and any join hint touching a dropped entity.
+ * Cloud: drop local-only metrics, then any synonym naming a dropped metric.
  * KEEP IN SYNC with semantic.rs::eligible_for_posture.
  */
 export function eligibleForPosture(isCloud: boolean): SemanticSet {
@@ -376,19 +322,8 @@ export function eligibleForPosture(isCloud: boolean): SemanticSet {
     if (!keep) droppedMetrics.add(m.name.toLowerCase());
     return keep;
   });
-  const droppedEntities = new Set<string>();
-  const entities = store.entities.filter((e) => {
-    const keep = !entityEffectivelyLocalOnly(e.table);
-    if (!keep) droppedEntities.add(e.name.toLowerCase());
-    return keep;
-  });
   const synonyms = store.synonyms.filter((s) => !droppedMetrics.has(s.canonical.toLowerCase()));
-  const joinHints = store.joinHints.filter(
-    (j) =>
-      !droppedEntities.has(j.leftEntity.toLowerCase()) &&
-      !droppedEntities.has(j.rightEntity.toLowerCase()),
-  );
-  return { metrics, synonyms, entities, joinHints };
+  return { metrics, synonyms };
 }
 
 // --- Applicable semantics (openspec: add-semantic-layer §6.1) ----------------------
@@ -415,10 +350,29 @@ export interface SynonymCard {
   canonical: string;
 }
 
-/** The semantic definitions applicable to the current tables. KEEP IN SYNC. */
+/**
+ * One auto-derived "save as metric" proposal (openspec: field-patch-0.12.5
+ * §3.4). KEEP IN SYNC with `SuggestedMetric` in meta.rs / src/contracts/types.ts.
+ */
+export interface SuggestedMetric {
+  expression: string;
+  entity: string;
+  occurrences: number;
+  certified: boolean;
+}
+
+/**
+ * The semantic definitions applicable to the current tables, plus the §3.4
+ * auto-derived PROPOSALS (never stored until the user accepts). KEEP IN SYNC
+ * with `SemanticCards` in meta.rs / src/contracts/types.ts. PARITY: the column
+ * catalog + SQL mining are Rust-only, so this dev twin always returns EMPTY
+ * `suggested*` arrays (the shipped Rust engine computes the real proposals).
+ */
 export interface SemanticCards {
   metrics: MetricCard[];
   synonyms: SynonymCard[];
+  suggestedSynonyms: SynonymCard[];
+  suggestedMetrics: SuggestedMetric[];
 }
 
 /**
@@ -428,7 +382,9 @@ export interface SemanticCards {
  * meta.rs::applicable_semantics — only op:"defineMetric" is Rust-only. Metrics
  * gate on their `reads` intersecting `included`; synonyms ride when their
  * canonical names a surfaced metric or names no metric at all (a column
- * synonym). KEEP IN SYNC with meta.rs::applicable_semantics.
+ * synonym). KEEP IN SYNC with meta.rs::applicable_semantics. PARITY: the §3.4
+ * `suggested*` proposals need the column catalog + SQL mining (Rust-only), so
+ * this twin returns them EMPTY — the shipped Rust engine fills them.
  */
 export function applicableSemantics(included: string[], isCloud: boolean): SemanticCards {
   const set = eligibleForPosture(isCloud);
@@ -452,7 +408,7 @@ export function applicableSemantics(included: string[], isCloud: boolean): Seman
       return surfaced.has(canon) || !allMetrics.has(canon);
     })
     .map((s) => ({ term: s.term, canonical: s.canonical }));
-  return { metrics, synonyms };
+  return { metrics, synonyms, suggestedSynonyms: [], suggestedMetrics: [] };
 }
 
 /** Whether a metric's transitive source files intersect the included set: its
@@ -494,13 +450,12 @@ export function resolveMetric(name: string): string | undefined {
 // --- §2 prompt block: resolution into NL→SQL ---------------------------------------
 //
 // PARITY: the analytics-branch prompt injection is RUST-ONLY (synth.rs) — this
-// dev twin has no analytics branch, and the §2.4 curated-vs-heuristic join-hint
-// merge + `curatedJoinPairs` are Rust-only (there is no heuristic join_hints
-// here). What the twin DOES mirror, byte-identically, is the rendered block
-// itself: `renderBlock` produces the SAME label strings + `SEMANTIC_FEWSHOTS`
-// lines as semantic.rs::render_block (ts-twin.md rule 2), so the two engines
-// agree on every business-definitions string. Change these in lockstep with
-// semantic.rs.
+// dev twin has no analytics branch. What the twin DOES mirror, byte-identically,
+// is the rendered block itself: `renderBlock` produces the SAME label strings +
+// `SEMANTIC_FEWSHOTS` lines as semantic.rs::render_block (ts-twin.md rule 2), so
+// the two engines agree on every business-definitions string. Change these in
+// lockstep with semantic.rs. (The entities + curated-join sections were removed
+// in field-patch-0.12.5 §3.)
 
 /** Block label (rendered `[n] business definitions`). KEEP IN SYNC with BLOCK_NAME. */
 const BLOCK_NAME = "business definitions";
@@ -508,15 +463,11 @@ const BLOCK_HEADER =
   "Business definitions for this vault (curated meanings — prefer these over guessing; write SQL that uses each metric's exact definition):";
 const METRICS_HEADER = "Metrics (name = definition):";
 const SYNONYMS_HEADER = "Synonyms (term → canonical column or metric):";
-const ENTITIES_HEADER = "Entities (name: table (key columns) — description):";
-const CURATED_JOIN_HEADER = "Curated join hints (authoritative — prefer over inferred joins):";
 const EXAMPLES_HEADER = "Examples (a defined term expands to its metric definition):";
 
 // Per-kind caps — keep the NEWEST N of each kind. KEEP IN SYNC with semantic.rs.
 const MAX_BLOCK_METRICS = 24;
 const MAX_BLOCK_SYNONYMS = 24;
-const MAX_BLOCK_ENTITIES = 12;
-const MAX_BLOCK_JOIN_HINTS = 12;
 
 /**
  * Blessed question→SQL pairs demonstrating a metric reference EXPANDING to its
@@ -547,15 +498,13 @@ function descSuffix(description: string): string {
 
 /**
  * The pure renderer over an already-posture-filtered set — byte-identical to
- * semantic.rs::render_block. Fixed order: metrics, synonyms, entities, curated
- * join hints, then examples (only with a metric present). `null` when nothing
- * is eligible (keeps the prompt byte-identical to today). KEEP IN SYNC.
+ * semantic.rs::render_block. Fixed order: metrics, synonyms, then examples (only
+ * with a metric present). `null` when nothing is eligible (keeps the prompt
+ * byte-identical to today). KEEP IN SYNC.
  */
 export function renderBlock(set: SemanticSet): { name: string; text: string } | null {
   const metrics = newestFirst(set.metrics, MAX_BLOCK_METRICS);
   const synonyms = newestFirst(set.synonyms, MAX_BLOCK_SYNONYMS);
-  const entities = newestFirst(set.entities, MAX_BLOCK_ENTITIES);
-  const hints = newestFirst(set.joinHints, MAX_BLOCK_JOIN_HINTS);
 
   const sections: string[] = [];
   if (metrics.length > 0) {
@@ -566,23 +515,6 @@ export function renderBlock(set: SemanticSet): { name: string; text: string } | 
   if (synonyms.length > 0) {
     const lines = [SYNONYMS_HEADER];
     for (const s of synonyms) lines.push(`- ${s.term} → ${s.canonical}`);
-    sections.push(lines.join("\n"));
-  }
-  if (entities.length > 0) {
-    const lines = [ENTITIES_HEADER];
-    for (const e of entities) {
-      const cols = e.keyColumns.length > 0 ? ` (${e.keyColumns.join(", ")})` : "";
-      lines.push(`- ${e.name}: ${e.table}${cols}${descSuffix(e.description)}`);
-    }
-    sections.push(lines.join("\n"));
-  }
-  if (hints.length > 0) {
-    const lines = [CURATED_JOIN_HEADER];
-    for (const j of hints) {
-      lines.push(
-        `- ${j.leftEntity}.${j.leftColumn} = ${j.rightEntity}.${j.rightColumn}${descSuffix(j.description)}`,
-      );
-    }
     sections.push(lines.join("\n"));
   }
   // Metric-expansion examples ride only when a metric exists (byte-identical
@@ -746,32 +678,6 @@ export function createSynonym(term: string, canonical: string): Synonym {
 }
 
 /**
- * Create an entity: a `name` bound to a `table`, key columns, a description.
- * Name sanitizes with the metric rules, unique case-insensitively; `table` not
- * empty. KEEP IN SYNC with semantic.rs::create_entity.
- */
-export function createEntity(
-  name: string,
-  table: string,
-  keyColumns: string[],
-  description: string,
-): Entity {
-  const normalized = normalizeName(name);
-  if (!normalized) throw new Error("an entity needs a name");
-  if (RESERVED_NAMES.has(normalized)) throw new Error(`"${normalized}" is a reserved word`);
-  const t = table.trim();
-  if (!t) throw new Error("an entity needs a table");
-  const store = listSemantic();
-  if (store.entities.some((e) => e.name.toLowerCase() === normalized)) {
-    throw new Error(`an entity named "${normalized}" already exists`);
-  }
-  const entity: Entity = { name: normalized, table: t, keyColumns: [...keyColumns], description };
-  store.entities.push(entity);
-  save(store);
-  return { ...entity, keyColumns: [...entity.keyColumns] };
-}
-
-/**
  * Rename a metric — REFUSED with a message naming the dependent synonyms while
  * any synonym maps to it; otherwise a pure store update (id + reads untouched).
  * KEEP IN SYNC with semantic.rs::rename_metric.
@@ -834,11 +740,71 @@ export function deleteSynonym(term: string): void {
   save(store);
 }
 
-/** Delete an entity by its name (case-insensitive). */
-export function deleteEntity(name: string): void {
-  const store = listSemantic();
-  const before = store.entities.length;
-  store.entities = store.entities.filter((e) => e.name.toLowerCase() !== name.toLowerCase());
-  if (store.entities.length === before) throw new Error("entity not found");
-  save(store);
+// --- Auto-derived PROPOSALS (openspec: field-patch-0.12.5 §3.4) --------------------
+
+/**
+ * Curated business-data abbreviations, `[full, abbrev]` — the STRONG SIGNAL a
+ * synonym proposal requires. Matched against the WHOLE (lowercased) column name
+ * in BOTH directions; there is deliberately NO substring / stem / subsequence
+ * guessing, because real-world abbreviations are irregular (`qty`↔`quantity`
+ * drops interior letters, `rgn`↔`region` drops vowels) and any fuzzy rule loose
+ * enough to catch them ALSO merges unrelated columns that merely share a stem
+ * (`region`↔`regularization`, `amount`↔`amortization`). A curated dictionary
+ * can only ever fire on a known pair, so there are no false-positive merges.
+ * KEEP IN SYNC with semantic.rs::ABBREVIATIONS (same pairs, same order).
+ */
+const ABBREVIATIONS: [string, string][] = [
+  ["amount", "amt"],
+  ["quantity", "qty"],
+  ["region", "rgn"],
+  ["number", "num"],
+  ["description", "desc"],
+  ["category", "cat"],
+  ["customer", "cust"],
+  ["account", "acct"],
+  ["department", "dept"],
+  ["revenue", "rev"],
+  ["average", "avg"],
+  ["transaction", "txn"],
+  ["reference", "ref"],
+  ["balance", "bal"],
+  ["percent", "pct"],
+  ["organization", "org"],
+  ["identifier", "ident"],
+  ["address", "addr"],
+];
+
+/**
+ * PROPOSE column synonyms from a column inventory (openspec §3.4). For each
+ * column that exactly matches one side of a known abbreviation pair, propose a
+ * synonym mapping the OTHER form to that column (`{term: otherForm, canonical:
+ * column}`). CONSERVATIVE — no false-positive merges: ONLY the curated
+ * `ABBREVIATIONS` dictionary fires (a strong signal), never a stem/substring
+ * guess, so `region`/`regularization` never merge; a pair is skipped when BOTH
+ * forms are already columns (ambiguous); a proposal duplicating an existing
+ * synonym `term` is skipped. Deterministic (input column order, then dictionary
+ * order), de-duplicated by term. NOTHING is written — the user accepts each via
+ * the guarded `createSynonym`. KEEP IN SYNC with semantic.rs::propose_synonyms.
+ */
+export function proposeSynonyms(columns: string[], existing: Synonym[]): Synonym[] {
+  const cols = columns.map((c) => c.trim().toLowerCase()).filter((c) => c.length > 0);
+  const colSet = new Set(cols);
+  const existingTerms = new Set(existing.map((s) => s.term.trim().toLowerCase()));
+  const seen = new Set<string>();
+  const out: Synonym[] = [];
+  for (const col of cols) {
+    for (const [full, abbrev] of ABBREVIATIONS) {
+      let term: string;
+      if (col === full) term = abbrev;
+      else if (col === abbrev) term = full;
+      else continue;
+      // Both forms present as columns ⇒ ambiguous; skip. Also skip the identity
+      // and any term an existing (or already-proposed) synonym owns.
+      if (colSet.has(term) || term === col) continue;
+      if (existingTerms.has(term) || seen.has(term)) continue;
+      seen.add(term);
+      out.push({ term, canonical: col });
+    }
+  }
+  return out;
 }

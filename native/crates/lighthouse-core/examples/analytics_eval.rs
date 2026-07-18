@@ -39,7 +39,7 @@ use lighthouse_core::analytics::{
 };
 use lighthouse_core::beam::{BeamLoop, Budget, StopReason};
 use lighthouse_core::catalog::ColumnKind;
-use lighthouse_core::semantic::{Entity, JoinHint, Metric, SemanticSet, Synonym};
+use lighthouse_core::semantic::{Metric, SemanticSet, Synonym};
 use lighthouse_core::views::{Reads, SummarySource, ViewSummary};
 use lighthouse_core::ledger::assumption_ledger;
 use lighthouse_core::llm::{stream_answer, Ctx, ModelCfg};
@@ -219,11 +219,12 @@ d,amount
 // --- Messy fixture for the semantic-store ablation floor (openspec:
 //     field-patch-0.12.5 §3) --------------------------------------------------
 //
-// Deliberately MESSY so each hand-authored business-definition component has
-// something real to do: abbreviated columns (`rgn`, `amt`) a SYNONYM resolves, a
-// recurring FILTERed aggregation a METRIC names, and an orders↔reps pair a
-// declared JOIN hint makes authoritative. Seeded into the semantic store and
-// registered as tables so ablating each component MEASURABLY drops the pass rate.
+// Deliberately MESSY so each KEPT hand-authored business-definition component
+// has something real to do: abbreviated columns (`rgn`, `amt`) a SYNONYM
+// resolves, and a recurring FILTERed aggregation a METRIC names. Seeded into the
+// semantic store and registered as tables so ablating each component MEASURABLY
+// drops the pass rate. (Declared joins were removed in §3, so the fixture no
+// longer seeds a joinHint/entities.)
 //
 // Paid rows: 1200 + 300 + 700 = 2200 (the pending row excluded).
 const MESSY_ORDERS_CSV: &str = "\
@@ -1020,11 +1021,12 @@ async fn main() {
     // The MEASUREMENT floor. Seeds a realistic MESSY fixture's definitions into
     // the REAL semantic store, then adds model-free checks that route through
     // `semantic::eligible_for_posture` — the seam the LIGHTHOUSE_ABLATE_* gates
-    // act on. Each of the three hand-authored components has dependent checks that
-    // PASS with the component present and FAIL when its gate removes it, so an
-    // ablation run MEASURABLY drops the rate (docs/analytics-beam Phase D +
-    // `.github/workflows/ablation.yml`). Without these the study is meaningless:
-    // the eval reads no store today.
+    // act on. Each of the two KEPT hand-authored components has dependent checks
+    // that PASS with the component present and FAIL when its gate removes it, so
+    // an ablation run MEASURABLY drops the rate (docs/analytics-beam Phase D +
+    // `.github/workflows/ablation.yml`). (The third component — declared joins +
+    // backing entities — was REMOVED in §3 for having no authoring UI, so there
+    // is no JOINS gate or joins check anymore.)
     //
     // WHICH CHECK DEPENDS ON WHICH COMPONENT (audited — never fabricated):
     //   [metrics]  "net_revenue certifies…" + "…is injected" — certification AND
@@ -1036,9 +1038,6 @@ async fn main() {
     //              contribution; ABLATE_SYNONYMS ⇒ both fail. (The end-to-end lift
     //              of a model actually using the abbreviation is the opt-in
     //              provider leg's job, not this model-free floor.)
-    //   [joins]    "declared join is a curated pair" + "…rendered" —
-    //              curated_join_pairs AND the block's curated section both need the
-    //              joinHint (+ backing entities) eligible; ABLATE_JOINS ⇒ both fail.
     // (Component-independent sanity: the paid total 2200 is a genuine verified
     // answer regardless of ablation — execution never consults the store.)
     println!("\n== semantic store ablation floor (model-free) ==");
@@ -1118,32 +1117,6 @@ async fn main() {
                 Ok(())
             } else {
                 Err("synonym region→rgn absent; ABLATE_SYNONYMS removes it".to_string())
-            },
-        );
-
-        // [joins] The declared join is authoritative for the orders↔reps pair.
-        let pairs = lighthouse_core::semantic::curated_join_pairs(false);
-        let has_pair = pairs.iter().any(|(a, b)| {
-            (a == "orders_msy" && b == "reps_msy") || (a == "reps_msy" && b == "orders_msy")
-        });
-        record(
-            &mut card,
-            "[joins] declared orders_msy↔reps_msy join is a curated pair",
-            if has_pair {
-                Ok(())
-            } else {
-                Err(format!(
-                    "curated pairs {pairs:?} miss the join; ABLATE_JOINS removes joinHints + entities"
-                ))
-            },
-        );
-        record(
-            &mut card,
-            "[joins] the curated join section is rendered into the block",
-            if block.contains("Curated join hints (authoritative") {
-                Ok(())
-            } else {
-                Err("curated join section absent from the block".to_string())
             },
         );
     }
@@ -1481,11 +1454,11 @@ fn numeric_tokens(line: &str) -> Vec<String> {
 // --- Semantic-store ablation floor helper (openspec: field-patch-0.12.5 §3) --------
 
 /// Seed the MESSY fixture's business definitions directly into the semantic
-/// store at `state_dir()/semantic.json` (the v1 envelope both engines read).
-/// Written whole (a joinHint has no CRUD in either engine) via the real
-/// `SemanticSet` serialization + a `v: 1` stamp, so `eligible_for_posture`'s
-/// ablation hook governs it exactly as it governs a user's store. The caller
-/// must have pointed `VAULT_DIR` at an isolated temp dir first.
+/// store at `state_dir()/semantic.json` (the v1 envelope both engines read) via
+/// the real `SemanticSet` serialization + a `v: 1` stamp, so
+/// `eligible_for_posture`'s ablation hook governs it exactly as it governs a
+/// user's store. The caller must have pointed `VAULT_DIR` at an isolated temp
+/// dir first.
 fn seed_messy_semantic_store() {
     let set = SemanticSet {
         metrics: vec![Metric {
@@ -1502,27 +1475,6 @@ fn seed_messy_semantic_store() {
             Synonym { term: "amount".to_string(), canonical: "amt".to_string() },
             Synonym { term: "region".to_string(), canonical: "rgn".to_string() },
         ],
-        entities: vec![
-            Entity {
-                name: "orders_msy".to_string(),
-                table: "orders_msy".to_string(),
-                key_columns: vec!["rep_id".to_string()],
-                description: "orders ledger".to_string(),
-            },
-            Entity {
-                name: "reps_msy".to_string(),
-                table: "reps_msy".to_string(),
-                key_columns: vec!["rep_id".to_string()],
-                description: "sales reps".to_string(),
-            },
-        ],
-        join_hints: vec![JoinHint {
-            left_entity: "orders_msy".to_string(),
-            left_column: "rep_id".to_string(),
-            right_entity: "reps_msy".to_string(),
-            right_column: "rep_id".to_string(),
-            description: "each order's rep".to_string(),
-        }],
     };
     let mut value = serde_json::to_value(&set).expect("serialize the semantic set");
     value

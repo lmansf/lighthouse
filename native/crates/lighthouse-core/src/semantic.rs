@@ -29,11 +29,14 @@
 //! collide on the wire.
 //!
 //! Versioning posture (user data, not a cache): the store is a versioned
-//! envelope `{v: 1, metrics, synonyms, entities, joinHints}` in
-//! `state_dir()/semantic.json`. `v == 1` loads; an unknown or missing version
-//! — or unparseable JSON — loads EMPTY for the session, and the first
-//! subsequent write renames the unreadable file to `semantic.json.bak-<epochms>`
-//! before writing a fresh v1 envelope. Nothing is silently clobbered.
+//! envelope `{v: 1, metrics, synonyms}` in `state_dir()/semantic.json`.
+//! `v == 1` loads; an unknown or missing version — or unparseable JSON — loads
+//! EMPTY for the session, and the first subsequent write renames the unreadable
+//! file to `semantic.json.bak-<epochms>` before writing a fresh v1 envelope.
+//! Nothing is silently clobbered. A v1 file written by an OLDER engine that
+//! still carries `entities`/`joinHints` keys loads cleanly — serde ignores the
+//! now-unknown keys, so the declared-join machinery (removed in
+//! field-patch-0.12.5 §3 for having no authoring UI) drops away silently.
 //!
 //! The dev server twin (src/server/semantic.ts, KEEP IN SYNC) mirrors this
 //! module byte-compatibly: same envelope, same ids, same validation and error
@@ -114,45 +117,17 @@ pub struct Synonym {
     pub canonical: String,
 }
 
-/// A named entity: a friendly name bound to a table, its key columns, and a
-/// description. (Record format + prompt rendering land in §1/§2; the full
-/// relationship editor is a §6 follow-on.)
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Entity {
-    /// Sanitized identifier (the `normalize_view_name` rules), unique
-    /// case-insensitively among entities.
-    pub name: String,
-    /// The table (or saved view) this entity is.
-    pub table: String,
-    /// The key columns (for join hints and the model's mapping).
-    pub key_columns: Vec<String>,
-    /// What the entity is, in plain words.
-    pub description: String,
-}
-
-/// A curated join hint: how two entities relate. Renders alongside the
-/// engine's heuristic join hints and wins for the same table pair (§2).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct JoinHint {
-    pub left_entity: String,
-    pub left_column: String,
-    pub right_entity: String,
-    pub right_column: String,
-    pub description: String,
-}
-
-/// The four record kinds of the semantic layer — the full store, or the
+/// The two record kinds of the semantic layer — the full store, or the
 /// posture-eligible subset (`eligible_for_posture`). §2 renders these into the
-/// prompt block; §5 folds the metrics into the answer-cache key.
+/// prompt block; §5 folds the metrics into the answer-cache key. (Declared join
+/// hints + their backing entities were removed in field-patch-0.12.5 §3 — they
+/// had no authoring UI in either engine; the auto-derived `analytics::join_hints`
+/// already cover join inference.)
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SemanticSet {
     pub metrics: Vec<Metric>,
     pub synonyms: Vec<Synonym>,
-    pub entities: Vec<Entity>,
-    pub join_hints: Vec<JoinHint>,
 }
 
 // --- Store (versioned envelope, bak-on-write — the views.rs posture) ----------------
@@ -161,15 +136,16 @@ fn semantic_path() -> PathBuf {
     state_dir().join("semantic.json")
 }
 
-/// The on-disk envelope: `{v, metrics, synonyms, entities, joinHints}`.
+/// The on-disk envelope: `{v, metrics, synonyms}`. Serde does NOT
+/// `deny_unknown_fields`, so a file written by an older engine that still
+/// carries `entities`/`joinHints` keys deserializes cleanly — those keys are
+/// ignored and dropped on the next write (field-patch-0.12.5 §3).
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Store {
     v: u32,
     metrics: Vec<Metric>,
     synonyms: Vec<Synonym>,
-    entities: Vec<Entity>,
-    join_hints: Vec<JoinHint>,
 }
 
 impl Store {
@@ -178,16 +154,12 @@ impl Store {
             v,
             metrics: set.metrics.clone(),
             synonyms: set.synonyms.clone(),
-            entities: set.entities.clone(),
-            join_hints: set.join_hints.clone(),
         }
     }
     fn into_set(self) -> SemanticSet {
         SemanticSet {
             metrics: self.metrics,
             synonyms: self.synonyms,
-            entities: self.entities,
-            join_hints: self.join_hints,
         }
     }
 }
@@ -198,7 +170,8 @@ impl Store {
 /// wholesale once the envelope checks pass; here serde also rejects records
 /// with malformed required fields (an out-of-whitelist summary source
 /// included) — engine-written files always carry every field, so the twins
-/// agree on every file they write.
+/// agree on every file they write. Unknown keys (a legacy `entities`/`joinHints`
+/// pair) are ignored, never an error.
 fn parse_store(text: &str) -> Option<SemanticSet> {
     match serde_json::from_str::<Store>(text) {
         Ok(s) if s.v == STORE_VERSION => Some(s.into_set()),
@@ -294,43 +267,22 @@ pub fn metric_effectively_local_only(reads: &Reads) -> bool {
     })
 }
 
-/// Whether an entity's table is effectively local-only: its `table` resolves to
-/// a saved view that is local-only, or to a current file that is. Entities
-/// carry no stored `reads` (their wire shape is `{name, table, keyColumns,
-/// description}`), so eligibility resolves the table at ask time. KEEP IN SYNC
-/// with semantic.ts::entityEffectivelyLocalOnly.
-fn entity_effectively_local_only(table: &str) -> bool {
-    let table = table.trim().to_lowercase();
-    if table.is_empty() {
-        return false;
-    }
-    let view_records = crate::views::list();
-    if let Some(v) = view_records.iter().find(|v| v.name.to_lowercase() == table) {
-        return crate::views::view_effectively_local_only(v, &view_records);
-    }
-    crate::vault::active_included_file_ids().iter().any(|id| {
-        crate::vault::doc_path(id).is_some_and(|(name, _)| {
-            (crate::analytics::is_tabular(&name) || crate::analytics::is_pdf(&name))
-                && crate::analytics::sanitize_table_name(&name) == table
-                && crate::vault::node_is_local_only(id)
-        })
-    })
-}
-
 // --- Env-gated per-kind ablation hook (openspec: field-patch-0.12.5 §3) -------------
 //
 // The MEASUREMENT instrument for "do the manual business-definition components
-// earn their keep?": each of the three hand-authored kinds — metric
-// definitions, column synonyms, and declared joins (joinHints + their backing
-// entities) — can be made INELIGIBLE for a run via an environment gate, WITHOUT
-// a shipped setting, so the analytics + trust scorecards can be scored with each
-// component on and off and its per-component lift measured (docs/analytics-beam
-// Phase D + `.github/workflows/ablation.yml`).
+// earn their keep?": the two surviving hand-authored kinds — metric definitions
+// and column synonyms — can be made INELIGIBLE for a run via an environment
+// gate, WITHOUT a shipped setting, so the analytics + trust scorecards can be
+// scored with each component on and off and its per-component lift measured
+// (docs/analytics-beam Phase D + `.github/workflows/ablation.yml`). The declared
+// joins (joinHints + backing entities) were REMOVED in field-patch-0.12.5 §3
+// after the measurement showed no lift and no authoring UI, so the JOINS gate is
+// gone; only METRICS + SYNONYMS remain.
 //
 // Applied INSIDE `eligible_for_posture` — the ONE seam every consumer routes
-// through (§2 prompt injection, the §2.4 curated-join merge, the §3/§4
-// certify/trust path, and the §5 answer-cache key) — so an ablated kind vanishes
-// from ALL of them at once, exactly as if the store held none of it.
+// through (§2 prompt injection, the §3/§4 certify/trust path, and the §5
+// answer-cache key) — so an ablated kind vanishes from ALL of them at once,
+// exactly as if the store held none of it.
 //
 // Ships INERT: with no `LIGHTHOUSE_ABLATE_*` variable set, `Ablation::from_env`
 // is all-false, `any()` is false, and `apply` is a byte-for-byte no-op — every
@@ -343,7 +295,6 @@ fn entity_effectively_local_only(table: &str) -> bool {
 struct Ablation {
     metrics: bool,
     synonyms: bool,
-    joins: bool,
 }
 
 /// A gate is ON only for exactly `1` or `true` (trimmed, case-insensitive); any
@@ -365,21 +316,17 @@ impl Ablation {
         Ablation {
             metrics: ablate_flag(std::env::var("LIGHTHOUSE_ABLATE_METRICS").ok()),
             synonyms: ablate_flag(std::env::var("LIGHTHOUSE_ABLATE_SYNONYMS").ok()),
-            joins: ablate_flag(std::env::var("LIGHTHOUSE_ABLATE_JOINS").ok()),
         }
     }
 
     /// Whether ANY kind is ablated — the inert-ship guard: `false` ⇒ `apply` is a
     /// no-op and the eligible set is byte-identical to today.
     fn any(self) -> bool {
-        self.metrics || self.synonyms || self.joins
+        self.metrics || self.synonyms
     }
 
     /// Zero out the ablated kinds IN PLACE, as if the store held none of that
-    /// kind. JOINS drops joinHints AND their backing entities together: a curated
-    /// join renders through its entities' tables (`curated_join_pairs`), so
-    /// without the entities the pair could not resolve — the two are ONE component
-    /// for the study (openspec §3).
+    /// kind.
     fn apply(self, set: &mut SemanticSet) {
         if self.metrics {
             set.metrics.clear();
@@ -387,29 +334,23 @@ impl Ablation {
         if self.synonyms {
             set.synonyms.clear();
         }
-        if self.joins {
-            set.join_hints.clear();
-            set.entities.clear();
-        }
     }
 }
 
 /// The definitions usable under an ask's posture (§1.4) — the ONE gate that
 /// governs §2 prompt injection AND the §3/§5 cache key. On a device ask every
 /// definition is eligible (marks are inert locally). A cloud ask drops the
-/// effectively-local-only metrics AND the entities over local-only tables, and
-/// then anything that references a dropped definition (a synonym whose
-/// canonical names a dropped metric, a join hint touching a dropped entity), so
-/// a private table's meaning can never ride a view of itself into a vendor
-/// prompt. KEEP IN SYNC with semantic.ts::eligibleForPosture.
+/// effectively-local-only metrics and then any synonym whose canonical names a
+/// dropped metric, so a private table's meaning can never ride a view of itself
+/// into a vendor prompt. KEEP IN SYNC with semantic.ts::eligibleForPosture.
 pub fn eligible_for_posture(is_cloud: bool) -> SemanticSet {
     let mut store = list();
     // openspec field-patch-0.12.5 §3: the env-gated per-kind ablation — the
     // measurement instrument, applied at this single seam. Ships INERT — with no
     // LIGHTHOUSE_ABLATE_* gate set, `any()` is false and `apply` is never even
     // reached, so the eligible set is byte-identical to today; when a gate is
-    // set, that kind is removed here and vanishes from prompt injection, curated
-    // joins, certify/trust, and the cache key at once.
+    // set, that kind is removed here and vanishes from prompt injection,
+    // certify/trust, and the cache key at once.
     let ablation = Ablation::from_env();
     if ablation.any() {
         ablation.apply(&mut store);
@@ -429,37 +370,12 @@ pub fn eligible_for_posture(is_cloud: bool) -> SemanticSet {
             keep
         })
         .collect();
-    let mut dropped_entities: Vec<String> = Vec::new();
-    let entities: Vec<Entity> = store
-        .entities
-        .into_iter()
-        .filter(|e| {
-            let keep = !entity_effectively_local_only(&e.table);
-            if !keep {
-                dropped_entities.push(e.name.to_lowercase());
-            }
-            keep
-        })
-        .collect();
     let synonyms: Vec<Synonym> = store
         .synonyms
         .into_iter()
         .filter(|s| !dropped_metrics.contains(&s.canonical.to_lowercase()))
         .collect();
-    let join_hints: Vec<JoinHint> = store
-        .join_hints
-        .into_iter()
-        .filter(|j| {
-            !dropped_entities.contains(&j.left_entity.to_lowercase())
-                && !dropped_entities.contains(&j.right_entity.to_lowercase())
-        })
-        .collect();
-    SemanticSet {
-        metrics,
-        synonyms,
-        entities,
-        join_hints,
-    }
+    SemanticSet { metrics, synonyms }
 }
 
 // --- Resolver (§1.6) ---------------------------------------------------------------
@@ -494,14 +410,12 @@ pub fn resolve_metric(name: &str) -> Option<String> {
 // change them in lockstep with semantic.ts.
 
 /// The block's prompt label (rendered as `[n] business definitions`), lowercase
-/// like the "join hints" card. KEEP IN SYNC with semantic.ts::BLOCK_NAME.
+/// like the auto-derived "join hints" card. KEEP IN SYNC with semantic.ts::BLOCK_NAME.
 const BLOCK_NAME: &str = "business definitions";
 /// Leading line of the block body. KEEP IN SYNC with semantic.ts::BLOCK_HEADER.
 const BLOCK_HEADER: &str = "Business definitions for this vault (curated meanings — prefer these over guessing; write SQL that uses each metric's exact definition):";
 const METRICS_HEADER: &str = "Metrics (name = definition):";
 const SYNONYMS_HEADER: &str = "Synonyms (term → canonical column or metric):";
-const ENTITIES_HEADER: &str = "Entities (name: table (key columns) — description):";
-const CURATED_JOIN_HEADER: &str = "Curated join hints (authoritative — prefer over inferred joins):";
 const EXAMPLES_HEADER: &str = "Examples (a defined term expands to its metric definition):";
 
 // Per-kind caps: the block keeps the NEWEST N of each kind (the
@@ -509,8 +423,6 @@ const EXAMPLES_HEADER: &str = "Examples (a defined term expands to its metric de
 // analytics window. KEEP IN SYNC with semantic.ts.
 const MAX_BLOCK_METRICS: usize = 24;
 const MAX_BLOCK_SYNONYMS: usize = 24;
-const MAX_BLOCK_ENTITIES: usize = 12;
-const MAX_BLOCK_JOIN_HINTS: usize = 12;
 
 /// Blessed question→SQL pairs demonstrating a metric reference EXPANDING to its
 /// stored definition — they ride in the block (metrics present) so the model
@@ -548,25 +460,23 @@ fn desc_suffix(description: &str) -> String {
 }
 
 /// The business-definitions block for an ask's posture (openspec §2.1). Renders
-/// the posture-eligible metrics, synonyms, entities, and curated join hints (the
-/// §1 `eligible_for_posture` gate — local-only definitions are excluded on a
-/// cloud ask), then metric-expansion examples. `None` when nothing is eligible
-/// (empty store OR all filtered out), which keeps the prompt byte-identical to
-/// today. KEEP IN SYNC with semantic.ts::promptBlock.
+/// the posture-eligible metrics and synonyms (the §1 `eligible_for_posture`
+/// gate — local-only definitions are excluded on a cloud ask), then
+/// metric-expansion examples. `None` when nothing is eligible (empty store OR
+/// all filtered out), which keeps the prompt byte-identical to today. KEEP IN
+/// SYNC with semantic.ts::promptBlock.
 pub fn prompt_block(is_cloud: bool) -> Option<Ctx> {
     render_block(&eligible_for_posture(is_cloud))
 }
 
 /// The pure renderer over an already-posture-filtered set (testable without a
-/// vault). Fixed section order: metrics, synonyms, entities, curated join hints,
-/// then examples (only when a metric is present — they demonstrate metric
-/// expansion). An all-empty set renders `None`. KEEP IN SYNC with
-/// semantic.ts::renderBlock (byte-identical output).
+/// vault). Fixed section order: metrics, synonyms, then examples (only when a
+/// metric is present — they demonstrate metric expansion). An all-empty set
+/// renders `None`. KEEP IN SYNC with semantic.ts::renderBlock (byte-identical
+/// output).
 fn render_block(set: &SemanticSet) -> Option<Ctx> {
     let metrics = newest_first(&set.metrics, MAX_BLOCK_METRICS);
     let synonyms = newest_first(&set.synonyms, MAX_BLOCK_SYNONYMS);
-    let entities = newest_first(&set.entities, MAX_BLOCK_ENTITIES);
-    let hints = newest_first(&set.join_hints, MAX_BLOCK_JOIN_HINTS);
 
     let mut sections: Vec<String> = Vec::new();
     if !metrics.is_empty() {
@@ -580,29 +490,6 @@ fn render_block(set: &SemanticSet) -> Option<Ctx> {
         let mut lines = vec![SYNONYMS_HEADER.to_string()];
         for s in &synonyms {
             lines.push(format!("- {} → {}", s.term, s.canonical));
-        }
-        sections.push(lines.join("\n"));
-    }
-    if !entities.is_empty() {
-        let mut lines = vec![ENTITIES_HEADER.to_string()];
-        for e in &entities {
-            let cols = if e.key_columns.is_empty() {
-                String::new()
-            } else {
-                format!(" ({})", e.key_columns.join(", "))
-            };
-            lines.push(format!("- {}: {}{}{}", e.name, e.table, cols, desc_suffix(&e.description)));
-        }
-        sections.push(lines.join("\n"));
-    }
-    if !hints.is_empty() {
-        let mut lines = vec![CURATED_JOIN_HEADER.to_string()];
-        for j in &hints {
-            lines.push(format!(
-                "- {}.{} = {}.{}{}",
-                j.left_entity, j.left_column, j.right_entity, j.right_column,
-                desc_suffix(&j.description)
-            ));
         }
         sections.push(lines.join("\n"));
     }
@@ -624,37 +511,6 @@ fn render_block(set: &SemanticSet) -> Option<Ctx> {
         // Auxiliary guidance, like the heuristic join-hints card (score 0.0).
         score: 0.0,
     })
-}
-
-/// The normalized TABLE pairs the posture-eligible curated join hints name, for
-/// the §2.4 merge: the heuristic `analytics::join_hints` drops a pair a curated
-/// hint already covers (the curated hint WINS, rendered in the block above).
-/// Each entity name resolves to its sanitized table (falling back to the name
-/// as a literal table), so a pair compares to the heuristic hints' registered
-/// table names. PARITY: Rust-only (the twin has no analytics/join_hints).
-pub fn curated_join_pairs(is_cloud: bool) -> Vec<(String, String)> {
-    let set = eligible_for_posture(is_cloud);
-    set.join_hints
-        .iter()
-        .map(|j| {
-            (
-                resolved_table(&j.left_entity, &set.entities),
-                resolved_table(&j.right_entity, &set.entities),
-            )
-        })
-        .collect()
-}
-
-/// Resolve an entity name to the sanitized table it stands for (its stored
-/// `table`, sanitized like a registered file table), falling back to treating
-/// the name itself as a literal table when it is not a defined entity.
-fn resolved_table(entity_name: &str, entities: &[Entity]) -> String {
-    let table = entities
-        .iter()
-        .find(|e| e.name.eq_ignore_ascii_case(entity_name))
-        .map(|e| e.table.as_str())
-        .unwrap_or(entity_name);
-    crate::analytics::sanitize_table_name(table)
 }
 
 // --- Dependency helpers (pure, testable on synthetic stores) -----------------------
@@ -844,43 +700,6 @@ pub fn create_synonym(term: &str, canonical: &str) -> Result<Synonym, String> {
     Ok(synonym)
 }
 
-/// Create an entity: a friendly `name` bound to a `table`, its key columns, and
-/// a description. The name sanitizes with the metric rules and is unique
-/// case-insensitively among entities; `table` may not be empty. KEEP IN SYNC
-/// with semantic.ts::createEntity.
-pub fn create_entity(
-    name: &str,
-    table: &str,
-    key_columns: &[String],
-    description: &str,
-) -> Result<Entity, String> {
-    let name = normalize_name(name);
-    if name.is_empty() {
-        return Err("an entity needs a name".to_string());
-    }
-    if RESERVED_NAMES.contains(&name.as_str()) {
-        return Err(format!("\"{name}\" is a reserved word"));
-    }
-    let table = table.trim().to_string();
-    if table.is_empty() {
-        return Err("an entity needs a table".to_string());
-    }
-    let _guard = store_lock();
-    let mut store = list();
-    if store.entities.iter().any(|e| e.name.eq_ignore_ascii_case(&name)) {
-        return Err(format!("an entity named \"{name}\" already exists"));
-    }
-    let entity = Entity {
-        name,
-        table,
-        key_columns: key_columns.to_vec(),
-        description: description.to_string(),
-    };
-    store.entities.push(entity.clone());
-    save(&store);
-    Ok(entity)
-}
-
 /// Rename a metric — REFUSED with a message naming the dependent synonyms while
 /// any synonym maps to it (silently rewriting a user-approved synonym risks
 /// orphaning it — the `views::rename` dependent rule). Otherwise a pure store
@@ -965,18 +784,189 @@ pub fn delete_synonym(term: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Delete an entity by its name (case-insensitive). KEEP IN SYNC with
-/// semantic.ts::deleteEntity.
-pub fn delete_entity(name: &str) -> Result<(), String> {
-    let _guard = store_lock();
-    let mut store = list();
-    let before = store.entities.len();
-    store.entities.retain(|e| !e.name.eq_ignore_ascii_case(name));
-    if store.entities.len() == before {
-        return Err("entity not found".to_string());
+// --- Auto-derived PROPOSALS (openspec: field-patch-0.12.5 §3.4) --------------------
+//
+// The authoring cost of the two KEPT components (metrics + synonyms) moves off
+// the user: instead of hand-typing every definition, the engine PROPOSES them
+// from what it already sees — column inventories and recurring query usage.
+// Everything here is a PROPOSAL surfaced in the SemanticNav "Suggested"
+// affordance; NOTHING is written to the store without an explicit user accept,
+// which routes through the SAME guarded `create_synonym` / `create_metric` path.
+// KEEP IN SYNC with semantic.ts::proposeSynonyms (the synonym derivation is a
+// behavior-identical twin); metric mining is Rust-only (analytics::propose_metric
+// parses SQL through DataFusion).
+
+/// Curated business-data abbreviations, `(full, abbrev)` — the STRONG SIGNAL a
+/// synonym proposal requires. Matched against the WHOLE (lowercased) column name
+/// in BOTH directions; there is deliberately NO substring / stem / subsequence
+/// guessing, because real-world abbreviations are irregular (`qty`↔`quantity`
+/// drops interior letters, `rgn`↔`region` drops vowels) and any fuzzy rule loose
+/// enough to catch them ALSO merges unrelated columns that merely share a stem
+/// (`region`↔`regularization`, `amount`↔`amortization`). A curated dictionary is
+/// the conservative choice: it can only ever fire on a known pair, so there are
+/// no false-positive merges. KEEP IN SYNC with semantic.ts::ABBREVIATIONS.
+const ABBREVIATIONS: &[(&str, &str)] = &[
+    ("amount", "amt"),
+    ("quantity", "qty"),
+    ("region", "rgn"),
+    ("number", "num"),
+    ("description", "desc"),
+    ("category", "cat"),
+    ("customer", "cust"),
+    ("account", "acct"),
+    ("department", "dept"),
+    ("revenue", "rev"),
+    ("average", "avg"),
+    ("transaction", "txn"),
+    ("reference", "ref"),
+    ("balance", "bal"),
+    ("percent", "pct"),
+    ("organization", "org"),
+    ("identifier", "ident"),
+    ("address", "addr"),
+];
+
+/// PROPOSE column synonyms from a column inventory (openspec §3.4). For each
+/// column that exactly matches one side of a known abbreviation pair, propose a
+/// synonym mapping the OTHER form to that column (`{term: other_form, canonical:
+/// column}`) — so an analyst who types the long form finds the abbreviated
+/// column, and vice-versa. CONSERVATIVE — no false-positive merges:
+///   - ONLY the curated `ABBREVIATIONS` dictionary fires (a strong signal),
+///     never a stem/substring guess, so `region`/`regularization` never merge;
+///   - a pair is skipped when BOTH forms are already columns (ambiguous);
+///   - a proposal duplicating an existing synonym `term` is skipped.
+/// Output is deterministic (input column order, then dictionary order) and
+/// de-duplicated by term. NOTHING is written — the user accepts each proposal via
+/// the guarded `create_synonym`. KEEP IN SYNC with semantic.ts::proposeSynonyms.
+pub fn propose_synonyms(columns: &[String], existing: &[Synonym]) -> Vec<Synonym> {
+    let cols: Vec<String> = columns
+        .iter()
+        .map(|c| c.trim().to_lowercase())
+        .filter(|c| !c.is_empty())
+        .collect();
+    let col_set: std::collections::HashSet<&str> = cols.iter().map(String::as_str).collect();
+    let existing_terms: std::collections::HashSet<String> =
+        existing.iter().map(|s| s.term.trim().to_lowercase()).collect();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut out: Vec<Synonym> = Vec::new();
+    for col in &cols {
+        for (full, abbrev) in ABBREVIATIONS {
+            let term = if col == full {
+                *abbrev
+            } else if col == abbrev {
+                *full
+            } else {
+                continue;
+            };
+            // Both forms present as columns ⇒ ambiguous; a synonym would fight a
+            // real column, so skip. Also skip the degenerate identity and any
+            // term an existing (or already-proposed) synonym owns.
+            if col_set.contains(term) || term == col.as_str() {
+                continue;
+            }
+            if existing_terms.contains(term) || !seen.insert(term.to_string()) {
+                continue;
+            }
+            out.push(Synonym {
+                term: term.to_string(),
+                canonical: col.clone(),
+            });
+        }
     }
-    save(&store);
-    Ok(())
+    out
+}
+
+/// A mined metric proposal (openspec §3.4): a recurring aggregation the engine
+/// saw in real usage, surfaced for one-click "save as metric". `occurrences` is
+/// how many usage sites carried it; `certified` marks that at least one was a
+/// certified answer (which qualifies it at a single occurrence).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetricProposal {
+    pub expression: String,
+    pub entity: String,
+    pub occurrences: usize,
+    pub certified: bool,
+}
+
+/// The recurrence bar a mined expression must clear to be proposed: it must
+/// appear in at least this many usage sites, OR (below) come from a certified
+/// answer. Two is the smallest number that means "recurring" — a one-off query
+/// is not yet a business definition.
+const MIN_METRIC_OCCURRENCES: usize = 2;
+
+/// The MINING core (pure, testable): from `(sql, certified)` usage sites, propose
+/// the recurring aggregations. Each SQL is parsed with `analytics::propose_metric`
+/// (the SAME parser the guard + certifier use, so a proposal can never disagree
+/// with them); a `(expression, entity)` pair QUALIFIES when it recurs
+/// (≥ `MIN_METRIC_OCCURRENCES`) OR appeared in a certified answer. A pair whose
+/// expression already matches an existing metric (whitespace/case-insensitive) is
+/// dropped — it is already defined. Deterministic order: most-recurring first,
+/// then by expression. KEEP IN SYNC: Rust-only (analytics::propose_metric).
+pub fn propose_metrics_from_usage(
+    usage: &[(String, bool)],
+    existing: &[Metric],
+) -> Vec<MetricProposal> {
+    let existing_exprs: std::collections::HashSet<String> =
+        existing.iter().map(|m| normalize_expr(&m.expression)).collect();
+    // Tally by (normalized expression, lowercased entity), keeping the first-seen
+    // raw expression/entity for display.
+    let mut tallies: Vec<(String, MetricProposal)> = Vec::new();
+    for (sql, certified) in usage {
+        let Some((expression, entity)) = crate::analytics::propose_metric(sql) else {
+            continue;
+        };
+        if existing_exprs.contains(&normalize_expr(&expression)) {
+            continue;
+        }
+        let key = format!("{}\u{0}{}", normalize_expr(&expression), entity.to_lowercase());
+        if let Some((_, p)) = tallies.iter_mut().find(|(k, _)| *k == key) {
+            p.occurrences += 1;
+            p.certified = p.certified || *certified;
+        } else {
+            tallies.push((
+                key,
+                MetricProposal {
+                    expression,
+                    entity,
+                    occurrences: 1,
+                    certified: *certified,
+                },
+            ));
+        }
+    }
+    let mut proposals: Vec<MetricProposal> = tallies
+        .into_iter()
+        .map(|(_, p)| p)
+        .filter(|p| p.occurrences >= MIN_METRIC_OCCURRENCES || p.certified)
+        .collect();
+    proposals.sort_by(|a, b| {
+        b.occurrences
+            .cmp(&a.occurrences)
+            .then_with(|| a.expression.cmp(&b.expression))
+    });
+    proposals
+}
+
+/// Whitespace-collapsed, lowercased expression key — so `SUM(x)` and `sum( x )`
+/// tally together and dedupe against an existing metric consistently.
+fn normalize_expr(expr: &str) -> String {
+    expr.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+}
+
+/// PROPOSE metrics mined from real usage (openspec §3.4): recurring aggregations
+/// across saved views, pinned questions, and cached analytics answers. Gathers
+/// each store's SQL plus a certified flag (only a cached analytics answer can be
+/// certified), then runs the mining core against the current metrics. Rust-only.
+pub fn propose_metrics() -> Vec<MetricProposal> {
+    let mut usage: Vec<(String, bool)> = Vec::new();
+    for v in crate::views::list() {
+        usage.push((v.sql, false));
+    }
+    for p in crate::pins::list() {
+        usage.push((p.sql, false));
+    }
+    usage.extend(crate::answer_cache::mined_analytics_sqls());
+    propose_metrics_from_usage(&usage, &list().metrics)
 }
 
 #[cfg(test)]
@@ -1023,49 +1013,46 @@ mod tests {
                 term: "GMV".into(),
                 canonical: "revenue".into(),
             }],
-            entities: vec![Entity {
-                name: "sales".into(),
-                table: "sales".into(),
-                key_columns: vec!["region".into()],
-                description: "the sales ledger".into(),
-            }],
-            join_hints: vec![JoinHint {
-                left_entity: "orders".into(),
-                left_column: "rep".into(),
-                right_entity: "reps".into(),
-                right_column: "rep".into(),
-                description: "orders to reps".into(),
-            }],
         };
         let text = serde_json::to_string_pretty(&Store::from_set(STORE_VERSION, &set)).unwrap();
-        // The byte contract with the TS twin: envelope key `joinHints`,
+        // The byte contract with the TS twin: the two record arrays in order,
         // camelCase record keys, the summary source as a bare lowercase string,
-        // and the view types' `fileId`/`tableName` reused verbatim.
+        // and the view types' `fileId`/`tableName` reused verbatim. The removed
+        // declared-join machinery leaves NO `entities`/`joinHints` keys.
         for needle in [
             "\"v\": 1",
-            "\"joinHints\": [",
+            "\"metrics\": [",
+            "\"synonyms\": [",
             "\"createdMs\": 7",
             "\"fileId\": \"sales.csv\"",
             "\"tableName\": \"sales\"",
             "\"source\": \"question\"",
-            "\"keyColumns\": [",
-            "\"leftEntity\": \"orders\"",
-            "\"rightColumn\": \"rep\"",
         ] {
             assert!(text.contains(needle), "missing {needle} in:\n{text}");
         }
+        assert!(!text.contains("joinHints"), "no joinHints key: {text}");
+        assert!(!text.contains("entities"), "no entities key: {text}");
         let parsed = parse_store(&text).expect("v1 loads");
         assert_eq!(parsed, set, "round trip preserves every record");
+
+        // Backward compatibility: a v1 file written by an OLDER engine that still
+        // carries `entities`/`joinHints` keys loads cleanly — serde ignores the
+        // now-unknown keys (never an error), and they are simply dropped.
+        let legacy = parse_store(
+            r#"{"v":1,"metrics":[],"synonyms":[{"term":"gmv","canonical":"revenue"}],"entities":[{"name":"sales","table":"sales","keyColumns":[],"description":""}],"joinHints":[{"leftEntity":"o","leftColumn":"r","rightEntity":"p","rightColumn":"r","description":""}]}"#,
+        )
+        .expect("legacy file with entities/joinHints keys still loads");
+        assert_eq!(legacy.synonyms.len(), 1, "kept kinds survive; legacy keys dropped");
 
         // Anything else reads as unreadable (None): unknown/missing version,
         // corrupt JSON, and a record with an out-of-whitelist summary source
         // (the SummarySource whitelist — malformed, not coerced).
-        assert!(parse_store(r#"{"v":99,"metrics":[],"synonyms":[],"entities":[],"joinHints":[]}"#).is_none());
+        assert!(parse_store(r#"{"v":99,"metrics":[],"synonyms":[]}"#).is_none());
         assert!(parse_store(r#"{"metrics":[]}"#).is_none());
         assert!(parse_store("{ not json").is_none());
         assert!(parse_store("null").is_none());
         assert!(parse_store(
-            r#"{"v":1,"metrics":[{"id":"a","name":"n","expression":"SUM(x)","description":"","entity":"t","reads":{"files":[],"views":[]},"summary":{"text":"t","source":"guess"},"createdMs":1}],"synonyms":[],"entities":[],"joinHints":[]}"#
+            r#"{"v":1,"metrics":[{"id":"a","name":"n","expression":"SUM(x)","description":"","entity":"t","reads":{"files":[],"views":[]},"summary":{"text":"t","source":"guess"},"createdMs":1}],"synonyms":[]}"#
         )
         .is_none());
     }
@@ -1198,19 +1185,6 @@ mod tests {
                 1,
             )],
             synonyms: vec![Synonym { term: "GMV".into(), canonical: "revenue".into() }],
-            entities: vec![Entity {
-                name: "sales".into(),
-                table: "sales".into(),
-                key_columns: vec!["region".into(), "product".into()],
-                description: "the sales ledger".into(),
-            }],
-            join_hints: vec![JoinHint {
-                left_entity: "orders".into(),
-                left_column: "rep".into(),
-                right_entity: "reps".into(),
-                right_column: "rep".into(),
-                description: "each order's owner".into(),
-            }],
         };
         let block = render_block(&set).expect("a non-empty set renders a block");
         assert_eq!(block.name, "business definitions");
@@ -1223,12 +1197,6 @@ mod tests {
             "",
             "Synonyms (term → canonical column or metric):",
             "- GMV → revenue",
-            "",
-            "Entities (name: table (key columns) — description):",
-            "- sales: sales (region, product) — the sales ledger",
-            "",
-            "Curated join hints (authoritative — prefer over inferred joins):",
-            "- orders.rep = reps.rep — each order's owner",
             "",
             "Examples (a defined term expands to its metric definition):",
             "Q: revenue by region",
@@ -1287,19 +1255,6 @@ mod tests {
         SemanticSet {
             metrics: vec![metric("revenue", "SUM(amount)", "", 1)],
             synonyms: vec![Synonym { term: "gmv".into(), canonical: "revenue".into() }],
-            entities: vec![Entity {
-                name: "sales".into(),
-                table: "sales".into(),
-                key_columns: vec![],
-                description: String::new(),
-            }],
-            join_hints: vec![JoinHint {
-                left_entity: "orders".into(),
-                left_column: "rep".into(),
-                right_entity: "reps".into(),
-                right_column: "rep".into(),
-                description: String::new(),
-            }],
         }
     }
 
@@ -1334,17 +1289,124 @@ mod tests {
         let mut m = full_set();
         Ablation { metrics: true, ..Default::default() }.apply(&mut m);
         assert!(m.metrics.is_empty(), "metrics ablated");
-        assert_eq!((m.synonyms.len(), m.entities.len(), m.join_hints.len()), (1, 1, 1));
+        assert_eq!(m.synonyms.len(), 1, "synonyms untouched");
         // synonyms only
         let mut s = full_set();
         Ablation { synonyms: true, ..Default::default() }.apply(&mut s);
         assert!(s.synonyms.is_empty(), "synonyms ablated");
-        assert_eq!((s.metrics.len(), s.entities.len(), s.join_hints.len()), (1, 1, 1));
-        // joins drops joinHints AND the backing entities together
-        let mut j = full_set();
-        Ablation { joins: true, ..Default::default() }.apply(&mut j);
-        assert!(j.join_hints.is_empty(), "joinHints ablated");
-        assert!(j.entities.is_empty(), "backing entities ablated with joins");
-        assert_eq!((j.metrics.len(), j.synonyms.len()), (1, 1));
+        assert_eq!(s.metrics.len(), 1, "metrics untouched");
+    }
+
+    // --- §3.4 auto-derived proposals ------------------------------------------
+
+    #[test]
+    fn propose_synonyms_fires_only_on_the_abbreviation_dictionary() {
+        // The obvious ones: a column that is a known abbrev proposes the full
+        // form as the term (and vice-versa), so either spelling resolves.
+        let cols = vec![
+            "amt".to_string(),
+            "qty".to_string(),
+            "region".to_string(),
+        ];
+        let out = propose_synonyms(&cols, &[]);
+        assert!(
+            out.contains(&Synonym { term: "amount".into(), canonical: "amt".into() }),
+            "amt → propose amount: {out:?}"
+        );
+        assert!(
+            out.contains(&Synonym { term: "quantity".into(), canonical: "qty".into() }),
+            "qty → propose quantity: {out:?}"
+        );
+        assert!(
+            out.contains(&Synonym { term: "rgn".into(), canonical: "region".into() }),
+            "region → propose rgn: {out:?}"
+        );
+    }
+
+    #[test]
+    fn propose_synonyms_never_merges_unrelated_columns_sharing_a_stem() {
+        // The no-false-positive pins: columns that merely SHARE A STEM with a
+        // dictionary word (region↔regularization, amount↔amortization) or that
+        // resemble an abbreviation without being one (quant vs quantity) must
+        // NEVER be proposed as synonyms of each other. Only EXACT dictionary
+        // matches fire, so these produce nothing.
+        let cols = vec![
+            "regularization".to_string(),
+            "amortization".to_string(),
+            "quant".to_string(),
+            "customer_segment".to_string(), // compound, not a whole-name match
+        ];
+        let out = propose_synonyms(&cols, &[]);
+        assert!(out.is_empty(), "no stem/substring merge ever proposed: {out:?}");
+    }
+
+    #[test]
+    fn propose_synonyms_skips_ambiguous_and_existing() {
+        // Both forms present as columns ⇒ ambiguous ⇒ propose neither direction.
+        let both = vec!["amount".to_string(), "amt".to_string()];
+        assert!(propose_synonyms(&both, &[]).is_empty(), "both forms present ⇒ skip");
+
+        // A term an existing synonym already owns is not re-proposed.
+        let cols = vec!["amt".to_string()];
+        let existing = vec![Synonym { term: "amount".into(), canonical: "amt".into() }];
+        assert!(
+            propose_synonyms(&cols, &existing).is_empty(),
+            "existing synonym term is not re-proposed"
+        );
+
+        // Deterministic + de-duplicated by term across repeated columns.
+        let dup = vec!["amt".to_string(), "amt".to_string()];
+        assert_eq!(propose_synonyms(&dup, &[]).len(), 1, "deduped by term");
+    }
+
+    #[test]
+    fn propose_metrics_requires_recurrence_or_certification() {
+        let sql = "SELECT SUM(amount) FILTER (WHERE status = 'paid') AS revenue FROM sales";
+        let other = "SELECT COUNT(*) AS n FROM orders";
+
+        // A one-off (single, uncertified) expression does NOT clear the bar.
+        let once = propose_metrics_from_usage(&[(sql.to_string(), false)], &[]);
+        assert!(once.is_empty(), "a single uncertified use is not proposed: {once:?}");
+
+        // Twice ⇒ recurring ⇒ proposed, occurrences counted, entity parsed.
+        let twice =
+            propose_metrics_from_usage(&[(sql.to_string(), false), (sql.to_string(), false)], &[]);
+        assert_eq!(twice.len(), 1);
+        assert_eq!(twice[0].occurrences, 2);
+        assert_eq!(twice[0].entity, "sales");
+        assert!(twice[0].expression.contains("SUM(amount)"), "{:?}", twice[0]);
+
+        // A single CERTIFIED use qualifies at one occurrence (a blessed answer).
+        let certified = propose_metrics_from_usage(&[(sql.to_string(), true)], &[]);
+        assert_eq!(certified.len(), 1);
+        assert!(certified[0].certified);
+
+        // Most-recurring first is the sort order.
+        let mixed = propose_metrics_from_usage(
+            &[
+                (other.to_string(), false),
+                (sql.to_string(), false),
+                (sql.to_string(), false),
+                (other.to_string(), false),
+                (sql.to_string(), false),
+            ],
+            &[],
+        );
+        assert_eq!(mixed.len(), 2);
+        assert_eq!(mixed[0].occurrences, 3, "the 3× expression sorts first");
+    }
+
+    #[test]
+    fn propose_metrics_drops_already_defined_expressions() {
+        let sql = "SELECT SUM(amount) FILTER (WHERE status = 'paid') AS revenue FROM sales";
+        let existing = vec![metric(
+            "revenue",
+            "SUM(amount) FILTER (WHERE status = 'paid')",
+            "",
+            1,
+        )];
+        let out =
+            propose_metrics_from_usage(&[(sql.to_string(), false), (sql.to_string(), false)], &existing);
+        assert!(out.is_empty(), "an already-defined expression is not re-proposed: {out:?}");
     }
 }

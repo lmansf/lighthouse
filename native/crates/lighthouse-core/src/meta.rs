@@ -958,12 +958,32 @@ pub struct SynonymCard {
     pub canonical: String,
 }
 
+/// One auto-derived "save as metric" proposal for the nav's Suggested affordance
+/// (openspec: field-patch-0.12.5 §3.4): a recurring aggregation mined from usage.
+/// The user names it on accept (it prefills the New metric dialog); nothing is
+/// stored until then. KEEP IN SYNC with `SuggestedMetric` in
+/// src/contracts/types.ts.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SuggestedMetric {
+    pub expression: String,
+    pub entity: String,
+    pub occurrences: usize,
+    pub certified: bool,
+}
+
 /// The semantic definitions applicable to the current tables, for the nav
-/// (openspec §6.1). KEEP IN SYNC with `SemanticCards` in src/contracts/types.ts.
+/// (openspec §6.1). `suggested_*` are the field-patch-0.12.5 §3.4 auto-derived
+/// PROPOSALS (never stored until the user accepts): synonyms mined from the
+/// included columns' abbreviations, metrics mined from recurring usage. KEEP IN
+/// SYNC with `SemanticCards` in src/contracts/types.ts.
 #[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SemanticCards {
     pub metrics: Vec<MetricCard>,
     pub synonyms: Vec<SynonymCard>,
+    pub suggested_synonyms: Vec<SynonymCard>,
+    pub suggested_metrics: Vec<SuggestedMetric>,
 }
 
 /// The posture-eligible metrics/synonyms whose tables are in the included set —
@@ -978,9 +998,9 @@ pub struct SemanticCards {
 /// all (a column synonym — kept, it can't be ruled out). PARITY: mirrored in
 /// semantic.ts::applicableSemantics (the twin computes the identical subset — no
 /// analytics needed).
-pub fn applicable_semantics(included: Vec<String>, is_cloud: bool) -> SemanticCards {
+pub fn applicable_semantics(included_vec: Vec<String>, is_cloud: bool) -> SemanticCards {
     let set = crate::semantic::eligible_for_posture(is_cloud);
-    let included: HashSet<&str> = included.iter().map(String::as_str).collect();
+    let included: HashSet<&str> = included_vec.iter().map(String::as_str).collect();
     let view_records = crate::views::list();
     let metrics: Vec<MetricCard> = set
         .metrics
@@ -1012,7 +1032,49 @@ pub fn applicable_semantics(included: Vec<String>, is_cloud: bool) -> SemanticCa
             canonical: s.canonical.clone(),
         })
         .collect();
-    SemanticCards { metrics, synonyms }
+
+    // Auto-derived PROPOSALS (openspec: field-patch-0.12.5 §3.4) — the nav's
+    // Suggested affordance. Never stored: the user accepts each through the same
+    // guarded create path. Synonyms come from the included tabular columns'
+    // known abbreviations (deduped against ALL existing synonyms, not just the
+    // posture-eligible ones); metrics come from recurring usage. Column reads are
+    // the cheap cache-first `columns_for` the recipe/capability surfaces already
+    // run on the included set.
+    let tabular: Vec<(String, String, PathBuf)> =
+        included_files_with_mtime(&included_vec, is_cloud)
+            .into_iter()
+            .filter(|(_, name, _, _)| is_tabular(name))
+            .map(|(id, name, abs, _)| (id, name, abs))
+            .collect();
+    let columns: Vec<String> = catalog::columns_for(&tabular)
+        .into_iter()
+        .flat_map(|fc| fc.columns.into_iter().map(|c| c.name))
+        .collect();
+    let all_synonyms = crate::semantic::list().synonyms;
+    let suggested_synonyms: Vec<SynonymCard> =
+        crate::semantic::propose_synonyms(&columns, &all_synonyms)
+            .into_iter()
+            .map(|s| SynonymCard {
+                term: s.term,
+                canonical: s.canonical,
+            })
+            .collect();
+    let suggested_metrics: Vec<SuggestedMetric> = crate::semantic::propose_metrics()
+        .into_iter()
+        .map(|p| SuggestedMetric {
+            expression: p.expression,
+            entity: p.entity,
+            occurrences: p.occurrences,
+            certified: p.certified,
+        })
+        .collect();
+
+    SemanticCards {
+        metrics,
+        synonyms,
+        suggested_synonyms,
+        suggested_metrics,
+    }
 }
 
 /// Whether a metric's transitive source files intersect the included set: its

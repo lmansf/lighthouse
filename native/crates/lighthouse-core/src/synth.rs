@@ -1402,9 +1402,9 @@ fn live_pipeline(
                     }));
                     // The semantic layer's business-definitions block (openspec:
                     // add-semantic-layer §2.2): posture-eligible metrics,
-                    // synonyms, entities, curated join hints, and metric-
-                    // expansion examples, rendered deterministically and
-                    // count-capped. Pushed here so BOTH the single-query and
+                    // synonyms, and metric-expansion examples, rendered
+                    // deterministically and count-capped. Pushed here so BOTH the
+                    // single-query and
                     // multi-step paths (each consumes `sql_ctxs`) see it. Zero
                     // eligible definitions ⇒ None ⇒ NOT pushed ⇒ every prompt
                     // string below is byte-identical to the pre-semantic-layer
@@ -1431,15 +1431,11 @@ fn live_pipeline(
                     if let Some(brief) = crate::vault_brief::draft_brief(&regs) {
                         sql_ctxs.push(brief);
                     }
-                    // Curated join hints WIN over the heuristic ones for the same
-                    // table pair (§2.4): the curated hint renders in the block
-                    // above, so drop the heuristic line for that pair. Zero
-                    // curated hints ⇒ empty exclude ⇒ `join_hints_excluding`
-                    // reproduces `join_hints` byte-for-byte.
-                    let curated_pairs = crate::semantic::curated_join_pairs(is_cloud);
-                    if let Some(hints) =
-                        crate::analytics::join_hints_excluding(&regs, &curated_pairs)
-                    {
+                    // Auto-derived join hints (columns shared across registered
+                    // tables). The declared/curated join hints that used to win
+                    // over these for a pair were removed in field-patch-0.12.5 §3
+                    // (no authoring UI), so this is now the sole join-hint source.
+                    if let Some(hints) = crate::analytics::join_hints(&regs) {
                         sql_ctxs.push(Ctx {
                             name: "join hints".to_string(),
                             text: hints,

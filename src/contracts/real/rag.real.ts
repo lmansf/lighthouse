@@ -675,10 +675,14 @@ class RealRagService implements RagService {
 
   async applicableSemantics(includedFileIds: string[]): Promise<SemanticCards> {
     const res = await this.semanticOp({ action: "list", includedFileIds });
-    const cards = res.semantic as SemanticCards | undefined;
+    const cards = res.semantic as Partial<SemanticCards> | undefined;
     return {
       metrics: Array.isArray(cards?.metrics) ? cards.metrics : [],
       synonyms: Array.isArray(cards?.synonyms) ? cards.synonyms : [],
+      // §3.4 auto-derived proposals — present from the Rust engine, empty from
+      // the dev twin (catalog + SQL mining are Rust-only).
+      suggestedSynonyms: Array.isArray(cards?.suggestedSynonyms) ? cards.suggestedSynonyms : [],
+      suggestedMetrics: Array.isArray(cards?.suggestedMetrics) ? cards.suggestedMetrics : [],
     };
   }
 

@@ -1006,14 +1006,33 @@ export interface SynonymCard {
 }
 
 /**
+ * One auto-derived "save as metric" proposal for the nav's Suggested affordance
+ * (openspec: field-patch-0.12.5 §3.4): a recurring aggregation mined from usage.
+ * The user names it on accept (it prefills the New metric dialog); nothing is
+ * stored until then. KEEP IN SYNC with the Rust `SuggestedMetric` in meta.rs.
+ */
+export interface SuggestedMetric {
+  expression: string;
+  entity: string;
+  occurrences: number;
+  certified: boolean;
+}
+
+/**
  * The posture-eligible metrics/synonyms applicable to the current tables — the
- * semantic nav's data (openspec §6.1). A metric over a file the chat isn't
- * showing never surfaces (the recipe/view applicability rule), and a local-only
- * metric is absent on a cloud ask. KEEP IN SYNC with the Rust `SemanticCards`.
+ * semantic nav's data (openspec §6.1) — plus the field-patch-0.12.5 §3.4
+ * auto-derived PROPOSALS (`suggested*`, never stored until the user accepts):
+ * synonyms mined from the included columns' abbreviations, metrics mined from
+ * recurring usage. A metric over a file the chat isn't showing never surfaces
+ * (the recipe/view applicability rule), and a local-only metric is absent on a
+ * cloud ask. KEEP IN SYNC with the Rust `SemanticCards`. (The dev twin + mock
+ * return empty `suggested*` arrays — the catalog + SQL mining are Rust-only.)
  */
 export interface SemanticCards {
   metrics: MetricCard[];
   synonyms: SynonymCard[];
+  suggestedSynonyms: SynonymCard[];
+  suggestedMetrics: SuggestedMetric[];
 }
 
 /**

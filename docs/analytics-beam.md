@@ -151,29 +151,31 @@ zero setup. How it ships:
 
 ## Phase D — semantic layer (measured)
 
-The semantic layer ships three **hand-authored** business-definition components —
-**metric definitions**, **column synonyms**, and **declared join hints (+ their
-backing entities)**. Phase D asks whether each earns its keep *before* we invest
-in auto-derivation, by MEASURING each component's lift on the analytics + trust
-scorecards instead of guessing. (Auto-derived join hints,
-`analytics::join_hints`, are NOT on trial — only the three manual components are.)
+The semantic layer shipped three **hand-authored** business-definition
+components — **metric definitions**, **column synonyms**, and **declared join
+hints (+ their backing entities)**. Phase D asked whether each earns its keep
+*before* investing in auto-derivation, by MEASURING each component's lift on the
+analytics + trust scorecards instead of guessing. The verdict (below) **removed
+the declared joins** — they had no authoring UI, so no user could create one —
+and **kept metrics + synonyms** with their authoring moved to auto-derived
+proposals. (Auto-derived join hints, `analytics::join_hints`, were never on
+trial and remain — they cover join inference on their own.)
 
 ### Method
 
 - **Ablation hook.** An env-gated, per-kind hook lives at
   `semantic::eligible_for_posture` — the ONE seam every consumer routes through
-  (prompt injection, the curated-join merge, certify/trust, the answer-cache
-  key). `LIGHTHOUSE_ABLATE_METRICS | _SYNONYMS | _JOINS` (`=1`/`true`) each make
-  that kind ineligible for a run — as if the store held none of it (JOINS drops
-  joinHints *and* their backing entities). It ships **INERT**: with no variable
-  set, behavior is byte-identical to today (unit-pinned), so nothing is removed
-  or disabled — this is a measurement instrument, not a shipped setting or UI.
-  Mirrored byte-for-byte in the TS twin (`semantic.ts`).
+  (prompt injection, certify/trust, the answer-cache key).
+  `LIGHTHOUSE_ABLATE_METRICS | _SYNONYMS` (`=1`/`true`) each make that kind
+  ineligible for a run — as if the store held none of it. It ships **INERT**:
+  with no variable set, behavior is byte-identical to today (unit-pinned), so
+  nothing is removed or disabled — this is a measurement instrument, not a
+  shipped setting or UI. Mirrored byte-for-byte in the TS twin (`semantic.ts`).
+  (The `_JOINS` gate was retired with the declared-join component in §3.4.)
 - **Fixtures.** `examples/analytics_eval.rs` seeds a realistic *messy* fixture's
   definitions into the semantic store: abbreviated columns (`amt`, `rgn`) a
-  **synonym** resolves; a recurring `SUM(amt) FILTER (WHERE status='paid')` a
-  **metric** names; an `orders_msy`↔`reps_msy` pair a declared **join** makes
-  authoritative. Model-free checks that route through `eligible_for_posture`
+  **synonym** resolves and a recurring `SUM(amt) FILTER (WHERE status='paid')` a
+  **metric** names. Model-free checks that route through `eligible_for_posture`
   depend on each component (commented per check in the eval), so ablating a
   component measurably drops the pass rate.
 - **Runner.** The eval always prints `SCORECARD total=… passed=… rate=…` (pass
@@ -193,22 +195,47 @@ scorecards instead of guessing. (Auto-derived join hints,
   metrics mined from recurring usage). Either way, manual authoring becomes
   optional polish — never a prerequisite for a good answer.
 
-### Results (pending the CI ablation run — no numbers invented)
+### Results (model-free ablation floor, `analytics_eval`)
 
 | component | baseline rate | ablated rate | lift (points) | verdict |
 |---|---|---|---|---|
-| metric definitions          | _tbd_ | _tbd_ | _tbd_ | _tbd_ |
-| column synonyms             | _tbd_ | _tbd_ | _tbd_ | _tbd_ |
-| declared joins (+ entities) | _tbd_ | _tbd_ | _tbd_ | _tbd_ |
+| metric definitions | 48/48 = 1.000 | 46/48 = 0.958 | 4.2 | **KEEP** — authoring auto-derived |
+| column synonyms    | 48/48 = 1.000 | 46/48 = 0.958 | 4.2 | **KEEP** — authoring auto-derived |
 
-**Verdict: pending.** Fill from the `ablation.yml` output, then apply the
-decision rule per component and record the follow-through (auto-derive, or
-removal). Note that the model-free floor measures whether each component is
-*exercised and wired*; the end-to-end answer-quality lift of synonyms/metrics is
-the opt-in provider NL leg's job (`LIGHTHOUSE_EVAL_*`) plus a transcript review.
+*(The third component — declared join hints + their backing entities — is not in
+the table: it had **no authoring UI in either engine**, so no user could ever
+create one, its real-world lift was structurally zero, and the auto-derived
+`analytics::join_hints` already cover join inference. It was **REMOVED** — UI is
+moot, storage/prompt/docs are gone — rather than measured against a fixture that
+only the eval itself could seed.)*
 
-> The engine-drafted **vault brief** (§3.5) is a new additive deliverable, not
-> part of this study: a deterministic summary of vault composition + the
+### Verdict (plain language)
+
+Read the scorecard for what it is: a **model-free** floor that measures whether
+each component is **wired and present** — not answer quality. Each kept component
+owns exactly the two checks that depend on it (a metric certifies its recurring
+FILTERed sum *and* injects its definition; a synonym injects each of its two
+abbreviation mappings), so ablating one drops **only its own** two checks — hence
+the symmetric 4.2-point lift. That is presence, not proof of end-to-end lift; the
+true answer-quality delta needs the **provider NL scorecard** (a real model,
+`LIGHTHOUSE_EVAL_PROVIDER`) plus a transcript review, which is a follow-on.
+
+Against that floor the owner's verdict (field-patch-0.12.5 §3.4):
+- **Declared joins + backing entities → REMOVED.** No authoring surface exists in
+  either engine, so they were dead weight; auto-derived join hints handle joins.
+- **Metric definitions + column synonyms → KEPT**, but the **authoring cost moves
+  off the user** via auto-derived *proposals* (never silently applied): synonyms
+  are proposed from the included columns' known abbreviations
+  (`semantic::propose_synonyms`, conservative — a curated dictionary only, no
+  false-positive stem merges); metrics are mined from recurring usage
+  (`semantic::propose_metrics` over saved views, pins, and cached analytic SQL via
+  `analytics::propose_metric`, threshold ≥ 2 occurrences or one certified answer).
+  Both surface in the SemanticNav **Suggested** list, accepted one-by-one through
+  the same guarded create path. End state: manual authoring is optional polish,
+  never a prerequisite for a good answer.
+
+> The engine-drafted **vault brief** (§3.5) is a separate additive deliverable,
+> not part of this study: a deterministic summary of vault composition + the
 > queryable tables in scope, injected as one editable block beside the
 > business-definitions block. It draws only on engine-known facts, never model
 > prose.
