@@ -804,3 +804,249 @@ After each phase: gates green, PR opened, and a short status summary —
 shipped / blocked-on-maintainer / deferred, with reasons. If a phase can't
 complete, land what's green and report precisely where you stopped.
 ```
+
+---
+
+## 8. Refocused plan (2026-07-14): analyst-first, trust-first
+
+Maintainer direction after reviewing §1–7: **focus on the data analyst** and
+make the analytical side pristine; **fix the trust and misbranding issues
+that exist today**; and to get there faster, **drop all automatic data
+collection outright** — usage telemetry, A/B experiments, and the Experiments
+leaderboard dialog — keeping **feedback and bug reports** as the only
+channel, explicit and user-initiated. The security-director track (§4 Wave 2)
+is deferred, and dropping collection makes much of it moot: the strongest
+possible trust feature is having nothing to disclose.
+
+The posture this plan encodes everywhere: *the only bytes that ever leave the
+machine on Lighthouse's behalf are a cloud-model request the user configured,
+a license/trial check, an update check, pinned asset downloads, and a
+feedback or bug report the user explicitly pressed Send on.*
+
+### The two tracks
+
+**Track T — trust & truth reset** (one session, one PR). Remove both engines'
+telemetry (`usage.ts`/`usage.rs`, launch pings, `model_selected`, the
+counts-only vault presence events, every `data-log` attribute, the onboarding
+consent checkbox) and the whole experiment machinery
+(`experiment.ts`/`experiment.rs`, server-balanced `assign`,
+`experiments.json`); delete the Experiments dialog and put "Send feedback" in
+its menu slot; consolidate the feedback/bug/interest channel around a
+show-before-send dialog; rewrite the README and stale docs to match the
+shipping product; add `docs/data-flows.md` (now five items long); disarm the
+legacy Electron release pipeline that still auto-fires on `v*` tags. Care
+point: explicit submissions (bug reports, feedback, interest votes) ride the
+same Edge Function as the deleted telemetry — keep those ops, delete the
+ambient ones, and produce a server-side decommission checklist rather than
+deploying.
+
+**Track G — "Genie v3": pristine analytics** (OpenSpec batch in the #129
+house style, one commit per feature). Ordered so each step hardens the ground
+the next stands on: **G1** correctness audit + eval floor for the existing
+analytics path (adversarial two-pass review of `analytics.rs`, `catalog.rs`,
+`table_profile.rs`, tabular chunking, `chartSpec.ts`; golden executor tests;
+prompt snapshot tests; truncation honesty), **G2** fast private answers (GPU
+guided default + extractive fast-draft swapped in place), **G3** PDF tables,
+**G4** presentation polish (chart kinds, axis/number/date formatting,
+sortable tables, pin-diff mini-charts), **G5** briefings (deterministic
+digest note + OS notification), **G6** cross-conversation recall (optional,
+last). The §5 A-prompts remain valid individually; the Track G prompt below
+supersedes their sequencing and strips the dropped policy-layer references
+(notification and history controls become plain user preferences).
+
+**In parallel, maintainer-gated:** code signing (§5 F1 / §7 step 0.3,
+unchanged) — the one remaining trust item no code-only session can finish.
+Certificates to provision: Windows Authenticode, Apple Developer ID +
+notarization account, tauri updater signing key.
+
+### Order
+
+Run **T before G**: it shrinks the surface G ships into (G's new UI would
+otherwise need `data-log` wiring), and it converts the marketing claim into a
+grep-provable fact before new analyst features draw attention to the product.
+
+### Track T prompt
+
+```
+Remove every form of automatic data collection from Lighthouse, replace the
+Experiments dashboard with a single explicit feedback channel, and make the
+repo's front-door docs tell the truth about the shipping product. One PR, no
+version bump. The posture to encode everywhere: the only bytes that ever
+leave the machine on Lighthouse's behalf are a cloud-model request the user
+configured, a license/trial check, an update check, pinned asset downloads,
+and a feedback/bug report the user explicitly pressed Send on.
+
+Ground rules: the Rust engine (native/) is the shipping product and the TS
+engine under src/server is its web-dev twin — changes land in BOTH engines
+per the existing PARITY convention. No behavior changes outside the scope
+below. Gates: npm test (tsc + node suites), the native cargo suite, lint,
+plus the proof gates at the end.
+
+1. Delete usage telemetry, both engines:
+   - src/server/usage.ts and src/features/usage/useUsageCapture.ts; every
+     data-log / data-log-type attribute (grep — they're spread across ~15
+     components); the launch ping and the account-email attachment on events
+     (license.ts / profile.ts); the model_selected event; the counts-only
+     vault presence telemetry in vault.ts and vault.rs.
+   - native: usage.rs plus its references in license.rs / profile.rs /
+     lib.rs and the routes/commands that expose it.
+   - Onboarding: remove the "share usage analytics" checkbox and the
+     usageLoggingOptOut plumbing (src/features/onboarding/OnboardingPanel.tsx)
+     and the trial-mint consent-reset logic; the register payload keeps only
+     what licensing needs.
+2. Delete the A/B experiment machinery, both engines: experiment.ts /
+   experiment.rs, the server-balanced `assign` call, the local-hash
+   fallback, pilot overrides, experiments.json state. Default inclusion
+   became an explicit user choice in #99 — verify nothing still resolves a
+   variant and migrate any straggler to the setting. Delete or stamp
+   docs/experiments/ as historical.
+3. Replace the dashboard with the feedback channel:
+   - Delete src/features/experiments/ExperimentsDialog.tsx and the
+     "Experiments" gear-menu item (src/features/license/LicenseGate.tsx,
+     ~line 1481); in its slot, a "Send feedback" item opening the feedback
+     form.
+   - Consolidate the voluntary channel (BugReport.tsx, FeedbackNudge.tsx,
+     FeatureInterestVote.tsx — keep all three): every submission shows
+     exactly what will be sent before sending — the message, app version,
+     OS — plus an off-by-default checkbox to attach a shell.log excerpt,
+     rendered in the dialog so the user reads it first. Nothing sends
+     without a click.
+   - Careful seam: explicit submissions (bug reports, feedback, interest
+     votes) ride the same Edge Function ops as the deleted telemetry — map
+     the /api/event and /api/usage routes and the function's op handlers,
+     keep the ops that carry explicit submissions, delete the ones that
+     carry ambient telemetry.
+4. Server-side decommission checklist (report, don't deploy — I run
+   deploys): which Edge Function ops and tables are now dead (click_events,
+   events if unused after the seam split, experiment_assignments, the
+   assign op) and what the license function still needs.
+5. Docs truth pass:
+   - README: the theme description (the app has been Forerunner steel/blue
+     since #53, not sandy-beach), the Run-it section (the Tauri desktop app
+     is the product — say what's true about the Electron-era launchers or
+     remove them from the front door), the Status section, and a short
+     privacy paragraph stating the posture above.
+   - New docs/data-flows.md: the complete egress list — chosen cloud
+     provider, license/trial check, update check, pinned asset downloads,
+     explicit feedback — when each fires, what it carries, how to turn it
+     off. After this PR the list is exactly that long; write it for a
+     skeptical reviewer.
+   - Stamp or fix stale docs (docs/desktop.md and ARCHITECTURE.md predate
+     the Tauri cutover). Document the naming debt: the npm package and
+     userData dir remain rag-vault because renaming breaks upgrades — no
+     rename in this pass.
+6. The repo builds only what it ships: .github/workflows/release.yml still
+   auto-triggers on every v* tag and builds the retired Electron
+   installers. Archive the current state to branch archive/electron-shell,
+   then delete release.yml. Deeper Electron/TS-twin removal is out of scope
+   here.
+
+Proof gates, beyond the suites: (a) grep-clean — usage capture, experiment,
+data-log, pingLaunch, model_selected appear nowhere outside docs/history;
+(b) run the built app through onboarding and one ask with outbound requests
+observed (mock fetch layer or local proxy) and assert zero requests except
+those in docs/data-flows.md; (c) the bug-report and feedback forms still
+round-trip end-to-end; (d) the Experiments dialog is absent from the bundle.
+End with the decommission checklist and a one-paragraph summary of what a
+privacy reviewer would now find.
+```
+
+### Track G prompt
+
+```
+Make Lighthouse's analytics experience pristine — a "Genie v3" batch in the
+house style of PR #129: every feature OpenSpec-planned
+(openspec/changes/<id>/ with proposal, design with Non-goals pinned, spec
+deltas, tasks; `openspec validate --all` green), implemented one commit per
+feature, opened as one PR for review. No version bump — that happens at ship
+time. Read docs/analytics-genie.md and the existing openspec/changes/ first:
+everything below extends that architecture and its invariants — the model
+never does arithmetic, every number traces to DataFusion output, the SQL is
+shown verbatim, the read-only single-SELECT guard stands, and the analytics
+branch may only add capability, never break an answer. Analytics is
+Rust-only (established PARITY decision); shared paths (chunking, chart spec
+parsing, prompts) land in both engines byte-identically per convention.
+
+G1 — Correctness audit + eval floor. Do this first: harden what exists
+    before anything new lands.
+    - Adversarial two-pass review (the #135 pattern: find, then
+      independently verify each finding before fixing) of analytics.rs,
+      catalog.rs, table_profile.rs, the tabular chunking path, and
+      src/lib/chartSpec.ts. Hunt the wrong-but-plausible class specifically:
+      date arithmetic over ISO strings (substr-based grouping), Excel
+      serials that slipped the harden-excel pass, union-group misgrouping
+      (same stem, different schema), join-hint false positives, NULL
+      handling in aggregates, LIMIT/cap truncation narrated as if complete,
+      guard bypasses (subquery-smuggled DML, multi-statement, CTE tricks).
+      Every confirmed finding gets a fix + regression test.
+    - Eval harness: golden executor tests (committed fixtures → expected
+      result tables) covering dates, unions, joins, and header detection;
+      prompt snapshot tests so any schema-card or few-shot drift is a
+      reviewed diff; an examples/analytics_eval.rs scorecard (question →
+      expected numbers over fixtures) runnable locally against a configured
+      provider — wire it into CI only where it can run model-free; never
+      add a flaky gate.
+    - Truncation honesty: any capped or truncated result must say so in the
+      answer and footer ("first 200 rows of 12,431").
+
+G2 — Fast private answers. Probe for a usable GPU (the Vulkan/Metal offload
+    machinery from 0.6.0 exists — read local_model.rs and the shell
+    supervisor first), default the offload layers accordingly with a
+    visible "GPU: on (N layers)" line in the AI-models dialog and a clean
+    CPU fallback on the known crash class. Then stream the existing
+    extractive answer immediately as "Draft — verifying with the private
+    model…", replaced in place when the local model's grounded answer lands
+    (orchestration in synth.rs plus one UI state; the final answer's
+    citations are authoritative; Preferences toggle, default on). Target:
+    first visible token under 2 s on the private path.
+
+G3 — PDF tables (OpenSpec: add-pdf-tables). Text-layer PDFs only (scanned
+    PDFs already OCR to prose). Cluster positioned text runs into columns
+    by x-alignment across consecutive lines (at least 3 aligned rows by 2
+    columns; a pure, unit-tested heuristic in the spirit of
+    detect_header_row). Emit each detected table as header-carrying rows so
+    it flows through the existing tabular chunking, and register detected
+    tables in analytics like workbook sheets under the existing caps. Cache
+    version bump in BOTH engines. Fixtures must include a two-column prose
+    PDF that must NOT false-positive, a clean financial table, and a ragged
+    one.
+
+G4 — Presentation polish. New engine-built chart kinds — stacked/grouped
+    bar, area, scatter — with matching theme-aware hand-rolled SVG in the
+    existing renderer; axis formatting (thousands separators, compact
+    notation, date ticks by granularity, zero-baseline rule for bars);
+    in-chat result tables sortable by header click with the truncation
+    footer from G1; changed-pin alerts embed a before/after mini-chart when
+    the result is chartable. The trust invariant stands: chart specs are
+    built from query batches, never model text; existing bar/line fixtures
+    stay byte-identical.
+
+G5 — Briefings (OpenSpec: add-briefings). When pinned questions change —
+    at most once per user-set daily time, plus on demand from the pins
+    dialog — write/refresh "Lighthouse Briefing.md" under Lighthouse Notes/
+    via the existing sanitized vault-write helper: per changed pin a
+    compact before→after table and the freshness footer, deterministic,
+    zero model calls. Fire one OS notification (Tauri notification plugin,
+    behind a user preference, default on) respecting the power-conserve
+    activity states — never wake from hidden. Build the scheduler beside
+    the existing debounced pin recheck; do not duplicate it. TS twin:
+    on-demand note only (PARITY).
+
+G6 — Cross-conversation recall (OpenSpec: add-conversation-recall; take
+    this only if G1–G5 are green). With "Save chats on this device" on,
+    auto-export each conversation to Lighthouse Notes/Chats/ as markdown
+    (frontmatter: date, title, provider, cited file ids) reusing
+    exportChat. Chunks retrieved from that folder carry a conversation
+    source kind: the synthesis prompt labels them "from your past
+    Lighthouse conversation (date)" and references render with a chat
+    glyph opening the note. A "what did I ask/conclude about X?" meta cue
+    prefers conversation-kind chunks. Zero notes are written while chat
+    history is off.
+
+Gates per feature: unit + fixture tests in the owning engine, parity
+fixtures where the path is shared, a live end-to-end check against the real
+built app (headless Xvfb where needed, per repo practice), and the G1 eval
+suite stays green through G2–G6. After each feature: one commit, a one-line
+status. If a feature can't complete, land what's green and report where you
+stopped.
+```
