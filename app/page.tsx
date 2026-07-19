@@ -57,10 +57,16 @@ export default function Home() {
 
   const centered: React.CSSProperties = {
     display: "flex",
+    // dvh so onboarding isn't clipped under the mobile toolbar; 100vh fallback.
     height: "100vh",
+    minHeight: "100dvh",
     alignItems: "center",
     justifyContent: "center",
+    overflowX: "hidden",
     overflowY: "auto",
+    // Clear notches / home indicator on the full-screen onboarding surface.
+    padding:
+      "var(--lh-safe-top) var(--lh-safe-right) var(--lh-safe-bottom) var(--lh-safe-left)",
   };
 
   let shell: React.ReactNode;

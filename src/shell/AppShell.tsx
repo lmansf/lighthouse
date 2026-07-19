@@ -14,8 +14,18 @@ import { StartupPrompt } from "@/features/startup/StartupPrompt";
 const useStyles = makeStyles({
   root: {
     display: "flex",
-    height: "100vh",
-    width: "100vw",
+    // 100dvh tracks the shrinking/growing mobile toolbar; 100vh is the desktop
+    // fallback (array = both declarations, dvh wins where supported).
+    height: ["100vh", "100dvh"],
+    // width:100vw ignores the scrollbar/safe-area and overflows horizontally on
+    // touch; 100% fills the flex/body box instead. Children own their widths.
+    width: "100%",
+    // Clear notches / the iPad home indicator. env() insets are 0 on desktop,
+    // so this is a no-op there (vars defined in app/globals.css :root).
+    paddingTop: "var(--lh-safe-top)",
+    paddingRight: "var(--lh-safe-right)",
+    paddingBottom: "var(--lh-safe-bottom)",
+    paddingLeft: "var(--lh-safe-left)",
     backgroundColor: tokens.colorNeutralBackground1,
     color: tokens.colorNeutralForeground1,
   },
