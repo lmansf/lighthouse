@@ -646,6 +646,7 @@ mod tests {
             cached_at: None,
             cost: None,
             manifest: None,
+            chart: None,
         }
     }
 
@@ -764,6 +765,7 @@ mod tests {
                 cost_estimate_usd: Some(0.0123),
             }),
             manifest: None,
+            chart: None,
         };
         let line = provenance_line(Some(&meta));
         assert!(line.contains("answered via anthropic"), "{line}");
