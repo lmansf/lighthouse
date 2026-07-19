@@ -51,6 +51,29 @@ Xcode / Ruby / Rust needed on your machine.
 5. From then on the build lanes (`fastlane ios beta` / `android beta`) run with
    `MATCH_READONLY=1` to build + upload to TestFlight / Play internal testing.
 
+## Troubleshooting
+
+- **`Authentication credentials are missing or invalid` (during `fastlane match` / `ios certs`)** —
+  the App Store Connect **API key** was rejected by Apple. `match` reaching this
+  point means the certs repo, git token, and `MATCH_PASSWORD` are all fine; only
+  the Apple key is wrong. Almost always one of:
+  1. `APP_STORE_CONNECT_KEY_ID` and `APP_STORE_CONNECT_KEY_P8` are from **different
+     keys** (e.g. a new key was generated for a fresh `.p8` but the Key ID secret
+     still holds the old id). They must be the **same** key.
+  2. The key was **revoked** in App Store Connect → Users and Access → Integrations
+     → App Store Connect API. Generate a new one and update **both** secrets.
+  3. `APP_STORE_CONNECT_KEY_P8` isn't clean base64 of the raw `.p8` (extra
+     newlines, or double-encoded). Re-encode: `base64 -i AuthKey_XXXX.p8 | pbcopy`.
+  The `mobile-bootstrap` workflow runs a preflight that structurally validates the
+  Key ID (10 chars), Issuer ID (UUID), and that the `.p8` decodes to a PKCS#8
+  private key — so if that preflight passes but `match` still fails auth, it's #1
+  or #2 (a semantic mismatch Apple rejects, not a formatting problem).
+- **`input ruby-version needs to be specified`** — pinned to `3.3` in the workflow;
+  don't remove it (there's no `.ruby-version` in the repo).
+- **A secret "is definitely set" but reads empty in CI** — it's an *Environment*
+  secret, not a *Repository* secret, or it's in the wrong repo. All 7 live in
+  **`lmansf/lighthouse`** (the repo that runs the workflow), as Repository secrets.
+
 ## App Store Connect app record
 
 Create the **Lighthouse** app in App Store Connect (My Apps → +) tied to
