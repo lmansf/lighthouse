@@ -33,7 +33,7 @@
   recommendation per the pre-agreed ladder. GO decision recorded before §2.
 
 ## 2. Crate split (engine-side, desktop-neutral — lands first, ships alone)
-- [ ] 2.1 Restructure `lighthouse-desktop` into lib + bin per design.md:
+- [~] 2.1 Restructure `lighthouse-desktop` into lib + bin per design.md:
   `lib.rs` run-builder + `#[tauri::mobile_entry_point]`, `src/desktop/`
   modules behind `cfg(desktop)` (tray, widget, whisper, shortcuts, autostart,
   single-instance, window-state, boot_guard, updater loop, llama
@@ -42,13 +42,26 @@
   behavior (grep-verify every moved call site — the crate cannot compile in
   the dev container); `cargo check --target aarch64-linux-android -p
   lighthouse-desktop --lib` compiles with desktop modules absent.
+  — **PART 1 DONE** (`claude/mobile-s2-crate-split`): lib/bin split — all shell
+  logic moved `main.rs`→`lib.rs` unchanged, thin bin calls
+  `lighthouse_desktop::run()`, `#[cfg_attr(mobile, tauri::mobile_entry_point)]`
+  wired, crate-type `staticlib`/`cdylib`/`rlib` added, `windows_subsystem` attr
+  moved to the bin. `commands.rs` `crate::` refs resolve unchanged. Desktop
+  compile verified by native.yml `cargo build --workspace` (ubuntu+webkit).
+  **PART 2 TODO:** move the desktop-only modules under `src/desktop/` behind
+  `cfg(desktop)` + add the `-p lighthouse-desktop --lib` aarch64-linux-android
+  check (needs the cfg gating first).
 - [ ] 2.2 Commit `tauri ios init` / `tauri android init` projects under
   `gen/`; wire icons via `tauri icon` from the existing source art
   (`scripts/gen-icons.mjs` gains the mobile outputs as committed artifacts).
-- [ ] 2.3 Add the per-PR Android tripwire to `.github/workflows/native.yml`:
+- [~] 2.3 Add the per-PR Android tripwire to `.github/workflows/native.yml`:
   NDK setup + `cargo check --target aarch64-linux-android -p lighthouse-core`.
   VERIFY: tripwire red on a deliberately non-portable draft commit, green on
   revert.
+  — **DONE** (`claude/mobile-s2-crate-split`): `android-tripwire` job added to
+  native.yml (NDK resolve + `cargo check --target aarch64-linux-android -p
+  lighthouse-core`); pending first green in CI. The desktop `--lib` android
+  check lands with §2.1 part 2.
 
 ## 3. Mobile shell (engine before UI: §3 lands before §4)
 - [ ] 3.1 `src/mobile/` bootstrap: app-container path mapping for
