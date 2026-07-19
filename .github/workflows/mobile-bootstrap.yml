@@ -1,0 +1,89 @@
+# Manual (workflow_dispatch) macOS bootstrap for the iOS app (§2.2 + signing).
+# Runs the two macOS-gated steps that the Linux dev env can't:
+#   - `certs`   : fastlane match creates/refreshes the Apple Distribution cert +
+#                 profiles for app.lhvault and stores them ENCRYPTED in the
+#                 private MATCH_GIT_URL repo.
+#   - `ios-init`: `tauri ios init` generates gen/apple and commits it back to the
+#                 branch this ran on.
+# Prereqs: the repo secrets in docs/mobile-signing.md must exist. Nothing here is
+# on the desktop release path — it only runs when you click "Run workflow".
+name: mobile-bootstrap
+
+on:
+  workflow_dispatch:
+    inputs:
+      task:
+        description: "What to run"
+        type: choice
+        default: both
+        options: [both, certs, ios-init]
+
+jobs:
+  ios-certs:
+    if: ${{ inputs.task == 'certs' || inputs.task == 'both' }}
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ruby/setup-ruby@v1
+        with:
+          bundler-cache: true # bundle install (root Gemfile pins fastlane) + cache
+      - name: Derive match git auth (base64 user:token — never logged)
+        env:
+          MATCH_GIT_TOKEN: ${{ secrets.MATCH_GIT_TOKEN }}
+        run: |
+          AUTH=$(printf '%s' "x-access-token:${MATCH_GIT_TOKEN}" | base64 | tr -d '\n')
+          echo "::add-mask::${AUTH}"
+          echo "MATCH_GIT_BASIC_AUTHORIZATION=${AUTH}" >> "$GITHUB_ENV"
+      - name: fastlane match — create/refresh app.lhvault signing (readonly off)
+        run: bundle exec fastlane ios certs
+        env:
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APP_STORE_CONNECT_KEY_P8: ${{ secrets.APP_STORE_CONNECT_KEY_P8 }}
+          APP_STORE_CONNECT_KEY_P8_BASE64: "1"
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          MATCH_GIT_URL: ${{ secrets.MATCH_GIT_URL }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+          # MATCH_GIT_BASIC_AUTHORIZATION comes from the derive step above.
+          # certs lane hard-sets readonly:false; MATCH_READONLY left unset.
+
+  ios-init:
+    if: ${{ inputs.task == 'ios-init' || inputs.task == 'both' }}
+    runs-on: macos-latest
+    permissions:
+      contents: write # to push gen/apple back to the branch
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true # keep GITHUB_TOKEN wired for the push
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
+      - name: Ensure Cocoapods
+        run: brew list cocoapods >/dev/null 2>&1 || brew install cocoapods
+      - name: Install JS deps
+        run: npm ci
+      - name: Static-export the UI (frontendDist = ui-dist)
+        run: node scripts/build-ui-static.mjs
+      - name: tauri ios init (non-interactive)
+        working-directory: native/crates/lighthouse-desktop
+        env:
+          CI: "true"
+          APPLE_DEVELOPMENT_TEAM: ${{ secrets.APPLE_TEAM_ID }}
+        run: npx --yes @tauri-apps/cli@^2 ios init --ci --skip-targets-install --verbose
+      - name: Commit gen/apple back to the branch
+        working-directory: native/crates/lighthouse-desktop
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Tauri's template gitignores /gen — force-add so the project is tracked.
+          git add -f gen/apple
+          if git diff --cached --quiet; then
+            echo "gen/apple unchanged — nothing to commit."
+          else
+            git commit -m "chore(ios): generate gen/apple via mobile-bootstrap [skip ci]"
+            git push origin "HEAD:${{ github.ref_name }}"
+          fi
