@@ -41,7 +41,7 @@ fn nsis_installer_hooks_are_wired() {
 #[test]
 fn hook_process_names_match_the_supervisor() {
     let hooks = include_str!("../installer-hooks.nsh");
-    let supervise = include_str!("../src/supervise.rs");
+    let supervise = include_str!("../src/desktop/supervise.rs");
     assert!(
         supervise.contains("llama-server.exe") && hooks.contains("llama-server.exe"),
         "chat/embed server binary name drifted between supervise.rs and the hooks"
