@@ -158,7 +158,7 @@ jobs:
           set -euo pipefail
           cargo build -p lighthouse-cli --target x86_64-linux-android --release 2>&1 | tee /tmp/cli-android.log
           ls -la target/x86_64-linux-android/release/lighthouse
-      - name: Seed the zero-network fixture vault (same fact as the desktop smoke)
+      - name: Seed the fixture vault + write the on-device runner
         run: |
           set -euo pipefail
           VAULT="$RUNNER_TEMP/lh-android-vault"
@@ -172,6 +172,35 @@ jobs:
           # (mirrors the desktop headless smoke).
           printf '%s' '{"defaultInclusionChoice":"include"}' > "$VAULT/.rag-vault/profile.json"
           echo "VAULT=$VAULT" >> "$GITHUB_ENV"
+          # The emulator-runner executes each `script` LINE in a separate shell, so
+          # cross-line state (vars, `set -e`) is lost. Put the whole routine in ONE
+          # file and invoke it as a single line. Quoted heredoc: `$VAULT` /
+          # `$GITHUB_WORKSPACE` resolve at RUN time from the inherited env.
+          cat > "$RUNNER_TEMP/android-smoke.sh" <<'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          BIN="$GITHUB_WORKSPACE/native/target/x86_64-linux-android/release/lighthouse"
+          adb wait-for-device
+          adb push "$BIN" /data/local/tmp/lighthouse
+          adb shell chmod 0755 /data/local/tmp/lighthouse
+          adb push "$VAULT" /data/local/tmp/lh-vault
+          # Same ask + flags as the desktop headless smoke: --local + no key = zero egress.
+          set +e
+          OUT=$(adb shell "cd /data/local/tmp && ./lighthouse ask 'What is the Q3 revenue target for the smoke test?' --vault /data/local/tmp/lh-vault --local --json 2>&1")
+          code=$?
+          set -e
+          echo "----- on-device CLI output -----"; echo "$OUT"; echo "--------------------------------"
+          if echo "$OUT" | grep -q "42"; then HASNUM=yes; else HASNUM=no; fi
+          echo "SPIKE_RESULT android_engine ran=yes exit=$code grounded_42=$HASNUM"
+          {
+            echo "## Android engine smoke (x86_64 emulator, API 34)"
+            echo "- CLI \`ask … --local --json\` exit: **$code**"
+            echo "- answer cites the grounded fact (\"42\"): **$HASNUM**"
+          } >> "$GITHUB_STEP_SUMMARY"
+          test "$code" = "0" || { echo "engine exited nonzero on-device"; exit 1; }
+          test "$HASNUM" = "yes" || { echo "answer did not cite the grounded fact"; exit 1; }
+          SH
+          chmod +x "$RUNNER_TEMP/android-smoke.sh"
       - name: Enable KVM (Android emulator hardware acceleration)
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -186,27 +215,6 @@ jobs:
           force-avd-creation: false
           emulator-options: -no-snapshot -no-window -noaudio -no-boot-anim -gpu swiftshader_indirect
           disable-animations: true
-          # NOTE: the emulator-runner runs `script` under /usr/bin/sh (dash), not
-          # bash — so this must be POSIX sh (no `pipefail`, no bashisms).
-          script: |
-            set -eu
-            BIN=native/target/x86_64-linux-android/release/lighthouse
-            adb push "$BIN" /data/local/tmp/lighthouse
-            adb shell chmod 0755 /data/local/tmp/lighthouse
-            adb push "$VAULT" /data/local/tmp/lh-vault
-            # Same ask + flags as the desktop headless smoke: --local + no key = zero egress.
-            set +e
-            OUT=$(adb shell "cd /data/local/tmp && ./lighthouse ask 'What is the Q3 revenue target for the smoke test?' --vault /data/local/tmp/lh-vault --local --json 2>&1")
-            code=$?
-            set -e
-            echo "----- on-device CLI output -----"
-            echo "$OUT"
-            echo "--------------------------------"
-            if echo "$OUT" | grep -q "42"; then HASNUM=yes; else HASNUM=no; fi
-            echo "SPIKE_RESULT android_engine ran=yes exit=$code grounded_42=$HASNUM"
-            echo "## Android engine smoke (x86_64 emulator, API 34)" >> "$GITHUB_STEP_SUMMARY"
-            echo "- CLI \`ask … --local --json\` exit: **$code**" >> "$GITHUB_STEP_SUMMARY"
-            echo "- answer cites the grounded fact (\"42\"): **$HASNUM**" >> "$GITHUB_STEP_SUMMARY"
-            # Fail the job unless the engine ran AND produced the grounded answer.
-            test "$code" = "0" || { echo "engine exited nonzero on-device"; exit 1; }
-            test "$HASNUM" = "yes" || { echo "answer did not cite the grounded fact"; exit 1; }
+          # Single line — the routine lives in the runner script (the action runs
+          # each `script` line in its own shell, so multi-line state is lost).
+          script: bash "$RUNNER_TEMP/android-smoke.sh"
