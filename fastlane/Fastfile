@@ -73,6 +73,12 @@ platform :ios do
       scheme: "lighthouse-desktop_iOS",
       configuration: "release", # tauri's generated configs are lowercase
       destination: "generic/platform=iOS",
+      # Xcode 15+ user-script sandboxing blocks the "Build Rust Code" phase
+      # (npm/npx/cargo need network + workspace access) — turn it off.
+      xcargs: "ENABLE_USER_SCRIPT_SANDBOXING=NO",
+      # Raw xcodebuild output (no xcbeautify): the Rust phase's own stderr is
+      # the diagnostic that matters, and the formatter swallows it.
+      xcodebuild_formatter: "",
       export_method: "app-store",
       export_options: {
         provisioningProfiles: { "app.lhvault" => "match AppStore app.lhvault" },
