@@ -16,7 +16,7 @@ use std::sync::Mutex;
 
 use lighthouse_core::config::resources_dir;
 use lighthouse_core::local_model::{find_installed_model, model_gguf_files, uninstall_marker_path};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 pub const RELEASE_PAGE_URL: &str = "https://github.com/lmansf/lighthouse/releases/latest";
 
@@ -795,7 +795,7 @@ pub async fn update_now(app: AppHandle) -> serde_json::Value {
 
     // Pinned base (see `lib.rs::app_data_base`) so update staging stays with the
     // rest of the app-data across the 0.12.8 identifier rename.
-    let dir = crate::app_data_base(app)
+    let dir = crate::app_data_base(&app)
         .unwrap_or_else(std::env::temp_dir)
         .join("updates");
     let _ = fs::create_dir_all(&dir);
