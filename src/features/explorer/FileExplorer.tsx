@@ -68,6 +68,7 @@ import {
   LinkRegular,
   LockClosedRegular,
   LockOpenRegular,
+  MoreHorizontalRegular,
   OpenRegular,
   RenameRegular,
   ShieldKeyholeRegular,
@@ -358,6 +359,14 @@ const useStyles = makeStyles({
     backgroundColor: tokens.colorNeutralBackground2,
   },
   check: { flexShrink: 0 },
+  // Coarse-pointer-only ⋯ overflow trigger. On touch there is no right-click to
+  // open the row's action menu, so surface a tappable button that re-fires it.
+  // Hidden on desktop (right-click still works) — desktop density unchanged.
+  rowMenuBtn: {
+    display: "none",
+    flexShrink: 0,
+    "@media (pointer: coarse)": { display: "inline-flex" },
+  },
   // The eye reads as part of the row until you need it; the amber mark (the
   // AA-gated foreground amber, via colorBrandForeground1) says "in the beam"
   // — scanning the tree shows exactly what the AI can see.
@@ -639,6 +648,7 @@ function TreeRowImpl({
           flash ? ` ${styles.rowRevealFlash}` : ""
         }${dropInto ? ` ${styles.rowDropInto}` : ""}`}
         style={{ paddingLeft: `${depth * 18 + 4}px` }}
+        data-explorer-row=""
         role="button"
         tabIndex={0}
         aria-expanded={node.kind === "folder" ? expanded : undefined}
@@ -797,6 +807,32 @@ function TreeRowImpl({
             onClick={(e) => {
               e.stopPropagation();
               toggleVisibility();
+            }}
+          />
+        </Tooltip>
+        {/* Coarse-pointer-only ⋯ button: touch has no right-click, so re-fire the
+            row's openOnContext menu by synthesizing a contextmenu event at this
+            button. Hidden on desktop (styles.rowMenuBtn), so right-click is
+            unchanged there. */}
+        <Tooltip content="Actions" relationship="label">
+          <Button
+            appearance="subtle"
+            size="small"
+            className={styles.rowMenuBtn}
+            icon={<MoreHorizontalRegular />}
+            aria-label={`Actions for ${node.name}`}
+            onClick={(e) => {
+              e.stopPropagation();
+              const rowEl = e.currentTarget.closest("[data-explorer-row]");
+              const r = e.currentTarget.getBoundingClientRect();
+              rowEl?.dispatchEvent(
+                new MouseEvent("contextmenu", {
+                  bubbles: true,
+                  cancelable: true,
+                  clientX: Math.round(r.left),
+                  clientY: Math.round(r.bottom),
+                }),
+              );
             }}
           />
         </Tooltip>
