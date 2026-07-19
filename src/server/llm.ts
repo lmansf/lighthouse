@@ -245,6 +245,7 @@ export const SYSTEM_PROMPT = [
   "Style:",
   "- Lead with the answer itself: for a numeric ask the FIRST line is the figure with its unit and label (e.g. \"$4.2M — total Q3 revenue.\"); otherwise it is one direct sentence. Elaborate after that line, as concisely as the question allows.",
   "- Format for readability with Markdown: headings, **bold**, bullet/numbered lists, tables, and `code`/fenced code where they help. The interface renders Markdown.",
+  "- Inline HTML also renders (sanitized to a safe allowlist), so reach for it when Markdown falls short: <sub>/<sup> for units and footnote marks, <br> for line breaks inside table cells, <details><summary> to fold long detail, <mark> to highlight the key figure, <kbd> for keys. Scripts, images, iframes, styles, and event handlers are stripped — never rely on them.",
   "",
   "Describing the sources:",
   "- When it helps the user get oriented — for a broad question, or when several files back your answer — briefly summarize the makeup of the sources you drew on: how many of each file type, with a handful of concrete example names. Infer the type from each source's filename extension (.xlsx/.csv → spreadsheet, .pdf → PDF, .docx → document, .md/.txt → note).",

@@ -115,3 +115,58 @@ test("ChatPanel renders the streaming turn progressively (block-memoized)", () =
   // The streaming branch drives StreamingAnswer with the citation handler.
   assert.match(src, /<StreamingAnswer\s+content=\{m\.content\}\s+turnId=\{m\.id\}\s+onCite=\{handleCitationClick\}/);
 });
+
+// --- Inline HTML holdback (html-in-answers): MarkdownView renders sanitized
+// inline HTML now, so a tag still being typed must be withheld like any other
+// unterminated construct — and prose that merely contains `<` must not be.
+test("a half-typed HTML tag is withheld until its > arrives", () => {
+  // The space before the withheld `<` stays — same convention as the other
+  // inline holdbacks (only the unterminated run itself is withheld).
+  assert.equal(safeMarkdownPrefix("The key figure is <ma"), "The key figure is ");
+  assert.equal(safeMarkdownPrefix("Fold this: <details><summ"), "Fold this: <details>");
+  assert.equal(safeMarkdownPrefix("End of run.</su"), "End of run.");
+  assert.equal(
+    safeMarkdownPrefix('cell one<br'),
+    "cell one",
+    "attribute-less closing-tag-in-progress is withheld",
+  );
+  assert.equal(
+    safeMarkdownPrefix('<td colspan="2'),
+    "",
+    "a tag mid-attribute is withheld from its < on",
+  );
+});
+
+test("a complete HTML tag streams through untouched", () => {
+  const done = "3<sup>2</sup> and a break<br>here, <mark>$4.2M</mark>.";
+  assert.equal(safeMarkdownPrefix(done), done);
+});
+
+test("prose comparisons with < are not mistaken for tags", () => {
+  const prose = "Margins stayed 3 < 5 while 7 <= 9 held.";
+  assert.equal(safeMarkdownPrefix(prose), prose);
+});
+
+test("the prefix property holds while an HTML-flavored answer streams", () => {
+  const fixture = [
+    "The result is 4.2M<sup>*</sup> this quarter.",
+    "",
+    "<details><summary>Appendix</summary>",
+    "Detail line with <mark>the key figure</mark> inside.",
+    "</details>",
+  ].join("\n");
+  for (let i = 0; i <= fixture.length; i++) {
+    const whole = fixture.slice(0, i);
+    const safe = safeMarkdownPrefix(whole);
+    assert.ok(whole.startsWith(safe), `not a literal prefix at cut ${i}`);
+    const tail = safe.split("\n").pop() ?? "";
+    const lt = tail.lastIndexOf("<");
+    if (lt >= 0) {
+      assert.ok(
+        !/^<\/?[a-zA-Z][^>]*$/.test(tail.slice(lt)),
+        `prefix at cut ${i} ends in a half-typed tag: ${JSON.stringify(tail)}`,
+      );
+    }
+  }
+  assert.equal(safeMarkdownPrefix(fixture), fixture, "complete HTML answer must pass untouched");
+});

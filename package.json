@@ -32,6 +32,8 @@
     "react": "19.0.0",
     "react-dom": "19.0.0",
     "react-markdown": "^9.1.0",
+    "rehype-raw": "^7.0.0",
+    "rehype-sanitize": "^6.0.0",
     "remark-gfm": "^4.0.1",
     "unpdf": "^1.6.2",
     "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz",
@@ -43,6 +45,7 @@
     "@types/react-dom": "19.0.3",
     "eslint": "^8.57.1",
     "eslint-config-next": "^15.5.19",
+    "rehype-stringify": "^10.0.1",
     "typescript": "5.7.3"
   },
   "overrides": {

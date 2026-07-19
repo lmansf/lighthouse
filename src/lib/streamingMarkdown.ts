@@ -225,6 +225,19 @@ function trimUnbalancedInline(block: string): string {
     if ((line.match(/~~/g) || []).length % 2 === 1) {
       line = line.slice(0, line.lastIndexOf("~~"));
     }
+    // An HTML tag still being typed (`<b`, `</su`, `<td colspan="2`): withhold
+    // from its `<` on. Only when the text after `<` reads as a tag the way the
+    // HTML tokenizer decides one — `/` or a letter — so a prose comparison
+    // like "3 < 5" keeps streaming exactly as HTML itself would show it. A
+    // COMPLETED tag has its `>` and never matches. (MarkdownView renders
+    // sanitized inline HTML now, so a half-typed tag would otherwise flash as
+    // literal text and then reflow into an element.)
+    {
+      const lt = line.lastIndexOf("<");
+      if (lt >= 0 && /^<\/?[a-zA-Z][^>]*$/.test(line.slice(lt))) {
+        line = line.slice(0, lt);
+      }
+    }
     // Link or image being typed: `[text` with no `]`, or `](dest` with no `)`.
     const open = line.lastIndexOf("[");
     if (open >= 0) {
