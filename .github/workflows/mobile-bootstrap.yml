@@ -78,27 +78,30 @@ jobs:
           echo "Key material is well-formed."
           echo "NOTE: if 'match' still reports 'Authentication credentials are missing or invalid',"
           echo "the Key ID and the .p8 are from DIFFERENT keys, or the key was revoked (see docs/mobile-signing.md)."
-      - name: Diagnose — fingerprint the stored .p8 (public key only, no secret printed)
-        # Prints the PUBLIC-key SHA-256 + curve of the stored .p8 so it can be
-        # matched against the real key file. Only public material is emitted; the
+      - name: Diagnose — identity of the stored ASC credentials (hashes only, no secret printed)
+        # Emits SHA-256 of the Key ID and Issuer ID (a hash reveals neither, and
+        # neither is sensitive), plus the PUBLIC-key SHA-256 + curve of the stored
+        # .p8. Lets the stored triple be checked against the intended values. The
         # decoded private key is written mode-600 to RUNNER_TEMP and deleted.
         env:
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
           APP_STORE_CONNECT_KEY_P8: ${{ secrets.APP_STORE_CONNECT_KEY_P8 }}
         run: |
           set +e
           umask 077
-          KF="$RUNNER_TEMP/asc_key.p8"; PUB="$RUNNER_TEMP/asc_pub.pem"
+          h(){ printf '%s' "$1" | openssl dgst -sha256 2>/dev/null | awk '{print $NF}'; }
+          echo "Stored KEY_ID    sha256: $(h "$APP_STORE_CONNECT_KEY_ID")"
+          echo "Stored ISSUER_ID sha256: $(h "$APP_STORE_CONNECT_ISSUER_ID")"
+          KF="$RUNNER_TEMP/asc_key.p8"
           printf '%s' "$APP_STORE_CONNECT_KEY_P8" | openssl base64 -d -A > "$KF" 2>/dev/null
-          openssl pkey -in "$KF" -pubout -out "$PUB" 2>/dev/null
-          FP=$(openssl pkey -pubin -in "$PUB" -outform DER 2>/dev/null | openssl dgst -sha256 2>/dev/null | awk '{print $NF}')
-          CURVE=$(openssl pkey -pubin -in "$PUB" -text -noout 2>/dev/null | grep -i 'NIST CURVE' | tr -d ' ')
-          rm -f "$KF" "$PUB"
-          echo "Stored .p8 -> public-key SHA-256: ${FP:-<not-parseable-as-EC-key>}"
-          echo "Stored .p8 -> curve: ${CURVE:-<unknown>}   (App Store Connect keys are NISTCURVE:P-256)"
-          echo "On your Mac, confirm this is the SAME key as your Key ID by running:"
+          FP=$(openssl pkey -in "$KF" -pubout -outform DER 2>/dev/null | openssl dgst -sha256 2>/dev/null | awk '{print $NF}')
+          CURVE=$(openssl pkey -in "$KF" -pubout 2>/dev/null | openssl pkey -pubin -text -noout 2>/dev/null | grep -i 'NIST CURVE' | tr -d ' ')
+          rm -f "$KF"
+          echo "Stored .p8 public-key SHA-256: ${FP:-<not-parseable-as-EC-key>}"
+          echo "Stored .p8 curve: ${CURVE:-<unknown>}   (App Store Connect keys are NISTCURVE:P-256)"
+          echo "Compare the .p8 fingerprint on your Mac:"
           echo "  openssl pkey -in AuthKey_<yourKeyID>.p8 -pubout -outform DER | openssl dgst -sha256"
-          echo "Match => .p8 secret is correct, so a persistent 401 means the Issuer ID is wrong,"
-          echo "or the key is revoked / an Individual (not Team) key. Mismatch => wrong .p8 uploaded."
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: "3.3" # no .ruby-version in repo — setup-ruby requires an explicit pin
