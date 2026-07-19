@@ -36,7 +36,7 @@
   recommendation per the pre-agreed ladder. GO decision recorded before §2.
 
 ## 2. Crate split (engine-side, desktop-neutral — lands first, ships alone)
-- [~] 2.1 Restructure `lighthouse-desktop` into lib + bin per design.md:
+- [x] 2.1 Restructure `lighthouse-desktop` into lib + bin per design.md:
   `lib.rs` run-builder + `#[tauri::mobile_entry_point]`, `src/desktop/`
   modules behind `cfg(desktop)` (tray, widget, whisper, shortcuts, autostart,
   single-instance, window-state, boot_guard, updater loop, llama
@@ -51,7 +51,8 @@
   wired, crate-type `staticlib`/`cdylib`/`rlib` added, `windows_subsystem` attr
   moved to the bin. `commands.rs` `crate::` refs resolve unchanged. Desktop
   compile verified by native.yml `cargo build --workspace` (ubuntu+webkit).
-  **PART 2 IMPLEMENTED** (pending CI green): `src/desktop/` now holds
+  **PART 2 DONE — VERIFY GREEN** (`2cd9449`: android tripwire + desktop
+  test/build both success): `src/desktop/` now holds
   boot_guard/supervise/whisper (moved byte-identical), widget.rs (widget +
   explorer windows, states, summon hotkey, OS open/reveal, autostart), tray.rs
   (tray + menus + handlers), and mod.rs (desktop plugins/state/event wiring +
@@ -66,7 +67,7 @@
 - [ ] 2.2 Commit `tauri ios init` / `tauri android init` projects under
   `gen/`; wire icons via `tauri icon` from the existing source art
   (`scripts/gen-icons.mjs` gains the mobile outputs as committed artifacts).
-- [~] 2.3 Add the per-PR Android tripwire to `.github/workflows/native.yml`:
+- [x] 2.3 Add the per-PR Android tripwire to `.github/workflows/native.yml`:
   NDK setup + `cargo check --target aarch64-linux-android -p lighthouse-core`.
   VERIFY: tripwire red on a deliberately non-portable draft commit, green on
   revert.
