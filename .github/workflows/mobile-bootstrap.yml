@@ -47,6 +47,37 @@ jobs:
             exit 1
           fi
           echo "All 7 Apple/match secrets are present."
+      - name: Preflight — App Store Connect key material is well-formed
+        # Structural checks only — the decoded .p8 is NEVER printed. Rules out
+        # malformed base64 / wrong-shaped IDs so a match auth failure can be
+        # attributed to a Key-ID↔.p8 mismatch or a revoked key instead.
+        env:
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APP_STORE_CONNECT_KEY_P8: ${{ secrets.APP_STORE_CONNECT_KEY_P8 }}
+        run: |
+          fail=0
+          if ! printf '%s' "$APP_STORE_CONNECT_KEY_ID" | grep -Eq '^[A-Z0-9]{10}$'; then
+            echo "::error::APP_STORE_CONNECT_KEY_ID is not a 10-char App Store Connect key id (length ${#APP_STORE_CONNECT_KEY_ID})."
+            fail=1
+          fi
+          if ! printf '%s' "$APP_STORE_CONNECT_ISSUER_ID" | grep -Eiq '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'; then
+            echo "::error::APP_STORE_CONNECT_ISSUER_ID is not a UUID."
+            fail=1
+          fi
+          # Decode the .p8 through the pipe and assert PKCS#8 — decoded bytes are
+          # discarded by grep -q, never echoed.
+          if printf '%s' "$APP_STORE_CONNECT_KEY_P8" | openssl base64 -d -A 2>/dev/null | grep -q 'BEGIN PRIVATE KEY'; then
+            echo "APP_STORE_CONNECT_KEY_P8 decodes to a PKCS#8 private key ✔"
+          else
+            echo "::error::APP_STORE_CONNECT_KEY_P8 does not base64-decode to a '-----BEGIN PRIVATE KEY-----' block."
+            echo "Re-encode the raw file with: base64 -i AuthKey_XXXX.p8 | pbcopy  (no extra newlines/spaces; do not double-encode)."
+            fail=1
+          fi
+          [ "$fail" -ne 0 ] && exit 1
+          echo "Key material is well-formed."
+          echo "NOTE: if 'match' still reports 'Authentication credentials are missing or invalid',"
+          echo "the Key ID and the .p8 are from DIFFERENT keys, or the key was revoked (see docs/mobile-signing.md)."
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: "3.3" # no .ruby-version in repo — setup-ruby requires an explicit pin
