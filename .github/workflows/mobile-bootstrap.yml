@@ -26,6 +26,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ruby/setup-ruby@v1
         with:
+          ruby-version: "3.3" # no .ruby-version in repo — setup-ruby requires an explicit pin
           bundler-cache: true # bundle install (root Gemfile pins fastlane) + cache
       - name: Derive match git auth (base64 user:token — never logged)
         env:
