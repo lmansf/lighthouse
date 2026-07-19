@@ -218,3 +218,76 @@ jobs:
           # Single line — the routine lives in the runner script (the action runs
           # each `script` line in its own shell, so multi-line state is lost).
           script: bash "$RUNNER_TEMP/android-smoke.sh"
+
+  # ── Criterion 1.3 (engine leg, iOS): the zero-network ask RUNS on iOS sim ────
+  # The macOS twin of android-engine-smoke. Proves the pure-Rust pipeline
+  # (extract → index → lexical retrieve → extractive answer) EXECUTES on the iOS
+  # runtime, not just links. Cross-compiles the `lighthouse` CLI for the iOS
+  # *simulator* (aarch64-apple-ios-sim on the Apple-silicon runner), boots a
+  # simulator, and runs the SAME grounded, zero-network ask via `xcrun simctl
+  # spawn` — the iOS analogue of `adb shell exec`. `--local` makes no network
+  # request, so the mobile TLS branch stays compiled-but-uncalled (no keychain /
+  # entitlements needed). Engine leg of 1.3; the ask inside the Tauri iOS shell
+  # still needs the §2 crate split + a booted app, and stays deferred.
+  ios-engine-smoke:
+    name: engine runs on iOS (simulator)
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios-sim
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native
+      - name: Cross-compile the `lighthouse` CLI for the iOS simulator
+        working-directory: native
+        run: |
+          set -euo pipefail
+          cargo build -p lighthouse-cli --target aarch64-apple-ios-sim --release 2>&1 | tee /tmp/cli-ios.log
+          ls -la target/aarch64-apple-ios-sim/release/lighthouse
+      - name: Seed the fixture vault
+        run: |
+          set -euo pipefail
+          VAULT="$RUNNER_TEMP/lh-ios-vault"
+          mkdir -p "$VAULT/docs" "$VAULT/.rag-vault"
+          printf '%s\n' \
+            '# Smoke fixture' '' \
+            'The Q3 revenue target for the smoke test is 42 million dollars.' \
+            'This document exists so CI can prove a grounded, zero-network answer.' '' \
+            > "$VAULT/docs/smoke-fixture.md"
+          # Onboard "index everything" so the fixture becomes a RAG-included node.
+          printf '%s' '{"defaultInclusionChoice":"include"}' > "$VAULT/.rag-vault/profile.json"
+          echo "VAULT=$VAULT" >> "$GITHUB_ENV"
+      - name: Boot an iOS simulator
+        run: |
+          set -euo pipefail
+          # Device name varies by Xcode; pick the first AVAILABLE iPhone by UDID.
+          UDID=$(xcrun simctl list devices available -j | python3 -c "import json,sys; d=json.load(sys.stdin); devs=[x for rt in d['devices'].values() for x in rt if x.get('isAvailable') and 'iPhone' in x.get('name','')]; print(devs[0]['udid'] if devs else '')")
+          test -n "$UDID" || { echo 'no available iPhone simulator on the runner'; xcrun simctl list devices; exit 1; }
+          echo "SIM_UDID=$UDID" >> "$GITHUB_ENV"
+          # -b: boot the device if not already booted, then wait until booted.
+          xcrun simctl bootstatus "$UDID" -b
+          echo "booted simulator $UDID"
+      - name: Run the grounded zero-network ask on the simulator
+        run: |
+          set -euo pipefail
+          BIN="$GITHUB_WORKSPACE/native/target/aarch64-apple-ios-sim/release/lighthouse"
+          # simctl spawn runs the ios-sim Mach-O in the simulator runtime with host
+          # FS visible, so $VAULT (a host path) is readable — the iOS analogue of
+          # `adb shell exec`. It propagates the child's exit status.
+          set +e
+          OUT=$(xcrun simctl spawn "$SIM_UDID" "$BIN" ask "What is the Q3 revenue target for the smoke test?" --vault "$VAULT" --local --json 2>&1)
+          code=$?
+          set -e
+          echo "----- on-sim CLI output -----"; echo "$OUT"; echo "-----------------------------"
+          if echo "$OUT" | grep -q "42"; then HASNUM=yes; else HASNUM=no; fi
+          echo "SPIKE_RESULT ios_engine ran=yes exit=$code grounded_42=$HASNUM"
+          {
+            echo "## iOS engine smoke (simulator)"
+            echo "- CLI \`ask … --local --json\` exit: **$code**"
+            echo "- answer cites the grounded fact (\"42\"): **$HASNUM**"
+          } >> "$GITHUB_STEP_SUMMARY"
+          test "$code" = "0" || { echo "engine exited nonzero on-sim"; exit 1; }
+          test "$HASNUM" = "yes" || { echo "answer did not cite the grounded fact"; exit 1; }
