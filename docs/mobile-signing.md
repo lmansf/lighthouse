@@ -83,8 +83,26 @@ Xcode / Ruby / Rust needed on your machine.
   one (App Store builds need only the Distribution cert); if you hit this via
   `dev_certs`, revoke an unused Development cert in the Developer portal first.
 
-## App Store Connect app record
+## Building the iOS app (after the bootstrap)
 
-Create the **Lighthouse** app in App Store Connect (My Apps → +) tied to
-`app.lhvault` before the first TestFlight upload — or let the first
-`upload_to_testflight` create it via the API key.
+The `mobile-bootstrap` workflow gained two more tasks once certs + `gen/apple`
+landed:
+
+- **`task = ios-build`** — builds the **signed App Store `.ipa`** on a macOS
+  runner (match readonly → manual signing on the committed Xcode project →
+  fastlane gym; the Rust lib compiles inside Xcode's "Build Rust Code" phase)
+  and uploads it as a workflow artifact. Works even before the App Store
+  Connect app record exists — use it to prove the build.
+- **`task = ios-beta`** — same build, then uploads to **TestFlight**. Requires
+  the app record (below). The build number is the workflow run number, so every
+  upload is unique; the marketing version comes from `package.json`.
+
+## App Store Connect app record (one-time, manual)
+
+The App Store Connect **API cannot create app records** (and neither can the
+uploader), so this is a one-time manual step in the web UI:
+[appstoreconnect.apple.com](https://appstoreconnect.apple.com) → **My Apps** →
+**+** → **New App**: platform **iOS**, name **Lighthouse**, bundle ID
+**app.lhvault** (already registered on the Developer Portal by `match`), any
+SKU (e.g. `lighthouse-001`), primary language. After that, `ios-beta` uploads
+land in TestFlight.

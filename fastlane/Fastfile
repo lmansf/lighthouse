@@ -43,21 +43,58 @@ platform :ios do
     match(type: "development", api_key: asc_api_key, readonly: false)
   end
 
-  # TestFlight build. Requires gen/apple (tauri ios init) to exist.
-  lane :beta do
-    unless File.directory?("../gen/apple")
-      UI.user_error!("gen/apple is missing — run `tauri ios init` on macOS first (§2.2).")
+  APPLE_PROJ = "native/crates/lighthouse-desktop/gen/apple/lighthouse-desktop.xcodeproj"
+
+  # Build the signed App Store .ipa from the committed gen/apple project.
+  # The Rust static lib is compiled by the project's own "Build Rust Code"
+  # pre-build phase (`npm run -- tauri ios xcode-script`), so gym is the only
+  # driver needed — no separate `tauri ios build`. Prereqs on the runner:
+  # npm ci + the static UI export (frontendDist ui-dist) + rust with the
+  # aarch64-apple-ios target. Signing comes from match (readonly) flipped to
+  # manual on the project, so headless xcodebuild never needs an Apple session.
+  private_lane :build_signed_ipa do
+    unless File.directory?("../native/crates/lighthouse-desktop/gen/apple")
+      UI.user_error!("gen/apple is missing — run the mobile-bootstrap ios-init task first (§2.2).")
     end
+    setup_ci if ENV["CI"] # temp keychain so the match cert is usable headless
     key = asc_api_key
     match(type: "appstore", api_key: key, readonly: true)
-    # `tauri ios build` produces the .ipa; wire the exact export path here once
-    # gen/apple lands. Kept explicit rather than guessed.
-    sh("cd .. && npm run tauri ios build -- --export-method app-store-connect")
-    upload_to_testflight(
-      api_key: key,
-      skip_waiting_for_build_processing: true,
-      ipa: Dir["../gen/apple/build/**/*.ipa"].max_by { |f| File.mtime(f) },
+    update_code_signing_settings(
+      path: APPLE_PROJ,
+      use_automatic_signing: false,
+      team_id: ENV.fetch("APPLE_TEAM_ID"),
+      code_sign_identity: "Apple Distribution",
+      profile_name: "match AppStore app.lhvault",
+      bundle_identifier: "app.lhvault",
+      targets: ["lighthouse-desktop_iOS"],
     )
+    build_app(
+      project: APPLE_PROJ,
+      scheme: "lighthouse-desktop_iOS",
+      configuration: "release", # tauri's generated configs are lowercase
+      destination: "generic/platform=iOS",
+      export_method: "app-store",
+      export_options: {
+        provisioningProfiles: { "app.lhvault" => "match AppStore app.lhvault" },
+      },
+      output_directory: "build/ios",
+      output_name: "Lighthouse",
+    )
+    key
+  end
+
+  # Prove the signed .ipa builds — no upload. Safe before the App Store
+  # Connect app record exists; the artifact lands in build/ios/.
+  lane :build_ipa do
+    build_signed_ipa
+  end
+
+  # TestFlight: signed build + upload. Requires the App Store Connect app
+  # record for app.lhvault to exist (one-time manual step — the API can't
+  # create app records; see docs/mobile-signing.md).
+  lane :beta do
+    key = build_signed_ipa
+    upload_to_testflight(api_key: key, skip_waiting_for_build_processing: true)
   end
 end
 

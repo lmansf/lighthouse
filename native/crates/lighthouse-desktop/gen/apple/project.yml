@@ -52,8 +52,8 @@ targets:
           - UIInterfaceOrientationPortraitUpsideDown
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
-        CFBundleShortVersionString: 0.12.8
-        CFBundleVersion: "0.12.8"
+        CFBundleShortVersionString: 0.13.0
+        CFBundleVersion: "0.13.0"
     entitlements:
       path: lighthouse-desktop_iOS/lighthouse-desktop_iOS.entitlements
     scheme:
