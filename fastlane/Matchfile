@@ -1,0 +1,20 @@
+# fastlane match — manages the Apple Distribution certificate + provisioning
+# profiles for app.lhvault, stored ENCRYPTED in a private git repo (never in
+# this repo). See docs/mobile-signing.md for the one-time bootstrap.
+#
+# Storage + passphrase come from the environment:
+#   MATCH_GIT_URL   — a PRIVATE git repo that holds the encrypted certs
+#   MATCH_PASSWORD  — the passphrase that encrypts them
+# The App Store Connect API key is passed to `match` from the Fastfile, so it
+# isn't duplicated here.
+git_url(ENV["MATCH_GIT_URL"])
+storage_mode("git")
+
+# appstore = Distribution cert + App Store provisioning profile. The Fastfile's
+# `certs` lane also fetches a `development` type for local/dev builds.
+type("appstore")
+
+app_identifier(["app.lhvault"])
+
+# CI build lanes read certs read-only; the `certs` bootstrap lane flips this off.
+readonly(ENV["MATCH_READONLY"] == "1")
