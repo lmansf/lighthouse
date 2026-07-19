@@ -1,0 +1,15 @@
+# fastlane Appfile — app identity for the store lanes.
+# The bundle identifier is unified to app.lhvault across desktop + mobile (0.12.8).
+# Team id / Apple id come from the environment so nothing sensitive is committed.
+app_identifier("app.lhvault")
+
+# 10-character Apple Developer Team ID (Membership page). Kept in a secret /
+# env var, not committed. With the App Store Connect API key most lanes don't
+# strictly need apple_id, so it's optional.
+team_id(ENV["APPLE_TEAM_ID"])
+apple_id(ENV["APPLE_ID"]) if ENV["APPLE_ID"]
+
+# Google Play package name (Android) — same unified identifier.
+for_platform :android do
+  package_name("app.lhvault")
+end
