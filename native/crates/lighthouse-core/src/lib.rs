@@ -27,6 +27,9 @@ pub mod ledger;
 pub mod llm;
 pub mod local_model;
 pub mod meta;
+// Mobile TLS root discovery (add-mobile-apps §1.2 spike). Crate-internal; the
+// mobile branch is cfg-compiled away off the iOS/Android triples.
+mod mobile_tls;
 pub mod ocr;
 pub mod pdf_tables;
 pub mod pins;

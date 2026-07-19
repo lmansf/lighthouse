@@ -50,6 +50,15 @@ keyring = { version = "3", default-features = false, features = [
     "crypto-rust",
 ], optional = true }
 
+# Mobile TLS (add-mobile-apps §1.2 spike). `rustls-native-certs` (what reqwest's
+# `rustls-tls-native-roots` uses) is broken on Android, so on the mobile triples
+# we verify certs through the OS platform verifier instead. rustls 0.23 + ring
+# matches the workspace's existing rustls instance (Cargo.lock), so the two
+# unify rather than duplicating. Compiled away entirely off-mobile.
+[target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-platform-verifier = "0.5"
+
 [features]
 # Store the per-install sealing secret in the OS keychain rather than the
 # secret.key file. The file path stays as a fail-closed fallback when no

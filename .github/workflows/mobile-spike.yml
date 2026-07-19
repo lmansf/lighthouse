@@ -1,0 +1,293 @@
+# THROWAWAY spike lane (add-mobile-apps §1 de-risking) — NOT a shipping gate.
+#
+# Sole purpose: get an honest go/no-go on whether `lighthouse-core` (DataFusion
+# 54 + parquet/arrow, the pure-Rust extraction stack, ring+rustls, notify) even
+# cross-compiles for the two mobile triples, with real per-arch library size and
+# Android 16 KB page-alignment numbers. The dev container can build neither
+# triple (no Xcode iOS SDK, no NDK), so the actual builds run here on real
+# runners; the SPIKE-REPORT records what THIS lane observed, never a guess.
+#
+# Job conclusion IS the signal: green = the triple compiled (size/alignment in
+# the step summary); red = it did not (the compiler error is the no-go evidence).
+# Delete this file and the aarch64 targets when the spike closes.
+name: mobile-spike
+
+on:
+  workflow_dispatch: {}
+  # Also auto-run on the spike branch when the engine or this lane changes, so
+  # the go/no-go fires without depending on dispatch-by-ref for a workflow that
+  # isn't on the default branch. Path-filtered so doc-only commits don't burn
+  # macOS minutes.
+  push:
+    branches: [mobile/s1-spike]
+    paths:
+      - ".github/workflows/mobile-spike.yml"
+      - "native/Cargo.toml"
+      - "native/Cargo.lock"
+      - "native/crates/lighthouse-core/**"
+
+permissions:
+  contents: read
+
+jobs:
+  # ── Criterion 1.1a: aarch64-apple-ios ──────────────────────────────────────
+  # macos-latest carries the iOS SDK; a bare `cargo rustc --crate-type staticlib`
+  # links the whole graph for the device triple (the real go/no-go) and yields a
+  # .a whose size proxies the < ~80 MB per-arch library budget.
+  ios-core:
+    name: core → aarch64-apple-ios
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native
+      - name: Cross-compile lighthouse-core (staticlib) for aarch64-apple-ios
+        working-directory: native
+        run: |
+          set -euo pipefail
+          cargo rustc -p lighthouse-core --target aarch64-apple-ios --release --crate-type staticlib 2>&1 | tee /tmp/ios-build.log
+      - name: Measure library size (budget < ~80 MB)
+        if: success()
+        working-directory: native
+        run: |
+          set -euo pipefail
+          LIB=$(ls -1 target/aarch64-apple-ios/release/liblighthouse_core.a | head -1)
+          BYTES=$(stat -f%z "$LIB")
+          MB=$(echo "scale=1; $BYTES/1048576" | bc)
+          # Emit to BOTH the step summary (human) and stdout (so get_job_logs can read it).
+          echo "SPIKE_RESULT ios compiled=yes staticlib=${LIB##*/} size_mb=${MB} bytes=${BYTES} budget_mb=80"
+          echo "## iOS (aarch64-apple-ios) — COMPILED ✅" >> "$GITHUB_STEP_SUMMARY"
+          echo "- staticlib: \`$LIB\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- size: **${MB} MB** (${BYTES} bytes) — budget < ~80 MB" >> "$GITHUB_STEP_SUMMARY"
+
+  # ── Criterion 1.1b: aarch64-linux-android ──────────────────────────────────
+  # ubuntu-latest ships an NDK; a cdylib build lets us both size the artifact and
+  # read the ELF LOAD-segment alignment. Android 15+ requires 16 KB (0x4000)
+  # page alignment, forced here via the NDK linker's max-page-size flag.
+  android-core:
+    name: core → aarch64-linux-android
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native
+      - name: Resolve NDK toolchain
+        run: |
+          set -euo pipefail
+          NDK="${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_ROOT}"
+          echo "NDK at: $NDK"
+          BIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          echo "CC_aarch64_linux_android=$BIN/aarch64-linux-android24-clang" >> "$GITHUB_ENV"
+          echo "AR_aarch64_linux_android=$BIN/llvm-ar" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$BIN/aarch64-linux-android24-clang" >> "$GITHUB_ENV"
+          echo "NDK_BIN=$BIN" >> "$GITHUB_ENV"
+      - name: Cross-compile lighthouse-core (cdylib, 16 KB-aligned) for aarch64-linux-android
+        working-directory: native
+        env:
+          # Force 16 KB max page size so the cdylib is Android-15-ready.
+          RUSTFLAGS: "-C link-arg=-Wl,-z,max-page-size=16384"
+        run: |
+          set -euo pipefail
+          cargo rustc -p lighthouse-core --target aarch64-linux-android --release --crate-type cdylib 2>&1 | tee /tmp/android-build.log
+      - name: Measure size + verify 16 KB page alignment
+        if: success()
+        working-directory: native
+        run: |
+          set -euo pipefail
+          SO=$(ls -1 target/aarch64-linux-android/release/liblighthouse_core.so | head -1)
+          BYTES=$(stat -c%s "$SO")
+          MB=$(echo "scale=1; $BYTES/1048576" | bc)
+          echo "## Android (aarch64-linux-android) — COMPILED ✅" >> "$GITHUB_STEP_SUMMARY"
+          echo "- cdylib: \`$SO\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- size: **${MB} MB** (${BYTES} bytes) — budget < ~80 MB" >> "$GITHUB_STEP_SUMMARY"
+          # Smallest LOAD-segment alignment must be >= 0x4000 (16 KB).
+          ALIGNS=$("$NDK_BIN/llvm-readelf" -l "$SO" | awk '/LOAD/ {print $NF}' | sort -u)
+          ALIGN_CSV=$(echo $ALIGNS | tr '\n' ',')
+          if echo "$ALIGNS" | grep -qx "0x4000"; then ALIGN_VERDICT=PASS; else ALIGN_VERDICT=CHECK; fi
+          # Emit to BOTH the step summary (human) and stdout (so get_job_logs can read it).
+          echo "SPIKE_RESULT android compiled=yes cdylib=${SO##*/} size_mb=${MB} bytes=${BYTES} budget_mb=80 load_aligns=${ALIGN_CSV} align16k=${ALIGN_VERDICT}"
+          echo "## Android (aarch64-linux-android) — COMPILED ✅" >> "$GITHUB_STEP_SUMMARY"
+          echo "- cdylib: \`$SO\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- size: **${MB} MB** (${BYTES} bytes) — budget < ~80 MB" >> "$GITHUB_STEP_SUMMARY"
+          echo "- LOAD alignments: \`${ALIGN_CSV}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- 16 KB page alignment: **${ALIGN_VERDICT}** (want 0x4000)" >> "$GITHUB_STEP_SUMMARY"
+
+  # ── Criterion 1.3 (engine leg): the zero-network ask RUNS on Android ────────
+  # Compile-only proves the graph links; this proves the pure-Rust pipeline
+  # (extract → index → lexical retrieve → extractive answer) actually EXECUTES on
+  # the Android runtime. Cross-compiles the `lighthouse` CLI for
+  # x86_64-linux-android (the emulator's arch — the pipeline is arch-agnostic, and
+  # the mobile TLS branch stays compiled-but-uncalled since `--local` makes no
+  # network request, so no JVM/JNI is needed), boots an x86_64 emulator, and runs
+  # the SAME grounded, zero-network ask the desktop headless smoke uses. This is
+  # the engine leg of 1.3; the full 1.3 (the ask inside the Tauri mobile shell)
+  # still needs the §2 crate split + a booted app, and stays deferred.
+  android-engine-smoke:
+    name: engine runs on Android (x86_64 emulator)
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native
+      - name: Resolve NDK toolchain (x86_64-linux-android)
+        run: |
+          set -euo pipefail
+          NDK="${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_ROOT}"
+          BIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          echo "CC_x86_64_linux_android=$BIN/x86_64-linux-android24-clang" >> "$GITHUB_ENV"
+          echo "AR_x86_64_linux_android=$BIN/llvm-ar" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER=$BIN/x86_64-linux-android24-clang" >> "$GITHUB_ENV"
+      - name: Cross-compile the `lighthouse` CLI for x86_64-linux-android
+        working-directory: native
+        run: |
+          set -euo pipefail
+          cargo build -p lighthouse-cli --target x86_64-linux-android --release 2>&1 | tee /tmp/cli-android.log
+          ls -la target/x86_64-linux-android/release/lighthouse
+      - name: Seed the fixture vault + write the on-device runner
+        run: |
+          set -euo pipefail
+          VAULT="$RUNNER_TEMP/lh-android-vault"
+          mkdir -p "$VAULT/docs" "$VAULT/.rag-vault"
+          printf '%s\n' \
+            '# Smoke fixture' '' \
+            'The Q3 revenue target for the smoke test is 42 million dollars.' \
+            'This document exists so CI can prove a grounded, zero-network answer.' '' \
+            > "$VAULT/docs/smoke-fixture.md"
+          # Onboard "index everything" so the fixture becomes a RAG-included node
+          # (mirrors the desktop headless smoke).
+          printf '%s' '{"defaultInclusionChoice":"include"}' > "$VAULT/.rag-vault/profile.json"
+          echo "VAULT=$VAULT" >> "$GITHUB_ENV"
+          # The emulator-runner executes each `script` LINE in a separate shell, so
+          # cross-line state (vars, `set -e`) is lost. Put the whole routine in ONE
+          # file and invoke it as a single line. Quoted heredoc: `$VAULT` /
+          # `$GITHUB_WORKSPACE` resolve at RUN time from the inherited env.
+          cat > "$RUNNER_TEMP/android-smoke.sh" <<'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          BIN="$GITHUB_WORKSPACE/native/target/x86_64-linux-android/release/lighthouse"
+          adb wait-for-device
+          adb push "$BIN" /data/local/tmp/lighthouse
+          adb shell chmod 0755 /data/local/tmp/lighthouse
+          adb push "$VAULT" /data/local/tmp/lh-vault
+          # Same ask + flags as the desktop headless smoke: --local + no key = zero egress.
+          set +e
+          OUT=$(adb shell "cd /data/local/tmp && ./lighthouse ask 'What is the Q3 revenue target for the smoke test?' --vault /data/local/tmp/lh-vault --local --json 2>&1")
+          code=$?
+          set -e
+          echo "----- on-device CLI output -----"; echo "$OUT"; echo "--------------------------------"
+          if echo "$OUT" | grep -q "42"; then HASNUM=yes; else HASNUM=no; fi
+          echo "SPIKE_RESULT android_engine ran=yes exit=$code grounded_42=$HASNUM"
+          {
+            echo "## Android engine smoke (x86_64 emulator, API 34)"
+            echo "- CLI \`ask … --local --json\` exit: **$code**"
+            echo "- answer cites the grounded fact (\"42\"): **$HASNUM**"
+          } >> "$GITHUB_STEP_SUMMARY"
+          test "$code" = "0" || { echo "engine exited nonzero on-device"; exit 1; }
+          test "$HASNUM" = "yes" || { echo "answer did not cite the grounded fact"; exit 1; }
+          SH
+          chmod +x "$RUNNER_TEMP/android-smoke.sh"
+      - name: Enable KVM (Android emulator hardware acceleration)
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Boot emulator + run the grounded zero-network ask on-device
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: default
+          force-avd-creation: false
+          emulator-options: -no-snapshot -no-window -noaudio -no-boot-anim -gpu swiftshader_indirect
+          disable-animations: true
+          # Single line — the routine lives in the runner script (the action runs
+          # each `script` line in its own shell, so multi-line state is lost).
+          script: bash "$RUNNER_TEMP/android-smoke.sh"
+
+  # ── Criterion 1.3 (engine leg, iOS): the zero-network ask RUNS on iOS sim ────
+  # The macOS twin of android-engine-smoke. Proves the pure-Rust pipeline
+  # (extract → index → lexical retrieve → extractive answer) EXECUTES on the iOS
+  # runtime, not just links. Cross-compiles the `lighthouse` CLI for the iOS
+  # *simulator* (aarch64-apple-ios-sim on the Apple-silicon runner), boots a
+  # simulator, and runs the SAME grounded, zero-network ask via `xcrun simctl
+  # spawn` — the iOS analogue of `adb shell exec`. `--local` makes no network
+  # request, so the mobile TLS branch stays compiled-but-uncalled (no keychain /
+  # entitlements needed). Engine leg of 1.3; the ask inside the Tauri iOS shell
+  # still needs the §2 crate split + a booted app, and stays deferred.
+  ios-engine-smoke:
+    name: engine runs on iOS (simulator)
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios-sim
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native
+      - name: Cross-compile the `lighthouse` CLI for the iOS simulator
+        working-directory: native
+        run: |
+          set -euo pipefail
+          cargo build -p lighthouse-cli --target aarch64-apple-ios-sim --release 2>&1 | tee /tmp/cli-ios.log
+          ls -la target/aarch64-apple-ios-sim/release/lighthouse
+      - name: Seed the fixture vault
+        run: |
+          set -euo pipefail
+          VAULT="$RUNNER_TEMP/lh-ios-vault"
+          mkdir -p "$VAULT/docs" "$VAULT/.rag-vault"
+          printf '%s\n' \
+            '# Smoke fixture' '' \
+            'The Q3 revenue target for the smoke test is 42 million dollars.' \
+            'This document exists so CI can prove a grounded, zero-network answer.' '' \
+            > "$VAULT/docs/smoke-fixture.md"
+          # Onboard "index everything" so the fixture becomes a RAG-included node.
+          printf '%s' '{"defaultInclusionChoice":"include"}' > "$VAULT/.rag-vault/profile.json"
+          echo "VAULT=$VAULT" >> "$GITHUB_ENV"
+      - name: Boot an iOS simulator
+        run: |
+          set -euo pipefail
+          # Device name varies by Xcode; pick the first AVAILABLE iPhone by UDID.
+          UDID=$(xcrun simctl list devices available -j | python3 -c "import json,sys; d=json.load(sys.stdin); devs=[x for rt in d['devices'].values() for x in rt if x.get('isAvailable') and 'iPhone' in x.get('name','')]; print(devs[0]['udid'] if devs else '')")
+          test -n "$UDID" || { echo 'no available iPhone simulator on the runner'; xcrun simctl list devices; exit 1; }
+          echo "SIM_UDID=$UDID" >> "$GITHUB_ENV"
+          # -b: boot the device if not already booted, then wait until booted.
+          xcrun simctl bootstatus "$UDID" -b
+          echo "booted simulator $UDID"
+      - name: Run the grounded zero-network ask on the simulator
+        run: |
+          set -euo pipefail
+          BIN="$GITHUB_WORKSPACE/native/target/aarch64-apple-ios-sim/release/lighthouse"
+          # simctl spawn runs the ios-sim Mach-O in the simulator runtime with host
+          # FS visible, so $VAULT (a host path) is readable — the iOS analogue of
+          # `adb shell exec`. It propagates the child's exit status.
+          set +e
+          OUT=$(xcrun simctl spawn "$SIM_UDID" "$BIN" ask "What is the Q3 revenue target for the smoke test?" --vault "$VAULT" --local --json 2>&1)
+          code=$?
+          set -e
+          echo "----- on-sim CLI output -----"; echo "$OUT"; echo "-----------------------------"
+          if echo "$OUT" | grep -q "42"; then HASNUM=yes; else HASNUM=no; fi
+          echo "SPIKE_RESULT ios_engine ran=yes exit=$code grounded_42=$HASNUM"
+          {
+            echo "## iOS engine smoke (simulator)"
+            echo "- CLI \`ask … --local --json\` exit: **$code**"
+            echo "- answer cites the grounded fact (\"42\"): **$HASNUM**"
+          } >> "$GITHUB_STEP_SUMMARY"
+          test "$code" = "0" || { echo "engine exited nonzero on-sim"; exit 1; }
+          test "$HASNUM" = "yes" || { echo "answer did not cite the grounded fact"; exit 1; }
