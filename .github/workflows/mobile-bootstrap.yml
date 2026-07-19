@@ -24,6 +24,29 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Preflight — required repo secrets are present
+        env:
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APP_STORE_CONNECT_KEY_P8: ${{ secrets.APP_STORE_CONNECT_KEY_P8 }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          MATCH_GIT_URL: ${{ secrets.MATCH_GIT_URL }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+          MATCH_GIT_TOKEN: ${{ secrets.MATCH_GIT_TOKEN }}
+        run: |
+          missing=()
+          for v in APP_STORE_CONNECT_KEY_ID APP_STORE_CONNECT_ISSUER_ID \
+                   APP_STORE_CONNECT_KEY_P8 APPLE_TEAM_ID MATCH_GIT_URL \
+                   MATCH_PASSWORD MATCH_GIT_TOKEN; do
+            [ -z "${!v}" ] && missing+=("$v")
+          done
+          if [ ${#missing[@]} -ne 0 ]; then
+            echo "::error::Missing/empty repository secrets: ${missing[*]}"
+            echo "Add them under Settings → Secrets and variables → Actions → *Repository* secrets"
+            echo "(NOT Environment secrets — this workflow has no 'environment:' declared). See docs/mobile-signing.md."
+            exit 1
+          fi
+          echo "All 7 Apple/match secrets are present."
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: "3.3" # no .ruby-version in repo — setup-ruby requires an explicit pin
@@ -57,6 +80,16 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: true # keep GITHUB_TOKEN wired for the push
+      - name: Preflight — APPLE_TEAM_ID is present
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ -z "$APPLE_TEAM_ID" ]; then
+            echo "::error::APPLE_TEAM_ID secret is missing/empty — 'tauri ios init' needs it for apple.development-team."
+            echo "Add it under Settings → Secrets and variables → Actions → *Repository* secrets. See docs/mobile-signing.md."
+            exit 1
+          fi
+          echo "APPLE_TEAM_ID present."
       - uses: actions/setup-node@v4
         with:
           node-version: 22
