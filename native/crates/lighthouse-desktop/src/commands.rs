@@ -1342,6 +1342,8 @@ pub async fn connect_op(body: Value) -> Result<Value, String> {
 // (which is exactly how the Install click used to crash the desktop build).
 #[tauri::command]
 pub async fn model_status(app: AppHandle) -> Value {
+    // `mut` feeds the desktop-only GPU merge below; on mobile it's unused.
+    #[cfg_attr(not(desktop), allow(unused_mut))]
     let mut v = serde_json::to_value(local_model::model_status()).unwrap_or_else(|_| json!({}));
     // Merge the shell's REAL llama-server GPU launch state (G2) so the AI-models
     // dialog shows "GPU acceleration: on (N layers)" / "off — CPU" instead of a
@@ -1779,6 +1781,11 @@ pub async fn pick_link_paths(app: AppHandle, directory: bool) -> Vec<String> {
     };
     let dialog = app.dialog().file().set_title(title);
     if directory {
+        // The dialog plugin's folder picker is desktop-only (no
+        // Android/iOS folder-pick API); folder-LINKING is a desktop flow
+        // anyway — mobile ingestion is copy-in via the share sheet /
+        // document picker (§3.3). Answer "nothing picked" there.
+        #[cfg(desktop)]
         dialog.pick_folder(move |p| {
             let out = p
                 .and_then(|f| f.into_path().ok())
@@ -1786,6 +1793,11 @@ pub async fn pick_link_paths(app: AppHandle, directory: bool) -> Vec<String> {
                 .unwrap_or_default();
             let _ = tx.send(out);
         });
+        #[cfg(not(desktop))]
+        {
+            let _ = dialog;
+            let _ = tx.send(Vec::new());
+        }
     } else {
         dialog.pick_files(move |ps| {
             let out = ps
