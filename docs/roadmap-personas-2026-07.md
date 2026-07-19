@@ -3110,3 +3110,200 @@ G7 — Big-table streaming registration (amends add-tabular-scale).
     result table, chart, SQL, file provenance + freshness, timestamp)
     via the existing artifacts machinery.
 ```
+
+## 23. iOS/iPadOS port — on-device storage as first-class sources, out of the box (2026-07-19)
+
+The port's first credibility test is not the model or the layout — it is
+whether a fresh install on an iPhone can see the user's files at all. iOS
+sandboxing breaks every filesystem assumption the desktop makes: references
+are persisted as absolute paths (`VaultState.references` in `state.json`),
+which fail twice on iOS — picker-granted access dies on relaunch without a
+security-scoped bookmark, and the app container path itself changes across
+updates. A survey of main (2026-07-19) confirms: zero mobile scaffolding
+exists (no `gen/apple`, no `cfg(mobile)`/`cfg(target_os = "ios")` anywhere
+in `native/`), the picker has no type-filter registry (filtering happens at
+extraction), the desktop shell's llama-server child-spawning is ungated
+(iOS forbids exec), and — usefully — `watch.rs` already documents a
+graceful poll fallback for platforms where watching fails, and the
+`add-local-only-marks` change is a ready template for a new per-file
+provenance flag. The prompt below turns that survey into the port's
+file-sources layer: four zero-setup ingestion doors, bookmark-backed
+persistence, and honest origin labeling.
+
+### Prompt
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first, local-first analytics AI harness for analysts: Rust engine
+(native/crates/lighthouse-core) in a Tauri 2 shell
+(native/crates/lighthouse-desktop), byte-compatible TS twin engine
+(src/server/), React UI (src/). Read CLAUDE.md, docs/ts-twin.md, and
+docs/roadmap-personas-2026-07.md §14 (the seven opinions) before writing
+code. This session delivers the iOS/iPadOS port's FILE-SOURCES layer: on a
+fresh iPhone or iPad install, on-device storage works as a file source out
+of the box — no account, no cloud, no setup, no instructions.
+
+Scope discipline: scaffold + file sources ONLY. The local-model runtime
+(llama must run in-process on iOS — no child processes), touch/layout
+adaptation, and App Store packaging are separate prompts. That scope is
+still a useful app: deterministic analytics (DataFusion answers, recipes,
+extraction, boards, charts) need no model at all, so this prompt alone
+makes iPhone Lighthouse real — pick a spreadsheet, ask, get a charted
+answer, entirely on device.
+
+0. Ground and scaffold. Check for existing mobile work first (remote
+   branches, native/crates/lighthouse-desktop/gen/, mobile cfg gates); as
+   of 2026-07-19 main has none — if a WIP branch has appeared since, build
+   on it instead of re-scaffolding. Otherwise `tauri ios init` inside
+   lighthouse-desktop. Gate desktop-only shell code behind Tauri's
+   #[cfg(desktop)] idiom: supervise.rs (chat + embed llama-server
+   children), local_model.rs install/uninstall, tray, autostart,
+   global-shortcut, window-state, whisper hooks. Mobile stubs report the
+   local model through the EXISTING status shapes ("not available on this
+   platform" semantics — no new error strings; the ask pipeline already
+   degrades honestly when no local model exists). `cargo check -p
+   lighthouse-core --target aarch64-apple-ios` must pass; core has no
+   target gates today — add only what compilation forces. The notify
+   watcher stays as-is: watch.rs documents that a platform where the
+   watcher fails "just behaves like the legacy poll model" — do not fork
+   the freshness model for iOS.
+
+1. References become bookmark-aware (the load-bearing change). Desktop
+   links files in place: pick_link_paths → useRagStore.addReference →
+   vault::add_reference → VaultState.references: HashMap<id,
+   Reference{path,name,kind}>. On iOS, extend Reference with OPTIONAL
+   fields: bookmark (base64 bookmark data) and origin (section 6).
+   state.json is deliberately un-versioned — serde-default tolerance IS
+   the migration story (vault.rs header): old state loads with None,
+   desktop simply never sets the new fields. At boot the iOS shell
+   resolves each bookmark → live path, calls
+   startAccessingSecurityScopedResource, holds the scope for the app
+   session, and hands the engine resolved paths (iOS bookmarks are
+   implicitly security-scoped; the macOS-only .withSecurityScope flag
+   does not exist there — do not cargo-cult it). Stale-but-resolvable
+   bookmarks re-mint themselves; unresolvable ones surface the EXISTING
+   honest unavailable state (DataSource.available = false / missing-file
+   handling) — never a crash, never a silently empty index. Express the
+   resolve lifecycle as a pure verdict function (bookmark_verdict — the
+   warm_wait_verdict house pattern) twinned Rust/TS with parity tests;
+   Swift performs API calls only, no logic. Vault root on iOS: derive the
+   app Documents directory EVERY boot and leave DesktopSettings.vault_dir
+   None — never persist an absolute container path. `.rag-vault/` stays
+   where it is.
+
+2. Door 1 — the Files picker. Keep the SAME invoke command name
+   (pick_link_paths) so desktopBridge/tauriTransport stay one code path;
+   the iOS implementation is UIDocumentPickerViewController with
+   multi-select, opening to On My iPhone/iPad, plus folder picking — a
+   picked folder is a linked reference with recursive security-scoped
+   access, exactly desktop's Link-folder semantics. External USB/SD
+   volumes on iPad arrive through the same picker and bookmark path; an
+   unplugged volume is the unavailable state, replugging resolves again.
+   Type filter: no registry exists today — create ONE exported registry
+   (LINKABLE_EXT / linkableExtensions in extract.rs + extract.ts, PARITY
+   comment) derived from RICH_EXT + the plain-text set, and map it to
+   UTTypes on iOS (system identifiers where they exist — com.adobe.pdf,
+   public.comma-separated-values-text, org.openxmlformats.… — verify each
+   resolves on device). The engine's truth drives the filter; never a
+   hand-list in Swift.
+
+3. Door 2 — the Lighthouse folder in Files. Info.plist:
+   UIFileSharingEnabled + LSSupportsOpeningDocumentsInPlace. The vault
+   dir IS Documents, so "On My iPhone → Lighthouse" appears in the Files
+   app and anything dropped there becomes a source with zero interaction.
+   Freshness without FSEvents: rely on the documented poll fallback (use
+   the web POLL_MS cadence on mobile, not desktop's 15 s) plus a
+   foreground nudge — on app resume, bump the watcher GENERATION / emit
+   vault-changed so a file dropped while backgrounded appears within one
+   tick of coming back. The empty-sources state on iOS names the three
+   real doors ("Add from Files", "Drop files into On My iPhone →
+   Lighthouse", "Share into Lighthouse from any app") — byte-pinned copy,
+   first-run-tour surface conventions.
+
+4. Door 3 — the share sheet / Open in Lighthouse. Declare
+   CFBundleDocumentTypes (UTImportedTypeDeclarations only where no system
+   identifier exists) for the same registry, so Mail/Safari/Files offer
+   Lighthouse for every supported type. A shared-in URL lands in the app
+   inbox (tmp …-Inbox — it dies after return): COPY it into the vault via
+   the existing upload path (write_artifact semantics — this is an
+   upload, not a link), dedupe as uploads dedupe, and attach it to the
+   active investigation the way drag-attach does (attachmentFileIds).
+   Share-in is the #1 real-world iOS ingestion path — treat latency as
+   first-run UX: the source is visible before the share sheet dismisses.
+
+5. Door 4 — iPad drag & drop. Desktop routes OS drags through native
+   tauri://drag-* events re-broadcast as lighthouse:os-drag/os-drop, and
+   the DOM Files handlers stand down behind isDesktopShell(). Verify
+   whether Tauri surfaces native drag events on iPadOS at our pinned
+   version; if it does not, make the stand-down guard platform-aware so
+   the DOM path runs: WKWebView delivers real File objects on iPad drops,
+   and pathsForFiles' existing unresolved-File fallback already
+   byte-uploads them — the web fallback IS the iPad implementation.
+   Desktop behavior stays byte-identical either way. Both drop targets
+   work: the sources panel (link/upload) and the ask box (per-ask
+   attach).
+
+6. Origin honesty. New per-reference origin classification: on-device |
+   icloud-synced | provider-synced (third-party file-provider domains),
+   decided by a PURE classifier over URL resource attributes
+   (ubiquitous-item flag, container test, provider domain) with injected
+   attributes so it unit-tests in both twins; Swift only fetches
+   attributes. Follow the add-local-only-marks template exactly
+   (FileNode/RagReference field + VaultState map + serde-default + twin
+   parity). The shield's status popover gains ONE honest line for synced
+   storage ("N sources live in iCloud Drive — processed on this
+   device"), byte-pinned. Egress accounting does NOT change: picking an
+   iCloud file causes no Lighthouse egress and "All local" stays true
+   when no cloud model is used — say it precisely and do not over-claim
+   "this device only" for a file Apple syncs. local_only marks keep
+   working unchanged (they gate cloud-model exposure wherever the file
+   lives).
+
+7. Tests, CI floor, parity. Pure logic (bookmark_verdict, origin
+   classifier, registry derivation) tested in cargo + node with parity
+   pins. Swift stays thin enough to grep-verify — the lighthouse-desktop
+   convention (that crate doesn't build in the dev container; the same
+   rule extends to gen/apple). New settings/state fields go through the
+   settings_test.rs no-`..` tripwire and a state.json serde-default
+   round-trip. CI: add an ios-check leg on a macOS runner — rustup
+   target add aarch64-apple-ios && cargo check -p lighthouse-core
+   --target aarch64-apple-ios at minimum, a simulator build of the shell
+   if the runner tolerates it (no signing needed for sim). Full desktop
+   suites stay green with zero desktop behavior change — the diff of
+   desktop-only paths shows gating only.
+
+Constraints. No analytics, telemetry, or accounts — unchanged. NO iCloud
+entitlements: the document picker needs none, and we read Apple-synced
+files without hosting in them — do not add the iCloud Documents
+capability. SharePoint plumbing untouched. Prompts/labels byte-identical
+across twins; PARITY comments mark deliberate divergences. CACHE_VERSION
+untouched (extraction semantics do not change here). No version bump in
+this prompt — mobile release/versioning is a separate owner decision.
+
+Acceptance (every item zero-config from a fresh install):
+1. Pick a PDF + an XLSX from On My iPhone → sources appear, extraction
+   runs, a deterministic analytics ask answers with a chart — no model,
+   no network, egress shield "All local".
+2. Link a folder, kill and relaunch the app → files still readable (the
+   bookmark survived); move one file away in Files → that source shows
+   unavailable, nothing crashes, the rest still answer.
+3. Drop a CSV into On My iPhone → Lighthouse while the app is
+   backgrounded → it is visible within one tick of foregrounding.
+4. Share a CSV from Mail → it lands as an uploaded source, attached to
+   the active investigation, visible before the sheet dismisses.
+5. Pick a file from iCloud Drive → it works, origin is labeled, the
+   shield popover carries the one synced-storage line, egress still
+   reads "All local".
+6. iPad Split View: drops from Files land on both the sources panel and
+   the ask box.
+7. Desktop: full node + cargo suites green; desktop file flows
+   byte-identical to main.
+
+Environment. iOS builds need macOS + Xcode — run this prompt there for
+simulator verification. If run in the Linux dev container instead: land
+the engine/TS/registry/verdict work with full tests, write the
+Swift/plist/scaffold pieces grep-verified against Tauri 2 mobile docs,
+and lean on the ios-check CI leg — the lighthouse-desktop convention.
+One commit per numbered section. Open ONE PR titled "iOS: on-device
+storage as first-class sources"; stop at the PR.
+```
