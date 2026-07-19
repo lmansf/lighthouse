@@ -256,3 +256,10 @@ jobs:
           name: lighthouse-ios-ipa
           path: build/ios/*.ipa
           if-no-files-found: warn
+      - name: Upload raw xcodebuild log (diagnosis)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lighthouse-ios-buildlog
+          path: ~/Library/Logs/gym/
+          if-no-files-found: warn
