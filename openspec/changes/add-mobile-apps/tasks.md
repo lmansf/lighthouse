@@ -41,10 +41,12 @@
   `x86_64-linux-android`, pushed to a booted API-34 emulator, answered the same
   grounded `--local --json` ask the desktop headless smoke uses — on-device
   `exit=0`, answer cites the fixture fact ("42"), `provenance.origin=device`,
-  0 tokens / 0 egress. Proves the pure-Rust extract→retrieve→answer pipeline
-  EXECUTES on the Android runtime. STILL DEFERRED: the iOS-simulator engine leg
-  (no macOS-simulator lane was stood up) and the Tauri-**shell** wrapping on
-  both platforms (needs the §2 crate split + a booted app). See `SPIKE-REPORT.md`.
+  0 tokens / 0 egress. **iOS-simulator engine leg ALSO PASS** (`ios-engine-smoke`,
+  commit `8a47091`, `aarch64-apple-ios-sim` via `xcrun simctl spawn`): same on-sim
+  `exit=0` + grounded "42" + `origin=device`, 0 egress. Proves the pure-Rust
+  extract→retrieve→answer pipeline EXECUTES on BOTH mobile runtimes. STILL
+  DEFERRED: the Tauri-**shell** wrapping on both platforms (needs the §2 crate
+  split + a booted app). See `SPIKE-REPORT.md`.
 - [ ] 1.4 Validate Fluent UI v9 Menu/Popover/Dialog/focus in WKWebView and
   Android System WebView; validate `keyring` apple-native on iOS for the
   sealing secret (file fallback is the recorded alternative).

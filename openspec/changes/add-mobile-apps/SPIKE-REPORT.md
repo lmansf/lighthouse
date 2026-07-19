@@ -1,8 +1,8 @@
 # Mobile de-risking spike — report (add-mobile-apps §1)
 
-**Status: 1.1 PASS + 1.2a compile-PASS + 1.3 engine-leg PASS (Android),
-all measured in CI; the remaining device legs (1.2b live-TLS, the 1.3
-iOS-simulator engine leg + the Tauri-shell wrapping, 1.4 webview) DEFERRED with
+**Status: 1.1 PASS + 1.2a compile-PASS + 1.3 engine-leg PASS (Android AND iOS
+simulator), all measured in CI; the remaining legs (1.2b live-TLS, the 1.3
+Tauri-shell wrapping on both platforms, 1.4 webview) DEFERRED with
 evidence.** This
 report is filled *only* from observed results. A line is marked PASS/FAIL only
 where there is evidence (a CI job conclusion, a measured number, an on-device
@@ -21,15 +21,16 @@ are deferred, so the full GO is "leaning yes, pending the deferred legs." **No
 reroute is taken here** — the fallback ladder is an owner decision.
 
 **Second signal (1.3 engine leg): the engine doesn't just compile — it RUNS on
-Android.** The cross-compiled `lighthouse` CLI, pushed to a booted `x86_64`
-API-34 emulator, answered the same grounded, zero-network `--local --json` ask
-the desktop headless smoke uses: `exit=0`, the answer cites the fixture fact
-("42"), `provenance.origin=device`, 0 tokens / 0 egress. So the pure-Rust
-pipeline (extract → index → lexical retrieve → extractive answer) EXECUTES on
-the Android runtime, not just links. This is the *engine* leg only (via the CLI,
-arch-agnostic); the ask *inside the Tauri mobile shell*, and the same run on an
-iOS simulator, remain deferred (they need the §2 crate split + booted app / a
-macOS-simulator lane).
+both mobile runtimes.** The cross-compiled `lighthouse` CLI answered the same
+grounded, zero-network `--local --json` ask the desktop headless smoke uses on
+**both** a booted `x86_64` API-34 Android emulator (via `adb`) and a booted iOS
+simulator (`aarch64-apple-ios-sim` via `xcrun simctl spawn`): `exit=0`, the
+answer cites the fixture fact ("42"), `provenance.origin=device`, 0 tokens /
+0 egress, on each. So the pure-Rust pipeline (extract → index → lexical
+retrieve → extractive answer) EXECUTES on both device runtimes, not just links.
+This is the *engine* leg (via the CLI, arch-agnostic); the ask *inside the Tauri
+mobile shell* remains deferred on both platforms (needs the §2 crate split + a
+booted app).
 
 ## What this spike decides
 
@@ -75,7 +76,7 @@ behaving in **WKWebView + Android System WebView**.
 | 1.2a | TLS swap to `rustls-platform-verifier` **compiles + links** on both mobile triples | **PASS** | run #3 (`2724ab4`): `ios-core` + `android-core` both green with the swap wired into `llm.rs` |
 | 1.2b | Live HTTPS handshake through the platform verifier from a booted sim/emulator | **DEFERRED** | needs a running device + the §2 scaffold |
 | 1.3-engine (Android) | The zero-network extractive ask EXECUTES on a booted Android emulator — engine via the cross-compiled CLI (arch-agnostic), not yet the Tauri shell | **PASS** | `android-engine-smoke` green (run `29666664490`, commit `b134739`): on-device `SPIKE_RESULT … ran=yes exit=0 grounded_42=yes`; answer cites "42", `provenance.origin=device`, 0 tokens / 0 egress |
-| 1.3-engine (iOS sim) | Same ask on an iOS simulator | **DEFERRED** | not run — needs a macOS + booted-simulator lane; only the Android emulator leg was stood up |
+| 1.3-engine (iOS sim) | The zero-network extractive ask EXECUTES on a booted iOS simulator — engine via the cross-compiled CLI, run through `xcrun simctl spawn` | **PASS** | `ios-engine-smoke` green (commit `8a47091`, `aarch64-apple-ios-sim`): on-sim `SPIKE_RESULT … ran=yes exit=0 grounded_42=yes`; answer cites "42", `provenance.origin=device`, 0 tokens / 0 egress |
 | 1.3-shell | The same ask INSIDE a Tauri mobile app (both platforms) | **DEFERRED** | needs the §2 crate split + `tauri ios/android init` app linking the lib crate; the engine leg above de-risks the pipeline, the shell wrapping remains |
 | 1.4 | Fluent UI v9 Menu/Popover/Dialog/focus behave in WKWebView + Android System WebView | **DEFERRED** | needs the running app from 1.3 to inspect the live webview |
 
@@ -138,19 +139,19 @@ cross-compiles as-is.
 Android-`rustls-native-certs` blocker has a compiling fix, wired into the async
 provider client and proven on both triples.
 
-**Engine-execution leg (1.3 engine, Android): now closed** in commit `b134739`
-(`android-engine-smoke` green) — the zero-network extract→retrieve→answer
-pipeline runs on a booted Android emulator and produces a grounded, zero-egress
-answer. This is the most reassuring runtime signal short of the full app: the
-engine's cross-compiled code doesn't just link, it executes correctly on the
-device runtime. The equivalent iOS-simulator engine leg was not run and stays
-deferred.
+**Engine-execution leg (1.3 engine, Android + iOS): now closed** on both — the
+zero-network extract→retrieve→answer pipeline runs on a booted Android emulator
+(commit `b134739`, `android-engine-smoke`) AND a booted iOS simulator (commit
+`8a47091`, `ios-engine-smoke`, via `xcrun simctl spawn`), producing a grounded,
+zero-egress answer each time. This is the most reassuring runtime signal short
+of the full app: the engine's cross-compiled code doesn't just link, it executes
+correctly on both device runtimes.
 
 **Full spike gate: not yet closed.** The remaining legs are all
 **device-/shell-dependent**: 1.2b (a live HTTPS handshake through the platform
-verifier from a booted device), the 1.3 *iOS-simulator* engine leg + the 1.3
-*Tauri-shell* wrapping (the ask inside the actual mobile app, both platforms),
-and 1.4 (Fluent in both webviews). They require the §0 Apple/Play enrollments,
+verifier from a booted device), the 1.3 *Tauri-shell* wrapping (the ask inside
+the actual mobile app, both platforms), and 1.4 (Fluent in both webviews). They
+require the §0 Apple/Play enrollments,
 the §2 crate split, `tauri ios/android init` projects, and a booted
 iOS-simulator lane, which this spike did not stand up. The recommendation is
 **proceed to stand those up** (they are now the only thing between here and a
@@ -163,15 +164,13 @@ engine actually executing a grounded zero-network ask on Android.
    (`embed.rs`, `local_model.rs`, `provider_auth.rs`), then exercise a live
    provider models-list call from a booted simulator + emulator to confirm the
    platform verifier trusts a real chain end-to-end.
-2. **1.3** — the Android *engine* leg is DONE (`android-engine-smoke`: the CLI
-   proves the pipeline runs on the emulator). What remains: (a) the same engine
-   leg on an **iOS simulator** — a macOS lane that cross-compiles the CLI for
-   `aarch64-apple-ios-sim`, boots a simulator via `simctl`, seeds the fixture
-   with `simctl get_app_container`, and asserts the extractive answer; (b) the
-   **shell** leg on both platforms — `tauri ios init` / `tauri android init`
-   throwaway projects linking a lib-crate `lighthouse-desktop` (the §2 crate
-   split is the real prerequisite), port `SMOKE_DRIVER_JS`, and assert the ask
-   answers inside the booted app.
+2. **1.3** — the *engine* leg is DONE on **both** platforms
+   (`android-engine-smoke` + `ios-engine-smoke`: the CLI proves the pipeline runs
+   on the emulator and the simulator). What remains: the **shell** leg on both —
+   `tauri ios init` / `tauri android init` projects linking a lib-crate
+   `lighthouse-desktop` (the §2 crate split is the real prerequisite; §2.1
+   part 1, the lib/bin split, is now landed on `claude/mobile-s2-crate-split`),
+   port `SMOKE_DRIVER_JS`, and assert the ask answers inside the booted app.
 3. **1.4** — with 1.3's app booted, drive Fluent v9 Menu/Popover/Dialog/focus
    in WKWebView + Android System WebView; validate `keyring` apple-native for
    the sealing secret.
