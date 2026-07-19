@@ -1,0 +1,18 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "desktop-only",
+  "description": "Desktop-only plugin grants (add-mobile-apps §2): autostart and window-state exist only where the plugins are compiled in — the mobile targets exclude those crates entirely, so validating these permissions there would fail the build. Platform-scoped to the three desktop OSes.",
+  "windows": [
+    "main",
+    "explorer"
+  ],
+  "platforms": [
+    "linux",
+    "macOS",
+    "windows"
+  ],
+  "permissions": [
+    "autostart:default",
+    "window-state:default"
+  ]
+}
