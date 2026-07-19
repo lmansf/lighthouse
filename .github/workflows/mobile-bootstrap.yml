@@ -16,7 +16,7 @@ on:
         description: "What to run"
         type: choice
         default: both
-        options: [both, certs, ios-init]
+        options: [both, certs, ios-init, ios-build, ios-beta]
 
 jobs:
   ios-certs:
@@ -176,3 +176,83 @@ jobs:
             git commit -m "chore(ios): generate gen/apple via mobile-bootstrap [skip ci]"
             git push origin "HEAD:${{ github.ref_name }}"
           fi
+
+  # Build the signed App Store .ipa from the committed gen/apple project
+  # (task=ios-build), optionally uploading it to TestFlight (task=ios-beta —
+  # requires the App Store Connect app record for app.lhvault to exist; see
+  # docs/mobile-signing.md). The Rust lib compiles inside Xcode's "Build Rust
+  # Code" phase, so this job just preps toolchains and lets fastlane gym drive.
+  ios-build:
+    if: ${{ inputs.task == 'ios-build' || inputs.task == 'ios-beta' }}
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Preflight — required repo secrets are present
+        env:
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APP_STORE_CONNECT_KEY_P8: ${{ secrets.APP_STORE_CONNECT_KEY_P8 }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          MATCH_GIT_URL: ${{ secrets.MATCH_GIT_URL }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+          MATCH_GIT_TOKEN: ${{ secrets.MATCH_GIT_TOKEN }}
+        run: |
+          missing=()
+          for v in APP_STORE_CONNECT_KEY_ID APP_STORE_CONNECT_ISSUER_ID \
+                   APP_STORE_CONNECT_KEY_P8 APPLE_TEAM_ID MATCH_GIT_URL \
+                   MATCH_PASSWORD MATCH_GIT_TOKEN; do
+            [ -z "${!v}" ] && missing+=("$v")
+          done
+          if [ ${#missing[@]} -ne 0 ]; then
+            echo "::error::Missing/empty repository secrets: ${missing[*]}"
+            exit 1
+          fi
+          echo "All 7 Apple/match secrets are present."
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+          bundler-cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+      - name: Install JS deps
+        run: npm ci
+      - name: Static-export the UI (frontendDist = ui-dist)
+        run: node scripts/build-ui-static.mjs
+      - name: Derive match git auth (base64 user:token — never logged)
+        env:
+          MATCH_GIT_TOKEN: ${{ secrets.MATCH_GIT_TOKEN }}
+        run: |
+          AUTH=$(printf '%s' "x-access-token:${MATCH_GIT_TOKEN}" | base64 | tr -d '\n')
+          echo "::add-mask::${AUTH}"
+          echo "MATCH_GIT_BASIC_AUTHORIZATION=${AUTH}" >> "$GITHUB_ENV"
+      - name: Sync iOS bundle version (marketing = package.json, build = run number)
+        run: |
+          VER=$(node -p "require('./package.json').version")
+          PLIST=native/crates/lighthouse-desktop/gen/apple/lighthouse-desktop_iOS/Info.plist
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${VER}" "$PLIST"
+          # TestFlight requires a unique, increasing build number per upload.
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${{ github.run_number }}" "$PLIST"
+          echo "iOS version ${VER} (build ${{ github.run_number }})"
+      - name: Build signed .ipa${{ inputs.task == 'ios-beta' && ' + upload to TestFlight' || '' }}
+        env:
+          CI: "true"
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APP_STORE_CONNECT_KEY_P8: ${{ secrets.APP_STORE_CONNECT_KEY_P8 }}
+          APP_STORE_CONNECT_KEY_P8_BASE64: "1"
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          MATCH_GIT_URL: ${{ secrets.MATCH_GIT_URL }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+          MATCH_READONLY: "1"
+        run: bundle exec fastlane ios ${{ inputs.task == 'ios-beta' && 'beta' || 'build_ipa' }}
+      - name: Upload .ipa artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lighthouse-ios-ipa
+          path: build/ios/*.ipa
+          if-no-files-found: warn

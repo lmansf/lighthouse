@@ -21,7 +21,8 @@
     "fetch:model": "node scripts/fetch-local-model.mjs",
     "test:extract": "node --test \"test/**/*.test.mjs\"",
     "build:ui-static": "node scripts/build-ui-static.mjs",
-    "desktop:build": "node scripts/build-ui-static.mjs && cd native && cargo build --release -p lighthouse-desktop"
+    "desktop:build": "node scripts/build-ui-static.mjs && cd native && cargo build --release -p lighthouse-desktop",
+    "tauri": "npx --yes @tauri-apps/cli@^2"
   },
   "dependencies": {
     "@fluentui/react-components": "^9.54.0",
