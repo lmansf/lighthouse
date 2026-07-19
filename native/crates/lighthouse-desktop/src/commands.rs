@@ -1250,7 +1250,9 @@ pub async fn profile_op(body: Value) -> Result<Value, String> {
 /// to the last ~100 lines / ~16 KB so a bug report stays small. This is the only
 /// diagnostics attached to a report, and only when the user opts in.
 fn shell_log_excerpt(app: &AppHandle) -> String {
-    let Ok(dir) = app.path().app_data_dir() else {
+    // Pinned base (see `lib.rs::app_data_base`) so this reads the same shell.log
+    // that `shell_log` writes across the 0.12.8 identifier rename.
+    let Some(dir) = crate::app_data_base(app) else {
         return String::new();
     };
     let Ok(text) = std::fs::read_to_string(dir.join("shell.log")) else {

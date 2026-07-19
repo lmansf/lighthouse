@@ -74,12 +74,44 @@ fn servers_suspended(app: &AppHandle) -> bool {
     }
 }
 
+/// The install-global app-data base, PINNED to the historical
+/// `com.lighthouse.app` directory.
+///
+/// 0.12.8 renamed the Tauri bundle identifier `com.lighthouse.app` →
+/// `app.lhvault` (to match the App Store identity / owned domain lhvault.app).
+/// Tauri derives `app_data_dir()` as `<base>/<identifier>`, so *following* the
+/// rename would silently relocate — and orphan — every existing user's
+/// settings, sealed API keys, and downloaded models. The identifier is the
+/// app's OS / store / updater identity; the on-disk data path is deliberately
+/// decoupled from it so the rename carries ZERO data-migration risk.
+/// `boot_guard.rs::state_dir` pins the same literal, and `secrets.rs`'s
+/// `KEYCHAIN_SERVICE` is likewise left unchanged. DO NOT "unify" this to
+/// `app_data_dir()` without first shipping a first-launch data migration —
+/// `tests/identity_pin.rs` guards against exactly that. Every app-data reader/
+/// writer in the crate (settings, secrets env, logs, updater staging) resolves
+/// through here so nothing splits across the old and new identifier dirs.
+pub(crate) fn app_data_base(app: &AppHandle) -> Option<PathBuf> {
+    let dir = app.path().app_data_dir().ok()?;
+    // Desktop only: `<base>/app.lhvault` → `<base>/com.lighthouse.app`, so the
+    // rename moves no existing data (if there's somehow no parent, keep the
+    // derived dir rather than lose the base). Mobile ships later and is
+    // greenfield — it uses its natural `app.lhvault` path, nothing to preserve.
+    #[cfg(desktop)]
+    let base = dir
+        .parent()
+        .map(|b| b.join("com.lighthouse.app"))
+        .unwrap_or(dir);
+    #[cfg(not(desktop))]
+    let base = dir;
+    Some(base)
+}
+
 /// Append a timestamped line to app-data/shell.log — the debugging lifeline
 /// for GUI builds, where stderr goes nowhere (0.6.3 field report: widget mode
 /// silently absent on one Windows machine, zero clues). Rotates once past
 /// ~256 KB (shell.log → shell.log.1) so it can run forever. Best-effort.
 pub fn shell_log(app: &AppHandle, msg: &str) {
-    let Ok(dir) = app.path().app_data_dir() else { return };
+    let Some(dir) = app_data_base(app) else { return };
     let _ = fs::create_dir_all(&dir);
     let path = dir.join("shell.log");
     if fs::metadata(&path).map(|m| m.len() > 256 * 1024).unwrap_or(false) {
@@ -163,12 +195,12 @@ fn smoke_state_dir() -> Option<PathBuf> {
 }
 
 fn settings_file(app: &AppHandle) -> PathBuf {
+    // Pinned base (see `app_data_base`) so the 0.12.8 identifier rename does not
+    // move `lighthouse-settings.json` — and the vaultDir pointer inside it —
+    // out from under existing installs. Smoke isolation still wins.
     smoke_state_dir()
-        .unwrap_or_else(|| {
-            app.path()
-                .app_data_dir()
-                .unwrap_or_else(|_| std::env::temp_dir())
-        })
+        .or_else(|| app_data_base(app))
+        .unwrap_or_else(std::env::temp_dir)
         .join("lighthouse-settings.json")
 }
 
@@ -231,11 +263,9 @@ pub fn vault_dir_setting(app: &AppHandle) -> PathBuf {
         let default = app
             .path()
             .document_dir()
-            .unwrap_or_else(|_| {
-                app.path()
-                    .app_data_dir()
-                    .unwrap_or_else(|_| std::env::temp_dir())
-            })
+            // Pinned base (see `app_data_base`) so a no-Documents fallback lands
+            // at the same default across the 0.12.8 identifier rename.
+            .unwrap_or_else(|_| app_data_base(app).unwrap_or_else(std::env::temp_dir))
             .join("Lighthouse Vault");
         if lighthouse_core::policy::vault_path_allowed(&default) {
             default
@@ -257,7 +287,10 @@ fn bootstrap_env(app: &AppHandle) {
     std::env::set_var("LIGHTHOUSE_DESKTOP", "1");
     std::env::set_var("VAULT_DIR", vault_dir_setting(app));
     std::env::set_var("LIGHTHOUSE_SETTINGS_FILE", settings_file(app));
-    if let Some(data) = smoke_state_dir().or_else(|| app.path().app_data_dir().ok()) {
+    // Pinned base (see `app_data_base`): models, connectors, profile, and the
+    // whole LIGHTHOUSE_APP_STATE_DIR (secrets, sealed keys) stay at the historical
+    // path across the 0.12.8 identifier rename. Smoke isolation still wins.
+    if let Some(data) = smoke_state_dir().or_else(|| app_data_base(app)) {
         let models = data.join("models");
         let connectors = data.join("connectors");
         let _ = fs::create_dir_all(&models);

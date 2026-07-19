@@ -153,7 +153,9 @@ fn llm_root() -> PathBuf {
 }
 
 fn log_file(app: &AppHandle, name: &str) -> Option<fs::File> {
-    let dir = app.path().app_data_dir().ok()?;
+    // Pinned base (see `lib.rs::app_data_base`) so supervisor logs sit with the
+    // rest of the app-data across the 0.12.8 identifier rename.
+    let dir = crate::app_data_base(app)?;
     let _ = fs::create_dir_all(&dir);
     fs::OpenOptions::new()
         .create(true)
@@ -791,10 +793,10 @@ pub async fn update_now(app: AppHandle) -> serde_json::Value {
         return serde_json::json!({ "ok": true, "action": "page" });
     };
 
-    let dir = app
-        .path()
-        .app_data_dir()
-        .unwrap_or_else(|_| std::env::temp_dir())
+    // Pinned base (see `lib.rs::app_data_base`) so update staging stays with the
+    // rest of the app-data across the 0.12.8 identifier rename.
+    let dir = crate::app_data_base(&app)
+        .unwrap_or_else(std::env::temp_dir)
         .join("updates");
     let _ = fs::create_dir_all(&dir);
     let dest = dir.join(&name);

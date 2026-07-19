@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Lighthouse",
-  "version": "0.12.7",
-  "identifier": "com.lighthouse.app",
+  "version": "0.12.8",
+  "identifier": "app.lhvault",
   "build": {
     "frontendDist": "ui-dist"
   },

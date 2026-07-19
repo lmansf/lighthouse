@@ -3,13 +3,15 @@
 ## 0. Enrollments + naming (owner, wall-clock — start immediately, blocks §5/§7 only)
 - [~] 0.1 Enroll the Apple Developer Program (also unblocks the dormant desktop
   macOS signing item in `docs/maintainer-provisioning.md`); create the App ID
-  for `com.lighthouse.app` and verify the "Lighthouse" listing name.
-  — **ENROLLMENT DONE** (owner, 2026-07-19). Still open: create the App ID for
-  `com.lighthouse.app` + verify the "Lighthouse" listing name in App Store
-  Connect, then record the §0.3 secrets (ASC API key, Distribution cert).
+  for `app.lhvault` and verify the "Lighthouse" listing name.
+  — **ENROLLMENT DONE** + **App ID `app.lhvault` REGISTERED** (owner,
+  2026-07-19; unified with the desktop bundle identifier as of 0.12.8, matching
+  the owned domain lhvault.app). Still open: verify the "Lighthouse" listing
+  name in App Store Connect, then record the §0.3 secrets (ASC API key,
+  Distribution cert).
 - [ ] 0.2 Register the Google Play organization account (D-U-N-S); reserve the
-  `com.lighthouse.app` applicationId (immutable after first upload) and verify
-  the listing name.
+  `app.lhvault` applicationId (immutable after first upload; unified with the
+  desktop/iOS identifier) and verify the listing name.
 - [ ] 0.3 Record store secrets in the repo's secrets-gated pattern (ASC API
   key, Apple Distribution cert, Android upload keystore, Play service
   account) — absent secrets must skip lanes loudly, never half-sign.
