@@ -9,7 +9,11 @@ import {
   shorthands,
   tokens,
 } from "@fluentui/react-components";
-import { PanelLeftContractRegular, PanelLeftExpandRegular } from "@fluentui/react-icons";
+import {
+  PanelLeftContractRegular,
+  PanelLeftExpandRegular,
+  SearchRegular,
+} from "@fluentui/react-icons";
 import { LAYOUT, ACCENTS } from "./theme";
 import { SettingsMenu } from "@/features/settings/SettingsMenu";
 import { UpdateNotice } from "@/features/update/UpdateNotice";
@@ -49,6 +53,20 @@ const useStyles = makeStyles({
     ...shorthands.borderBottom("1px", "solid", tokens.colorNeutralStroke2),
   },
   headerCollapsed: { justifyContent: "center", ...shorthands.padding(0) },
+  // Trailing header controls kept grouped on the right so the brand stays left
+  // even when the touch-only quick-open button is present.
+  headerActions: { display: "flex", alignItems: "center", gap: tokens.spacingHorizontalXS },
+  // Quick-open / command search. Ctrl/Cmd+P covers desktop, so this button only
+  // appears on coarse (touch) pointers, where the finder is otherwise
+  // unreachable. Kept a 44px tap target. Desktop is pixel-unchanged.
+  quickOpenBtn: {
+    display: "none",
+    "@media (pointer: coarse)": {
+      display: "inline-flex",
+      minWidth: "44px",
+      minHeight: "44px",
+    },
+  },
   brand: {
     display: "flex",
     alignItems: "center",
@@ -170,15 +188,30 @@ export function Sidebar({
               <span className={styles.beacon} />
               <Text weight="semibold">Lighthouse</Text>
             </span>
-            <Tooltip content={`Collapse files ${toggleHint}`} relationship="label">
-              <Button
-                appearance="subtle"
-                size="small"
-                icon={<PanelLeftContractRegular />}
-                aria-label="Collapse sidebar"
-                onClick={onToggleCollapsed}
-              />
-            </Tooltip>
+            <span className={styles.headerActions}>
+              <Tooltip content="Quick open a file" relationship="label">
+                <Button
+                  appearance="subtle"
+                  className={styles.quickOpenBtn}
+                  icon={<SearchRegular />}
+                  aria-label="Quick open a file"
+                  // Reuses the exact event the Ctrl/Cmd+P shortcut dispatches,
+                  // so the fuzzy finder is reachable without a keyboard.
+                  onClick={() =>
+                    window.dispatchEvent(new CustomEvent("lighthouse:quick-open"))
+                  }
+                />
+              </Tooltip>
+              <Tooltip content={`Collapse files ${toggleHint}`} relationship="label">
+                <Button
+                  appearance="subtle"
+                  size="small"
+                  icon={<PanelLeftContractRegular />}
+                  aria-label="Collapse sidebar"
+                  onClick={onToggleCollapsed}
+                />
+              </Tooltip>
+            </span>
           </>
         )}
       </div>

@@ -45,6 +45,8 @@ const useStyles = makeStyles({
     top: "0px",
     right: "0px",
     opacity: 0,
+    // Touch can't hover to reveal the PNG-export button; show it on no-hover.
+    "@media (hover: none)": { opacity: 1 },
     transitionProperty: "opacity",
     transitionDuration: tokens.durationFast, // 150ms ease-out (Beam standard)
     transitionTimingFunction: tokens.curveDecelerateMid,

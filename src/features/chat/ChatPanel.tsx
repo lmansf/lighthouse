@@ -543,6 +543,9 @@ const useStyles = makeStyles({
     opacity: 0,
     transitionProperty: "opacity",
     transitionDuration: tokens.durationFaster,
+    // Touch has no hover to reveal this, so show it outright on no-hover
+    // pointers. Desktop (hover: hover) keeps the hover-gated reveal.
+    "@media (hover: none)": { opacity: 1 },
   },
   // Sortable result tables: the whole header cell is the click target, with a
   // subtle pointer + hover and a keyboard focus ring. Border/padding/alignment
@@ -778,7 +781,7 @@ const useStyles = makeStyles({
     animationTimingFunction: "ease-out",
     "@media (prefers-reduced-motion: reduce)": { animationName: "none" },
   },
-  openIcon: { opacity: 0, transition: "opacity 120ms ease", color: tokens.colorNeutralForeground3 },
+  openIcon: { opacity: 0, transition: "opacity 120ms ease", color: tokens.colorNeutralForeground3, "@media (hover: none)": { opacity: 1 } },
   refMeta: { display: "flex", flexDirection: "column", flex: 1, minWidth: 0 },
   // §3: related files as compact GitHub-tag-style chips on a wrapping row.
   refChipRow: {
@@ -810,6 +813,7 @@ const useStyles = makeStyles({
   refChipPct: { color: tokens.colorNeutralForeground3, fontVariantNumeric: "tabular-nums" },
   refChipOpen: {
     opacity: 0,
+    "@media (hover: none)": { opacity: 1 },
     transition: "opacity 120ms ease",
     color: tokens.colorNeutralForeground3,
     display: "inline-flex",
@@ -1026,6 +1030,7 @@ const useStyles = makeStyles({
     gap: "0",
     opacity: 0,
     transition: "opacity 120ms ease",
+    "@media (hover: none)": { opacity: 1 },
   },
   editWrap: { alignSelf: "stretch", display: "flex", flexDirection: "column", gap: tokens.spacingVerticalXS },
   editActions: { display: "flex", justifyContent: "flex-end", gap: tokens.spacingHorizontalS },

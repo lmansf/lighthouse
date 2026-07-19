@@ -1,10 +1,19 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import "./globals.css";
 import { Providers } from "./providers";
 
 export const metadata: Metadata = {
   title: "Lighthouse",
   description: "Curate which files and data sources your AI can see.",
+};
+
+// viewport-fit=cover unlocks env(safe-area-inset-*) so the frame can clear the
+// iPad home indicator / notches. No maximum-scale / user-scalable=no — pinch
+// zoom stays available for accessibility. Desktop is unaffected.
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  viewportFit: "cover",
 };
 
 export default function RootLayout({
