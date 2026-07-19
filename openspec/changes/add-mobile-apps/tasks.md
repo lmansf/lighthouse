@@ -32,10 +32,19 @@
   ios/android) compiles + links on both triples; host build byte-identical.
   1.2b (widen to the other clients + a live handshake from a booted device)
   stays DEFERRED — device lane not stood up.
-- [ ] 1.3 Scaffold a throwaway Tauri mobile app linking the lib crate; port
+- [~] 1.3 Scaffold a throwaway Tauri mobile app linking the lib crate; port
   `SMOKE_DRIVER_JS` and prove the zero-network extractive ask answers on iOS
   simulator and Android emulator (fixture vault seeded via
   `simctl get_app_container` / `adb push`).
+  — **1.3 ENGINE LEG (Android) PASS** (`mobile-spike.yml` `android-engine-smoke`,
+  run `29666664490`, commit `b134739`): the CLI cross-compiled for
+  `x86_64-linux-android`, pushed to a booted API-34 emulator, answered the same
+  grounded `--local --json` ask the desktop headless smoke uses — on-device
+  `exit=0`, answer cites the fixture fact ("42"), `provenance.origin=device`,
+  0 tokens / 0 egress. Proves the pure-Rust extract→retrieve→answer pipeline
+  EXECUTES on the Android runtime. STILL DEFERRED: the iOS-simulator engine leg
+  (no macOS-simulator lane was stood up) and the Tauri-**shell** wrapping on
+  both platforms (needs the §2 crate split + a booted app). See `SPIKE-REPORT.md`.
 - [ ] 1.4 Validate Fluent UI v9 Menu/Popover/Dialog/focus in WKWebView and
   Android System WebView; validate `keyring` apple-native on iOS for the
   sealing secret (file fallback is the recorded alternative).
