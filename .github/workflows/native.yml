@@ -45,12 +45,12 @@ jobs:
         run: cargo run -p lighthouse-core --example chart_eval --locked
 
   # add-mobile-apps §2.3: per-PR Android portability tripwire. Keeps
-  # lighthouse-core cross-compilable for the mobile triple so a non-portable
-  # dependency or a cfg mistake fails HERE (a fast cargo check), not later in
-  # the mobile build. Core only for now — the shell's `-p lighthouse-desktop
-  # --lib` mobile check lands with the §2.1 cfg(desktop) split.
+  # lighthouse-core — and, since the §2.1 cfg(desktop) split, the
+  # lighthouse-desktop LIBRARY (the shared shell the mobile targets link) —
+  # cross-compilable for the mobile triple, so a non-portable dependency or a
+  # cfg mistake fails HERE (a fast cargo check), not later in the mobile build.
   android-tripwire:
-    name: android portability (core)
+    name: android portability (core + shell lib)
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -74,3 +74,7 @@ jobs:
           echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$BIN/aarch64-linux-android24-clang" >> "$GITHUB_ENV"
       - name: cargo check core for aarch64-linux-android
         run: cargo check --target aarch64-linux-android -p lighthouse-core --locked
+      # §2.1 VERIFY: the shell library must compile for Android with the
+      # desktop modules absent (tray/widget/whisper/supervision cfg'd out).
+      - name: cargo check desktop shell LIB for aarch64-linux-android
+        run: cargo check --target aarch64-linux-android -p lighthouse-desktop --lib --locked

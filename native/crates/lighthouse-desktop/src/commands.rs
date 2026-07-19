@@ -1137,7 +1137,9 @@ pub async fn chat_ask(
         );
     // Mark a chat in flight so background-conserve suspension (hide-to-tray /
     // idle) can't kill the local chat server out from under this stream — the
-    // teardown waits until the guard drops at the end of the ask.
+    // teardown waits until the guard drops at the end of the ask. Desktop-only:
+    // mobile has no supervised local servers to conserve.
+    #[cfg(desktop)]
     let _chat_guard = crate::supervise::ChatGuard::new();
     // The whole ask path — single-shot RAG or multi-document synthesis, with
     // pre-answer progress chunks (docs/multi-doc-synthesis.md) — lives in the
@@ -1344,7 +1346,9 @@ pub async fn model_status(app: AppHandle) -> Value {
     // Merge the shell's REAL llama-server GPU launch state (G2) so the AI-models
     // dialog shows "GPU acceleration: on (N layers)" / "off — CPU" instead of a
     // guess. Absent until a chat server has run this session (gpu_status None) —
-    // the UI treats missing fields as "unknown → render nothing".
+    // the UI treats missing fields as "unknown → render nothing". Desktop-only:
+    // mobile has no llama supervision, so the fields stay absent there.
+    #[cfg(desktop)]
     if let (Some(obj), Some(g)) = (
         v.as_object_mut(),
         app.try_state::<crate::supervise::Supervisor>()
@@ -1354,6 +1358,8 @@ pub async fn model_status(app: AppHandle) -> Value {
         obj.insert("gpuLayers".into(), json!(g.layers));
         obj.insert("gpuRunning".into(), json!(g.running));
     }
+    #[cfg(not(desktop))]
+    let _ = &app;
     v
 }
 
@@ -1366,7 +1372,11 @@ pub async fn model_download(app: AppHandle) -> Value {
     // moment the file lands. One watcher at a time; start_local_llm itself
     // enforces the safe-mode gate, and a suspended (hidden/passive) app defers
     // to reconcile's normal resume behavior instead of warming from the
-    // background.
+    // background. Desktop-only: mobile has no llama supervision to warm.
+    #[cfg(not(desktop))]
+    let _ = &app;
+    #[cfg(desktop)]
+    {
     static WATCHING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     if !WATCHING.swap(true, std::sync::atomic::Ordering::SeqCst) {
         tauri::async_runtime::spawn(async move {
@@ -1390,6 +1400,7 @@ pub async fn model_download(app: AppHandle) -> Value {
             WATCHING.store(false, std::sync::atomic::Ordering::SeqCst);
         });
     }
+    }
     v
 }
 
@@ -1400,14 +1411,24 @@ pub async fn model_uninstall() -> Value {
 
 #[tauri::command]
 pub fn open_node(node_id: String) -> Result<Value, String> {
-    let abs =
-        vault::resolve_node_path(&node_id).map_err(|e| err_string(e, "could not open file"))?;
-    match std::fs::metadata(&abs) {
-        Err(_) => Err("file no longer exists".into()),
-        Ok(meta) if !meta.is_file() => Err("not a file".into()),
-        Ok(_) => {
-            crate::open_with_os(&abs);
-            Ok(json!({ "ok": true }))
+    // Mobile has no spawnable OS opener; §3.3 routes "open" through the OS
+    // viewer/share intents instead. Honest error until then, never a silent ok.
+    #[cfg(not(desktop))]
+    {
+        let _ = node_id;
+        return Err("opening files in the OS is not available on this platform yet".into());
+    }
+    #[cfg(desktop)]
+    {
+        let abs =
+            vault::resolve_node_path(&node_id).map_err(|e| err_string(e, "could not open file"))?;
+        match std::fs::metadata(&abs) {
+            Err(_) => Err("file no longer exists".into()),
+            Ok(meta) if !meta.is_file() => Err("not a file".into()),
+            Ok(_) => {
+                crate::open_with_os(&abs);
+                Ok(json!({ "ok": true }))
+            }
         }
     }
 }
@@ -1418,6 +1439,14 @@ pub fn open_node(node_id: String) -> Result<Value, String> {
 /// Works for folders too (a folder reveals/opens in place).
 #[tauri::command]
 pub fn reveal_node(app: AppHandle, node_id: Option<String>) -> Result<Value, String> {
+    // Mobile has no OS file manager to reveal into (§3.3 exposes the vault via
+    // the Files app / SAF instead). Honest error until then.
+    #[cfg(not(desktop))]
+    {
+        let _ = (app, node_id);
+        return Err("revealing files in the OS is not available on this platform yet".into());
+    }
+    #[cfg(desktop)]
     match node_id.filter(|s| !s.trim().is_empty()) {
         None => {
             crate::open_with_os(&crate::vault_dir_setting(&app));
@@ -1438,10 +1467,22 @@ pub fn reveal_node(app: AppHandle, node_id: Option<String>) -> Result<Value, Str
 #[tauri::command]
 pub fn settings_get(app: AppHandle) -> Value {
     let s = settings::read_desktop_settings();
+    // Hotkey + whisper are desktop machinery; the mobile shell reports them as
+    // dead/unsupported so the UI swaps its copy instead of promising a chord.
+    #[cfg(desktop)]
     let hotkey_ok = app
         .try_state::<crate::HotkeyOk>()
         .map(|h| h.0.load(std::sync::atomic::Ordering::Relaxed))
         .unwrap_or(false);
+    #[cfg(not(desktop))]
+    let hotkey_ok = {
+        let _ = &app;
+        false
+    };
+    #[cfg(desktop)]
+    let whisper_permission = crate::whisper::permission_state();
+    #[cfg(not(desktop))]
+    let whisper_permission = "unsupported";
     json!({
         "desktop": true,
         "runOnStartup": s.run_on_startup != Some(false),
@@ -1449,7 +1490,7 @@ pub fn settings_get(app: AppHandle) -> Value {
         "uiMode": s.ui_mode, // null until the first-run chooser is answered
         "whisperMode": s.whisper_mode == Some(true),
         // "granted" | "pending" (macOS Accessibility) | "unsupported" | "unknown"
-        "whisperPermission": crate::whisper::permission_state(),
+        "whisperPermission": whisper_permission,
         "summonShortcut": s
             .summon_shortcut
             .as_deref()
@@ -1504,7 +1545,9 @@ pub fn settings_set(
 ) -> Value {
     // A new summon shortcut must PARSE before anything persists — saving an
     // unregistrable string would strand the user with no hotkey at all.
-    // Empty string = reset to the default chord.
+    // Empty string = reset to the default chord. (Desktop-only: mobile has no
+    // global-shortcut backend; the value persists inert there.)
+    #[cfg(desktop)]
     if let Some(accel) = summon_shortcut.as_deref().map(str::trim) {
         if !accel.is_empty()
             && accel
@@ -1522,11 +1565,14 @@ pub fn settings_set(
             });
         }
     }
+    #[cfg(desktop)]
     let switched_mode = ui_mode.clone();
+    #[cfg(desktop)]
     let shortcut_changed = summon_shortcut.is_some();
     // Remember the working chord so a new one that PARSES but fails to
     // register (another app already owns it) can be rolled back instead of
     // stranding the user hotkey-less with a broken value persisted.
+    #[cfg(desktop)]
     let prev_shortcut = settings::read_desktop_settings().summon_shortcut;
     let s = settings::write_desktop_settings(
         run_on_startup,
@@ -1560,6 +1606,7 @@ pub fn settings_set(
             settings::set_appearance(ap);
         }
     }
+    #[cfg(desktop)]
     if shortcut_changed && !crate::register_summon_shortcut(&app) {
         // The new chord didn't register — restore the previous one so the
         // summon hotkey keeps working, and report the failure to the UI.
@@ -1591,9 +1638,10 @@ pub fn settings_set(
             "summonHotkeyOk": true,
         });
     }
-    // Autostart is CONSENT-FIRST (mirrors the boot gate in main.rs): only
+    // Autostart is CONSENT-FIRST (mirrors the boot gate in desktop::setup): only
     // touch the OS registration once the startup prompt has been answered.
     // Unrelated writes — e.g. the first-run uiMode chooser — must not enroll.
+    #[cfg(desktop)]
     if s.startup_asked == Some(true) {
         crate::apply_autostart(&app, s.run_on_startup != Some(false));
     }
@@ -1606,6 +1654,7 @@ pub fn settings_set(
     // Window work is deferred to the main thread: show_widget may lazily
     // CREATE the widget window, and building a webview from a sync command
     // handler deadlocks the IPC thread against the main loop.
+    #[cfg(desktop)]
     if let Some(mode) = switched_mode.as_deref() {
         let resident = mode == "widget";
         crate::set_widget_resident(&app, resident);
@@ -1628,6 +1677,7 @@ pub fn settings_set(
     // Whisper mode (W3) starts/stops its keyboard hook live — no relaunch.
     // Managed policy widgetHotkeys "off": turning it ON is refused here (the
     // hook must never install); turning it OFF is always honored.
+    #[cfg(desktop)]
     if let Some(on) = whisper_mode {
         if !on || lighthouse_core::policy::hotkeys_allowed() {
             crate::whisper::set_enabled(&app, on);
@@ -1636,13 +1686,25 @@ pub fn settings_set(
     // Semantic search (B2) applies live too: the supervisor's 3 s reconcile
     // starts or stops the embedding server to match the new setting, and its
     // health poll kicks the vector warm pass once the server is up.
+    // (Desktop-only: mobile has no supervised embedding server.)
+    #[cfg(desktop)]
     if semantic_search.is_some() {
         app.state::<crate::supervise::Supervisor>().reconcile(&app);
     }
+    #[cfg(desktop)]
     let hotkey_ok = app
         .try_state::<crate::HotkeyOk>()
         .map(|h| h.0.load(std::sync::atomic::Ordering::Relaxed))
         .unwrap_or(false);
+    #[cfg(not(desktop))]
+    let hotkey_ok = {
+        let _ = &app;
+        false
+    };
+    #[cfg(desktop)]
+    let whisper_permission = crate::whisper::permission_state();
+    #[cfg(not(desktop))]
+    let whisper_permission = "unsupported";
     // Re-read so the response reflects any explorer-width merge above (which the
     // positional writer's returned `s` doesn't know about); the boolean fields
     // are unaffected either way.
@@ -1653,7 +1715,7 @@ pub fn settings_set(
         "startupAsked": s.startup_asked == Some(true),
         "uiMode": s.ui_mode,
         "whisperMode": s.whisper_mode == Some(true),
-        "whisperPermission": crate::whisper::permission_state(),
+        "whisperPermission": whisper_permission,
         "summonShortcut": s
             .summon_shortcut
             .as_deref()
@@ -1773,22 +1835,32 @@ pub fn upload_file(request: tauri::ipc::Request<'_>) -> Result<Value, String> {
 /// preload's read-only update bridge).
 #[tauri::command]
 pub fn update_state(app: AppHandle) -> Value {
-    let newer = app
-        .try_state::<crate::supervise::UpdateState>()
-        .and_then(|s| s.0.lock().ok().and_then(|g| g.clone()));
-    match newer {
-        Some(info) => json!({
-            "phase": "available",
-            "version": info.version,
-            "url": crate::supervise::RELEASE_PAGE_URL,
-            // In-app install = asset + detached signature + a baked-in key to
-            // verify with (updater Phase B); otherwise the button says
-            // "Get it" and opens the releases page.
-            "canInstall": info.asset_url.is_some()
-                && info.sig_url.is_some()
-                && crate::supervise::updater_pubkey().is_some(),
-        }),
-        None => json!({ "phase": "none" }),
+    // Mobile updates are store-mediated (App Store / Play) — the shell never
+    // checks or installs, so the banner permanently reads "no update here".
+    #[cfg(not(desktop))]
+    {
+        let _ = &app;
+        return json!({ "phase": "none" });
+    }
+    #[cfg(desktop)]
+    {
+        let newer = app
+            .try_state::<crate::supervise::UpdateState>()
+            .and_then(|s| s.0.lock().ok().and_then(|g| g.clone()));
+        match newer {
+            Some(info) => json!({
+                "phase": "available",
+                "version": info.version,
+                "url": crate::supervise::RELEASE_PAGE_URL,
+                // In-app install = asset + detached signature + a baked-in key to
+                // verify with (updater Phase B); otherwise the button says
+                // "Get it" and opens the releases page.
+                "canInstall": info.asset_url.is_some()
+                    && info.sig_url.is_some()
+                    && crate::supervise::updater_pubkey().is_some(),
+            }),
+            None => json!({ "phase": "none" }),
+        }
     }
 }
 
@@ -1797,7 +1869,15 @@ pub fn update_state(app: AppHandle) -> Value {
 /// per-platform behavior and fallbacks).
 #[tauri::command]
 pub async fn update_now(app: AppHandle) -> Value {
-    crate::supervise::update_now(app).await
+    #[cfg(not(desktop))]
+    {
+        let _ = &app;
+        return json!({ "ok": false, "error": "updates arrive through the app store on this platform" });
+    }
+    #[cfg(desktop)]
+    {
+        crate::supervise::update_now(app).await
+    }
 }
 
 /// Monotonic vault-change counter (the watcher's generation) so the UI can
@@ -1831,9 +1911,15 @@ pub fn smoke_report(app: tauri::AppHandle, payload: String) {
 // for the blur-hide decision in main.rs. ---
 
 /// Hide the widget (Esc, the ✕ button, or after a result action).
+/// The widget commands stay REGISTERED on mobile — the shared UI may still
+/// invoke them — but their bodies are desktop-only no-ops there (no floating
+/// bar exists to act on).
 #[tauri::command]
 pub fn widget_hide(app: AppHandle) {
+    #[cfg(desktop)]
     crate::hide_widget(&app);
+    #[cfg(not(desktop))]
+    let _ = &app;
 }
 
 /// Summon the widget from the UI (the first-run mode chooser and Preferences
@@ -1843,6 +1929,10 @@ pub fn widget_hide(app: AppHandle) {
 /// deadlocks the IPC handler against the main loop.
 #[tauri::command]
 pub async fn widget_show(app: AppHandle) {
+    #[cfg(not(desktop))]
+    let _ = &app;
+    #[cfg(desktop)]
+    {
     let inner = app.clone();
     let _ = app.run_on_main_thread(move || {
         crate::show_widget(&inner, true);
@@ -1863,6 +1953,7 @@ pub async fn widget_show(app: AppHandle) {
                 .show(|_| {});
         }
     });
+    }
 }
 
 /// Pin = the user's "keep above other windows" toggle: always-on-top AND no
@@ -1872,12 +1963,17 @@ pub async fn widget_show(app: AppHandle) {
 /// everything, unpinned lets other windows cover it until the next summon.
 #[tauri::command]
 pub fn widget_set_pin(app: AppHandle, pinned: bool) {
-    crate::set_widget_pinned(&app, pinned);
-    if let Some(w) = app.get_webview_window(crate::WIDGET_LABEL) {
-        let _ = w.set_always_on_top(pinned);
-        // A pinned bar should survive workspace switches where the OS
-        // supports it (macOS/Linux; a no-op on Windows).
-        let _ = w.set_visible_on_all_workspaces(pinned);
+    #[cfg(not(desktop))]
+    let _ = (&app, pinned);
+    #[cfg(desktop)]
+    {
+        crate::set_widget_pinned(&app, pinned);
+        if let Some(w) = app.get_webview_window(crate::WIDGET_LABEL) {
+            let _ = w.set_always_on_top(pinned);
+            // A pinned bar should survive workspace switches where the OS
+            // supports it (macOS/Linux; a no-op on Windows).
+            let _ = w.set_visible_on_all_workspaces(pinned);
+        }
     }
 }
 
@@ -1886,11 +1982,16 @@ pub fn widget_set_pin(app: AppHandle, pinned: bool) {
 /// can't fill the screen (520 leaves room for a compact streamed answer).
 #[tauri::command]
 pub fn widget_resize(app: AppHandle, height: f64) {
-    const MIN: f64 = 56.0;
-    const MAX: f64 = 520.0;
-    if let Some(w) = app.get_webview_window(crate::WIDGET_LABEL) {
-        let clamped = height.clamp(MIN, MAX);
-        let _ = w.set_size(tauri::LogicalSize::new(crate::WIDGET_WIDTH, clamped));
+    #[cfg(not(desktop))]
+    let _ = (&app, height);
+    #[cfg(desktop)]
+    {
+        const MIN: f64 = 56.0;
+        const MAX: f64 = 520.0;
+        if let Some(w) = app.get_webview_window(crate::WIDGET_LABEL) {
+            let clamped = height.clamp(MIN, MAX);
+            let _ = w.set_size(tauri::LogicalSize::new(crate::WIDGET_WIDTH, clamped));
+        }
     }
 }
 
@@ -1899,6 +2000,9 @@ pub fn widget_resize(app: AppHandle, height: f64) {
 /// is the POINT); Esc/✕ still hide explicitly. Orthogonal to the user's pin.
 #[tauri::command]
 pub fn widget_hold(app: AppHandle, hold: bool) {
+    #[cfg(not(desktop))]
+    let _ = (&app, hold);
+    #[cfg(desktop)]
     if let Some(state) = app.try_state::<crate::WidgetHold>() {
         state.0.store(hold, std::sync::atomic::Ordering::Relaxed);
     }
@@ -1912,10 +2016,15 @@ pub fn show_main(app: AppHandle, seed_question: Option<String>) {
     use tauri::Emitter;
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.show();
-        let _ = w.unminimize();
+        // Minimize/unminimize and llama supervision are desktop concepts; on
+        // mobile the main webview is the only surface and is already up.
+        #[cfg(desktop)]
+        {
+            let _ = w.unminimize();
+            // Resume the local servers if background-conserve had suspended them.
+            crate::resume_servers(&app);
+        }
         let _ = w.set_focus();
-        // Resume the local servers if background-conserve had suspended them.
-        crate::resume_servers(&app);
     }
     if let Some(q) = seed_question.filter(|q| !q.trim().is_empty()) {
         let _ = app.emit_to("main", "ask-question", json!({ "question": q }));
@@ -1926,7 +2035,10 @@ pub fn show_main(app: AppHandle, seed_question: Option<String>) {
 /// anything that wants the literal folder rather than the explorer window).
 #[tauri::command]
 pub fn open_vault_dir(app: AppHandle) {
+    #[cfg(desktop)]
     crate::open_with_os(&crate::vault_dir_setting(&app));
+    #[cfg(not(desktop))]
+    let _ = &app;
 }
 
 /// Open (or raise) the standalone vault-explorer window — the widget's 📁
@@ -1940,6 +2052,11 @@ pub fn open_vault_dir(app: AppHandle) {
 /// run_on_main_thread makes the builder run where GTK/AppKit require it.
 #[tauri::command]
 pub async fn open_explorer(app: AppHandle) {
-    let inner = app.clone();
-    let _ = app.run_on_main_thread(move || crate::open_explorer(&inner));
+    #[cfg(desktop)]
+    {
+        let inner = app.clone();
+        let _ = app.run_on_main_thread(move || crate::open_explorer(&inner));
+    }
+    #[cfg(not(desktop))]
+    let _ = &app;
 }

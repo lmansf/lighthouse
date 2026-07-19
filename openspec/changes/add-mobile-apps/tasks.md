@@ -1,9 +1,12 @@
 # Tasks — mobile apps (one PR per numbered section; §1 gates everything after it)
 
 ## 0. Enrollments + naming (owner, wall-clock — start immediately, blocks §5/§7 only)
-- [ ] 0.1 Enroll the Apple Developer Program (also unblocks the dormant desktop
+- [~] 0.1 Enroll the Apple Developer Program (also unblocks the dormant desktop
   macOS signing item in `docs/maintainer-provisioning.md`); create the App ID
   for `com.lighthouse.app` and verify the "Lighthouse" listing name.
+  — **ENROLLMENT DONE** (owner, 2026-07-19). Still open: create the App ID for
+  `com.lighthouse.app` + verify the "Lighthouse" listing name in App Store
+  Connect, then record the §0.3 secrets (ASC API key, Distribution cert).
 - [ ] 0.2 Register the Google Play organization account (D-U-N-S); reserve the
   `com.lighthouse.app` applicationId (immutable after first upload) and verify
   the listing name.
@@ -48,9 +51,18 @@
   wired, crate-type `staticlib`/`cdylib`/`rlib` added, `windows_subsystem` attr
   moved to the bin. `commands.rs` `crate::` refs resolve unchanged. Desktop
   compile verified by native.yml `cargo build --workspace` (ubuntu+webkit).
-  **PART 2 TODO:** move the desktop-only modules under `src/desktop/` behind
-  `cfg(desktop)` + add the `-p lighthouse-desktop --lib` aarch64-linux-android
-  check (needs the cfg gating first).
+  **PART 2 IMPLEMENTED** (pending CI green): `src/desktop/` now holds
+  boot_guard/supervise/whisper (moved byte-identical), widget.rs (widget +
+  explorer windows, states, summon hotkey, OS open/reveal, autostart), tray.rs
+  (tray + menus + handlers), and mod.rs (desktop plugins/state/event wiring +
+  the desktop half of setup) — the whole module `#[cfg(desktop)]`; lib.rs keeps
+  the portable spine (bootstrap_env, settings, commands registration, pins
+  scheduler, watcher, smoke/diag, transport) with crate-root re-exports so
+  every pre-split `crate::` call site resolves unchanged. Desktop-only command
+  bodies cfg-gated (widget ops no-op; open/reveal + updater answer honestly on
+  mobile). Desktop-only plugins + x11rb excluded from the mobile dep graph
+  (verified via `cargo tree --target aarch64-linux-android`). The
+  `-p lighthouse-desktop --lib` android check added to the tripwire.
 - [ ] 2.2 Commit `tauri ios init` / `tauri android init` projects under
   `gen/`; wire icons via `tauri icon` from the existing source art
   (`scripts/gen-icons.mjs` gains the mobile outputs as committed artifacts).
@@ -60,8 +72,8 @@
   revert.
   — **DONE** (`claude/mobile-s2-crate-split`): `android-tripwire` job added to
   native.yml (NDK resolve + `cargo check --target aarch64-linux-android -p
-  lighthouse-core`); pending first green in CI. The desktop `--lib` android
-  check lands with §2.1 part 2.
+  lighthouse-core`) — first run green. Extended with the §2.1 desktop `--lib`
+  android check in part 2.
 
 ## 3. Mobile shell (engine before UI: §3 lands before §4)
 - [ ] 3.1 `src/mobile/` bootstrap: app-container path mapping for
