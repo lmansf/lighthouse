@@ -73,6 +73,15 @@ Xcode / Ruby / Rust needed on your machine.
 - **A secret "is definitely set" but reads empty in CI** — it's an *Environment*
   secret, not a *Repository* secret, or it's in the wrong repo. All 7 live in
   **`lmansf/lighthouse`** (the repo that runs the workflow), as Repository secrets.
+- **`Authentication credentials are missing or invalid` even when the triple is
+  self-consistent** — the App Store Connect key is an **Individual** key, not a
+  **Team** key. Only Team keys authenticate with an Issuer ID (which `match`
+  uses). Create the key under Integrations → App Store Connect API → **Team
+  Keys** (role **App Manager**) and set all three secrets from it.
+- **`Could not create another Development certificate, reached the maximum`** —
+  Apple caps an account at 2 Development certs. The `certs` lane no longer makes
+  one (App Store builds need only the Distribution cert); if you hit this via
+  `dev_certs`, revoke an unused Development cert in the Developer portal first.
 
 ## App Store Connect app record
 

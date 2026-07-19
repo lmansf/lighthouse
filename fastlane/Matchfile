@@ -10,8 +10,10 @@
 git_url(ENV["MATCH_GIT_URL"])
 storage_mode("git")
 
-# appstore = Distribution cert + App Store provisioning profile. The Fastfile's
-# `certs` lane also fetches a `development` type for local/dev builds.
+# appstore = Distribution cert + App Store provisioning profile — all the App
+# Store / TestFlight pipeline needs. (A `development` cert is fetched only by the
+# optional `ios dev_certs` lane, kept out of `certs` so Apple's 2-cert account
+# cap can't block the bootstrap.)
 type("appstore")
 
 app_identifier(["app.lhvault"])

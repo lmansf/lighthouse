@@ -27,8 +27,20 @@ platform :ios do
   # the secrets are set. Safe to re-run — it reuses existing valid certs.
   lane :certs do
     key = asc_api_key
+    # Only the App Store **Distribution** cert + profile are needed for
+    # TestFlight / App Store builds. We deliberately do NOT create a
+    # `development` cert here: it's for local on-device debug builds we don't do
+    # in CI, and Apple caps an account at 2 Development certs — hitting that cap
+    # would fail the whole bootstrap even though distribution signing is fine.
+    # Use the separate `ios dev_certs` lane below only if you need debug builds.
     match(type: "appstore", api_key: key, readonly: false)
-    match(type: "development", api_key: key, readonly: false)
+  end
+
+  # Optional: development signing for local on-device debug builds. Kept out of
+  # `certs` so a full Development-certificate slot (Apple allows 2) can't block
+  # the App Store bootstrap. Run manually only when you actually need it.
+  lane :dev_certs do
+    match(type: "development", api_key: asc_api_key, readonly: false)
   end
 
   # TestFlight build. Requires gen/apple (tauri ios init) to exist.
