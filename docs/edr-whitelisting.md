@@ -18,7 +18,8 @@ turns off the flagged behaviors org-wide, engine-enforced).
 | | |
 |---|---|
 | Product | Lighthouse |
-| Bundle identifier | `com.lighthouse.app` |
+| Bundle identifier | `app.lhvault` (0.12.8+; was `com.lighthouse.app`) |
+| App-data directory | `…/com.lighthouse.app/` — pinned to the historical name for data continuity, deliberately decoupled from the bundle identifier |
 | Publisher / signing | Authenticode (Windows) + Apple Developer ID (macOS) — **see status below** |
 | Auto-update | Tauri updater, signed manifests verified with a pinned minisign public key (`docs/signing.md`) |
 

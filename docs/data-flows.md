@@ -301,10 +301,12 @@ because any "rag-vault" service exists anywhere:
   settings, and trash beside your files).
 
 Renaming either would strand the state of existing installs, so the names
-stay. Note that the shipping desktop app's **app-data directory is derived
-from the Tauri identifier `com.lighthouse.app`** (see
-`native/crates/lighthouse-desktop/tauri.conf.json`), **not** from
-`rag-vault` — the `rag-vault` string is a historical package/dir name, not a
+stay. The shipping desktop app's **app-data directory is `com.lighthouse.app`**
+— historically derived from the Tauri identifier of the same name, and since
+0.12.8 **pinned** to that path even though the identifier itself became
+`app.lhvault` (`native/crates/lighthouse-desktop/tauri.conf.json`), so the
+rename moved no existing user's settings, sealed keys, or models. It is **not**
+derived from `rag-vault` — that string is a historical package/dir name, not a
 network endpoint or an account namespace.
 
 *Related: `README.md` §Network & privacy · `docs/signing.md` ·

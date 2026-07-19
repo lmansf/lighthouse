@@ -215,8 +215,9 @@ at the one-time [launch-at-login](#launch-at-login) prompt, Lighthouse adds
 itself to login items so it stays running in the tray.
 
 Uninstalling removes the app and leaves your data alone: the settings/logs
-(under the OS app-data directory derived from the identifier
-`com.lighthouse.app` — not the Electron-era `%APPDATA%\rag-vault`) and your
+(under the OS app-data directory `com.lighthouse.app` — pinned to that name for
+continuity even though the app's bundle identifier became `app.lhvault` in
+0.12.8, and not the Electron-era `%APPDATA%\rag-vault`) and your
 vault (`Documents\Lighthouse Vault` by default, or wherever you pointed it)
 are never deleted, so a reinstall picks up where you left off. (The
 Electron uninstaller's one-time "also delete your Lighthouse data?" prompt

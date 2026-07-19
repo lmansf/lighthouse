@@ -74,8 +74,9 @@ authored against them:
 7. **Store accounts:** owner enrolls the Apple Developer Program and registers
    a Google Play **organization** account (D-U-N-S; skips the 12-tester/14-day
    gate). No F-Droid/sideload channel for v1 (revisit after launch). Verify
-   "Lighthouse" listing names and `com.lighthouse.app` availability before
-   first upload — the Play applicationId is immutable.
+   "Lighthouse" listing names and `app.lhvault` availability before
+   first upload — the Play applicationId is immutable. The bundle/app identifier
+   is `app.lhvault` across desktop, iOS, and Android (unified in 0.12.8).
 8. **Crash reporting: none.** Telemetry stays deleted. Mobile gets a
    user-initiated, consent-gated diagnostics/log export instead.
 
