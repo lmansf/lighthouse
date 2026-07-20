@@ -447,7 +447,13 @@ fn warming_label(waited_ms: u64) -> String {
 /// healthy server) it ends immediately. Cancellation is inherited: dropping
 /// the outer answer stream drops this stream mid-sleep.
 fn local_warm_wait(cfg: &ModelCfg) -> Pin<Box<dyn Stream<Item = ChatChunk> + Send>> {
-    let is_local = cfg.provider_id.as_deref() == Some("local");
+    // §3 structural pin: on a mobile shell the private model can never become
+    // healthy (local_model::local_model_supported), so no ask may ever hold
+    // for a warm-up — "warming up…" is unreachable there by construction.
+    // Mobile profiles are already normalized off "local" (profile.rs load);
+    // this guard makes the property hold for ANY cfg a caller passes.
+    let is_local =
+        cfg.provider_id.as_deref() == Some("local") && crate::local_model::supported_here();
     Box::pin(async_stream::stream! {
         if !is_local {
             return;

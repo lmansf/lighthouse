@@ -12,8 +12,12 @@ interface AuthStore {
   /**
    * Client-only step override for onboarding Back navigation. The server stays
    * authoritative on forward moves — every mutation re-syncs `onboarding` from
-   * its response — so this only ever rewinds the visible step; re-submitting
-   * re-advances it.
+   * its response — so this only rewinds the visible step; re-submitting
+   * re-advances it. One deliberate forward exception (§3): the mobile model
+   * slide's "Continue without a key" hops to "inclusion" with NO provider
+   * selected — the profile step machine has no op for that transition, and the
+   * durable finish is the terminal completeOnboarding, so quitting mid-hop
+   * just resumes at select-model.
    */
   setStep: (step: OnboardingState["step"]) => void;
   finishVault: () => Promise<void>;

@@ -112,15 +112,11 @@ pub(crate) fn app_data_base(app: &AppHandle) -> Option<PathBuf> {
 /// window-size proxies. Deliberately distinct from the existing
 /// `desktop: true` compat flag and from LIGHTHOUSE_DESKTOP=1, which both mean
 /// "embedded shell" (the engine relies on that on iOS too) — this field is
-/// WHICH shell.
+/// WHICH shell. Delegates to the core (§3): the same value drives the
+/// engine's own platform verdicts (local-model support, profile defaults),
+/// so shell and engine can never disagree about what they're running on.
 pub(crate) fn platform_kind() -> &'static str {
-    if cfg!(target_os = "ios") {
-        "ios"
-    } else if cfg!(target_os = "android") {
-        "android"
-    } else {
-        "desktop"
-    }
+    lighthouse_core::config::platform_kind()
 }
 
 /// Append a timestamped line to app-data/shell.log — the debugging lifeline

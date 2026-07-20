@@ -2391,7 +2391,10 @@ export function ChatPanel() {
 
   // Who answers, for the provenance line: the local model keeps everything on
   // this device; a hosted provider receives excerpts of files visible to AI.
-  // No provider chosen yet means the private local default (see MODEL_PROVIDERS).
+  // No provider chosen yet answers on this device either way — the private
+  // local default on desktop, the deterministic/extractive path on mobile
+  // (§3: mobile profiles default to NO provider) — matching originOf's
+  // "device" stamp for both.
   const providerId = useAuthStore((s) => s.onboarding.providerId);
   const providerLabel =
     MODEL_PROVIDERS.find((p) => p.id === providerId)?.label ?? "your AI provider";

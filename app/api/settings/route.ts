@@ -2,7 +2,7 @@
  *  prompt flag). No-ops on the web build, where there is no settings file. */
 import { NextResponse } from "next/server";
 import { isSameOrigin } from "@/server/http";
-import { isDesktopApp } from "@/server/config";
+import { isDesktopApp, platformKind } from "@/server/config";
 import {
   readDesktopSettings,
   writeDesktopSettings,
@@ -23,9 +23,9 @@ export async function GET() {
   const s = readDesktopSettings();
   return NextResponse.json({
     desktop: isDesktopApp(),
-    // PARITY: mirrors settings_get (commands.rs) §1 — the twin is always the
-    // web dev flow on a computer, so the form factor is constant "desktop".
-    platform: "desktop",
+    // PARITY: mirrors settings_get (commands.rs) §1 — the engine-reported
+    // form factor (config.ts platformKind, constant "desktop" on the twin).
+    platform: platformKind(),
     runOnStartup: s.runOnStartup !== false, // default on
     startupAsked: Boolean(s.startupAsked),
     uiMode: s.uiMode ?? null, // null until the first-run chooser is answered

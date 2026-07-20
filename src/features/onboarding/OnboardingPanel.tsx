@@ -38,7 +38,7 @@ import {
   makeStyles,
   tokens,
 } from "@fluentui/react-components";
-import { MODEL_PROVIDERS } from "@/contracts";
+import { MODEL_PROVIDERS, MOBILE_NO_PROVIDER_TRUTHS, modelProvidersFor } from "@/contracts";
 import { apiKeyBillingNote } from "@/lib/billingNotes";
 import {
   LocalModelInstallPanel,
@@ -183,6 +183,17 @@ export function OnboardingPanel() {
     }
   }, [onboarding.defaultInclusion]);
 
+  // §3: the mobile roster has no local entry (modelProvidersFor), but the
+  // pre-fetch default above is "local" — re-point it at the roster's first
+  // cloud vendor the moment the form factor resolves. A user who already
+  // picked a cloud provider keeps their pick; on desktop this never fires.
+  useEffect(() => {
+    if (platform === "desktop" || providerId !== "local") return;
+    const first = modelProvidersFor(platform)[0];
+    setProviderId(first.id);
+    setModelId(first.models[0]);
+  }, [platform, providerId]);
+
   const provider = MODEL_PROVIDERS.find((p) => p.id === providerId)!;
 
   /** Open the vault folder in the OS file manager (desktop only; reuses the
@@ -198,7 +209,17 @@ export function OnboardingPanel() {
 
   /** Commit the model choice (shared by the Continue button and Enter-to-submit). */
   function continueFromModel() {
-    if (providerId !== "local" && !apiKey) return;
+    if (providerId !== "local" && !apiKey) {
+      // §3 mobile: "Continue without a key" — finish setup with NO provider
+      // selected. Deterministic asks answer either way, and the first saved
+      // key later becomes the selection (Settings → AI models runs the same
+      // selectModel seam). The hop is client-side (there is no engine op for
+      // select-model → inclusion without a selection); the durable finish is
+      // the terminal completeOnboarding on the next slide. Desktop keeps the
+      // hard key gate — its escape hatch is the private model radio.
+      if (platform !== "desktop") setStep("inclusion");
+      return;
+    }
     void selectModel(providerId, modelId, apiKey);
   }
 
@@ -284,9 +305,11 @@ export function OnboardingPanel() {
   if (onboarding.step === "select-model") {
     // Private-first framing: the on-device model is the hero (first, default);
     // the cloud vendors are grouped honestly, one click away. Local vs cloud is
-    // just `id === "local"`.
-    const isLocal = providerId === "local";
-    const cloudProviders = MODEL_PROVIDERS.filter((p) => p.id !== "local");
+    // just `id === "local"` — §3: gated on the desktop form factor too, a
+    // structural pin that keeps LocalModelInstallPanel unreachable on mobile
+    // (where modelProvidersFor drops the local entry entirely).
+    const isLocal = platform === "desktop" && providerId === "local";
+    const cloudProviders = modelProvidersFor(platform).filter((p) => p.id !== "local");
     const isAllowed = (id: string) => (allowedProviders ? allowedProviders.includes(id) : true);
     const firstAllowedCloud = cloudProviders.find((p) => isAllowed(p.id)) ?? cloudProviders[0];
     const localModelId = MODEL_PROVIDERS.find((p) => p.id === "local")!.models[0];
@@ -305,34 +328,42 @@ export function OnboardingPanel() {
         </Text>
         <Title3>Choose your model</Title3>
         <Text className={styles.hint}>
-          Private by default — your files stay on this device unless you choose a cloud model.
+          {/* §3: the mobile slide leads with the two truths — narration needs a
+              cloud key, and the private model is a desktop thing. */}
+          {platform === "desktop"
+            ? "Private by default — your files stay on this device unless you choose a cloud model."
+            : MOBILE_NO_PROVIDER_TRUTHS}
         </Text>
 
         {/* Hero: the on-device private model comes first. Cloud is the honest
-            alternative right beneath it — no dark pattern, one click away. */}
-        <RadioGroup
-          value={isLocal ? "local" : "cloud"}
-          onChange={(_, d) => {
-            if (d.value === "local") {
-              setProviderId("local");
-              setModelId(localModelId);
-            } else {
-              setProviderId(firstAllowedCloud.id);
-              setModelId(firstAllowedCloud.models[0]);
-            }
-          }}
-        >
-          <Radio
-            value="local"
-            disabled={!isAllowed("local")}
-            label="Private — runs on this device. No API key; nothing leaves this device. (Recommended)"
-          />
-          <Radio
-            value="cloud"
-            disabled={!cloudProviders.some((p) => isAllowed(p.id))}
-            label="Cloud model — sends excerpts of your included files to a provider you choose, to answer."
-          />
-        </RadioGroup>
+            alternative right beneath it — no dark pattern, one click away.
+            §3: desktop-only — the mobile roster has no local entry, so there
+            is no local/cloud choice to make and the radio group is gone. */}
+        {platform === "desktop" && (
+          <RadioGroup
+            value={isLocal ? "local" : "cloud"}
+            onChange={(_, d) => {
+              if (d.value === "local") {
+                setProviderId("local");
+                setModelId(localModelId);
+              } else {
+                setProviderId(firstAllowedCloud.id);
+                setModelId(firstAllowedCloud.models[0]);
+              }
+            }}
+          >
+            <Radio
+              value="local"
+              disabled={!isAllowed("local")}
+              label="Private — runs on this device. No API key; nothing leaves this device. (Recommended)"
+            />
+            <Radio
+              value="cloud"
+              disabled={!cloudProviders.some((p) => isAllowed(p.id))}
+              label="Cloud model — sends excerpts of your included files to a provider you choose, to answer."
+            />
+          </RadioGroup>
+        )}
 
         {isLocal ? (
           /* onboarding copy: the panel's download button doubles as the
@@ -406,7 +437,16 @@ export function OnboardingPanel() {
             </Field>
           </>
         )}
-        <ContinueSetupButton providerId={providerId} disabled={!isLocal && !apiKey} />
+        {platform === "desktop" ? (
+          <ContinueSetupButton providerId={providerId} disabled={!isLocal && !apiKey} />
+        ) : (
+          /* §3 mobile: never hard-block — with no key the primary action
+             finishes setup with NO provider selected (continueFromModel);
+             deterministic answers work from day zero. */
+          <Button appearance="primary" type="submit">
+            {apiKey ? "Continue" : "Continue without a key"}
+          </Button>
+        )}
         <Button appearance="subtle" type="button" onClick={() => setStep("vault")}>
           Back
         </Button>

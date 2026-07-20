@@ -130,6 +130,43 @@ fn uninstall_pending() -> bool {
     models_dir().join(UNINSTALL_MARKER).exists()
 }
 
+/// §3 verdict (pure, host-testable): can the private local model run on this
+/// form factor? Only the desktop shell can — it owns llama-server and the
+/// ~4.2 GB weights. Phone-class hardware gets a first-class "unsupported"
+/// status instead of a download that can never finish; anything unrecognized
+/// fails closed. KEEP IN SYNC with src/server/localModel.ts::localModelSupported.
+pub fn local_model_supported(platform_kind: &str) -> bool {
+    platform_kind == "desktop"
+}
+
+/// The verdict applied to THIS build (config::platform_kind) — the guard every
+/// engine entry point below uses, shared with synth's warm-wait short-circuit.
+pub(crate) fn supported_here() -> bool {
+    local_model_supported(crate::config::platform_kind())
+}
+
+/// The honest mobile answer for every model op: status "unsupported", with any
+/// stray on-disk bytes (a leftover `.gguf` synced/copied from a desktop data
+/// dir, or an orphaned `.part`) surfaced via `removable` + `total` so the
+/// existing uninstall affordance can offer to free them ("frees N GB").
+fn unsupported_status() -> Progress {
+    let partial_bytes = partial_size();
+    let stray: u64 = model_gguf_files()
+        .iter()
+        .filter_map(|p| fs::metadata(p).ok())
+        .map(|m| m.len())
+        .sum::<u64>()
+        + partial_bytes.unwrap_or(0);
+    Progress {
+        status: "unsupported".to_string(),
+        received: 0,
+        total: stray,
+        error: None,
+        removable: Some(stray > 0),
+        partial_bytes,
+    }
+}
+
 // --- shell-facing helpers (the desktop shell owns llama-server and the
 // uninstall handshake; these expose the same discovery the picker uses so the
 // two always agree) ---
@@ -166,7 +203,7 @@ pub fn uninstall_marker_path() -> PathBuf {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Progress {
-    pub status: String, // ready | absent | downloading | uninstalling | error
+    pub status: String, // ready | absent | downloading | uninstalling | error | unsupported (§3: mobile)
     pub received: u64,
     pub total: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -269,6 +306,12 @@ fn set_progress(p: Progress) {
 
 /// Current model state; "ready" the moment an installed model is present.
 pub fn model_status() -> Progress {
+    // §3: on a mobile shell the private model is UNSUPPORTED — a first-class
+    // status, not an error the UI retries. Reported before anything else so
+    // no mobile caller ever sees "absent" (which reads as "installable").
+    if !supported_here() {
+        return unsupported_status();
+    }
     if uninstall_pending() {
         return Progress::simple("uninstalling");
     }
@@ -309,6 +352,19 @@ pub fn model_status() -> Progress {
 /// on its own — a rapid second click must not silently discard gigabytes of
 /// resumable progress.
 pub fn request_uninstall() -> Progress {
+    // §3: on a mobile shell nothing ever mmaps the weights (llama-server is
+    // desktop-only) and no shell watcher exists to honor the marker handshake
+    // — a marker would leave "uninstalling" pending forever. Delete stray
+    // files directly instead: this is the engine half of the UI's existing
+    // "remove the leftover file (frees N GB)" affordance.
+    if !supported_here() {
+        for f in model_gguf_files() {
+            let _ = fs::remove_file(f);
+        }
+        let _ = fs::remove_file(part_path());
+        let _ = fs::remove_file(uninstall_marker_path());
+        return unsupported_status();
+    }
     {
         let mut guard = PROGRESS.lock().unwrap();
         let downloading = guard
@@ -349,6 +405,13 @@ pub fn request_uninstall() -> Progress {
 /// and since sync Tauri commands execute on the main thread, that panic took
 /// the whole app down the moment the user clicked Install.
 pub fn start_download() -> Progress {
+    // §3 refusal: phone-class hardware can't run the ~4.2 GB private model,
+    // so the engine never starts the download there. The UI already offers no
+    // Install affordance on mobile (the roster drops the local entry) — this
+    // is the engine-side guarantee for any other caller.
+    if !supported_here() {
+        return unsupported_status();
+    }
     let gen;
     {
         // Check-and-mark under one lock so two rapid calls can't both spawn.
@@ -575,4 +638,31 @@ async fn download(gen: u64) -> anyhow::Result<()> {
     }
     fs::rename(&tmp, &dest)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// §3 pinned verdict: the private model runs ONLY on the desktop shell,
+    /// and anything unrecognized fails closed. KEEP IN SYNC with the
+    /// localModelSupported pin in test/localModelPlatform.test.mjs.
+    #[test]
+    fn local_model_supported_only_on_desktop() {
+        assert!(local_model_supported("desktop"));
+        assert!(!local_model_supported("ios"));
+        assert!(!local_model_supported("android"));
+        assert!(!local_model_supported(""));
+        assert!(!local_model_supported("web"));
+    }
+
+    /// This build's own guard agrees with the config platform signal — the
+    /// same assert pins the mobile arm under a cross-compiled `cargo test`.
+    #[test]
+    fn supported_here_matches_platform_kind() {
+        assert_eq!(
+            supported_here(),
+            crate::config::platform_kind() == "desktop"
+        );
+    }
 }

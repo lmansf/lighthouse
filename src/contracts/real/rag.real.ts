@@ -1,6 +1,8 @@
 /** Real RagService — talks to the local `/api/rag` route (filesystem-backed). */
 import type { PlatformKind, RagService } from "../services";
-import { rememberPlatform } from "@/shell/desktopBridge";
+// Relative (not "@/") so the node test loader can resolve this file — the
+// contracts barrel is imported by engine-level suites without webpack aliases.
+import { rememberPlatform } from "../../shell/desktopBridge";
 import type {
   Board,
   BoardCardRef,

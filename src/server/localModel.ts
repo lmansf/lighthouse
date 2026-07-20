@@ -37,7 +37,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import https from "node:https";
-import { resourcesDir } from "./config";
+import { platformKind, resourcesDir } from "./config";
 import { recordEgress, PURPOSE_MODEL_DOWNLOAD } from "./egress";
 
 /** Hugging Face GGUF for the bundled private model (overridable for self-hosters). */
@@ -139,7 +139,59 @@ function uninstallPending(): boolean {
   return existsSync(join(modelsDir(), UNINSTALL_MARKER));
 }
 
-export type ModelStatus = "ready" | "absent" | "downloading" | "uninstalling" | "error";
+/**
+ * §3 verdict (pure): can the private local model run on this form factor?
+ * Only the desktop shell can — it owns llama-server and the ~4.2 GB weights.
+ * Phone-class hardware gets a first-class "unsupported" status instead of a
+ * download that can never finish; anything unrecognized fails closed.
+ * KEEP IN SYNC with local_model.rs::local_model_supported.
+ */
+export function localModelSupported(platformKind: string): boolean {
+  return platformKind === "desktop";
+}
+
+/** The verdict applied to THIS engine (config.ts platformKind — constant
+ *  "desktop" on the twin, so the mobile guards below are structurally dead
+ *  here; they exist to stay line-parallel with local_model.rs). */
+function supportedHere(): boolean {
+  return localModelSupported(platformKind());
+}
+
+/**
+ * The honest mobile answer for every model op: status "unsupported", with any
+ * stray on-disk bytes (a leftover `.gguf` synced/copied from a desktop data
+ * dir, or an orphaned `.part`) surfaced via `removable` + `total` so the
+ * existing uninstall affordance can offer to free them ("frees N GB").
+ * PARITY: mirrors local_model.rs::unsupported_status.
+ */
+function unsupportedStatus(): Progress {
+  const partialBytes = partialSize() || undefined;
+  let stray = partialBytes ?? 0;
+  for (const dir of searchDirs()) {
+    try {
+      for (const n of readdirSync(dir)) {
+        if (n.toLowerCase().endsWith(".gguf")) stray += statSync(join(dir, n)).size;
+      }
+    } catch {
+      /* dir may not exist yet */
+    }
+  }
+  return {
+    status: "unsupported",
+    received: 0,
+    total: stray,
+    removable: stray > 0,
+    partialBytes,
+  };
+}
+
+export type ModelStatus =
+  | "ready"
+  | "absent"
+  | "downloading"
+  | "uninstalling"
+  | "error"
+  | "unsupported"; // §3: mobile shells — the private model can't run there
 
 interface Progress {
   status: ModelStatus;
@@ -199,6 +251,11 @@ function resumableBytes(): number {
 
 /** Current model state; reports "ready" the moment an installed model is present. */
 export function modelStatus(): Progress {
+  // §3: on a mobile shell the private model is UNSUPPORTED — a first-class
+  // status, not an error the UI retries. Reported before anything else so no
+  // mobile caller ever sees "absent" (which reads as "installable").
+  // PARITY: mirrors local_model.rs::model_status.
+  if (!supportedHere()) return unsupportedStatus();
   if (uninstallPending()) return { status: "uninstalling", received: 0, total: 0 };
   if (progress.status === "downloading") return progress;
   if (installedModel()) return { status: "ready", received: 0, total: 0 };
@@ -227,6 +284,23 @@ export function modelStatus(): Progress {
  * resumable progress.
  */
 export function requestUninstall(): Progress {
+  // §3: on a mobile shell nothing ever mmaps the weights (llama-server is
+  // desktop-only) and no shell watcher exists to honor the marker handshake —
+  // delete stray files directly instead. PARITY: local_model.rs::request_uninstall.
+  if (!supportedHere()) {
+    for (const dir of searchDirs()) {
+      try {
+        for (const n of readdirSync(dir)) {
+          if (n.toLowerCase().endsWith(".gguf")) rmSync(join(dir, n), { force: true });
+        }
+      } catch {
+        /* dir may not exist yet */
+      }
+    }
+    rmSync(partPath(), { force: true });
+    rmSync(join(modelsDir(), UNINSTALL_MARKER), { force: true });
+    return unsupportedStatus();
+  }
   if (progress.status === "downloading") {
     pauseRequested = true;
     abortInFlight?.(new Error("download paused"));
@@ -259,6 +333,9 @@ export function requestUninstall(): Progress {
  * A kept `.part` from an earlier attempt is resumed via HTTP Range.
  */
 export function startDownload(): Progress {
+  // §3 refusal: phone-class hardware can't run the ~4.2 GB private model, so
+  // the engine never starts the download there. PARITY: local_model.rs::start_download.
+  if (!supportedHere()) return unsupportedStatus();
   if (progress.status === "downloading") return progress;
   if (installedModel()) return { status: "ready", received: 0, total: 0 };
   pauseRequested = false;

@@ -47,6 +47,7 @@ import {
 import { shouldAutoOpenTour } from "./tourGating";
 import { BEAM_SWEEP } from "@/shell/theme";
 import { platformKind, type PlatformKind } from "@/shell/desktopBridge";
+import { MOBILE_NO_PROVIDER_TRUTHS } from "@/contracts";
 
 /**
  * The former Quick Start's localStorage once-flag. SummonHint keys its "wait
@@ -107,11 +108,13 @@ const stepsFor = (platform: PlatformKind): TourStep[] => [
     icon: <BrainCircuitRegular />,
     title: "Private on-device, or cloud",
     // §3: the private model does not exist on mobile — the tour must not
-    // advertise it there.
+    // advertise it there. The two truths are the shared canonical string
+    // (byte-identical with the empty-provider states in the chat header
+    // switcher, Settings → AI models, and the onboarding model slide).
     body:
       platform === "desktop"
         ? "Choose who answers: a model that runs entirely on this device, or a cloud provider. This line always tells you whether anything leaves this device."
-        : "Add a cloud API key to enable narrated answers — the private model runs on the desktop app. This line always tells you whether anything leaves this device.",
+        : `${MOBILE_NO_PROVIDER_TRUTHS} This line always tells you whether anything leaves this device.`,
     position: "above",
   },
   {

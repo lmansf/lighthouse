@@ -123,6 +123,26 @@ pub fn is_desktop_app() -> bool {
         .unwrap_or(false)
 }
 
+/// The ONE engine-reported platform signal (iOS field patch 1 §1): the form
+/// factor this engine was compiled into — `"desktop"`, `"ios"`, or
+/// `"android"`. Deliberately distinct from [`is_desktop_app`] /
+/// LIGHTHOUSE_DESKTOP=1, which mean "embedded shell" (true on iOS too): this
+/// is WHICH shell. Compile-time by design — no UA sniffing, no window-size
+/// proxies — so pure platform verdicts (local_model::local_model_supported,
+/// profile's default provider) can be unit-tested against all three values
+/// while call sites read the build's own. PARITY: the TS twin's
+/// config.ts::platformKind is the constant "desktop" (it only runs in the web
+/// dev flow on a computer).
+pub fn platform_kind() -> &'static str {
+    if cfg!(target_os = "ios") {
+        "ios"
+    } else if cfg!(target_os = "android") {
+        "android"
+    } else {
+        "desktop"
+    }
+}
+
 /// Root of the bundled offline resources (local model binary).
 pub fn resources_dir() -> PathBuf {
     match env_trimmed("LIGHTHOUSE_RESOURCES_PATH") {
@@ -230,4 +250,26 @@ pub fn parse_ms(s: &str) -> Option<i64> {
         return Some(d.and_hms_opt(0, 0, 0)?.and_utc().timestamp_millis());
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// §1/§3 pin: the platform signal is exactly one of the three literals the
+    /// UI branches on, and it agrees with the compile target — under a mobile
+    /// cross-compile (`cargo test --target aarch64-apple-ios`) the same assert
+    /// pins the mobile arms.
+    #[test]
+    fn platform_kind_matches_compile_target() {
+        let k = platform_kind();
+        assert!(["desktop", "ios", "android"].contains(&k));
+        if cfg!(target_os = "ios") {
+            assert_eq!(k, "ios");
+        } else if cfg!(target_os = "android") {
+            assert_eq!(k, "android");
+        } else {
+            assert_eq!(k, "desktop");
+        }
+    }
 }

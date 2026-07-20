@@ -68,11 +68,11 @@ test("switchChoices lists ONLY configured providers — keyed clouds in catalog 
 
   // Keyed clouds only (local weights absent): catalog order, never the keys.
   assert.deepEqual(
-    switchChoices(["openai", "anthropic"], false).map((c) => c.id),
+    switchChoices(["openai", "anthropic"], false, "desktop").map((c) => c.id),
     ["anthropic", "openai"],
   );
   // The private model leads once ready, carrying its on-device hint.
-  const withLocal = switchChoices(["openai"], true);
+  const withLocal = switchChoices(["openai"], true, "desktop");
   assert.deepEqual(
     withLocal.map((c) => c.id),
     ["local", "openai"],
@@ -80,9 +80,24 @@ test("switchChoices lists ONLY configured providers — keyed clouds in catalog 
   assert.equal(withLocal[0].hint, LOCAL_HINT);
   assert.equal(withLocal[1].hint, undefined, "only the private model carries a hint");
   // Nothing configured (older engine: keyedProviders absent) ⇒ empty menu body.
-  assert.deepEqual(switchChoices(undefined, false), []);
+  assert.deepEqual(switchChoices(undefined, false, "desktop"), []);
   // An unknown keyed id (removed vendor) never surfaces a dead row.
-  assert.deepEqual(switchChoices(["cohere"], false), []);
+  assert.deepEqual(switchChoices(["cohere"], false, "desktop"), []);
+});
+
+test("switchChoices §3: a mobile shell never offers the private model — even 'ready'", () => {
+  const { switchChoices } = helpers;
+
+  // The platform filter is structural: localReady=true (impossible on a real
+  // mobile engine, which reports "unsupported") still yields no local row.
+  for (const platform of ["ios", "android"]) {
+    assert.deepEqual(
+      switchChoices(["openai", "anthropic"], true, platform).map((c) => c.id),
+      ["anthropic", "openai"],
+      `${platform}: local must be GONE, keyed clouds intact`,
+    );
+    assert.deepEqual(switchChoices(undefined, true, platform), []);
+  }
 });
 
 test("switchArgs: first model on a provider hop, kept model on a re-pick, NEVER a key", () => {
