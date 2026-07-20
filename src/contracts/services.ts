@@ -6,6 +6,13 @@
  * (vector store, identity provider, model API) behind the same surface.
  */
 
+/**
+ * Form factor of the running shell, reported by the engine on every
+ * capability surface (settings + rag list). Distinct from `desktop: boolean`,
+ * which means "embedded shell" (true on iOS too) and stays for compat.
+ */
+export type PlatformKind = "desktop" | "ios" | "android";
+
 import type {
   Board,
   BoardCardRef,
@@ -268,11 +275,13 @@ export interface RagService {
   restoreFromVault(token: RestoreToken): Promise<void>;
   /**
    * Capabilities of the running deployment. `desktop` is true only in the
-   * packaged desktop app, where filesystem-backed actions (opening a cited file
-   * natively, linking by path) work; a plain web deployment reports false so the
-   * UI can hide affordances the server would refuse.
+   * packaged shell (desktop OR mobile — it means "embedded shell", and the
+   * engine relies on it on iOS too), where filesystem-backed actions work; a
+   * plain web deployment reports false so the UI can hide affordances the
+   * server would refuse. `platform` is the §1 form-factor signal — the ONE
+   * value UI platform gates key off (no UA sniffing, no window-size proxies).
    */
-  capabilities(): Promise<{ desktop: boolean }>;
+  capabilities(): Promise<{ desktop: boolean; platform: PlatformKind }>;
   /**
    * Read-only snapshot of the machine-scope managed policy: which settings an
    * org-deployed policy.json locks. The UI disables the matching controls and

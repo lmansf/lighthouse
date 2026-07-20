@@ -36,6 +36,8 @@ import { useAuthStore } from "@/stores/useAuthStore";
 import { useRagStore } from "@/stores/useRagStore";
 import { shortProviderLabel, switchArgs, switchChoices } from "@/lib/providerSwitch";
 import { apiKeyBillingNote } from "@/lib/billingNotes";
+import { MOBILE_NO_PROVIDER_TRUTHS } from "@/contracts";
+import { platformKind } from "@/shell/desktopBridge";
 
 const useStyles = makeStyles({
   // Compact header trigger, sized like the EgressShield's (subtle, no bulk).
@@ -93,7 +95,11 @@ export function ProviderSwitch({
     }
   }, []);
 
-  const choices = switchChoices(onboarding.keyedProviders, localReady);
+  // §3: platform-filtered roster — on a mobile shell the local entry is gone
+  // (platformKind is primed from the first capability payload well before the
+  // chat header renders).
+  const platform = platformKind();
+  const choices = switchChoices(onboarding.keyedProviders, localReady, platform);
   const isAllowed = (id: string) => (allowedProviders ? allowedProviders.includes(id) : true);
   const label = shortProviderLabel(onboarding.providerId);
 
@@ -166,7 +172,12 @@ export function ProviderSwitch({
           ))}
           {choices.length === 0 && (
             <Text size={200} className={styles.menuNote}>
-              No other AI models are set up yet — add one under Manage….
+              {/* §3 mobile empty state: exactly the two truths (narration
+                  needs a cloud key; the private model is a desktop thing) —
+                  the Manage… item below is the way in. */}
+              {platform === "desktop"
+                ? "No other AI models are set up yet — add one under Manage…."
+                : MOBILE_NO_PROVIDER_TRUTHS}
             </Text>
           )}
           {allowedProviders && (

@@ -8,7 +8,8 @@
  * contracts barrel) so node tests can load this without dragging the real
  * services in — same precedent as lib/evidencePack.ts.
  */
-import { MODEL_PROVIDERS } from "../contracts/mocks/providers";
+import { MODEL_PROVIDERS, modelProvidersFor } from "../contracts/mocks/providers";
+import type { PlatformKind } from "../contracts/services";
 
 export interface SwitchChoice {
   id: string;
@@ -27,14 +28,20 @@ export const LOCAL_HINT = "runs on this device";
  * a stored key (`keyedProviders` carries key PRESENCE only, never keys). The
  * active provider gets no special seat: an unkeyed cloud selection still
  * yields a menu of real, one-click destinations only.
+ *
+ * §3: the roster is platform-filtered (modelProvidersFor) — on a mobile shell
+ * the local entry is GONE regardless of `localReady` (the engine reports
+ * "unsupported" there, so localReady can't be true anyway; the filter makes
+ * it structural).
  */
 export function switchChoices(
   keyedProviders: string[] | undefined,
   localReady: boolean,
+  platform: PlatformKind,
 ): SwitchChoice[] {
   const keyed = new Set(keyedProviders ?? []);
   const out: SwitchChoice[] = [];
-  for (const p of MODEL_PROVIDERS) {
+  for (const p of modelProvidersFor(platform)) {
     if (p.id === "local") {
       if (localReady) out.push({ id: p.id, label: p.label, hint: LOCAL_HINT });
     } else if (keyed.has(p.id)) {

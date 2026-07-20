@@ -89,6 +89,23 @@ fn is_known_provider(id: &str) -> bool {
     id == LOCAL_PROVIDER_ID || id == "anthropic" || crate::llm::remote_provider(id).is_some()
 }
 
+/// §3: what a profile is normalized TO when its stored provider can't answer
+/// here — pure for tests. The desktop keeps the historic private-local
+/// default; a mobile shell (where the local model is unsupported) gets NO
+/// provider at all: deterministic asks still answer (origin "device"), and
+/// the first saved cloud key becomes the selection via the ordinary
+/// select_model path. KEEP IN SYNC with profile.ts::defaultProviderFor.
+fn default_provider_for(platform_kind: &str) -> (Option<String>, Option<String>) {
+    if crate::local_model::local_model_supported(platform_kind) {
+        (
+            Some(LOCAL_PROVIDER_ID.to_string()),
+            Some(LOCAL_MODEL_ID.to_string()),
+        )
+    } else {
+        (None, None)
+    }
+}
+
 fn load() -> StoredProfile {
     let mut p: StoredProfile = read_json(&profile_path(), StoredProfile::default());
     let mut dirty = false;
@@ -118,12 +135,21 @@ fn load() -> StoredProfile {
         p.api_key = None;
         dirty = true;
     }
-    if let Some(id) = p.provider_id.as_deref() {
-        if !is_known_provider(id) {
-            p.provider_id = Some(LOCAL_PROVIDER_ID.to_string());
-            p.model_id = Some(LOCAL_MODEL_ID.to_string());
-            dirty = true;
-        }
+    // Normalize a provider that can't answer HERE: one this build never wired
+    // (see is_known_provider), or — §3 — "local" on a mobile shell, where the
+    // private model is unsupported (a profile synced/copied from a desktop
+    // install, or written pre-patch). Either way the fallback is platform-
+    // aware: local on desktop, NO provider on mobile.
+    let unusable = match p.provider_id.as_deref() {
+        Some(id) if !is_known_provider(id) => true,
+        Some(LOCAL_PROVIDER_ID) => !crate::local_model::supported_here(),
+        _ => false,
+    };
+    if unusable {
+        let (provider_id, model_id) = default_provider_for(crate::config::platform_kind());
+        p.provider_id = provider_id;
+        p.model_id = model_id;
+        dirty = true;
     }
     if dirty {
         save(&p);
@@ -340,4 +366,26 @@ fn resolve_key(provider_id: &str, p: &StoredProfile) -> Option<String> {
         return p.api_key.clone().filter(|k| !k.is_empty());
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// §3 pinned fallback: desktop normalizes to the private local default;
+    /// a mobile shell normalizes to NO provider (deterministic answers only,
+    /// until the first saved key selects a cloud provider). KEEP IN SYNC with
+    /// the defaultProviderFor pin in test/localModelPlatform.test.mjs.
+    #[test]
+    fn default_provider_is_platform_aware() {
+        assert_eq!(
+            default_provider_for("desktop"),
+            (
+                Some(LOCAL_PROVIDER_ID.to_string()),
+                Some(LOCAL_MODEL_ID.to_string())
+            )
+        );
+        assert_eq!(default_provider_for("ios"), (None, None));
+        assert_eq!(default_provider_for("android"), (None, None));
+    }
 }

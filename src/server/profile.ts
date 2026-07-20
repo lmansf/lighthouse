@@ -8,8 +8,9 @@
  * returned to the client (only `hasApiKey` / `keyedProviders`).
  */
 import type { OnboardingState } from "@/contracts";
-import { profilePath, readJson, writeJson } from "./config";
+import { platformKind, profilePath, readJson, writeJson } from "./config";
 import { REMOTE_PROVIDERS, remoteProvider } from "./llm";
+import { localModelSupported } from "./localModel";
 import { providerAllowed } from "./policy";
 import { getProviderKey, setProviderKey } from "./secrets";
 
@@ -62,6 +63,23 @@ const KNOWN_PROVIDER_IDS = new Set([
   ...REMOTE_PROVIDERS.map((p) => p.id),
 ]);
 
+/**
+ * §3: what a profile is normalized TO when its stored provider can't answer
+ * here — pure for tests. The desktop keeps the historic private-local default;
+ * a mobile shell (where the local model is unsupported) gets NO provider at
+ * all: deterministic asks still answer (origin "device"), and the first saved
+ * cloud key becomes the selection via the ordinary selectModel path.
+ * KEEP IN SYNC with profile.rs::default_provider_for.
+ */
+export function defaultProviderFor(platform: string): {
+  providerId: string | null;
+  modelId: string | null;
+} {
+  return localModelSupported(platform)
+    ? { providerId: LOCAL_PROVIDER_ID, modelId: LOCAL_MODEL_ID }
+    : { providerId: null, modelId: null };
+}
+
 function load(): StoredProfile {
   let p: StoredProfile = { ...EMPTY, ...readJson(profilePath(), EMPTY) };
   let dirty = false;
@@ -88,8 +106,17 @@ function load(): StoredProfile {
     p = { ...p, apiKeys: undefined, apiKey: undefined };
     dirty = true;
   }
-  if (p.providerId && !KNOWN_PROVIDER_IDS.has(p.providerId)) {
-    p = { ...p, providerId: LOCAL_PROVIDER_ID, modelId: LOCAL_MODEL_ID };
+  // Normalize a provider that can't answer HERE: one this build never wired
+  // (KNOWN_PROVIDER_IDS), or — §3 — "local" on a mobile shell, where the
+  // private model is unsupported. Either way the fallback is platform-aware:
+  // local on desktop, NO provider on mobile. PARITY: profile.rs::load.
+  const unusable =
+    Boolean(p.providerId) &&
+    (!KNOWN_PROVIDER_IDS.has(p.providerId!) ||
+      (p.providerId === LOCAL_PROVIDER_ID && !localModelSupported(platformKind())));
+  if (unusable) {
+    const d = defaultProviderFor(platformKind());
+    p = { ...p, providerId: d.providerId, modelId: d.modelId };
     dirty = true;
   }
   if (dirty) save(p);

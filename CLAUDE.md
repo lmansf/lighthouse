@@ -2,19 +2,28 @@
 
 ## Versioning policy (owner directive, 2026-07-14)
 
-Stay on the **0.11.x** line: every release is a PATCH bump — 0.11.1, 0.11.2,
-0.11.3, … — regardless of whether it carries fixes or new features. Only a
-**major overhaul** (a rewrite-scale change, explicitly approved by the owner)
-moves the minor version (0.12.0). Do not bump minor for ordinary feature
-releases.
+Stay on the current line (**0.13.x** as of the iPad/touch release): every
+release is a PATCH bump — 0.13.1, 0.13.2, … — regardless of whether it
+carries fixes or new features. Only a **major overhaul** (a rewrite-scale
+change, explicitly approved by the owner) moves the minor version (0.14.0).
+Do not bump minor for ordinary feature releases.
 
-## Release mechanics (post-0.11.0 — Electron retired)
+## Release mechanics (post-0.11.0 — Electron retired; iOS added in 0.13.x)
 
-- Version stamps live in FIVE files and must move together:
+- Version stamps live in SEVEN files and must move together:
   `package.json`, `package-lock.json` (×2 stamps), `native/Cargo.toml`
   (workspace version), `native/crates/lighthouse-desktop/tauri.conf.json`,
-  and `native/Cargo.lock` (every `lighthouse-*` crate — FIVE as of 0.12.6;
-  the workspace grew past the original three, so bump by pattern, not count).
+  `native/Cargo.lock` (every `lighthouse-*` crate — FIVE as of 0.12.6;
+  the workspace grew past the original three, so bump by pattern, not count),
+  and the two committed iOS project stamps:
+  `native/crates/lighthouse-desktop/gen/apple/project.yml`
+  (CFBundleShortVersionString + CFBundleVersion) and
+  `native/crates/lighthouse-desktop/gen/apple/lighthouse-desktop_iOS/Info.plist`
+  (CFBundleShortVersionString + CFBundleVersion). The committed
+  CFBundleVersion is a baseline: the `ios-build` job re-syncs
+  CFBundleShortVersionString from package.json and stamps CFBundleVersion
+  with the CI run number at build time (TestFlight build uniqueness), so
+  drift here breaks local builds' honesty, not CI.
 - Pipeline: bump → PR → squash-merge to main → `desktop-release.yml`
   (workflow_dispatch on main; empty `release_tag` derives v<version> from
   package.json; runs JS checks + the 3-OS `release-smoke.yml` gate, creates

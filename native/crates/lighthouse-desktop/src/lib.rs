@@ -106,6 +106,19 @@ pub(crate) fn app_data_base(app: &AppHandle) -> Option<PathBuf> {
     Some(base)
 }
 
+/// The ONE platform signal (iOS field patch 1 §1): the shell's form factor,
+/// carried on every capability surface (settings_get / rag_list) so the UI
+/// branches on a single engine-reported value — no UA sniffing, no
+/// window-size proxies. Deliberately distinct from the existing
+/// `desktop: true` compat flag and from LIGHTHOUSE_DESKTOP=1, which both mean
+/// "embedded shell" (the engine relies on that on iOS too) — this field is
+/// WHICH shell. Delegates to the core (§3): the same value drives the
+/// engine's own platform verdicts (local-model support, profile defaults),
+/// so shell and engine can never disagree about what they're running on.
+pub(crate) fn platform_kind() -> &'static str {
+    lighthouse_core::config::platform_kind()
+}
+
 /// Append a timestamped line to app-data/shell.log — the debugging lifeline
 /// for GUI builds, where stderr goes nowhere (0.6.3 field report: widget mode
 /// silently absent on one Windows machine, zero clues). Rotates once past

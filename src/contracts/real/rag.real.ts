@@ -1,5 +1,8 @@
 /** Real RagService — talks to the local `/api/rag` route (filesystem-backed). */
-import type { RagService } from "../services";
+import type { PlatformKind, RagService } from "../services";
+// Relative (not "@/") so the node test loader can resolve this file — the
+// contracts barrel is imported by engine-level suites without webpack aliases.
+import { rememberPlatform } from "../../shell/desktopBridge";
 import type {
   Board,
   BoardCardRef,
@@ -41,10 +44,19 @@ import type {
   SigninStatus,
 } from "../types";
 
-async function getTree(): Promise<{ sources: DataSource[]; nodes: FileNode[]; desktop: boolean }> {
+async function getTree(): Promise<{
+  sources: DataSource[];
+  nodes: FileNode[];
+  desktop: boolean;
+  platform?: PlatformKind;
+}> {
   const r = await fetch("/api/rag", { cache: "no-store" });
   if (!r.ok) throw new Error(`GET /api/rag ${r.status}`);
-  return r.json();
+  const t = await r.json();
+  // Prime the ambient platform helper (§1) from the earliest payload every
+  // window fetches; absent field (older engine) ⇒ helper stays "desktop".
+  rememberPlatform(t.platform);
+  return t;
 }
 
 async function post(body: unknown): Promise<Record<string, unknown>> {
@@ -352,8 +364,9 @@ class RealRagService implements RagService {
     await post({ op: "restore", token });
   }
 
-  async capabilities(): Promise<{ desktop: boolean }> {
-    return { desktop: (await getTree()).desktop };
+  async capabilities(): Promise<{ desktop: boolean; platform: PlatformKind }> {
+    const t = await getTree();
+    return { desktop: t.desktop, platform: t.platform ?? "desktop" };
   }
 
   async policy(): Promise<PolicySnapshot> {

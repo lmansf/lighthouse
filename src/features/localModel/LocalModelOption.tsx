@@ -27,7 +27,10 @@ import {
   PauseRegular,
 } from "@fluentui/react-icons";
 
-type ModelStatus = "ready" | "absent" | "downloading" | "uninstalling" | "error";
+// "unsupported" (§3) is what a mobile engine reports — these components never
+// mount there (the platform-filtered roster has no local entry), so it needs
+// no rendering branch, but the payload type stays honest.
+type ModelStatus = "ready" | "absent" | "downloading" | "uninstalling" | "error" | "unsupported";
 
 interface ModelState {
   status: ModelStatus;
@@ -191,8 +194,10 @@ const useStyles = makeStyles({
   },
 });
 
-/** Human-readable size, e.g. "4.2 GB" / "512 MB". */
-function humanBytes(n: number): string {
+/** Human-readable size, e.g. "4.2 GB" / "512 MB". Exported for the §3 mobile
+ *  stray-weights row in Settings → AI models (this panel's usual home never
+ *  mounts there). */
+export function humanBytes(n: number): string {
   if (!n) return "";
   const gb = n / 1_000_000_000;
   if (gb >= 1) return `${gb.toFixed(1)} GB`;

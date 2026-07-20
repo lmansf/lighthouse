@@ -117,6 +117,19 @@ export function isDesktopApp(): boolean {
 }
 
 /**
+ * The ONE engine-reported platform signal (iOS field patch 1 §1): the form
+ * factor this engine runs on. PARITY: mirrors config.rs::platform_kind, where
+ * the value is baked in at compile time (cfg!(target_os)). The TS twin only
+ * ever runs in the web dev flow on a computer, so its value is the constant
+ * "desktop" — kept as a function (not a literal at call sites) so the twins'
+ * capability payloads and platform verdicts (localModel.ts, profile.ts,
+ * synth.ts) stay line-parallel with the Rust engine's.
+ */
+export function platformKind(): "desktop" | "ios" | "android" {
+  return "desktop";
+}
+
+/**
  * Root of the bundled offline resources (the local model).
  * The desktop shell sets LIGHTHOUSE_RESOURCES_PATH to its bundled resources dir
  * in the packaged app; otherwise we fall back to `./resources` in the repo so it

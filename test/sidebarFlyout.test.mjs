@@ -241,7 +241,12 @@ test("SectionRail: focusable header rows, aria-expanded, roving tabindex, Beam f
 test("SectionFlyout: a labeled region with a Close button, Esc, click-outside, and its own resizer", () => {
   const fly = read("src/shell/SectionFlyout.tsx");
   assert.match(fly, /id=\{FLYOUT_PANEL_ID\}/, "the panel id matches the rail's aria-controls");
-  assert.match(fly, /role="region"/, "the flyout is a labeled region");
+  // §5: a labeled region inline; the compact sheet presents as a modal dialog.
+  assert.match(
+    fly,
+    /role=\{compact \? "dialog" : "region"\}/,
+    "the flyout is a labeled region (a dialog as the compact sheet)",
+  );
   assert.match(fly, /aria-label="Close"/, "the X is labeled Close");
   assert.match(fly, /"Escape"[\s\S]*close\(\)/, "Esc closes");
   assert.match(fly, /pointerdown/, "a click-outside listener closes");

@@ -2,7 +2,7 @@
 export * from "./types";
 export * from "./services";
 
-export { MODEL_PROVIDERS } from "./mocks/providers";
+export { MODEL_PROVIDERS, MOBILE_NO_PROVIDER_TRUTHS, modelProvidersFor } from "./mocks/providers";
 export { SEED_NODES, SEED_SOURCES } from "./mocks/files";
 
 // Real, local-first implementations (filesystem vault + local retrieval +

@@ -213,6 +213,29 @@ fn http_client() -> &'static reqwest::Client {
     CLIENT.get_or_init(reqwest::Client::new)
 }
 
+/// §4 instrumentation: the FULL error chain, not just the top Display line.
+/// `reqwest::Error` prints as "error sending request for url (…)" while the
+/// actual cause — DNS, connect refused, or a TLS failure like "invalid peer
+/// certificate: UnknownIssuer" (the first-round iOS field report: no trust
+/// anchors) — sits in the `source()` chain. Every transport error the ask
+/// note and the Settings key test show goes through here, so the user (and a
+/// bug report) sees the real reason. Kept after the TLS fix on purpose: the
+/// surface is the diagnosis tool for whatever breaks next.
+fn error_chain(e: &(dyn std::error::Error + 'static)) -> String {
+    let mut out = e.to_string();
+    let mut src = e.source();
+    while let Some(cause) = src {
+        let line = cause.to_string();
+        // Skip layers that add no words (some wrappers Display their source).
+        if !line.is_empty() && !out.contains(&line) {
+            out.push_str(": ");
+            out.push_str(&line);
+        }
+        src = cause.source();
+    }
+    out
+}
+
 /// Prior turns with empty content dropped and the sequence trimmed to begin
 /// with a user turn (Anthropic rejects otherwise; mirrored for the local path).
 fn prior_turns(history: &[ChatTurn]) -> Vec<&ChatTurn> {
@@ -834,7 +857,7 @@ async fn stream_chat_completions(
         {
             Ok(r) => r,
             Err(e) => {
-                yield Err(anyhow::anyhow!(e.to_string()));
+                yield Err(anyhow::anyhow!(error_chain(&e)));
                 return;
             }
         };
@@ -884,7 +907,9 @@ pub async fn validate_key(provider_id: &str, api_key: &str) -> Result<(), String
         return Err("this provider doesn't use an API key".to_string());
     };
     match req.timeout(Duration::from_secs(10)).send().await {
-        Err(e) => Err(format!("couldn't reach the provider — {e}")),
+        // §4: full chain (error_chain) — "couldn't reach the provider" alone
+        // hid the actual transport cause (DNS vs connect vs TLS trust).
+        Err(e) => Err(format!("couldn't reach the provider — {}", error_chain(&e))),
         Ok(res) if res.status().is_success() || res.status().as_u16() == 429 => Ok(()),
         Ok(res) => {
             let status = res.status().as_u16();
@@ -919,7 +944,7 @@ fn sse_deltas(
             let chunk = match chunk {
                 Ok(c) => c,
                 Err(e) => {
-                    yield Err(anyhow::anyhow!(e.to_string()));
+                    yield Err(anyhow::anyhow!(error_chain(&e)));
                     return;
                 }
             };
@@ -990,7 +1015,7 @@ async fn stream_claude(
         {
             Ok(r) => r,
             Err(e) => {
-                yield Err(anyhow::anyhow!(e.to_string()));
+                yield Err(anyhow::anyhow!(error_chain(&e)));
                 return;
             }
         };
@@ -1172,7 +1197,7 @@ async fn stream_local(
                 return;
             }
             Ok(Err(e)) => {
-                yield Err(anyhow::anyhow!(e.to_string()));
+                yield Err(anyhow::anyhow!(error_chain(&e)));
                 return;
             }
             Ok(Ok(r)) => r,
@@ -1540,5 +1565,36 @@ mod tests {
         assert_eq!(cost_estimate_usd(&c, Usage { input: 100, output: 50 }), None);
         // A keyless/model-free cfg (no model id) is likewise unpriced.
         assert_eq!(cost_estimate_usd(&cfg(None, None), Usage { input: 100, output: 50 }), None);
+    }
+
+    /// §4 pin: transport errors surface their FULL cause chain — the top line
+    /// alone ("error sending request…") hid the actual failure (the iOS TLS
+    /// trust report). KEEP IN SYNC with the errorChain pin in
+    /// test/errorChain.test.mjs.
+    #[test]
+    fn error_chain_walks_sources_and_skips_echoes() {
+        #[derive(Debug)]
+        struct Layer(&'static str, Option<Box<Layer>>);
+        impl std::fmt::Display for Layer {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(self.0)
+            }
+        }
+        impl std::error::Error for Layer {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                self.1.as_deref().map(|l| l as _)
+            }
+        }
+
+        let tls = Layer("invalid peer certificate: UnknownIssuer", None);
+        let send = Layer("error sending request", Some(Box::new(tls)));
+        assert_eq!(
+            error_chain(&send),
+            "error sending request: invalid peer certificate: UnknownIssuer"
+        );
+        // A wrapper that already Displays its source adds no duplicate line.
+        let inner = Layer("connection refused", None);
+        let echo = Layer("connect failed: connection refused", Some(Box::new(inner)));
+        assert_eq!(error_chain(&echo), "connect failed: connection refused");
     }
 }

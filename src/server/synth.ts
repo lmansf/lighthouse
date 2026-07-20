@@ -33,7 +33,8 @@ import {
   type LocalHealth,
   type Ctx,
 } from "./llm";
-import { isInstalled as isModelInstalled } from "./localModel";
+import { isInstalled as isModelInstalled, localModelSupported } from "./localModel";
+import { platformKind } from "./config";
 import { readDesktopSettings } from "./settings";
 import { metaIntent, renderMeta } from "./meta";
 import { isProfileable, profileChart, tableProfile } from "./tableProfile";
@@ -344,7 +345,12 @@ export function warmingLabel(waitedMs: number): string {
  *  fallback. Any other provider (or a healthy server) returns immediately.
  *  KEEP IN SYNC with synth.rs::local_warm_wait. */
 async function* localWarmWait(cfg: ModelCfg): AsyncGenerator<ChatChunk> {
-  if (cfg.providerId !== "local") return;
+  // §3 structural pin: on a mobile shell the private model can never become
+  // healthy (localModelSupported), so no ask may ever hold for a warm-up —
+  // "warming up…" is unreachable there by construction. PARITY: mirrors
+  // synth.rs::local_warm_wait's guard (dead on the twin: platformKind() is
+  // constant "desktop").
+  if (cfg.providerId !== "local" || !localModelSupported(platformKind())) return;
   const installed = isModelInstalled();
   let waited = 0;
   for (;;) {

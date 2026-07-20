@@ -259,9 +259,11 @@ export function ModeChooserAuto({ onSettled }: { onSettled: () => void }) {
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
         if (!alive) return;
-        // Only a desktop install that has never chosen gets asked; anything
-        // else (web build, already chosen, unreadable settings) settles now.
-        if (d && d.desktop === true && d.uiMode == null) {
+        // Only a DESKTOP-form-factor install that has never chosen gets asked
+        // (§1 platform gate): window/widget/tray/summon-hotkey are desktop
+        // concepts, so the dialog never mounts on ios/android. Anything else
+        // (web build, mobile, already chosen, unreadable settings) settles now.
+        if (d && d.platform === "desktop" && d.uiMode == null) {
           setHotkeyOk(d.summonHotkeyOk !== false);
           setOpen(true);
         } else settle();

@@ -48,12 +48,15 @@ import {
 } from "@fluentui/react-icons";
 import {
   MODEL_PROVIDERS,
+  MOBILE_NO_PROVIDER_TRUTHS,
+  modelProvidersFor,
   ragService,
   type AuditSnapshot,
   type SigninStart,
   type SigninStatus,
 } from "@/contracts";
-import { LocalModelInstallPanel } from "@/features/localModel/LocalModelOption";
+import { platformKind } from "@/shell/desktopBridge";
+import { LocalModelInstallPanel, humanBytes } from "@/features/localModel/LocalModelOption";
 import { apiKeyBillingNote, signinBillingNote } from "@/lib/billingNotes";
 import { RULE_ACTION_LABEL } from "@/features/explorer/FolderRulesDialog";
 import { START_TOUR_EVENT } from "@/features/help/FirstRunTour";
@@ -237,7 +240,13 @@ function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean
   // rejects server-side regardless).
   const allowedProviders = useRagStore((s) => s.policy?.locks.allowedProviders ?? null);
 
-  const [providerId, setProviderId] = useState(onboarding.providerId ?? MODEL_PROVIDERS[0].id);
+  // §3 form factor: on a mobile shell the roster has no local entry, so the
+  // dialog's default selection is the roster's first CLOUD vendor and the
+  // local/cloud radio never renders. platformKind() is primed from the first
+  // capability payload, long before Settings can open.
+  const platform = platformKind();
+  const roster = modelProvidersFor(platform);
+  const [providerId, setProviderId] = useState(onboarding.providerId ?? roster[0].id);
   const [modelId, setModelId] = useState(onboarding.modelId ?? firstModelFor(providerId));
   const [apiKey, setApiKey] = useState("");
   const [saving, setSaving] = useState(false);
@@ -255,11 +264,50 @@ function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean
   const [signinError, setSigninError] = useState<string | null>(null);
   const [signinBusy, setSigninBusy] = useState(false);
 
+  // §3 stray weights on a mobile shell (a data dir synced/copied from a
+  // desktop install): the roster has no local entry, so the install panel —
+  // the usual uninstall home — never mounts. Probe /api/model on open
+  // (engine reports "unsupported" with the leftover byte count) and offer
+  // the one honest affordance: remove the file, free the space. Desktop
+  // never probes here — its panel owns the uninstall flow.
+  const [strayBytes, setStrayBytes] = useState(0);
+  useEffect(() => {
+    if (!open || platform === "desktop") return;
+    let alive = true;
+    void fetch("/api/model")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (alive) setStrayBytes(d?.status === "unsupported" && d.removable ? d.total || 0 : 0);
+      })
+      .catch(() => {
+        /* transient — the row just doesn't show this open */
+      });
+    return () => {
+      alive = false;
+    };
+  }, [open, platform]);
+
+  async function removeStray() {
+    try {
+      // The existing uninstall seam; on mobile the engine deletes directly
+      // (no marker handshake) and reports the post-delete state.
+      const r = await fetch("/api/model", { method: "DELETE" });
+      if (r.ok) {
+        const d = await r.json();
+        setStrayBytes(d?.removable ? d.total || 0 : 0);
+      }
+    } catch {
+      /* keep the row — the user can retry */
+    }
+  }
+
   // Re-sync the fields to the saved settings on the open transition.
   useEffect(() => {
     if (!open) return;
     const current = useAuthStore.getState().onboarding;
-    const pid = current.providerId ?? MODEL_PROVIDERS[0].id;
+    // §3: same platform-aware default as the initial state — never "local"
+    // on a mobile shell (the engine normalizes a stored "local" away there).
+    const pid = current.providerId ?? modelProvidersFor(platformKind())[0].id;
     setProviderId(pid);
     setModelId(current.modelId ?? firstModelFor(pid));
     setApiKey("");
@@ -338,9 +386,11 @@ function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean
 
   // Private-first framing (matches onboarding): the on-device model is the hero;
   // cloud vendors are the honest, one-click alternative grouped below. Local vs
-  // cloud is just `id === "local"`.
-  const isLocal = providerId === "local";
-  const cloudProviders = MODEL_PROVIDERS.filter((p) => p.id !== "local");
+  // cloud is just `id === "local"` — §3: gated on the desktop form factor too,
+  // a structural pin that keeps LocalModelInstallPanel unreachable on mobile
+  // (where the roster drops the local entry entirely).
+  const isLocal = platform === "desktop" && providerId === "local";
+  const cloudProviders = roster.filter((p) => p.id !== "local");
   const isAllowed = (id: string) => (allowedProviders ? allowedProviders.includes(id) : true);
   const firstAllowedCloud = cloudProviders.find((p) => isAllowed(p.id)) ?? cloudProviders[0];
   const localModelId = MODEL_PROVIDERS.find((p) => p.id === "local")!.models[0];
@@ -442,34 +492,55 @@ function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean
           <DialogContent>
             <div className={styles.modelFields}>
               {/* Private-first: the on-device model is the hero; cloud vendors
-                  are the honest, one-click alternative grouped below. */}
-              <RadioGroup
-                value={isLocal ? "local" : "cloud"}
-                onChange={(_, d) => {
-                  if (d.value === "local") {
-                    setProviderId("local");
-                    setModelId(localModelId);
-                  } else {
-                    setProviderId(firstAllowedCloud.id);
-                    setModelId(firstAllowedCloud.models[0]);
-                  }
-                  // Keys are per-provider: never carry a half-typed key (or a
-                  // stale test verdict) across a switch.
-                  setApiKey("");
-                  setTestResult(null);
-                }}
-              >
-                <Radio
-                  value="local"
-                  disabled={!isAllowed("local")}
-                  label="Private — runs on this device. No API key; nothing leaves your computer. (Recommended)"
-                />
-                <Radio
-                  value="cloud"
-                  disabled={!cloudProviders.some((p) => isAllowed(p.id))}
-                  label="Cloud model — sends excerpts of your included files to a provider you choose, to answer."
-                />
-              </RadioGroup>
+                  are the honest, one-click alternative grouped below. §3: the
+                  radio is desktop-only — the mobile roster has no local entry,
+                  so there is no local/cloud choice; with no provider selected
+                  yet, the dialog leads with the two truths instead. */}
+              {platform === "desktop" ? (
+                <RadioGroup
+                  value={isLocal ? "local" : "cloud"}
+                  onChange={(_, d) => {
+                    if (d.value === "local") {
+                      setProviderId("local");
+                      setModelId(localModelId);
+                    } else {
+                      setProviderId(firstAllowedCloud.id);
+                      setModelId(firstAllowedCloud.models[0]);
+                    }
+                    // Keys are per-provider: never carry a half-typed key (or a
+                    // stale test verdict) across a switch.
+                    setApiKey("");
+                    setTestResult(null);
+                  }}
+                >
+                  <Radio
+                    value="local"
+                    disabled={!isAllowed("local")}
+                    label="Private — runs on this device. No API key; nothing leaves this device. (Recommended)"
+                  />
+                  <Radio
+                    value="cloud"
+                    disabled={!cloudProviders.some((p) => isAllowed(p.id))}
+                    label="Cloud model — sends excerpts of your included files to a provider you choose, to answer."
+                  />
+                </RadioGroup>
+              ) : (
+                <>
+                  {!onboarding.providerId && (
+                    <Text className={styles.prefHint}>{MOBILE_NO_PROVIDER_TRUTHS}</Text>
+                  )}
+                  {strayBytes > 0 && (
+                    <div className={styles.testKeyRow}>
+                      <Text className={styles.prefHint}>
+                        A leftover private-model file is on this device — it can&apos;t run here.
+                      </Text>
+                      <Button size="small" appearance="secondary" onClick={() => void removeStray()}>
+                        Remove — frees {humanBytes(strayBytes)}
+                      </Button>
+                    </div>
+                  )}
+                </>
+              )}
               {allowedProviders && (
                 <Text className={styles.prefHint}>
                   Provider choice is managed by your organization.

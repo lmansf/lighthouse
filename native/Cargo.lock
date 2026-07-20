@@ -3181,6 +3181,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tower-service",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -3799,7 +3800,7 @@ dependencies = [
 
 [[package]]
 name = "lighthouse-cli"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "futures",
  "lighthouse-core",
@@ -3811,7 +3812,7 @@ dependencies = [
 
 [[package]]
 name = "lighthouse-core"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -3850,7 +3851,7 @@ dependencies = [
 
 [[package]]
 name = "lighthouse-desktop"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -3882,7 +3883,7 @@ dependencies = [
 
 [[package]]
 name = "lighthouse-mcp"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "futures",
  "lighthouse-core",
@@ -3894,7 +3895,7 @@ dependencies = [
 
 [[package]]
 name = "lighthouse-server"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -5483,6 +5484,7 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-streams 0.4.2",
  "web-sys",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -7713,6 +7715,15 @@ dependencies = [
  "pkg-config",
  "soup3-sys",
  "system-deps",
+]
+
+[[package]]
+name = "webpki-roots"
+version = "1.0.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7dcd9d09a39985f5344844e66b0c530a33843579125f23e21e9f0f220850f22a"
+dependencies = [
+ "rustls-pki-types",
 ]
 
 [[package]]

@@ -7,8 +7,11 @@ import { SectionRail } from "./SectionRail";
 import { SectionFlyout } from "./SectionFlyout";
 import { sectionById } from "./sidebarSections";
 import { LAYOUT } from "./theme";
+import { usePaneLayout } from "./paneLayout";
 import { useVaultTree } from "./useVaultTree";
 import { useSidebarFlyout } from "@/stores/useSidebarFlyout";
+import { useChatStore } from "@/stores/useChatStore";
+import { INSPECT_FILE_EVENT } from "@/lib/citePreview";
 import { StartupPrompt } from "@/features/startup/StartupPrompt";
 
 const useStyles = makeStyles({
@@ -72,6 +75,34 @@ const useStyles = makeStyles({
   },
   // While dragging, keep the hairline lit even as the cursor leaves the strip.
   handleActive: { "::after": { backgroundColor: tokens.colorBrandStroke1 } },
+  // --- §5 compact drawer (mobile shells < 700px only — paneLayout) ----------
+  // The scrim: full-screen, above main, below the drawer. Tapping it closes.
+  scrim: {
+    position: "fixed",
+    inset: 0,
+    zIndex: 20,
+    backgroundColor: "rgba(0, 0, 0, 0.4)",
+  },
+  // The drawer panel hosting the SAME Sidebar component the desktop column
+  // renders. Width is its own (≤85vw) — the persisted explorerWidth is
+  // deliberately NOT applied here (and with no resize handle, never written).
+  // The inherited --sidebar-w:100% makes the Sidebar fill this panel.
+  drawer: {
+    position: "fixed",
+    top: 0,
+    bottom: 0,
+    left: 0,
+    zIndex: 21,
+    width: "min(320px, 85vw)",
+    display: "flex",
+    boxShadow: tokens.shadow64,
+    // Notch/home-indicator clearance inside the overlay (the root's padding
+    // doesn't reach a fixed-position child).
+    paddingTop: "var(--lh-safe-top)",
+    paddingBottom: "var(--lh-safe-bottom)",
+    paddingLeft: "var(--lh-safe-left)",
+    backgroundColor: tokens.colorNeutralBackground2,
+  },
 });
 
 interface AppShellProps {
@@ -124,6 +155,84 @@ export function AppShell({ sidebar, main }: AppShellProps) {
       return false;
     }
   });
+
+  // --- §5 compact layout (mobile shells < 700px — see paneLayout.ts) --------
+  // On desktop `layout.compact` is false at every window width (the verdict's
+  // structural pin), so everything below the drawer effects renders the exact
+  // pre-§5 tree there.
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const layout = usePaneLayout(drawerOpen);
+  // Live mirror for the [] -mounted listeners below (shortcuts, reveal).
+  const compactRef = useRef(layout.compact);
+  compactRef.current = layout.compact;
+
+  // Open requests come from the chat header's drawer button (the chat pane is
+  // the screen — the shell owns no chrome of its own there).
+  useEffect(() => {
+    const onOpen = () => setDrawerOpen(true);
+    window.addEventListener("lighthouse:open-drawer", onOpen);
+    return () => window.removeEventListener("lighthouse:open-drawer", onOpen);
+  }, []);
+
+  // Esc closes the drawer — unless a section sheet is up (it owns Esc first).
+  useEffect(() => {
+    if (!layout.drawerVisible) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      if (useSidebarFlyout.getState().openSection) return;
+      e.preventDefault();
+      setDrawerOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [layout.drawerVisible]);
+
+  // Auto-close: the drawer yields the screen the moment its action lands —
+  // a file opened into the inspector, or an ask sent (any transcript growth).
+  useEffect(() => {
+    if (!layout.drawerVisible) return;
+    const close = () => setDrawerOpen(false);
+    window.addEventListener(INSPECT_FILE_EVENT, close);
+    return () => window.removeEventListener(INSPECT_FILE_EVENT, close);
+  }, [layout.drawerVisible]);
+  const messageCount = useChatStore((s) => s.messages.length);
+  const prevMessageCount = useRef(messageCount);
+  useEffect(() => {
+    if (messageCount > prevMessageCount.current && layout.drawerVisible) setDrawerOpen(false);
+    prevMessageCount.current = messageCount;
+  }, [messageCount, layout.drawerVisible]);
+
+  // Swipe-left on the drawer dismisses it (scrim tap and Esc are the other
+  // two paths). A plain horizontal-delta check — no gesture library.
+  const touchStartX = useRef<number | null>(null);
+  const onDrawerTouchStart = (e: React.TouchEvent) => {
+    touchStartX.current = e.touches[0]?.clientX ?? null;
+  };
+  const onDrawerTouchEnd = (e: React.TouchEvent) => {
+    const start = touchStartX.current;
+    touchStartX.current = null;
+    const end = e.changedTouches[0]?.clientX;
+    if (start != null && typeof end === "number" && end - start < -40) setDrawerOpen(false);
+  };
+
+  // Ask box vs the on-screen keyboard: the OS keyboard overlays a WKWebView
+  // rather than resizing it, so pad the main column by the covered height
+  // (visualViewport). Compact-only; 0 on desktop and whenever it's closed.
+  const [keyboardInset, setKeyboardInset] = useState(0);
+  useEffect(() => {
+    if (!layout.compact || typeof window === "undefined" || !window.visualViewport) return;
+    const vv = window.visualViewport;
+    const update = () =>
+      setKeyboardInset(Math.max(0, Math.round(window.innerHeight - vv.height - vv.offsetTop)));
+    update();
+    vv.addEventListener("resize", update);
+    vv.addEventListener("scroll", update);
+    return () => {
+      vv.removeEventListener("resize", update);
+      vv.removeEventListener("scroll", update);
+      setKeyboardInset(0);
+    };
+  }, [layout.compact]);
   // Persist the collapsed choice so it survives a relaunch.
   useEffect(() => {
     try {
@@ -209,7 +318,12 @@ export function AppShell({ sidebar, main }: AppShellProps) {
         const sfw = d?.flyoutWidth?.[m];
         if (typeof sfw === "number") flyoutHydrate.flyoutWidth = sfw;
         const sof = d?.openFlyout;
-        if (typeof sof === "string" && sectionById(sof)) flyoutHydrate.openSection = sof;
+        // §5: on a compact shell a persisted open section would materialize as
+        // a full-screen sheet over first paint — sections open by gesture only
+        // there, so the remembered id is not replayed.
+        if (typeof sof === "string" && sectionById(sof) && !compactRef.current) {
+          flyoutHydrate.openSection = sof;
+        }
         useSidebarFlyout.getState().hydrate(flyoutHydrate);
       })
       .catch(() => {
@@ -314,7 +428,9 @@ export function AppShell({ sidebar, main }: AppShellProps) {
       if (e.key === "n" || e.key === "N") fire("lighthouse:new-chat");
       else if (e.key === "b" || e.key === "B") {
         e.preventDefault();
-        setCollapsed((c) => !c);
+        // §5: in the compact arrangement the sidebar IS the drawer.
+        if (compactRef.current) setDrawerOpen((o) => !o);
+        else setCollapsed((c) => !c);
       } else if (e.key === "p" || e.key === "P") {
         // preventDefault deliberately shadows the browser's Print in the web
         // twin — inside the app, Ctrl/Cmd+P is the file finder.
@@ -329,10 +445,63 @@ export function AppShell({ sidebar, main }: AppShellProps) {
   // sidebar is actually open when that happens (a collapsed rail hides the
   // tree; the explorer itself stays mounted and handles the scroll + flash).
   useEffect(() => {
-    const onReveal = () => setCollapsed(false);
+    const onReveal = () => {
+      // §5: compact has no collapsed rail — revealing means opening the drawer.
+      if (compactRef.current) setDrawerOpen(true);
+      else setCollapsed(false);
+    };
     window.addEventListener("lighthouse:reveal-node", onReveal);
     return () => window.removeEventListener("lighthouse:reveal-node", onReveal);
   }, []);
+
+  if (layout.compact) {
+    // §5 compact arrangement: the chat pane IS the screen. The sidebar is an
+    // overlay drawer (scrim / Esc / swipe-left dismiss; auto-closes when a
+    // file opens or an ask is sent), sections are full-width sheets, and none
+    // of the resize machinery exists — the persisted explorerWidth is neither
+    // applied (the drawer sizes itself) nor ever written (no handle). This
+    // branch is unreachable on the desktop platform at any width (paneLayout's
+    // structural pin), so the return below stays the desktop tree verbatim.
+    return (
+      <main className={styles.root}>
+        {layout.drawerVisible && (
+          <>
+            <div className={styles.scrim} onClick={() => setDrawerOpen(false)} aria-hidden />
+            <div
+              className={styles.drawer}
+              role="dialog"
+              aria-modal="true"
+              aria-label="Files"
+              // The Sidebar reads --sidebar-w for its width; 100% fills the
+              // drawer panel instead of any remembered desktop width.
+              style={{ "--sidebar-w": "100%" } as React.CSSProperties}
+              onTouchStart={onDrawerTouchStart}
+              onTouchEnd={onDrawerTouchEnd}
+            >
+              <Sidebar
+                collapsed={false}
+                // The collapse affordance doubles as the drawer's close button.
+                onToggleCollapsed={() => setDrawerOpen(false)}
+                rail={<SectionRail />}
+              >
+                {sidebar}
+              </Sidebar>
+            </div>
+          </>
+        )}
+        {/* Section panels render as sheets — independent of the drawer, so a
+            sheet opened from the rail survives the drawer auto-closing. */}
+        <SectionFlyout compact />
+        <div
+          className={styles.main}
+          style={keyboardInset ? { paddingBottom: `${keyboardInset}px` } : undefined}
+        >
+          {main}
+        </div>
+        <StartupPrompt />
+      </main>
+    );
+  }
 
   return (
     <main className={styles.root}>

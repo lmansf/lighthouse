@@ -20,7 +20,7 @@ import {
   rulesListing,
 } from "@/server/sources/registry";
 import { isSameOrigin } from "@/server/http";
-import { isDesktopApp } from "@/server/config";
+import { isDesktopApp, platformKind } from "@/server/config";
 import { readDesktopSettings, writeDesktopSettings } from "@/server/settings";
 import { policySnapshot } from "@/server/policy";
 import { egressSnapshot } from "@/server/egress";
@@ -85,7 +85,10 @@ export const dynamic = "force-dynamic";
 
 export async function GET() {
   const [sources, nodes] = await Promise.all([listSources(), listNodes()]);
-  return NextResponse.json({ sources, nodes, desktop: isDesktopApp() });
+  // PARITY: mirrors rag_list (commands.rs). `platform` is the §1 form-factor
+  // signal (config.ts platformKind — constant "desktop" on the twin, while
+  // the Rust shell reports its compile target).
+  return NextResponse.json({ sources, nodes, desktop: isDesktopApp(), platform: platformKind() });
 }
 
 export async function POST(req: Request) {

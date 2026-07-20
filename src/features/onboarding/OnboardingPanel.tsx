@@ -38,7 +38,7 @@ import {
   makeStyles,
   tokens,
 } from "@fluentui/react-components";
-import { MODEL_PROVIDERS } from "@/contracts";
+import { MODEL_PROVIDERS, MOBILE_NO_PROVIDER_TRUTHS, modelProvidersFor } from "@/contracts";
 import { apiKeyBillingNote } from "@/lib/billingNotes";
 import {
   LocalModelInstallPanel,
@@ -47,7 +47,7 @@ import {
 import { useAuthStore } from "@/stores/useAuthStore";
 import { useRagStore } from "@/stores/useRagStore";
 import { ModeChooserAuto } from "./ModeChooser";
-import { isDesktopShell } from "@/shell/desktopBridge";
+import { isDesktopShell, rememberPlatform, type PlatformKind } from "@/shell/desktopBridge";
 import { BEAM_SWEEP } from "@/shell/theme";
 
 const useStyles = makeStyles({
@@ -152,8 +152,27 @@ export function OnboardingPanel() {
   // so the __TAURI_INTERNALS__ probe can't cause an SSR/client hydration
   // mismatch (the server always renders the web branch).
   const [isDesktop, setIsDesktop] = useState(false);
+  // §1 form factor for the platform-gated copy below. Onboarding runs BEFORE
+  // the vault tree loads (the usual platformKind() primer), so fetch the
+  // settings payload once here; "desktop" until it answers.
+  const [platform, setPlatform] = useState<PlatformKind>("desktop");
   useEffect(() => {
     setIsDesktop(isDesktopShell());
+    let alive = true;
+    void fetch("/api/settings")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        rememberPlatform(d?.platform);
+        if (alive && (d?.platform === "ios" || d?.platform === "android")) {
+          setPlatform(d.platform);
+        }
+      })
+      .catch(() => {
+        /* older engine / web — stay "desktop" */
+      });
+    return () => {
+      alive = false;
+    };
   }, []);
 
   // Sync the radio to the effective default once the profile has loaded, unless
@@ -163,6 +182,17 @@ export function OnboardingPanel() {
       setInclusionPref(onboarding.defaultInclusion);
     }
   }, [onboarding.defaultInclusion]);
+
+  // §3: the mobile roster has no local entry (modelProvidersFor), but the
+  // pre-fetch default above is "local" — re-point it at the roster's first
+  // cloud vendor the moment the form factor resolves. A user who already
+  // picked a cloud provider keeps their pick; on desktop this never fires.
+  useEffect(() => {
+    if (platform === "desktop" || providerId !== "local") return;
+    const first = modelProvidersFor(platform)[0];
+    setProviderId(first.id);
+    setModelId(first.models[0]);
+  }, [platform, providerId]);
 
   const provider = MODEL_PROVIDERS.find((p) => p.id === providerId)!;
 
@@ -179,7 +209,17 @@ export function OnboardingPanel() {
 
   /** Commit the model choice (shared by the Continue button and Enter-to-submit). */
   function continueFromModel() {
-    if (providerId !== "local" && !apiKey) return;
+    if (providerId !== "local" && !apiKey) {
+      // §3 mobile: "Continue without a key" — finish setup with NO provider
+      // selected. Deterministic asks answer either way, and the first saved
+      // key later becomes the selection (Settings → AI models runs the same
+      // selectModel seam). The hop is client-side (there is no engine op for
+      // select-model → inclusion without a selection); the durable finish is
+      // the terminal completeOnboarding on the next slide. Desktop keeps the
+      // hard key gate — its escape hatch is the private model radio.
+      if (platform !== "desktop") setStep("inclusion");
+      return;
+    }
     void selectModel(providerId, modelId, apiKey);
   }
 
@@ -208,20 +248,23 @@ export function OnboardingPanel() {
         <Title3>Welcome to Lighthouse</Title3>
         <ul className={styles.bullets}>
           <li>
-            <Text>Your files stay on your machine.</Text>
+            <Text>Your files stay on this device.</Text>
           </li>
           <li>
             <Text>Chat with an AI grounded in your own documents.</Text>
           </li>
           <li>
-            <Text>Nothing leaves your computer until you choose a cloud model.</Text>
+            <Text>Nothing leaves this device until you choose a cloud model.</Text>
           </li>
         </ul>
         <Text className={styles.hint}>
           Your documents live in your vault folder. Add files there and Lighthouse
           can search them and answer from what they say.
         </Text>
-        {isDesktop && (
+        {/* §2 platform gate: "Open vault folder" + the File-menu affordance are
+            desktop concepts. On iOS the whole block is one line pointing at
+            where the vault actually lives — the Files app. */}
+        {isDesktop && platform === "desktop" && (
           <>
             <Button appearance="secondary" type="button" onClick={openVaultFolder}>
               Open vault folder
@@ -231,6 +274,11 @@ export function OnboardingPanel() {
               &ldquo;Choose vault folder…&rdquo;.
             </Text>
           </>
+        )}
+        {platform === "ios" && (
+          <Text size={200} className={styles.hint}>
+            Your vault lives in the Files app: On My iPhone → Lighthouse.
+          </Text>
         )}
         <Button appearance="primary" type="submit">
           Continue
@@ -257,9 +305,11 @@ export function OnboardingPanel() {
   if (onboarding.step === "select-model") {
     // Private-first framing: the on-device model is the hero (first, default);
     // the cloud vendors are grouped honestly, one click away. Local vs cloud is
-    // just `id === "local"`.
-    const isLocal = providerId === "local";
-    const cloudProviders = MODEL_PROVIDERS.filter((p) => p.id !== "local");
+    // just `id === "local"` — §3: gated on the desktop form factor too, a
+    // structural pin that keeps LocalModelInstallPanel unreachable on mobile
+    // (where modelProvidersFor drops the local entry entirely).
+    const isLocal = platform === "desktop" && providerId === "local";
+    const cloudProviders = modelProvidersFor(platform).filter((p) => p.id !== "local");
     const isAllowed = (id: string) => (allowedProviders ? allowedProviders.includes(id) : true);
     const firstAllowedCloud = cloudProviders.find((p) => isAllowed(p.id)) ?? cloudProviders[0];
     const localModelId = MODEL_PROVIDERS.find((p) => p.id === "local")!.models[0];
@@ -278,34 +328,42 @@ export function OnboardingPanel() {
         </Text>
         <Title3>Choose your model</Title3>
         <Text className={styles.hint}>
-          Private by default — your files stay on this device unless you choose a cloud model.
+          {/* §3: the mobile slide leads with the two truths — narration needs a
+              cloud key, and the private model is a desktop thing. */}
+          {platform === "desktop"
+            ? "Private by default — your files stay on this device unless you choose a cloud model."
+            : MOBILE_NO_PROVIDER_TRUTHS}
         </Text>
 
         {/* Hero: the on-device private model comes first. Cloud is the honest
-            alternative right beneath it — no dark pattern, one click away. */}
-        <RadioGroup
-          value={isLocal ? "local" : "cloud"}
-          onChange={(_, d) => {
-            if (d.value === "local") {
-              setProviderId("local");
-              setModelId(localModelId);
-            } else {
-              setProviderId(firstAllowedCloud.id);
-              setModelId(firstAllowedCloud.models[0]);
-            }
-          }}
-        >
-          <Radio
-            value="local"
-            disabled={!isAllowed("local")}
-            label="Private — runs on this device. No API key; nothing leaves your computer. (Recommended)"
-          />
-          <Radio
-            value="cloud"
-            disabled={!cloudProviders.some((p) => isAllowed(p.id))}
-            label="Cloud model — sends excerpts of your included files to a provider you choose, to answer."
-          />
-        </RadioGroup>
+            alternative right beneath it — no dark pattern, one click away.
+            §3: desktop-only — the mobile roster has no local entry, so there
+            is no local/cloud choice to make and the radio group is gone. */}
+        {platform === "desktop" && (
+          <RadioGroup
+            value={isLocal ? "local" : "cloud"}
+            onChange={(_, d) => {
+              if (d.value === "local") {
+                setProviderId("local");
+                setModelId(localModelId);
+              } else {
+                setProviderId(firstAllowedCloud.id);
+                setModelId(firstAllowedCloud.models[0]);
+              }
+            }}
+          >
+            <Radio
+              value="local"
+              disabled={!isAllowed("local")}
+              label="Private — runs on this device. No API key; nothing leaves this device. (Recommended)"
+            />
+            <Radio
+              value="cloud"
+              disabled={!cloudProviders.some((p) => isAllowed(p.id))}
+              label="Cloud model — sends excerpts of your included files to a provider you choose, to answer."
+            />
+          </RadioGroup>
+        )}
 
         {isLocal ? (
           /* onboarding copy: the panel's download button doubles as the
@@ -379,7 +437,16 @@ export function OnboardingPanel() {
             </Field>
           </>
         )}
-        <ContinueSetupButton providerId={providerId} disabled={!isLocal && !apiKey} />
+        {platform === "desktop" ? (
+          <ContinueSetupButton providerId={providerId} disabled={!isLocal && !apiKey} />
+        ) : (
+          /* §3 mobile: never hard-block — with no key the primary action
+             finishes setup with NO provider selected (continueFromModel);
+             deterministic answers work from day zero. */
+          <Button appearance="primary" type="submit">
+            {apiKey ? "Continue" : "Continue without a key"}
+          </Button>
+        )}
         <Button appearance="subtle" type="button" onClick={() => setStep("vault")}>
           Back
         </Button>

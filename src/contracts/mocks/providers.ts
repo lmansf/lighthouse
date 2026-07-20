@@ -1,4 +1,5 @@
 import type { ModelProvider } from "../types";
+import type { PlatformKind } from "../services";
 
 /**
  * Model providers offered in the picker (onboarding step 3 and Settings → AI
@@ -66,3 +67,30 @@ export const MODEL_PROVIDERS: ModelProvider[] = [
     apiKeyUrl: "https://platform.deepseek.com/api_keys",
   },
 ];
+
+/**
+ * §3 (iOS field patch 1): the roster for a given form factor. The private
+ * on-device model exists only on the desktop shell — phone-class hardware
+ * can't run the ~4.2 GB weights — so on ios/android the local entry is GONE
+ * (not disabled). The onboarding model slide, Settings → AI models, and the
+ * chat header switcher all consume this one filter, which is what keeps
+ * LocalModelInstallPanel and every Install CTA from ever mounting there. The
+ * engine enforces the same verdict regardless (local_model.rs::
+ * local_model_supported / localModel.ts::localModelSupported — downloads are
+ * refused, status reports "unsupported").
+ */
+export function modelProvidersFor(platform: PlatformKind): ModelProvider[] {
+  return platform === "desktop"
+    ? MODEL_PROVIDERS
+    : MODEL_PROVIDERS.filter((p) => p.id !== "local");
+}
+
+/**
+ * §3: the two truths of the mobile empty-provider state, byte-identical
+ * everywhere it appears (chat header switcher, Settings → AI models, the
+ * onboarding model slide, and the first-run tour's models step): narrated
+ * answers need a cloud key, and the private model lives in the desktop app.
+ * Deterministic asks answer either way — this line is about narration only.
+ */
+export const MOBILE_NO_PROVIDER_TRUTHS =
+  "Add a cloud API key to enable narrated answers — the private model runs on the desktop app.";
