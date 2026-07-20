@@ -42,6 +42,7 @@ import {
   ToggleButton,
   Tooltip,
   makeStyles,
+  mergeClasses,
   shorthands,
   tokens,
 } from "@fluentui/react-components";
@@ -295,6 +296,11 @@ const useStyles = makeStyles({
   },
   emptyStateIcon: { fontSize: "40px", color: tokens.colorBrandForeground1 },
   emptyStatePrivacy: { color: tokens.colorNeutralForeground3 },
+  // fp4 §2: on the full-screen mobile files page the empty state is the page's
+  // primary call to action — center it in the viewport so the add control reads
+  // as the one thing to do. The parent scroll container is safe-area padded
+  // (fp3 §3 page) and clears the §3 tab bar, so this is never clipped.
+  emptyStateMobile: { minHeight: "55vh", justifyContent: "center", marginTop: 0 },
   // fp4 §1: the WKWebView-safe add-files control. iOS opens NO document picker
   // for a programmatic `.click()` on a display:none input, and routing the tap
   // through a Fluent Menu strips the user gesture on dismissal — so on a mobile
@@ -2298,7 +2304,7 @@ export function FileExplorer() {
           // First-run: nothing added yet across any source, so the per-source
           // one-liners would just repeat themselves - show one real call to
           // action instead. Drag-drop onto the whole panel still works.
-          <div className={styles.emptyState}>
+          <div className={mergeClasses(styles.emptyState, isMobile && styles.emptyStateMobile)}>
             <FolderAddRegular className={styles.emptyStateIcon} />
             <Text size={400} weight="semibold">
               Add your first files
