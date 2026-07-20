@@ -75,33 +75,38 @@ const useStyles = makeStyles({
   },
   // While dragging, keep the hairline lit even as the cursor leaves the strip.
   handleActive: { "::after": { backgroundColor: tokens.colorBrandStroke1 } },
-  // --- §5 compact drawer (mobile shells < 700px only — paneLayout) ----------
-  // The scrim: full-screen, above main, below the drawer. Tapping it closes.
-  scrim: {
+  // --- fp3 §3 compact files PAGE (mobile shells < 700px only — paneLayout) ---
+  // The files sidebar is a FULL-SCREEN page that slides in from the left edge
+  // over the chat — no scrim, no 85vw overlay (the phone/compact-iPad has no
+  // room for a partial column). Same inset:0 safe-area sheet primitive the
+  // section sheets use (SectionFlyout.styles.sheet). The Sidebar inside reads
+  // --sidebar-w:100% so it fills the page; its persisted desktop width is never
+  // applied here (and, with no resize handle, never written).
+  page: {
     position: "fixed",
     inset: 0,
-    zIndex: 20,
-    backgroundColor: "rgba(0, 0, 0, 0.4)",
-  },
-  // The drawer panel hosting the SAME Sidebar component the desktop column
-  // renders. Width is its own (≤85vw) — the persisted explorerWidth is
-  // deliberately NOT applied here (and with no resize handle, never written).
-  // The inherited --sidebar-w:100% makes the Sidebar fill this panel.
-  drawer: {
-    position: "fixed",
-    top: 0,
-    bottom: 0,
-    left: 0,
     zIndex: 21,
-    width: "min(320px, 85vw)",
     display: "flex",
-    boxShadow: tokens.shadow64,
-    // Notch/home-indicator clearance inside the overlay (the root's padding
-    // doesn't reach a fixed-position child).
+    backgroundColor: tokens.colorNeutralBackground2,
     paddingTop: "var(--lh-safe-top)",
     paddingBottom: "var(--lh-safe-bottom)",
     paddingLeft: "var(--lh-safe-left)",
-    backgroundColor: tokens.colorNeutralBackground2,
+    paddingRight: "var(--lh-safe-right)",
+    // Slide-in from the left edge; prefers-reduced-motion falls back to a fade.
+    transitionProperty: "transform, opacity",
+    transitionDuration: tokens.durationSlow,
+    transitionTimingFunction: tokens.curveEasyEase,
+    "@media (prefers-reduced-motion: reduce)": {
+      transitionProperty: "opacity",
+      transitionDuration: "0.01ms",
+    },
+  },
+  // Pre-entrance: parked one screen to the left (reduced-motion: just faded);
+  // cleared on the next frame so the page eases in.
+  pageEntering: {
+    transform: "translateX(-100%)",
+    opacity: 0,
+    "@media (prefers-reduced-motion: reduce)": { transform: "none" },
   },
 });
 
@@ -202,8 +207,10 @@ export function AppShell({ sidebar, main }: AppShellProps) {
     prevMessageCount.current = messageCount;
   }, [messageCount, layout.drawerVisible]);
 
-  // Swipe-left on the drawer dismisses it (scrim tap and Esc are the other
-  // two paths). A plain horizontal-delta check — no gesture library.
+  // fp3 §3: edge-swipe-RIGHT on the files page goes back to chat — the iOS
+  // "back" gesture, the mirror of the old swipe-left drawer dismiss. Esc is the
+  // other path (there is no scrim to tap now — the page is full-screen). A plain
+  // horizontal-delta check, no gesture library.
   const touchStartX = useRef<number | null>(null);
   const onDrawerTouchStart = (e: React.TouchEvent) => {
     touchStartX.current = e.touches[0]?.clientX ?? null;
@@ -212,8 +219,20 @@ export function AppShell({ sidebar, main }: AppShellProps) {
     const start = touchStartX.current;
     touchStartX.current = null;
     const end = e.changedTouches[0]?.clientX;
-    if (start != null && typeof end === "number" && end - start < -40) setDrawerOpen(false);
+    if (start != null && typeof end === "number" && end - start > 40) setDrawerOpen(false);
   };
+
+  // fp3 §3: page-entrance animation — mount parked off-screen-left, then clear
+  // on the next frame so it eases in (mirrors SectionFlyout's sheet entrance).
+  const [pageEntered, setPageEntered] = useState(false);
+  useEffect(() => {
+    if (!layout.drawerVisible) {
+      setPageEntered(false);
+      return;
+    }
+    const r = requestAnimationFrame(() => setPageEntered(true));
+    return () => cancelAnimationFrame(r);
+  }, [layout.drawerVisible]);
 
   // Ask box vs the on-screen keyboard: the OS keyboard overlays a WKWebView
   // rather than resizing it, so pad the main column by the covered height
@@ -455,39 +474,38 @@ export function AppShell({ sidebar, main }: AppShellProps) {
   }, []);
 
   if (layout.compact) {
-    // §5 compact arrangement: the chat pane IS the screen. The sidebar is an
-    // overlay drawer (scrim / Esc / swipe-left dismiss; auto-closes when a
-    // file opens or an ask is sent), sections are full-width sheets, and none
-    // of the resize machinery exists — the persisted explorerWidth is neither
-    // applied (the drawer sizes itself) nor ever written (no handle). This
-    // branch is unreachable on the desktop platform at any width (paneLayout's
-    // structural pin), so the return below stays the desktop tree verbatim.
+    // fp3 §3 compact arrangement: the chat pane IS the screen. The sidebar is a
+    // full-screen PAGE that slides in from the left edge (no scrim, no overlay;
+    // Esc / edge-swipe-right / the header Back control dismiss it; auto-closes
+    // when a file opens or an ask is sent), sections are full-width sheets, and
+    // none of the resize machinery exists — the persisted explorerWidth is
+    // neither applied (the page is viewport-sized) nor ever written (no handle).
+    // This branch is unreachable on the desktop platform at any width
+    // (paneLayout's structural pin), so the return below stays the desktop tree.
     return (
       <main className={styles.root}>
         {layout.drawerVisible && (
-          <>
-            <div className={styles.scrim} onClick={() => setDrawerOpen(false)} aria-hidden />
-            <div
-              className={styles.drawer}
-              role="dialog"
-              aria-modal="true"
-              aria-label="Files"
-              // The Sidebar reads --sidebar-w for its width; 100% fills the
-              // drawer panel instead of any remembered desktop width.
-              style={{ "--sidebar-w": "100%" } as React.CSSProperties}
-              onTouchStart={onDrawerTouchStart}
-              onTouchEnd={onDrawerTouchEnd}
+          <div
+            className={mergeClasses(styles.page, !pageEntered && styles.pageEntering)}
+            role="dialog"
+            aria-modal="true"
+            aria-label="Files"
+            // The Sidebar reads --sidebar-w for its width; 100% fills the page
+            // instead of any remembered desktop width.
+            style={{ "--sidebar-w": "100%" } as React.CSSProperties}
+            onTouchStart={onDrawerTouchStart}
+            onTouchEnd={onDrawerTouchEnd}
+          >
+            <Sidebar
+              collapsed={false}
+              // The header control is the page's 44pt Back-to-chat button (§3).
+              backControl
+              onToggleCollapsed={() => setDrawerOpen(false)}
+              rail={<SectionRail />}
             >
-              <Sidebar
-                collapsed={false}
-                // The collapse affordance doubles as the drawer's close button.
-                onToggleCollapsed={() => setDrawerOpen(false)}
-                rail={<SectionRail />}
-              >
-                {sidebar}
-              </Sidebar>
-            </div>
-          </>
+              {sidebar}
+            </Sidebar>
+          </div>
         )}
         {/* Section panels render as sheets — independent of the drawer, so a
             sheet opened from the rail survives the drawer auto-closing. */}

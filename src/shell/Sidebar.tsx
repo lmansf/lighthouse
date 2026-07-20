@@ -10,6 +10,7 @@ import {
   tokens,
 } from "@fluentui/react-components";
 import {
+  ArrowLeftRegular,
   PanelLeftContractRegular,
   PanelLeftExpandRegular,
   SearchRegular,
@@ -67,6 +68,10 @@ const useStyles = makeStyles({
       minHeight: "44px",
     },
   },
+  // fp3 §3: the files-page Back control (replaces the collapse chevron when the
+  // sidebar is the full-screen compact page). A thumb-sized ≥44pt target with an
+  // explicit label so "go back to chat" reads unambiguously on a phone/iPad.
+  backBtn: { minWidth: "44px", minHeight: "44px" },
   brand: {
     display: "flex",
     alignItems: "center",
@@ -135,6 +140,13 @@ interface SidebarProps {
   /** True while a live drag is resizing the sidebar — suppresses the width
    *  transition so the edge tracks the cursor instead of easing behind it. */
   resizing?: boolean;
+  /**
+   * fp3 §3: render the trailing header control as a full-screen-page "Back"
+   * button (a 44pt back arrow + label) instead of the desktop collapse chevron.
+   * Set by AppShell only in the compact files-page branch; desktop/widget/
+   * explorer callers omit it and keep the collapse affordance byte-for-byte.
+   */
+  backControl?: boolean;
 }
 
 /**
@@ -150,6 +162,7 @@ export function Sidebar({
   rail,
   width,
   resizing,
+  backControl,
 }: SidebarProps) {
   const styles = useStyles();
 
@@ -202,15 +215,28 @@ export function Sidebar({
                   }
                 />
               </Tooltip>
-              <Tooltip content={`Collapse files ${toggleHint}`} relationship="label">
+              {backControl ? (
+                // fp3 §3: the compact files-page Back control (44pt).
                 <Button
                   appearance="subtle"
-                  size="small"
-                  icon={<PanelLeftContractRegular />}
-                  aria-label="Collapse sidebar"
+                  className={styles.backBtn}
+                  icon={<ArrowLeftRegular />}
+                  aria-label="Back to chat"
                   onClick={onToggleCollapsed}
-                />
-              </Tooltip>
+                >
+                  Back
+                </Button>
+              ) : (
+                <Tooltip content={`Collapse files ${toggleHint}`} relationship="label">
+                  <Button
+                    appearance="subtle"
+                    size="small"
+                    icon={<PanelLeftContractRegular />}
+                    aria-label="Collapse sidebar"
+                    onClick={onToggleCollapsed}
+                  />
+                </Tooltip>
+              )}
             </span>
           </>
         )}

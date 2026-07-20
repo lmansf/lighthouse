@@ -6,9 +6,10 @@
  *
  * paneLayout() is the single decision-maker for how the shell arranges its
  * panes: below COMPACT_BREAKPOINT on a MOBILE shell the chat pane is the
- * screen, the sidebar becomes an overlay drawer, section panels become
- * full-width sheets, and the explorer's resize machinery (handle + persisted
- * width) does not exist. The desktop platform NEVER takes the compact branch
+ * screen, the sidebar becomes a full-screen PAGE that slides in from the left
+ * edge (fp3 §3 — no scrim, no overlay), section panels become full-width
+ * sheets, and the explorer's resize machinery (handle + persisted width) does
+ * not exist. The desktop platform NEVER takes the compact branch
  * — at any window width — so desktop rendering is byte-for-byte the 0.13.0
  * tree (the structural pin the unit tests hold); an iPad at ≥700pt likewise
  * keeps the desktop arrangement.
@@ -28,9 +29,11 @@ export const COMPACT_BREAKPOINT = 700;
 export interface PaneLayout {
   /** True only on a mobile shell below the breakpoint. */
   compact: boolean;
-  /** How the file sidebar renders: a normal column, or an overlay drawer. */
-  sidebarMode: "column" | "drawer";
-  /** Whether the drawer is on screen right now (compact only — a stale
+  /** How the file sidebar renders: a normal column (desktop / iPad ≥700pt), or
+   *  — at compact (fp3 §3) — a full-screen "page" that slides in from the left
+   *  edge over the chat (no scrim, no 85vw overlay). */
+  sidebarMode: "column" | "page";
+  /** Whether the files page is on screen right now (compact only — a stale
    *  drawerOpen can never leak into the desktop arrangement). */
   drawerVisible: boolean;
   /** The explorer resize handle exists only in the column arrangement. */
@@ -53,7 +56,7 @@ export function paneLayout(
   const compact = platform !== "desktop" && width < COMPACT_BREAKPOINT;
   return {
     compact,
-    sidebarMode: compact ? "drawer" : "column",
+    sidebarMode: compact ? "page" : "column",
     drawerVisible: compact && drawerOpen,
     showResizeHandle: !compact,
     applyExplorerWidth: !compact,

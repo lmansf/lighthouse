@@ -35,19 +35,20 @@ test("desktop never compacts — any width, drawer state irrelevant (structural 
   }
 });
 
-test("mobile below the breakpoint: drawer arrangement, no resize machinery", () => {
+test("mobile below the breakpoint: full-screen page arrangement, no resize machinery", () => {
   for (const platform of ["ios", "android"]) {
     for (const width of [320, 375, 390, 699]) {
       const closed = paneLayout(width, false, platform);
       assert.equal(closed.compact, true, `${platform}@${width}`);
-      assert.equal(closed.sidebarMode, "drawer");
+      // fp3 §3: the compact sidebar is a full-screen PAGE (was an overlay drawer).
+      assert.equal(closed.sidebarMode, "page");
       assert.equal(closed.drawerVisible, false);
       assert.equal(closed.showResizeHandle, false, "handle does not exist in compact");
       assert.equal(closed.applyExplorerWidth, false, "explorerWidth never applied in compact");
       assert.equal(closed.sectionsAsSheets, true);
 
       const open = paneLayout(width, true, platform);
-      assert.equal(open.drawerVisible, true, "drawerOpen shows the drawer only in compact");
+      assert.equal(open.drawerVisible, true, "drawerOpen shows the files page only in compact");
     }
   }
 });
