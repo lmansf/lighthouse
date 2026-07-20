@@ -41,6 +41,12 @@ targets:
       path: lighthouse-desktop_iOS/Info.plist
       properties:
         LSRequiresIPhoneOS: true
+        # fp2 §5: standing export-compliance declaration — the app uses ONLY
+        # exempt standard encryption (rustls/ring TLS, AES-GCM secrets
+        # sealing, SHA-2, Ed25519 signature verify; the Cargo.lock crypto
+        # inventory grounds this). With the key present App Store Connect
+        # stops holding every build on the per-upload compliance question.
+        ITSAppUsesNonExemptEncryption: false
         UILaunchStoryboardName: LaunchScreen
         UIRequiredDeviceCapabilities: [arm64, metal]
         UISupportedInterfaceOrientations:
