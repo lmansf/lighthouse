@@ -3803,3 +3803,364 @@ lane as the gate. One commit per numbered section. Open ONE PR titled
 "iOS field patch 3: OCR ships, touch-grade chat, files page —
 iPad-first"; stop at the PR.
 ```
+
+## 26. Field patch: add-files that opens, a reachable portrait nav — round-3 reports (2026-07-19)
+
+Round-3 device reports: add-files does nothing from either button, the
+add area looks missing on an empty vault, and the nav is unreachable in
+portrait. This patch STACKS ON 0.13.3 (the §25 patch, branch
+ios-field-patch-3, in flight) — verify all three on a build of merged
+0.13.3 first, because §25's full-screen files page already moves two of
+them. Diagnosis (main @ 0.13.2):
+- **Add files (both buttons) is a dead tap on iOS.** Both the toolbar
+  "Browse… → Files…" item (FileExplorer.tsx:1896-1901) and the
+  empty-state "Add files…" button (:2214-2216) call
+  `fileInputRef.current?.click()` on ONE shared `<input type="file"
+  hidden>` (:1837-1846). iOS WKWebView will not present the document
+  picker for a programmatic `.click()` on a display:none/hidden input,
+  and the toolbar path additionally fires from inside a Fluent Menu
+  that dismisses the popover around the onClick — losing the
+  user-gesture token. `onChange` never fires; the failure is a silent
+  no-op (no error surface). The upload backend itself is fine on iOS
+  (`upload_file` is ungated, `vault::add_file` is portable). §25 does
+  NOT touch this path (it only trims the menu and adds an iPad
+  drag-drop fallback).
+- **The empty-state add area is not actually hidden.** `list_sources`
+  always returns exactly one source ("Local Vault"), so the
+  `nodes.length === 0 && sources.length <= 1` empty-state card DOES
+  render on a fresh iOS install (FileExplorer.tsx:2198). It reads as
+  "missing" because its button is the same dead `.click()` path, and
+  in the pre-§25 85vw drawer the centered card was cramped. §25's
+  full-screen page gives it room — so after 0.13.3 this is largely a
+  visibility win already; the residual is the broken tap (fixed here).
+- **The "navbar" is the SectionRail** (History / Investigations /
+  Insights / …), mounted INSIDE the sidebar (Sidebar.tsx:221). In
+  portrait (<700pt) the sidebar is an overlay drawer/page reachable
+  only via one chat-header button ("Open files and sections",
+  ChatPanel.tsx:4869-4879); in landscape (>700pt) it renders as a
+  persistent column — which is exactly why it's reachable landscape
+  but "not reachable" portrait. §25 makes the rail legible (48pt rows,
+  History/Investigations promoted, the rest folded under "More", a
+  Back control) but leaves it gated behind that single button — no
+  always-visible portrait nav.
+
+### Prompt
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first, local-first analytics AI harness for analysts: Rust
+engine (native/crates/lighthouse-core) in a Tauri 2 shell
+(native/crates/lighthouse-desktop — the SAME crate is the iOS app via
+mobile_entry_point; desktop-only code under src/desktop/ behind
+#[cfg(desktop)]), byte-compatible TS twin (src/server/), React UI
+(src/). Read CLAUDE.md, docs/ts-twin.md, and
+docs/roadmap-personas-2026-07.md §24–§26 before writing code. This
+patch STACKS ON 0.13.3 (§25 / ios-field-patch-3). FIRST: check out
+merged 0.13.3, build it, and re-observe all three reports on an iPhone
+simulator — §25's full-screen files page already changes two of them;
+fix what the merged build actually shows, and note any report already
+resolved in the PR body rather than fixing a ghost. Platform truth is
+platformKind()/isMobileShell() (src/shell/desktopBridge.ts) and the
+pure paneLayout() verdict (src/shell/paneLayout.ts,
+COMPACT_BREAKPOINT=700, plus §25's coarse-pointer axis); extend those,
+never a parallel signal.
+
+1. Add-files opens the picker on iOS (the core bug — a dead tap today).
+   Root cause: both the toolbar "Files…" item and the empty-state
+   "Add files…" button call fileInputRef.current?.click() on a shared
+   <input type="file" hidden>; iOS WKWebView opens no picker for a
+   programmatic .click() on a display:none input, and the menu path
+   loses the user gesture. Fix by making the TAP land on the input
+   itself — the standard WKWebView-safe pattern — not a JS .click():
+   - The mobile add affordance becomes a real <label>-wrapped (or
+     htmlFor-linked) file input, or a button with a visually-hidden-
+     but-hit-testable input overlaid on it (opacity:0, positioned over
+     the control, pointer-events on) — so activating it IS a direct
+     user gesture on the input. No .click() in the mobile path.
+     Keep the input interactable (visually-hidden utility, NOT hidden/
+     display:none). accept stays unset (any file); multiple stays.
+   - On compact, the primary add action is a DIRECT control, not a
+     Fluent Menu item (the menu dismissal is what strips the gesture).
+     The empty-state "Add files…" button and the toolbar add both use
+     the same label/overlay component. Desktop keeps its Browse menu
+     and link-first items exactly as today (desktopOS-gated).
+   - Add an honest outcome: if files are chosen and the upload fails,
+     surface the existing notice; if the user cancels, no-op quietly.
+     A successful add scrolls the new source into view. Never a silent
+     nothing again.
+   - Verify the whole seam on device/simulator: pick 2 files from the
+     Files app → onChange fires → /api/upload → upload_file →
+     vault::add_file → sources refresh. Add a test that pins the
+     mobile add path is label/overlay-based (no .click() on a hidden
+     input) so this can't regress to the broken pattern.
+
+2. The empty vault invites the first add (mostly free after §25).
+   On a fresh iOS install (one "Local Vault" source, zero nodes) the
+   full-screen files page shows a prominent, centered empty-state:
+   the §1 add control as the primary action, one line of copy ("Add
+   files from the Files app — they stay on this device."), and — if
+   the §23 doors apply — the "On My iPhone → Lighthouse" hint. It must
+   be reachable and tappable with the keyboard closed, safe-area
+   padded, not clipped. If §25's page already renders this well,
+   confirm it and just wire §1's working control; do not rebuild it.
+
+3. A reachable portrait nav (persistent, not buried). §25 built the
+   full-screen page/sheet primitives (files page, section pages) but
+   they are still launched from ONE chat-header button, so the Sections
+   nav is effectively unreachable in portrait. Add a compact bottom
+   tab bar as THE compact navigation, absorbing that single button:
+   - Compact only (platform !== "desktop" && width < 700 — the
+     paneLayout verdict gains a `showTabBar` field; desktop and
+     iPad-regular ≥700pt render NO tab bar and keep the persistent
+     column exactly as today — structural pin in paneLayout.test).
+   - Three destinations, iOS-idiomatic: **Chat** (home / the ask
+     surface), **Files** (the §25 files page), **Sections** (opens the
+     §25 section rail as a full page — History first, then
+     Investigations/Insights/Recipes/Library/Definitions at 48pt).
+     The lone "Open files and sections" header button
+     (ChatPanel.tsx:4869) is removed — the tab bar replaces it.
+   - Fixed to the bottom, safe-area-inset-bottom aware (never under
+     the home indicator), 44pt+ targets, the active tab marked; it
+     hides while the software keyboard is up (visualViewport) so it
+     never floats mid-screen, and re-shows on blur. Respect
+     prefers-reduced-motion. Selecting a tab that's already active
+     scrolls-to-top / closes its page (iOS convention).
+   - The composer and bug-report FAB reflow above the tab bar (no
+     overlap); the §25 auto-return (open file / send ask → back to
+     Chat) now selects the Chat tab.
+   - Express the tab set as data + the visibility in paneLayout (pure,
+     tested); the bar is a thin presentational component.
+
+4. Stamp + loop. Bump 0.13.3 → 0.13.4 across ALL SEVEN stamp files per
+   CLAUDE.md's current release-mechanics section (follow it verbatim;
+   ios-build re-syncs the short version and stamps CFBundleVersion
+   with the run number). Full node + cargo suites, release-smoke, and
+   the ios-build lane green. After merge: dispatch mobile-bootstrap.yml
+   task: ios-beta.
+
+Constraints. No analytics/telemetry/accounts. No new entitlements or
+Info.plist keys (the file input needs none). Labels byte-identical
+across twins with PARITY comments; pinned label tests move with their
+strings. Desktop pixel-identical and iPad-regular (≥700pt) identical
+to 0.13.3 (tab bar unreachable there — pin it). SharePoint plumbing
+untouched. Scope = these three reports + the stamp; nothing else.
+
+Acceptance (iPhone simulator/device, fresh install):
+1. From BOTH the empty-state button and the Files-page add control,
+   tapping opens the iOS document picker; choosing files adds them
+   (onboard → extraction → visible), with an error surfaced on
+   failure and nothing silent on cancel. A test pins the mobile add
+   path as label/overlay-based (no hidden-input .click()).
+2. A fresh install shows a prominent, tappable "Add files…" empty
+   state on the full-screen files page, keyboard-closed and
+   safe-area-clear.
+3. Portrait: a bottom tab bar (Chat · Files · Sections) is always
+   visible; Sections reaches History and every rail entry without
+   hunting; the bar sits above the home indicator, hides with the
+   keyboard, and doesn't overlap the composer or FAB. Landscape
+   (>700pt), iPad-regular, and desktop show NO tab bar and the
+   persistent column exactly as 0.13.3 (pins).
+4. All seven stamps read 0.13.4; suites + release-smoke + ios-build
+   green.
+
+Environment. macOS + Xcode for acceptance 1–3 (simulator suffices);
+Linux container fallback is the house convention (UI/engine logic with
+tests; the ios-build lane as the gate). One commit per numbered
+section. Open ONE PR titled "iOS field patch 4: add-files opens,
+portrait tab-bar nav"; stop at the PR.
+```
+
+## 27. Delivering an on-device private model on iOS (narration-tier) (2026-07-19)
+
+Report 4 — "the private model isn't available on phone; how do we
+deliver a private model?" — is architecture, not a bug, and it is the
+one item deliberately deferred since §23. §24/#192 REMOVED the private
+model from the iOS roster on purpose, because the desktop mechanism
+cannot exist on a phone: desktop spawns a bundled `llama-server` child
+process serving a 4.2 GB Mistral-7B GGUF over loopback :8080
+(src/desktop/supervise.rs, all #[cfg(desktop)]), and iOS forbids
+child processes and loopback servers of bundled binaries — everything
+must run IN-PROCESS. This section is the real build.
+
+The decisive simplification: **the model's only job is narration.**
+Lighthouse analytics are deterministic (DataFusion SQL; "the model
+never does arithmetic") — the private model does NL→intent and turns
+already-computed result tables into prose. That does not need a 7B
+reasoning model; it needs faithful, grounded summarization. The
+smallest model the roster ever shipped was SmolLM2-1.7B (~1 GB Q4) —
+right-size DOWN from desktop, hard.
+
+Recommendation (from a 2026 landscape survey; verify signatures
+against final docs at build time — some iOS 27 APIs were beta as of
+mid-2026):
+- **Primary — Apple Foundation Models (`SystemLanguageModel`).** The
+  ~3B on-device system LLM Apple ships with iOS/iPadOS 26+: zero model
+  download, guaranteed on-device/offline, free, native Swift streaming
+  + guided generation + tool-calling. Purpose-fit for narration and
+  sidesteps every App-Store size/memory problem. Constraint: only on
+  Apple-Intelligence hardware (iPhone 15 Pro+ / M-series iPad / 8 GB+
+  RAM); small context window (4096 on 26.0, 8192 on 27) — feed
+  aggregated/top-N tables, never raw rows — and occasional guardrail
+  refusals to catch.
+- **Fallback — one small Apache-2.0 GGUF (~1–1.7B, e.g. Qwen3-1.7B or
+  SmolLM2-1.7B) linked in-process via llama.cpp + Metal** for devices
+  below that floor. llama.cpp is NOT yet a dependency (only the
+  external binary is used); this adds a Rust binding (llama-cpp-2) or
+  static link, needs the `com.apple.developer.kernel.increased-memory-
+  limit` entitlement (currently absent — entitlements file is empty),
+  no JIT (iOS forbids it). Migrate this tier to Apple's
+  `MLXLanguageModel` (same Foundation Models API, iOS 27) once it's GA
+  to collapse to one seam.
+- **Explicitly EXCLUDE `PrivateCloudComputeLanguageModel`** — it runs
+  on Apple's servers; data would leave the device, violating the whole
+  privacy guarantee. On-device only.
+
+### Prompt
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first, local-first analytics AI harness for analysts: Rust
+engine (native/crates/lighthouse-core) in a Tauri 2 shell
+(native/crates/lighthouse-desktop — the SAME crate is the iOS app via
+mobile_entry_point; desktop code under src/desktop/ behind
+#[cfg(desktop)]), byte-compatible TS twin (src/server/), React UI
+(src/). Read CLAUDE.md, docs/ts-twin.md, docs/analytics-beam.md,
+docs/data-flows.md, and docs/roadmap-personas-2026-07.md §23, §24, §27
+before writing code. GOAL: deliver a working on-device PRIVATE MODEL on
+iOS/iPadOS — nothing leaves the device — re-enabling the "private"
+provider that §24/#192 removed, but only where a real on-device backend
+exists. The model is NARRATION-TIER: analytics stay deterministic
+(DataFusion; the model never computes numbers) — it does NL→intent and
+prose synthesis of computed tables. Right-size accordingly.
+
+This is a two-phase prompt: SPIKE (decide) then BUILD. Do not skip the
+spike — some 2026 Apple APIs were beta at authoring time; confirm them
+against current docs and the installed SDK before committing to them.
+
+PHASE A — Spike & decide (one short doc commit, docs/ios-private-
+model.md).
+  - Confirm on the current Xcode/SDK: Apple Foundation Models
+    `SystemLanguageModel` — availability API, streaming call, guided
+    generation, the device/OS floor (which chips, RAM, iOS version),
+    the context-window size and overflow error, and the availability
+    check that returns "unavailable" on older hardware. Confirm
+    whether it runs in the iOS Simulator or needs a device.
+  - Confirm the fallback: does llama.cpp cross-compile for
+    aarch64-apple-ios with Metal from our Rust staticlib? Is
+    llama-cpp-2 usable (or do we static-link llama.cpp and FFI)? Pick
+    a small Apache-2.0/MIT model (Qwen3-1.7B or SmolLM2-1.7B, ~1 GB
+    Q4) — record the license and the redistribution terms.
+  - Decide the support split and write it down: Tier-1 (Foundation
+    Models) devices, Tier-2 (bundled/downloaded small GGUF) devices,
+    and the app's iOS floor. Note explicitly that
+    PrivateCloudComputeLanguageModel is EXCLUDED (off-device). Note
+    the twin-invariant impact (below). Nothing in Phase B contradicts
+    this doc without updating it.
+
+PHASE B — Build.
+1. A model-transport seam in the engine. Define a PrivateModel
+   abstraction in lighthouse-core (build the prompt → stream tokens →
+   done), with the EXISTING desktop llama-server client as its desktop
+   impl, UNCHANGED and still #[cfg(desktop)]. Prompt/label construction
+   stays in shared engine code so it is byte-identical across desktop,
+   the TS twin, and iOS (PARITY comments). The engine depends only on
+   the seam; desktop vs iOS is an impl swap. stream_local / the "local"
+   provider dialect keep working on desktop bit-for-bit.
+
+2. The iOS backend via a Tauri mobile plugin (Swift). Using Tauri 2's
+   desktop.rs/mobile.rs plugin split, the iOS impl calls Swift over
+   FFI. The Swift plugin:
+   - checks SystemLanguageModel availability; if available →
+     LanguageModelSession.streamResponse, forwarding tokens back over
+     the Tauri channel to the engine, matching the desktop streaming
+     contract (SSE ↔ Swift async stream);
+   - else → the Tier-2 path (bundled small GGUF via llama.cpp+Metal
+     in-process, or MLXLanguageModel if you adopted iOS 27) exposing
+     the same token stream;
+   - pre-summarizes to fit the context window (feed the engine's
+     aggregated/top-N table, never raw rows); catches
+     exceededContextWindowSize and guardrail refusals and signals a
+     clean fallback verdict (the engine then uses its existing
+     extractive/templated narration — never a crash, never raw error
+     text to the user).
+   Swift stays thin (API calls only; no business logic — the
+   lighthouse-desktop grep-verify convention). If Tier-2 static
+   linking is heavy, land Tier-1 first behind the seam and stage
+   Tier-2 as a follow-up commit — but the seam and the availability
+   verdict ship together.
+
+3. Honest roster, availability-driven (reverse §24's blanket removal
+   correctly). The "private" provider reappears on iOS ONLY when the
+   plugin reports a usable backend for THIS device
+   (Tier-1 available, or Tier-2 present). providers.ts
+   modelProvidersFor(platform) and profile.rs default become
+   availability-aware, not platform-blanket: a Tier-1 device offers
+   the private model (and it may be the sensible default since it's
+   zero-setup and fully private); a below-floor device with no
+   bundled model still shows NO private option and the §24 empty-
+   provider truths. The model slide / Settings show the on-device
+   model as ready when the device supports it, with copy that says
+   what it is ("Runs on this device using Apple's on-device model" /
+   "…a built-in private model") — byte-pinned, honest about which
+   tier. No download CTA for Tier-1 (there's nothing to download).
+
+4. Warm-start + memory reality. Reuse the warm-wait state machine
+   (synth warmingLabel) for any load latency: Tier-1 is resident (no
+   warm), Tier-2 loads weights (a real warm — check
+   os_proc_available_memory before load and degrade to extractive if
+   the device can't hold it). If Tier-2 ships, add the
+   com.apple.developer.kernel.increased-memory-limit entitlement (the
+   iOS entitlements file is currently empty) and justify it in the PR.
+   No JIT anywhere (iOS forbids it for third-party apps).
+
+5. App-Store hygiene. Tier-1 = zero download (prefer it for exactly
+   this reason). If Tier-2 bundles a ~1 GB model, keep the base app
+   slim (Background Assets, NOT the deprecated On-Demand Resources)
+   and respect the cellular-download opt-in. Record the chosen
+   mechanism in the Phase-A doc.
+
+6. Tests, twin, stamps. Twin invariant: prompt/label strings stay
+   byte-identical (PARITY); what legitimately diverges — transport
+   (in-process Swift vs loopback HTTP) and generated narration TEXT
+   (a different model → not byte-identical) — must have any golden-
+   output equality test PLATFORM-GATED, never asserted equal across
+   engines. Pure logic (availability verdict, tier selection, context-
+   budget/summarize) tested in cargo + node. Swift/plugin/entitlements
+   grep-verified; the ios-build lane is the gate (and, if a device-
+   only path can't run in CI, say so). Bump the version across all
+   SEVEN stamps per CLAUDE.md.
+
+Constraints. Nothing leaves the device — on-device inference only;
+PrivateCloudComputeLanguageModel is banned. No analytics/telemetry/
+accounts. Desktop private-model path byte-identical. Deterministic
+analytics untouched (this is narration only). SharePoint plumbing
+untouched. Prompts/labels byte-identical across twins with PARITY
+comments.
+
+Acceptance:
+1. On a Tier-1 device (iPhone 15 Pro+ / M-series iPad, iOS 26+): the
+   private model appears in the roster, a deterministic analytics ask
+   is NARRATED by the on-device model, streaming, fully offline (turn
+   on Airplane Mode — it still answers), egress shield reads "All
+   local" and no host is recorded.
+2. On a below-floor device (or Tier-1 unavailable): no broken private
+   option — either the bundled Tier-2 model narrates on-device, or the
+   honest empty-provider state shows; never a spinner-to-nowhere.
+3. A guardrail refusal or context overflow degrades to the engine's
+   extractive narration with a calm note — never a crash or raw error.
+4. Airplane-mode end to end: pick a file, ask, get a charted +
+   narrated answer with zero network.
+5. Twin: shared prompt/label tests pass byte-identical; the narration
+   golden test is platform-gated; desktop local model unchanged.
+6. All seven stamps bumped; suites + release-smoke + ios-build green;
+   Phase-A decision doc committed.
+
+Environment. Requires macOS + Xcode, and Tier-1 verification needs a
+real Apple-Intelligence device (the Simulator may not host the system
+model — confirm in Phase A). Linux container: land the engine seam,
+availability/tier/summarize logic, roster wiring, and twin tests with
+full coverage; Swift plugin + entitlements + Cargo iOS-target pieces
+grep-verified; gate on ios-build. Commit per numbered section (Phase A
+first). Open ONE PR titled "iOS: on-device private model (Apple
+Foundation Models + small-GGUF fallback)"; stop at the PR.
+```
