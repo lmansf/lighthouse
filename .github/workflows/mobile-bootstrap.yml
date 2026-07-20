@@ -233,6 +233,26 @@ jobs:
         run: node scripts/fetch-local-model.mjs --only=ocr
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Stage OCR models into the iOS asset payload (ui-dist/ocr → app assets/ocr)
+        # iOS field patch 3 §1 — THE fix for "OCR fetched in CI but never on
+        # device". On iOS, tauri.conf.json `bundle.resources` (llm/embed/ocr)
+        # do NOT board the .app: that config is a DESKTOP-bundler concept, and
+        # `tauri ios build` drives xcodebuild against the COMMITTED pbxproj (no
+        # xcodegen regen — verified in the fp2 build log — so gen/apple/project.yml
+        # is inert at build time). The seam that DOES survive is frontendDist:
+        # tauri copies `ui-dist` → `gen/apple/assets` wholesale, and the pbxproj
+        # `assets` folder-reference copies that into `<App>.app/assets`. On iOS
+        # tauri's resource_dir() IS `<App>.app/assets`, so the engine resolves
+        # models at `assets/ocr` (config::resources_dir().join("ocr")). Placing
+        # them under `ui-dist/ocr` therefore lands them EXACTLY at the resolved
+        # path with ZERO engine-resolution changes. iOS-only (this job); the
+        # desktop build keeps its own clean ui-dist + bundle.resources path.
+        run: |
+          set -euo pipefail
+          mkdir -p ui-dist/ocr
+          cp -f resources/ocr/text-detection.rten resources/ocr/text-recognition.rten ui-dist/ocr/
+          echo "Staged bundled OCR models into ui-dist/ocr:"
+          ls -la ui-dist/ocr
       - name: Derive match git auth (base64 user:token — never logged)
         env:
           MATCH_GIT_TOKEN: ${{ secrets.MATCH_GIT_TOKEN }}
@@ -248,7 +268,9 @@ jobs:
           # TestFlight requires a unique, increasing build number per upload.
           /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${{ github.run_number }}" "$PLIST"
           echo "iOS version ${VER} (build ${{ github.run_number }})"
-      - name: Build signed .ipa${{ inputs.task == 'ios-beta' && ' + upload to TestFlight' || '' }}
+      - name: Build signed .ipa
+        # Always just BUILD here (both tasks). The TestFlight upload is a
+        # separate step below so the OCR-payload tripwire can gate it (fp3 §1).
         env:
           CI: "true"
           APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
@@ -259,7 +281,50 @@ jobs:
           MATCH_GIT_URL: ${{ secrets.MATCH_GIT_URL }}
           MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
           MATCH_READONLY: "1"
-        run: bundle exec fastlane ios ${{ inputs.task == 'ios-beta' && 'beta' || 'build_ipa' }}
+        run: bundle exec fastlane ios build_ipa
+      - name: Assert OCR models boarded the .app payload (fp3 §1 tripwire)
+        # Prove the two .rten models are inside the built payload at the path
+        # the engine actually resolves on iOS (<App>.app/assets/ocr). This is
+        # the standing guard against silently re-shipping the first-device
+        # defect (scanned PDFs extracting to nothing). It runs BEFORE the
+        # TestFlight upload, so a modelless build fails here and never reaches
+        # testers. On failure it prints where the .rten files DID land, so a
+        # broken staging seam is diagnosable in one run.
+        run: |
+          set -euo pipefail
+          IPA=build/ios/Lighthouse.ipa
+          test -f "$IPA" || { echo "::error::no .ipa at $IPA"; exit 1; }
+          WORK=$(mktemp -d)
+          unzip -q "$IPA" -d "$WORK"
+          APP=$(find "$WORK/Payload" -maxdepth 1 -name '*.app' -type d | head -1)
+          test -n "$APP" || { echo "::error::no .app inside Payload/"; exit 1; }
+          missing=0
+          for m in text-detection.rten text-recognition.rten; do
+            f="$APP/assets/ocr/$m"
+            if [ -f "$f" ]; then
+              echo "✔ assets/ocr/$m ($(wc -c < "$f" | tr -d ' ') bytes)"
+            else
+              echo "::error::MISSING $m at assets/ocr/ in the .app payload"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "Diagnostic — .rten files actually present in the payload:"
+            find "$APP" -name '*.rten' -print || echo "  (none anywhere in the .app)"
+            rm -rf "$WORK"; exit 1
+          fi
+          rm -rf "$WORK"
+          echo "OCR models boarded the payload at the engine-resolved path (assets/ocr)."
+      - name: Upload to TestFlight
+        if: ${{ inputs.task == 'ios-beta' }}
+        env:
+          CI: "true"
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APP_STORE_CONNECT_KEY_P8: ${{ secrets.APP_STORE_CONNECT_KEY_P8 }}
+          APP_STORE_CONNECT_KEY_P8_BASE64: "1"
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: bundle exec fastlane ios upload_only
       - name: Upload .ipa artifact
         if: always()
         uses: actions/upload-artifact@v4

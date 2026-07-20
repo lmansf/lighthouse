@@ -330,24 +330,36 @@ export function FileInspector({
                   )}
                 </div>
 
-                {/* Extracted text preview — what the model would actually read. */}
+                {/* Extracted text preview — what the model would actually read.
+                    Three honest states (fp3 §1):
+                    1. Text present, OCR-derived → flag possible recognition
+                       errors. Text from a real text layer needs no annotation
+                       on ANY engine — the old web-twin line "OCR detection:
+                       desktop app only" was stale (the native app OCRs on iOS
+                       too) and is gone: the twin reports
+                       ocrAvailability "unsupported" and its previews are
+                       always text-layer reads, so there is nothing to hedge.
+                    2. No text → found by name only (includes OCR off by
+                       toggle/policy — a choice, not a defect).
+                    3. No text AND the engine says "missing-models" → the
+                       build defect, named out loud instead of silence. */}
                 <div className={styles.section}>
                   <Text className={styles.label}>Extracted text</Text>
                   {data.extractPreview ? (
                     <>
                       <div className={styles.preview}>{data.extractPreview}</div>
-                      {desktop ? (
-                        data.fromOcr ? (
-                          <Text size={200} className={styles.ocr}>
-                            Read by OCR — may contain recognition errors.
-                          </Text>
-                        ) : null
-                      ) : (
-                        <Text size={200} className={styles.muted}>
-                          OCR detection: desktop app only
+                      {data.fromOcr && (
+                        <Text size={200} className={styles.ocr}>
+                          Read by OCR — may contain recognition errors.
                         </Text>
                       )}
                     </>
+                  ) : data.ocrAvailability === "missing-models" ? (
+                    <Text className={styles.ocr}>
+                      This build is missing its OCR models — scans and images can&rsquo;t
+                      be read until an update restores them. The file stays findable by
+                      name.
+                    </Text>
                   ) : (
                     <Text className={styles.muted}>
                       No extractable text — this file is found by name only.

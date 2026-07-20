@@ -4,10 +4,12 @@
  * and OMITS the Rust-engine-only ones.
  *
  * PARITY: the twin returns { name, included, localOnly, extractPreview,
- * chunkMode, testSearch? } and deliberately OMITS { fromOcr, chunkCount,
- * columns, indexedAt, fresh } — OCR, the persistent chunk index, and the column
- * catalog are Rust-engine-only (docs/ts-twin.md). It never fabricates a value:
- * an omitted field is simply absent, and the UI renders it as "desktop only".
+ * chunkMode, ocrAvailability?, testSearch? } and deliberately OMITS { fromOcr,
+ * chunkCount, columns, indexedAt, fresh } — OCR, the persistent chunk index,
+ * and the column catalog are Rust-engine-only (docs/ts-twin.md). It never
+ * fabricates a value: an omitted field is simply absent, and `ocrAvailability`
+ * carries this engine's own honest constant ("unsupported"), not a fake of the
+ * Rust engine's live verdict.
  *
  * PURE READ: it calls listNodes / docText / retrieve — never a setter.
  */
@@ -28,6 +30,14 @@ const isTabular = (name: string): boolean => {
   return TABULAR_EXT.some((e) => lower.endsWith(e));
 };
 
+/** Files OCR could ever be involved in extracting: raster images + PDFs.
+ *  KEEP IN SYNC with extract.rs `ocr_could_apply` (OCR_IMAGE_EXT + ".pdf"). */
+const OCR_RELEVANT_EXT = [".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff", ".pdf"];
+const ocrCouldApply = (name: string): boolean => {
+  const lower = name.toLowerCase();
+  return OCR_RELEVANT_EXT.some((e) => lower.endsWith(e));
+};
+
 export async function inspect(fileId: string, query?: string): Promise<FileInspection> {
   // Name + effective inclusion + local-only come from the SAME painted walk the
   // explorer renders, so the panel's labels match the file's row exactly.
@@ -45,6 +55,14 @@ export async function inspect(fileId: string, query?: string): Promise<FileInspe
     includedBy: inclusionAttribution(fileId),
     localOnlyBy: localOnlyAttribution(fileId),
   };
+
+  // OCR availability (iOS field patch 3 §1): a SHARED field with per-engine
+  // honest values. This engine has no OCR at all, so for the files OCR could
+  // apply to (images + PDFs) it reports the constant "unsupported" — a true
+  // statement, not a fake of the Rust engine's live verdict ("ready" | "off" |
+  // "missing-models"). PARITY: inspect.rs fills the same field via
+  // ocr::availability(), gated on the same extension set.
+  if (ocrCouldApply(node.name)) out.ocrAvailability = "unsupported";
 
   // Extract preview — the bounded slice of text the model would read. Null for a
   // rich format the twin can't parse (images, .doc, .pptx, .odt, .rtf) or a
