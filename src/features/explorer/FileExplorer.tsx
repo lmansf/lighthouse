@@ -1799,10 +1799,16 @@ export function FileExplorer() {
     };
   }, []);
 
-  // DOM drag handlers: the OS-drop path for the WEB build only — inside the
-  // desktop shell the native events above own OS drops (see isDesktopShell).
+  // DOM drag handlers: the OS-drop path for the WEB build AND the mobile shell
+  // (fp3 §5). Inside the DESKTOP shell the native `lighthouse:os-drop` events
+  // above own OS drops (isDesktopShell → DOM stands down to avoid double-add).
+  // But an iPad is ALSO an embedded shell (isDesktopShell true) where Tauri's
+  // desktop drag-drop bridge does NOT fire for Files-app drags into the
+  // WKWebView — iPadOS delivers them as ordinary DOM drag events. So on a
+  // mobile shell we keep the DOM path live as the working fallback; the native
+  // listener stays dormant there (the iOS shell never emits those events).
   const domOsDrag = (e: React.DragEvent) =>
-    !isDesktopShell() && e.dataTransfer.types.includes("Files");
+    (!isDesktopShell() || isMobile) && e.dataTransfer.types.includes("Files");
 
   return (
     <section

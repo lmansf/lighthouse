@@ -2827,14 +2827,19 @@ export function ChatPanel() {
     reportSkipped(skipped);
   }
 
-  // Inside the Tauri shell, OS file drags arrive via the NATIVE drag-drop
-  // events (rebroadcast as lighthouse:os-* CustomEvents) — the DOM "Files"
-  // events never fire on Windows and would double-handle drops on macOS, so
-  // the DOM path only reacts to OS files on the web. Internal drags from the
-  // explorer (FILE_DRAG_MIME) are DOM-native everywhere and stay as they are.
+  // Inside the DESKTOP Tauri shell, OS file drags arrive via the NATIVE
+  // drag-drop events (rebroadcast as lighthouse:os-* CustomEvents) — the DOM
+  // "Files" events never fire on Windows and would double-handle drops on
+  // macOS, so the DOM path only reacts to OS files off the desktop shell.
+  // fp3 §5: an iPad is an embedded shell too, but Tauri's desktop drag bridge
+  // does NOT fire for Files-app drags into the WKWebView — iPadOS delivers them
+  // as ordinary DOM drag events — so a mobile shell keeps the DOM path live as
+  // the working fallback. Internal explorer drags (FILE_DRAG_MIME) are
+  // DOM-native everywhere and stay as they are.
   const isFileDrag = (e: DragEvent) =>
     e.dataTransfer.types.includes(FILE_DRAG_MIME) ||
-    (!isDesktopShell() && e.dataTransfer.types.includes("Files"));
+    ((!isDesktopShell() || platformKind() !== "desktop") &&
+      e.dataTransfer.types.includes("Files"));
 
   // Link OS-dropped paths in place and attach the resulting file nodes — the
   // native-event twin of attachOsFiles (which handles browser File objects).
