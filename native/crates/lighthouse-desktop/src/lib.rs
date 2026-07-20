@@ -350,13 +350,18 @@ fn bootstrap_env(app: &AppHandle) {
         }
         std::env::set_var("LIGHTHOUSE_APP_STATE_DIR", &data);
     }
-    // Bundled offline assets (llama-server). Packaged builds have
-    // them under the resource dir; dev runs fall back to the repo's resources/.
+    // Bundled offline assets (llama-server, embed + OCR models). Packaged
+    // builds have them under the resource dir; dev runs fall back to the
+    // repo's resources/. §1 (iOS field patch 2): accept the dir when ANY of
+    // the three asset folders exists — the mobile bundle carries only `ocr`
+    // (llama-server and the embed GGUF it serves are desktop-only), and the
+    // old llm-only gate would have rejected a bundle without it, leaving
+    // LIGHTHOUSE_RESOURCES_PATH unset and OCR unreachable on device.
     let resource_root = app
         .path()
         .resource_dir()
         .ok()
-        .filter(|d| d.join("llm").exists());
+        .filter(|d| d.join("llm").exists() || d.join("ocr").exists() || d.join("embed").exists());
     let dev_root = std::env::current_dir()
         .ok()
         .map(|d| d.join("../../../resources"))

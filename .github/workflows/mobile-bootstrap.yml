@@ -222,6 +222,17 @@ jobs:
         run: npm ci
       - name: Static-export the UI (frontendDist = ui-dist)
         run: node scripts/build-ui-static.mjs
+      - name: Fetch bundled OCR models (scanned-PDF/image reading on device)
+        # iOS field patch 2 §1: without this the bundle ships resources/ocr as
+        # a .gitkeep placeholder and scanned PDFs honestly extract to nothing
+        # (first-device report). OCR-only on purpose — llama-server can't run
+        # on iOS and the embedding GGUF is served BY llama-server, so neither
+        # belongs in the mobile bundle. NOT continue-on-error (unlike the
+        # desktop step): here the models are the point of the bundle entry —
+        # a build without them would re-ship the exact defect this fixes.
+        run: node scripts/fetch-local-model.mjs --only=ocr
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Derive match git auth (base64 user:token — never logged)
         env:
           MATCH_GIT_TOKEN: ${{ secrets.MATCH_GIT_TOKEN }}
