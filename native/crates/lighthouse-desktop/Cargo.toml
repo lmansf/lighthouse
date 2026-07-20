@@ -16,7 +16,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 futures = { workspace = true }
-reqwest = { workspace = true }
+# reqwest is declared per-target below (§4): the TLS root store differs by
+# platform — see the seam comment in lighthouse-core/Cargo.toml.
 rand = { workspace = true }
 hex = { workspace = true }
 axum = { workspace = true }
@@ -30,11 +31,18 @@ tauri-plugin-notification = "2"
 # multi-window state to remember, no global hotkey backend. They pair with the
 # `cfg(desktop)` shell code in src/desktop/ and are excluded from the mobile
 # dependency graph entirely.
+# reqwest rides the same split (§4): OS trust roots on desktop, compiled-in
+# webpki roots on mobile — the full seam rationale lives in
+# lighthouse-core/Cargo.toml, which declares the identical pair.
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-single-instance = "2"
 tauri-plugin-autostart = "2"
 tauri-plugin-window-state = "2"
 tauri-plugin-global-shortcut = "2"
+reqwest = { workspace = true, features = ["rustls-tls-native-roots"] }
+
+[target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
+reqwest = { workspace = true, features = ["rustls-tls-webpki-roots"] }
 
 # W3 Whisper mode: the WH_KEYBOARD_LL tap-chord hook (whisper.rs).
 # Win32_System_JobObjects (+ Win32_Security, which gates CreateJobObjectW's

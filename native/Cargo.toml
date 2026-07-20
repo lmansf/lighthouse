@@ -18,7 +18,16 @@ bytes = "1"
 # "blocking" serves the embedding client (crate::embed): retrieval runs inside
 # spawn_blocking and the vector warm pass on a plain thread, so a sync client
 # (with its own internal runtime thread) fits better than juggling handles.
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "json", "stream", "multipart", "blocking"] }
+#
+# NOTE (iOS field patch 1 §4): deliberately NO TLS root-store feature here —
+# the member crates select it per compile target (see the [target...] reqwest
+# sections in lighthouse-core/lighthouse-desktop): native OS roots on desktop
+# (unchanged), compiled-in webpki roots on iOS/Android, where rustls-native-
+# certs has no keychain backend and yields an EMPTY root store (every provider
+# handshake fails "invalid peer certificate: UnknownIssuer" — the first-round
+# TestFlight report). Keep this line feature-free or desktop features would
+# additively leak into the mobile build.
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "multipart", "blocking"] }
 sha1 = "0.10"
 sha2 = "0.10"
 hex = "0.4"

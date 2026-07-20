@@ -283,6 +283,26 @@ export interface Usage {
   output: number;
 }
 
+/**
+ * §4 instrumentation: the FULL error chain, not just the top message. Node's
+ * fetch rejects with a bare "fetch failed" whose actual cause (DNS, connect
+ * refused, a TLS trust failure) hangs off `err.cause` — exactly the layer the
+ * top message hides. Every transport error the ask note and the key test show
+ * goes through here, so the user (and a bug report) sees the real reason.
+ * PARITY: mirrors llm.rs::error_chain (which walks std::error::Error::source).
+ */
+export function errorChain(err: unknown): string {
+  if (!(err instanceof Error)) return err == null ? "error" : String(err) || "error";
+  let out = err.message || "error";
+  let cause: unknown = err.cause;
+  for (let depth = 0; depth < 8 && cause != null; depth++) {
+    const line = cause instanceof Error ? cause.message : String(cause);
+    if (line && !out.includes(line)) out += `: ${line}`;
+    cause = cause instanceof Error ? cause.cause : undefined;
+  }
+  return out;
+}
+
 /** Stream an answer as incremental text deltas. */
 export async function* streamAnswer(
   question: string,
@@ -313,9 +333,9 @@ export async function* streamAnswer(
       }
       return;
     } catch (err) {
-      const note = `\n\n_(Local model unavailable — ${
-        err instanceof Error ? err.message : "error"
-      }${emitted ? "." : "; is the local model running? Falling back to passages."})_\n\n`;
+      const note = `\n\n_(Local model unavailable — ${errorChain(err)}${
+        emitted ? "." : "; is the local model running? Falling back to passages."
+      })_\n\n`;
       yield note;
       if (emitted) return;
       yield* extractive(question, contexts, false);
@@ -344,9 +364,9 @@ export async function* streamAnswer(
       }
       return;
     } catch (err) {
-      const note = `\n\n_(Live model unavailable — ${
-        err instanceof Error ? err.message : "error"
-      }${emitted ? "." : "; falling back to local passages."})_\n\n`;
+      const note = `\n\n_(Live model unavailable — ${errorChain(err)}${
+        emitted ? "." : "; falling back to local passages."
+      })_\n\n`;
       yield note;
       if (emitted) return;
     }
@@ -373,9 +393,9 @@ export async function* streamAnswer(
       }
       return;
     } catch (err) {
-      const note = `\n\n_(Live model unavailable — ${
-        err instanceof Error ? err.message : "error"
-      }${emitted ? "." : "; falling back to local passages."})_\n\n`;
+      const note = `\n\n_(Live model unavailable — ${errorChain(err)}${
+        emitted ? "." : "; falling back to local passages."
+      })_\n\n`;
       yield note;
       if (emitted) return;
     }
@@ -480,8 +500,9 @@ export async function validateKey(
     recordEgress(url, PURPOSE_AI_PROVIDER);
     res = await fetch(url, { headers, signal: AbortSignal.timeout(10_000) });
   } catch (err) {
-    const reason = err instanceof Error ? err.message : "network error";
-    return { ok: false, error: `couldn't reach the provider — ${reason}` };
+    // §4: full chain (errorChain) — "fetch failed" alone hid the actual
+    // transport cause (DNS vs connect vs TLS trust). PARITY: llm.rs validate_key.
+    return { ok: false, error: `couldn't reach the provider — ${errorChain(err)}` };
   }
   if (res.ok || res.status === 429) return { ok: true };
   const hint =

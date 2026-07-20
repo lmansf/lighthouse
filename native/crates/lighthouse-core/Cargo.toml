@@ -13,7 +13,8 @@ tokio = { workspace = true }
 futures = { workspace = true }
 async-stream = { workspace = true }
 bytes = { workspace = true }
-reqwest = { workspace = true }
+# reqwest is declared per-target below (§4): the TLS root store differs by
+# platform while everything else about the dependency stays workspace-shared.
 sha1 = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
@@ -49,6 +50,27 @@ keyring = { version = "3", default-features = false, features = [
     "sync-secret-service",
     "crypto-rust",
 ], optional = true }
+
+# --- TLS trust roots, per compile target (iOS field patch 1 §4) -------------
+# PARITY-style seam: same dependency, same client code (llm.rs http_client),
+# ONE deliberate divergence — where the trust anchors come from.
+#
+# Desktop (macOS/Windows/Linux): the OS root store via rustls-native-certs —
+# byte-for-byte the feature set every 0.13.0 desktop build shipped with.
+#
+# iOS/Android: rustls-native-certs has NO backend (it cannot read the iOS
+# keychain), so "native roots" resolves to an EMPTY store and every cloud-
+# provider handshake fails with "invalid peer certificate: UnknownIssuer" —
+# the first-round TestFlight report (§4). Mobile compiles in the Mozilla CA
+# bundle (webpki-roots) instead: deterministic, offline-verifiable, no OS
+# trust-store query, no ATS exceptions, no entitlements. (The alternative,
+# rustls-platform-verifier, would honor MDM-installed enterprise CAs; switch
+# to it deliberately if that audience ever materializes.)
+[target.'cfg(not(any(target_os = "ios", target_os = "android")))'.dependencies]
+reqwest = { workspace = true, features = ["rustls-tls-native-roots"] }
+
+[target.'cfg(any(target_os = "ios", target_os = "android"))'.dependencies]
+reqwest = { workspace = true, features = ["rustls-tls-webpki-roots"] }
 
 [features]
 # Store the per-install sealing secret in the OS keychain rather than the
