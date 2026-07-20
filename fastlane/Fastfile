@@ -148,6 +148,20 @@ platform :ios do
       skip_waiting_for_build_processing: true,
     )
   end
+
+  # Upload an ALREADY-built .ipa (build/ios/Lighthouse.ipa from `build_ipa`) to
+  # TestFlight. Split out of `beta` so CI can wedge the OCR-payload tripwire
+  # (iOS field patch 3 §1) BETWEEN build and upload — a build whose bundled
+  # models never boarded the .app fails the tripwire and never reaches testers.
+  lane :upload_only do
+    ipa = File.expand_path("../build/ios/Lighthouse.ipa")
+    UI.user_error!("no .ipa at #{ipa} — run `fastlane ios build_ipa` first.") unless File.exist?(ipa)
+    upload_to_testflight(
+      api_key: asc_api_key,
+      ipa: ipa,
+      skip_waiting_for_build_processing: true,
+    )
+  end
 end
 
 platform :android do

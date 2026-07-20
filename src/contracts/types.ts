@@ -323,6 +323,13 @@ export interface FileInspection {
   /** Rust-only: the preview text came from OCR (image / scanned PDF). The twin
    *  has no OCR and omits this. */
   fromOcr?: boolean;
+  /** Whether OCR can run in THIS engine right now, and why not (iOS field
+   *  patch 3 §1 — a build whose models never shipped becomes diagnosable):
+   *  "ready" | "off" (toggle / managed policy) | "missing-models" (the .rten
+   *  files didn't load) from the Rust engine; the TS twin fills its own honest
+   *  constant "unsupported" (it has no OCR — images stay findable by name
+   *  only). Present only for files OCR could apply to (images + PDFs). */
+  ocrAvailability?: "ready" | "off" | "missing-models" | "unsupported";
   /** How the file is chunked: row-windows (tabular) vs word-windows (prose). */
   chunkMode?: "tabular" | "prose";
   /** Rust-only: chunk count from the persistent index. The twin re-chunks per

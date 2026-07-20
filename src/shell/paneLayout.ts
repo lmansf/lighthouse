@@ -6,9 +6,10 @@
  *
  * paneLayout() is the single decision-maker for how the shell arranges its
  * panes: below COMPACT_BREAKPOINT on a MOBILE shell the chat pane is the
- * screen, the sidebar becomes an overlay drawer, section panels become
- * full-width sheets, and the explorer's resize machinery (handle + persisted
- * width) does not exist. The desktop platform NEVER takes the compact branch
+ * screen, the sidebar becomes a full-screen PAGE that slides in from the left
+ * edge (fp3 §3 — no scrim, no overlay), section panels become full-width
+ * sheets, and the explorer's resize machinery (handle + persisted width) does
+ * not exist. The desktop platform NEVER takes the compact branch
  * — at any window width — so desktop rendering is byte-for-byte the 0.13.0
  * tree (the structural pin the unit tests hold); an iPad at ≥700pt likewise
  * keeps the desktop arrangement.
@@ -28,9 +29,11 @@ export const COMPACT_BREAKPOINT = 700;
 export interface PaneLayout {
   /** True only on a mobile shell below the breakpoint. */
   compact: boolean;
-  /** How the file sidebar renders: a normal column, or an overlay drawer. */
-  sidebarMode: "column" | "drawer";
-  /** Whether the drawer is on screen right now (compact only — a stale
+  /** How the file sidebar renders: a normal column (desktop / iPad ≥700pt), or
+   *  — at compact (fp3 §3) — a full-screen "page" that slides in from the left
+   *  edge over the chat (no scrim, no 85vw overlay). */
+  sidebarMode: "column" | "page";
+  /** Whether the files page is on screen right now (compact only — a stale
    *  drawerOpen can never leak into the desktop arrangement). */
   drawerVisible: boolean;
   /** The explorer resize handle exists only in the column arrangement. */
@@ -53,7 +56,7 @@ export function paneLayout(
   const compact = platform !== "desktop" && width < COMPACT_BREAKPOINT;
   return {
     compact,
-    sidebarMode: compact ? "drawer" : "column",
+    sidebarMode: compact ? "page" : "column",
     drawerVisible: compact && drawerOpen,
     showResizeHandle: !compact,
     applyExplorerWidth: !compact,
@@ -110,5 +113,51 @@ export function usePaneLayout(drawerOpen: boolean): PaneLayout {
     compactViewport ? COMPACT_BREAKPOINT - 1 : COMPACT_BREAKPOINT,
     drawerOpen,
     platformKind(),
+  );
+}
+
+// --- The touch (pointer) axis (iOS field patch 3 §2) ------------------------
+// A SECOND, orthogonal signal. `compact` (above) thresholds WIDTH and drives
+// PRESENTATION (drawer/page/sheets); this thresholds the primary POINTER and
+// drives SIZING (≥44pt tap targets, touch-action). They are deliberately
+// distinct: an iPad at ≥700pt is NOT compact (keeps the desktop arrangement)
+// but IS coarse-pointer (gets touch-grade sizing), and a desktop with a
+// touchscreen is coarse yet must never compact. Same shared-singleton pattern
+// as the width query — one matchMedia, every consumer subscribes.
+const COARSE_POINTER_QUERY = "(pointer: coarse)";
+
+let pmql: MediaQueryList | null = null;
+const pointerListeners = new Set<() => void>();
+
+function ensurePointerQuery(): MediaQueryList | null {
+  if (typeof window === "undefined") return null;
+  if (!pmql) {
+    pmql = window.matchMedia(COARSE_POINTER_QUERY);
+    pmql.addEventListener("change", () => {
+      for (const l of pointerListeners) l();
+    });
+  }
+  return pmql;
+}
+
+function subscribePointer(cb: () => void): () => void {
+  ensurePointerQuery();
+  pointerListeners.add(cb);
+  return () => pointerListeners.delete(cb);
+}
+
+/**
+ * True when the primary input is a coarse pointer (touch): every iPhone and
+ * iPad, plus a touchscreen laptop. The tap-sizing axis — NOT a form-factor or
+ * width proxy. SSR renders the fine-pointer (mouse) default; the client
+ * corrects on hydration. Hardware keyboards are orthogonal again: an iPad with
+ * a Magic Keyboard is still coarse-pointer, so keyboard affordances stay live
+ * even where the touch HINT COPY is hidden.
+ */
+export function useCoarsePointer(): boolean {
+  return useSyncExternalStore(
+    subscribePointer,
+    () => ensurePointerQuery()?.matches ?? false,
+    () => false,
   );
 }

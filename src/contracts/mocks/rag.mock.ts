@@ -171,6 +171,9 @@ class MockRagService implements RagService {
       chunkMode: tabular ? "tabular" : "prose",
       extractPreview: `…extracted text preview for ${node.name}…`,
     };
+    // Like the twin (src/server/inspect.ts): no OCR in this engine, reported
+    // honestly for the files OCR could apply to (images + PDFs).
+    if (/\.(png|jpe?g|webp|bmp|tiff?|pdf)$/i.test(node.name)) out.ocrAvailability = "unsupported";
     const q = query?.trim();
     if (q) {
       const terms = q.toLowerCase().split(/\s+/).filter(Boolean);

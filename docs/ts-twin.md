@@ -59,7 +59,7 @@ intents) but degrades as noted:
 | Column catalog (join hints, suggested asks, find-column) | `catalog.rs` | `suggestedAsks` returns `[]`; findColumn intent falls through to retrieval |
 | Local embeddings + hybrid search | `embed.rs` | retrieval stays lexical (BM25) |
 | Persistent incremental retrieval index | `index.rs` | re-reads/re-chunks per query under legacy caps |
-| OCR (scanned PDFs, raster images) | `ocr.rs` | image files stay name-match-only |
+| OCR (scanned PDFs, raster images) | `ocr.rs` | image files stay name-match-only. The file inspector's `ocrAvailability` field IS shared (a SELECT-less report): the Rust engine returns its live verdict (`ready`/`off`/`missing-models` — the last one makes a build whose bundled models never shipped diagnosable, iOS fp3 §1), while the twin fills the SAME field with its own honest constant `unsupported` for images + PDFs |
 | Filesystem watcher (event-driven freshness) | `watch.rs` | poll-style freshness |
 | Extra rich formats: `.doc`, `.pptx`, `.odt`, `.odp`, `.rtf`, images | `extract.rs` `RICH_EXT` | name-match-only (TS extracts pdf/docx/xlsx/csv/md/txt via mammoth/unpdf/xlsx) |
 | Semantic layer: certification, trust reconcile, metric proposal (parse executed SQL) | `analytics.rs` (`certified_metrics`/`reconcile_metric`/`propose_metric`) + `synth.rs` prompt injection | never certifies/reconciles (no analytics branch → no `AnalyticsMeta.certified`/`.trust`); `op:"defineMetric"` answers `{available:false}`. The store/CRUD/`applicableSemantics` list ARE mirrored (`semantic.ts`) — a metric carries its `reads`, so `list` needs no DataFusion |

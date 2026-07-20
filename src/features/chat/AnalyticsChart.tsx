@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { Button, Text, Tooltip, makeStyles, tokens } from "@fluentui/react-components";
 import { ArrowDownloadRegular, CheckmarkRegular } from "@fluentui/react-icons";
 import {
@@ -201,6 +201,34 @@ export function AnalyticsChart({ spec }: { spec: ChartSpec }) {
   const styles = useStyles();
   const svgRef = useRef<SVGSVGElement | null>(null);
   const [exported, setExported] = useState(false);
+  // fp3 §2: tap-to-reveal a datapoint tooltip on touch. Native SVG <title> only
+  // shows on hover / long-press, so a plain tap on a phone/iPad reveals nothing.
+  // ONE delegated handler reads whichever datapoint (circle/rect) was tapped —
+  // reusing its existing <title> text — and toggles an overlay label; hover
+  // (mouse / iPad trackpad) keeps the native <title>, untouched. Tapping the
+  // same point again, or the chart background, dismisses it.
+  const [tap, setTap] = useState<{ tx: number; ty: number; text: string } | null>(null);
+  const onChartTap = (e: ReactMouseEvent<SVGSVGElement>) => {
+    const shape = (e.target as Element).closest("circle, rect") as SVGElement | null;
+    const text = shape?.querySelector("title")?.textContent ?? "";
+    if (!shape || !text) {
+      setTap(null);
+      return;
+    }
+    const cx = shape.getAttribute("cx");
+    const cy = shape.getAttribute("cy");
+    let tx: number;
+    let ty: number;
+    if (cx !== null && cy !== null) {
+      tx = Number(cx);
+      ty = Number(cy);
+    } else {
+      // a bar rect: anchor at the top-center of the bar
+      tx = Number(shape.getAttribute("x") ?? 0) + Number(shape.getAttribute("width") ?? 0) / 2;
+      ty = Number(shape.getAttribute("y") ?? 0);
+    }
+    setTap((prev) => (prev && prev.text === text ? null : { tx, ty, text }));
+  };
   const inner = { w: W - MARGIN.left - MARGIN.right, h: H - MARGIN.top - MARGIN.bottom };
 
   const isStacked = spec.kind === "bar" && spec.stacked === true;
@@ -284,6 +312,8 @@ export function AnalyticsChart({ spec }: { spec: ChartSpec }) {
         role="img"
         aria-hidden="false"
         className={styles.svg}
+        style={{ touchAction: "manipulation" }}
+        onClick={onChartTap}
       >
         <title>{aria}</title>
         {/* horizontal gridlines + tick labels */}
@@ -476,6 +506,40 @@ export function AnalyticsChart({ spec }: { spec: ChartSpec }) {
                 </g>
               );
             })}
+        {/* fp3 §2: the tapped-datapoint tooltip. A rounded label above the
+            point, clamped inside the viewBox; pointer-events off so the next
+            tap reaches the shape/background underneath (toggle + dismiss). */}
+        {tap &&
+          (() => {
+            const pad = 5;
+            const charW = 6.1;
+            const wBox = Math.min(W - 8, tap.text.length * charW + pad * 2);
+            const hBox = 20;
+            const bx = Math.max(4, Math.min(W - wBox - 4, tap.tx - wBox / 2));
+            const by = Math.max(4, tap.ty - hBox - 8);
+            return (
+              <g style={{ pointerEvents: "none" }}>
+                <rect
+                  x={bx}
+                  y={by}
+                  width={wBox}
+                  height={hBox}
+                  rx={5}
+                  fill={tokens.colorNeutralBackgroundInverted}
+                  opacity={0.95}
+                />
+                <text
+                  x={bx + wBox / 2}
+                  y={by + hBox / 2 + 3.5}
+                  textAnchor="middle"
+                  fontSize="10.5"
+                  fill={tokens.colorNeutralForegroundInverted}
+                >
+                  {tap.text}
+                </text>
+              </g>
+            );
+          })()}
       </svg>
       {spec.series.length > 1 && (
         <figcaption className={styles.legend}>

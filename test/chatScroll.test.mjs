@@ -61,17 +61,26 @@ test("anchor jumps are instant scrollTop writes — reduced-motion needs no spec
     /el\.scrollTop = top;\s*\n\s*programmaticScrollTopRef\.current = el\.scrollTop;/,
     "writeScrollTop records the applied (post-clamp) position",
   );
-  // The single smooth scroll in the file is the pre-existing, user-initiated
+  // The single scrollIntoView in the file is the pre-existing, user-initiated
   // citation-chip card reveal — not part of the streaming anchor machinery.
   assert.equal(
     (chat.match(/\.scrollIntoView\(/g) ?? []).length,
     1,
     "no new scrollIntoView beside the citation-chip reveal",
   );
+  // fp3 §2: that one citation reveal now jumps INSTANTLY on a coarse pointer
+  // (smooth on a mouse) — a smooth citation jump fights the browser's own
+  // scroll during an iOS pinch/zoom. It is still the only scrollIntoView, and
+  // the streaming anchor machinery stays raw-scrollTop (asserted above).
   assert.equal(
-    (chat.match(/behavior:\s*"smooth"/g) ?? []).length,
+    (chat.match(/behavior:\s*coarsePointer\s*\?\s*"auto"\s*:\s*"smooth"/g) ?? []).length,
     1,
-    "no new smooth scrolling beside the citation-chip reveal",
+    "the single citation reveal is instant-on-touch, smooth-on-mouse",
+  );
+  assert.equal(
+    (chat.match(/behavior:\s*"smooth"(?!\s*[:}])/g) ?? []).length,
+    0,
+    "no unconditional smooth scrolling remains",
   );
 });
 

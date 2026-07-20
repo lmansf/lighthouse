@@ -37,6 +37,15 @@ fn is_ocr_image_ext(ext: &str) -> bool {
     OCR_IMAGE_EXT.contains(&ext)
 }
 
+/// Whether OCR could ever be involved in extracting this extension: raster
+/// images (always OCR) and PDFs (the scanned-page fallback). The inspector
+/// gates its `ocrAvailability` field on this so inspecting a .txt never pays
+/// the one-time model load. KEEP IN SYNC with OCR_RELEVANT_EXT in
+/// src/server/inspect.ts.
+pub fn ocr_could_apply(ext: &str) -> bool {
+    is_ocr_image_ext(ext) || ext == ".pdf"
+}
+
 pub fn is_rich_file(name: &str) -> bool {
     let ext = match name.rsplit_once('.') {
         Some((stem, ext)) if !stem.is_empty() => format!(".{}", ext.to_lowercase()),

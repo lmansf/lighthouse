@@ -14,9 +14,18 @@
  */
 import { useRef, useState } from "react";
 import { Text, makeStyles, mergeClasses, shorthands, tokens } from "@fluentui/react-components";
-import { ChevronRightRegular } from "@fluentui/react-icons";
-import { SIDEBAR_SECTIONS } from "./sidebarSections";
+import { ChevronRightRegular, MoreHorizontalRegular } from "@fluentui/react-icons";
+import { SIDEBAR_SECTIONS, type SidebarSection } from "./sidebarSections";
 import { useSidebarFlyout } from "@/stores/useSidebarFlyout";
+import { usePaneLayout } from "./paneLayout";
+
+/**
+ * fp3 §4: at compact the seven rail sections don't all deserve a first-class
+ * row on a phone. History + Investigations (the two the user reaches for most)
+ * stay top-level; the other five fold under a "More" row that expands them as a
+ * simple in-page list. Desktop / iPad-regular render all seven unchanged.
+ */
+const COMPACT_PRIMARY_IDS = new Set(["history", "investigations"]);
 
 /** The id of the flyout panel the rows disclose — the rail's `aria-controls`
  *  target and the flyout region's `id` must agree. */
@@ -40,6 +49,8 @@ const useStyles = makeStyles({
     gap: tokens.spacingHorizontalS,
     width: "100%",
     minHeight: "34px",
+    // fp3 §4: touch-grade 48pt rows on a coarse pointer (the files page).
+    "@media (pointer: coarse)": { minHeight: "48px" },
     ...shorthands.padding(tokens.spacingVerticalXS, tokens.spacingHorizontalS),
     ...shorthands.border("none"),
     ...shorthands.borderRadius(tokens.borderRadiusMedium),
@@ -90,19 +101,38 @@ const useStyles = makeStyles({
     "@media (prefers-reduced-motion: reduce)": { transitionDuration: "0.01ms" },
   },
   chevronOpen: { transform: "rotate(90deg)" },
+  // fp3 §4: the five secondary sections under an expanded "More" — indented one
+  // step so the two-level grouping reads at a glance.
+  subRow: { paddingLeft: tokens.spacingHorizontalXL },
 });
 
 export function SectionRail() {
   const styles = useStyles();
   const openSection = useSidebarFlyout((s) => s.openSection);
   const toggle = useSidebarFlyout((s) => s.toggle);
-  // Roving tabindex: exactly one row is tabbable; arrows move the focus (and the
-  // tabbable row) within the group.
+  // Platform-aware compact (fp3 §4): desktop NEVER compacts at any width (the
+  // paneLayout structural pin), so the desktop/iPad-regular render below stays
+  // byte-for-byte the seven-row rail. Only a mobile shell <700pt folds.
+  const compact = usePaneLayout(false).compact;
+  const [moreOpen, setMoreOpen] = useState(false);
+  // Roving tabindex over the CURRENTLY VISIBLE rows: exactly one is tabbable;
+  // arrows move the focus (and the tabbable row) within the group.
   const [focusIdx, setFocusIdx] = useState(0);
   const btnRefs = useRef<Array<HTMLButtonElement | null>>([]);
 
+  // The visible section rows, in order. Full list off-compact; at compact only
+  // the primary sections (History + Investigations) sit at top level.
+  const primary = compact
+    ? SIDEBAR_SECTIONS.filter((s) => COMPACT_PRIMARY_IDS.has(s.id))
+    : SIDEBAR_SECTIONS;
+  const secondary = compact
+    ? SIDEBAR_SECTIONS.filter((s) => !COMPACT_PRIMARY_IDS.has(s.id))
+    : [];
+  // Total tabbable rows: primary + (compact ? the "More" row + expanded secondary : 0).
+  const rowCount = primary.length + (compact ? 1 + (moreOpen ? secondary.length : 0) : 0);
+
   const focusRow = (i: number) => {
-    const clamped = Math.max(0, Math.min(SIDEBAR_SECTIONS.length - 1, i));
+    const clamped = Math.max(0, Math.min(rowCount - 1, i));
     setFocusIdx(clamped);
     btnRefs.current[clamped]?.focus();
   };
@@ -119,49 +149,80 @@ export function SectionRail() {
       focusRow(0);
     } else if (e.key === "End") {
       e.preventDefault();
-      focusRow(SIDEBAR_SECTIONS.length - 1);
+      focusRow(rowCount - 1);
     }
     // Enter/Space fall through to the button's native click → toggle.
   };
+
+  const sectionRow = (section: SidebarSection, i: number, sub = false) => {
+    const isOpen = openSection === section.id;
+    const Icon = section.icon;
+    return (
+      <button
+        key={section.id}
+        type="button"
+        ref={(el) => {
+          btnRefs.current[i] = el;
+        }}
+        className={mergeClasses(styles.row, sub && styles.subRow, isOpen && styles.rowActive)}
+        aria-expanded={isOpen}
+        aria-controls={isOpen ? FLYOUT_PANEL_ID : undefined}
+        tabIndex={i === focusIdx ? 0 : -1}
+        onClick={() => toggle(section.id)}
+        onFocus={() => setFocusIdx(i)}
+        onKeyDown={(e) => onKeyDown(e, i)}
+      >
+        <span className={mergeClasses(styles.icon, isOpen && styles.iconActive)} aria-hidden>
+          <Icon />
+        </span>
+        <Text size={300} className={styles.label}>
+          {section.label}
+        </Text>
+        <span className={mergeClasses(styles.chevron, isOpen && styles.chevronOpen)} aria-hidden>
+          <ChevronRightRegular />
+        </span>
+      </button>
+    );
+  };
+
+  const moreIdx = primary.length; // the "More" row's flat index
 
   return (
     <nav aria-label="Sections" data-section-rail className={styles.rail}>
       <Text size={100} weight="semibold" className={styles.groupLabel} aria-hidden>
         Sections
       </Text>
-      {SIDEBAR_SECTIONS.map((section, i) => {
-        const isOpen = openSection === section.id;
-        const Icon = section.icon;
-        return (
+      {primary.map((section, i) => sectionRow(section, i))}
+      {compact && (
+        <>
           <button
-            key={section.id}
             type="button"
             ref={(el) => {
-              btnRefs.current[i] = el;
+              btnRefs.current[moreIdx] = el;
             }}
-            className={mergeClasses(styles.row, isOpen && styles.rowActive)}
-            aria-expanded={isOpen}
-            aria-controls={isOpen ? FLYOUT_PANEL_ID : undefined}
-            tabIndex={i === focusIdx ? 0 : -1}
-            onClick={() => toggle(section.id)}
-            onFocus={() => setFocusIdx(i)}
-            onKeyDown={(e) => onKeyDown(e, i)}
+            className={styles.row}
+            aria-expanded={moreOpen}
+            tabIndex={moreIdx === focusIdx ? 0 : -1}
+            onClick={() => setMoreOpen((o) => !o)}
+            onFocus={() => setFocusIdx(moreIdx)}
+            onKeyDown={(e) => onKeyDown(e, moreIdx)}
           >
-            <span className={mergeClasses(styles.icon, isOpen && styles.iconActive)} aria-hidden>
-              <Icon />
+            <span className={styles.icon} aria-hidden>
+              <MoreHorizontalRegular />
             </span>
             <Text size={300} className={styles.label}>
-              {section.label}
+              More
             </Text>
             <span
-              className={mergeClasses(styles.chevron, isOpen && styles.chevronOpen)}
+              className={mergeClasses(styles.chevron, moreOpen && styles.chevronOpen)}
               aria-hidden
             >
               <ChevronRightRegular />
             </span>
           </button>
-        );
-      })}
+          {moreOpen && secondary.map((section, j) => sectionRow(section, moreIdx + 1 + j, true))}
+        </>
+      )}
     </nav>
   );
 }

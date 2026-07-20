@@ -863,7 +863,12 @@ function TreeRowImpl({
                 Open containing folder
               </MenuItem>
             )}
-            {movable && (
+            {/* fp3 §4: Move-to / Rules / Unlink are hidden on the compact files
+                page — power-curation the phone user rarely reaches for. The row
+                menu there is Inspect / Rename / Hide-Visible / New folder /
+                Remove. Nothing is removed; the desktop/iPad-regular menu keeps
+                every item. (Open / Reveal are already desktop-form-factor only.) */}
+            {movable && !compactRow && (
               <Menu>
                 <MenuTrigger disableButtonEnhancement>
                   <MenuItem icon={<FolderArrowRightRegular />}>Move to…</MenuItem>
@@ -893,7 +898,7 @@ function TreeRowImpl({
                 New folder inside…
               </MenuItem>
             )}
-            {(openable || revealable || movable || editable) && <MenuDivider />}
+            {(openable || revealable || (movable && !compactRow) || editable) && <MenuDivider />}
             {node.kind === "file" && (
               <MenuItem icon={<SparkleRegular />} onClick={() => onInspect(node.id, node.name)}>
                 What the AI sees
@@ -902,7 +907,7 @@ function TreeRowImpl({
             {/* Bulk curation rules (openspec: add-curation-rules): manage the
                 predicate rules scoped to this folder. Local + linked folders
                 only — cloud nodes resolve connector-side. */}
-            {node.kind === "folder" && !isRemote && (
+            {node.kind === "folder" && !isRemote && !compactRow && (
               <MenuItem icon={<FilterRegular />} onClick={() => onFolderRules(node.id, node.name)}>
                 Rules for this folder…
               </MenuItem>
@@ -919,7 +924,7 @@ function TreeRowImpl({
             >
               {isLocalOnly ? "Allow cloud models" : "Keep private (this device only)"}
             </MenuItem>
-            {node.external && node.parentId === null && (
+            {node.external && node.parentId === null && !compactRow && (
               <MenuItem icon={<DismissRegular />} onClick={() => onUnlink(node.id)}>
                 Unlink (leave files in place)
               </MenuItem>
@@ -1794,10 +1799,16 @@ export function FileExplorer() {
     };
   }, []);
 
-  // DOM drag handlers: the OS-drop path for the WEB build only — inside the
-  // desktop shell the native events above own OS drops (see isDesktopShell).
+  // DOM drag handlers: the OS-drop path for the WEB build AND the mobile shell
+  // (fp3 §5). Inside the DESKTOP shell the native `lighthouse:os-drop` events
+  // above own OS drops (isDesktopShell → DOM stands down to avoid double-add).
+  // But an iPad is ALSO an embedded shell (isDesktopShell true) where Tauri's
+  // desktop drag-drop bridge does NOT fire for Files-app drags into the
+  // WKWebView — iPadOS delivers them as ordinary DOM drag events. So on a
+  // mobile shell we keep the DOM path live as the working fallback; the native
+  // listener stays dormant there (the iOS shell never emits those events).
   const domOsDrag = (e: React.DragEvent) =>
-    !isDesktopShell() && e.dataTransfer.types.includes("Files");
+    (!isDesktopShell() || isMobile) && e.dataTransfer.types.includes("Files");
 
   return (
     <section
@@ -1912,20 +1923,27 @@ export function FileExplorer() {
                     {desktopOS ? "Copy folder in…" : "Folder…"}
                   </MenuItem>
                 )}
-                <MenuDivider />
-                <MenuItem
-                  icon={<CloudArrowUpRegular />}
-                  onClick={() =>
-                    registerInterest("SharePoint isn't ready yet — it's on the way.")
-                  }
-                >
-                  <span className={styles.comingSoonItem}>
-                    SharePoint
-                    <Badge appearance="tint" color="brand" size="small">
-                      Coming soon
-                    </Badge>
-                  </span>
-                </MenuItem>
+                {/* fp3 §4: the SharePoint "coming soon" teaser is hidden (not
+                    removed — the plumbing stays) on the compact files page, where
+                    the Browse menu is trimmed to what actually works on device. */}
+                {!compact && (
+                  <>
+                    <MenuDivider />
+                    <MenuItem
+                      icon={<CloudArrowUpRegular />}
+                      onClick={() =>
+                        registerInterest("SharePoint isn't ready yet — it's on the way.")
+                      }
+                    >
+                      <span className={styles.comingSoonItem}>
+                        SharePoint
+                        <Badge appearance="tint" color="brand" size="small">
+                          Coming soon
+                        </Badge>
+                      </span>
+                    </MenuItem>
+                  </>
+                )}
               </MenuList>
             </MenuPopover>
           </Menu>

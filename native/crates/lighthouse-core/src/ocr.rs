@@ -113,6 +113,27 @@ pub fn available() -> bool {
     enabled() && crate::policy::ocr_allowed() && engine().is_some()
 }
 
+/// The inspector's availability verdict (iOS field patch 3 §1) — WHY OCR can
+/// or can't run right now, so a build whose models never boarded the payload
+/// is diagnosable from the UI instead of silently name-only:
+///   - "ready":          toggle on, policy allows, models loaded.
+///   - "off":            the user toggle or managed policy disabled it — a
+///                       choice, not a defect. Checked FIRST (like
+///                       `available()`) so a managed-off never loads models.
+///   - "missing-models": OCR would run but the .rten files didn't load — in a
+///                       packaged build that means they never shipped.
+/// PARITY: the TS twin reports the constant "unsupported" (it has no OCR;
+/// image files stay findable by name only there — docs/ts-twin.md).
+pub fn availability() -> &'static str {
+    if !(enabled() && crate::policy::ocr_allowed()) {
+        "off"
+    } else if engine().is_some() {
+        "ready"
+    } else {
+        "missing-models"
+    }
+}
+
 /// Tiny counting semaphore (std has none): bounds concurrent inferences.
 struct Gate {
     slots: Mutex<usize>,

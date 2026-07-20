@@ -61,6 +61,9 @@ fn tabular_inspection_reports_all_rust_fields_and_scoped_test_search() {
     assert!(insp.chunk_count.unwrap_or(0) >= 1, "index chunk count present");
     assert!(insp.indexed_at.is_some(), "index freshness key present");
     assert_eq!(insp.fresh, Some(true), "freshly warmed ⇒ matches disk");
+    // fp3 §1: OCR availability is gated on OCR-relevant extensions — a csv
+    // never carries it (and never pays the model-load probe).
+    assert!(insp.ocr_availability.is_none(), "csv is not OCR-relevant");
 
     // Columns + kinds from the catalog.
     let cols = insp.columns.as_ref().expect("tabular file has catalog columns");
@@ -121,6 +124,39 @@ fn prose_mode_no_columns_and_stale_index_is_reported() {
     let stale = inspect("other.md", None);
     assert_eq!(stale.fresh, Some(false), "edited on disk ⇒ index entry is stale");
     assert!(stale.indexed_at.is_some(), "the stale entry still renders its key");
+}
+
+/// fp3 §1: for a file OCR could apply to (image / PDF) the inspection carries
+/// the OCR availability verdict, so a build whose models never shipped is
+/// diagnosable from the panel instead of silently name-only. The VALUE depends
+/// on the environment (models fetched or not, toggle, policy, and the
+/// process-wide OnceLock a sibling test may already have primed), so assert
+/// presence + the closed value set rather than one env-dependent value.
+#[test]
+fn ocr_relevant_file_reports_availability_verdict() {
+    let dir = tempfile::tempdir().unwrap();
+    let _guard = common::lock_env(dir.path());
+    setup(dir.path());
+    // Not a decodable image — extraction honestly yields no text, which is
+    // exactly the silent state the availability field explains.
+    write(&dir.path().join("scan.png"), "not really a png");
+    vault::invalidate_walk_cache();
+
+    let insp = inspect("scan.png", None);
+    let verdict = insp
+        .ocr_availability
+        .as_deref()
+        .expect("png is OCR-relevant ⇒ availability present");
+    assert!(
+        ["ready", "off", "missing-models"].contains(&verdict),
+        "verdict is one of the engine's three honest states: {verdict:?}"
+    );
+    assert!(insp.extract_preview.is_none(), "undecodable png has no text");
+
+    // The serialized payload carries the camelCase key the UI reads (the node
+    // twin fills the SAME key with its own constant "unsupported").
+    let v = serde_json::to_value(&insp).unwrap();
+    assert!(v.get("ocrAvailability").is_some(), "payload carries ocrAvailability");
 }
 
 /// Inspecting must not mutate vault state: inclusion + local-only survive an

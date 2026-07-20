@@ -112,3 +112,22 @@ test("an unknown file id yields an empty inspection, not an error", async () => 
   const insp = await inspect("does-not-exist.md");
   assert.deepEqual(insp, {}, "no node ⇒ empty payload");
 });
+
+// iOS field patch 3 §1: ocrAvailability is a SHARED field with a per-engine
+// honest value. This engine has no OCR, so for a file OCR could apply to it
+// reports the constant "unsupported" (never a fake of the Rust engine's live
+// "ready"/"off"/"missing-models" verdict); for a non-OCR file it is absent.
+// PARITY: inspect.rs fills the same field via ocr::availability(), gated on the
+// same OCR-relevant extension set.
+test("ocrAvailability is 'unsupported' for OCR-relevant files, absent otherwise", async () => {
+  const vault = freshVault();
+  seed(vault); // sales.csv (not OCR-relevant) + other.md
+  writeFileSync(path.join(vault, "scan.pdf"), "%PDF-1.4\n% not really a pdf\n");
+  vaultMod.setIncluded("scan.pdf", true);
+
+  const pdf = await inspect("scan.pdf");
+  assert.equal(pdf.ocrAvailability, "unsupported", "the twin reports its honest OCR constant for a PDF");
+
+  const csv = await inspect("sales.csv");
+  assert.ok(!("ocrAvailability" in csv), "a non-OCR file carries no ocrAvailability");
+});

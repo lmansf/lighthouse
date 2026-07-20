@@ -135,7 +135,7 @@ import { modKey } from "@/features/onboarding/ModeChooser";
 import { ACCENTS, BEAM_SWEEP } from "@/shell/theme";
 import { FILE_DRAG_MIME, parseDraggedFiles, type DraggedFile } from "@/shell/dnd";
 import { isDesktopShell, pathsForFiles, platformKind } from "@/shell/desktopBridge";
-import { usePaneLayout } from "@/shell/paneLayout";
+import { usePaneLayout, useCoarsePointer } from "@/shell/paneLayout";
 
 // The markdown stack (react-markdown + remark-gfm + micromark, ~263 KB) is the
 // single largest chunk and is only needed once a finished answer renders — not
@@ -539,6 +539,11 @@ const useStyles = makeStyles({
   tableWrap: {
     position: "relative",
     overflowX: "auto",
+    // fp3 §2 (scroll truth): keep a horizontal swipe on a wide result table
+    // INSIDE the table — it must never chain out to navigate the chat page or
+    // trigger the browser's back-swipe. Momentum scroll on iOS.
+    overscrollBehaviorX: "contain",
+    WebkitOverflowScrolling: "touch",
     ":hover .lh-copy-csv": { opacity: 1 },
     ":focus-within .lh-copy-csv": { opacity: 1 },
   },
@@ -790,12 +795,15 @@ const useStyles = makeStyles({
   openIcon: { opacity: 0, transition: "opacity 120ms ease", color: tokens.colorNeutralForeground3, "@media (hover: none)": { opacity: 1 } },
   refMeta: { display: "flex", flexDirection: "column", flex: 1, minWidth: 0 },
   // §3: related files as compact GitHub-tag-style chips on a wrapping row.
+  // fp3 §2: the row WRAPS (never shrinks its chips) so touch targets stay full
+  // size when they overflow; a coarse pointer gets a roomier gap.
   refChipRow: {
     display: "flex",
     flexWrap: "wrap",
     alignItems: "center",
     gap: tokens.spacingHorizontalXS,
     marginTop: tokens.spacingVerticalXS,
+    "@media (pointer: coarse)": { gap: tokens.spacingHorizontalS },
   },
   refChip: {
     display: "inline-flex",
@@ -814,6 +822,14 @@ const useStyles = makeStyles({
     ":hover": { backgroundColor: tokens.colorNeutralBackground3Hover },
     ":hover .open-affordance": { opacity: 1 },
     ":focus-within .open-affordance": { opacity: 1 },
+    // fp3 §2 tap sizing: a coarse pointer gets a ≥44pt effective hit area —
+    // grown by padding + min-height, NOT by font size (the chip stays visually
+    // compact). touch-action kills the double-tap zoom while pinch still works.
+    "@media (pointer: coarse)": {
+      minHeight: "44px",
+      ...shorthands.padding(tokens.spacingVerticalSNudge, tokens.spacingHorizontalM),
+      touchAction: "manipulation",
+    },
   },
   refChipName: { fontWeight: tokens.fontWeightSemibold, whiteSpace: "nowrap" },
   refChipPct: { color: tokens.colorNeutralForeground3, fontVariantNumeric: "tabular-nums" },
@@ -841,6 +857,12 @@ const useStyles = makeStyles({
     fontWeight: tokens.fontWeightSemibold,
     cursor: "pointer",
     ":hover": { backgroundColor: tokens.colorBrandBackground2Hover },
+    // fp3 §2 tap sizing (see refChip).
+    "@media (pointer: coarse)": {
+      minHeight: "44px",
+      ...shorthands.padding(tokens.spacingVerticalSNudge, tokens.spacingHorizontalM),
+      touchAction: "manipulation",
+    },
   },
   moreChip: {
     ...shorthands.padding("2px", tokens.spacingHorizontalSNudge),
@@ -850,6 +872,12 @@ const useStyles = makeStyles({
     color: tokens.colorNeutralForeground2,
     fontSize: tokens.fontSizeBase200,
     cursor: "pointer",
+    // fp3 §2 tap sizing (see refChip).
+    "@media (pointer: coarse)": {
+      minHeight: "44px",
+      ...shorthands.padding(tokens.spacingVerticalSNudge, tokens.spacingHorizontalM),
+      touchAction: "manipulation",
+    },
   },
   composer: {
     display: "flex",
@@ -926,6 +954,33 @@ const useStyles = makeStyles({
   // the suffix reads as a quiet hint in the placeholder grey.
   ghostTyped: { color: "transparent" },
   ghostSuffix: { color: tokens.colorNeutralForeground4 },
+  // fp3 §2: the ghost's TOUCH affordance. On a coarse pointer there is no →
+  // key to accept the inline completion, so a tappable pill under the composer
+  // offers the same accept — the ghost itself is NEVER gated on platform (iPads
+  // have hardware keyboards); only this fallback is coarse-pointer-only.
+  ghostAcceptTouch: {
+    alignSelf: "flex-start",
+    display: "inline-flex",
+    alignItems: "center",
+    gap: tokens.spacingHorizontalXS,
+    maxWidth: "100%",
+    minHeight: "44px",
+    ...shorthands.padding(tokens.spacingVerticalSNudge, tokens.spacingHorizontalM),
+    ...shorthands.border("1px", "dashed", tokens.colorNeutralStroke2),
+    ...shorthands.borderRadius(tokens.borderRadiusCircular),
+    backgroundColor: tokens.colorNeutralBackground2,
+    color: tokens.colorNeutralForeground2,
+    fontSize: tokens.fontSizeBase200,
+    cursor: "pointer",
+    touchAction: "manipulation",
+    ":hover": { backgroundColor: tokens.colorNeutralBackground2Hover },
+  },
+  ghostAcceptText: {
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+    color: tokens.colorNeutralForeground3,
+  },
   // Faint guidance under the composer: keyboard hint + where answers come from.
   composerMeta: {
     display: "flex",
@@ -2381,6 +2436,10 @@ function LighthouseLoader({
 
 export function ChatPanel() {
   const styles = useStyles();
+  // fp3 §2: the touch (coarse-pointer) axis — drives tap behaviors that CSS
+  // media queries can't reach (mount-autofocus suppression, instant citation
+  // jump, tappable ghost). Distinct from compact/width and from platformKind.
+  const coarsePointer = useCoarsePointer();
   // Subscribe to `nodes` (not the stable `includedFileIds` fn) so the panel
   // re-renders when the explorer toggles inclusion - this is the live seam.
   const nodes = useRagStore((s) => s.nodes);
@@ -2768,14 +2827,19 @@ export function ChatPanel() {
     reportSkipped(skipped);
   }
 
-  // Inside the Tauri shell, OS file drags arrive via the NATIVE drag-drop
-  // events (rebroadcast as lighthouse:os-* CustomEvents) — the DOM "Files"
-  // events never fire on Windows and would double-handle drops on macOS, so
-  // the DOM path only reacts to OS files on the web. Internal drags from the
-  // explorer (FILE_DRAG_MIME) are DOM-native everywhere and stay as they are.
+  // Inside the DESKTOP Tauri shell, OS file drags arrive via the NATIVE
+  // drag-drop events (rebroadcast as lighthouse:os-* CustomEvents) — the DOM
+  // "Files" events never fire on Windows and would double-handle drops on
+  // macOS, so the DOM path only reacts to OS files off the desktop shell.
+  // fp3 §5: an iPad is an embedded shell too, but Tauri's desktop drag bridge
+  // does NOT fire for Files-app drags into the WKWebView — iPadOS delivers them
+  // as ordinary DOM drag events — so a mobile shell keeps the DOM path live as
+  // the working fallback. Internal explorer drags (FILE_DRAG_MIME) are
+  // DOM-native everywhere and stay as they are.
   const isFileDrag = (e: DragEvent) =>
     e.dataTransfer.types.includes(FILE_DRAG_MIME) ||
-    (!isDesktopShell() && e.dataTransfer.types.includes("Files"));
+    ((!isDesktopShell() || platformKind() !== "desktop") &&
+      e.dataTransfer.types.includes("Files"));
 
   // Link OS-dropped paths in place and attach the resulting file nodes — the
   // native-event twin of attachOsFiles (which handles browser File objects).
@@ -2960,10 +3024,15 @@ export function ChatPanel() {
     derivePinned(el);
   }
 
-  // Focus the composer on mount so the user can just start typing.
+  // Focus the composer on mount so the user can just start typing. fp3 §2: NOT
+  // on a coarse pointer — auto-focusing pops the on-screen keyboard the instant
+  // chat opens, covering half the phone/iPad before the user has done anything.
+  // A hardware keyboard is still a coarse-pointer device (iPad + Magic Keyboard)
+  // but the tap-to-focus cost there is trivial; the keyboard-pop cost is not.
   useEffect(() => {
+    if (coarsePointer) return;
     composerRef.current?.focus();
-  }, []);
+  }, [coarsePointer]);
 
   // Auto-grow the composer with the draft (one line up to ~six); beyond the cap
   // the textarea scrolls internally. Measured off scrollHeight, so pasted
@@ -3857,7 +3926,10 @@ export function ChatPanel() {
     (turnId: string, n: number) => {
       const card = document.getElementById(citeCardId(turnId, n));
       if (card) {
-        card.scrollIntoView({ behavior: "smooth", block: "nearest" });
+        // fp3 §2: instant on touch — a smooth citation jump fights the browser's
+        // own scroll during an iOS pinch/zoom and lands in the wrong place; a
+        // coarse pointer takes the deterministic jump. Mouse keeps the glide.
+        card.scrollIntoView({ behavior: coarsePointer ? "auto" : "smooth", block: "nearest" });
         setFlashCite(`${turnId}:${n}`);
         if (flashTimer.current !== null) window.clearTimeout(flashTimer.current);
         flashTimer.current = window.setTimeout(() => setFlashCite(null), 1200);
@@ -3867,7 +3939,7 @@ export function ChatPanel() {
       const ref = useChatStore.getState().messages.find((x) => x.id === turnId)?.references?.[n - 1];
       if (ref) openPreview(turnId, ref);
     },
-    [openPreview],
+    [openPreview, coarsePointer],
   );
 
   // Open a cited file in its native app (desktop only; the route no-ops on web).
@@ -4579,6 +4651,20 @@ export function ChatPanel() {
             {lastAskText ? " · ↑ to recall your last question" : ""}
             {ghostText !== null ? " · → to complete" : ""}
           </Text>
+        )}
+        {/* fp3 §2: on a coarse pointer, the ghost completion is tappable (there
+            is no → key). The ghost itself is never platform-gated — only this
+            touch fallback is; a hardware keyboard (iPad) keeps using →. */}
+        {coarsePointer && ghostText !== null && (
+          <button
+            type="button"
+            className={styles.ghostAcceptTouch}
+            onClick={() => applySuggestion(question + ghostText)}
+          >
+            <CheckmarkRegular fontSize={14} />
+            <span>Complete:</span>
+            <span className={styles.ghostAcceptText}>{ghostText.trim()}</span>
+          </button>
         )}
         <Text size={200} className={styles.metaLine} data-tour="models">
           {provenance}

@@ -49,6 +49,15 @@ pub struct FileInspection {
     /// OCR (an image, or a scanned-PDF fallback). PARITY: the TS twin omits it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub from_ocr: Option<bool>,
+    /// Whether OCR can run in THIS engine right now, and why not when it can't
+    /// (iOS field patch 3 §1 — makes a build whose models never shipped
+    /// diagnosable from the inspector instead of silently name-only):
+    /// "ready" | "off" | "missing-models" (`ocr::availability`). Present only
+    /// for files OCR could apply to (images + PDFs) so inspecting a .txt never
+    /// loads the models. PARITY: the TS twin fills the same field with its own
+    /// honest constant "unsupported" (it has no OCR at all).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ocr_availability: Option<String>,
     /// `tabular` (row-windows) vs `prose` (word-windows). Shared — the chunker
     /// is parity-pinned across the twins.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -136,6 +145,11 @@ pub fn inspect(file_id: &str, query: Option<&str>) -> FileInspection {
         _ => false,
     });
     out.extract_preview = preview;
+    // OCR availability (fp3 §1) — only for files OCR could ever touch, so a
+    // plain-text inspect never pays the one-time model load probe.
+    if crate::extract::ocr_could_apply(&ext) {
+        out.ocr_availability = Some(crate::ocr::availability().to_string());
+    }
 
     // Chunk count + last-indexed key + freshness — a PEEK at the persistent
     // index (no rebuild, so a stale entry stays observably stale, which is the
