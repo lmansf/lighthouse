@@ -140,21 +140,54 @@ function uninstallPending(): boolean {
 }
 
 /**
- * §3 verdict (pure): can the private local model run on this form factor?
- * Only the desktop shell can — it owns llama-server and the ~4.2 GB weights.
- * Phone-class hardware gets a first-class "unsupported" status instead of a
- * download that can never finish; anything unrecognized fails closed.
- * KEEP IN SYNC with local_model.rs::local_model_supported.
+ * Runtime signal mirroring local_model.rs::ON_DEVICE_BACKEND — is an on-device
+ * private-model backend wired on THIS build? Structurally dead on the twin
+ * (platformKind() is always "desktop" here); it exists to stay line-parallel and
+ * to give the mock/tests a settable knob. Default false (fail closed).
+ * KEEP IN SYNC with local_model.rs::set_on_device_backend.
  */
+let ON_DEVICE_BACKEND = false;
+export function setOnDeviceBackend(available: boolean): void {
+  ON_DEVICE_BACKEND = available;
+}
+export function onDeviceBackend(): boolean {
+  return ON_DEVICE_BACKEND;
+}
+
+/**
+ * §3 / add-mobile-local-inference verdict (pure): can a PRIVATE, on-device model
+ * answer on this form factor? The desktop shell always can — it owns llama-server
+ * and the weights. A mobile shell can ONLY when its plugin has reported a usable
+ * on-device backend (`onDeviceBackend`: Apple Foundation Models available, or a
+ * bundled GGUF present) — otherwise phone-class hardware gets the first-class
+ * "unsupported" status, never a broken private option. Anything unrecognized
+ * fails closed. KEEP IN SYNC with local_model.rs::local_model_available.
+ */
+export function localModelAvailable(platformKind: string, onDeviceBackend: boolean): boolean {
+  switch (platformKind) {
+    case "desktop":
+      return true;
+    case "ios":
+    case "android":
+      return onDeviceBackend;
+    default:
+      return false;
+  }
+}
+
+/** The no-backend specialization of `localModelAvailable` — true only where the
+ *  private model runs WITHOUT a reported backend, i.e. the desktop shell. Kept so
+ *  pre-reversal call sites read unchanged. KEEP IN SYNC with
+ *  local_model.rs::local_model_supported. */
 export function localModelSupported(platformKind: string): boolean {
-  return platformKind === "desktop";
+  return localModelAvailable(platformKind, false);
 }
 
 /** The verdict applied to THIS engine (config.ts platformKind — constant
  *  "desktop" on the twin, so the mobile guards below are structurally dead
  *  here; they exist to stay line-parallel with local_model.rs). */
 function supportedHere(): boolean {
-  return localModelSupported(platformKind());
+  return localModelAvailable(platformKind(), onDeviceBackend());
 }
 
 /**

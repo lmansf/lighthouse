@@ -23,13 +23,14 @@ import { register } from "node:module";
 
 register("./_ts-extensionless-hook.mjs", import.meta.url);
 
-const { localModelSupported } = await import("../src/server/localModel.ts");
+const { localModelSupported, localModelAvailable, setOnDeviceBackend, onDeviceBackend } =
+  await import("../src/server/localModel.ts");
 const { defaultProviderFor } = await import("../src/server/profile.ts");
 const { MODEL_PROVIDERS, MOBILE_NO_PROVIDER_TRUTHS, modelProvidersFor } = await import(
   "../src/contracts/mocks/providers.ts"
 );
 
-test("localModelSupported: desktop only, everything else fails closed", () => {
+test("localModelSupported: the no-backend verdict is desktop only", () => {
   assert.equal(localModelSupported("desktop"), true);
   assert.equal(localModelSupported("ios"), false);
   assert.equal(localModelSupported("android"), false);
@@ -37,13 +38,36 @@ test("localModelSupported: desktop only, everything else fails closed", () => {
   assert.equal(localModelSupported("web"), false);
 });
 
-test("defaultProviderFor: private-local on desktop, NO provider on mobile", () => {
-  assert.deepEqual(defaultProviderFor("desktop"), {
-    providerId: "local",
-    modelId: "lighthouse-local",
-  });
-  assert.deepEqual(defaultProviderFor("ios"), { providerId: null, modelId: null });
-  assert.deepEqual(defaultProviderFor("android"), { providerId: null, modelId: null });
+test("localModelAvailable: mobile lights up ONLY with a reported on-device backend", () => {
+  // Desktop is always available — the backend flag is moot there.
+  assert.equal(localModelAvailable("desktop", false), true);
+  assert.equal(localModelAvailable("desktop", true), true);
+  // add-mobile-local-inference: a mobile shell is available iff a backend exists.
+  assert.equal(localModelAvailable("ios", true), true);
+  assert.equal(localModelAvailable("android", true), true);
+  assert.equal(localModelAvailable("ios", false), false);
+  assert.equal(localModelAvailable("android", false), false);
+  // Unknown fails closed.
+  assert.equal(localModelAvailable("web", true), false);
+});
+
+test("onDeviceBackend: defaults false, settable by the shell", () => {
+  assert.equal(onDeviceBackend(), false, "fails closed until the plugin reports a backend");
+  setOnDeviceBackend(true);
+  assert.equal(onDeviceBackend(), true);
+  setOnDeviceBackend(false); // restore the module default for the other tests
+  assert.equal(onDeviceBackend(), false);
+});
+
+test("defaultProviderFor: private-local on desktop and on a mobile shell WITH a backend", () => {
+  const local = { providerId: "local", modelId: "lighthouse-local" };
+  assert.deepEqual(defaultProviderFor("desktop", false), local);
+  assert.deepEqual(defaultProviderFor("desktop", true), local);
+  assert.deepEqual(defaultProviderFor("ios", true), local);
+  assert.deepEqual(defaultProviderFor("android", true), local);
+  // No backend on mobile → NO provider (the deterministic device path answers).
+  assert.deepEqual(defaultProviderFor("ios", false), { providerId: null, modelId: null });
+  assert.deepEqual(defaultProviderFor("android", false), { providerId: null, modelId: null });
 });
 
 test("modelProvidersFor: desktop keeps the full catalog, mobile drops ONLY local", () => {

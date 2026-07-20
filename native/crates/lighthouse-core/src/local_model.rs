@@ -130,19 +130,58 @@ fn uninstall_pending() -> bool {
     models_dir().join(UNINSTALL_MARKER).exists()
 }
 
-/// §3 verdict (pure, host-testable): can the private local model run on this
-/// form factor? Only the desktop shell can — it owns llama-server and the
-/// ~4.2 GB weights. Phone-class hardware gets a first-class "unsupported"
-/// status instead of a download that can never finish; anything unrecognized
-/// fails closed. KEEP IN SYNC with src/server/localModel.ts::localModelSupported.
-pub fn local_model_supported(platform_kind: &str) -> bool {
-    platform_kind == "desktop"
+/// Runtime signal: is an on-device PRIVATE-model backend wired on THIS build
+/// right now? Desktop ignores it (llama-server is always its backend); a mobile
+/// shell sets it true once its plugin confirms a usable backend for THIS device
+/// — Apple Foundation Models reports `.available`, or a bundled small-model GGUF
+/// is present and loadable (add-mobile-local-inference; docs/ios-private-model.md).
+/// Default false so a mobile build FAILS CLOSED — the private model stays hidden
+/// (exactly the pre-reversal behavior) until the plugin proves a backend.
+static ON_DEVICE_BACKEND: AtomicBool = AtomicBool::new(false);
+
+/// The shell reports whether an on-device private-model backend is available for
+/// this device (called from the iOS plugin's availability probe at boot and on
+/// Apple-Intelligence state changes; a desktop build never needs it). Cheap and
+/// thread-safe. KEEP IN SYNC with src/server/localModel.ts::setOnDeviceBackend.
+pub fn set_on_device_backend(available: bool) {
+    ON_DEVICE_BACKEND.store(available, Ordering::Relaxed);
 }
 
-/// The verdict applied to THIS build (config::platform_kind) — the guard every
-/// engine entry point below uses, shared with synth's warm-wait short-circuit.
+/// Whether the shell has reported an on-device backend (default false).
+pub fn on_device_backend() -> bool {
+    ON_DEVICE_BACKEND.load(Ordering::Relaxed)
+}
+
+/// §3 / add-mobile-local-inference verdict (pure, host-testable): can a PRIVATE,
+/// on-device model answer on this form factor? The desktop shell always can — it
+/// owns llama-server and the weights. A mobile shell can ONLY when its plugin has
+/// reported a usable on-device backend (`on_device_backend`: Apple Foundation
+/// Models available, or a bundled GGUF present) — otherwise phone-class hardware
+/// gets the first-class "unsupported" status, never a broken private option.
+/// Anything unrecognized fails closed. KEEP IN SYNC with
+/// src/server/localModel.ts::localModelAvailable.
+pub fn local_model_available(platform_kind: &str, on_device_backend: bool) -> bool {
+    match platform_kind {
+        "desktop" => true,
+        "ios" | "android" => on_device_backend,
+        _ => false,
+    }
+}
+
+/// The no-backend specialization of `local_model_available` — true only where the
+/// private model runs WITHOUT a reported on-device backend, i.e. the desktop
+/// shell. Kept so pre-reversal call sites and the desktop pin read unchanged.
+/// KEEP IN SYNC with src/server/localModel.ts::localModelSupported.
+pub fn local_model_supported(platform_kind: &str) -> bool {
+    local_model_available(platform_kind, false)
+}
+
+/// The verdict applied to THIS build (config::platform_kind + the runtime
+/// on-device-backend signal) — the guard every engine entry point below uses,
+/// shared with synth's warm-wait short-circuit. Desktop is always true; a mobile
+/// shell tracks its plugin's reported availability.
 pub(crate) fn supported_here() -> bool {
-    local_model_supported(crate::config::platform_kind())
+    local_model_available(crate::config::platform_kind(), on_device_backend())
 }
 
 /// The honest mobile answer for every model op: status "unsupported", with any
@@ -649,11 +688,21 @@ mod tests {
     /// localModelSupported pin in test/localModelPlatform.test.mjs.
     #[test]
     fn local_model_supported_only_on_desktop() {
+        // The no-backend verdict is still desktop-only.
         assert!(local_model_supported("desktop"));
         assert!(!local_model_supported("ios"));
         assert!(!local_model_supported("android"));
         assert!(!local_model_supported(""));
         assert!(!local_model_supported("web"));
+        // add-mobile-local-inference: WITH a reported on-device backend, a mobile
+        // shell IS available; desktop ignores the flag; unknown fails closed.
+        assert!(local_model_available("desktop", false));
+        assert!(local_model_available("desktop", true));
+        assert!(local_model_available("ios", true));
+        assert!(local_model_available("android", true));
+        assert!(!local_model_available("ios", false));
+        assert!(!local_model_available("android", false));
+        assert!(!local_model_available("web", true));
     }
 
     /// This build's own guard agrees with the config platform signal — the

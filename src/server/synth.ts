@@ -33,7 +33,7 @@ import {
   type LocalHealth,
   type Ctx,
 } from "./llm";
-import { isInstalled as isModelInstalled, localModelSupported } from "./localModel";
+import { isInstalled as isModelInstalled, localModelAvailable, onDeviceBackend } from "./localModel";
 import { platformKind } from "./config";
 import { readDesktopSettings } from "./settings";
 import { metaIntent, renderMeta } from "./meta";
@@ -345,12 +345,14 @@ export function warmingLabel(waitedMs: number): string {
  *  fallback. Any other provider (or a healthy server) returns immediately.
  *  KEEP IN SYNC with synth.rs::local_warm_wait. */
 async function* localWarmWait(cfg: ModelCfg): AsyncGenerator<ChatChunk> {
-  // §3 structural pin: on a mobile shell the private model can never become
-  // healthy (localModelSupported), so no ask may ever hold for a warm-up —
-  // "warming up…" is unreachable there by construction. PARITY: mirrors
-  // synth.rs::local_warm_wait's guard (dead on the twin: platformKind() is
-  // constant "desktop").
-  if (cfg.providerId !== "local" || !localModelSupported(platformKind())) return;
+  // §3 / add-mobile-local-inference guard: a warm-up only ever holds where the
+  // private model can actually become healthy — the desktop shell, or a mobile
+  // shell whose plugin reports an on-device backend (Tier-2 GGUF load is the real
+  // warm; Tier-1 Foundation Models is resident so warmWaitVerdict proceeds at
+  // once). Where no backend is available, "warming up…" is unreachable by
+  // construction. PARITY: mirrors synth.rs::local_warm_wait's supported_here()
+  // guard (dead on the twin: platformKind() is constant "desktop").
+  if (cfg.providerId !== "local" || !localModelAvailable(platformKind(), onDeviceBackend())) return;
   const installed = isModelInstalled();
   let waited = 0;
   for (;;) {
