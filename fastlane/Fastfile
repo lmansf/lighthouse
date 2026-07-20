@@ -57,6 +57,7 @@ platform :ios do
   private_lane :build_signed_ipa do
     require "base64"
     require "fileutils"
+    require "shellwords"
     unless File.directory?("../native/crates/lighthouse-desktop/gen/apple")
       UI.user_error!("gen/apple is missing — run the mobile-bootstrap ios-init task first (§2.2).")
     end
@@ -69,6 +70,11 @@ platform :ios do
     File.write(key_path, Base64.decode64(ENV.fetch("APP_STORE_CONNECT_KEY_P8")))
     File.chmod(0o600, key_path)
     begin
+      # Tauri's own exportArchive uses CLOUD signing, which App-Manager API
+      # keys may not be allowed to do ("Cloud signing permission error", probe
+      # run 29708300304 — the ARCHIVE itself built + signed fine). Tolerate the
+      # export failing; we then export the archive ourselves below with manual
+      # signing + the match profile — fully offline, no cloud permissions.
       sh(
         {
           "APPLE_API_KEY" => ENV.fetch("APP_STORE_CONNECT_KEY_ID"),
@@ -77,15 +83,50 @@ platform :ios do
           "APPLE_DEVELOPMENT_TEAM" => ENV.fetch("APPLE_TEAM_ID"),
         },
         "cd .. && npm run -- tauri ios build --export-method app-store-connect",
+        error_callback: ->(_res) {
+          UI.important("tauri's export step failed (expected without cloud-signing permission) — exporting from the archive with the match profile instead.")
+        },
       )
     ensure
       File.delete(key_path) if File.exist?(key_path)
     end
     ipa = Dir["../native/crates/lighthouse-desktop/gen/apple/build/**/*.ipa"]
       .max_by { |f| File.mtime(f) }
-    UI.user_error!("tauri ios build produced no .ipa under gen/apple/build/") unless ipa
+    if ipa.nil?
+      archive = Dir["../native/crates/lighthouse-desktop/gen/apple/build/**/*.xcarchive"]
+        .max_by { |f| File.mtime(f) }
+      UI.user_error!("tauri ios build produced neither an .ipa nor an .xcarchive — the BUILD itself failed; see the xcodebuild output above.") unless archive
+      # Manual-signing export: Distribution cert from the match keychain + the
+      # locally-installed "match AppStore app.lhvault" profile. Offline.
+      export_plist = File.expand_path("../build/ExportOptions-manual.plist")
+      FileUtils.mkdir_p(File.dirname(export_plist))
+      File.write(export_plist, <<~PLIST)
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0">
+        <dict>
+          <key>method</key><string>app-store-connect</string>
+          <key>destination</key><string>export</string>
+          <key>signingStyle</key><string>manual</string>
+          <key>signingCertificate</key><string>Apple Distribution</string>
+          <key>teamID</key><string>#{ENV.fetch("APPLE_TEAM_ID")}</string>
+          <key>provisioningProfiles</key>
+          <dict>
+            <key>app.lhvault</key><string>match AppStore app.lhvault</string>
+          </dict>
+        </dict>
+        </plist>
+      PLIST
+      sh("xcodebuild -exportArchive -archivePath #{archive.shellescape} " \
+         "-exportOptionsPlist #{export_plist.shellescape} " \
+         "-exportPath ../build/ios")
+      ipa = Dir["../build/ios/*.ipa"].max_by { |f| File.mtime(f) }
+      UI.user_error!("manual exportArchive produced no .ipa in build/ios/") unless ipa
+    end
     FileUtils.mkdir_p("../build/ios")
-    FileUtils.cp(ipa, "../build/ios/Lighthouse.ipa")
+    unless File.expand_path(ipa) == File.expand_path("../build/ios/Lighthouse.ipa")
+      FileUtils.cp(ipa, "../build/ios/Lighthouse.ipa")
+    end
     lane_context[SharedValues::IPA_OUTPUT_PATH] = File.expand_path("../build/ios/Lighthouse.ipa")
     key
   end
