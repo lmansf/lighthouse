@@ -19,6 +19,7 @@
 		961CFC3DFC08DEAFF02AFF87 /* WebKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 9252332FF309DD1895951DD8 /* WebKit.framework */; };
 		BF9F30EF72B74195CFA496BE /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = D113EFA26CF23E4AAAF54E9F /* Security.framework */; };
 		CDF49D43E7C5B6B5F8D52C72 /* main.mm in Sources */ = {isa = PBXBuildFile; fileRef = F63A80A633B879CC980DECD8 /* main.mm */; };
+		FEB2C3D4E5F6071829304A5C /* PrivateModelServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = FDA1B2C3D4E5F60718293A4B /* PrivateModelServer.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -47,6 +48,7 @@
 		ED44C2C53B97463EFF0DB47A /* commands.rs */ = {isa = PBXFileReference; path = commands.rs; sourceTree = "<group>"; };
 		F63A80A633B879CC980DECD8 /* main.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = main.mm; sourceTree = "<group>"; };
 		F69F603F97F793999D37E46D /* bindings.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = bindings.h; sourceTree = "<group>"; };
+		FDA1B2C3D4E5F60718293A4B /* PrivateModelServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PrivateModelServer.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -87,6 +89,7 @@
 			isa = PBXGroup;
 			children = (
 				F63A80A633B879CC980DECD8 /* main.mm */,
+				FDA1B2C3D4E5F60718293A4B /* PrivateModelServer.swift */,
 				3DFDA17338CBFFDF42AE20BE /* bindings */,
 			);
 			path = "lighthouse-desktop";
@@ -271,6 +274,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				CDF49D43E7C5B6B5F8D52C72 /* main.mm in Sources */,
+				FEB2C3D4E5F6071829304A5C /* PrivateModelServer.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -301,6 +305,18 @@
 				);
 				"LIBRARY_SEARCH_PATHS[arch=arm64]" = "$(inherited) $(PROJECT_DIR)/Externals/arm64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME) $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/$(PLATFORM_NAME)";
 				"LIBRARY_SEARCH_PATHS[arch=x86_64]" = "$(inherited) $(PROJECT_DIR)/Externals/x86_64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME) $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/$(PLATFORM_NAME)";
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-weak_framework",
+					FoundationModels,
+				);
+				OTHER_SWIFT_FLAGS = (
+					"$(inherited)",
+					"-Xfrontend",
+					"-disable-autolink-framework",
+					"-Xfrontend",
+					FoundationModels,
+				);
 				PRODUCT_BUNDLE_IDENTIFIER = app.lhvault;
 				PRODUCT_NAME = Lighthouse;
 				SDKROOT = iphoneos;
@@ -452,6 +468,18 @@
 				);
 				"LIBRARY_SEARCH_PATHS[arch=arm64]" = "$(inherited) $(PROJECT_DIR)/Externals/arm64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME) $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/$(PLATFORM_NAME)";
 				"LIBRARY_SEARCH_PATHS[arch=x86_64]" = "$(inherited) $(PROJECT_DIR)/Externals/x86_64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME) $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/$(PLATFORM_NAME)";
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-weak_framework",
+					FoundationModels,
+				);
+				OTHER_SWIFT_FLAGS = (
+					"$(inherited)",
+					"-Xfrontend",
+					"-disable-autolink-framework",
+					"-Xfrontend",
+					FoundationModels,
+				);
 				PRODUCT_BUNDLE_IDENTIFIER = app.lhvault;
 				PRODUCT_NAME = Lighthouse;
 				SDKROOT = iphoneos;

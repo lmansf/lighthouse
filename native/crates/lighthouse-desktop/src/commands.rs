@@ -2085,3 +2085,89 @@ pub async fn open_explorer(app: AppHandle) {
     #[cfg(not(desktop))]
     let _ = &app;
 }
+
+// --- On-device private-model availability (docs/ios-private-model.md §5) ------
+//
+// The "private" provider is ONE contract, not a platform: the OpenAI-compatible
+// `/v1/chat/completions` (streaming SSE deltas) + `/health` pair the engine
+// speaks at `local_llm_url()` (lighthouse-core/src/llm.rs). Desktop's supervised
+// llama-server answers it; on iOS the shell serves the SAME contract in-process
+// behind Apple Foundation Models (gen/apple/.../PrivateModelServer.swift). This
+// command reports whether a usable on-device backend exists for THIS device —
+// and on iOS wires the engine to the loopback responder before returning — so
+// `lighthouse-core` streams identically on device with no core change.
+//
+// The reply shape { available, tier, reason } is exactly what the mobile roster
+// probes once to light up the "private" provider (src/stores/useOnDeviceModel.ts).
+
+// The Swift shim's probe-and-ensure entry point (PrivateModelServer.swift,
+// `@_cdecl("lighthouse_fm_ensure")`). iOS-only: only the iOS app target compiles
+// and links that Swift source. Returns a result code (the FM_* constants on the
+// Swift side); on success writes the bound 127.0.0.1 port through `out_port`.
+#[cfg(all(not(desktop), target_os = "ios"))]
+extern "C" {
+    fn lighthouse_fm_ensure(out_port: *mut u16) -> i32;
+}
+
+/// Shared body for the `private_model_availability` command AND the iOS startup
+/// hook (lib.rs), so the availability verdict + the `LIGHTHOUSE_LOCAL_LLM_URL`
+/// env var are set before the first ask. Sync so the setup hook runs it inline.
+pub(crate) fn private_model_availability_impl() -> Value {
+    #[cfg(desktop)]
+    {
+        // Desktop always owns the private model (the supervised llama-server on
+        // the same OpenAI-compatible contract) — no shim, no probe.
+        return json!({ "available": true, "tier": "llama-server", "reason": null });
+    }
+    #[cfg(all(not(desktop), target_os = "ios"))]
+    {
+        let mut port: u16 = 0;
+        // SAFETY: `lighthouse_fm_ensure` is defined by PrivateModelServer.swift
+        // and linked into the iOS app target; it only writes `port` (a valid
+        // local) and returns a small integer code.
+        let code = unsafe { lighthouse_fm_ensure(&mut port as *mut u16) };
+        if code == 1 && port != 0 {
+            // Point the engine's local transport at the in-process responder
+            // BEFORE returning, so the very next ask streams through it, then
+            // flip the runtime seam the engine's local branch reads.
+            let url = format!("http://127.0.0.1:{port}/v1/chat/completions");
+            std::env::set_var("LIGHTHOUSE_LOCAL_LLM_URL", url);
+            local_model::set_on_device_backend(true);
+            return json!({ "available": true, "tier": "foundation", "reason": null });
+        }
+        // Fail closed: the private provider stays hidden until a backend proves
+        // usable. The reason maps the Swift result code to honest roster copy.
+        local_model::set_on_device_backend(false);
+        let reason = match code {
+            0 => "Apple Intelligence is not enabled on this device",
+            -1 => "this device is not eligible for Apple Intelligence",
+            -2 => "the on-device model is still preparing — try again shortly",
+            -3 => "the on-device private model requires iOS 26 or later",
+            -5 => "the on-device private model could not be started",
+            _ => "the on-device private model is unavailable on this device",
+        };
+        return json!({ "available": false, "tier": "none", "reason": reason });
+    }
+    #[cfg(all(not(desktop), not(target_os = "ios")))]
+    {
+        // Other mobile targets (Android) get no Tier-1 backend this round —
+        // fail closed so the "private" provider stays absent (the pre-reversal
+        // empty-provider truths stand).
+        local_model::set_on_device_backend(false);
+        return json!({
+            "available": false,
+            "tier": "none",
+            "reason": "the on-device private model is not available on this platform",
+        });
+    }
+}
+
+/// Whether a private, on-device model backend is usable on THIS device, and
+/// which tier serves it — `{ available, tier, reason }`. The mobile roster
+/// (`src/stores/useOnDeviceModel.ts`) probes this once to light the "private"
+/// provider up with honest per-tier copy. Registered on EVERY target (like
+/// `model_status`); desktop answers the llama-server tier without any shim.
+#[tauri::command]
+pub async fn private_model_availability() -> Value {
+    private_model_availability_impl()
+}
