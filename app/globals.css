@@ -11,6 +11,11 @@
   --lh-safe-right: env(safe-area-inset-right, 0px);
   --lh-safe-bottom: env(safe-area-inset-bottom, 0px);
   --lh-safe-left: env(safe-area-inset-left, 0px);
+  /* fp4 §3: space reserved above the compact bottom tab bar (its content height
+     while the bar is shown, else 0). AppShell sets it on the document root when
+     the bar is on screen; the compact pages, the chat composer, and the bug FAB
+     read it. 0 everywhere the bar isn't shown — desktop is untouched. */
+  --lh-tabbar-h: 0px;
 }
 
 html,

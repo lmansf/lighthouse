@@ -1,13 +1,15 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { makeStyles, mergeClasses, tokens } from "@fluentui/react-components";
+import { Button, Text, makeStyles, mergeClasses, tokens } from "@fluentui/react-components";
+import { ArrowLeftRegular } from "@fluentui/react-icons";
 import { Sidebar } from "./Sidebar";
 import { SectionRail } from "./SectionRail";
 import { SectionFlyout } from "./SectionFlyout";
 import { sectionById } from "./sidebarSections";
 import { LAYOUT } from "./theme";
-import { usePaneLayout } from "./paneLayout";
+import { usePaneLayout, type CompactTab } from "./paneLayout";
+import { CompactTabBar, TAB_BAR_CONTENT_HEIGHT } from "./CompactTabBar";
 import { useVaultTree } from "./useVaultTree";
 import { useSidebarFlyout } from "@/stores/useSidebarFlyout";
 import { useChatStore } from "@/stores/useChatStore";
@@ -89,7 +91,11 @@ const useStyles = makeStyles({
     display: "flex",
     backgroundColor: tokens.colorNeutralBackground2,
     paddingTop: "var(--lh-safe-top)",
-    paddingBottom: "var(--lh-safe-bottom)",
+    // fp4 §3: reserve room for the fixed bottom tab bar (which sits above this
+    // page at z 40) on top of the home-indicator inset, so the page's own footer
+    // (settings gear / rail bottom) is never hidden behind it. --lh-tabbar-h is 0
+    // whenever the bar is hidden (keyboard up) or absent, collapsing to just safe.
+    paddingBottom: "calc(var(--lh-safe-bottom, 0px) + var(--lh-tabbar-h, 0px))",
     paddingLeft: "var(--lh-safe-left)",
     paddingRight: "var(--lh-safe-right)",
     // Slide-in from the left edge; prefers-reduced-motion falls back to a fade.
@@ -108,6 +114,40 @@ const useStyles = makeStyles({
     opacity: 0,
     "@media (prefers-reduced-motion: reduce)": { transform: "none" },
   },
+  // --- fp4 §3 compact SECTIONS page (mobile shells < 700px only) ------------
+  // The Sections tab opens the section rail as its own full-screen page (a peer
+  // of the files page). Its chrome mirrors the files page: a header row with the
+  // title + a 44pt Back-to-chat control, and a scrollable body holding the rail
+  // in `page` mode (every section a flat 48pt row, History first).
+  sectionsPage: {
+    flex: 1,
+    minWidth: 0,
+    display: "flex",
+    flexDirection: "column",
+  },
+  sectionsHeader: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: tokens.spacingHorizontalS,
+    height: `${LAYOUT.headerHeight}px`,
+    flexShrink: 0,
+    paddingLeft: tokens.spacingHorizontalM,
+    paddingRight: tokens.spacingHorizontalM,
+    borderBottomWidth: "1px",
+    borderBottomStyle: "solid",
+    borderBottomColor: tokens.colorNeutralStroke2,
+  },
+  sectionsBody: {
+    flex: 1,
+    minHeight: 0,
+    overflowY: "auto",
+    paddingLeft: tokens.spacingHorizontalM,
+    paddingRight: tokens.spacingHorizontalM,
+    paddingTop: tokens.spacingVerticalS,
+  },
+  // The page's 44pt Back control (mirrors the Sidebar's fp3 §3 backBtn).
+  backBtn: { minWidth: "44px", minHeight: "44px" },
 });
 
 interface AppShellProps {
@@ -165,45 +205,57 @@ export function AppShell({ sidebar, main }: AppShellProps) {
   // On desktop `layout.compact` is false at every window width (the verdict's
   // structural pin), so everything below the drawer effects renders the exact
   // pre-§5 tree there.
-  const [drawerOpen, setDrawerOpen] = useState(false);
-  const layout = usePaneLayout(drawerOpen);
+  // fp4 §3: the compact bottom tab bar's selected destination is THE compact nav
+  // state — "chat" (home / the ask surface), "files" (the fp3 §3 files page), or
+  // "sections" (the section rail as a full page). It subsumes the old boolean
+  // drawerOpen: files-open === tab "files", so paneLayout's drawerVisible still
+  // means "the files page is on screen".
+  const [compactTab, setCompactTab] = useState<CompactTab>("chat");
+  const layout = usePaneLayout(compactTab === "files");
+  // A section flyout sheet (History, Insights, …) is a modal over everything —
+  // while one is open the tab bar slides away and the sheet's own X/Esc dismiss
+  // it (returning to whichever page launched it).
+  const sheetOpen = useSidebarFlyout((s) => s.openSection !== null);
   // Live mirror for the [] -mounted listeners below (shortcuts, reveal).
   const compactRef = useRef(layout.compact);
   compactRef.current = layout.compact;
 
-  // Open requests come from the chat header's drawer button (the chat pane is
-  // the screen — the shell owns no chrome of its own there).
+  // Open requests come from the Files tab (and the Ctrl/Cmd+B shortcut). The
+  // lone chat-header "open files and sections" button is gone (fp4 §3) — the tab
+  // bar is the way in now — but the event it dispatched is still honored.
   useEffect(() => {
-    const onOpen = () => setDrawerOpen(true);
+    const onOpen = () => setCompactTab("files");
     window.addEventListener("lighthouse:open-drawer", onOpen);
     return () => window.removeEventListener("lighthouse:open-drawer", onOpen);
   }, []);
 
-  // Esc closes the drawer — unless a section sheet is up (it owns Esc first).
+  // Esc backs a compact page (files or sections) out to chat — unless a section
+  // sheet is up, which owns Esc first (it closes to the page, not to chat).
   useEffect(() => {
-    if (!layout.drawerVisible) return;
+    if (!layout.compact || compactTab === "chat") return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
       if (useSidebarFlyout.getState().openSection) return;
       e.preventDefault();
-      setDrawerOpen(false);
+      setCompactTab("chat");
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [layout.drawerVisible]);
+  }, [layout.compact, compactTab]);
 
-  // Auto-close: the drawer yields the screen the moment its action lands —
-  // a file opened into the inspector, or an ask sent (any transcript growth).
+  // Auto-return: the files page yields to chat the moment its action lands —
+  // a file opened into the inspector, or an ask sent (any transcript growth) —
+  // which now reselects the Chat tab (fp4 §3).
   useEffect(() => {
     if (!layout.drawerVisible) return;
-    const close = () => setDrawerOpen(false);
+    const close = () => setCompactTab("chat");
     window.addEventListener(INSPECT_FILE_EVENT, close);
     return () => window.removeEventListener(INSPECT_FILE_EVENT, close);
   }, [layout.drawerVisible]);
   const messageCount = useChatStore((s) => s.messages.length);
   const prevMessageCount = useRef(messageCount);
   useEffect(() => {
-    if (messageCount > prevMessageCount.current && layout.drawerVisible) setDrawerOpen(false);
+    if (messageCount > prevMessageCount.current && layout.drawerVisible) setCompactTab("chat");
     prevMessageCount.current = messageCount;
   }, [messageCount, layout.drawerVisible]);
 
@@ -211,6 +263,8 @@ export function AppShell({ sidebar, main }: AppShellProps) {
   // "back" gesture, the mirror of the old swipe-left drawer dismiss. Esc is the
   // other path (there is no scrim to tap now — the page is full-screen). A plain
   // horizontal-delta check, no gesture library.
+  // Shared by both compact pages (files + sections): a rightward edge swipe is
+  // the iOS "back" gesture → return to chat.
   const touchStartX = useRef<number | null>(null);
   const onDrawerTouchStart = (e: React.TouchEvent) => {
     touchStartX.current = e.touches[0]?.clientX ?? null;
@@ -219,7 +273,7 @@ export function AppShell({ sidebar, main }: AppShellProps) {
     const start = touchStartX.current;
     touchStartX.current = null;
     const end = e.changedTouches[0]?.clientX;
-    if (start != null && typeof end === "number" && end - start > 40) setDrawerOpen(false);
+    if (start != null && typeof end === "number" && end - start > 40) setCompactTab("chat");
   };
 
   // fp3 §3: page-entrance animation — mount parked off-screen-left, then clear
@@ -233,6 +287,19 @@ export function AppShell({ sidebar, main }: AppShellProps) {
     const r = requestAnimationFrame(() => setPageEntered(true));
     return () => cancelAnimationFrame(r);
   }, [layout.drawerVisible]);
+
+  // fp4 §3: the Sections page shares the files page's slide-in entrance.
+  const sectionsVisible = layout.compact && compactTab === "sections";
+  const sectionsScrollRef = useRef<HTMLDivElement>(null);
+  const [sectionsEntered, setSectionsEntered] = useState(false);
+  useEffect(() => {
+    if (!sectionsVisible) {
+      setSectionsEntered(false);
+      return;
+    }
+    const r = requestAnimationFrame(() => setSectionsEntered(true));
+    return () => cancelAnimationFrame(r);
+  }, [sectionsVisible]);
 
   // Ask box vs the on-screen keyboard: the OS keyboard overlays a WKWebView
   // rather than resizing it, so pad the main column by the covered height
@@ -252,6 +319,38 @@ export function AppShell({ sidebar, main }: AppShellProps) {
       setKeyboardInset(0);
     };
   }, [layout.compact]);
+
+  // fp4 §3: the tab bar slides away while the keyboard is up (so it never floats
+  // mid-screen) or while a modal section sheet covers the screen; it's on screen
+  // exactly when compact, keyboard down, no sheet.
+  const tabBarHidden = keyboardInset > 0 || sheetOpen;
+  const tabBarShown = layout.showTabBar && !tabBarHidden;
+  // Reserve room above the bar for the composer, the files/sections pages, and
+  // the bug FAB. --lh-tabbar-h is the bar's content height while it's shown, else
+  // 0. It lives on the document root so it also cascades to the FAB, which mounts
+  // as a sibling of AppShell (outside this subtree). Desktop never shows the bar,
+  // so the var stays 0 there and every `var(--lh-tabbar-h, 0px)` consumer is a
+  // no-op — the desktop tree is byte-for-byte unchanged.
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    const el = document.documentElement;
+    el.style.setProperty("--lh-tabbar-h", tabBarShown ? `${TAB_BAR_CONTENT_HEIGHT}px` : "0px");
+    return () => el.style.setProperty("--lh-tabbar-h", "0px");
+  }, [tabBarShown]);
+
+  // fp4 §3: tapping the already-active tab scrolls that surface to top (the iOS
+  // convention). Chat + the files explorer own their own scroll containers, so
+  // they listen for a nudge event; the sections page scroll is owned here.
+  const handleTabSelect = (tab: CompactTab) => {
+    if (tab === compactTab) {
+      if (tab === "chat") window.dispatchEvent(new CustomEvent("lighthouse:chat-scroll-top"));
+      else if (tab === "files") window.dispatchEvent(new CustomEvent("lighthouse:explorer-scroll-top"));
+      else sectionsScrollRef.current?.scrollTo({ top: 0, behavior: "auto" });
+      return;
+    }
+    setCompactTab(tab);
+  };
+
   // Persist the collapsed choice so it survives a relaunch.
   useEffect(() => {
     try {
@@ -447,8 +546,8 @@ export function AppShell({ sidebar, main }: AppShellProps) {
       if (e.key === "n" || e.key === "N") fire("lighthouse:new-chat");
       else if (e.key === "b" || e.key === "B") {
         e.preventDefault();
-        // §5: in the compact arrangement the sidebar IS the drawer.
-        if (compactRef.current) setDrawerOpen((o) => !o);
+        // §5/fp4 §3: in the compact arrangement B toggles the Files tab/page.
+        if (compactRef.current) setCompactTab((t) => (t === "files" ? "chat" : "files"));
         else setCollapsed((c) => !c);
       } else if (e.key === "p" || e.key === "P") {
         // preventDefault deliberately shadows the browser's Print in the web
@@ -465,8 +564,8 @@ export function AppShell({ sidebar, main }: AppShellProps) {
   // tree; the explorer itself stays mounted and handles the scroll + flash).
   useEffect(() => {
     const onReveal = () => {
-      // §5: compact has no collapsed rail — revealing means opening the drawer.
-      if (compactRef.current) setDrawerOpen(true);
+      // §5/fp4 §3: compact has no collapsed rail — revealing selects the Files tab.
+      if (compactRef.current) setCompactTab("files");
       else setCollapsed(false);
     };
     window.addEventListener("lighthouse:reveal-node", onReveal);
@@ -500,22 +599,59 @@ export function AppShell({ sidebar, main }: AppShellProps) {
               collapsed={false}
               // The header control is the page's 44pt Back-to-chat button (§3).
               backControl
-              onToggleCollapsed={() => setDrawerOpen(false)}
+              onToggleCollapsed={() => setCompactTab("chat")}
               rail={<SectionRail />}
             >
               {sidebar}
             </Sidebar>
           </div>
         )}
-        {/* Section panels render as sheets — independent of the drawer, so a
-            sheet opened from the rail survives the drawer auto-closing. */}
+        {/* fp4 §3: the Sections tab opens the section rail as its own full page
+            (History first, every section a flat 48pt row). Tapping a section
+            still opens its SectionFlyout sheet over the top (the modal below). */}
+        {sectionsVisible && (
+          <div
+            className={mergeClasses(styles.page, !sectionsEntered && styles.pageEntering)}
+            role="dialog"
+            aria-modal="true"
+            aria-label="Sections"
+            onTouchStart={onDrawerTouchStart}
+            onTouchEnd={onDrawerTouchEnd}
+          >
+            <div className={styles.sectionsPage}>
+              <div className={styles.sectionsHeader}>
+                <Text weight="semibold">Sections</Text>
+                <Button
+                  appearance="subtle"
+                  className={styles.backBtn}
+                  icon={<ArrowLeftRegular />}
+                  aria-label="Back to chat"
+                  onClick={() => setCompactTab("chat")}
+                >
+                  Back
+                </Button>
+              </div>
+              <div className={styles.sectionsBody} ref={sectionsScrollRef}>
+                <SectionRail page />
+              </div>
+            </div>
+          </div>
+        )}
+        {/* Section panels render as sheets — independent of the pages, so a
+            sheet opened from either rail survives the page auto-closing. */}
         <SectionFlyout compact />
         <div
           className={styles.main}
-          style={keyboardInset ? { paddingBottom: `${keyboardInset}px` } : undefined}
+          // Reflow above the fixed tab bar: reserve its height when the keyboard
+          // is down; when the keyboard is up the bar hides, so pad by the covered
+          // height instead (they're mutually exclusive).
+          style={{ paddingBottom: keyboardInset ? `${keyboardInset}px` : "var(--lh-tabbar-h, 0px)" }}
         >
           {main}
         </div>
+        {/* fp4 §3: THE compact navigation. Hidden while the keyboard is up or a
+            modal section sheet is open; desktop/iPad-regular never reach here. */}
+        <CompactTabBar active={compactTab} onSelect={handleTabSelect} hidden={tabBarHidden} />
         <StartupPrompt />
       </main>
     );

@@ -42,6 +42,7 @@ import {
   ToggleButton,
   Tooltip,
   makeStyles,
+  mergeClasses,
   shorthands,
   tokens,
 } from "@fluentui/react-components";
@@ -295,6 +296,51 @@ const useStyles = makeStyles({
   },
   emptyStateIcon: { fontSize: "40px", color: tokens.colorBrandForeground1 },
   emptyStatePrivacy: { color: tokens.colorNeutralForeground3 },
+  // fp4 §2: on the full-screen mobile files page the empty state is the page's
+  // primary call to action — center it in the viewport so the add control reads
+  // as the one thing to do. The parent scroll container is safe-area padded
+  // (fp3 §3 page) and clears the §3 tab bar, so this is never clipped.
+  emptyStateMobile: { minHeight: "55vh", justifyContent: "center", marginTop: 0 },
+  // fp4 §1: the WKWebView-safe add-files control. iOS opens NO document picker
+  // for a programmatic `.click()` on a display:none input, and routing the tap
+  // through a Fluent Menu strips the user gesture on dismissal — so on a mobile
+  // shell the add affordance is a real <label> styled as a primary button with
+  // a visually-hidden-BUT-hit-testable <input type=file> overlaid on it (opacity
+  // 0, inset 0, pointer-events on). Activating the control IS a direct gesture
+  // on the input, which is the only thing WKWebView will open a picker for.
+  mobileAddBtn: {
+    position: "relative",
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: tokens.spacingHorizontalS,
+    minHeight: "44px",
+    ...shorthands.padding(tokens.spacingVerticalS, tokens.spacingHorizontalL),
+    ...shorthands.borderRadius(tokens.borderRadiusMedium),
+    ...shorthands.border("0"),
+    backgroundColor: tokens.colorBrandBackground,
+    color: tokens.colorNeutralForegroundOnBrand,
+    fontFamily: "inherit",
+    fontSize: tokens.fontSizeBase300,
+    fontWeight: tokens.fontWeightSemibold,
+    cursor: "pointer",
+    touchAction: "manipulation",
+    ":hover": { backgroundColor: tokens.colorBrandBackgroundHover },
+    ":active": { backgroundColor: tokens.colorBrandBackgroundPressed },
+    ":focus-within": { outline: `2px solid ${tokens.colorStrokeFocus2}`, outlineOffset: "1px" },
+  },
+  // The overlaid file input: covers the whole label, transparent, so a tap
+  // anywhere on the button lands directly on the input. NOT display:none /
+  // hidden — WKWebView will not open a picker for a non-rendered input.
+  mobileAddInput: {
+    position: "absolute",
+    inset: 0,
+    width: "100%",
+    height: "100%",
+    opacity: 0,
+    cursor: "pointer",
+    fontSize: 0,
+  },
   removeError: {
     marginTop: tokens.spacingVerticalS,
     color: tokens.colorPaletteRedForeground1,
@@ -1183,6 +1229,11 @@ export function FileExplorer() {
     if (ids.length === 0) return;
     setJustAdded(new Set(ids));
     setAddFlash(ids.length);
+    // fp4 §1: on a mobile shell, bring the freshly-added content into view — new
+    // top-level files land at the top of the list, and after a first add from
+    // the empty state the user must SEE that something happened (never a silent
+    // nothing). Instant, not a smooth glide (fp3 §2 scroll-truth on touch).
+    if (isMobile) scrollRef.current?.scrollTo({ top: 0, behavior: "auto" });
     if (flashTimer.current) window.clearTimeout(flashTimer.current);
     flashTimer.current = window.setTimeout(() => {
       setAddFlash(null);
@@ -1400,6 +1451,14 @@ export function FileExplorer() {
     };
     window.addEventListener("lighthouse:explorer-autofit", onAutoFit);
     return () => window.removeEventListener("lighthouse:explorer-autofit", onAutoFit);
+  }, []);
+
+  // fp4 §3: re-tapping the active Files tab in the compact tab bar scrolls the
+  // file list to top (the iOS convention). The tab bar (AppShell) dispatches this.
+  useEffect(() => {
+    const onScrollTop = () => scrollRef.current?.scrollTo({ top: 0, behavior: "auto" });
+    window.addEventListener("lighthouse:explorer-scroll-top", onScrollTop);
+    return () => window.removeEventListener("lighthouse:explorer-scroll-top", onScrollTop);
   }, []);
 
   // --- Quick-open "reveal in explorer" (time-savers): the palette's Enter
@@ -1762,6 +1821,33 @@ export function FileExplorer() {
     return () => window.removeEventListener("lighthouse:browse-files", onBrowse);
   }, []);
 
+  /**
+   * fp4 §1: the mobile add-files control. A <label> styled as a primary button
+   * with an overlaid file input (styles.mobileAddBtn/mobileAddInput) so the tap
+   * IS a direct user gesture on the input — the only thing an iOS WKWebView
+   * opens a picker for. Both the toolbar add and the empty state use this on a
+   * mobile shell; desktop keeps its Browse menu (which .click()s a hidden input,
+   * a gesture WebView2/WKWebView-on-desktop honor). `data-mobile-add` pins the
+   * label/overlay shape so a test can prove it never regresses to `.click()` on
+   * a hidden input. `accept` stays unset (any file); `multiple` stays.
+   */
+  const mobileAddControl = (label: string) => (
+    <label className={styles.mobileAddBtn} data-mobile-add>
+      <FolderOpenRegular />
+      <span>{label}</span>
+      <input
+        type="file"
+        multiple
+        className={styles.mobileAddInput}
+        aria-label={label}
+        onChange={(e) => {
+          sendFiles(e.target.files, { preferLink: false }); // explicit copy
+          e.currentTarget.value = "";
+        }}
+      />
+    </label>
+  );
+
   // Native OS drag-drop (desktop shell). The DOM "Files" events below never
   // fire on Windows (WebView2 suppresses them while Tauri's native handler is
   // active) and would double-handle drops on macOS — so inside the shell, the
@@ -1873,6 +1959,14 @@ export function FileExplorer() {
               e.target.value = "";
             }}
           />
+          {/* fp4 §1: on a mobile shell (iOS/iPadOS, ANY width — the WKWebView
+              `.click()` bug isn't width-gated) the toolbar add is a DIRECT label
+              control; the Menu dismissal strips the user gesture iOS needs to
+              open the picker. Desktop AND the web twin keep the full Browse menu
+              with its link-first and copy-in items exactly as before. */}
+          {isMobile ? (
+            mobileAddControl("Add files")
+          ) : (
           <Menu>
             <MenuTrigger disableButtonEnhancement>
               <Button icon={<FolderOpenRegular />} appearance="primary" size="small">
@@ -1947,6 +2041,7 @@ export function FileExplorer() {
               </MenuList>
             </MenuPopover>
           </Menu>
+          )}
           <Tooltip content="Create a new folder in the vault" relationship="label">
             <Button
               icon={<FolderAddRegular />}
@@ -2217,7 +2312,7 @@ export function FileExplorer() {
           // First-run: nothing added yet across any source, so the per-source
           // one-liners would just repeat themselves - show one real call to
           // action instead. Drag-drop onto the whole panel still works.
-          <div className={styles.emptyState}>
+          <div className={mergeClasses(styles.emptyState, isMobile && styles.emptyStateMobile)}>
             <FolderAddRegular className={styles.emptyStateIcon} />
             <Text size={400} weight="semibold">
               Add your first files
@@ -2229,9 +2324,16 @@ export function FileExplorer() {
                 ? "Add files from the Files app — they stay on this device."
                 : "Drag files or folders here, or browse — they stay on your machine."}
             </Text>
-            <Button appearance="primary" icon={<FolderOpenRegular />} onClick={browseForFiles}>
-              {isMobile ? "Add files…" : "Browse…"}
-            </Button>
+            {/* fp4 §1/§2: the empty-state primary add uses the WKWebView-safe
+                label control on a mobile shell (the tap opens the iOS document
+                picker directly); desktop keeps its Browse button. */}
+            {isMobile ? (
+              mobileAddControl("Add files…")
+            ) : (
+              <Button appearance="primary" icon={<FolderOpenRegular />} onClick={browseForFiles}>
+                Browse…
+              </Button>
+            )}
             <Text size={200} className={styles.emptyStatePrivacy}>
               {isMobile
                 ? "Files never leave this device unless you choose a cloud AI model."

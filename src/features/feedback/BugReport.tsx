@@ -40,7 +40,11 @@ const useStyles = makeStyles({
   fab: {
     position: "fixed",
     right: tokens.spacingHorizontalL,
-    bottom: tokens.spacingVerticalL,
+    // fp4 §3: ride above the compact bottom tab bar (its content height + the
+    // home-indicator inset) so the two never overlap. Both vars are 0 on desktop
+    // and whenever the bar is hidden, so this computes to the original bottom
+    // there — desktop is pixel-identical.
+    bottom: `calc(var(--lh-tabbar-h, 0px) + var(--lh-safe-bottom, 0px) + ${tokens.spacingVerticalL})`,
     zIndex: 900,
     minWidth: "auto",
     width: "36px",

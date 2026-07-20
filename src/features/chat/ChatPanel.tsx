@@ -67,7 +67,6 @@ import {
   FilterRegular,
   HistoryRegular,
   LockClosedRegular,
-  NavigationRegular,
   OpenRegular,
   SparkleRegular,
   PinRegular,
@@ -135,7 +134,7 @@ import { modKey } from "@/features/onboarding/ModeChooser";
 import { ACCENTS, BEAM_SWEEP } from "@/shell/theme";
 import { FILE_DRAG_MIME, parseDraggedFiles, type DraggedFile } from "@/shell/dnd";
 import { isDesktopShell, pathsForFiles, platformKind } from "@/shell/desktopBridge";
-import { usePaneLayout, useCoarsePointer } from "@/shell/paneLayout";
+import { useCoarsePointer } from "@/shell/paneLayout";
 
 // The markdown stack (react-markdown + remark-gfm + micromark, ~263 KB) is the
 // single largest chunk and is only needed once a finished answer renders — not
@@ -264,10 +263,6 @@ const useStyles = makeStyles({
     marginBottom: tokens.spacingVerticalM,
   },
   headerMeta: { display: "flex", alignItems: "center", gap: tokens.spacingHorizontalS },
-  // §5 compact: the drawer button — the chat pane is the whole screen there,
-  // so this is the way into files/sections. Thumb-sized (≥44pt); never
-  // rendered outside the compact arrangement (paneLayout).
-  drawerBtn: { minWidth: "44px", minHeight: "44px", flexShrink: 0 },
   // Compact context header (openspec: add-investigations §4.2): the Title3 is
   // the investigation's name with its scope size as a quiet baseline caption
   // ("Ask" alone in the global context). The name truncates before it can
@@ -2454,11 +2449,6 @@ export function ChatPanel() {
   );
   const includedFileIds = useMemo(() => includedFiles.map((f) => f.id), [includedFiles]);
 
-  // §5: the compact arrangement (mobile shells < 700px — paneLayout). Only
-  // the header's drawer button keys off it here; false at every width on
-  // desktop, so nothing in this panel changes there.
-  const paneCompact = usePaneLayout(false).compact;
-
   // Who answers, for the provenance line: the local model keeps everything on
   // this device; a hosted provider receives excerpts of files visible to AI.
   // No provider chosen yet answers on this device either way — the private
@@ -3052,6 +3042,15 @@ export function ChatPanel() {
     const onNewChat = () => newChatRef.current();
     window.addEventListener("lighthouse:new-chat", onNewChat);
     return () => window.removeEventListener("lighthouse:new-chat", onNewChat);
+  }, []);
+
+  // fp4 §3: re-tapping the active Chat tab in the compact tab bar scrolls the
+  // transcript to the top (the iOS convention). The tab bar (AppShell) dispatches
+  // this; the composer/FAB don't move. Instant, matching the touch scroll idiom.
+  useEffect(() => {
+    const onScrollTop = () => bodyRef.current?.scrollTo({ top: 0, behavior: "auto" });
+    window.addEventListener("lighthouse:chat-scroll-top", onScrollTop);
+    return () => window.removeEventListener("lighthouse:chat-scroll-top", onScrollTop);
   }, []);
 
   // Quick-open's Ctrl/Cmd+Enter attaches a file to the conversation through
@@ -4949,20 +4948,9 @@ export function ChatPanel() {
           {/* Compact context header (openspec: add-investigations §4.2): inside
               an investigation the Title3 is its name with the scope size as a
               quiet caption; the global context stays plain "Ask". */}
-          {/* §5 compact: the way into files/sections — the shell renders the
-              sidebar as an overlay drawer there and owns no chrome of its own.
-              Never mounts outside the compact arrangement (desktop unchanged). */}
-          {paneCompact && (
-            <Tooltip content="Open files" relationship="label">
-              <Button
-                appearance="subtle"
-                className={styles.drawerBtn}
-                icon={<NavigationRegular />}
-                aria-label="Open files and sections"
-                onClick={() => window.dispatchEvent(new CustomEvent("lighthouse:open-drawer"))}
-              />
-            </Tooltip>
-          )}
+          {/* fp4 §3: the lone compact "open files and sections" button that used
+              to live here is gone — the portrait bottom tab bar (AppShell) is the
+              way into Files and Sections now. Desktop header is unchanged. */}
           <div className={styles.headerTitle}>
             <Title3 className={styles.headerTitleName}>
               {currentInvestigation ? currentInvestigation.name : "Ask"}
