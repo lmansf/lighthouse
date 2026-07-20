@@ -134,7 +134,7 @@ import { chatHistoryLocked } from "@/stores/managedLocks";
 import { modKey } from "@/features/onboarding/ModeChooser";
 import { ACCENTS, BEAM_SWEEP } from "@/shell/theme";
 import { FILE_DRAG_MIME, parseDraggedFiles, type DraggedFile } from "@/shell/dnd";
-import { isDesktopShell, pathsForFiles } from "@/shell/desktopBridge";
+import { isDesktopShell, pathsForFiles, platformKind } from "@/shell/desktopBridge";
 import { usePaneLayout } from "@/shell/paneLayout";
 
 // The markdown stack (react-markdown + remark-gfm + micromark, ~263 KB) is the
@@ -4568,11 +4568,18 @@ export function ChatPanel() {
         </div>
       </div>
       <div className={styles.composerMeta}>
-        <Text size={200} className={styles.metaLine}>
-          Enter to send · Shift+Enter for a new line
-          {lastAskText ? " · ↑ to recall your last question" : ""}
-          {ghostText !== null ? " · → to complete" : ""}
-        </Text>
+        {/* fp2 §3: keyboard-shortcut lines are desktop copy (the fp1 §2 rule —
+            the tour was gated, this line was missed). On a mobile shell the
+            labeled Ask button IS the affordance; dropping the line also
+            reclaims two wrapped rows under the phone composer. The provenance
+            line below stays on every platform — that one is the privacy truth. */}
+        {platformKind() === "desktop" && (
+          <Text size={200} className={styles.metaLine}>
+            Enter to send · Shift+Enter for a new line
+            {lastAskText ? " · ↑ to recall your last question" : ""}
+            {ghostText !== null ? " · → to complete" : ""}
+          </Text>
+        )}
         <Text size={200} className={styles.metaLine} data-tour="models">
           {provenance}
         </Text>
