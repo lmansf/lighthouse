@@ -3544,3 +3544,262 @@ device TLS, compact layout"; stop at the PR. After it merges, the
 TestFlight loop is: dispatch mobile-bootstrap.yml with task: ios-beta
 (fastlane builds the signed .ipa and uploads to TestFlight).
 ```
+
+## 25. Field patch: OCR that ships, touch-grade chat, a files PAGE — round-2 reports, iPad-first (2026-07-19)
+
+Round-2 TestFlight reports, filed AFTER field patches #192/#193 merged
+(main @ 0.13.2): chat still clunky, OCR "not running", the file
+slide-out cluttered and drawer-ish. A code diagnosis explains each.
+**OCR** is in-process `ocrs`/`rten` (no Vision, no Swift bridge); #193
+wired the CI model fetch and relaxed the `LIGHTHOUSE_RESOURCES_PATH`
+boot gate, but the two `.rten` models are **never staged into the iOS
+.app** — desktop stages them via `tauri.conf.json bundle.resources`,
+whose `bundle.targets` are desktop-only, while the iOS bundle
+(project.yml/pbxproj `PBXResourcesBuildPhase`) ships only
+`Assets.xcassets`, `LaunchScreen.storyboard`, and the frontend `assets`
+folder. On device `resource_dir()/ocr` doesn't exist →
+`ocr::available()` = false → every image/scanned-PDF extraction returns
+the (deliberately uncached) `OcrUnavailable` no-op, indistinguishable in
+the UI from "no text found". CACHE_VERSION and the `ocr_enabled`
+default are healthy — `OcrUnavailable` is never cached, so files
+self-heal the moment models appear; do NOT bump the cache. **Chat**:
+#192/#193 gave the header the compact pass but never the message body
+or composer — sub-44 pt citation/refine/related-file chips, anchored
+popovers (assumption ledger, provenance), nested horizontal scrollers
+fighting the read-from-top scroll hold, ghost autocomplete with no
+touch affordance, autofocus popping the keyboard on entry. **The
+slide-out**: sections already render as full-screen sheets
+(`SectionFlyout` `inset:0`), but the file drawer is the one surface
+still a `min(320px, 85vw)` overlay + scrim (`AppShell.tsx:90-105`);
+the seam to change is the pure `paneLayout()` verdict. And per the
+owner: **iPad is the primary mode after desktop and is untested** — so
+every fix below lands on its true axis (viewport width vs pointer
+coarseness vs hardware keyboard), which makes iPhone fixes benefit
+iPad automatically, and this patch carries the first iPad verification
+matrix.
+
+### Prompt
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first, local-first analytics AI harness for analysts: Rust
+engine (native/crates/lighthouse-core) in a Tauri 2 shell
+(native/crates/lighthouse-desktop — the SAME crate is the iOS app via
+mobile_entry_point; desktop-only code under src/desktop/ behind
+#[cfg(desktop)]), byte-compatible TS twin engine (src/server/), React
+UI (src/). Read CLAUDE.md (release mechanics now document SEVEN stamp
+files and the 0.13.x line), docs/ts-twin.md, and
+docs/roadmap-personas-2026-07.md §24–§25 (diagnosis preambles) before
+writing code. This session fixes the round-2 device reports — OCR,
+chat feel, and the files surface — with iPad as a first-class target:
+iPad is the app's primary mode after desktop, it is untested, and
+every change must land on the axis that makes it benefit both devices
+(width < 700 = compact presentation; pointer: coarse = touch sizing;
+hardware keyboard = keyboard affordances). One codebase, axis-gated —
+never a per-device fork. Platform truth comes from platformKind()/
+isMobileShell() (src/shell/desktopBridge.ts:40-62) and the pure
+paneLayout() verdict (src/shell/paneLayout.ts, COMPACT_BREAKPOINT=700);
+extend those, don't invent parallel signals.
+
+1. OCR actually ships (the report is "OCR doesn't run"; the truth is
+   "OCR never boarded the plane").
+   - Root cause to fix: resources/ocr (text-detection.rten +
+     text-recognition.rten, CI-fetched by scripts/fetch-local-model.mjs
+     --only=ocr in the ios-build job) is not part of the iOS app
+     payload. Stage it: add the OCR models to the iOS bundle via
+     gen/apple/project.yml resources (or the pre-build copy into the
+     staged bundle — pick the seam that survives `tauri ios build`
+     regenerating things, and say why in the PR). Then verify the
+     RESOLVED path: lighthouse-core resolves models at
+     config::resources_dir().join("ocr") via LIGHTHOUSE_RESOURCES_PATH
+     (lib.rs bootstrap gate, relaxed by #193) — if staging lands the
+     models under assets/ocr instead of ocr/, fix the resolution (one
+     seam, engine-side, cfg'd by platform if needed) rather than
+     scattering path guesses.
+   - Do NOT touch CACHE_VERSION or ocr_enabled defaults: extract.rs
+     deliberately never caches OcrUnavailable (extract.rs:1409-1415),
+     so every scanned file ingested before this fix self-heals on next
+     ask/open. State this in the PR so nobody "fixes" it again.
+   - Make the silent state diagnosable: today a missing-models build is
+     indistinguishable from "no text in file". The inspect payload
+     (inspect.rs) gains an ocr availability field (twins + PARITY);
+     FileInspector then distinguishes three honest states: "Read by
+     OCR — may contain recognition errors" (exists today, keep),
+     "No extractable text — found by name only", and "This build is
+     missing its OCR models" (new, should never appear once staging is
+     fixed — it exists to make the NEXT regression a one-glance
+     diagnosis). Fix the stale web-twin wording "OCR detection:
+     desktop app only" in the same file — it is false on iOS.
+   - CI tripwire so this cannot regress: the ios-build lane gains a
+     post-build assertion that the built .app payload contains both
+     .rten files at the path the engine resolves (unzip the .ipa,
+     test -f). Red lane = the report you are fixing.
+
+2. Touch-grade chat (the body and composer never got the compact pass
+   the header got). Fix on the right axes:
+   - Tap sizing (axis: pointer coarse — applies to iPhone AND iPad,
+     all widths): related-file/synth/"+N more" chips
+     (ChatPanel.tsx:800-853), citation chips, and the RefineChips
+     action row (:1716) reach ≥44pt effective targets (padding, not
+     font blowup; hit-slop where visual size must stay); chip rows
+     wrap or scroll deliberately instead of shrinking. touch-action:
+     manipulation on chip/button rows kills double-tap zoom without
+     disabling page pinch (accessibility keeps zoom).
+   - Detail surfaces (axis: width): at compact, anchored popovers
+     become bottom sheets — assumption ledger (:1229-1370) and the
+     provenance stamp (:718-737) — safe-area padded, 44pt close. At
+     iPad regular width popovers REMAIN (they are correct iPad HIG);
+     the sheet branch is the compact branch of the same component,
+     not a fork.
+   - Scroll truth: keep the read-from-top hold (instant scrollTop
+     writes are already right) but harden it on device: widen the
+     "our echo vs user intent" discriminator (>1px is fragile under
+     iOS zoom/subpixel), treat visualViewport keyboard transitions as
+     non-user echoes, and make the citation-jump scrollIntoView
+     (:3860) instant on touch. Nested horizontal scrollers (tableWrap
+     :539-541, :425) get overscroll-behavior-x: contain so a table
+     pan never hijacks the transcript.
+   - Composer: no autofocus keyboard pop on entry on touch
+     (:2964-2966 gates on pointer); auto-grow stays. Ghost
+     autocomplete gains a TOUCH affordance instead of dying: the
+     ghost text is tappable to accept (one tap = accept completion),
+     while → keeps working for hardware keyboards — which iPads
+     HAVE; do not gate ghost on platform, gate the *hint copy* only.
+     Keep the composer clear of the bug-report FAB (:254) at compact
+     — move the FAB into the header overflow on compact if they
+     collide.
+   - AnalyticsChart: verify tooltips/legends are reachable by tap
+     (tap datapoint = tooltip toggle); hover keeps working (iPad
+     trackpad). Fix what the device shows.
+
+3. The files surface becomes a PAGE, not a slide-out (report D).
+   Sections already present as full-screen sheets on compact
+   (SectionFlyout styles.sheet inset:0, 44pt close); the file drawer
+   is the odd one out. Unify: ONE shared full-screen page/sheet
+   primitive (extract from SectionFlyout) used by both sections and
+   the files surface. At compact, paneLayout's sidebarMode becomes
+   "page": the files surface slides in from the left edge as a full
+   page (no scrim, no 85vw overlay), with a 44pt Back control in its
+   header (replaces the collapse button), edge-swipe-right to go
+   back (mirror of the existing swipe-left close, AppShell.tsx:
+   205-216), Esc still closes (iPad hardware keyboard), and
+   prefers-reduced-motion collapses the transition to a fade. Keep
+   the existing auto-return behaviors: opening a file or sending an
+   ask navigates back to chat (:192-203). Desktop and iPad ≥700pt
+   keep the persistent column sidebar exactly as today (paneLayout
+   pin: the page branch is unreachable there).
+
+4. The files page content, simplified (report C). At compact the page
+   shows an analyst's phone essentials and nothing else:
+   - KEEP: page title + "N of M visible to AI" badge, search, the
+     44pt quick-open, Browse → the native Files picker path (the
+     desktopOS link/copy-folder items are already gated off),
+     per-row visible-to-AI eye toggle, local-only lock (smaller,
+     secondary), row ⋯ menu reduced to: Inspect, Rename, Hide from
+     AI / Visible to AI, New folder inside (folders), Remove (with
+     confirm). Rows stay 48pt (#193).
+   - CUT at compact (hide, don't delete — desktop keeps everything):
+     the SharePoint "coming soon" stub (FileExplorer.tsx:1917-1923 —
+     dead button, pure clutter; the dormant plumbing stays per the
+     standing owner decision), Rules for this folder…, Move to…,
+     Unlink, Open/Reveal (already desktopOS), "Open the vault
+     folder…" (already desktopOS).
+   - The SectionRail's SEVEN 34px rows are desktop nav on a phone.
+     At compact: History and Investigations stay as first-class 48pt
+     rows; the rest (What stands out, Business definitions, What you
+     can do, Recipes, Library) collapse into one "More" row opening
+     a simple list page whose entries open the existing sheets.
+     Nothing is removed from iPad ≥700pt or desktop: all seven rail
+     entries and every menu item render there exactly as today —
+     the analyst's full harness is the iPad-regular experience.
+   - Structural pins: desktop + iPad-regular render of FileExplorer/
+     SectionRail is byte-identical to main (the compact branch is
+     width-gated); the cut list is asserted at compact.
+
+5. iPad readiness pass (the primary mode ships next — it is untested;
+   this patch must leave it verified, not assumed). On simulators
+   (iPad Pro 13" and iPad mini), portrait and landscape:
+   - Regular width: three-pane column layout renders as 0.13.2
+     desktop-equivalent; all seven rail sections; popovers not
+     sheets; provider/egress header full labels (compact-only
+     icon-mode stays compact-only).
+   - Split View 1/3 and Slide Over (<700pt): the compact experience
+     from this patch — files page, sheets, simplified rail — engages
+     for free; Split View 1/2: whichever side of 700 it lands on,
+     verify no in-between breakage at the boundary (resize across it
+     live).
+   - Hardware keyboard: Enter sends, Shift+Enter newlines, → accepts
+     ghost, Esc closes page/sheets — all live on iPad even though
+     the hint copy is hidden on touch.
+   - Trackpad: hover-reveal affordances still appear (hover: hover
+     media re-engages), tap targets stay 44pt (pointer can be fine
+     while touch remains primary — size for coarse when EITHER is
+     coarse).
+   - Files-app drag & drop onto the explorer page and the ask box
+     (§23 door 4): verify it actually works on iPadOS; if the native
+     tauri drag events don't fire there, the platform-aware DOM
+     fallback from §23/§24 must. Record the observed state and any
+     fix in the PR body.
+   Fix in-scope breakage this pass finds; anything out of scope gets
+   a one-line note in the PR body, not a silent skip.
+
+6. Stamps and the beta loop. Bump 0.13.2 → 0.13.3 in lockstep across
+   ALL SEVEN stamp files exactly as CLAUDE.md now documents (it is
+   current — follow it; note ios-build re-syncs the short version and
+   stamps CFBundleVersion with the CI run number). Full node + cargo
+   suites, release-smoke, and the ios-build lane (with its new OCR
+   payload assertion) green. After merge the loop is: dispatch
+   mobile-bootstrap.yml task: ios-beta — and this build is also the
+   first iPad TestFlight candidate (same binary; add the iPad
+   screenshots/device family only if the lane already supports it,
+   otherwise note it for the release prompt).
+
+Constraints. No analytics, telemetry, or accounts. No new
+entitlements or Info.plist keys (in-process OCR needs none — no
+Vision, no camera/photos APIs). Labels byte-identical across twins
+with PARITY comments; pinned label tests move in the same commit as
+their strings. CACHE_VERSION untouched (self-heal by design — see
+§1). SharePoint plumbing retained (hidden at compact, never deleted).
+Desktop pixel-identical; iPad ≥700pt identical to desktop rendering
+except axis-correct touch sizing. Scope = these four reports + the
+iPad pass + stamps; nothing else rides along.
+
+Acceptance (device/simulator, fresh install unless noted):
+1. OCR: the built .ipa payload contains both .rten models at the
+   engine-resolved path (CI assertion green); on device a photographed
+   receipt and a scanned PDF both extract and answer; a scanned file
+   ingested BEFORE the fix answers after it (self-heal, no cache
+   bump); FileInspector shows the OCR line; deleting the models from
+   a dev build shows "missing its OCR models" — never a silent blank.
+2. Chat at 390pt: every interactive element in the transcript ≥44pt
+   effective; no anchored popover (sheets instead — ledger and
+   provenance); a wide table pans horizontally without moving the
+   transcript; the streamed answer's top holds steady while the
+   keyboard opens/closes mid-stream; ghost completion accepts by tap;
+   no keyboard pop on entering a chat; no double-tap zoom on chip
+   rows; chart tooltips toggle by tap.
+3. Files page at compact: full-screen page with Back (44pt), edge-
+   swipe back, no scrim; opening a file or sending an ask returns to
+   chat; reduced-motion = fade; sections and files share the same
+   primitive (one component, structural pin).
+4. Files page content at compact matches the keep/cut list; rail =
+   History, Investigations, More (48pt); SharePoint stub, folder
+   rules, Move, Unlink absent at compact; desktop AND iPad-regular
+   render byte-identical to main (pins).
+5. iPad matrix passes: Pro 13"/mini × portrait/landscape regular
+   (three-pane, seven sections, popovers, full header labels); Split
+   1/3 + Slide Over = compact experience; live resize across 700pt
+   doesn't wedge; hardware keyboard (Enter / Shift+Enter / → / Esc)
+   and trackpad hover verified; Files drag-drop state recorded (works
+   or fixed or explicitly noted).
+6. All seven stamps read 0.13.3; suites + release-smoke + ios-build
+   (incl. OCR assertion) green.
+
+Environment. Run on macOS + Xcode — acceptance 1–5 need simulators
+(and ideally one real device for OCR + scroll feel). The Linux
+container fallback is the house convention: engine/TS/UI logic with
+full tests; gen/apple + CI-lane pieces grep-verified; the ios-build
+lane as the gate. One commit per numbered section. Open ONE PR titled
+"iOS field patch 3: OCR ships, touch-grade chat, files page —
+iPad-first"; stop at the PR.
+```
