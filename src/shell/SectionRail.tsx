@@ -106,7 +106,7 @@ const useStyles = makeStyles({
   subRow: { paddingLeft: tokens.spacingHorizontalXL },
 });
 
-export function SectionRail() {
+export function SectionRail({ page = false }: { page?: boolean } = {}) {
   const styles = useStyles();
   const openSection = useSidebarFlyout((s) => s.openSection);
   const toggle = useSidebarFlyout((s) => s.toggle);
@@ -114,22 +114,31 @@ export function SectionRail() {
   // paneLayout structural pin), so the desktop/iPad-regular render below stays
   // byte-for-byte the seven-row rail. Only a mobile shell <700pt folds.
   const compact = usePaneLayout(false).compact;
+  // fp4 §3: the dedicated Sections PAGE (page=true) never folds — it shows every
+  // section as a flat 48pt row with History + Investigations promoted to the top.
+  // Only the files-page rail folds the five secondaries under a "More" row.
+  const fold = compact && !page;
   const [moreOpen, setMoreOpen] = useState(false);
   // Roving tabindex over the CURRENTLY VISIBLE rows: exactly one is tabbable;
   // arrows move the focus (and the tabbable row) within the group.
   const [focusIdx, setFocusIdx] = useState(0);
   const btnRefs = useRef<Array<HTMLButtonElement | null>>([]);
 
-  // The visible section rows, in order. Full list off-compact; at compact only
-  // the primary sections (History + Investigations) sit at top level.
-  const primary = compact
-    ? SIDEBAR_SECTIONS.filter((s) => COMPACT_PRIMARY_IDS.has(s.id))
+  // The visible section rows, in order. On the Sections page every section is a
+  // top-level row, History + Investigations first (the fp3 §4 primaries), then
+  // the rest in registry order. Elsewhere the order is the registry's verbatim.
+  const ordered = page
+    ? [
+        ...SIDEBAR_SECTIONS.filter((s) => COMPACT_PRIMARY_IDS.has(s.id)),
+        ...SIDEBAR_SECTIONS.filter((s) => !COMPACT_PRIMARY_IDS.has(s.id)),
+      ]
     : SIDEBAR_SECTIONS;
-  const secondary = compact
-    ? SIDEBAR_SECTIONS.filter((s) => !COMPACT_PRIMARY_IDS.has(s.id))
-    : [];
-  // Total tabbable rows: primary + (compact ? the "More" row + expanded secondary : 0).
-  const rowCount = primary.length + (compact ? 1 + (moreOpen ? secondary.length : 0) : 0);
+  // Full list off-fold (desktop, iPad-regular, and the Sections page); when
+  // folding (the compact files-page rail) only the primaries sit at top level.
+  const primary = fold ? ordered.filter((s) => COMPACT_PRIMARY_IDS.has(s.id)) : ordered;
+  const secondary = fold ? ordered.filter((s) => !COMPACT_PRIMARY_IDS.has(s.id)) : [];
+  // Total tabbable rows: primary + (folding ? the "More" row + expanded secondary : 0).
+  const rowCount = primary.length + (fold ? 1 + (moreOpen ? secondary.length : 0) : 0);
 
   const focusRow = (i: number) => {
     const clamped = Math.max(0, Math.min(rowCount - 1, i));
@@ -189,11 +198,15 @@ export function SectionRail() {
 
   return (
     <nav aria-label="Sections" data-section-rail className={styles.rail}>
-      <Text size={100} weight="semibold" className={styles.groupLabel} aria-hidden>
-        Sections
-      </Text>
+      {/* The Sections page carries its own header title, so the rail drops this
+          duplicate group label there (fp4 §3); every other surface keeps it. */}
+      {!page && (
+        <Text size={100} weight="semibold" className={styles.groupLabel} aria-hidden>
+          Sections
+        </Text>
+      )}
       {primary.map((section, i) => sectionRow(section, i))}
-      {compact && (
+      {fold && (
         <>
           <button
             type="button"

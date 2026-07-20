@@ -44,7 +44,37 @@ export interface PaneLayout {
   /** Section panels (Insights, History, …) render as full-width safe-area
    *  sheets instead of an inline column. */
   sectionsAsSheets: boolean;
+  /** fp4 §3: the compact portrait bottom tab bar (Chat · Files · Sections) is
+   *  THE navigation on a mobile shell below the breakpoint. Desktop and an
+   *  iPad-regular (≥700pt) never show it — they keep the persistent column — so
+   *  this is `compact` exactly, and the unit tests pin the never-on-desktop
+   *  half as a structural invariant. */
+  showTabBar: boolean;
 }
+
+/**
+ * fp4 §3: the compact bottom-nav destinations. The set + order live HERE as pure
+ * data (no Fluent, no icons) so `paneLayout` owns WHAT the tabs are and WHEN the
+ * bar shows (`showTabBar`), and both are host-testable. The tab bar component is
+ * purely presentational: it maps each id to an icon and renders the labels.
+ *
+ * - chat: home / the ask surface (the base layer — no page overlaid).
+ * - files: the fp3 §3 full-screen files page.
+ * - sections: the section rail as its own full page (History first).
+ */
+export type CompactTab = "chat" | "files" | "sections";
+
+export interface CompactTabDef {
+  id: CompactTab;
+  /** The label under the icon (byte-identical across twins; pinned). */
+  label: string;
+}
+
+export const COMPACT_TABS: readonly CompactTabDef[] = [
+  { id: "chat", label: "Chat" },
+  { id: "files", label: "Files" },
+  { id: "sections", label: "Sections" },
+];
 
 /** The §5 verdict — pure, host-testable (test/paneLayout.test.mjs pins it,
  *  including the desktop-never-compact structural pin). */
@@ -61,6 +91,7 @@ export function paneLayout(
     showResizeHandle: !compact,
     applyExplorerWidth: !compact,
     sectionsAsSheets: compact,
+    showTabBar: compact,
   };
 }
 

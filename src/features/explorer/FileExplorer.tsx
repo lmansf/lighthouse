@@ -1453,6 +1453,14 @@ export function FileExplorer() {
     return () => window.removeEventListener("lighthouse:explorer-autofit", onAutoFit);
   }, []);
 
+  // fp4 §3: re-tapping the active Files tab in the compact tab bar scrolls the
+  // file list to top (the iOS convention). The tab bar (AppShell) dispatches this.
+  useEffect(() => {
+    const onScrollTop = () => scrollRef.current?.scrollTo({ top: 0, behavior: "auto" });
+    window.addEventListener("lighthouse:explorer-scroll-top", onScrollTop);
+    return () => window.removeEventListener("lighthouse:explorer-scroll-top", onScrollTop);
+  }, []);
+
   // --- Quick-open "reveal in explorer" (time-savers): the palette's Enter
   // dispatches "lighthouse:reveal-node" {id}; we expand the node's ancestors,
   // scroll the windowed list to its row, and flash it. Two-phase because the
