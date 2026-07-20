@@ -50,6 +50,15 @@ import https from "node:https";
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const dest = join(root, "resources", "llm");
 const force = process.argv.includes("--force");
+// iOS field patch 2 §1: `--only=ocr` fetches JUST the OCR models. The mobile
+// (ios-build) bundle wants them — ocrs/rten run in-process in the engine on
+// any target — but has no use for llama-server (desktop-only process) or the
+// embedding GGUF (served BY llama-server), so those stay desktop-only weight.
+const only = (process.argv.find((a) => a.startsWith("--only=")) || "").slice("--only=".length);
+if (only && only !== "ocr") {
+  console.error(`unknown --only=${only} (supported: ocr)`);
+  process.exit(1);
+}
 const platform = process.platform; // win32 | darwin | linux
 
 const LLAMACPP_API = "https://api.github.com/repos/ggml-org/llama.cpp/releases";
@@ -381,6 +390,16 @@ async function fetchOcr() {
 }
 
 async function main() {
+  if (only === "ocr") {
+    await fetchOcr();
+    if (RECORD && Object.keys(recorded).length) {
+      console.log(`\n--record: paste these into ASSET_SHA256 (scripts/fetch-local-model.mjs), then commit:`);
+      for (const [k, v] of Object.entries(recorded)) console.log(`  ${JSON.stringify(k)}: ${JSON.stringify(v)},`);
+    }
+    console.log(`\nOCR models ready in resources/ocr/ (mobile bundle set).`);
+    return;
+  }
+
   mkdirSync(dest, { recursive: true });
   const serverName = platform === "win32" ? "llama-server.exe" : "llama-server";
   const serverPath = join(dest, serverName);

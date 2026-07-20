@@ -35,6 +35,7 @@ import {
   LockClosedRegular,
 } from "@fluentui/react-icons";
 import { useRagStore } from "@/stores/useRagStore";
+import { usePaneLayout } from "@/shell/paneLayout";
 import { hiddenFromCloudLabel } from "@/lib/privacyState";
 
 const useStyles = makeStyles({
@@ -42,6 +43,11 @@ const useStyles = makeStyles({
     minWidth: "auto",
     ...shorthands.padding(0, tokens.spacingHorizontalXS),
   },
+  // §2 (iOS field patch 2): in the compact arrangement the trigger is
+  // icon-only and thumb-sized — the label text lives in the aria-label and
+  // the dialog. On a 390pt header the full "N to <host>" badge clipped
+  // mid-glyph (first-device report).
+  triggerCompact: { minWidth: "44px", minHeight: "44px" },
   list: {
     display: "flex",
     flexDirection: "column",
@@ -107,6 +113,10 @@ export function EgressShield({
   const styles = useStyles();
   const [open, setOpen] = useState(false);
   const egress = useRagStore((s) => s.egress);
+  // §2: compact (mobile < 700px) collapses the trigger to its icon. Derived
+  // from the shared paneLayout signal — false everywhere on desktop, so the
+  // widget/desktop mounts render exactly as before.
+  const compact = usePaneLayout(false).compact;
 
   // Until the first snapshot lands, say nothing (avoid a flash of "All local"
   // that could then flip). total 0 is the genuine All-local signal.
@@ -128,8 +138,8 @@ export function EgressShield({
     <>
       <Button
         appearance="subtle"
-        size="small"
-        className={styles.trigger}
+        size={compact ? "medium" : "small"}
+        className={compact ? styles.triggerCompact : styles.trigger}
         icon={local ? <ShieldCheckmarkRegular /> : <GlobeRegular />}
         onClick={() => setOpen(true)}
         aria-label={
@@ -138,9 +148,14 @@ export function EgressShield({
             : `${label} — view egress detail`
         }
       >
-        <Badge appearance="tint" color={local ? "success" : "warning"}>
-          {label}
-        </Badge>
+        {/* §2: the badge text renders only where it fits; compact keeps the
+            icon (shield = all local, globe = something left) and tells the
+            full story in the dialog. */}
+        {!compact && (
+          <Badge appearance="tint" color={local ? "success" : "warning"}>
+            {label}
+          </Badge>
+        )}
       </Button>
 
       <Dialog open={open} onOpenChange={(_, d) => setOpen(d.open)}>

@@ -38,10 +38,15 @@ import { shortProviderLabel, switchArgs, switchChoices } from "@/lib/providerSwi
 import { apiKeyBillingNote } from "@/lib/billingNotes";
 import { MOBILE_NO_PROVIDER_TRUTHS } from "@/contracts";
 import { platformKind } from "@/shell/desktopBridge";
+import { usePaneLayout } from "@/shell/paneLayout";
 
 const useStyles = makeStyles({
   // Compact header trigger, sized like the EgressShield's (subtle, no bulk).
   trigger: { minWidth: "auto", ...shorthands.padding(0, tokens.spacingHorizontalXS) },
+  // §2 (iOS field patch 2): icon-only, thumb-sized trigger for the compact
+  // arrangement — the full vendor label wrapped the 390pt header to two
+  // lines (first-device report); it lives in the menu + aria-label instead.
+  triggerCompact: { minWidth: "44px", minHeight: "44px" },
   // Quiet in-menu notes (empty state / managed policy) — informational rows,
   // not items, so keyboard navigation skips them.
   menuNote: {
@@ -99,6 +104,9 @@ export function ProviderSwitch({
   // (platformKind is primed from the first capability payload well before the
   // chat header renders).
   const platform = platformKind();
+  // §2 (fp2): compact collapses the trigger to its icon — false at every
+  // width on desktop (paneLayout's structural pin), so desktop is unchanged.
+  const compact = usePaneLayout(false).compact;
   const choices = switchChoices(onboarding.keyedProviders, localReady, platform);
   const isAllowed = (id: string) => (allowedProviders ? allowedProviders.includes(id) : true);
   const label = shortProviderLabel(onboarding.providerId);
@@ -146,14 +154,16 @@ export function ProviderSwitch({
         >
           <MenuButton
             appearance="subtle"
-            size="small"
-            className={styles.trigger}
+            size={compact ? "medium" : "small"}
+            className={compact ? styles.triggerCompact : styles.trigger}
             icon={<BrainCircuitRegular />}
             disabled={busy}
             disabledFocusable={disabledReason !== undefined}
             aria-label={disabledReason ?? `AI model: ${label} — switch`}
           >
-            {label}
+            {/* §2: label only where it fits; the compact trigger is the brain
+                icon alone (the open menu names every choice). */}
+            {compact ? null : label}
           </MenuButton>
         </Tooltip>
       </MenuTrigger>
