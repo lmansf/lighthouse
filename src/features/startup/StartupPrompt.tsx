@@ -81,7 +81,9 @@ export function StartupPrompt() {
         try {
           const r = await fetch("/api/settings");
           const d = await r.json();
-          if (!cancelled && d.desktop && !d.startupAsked) {
+          // §1 platform gate: launch-at-login ("when you sign in to your
+          // computer") is a desktop concept — never prompt on ios/android.
+          if (!cancelled && d.platform === "desktop" && !d.startupAsked) {
             setOn(d.runOnStartup !== false);
             setOpen(true);
           }

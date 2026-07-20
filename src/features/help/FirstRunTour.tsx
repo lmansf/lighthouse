@@ -46,6 +46,7 @@ import {
 } from "@fluentui/react-icons";
 import { shouldAutoOpenTour } from "./tourGating";
 import { BEAM_SWEEP } from "@/shell/theme";
+import { platformKind, type PlatformKind } from "@/shell/desktopBridge";
 
 /**
  * The former Quick Start's localStorage once-flag. SummonHint keys its "wait
@@ -71,19 +72,27 @@ interface TourStep {
   position: TourPosition;
 }
 
-const STEPS: TourStep[] = [
+const stepsFor = (platform: PlatformKind): TourStep[] => [
   {
     anchor: "explorer",
     icon: <DocumentAddRegular />,
     title: "Add files, choose what's visible",
-    body: "Drag files and folders in, or browse to them — they stay on your machine. The eye toggle on each row controls exactly what the AI can see, so nothing is read unless you choose it. The lock toggle keeps a file private to this device — hidden from cloud models, while the private model can always read it.",
+    body:
+      platform === "desktop"
+        ? "Drag files and folders in, or browse to them — they stay on this device. The eye toggle on each row controls exactly what the AI can see, so nothing is read unless you choose it. The lock toggle keeps a file private to this device — hidden from cloud models, while the private model can always read it."
+        : "Add files and they stay on this device. The eye toggle on each row controls exactly what the AI can see, so nothing is read unless you choose it. The lock toggle keeps a file hidden from cloud models.",
     position: "after",
   },
   {
     anchor: "chat",
     icon: <ChatSparkleRegular />,
     title: "Ask, and get grounded answers",
-    body: "Ask in plain language. Answers are built only from your visible files and cite the exact sources — click a citation to jump to it. Enter sends; Shift+Enter adds a line.",
+    // §2: the keyboard-shortcut line renders only where a hardware keyboard
+    // is the norm; mobile copy names the send button instead.
+    body:
+      platform === "desktop"
+        ? "Ask in plain language. Answers are built only from your visible files and cite the exact sources — click a citation to jump to it. Enter sends; Shift+Enter adds a line."
+        : "Ask in plain language. Answers are built only from your visible files and cite the exact sources — tap a citation to jump to it. Tap Send to ask.",
     position: "above",
   },
   {
@@ -97,7 +106,12 @@ const STEPS: TourStep[] = [
     anchor: "models",
     icon: <BrainCircuitRegular />,
     title: "Private on-device, or cloud",
-    body: "Choose who answers: a model that runs entirely on this device, or a cloud provider. This line always tells you whether anything leaves your machine.",
+    // §3: the private model does not exist on mobile — the tour must not
+    // advertise it there.
+    body:
+      platform === "desktop"
+        ? "Choose who answers: a model that runs entirely on this device, or a cloud provider. This line always tells you whether anything leaves this device."
+        : "Add a cloud API key to enable narrated answers — the private model runs on the desktop app. This line always tells you whether anything leaves this device.",
     position: "above",
   },
   {
@@ -160,6 +174,10 @@ export function FirstRunTour() {
   const [placed, setPlaced] = useState(false);
   const nextRef = useRef<HTMLButtonElement>(null);
 
+  // Platform-aware copy (§2): platformKind() is primed well before the tour
+  // can open (the vault tree loads first), and the value never changes within
+  // a session — reading it at render is stable.
+  const STEPS = stepsFor(platformKind());
   const step = STEPS[index];
   const isLast = index === STEPS.length - 1;
 
@@ -176,7 +194,8 @@ export function FirstRunTour() {
       }
       return i + 1;
     });
-  }, []);
+    // STEPS.length is the same on every render (5 steps per platform).
+  }, [STEPS.length]);
 
   // Auto-open once per install. Gate on the install-global `tourShown` and
   // persist it true the MOMENT we decide to show — so completing AND skipping

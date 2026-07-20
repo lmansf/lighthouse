@@ -462,7 +462,7 @@ function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean
                 <Radio
                   value="local"
                   disabled={!isAllowed("local")}
-                  label="Private — runs on this device. No API key; nothing leaves your computer. (Recommended)"
+                  label="Private — runs on this device. No API key; nothing leaves this device. (Recommended)"
                 />
                 <Radio
                   value="cloud"

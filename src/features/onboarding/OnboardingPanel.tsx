@@ -47,7 +47,7 @@ import {
 import { useAuthStore } from "@/stores/useAuthStore";
 import { useRagStore } from "@/stores/useRagStore";
 import { ModeChooserAuto } from "./ModeChooser";
-import { isDesktopShell } from "@/shell/desktopBridge";
+import { isDesktopShell, rememberPlatform, type PlatformKind } from "@/shell/desktopBridge";
 import { BEAM_SWEEP } from "@/shell/theme";
 
 const useStyles = makeStyles({
@@ -152,8 +152,27 @@ export function OnboardingPanel() {
   // so the __TAURI_INTERNALS__ probe can't cause an SSR/client hydration
   // mismatch (the server always renders the web branch).
   const [isDesktop, setIsDesktop] = useState(false);
+  // §1 form factor for the platform-gated copy below. Onboarding runs BEFORE
+  // the vault tree loads (the usual platformKind() primer), so fetch the
+  // settings payload once here; "desktop" until it answers.
+  const [platform, setPlatform] = useState<PlatformKind>("desktop");
   useEffect(() => {
     setIsDesktop(isDesktopShell());
+    let alive = true;
+    void fetch("/api/settings")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        rememberPlatform(d?.platform);
+        if (alive && (d?.platform === "ios" || d?.platform === "android")) {
+          setPlatform(d.platform);
+        }
+      })
+      .catch(() => {
+        /* older engine / web — stay "desktop" */
+      });
+    return () => {
+      alive = false;
+    };
   }, []);
 
   // Sync the radio to the effective default once the profile has loaded, unless
@@ -208,20 +227,23 @@ export function OnboardingPanel() {
         <Title3>Welcome to Lighthouse</Title3>
         <ul className={styles.bullets}>
           <li>
-            <Text>Your files stay on your machine.</Text>
+            <Text>Your files stay on this device.</Text>
           </li>
           <li>
             <Text>Chat with an AI grounded in your own documents.</Text>
           </li>
           <li>
-            <Text>Nothing leaves your computer until you choose a cloud model.</Text>
+            <Text>Nothing leaves this device until you choose a cloud model.</Text>
           </li>
         </ul>
         <Text className={styles.hint}>
           Your documents live in your vault folder. Add files there and Lighthouse
           can search them and answer from what they say.
         </Text>
-        {isDesktop && (
+        {/* §2 platform gate: "Open vault folder" + the File-menu affordance are
+            desktop concepts. On iOS the whole block is one line pointing at
+            where the vault actually lives — the Files app. */}
+        {isDesktop && platform === "desktop" && (
           <>
             <Button appearance="secondary" type="button" onClick={openVaultFolder}>
               Open vault folder
@@ -231,6 +253,11 @@ export function OnboardingPanel() {
               &ldquo;Choose vault folder…&rdquo;.
             </Text>
           </>
+        )}
+        {platform === "ios" && (
+          <Text size={200} className={styles.hint}>
+            Your vault lives in the Files app: On My iPhone → Lighthouse.
+          </Text>
         )}
         <Button appearance="primary" type="submit">
           Continue
@@ -298,7 +325,7 @@ export function OnboardingPanel() {
           <Radio
             value="local"
             disabled={!isAllowed("local")}
-            label="Private — runs on this device. No API key; nothing leaves your computer. (Recommended)"
+            label="Private — runs on this device. No API key; nothing leaves this device. (Recommended)"
           />
           <Radio
             value="cloud"
