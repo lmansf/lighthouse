@@ -112,3 +112,49 @@ export function usePaneLayout(drawerOpen: boolean): PaneLayout {
     platformKind(),
   );
 }
+
+// --- The touch (pointer) axis (iOS field patch 3 §2) ------------------------
+// A SECOND, orthogonal signal. `compact` (above) thresholds WIDTH and drives
+// PRESENTATION (drawer/page/sheets); this thresholds the primary POINTER and
+// drives SIZING (≥44pt tap targets, touch-action). They are deliberately
+// distinct: an iPad at ≥700pt is NOT compact (keeps the desktop arrangement)
+// but IS coarse-pointer (gets touch-grade sizing), and a desktop with a
+// touchscreen is coarse yet must never compact. Same shared-singleton pattern
+// as the width query — one matchMedia, every consumer subscribes.
+const COARSE_POINTER_QUERY = "(pointer: coarse)";
+
+let pmql: MediaQueryList | null = null;
+const pointerListeners = new Set<() => void>();
+
+function ensurePointerQuery(): MediaQueryList | null {
+  if (typeof window === "undefined") return null;
+  if (!pmql) {
+    pmql = window.matchMedia(COARSE_POINTER_QUERY);
+    pmql.addEventListener("change", () => {
+      for (const l of pointerListeners) l();
+    });
+  }
+  return pmql;
+}
+
+function subscribePointer(cb: () => void): () => void {
+  ensurePointerQuery();
+  pointerListeners.add(cb);
+  return () => pointerListeners.delete(cb);
+}
+
+/**
+ * True when the primary input is a coarse pointer (touch): every iPhone and
+ * iPad, plus a touchscreen laptop. The tap-sizing axis — NOT a form-factor or
+ * width proxy. SSR renders the fine-pointer (mouse) default; the client
+ * corrects on hydration. Hardware keyboards are orthogonal again: an iPad with
+ * a Magic Keyboard is still coarse-pointer, so keyboard affordances stay live
+ * even where the touch HINT COPY is hidden.
+ */
+export function useCoarsePointer(): boolean {
+  return useSyncExternalStore(
+    subscribePointer,
+    () => ensurePointerQuery()?.matches ?? false,
+    () => false,
+  );
+}
