@@ -83,7 +83,8 @@ import { useRagStore } from "@/stores/useRagStore";
 import { useAuthStore } from "@/stores/useAuthStore";
 import { cloudProviderActive } from "@/lib/privacyState";
 import { FILE_DRAG_MIME, parseDraggedFiles, serializeDraggedFiles } from "@/shell/dnd";
-import { desktopBridge, isDesktopShell, pathsForFiles } from "@/shell/desktopBridge";
+import { desktopBridge, isDesktopShell, pathsForFiles, platformKind } from "@/shell/desktopBridge";
+import { usePaneLayout } from "@/shell/paneLayout";
 
 /** Persists dismissal of the include-by-default note so it isn't permanent noise. */
 const CONTROL_NOTE_DISMISSED_KEY = "lighthouse.controlNote.dismissed";
@@ -308,6 +309,10 @@ const useStyles = makeStyles({
     minHeight: "34px",
     ":hover": { backgroundColor: tokens.colorNeutralBackground2Hover },
   },
+  // fp2 §4: thumb-sized rows in the compact arrangement (the 34px desktop
+  // density read as "made for a mouse" on the phone). Must stay in sync with
+  // VROW_H_COMPACT — the virtualizer positions rows by that constant.
+  rowCompact: { minHeight: "48px" },
   rowIncluded: {
     backgroundColor: tokens.colorBrandBackground2,
   },
@@ -592,9 +597,17 @@ function TreeRowImpl({
   // Only local-vault files can be attached to a chat question.
   const attachable = node.kind === "file" && !isRemote;
   // Open natively (files), reveal in the OS file manager (files or folders),
-  // and reparent (op:move) — all desktop-only, local-only.
-  const openable = desktop && node.kind === "file" && !isRemote;
-  const revealable = desktop && !isRemote;
+  // and reparent (op:move) — all desktop-only, local-only. fp2 §4: "desktop"
+  // here means the EMBEDDED SHELL (true on iOS too — the fp1 §1 distinction);
+  // opening in a native app / revealing in a file manager are desktop
+  // FORM-FACTOR concepts, so both additionally require the desktop platform.
+  const desktopOS = desktop && platformKind() === "desktop";
+  // fp2 §4: thumb-sized rows in the compact arrangement. Shared matchMedia
+  // signal — one subscription store, and false at every width on desktop, so
+  // desktop rows are pixel-identical.
+  const compactRow = usePaneLayout(false).compact;
+  const openable = desktopOS && node.kind === "file" && !isRemote;
+  const revealable = desktopOS && !isRemote;
   // Only walk the tree for move destinations once the context menu is open; the
   // MenuPopover (and thus `movable`/`moveTargets`) only renders while open.
   const moveTargets = menuOpen ? moveTargetsFor(node) : NO_MOVE_TARGETS;
@@ -642,11 +655,11 @@ function TreeRowImpl({
       <Menu openOnContext onOpenChange={(_, d) => setMenuOpen(d.open)}>
         <MenuTrigger disableButtonEnhancement>
       <div
-        className={`${styles.row}${node.ragIncluded ? ` ${styles.rowIncluded}` : ""}${
-          selected ? ` ${styles.rowSelected}` : ""
-        }${justAdded.has(node.id) ? ` ${styles.rowJustAdded}` : ""}${
-          flash ? ` ${styles.rowRevealFlash}` : ""
-        }${dropInto ? ` ${styles.rowDropInto}` : ""}`}
+        className={`${styles.row}${compactRow ? ` ${styles.rowCompact}` : ""}${
+          node.ragIncluded ? ` ${styles.rowIncluded}` : ""
+        }${selected ? ` ${styles.rowSelected}` : ""}${
+          justAdded.has(node.id) ? ` ${styles.rowJustAdded}` : ""
+        }${flash ? ` ${styles.rowRevealFlash}` : ""}${dropInto ? ` ${styles.rowDropInto}` : ""}`}
         style={{ paddingLeft: `${depth * 18 + 4}px` }}
         data-explorer-row=""
         role="button"
@@ -938,6 +951,10 @@ function TreeRowImpl({
 const TreeRow = memo(TreeRowImpl);
 
 const VROW_H = 34; // must match styles.row minHeight (rows are fixed-height)
+// fp2 §4: the compact (mobile) row height — must match styles.rowCompact. The
+// virtualizer + reveal-scroll take the LIVE value so windowing math and row
+// styling can never disagree.
+const VROW_H_COMPACT = 48;
 const VOVERSCAN = 10; // rows kept mounted just outside the viewport, each side
 
 /**
@@ -954,6 +971,7 @@ function VirtualRows({
   scrollRef,
   renderRow,
   dataSourceId,
+  rowH = VROW_H,
 }: {
   rows: FlatRow[];
   scrollRef: React.RefObject<HTMLDivElement | null>;
@@ -961,6 +979,9 @@ function VirtualRows({
   /** Stamped on the block so the quick-open reveal can find this source's
    *  block in the DOM and scroll to a row inside it by index. */
   dataSourceId: string;
+  /** fp2 §4: the fixed row height for the windowing math — VROW_H on desktop
+   *  (the default, unchanged), VROW_H_COMPACT in the compact arrangement. */
+  rowH?: number;
 }) {
   const blockRef = useRef<HTMLDivElement>(null);
   const [range, setRange] = useState({ start: 0, end: Math.min(rows.length, 40) });
@@ -976,8 +997,8 @@ function VirtualRows({
         block.getBoundingClientRect().top - sc.getBoundingClientRect().top + sc.scrollTop;
       const viewTop = sc.scrollTop - blockTop;
       const viewBot = viewTop + sc.clientHeight;
-      const start = Math.max(0, Math.floor(viewTop / VROW_H) - VOVERSCAN);
-      const end = Math.min(count, Math.ceil(viewBot / VROW_H) + VOVERSCAN);
+      const start = Math.max(0, Math.floor(viewTop / rowH) - VOVERSCAN);
+      const end = Math.min(count, Math.ceil(viewBot / rowH) + VOVERSCAN);
       setRange((prev) => (prev.start === start && prev.end === end ? prev : { start, end }));
     };
     recompute();
@@ -987,24 +1008,24 @@ function VirtualRows({
       sc.removeEventListener("scroll", recompute);
       window.removeEventListener("resize", recompute);
     };
-  }, [scrollRef, count]);
+  }, [scrollRef, count, rowH]);
 
   const visible = rows.slice(range.start, range.end);
   return (
     <div
       ref={blockRef}
       data-vrows-source={dataSourceId}
-      style={{ position: "relative", height: count * VROW_H }}
+      style={{ position: "relative", height: count * rowH }}
     >
       {visible.map((row, i) => (
         <div
           key={row.node.id}
           style={{
             position: "absolute",
-            top: (range.start + i) * VROW_H,
+            top: (range.start + i) * rowH,
             left: 0,
             right: 0,
-            height: VROW_H,
+            height: rowH,
           }}
         >
           {renderRow(row)}
@@ -1039,6 +1060,14 @@ export function FileExplorer() {
   const linkPaths = useRagStore((s) => s.linkPaths);
   const processing = useRagStore((s) => s.processing);
   const desktop = useRagStore((s) => s.desktop);
+  // fp2 §4: `desktop` is the EMBEDDED-SHELL flag (true on iOS too); the
+  // link-in-place picker, "Open vault folder", and OS-reveal affordances are
+  // desktop FORM-FACTOR concepts, so they key off desktopOS instead. compact
+  // sizes the rows for touch (false at every width on desktop).
+  const desktopOS = desktop && platformKind() === "desktop";
+  const isMobile = platformKind() !== "desktop";
+  const compact = usePaneLayout(false).compact;
+  const rowH = compact ? VROW_H_COMPACT : VROW_H;
   const lastError = useRagStore((s) => s.lastError);
   const clearLastError = useRagStore((s) => s.clearLastError);
   // The user's effective default-inclusion behavior (their explicit onboarding
@@ -1466,13 +1495,13 @@ export function FileExplorer() {
     // Same content-relative measurement VirtualRows uses, so the two agree.
     const blockTop =
       block.getBoundingClientRect().top - sc.getBoundingClientRect().top + sc.scrollTop;
-    const rowTop = blockTop + found.index * VROW_H;
-    const centered = rowTop - (sc.clientHeight - VROW_H) / 2;
+    const rowTop = blockTop + found.index * rowH;
+    const centered = rowTop - (sc.clientHeight - rowH) / 2;
     sc.scrollTop = Math.max(0, Math.min(centered, sc.scrollHeight - sc.clientHeight));
     setRevealFlashId(revealTarget.id);
     if (revealTimer.current) window.clearTimeout(revealTimer.current);
     revealTimer.current = window.setTimeout(() => setRevealFlashId(null), 1400);
-  }, [revealTarget, sources, nodes, visibleIds, compareNodes, childrenOf, isExpanded]);
+  }, [revealTarget, sources, nodes, visibleIds, compareNodes, childrenOf, isExpanded, rowH]);
 
   // Outcome of the last add (link or upload) worth telling the user about -
   // rendered as a dismissible banner instead of a silent console.warn.
@@ -1705,7 +1734,12 @@ export function FileExplorer() {
    * copy), on the web the hidden file input.
    */
   const browseForFiles = () => {
-    if (desktop) {
+    // fp2 §4: link-in-place needs the DESKTOP form factor, not just the
+    // embedded shell — on iOS `desktop` is true but the link bridge doesn't
+    // exist, so this branch made Browse… a dead button on the phone
+    // (first-device report). Mobile takes the file-input path: WKWebView
+    // opens the native Files picker and the bytes upload into the vault.
+    if (desktopOS) {
       void desktopBridge()?.linkDialog(false).then((paths) => {
         if (paths.length) void linkAndReport(paths);
       });
@@ -1838,8 +1872,10 @@ export function FileExplorer() {
               <MenuList>
                 {/* Link-first on the desktop: files stay where they are and are
                     read in place - no duplicate copy is made. Copying in stays
-                    available below as the explicit secondary option. */}
-                {desktop && (
+                    available below as the explicit secondary option. fp2 §4:
+                    desktop FORM FACTOR only — the link bridge doesn't exist on
+                    a mobile shell, and these were dead rows there. */}
+                {desktopOS && (
                   <>
                     <MenuItem icon={<LinkRegular />} onClick={browseForFiles}>
                       Files… (linked in place)
@@ -1861,14 +1897,21 @@ export function FileExplorer() {
                   icon={<DocumentRegular />}
                   onClick={() => fileInputRef.current?.click()}
                 >
-                  {desktop ? "Copy files in…" : "Files…"}
+                  {desktopOS ? "Copy files in…" : "Files…"}
                 </MenuItem>
-                <MenuItem
-                  icon={<FolderAddRegular />}
-                  onClick={() => folderInputRef.current?.click()}
-                >
-                  {desktop ? "Copy folder in…" : "Folder…"}
-                </MenuItem>
+                {/* fp2 §4: folder selection rides webkitdirectory, which iOS
+                    WKWebView doesn't support — the row would open a picker
+                    that can't pick. Mobile adds files (multi-select works);
+                    folders come from the Files app's "On My iPhone →
+                    Lighthouse" tree. */}
+                {platformKind() === "desktop" && (
+                  <MenuItem
+                    icon={<FolderAddRegular />}
+                    onClick={() => folderInputRef.current?.click()}
+                  >
+                    {desktopOS ? "Copy folder in…" : "Folder…"}
+                  </MenuItem>
+                )}
                 <MenuDivider />
                 <MenuItem
                   icon={<CloudArrowUpRegular />}
@@ -1895,7 +1938,10 @@ export function FileExplorer() {
               onClick={() => openNewFolder(null)}
             />
           </Tooltip>
-          {desktop && (
+          {/* fp2 §4: "your file manager" is a desktop concept — on iOS the
+              vault lives in the Files app and this button had nothing real
+              to do (the embedded-shell flag alone is true there too). */}
+          {desktopOS && (
             <Tooltip content="Open the vault folder in your file manager" relationship="label">
               <Button
                 icon={<FolderOpenRegular />}
@@ -2158,14 +2204,20 @@ export function FileExplorer() {
             <Text size={400} weight="semibold">
               Add your first files
             </Text>
+            {/* fp2 §4: mobile copy drops the drag idiom and the "machine"
+                vocabulary (the fp1 §2 rule); desktop strings byte-identical. */}
             <Text size={300}>
-              Drag files or folders here, or browse — they stay on your machine.
+              {isMobile
+                ? "Add files from the Files app — they stay on this device."
+                : "Drag files or folders here, or browse — they stay on your machine."}
             </Text>
             <Button appearance="primary" icon={<FolderOpenRegular />} onClick={browseForFiles}>
-              Browse…
+              {isMobile ? "Add files…" : "Browse…"}
             </Button>
             <Text size={200} className={styles.emptyStatePrivacy}>
-              Files never leave your computer unless you choose a cloud AI model.
+              {isMobile
+                ? "Files never leave this device unless you choose a cloud AI model."
+                : "Files never leave your computer unless you choose a cloud AI model."}
             </Text>
           </div>
         ) : visibleIds && visibleIds.size === 0 ? (
@@ -2208,6 +2260,7 @@ export function FileExplorer() {
                       rows={flattenVisible(roots, childrenOf, compareNodes, isExpanded, visibleIds)}
                       scrollRef={scrollRef}
                       dataSourceId={source.id}
+                      rowH={rowH}
                       renderRow={(row) => (
                         <TreeRow
                           node={row.node}
