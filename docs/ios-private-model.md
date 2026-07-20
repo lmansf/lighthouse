@@ -49,7 +49,12 @@ existing `LIGHTHOUSE_LOCAL_LLM_URL` / `LIGHTHOUSE_EMBED_URL` seams"* and a
 
 - **Ship Tier-1 first** behind the engine seam; **Tier-2 is a stageable
   follow-up** — but the seam **and** the availability verdict ship together in
-  0.13.5, so the roster is honest from day one.
+  0.13.5, so the roster is honest from day one. **0.13.5 scope = Tier-1
+  (Foundation Models) + the seam + the availability reversal.** Tier-2's bundled
+  GGUF, its `increased-memory-limit` entitlement (§4), and Background Assets
+  delivery (§5) land in a follow-up (0.13.6+) — none of them are needed for a
+  Tier-1 device, and deferring them keeps 0.13.5 free of the llama.cpp-iOS build
+  and the ~1 GB payload.
 - **`PrivateCloudComputeLanguageModel` is EXCLUDED** — it is off-device. Staying on
   `SystemLanguageModel.default` guarantees we never construct it (§3.6).
 - **App floor stays where it is today** (whatever the committed
