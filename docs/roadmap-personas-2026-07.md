@@ -3307,3 +3307,240 @@ and lean on the ios-check CI leg — the lighthouse-desktop convention.
 One commit per numbered section. Open ONE PR titled "iOS: on-device
 storage as first-class sources"; stop at the PR.
 ```
+
+## 24. TestFlight field patch — first device reports (2026-07-19)
+
+The first TestFlight build came back with four reports: onboarding talks
+about "your computer", the private model is offered though it cannot run,
+a cloud API key doesn't produce answers, and the phone layout is three
+desktop panes fighting over 390 points. A static diagnosis of main @
+0.13.0 traced each to code. Three of the four share one root: **the iOS
+shell still identifies as a desktop** — `bootstrap_env` sets
+`LIGHTHOUSE_DESKTOP=1` unconditionally on the shared path (lib.rs:287),
+`settings_get`/`rag_list` hardcode `"desktop": true` (commands.rs:1491,
+:56), `capabilities()` mirrors it (rag.real.ts:355), and
+`isDesktopShell()` is true inside any Tauri webview — so the phone gets
+the desktop mode-chooser ("How should Lighthouse live on your desktop?",
+tray/widget/hotkey cards), desktop copy everywhere, and a local-model
+offer whose status/download ops live un-gated in shared core while only
+the llama supervisor is `#[cfg(desktop)]` (a tester can download a
+4.2 GB GGUF nothing can ever run — and it is the DEFAULT provider). The
+cloud-key failure is NOT a key bug — save→seal→resolve all work on iOS
+(secrets.json under app_state_dir, set on the shared bootstrap path);
+the prime suspect is outbound TLS: engine requests are native reqwest
+with `rustls-tls-native-roots`, which finds no trust anchors on iOS, so
+every provider handshake fails (ATS/CSP are NOT involved — native
+sockets bypass both). The layout: Sidebar is a fixed 360 px
+`flexShrink:0` column, flyouts min 280 px, and no width breakpoint
+exists anywhere — PR #187 added viewport/safe-area/touch polish only.
+The prompt below fixes all four, plus the stamp/docs drift the port
+exposed (main is 0.13.0 with iOS version stamps in gen/apple, while
+CLAUDE.md still documents the 0.11.x five-file regime).
+
+### Prompt
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first, local-first analytics AI harness for analysts: Rust
+engine (native/crates/lighthouse-core) in a Tauri 2 shell
+(native/crates/lighthouse-desktop — the SAME crate is the iOS app via
+#[tauri::mobile_entry_point], desktop-only code under src/desktop/
+behind #[cfg(desktop)]), byte-compatible TS twin engine (src/server/),
+React UI (src/). Read CLAUDE.md, docs/ts-twin.md, and
+docs/roadmap-personas-2026-07.md §14 and §24 (this prompt's diagnosis
+preamble) before writing code. This session fixes the four first-round
+TestFlight reports. The diagnosis below is from static analysis of
+main @ 0.13.0 — verify each root cause as you land its fix; where the
+device disagrees with the diagnosis, fix what the device shows and
+record the correction in the PR body.
+
+1. One real platform signal (the root under three of the four bugs).
+   Today every capability surface hardcodes desktop: settings_get
+   (commands.rs:1491), rag_list (commands.rs:56), capabilities()
+   (src/contracts/real/rag.real.ts:355), isDesktopShell()
+   (src/shell/desktopBridge.ts:29). Add ONE platform field at the
+   engine seam — platform: "desktop" | "ios" | "android" — plumbed
+   from the shell (cfg(target_os)) through settings_get/rag_list/
+   capabilities, with a UI helper (isMobileShell()/platformKind())
+   beside isDesktopShell(). Do NOT change what LIGHTHOUSE_DESKTOP=1
+   means mid-patch (it means "embedded shell", and the engine relies
+   on it on iOS too) — the new field carries form factor; existing
+   desktop:true stays for compatibility and desktop reads identically.
+   TS twin mirrors the field (PARITY comment). Every fix below
+   consumes THIS signal — no UA sniffing, no window-size proxies for
+   capability.
+
+2. Onboarding speaks device language. The "login about a computer" the
+   tester saw is the first-run OnboardingPanel + the desktop
+   mode-chooser leaking onto the phone:
+   - ModeChooserAuto (src/features/onboarding/ModeChooser.tsx:264
+     opens on d.desktop === true) must gate on platform === "desktop":
+     window/widget/tray/summon-hotkey ("Ctrl + Super + Shift +
+     Space") and "Open Lighthouse when I sign in to my computer" are
+     desktop concepts — the dialog NEVER mounts on mobile. Same for
+     StartupPrompt.tsx ("when you sign in to your computer" — startup
+     is a desktop concept) and the "Open vault folder" / "File menu →
+     'Choose vault folder…'" affordance block
+     (OnboardingPanel.tsx:224-234); on iOS that block becomes one
+     line: where files live in the Files app ("On My iPhone →
+     Lighthouse"), consistent with roadmap §23's empty-state doors.
+   - Vocabulary: replace "your machine"/"your computer" with "this
+     device" in the CANONICAL strings (OnboardingPanel welcome slide
+     :208-223, model slide :301, FirstRunTour.tsx:79-100) — one
+     vocabulary on all platforms rather than a per-platform fork;
+     "device" reads correctly on desktop too. Update every pinned
+     test that asserts these strings, both twins, byte-identical.
+   - Keyboard-shortcut lines ("Enter sends; Shift+Enter…") render only
+     where a hardware keyboard is the norm (platform === "desktop");
+     mobile copy names the send button.
+
+3. The private model tells the truth on iOS. Reality: local_model.rs
+   status/download live UN-gated in shared core (commands.rs:1346
+   model_status, :1371 model_download); only the llama supervisor is
+   #[cfg(desktop)] — so iOS shows "absent → Install", can download a
+   4.2 GB Mistral GGUF that nothing can run (stream_local targets
+   127.0.0.1:8080, llm.rs:1128), and local is the DEFAULT provider
+   (providers.ts:20-31 lists it first "so it is the default";
+   profile.rs:17-18,121-126 falls back to LOCAL_PROVIDER_ID). Fix at
+   every layer, engine first:
+   - model_status on mobile returns a first-class "unsupported"
+     status (new honest state, both twins' shapes) and model_download
+     REFUSES on mobile (belt and braces — the engine guards even if a
+     stale UI asks). If a stray/partial GGUF exists from an earlier
+     build, the unsupported state offers removal ("frees N GB") via
+     the existing uninstall path.
+   - Roster: the local entry is filtered out when
+     platform !== "desktop" — not disabled-with-a-tooltip, GONE (do
+     not advertise what cannot exist). Onboarding's model slide and
+     Settings → AI models consume the same filter;
+     LocalModelInstallPanel and the Install/Resume CTAs never mount.
+   - Default provider on mobile zero-config: NO provider selected —
+     deterministic analytics still answers (that is the §23 promise),
+     and the empty-provider state says exactly two truths: "add a
+     cloud API key to enable narrated answers" and "the private model
+     runs on the desktop app". profile.rs default fallback becomes
+     platform-aware; the first saved key becomes the default provider.
+   - Warm-start seams (synth.rs / synth.ts localWarmWait,
+     "Private model warming up…") short-circuit on unsupported — that
+     label must be unreachable on mobile by construction. Tests: the
+     platform-aware default, the roster filter, the unsupported
+     verdict — all twinned with parity pins.
+
+4. Cloud key → first streamed answer on device (diagnose, THEN fix).
+   The key path is healthy on iOS: selectModel → profile_op →
+   secrets::set_provider_key (AES-GCM secrets.json under
+   app_state_dir, bootstrap sets the dir on the shared path) →
+   resolve_key at ask time. The static prime suspect is the transport:
+   llm.rs uses native reqwest built with rustls-tls-native-roots
+   (native/Cargo.toml:21), and on iOS that trust-store enumeration
+   yields no anchors — every provider TLS handshake fails, which the
+   tester experiences as "didn't load". In order:
+   a. Instrument first: the ask error card and Settings' key test must
+      surface the ACTUAL transport error string from stream_*'s
+      Err yields (llm.rs:836-849) — no silent spinner. This surface
+      stays after the fix (it is how the next field report
+      self-diagnoses).
+   b. Fix the trust roots for Apple mobile: switch the engine's TLS to
+      the platform verifier (rustls-platform-verifier) on iOS —
+      keeping desktop's current stack byte-for-byte unchanged — or,
+      if the dependency footprint offends, compile webpki-roots into
+      mobile targets only. Justify the choice in one PARITY-style
+      comment at the Cargo feature seam. Do NOT add ATS exceptions or
+      entitlements — native sockets never traverse ATS/CSP and the
+      plists stay clean.
+   c. Verify ON DEVICE (or simulator) with a real key: keyed provider
+      becomes selectable (ProviderSwitch keyedProviders), an ask
+      streams, provenance/egress stamps record the host exactly as
+      desktop does. If the observed error was something else (proxy,
+      IPv6, SSE buffering), fix THAT and write the correction into
+      the PR body — the instrumentation from (a) will say.
+
+5. A phone layout that composes instead of squishes. Reality: the
+   shell is a fixed flex row — Sidebar at 360 px flexShrink:0
+   (Sidebar.tsx:33-34, tokens sidebarWidth/Min/Max 360/200/720),
+   8 px resize handle, SectionFlyout ≥280 px, chat takes the
+   remainder (AppShell.tsx:337-375) — and NO width breakpoint exists
+   (PR #187 added viewport/safe-area/dvh + coarse-pointer affordances
+   only). On a 375–390 pt phone the expanded sidebar IS the screen.
+   Build the compact mode:
+   - ONE width signal (matchMedia, compact when viewport width
+     < 700 px — a hook beside the platform helper; iPad regular width
+     stays the 0.13.0 multi-pane, iPad narrow Split View gets compact
+     for free).
+   - Compact rules: the chat pane is the screen. The Sidebar becomes
+     a full-height overlay drawer (slide-over above the chat, scrim,
+     dismiss on scrim-tap/swipe/Esc), opened from a header control;
+     it auto-closes when a file is opened or an ask is sent.
+     SectionFlyout and the History flyout render as sheets (full-
+     width, safe-area padded) instead of side columns. The resize
+     handle does not render; explorerWidth is neither applied nor
+     persisted from compact (a phone session must never corrupt the
+     desktop width).
+   - The ask box respects the keyboard (visualViewport) and
+     safe-areas; header/rail tap targets ≥ 44 pt. Keep #187's
+     touch/hover work as-is.
+   - Desktop stays pixel-identical (the compact branch is
+     unreachable ≥ 700 px — structural pin). Express the pane
+     decision as a pure function (paneLayout(width, drawerOpen,
+     platform) — the verdict-fn house pattern) with unit tests;
+     components consume its output.
+
+6. Stamps, docs, and the beta loop. Bump 0.13.0 → 0.13.1 in LOCKSTEP
+   across ALL stamp locations — the five classic (package.json,
+   package-lock.json ×2 stamps, native/Cargo.toml workspace,
+   tauri.conf.json, native/Cargo.lock every lighthouse-* crate — by
+   pattern) PLUS the iOS stamps the port added:
+   gen/apple/project.yml (CFBundleShortVersionString) and
+   gen/apple/lighthouse-desktop_iOS/Info.plist
+   (CFBundleShortVersionString AND CFBundleVersion — TestFlight
+   requires a fresh CFBundleVersion per upload; moving both to 0.13.1
+   satisfies it). Then fix CLAUDE.md's release-mechanics section to
+   match reality: it still documents the 0.11.x line and "FIVE files"
+   — update it to the current version line and the full stamp set
+   (including gen/apple) so no future session mis-bumps. Do not
+   change the versioning POLICY (patch bumps stay the rule; minor
+   moves stay owner-only) — document, don't legislate.
+
+Constraints. No analytics, telemetry, or accounts. No ATS exceptions,
+no new entitlements, no new Info.plist network keys. Prompts/labels
+byte-identical across twins; PARITY comments mark deliberate
+divergences; pinned label tests updated in the same commit as their
+strings. Desktop behavior unchanged (the compact branch and platform
+gates are unreachable there — say so with structural pins). SharePoint
+plumbing untouched. Scope = these four reports + the stamp/docs drift;
+nothing else rides along.
+
+Acceptance (fresh TestFlight install, zero config):
+1. First launch: onboarding speaks device language — no desktop mode
+   dialog, no tray/widget/hotkey/"sign in to your computer"/"File
+   menu" text anywhere on the phone; the files line points at the
+   Files app; FirstRunTour and StartupPrompt never contradict the
+   platform.
+2. The private model is nowhere: not in the roster, not the default,
+   no Install CTA, "warming up…" unreachable; a deterministic ask
+   (table + chart) answers with zero providers configured; the
+   empty-provider state names its two truths.
+3. Paste a real Anthropic/OpenAI/DeepSeek key → provider selectable →
+   ask streams on device with correct egress/provenance stamps. A bad
+   key or dead network shows the actual error line — never a silent
+   spinner.
+4. iPhone portrait (375×812 and 390×844): chat is full-width; sidebar
+   is a dismissible drawer; flyouts/History are sheets; nothing
+   overlaps or squishes; keyboard doesn't cover the ask box. iPad
+   full-screen and ≥700 pt Split View render exactly as 0.13.0;
+   desktop pixel-identical.
+5. All stamp locations read 0.13.1 in lockstep; CLAUDE.md documents
+   the real stamp set and line; full node + cargo suites and
+   release-smoke green; the ios-build lane (mobile-bootstrap.yml,
+   task: ios-build) produces an .ipa from the PR head.
+
+Environment. Run on macOS + Xcode for simulator/device verification —
+section 4c and acceptance 1–4 are only truly checkable there; the
+Linux container fallback is the house convention (engine/TS/UI logic
+with full tests; Swift/plist/Cargo-target pieces grep-verified; the
+ios-build CI lane as the gate). One commit per numbered section. Open
+ONE PR titled "iOS field patch 1: platform truth, honest model roster,
+device TLS, compact layout"; stop at the PR. After it merges, the
+TestFlight loop is: dispatch mobile-bootstrap.yml with task: ios-beta
+(fastlane builds the signed .ipa and uploads to TestFlight).
+```
