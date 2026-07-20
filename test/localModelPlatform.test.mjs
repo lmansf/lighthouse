@@ -9,9 +9,12 @@
  *     deterministic device path still answers); desktop keeps the historic
  *     private-local default. KEEP IN SYNC with
  *     profile.rs::default_provider_is_platform_aware.
- *   - modelProvidersFor: the UI roster drops the local entry entirely on
- *     mobile (GONE, not disabled) — the model slide, Settings → AI models and
- *     the chat header switcher all consume this one filter.
+ *   - modelProvidersFor: the availability-driven UI roster — the local entry is
+ *     GONE on a mobile shell WITHOUT a backend, and returns (local leading) when
+ *     one is reported (add-mobile-local-inference). The model slide, Settings →
+ *     AI models and the chat header switcher all consume this one filter.
+ *   - ON_DEVICE_MODEL_COPY: the byte-pinned per-tier description for the
+ *     on-device model when it IS available on a mobile shell.
  *   - MOBILE_NO_PROVIDER_TRUTHS: the empty-provider state's exact two truths,
  *     byte-pinned because the same sentence appears on several surfaces.
  *
@@ -26,9 +29,8 @@ register("./_ts-extensionless-hook.mjs", import.meta.url);
 const { localModelSupported, localModelAvailable, setOnDeviceBackend, onDeviceBackend } =
   await import("../src/server/localModel.ts");
 const { defaultProviderFor } = await import("../src/server/profile.ts");
-const { MODEL_PROVIDERS, MOBILE_NO_PROVIDER_TRUTHS, modelProvidersFor } = await import(
-  "../src/contracts/mocks/providers.ts"
-);
+const { MODEL_PROVIDERS, MOBILE_NO_PROVIDER_TRUTHS, ON_DEVICE_MODEL_COPY, modelProvidersFor } =
+  await import("../src/contracts/mocks/providers.ts");
 
 test("localModelSupported: the no-backend verdict is desktop only", () => {
   assert.equal(localModelSupported("desktop"), true);
@@ -70,18 +72,31 @@ test("defaultProviderFor: private-local on desktop and on a mobile shell WITH a 
   assert.deepEqual(defaultProviderFor("android", false), { providerId: null, modelId: null });
 });
 
-test("modelProvidersFor: desktop keeps the full catalog, mobile drops ONLY local", () => {
-  // Desktop is the untouched catalog — same array, local still leads.
+test("modelProvidersFor: availability-driven — desktop full, mobile local iff a backend", () => {
+  // Desktop is the untouched catalog — same array, local still leads. The
+  // backend flag is moot there (the `desktop` short-circuit wins).
   assert.equal(modelProvidersFor("desktop"), MODEL_PROVIDERS);
+  assert.equal(modelProvidersFor("desktop", false), MODEL_PROVIDERS);
   assert.equal(MODEL_PROVIDERS[0].id, "local", "catalog invariant: local leads on desktop");
 
+  const cloudOnly = MODEL_PROVIDERS.filter((p) => p.id !== "local").map((p) => p.id);
+
+  // No backend (default arg AND explicit false) → local is GONE on mobile,
+  // every cloud vendor surviving in catalog order.
+  for (const roster of [modelProvidersFor("ios"), modelProvidersFor("ios", false)]) {
+    assert.ok(!roster.some((p) => p.id === "local"), "ios without a backend: local must be GONE");
+    assert.deepEqual(roster.map((p) => p.id), cloudOnly);
+  }
+
+  // add-mobile-local-inference: a reported backend brings local back — the FULL
+  // catalog, local leading, exactly like desktop.
   for (const platform of ["ios", "android"]) {
-    const roster = modelProvidersFor(platform);
-    assert.ok(!roster.some((p) => p.id === "local"), `${platform}: local must be GONE`);
-    // Every cloud vendor survives, in catalog order.
+    const roster = modelProvidersFor(platform, true);
+    assert.equal(roster[0].id, "local", `${platform} with a backend: local must lead`);
     assert.deepEqual(
       roster.map((p) => p.id),
-      MODEL_PROVIDERS.filter((p) => p.id !== "local").map((p) => p.id),
+      MODEL_PROVIDERS.map((p) => p.id),
+      `${platform} with a backend: the full catalog returns`,
     );
   }
 });
@@ -91,4 +106,9 @@ test("the mobile empty-provider copy says exactly the two truths", () => {
     MOBILE_NO_PROVIDER_TRUTHS,
     "Add a cloud API key to enable narrated answers — the private model runs on the desktop app.",
   );
+});
+
+test("ON_DEVICE_MODEL_COPY: the per-tier on-device descriptions are byte-exact", () => {
+  assert.equal(ON_DEVICE_MODEL_COPY.foundation, "Runs on this device using Apple's on-device model");
+  assert.equal(ON_DEVICE_MODEL_COPY.gguf, "Runs on this device using a built-in private model");
 });

@@ -38,13 +38,19 @@ import {
   makeStyles,
   tokens,
 } from "@fluentui/react-components";
-import { MODEL_PROVIDERS, MOBILE_NO_PROVIDER_TRUTHS, modelProvidersFor } from "@/contracts";
+import {
+  MODEL_PROVIDERS,
+  MOBILE_NO_PROVIDER_TRUTHS,
+  ON_DEVICE_MODEL_COPY,
+  modelProvidersFor,
+} from "@/contracts";
 import { apiKeyBillingNote } from "@/lib/billingNotes";
 import {
   LocalModelInstallPanel,
   useLocalModel,
 } from "@/features/localModel/LocalModelOption";
 import { useAuthStore } from "@/stores/useAuthStore";
+import { useOnDeviceModel } from "@/stores/useOnDeviceModel";
 import { useRagStore } from "@/stores/useRagStore";
 import { ModeChooserAuto } from "./ModeChooser";
 import { isDesktopShell, rememberPlatform, type PlatformKind } from "@/shell/desktopBridge";
@@ -156,6 +162,12 @@ export function OnboardingPanel() {
   // the vault tree loads (the usual platformKind() primer), so fetch the
   // settings payload once here; "desktop" until it answers.
   const [platform, setPlatform] = useState<PlatformKind>("desktop");
+  // add-mobile-local-inference: does this device actually have an on-device
+  // backend, and which tier serves it? The store probes once on a mobile shell
+  // (this component primes platformKind() below, so the probe fires as soon as
+  // the form factor resolves); false/"none" on desktop and on a mobile shell
+  // without a backend, keeping both byte-identical.
+  const { available: onDeviceBackend, tier: onDeviceTier } = useOnDeviceModel();
   useEffect(() => {
     setIsDesktop(isDesktopShell());
     let alive = true;
@@ -183,16 +195,17 @@ export function OnboardingPanel() {
     }
   }, [onboarding.defaultInclusion]);
 
-  // §3: the mobile roster has no local entry (modelProvidersFor), but the
-  // pre-fetch default above is "local" — re-point it at the roster's first
-  // cloud vendor the moment the form factor resolves. A user who already
-  // picked a cloud provider keeps their pick; on desktop this never fires.
+  // add-mobile-local-inference: the pre-fetch default is "local", but a mobile
+  // shell WITHOUT a backend has no local entry — re-point it at the roster's
+  // first cloud vendor once the form factor resolves. When a backend IS reported
+  // (or on desktop) local stays offered, so this never fires. A user who already
+  // picked a cloud provider keeps their pick.
   useEffect(() => {
-    if (platform === "desktop" || providerId !== "local") return;
-    const first = modelProvidersFor(platform)[0];
+    if (platform === "desktop" || onDeviceBackend || providerId !== "local") return;
+    const first = modelProvidersFor(platform, onDeviceBackend)[0];
     setProviderId(first.id);
     setModelId(first.models[0]);
-  }, [platform, providerId]);
+  }, [platform, onDeviceBackend, providerId]);
 
   const provider = MODEL_PROVIDERS.find((p) => p.id === providerId)!;
 
@@ -305,11 +318,21 @@ export function OnboardingPanel() {
   if (onboarding.step === "select-model") {
     // Private-first framing: the on-device model is the hero (first, default);
     // the cloud vendors are grouped honestly, one click away. Local vs cloud is
-    // just `id === "local"` — §3: gated on the desktop form factor too, a
-    // structural pin that keeps LocalModelInstallPanel unreachable on mobile
-    // (where modelProvidersFor drops the local entry entirely).
-    const isLocal = platform === "desktop" && providerId === "local";
-    const cloudProviders = modelProvidersFor(platform).filter((p) => p.id !== "local");
+    // just `id === "local"` — add-mobile-local-inference: the local option is
+    // offered wherever the roster carries it (desktop, or a mobile shell with a
+    // reported backend). A mobile shell without a backend has no local entry, so
+    // the hero radio never renders and LocalModelInstallPanel never mounts.
+    const localOffered = platform === "desktop" || onDeviceBackend;
+    const isLocal = localOffered && providerId === "local";
+    // The private model's description line: the catalog framing on desktop
+    // (tier "llama-server"), the honest per-tier copy on a mobile shell.
+    const localModelLabel =
+      platform === "desktop"
+        ? "Private — runs on this device. No API key; nothing leaves this device. (Recommended)"
+        : onDeviceTier === "gguf"
+          ? ON_DEVICE_MODEL_COPY.gguf
+          : ON_DEVICE_MODEL_COPY.foundation;
+    const cloudProviders = modelProvidersFor(platform, onDeviceBackend).filter((p) => p.id !== "local");
     const isAllowed = (id: string) => (allowedProviders ? allowedProviders.includes(id) : true);
     const firstAllowedCloud = cloudProviders.find((p) => isAllowed(p.id)) ?? cloudProviders[0];
     const localModelId = MODEL_PROVIDERS.find((p) => p.id === "local")!.models[0];
@@ -337,9 +360,11 @@ export function OnboardingPanel() {
 
         {/* Hero: the on-device private model comes first. Cloud is the honest
             alternative right beneath it — no dark pattern, one click away.
-            §3: desktop-only — the mobile roster has no local entry, so there
-            is no local/cloud choice to make and the radio group is gone. */}
-        {platform === "desktop" && (
+            add-mobile-local-inference: shown wherever local is offered (desktop,
+            or a mobile shell with a backend); a mobile shell without a backend
+            has no local entry, so there is no local/cloud choice and the radio
+            group is gone. */}
+        {localOffered && (
           <RadioGroup
             value={isLocal ? "local" : "cloud"}
             onChange={(_, d) => {
@@ -355,7 +380,7 @@ export function OnboardingPanel() {
             <Radio
               value="local"
               disabled={!isAllowed("local")}
-              label="Private — runs on this device. No API key; nothing leaves this device. (Recommended)"
+              label={localModelLabel}
             />
             <Radio
               value="cloud"
@@ -369,8 +394,14 @@ export function OnboardingPanel() {
           /* onboarding copy: the panel's download button doubles as the
              "start it now, keep setting up" offer — starting NEVER blocks
              Continue (the soft gate below stays soft) because the download is
-             fire-and-forget on the server and survives leaving this step. */
-          <LocalModelInstallPanel onboarding />
+             fire-and-forget on the server and survives leaving this step.
+             add-mobile-local-inference: the llama-server download panel is a
+             desktop concept — a mobile backend has nothing to download (Tier-1
+             is resident, Tier-2 fetches via the shell), so on a mobile shell the
+             private model is simply selected with no panel beneath the radio. */
+          platform === "desktop" ? (
+            <LocalModelInstallPanel onboarding />
+          ) : null
         ) : (
           <>
             {/* Honest cloud heading, naming the selected vendor. */}
