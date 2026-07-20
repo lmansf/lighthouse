@@ -4164,3 +4164,347 @@ grep-verified; gate on ios-build. Commit per numbered section (Phase A
 first). Open ONE PR titled "iOS: on-device private model (Apple
 Foundation Models + small-GGUF fallback)"; stop at the PR.
 ```
+
+## 28. Field patch: faster & calmer — perceived speed, honest tables, real feedback (2026-07-19)
+
+Nine owner notes; seven land here (the two report-template buttons are
+§29). Diagnosis on main @ 0.13.4:
+- **"SQL engine looks slow" is NOT DataFusion.** Deterministic exec on
+  ≤200 rows is milliseconds (analytics.rs run_query, MAX_RESULT_ROWS=200);
+  the latency is (a) a fresh `SessionContext::new()` with FULL table/view
+  re-registration on EVERY ask — CSV schema re-inferred from the file
+  head, XLSX/PDF re-materialized to MemTable, nothing reused across asks
+  (synth.rs:1102, analytics.rs:341) — and (b) the computed result exists
+  before narration but the UI shows only "Reading table schemas… /
+  Summarizing results…" spinners until the slow model prose starts
+  (synth.rs:1064,1835). The answer cache (answer_cache.rs, posture-keyed)
+  only short-circuits identical repeats; registration is never cached.
+- **"Limit thinking time" = Lighthouse's own multi-pass synthesis,** not
+  provider reasoning tokens (no reasoning_effort/budget_tokens/thinking
+  param is sent anywhere — llm.rs only sets max_tokens). The cost is the
+  Beam loop (beam.rs, `beam_max_steps` default 5, each step a sequential
+  plan+decide model call, synth.rs:1798) plus NL→SQL and the plan-preview
+  pass. Remote-keyed only; local models never multi-step.
+- **The warm loader** already emits a fresh progress chunk every 1.5s via
+  `local_warm_wait`→`warming_label(waited)` (synth.rs:434,472) — a rotating
+  message list is a byte-pinned one-liner there. The "minutes" is the
+  LOAD/warm (llama-server spawn + /health, 5-min budget), not the download
+  (which has its own byte-% UI).
+- **The feedback FAB** (BugReport.tsx) uses `ChatHelpRegular` (chat +
+  question mark) and is bug-shaped (where/what + a shell.log diagnostics
+  attachment); transport is zero-backend mailto + GitHub-issue
+  (feedbackLinks.ts, byte-pinned, subject already "Lighthouse feedback:").
+- **The system prompt** (SYSTEM_PROMPT, llm.rs:194 + byte-identical
+  llm.ts:227) has NO table-row cap; engine caps exist (NARRATE_MAX_ROWS=40
+  fed to narration, deterministic truncation_footer) but nothing tells the
+  model to render ≤10.
+- **CSV preview** (FileInspector.tsx:346) renders `extractPreview` as raw
+  text — no delimiter parsing; source is a bounded raw slice
+  (inspect.rs `extract_preview`). A table renderer already exists
+  (parseMarkdownTable, MarkdownView).
+
+### Prompt
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first, local-first analytics AI harness for analysts: Rust
+engine (native/crates/lighthouse-core) in a Tauri 2 shell
+(native/crates/lighthouse-desktop), byte-compatible TS twin
+(src/server/), React UI (src/). Read CLAUDE.md, docs/ts-twin.md,
+docs/analytics-beam.md, and docs/roadmap-personas-2026-07.md §14 + §28
+before writing code. The analytics are DETERMINISTIC (DataFusion; the
+model never does arithmetic — it narrates verified results). This patch
+makes Lighthouse FEEL fast and calm and speak honestly; each item's
+root cause is diagnosed in §28 — verify as you fix.
+
+1. Perceived speed — show the numbers the instant they exist (the
+   biggest win). Today the deterministic result (table + chart) is
+   computed BEFORE narration but the UI shows only spinners until the
+   slow model prose starts. Surface the engine result the moment it's
+   ready — the computed result table and its §22.6 meta.chart render
+   first, then narration streams in beneath it. The user sees verified
+   numbers immediately; the prose catches up. This aligns with the Beam
+   thesis (the engine result is the truth; narration is commentary).
+   Keep provenance/freshness/truncation footers intact. Pin: an
+   analytics answer paints its result table before the first narration
+   token.
+
+2. Real speed — stop re-registering tables every ask. Today each ask
+   builds a fresh SessionContext and re-registers/re-infers/re-
+   materializes every included file (analytics.rs register_tables/
+   register_views; XLSX/PDF → MemTable). Cache the registered context
+   (or the registered TableProviders) keyed on the included file set +
+   each file's mtime/size, reused across asks; invalidate on
+   vault-changed (the watcher already bumps a GENERATION) and on
+   posture change. First ask after a change pays the cost; repeats are
+   instant. Correctness unchanged: same schemas, same results, the
+   answer cache still layers on top. Add a test that a second ask over
+   an unchanged vault does not re-infer schemas (spy/counter on the
+   registration path).
+
+3. Don't over-think simple asks (limit "thinking time"). "Thinking"
+   here is Lighthouse's multi-pass synthesis, not provider reasoning.
+   - Lower the default Beam budget: beam_max_steps 5 → 2, and tighten
+     the multi-step trigger (analytics.rs MULTI_STEP_WORDS /
+     multi_step_cue) so a simple single-fact ask takes the ONE-shot
+     path (NL→SQL → execute → narrate) and never enters the plan+decide
+     loop. Preserve genuine multi-part depth — a question that truly
+     needs decomposition still escalates; this is about not spending
+     five model round-trips on "what's the total?".
+   - Skip the plan-preview model call unless plan-approval is explicitly
+     on.
+   - Where a provider dialect exposes a low-reasoning / minimal-thinking
+     switch (e.g. reasoning_effort:"low" or an equivalent per-dialect
+     param), send the lowest setting for narration by default — narration
+     of computed tables needs no deep reasoning. Add it per-dialect
+     behind a small helper; never send an unsupported param. Keep
+     max_tokens as the backstop.
+   - Compounds with §1/§2: fewer round-trips + cached registration +
+     result-first paint is the felt speedup.
+
+4. A progressive warm loader (the private model's minutes-long first
+   load). `warming_label(waited)` currently returns one byte-pinned
+   string; make it cycle a PREDETERMINED, HONEST list keyed off elapsed
+   time (index = waited / rotate_interval, clamped to the last), e.g.
+   "Warming up the private model…", "Loading model weights into
+   memory…", "First load is the slow one — it's cached after this…",
+   "Almost ready…". Every line must be TRUE (no fake progress); keep the
+   trailing elapsed "(Ns)" honesty. Rotate on the existing 1.5s poll
+   (or a small multiple). Byte-identical across synth.rs + synth.ts;
+   update test/localWarmWait.test.mjs to pin the rotation. This is the
+   LOAD/warm phase only — the download keeps its byte-% UI.
+
+5. Honest tables — cap rendered rows at ~10 in the system prompt. Add
+   to SYSTEM_PROMPT (llm.rs:194 AND byte-identical llm.ts:227, parity-
+   tested) a Style rule: when rendering a result table, show at most 10
+   rows; if more exist, show the first 10 and state "showing first 10 of
+   N". Reconcile the engine so the model isn't fed 40 then asked to show
+   10: lower the narration feed (NARRATE_MAX_ROWS) toward ~12 and make
+   the deterministic truncation_footer/row_cap_footer math agree with
+   the ~10 shown, and with §1's result-first table (it caps at ~10 too,
+   with the footer disclosing the true N). One consistent story: ≤10
+   rows visible, honest "of N" everywhere. Update the parity + footer
+   tests.
+
+6. Feedback icon → an idea, not a question. In BugReport.tsx (the FAB)
+   and SettingsMenu.tsx (the "Send feedback" item), swap
+   ChatHelpRegular → LightbulbRegular (or LightbulbFilamentRegular) from
+   @fluentui/react-icons. Align FeedbackNudge's ChatSparkleRegular only
+   if it reads inconsistent. Icon-only change; no behavior.
+
+7. A real feedback form (short & sweet), not a bug report. Reframe the
+   BugReport.tsx form as FEEDBACK with 1–3 questions, keeping the
+   zero-backend transport (feedbackLinks.ts mailto + GitHub-issue,
+   subject "Lighthouse feedback:", the "lighthouse:open-feedback" event
+   seam — all reused, byte-pins respected). New form:
+   - Q1 (required): "What would make Lighthouse better for you?"
+     (multiline).
+   - Q2 (optional, one tap): a quick sentiment — e.g. "How's Lighthouse
+     working for you?" as 3 faces/segments (Rough · OK · Great) folded
+     into the body text.
+   - Q3 (optional): "Anything else? (context, a wish, a rough edge)".
+   Drop the bug framing and the shell.log/diagnostics attachment from
+   the DEFAULT face — feedback isn't a crash report. Preserve bug
+   reporting via a small secondary "Report a problem instead" toggle
+   that re-adds the "what happened" + optional diagnostics excerpt and
+   flips the issue label back to a bug label — nothing lost, feedback
+   just leads. Rename the component/strings to Feedback (keep the file
+   move minimal); update its tests + any label pins.
+
+8. Prettify separated-value previews. In FileInspector.tsx, when the
+   inspected file is CSV/TSV/PSV (by extension/mime), render the preview
+   as a TABLE instead of the raw `extractPreview` text div. Prefer an
+   engine-side parsed preview: add `preview_table: Option<{ header,
+   rows }>` to FileInspection (inspect.rs + src/server/inspect.ts twin,
+   serde-default so old payloads tolerate absence), filled for tabular
+   files from a CORRECT delimiter parse (honor quoted fields + embedded
+   delimiters — do not naive-split on comma), capped ~10 rows × the
+   existing col cap, with the true row count noted ("first 10 of N",
+   consistent with §5). The UI renders it via the existing table path
+   (parseMarkdownTable/MarkdownView styling); on parse failure or non-
+   tabular files, fall back to today's monospace text. Keeps CACHE_VERSION
+   untouched (preview only, not extraction semantics).
+
+9. Stamp + gates. Bump 0.13.4 → 0.13.5 across all seven stamp files per
+   CLAUDE.md. Full node + cargo suites, release-smoke green.
+
+Constraints. No analytics/telemetry/accounts. Deterministic analytics
+unchanged (speed items are caching + ordering + fewer model calls, never
+touching the numbers). Prompts/labels byte-identical across twins with
+PARITY comments; pinned label/prompt tests move in the same commit as
+their strings. Desktop and mobile both benefit; no desktop regression.
+SharePoint plumbing untouched. Scope = these seven items + stamp; the
+report-template buttons are §29.
+
+Acceptance:
+1. An analytics ask paints its result table + chart before the first
+   narration word; numbers feel instant even when prose is slow.
+2. A second ask over an unchanged vault does not re-infer/re-register
+   (test-pinned); repeat asks are visibly faster.
+3. A simple single-fact ask takes the one-shot path (no Beam loop);
+   multi-part asks still decompose. Narration requests minimal provider
+   reasoning where supported.
+4. The warm loader cycles honest messages over the load, elapsed
+   seconds intact; download keeps its %.
+5. Model-rendered and engine result tables show ≤10 rows with an honest
+   "of N"; footers/caps agree; parity tests pass.
+6. The feedback entry shows a lightbulb.
+7. The feedback form asks 1–3 feedback questions, sends via the existing
+   mailto/issue transport, and still allows "Report a problem instead".
+8. A CSV/TSV preview renders as a clean capped table, raw-text fallback
+   on parse failure.
+9. Seven stamps read 0.13.5; suites + release-smoke green.
+
+Environment. Desktop-buildable items run/test in the container; the
+desktop crate doesn't compile here (grep-verify shared-signature call
+sites — CLAUDE.md). One commit per numbered section. Open ONE PR titled
+"Faster & calmer: result-first paint, cached registration, honest
+tables, real feedback"; stop at the PR.
+```
+
+## 29. Two report-template buttons: Scientific method & Business report (2026-07-19)
+
+The remaining two owner notes: a "Scientific method" button (hypothesis
+· methods · experiment · results · conclusion, key chart in the results
+section, hypothesis grounded in something tangible) and a "Business
+report" button (an effective, explicitly-modeled structured report).
+These are new one-click REPORT TEMPLATES — not column-typed recipes —
+and they get their own PR because they share real scaffolding.
+
+Grounding (both structures researched, not invented):
+- **Business = answer-first (BLUF + Minto pyramid):** Bottom line → Key
+  chart → Context & question → What the data shows (≤3 MECE points) →
+  Assumptions & caveats → Recommendations & next steps. Lead with the
+  answer; the one hero chart sits directly beneath the bottom line;
+  recommendations each name the finding they rest on.
+- **Scientific = IMRaD:** Introduction/hypothesis → Methods (the
+  "experiment" is the execution of the methods, not a separate section)
+  → Results (the key chart lives HERE) → Discussion/Conclusion. The
+  hypothesis must be grounded in a real computed pattern (a detected
+  trend/outlier/aggregate), never a generic guess.
+- Both carry a MANDATORY assumptions/caveats section and hard honesty
+  rules: every quantitative claim traces to a computed value (no
+  invented/extrapolated numbers — the existing anti-arithmetic
+  guardrail), "correlated with" not "caused by", specific
+  finding-linked recommendations, ~150–350 words of prose, the bottom
+  line/abstract bolded.
+
+Reuse map (from the code survey): the multi-section report struct
+already exists — reports.rs `Report { title, summary, sections:
+Vec<ReportSection>, caveats }` + `render_markdown`; recipes.rs
+`BUILTINS` + the `run-recipe:{id} on {table}` cue rendered as circular
+chips (ChatPanel.tsx:4901, RecipesNav.tsx); the §22.6 `meta.chart`
+channel embeds the one key chart; useValidatedChips gates a chip to
+answers whose data supports it; evidencePack.ts/reportExport.ts export.
+
+### Prompt
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first, local-first analytics AI harness for analysts: Rust
+engine (native/crates/lighthouse-core) in a Tauri 2 shell, byte-
+compatible TS twin (src/server/), React UI (src/). Read CLAUDE.md,
+docs/ts-twin.md, docs/analytics-beam.md, and
+docs/roadmap-personas-2026-07.md §14 + §29 before writing code. This PR
+stacks on §28's speed/table work (rebase onto it). Build TWO one-click
+report templates as suggestion buttons: "Scientific method" and
+"Business report". Analytics stay DETERMINISTIC — the engine computes
+every number; the model only narrates the sections in the prescribed
+structure. Reuse the existing report/recipe/chart scaffolding; do not
+reinvent it.
+
+1. A report-template concept (reusing recipe rails). Add a report-
+   template abstraction beside recipes.rs BUILTINS (twin in
+   src/server/): each template = { id, name, summary, a fixed SECTION
+   PLAN (ordered headings + the deterministic sub-question each section
+   needs), a narration_prompt that enforces the structure + honesty
+   rules, and which section carries the key chart }. Cue
+   "run-report:{id} on {table}" mirrors "run-recipe:" (parse in the
+   same place, meta.rs/synth.rs). The engine runs the section sub-
+   queries deterministically (reuse run_query + the multi-step result
+   accumulator, synth.rs:1834), assembles a reports.rs `Report`, and
+   renders via reports::render_markdown; the one key chart rides the
+   §22.6 meta.chart channel into its section. Byte-identical
+   prompts/labels across twins (PARITY).
+
+2. Scientific method template (IMRaD; hypothesis from something
+   tangible). Sections: Hypothesis (Introduction) · Methods · Results ·
+   Conclusion (Discussion). The hypothesis MUST be grounded in a real
+   computed pattern — first run a cheap deterministic probe (a
+   trend/outlier/top-mover/aggregate over the table) and phrase the
+   hypothesis around THAT observed value ("Given revenue rose in 3 of
+   the last 4 months, we test whether the upward trend is
+   significant…"), never a generic template sentence. Methods states
+   the data, scope, and exactly what was computed (reproducible).
+   Results presents the computed numbers and EMBEDS THE KEY CHART here.
+   Conclusion states whether the data supports the hypothesis, with
+   limitations. Bold a one-line abstract on top.
+
+3. Business report template (answer-first: BLUF + Minto). Sections:
+   Bottom line (bold, 1–2 sentences: the answer + the single key number
+   + scope) · Key chart (with a one-line takeaway caption) · Context &
+   question (1–3 lines) · What the data shows (≤3 MECE supporting
+   points — no overlap, no gaps) · Assumptions & caveats (source,
+   metric definitions, date range, exclusions) · Recommendations & next
+   steps (specific, each tied to a stated finding). The key chart sits
+   directly under the Bottom line. ~150–350 words total.
+
+4. Honesty guardrails (shared, enforced — not just requested). Every
+   quantitative claim traces to an engine-computed value; the narration
+   prompt forbids new/estimated/extrapolated numbers (extend the
+   existing anti-arithmetic guardrail). Say "correlated with", not
+   "caused by", unless established. Every recommendation names the
+   finding it rests on. The Assumptions/caveats section is MANDATORY and
+   non-empty (the template refuses to render it away) — reuse the
+   deterministic freshness/provenance/truncation facts the engine
+   already stamps. Ban superlatives the numbers don't support.
+
+5. Surfacing (validated chips). Render the two templates as circular
+   suggestion buttons beside recipes (ChatPanel suggestion/recipe row +
+   RecipesNav gallery), labeled "Scientific report" / "Business report",
+   click → sendQuestion(runReportQuestion(id, table)) mirroring
+   runRecipeQuestion. Gate via useValidatedChips: offer them only when
+   the active answer/table has enough shape to report on (numeric +
+   ≥ a few rows; the business chart needs a chartable series). No chip
+   when there's nothing to report.
+
+6. Export. A generated report exports through the existing
+   evidencePack.ts/reportExport.ts path (one self-contained file:
+   sections, the chart, SQL, provenance + freshness, timestamp) — the
+   §G7 evidence-pack idiom. Reuse, don't rebuild.
+
+7. Tests, twin, stamp. Pure logic (section plan, hypothesis-probe
+   selection, MECE-point assembly, chart-section placement) tested in
+   cargo + node; template prompts/labels parity-pinned; a golden render
+   test per template (structure present, chart in the right section,
+   assumptions non-empty, no invented numbers in a fixture). Bump one
+   patch level across all seven stamps per CLAUDE.md (0.13.5 → 0.13.6 if
+   §28 landed first; reconcile if not).
+
+Constraints. No analytics/telemetry/accounts. Deterministic analytics
+unchanged (templates orchestrate existing queries + narration).
+Prompts/labels byte-identical across twins with PARITY comments.
+Reuse reports.rs / meta.chart / recipe-chip rendering / evidencePack —
+new code only where the survey shows a genuine gap. Desktop + mobile
+both. SharePoint plumbing untouched.
+
+Acceptance:
+1. "Scientific report" produces IMRaD sections; the hypothesis quotes a
+   real computed pattern from the table; the key chart renders in
+   Results; a Conclusion judges the hypothesis with limitations.
+2. "Business report" produces answer-first sections; the bold Bottom
+   line leads with the key number; the hero chart sits beneath it; ≤3
+   MECE points; a non-empty Assumptions section; finding-linked
+   recommendations.
+3. Neither invents a number (fixture test); both say "correlated"
+   honestly; both stay ~150–350 words.
+4. Both appear as validated chips only when the answer's data supports a
+   report; both export via the evidence-pack path.
+5. Twin parity tests pass; golden render tests pass; seven stamps
+   bumped; suites + release-smoke green.
+
+Environment. Container-testable (engine + twin + UI logic with full
+coverage); grep-verify desktop-crate call sites. One commit per numbered
+section. Open ONE PR titled "Report templates: Scientific method &
+Business report"; stop at the PR.
+```
