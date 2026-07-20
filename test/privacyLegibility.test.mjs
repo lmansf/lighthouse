@@ -187,9 +187,12 @@ test("header count click: dispatches the filter event (+ the sidebar-open ping)"
     "the detail-less reveal-node ping rides along to open a collapsed sidebar",
   );
   const appShell = read("src/shell/AppShell.tsx");
+  // §5 reshaped the handler (compact opens the drawer instead of un-collapsing)
+  // but the property this pins is unchanged: the listener reads NO detail —
+  // the ping is safe.
   assert.match(
     appShell,
-    /const onReveal = \(\) => setCollapsed\(false\)/,
+    /const onReveal = \(\) => \{\s*\/\/[^\n]*\n\s*if \(compactRef\.current\) setDrawerOpen\(true\);\s*else setCollapsed\(false\);/,
     "AppShell's listener really is name-only (no detail read) — the ping is safe",
   );
   assert.match(

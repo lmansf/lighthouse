@@ -99,9 +99,26 @@ const useStyles = makeStyles({
     ":focus-visible::after": { backgroundColor: tokens.colorBrandStroke1 },
   },
   handleActive: { "::after": { backgroundColor: tokens.colorBrandStroke1 } },
+  // §5 compact: the panel as a full-width safe-area sheet over everything —
+  // the phone has no room for a second column. Width comes from the viewport
+  // (the store's persisted flyoutWidth is NOT applied), and the resize handle
+  // does not exist. Esc and the X close it; there is no "outside" to click.
+  sheet: {
+    position: "fixed",
+    inset: 0,
+    zIndex: 30,
+    width: "100%",
+    borderRightWidth: 0,
+    paddingTop: "var(--lh-safe-top)",
+    paddingBottom: "var(--lh-safe-bottom)",
+    paddingLeft: "var(--lh-safe-left)",
+    paddingRight: "var(--lh-safe-right)",
+  },
+  // A thumb-sized close target on the sheet (≥44pt).
+  sheetClose: { minWidth: "44px", minHeight: "44px" },
 });
 
-export function SectionFlyout() {
+export function SectionFlyout({ compact = false }: { compact?: boolean } = {}) {
   const styles = useStyles();
   const openSection = useSidebarFlyout((s) => s.openSection);
   const flyoutWidth = useSidebarFlyout((s) => s.flyoutWidth);
@@ -140,9 +157,10 @@ export function SectionFlyout() {
   }, [section, close]);
 
   // Click-outside: a pointerdown anywhere that is neither inside the flyout nor
-  // inside the rail (which owns its own toggle) closes it.
+  // inside the rail (which owns its own toggle) closes it. Not armed for the
+  // §5 sheet — it covers the viewport, so there is no outside; Esc + X close.
   useEffect(() => {
-    if (!section) return;
+    if (!section || compact) return;
     const onDown = (e: PointerEvent) => {
       const t = e.target as HTMLElement | null;
       if (!t) return;
@@ -159,7 +177,7 @@ export function SectionFlyout() {
       window.clearTimeout(id);
       document.removeEventListener("pointerdown", onDown, true);
     };
-  }, [section, close]);
+  }, [section, close, compact]);
 
   // Pointer drag on the right edge: capture so moves keep arriving past other
   // elements; read the live start width from the store (getState is never stale).
@@ -217,14 +235,18 @@ export function SectionFlyout() {
       <aside
         ref={asideRef}
         id={FLYOUT_PANEL_ID}
-        role="region"
+        role={compact ? "dialog" : "region"}
+        aria-modal={compact || undefined}
         aria-label={section.label}
-        className={mergeClasses(styles.flyout, !entered && styles.entering)}
+        className={mergeClasses(styles.flyout, !entered && styles.entering, compact && styles.sheet)}
         style={
-          {
-            width: `${flyoutWidth}px`,
-            ...(resizing ? { transitionProperty: "none" } : {}),
-          } as React.CSSProperties
+          // §5 sheet: viewport-sized — the persisted flyoutWidth is not applied.
+          compact
+            ? undefined
+            : ({
+                width: `${flyoutWidth}px`,
+                ...(resizing ? { transitionProperty: "none" } : {}),
+              } as React.CSSProperties)
         }
       >
         <div className={styles.header}>
@@ -233,7 +255,8 @@ export function SectionFlyout() {
           </Text>
           <Button
             appearance="subtle"
-            size="small"
+            size={compact ? "medium" : "small"}
+            className={compact ? styles.sheetClose : undefined}
             icon={<DismissRegular />}
             aria-label="Close"
             onClick={() => close()}
@@ -243,21 +266,25 @@ export function SectionFlyout() {
           <Body />
         </div>
       </aside>
-      <div
-        className={mergeClasses(styles.handle, resizing && styles.handleActive)}
-        role="separator"
-        aria-orientation="vertical"
-        aria-label="Resize section panel (drag, or use arrow keys)"
-        aria-valuemin={FLYOUT_MIN}
-        aria-valuemax={FLYOUT_MAX}
-        aria-valuenow={flyoutWidth}
-        tabIndex={0}
-        onPointerDown={onHandlePointerDown}
-        onPointerMove={onHandlePointerMove}
-        onPointerUp={endDrag}
-        onPointerCancel={endDrag}
-        onKeyDown={onHandleKeyDown}
-      />
+      {/* The resize handle exists only in the inline-column arrangement — a
+          full-width sheet has nothing to resize. */}
+      {!compact && (
+        <div
+          className={mergeClasses(styles.handle, resizing && styles.handleActive)}
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize section panel (drag, or use arrow keys)"
+          aria-valuemin={FLYOUT_MIN}
+          aria-valuemax={FLYOUT_MAX}
+          aria-valuenow={flyoutWidth}
+          tabIndex={0}
+          onPointerDown={onHandlePointerDown}
+          onPointerMove={onHandlePointerMove}
+          onPointerUp={endDrag}
+          onPointerCancel={endDrag}
+          onKeyDown={onHandleKeyDown}
+        />
+      )}
     </>
   );
 }
