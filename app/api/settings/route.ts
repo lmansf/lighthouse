@@ -23,6 +23,9 @@ export async function GET() {
   const s = readDesktopSettings();
   return NextResponse.json({
     desktop: isDesktopApp(),
+    // PARITY: mirrors settings_get (commands.rs) §1 — the twin is always the
+    // web dev flow on a computer, so the form factor is constant "desktop".
+    platform: "desktop",
     runOnStartup: s.runOnStartup !== false, // default on
     startupAsked: Boolean(s.startupAsked),
     uiMode: s.uiMode ?? null, // null until the first-run chooser is answered

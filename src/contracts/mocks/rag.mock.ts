@@ -590,8 +590,10 @@ class MockRagService implements RagService {
     this.nodes.push(...nodes.filter((n) => !have.has(n.id)).map((n) => ({ ...n })));
   }
 
-  async capabilities(): Promise<{ desktop: boolean }> {
-    return { desktop: false };
+  async capabilities(): Promise<{ desktop: boolean; platform: "desktop" }> {
+    // The mock is the plain-web deployment: not an embedded shell, computer
+    // form factor.
+    return { desktop: false, platform: "desktop" };
   }
 
   async policy(): Promise<PolicySnapshot> {

@@ -31,6 +31,37 @@ export function isDesktopShell(): boolean {
 }
 
 /**
+ * Form factor of the running shell (iOS field patch 1 §1). Reported by the
+ * ENGINE on the settings/rag-list payloads — never sniffed from the UA or the
+ * window size. `desktop` here means form factor; note `isDesktopShell()` above
+ * answers a different question ("is this an embedded Tauri shell" — true on
+ * iOS too).
+ */
+export type PlatformKind = "desktop" | "ios" | "android";
+
+let platformCache: PlatformKind | null = null;
+
+/**
+ * Record the engine-reported platform. Called wherever a payload carrying the
+ * field is ingested (rag.real getTree — the first fetch every window makes);
+ * unknown/absent values are ignored so an older engine leaves the default.
+ */
+export function rememberPlatform(p: unknown): void {
+  if (p === "desktop" || p === "ios" || p === "android") platformCache = p;
+}
+
+/** Engine-reported form factor; "desktop" until the first payload arrives. */
+export function platformKind(): PlatformKind {
+  return platformCache ?? "desktop";
+}
+
+/** True on the phone/tablet shells — the §1 gate for mobile-only branches. */
+export function isMobileShell(): boolean {
+  const p = platformKind();
+  return p === "ios" || p === "android";
+}
+
+/**
  * Resolve OS-dropped files to their real absolute paths. Only meaningful on
  * the desktop; a file that cannot be resolved (e.g. an image dragged out of a
  * web page rather than off the disk) comes back under `unresolved` so the

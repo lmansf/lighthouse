@@ -53,7 +53,14 @@ fn percent_decode(s: &str) -> String {
 #[tauri::command]
 pub async fn rag_list() -> Value {
     let (sources_list, nodes) = tokio::join!(sources::list_sources(), sources::list_nodes());
-    json!({ "sources": sources_list, "nodes": nodes, "desktop": true })
+    // `desktop: true` = "embedded shell" (compat; the engine and existing UI
+    // read it on iOS too). `platform` is the form-factor signal (§1).
+    json!({
+        "sources": sources_list,
+        "nodes": nodes,
+        "desktop": true,
+        "platform": crate::platform_kind(),
+    })
 }
 
 #[tauri::command]
@@ -1489,6 +1496,10 @@ pub fn settings_get(app: AppHandle) -> Value {
     let whisper_permission = "unsupported";
     json!({
         "desktop": true,
+        // Form factor (§1): "desktop" | "ios" | "android". The UI's platform
+        // gates (mode chooser, startup prompt, model roster) key off THIS, not
+        // the compat `desktop` flag above.
+        "platform": crate::platform_kind(),
         "runOnStartup": s.run_on_startup != Some(false),
         "startupAsked": s.startup_asked == Some(true),
         "uiMode": s.ui_mode, // null until the first-run chooser is answered

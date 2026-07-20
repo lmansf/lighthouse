@@ -85,7 +85,10 @@ export const dynamic = "force-dynamic";
 
 export async function GET() {
   const [sources, nodes] = await Promise.all([listSources(), listNodes()]);
-  return NextResponse.json({ sources, nodes, desktop: isDesktopApp() });
+  // PARITY: mirrors rag_list (commands.rs). `platform` is the §1 form-factor
+  // signal; the TS twin only ever runs in the web dev flow on a computer, so
+  // it is constant "desktop" here while the Rust shell reports its target_os.
+  return NextResponse.json({ sources, nodes, desktop: isDesktopApp(), platform: "desktop" });
 }
 
 export async function POST(req: Request) {
