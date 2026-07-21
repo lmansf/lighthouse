@@ -2493,6 +2493,13 @@ export function ChatPanel() {
   // InvestigationsNav operations surface (switch, create, scope-from-selection,
   // local-only policy, rename/branch/archive) with the Sections rail retired.
   const [invOpen, setInvOpen] = useState(false);
+  // §4: the Files action row's "Add to investigation scope" opens the picker
+  // (its scope-from-selection reads the live grid selection).
+  useEffect(() => {
+    const onOpen = () => setInvOpen(true);
+    window.addEventListener("lighthouse:open-investigations", onOpen);
+    return () => window.removeEventListener("lighthouse:open-investigations", onOpen);
+  }, []);
   // Subscribe to `nodes` (not the stable `includedFileIds` fn) so the panel
   // re-renders when the explorer toggles inclusion - this is the live seam.
   const nodes = useRagStore((s) => s.nodes);

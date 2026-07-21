@@ -4,7 +4,7 @@ import dynamic from "next/dynamic";
 import { useAuthStore } from "@/stores/useAuthStore";
 import { AppShell } from "@/shell/AppShell";
 import { OnboardingPanel } from "@/features/onboarding/OnboardingPanel";
-import { FileExplorer } from "@/features/explorer/FileExplorer";
+import { FilesSurface } from "@/features/explorer/FileTileGrid";
 // Static import (no dynamic gain): FileExplorer already pulls FileInspector
 // into the first-paint graph, so the host adds only its own few lines.
 import { FileInspectorHost } from "@/features/explorer/FileInspector";
@@ -81,7 +81,7 @@ export default function Home() {
     // 0.13.10 §3: the sidebar is Files + the Settings footer, nothing else —
     // the Files tree is the body's only content (no section rail).
     shell = (
-      <AppShell sidebar={<FileExplorer />} main={<ChatPanel />} />
+      <AppShell sidebar={<FilesSurface />} main={<ChatPanel />} />
     );
   }
 
