@@ -245,7 +245,7 @@ final class PrivateModelServer {
             + "Connection: close\r\n\r\n"
         send(connection, string: headers, done: false)
 
-        let (instructions, prompt) = Self.buildRequest(fromBody: body)
+        let prompt = Self.buildPrompt(fromBody: body)
 
         #if canImport(FoundationModels)
         if #available(iOS 26, *), !prompt.isEmpty {
@@ -253,9 +253,14 @@ final class PrivateModelServer {
                 guard let self = self else { return }
                 var sent = ""
                 do {
-                    let session = instructions.isEmpty
-                        ? LanguageModelSession()
-                        : LanguageModelSession(instructions: instructions)
+                    // One plain session, prompt-only: Apple documents
+                    // `instructions` as a system prompt merely PREPENDED to the
+                    // prompt text (buildPrompt already folds the engine's system
+                    // block in at the front), so this is behaviourally the same
+                    // while calling only the no-arg initializer + String
+                    // `streamResponse` — the two signatures that are stable
+                    // across the iOS 26/27 FoundationModels SDKs.
+                    let session = LanguageModelSession()
                     let stream = session.streamResponse(to: prompt)
                     // Elements are CUMULATIVE snapshots (§3.2); diff into deltas
                     // so the OpenAI-compatible contract sees forward tokens only.
@@ -293,37 +298,38 @@ final class PrivateModelServer {
         finishStream(connection)
     }
 
-    /// Split the OpenAI messages into (instructions, prompt): the system block
-    /// becomes the session's instructions — where Foundation Models expects the
-    /// grounding rules — and the conversation (prior turns + the final user
-    /// block, which already carries the numbered context + question from the
-    /// engine's `build_prompt`) becomes the prompt. Content reaches the model
-    /// byte-for-byte; only the transport framing is local (PARITY: the prompt
-    /// and system text themselves are the engine's, unchanged).
-    private static func buildRequest(fromBody body: Data) -> (instructions: String, prompt: String) {
+    /// Fold the OpenAI messages into a single prompt string for Foundation
+    /// Models. The engine's SYSTEM_PROMPT (grounding rules) is the system block
+    /// and leads; the conversation (prior turns + the final user block, which
+    /// already carries the numbered context + question from the engine's
+    /// `build_prompt`) follows in order. Apple documents `instructions` as a
+    /// system prompt that is simply prepended to the prompt text, so folding it
+    /// in here is behaviourally equivalent while keeping the on-device call on
+    /// the initializer whose signature is stable across the iOS 26/27 SDKs. The
+    /// model receives the engine's system + user text byte-for-byte (PARITY:
+    /// only the transport framing is local; the text itself is the engine's,
+    /// unchanged).
+    private static func buildPrompt(fromBody body: Data) -> String {
         guard
             let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
             let messages = object["messages"] as? [[String: Any]]
         else {
-            return ("", "")
+            return ""
         }
-        var instructions = ""
-        var turns: [String] = []
+        var blocks: [String] = []
         for message in messages {
             let role = (message["role"] as? String) ?? ""
             let content = (message["content"] as? String) ?? ""
             if content.isEmpty { continue }
             switch role {
-            case "system":
-                // The engine sends exactly one system block; first one wins.
-                if instructions.isEmpty { instructions = content }
             case "assistant":
-                turns.append("Assistant: \(content)")
+                blocks.append("Assistant: \(content)")
             default:
-                turns.append(content)
+                // system leads, user/other turns follow — order preserved.
+                blocks.append(content)
             }
         }
-        return (instructions, turns.joined(separator: "\n\n"))
+        return blocks.joined(separator: "\n\n")
     }
 
     // MARK: - SSE framing
