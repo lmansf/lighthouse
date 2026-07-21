@@ -4906,3 +4906,237 @@ fallback per house convention. One commit per numbered section. Open
 ONE PR titled "Apple-feel pass: token layer, glass chrome, control
 swaps, icon registry"; stop at the PR — include the screenshot set.
 ```
+
+## 32. Fit 4k, keep the quality: the token diet for the on-device tier (2026-07-21)
+
+Owner question: Apple's on-device model has <4k tokens (input+output
+share the window; 8,192 on iOS 27) — how do we keep answer quality
+with RAG + system prompt + instructions all inside it? Can parts move
+"semantically" so the model has less work?
+
+Measured anatomy @ 0.13.9 (chars/4 ≈ tokens, the engine's own
+heuristic):
+- **SYSTEM_PROMPT = 4,666 chars ≈ 1,166 tok — 28% of the window on
+  EVERY call** (llm.rs:208, twin llm.ts:227).
+- **Schema cards are paid twice**: up to 6 × 1,200 chars ≈ 1,800 tok
+  in the NL→SQL call, then RE-SENT into narration (synth.rs:2073)
+  where they're useless.
+- **Narration re-renders the result table** (≤40 rows / 6,000 chars ≈
+  1,500 tok in, ~10 rows back out) even though result-first paint
+  already shows the engine's table+chart; no "already shown"
+  instruction exists; ChunkMeta has `chart` but no `table`.
+- **Semantic block is ALL definitions** (≤24 metrics + 24 synonyms ≈
+  700 tok), not matched-to-question; SQL few-shots (~230 tok) always
+  ride; history re-sent up to 6,000 chars ≈ 1,500 tok/turn.
+- **Budgets are 6,144-tuned** (LOCAL_CTX_TOTAL_MAX_CHARS=11,000,
+  llm.rs:1063-1077, stale "~0.9k system" comment): worst-case RAG =
+  ~5,015 tok, narration = ~5,750, NL→SQL = ~4,616 — all blow 4,096.
+  The Swift bridge's overflow catch is deliberately EMPTY
+  (PrivateModelServer.swift:284-291): it ends cleanly → the engine
+  silently degrades to extractive narration. **On-device quality loss
+  today is mostly silent overflow, not model weakness.** No
+  tokenCount/contextSize budgeting exists (iOS 26.4 APIs unused).
+- Already good: fresh LanguageModelSession per ask (no transcript
+  accumulation); reports are 2 short calls over deterministic
+  sections; meta/suggested-asks are model-free; retrieval on iOS is
+  lexical whole-chunk top-5 (120-word chunks, 25-word overlap → ~20%
+  duplicate text between neighbors; no sentence-level selection).
+
+The strategy: the model should receive CONCLUSIONS TO PHRASE, not
+evidence to analyze — and never pay for anything the engine already
+renders. Everything below is shared-engine work (both twins) except
+one staged bridge upgrade.
+
+### Prompt
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first, local-first analytics AI harness: Rust engine
+(native/crates/lighthouse-core) in a Tauri 2 shell (same crate is the
+iOS app; the on-device model is Apple Foundation Models behind an
+OpenAI-compatible loopback bridge,
+gen/apple/Sources/lighthouse-desktop/PrivateModelServer.swift),
+byte-compatible TS twin (src/server/), React UI (src/). Read
+CLAUDE.md, docs/ts-twin.md, docs/ios-private-model.md, and
+docs/roadmap-personas-2026-07.md §14 + §32 (the measured token
+ledger) before writing code. GOAL: every ask fits the on-device
+model's window (4,096 iOS 26 / 8,192 iOS 27, input+output combined)
+with an output reserve — while quality HOLDS or improves, because the
+model stops re-doing engine work. Deterministic analytics unchanged;
+grounding rules unchanged. The silent-overflow→extractive path must
+become rare and observable instead of routine and invisible.
+
+1. A tiered token budgeter (the foundation — one seam, both twins).
+   Replace the 6,144-tuned char constants (llm.rs:1063-1123
+   clamp_local_contexts/clamp_local_history + the doc-budget family;
+   KEEP IN SYNC llm.ts) with a per-tier budget: tiers = apple-fm-4096,
+   apple-fm-8192, llama-6144 (desktop 7B), remote-large. Tier resolves
+   at the provider seam (the bridge ADVERTISES its window — §7); the
+   budgeter allocates per-segment ceilings (system, task instruction,
+   semantic, schema, evidence, history, question) with a fixed OUTPUT
+   RESERVE (≥900 tok on 4k), estimates via the existing chars/4
+   heuristic, and degrades DETERMINISTICALLY in priority order (drop
+   few-shots → shrink history → drop unmatched semantic entries →
+   drop lowest-scored evidence → shrink schema samples) instead of
+   letting the window overflow. Pure function, unit-tested in cargo +
+   node: for every call type, assembled prompt ≤ tier budget minus
+   reserve. Desktop 7B keeps its effective sizes via its tier — no
+   desktop behavior change beyond the stale comment fix.
+
+2. A compact prompt profile (the system-prompt diet). Author
+   SYSTEM_PROMPT_COMPACT (~1,100-1,300 chars ≈ 300 tok) carrying ONLY
+   the load-bearing rules: grounded-numbers-only, cite sources,
+   honest uncertainty, ≤10-row tables when a table is unavoidable,
+   plain concise style. Everything the ENGINE enforces
+   deterministically leaves the prompt (charts ride meta.chart — the
+   model never draws them; provenance/freshness footers are
+   engine-stamped; HTML rules irrelevant on-device). Profile selection
+   is MODEL-CLASS-driven at the §1 seam (compact for the 4k/6k local
+   tiers — the desktop 7B benefits too; full for cloud), lives in
+   SHARED engine code, byte-pinned across twins with its own parity
+   test. The full SYSTEM_PROMPT is untouched for cloud.
+
+3. Narration becomes prose-over-a-fact-sheet (the biggest single win;
+   applies to ALL tiers). The narration call currently re-sends
+   schema cards (~1,800 tok) and a ≤6,000-char result table, then
+   asks the model to re-render ~10 rows the UI already painted.
+   Change the contract:
+   - DROP schema cards from narration entirely (they inform SQL
+     generation, not prose).
+   - Feed a compact engine-built FACT SHEET instead of the raw
+     markdown table: row/col counts, the tier-capped result rows in a
+     token-lean layout (TSV-style lines, not markdown pipes), plus
+     engine-computed headline facts where cheap (totals, top mover,
+     min/max — reuse the insights.rs detector style). Tier-aware
+     result caps (4k tier: ~12 rows / ~1,200 chars). Every number the
+     model may cite is IN the fact sheet — grounding preserved.
+   - Tell the model the table and chart are ALREADY DISPLAYED: its
+     job is 3-6 sentences of prose — the answer, the why, the caveat
+     — and it must NOT re-render the table. Move the result table
+     onto the structured channel to make that safe: ChunkMeta gains
+     `table` beside `chart` (§22.6 idiom completed; serde-default,
+     twins, renderer draws it at the historic position). Cloud tiers
+     adopt the same prose-only contract — output tokens drop
+     everywhere and table-mangling ends; update the §28 ~10-row
+     SYSTEM_PROMPT rule to match (tables only when the meta channel
+     is absent).
+4. The NL→SQL call goes on the same diet (deterministic pruning —
+   "semantic" work the engine does so the model doesn't):
+   - Schema cards: rank tables AND columns against the question via
+     the lexical scorer + the semantic layer's synonyms (engine-side,
+     deterministic); send the top 2-3 tables, each card listing only
+     matched + key columns with types, ONE sample value per matched
+     column (not 3 full markdown rows). Budget-capped by §1.
+   - Semantic block: matched-to-question ONLY (metrics/synonyms whose
+     terms intersect the question/expansion — applicableSemantics
+     exists); the full-store dump ends. Cap by budget.
+   - Few-shots: drop to ONE on compact tiers (keep 5 for cloud), and
+     drop prior-SQL context to a summary line when budget-tight.
+   - The 40-row NARRATE caps and the 6-table MAX_TABLES_TOTAL stay
+     for cloud; compact tiers get tier values via §1.
+
+5. RAG evidence: quotes, not chunks. At the one retrieval seam
+   (vault::retrieve post-.take(k) / the synth.rs context assembly),
+   add an engine-side pre-digest for compact tiers: dedupe the ~20%
+   overlap between neighboring 120-word chunks, rank SENTENCES within
+   the top chunks by the same lexical scorer, and emit tight quoted
+   snippets (with doc/citation ids intact) up to the evidence budget
+   — top-K becomes budget-driven instead of fixed 5. History: engine
+   distillation — last exchange verbatim (small clamp) + a 1-2 line
+   deterministic summary of older turns (questions asked, tables
+   used), never 6,000 chars of transcript. Citations/local-only marks
+   unchanged; the extractive fallback keeps working.
+
+6. Reports stay 2 calls but get per-section caps: the findings block
+   currently concatenates EVERY section's result_markdown unbounded
+   (reports.rs:494, clamped only at 11,000 chars) — cap per-section
+   contributions (headline + a few rows each) so both framing calls
+   fit the 4k tier with reserve. Section structure and the
+   deterministic report body are untouched.
+
+7. The bridge: advertise, observe, and (staged) constrain.
+   - ADVERTISE: the /health (or ready) payload gains the model's
+     context size — use SystemLanguageModel contextSize /
+     tokenCount(for:) where the SDK has them (iOS 26.4+), else the
+     4,096 default; the engine's §1 tier resolves from it (8,192 on
+     iOS 27 devices scales the evidence budget automatically, no
+     hardcoding).
+   - OBSERVE: the empty overflow catch gains a signal — a final SSE
+     comment/flag distinguishing FM_OVERFLOW and FM_GUARDRAIL from a
+     normal end, so the engine KNOWS narration degraded. Engine: on
+     overflow, the answer's footer says so honestly (one quiet line),
+     and a local diagnostics counter increments (no telemetry —
+     shell.log only). After §1-§5 this should approach zero; the
+     counter proves it.
+   - STAGED (spike, own commit, optional to ship): guided generation
+     for intent — where the SDK exposes @Generable reliably, add a
+     structured-intent endpoint to the loopback contract (the model
+     fills a typed query-intent form over ENUMERATED schema elements;
+     the ENGINE compiles+validates the SQL deterministically, single-
+     SELECT guard intact). Kills few-shots and SQL-grammar prose from
+     the prompt and eliminates SQL syntax errors. Capability-probed;
+     plain-text path remains the fallback; record the spike verdict
+     in docs/ios-private-model.md either way.
+
+8. Prove "quality remains the same" (deterministic, CI-runnable).
+   - Budget floor: for fixture asks across call types, the assembled
+     compact-tier prompt fits (budget minus reserve) — pure-function
+     tests, both twins.
+   - Fact floor: the fact sheet contains every number/entity the
+     golden answer cites; citation ids valid; the pruned schema cards
+     retain the columns the golden SQL uses (fixtures from the
+     existing eval-floor suites).
+   - A/B harness (desktop, manual): full vs compact profile over the
+     existing eval fixtures on the local 7B — factual-coverage
+     parity gate documented in the PR (model-free CI asserts the
+     deterministic floors; the A/B run is evidence, not CI).
+   - Update docs/ios-private-model.md §6 (the deferred Phase-B
+     re-derivation is THIS work) and the stale llm.rs budget comment.
+
+9. Stamps + PR. Patch bump across all SEVEN stamp files per
+   CLAUDE.md. Full node + cargo suites, release-smoke, ios-build
+   green. PARITY comments on every twin-shared constant; pinned
+   prompt tests move in the same commit as their strings.
+
+Constraints. No analytics/telemetry/accounts (the overflow counter is
+local-log only). Deterministic analytics and grounding rules
+unchanged — this moves tokens, never truth. Byte-pinned labels
+unchanged except the narration-contract lines, updated with their
+pins. Cloud-tier prompt behavior changes ONLY where stated (prose-
+over-fact-sheet + meta table). SharePoint plumbing untouched. Desktop
+7B path: same budgeter, its own tier, no felt regression.
+
+Acceptance:
+1. On an iOS 26 device/simulator: a 6-table vault, a full semantic
+   store, a multi-turn conversation, and a 200-row result each
+   produce a MODEL-narrated answer (not extractive) — the overflow
+   counter stays 0 across the acceptance run; airplane-mode ask
+   still answers.
+2. Budget tests prove every call type fits 4,096 with ≥900 reserve
+   (and scales to 8,192 when advertised); the budgeter's drop order
+   is deterministic and unit-pinned in both twins.
+3. Narration is prose-only over the fact sheet; the result table
+   renders from the structured channel on all platforms; no schema
+   cards in narration calls; every number in narration exists in the
+   fact sheet (fixture-asserted).
+4. NL→SQL on compact tiers: ≤3 pruned schema cards, matched-only
+   semantic entries, one few-shot — and the golden-SQL fixtures still
+   produce correct queries.
+5. RAG on compact tiers: deduped sentence-quotes with valid
+   citations within budget; the honest footer appears on a forced
+   overflow and otherwise never.
+6. Reports' two framing calls fit the 4k tier on a 6-section report.
+7. All suites + release-smoke + ios-build green; seven stamps bumped;
+   docs updated (ios-private-model.md Phase-B section, llm.rs budget
+   comment, design of the fact-sheet/quote-digest in ts-twin.md if
+   twin-visible).
+
+Environment. Engine/twin/budgeter/pruner work is fully
+container-testable; the bridge changes (health payload, overflow
+signal, guided-gen spike) need macOS + Xcode and an Apple-
+Intelligence device for the acceptance-1 run — the house convention
+applies (grep-verified Swift, ios-build lane as gate, device run
+recorded in the PR). One commit per numbered section. Open ONE PR
+titled "On-device token diet: tiered budgeter, fact-sheet narration,
+quote-digest RAG"; stop at the PR.
+```
