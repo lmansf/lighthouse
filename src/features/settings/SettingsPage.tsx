@@ -1,0 +1,139 @@
+"use client";
+
+/**
+ * 0.13.10 §2: Settings as a full-screen compact PAGE — the third tab. The
+ * grouped, scrollable reorganization of SettingsMenu's popup content (§31
+ * restyles it iOS-grouped; here just structure): every destination is a 44pt
+ * row that opens the same dialog / fires the same event the desktop gear menu
+ * does, so the two hosts can never drift. (0.13.10 §3 adds the relocated
+ * Business definitions and Saved views management groups here.)
+ *
+ * History is NOT here — it lives on the chat header (both platforms, §2).
+ * The "Save chats on this device" switch lives in Preferences (§2).
+ */
+import { useState } from "react";
+import { Button, Text, makeStyles, shorthands, tokens } from "@fluentui/react-components";
+import {
+  BoardRegular,
+  BrainCircuitRegular,
+  HistoryRegular,
+  InfoRegular,
+  LightbulbRegular,
+  OpenRegular,
+  OptionsRegular,
+  PinRegular,
+  QuestionCircleRegular,
+} from "@fluentui/react-icons";
+import {
+  AboutDialog,
+  AiModelsDialog,
+  AuditLogDialog,
+  PreferencesDialog,
+  LH_REPO,
+} from "./SettingsMenu";
+import { START_TOUR_EVENT } from "@/features/help/FirstRunTour";
+
+const useStyles = makeStyles({
+  page: {
+    display: "flex",
+    flexDirection: "column",
+    gap: tokens.spacingVerticalS,
+    paddingTop: tokens.spacingVerticalM,
+    paddingBottom: tokens.spacingVerticalXXL,
+  },
+  groupLabel: {
+    color: tokens.colorNeutralForeground3,
+    paddingLeft: tokens.spacingHorizontalS,
+    marginTop: tokens.spacingVerticalM,
+  },
+  group: {
+    display: "flex",
+    flexDirection: "column",
+    ...shorthands.borderRadius(tokens.borderRadiusLarge),
+    backgroundColor: tokens.colorNeutralBackground1,
+    overflow: "hidden",
+  },
+  // A 44pt tappable settings row: icon + label, full width, quiet.
+  row: {
+    justifyContent: "flex-start",
+    minHeight: "44px",
+    ...shorthands.borderRadius(0),
+  },
+  // The relocated management surfaces render inline inside their group card.
+  inline: {
+    ...shorthands.padding(0, tokens.spacingHorizontalM, tokens.spacingVerticalS),
+  },
+});
+
+/** One tappable destination row. */
+function Row({
+  icon,
+  label,
+  onClick,
+}: {
+  icon: React.ReactElement;
+  label: string;
+  onClick: () => void;
+}) {
+  const styles = useStyles();
+  return (
+    <Button appearance="subtle" icon={icon} className={styles.row} onClick={onClick}>
+      {label}
+    </Button>
+  );
+}
+
+export function SettingsPage() {
+  const styles = useStyles();
+  const [aiDlg, setAiDlg] = useState(false);
+  const [prefDlg, setPrefDlg] = useState(false);
+  const [auditDlg, setAuditDlg] = useState(false);
+  const [aboutDlg, setAboutDlg] = useState(false);
+
+  return (
+    <div className={styles.page} aria-label="Settings">
+      <div className={styles.group}>
+        <Row icon={<OptionsRegular />} label="Preferences" onClick={() => setPrefDlg(true)} />
+        <Row icon={<BrainCircuitRegular />} label="AI models" onClick={() => setAiDlg(true)} />
+        <Row
+          icon={<PinRegular />}
+          label="Pinned questions"
+          onClick={() => window.dispatchEvent(new CustomEvent("lighthouse:open-pins"))}
+        />
+        <Row
+          icon={<BoardRegular />}
+          label="Board"
+          onClick={() => window.dispatchEvent(new CustomEvent("lighthouse:open-board"))}
+        />
+        <Row icon={<HistoryRegular />} label="Audit log" onClick={() => setAuditDlg(true)} />
+      </div>
+
+      <Text size={200} weight="semibold" className={styles.groupLabel}>
+        Help &amp; about
+      </Text>
+      <div className={styles.group}>
+        <Row
+          icon={<LightbulbRegular />}
+          label="Send feedback"
+          onClick={() => window.dispatchEvent(new Event("lighthouse:open-feedback"))}
+        />
+        <Row
+          icon={<QuestionCircleRegular />}
+          label="Take the tour"
+          onClick={() => window.dispatchEvent(new Event(START_TOUR_EVENT))}
+        />
+        <Row
+          icon={<OpenRegular />}
+          label="Lighthouse on GitHub"
+          onClick={() => window.open(LH_REPO, "_blank", "noopener,noreferrer")}
+        />
+        <Row icon={<InfoRegular />} label="About Lighthouse" onClick={() => setAboutDlg(true)} />
+      </div>
+
+      <AiModelsDialog open={aiDlg} setOpen={setAiDlg} />
+      <PreferencesDialog open={prefDlg} setOpen={setPrefDlg} />
+      <AuditLogDialog open={auditDlg} setOpen={setAuditDlg} />
+      <AboutDialog open={aboutDlg} setOpen={setAboutDlg} />
+    </div>
+  );
+}

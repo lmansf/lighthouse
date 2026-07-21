@@ -58,16 +58,19 @@ export interface PaneLayout {
 }
 
 /**
- * fp4 §3: the compact bottom-nav destinations. The set + order live HERE as pure
- * data (no Fluent, no icons) so `paneLayout` owns WHAT the tabs are and WHEN the
- * bar shows (`showTabBar`), and both are host-testable. The tab bar component is
- * purely presentational: it maps each id to an icon and renders the labels.
+ * fp4 §3 → 0.13.10 §2: the compact bottom-nav destinations. The set + order
+ * live HERE as pure data (no Fluent, no icons) so `paneLayout` owns WHAT the
+ * tabs are and WHEN the bar shows (`showTabBar`), and both are host-testable.
+ * The tab bar component is purely presentational: it maps each id to an icon
+ * and renders the labels.
  *
  * - chat: home / the ask surface (the base layer — no page overlaid).
  * - files: the fp3 §3 full-screen files page.
- * - sections: the section rail as its own full page (History first).
+ * - settings: Settings as its own full page (0.13.10 §2 — the Sections tab is
+ *   retired; its capabilities relocated to the chat header, Settings, and chat
+ *   chips per the §30 audit).
  */
-export type CompactTab = "chat" | "files" | "sections";
+export type CompactTab = "chat" | "files" | "settings";
 
 export interface CompactTabDef {
   id: CompactTab;
@@ -78,7 +81,7 @@ export interface CompactTabDef {
 export const COMPACT_TABS: readonly CompactTabDef[] = [
   { id: "chat", label: "Chat" },
   { id: "files", label: "Files" },
-  { id: "sections", label: "Sections" },
+  { id: "settings", label: "Settings" },
 ];
 
 /** The §5 verdict — pure, host-testable (test/paneLayout.test.mjs pins it,

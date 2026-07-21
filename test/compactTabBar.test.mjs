@@ -1,6 +1,6 @@
 /**
- * fp4 §3 source pins: the compact portrait bottom tab bar (Chat · Files ·
- * Sections) is THE navigation on a mobile shell. These are text pins (the
+ * fp4 §3 → 0.13.10 §2 source pins: the compact bottom tab bar (Chat · Files ·
+ * Settings) is THE navigation on a mobile shell. These are text pins (the
  * component imports Fluent, which won't load under `node --test`), proving the
  * iOS-idiomatic contract can't silently regress:
  *   - fixed to the bottom, safe-area-inset-bottom aware, ≥44pt targets;
@@ -8,7 +8,7 @@
  *   - it slides fully out of view (and stops intercepting taps) when hidden,
  *     honoring reduced motion;
  *   - AppShell hosts it, hides it while the keyboard is up or a sheet is open,
- *     opens the Sections rail as a full page, and reserves room above the bar;
+ *     opens Settings as a full page, and reserves room above the bar;
  *   - the lone chat-header "open files and sections" button is gone.
  *
  * Run: `node --test test/compactTabBar.test.mjs`
@@ -54,7 +54,7 @@ test("hidden slides fully off-screen, stops intercepting taps, and honors reduce
   assert.match(bar, /prefers-reduced-motion/, "the slide is honored off for reduced motion");
 });
 
-test("AppShell hosts the bar, hides it for keyboard/sheet, and opens Sections as a page", () => {
+test("AppShell hosts the bar, hides it for keyboard/sheet, and opens Settings as a page", () => {
   assert.match(
     shell,
     /<CompactTabBar active=\{compactTab\} onSelect=\{handleTabSelect\} hidden=\{tabBarHidden\} \/>/,
@@ -65,7 +65,8 @@ test("AppShell hosts the bar, hides it for keyboard/sheet, and opens Sections as
     /const tabBarHidden = keyboardInset > 0 \|\| editableFocused \|\| sheetOpen/,
     "the bar hides while the keyboard is up (overlay inset OR resize-mode editable focus) or a modal section sheet is open",
   );
-  assert.match(shell, /<SectionRail page \/>/, "the Sections tab opens the rail as a full page");
+  assert.match(shell, /<SettingsPage \/>/, "the Settings tab opens Settings as a full page");
+  assert.match(shell, /aria-label="Settings"/, "the page announces itself as Settings");
   assert.match(
     shell,
     /setProperty\("--lh-tabbar-h"/,

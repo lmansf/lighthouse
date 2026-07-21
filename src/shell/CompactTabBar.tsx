@@ -1,8 +1,8 @@
 "use client";
 
 /**
- * fp4 §3: the compact portrait bottom tab bar — THE navigation on a mobile shell
- * below the breakpoint (Chat · Files · Sections). It is deliberately a THIN
+ * fp4 §3: the compact bottom tab bar — THE navigation on a mobile shell
+ * below the breakpoint (Chat · Files · Settings). It is deliberately a THIN
  * presentational component: the tab set + order + when-to-show live in
  * `paneLayout` (COMPACT_TABS / showTabBar, pure + tested); this only maps each id
  * to an icon and reports taps.
@@ -17,12 +17,12 @@
  */
 import { makeStyles, mergeClasses, shorthands, tokens } from "@fluentui/react-components";
 import {
-  AppsListRegular,
-  AppsListFilled,
   ChatRegular,
   ChatFilled,
   FolderRegular,
   FolderFilled,
+  SettingsRegular,
+  SettingsFilled,
 } from "@fluentui/react-icons";
 import { COMPACT_TABS, type CompactTab } from "./paneLayout";
 
@@ -36,7 +36,7 @@ export const TAB_BAR_CONTENT_HEIGHT = 49;
 const TAB_ICONS: Record<CompactTab, { rest: React.ReactNode; active: React.ReactNode }> = {
   chat: { rest: <ChatRegular />, active: <ChatFilled /> },
   files: { rest: <FolderRegular />, active: <FolderFilled /> },
-  sections: { rest: <AppsListRegular />, active: <AppsListFilled /> },
+  settings: { rest: <SettingsRegular />, active: <SettingsFilled /> },
 };
 
 const useStyles = makeStyles({

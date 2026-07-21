@@ -1,29 +1,27 @@
 "use client";
 
 /**
- * [TEAM: chat] The History sidebar section (§22.2) — recent chats moved out of
- * the ChatPanel's header drawer into a first-class SectionFlyout section, so
- * past conversations are reachable from the rail without crowding the top bar.
- *
- * PROP-LESS by contract: the SectionFlyout mounts registered components with
- * no props (src/shell/SectionFlyout.tsx), so everything here reads the chat
+ * [TEAM: chat] The History surface (§22.2 → 0.13.10 §2) — recent chats,
+ * opened from the chat header's History button: a full-screen Sheet on
+ * compact, an anchored popover on desktop. Everything here reads the chat
  * store directly and owns its own local state (search, rename, delete
- * confirm, the All-chats toggle). What moved verbatim from the drawer: the
- * opt-in "Save chats on this device" switch, New chat, search, and the row
- * affordances (rename pencil, inline confirm delete). What's new here:
+ * confirm, the All-chats toggle); the host passes only `onClose` so opening
+ * a conversation can dismiss the surface. Structure:
  *
  *  - ChatGPT-style DATE GROUPING (Today / Yesterday / This week / Earlier)
  *    via the pure, clock-injectable groupByRecency (src/lib/historyGrouping);
  *  - context scoping: the CURRENT investigation's chats list first, with an
  *    "All chats" toggle that widens to every context (own chats still lead —
  *    conversationsAllContexts) — shown only when another context has chats;
- *  - opening a conversation closes the flyout (useSidebarFlyout.close), so
- *    the transcript you asked for is immediately in view.
+ *  - opening a conversation calls onClose, so the transcript you asked for
+ *    is immediately in view.
  *
- * New chat rides the EXISTING `lighthouse:new-chat` window event (the
- * settings-menu / Mod+N seam) instead of calling the store directly, so the
+ * The "Save chats on this device" switch moved to Settings → Preferences
+ * (0.13.10 §2) — the surface states the current posture in its empty copy
+ * but no longer carries the control. New chat rides the EXISTING
+ * `lighthouse:new-chat` window event (the settings-menu / Mod+N seam) so the
  * ChatPanel's own cleanup (draft, attachments, the Undo strip) stays in one
- * place. Beam treatment: Fluent tokens only, the SectionRail/flyout palette.
+ * place. Beam treatment: Fluent tokens only.
  */
 
 import { useMemo, useState } from "react";
@@ -31,7 +29,6 @@ import {
   Button,
   Input,
   SearchBox,
-  Switch,
   Text,
   ToggleButton,
   makeStyles,
@@ -51,7 +48,6 @@ import {
   conversationsForContext,
   useChatStore,
 } from "@/stores/useChatStore";
-import { useSidebarFlyout } from "@/stores/useSidebarFlyout";
 import { groupByRecency, relativeTimeLabel } from "@/lib/historyGrouping";
 
 const useStyles = makeStyles({
@@ -62,17 +58,8 @@ const useStyles = makeStyles({
     paddingTop: tokens.spacingVerticalM,
     paddingBottom: tokens.spacingVerticalS,
   },
-  // Opt-in persistence control at the top of the section: a switch plus a hint
-  // line that spells out where chats live and when they expire.
-  persist: {
-    display: "flex",
-    flexDirection: "column",
-    gap: tokens.spacingVerticalXS,
-    ...shorthands.padding(tokens.spacingVerticalS, tokens.spacingHorizontalM),
-    marginBottom: tokens.spacingVerticalXS,
-    borderRadius: tokens.borderRadiusMedium,
-    backgroundColor: tokens.colorNeutralBackground3,
-  },
+  // The persistence posture line (the control itself lives in Settings →
+  // Preferences, 0.13.10 §2).
   persistHint: { color: tokens.colorNeutralForeground3 },
   newChat: { width: "100%" },
   search: { width: "100%" },
@@ -137,7 +124,7 @@ const useStyles = makeStyles({
   confirmText: { color: tokens.colorStatusDangerForeground1, flex: 1, minWidth: "100px" },
 });
 
-export function HistoryNav() {
+export function HistoryNav({ onClose }: { onClose?: () => void } = {}) {
   const styles = useStyles();
   const conversations = useChatStore((s) => s.conversations);
   const currentId = useChatStore((s) => s.currentId);
@@ -147,8 +134,9 @@ export function HistoryNav() {
   const renameConversation = useChatStore((s) => s.renameConversation);
   const deleteConversation = useChatStore((s) => s.deleteConversation);
   const persistEnabled = useChatStore((s) => s.persistEnabled);
-  const setPersistEnabled = useChatStore((s) => s.setPersistEnabled);
-  const close = useSidebarFlyout((s) => s.close);
+  // The hosting surface (Sheet on compact, popover on desktop) dismisses via
+  // this — the surface's job, not the list's.
+  const close = onClose ?? (() => {});
 
   const [search, setSearch] = useState("");
   const [showAll, setShowAll] = useState(false);
@@ -199,20 +187,13 @@ export function HistoryNav() {
 
   return (
     <nav aria-label="History" className={styles.section}>
-      {/* Saving is opt-in: off by default, kept on this device when on, and
-          auto-cleared after two weeks. */}
-      <div className={styles.persist}>
-        <Switch
-          checked={persistEnabled}
-          onChange={(_, d) => setPersistEnabled(Boolean(d.checked))}
-          label="Save chats on this device"
-        />
-        <Text size={200} className={styles.persistHint}>
-          {persistEnabled
-            ? "Kept on this device and cleared automatically after two weeks. Delete any chat with its trash icon."
-            : "Chats aren't being saved — they clear when you close the app. Turn this on to keep them here."}
-        </Text>
-      </div>
+      {/* Saving is opt-in and lives in Settings → Preferences ("Save chats on
+          this device", 0.13.10 §2); this line states the current posture. */}
+      <Text size={200} className={styles.persistHint}>
+        {persistEnabled
+          ? "Kept on this device and cleared automatically after two weeks. Delete any chat with its trash icon."
+          : "Chats aren't being saved — they clear when you close the app. Turn on “Save chats on this device” in Settings to keep them here."}
+      </Text>
       <Button
         appearance="secondary"
         icon={<AddRegular />}

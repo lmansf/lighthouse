@@ -22,15 +22,15 @@ test("the breakpoint is 700 (the CSS query derives from this constant)", () => {
   assert.equal(COMPACT_BREAKPOINT, 700);
 });
 
-test("fp4 §3: the compact tab set is Chat · Files · Sections, in that order (pinned data)", () => {
+test("0.13.10 §2: the compact tab set is Chat · Files · Settings, in that order (pinned data)", () => {
   assert.deepEqual(
     COMPACT_TABS.map((t) => t.id),
-    ["chat", "files", "sections"],
-    "the destinations + order are Chat, Files, Sections",
+    ["chat", "files", "settings"],
+    "the destinations + order are Chat, Files, Settings — Sections is retired",
   );
   assert.deepEqual(
     COMPACT_TABS.map((t) => t.label),
-    ["Chat", "Files", "Sections"],
+    ["Chat", "Files", "Settings"],
     "the labels are byte-pinned (twin parity)",
   );
 });

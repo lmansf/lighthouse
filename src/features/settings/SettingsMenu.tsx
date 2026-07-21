@@ -70,7 +70,7 @@ import { useChatStore } from "@/stores/useChatStore";
 import { useRagStore } from "@/stores/useRagStore";
 import { BEAM_SWEEP } from "@/shell/theme";
 
-const LH_REPO = "https://github.com/lmansf/lighthouse";
+export const LH_REPO = "https://github.com/lmansf/lighthouse";
 
 const useStyles = makeStyles({
   full: { width: "100%" },
@@ -230,7 +230,7 @@ function openExternal(url: string) {
  * the stored key when the field is left blank, so the user can switch model
  * without re-pasting their key.
  */
-function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean) => void }) {
+export function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean) => void }) {
   const styles = useStyles();
   const onboarding = useAuthStore((s) => s.onboarding);
   // switchModel = selectModel + completeOnboarding in one publish: a post-
@@ -798,7 +798,7 @@ function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean
  * usually absent (opt-in), so this only ever shows the metadata, never the sha256
  * dressed up as the question.
  */
-function AuditLogDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean) => void }) {
+export function AuditLogDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean) => void }) {
   const styles = useStyles();
   const [snapshot, setSnapshot] = useState<AuditSnapshot | null>(null);
   const [loading, setLoading] = useState(false);
@@ -1043,7 +1043,7 @@ function accelFromEvent(e: KeyboardEvent): string | null {
  * usage analytics, and (desktop only) launching Lighthouse at login. Each
  * change applies immediately.
  */
-function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean) => void }) {
+export function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean) => void }) {
   const styles = useStyles();
   const defaultInclusion = useAuthStore((s) => s.onboarding.defaultInclusion);
   const setDefaultInclusion = useAuthStore((s) => s.setDefaultInclusion);
@@ -1753,7 +1753,7 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
  * NEXT_PUBLIC_APP_VERSION as VersionBadge; when it's absent (plain web dev)
  * the line shows the name alone.
  */
-function AboutDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean) => void }) {
+export function AboutDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean) => void }) {
   const styles = useStyles();
   const version = process.env.NEXT_PUBLIC_APP_VERSION;
   return (

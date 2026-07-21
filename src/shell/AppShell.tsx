@@ -15,6 +15,7 @@ import { useSidebarFlyout } from "@/stores/useSidebarFlyout";
 import { useChatStore } from "@/stores/useChatStore";
 import { INSPECT_FILE_EVENT } from "@/lib/citePreview";
 import { StartupPrompt } from "@/features/startup/StartupPrompt";
+import { SettingsPage } from "@/features/settings/SettingsPage";
 
 const useStyles = makeStyles({
   root: {
@@ -114,18 +115,18 @@ const useStyles = makeStyles({
     opacity: 0,
     "@media (prefers-reduced-motion: reduce)": { transform: "none" },
   },
-  // --- fp4 §3 compact SECTIONS page (mobile shells < 700px only) ------------
-  // The Sections tab opens the section rail as its own full-screen page (a peer
-  // of the files page). Its chrome mirrors the files page: a header row with the
-  // title + a 44pt Back-to-chat control, and a scrollable body holding the rail
-  // in `page` mode (every section a flat 48pt row, History first).
-  sectionsPage: {
+  // --- 0.13.10 §2 compact SETTINGS page (mobile shells only) ----------------
+  // The Settings tab opens Settings as its own full-screen page (a peer of the
+  // files page). Its chrome mirrors the files page: a header row with the title
+  // + a 44pt Back-to-chat control, and a scrollable body holding the grouped
+  // settings page (src/features/settings/SettingsPage).
+  pagePane: {
     flex: 1,
     minWidth: 0,
     display: "flex",
     flexDirection: "column",
   },
-  sectionsHeader: {
+  pageHeader: {
     display: "flex",
     alignItems: "center",
     justifyContent: "space-between",
@@ -138,7 +139,7 @@ const useStyles = makeStyles({
     borderBottomStyle: "solid",
     borderBottomColor: tokens.colorNeutralStroke2,
   },
-  sectionsBody: {
+  pageBody: {
     flex: 1,
     minHeight: 0,
     overflowY: "auto",
@@ -288,18 +289,28 @@ export function AppShell({ sidebar, main }: AppShellProps) {
     return () => cancelAnimationFrame(r);
   }, [layout.drawerVisible]);
 
-  // fp4 §3: the Sections page shares the files page's slide-in entrance.
-  const sectionsVisible = layout.compact && compactTab === "sections";
-  const sectionsScrollRef = useRef<HTMLDivElement>(null);
-  const [sectionsEntered, setSectionsEntered] = useState(false);
+  // 0.13.10 §2: the Settings page shares the files page's slide-in entrance.
+  const settingsVisible = layout.compact && compactTab === "settings";
+  const settingsScrollRef = useRef<HTMLDivElement>(null);
+  const [settingsEntered, setSettingsEntered] = useState(false);
   useEffect(() => {
-    if (!sectionsVisible) {
-      setSectionsEntered(false);
+    if (!settingsVisible) {
+      setSettingsEntered(false);
       return;
     }
-    const r = requestAnimationFrame(() => setSectionsEntered(true));
+    const r = requestAnimationFrame(() => setSettingsEntered(true));
     return () => cancelAnimationFrame(r);
-  }, [sectionsVisible]);
+  }, [settingsVisible]);
+
+  // 0.13.10 §2: "open preferences" routes to the Settings PAGE on compact (the
+  // desktop gear menu keeps opening its dialog — SettingsMenu listens there).
+  useEffect(() => {
+    const onPrefs = () => {
+      if (compactRef.current) setCompactTab("settings");
+    };
+    window.addEventListener("lighthouse:open-preferences", onPrefs);
+    return () => window.removeEventListener("lighthouse:open-preferences", onPrefs);
+  }, []);
 
   // Ask box vs the on-screen keyboard: the OS keyboard overlays a WKWebView
   // rather than resizing it, so pad the main column by the covered height
@@ -402,7 +413,7 @@ export function AppShell({ sidebar, main }: AppShellProps) {
     if (tab === compactTab) {
       if (tab === "chat") window.dispatchEvent(new CustomEvent("lighthouse:chat-scroll-top"));
       else if (tab === "files") window.dispatchEvent(new CustomEvent("lighthouse:explorer-scroll-top"));
-      else sectionsScrollRef.current?.scrollTo({ top: 0, behavior: "auto" });
+      else settingsScrollRef.current?.scrollTo({ top: 0, behavior: "auto" });
       return;
     }
     setCompactTab(tab);
@@ -663,21 +674,20 @@ export function AppShell({ sidebar, main }: AppShellProps) {
             </Sidebar>
           </div>
         )}
-        {/* fp4 §3: the Sections tab opens the section rail as its own full page
-            (History first, every section a flat 48pt row). Tapping a section
-            still opens its SectionFlyout sheet over the top (the modal below). */}
-        {sectionsVisible && (
+        {/* 0.13.10 §2: the Settings tab opens Settings as its own full page —
+            the grouped reorganization of the desktop gear menu's content. */}
+        {settingsVisible && (
           <div
-            className={mergeClasses(styles.page, !sectionsEntered && styles.pageEntering)}
+            className={mergeClasses(styles.page, !settingsEntered && styles.pageEntering)}
             role="dialog"
             aria-modal="true"
-            aria-label="Sections"
+            aria-label="Settings"
             onTouchStart={onDrawerTouchStart}
             onTouchEnd={onDrawerTouchEnd}
           >
-            <div className={styles.sectionsPage}>
-              <div className={styles.sectionsHeader}>
-                <Text weight="semibold">Sections</Text>
+            <div className={styles.pagePane}>
+              <div className={styles.pageHeader}>
+                <Text weight="semibold">Settings</Text>
                 <Button
                   appearance="subtle"
                   className={styles.backBtn}
@@ -688,8 +698,8 @@ export function AppShell({ sidebar, main }: AppShellProps) {
                   Back
                 </Button>
               </div>
-              <div className={styles.sectionsBody} ref={sectionsScrollRef}>
-                <SectionRail page />
+              <div className={styles.pageBody} ref={settingsScrollRef}>
+                <SettingsPage />
               </div>
             </div>
           </div>

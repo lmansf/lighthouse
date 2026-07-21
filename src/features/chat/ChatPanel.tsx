@@ -134,7 +134,9 @@ import { modKey } from "@/features/onboarding/ModeChooser";
 import { ACCENTS, BEAM_SWEEP } from "@/shell/theme";
 import { FILE_DRAG_MIME, parseDraggedFiles, type DraggedFile } from "@/shell/dnd";
 import { isDesktopShell, pathsForFiles, platformKind } from "@/shell/desktopBridge";
-import { useCoarsePointer } from "@/shell/paneLayout";
+import { useCoarsePointer, usePaneLayout } from "@/shell/paneLayout";
+import { Sheet } from "@/shell/Sheet";
+import { HistoryNav } from "./HistoryNav";
 
 // The markdown stack (react-markdown + remark-gfm + micromark, ~263 KB) is the
 // single largest chunk and is only needed once a finished answer renders — not
@@ -263,6 +265,9 @@ const useStyles = makeStyles({
     marginBottom: tokens.spacingVerticalM,
   },
   headerMeta: { display: "flex", alignItems: "center", gap: tokens.spacingHorizontalS },
+  // 0.13.10 §2: the desktop History popover — the same HistoryNav the compact
+  // Sheet hosts, anchored to the header's clock button.
+  historySurface: { width: "360px", maxHeight: "70vh", overflowY: "auto" },
   // Compact context header (openspec: add-investigations §4.2): the Title3 is
   // the investigation's name with its scope size as a quiet baseline caption
   // ("Ask" alone in the global context). The name truncates before it can
@@ -2462,6 +2467,10 @@ export function ChatPanel() {
   // media queries can't reach (mount-autofocus suppression, instant citation
   // jump, tappable ghost). Distinct from compact/width and from platformKind.
   const coarsePointer = useCoarsePointer();
+  // 0.13.10 §2: the History surface opens from the chat header on EVERY
+  // platform — a full-screen Sheet on compact, an anchored popover on desktop.
+  const compactLayout = usePaneLayout(false).compact;
+  const [historyOpen, setHistoryOpen] = useState(false);
   // Subscribe to `nodes` (not the stable `includedFileIds` fn) so the panel
   // re-renders when the explorer toggles inclusion - this is the live seam.
   const nodes = useRagStore((s) => s.nodes);
@@ -4316,6 +4325,40 @@ export function ChatPanel() {
     />
   );
 
+  // 0.13.10 §2: the History entry — one clock button in the header (hero and
+  // conversation alike). Compact opens the full-screen Sheet below; desktop
+  // anchors the same HistoryNav in a popover.
+  const historyButton = compactLayout ? (
+    <Tooltip content="Chat history" relationship="label">
+      <Button
+        appearance="subtle"
+        icon={<HistoryRegular />}
+        aria-label="Chat history"
+        onClick={() => setHistoryOpen(true)}
+      />
+    </Tooltip>
+  ) : (
+    <Popover open={historyOpen} onOpenChange={(_, d) => setHistoryOpen(d.open)} positioning="below-end">
+      <PopoverTrigger disableButtonEnhancement>
+        <Button
+          appearance="subtle"
+          icon={<HistoryRegular />}
+          aria-label="Chat history"
+          title="Chat history"
+        />
+      </PopoverTrigger>
+      <PopoverSurface className={styles.historySurface}>
+        <HistoryNav onClose={() => setHistoryOpen(false)} />
+      </PopoverSurface>
+    </Popover>
+  );
+  const historySheet =
+    compactLayout && historyOpen ? (
+      <Sheet title="History" onClose={() => setHistoryOpen(false)}>
+        <HistoryNav onClose={() => setHistoryOpen(false)} />
+      </Sheet>
+    ) : null;
+
   // Scope pill (openspec: add-investigations §4.2), the attachBar register: a
   // quiet reminder that asks here read only the investigation's files. Hidden
   // for an empty scope (= the whole vault — nothing narrower to disclose).
@@ -4897,9 +4940,12 @@ export function ChatPanel() {
           {/* §22.2: the one status popover (visible-files count, on-device
               policy, hidden-from-cloud, egress) — OUTSIDE the visible-files
               branch so the on-device promise never disappears with it when no
-              files are visible yet. Past chats live in the sidebar History
-              section now (HistoryNav); the hero carries no History button. */}
-          {statusShield}
+              files are visible yet. 0.13.10 §2: past chats open from the
+              History button here too — an empty screen must still reach them. */}
+          <div className={styles.heroInvRow}>
+            {statusShield}
+            {historyButton}
+          </div>
           {includedFileIds.length === 0 && attachments.length === 0 ? (
             // Pre-flight: nothing is visible to AI yet. Inform gently and offer
             // the fix, but never block asking.
@@ -4964,6 +5010,7 @@ export function ChatPanel() {
           )}
           <div className={styles.heroComposer}>{composer("Ask about the files visible to AI…")}</div>
         </div>
+        {historySheet}
       </section>
     );
   }
@@ -4977,6 +5024,7 @@ export function ChatPanel() {
       {...dropHandlers}
     >
       {pinsDialog}
+      {historySheet}
       <div className={styles.conversation}>
         {pinAlertBanner}
         <div className={styles.header}>
@@ -5015,6 +5063,7 @@ export function ChatPanel() {
                 History moved to the sidebar section; Save-to-note and New chat
                 stay as the header's quiet actions. */}
             {statusShield}
+            {historyButton}
             <Tooltip content="Save this chat as a note in your vault" relationship="label">
               <Button
                 appearance="subtle"
