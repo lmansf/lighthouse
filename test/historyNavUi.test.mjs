@@ -1,11 +1,10 @@
-// §22.2 History as a sidebar section — recent chats moved out of the
-// ChatPanel's header drawer into HistoryNav, mounted by the SectionFlyout via
-// the registry. The pure seams are exercised for real (the new
-// conversationsAllContexts selector; grouping has its own suite in
-// historyGrouping.test.mjs); the JSX surfaces (HistoryNav, ChatPanel,
-// sidebarSections) can't load in node, so their guarantees are asserted
-// structurally against the source — the recipesNavUi/investigationsUi house
-// style. Live behavior is the E2E pass.
+// §22.2 → 0.13.10 §2: History opens from the CHAT HEADER on every platform —
+// a full-screen Sheet on compact, an anchored popover on desktop (the Sections
+// rail that used to host it is retired). The pure seams are exercised for
+// real (the conversationsAllContexts selector; grouping has its own suite in
+// historyGrouping.test.mjs); the JSX surfaces (HistoryNav, ChatPanel) can't
+// load in node, so their guarantees are asserted structurally against the
+// source. Live behavior is verified on-device.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -24,7 +23,6 @@ const read = (p) => readFileSync(path.join(ROOT, p), "utf8");
 
 const nav = read("src/features/chat/HistoryNav.tsx");
 const chat = read("src/features/chat/ChatPanel.tsx");
-const registry = read("src/shell/sidebarSections.tsx");
 
 // --- The pure selector: All chats, current context first ---------------------
 
@@ -67,19 +65,12 @@ test("conversationsAllContexts lists the current context first, newest-first per
 
 // --- The section: registry entry, prop-less mount, store-directness ----------
 
-test("History is the FIRST registered sidebar section, mounting HistoryNav", () => {
-  assert.match(registry, /import \{ HistoryNav \} from "@\/features\/chat\/HistoryNav";/);
-  // First row of SIDEBAR_SECTIONS, directly above What stands out.
+test("HistoryNav takes only onClose (the hosting surface's dismissal) and reads the store directly", () => {
   assert.match(
-    registry,
-    /SIDEBAR_SECTIONS: SidebarSection\[\] = \[\s*\{ id: "history", label: "History", icon: HistoryRegular, Component: HistoryNav \},\s*\{ id: "insights"/,
-    "history leads the registry",
+    nav,
+    /export function HistoryNav\(\{ onClose \}: \{ onClose\?: \(\) => void \} = \{\}\)/,
+    "one optional prop — the surface's close, nothing else",
   );
-});
-
-test("HistoryNav is prop-less (the flyout mounts components bare) and reads the store directly", () => {
-  assert.match(nav, /export function HistoryNav\(\) \{/, "no props — the SectionFlyout contract");
-  assert.match(read("src/shell/SectionFlyout.tsx"), /<Body \/>/, "the flyout mounts it verbatim");
   for (const sel of [
     "s.conversations",
     "s.currentId",
@@ -87,14 +78,20 @@ test("HistoryNav is prop-less (the flyout mounts components bare) and reads the 
     "s.renameConversation",
     "s.deleteConversation",
     "s.persistEnabled",
-    "s.setPersistEnabled",
   ]) {
     assert.ok(nav.includes(sel), `reads useChatStore ${sel} directly`);
   }
 });
 
-test("the drawer body moved verbatim: persist switch + hints, search, rename, confirm delete", () => {
-  assert.match(nav, /label="Save chats on this device"/);
+test("0.13.10 §2: the persist SWITCH moved to Settings; the list keeps search/rename/delete", () => {
+  // The control lives in Preferences (Settings); History only states posture.
+  assert.doesNotMatch(nav, /label="Save chats on this device"/, "no switch here anymore");
+  assert.doesNotMatch(nav, /setPersistEnabled/, "…and no setter wired");
+  assert.match(
+    read("src/features/settings/SettingsMenu.tsx"),
+    /label="Save chats on this device/,
+    "Preferences carries the one persist control",
+  );
   assert.ok(nav.includes("Kept on this device and cleared automatically after two weeks."));
   assert.ok(nav.includes("Chats aren't being saved — they clear when you close the app."));
   assert.match(nav, /placeholder="Search chats…"/);
@@ -116,15 +113,15 @@ test("scoped listing first, with the All-chats toggle widening to every context"
   assert.match(nav, />\s*All chats\s*</, "…and labeled plainly");
 });
 
-test("the current chat is highlighted; opening a conversation closes the flyout", () => {
+test("the current chat is highlighted; opening a conversation dismisses the surface", () => {
   assert.match(nav, /const active = c\.id === currentId;/);
   assert.match(nav, /active && styles\.rowActive/, "the histRowActive pattern");
   assert.match(
     nav,
     /if \(id !== currentId\) openConversation\(id\);\s*\n\s*close\(\);/,
-    "open → store switch + useSidebarFlyout close()",
+    "open → store switch + the host surface's close",
   );
-  assert.match(nav, /useSidebarFlyout\(\(s\) => s\.close\)/);
+  assert.match(nav, /const close = onClose \?\? \(\(\) => \{\}\);/, "close is the onClose prop");
 });
 
 test("New chat rides the existing lighthouse:new-chat seam (ChatPanel keeps its cleanup)", () => {
@@ -134,9 +131,19 @@ test("New chat rides the existing lighthouse:new-chat seam (ChatPanel keeps its 
 
 // --- The ChatPanel side: the old entry points are gone -----------------------
 
-test("ChatPanel dropped the drawer, its header History button, and the hero affordance", () => {
-  assert.doesNotMatch(chat, /OverlayDrawer|DrawerHeader|DrawerBody/, "the drawer is gone");
-  assert.doesNotMatch(chat, /historyOpen|setHistoryOpen/, "…and its open state");
-  assert.doesNotMatch(chat, /historyButton|heroHistory/, "…and both entry points");
-  assert.doesNotMatch(chat, /histSearch|renamingId|confirmDeleteId/, "…and the drawer-local state");
+test("0.13.10 §2: the chat header hosts History — Sheet on compact, popover on desktop", () => {
+  assert.doesNotMatch(chat, /OverlayDrawer|DrawerHeader|DrawerBody/, "the old drawer stays gone");
+  assert.match(chat, /aria-label="Chat history"/, "the header clock button");
+  assert.match(
+    chat,
+    /compactLayout && historyOpen \? \(\s*\n\s*<Sheet title="History" onClose=/,
+    "compact opens the full-screen Sheet",
+  );
+  assert.match(
+    chat,
+    /<PopoverSurface className=\{styles\.historySurface\}>\s*\n\s*<HistoryNav onClose=/,
+    "desktop anchors the same HistoryNav in a popover",
+  );
+  assert.match(chat, /\{historyButton\}\s*\n\s*<Tooltip content="Save this chat/, "beside Save/New chat");
+  assert.doesNotMatch(chat, /histSearch|renamingId|confirmDeleteId/, "list state stays in HistoryNav");
 });

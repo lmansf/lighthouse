@@ -33,11 +33,13 @@ import {
 } from "@fluentui/react-components";
 import {
   BoardRegular,
-  LightbulbRegular,
+  BookRegular,
   BrainCircuitRegular,
   DeleteRegular,
   HistoryRegular,
   InfoRegular,
+  LibraryRegular,
+  LightbulbRegular,
   OpenRegular,
   OptionsRegular,
   PinRegular,
@@ -60,6 +62,8 @@ import { platformKind } from "@/shell/desktopBridge";
 import { LocalModelInstallPanel, humanBytes } from "@/features/localModel/LocalModelOption";
 import { apiKeyBillingNote, signinBillingNote } from "@/lib/billingNotes";
 import { RULE_ACTION_LABEL } from "@/features/explorer/FolderRulesDialog";
+import { SemanticNav } from "@/features/semantic/SemanticNav";
+import { ViewsNav } from "@/features/views/ViewsNav";
 import { START_TOUR_EVENT } from "@/features/help/FirstRunTour";
 import { showWidget, summonHotkey, prettyShortcut, modKey } from "@/features/onboarding/ModeChooser";
 import { useAuthStore } from "@/stores/useAuthStore";
@@ -70,7 +74,7 @@ import { useChatStore } from "@/stores/useChatStore";
 import { useRagStore } from "@/stores/useRagStore";
 import { BEAM_SWEEP } from "@/shell/theme";
 
-const LH_REPO = "https://github.com/lmansf/lighthouse";
+export const LH_REPO = "https://github.com/lmansf/lighthouse";
 
 const useStyles = makeStyles({
   full: { width: "100%" },
@@ -230,7 +234,7 @@ function openExternal(url: string) {
  * the stored key when the field is left blank, so the user can switch model
  * without re-pasting their key.
  */
-function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean) => void }) {
+export function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean) => void }) {
   const styles = useStyles();
   const onboarding = useAuthStore((s) => s.onboarding);
   // switchModel = selectModel + completeOnboarding in one publish: a post-
@@ -798,7 +802,7 @@ function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean
  * usually absent (opt-in), so this only ever shows the metadata, never the sha256
  * dressed up as the question.
  */
-function AuditLogDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean) => void }) {
+export function AuditLogDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean) => void }) {
   const styles = useStyles();
   const [snapshot, setSnapshot] = useState<AuditSnapshot | null>(null);
   const [loading, setLoading] = useState(false);
@@ -1043,7 +1047,7 @@ function accelFromEvent(e: KeyboardEvent): string | null {
  * usage analytics, and (desktop only) launching Lighthouse at login. Each
  * change applies immediately.
  */
-function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean) => void }) {
+export function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean) => void }) {
   const styles = useStyles();
   const defaultInclusion = useAuthStore((s) => s.onboarding.defaultInclusion);
   const setDefaultInclusion = useAuthStore((s) => s.setDefaultInclusion);
@@ -1753,7 +1757,7 @@ function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: bool
  * NEXT_PUBLIC_APP_VERSION as VersionBadge; when it's absent (plain web dev)
  * the line shows the name alone.
  */
-function AboutDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean) => void }) {
+export function AboutDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean) => void }) {
   const styles = useStyles();
   const version = process.env.NEXT_PUBLIC_APP_VERSION;
   return (
@@ -1801,12 +1805,48 @@ function AboutDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean) =
   );
 }
 
+/**
+ * 0.13.10 §3: a plain dialog host for the relocated management surfaces
+ * (Business definitions / Saved views) — the desktop counterpart of the
+ * Settings page's inline groups, so both platforms reach the same components.
+ */
+function NavDialog({
+  title,
+  open,
+  setOpen,
+  children,
+}: {
+  title: string;
+  open: boolean;
+  setOpen: (b: boolean) => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <Dialog open={open} onOpenChange={(_, d) => setOpen(d.open)}>
+      <DialogSurface>
+        <DialogBody>
+          <DialogTitle>{title}</DialogTitle>
+          <DialogContent>{children}</DialogContent>
+          <DialogActions>
+            <DialogTrigger disableButtonEnhancement>
+              <Button appearance="secondary">Close</Button>
+            </DialogTrigger>
+          </DialogActions>
+        </DialogBody>
+      </DialogSurface>
+    </Dialog>
+  );
+}
+
 export function SettingsMenu() {
   const styles = useStyles();
   const [aiDlg, setAiDlg] = useState(false);
   const [prefDlg, setPrefDlg] = useState(false);
   const [auditDlg, setAuditDlg] = useState(false);
   const [aboutDlg, setAboutDlg] = useState(false);
+  // 0.13.10 §3: the relocated management surfaces (the Sections rail is gone).
+  const [semanticDlg, setSemanticDlg] = useState(false);
+  const [viewsDlg, setViewsDlg] = useState(false);
 
   // Other features (chat empty states, explorer hints, …) deep-link into these
   // dialogs by dispatching window CustomEvents — the menu owns the dialogs, so
@@ -1865,6 +1905,13 @@ export function SettingsMenu() {
             >
               Board
             </MenuItem>
+            {/* 0.13.10 §3: the relocated management surfaces. */}
+            <MenuItem icon={<BookRegular />} onClick={() => setSemanticDlg(true)}>
+              Business definitions
+            </MenuItem>
+            <MenuItem icon={<LibraryRegular />} onClick={() => setViewsDlg(true)}>
+              Saved views
+            </MenuItem>
             <MenuItem
               icon={<LightbulbRegular />}
               onClick={() => window.dispatchEvent(new Event("lighthouse:open-feedback"))}
@@ -1896,6 +1943,12 @@ export function SettingsMenu() {
       <PreferencesDialog open={prefDlg} setOpen={setPrefDlg} />
       <AuditLogDialog open={auditDlg} setOpen={setAuditDlg} />
       <AboutDialog open={aboutDlg} setOpen={setAboutDlg} />
+      <NavDialog title="Business definitions" open={semanticDlg} setOpen={setSemanticDlg}>
+        <SemanticNav />
+      </NavDialog>
+      <NavDialog title="Saved views" open={viewsDlg} setOpen={setViewsDlg}>
+        <ViewsNav />
+      </NavDialog>
     </>
   );
 }

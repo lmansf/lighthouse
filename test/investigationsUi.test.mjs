@@ -113,25 +113,25 @@ test("the scope pill sits above the composer and shows the LIVE file count", () 
   );
 });
 
-test("the nav is a section in the sidebar registry — the Sidebar stays feature-agnostic", () => {
-  // Sectioned sidebar (openspec: field-patch-0.12.5 §1): InvestigationsNav is now
-  // the last section row (its flyout opens below the Files-tree anchor), listed
-  // in the registry rather than stacked in app/page.tsx.
-  const registry = read("src/shell/sidebarSections.tsx");
+test("0.13.10 §3: the nav mounts in the chat-header PICKER (Sheet on compact, popover on desktop)", () => {
+  const chat = read("src/features/chat/ChatPanel.tsx");
   assert.match(
-    registry,
+    chat,
     /import \{ InvestigationsNav \} from "@\/features\/investigations\/InvestigationsNav";/,
-    "the registry imports the nav",
+    "the chat header hosts the operations surface",
   );
   assert.match(
-    registry,
-    /id: "investigations"[\s\S]*Component: InvestigationsNav/,
-    "Investigations is a registered section rendering InvestigationsNav",
+    chat,
+    /<Sheet title="Investigations" onClose=\{\(\) => setInvOpen\(false\)\}>\s*\n\s*<InvestigationsNav \/>/,
+    "compact opens the full InvestigationsNav in a Sheet",
   );
-  // It is the last row (nothing follows it in SIDEBAR_SECTIONS).
-  assert.match(registry, /Component: ViewsNav[\s\S]*Component: InvestigationsNav\b[\s\S]*\];/);
-  // The Sidebar itself stays feature-agnostic — the rail content comes from the
-  // registry, so Sidebar.tsx never names any one section.
+  assert.match(
+    chat,
+    /<PopoverSurface className=\{styles\.invSurface\}>\s*\n\s*(\{\/\*[\s\S]*?\*\/\}\s*\n\s*)?<InvestigationsNav \/>/,
+    "desktop anchors the same surface to the title",
+  );
+  assert.match(chat, /aria-label="Investigations"/, "the title button announces the picker");
+  // The Sidebar stays feature-agnostic — no section rail, no nav imports.
   assert.doesNotMatch(
     read("src/shell/Sidebar.tsx"),
     /Investigation/,

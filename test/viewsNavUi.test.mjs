@@ -24,7 +24,6 @@ const nav = read("src/features/views/ViewsNav.tsx");
 const inspector = read("src/features/views/ViewInspector.tsx");
 const store = read("src/stores/useViewsStore.ts");
 const page = read("app/page.tsx");
-const registry = read("src/shell/sidebarSections.tsx");
 
 /** Reset the shared mock singleton between mock-driven tests. */
 async function resetViews() {
@@ -125,15 +124,17 @@ test("the row menu carries Inspect / Rename / Ask about this view / Delete", () 
   assert.match(nav, /<ShapeViewDialog\s+open=\{shapeOpen\}/, "New view opens ShapeViewDialog");
 });
 
-test("ViewsNav (Library) sits above Investigations in the section registry", () => {
-  // Sectioned sidebar (openspec: field-patch-0.12.5 §1): the sections live in the
-  // registry now; the Files tree is the sidebar's top anchor.
-  assert.match(registry, /import \{ ViewsNav \} from "@\/features\/views\/ViewsNav";/);
-  // Library carries the "library" id and renders ViewsNav, above Investigations.
-  assert.match(registry, /id: "library"[\s\S]*Component: ViewsNav/, "Library maps to ViewsNav");
-  assert.match(registry, /Component: RecipesNav[\s\S]*Component: ViewsNav[\s\S]*Component: InvestigationsNav/, "Recipes → Library → Investigations");
-  assert.match(page, /sidebar=\{<FileExplorer \/>\}/, "the file tree anchors the sidebar");
-  assert.doesNotMatch(page, /<ViewsNav \/>/, "the section moved to the rail registry");
+test("0.13.10 §3: ViewsNav mounts in Settings — the page group and the desktop dialog", () => {
+  const page = read("src/features/settings/SettingsPage.tsx");
+  assert.match(page, /import \{ ViewsNav \} from "@\/features\/views\/ViewsNav";/);
+  assert.match(page, />\s*Saved views\s*</, "the group is labeled Saved views");
+  const menu = read("src/features/settings/SettingsMenu.tsx");
+  assert.match(menu, />\s*Saved views\s*</, "the gear menu ITEM exists (not just prose)");
+  assert.match(
+    menu,
+    /<NavDialog title="Saved views"[\s\S]{0,120}<ViewsNav \/>/,
+    "…and its dialog mounts ViewsNav",
+  );
 });
 
 test("the local-only badge is sourced lazily from inspectView and cached", () => {

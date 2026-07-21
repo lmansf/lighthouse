@@ -15,6 +15,7 @@
 import type { ChatTurn } from "@/contracts";
 import { providerAllowed } from "./policy";
 import { recordEgress, PURPOSE_AI_PROVIDER } from "./egress";
+import { onDeviceBackend } from "./localModel";
 
 const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_MODELS_URL = "https://api.anthropic.com/v1/models";
@@ -130,7 +131,11 @@ export function fullDocCharBudget(cfg: {
 }): number {
   if (cfg.providerId === "anthropic") return 400_000;
   if (remoteProvider(cfg.providerId)) return 240_000;
-  return 11_000; // LOCAL_CTX_TOTAL_MAX_CHARS in llm.rs
+  // Apple's on-device Foundation model runs a 4096-token window shared
+  // between prompt and answer — the desktop local budget packed into it
+  // starves the answer, so the on-device tier sizes down.
+  // ON_DEVICE_CTX_TOTAL_MAX_CHARS / LOCAL_CTX_TOTAL_MAX_CHARS in llm.rs.
+  return onDeviceBackend() ? 5_000 : 11_000;
 }
 
 /** Per-segment budget for the sweep fallback (each segment is one map call). */
@@ -141,8 +146,9 @@ export function docSegmentCharBudget(cfg: {
 }): number {
   if (cfg.providerId === "anthropic") return 400_000;
   if (remoteProvider(cfg.providerId)) return 240_000;
-  // Under the Rust single-block clip (6,000) so no segment text is lost.
-  return 5_500;
+  // Under the Rust single-block clip of the active tier (6,000 desktop /
+  // 3,500 on-device) so no segment text is lost.
+  return onDeviceBackend() ? 3_000 : 5_500;
 }
 
 /**

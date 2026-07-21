@@ -4,17 +4,15 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Button, Text, makeStyles, mergeClasses, tokens } from "@fluentui/react-components";
 import { ArrowLeftRegular } from "@fluentui/react-icons";
 import { Sidebar } from "./Sidebar";
-import { SectionRail } from "./SectionRail";
-import { SectionFlyout } from "./SectionFlyout";
-import { sectionById } from "./sidebarSections";
 import { LAYOUT } from "./theme";
 import { usePaneLayout, type CompactTab } from "./paneLayout";
 import { CompactTabBar, TAB_BAR_CONTENT_HEIGHT } from "./CompactTabBar";
 import { useVaultTree } from "./useVaultTree";
-import { useSidebarFlyout } from "@/stores/useSidebarFlyout";
+import { anySheetOpen, useAnySheetOpen } from "./Sheet";
 import { useChatStore } from "@/stores/useChatStore";
 import { INSPECT_FILE_EVENT } from "@/lib/citePreview";
 import { StartupPrompt } from "@/features/startup/StartupPrompt";
+import { SettingsPage } from "@/features/settings/SettingsPage";
 
 const useStyles = makeStyles({
   root: {
@@ -81,7 +79,7 @@ const useStyles = makeStyles({
   // The files sidebar is a FULL-SCREEN page that slides in from the left edge
   // over the chat — no scrim, no 85vw overlay (the phone/compact-iPad has no
   // room for a partial column). Same inset:0 safe-area sheet primitive the
-  // section sheets use (SectionFlyout.styles.sheet). The Sidebar inside reads
+  // Sheet primitive uses (src/shell/Sheet.tsx). The Sidebar inside reads
   // --sidebar-w:100% so it fills the page; its persisted desktop width is never
   // applied here (and, with no resize handle, never written).
   page: {
@@ -114,18 +112,18 @@ const useStyles = makeStyles({
     opacity: 0,
     "@media (prefers-reduced-motion: reduce)": { transform: "none" },
   },
-  // --- fp4 §3 compact SECTIONS page (mobile shells < 700px only) ------------
-  // The Sections tab opens the section rail as its own full-screen page (a peer
-  // of the files page). Its chrome mirrors the files page: a header row with the
-  // title + a 44pt Back-to-chat control, and a scrollable body holding the rail
-  // in `page` mode (every section a flat 48pt row, History first).
-  sectionsPage: {
+  // --- 0.13.10 §2 compact SETTINGS page (mobile shells only) ----------------
+  // The Settings tab opens Settings as its own full-screen page (a peer of the
+  // files page). Its chrome mirrors the files page: a header row with the title
+  // + a 44pt Back-to-chat control, and a scrollable body holding the grouped
+  // settings page (src/features/settings/SettingsPage).
+  pagePane: {
     flex: 1,
     minWidth: 0,
     display: "flex",
     flexDirection: "column",
   },
-  sectionsHeader: {
+  pageHeader: {
     display: "flex",
     alignItems: "center",
     justifyContent: "space-between",
@@ -138,7 +136,7 @@ const useStyles = makeStyles({
     borderBottomStyle: "solid",
     borderBottomColor: tokens.colorNeutralStroke2,
   },
-  sectionsBody: {
+  pageBody: {
     flex: 1,
     minHeight: 0,
     overflowY: "auto",
@@ -212,10 +210,11 @@ export function AppShell({ sidebar, main }: AppShellProps) {
   // means "the files page is on screen".
   const [compactTab, setCompactTab] = useState<CompactTab>("chat");
   const layout = usePaneLayout(compactTab === "files");
-  // A section flyout sheet (History, Insights, …) is a modal over everything —
+  // A Sheet (History, the investigation picker, …) is a modal over everything —
   // while one is open the tab bar slides away and the sheet's own X/Esc dismiss
-  // it (returning to whichever page launched it).
-  const sheetOpen = useSidebarFlyout((s) => s.openSection !== null);
+  // it (returning to whichever page launched it). 0.13.10 §3: the signal is the
+  // Sheet primitive's mount counter, not the retired flyout store.
+  const sheetOpen = useAnySheetOpen();
   // Live mirror for the [] -mounted listeners below (shortcuts, reveal).
   const compactRef = useRef(layout.compact);
   compactRef.current = layout.compact;
@@ -229,13 +228,14 @@ export function AppShell({ sidebar, main }: AppShellProps) {
     return () => window.removeEventListener("lighthouse:open-drawer", onOpen);
   }, []);
 
-  // Esc backs a compact page (files or sections) out to chat — unless a section
-  // sheet is up, which owns Esc first (it closes to the page, not to chat).
+  // Esc backs a compact page (files or settings) out to chat — unless a Sheet
+  // is up, which owns Esc first (its capture-phase handler closes it and this
+  // bubbler only fires when no sheet consumed the key).
   useEffect(() => {
     if (!layout.compact || compactTab === "chat") return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
-      if (useSidebarFlyout.getState().openSection) return;
+      if (anySheetOpen()) return;
       e.preventDefault();
       setCompactTab("chat");
     };
@@ -255,9 +255,13 @@ export function AppShell({ sidebar, main }: AppShellProps) {
   const messageCount = useChatStore((s) => s.messages.length);
   const prevMessageCount = useRef(messageCount);
   useEffect(() => {
-    if (messageCount > prevMessageCount.current && layout.drawerVisible) setCompactTab("chat");
+    // Any compact page yields to Chat when an ask lands — Settings included
+    // (its inline ViewsNav/SemanticNav can fire asks that would otherwise
+    // stream invisibly under the page).
+    if (messageCount > prevMessageCount.current && layout.compact && compactTab !== "chat")
+      setCompactTab("chat");
     prevMessageCount.current = messageCount;
-  }, [messageCount, layout.drawerVisible]);
+  }, [messageCount, layout.compact, compactTab]);
 
   // fp3 §3: edge-swipe-RIGHT on the files page goes back to chat — the iOS
   // "back" gesture, the mirror of the old swipe-left drawer dismiss. Esc is the
@@ -277,7 +281,7 @@ export function AppShell({ sidebar, main }: AppShellProps) {
   };
 
   // fp3 §3: page-entrance animation — mount parked off-screen-left, then clear
-  // on the next frame so it eases in (mirrors SectionFlyout's sheet entrance).
+  // on the next frame so it eases in (mirrors the Sheet primitive's entrance).
   const [pageEntered, setPageEntered] = useState(false);
   useEffect(() => {
     if (!layout.drawerVisible) {
@@ -288,18 +292,28 @@ export function AppShell({ sidebar, main }: AppShellProps) {
     return () => cancelAnimationFrame(r);
   }, [layout.drawerVisible]);
 
-  // fp4 §3: the Sections page shares the files page's slide-in entrance.
-  const sectionsVisible = layout.compact && compactTab === "sections";
-  const sectionsScrollRef = useRef<HTMLDivElement>(null);
-  const [sectionsEntered, setSectionsEntered] = useState(false);
+  // 0.13.10 §2: the Settings page shares the files page's slide-in entrance.
+  const settingsVisible = layout.compact && compactTab === "settings";
+  const settingsScrollRef = useRef<HTMLDivElement>(null);
+  const [settingsEntered, setSettingsEntered] = useState(false);
   useEffect(() => {
-    if (!sectionsVisible) {
-      setSectionsEntered(false);
+    if (!settingsVisible) {
+      setSettingsEntered(false);
       return;
     }
-    const r = requestAnimationFrame(() => setSectionsEntered(true));
+    const r = requestAnimationFrame(() => setSettingsEntered(true));
     return () => cancelAnimationFrame(r);
-  }, [sectionsVisible]);
+  }, [settingsVisible]);
+
+  // 0.13.10 §2: "open preferences" routes to the Settings PAGE on compact (the
+  // desktop gear menu keeps opening its dialog — SettingsMenu listens there).
+  useEffect(() => {
+    const onPrefs = () => {
+      if (compactRef.current) setCompactTab("settings");
+    };
+    window.addEventListener("lighthouse:open-preferences", onPrefs);
+    return () => window.removeEventListener("lighthouse:open-preferences", onPrefs);
+  }, []);
 
   // Ask box vs the on-screen keyboard: the OS keyboard overlays a WKWebView
   // rather than resizing it, so pad the main column by the covered height
@@ -320,10 +334,67 @@ export function AppShell({ sidebar, main }: AppShellProps) {
     };
   }, [layout.compact]);
 
+  // Tauri's iOS WKWebView RESIZES for the keyboard instead of overlaying it
+  // (the Safari behavior the inset math above assumes): innerHeight shrinks
+  // WITH the visual viewport, the inset computes 0, and the tab bar kept
+  // floating mid-screen under the keyboard's accessory bar (0.13.9 field
+  // screenshot). Editable focus is the resize-proof keyboard signal — on a
+  // compact touch shell a focused text field means the keyboard owns the
+  // bottom edge, in either webview mode.
+  const [editableFocused, setEditableFocused] = useState(false);
+  useEffect(() => {
+    if (!layout.compact || typeof document === "undefined") return;
+    const editable = (t: unknown): boolean =>
+      t instanceof HTMLElement &&
+      (t instanceof HTMLTextAreaElement ||
+        (t instanceof HTMLInputElement &&
+          !["button", "checkbox", "radio", "range", "submit", "reset", "file", "color"].includes(
+            t.type,
+          )) ||
+        t.isContentEditable);
+    const onFocusIn = (e: FocusEvent) => {
+      if (editable(e.target)) setEditableFocused(true);
+    };
+    const onFocusOut = () => {
+      // The next focus target isn't set yet during focusout; read it after
+      // the move settles so field-to-field hops don't flicker the bar.
+      requestAnimationFrame(() => setEditableFocused(editable(document.activeElement)));
+    };
+    document.addEventListener("focusin", onFocusIn);
+    document.addEventListener("focusout", onFocusOut);
+    setEditableFocused(editable(document.activeElement));
+    return () => {
+      document.removeEventListener("focusin", onFocusIn);
+      document.removeEventListener("focusout", onFocusOut);
+      setEditableFocused(false);
+    };
+  }, [layout.compact]);
+
+  // iOS also scroll-wedges the page to "reveal" the focused field: the
+  // WKScrollView keeps a leftover offset afterwards and the whole fixed shell
+  // renders shifted up under the status bar (the 0.13.9 crowding screenshot).
+  // The compact shell never scrolls the document itself, so ANY document
+  // scroll is the wedge — push it straight back.
+  useEffect(() => {
+    if (!layout.compact || typeof window === "undefined") return;
+    const unwedge = () => {
+      if (window.scrollY !== 0 || window.scrollX !== 0) window.scrollTo(0, 0);
+    };
+    window.addEventListener("scroll", unwedge, { passive: true });
+    window.visualViewport?.addEventListener("resize", unwedge);
+    unwedge();
+    return () => {
+      window.removeEventListener("scroll", unwedge);
+      window.visualViewport?.removeEventListener("resize", unwedge);
+    };
+  }, [layout.compact]);
+
   // fp4 §3: the tab bar slides away while the keyboard is up (so it never floats
   // mid-screen) or while a modal section sheet covers the screen; it's on screen
-  // exactly when compact, keyboard down, no sheet.
-  const tabBarHidden = keyboardInset > 0 || sheetOpen;
+  // exactly when compact, keyboard down, no sheet. The keyboard is "up" when
+  // the overlay inset says so OR an editable element holds focus (the
+  // resize-mode signal above).
+  const tabBarHidden = keyboardInset > 0 || editableFocused || sheetOpen;
   const tabBarShown = layout.showTabBar && !tabBarHidden;
   // Reserve room above the bar for the composer, the files/sections pages, and
   // the bug FAB. --lh-tabbar-h is the bar's content height while it's shown, else
@@ -345,7 +416,7 @@ export function AppShell({ sidebar, main }: AppShellProps) {
     if (tab === compactTab) {
       if (tab === "chat") window.dispatchEvent(new CustomEvent("lighthouse:chat-scroll-top"));
       else if (tab === "files") window.dispatchEvent(new CustomEvent("lighthouse:explorer-scroll-top"));
-      else sectionsScrollRef.current?.scrollTo({ top: 0, behavior: "auto" });
+      else settingsScrollRef.current?.scrollTo({ top: 0, behavior: "auto" });
       return;
     }
     setCompactTab(tab);
@@ -423,26 +494,9 @@ export function AppShell({ sidebar, main }: AppShellProps) {
         if (typeof server === "number") setWidth(server);
         else if (typeof cached === "number") setWidth(cached);
         else setWidth(LAYOUT.sidebarWidth);
-        // Reconcile the section flyout (openspec: field-patch-0.12.5 §1) against
-        // the authoritative per-mode settings file: teach the store the mode, and
-        // let the server's width + a VALID open-section id win over the cache. An
-        // unknown/removed section id is dropped here (registry-checked), never
-        // reopening a ghost drawer. Absent server values keep the cache hydrate.
-        const flyoutHydrate: {
-          mode: UiMode;
-          flyoutWidth?: number;
-          openSection?: string;
-        } = { mode: m };
-        const sfw = d?.flyoutWidth?.[m];
-        if (typeof sfw === "number") flyoutHydrate.flyoutWidth = sfw;
-        const sof = d?.openFlyout;
-        // §5: on a compact shell a persisted open section would materialize as
-        // a full-screen sheet over first paint — sections open by gesture only
-        // there, so the remembered id is not replayed.
-        if (typeof sof === "string" && sectionById(sof) && !compactRef.current) {
-          flyoutHydrate.openSection = sof;
-        }
-        useSidebarFlyout.getState().hydrate(flyoutHydrate);
+        // (0.13.10 §3: the section-flyout hydrate is gone with the flyout —
+        // the engine's flyoutWidth/openFlyout settings fields remain, simply
+        // unread by this UI.)
       })
       .catch(() => {
         /* offline / web build — the synchronous cache hydration stands */
@@ -600,27 +654,25 @@ export function AppShell({ sidebar, main }: AppShellProps) {
               // The header control is the page's 44pt Back-to-chat button (§3).
               backControl
               onToggleCollapsed={() => setCompactTab("chat")}
-              rail={<SectionRail />}
             >
               {sidebar}
             </Sidebar>
           </div>
         )}
-        {/* fp4 §3: the Sections tab opens the section rail as its own full page
-            (History first, every section a flat 48pt row). Tapping a section
-            still opens its SectionFlyout sheet over the top (the modal below). */}
-        {sectionsVisible && (
+        {/* 0.13.10 §2: the Settings tab opens Settings as its own full page —
+            the grouped reorganization of the desktop gear menu's content. */}
+        {settingsVisible && (
           <div
-            className={mergeClasses(styles.page, !sectionsEntered && styles.pageEntering)}
+            className={mergeClasses(styles.page, !settingsEntered && styles.pageEntering)}
             role="dialog"
             aria-modal="true"
-            aria-label="Sections"
+            aria-label="Settings"
             onTouchStart={onDrawerTouchStart}
             onTouchEnd={onDrawerTouchEnd}
           >
-            <div className={styles.sectionsPage}>
-              <div className={styles.sectionsHeader}>
-                <Text weight="semibold">Sections</Text>
+            <div className={styles.pagePane}>
+              <div className={styles.pageHeader}>
+                <Text weight="semibold">Settings</Text>
                 <Button
                   appearance="subtle"
                   className={styles.backBtn}
@@ -631,15 +683,12 @@ export function AppShell({ sidebar, main }: AppShellProps) {
                   Back
                 </Button>
               </div>
-              <div className={styles.sectionsBody} ref={sectionsScrollRef}>
-                <SectionRail page />
+              <div className={styles.pageBody} ref={settingsScrollRef}>
+                <SettingsPage />
               </div>
             </div>
           </div>
         )}
-        {/* Section panels render as sheets — independent of the pages, so a
-            sheet opened from either rail survives the page auto-closing. */}
-        <SectionFlyout compact />
         <div
           className={styles.main}
           // Reflow above the fixed tab bar: reserve its height when the keyboard
@@ -662,7 +711,6 @@ export function AppShell({ sidebar, main }: AppShellProps) {
       <Sidebar
         collapsed={collapsed}
         onToggleCollapsed={() => setCollapsed((c) => !c)}
-        rail={<SectionRail />}
         width={width}
         resizing={resizing}
       >
@@ -688,10 +736,6 @@ export function AppShell({ sidebar, main }: AppShellProps) {
           onKeyDown={onHandleKeyDown}
         />
       )}
-      {/* The section flyout (openspec: field-patch-0.12.5 §1) sits between the
-          sidebar and main. It renders null unless a section is open; hidden with
-          the rail while the sidebar is collapsed. */}
-      {!collapsed && <SectionFlyout />}
       <div className={styles.main}>{main}</div>
       <StartupPrompt />
     </main>

@@ -50,6 +50,7 @@ import {
 import {
   AddRegular,
   ArrowClockwiseRegular,
+  ChevronDownRegular,
   ArrowDownRegular,
   ArrowUndoRegular,
   AttachRegular,
@@ -134,7 +135,11 @@ import { modKey } from "@/features/onboarding/ModeChooser";
 import { ACCENTS, BEAM_SWEEP } from "@/shell/theme";
 import { FILE_DRAG_MIME, parseDraggedFiles, type DraggedFile } from "@/shell/dnd";
 import { isDesktopShell, pathsForFiles, platformKind } from "@/shell/desktopBridge";
-import { useCoarsePointer } from "@/shell/paneLayout";
+import { useCoarsePointer, usePaneLayout } from "@/shell/paneLayout";
+import { Sheet } from "@/shell/Sheet";
+import { HistoryNav } from "./HistoryNav";
+import { InvestigateChips } from "./InvestigateChips";
+import { InvestigationsNav } from "@/features/investigations/InvestigationsNav";
 
 // The markdown stack (react-markdown + remark-gfm + micromark, ~263 KB) is the
 // single largest chunk and is only needed once a finished answer renders — not
@@ -263,6 +268,24 @@ const useStyles = makeStyles({
     marginBottom: tokens.spacingVerticalM,
   },
   headerMeta: { display: "flex", alignItems: "center", gap: tokens.spacingHorizontalS },
+  // 0.13.10 §2: the desktop History popover — the same HistoryNav the compact
+  // Sheet hosts, anchored to the header's clock button.
+  historySurface: { width: "360px", maxHeight: "70vh", overflowY: "auto" },
+  // 0.13.10 §3: the header investigation picker — the title IS the control.
+  invPickerBtn: {
+    display: "flex",
+    alignItems: "center",
+    gap: tokens.spacingHorizontalXS,
+    backgroundColor: "transparent",
+    ...shorthands.border("none"),
+    ...shorthands.padding(0),
+    cursor: "pointer",
+    color: "inherit",
+    fontFamily: "inherit",
+    minWidth: 0,
+    "@media (pointer: coarse)": { minHeight: "44px" },
+  },
+  invSurface: { width: "380px", maxHeight: "70vh", overflowY: "auto" },
   // Compact context header (openspec: add-investigations §4.2): the Title3 is
   // the investigation's name with its scope size as a quiet baseline caption
   // ("Ask" alone in the global context). The name truncates before it can
@@ -915,6 +938,18 @@ const useStyles = makeStyles({
     "& textarea": {
       height: "auto",
       maxHeight: `${COMPOSER_MAX_HEIGHT}px`,
+      // iOS WKWebView paints its own UA chrome on a bare <textarea> (white
+      // fill, hairline border, small radius) — a second box INSIDE the shell
+      // (0.13.9 field screenshot). The slot must be stripped explicitly, not
+      // just left to whatever the platform default happens to paint.
+      WebkitAppearance: "none",
+      appearance: "none",
+      backgroundColor: "transparent",
+      borderTopStyle: "none",
+      borderRightStyle: "none",
+      borderBottomStyle: "none",
+      borderLeftStyle: "none",
+      outlineStyle: "none",
     },
   },
   // --- §22.1 ghost autocomplete: the inline greyed continuation. ---
@@ -2450,6 +2485,21 @@ export function ChatPanel() {
   // media queries can't reach (mount-autofocus suppression, instant citation
   // jump, tappable ghost). Distinct from compact/width and from platformKind.
   const coarsePointer = useCoarsePointer();
+  // 0.13.10 §2: the History surface opens from the chat header on EVERY
+  // platform — a full-screen Sheet on compact, an anchored popover on desktop.
+  const compactLayout = usePaneLayout(false).compact;
+  const [historyOpen, setHistoryOpen] = useState(false);
+  // 0.13.10 §3: the investigation PICKER — the header title opens the full
+  // InvestigationsNav operations surface (switch, create, scope-from-selection,
+  // local-only policy, rename/branch/archive) with the Sections rail retired.
+  const [invOpen, setInvOpen] = useState(false);
+  // §4: the Files action row's "Add to investigation scope" opens the picker
+  // (its scope-from-selection reads the live grid selection).
+  useEffect(() => {
+    const onOpen = () => setInvOpen(true);
+    window.addEventListener("lighthouse:open-investigations", onOpen);
+    return () => window.removeEventListener("lighthouse:open-investigations", onOpen);
+  }, []);
   // Subscribe to `nodes` (not the stable `includedFileIds` fn) so the panel
   // re-renders when the explorer toggles inclusion - this is the live seam.
   const nodes = useRagStore((s) => s.nodes);
@@ -4050,7 +4100,9 @@ export function ChatPanel() {
   // old visual caps (4 asks, 3 recipes) at the consumption site. ---
   const validatedChips = useValidatedChips(includedFileIds);
   const engineAsks = useMemo(() => validatedChips.asks.slice(0, 4), [validatedChips.asks]);
-  const recipeChips = useMemo(() => validatedChips.recipes.slice(0, 3), [validatedChips.recipes]);
+  // 0.13.10 §3: chips are the ONLY recipe surface now (RecipesNav, the
+  // uncapped path, is retired) — every applicable recipe gets its chip.
+  const recipeChips = validatedChips.recipes;
 
   // --- §22.1 ghost autocomplete: the single best inline continuation of the
   //     draft, greyed after the caret; Right Arrow at the end accepts it. ---
@@ -4303,6 +4355,46 @@ export function ChatPanel() {
       onDeviceLocalOnly={investigationLocalOnly}
     />
   );
+
+  // 0.13.10 §2: the History entry — one clock button in the header (hero and
+  // conversation alike). Compact opens the full-screen Sheet below; desktop
+  // anchors the same HistoryNav in a popover.
+  const historyButton = compactLayout ? (
+    <Tooltip content="Chat history" relationship="label">
+      <Button
+        appearance="subtle"
+        icon={<HistoryRegular />}
+        aria-label="Chat history"
+        onClick={() => setHistoryOpen(true)}
+      />
+    </Tooltip>
+  ) : (
+    <Popover open={historyOpen} onOpenChange={(_, d) => setHistoryOpen(d.open)} positioning="below-end">
+      <PopoverTrigger disableButtonEnhancement>
+        <Button
+          appearance="subtle"
+          icon={<HistoryRegular />}
+          aria-label="Chat history"
+          title="Chat history"
+        />
+      </PopoverTrigger>
+      <PopoverSurface className={styles.historySurface}>
+        <HistoryNav onClose={() => setHistoryOpen(false)} />
+      </PopoverSurface>
+    </Popover>
+  );
+  const historySheet =
+    compactLayout && historyOpen ? (
+      <Sheet title="History" onClose={() => setHistoryOpen(false)}>
+        <HistoryNav onClose={() => setHistoryOpen(false)} />
+      </Sheet>
+    ) : null;
+  const investigationsSheet =
+    compactLayout && invOpen ? (
+      <Sheet title="Investigations" onClose={() => setInvOpen(false)}>
+        <InvestigationsNav />
+      </Sheet>
+    ) : null;
 
   // Scope pill (openspec: add-investigations §4.2), the attachBar register: a
   // quiet reminder that asks here read only the investigation's files. Hidden
@@ -4885,9 +4977,33 @@ export function ChatPanel() {
           {/* §22.2: the one status popover (visible-files count, on-device
               policy, hidden-from-cloud, egress) — OUTSIDE the visible-files
               branch so the on-device promise never disappears with it when no
-              files are visible yet. Past chats live in the sidebar History
-              section now (HistoryNav); the hero carries no History button. */}
-          {statusShield}
+              files are visible yet. 0.13.10 §2: past chats open from the
+              History button here too — an empty screen must still reach them. */}
+          <div className={styles.heroInvRow}>
+            {statusShield}
+            {historyButton}
+            {compactLayout ? (
+              <Button
+                appearance="subtle"
+                size="small"
+                icon={<ChevronDownRegular />}
+                onClick={() => setInvOpen(true)}
+              >
+                Investigations
+              </Button>
+            ) : (
+              <Popover open={invOpen} onOpenChange={(_, d) => setInvOpen(d.open)} positioning="below-start">
+                <PopoverTrigger disableButtonEnhancement>
+                  <Button appearance="subtle" size="small" icon={<ChevronDownRegular />}>
+                    Investigations
+                  </Button>
+                </PopoverTrigger>
+                <PopoverSurface className={styles.invSurface}>
+                  <InvestigationsNav />
+                </PopoverSurface>
+              </Popover>
+            )}
+          </div>
           {includedFileIds.length === 0 && attachments.length === 0 ? (
             // Pre-flight: nothing is visible to AI yet. Inform gently and offer
             // the fix, but never block asking.
@@ -4948,10 +5064,17 @@ export function ChatPanel() {
                   {r.name}
                 </Button>
               ))}
+              {/* 0.13.10 §3: the Investigate → report-template launcher (the
+                  retired "What you can do" section's one result-producing
+                  control), data-gated on investigable tables like the recipe
+                  chips beside it. */}
+              <InvestigateChips includedFileIds={includedFileIds} />
             </div>
           )}
           <div className={styles.heroComposer}>{composer("Ask about the files visible to AI…")}</div>
         </div>
+        {historySheet}
+        {investigationsSheet}
       </section>
     );
   }
@@ -4965,6 +5088,8 @@ export function ChatPanel() {
       {...dropHandlers}
     >
       {pinsDialog}
+      {historySheet}
+      {investigationsSheet}
       <div className={styles.conversation}>
         {pinAlertBanner}
         <div className={styles.header}>
@@ -4975,9 +5100,35 @@ export function ChatPanel() {
               to live here is gone — the portrait bottom tab bar (AppShell) is the
               way into Files and Sections now. Desktop header is unchanged. */}
           <div className={styles.headerTitle}>
-            <Title3 className={styles.headerTitleName}>
-              {currentInvestigation ? currentInvestigation.name : "Ask"}
-            </Title3>
+            {/* 0.13.10 §3: the title is the investigation PICKER — tap/click
+                opens the operations surface (InvestigationsNav verbatim). */}
+            {compactLayout ? (
+              <button
+                type="button"
+                className={styles.invPickerBtn}
+                aria-label="Investigations"
+                onClick={() => setInvOpen(true)}
+              >
+                <Title3 className={styles.headerTitleName}>
+                  {currentInvestigation ? currentInvestigation.name : "Ask"}
+                </Title3>
+                <ChevronDownRegular fontSize={16} aria-hidden />
+              </button>
+            ) : (
+              <Popover open={invOpen} onOpenChange={(_, d) => setInvOpen(d.open)} positioning="below-start">
+                <PopoverTrigger disableButtonEnhancement>
+                  <button type="button" className={styles.invPickerBtn} aria-label="Investigations">
+                    <Title3 className={styles.headerTitleName}>
+                      {currentInvestigation ? currentInvestigation.name : "Ask"}
+                    </Title3>
+                    <ChevronDownRegular fontSize={16} aria-hidden />
+                  </button>
+                </PopoverTrigger>
+                <PopoverSurface className={styles.invSurface}>
+                  <InvestigationsNav />
+                </PopoverSurface>
+              </Popover>
+            )}
             {currentInvestigation && (
               <Text size={200} className={styles.headerCaption}>
                 {scopeLabel}
@@ -5003,6 +5154,7 @@ export function ChatPanel() {
                 History moved to the sidebar section; Save-to-note and New chat
                 stay as the header's quiet actions. */}
             {statusShield}
+            {historyButton}
             <Tooltip content="Save this chat as a note in your vault" relationship="label">
               <Button
                 appearance="subtle"

@@ -98,15 +98,6 @@ const useStyles = makeStyles({
     ...shorthands.padding(0, tokens.spacingHorizontalM),
   },
   bodyHidden: { display: "none" },
-  // The section rail (openspec: field-patch-0.12.5 §1): the header-only rows for
-  // the six non-file sections, pinned below the Files tree. Fixed-height block
-  // (the tree flexes above it); a hairline separates it from the tree. Hidden
-  // with the body while collapsed.
-  rail: {
-    flexShrink: 0,
-    ...shorthands.padding(tokens.spacingVerticalS, tokens.spacingHorizontalS),
-    ...shorthands.borderTop("1px", "solid", tokens.colorNeutralStroke2),
-  },
   footer: {
     display: "flex",
     alignItems: "center",
@@ -126,12 +117,6 @@ interface SidebarProps {
   /** The sidebar body — the file explorer (the top anchor). Hidden while collapsed. */
   children: React.ReactNode;
   /**
-   * The section rail (openspec: field-patch-0.12.5 §1) — header-only rows for the
-   * non-file sections, rendered directly below the file tree and hidden with the
-   * body while collapsed. Optional so the widget/explorer windows can omit it.
-   */
-  rail?: React.ReactNode;
-  /**
    * Expanded width in px (openspec: add-usability-field-patch §1). Applied as
    * the `--sidebar-w` inline var; ignored while collapsed. Undefined ⇒ the
    * makeStyles default.
@@ -150,16 +135,16 @@ interface SidebarProps {
 }
 
 /**
- * Collapsible left sidebar: brand + collapse toggle on
- * top, the file explorer in the middle, and the settings gear pinned
- * bottom-left.
+ * Collapsible left sidebar: brand + collapse toggle on top, the file explorer
+ * in the middle, and the settings gear pinned bottom-left — Files + Settings
+ * only (0.13.10 §3: the section rail is retired; its capabilities live on the
+ * chat header, in Settings, and as chat chips).
  * Collapsed, it shrinks to a thin icon rail that still exposes expand + settings.
  */
 export function Sidebar({
   collapsed,
   onToggleCollapsed,
   children,
-  rail,
   width,
   resizing,
   backControl,
@@ -202,19 +187,25 @@ export function Sidebar({
               <Text weight="semibold">Lighthouse</Text>
             </span>
             <span className={styles.headerActions}>
-              <Tooltip content="Quick open a file" relationship="label">
-                <Button
-                  appearance="subtle"
-                  className={styles.quickOpenBtn}
-                  icon={<SearchRegular />}
-                  aria-label="Quick open a file"
-                  // Reuses the exact event the Ctrl/Cmd+P shortcut dispatches,
-                  // so the fuzzy finder is reachable without a keyboard.
-                  onClick={() =>
-                    window.dispatchEvent(new CustomEvent("lighthouse:quick-open"))
-                  }
-                />
-              </Tooltip>
+              {/* 0.13.10 §5: the compact files PAGE (backControl set) uses the
+                  tile grid's pull-down search instead — one finder per surface.
+                  The launcher stays for iPad-regular / desktop-touch, where the
+                  tree has no pull-down field. */}
+              {!backControl && (
+                <Tooltip content="Quick open a file" relationship="label">
+                  <Button
+                    appearance="subtle"
+                    className={styles.quickOpenBtn}
+                    icon={<SearchRegular />}
+                    aria-label="Quick open a file"
+                    // Reuses the exact event the Ctrl/Cmd+P shortcut dispatches,
+                    // so the fuzzy finder is reachable without a keyboard.
+                    onClick={() =>
+                      window.dispatchEvent(new CustomEvent("lighthouse:quick-open"))
+                    }
+                  />
+                </Tooltip>
+              )}
               {backControl ? (
                 // fp3 §3: the compact files-page Back control (44pt).
                 <Button
@@ -242,9 +233,6 @@ export function Sidebar({
         )}
       </div>
       <div className={mergeClasses(styles.body, collapsed && styles.bodyHidden)}>{children}</div>
-      {/* Section rail (openspec §1): the non-file sections as header rows below
-          the tree. Hidden with the body while collapsed, so collapse hides it. */}
-      {!collapsed && rail ? <div className={styles.rail}>{rail}</div> : null}
       {/* Above Settings: the one-line "new version" nudge (desktop only), a
           compact dot in the collapsed rail so it isn't hidden just because the
           sidebar is thin. */}

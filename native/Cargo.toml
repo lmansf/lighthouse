@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/lighthouse-core", "crates/lighthouse-server", "crates/lighthouse-desktop", "crates/lighthouse-cli", "crates/lighthouse-mcp"]
 
 [workspace.package]
-version = "0.13.9"
+version = "0.13.10"
 edition = "2021"
 license = "UNLICENSED"
 

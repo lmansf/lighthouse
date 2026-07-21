@@ -200,9 +200,9 @@ export function setExplorerWidth(mode: "window" | "widget", width: number): Desk
 
 /**
  * Sectioned-sidebar flyout width bounds (openspec: field-patch-0.12.5 §1).
- * PARITY: FLYOUT_WIDTH_MIN/MAX in settings.rs; mirrored client-side as
- * LAYOUT.flyoutMinWidth/flyoutMaxWidth (src/shell/theme.ts) and FLYOUT_MIN/MAX
- * (src/stores/sidebarFlyoutReducer.ts) — keep the four in sync.
+ * PARITY: FLYOUT_WIDTH_MIN/MAX in settings.rs — keep the two in sync. (The
+ * UI-side mirrors were retired with the section flyout in 0.13.10 §3; the
+ * settings field remains for compatibility, unread by the current UI.)
  */
 export const FLYOUT_WIDTH_MIN = 280;
 export const FLYOUT_WIDTH_MAX = 680;
