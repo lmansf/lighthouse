@@ -13,24 +13,40 @@ import { isDesktopShell, isMobileShell } from "@/shell/desktopBridge";
  *
  * Contract consumed (backed separately by the Rust shell): the Tauri command
  * `private_model_availability` → { available, tier, reason }. The probe runs
- * once, lazily, and ONLY on a mobile shell — desktop always shows local via
+ * lazily and ONLY on a mobile shell — desktop always shows local via
  * modelProvidersFor's `platform === "desktop"` short-circuit, so it never asks.
  * Any failure (plain web, an older shell without the command, a malformed
  * reply) leaves the fail-closed default { available: false, tier: "none" },
  * which keeps desktop and mobile-without-a-backend byte-identical.
+ *
+ * Unavailability is often TRANSIENT (iOS field report, 0.13.8): Apple
+ * Intelligence gets enabled in the Settings app mid-session, or the on-device
+ * model is still downloading (`modelNotReady`). So an AVAILABLE verdict latches
+ * for the session, but an unavailable one does NOT — the store re-probes on the
+ * next use (throttled) and when the app returns to the foreground, which is
+ * exactly the "flipped the toggle in Settings, came back" flow. The Rust side's
+ * `ensure` is idempotent and re-wires the engine's loopback URL the moment the
+ * backend turns usable, so a mid-session flip lights the provider up live. The
+ * honest `reason` is KEPT (not discarded) so Settings can say what to do
+ * instead of silently hiding the private option.
  */
 export type OnDeviceTier = "foundation" | "gguf" | "llama-server" | "none";
 
 export interface OnDeviceModelState {
   available: boolean;
   tier: OnDeviceTier;
+  /** The shell's honest unavailability reason (null when available/unknown). */
+  reason: string | null;
 }
 
-const DEFAULT: OnDeviceModelState = { available: false, tier: "none" };
+const DEFAULT: OnDeviceModelState = { available: false, tier: "none", reason: null };
 
 const useStore = create<OnDeviceModelState>(() => ({ ...DEFAULT }));
 
 const TIERS: readonly OnDeviceTier[] = ["foundation", "gguf", "llama-server", "none"];
+
+/** Minimum ms between re-probes while the verdict is unavailable. */
+const RETRY_MS = 4_000;
 
 /**
  * Invoke a shell (Rust/Tauri) command, reusing the already-present
@@ -50,25 +66,36 @@ async function invokeShell(cmd: string): Promise<unknown> {
 
 async function probe(): Promise<void> {
   const reply = (await invokeShell("private_model_availability")) as
-    | { available?: unknown; tier?: unknown }
+    | { available?: unknown; tier?: unknown; reason?: unknown }
     | undefined;
   if (!reply || typeof reply !== "object") return; // failure ⇒ stay at the default
   const tier =
     typeof reply.tier === "string" && (TIERS as readonly string[]).includes(reply.tier)
       ? (reply.tier as OnDeviceTier)
       : "none";
-  useStore.setState({ available: reply.available === true, tier });
+  const available = reply.available === true;
+  if (available) settled = true; // a wired backend is stable for the session
+  useStore.setState({
+    available,
+    tier,
+    reason: !available && typeof reply.reason === "string" ? reply.reason : null,
+  });
 }
 
 let settled = false;
+let lastProbe = 0;
+let foregroundHooked = false;
 
 /**
- * Ask the shell whether an on-device backend is wired, once. Cheap + idempotent:
- * a plain-web browser settles without asking (the command never exists there); a
- * mobile shell asks exactly once — but only after `platformKind()` has resolved
- * to a mobile form factor (it is primed asynchronously from the first engine
- * payload, so the first hook uses can precede it); a desktop shell never asks
- * (local always shows there) and simply re-checks on the next use.
+ * Ask the shell whether an on-device backend is wired. Cheap + idempotent: a
+ * plain-web browser settles without asking (the command never exists there); a
+ * desktop shell never asks (local always shows there); a mobile shell asks on
+ * first use — but only after `platformKind()` has resolved to a mobile form
+ * factor (it is primed asynchronously from the first engine payload, so the
+ * first hook uses can precede it). AVAILABLE latches; UNAVAILABLE re-probes on
+ * later uses (≥ RETRY_MS apart) and on return to the foreground, because the
+ * blocking condition (Apple Intelligence off, model still downloading) is
+ * user-fixable mid-session.
  */
 function maybeProbe(): void {
   if (settled || typeof window === "undefined") return;
@@ -77,15 +104,29 @@ function maybeProbe(): void {
     return;
   }
   if (!isMobileShell()) return; // desktop, or platform not yet primed — recheck next use
-  settled = true;
+  if (!foregroundHooked) {
+    foregroundHooked = true;
+    // The canonical recovery flow: user flips Apple Intelligence on in the
+    // Settings app (or the model finishes downloading while away) and returns.
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState !== "visible" || settled) return;
+      lastProbe = Date.now();
+      void probe();
+    });
+  }
+  const now = Date.now();
+  if (now - lastProbe < RETRY_MS) return;
+  lastProbe = now;
   void probe();
 }
 
 /**
- * The on-device-model availability, availability-probed once on a mobile shell.
- * Components read `{ available, tier }`, thread `available` into
- * `modelProvidersFor(platform, onDeviceBackend)` / `switchChoices(...)`, and use
- * `tier` to pick `ON_DEVICE_MODEL_COPY[tier]` for the honest description line.
+ * The on-device-model availability, probed on a mobile shell (available latches;
+ * unavailable retries). Components read `{ available, tier, reason }`, thread
+ * `available` into `modelProvidersFor(platform, onDeviceBackend)` /
+ * `switchChoices(...)`, use `tier` to pick `ON_DEVICE_MODEL_COPY[tier]` for the
+ * honest description line, and surface `reason` when the backend is unavailable
+ * so the user learns what would enable it instead of seeing nothing.
  */
 export function useOnDeviceModel(): OnDeviceModelState {
   maybeProbe();

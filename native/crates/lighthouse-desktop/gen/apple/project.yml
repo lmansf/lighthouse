@@ -88,7 +88,14 @@ targets:
         # disable Swift autolink for it (else autolink forces a hard load
         # command) and link it weakly instead. Network.framework needs no such
         # treatment (available since iOS 12).
-        OTHER_LDFLAGS: ["$(inherited)", "-weak_framework", "FoundationModels"]
+        # -exported_symbol pins the Swift shim's @_cdecl entry point into the
+        # executable's dyld export trie: Rust resolves it at RUNTIME via
+        # dlsym(RTLD_DEFAULT) (commands.rs — zero link-time coupling), and a
+        # symbol with no link-time references is exactly what a release
+        # archive's dead-strip + symbol strip can silently remove. Exported ⇒
+        # dead-strip root ⇒ in the trie ⇒ survives strip ⇒ dlsym always finds
+        # it (iOS field report: private model absent on device).
+        OTHER_LDFLAGS: ["$(inherited)", "-weak_framework", "FoundationModels", "-Wl,-exported_symbol,_lighthouse_fm_ensure"]
         OTHER_SWIFT_FLAGS: ["$(inherited)", "-Xfrontend", "-disable-autolink-framework", "-Xfrontend", "FoundationModels"]
       groups: [app]
     dependencies:
