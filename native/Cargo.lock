@@ -3859,6 +3859,7 @@ dependencies = [
  "core-foundation 0.10.1",
  "futures",
  "hex",
+ "libc",
  "lighthouse-core",
  "lighthouse-server",
  "objc2",

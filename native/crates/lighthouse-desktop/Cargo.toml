@@ -44,6 +44,13 @@ reqwest = { workspace = true, features = ["rustls-tls-native-roots"] }
 [target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
 reqwest = { workspace = true, features = ["rustls-tls-webpki-roots"] }
 
+# add-mobile-local-inference: dlsym the Swift @_cdecl private-model shim at
+# RUNTIME (commands.rs) rather than a link-time extern — the Swift lives in the
+# iOS app target that links after this cdylib, so a link-time reference would
+# leave the cdylib with an undefined symbol. iOS-only.
+[target.'cfg(target_os = "ios")'.dependencies]
+libc = "0.2"
+
 # W3 Whisper mode: the WH_KEYBOARD_LL tap-chord hook (whisper.rs).
 # Win32_System_JobObjects (+ Win32_Security, which gates CreateJobObjectW's
 # SECURITY_ATTRIBUTES param): the kill-on-close job that ties supervised

@@ -2101,12 +2101,27 @@ pub async fn open_explorer(app: AppHandle) {
 // probes once to light up the "private" provider (src/stores/useOnDeviceModel.ts).
 
 // The Swift shim's probe-and-ensure entry point (PrivateModelServer.swift,
-// `@_cdecl("lighthouse_fm_ensure")`). iOS-only: only the iOS app target compiles
-// and links that Swift source. Returns a result code (the FM_* constants on the
-// Swift side); on success writes the bound 127.0.0.1 port through `out_port`.
+// `@_cdecl("lighthouse_fm_ensure")`). Resolved at RUNTIME via dlsym, NOT a
+// link-time `extern` block: the Swift symbol is defined in the iOS APP target,
+// which links AFTER this crate's cdylib — so a link-time reference leaves the
+// cdylib with an undefined symbol and the build fails (a plain `extern` broke
+// `cargo build --target aarch64-apple-ios`). `RTLD_DEFAULT` searches the whole
+// process image, including the main executable where the `@_cdecl` symbol lives,
+// so the lookup resolves at first call with zero link-time coupling. Returns the
+// FM_* result code; on success writes the bound 127.0.0.1 port through `out_port`.
 #[cfg(all(not(desktop), target_os = "ios"))]
-extern "C" {
-    fn lighthouse_fm_ensure(out_port: *mut u16) -> i32;
+fn lighthouse_fm_ensure(out_port: *mut u16) -> i32 {
+    type EnsureFn = unsafe extern "C" fn(*mut u16) -> i32;
+    // dlsym adds the leading underscore itself; the trailing NUL makes a C string.
+    let name = b"lighthouse_fm_ensure\0".as_ptr() as *const libc::c_char;
+    let sym = unsafe { libc::dlsym(libc::RTLD_DEFAULT, name) };
+    if sym.is_null() {
+        return -3; // symbol absent (SDK/OS without the shim) → treat as unavailable
+    }
+    // SAFETY: the symbol is the Swift @_cdecl fn with exactly this signature; it
+    // only writes `out_port` (a valid local) and returns a small integer code.
+    let f: EnsureFn = unsafe { std::mem::transmute::<*mut libc::c_void, EnsureFn>(sym) };
+    unsafe { f(out_port) }
 }
 
 /// Shared body for the `private_model_availability` command AND the iOS startup
@@ -2122,10 +2137,9 @@ pub(crate) fn private_model_availability_impl() -> Value {
     #[cfg(all(not(desktop), target_os = "ios"))]
     {
         let mut port: u16 = 0;
-        // SAFETY: `lighthouse_fm_ensure` is defined by PrivateModelServer.swift
-        // and linked into the iOS app target; it only writes `port` (a valid
-        // local) and returns a small integer code.
-        let code = unsafe { lighthouse_fm_ensure(&mut port as *mut u16) };
+        // Resolves the Swift shim at runtime (dlsym, see above), then probes +
+        // ensures the loopback responder is up; a small integer result code back.
+        let code = lighthouse_fm_ensure(&mut port as *mut u16);
         if code == 1 && port != 0 {
             // Point the engine's local transport at the in-process responder
             // BEFORE returning, so the very next ask streams through it, then
