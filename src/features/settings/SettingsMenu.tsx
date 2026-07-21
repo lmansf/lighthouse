@@ -49,6 +49,7 @@ import {
 import {
   MODEL_PROVIDERS,
   MOBILE_NO_PROVIDER_TRUTHS,
+  ON_DEVICE_MODEL_COPY,
   modelProvidersFor,
   ragService,
   type AuditSnapshot,
@@ -62,6 +63,7 @@ import { RULE_ACTION_LABEL } from "@/features/explorer/FolderRulesDialog";
 import { START_TOUR_EVENT } from "@/features/help/FirstRunTour";
 import { showWidget, summonHotkey, prettyShortcut, modKey } from "@/features/onboarding/ModeChooser";
 import { useAuthStore } from "@/stores/useAuthStore";
+import { useOnDeviceModel } from "@/stores/useOnDeviceModel";
 import { useThemeStore } from "@/stores/useThemeStore";
 import { useAppearanceStore } from "@/stores/useAppearanceStore";
 import { useChatStore } from "@/stores/useChatStore";
@@ -240,12 +242,15 @@ function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean
   // rejects server-side regardless).
   const allowedProviders = useRagStore((s) => s.policy?.locks.allowedProviders ?? null);
 
-  // §3 form factor: on a mobile shell the roster has no local entry, so the
-  // dialog's default selection is the roster's first CLOUD vendor and the
-  // local/cloud radio never renders. platformKind() is primed from the first
-  // capability payload, long before Settings can open.
+  // add-mobile-local-inference: form factor + on-device backend drive the
+  // roster. On a mobile shell WITHOUT a backend the roster has no local entry,
+  // so the dialog's default selection is the roster's first CLOUD vendor and the
+  // local/cloud radio never renders; WITH a backend the private model leads
+  // again (and is the default). platformKind() is primed from the first
+  // capability payload, long before Settings can open; the store probes once.
   const platform = platformKind();
-  const roster = modelProvidersFor(platform);
+  const { available: onDeviceBackend, tier: onDeviceTier } = useOnDeviceModel();
+  const roster = modelProvidersFor(platform, onDeviceBackend);
   const [providerId, setProviderId] = useState(onboarding.providerId ?? roster[0].id);
   const [modelId, setModelId] = useState(onboarding.modelId ?? firstModelFor(providerId));
   const [apiKey, setApiKey] = useState("");
@@ -305,9 +310,10 @@ function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean
   useEffect(() => {
     if (!open) return;
     const current = useAuthStore.getState().onboarding;
-    // §3: same platform-aware default as the initial state — never "local"
-    // on a mobile shell (the engine normalizes a stored "local" away there).
-    const pid = current.providerId ?? modelProvidersFor(platformKind())[0].id;
+    // add-mobile-local-inference: same availability-aware default as the initial
+    // state — "local" only when the roster offers it (desktop, or a mobile shell
+    // with a reported backend); otherwise the first cloud vendor.
+    const pid = current.providerId ?? modelProvidersFor(platformKind(), onDeviceBackend)[0].id;
     setProviderId(pid);
     setModelId(current.modelId ?? firstModelFor(pid));
     setApiKey("");
@@ -315,7 +321,7 @@ function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean
     setTestResult(null);
     setSigninFlow(null);
     setSigninError(null);
-  }, [open]);
+  }, [open, onDeviceBackend]);
 
   // Load the sign-in status when the OpenAI row is in view; any provider
   // switch abandons an in-flight code (the engine's pending handshake simply
@@ -386,10 +392,21 @@ function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean
 
   // Private-first framing (matches onboarding): the on-device model is the hero;
   // cloud vendors are the honest, one-click alternative grouped below. Local vs
-  // cloud is just `id === "local"` — §3: gated on the desktop form factor too,
-  // a structural pin that keeps LocalModelInstallPanel unreachable on mobile
-  // (where the roster drops the local entry entirely).
-  const isLocal = platform === "desktop" && providerId === "local";
+  // cloud is just `id === "local"` — add-mobile-local-inference: the local
+  // option is offered when the roster carries it (desktop, or a mobile shell
+  // with a reported on-device backend); mobile-without-a-backend still has no
+  // local entry, so it never renders the radio (and never mounts the desktop
+  // install panel below, which stays `platform === "desktop"`-gated).
+  const localOffered = platform === "desktop" || onDeviceBackend;
+  const isLocal = localOffered && providerId === "local";
+  // The private model's description line: the catalog label on desktop
+  // (tier "llama-server"), the honest per-tier copy on a mobile shell.
+  const localModelLabel =
+    platform === "desktop"
+      ? "Private — runs on this device. No API key; nothing leaves this device. (Recommended)"
+      : onDeviceTier === "gguf"
+        ? ON_DEVICE_MODEL_COPY.gguf
+        : ON_DEVICE_MODEL_COPY.foundation;
   const cloudProviders = roster.filter((p) => p.id !== "local");
   const isAllowed = (id: string) => (allowedProviders ? allowedProviders.includes(id) : true);
   const firstAllowedCloud = cloudProviders.find((p) => isAllowed(p.id)) ?? cloudProviders[0];
@@ -492,11 +509,12 @@ function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean
           <DialogContent>
             <div className={styles.modelFields}>
               {/* Private-first: the on-device model is the hero; cloud vendors
-                  are the honest, one-click alternative grouped below. §3: the
-                  radio is desktop-only — the mobile roster has no local entry,
-                  so there is no local/cloud choice; with no provider selected
-                  yet, the dialog leads with the two truths instead. */}
-              {platform === "desktop" ? (
+                  are the honest, one-click alternative grouped below.
+                  add-mobile-local-inference: the radio shows wherever local is
+                  offered (desktop, or a mobile shell with a backend); a mobile
+                  shell WITHOUT a backend has no local entry, so there is no
+                  local/cloud choice and the dialog leads with the two truths. */}
+              {localOffered ? (
                 <RadioGroup
                   value={isLocal ? "local" : "cloud"}
                   onChange={(_, d) => {
@@ -516,7 +534,7 @@ function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean
                   <Radio
                     value="local"
                     disabled={!isAllowed("local")}
-                    label="Private — runs on this device. No API key; nothing leaves this device. (Recommended)"
+                    label={localModelLabel}
                   />
                   <Radio
                     value="cloud"
@@ -548,7 +566,14 @@ function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean
               )}
 
               {isLocal ? (
-                <LocalModelInstallPanel />
+                // add-mobile-local-inference: the llama-server download/uninstall
+                // panel is a desktop concept (no download CTA on a mobile
+                // backend — Tier-1 is resident, Tier-2 fetches via the shell).
+                // On a mobile shell the private model is simply selected; there
+                // is nothing to install, so no panel renders beneath the radio.
+                platform === "desktop" ? (
+                  <LocalModelInstallPanel />
+                ) : null
               ) : (
                 <>
                   {/* Honest cloud heading, naming the selected vendor. */}

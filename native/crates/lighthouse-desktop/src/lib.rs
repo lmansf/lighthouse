@@ -434,6 +434,7 @@ pub fn run() {
             commands::model_status,
             commands::model_download,
             commands::model_uninstall,
+            commands::private_model_availability,
             commands::open_node,
             commands::reveal_node,
             commands::settings_get,
@@ -477,6 +478,17 @@ pub fn run() {
             desktop::setup(app, smoke)?;
             #[cfg(not(desktop))]
             let _ = smoke;
+
+            // Mobile: probe the on-device private-model backend once at boot so
+            // the availability verdict + LIGHTHOUSE_LOCAL_LLM_URL are set before
+            // the first ask (on iOS this also stands up the in-process Foundation
+            // Models loopback responder). Runs inline — binding a resident
+            // Tier-1 model's loopback socket is instant, and the first ask must
+            // never race the probe. Desktop owns llama-server and never needs it.
+            #[cfg(not(desktop))]
+            {
+                let _ = commands::private_model_availability_impl();
+            }
 
             // --- Pinned-question rechecks (openspec: add-pinned-questions):
             // sample the watcher generation every 30 s; when it advanced,

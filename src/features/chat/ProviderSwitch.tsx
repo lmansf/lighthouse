@@ -34,6 +34,7 @@ import {
 import { BrainCircuitRegular, SettingsRegular } from "@fluentui/react-icons";
 import { useAuthStore } from "@/stores/useAuthStore";
 import { useRagStore } from "@/stores/useRagStore";
+import { useOnDeviceModel } from "@/stores/useOnDeviceModel";
 import { shortProviderLabel, switchArgs, switchChoices } from "@/lib/providerSwitch";
 import { apiKeyBillingNote } from "@/lib/billingNotes";
 import { MOBILE_NO_PROVIDER_TRUTHS } from "@/contracts";
@@ -100,14 +101,17 @@ export function ProviderSwitch({
     }
   }, []);
 
-  // §3: platform-filtered roster — on a mobile shell the local entry is gone
-  // (platformKind is primed from the first capability payload well before the
-  // chat header renders).
+  // add-mobile-local-inference: availability-filtered roster — on a mobile shell
+  // the local entry appears only when the plugin reports a usable on-device
+  // backend (else it stays gone). platformKind is primed from the first
+  // capability payload well before the chat header renders; the store probes
+  // once on a mobile shell (desktop keeps local via the desktop short-circuit).
   const platform = platformKind();
+  const { available: onDeviceBackend } = useOnDeviceModel();
   // §2 (fp2): compact collapses the trigger to its icon — false at every
   // width on desktop (paneLayout's structural pin), so desktop is unchanged.
   const compact = usePaneLayout(false).compact;
-  const choices = switchChoices(onboarding.keyedProviders, localReady, platform);
+  const choices = switchChoices(onboarding.keyedProviders, localReady, platform, onDeviceBackend);
   const isAllowed = (id: string) => (allowedProviders ? allowedProviders.includes(id) : true);
   const label = shortProviderLabel(onboarding.providerId);
 

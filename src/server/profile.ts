@@ -10,7 +10,7 @@
 import type { OnboardingState } from "@/contracts";
 import { platformKind, profilePath, readJson, writeJson } from "./config";
 import { REMOTE_PROVIDERS, remoteProvider } from "./llm";
-import { localModelSupported } from "./localModel";
+import { localModelAvailable, onDeviceBackend } from "./localModel";
 import { providerAllowed } from "./policy";
 import { getProviderKey, setProviderKey } from "./secrets";
 
@@ -66,16 +66,20 @@ const KNOWN_PROVIDER_IDS = new Set([
 /**
  * §3: what a profile is normalized TO when its stored provider can't answer
  * here — pure for tests. The desktop keeps the historic private-local default;
- * a mobile shell (where the local model is unsupported) gets NO provider at
- * all: deterministic asks still answer (origin "device"), and the first saved
+ * a mobile shell with a usable on-device backend ALSO defaults to the private
+ * model (zero-setup, fully private); a mobile shell WITHOUT one gets NO provider
+ * at all: deterministic asks still answer (origin "device"), and the first saved
  * cloud key becomes the selection via the ordinary selectModel path.
  * KEEP IN SYNC with profile.rs::default_provider_for.
  */
-export function defaultProviderFor(platform: string): {
+export function defaultProviderFor(
+  platform: string,
+  onDeviceBackend: boolean,
+): {
   providerId: string | null;
   modelId: string | null;
 } {
-  return localModelSupported(platform)
+  return localModelAvailable(platform, onDeviceBackend)
     ? { providerId: LOCAL_PROVIDER_ID, modelId: LOCAL_MODEL_ID }
     : { providerId: null, modelId: null };
 }
@@ -113,9 +117,10 @@ function load(): StoredProfile {
   const unusable =
     Boolean(p.providerId) &&
     (!KNOWN_PROVIDER_IDS.has(p.providerId!) ||
-      (p.providerId === LOCAL_PROVIDER_ID && !localModelSupported(platformKind())));
+      (p.providerId === LOCAL_PROVIDER_ID &&
+        !localModelAvailable(platformKind(), onDeviceBackend())));
   if (unusable) {
-    const d = defaultProviderFor(platformKind());
+    const d = defaultProviderFor(platformKind(), onDeviceBackend());
     p = { ...p, providerId: d.providerId, modelId: d.modelId };
     dirty = true;
   }

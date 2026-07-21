@@ -89,14 +89,16 @@ fn is_known_provider(id: &str) -> bool {
     id == LOCAL_PROVIDER_ID || id == "anthropic" || crate::llm::remote_provider(id).is_some()
 }
 
-/// §3: what a profile is normalized TO when its stored provider can't answer
-/// here — pure for tests. The desktop keeps the historic private-local
-/// default; a mobile shell (where the local model is unsupported) gets NO
-/// provider at all: deterministic asks still answer (origin "device"), and
-/// the first saved cloud key becomes the selection via the ordinary
-/// select_model path. KEEP IN SYNC with profile.ts::defaultProviderFor.
-fn default_provider_for(platform_kind: &str) -> (Option<String>, Option<String>) {
-    if crate::local_model::local_model_supported(platform_kind) {
+/// §3 / add-mobile-local-inference: what a profile is normalized TO when its
+/// stored provider can't answer here — pure for tests. The desktop keeps the
+/// historic private-local default; a mobile shell with a usable on-device backend
+/// (`on_device_backend`) ALSO defaults to the private model (zero-setup, fully
+/// private); a mobile shell WITHOUT one gets NO provider at all — deterministic
+/// asks still answer (origin "device"), and the first saved cloud key becomes the
+/// selection via the ordinary select_model path. KEEP IN SYNC with
+/// profile.ts::defaultProviderFor.
+fn default_provider_for(platform_kind: &str, on_device_backend: bool) -> (Option<String>, Option<String>) {
+    if crate::local_model::local_model_available(platform_kind, on_device_backend) {
         (
             Some(LOCAL_PROVIDER_ID.to_string()),
             Some(LOCAL_MODEL_ID.to_string()),
@@ -146,7 +148,10 @@ fn load() -> StoredProfile {
         _ => false,
     };
     if unusable {
-        let (provider_id, model_id) = default_provider_for(crate::config::platform_kind());
+        let (provider_id, model_id) = default_provider_for(
+            crate::config::platform_kind(),
+            crate::local_model::on_device_backend(),
+        );
         p.provider_id = provider_id;
         p.model_id = model_id;
         dirty = true;
@@ -378,14 +383,18 @@ mod tests {
     /// the defaultProviderFor pin in test/localModelPlatform.test.mjs.
     #[test]
     fn default_provider_is_platform_aware() {
-        assert_eq!(
-            default_provider_for("desktop"),
-            (
-                Some(LOCAL_PROVIDER_ID.to_string()),
-                Some(LOCAL_MODEL_ID.to_string())
-            )
+        let local = (
+            Some(LOCAL_PROVIDER_ID.to_string()),
+            Some(LOCAL_MODEL_ID.to_string()),
         );
-        assert_eq!(default_provider_for("ios"), (None, None));
-        assert_eq!(default_provider_for("android"), (None, None));
+        // Desktop always defaults to the private model — the backend flag is moot.
+        assert_eq!(default_provider_for("desktop", false), local);
+        assert_eq!(default_provider_for("desktop", true), local);
+        // add-mobile-local-inference: a mobile shell defaults to the private model
+        // ONLY with a reported on-device backend; without one, NO provider (§3).
+        assert_eq!(default_provider_for("ios", true), local);
+        assert_eq!(default_provider_for("android", true), local);
+        assert_eq!(default_provider_for("ios", false), (None, None));
+        assert_eq!(default_provider_for("android", false), (None, None));
     }
 }

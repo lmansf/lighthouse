@@ -69,18 +69,20 @@ export const MODEL_PROVIDERS: ModelProvider[] = [
 ];
 
 /**
- * §3 (iOS field patch 1): the roster for a given form factor. The private
- * on-device model exists only on the desktop shell — phone-class hardware
- * can't run the ~4.2 GB weights — so on ios/android the local entry is GONE
- * (not disabled). The onboarding model slide, Settings → AI models, and the
- * chat header switcher all consume this one filter, which is what keeps
- * LocalModelInstallPanel and every Install CTA from ever mounting there. The
- * engine enforces the same verdict regardless (local_model.rs::
- * local_model_supported / localModel.ts::localModelSupported — downloads are
- * refused, status reports "unsupported").
+ * add-mobile-local-inference: the roster for a given form factor + on-device
+ * backend. Desktop always leads with the private model. A mobile shell (ios/
+ * android) now returns the local entry TOO — but ONLY when the shell reports a
+ * usable on-device backend (`onDeviceBackend`, from the
+ * `private_model_availability` probe); with no backend it stays GONE (not
+ * disabled), exactly as fp1 §3 left it. This reverses the earlier blanket
+ * "hide local on mobile" into an availability probe. The onboarding model
+ * slide, Settings → AI models, and the chat header switcher all consume this
+ * one filter. The engine enforces the same verdict (local_model.rs::
+ * local_model_available / localModel.ts::localModelAvailable — below-floor
+ * refuses downloads and reports "unsupported").
  */
-export function modelProvidersFor(platform: PlatformKind): ModelProvider[] {
-  return platform === "desktop"
+export function modelProvidersFor(platform: PlatformKind, onDeviceBackend = false): ModelProvider[] {
+  return platform === "desktop" || onDeviceBackend
     ? MODEL_PROVIDERS
     : MODEL_PROVIDERS.filter((p) => p.id !== "local");
 }
@@ -94,3 +96,13 @@ export function modelProvidersFor(platform: PlatformKind): ModelProvider[] {
  */
 export const MOBILE_NO_PROVIDER_TRUTHS =
   "Add a cloud API key to enable narrated answers — the private model runs on the desktop app.";
+
+/**
+ * add-mobile-local-inference: how the on-device private model is described when
+ * it IS available on a mobile shell, per backend tier — honest about what runs.
+ * Byte-pinned (test/localModelPlatform.test.mjs). Desktop keeps the catalog label.
+ */
+export const ON_DEVICE_MODEL_COPY: Record<"foundation" | "gguf", string> = {
+  foundation: "Runs on this device using Apple's on-device model",
+  gguf: "Runs on this device using a built-in private model",
+};

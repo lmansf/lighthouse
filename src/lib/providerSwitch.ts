@@ -29,19 +29,21 @@ export const LOCAL_HINT = "runs on this device";
  * active provider gets no special seat: an unkeyed cloud selection still
  * yields a menu of real, one-click destinations only.
  *
- * §3: the roster is platform-filtered (modelProvidersFor) — on a mobile shell
- * the local entry is GONE regardless of `localReady` (the engine reports
- * "unsupported" there, so localReady can't be true anyway; the filter makes
- * it structural).
+ * add-mobile-local-inference: the roster is availability-filtered
+ * (modelProvidersFor(platform, onDeviceBackend)). The local entry is no longer
+ * structurally gone on mobile — it appears when the shell reports a usable
+ * on-device backend (`onDeviceBackend`) AND its weights are ready (`localReady`);
+ * with no backend it stays GONE, exactly as before. Desktop is unchanged.
  */
 export function switchChoices(
   keyedProviders: string[] | undefined,
   localReady: boolean,
   platform: PlatformKind,
+  onDeviceBackend = false,
 ): SwitchChoice[] {
   const keyed = new Set(keyedProviders ?? []);
   const out: SwitchChoice[] = [];
-  for (const p of modelProvidersFor(platform)) {
+  for (const p of modelProvidersFor(platform, onDeviceBackend)) {
     if (p.id === "local") {
       if (localReady) out.push({ id: p.id, label: p.label, hint: LOCAL_HINT });
     } else if (keyed.has(p.id)) {

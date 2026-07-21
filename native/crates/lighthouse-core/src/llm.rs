@@ -107,6 +107,20 @@ pub fn remote_provider(id: &str) -> Option<&'static RemoteProvider> {
 /// real answers stop naturally long before this.
 const REMOTE_MAX_TOKENS: u32 = 4096;
 
+// --- The PrivateModel transport seam (add-mobile-local-inference §1) ---------
+// The "private, on-device model" is defined by ONE contract, not a platform: the
+// OpenAI-compatible `/v1/chat/completions` (streaming deltas) + `/health` pair at
+// `local_llm_url()`. `stream_answer`'s `provider_id == "local"` branch → the
+// engine-level (NOT `#[cfg(desktop)]`) `stream_local` + `sse_deltas` speak it.
+//
+// - DESKTOP impl: the supervised `llama-server` answers this URL (unchanged).
+// - iOS impl (docs/ios-private-model.md): the shell serves the SAME contract
+//   in-process behind Apple Foundation Models (Tier-1) or a bundled GGUF
+//   (Tier-2), setting `LIGHTHOUSE_LOCAL_LLM_URL` to its loopback origin — so this
+//   engine code streams identically on device with no desktop-path change. The
+//   Swift side diffs Foundation Models' cumulative snapshots into the deltas this
+//   contract expects. Prompt/label construction (SYSTEM_PROMPT / build_prompt)
+//   stays shared + byte-identical across all impls (PARITY).
 fn local_llm_url() -> String {
     std::env::var("LIGHTHOUSE_LOCAL_LLM_URL")
         .ok()
