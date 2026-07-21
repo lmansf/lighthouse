@@ -429,13 +429,17 @@ pub(crate) fn warm_wait_verdict(
     }
 }
 
-/// The user-visible warming status. KEEP IN SYNC (byte-identical) with
-/// synth.ts::warmingLabel.
+/// The user-visible warming status — staged, progressive copy (faster & calmer):
+/// the message advances through reassuring phases instead of a raw ticking
+/// seconds counter, so a cold model load reads as steady progress, not a
+/// stopwatch. KEEP IN SYNC (byte-identical) with synth.ts::warmingLabel.
 fn warming_label(waited_ms: u64) -> String {
-    if waited_ms == 0 {
+    if waited_ms < 8000 {
         "Private model warming up…".to_string()
+    } else if waited_ms < 20000 {
+        "Loading the private model into memory…".to_string()
     } else {
-        format!("Private model warming up… ({}s)", waited_ms / 1000)
+        "Almost ready — the first private answer takes a moment…".to_string()
     }
 }
 
@@ -1701,7 +1705,7 @@ fn live_pipeline(
                         // The budgeted Beam loop (openspec: add-beam-loop §2):
                         // the former bare `steps.len() < 3` count is replaced by
                         // an explicit Budget — max_steps (config `beam_max_steps`,
-                        // default 5), a generous whole-loop wall-clock deadline,
+                        // default 2), a generous whole-loop wall-clock deadline,
                         // and the §1 token ceiling — plus a no-progress guard. The
                         // single combined plan+decide model call per iteration
                         // (§2.2) is unchanged, and every number is still computed
@@ -3178,8 +3182,17 @@ mod tests {
     #[test]
     fn warming_label_matches_the_twin() {
         assert_eq!(warming_label(0), "Private model warming up…");
-        assert_eq!(warming_label(4_500), "Private model warming up… (4s)");
-        assert_eq!(warming_label(61_000), "Private model warming up… (61s)");
+        assert_eq!(warming_label(4_500), "Private model warming up…");
+        assert_eq!(warming_label(8_000), "Loading the private model into memory…");
+        assert_eq!(warming_label(19_999), "Loading the private model into memory…");
+        assert_eq!(
+            warming_label(20_000),
+            "Almost ready — the first private answer takes a moment…"
+        );
+        assert_eq!(
+            warming_label(61_000),
+            "Almost ready — the first private answer takes a moment…"
+        );
     }
 
     // §22.6: the meta-answer fence extractor (twin: synth.ts::extractChartFence).

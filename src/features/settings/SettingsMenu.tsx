@@ -33,7 +33,7 @@ import {
 } from "@fluentui/react-components";
 import {
   BoardRegular,
-  ChatHelpRegular,
+  LightbulbRegular,
   BrainCircuitRegular,
   DeleteRegular,
   HistoryRegular,
@@ -1855,7 +1855,7 @@ export function SettingsMenu() {
               Board
             </MenuItem>
             <MenuItem
-              icon={<ChatHelpRegular />}
+              icon={<LightbulbRegular />}
               onClick={() => window.dispatchEvent(new Event("lighthouse:open-feedback"))}
             >
               Send feedback

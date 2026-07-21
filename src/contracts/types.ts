@@ -311,6 +311,18 @@ export interface RagReference {
  * Rust-engine-only — see docs/ts-twin.md); the UI renders those as "desktop
  * only" rather than blank.
  */
+/** A bounded, parsed preview of a delimited (CSV/TSV) file: the header row and
+ *  the first few data rows (columns capped) — a glance at the table's shape, not
+ *  the whole file. KEEP IN SYNC with `PreviewTable` in lighthouse-core
+ *  inspect.rs. */
+export interface PreviewTable {
+  header: string[];
+  rows: string[][];
+  /** True when the file has more rows or columns than shown — never a claim of
+   *  completeness. */
+  truncated: boolean;
+}
+
 export interface FileInspection {
   name?: string;
   /** Effective AI-visibility (included in retrieval). */
@@ -320,6 +332,10 @@ export interface FileInspection {
   /** A bounded slice of the extracted text the model would read. Absent when the
    *  file has no extractable text (it stays findable by name only). */
   extractPreview?: string;
+  /** For a CSV/TSV file, a tiny parsed table preview — header + first rows,
+   *  columns capped — so the panel shows the table's shape, not just a raw text
+   *  slice. Shared field (both engines parse delimited text); absent otherwise. */
+  previewTable?: PreviewTable;
   /** Rust-only: the preview text came from OCR (image / scanned PDF). The twin
    *  has no OCR and omits this. */
   fromOcr?: boolean;

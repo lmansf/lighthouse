@@ -12,7 +12,7 @@
 //! The former bound was a bare `steps.len() < 3` count. It is replaced by a
 //! `Budget` with three independent dimensions plus a no-progress guard:
 //!
-//! - `max_steps` — the config `beam_max_steps` (default 5), the primary bound
+//! - `max_steps` — the config `beam_max_steps` (default 2), the primary bound
 //!   that is ALWAYS present. The loop never runs more steps than this.
 //! - `deadline` — a generous whole-loop wall-clock safety net, so a wedged
 //!   provider cannot spin without end even if every other signal is absent.
@@ -45,7 +45,7 @@ pub const DEADLINE: Duration = Duration::from_secs(300);
 /// the former bare `steps.len() < 3` count (openspec: add-beam-loop §2.1).
 #[derive(Debug, Clone)]
 pub struct Budget {
-    /// Hard cap on executed steps (config `beam_max_steps`, default 5). Always
+    /// Hard cap on executed steps (config `beam_max_steps`, default 2). Always
     /// present — the primary bound the loop can never exceed.
     pub max_steps: usize,
     /// Whole-loop wall-clock stop: the loop does not start a step once this

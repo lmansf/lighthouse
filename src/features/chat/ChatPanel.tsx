@@ -84,7 +84,7 @@ import {
 } from "@fluentui/react-icons";
 import dynamic from "next/dynamic";
 import { type Components } from "react-markdown";
-import type { DragEvent } from "react";
+import type { DragEvent, ReactNode } from "react";
 import type { AnalyticsMeta, ChangedPin, ChatTurn, Pin, RagReference } from "@/contracts";
 import { chatService, MODEL_PROVIDERS, ragService, runRecipeQuestion } from "@/contracts";
 import { useRagStore } from "@/stores/useRagStore";
@@ -2408,6 +2408,21 @@ const References = memo(function References({
     </div>
   );
 });
+
+/** Result-first paint (faster & calmer): render heavier, non-critical chrome
+ *  (citation references and the like) ONE frame after mount, so the answer text
+ *  above it is visible and interactive first. The answer already streams in
+ *  live; this just keeps the settle moment from mounting a big sub-tree in the
+ *  same commit. A settled turn loaded from history defers by a single frame on
+ *  first open — imperceptible — and never unmounts thereafter. */
+function DeferredMount({ children }: { children: ReactNode }) {
+  const [ready, setReady] = useState(false);
+  useEffect(() => {
+    const raf = requestAnimationFrame(() => setReady(true));
+    return () => cancelAnimationFrame(raf);
+  }, []);
+  return ready ? <>{children}</> : null;
+}
 
 /** Subtle Lighthouse beacon loader, shown briefly while we wait for the first
  *  token. Multi-document synthesis narrates its stages through `label`
@@ -5335,15 +5350,17 @@ export function ChatPanel() {
                         />
                       )}
                       {m.references && m.references.length > 0 && (
-                        <References
-                          turnId={m.id}
-                          references={m.references}
-                          desktop={desktop}
-                          flashCite={flashCite}
-                          onOpen={openFile}
-                          onPreview={openPreview}
-                          onSynthesize={onSynthesizeStable}
-                        />
+                        <DeferredMount>
+                          <References
+                            turnId={m.id}
+                            references={m.references}
+                            desktop={desktop}
+                            flashCite={flashCite}
+                            onOpen={openFile}
+                            onPreview={openPreview}
+                            onSynthesize={onSynthesizeStable}
+                          />
+                        </DeferredMount>
                       )}
                       {/* Honesty note: files were visible, yet nothing matched. */}
                       {!m.error &&

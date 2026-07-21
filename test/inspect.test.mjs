@@ -62,6 +62,13 @@ test("the twin renders the shared fields and OMITS the Rust-only fields (never f
     "extractPreview is the extracted text",
   );
 
+  // CSV/TSV get a parsed table preview (header + first rows) — a SHARED field.
+  assert.ok(insp.previewTable, "a csv gets a parsed table preview");
+  assert.deepEqual(insp.previewTable.header, ["date", "region", "product", "amount"]);
+  assert.equal(insp.previewTable.rows.length, 3);
+  assert.deepEqual(insp.previewTable.rows[0], ["2025-01-02", "NE", "widgets", "10"]);
+  assert.equal(insp.previewTable.truncated, false, "the small fixture is not truncated");
+
   // Parity contract: the Rust-only fields are ABSENT, not present as fakes.
   for (const key of RUST_ONLY) {
     assert.ok(!(key in insp), `twin omits Rust-only field ${key}`);

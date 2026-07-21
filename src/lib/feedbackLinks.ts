@@ -16,10 +16,21 @@ export const FEEDBACK_EMAIL = "lmansf96@gmail.com";
 /** The public issue tracker "Open a GitHub issue" points at. */
 export const FEEDBACK_ISSUES_URL = "https://github.com/lmansf/lighthouse/issues/new";
 
+/** What the feedback is — a light triage signal chosen in the form. */
+export type FeedbackKind = "idea" | "problem" | "praise";
+
+/** Human label for a feedback kind (also the RadioGroup copy). */
+export function feedbackKindLabel(kind: FeedbackKind): string {
+  return kind === "problem" ? "Problem" : kind === "praise" ? "Praise" : "Idea";
+}
+
 export interface FeedbackReport {
+  /** What kind of feedback this is (idea / problem / praise). Optional so the
+   *  builders stay pure over a bare report; the form always sets it. */
+  kind?: FeedbackKind;
   /** Optional "where in the app?" context. */
   where?: string;
-  /** The required "what happened / what would you change?" message. */
+  /** The required message (an idea, a problem, or a note of praise). */
   what: string;
   /** App version (e.g. "0.11.3"); client-side from NEXT_PUBLIC_APP_VERSION. */
   version?: string;
@@ -40,6 +51,9 @@ const LOG_URL_CAP = 3000;
 /** The human-readable report body — shown for review AND used as the mail/issue body. */
 export function composeFeedbackBody(r: FeedbackReport, opts: { capLog?: boolean } = {}): string {
   const lines: string[] = [];
+  if (r.kind) {
+    lines.push(`Kind: ${feedbackKindLabel(r.kind)}`, "");
+  }
   lines.push(r.what.trim());
   if (r.where && r.where.trim()) {
     lines.push("", `Where: ${r.where.trim()}`);

@@ -1022,23 +1022,64 @@ fn register_grid(ctx: &SessionContext, tname: &str, grid: &crate::pdf_tables::Ta
     Some(tname.to_string())
 }
 
-/// calamine → Arrow MemTable per sheet (detected header; ≥80% numeric column →
-/// Float64 with nulls, else Utf8). Returns the registered table names, each
-/// with `Some(rows_registered)` when the sheet held more data rows than
-/// MAX_XLSX_ROWS — the caller turns that into the card note + answer footer,
-/// so the cap is never silent.
-fn register_workbook(
-    ctx: &SessionContext,
-    base: &str,
-    abs: &PathBuf,
-) -> Vec<(String, Option<usize>)> {
+/// Faster & calmer: one workbook's parsed sheets, cached by (path, mtime, size).
+/// The typed Arrow MemTables are immutable once built, so registering the SAME
+/// `Arc<MemTable>` into each ask's fresh `SessionContext` is byte-for-byte
+/// identical to a re-parse — never a stale or shifted number — while skipping
+/// the calamine read + type-inference pass on repeat asks against an unchanged
+/// book. Rust-only (no TS analytics twin).
+struct CachedWorkbook {
+    /// `wb.sheet_names().len() > 1` at parse time — drives `{base}__{sheet}`
+    /// naming exactly as the pre-cache path did, independent of how many sheets
+    /// actually survived typing.
+    multi: bool,
+    sheets: Vec<CachedSheet>,
+}
+
+struct CachedSheet {
+    /// Pre-sanitized sheet name for the `{base}__{sheet}` suffix (multi-sheet).
+    sheet: String,
+    mem: Arc<MemTable>,
+    /// Rows kept when the sheet held more data rows than MAX_XLSX_ROWS (None =
+    /// full coverage) — the caller turns it into the card note + answer footer.
+    capped_rows: Option<usize>,
+}
+
+/// Bounded so a large vault can't grow the cache without limit; on overflow the
+/// whole map is dropped (this is a perf cache, never a correctness store) and
+/// refills lazily.
+const WORKBOOK_CACHE_CAP: usize = 128;
+
+#[allow(clippy::type_complexity)]
+fn workbook_cache(
+) -> &'static std::sync::Mutex<std::collections::HashMap<(String, i64, u64), Arc<CachedWorkbook>>> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<(String, i64, u64), Arc<CachedWorkbook>>>,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// (path, mtime_ms, size) — the same "mtimeMs:size" freshness identity the index
+/// uses, so the key auto-invalidates the instant the file changes on disk. None
+/// when either stat is unavailable, so the caller parses fresh and skips the
+/// cache (matching the old always-parse behavior for un-stattable files).
+fn workbook_cache_key(abs: &PathBuf) -> Option<(String, i64, u64)> {
+    let size = std::fs::metadata(abs).ok()?.len();
+    let mtime = file_mtime_ms(abs)?;
+    Some((abs.to_string_lossy().to_string(), mtime, size))
+}
+
+/// The pure calamine → typed-MemTable parse for one workbook, factored out of
+/// `register_workbook` so its result is cacheable. No `ctx`, no table naming —
+/// just the typed sheets in book order plus the raw `multi` flag.
+fn parse_workbook(abs: &PathBuf) -> CachedWorkbook {
     use calamine::Reader;
     let Ok(mut wb) = calamine::open_workbook_auto(abs) else {
-        return vec![];
+        return CachedWorkbook { multi: false, sheets: vec![] };
     };
     let names: Vec<String> = wb.sheet_names().to_vec();
     let multi = names.len() > 1;
-    let mut out = Vec::new();
+    let mut sheets = Vec::new();
     for sheet in names.into_iter().take(MAX_SHEETS_PER_BOOK) {
         let Ok(range) = wb.worksheet_range(&sheet) else {
             continue;
@@ -1095,13 +1136,55 @@ fn register_workbook(
         let Ok(mem) = MemTable::try_new(schema, vec![vec![batch]]) else {
             continue;
         };
-        let tname = if multi {
-            format!("{base}__{}", sanitize_table_name(&sheet))
+        sheets.push(CachedSheet {
+            sheet: sanitize_table_name(&sheet),
+            mem: Arc::new(mem),
+            capped_rows,
+        });
+    }
+    CachedWorkbook { multi, sheets }
+}
+
+/// calamine → Arrow MemTable per sheet (detected header; ≥80% numeric column →
+/// Float64 with nulls, else Utf8). Returns the registered table names, each
+/// with `Some(rows_registered)` when the sheet held more data rows than
+/// MAX_XLSX_ROWS — the caller turns that into the card note + answer footer,
+/// so the cap is never silent. Parses once per (path, mtime, size) and reuses
+/// the typed sheets on repeat asks against an unchanged book (faster & calmer).
+fn register_workbook(
+    ctx: &SessionContext,
+    base: &str,
+    abs: &PathBuf,
+) -> Vec<(String, Option<usize>)> {
+    let key = workbook_cache_key(abs);
+    let wbk: Arc<CachedWorkbook> = match key
+        .as_ref()
+        .and_then(|k| workbook_cache().lock().ok().and_then(|c| c.get(k).cloned()))
+    {
+        Some(hit) => hit,
+        None => {
+            let parsed = Arc::new(parse_workbook(abs));
+            if let Some(k) = key {
+                if let Ok(mut c) = workbook_cache().lock() {
+                    if c.len() >= WORKBOOK_CACHE_CAP {
+                        c.clear();
+                    }
+                    c.insert(k, parsed.clone());
+                }
+            }
+            parsed
+        }
+    };
+
+    let mut out = Vec::new();
+    for s in &wbk.sheets {
+        let tname = if wbk.multi {
+            format!("{base}__{}", s.sheet)
         } else {
             base.to_string()
         };
-        if ctx.register_table(&tname, Arc::new(mem)).is_ok() {
-            out.push((tname, capped_rows));
+        if ctx.register_table(&tname, s.mem.clone()).is_ok() {
+            out.push((tname, s.capped_rows));
         }
     }
     out

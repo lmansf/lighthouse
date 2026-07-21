@@ -13,7 +13,7 @@
  *
  * PURE READ: it calls listNodes / docText / retrieve — never a setter.
  */
-import type { FileInspection } from "@/contracts";
+import type { FileInspection, PreviewTable } from "@/contracts";
 import { docText, inclusionAttribution, listNodes, localOnlyAttribution, retrieve } from "./vault";
 
 /** A glance at the extracted text, not the whole document. */
@@ -22,6 +22,44 @@ const PREVIEW_CHARS = 600;
 const TEST_SEARCH_K = 5;
 /** Per-hit text cap (matches the retrieval snippet cap). */
 const HIT_CHARS = 240;
+/** CSV/TSV parsed-preview bounds — a glance at the table's shape. KEEP IN SYNC
+ *  with inspect.rs PREVIEW_TABLE_ROWS / _COLS / _CHARS. */
+const PREVIEW_TABLE_ROWS = 5;
+const PREVIEW_TABLE_COLS = 8;
+const PREVIEW_TABLE_CHARS = 2000;
+
+/** Parse the head of a delimited file into a bounded (header, rows) preview —
+ *  the SAME shape inspect.rs::parse_preview_table produces, so the shared
+ *  `previewTable` field is alike across engines. Undefined unless there's at
+ *  least a 2-column header plus one data row. */
+function parsePreviewTable(text: string, delim: string): PreviewTable | undefined {
+  // The bounded slice may end mid-line; keep only whole lines so a partial
+  // trailing row never shows (the caller still flags `truncated`).
+  const sourceTruncated = text.length >= PREVIEW_TABLE_CHARS;
+  const whole = text.split("\n").map((l) => l.replace(/\r$/, ""));
+  if (sourceTruncated && whole.length > 1) whole.pop();
+  const lines = whole.filter((l) => l.trim() !== "");
+  if (lines.length === 0) return undefined;
+  const split = (line: string): string[] =>
+    line.split(delim).slice(0, PREVIEW_TABLE_COLS).map((c) => c.trim());
+  const header = split(lines[0]);
+  if (header.length < 2) return undefined;
+  const width = header.length;
+  const rows: string[][] = [];
+  let moreRows = false;
+  for (const line of lines.slice(1)) {
+    if (rows.length >= PREVIEW_TABLE_ROWS) {
+      moreRows = true;
+      break;
+    }
+    const cells = split(line);
+    while (cells.length < width) cells.push(""); // align every row to header width
+    rows.push(cells.slice(0, width));
+  }
+  if (rows.length === 0) return undefined;
+  const wide = lines[0].split(delim).length > PREVIEW_TABLE_COLS;
+  return { header, rows, truncated: sourceTruncated || moreRows || wide };
+}
 
 /** The tabular set the chunker keys on. KEEP IN SYNC with chunkTextsNamed. */
 const TABULAR_EXT = [".csv", ".tsv", ".parquet", ".xlsx", ".xlsm", ".xls"];
@@ -69,6 +107,17 @@ export async function inspect(fileId: string, query?: string): Promise<FileInspe
   // genuinely empty file: it stays findable by name only.
   const doc = await docText(fileId, PREVIEW_CHARS);
   if (doc) out.extractPreview = doc.text;
+
+  // CSV/TSV also get a small parsed table preview (header + first rows) so the
+  // panel shows the table's SHAPE, not just a raw text slice. A pure parse of a
+  // bounded head — SHARED with the Rust engine (both parse delimited text the
+  // same way). Non-delimited tabular files (xlsx) keep the text preview only.
+  const lowerName = node.name.toLowerCase();
+  if (lowerName.endsWith(".csv") || lowerName.endsWith(".tsv")) {
+    const delim = lowerName.endsWith(".tsv") ? "\t" : ",";
+    const table = await docText(fileId, PREVIEW_TABLE_CHARS);
+    if (table) out.previewTable = parsePreviewTable(table.text, delim);
+  }
 
   // File-scoped test-search — the EXISTING lexical scorer over ONLY this file id,
   // on the device path (a local preview, never sent to a provider, so local-only
