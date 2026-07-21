@@ -4,14 +4,11 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Button, Text, makeStyles, mergeClasses, tokens } from "@fluentui/react-components";
 import { ArrowLeftRegular } from "@fluentui/react-icons";
 import { Sidebar } from "./Sidebar";
-import { SectionRail } from "./SectionRail";
-import { SectionFlyout } from "./SectionFlyout";
-import { sectionById } from "./sidebarSections";
 import { LAYOUT } from "./theme";
 import { usePaneLayout, type CompactTab } from "./paneLayout";
 import { CompactTabBar, TAB_BAR_CONTENT_HEIGHT } from "./CompactTabBar";
 import { useVaultTree } from "./useVaultTree";
-import { useSidebarFlyout } from "@/stores/useSidebarFlyout";
+import { anySheetOpen, useAnySheetOpen } from "./Sheet";
 import { useChatStore } from "@/stores/useChatStore";
 import { INSPECT_FILE_EVENT } from "@/lib/citePreview";
 import { StartupPrompt } from "@/features/startup/StartupPrompt";
@@ -82,7 +79,7 @@ const useStyles = makeStyles({
   // The files sidebar is a FULL-SCREEN page that slides in from the left edge
   // over the chat — no scrim, no 85vw overlay (the phone/compact-iPad has no
   // room for a partial column). Same inset:0 safe-area sheet primitive the
-  // section sheets use (SectionFlyout.styles.sheet). The Sidebar inside reads
+  // Sheet primitive uses (src/shell/Sheet.tsx). The Sidebar inside reads
   // --sidebar-w:100% so it fills the page; its persisted desktop width is never
   // applied here (and, with no resize handle, never written).
   page: {
@@ -213,10 +210,11 @@ export function AppShell({ sidebar, main }: AppShellProps) {
   // means "the files page is on screen".
   const [compactTab, setCompactTab] = useState<CompactTab>("chat");
   const layout = usePaneLayout(compactTab === "files");
-  // A section flyout sheet (History, Insights, …) is a modal over everything —
+  // A Sheet (History, the investigation picker, …) is a modal over everything —
   // while one is open the tab bar slides away and the sheet's own X/Esc dismiss
-  // it (returning to whichever page launched it).
-  const sheetOpen = useSidebarFlyout((s) => s.openSection !== null);
+  // it (returning to whichever page launched it). 0.13.10 §3: the signal is the
+  // Sheet primitive's mount counter, not the retired flyout store.
+  const sheetOpen = useAnySheetOpen();
   // Live mirror for the [] -mounted listeners below (shortcuts, reveal).
   const compactRef = useRef(layout.compact);
   compactRef.current = layout.compact;
@@ -230,13 +228,14 @@ export function AppShell({ sidebar, main }: AppShellProps) {
     return () => window.removeEventListener("lighthouse:open-drawer", onOpen);
   }, []);
 
-  // Esc backs a compact page (files or sections) out to chat — unless a section
-  // sheet is up, which owns Esc first (it closes to the page, not to chat).
+  // Esc backs a compact page (files or settings) out to chat — unless a Sheet
+  // is up, which owns Esc first (its capture-phase handler closes it and this
+  // bubbler only fires when no sheet consumed the key).
   useEffect(() => {
     if (!layout.compact || compactTab === "chat") return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
-      if (useSidebarFlyout.getState().openSection) return;
+      if (anySheetOpen()) return;
       e.preventDefault();
       setCompactTab("chat");
     };
@@ -278,7 +277,7 @@ export function AppShell({ sidebar, main }: AppShellProps) {
   };
 
   // fp3 §3: page-entrance animation — mount parked off-screen-left, then clear
-  // on the next frame so it eases in (mirrors SectionFlyout's sheet entrance).
+  // on the next frame so it eases in (mirrors the Sheet primitive's entrance).
   const [pageEntered, setPageEntered] = useState(false);
   useEffect(() => {
     if (!layout.drawerVisible) {
@@ -491,26 +490,9 @@ export function AppShell({ sidebar, main }: AppShellProps) {
         if (typeof server === "number") setWidth(server);
         else if (typeof cached === "number") setWidth(cached);
         else setWidth(LAYOUT.sidebarWidth);
-        // Reconcile the section flyout (openspec: field-patch-0.12.5 §1) against
-        // the authoritative per-mode settings file: teach the store the mode, and
-        // let the server's width + a VALID open-section id win over the cache. An
-        // unknown/removed section id is dropped here (registry-checked), never
-        // reopening a ghost drawer. Absent server values keep the cache hydrate.
-        const flyoutHydrate: {
-          mode: UiMode;
-          flyoutWidth?: number;
-          openSection?: string;
-        } = { mode: m };
-        const sfw = d?.flyoutWidth?.[m];
-        if (typeof sfw === "number") flyoutHydrate.flyoutWidth = sfw;
-        const sof = d?.openFlyout;
-        // §5: on a compact shell a persisted open section would materialize as
-        // a full-screen sheet over first paint — sections open by gesture only
-        // there, so the remembered id is not replayed.
-        if (typeof sof === "string" && sectionById(sof) && !compactRef.current) {
-          flyoutHydrate.openSection = sof;
-        }
-        useSidebarFlyout.getState().hydrate(flyoutHydrate);
+        // (0.13.10 §3: the section-flyout hydrate is gone with the flyout —
+        // the engine's flyoutWidth/openFlyout settings fields remain, simply
+        // unread by this UI.)
       })
       .catch(() => {
         /* offline / web build — the synchronous cache hydration stands */
@@ -668,7 +650,6 @@ export function AppShell({ sidebar, main }: AppShellProps) {
               // The header control is the page's 44pt Back-to-chat button (§3).
               backControl
               onToggleCollapsed={() => setCompactTab("chat")}
-              rail={<SectionRail />}
             >
               {sidebar}
             </Sidebar>
@@ -704,9 +685,6 @@ export function AppShell({ sidebar, main }: AppShellProps) {
             </div>
           </div>
         )}
-        {/* Section panels render as sheets — independent of the pages, so a
-            sheet opened from either rail survives the page auto-closing. */}
-        <SectionFlyout compact />
         <div
           className={styles.main}
           // Reflow above the fixed tab bar: reserve its height when the keyboard
@@ -729,7 +707,6 @@ export function AppShell({ sidebar, main }: AppShellProps) {
       <Sidebar
         collapsed={collapsed}
         onToggleCollapsed={() => setCollapsed((c) => !c)}
-        rail={<SectionRail />}
         width={width}
         resizing={resizing}
       >
@@ -755,10 +732,6 @@ export function AppShell({ sidebar, main }: AppShellProps) {
           onKeyDown={onHandleKeyDown}
         />
       )}
-      {/* The section flyout (openspec: field-patch-0.12.5 §1) sits between the
-          sidebar and main. It renders null unless a section is open; hidden with
-          the rail while the sidebar is collapsed. */}
-      {!collapsed && <SectionFlyout />}
       <div className={styles.main}>{main}</div>
       <StartupPrompt />
     </main>

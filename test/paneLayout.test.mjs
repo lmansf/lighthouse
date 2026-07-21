@@ -44,7 +44,6 @@ test("desktop never compacts — any width, drawer state irrelevant (structural 
       assert.equal(l.drawerVisible, false, "a stale drawerOpen never leaks into desktop");
       assert.equal(l.showResizeHandle, true);
       assert.equal(l.applyExplorerWidth, true);
-      assert.equal(l.sectionsAsSheets, false);
       // fp4 §3 structural pin: desktop NEVER shows the compact tab bar.
       assert.equal(l.showTabBar, false, "desktop keeps the persistent column, no tab bar");
     }
@@ -61,7 +60,6 @@ test("mobile below the breakpoint: full-screen page arrangement, no resize machi
       assert.equal(closed.drawerVisible, false);
       assert.equal(closed.showResizeHandle, false, "handle does not exist in compact");
       assert.equal(closed.applyExplorerWidth, false, "explorerWidth never applied in compact");
-      assert.equal(closed.sectionsAsSheets, true);
       // fp4 §3: the compact bottom tab bar is THE nav here.
       assert.equal(closed.showTabBar, true, "the tab bar is the compact navigation");
 
@@ -80,7 +78,6 @@ test("mobile at/above the breakpoint keeps the desktop arrangement (iPad ≥700p
       assert.equal(l.drawerVisible, false);
       assert.equal(l.showResizeHandle, true);
       assert.equal(l.applyExplorerWidth, true);
-      assert.equal(l.sectionsAsSheets, false);
       // fp4 §3 structural pin: an iPad-regular (≥700pt) shows NO tab bar either.
       assert.equal(l.showTabBar, false, "iPad-regular keeps the column, no tab bar");
     }

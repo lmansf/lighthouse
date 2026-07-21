@@ -8,10 +8,10 @@ import { FileExplorer } from "@/features/explorer/FileExplorer";
 // Static import (no dynamic gain): FileExplorer already pulls FileInspector
 // into the first-paint graph, so the host adds only its own few lines.
 import { FileInspectorHost } from "@/features/explorer/FileInspector";
-// The six non-file sections (Insights, Semantic, Capabilities, Recipes, Library,
-// Investigations) are no longer stacked here — they live in the sidebar section
-// registry (src/shell/sidebarSections.tsx) and open as flyout panels from the
-// SectionRail below the file tree (openspec: field-patch-0.12.5 §1).
+// 0.13.10 §3: the Sections world is retired — Investigations opens from the
+// chat header's picker, Business definitions / Saved views live in Settings,
+// recipes and report templates are chat chips, History is the chat header's
+// clock button.
 import { ChatPanel } from "@/features/chat/ChatPanel";
 import { VersionBadge } from "@/shell/VersionBadge";
 
@@ -78,12 +78,8 @@ export default function Home() {
       </div>
     );
   } else {
-    // Sectioned sidebar (openspec: field-patch-0.12.5 §1): the Files tree is the
-    // TOP anchor of the sidebar and the only thing in its body. The six other
-    // sections (Insights, Semantic, Capabilities, Recipes, Library,
-    // Investigations) are now header-only rows in the SectionRail — rendered by
-    // AppShell below the tree — each sliding out its full UI in the flyout panel.
-    // Their order + identity live in src/shell/sidebarSections.tsx.
+    // 0.13.10 §3: the sidebar is Files + the Settings footer, nothing else —
+    // the Files tree is the body's only content (no section rail).
     shell = (
       <AppShell sidebar={<FileExplorer />} main={<ChatPanel />} />
     );

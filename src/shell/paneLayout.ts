@@ -46,10 +46,7 @@ export interface PaneLayout {
   /** Whether the persisted explorerWidth is applied to the sidebar. In the
    *  drawer it is neither applied nor (with the handle gone) ever persisted. */
   applyExplorerWidth: boolean;
-  /** Section panels (Insights, History, …) render as full-width safe-area
-   *  sheets instead of an inline column. */
-  sectionsAsSheets: boolean;
-  /** fp4 §3: the compact portrait bottom tab bar (Chat · Files · Sections) is
+  /** fp4 §3: the compact bottom tab bar (Chat · Files · Settings) is
    *  THE navigation on a mobile shell below the breakpoint. Desktop and an
    *  iPad-regular (≥700pt) never show it — they keep the persistent column — so
    *  this is `compact` exactly, and the unit tests pin the never-on-desktop
@@ -100,7 +97,6 @@ export function paneLayout(
     drawerVisible: compact && drawerOpen,
     showResizeHandle: !compact,
     applyExplorerWidth: !compact,
-    sectionsAsSheets: compact,
     showTabBar: compact,
   };
 }

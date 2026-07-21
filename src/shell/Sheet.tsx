@@ -44,6 +44,11 @@ function subscribeCount(cb: () => void): () => void {
   return () => countListeners.delete(cb);
 }
 
+/** Non-hook snapshot for event handlers (the shell's Esc arbitration). */
+export function anySheetOpen(): boolean {
+  return openCount > 0;
+}
+
 /** True while ANY Sheet is mounted — the tab bar slides away for the duration. */
 export function useAnySheetOpen(): boolean {
   return useSyncExternalStore(

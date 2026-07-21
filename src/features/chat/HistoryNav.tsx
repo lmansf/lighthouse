@@ -72,7 +72,7 @@ const useStyles = makeStyles({
   },
   scopeCaption: { color: tokens.colorNeutralForeground3 },
   list: { display: "flex", flexDirection: "column", gap: tokens.spacingVerticalXXS },
-  // Date-group headers, the SectionRail groupLabel treatment.
+  // Date-group headers, the quiet groupLabel treatment.
   groupLabel: {
     ...shorthands.padding(tokens.spacingVerticalXS, tokens.spacingHorizontalS, "2px"),
     marginTop: tokens.spacingVerticalXS,

@@ -3,7 +3,7 @@
 /**
  * [TEAM: semantic] The sidebar's Business definitions section (openspec:
  * add-semantic-layer §6.2) — the curated metrics + synonyms applicable to the
- * current tables, the ViewsNav/RecipesNav Library sibling. One row per metric
+ * current tables (hosted in Settings since 0.13.10 §3). One row per metric
  * (name + its definition, a per-row lock badge when local-only, an overflow menu
  * with Ask / Rename / Delete) and one per synonym (term → canonical, Delete).
  * "New metric" / "New synonym" author definitions inline.
@@ -57,7 +57,7 @@ import { ragService } from "@/contracts";
 import { useRagStore } from "@/stores/useRagStore";
 
 const useStyles = makeStyles({
-  // The Library-sibling chrome — the exact ViewsNav/RecipesNav treatment.
+  // The Library-sibling chrome — the exact ViewsNav treatment.
   section: {
     display: "flex",
     flexDirection: "column",
@@ -185,7 +185,7 @@ export function SemanticNav() {
     () => nodes.filter((n) => n.kind === "file" && n.ragIncluded).map((n) => n.id),
     [nodes],
   );
-  // Key by VALUE (the RecipesNav idiom): the vault poll rebuilds `nodes` every
+  // Key by VALUE: the vault poll rebuilds `nodes` every
   // few seconds even when nothing changed — a per-tick refetch would be waste.
   const includedKey = useMemo(() => includedFileIds.join("\n"), [includedFileIds]);
 

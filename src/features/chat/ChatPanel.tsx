@@ -50,6 +50,7 @@ import {
 import {
   AddRegular,
   ArrowClockwiseRegular,
+  ChevronDownRegular,
   ArrowDownRegular,
   ArrowUndoRegular,
   AttachRegular,
@@ -137,6 +138,8 @@ import { isDesktopShell, pathsForFiles, platformKind } from "@/shell/desktopBrid
 import { useCoarsePointer, usePaneLayout } from "@/shell/paneLayout";
 import { Sheet } from "@/shell/Sheet";
 import { HistoryNav } from "./HistoryNav";
+import { InvestigateChips } from "./InvestigateChips";
+import { InvestigationsNav } from "@/features/investigations/InvestigationsNav";
 
 // The markdown stack (react-markdown + remark-gfm + micromark, ~263 KB) is the
 // single largest chunk and is only needed once a finished answer renders — not
@@ -268,6 +271,21 @@ const useStyles = makeStyles({
   // 0.13.10 §2: the desktop History popover — the same HistoryNav the compact
   // Sheet hosts, anchored to the header's clock button.
   historySurface: { width: "360px", maxHeight: "70vh", overflowY: "auto" },
+  // 0.13.10 §3: the header investigation picker — the title IS the control.
+  invPickerBtn: {
+    display: "flex",
+    alignItems: "center",
+    gap: tokens.spacingHorizontalXS,
+    backgroundColor: "transparent",
+    ...shorthands.border("none"),
+    ...shorthands.padding(0),
+    cursor: "pointer",
+    color: "inherit",
+    fontFamily: "inherit",
+    minWidth: 0,
+    "@media (pointer: coarse)": { minHeight: "44px" },
+  },
+  invSurface: { width: "380px", maxHeight: "70vh", overflowY: "auto" },
   // Compact context header (openspec: add-investigations §4.2): the Title3 is
   // the investigation's name with its scope size as a quiet baseline caption
   // ("Ask" alone in the global context). The name truncates before it can
@@ -2471,6 +2489,10 @@ export function ChatPanel() {
   // platform — a full-screen Sheet on compact, an anchored popover on desktop.
   const compactLayout = usePaneLayout(false).compact;
   const [historyOpen, setHistoryOpen] = useState(false);
+  // 0.13.10 §3: the investigation PICKER — the header title opens the full
+  // InvestigationsNav operations surface (switch, create, scope-from-selection,
+  // local-only policy, rename/branch/archive) with the Sections rail retired.
+  const [invOpen, setInvOpen] = useState(false);
   // Subscribe to `nodes` (not the stable `includedFileIds` fn) so the panel
   // re-renders when the explorer toggles inclusion - this is the live seam.
   const nodes = useRagStore((s) => s.nodes);
@@ -4358,6 +4380,12 @@ export function ChatPanel() {
         <HistoryNav onClose={() => setHistoryOpen(false)} />
       </Sheet>
     ) : null;
+  const investigationsSheet =
+    compactLayout && invOpen ? (
+      <Sheet title="Investigations" onClose={() => setInvOpen(false)}>
+        <InvestigationsNav />
+      </Sheet>
+    ) : null;
 
   // Scope pill (openspec: add-investigations §4.2), the attachBar register: a
   // quiet reminder that asks here read only the investigation's files. Hidden
@@ -4945,6 +4973,27 @@ export function ChatPanel() {
           <div className={styles.heroInvRow}>
             {statusShield}
             {historyButton}
+            {compactLayout ? (
+              <Button
+                appearance="subtle"
+                size="small"
+                icon={<ChevronDownRegular />}
+                onClick={() => setInvOpen(true)}
+              >
+                Investigations
+              </Button>
+            ) : (
+              <Popover open={invOpen} onOpenChange={(_, d) => setInvOpen(d.open)} positioning="below-start">
+                <PopoverTrigger disableButtonEnhancement>
+                  <Button appearance="subtle" size="small" icon={<ChevronDownRegular />}>
+                    Investigations
+                  </Button>
+                </PopoverTrigger>
+                <PopoverSurface className={styles.invSurface}>
+                  <InvestigationsNav />
+                </PopoverSurface>
+              </Popover>
+            )}
           </div>
           {includedFileIds.length === 0 && attachments.length === 0 ? (
             // Pre-flight: nothing is visible to AI yet. Inform gently and offer
@@ -5006,11 +5055,17 @@ export function ChatPanel() {
                   {r.name}
                 </Button>
               ))}
+              {/* 0.13.10 §3: the Investigate → report-template launcher (the
+                  retired "What you can do" section's one result-producing
+                  control), data-gated on investigable tables like the recipe
+                  chips beside it. */}
+              <InvestigateChips includedFileIds={includedFileIds} />
             </div>
           )}
           <div className={styles.heroComposer}>{composer("Ask about the files visible to AI…")}</div>
         </div>
         {historySheet}
+        {investigationsSheet}
       </section>
     );
   }
@@ -5025,6 +5080,7 @@ export function ChatPanel() {
     >
       {pinsDialog}
       {historySheet}
+      {investigationsSheet}
       <div className={styles.conversation}>
         {pinAlertBanner}
         <div className={styles.header}>
@@ -5035,9 +5091,35 @@ export function ChatPanel() {
               to live here is gone — the portrait bottom tab bar (AppShell) is the
               way into Files and Sections now. Desktop header is unchanged. */}
           <div className={styles.headerTitle}>
-            <Title3 className={styles.headerTitleName}>
-              {currentInvestigation ? currentInvestigation.name : "Ask"}
-            </Title3>
+            {/* 0.13.10 §3: the title is the investigation PICKER — tap/click
+                opens the operations surface (InvestigationsNav verbatim). */}
+            {compactLayout ? (
+              <button
+                type="button"
+                className={styles.invPickerBtn}
+                aria-label="Investigations"
+                onClick={() => setInvOpen(true)}
+              >
+                <Title3 className={styles.headerTitleName}>
+                  {currentInvestigation ? currentInvestigation.name : "Ask"}
+                </Title3>
+                <ChevronDownRegular fontSize={16} aria-hidden />
+              </button>
+            ) : (
+              <Popover open={invOpen} onOpenChange={(_, d) => setInvOpen(d.open)} positioning="below-start">
+                <PopoverTrigger disableButtonEnhancement>
+                  <button type="button" className={styles.invPickerBtn} aria-label="Investigations">
+                    <Title3 className={styles.headerTitleName}>
+                      {currentInvestigation ? currentInvestigation.name : "Ask"}
+                    </Title3>
+                    <ChevronDownRegular fontSize={16} aria-hidden />
+                  </button>
+                </PopoverTrigger>
+                <PopoverSurface className={styles.invSurface}>
+                  <InvestigationsNav />
+                </PopoverSurface>
+              </Popover>
+            )}
             {currentInvestigation && (
               <Text size={200} className={styles.headerCaption}>
                 {scopeLabel}
