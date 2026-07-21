@@ -1,11 +1,12 @@
 /**
- * §5 (iOS field patch 1) pins: the compact phone layout's pure verdict —
- * paneLayout(width, drawerOpen, platform). The two structural pins that keep
- * desktop pixel-identical:
+ * §5 (iOS field patch 1) → 0.13.10 §1 pins: the compact layout's pure verdict —
+ * paneLayout(minDim, drawerOpen, platform), where minDim is the viewport's
+ * SHORT side (min of width and height), so a phone is compact in BOTH
+ * orientations. The two structural pins that keep desktop pixel-identical:
  *
- *   1. the desktop platform NEVER takes the compact branch, at any width;
- *   2. at or above COMPACT_BREAKPOINT no platform does (iPad-class stays on
- *      the desktop arrangement).
+ *   1. the desktop platform NEVER takes the compact branch, at any size;
+ *   2. at or above COMPACT_BREAKPOINT (short side) no platform does
+ *      (iPad-class stays on the desktop arrangement).
  *
  * Run: `node --test test/paneLayout.test.mjs`
  */
@@ -84,4 +85,30 @@ test("mobile at/above the breakpoint keeps the desktop arrangement (iPad ≥700p
       assert.equal(l.showTabBar, false, "iPad-regular keeps the column, no tab bar");
     }
   }
+});
+
+test("0.13.10 §1: the verdict thresholds the SHORT side — a phone is compact in landscape too", () => {
+  // iPhone 14/15/16 landscape: 844 wide but only 390 tall. The old width-only
+  // signal read 844 ≥ 700 and handed a phone the desktop column; the short
+  // side is what actually bounds the arrangement.
+  const phoneLandscape = paneLayout(Math.min(844, 390), false, "ios");
+  assert.equal(phoneLandscape.compact, true, "844×390 (short side 390) is compact");
+  assert.equal(phoneLandscape.showTabBar, true, "landscape phone keeps the tab bar");
+  assert.equal(phoneLandscape.showResizeHandle, false);
+
+  // iPad 11" landscape: 1180×820 — short side 820 ≥ 700 keeps the regular
+  // column, exactly as portrait (834×1194 → short side 834) does.
+  const ipadLandscape = paneLayout(Math.min(1180, 820), false, "ios");
+  assert.equal(ipadLandscape.compact, false, "1180×820 (short side 820) stays regular");
+  assert.equal(ipadLandscape.showTabBar, false);
+  assert.equal(ipadLandscape.sidebarMode, "column");
+
+  // iPad narrow Split View (~320-500 wide): compact exactly as before.
+  const splitView = paneLayout(Math.min(375, 820), false, "ios");
+  assert.equal(splitView.compact, true, "narrow Split View stays compact");
+
+  // Desktop with a SHORT window (h < 700 is common on laptops): never compact.
+  const shortDesktop = paneLayout(Math.min(1440, 640), false, "desktop");
+  assert.equal(shortDesktop.compact, false, "a short desktop window never compacts");
+  assert.equal(shortDesktop.showTabBar, false);
 });
