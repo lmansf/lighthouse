@@ -7,12 +7,17 @@ export const metadata: Metadata = {
   description: "Curate which files and data sources your AI can see.",
 };
 
-// viewport-fit=cover unlocks env(safe-area-inset-*) so the frame can clear the
-// iPad home indicator / notches. No maximum-scale / user-scalable=no — pinch
-// zoom stays available for accessibility. Desktop is unaffected.
+// Touch app posture (owner directive): the screen is ZOOM-LOCKED on iPhone/iPad
+// — no focus-zoom when the follow-up composer takes focus, and no pinch-zoom.
+// iPad/iPhone are the design target, so type is sized to read at 1× rather than
+// leaning on the user to zoom. viewport-fit=cover keeps env(safe-area-inset-*)
+// so the frame clears the notch / home indicator. Desktop (mouse) ignores
+// user-scalable, so this is a no-op there.
 export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
+  maximumScale: 1,
+  userScalable: false,
   viewportFit: "cover",
 };
 

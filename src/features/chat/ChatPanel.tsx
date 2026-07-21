@@ -3297,10 +3297,18 @@ export function ChatPanel() {
       // same way, so a policy applied AFTER bootstrap (when the store field was
       // already true) must not let a note slip through. Fire-and-forget.
       if (historyPersistEnabled && !chatHistoryLocked()) void exportConversationNoteNow();
-      // Hand focus back for the follow-up — but only if the user hasn't moved
-      // focus elsewhere (e.g. the explorer's search box) while it streamed.
+      // Hand focus back for the follow-up — but NOT on touch, where a
+      // programmatic focus pops the on-screen keyboard (and, historically, the
+      // iOS focus-zoom) uninvited the moment an answer lands. On iPhone/iPad the
+      // reader keeps the finished answer in view; tapping the composer is how a
+      // follow-up starts. Desktop keeps the hand-back — the keyboard is free
+      // there — and still only when the user hasn't moved focus elsewhere (e.g.
+      // the explorer's search box) mid-stream.
       const active = document.activeElement;
-      if (!active || active === document.body || active.closest('[data-lh-pane="chat"]')) {
+      if (
+        !coarsePointer &&
+        (!active || active === document.body || active.closest('[data-lh-pane="chat"]'))
+      ) {
         composerRef.current?.focus();
       }
     }
