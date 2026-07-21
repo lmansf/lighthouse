@@ -320,10 +320,67 @@ export function AppShell({ sidebar, main }: AppShellProps) {
     };
   }, [layout.compact]);
 
+  // Tauri's iOS WKWebView RESIZES for the keyboard instead of overlaying it
+  // (the Safari behavior the inset math above assumes): innerHeight shrinks
+  // WITH the visual viewport, the inset computes 0, and the tab bar kept
+  // floating mid-screen under the keyboard's accessory bar (0.13.9 field
+  // screenshot). Editable focus is the resize-proof keyboard signal — on a
+  // compact touch shell a focused text field means the keyboard owns the
+  // bottom edge, in either webview mode.
+  const [editableFocused, setEditableFocused] = useState(false);
+  useEffect(() => {
+    if (!layout.compact || typeof document === "undefined") return;
+    const editable = (t: unknown): boolean =>
+      t instanceof HTMLElement &&
+      (t instanceof HTMLTextAreaElement ||
+        (t instanceof HTMLInputElement &&
+          !["button", "checkbox", "radio", "range", "submit", "reset", "file", "color"].includes(
+            t.type,
+          )) ||
+        t.isContentEditable);
+    const onFocusIn = (e: FocusEvent) => {
+      if (editable(e.target)) setEditableFocused(true);
+    };
+    const onFocusOut = () => {
+      // The next focus target isn't set yet during focusout; read it after
+      // the move settles so field-to-field hops don't flicker the bar.
+      requestAnimationFrame(() => setEditableFocused(editable(document.activeElement)));
+    };
+    document.addEventListener("focusin", onFocusIn);
+    document.addEventListener("focusout", onFocusOut);
+    setEditableFocused(editable(document.activeElement));
+    return () => {
+      document.removeEventListener("focusin", onFocusIn);
+      document.removeEventListener("focusout", onFocusOut);
+      setEditableFocused(false);
+    };
+  }, [layout.compact]);
+
+  // iOS also scroll-wedges the page to "reveal" the focused field: the
+  // WKScrollView keeps a leftover offset afterwards and the whole fixed shell
+  // renders shifted up under the status bar (the 0.13.9 crowding screenshot).
+  // The compact shell never scrolls the document itself, so ANY document
+  // scroll is the wedge — push it straight back.
+  useEffect(() => {
+    if (!layout.compact || typeof window === "undefined") return;
+    const unwedge = () => {
+      if (window.scrollY !== 0 || window.scrollX !== 0) window.scrollTo(0, 0);
+    };
+    window.addEventListener("scroll", unwedge, { passive: true });
+    window.visualViewport?.addEventListener("resize", unwedge);
+    unwedge();
+    return () => {
+      window.removeEventListener("scroll", unwedge);
+      window.visualViewport?.removeEventListener("resize", unwedge);
+    };
+  }, [layout.compact]);
+
   // fp4 §3: the tab bar slides away while the keyboard is up (so it never floats
   // mid-screen) or while a modal section sheet covers the screen; it's on screen
-  // exactly when compact, keyboard down, no sheet.
-  const tabBarHidden = keyboardInset > 0 || sheetOpen;
+  // exactly when compact, keyboard down, no sheet. The keyboard is "up" when
+  // the overlay inset says so OR an editable element holds focus (the
+  // resize-mode signal above).
+  const tabBarHidden = keyboardInset > 0 || editableFocused || sheetOpen;
   const tabBarShown = layout.showTabBar && !tabBarHidden;
   // Reserve room above the bar for the composer, the files/sections pages, and
   // the bug FAB. --lh-tabbar-h is the bar's content height while it's shown, else

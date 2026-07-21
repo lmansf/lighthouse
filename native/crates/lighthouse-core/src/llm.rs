@@ -1076,6 +1076,31 @@ const LOCAL_CTX_TOTAL_MAX_CHARS: usize = 11_000;
 /// Prior-turn history kept for the local prompt, chars (newest turns win).
 const LOCAL_HISTORY_MAX_CHARS: usize = 6_000;
 
+// Apple's on-device Foundation model (the iOS/iPadOS private path) runs a
+// 4096-token window shared between prompt AND answer. The desktop budget
+// above packs ~5k prompt tokens — inside 4096 that leaves the model a few
+// hundred tokens to answer in (or overflows outright), which reads as
+// "works but does a poor job" (0.13.9 field report). This tier sizes down:
+// system (4,636 chars ≈ 1.16k tok, measured) + history (≤0.5k) + contexts
+// (≤1.25k) + question keeps ~1.1k tokens of answer headroom inside the
+// window — the on-device tier test pins that arithmetic.
+const ON_DEVICE_CTX_BLOCK_MAX_CHARS: usize = 3_500;
+const ON_DEVICE_CTX_TOTAL_MAX_CHARS: usize = 5_000;
+const ON_DEVICE_HISTORY_MAX_CHARS: usize = 2_000;
+
+/// Budget selectors — pure so tests pin both tiers without touching the
+/// process-global backend flag; production call sites pass
+/// `local_model::on_device_backend()`.
+fn local_ctx_block_max(on_device: bool) -> usize {
+    if on_device { ON_DEVICE_CTX_BLOCK_MAX_CHARS } else { LOCAL_CTX_BLOCK_MAX_CHARS }
+}
+fn local_ctx_total_max(on_device: bool) -> usize {
+    if on_device { ON_DEVICE_CTX_TOTAL_MAX_CHARS } else { LOCAL_CTX_TOTAL_MAX_CHARS }
+}
+fn local_history_max(on_device: bool) -> usize {
+    if on_device { ON_DEVICE_HISTORY_MAX_CHARS } else { LOCAL_HISTORY_MAX_CHARS }
+}
+
 // --- Single-document focus budgets (synth doc-focus, 0.11) -----------------------
 //
 // How much of ONE document can ride in a prompt, in chars (~4 chars/token —
@@ -1093,7 +1118,7 @@ pub fn full_doc_char_budget(cfg: &ModelCfg) -> usize {
     match cfg.provider_id.as_deref() {
         Some("anthropic") => 400_000,
         Some(id) if remote_provider(id).is_some() => 240_000,
-        _ => LOCAL_CTX_TOTAL_MAX_CHARS,
+        _ => local_ctx_total_max(crate::local_model::on_device_backend()),
     }
 }
 
@@ -1102,8 +1127,15 @@ pub fn doc_segment_char_budget(cfg: &ModelCfg) -> usize {
     match cfg.provider_id.as_deref() {
         Some("anthropic") => 400_000,
         Some(id) if remote_provider(id).is_some() => 240_000,
-        // Under the single-block clip (6,000) so no segment text is lost.
-        _ => 5_500,
+        // Under the single-block clip of the active tier (6,000 desktop /
+        // 3,500 on-device) so no segment text is lost.
+        _ => {
+            if crate::local_model::on_device_backend() {
+                3_000
+            } else {
+                5_500
+            }
+        }
     }
 }
 
@@ -1120,19 +1152,21 @@ pub fn max_doc_segments(cfg: &ModelCfg) -> usize {
 /// Clamp contexts to the local budget: each block clipped, then whole blocks
 /// dropped lowest-score-first until the total fits. Order is preserved (the
 /// numbered citations must keep matching what the answer refers to).
-fn clamp_local_contexts(contexts: &[Ctx]) -> Vec<Ctx> {
+fn clamp_local_contexts(contexts: &[Ctx], on_device: bool) -> Vec<Ctx> {
+    let block_max = local_ctx_block_max(on_device);
+    let total_max = local_ctx_total_max(on_device);
     let mut out: Vec<Ctx> = contexts
         .iter()
         .map(|c| {
             let mut c = c.clone();
-            if c.text.chars().count() > LOCAL_CTX_BLOCK_MAX_CHARS {
-                c.text = c.text.chars().take(LOCAL_CTX_BLOCK_MAX_CHARS).collect::<String>() + "…";
+            if c.text.chars().count() > block_max {
+                c.text = c.text.chars().take(block_max).collect::<String>() + "…";
             }
             c
         })
         .collect();
     let total = |cs: &[Ctx]| cs.iter().map(|c| c.text.chars().count()).sum::<usize>();
-    while out.len() > 1 && total(&out) > LOCAL_CTX_TOTAL_MAX_CHARS {
+    while out.len() > 1 && total(&out) > total_max {
         let (worst, _) = out
             .iter()
             .enumerate()
@@ -1147,12 +1181,13 @@ fn clamp_local_contexts(contexts: &[Ctx]) -> Vec<Ctx> {
 }
 
 /// Newest prior turns whose combined size fits the local history budget.
-fn clamp_local_history(history: &[ChatTurn]) -> Vec<ChatTurn> {
+fn clamp_local_history(history: &[ChatTurn], on_device: bool) -> Vec<ChatTurn> {
+    let max = local_history_max(on_device);
     let mut kept: Vec<ChatTurn> = Vec::new();
     let mut used = 0usize;
     for t in history.iter().rev() {
         let n = t.content.chars().count();
-        if used + n > LOCAL_HISTORY_MAX_CHARS {
+        if used + n > max {
             break;
         }
         used += n;
@@ -1171,8 +1206,9 @@ async fn stream_local(
     history: &[ChatTurn],
     usage: Option<UsageSink>,
 ) -> DeltaStream {
-    let contexts = clamp_local_contexts(contexts);
-    let history = clamp_local_history(history);
+    let on_device = crate::local_model::on_device_backend();
+    let contexts = clamp_local_contexts(contexts, on_device);
+    let history = clamp_local_history(history, on_device);
     let mut messages: Vec<serde_json::Value> =
         vec![json!({ "role": "system", "content": SYSTEM_PROMPT })];
     for t in prior_turns(&history) {
@@ -1369,14 +1405,14 @@ mod tests {
     #[test]
     fn local_context_budget_clips_blocks_and_drops_lowest_scores() {
         // One oversized block is clipped to the per-block cap (+ellipsis).
-        let clipped = clamp_local_contexts(&[ctx("big", 50_000, 1.0)]);
+        let clipped = clamp_local_contexts(&[ctx("big", 50_000, 1.0)], false);
         assert_eq!(clipped.len(), 1);
         assert!(clipped[0].text.chars().count() <= LOCAL_CTX_BLOCK_MAX_CHARS + 1);
 
         // Six 5k blocks exceed the total budget: lowest scores drop, the top
         // block survives, relative order is preserved, and it never empties.
         let many: Vec<Ctx> = (0..6).map(|i| ctx(&format!("c{i}"), 5_000, i as f64)).collect();
-        let packed = clamp_local_contexts(&many);
+        let packed = clamp_local_contexts(&many, false);
         let total: usize = packed.iter().map(|c| c.text.chars().count()).sum();
         assert!(total <= LOCAL_CTX_TOTAL_MAX_CHARS, "total {total}");
         assert!(!packed.is_empty());
@@ -1385,6 +1421,48 @@ mod tests {
         let mut sorted = names.clone();
         sorted.sort();
         assert_eq!(names, sorted, "citation order must be preserved");
+    }
+
+    // The on-device tier packs for Apple FM's 4096-token window (prompt AND
+    // answer share it): tighter blocks, tighter total, tighter history — the
+    // arithmetic in the constants' comment must leave ~1k tokens of answer
+    // headroom. The tier flag is an argument, so this pins both tiers without
+    // touching the process-global backend flag.
+    #[test]
+    fn on_device_tier_packs_for_the_4096_token_shared_window() {
+        // Per-block clip is the tighter on-device cap.
+        let clipped = clamp_local_contexts(&[ctx("big", 50_000, 1.0)], true);
+        assert!(clipped[0].text.chars().count() <= ON_DEVICE_CTX_BLOCK_MAX_CHARS + 1);
+
+        // Total budget is the tighter cap; highest score still survives.
+        let many: Vec<Ctx> = (0..6).map(|i| ctx(&format!("c{i}"), 3_000, i as f64)).collect();
+        let packed = clamp_local_contexts(&many, true);
+        let total: usize = packed.iter().map(|c| c.text.chars().count()).sum();
+        assert!(total <= ON_DEVICE_CTX_TOTAL_MAX_CHARS, "total {total}");
+        assert!(packed.iter().any(|c| c.name == "c5"), "highest score must survive");
+
+        // History keeps only the newest turns under the on-device cap.
+        let turns: Vec<ChatTurn> = (0..10)
+            .map(|i| ChatTurn { role: "user".into(), content: format!("{i}-{}", "y".repeat(1_000)) })
+            .collect();
+        let kept = clamp_local_history(&turns, true);
+        let used: usize = kept.iter().map(|t| t.content.chars().count()).sum();
+        assert!(used <= ON_DEVICE_HISTORY_MAX_CHARS, "used {used}");
+        assert!(kept.last().unwrap().content.starts_with("9-"), "newest turn kept");
+
+        // Whole-prompt arithmetic: system (~0.9k tok) + the packed budgets at
+        // ~4 chars/token must leave at least 900 tokens inside 4096.
+        let system_tokens = SYSTEM_PROMPT.chars().count() / 4;
+        let input_tokens = system_tokens
+            + ON_DEVICE_HISTORY_MAX_CHARS / 4
+            + ON_DEVICE_CTX_TOTAL_MAX_CHARS / 4
+            + 100; // question allowance
+        assert!(4096usize.saturating_sub(input_tokens) >= 900, "input {input_tokens} tokens");
+
+        // The budget selectors are the single source for both tiers.
+        assert_eq!(local_ctx_block_max(false), LOCAL_CTX_BLOCK_MAX_CHARS);
+        assert_eq!(local_ctx_total_max(true), ON_DEVICE_CTX_TOTAL_MAX_CHARS);
+        assert_eq!(local_history_max(true), ON_DEVICE_HISTORY_MAX_CHARS);
     }
 
     #[test]
@@ -1419,7 +1497,7 @@ mod tests {
                 content: format!("{i}-{}", "y".repeat(1_500)),
             })
             .collect();
-        let kept = clamp_local_history(&turns);
+        let kept = clamp_local_history(&turns, false);
         let used: usize = kept.iter().map(|t| t.content.chars().count()).sum();
         assert!(used <= LOCAL_HISTORY_MAX_CHARS, "used {used}");
         assert!(kept.last().unwrap().content.starts_with("9-"), "newest turn kept");

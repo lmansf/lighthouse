@@ -62,8 +62,8 @@ test("AppShell hosts the bar, hides it for keyboard/sheet, and opens Sections as
   );
   assert.match(
     shell,
-    /const tabBarHidden = keyboardInset > 0 \|\| sheetOpen/,
-    "the bar hides while the keyboard is up or a modal section sheet is open",
+    /const tabBarHidden = keyboardInset > 0 \|\| editableFocused \|\| sheetOpen/,
+    "the bar hides while the keyboard is up (overlay inset OR resize-mode editable focus) or a modal section sheet is open",
   );
   assert.match(shell, /<SectionRail page \/>/, "the Sections tab opens the rail as a full page");
   assert.match(

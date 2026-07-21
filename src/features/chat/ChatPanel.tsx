@@ -915,6 +915,18 @@ const useStyles = makeStyles({
     "& textarea": {
       height: "auto",
       maxHeight: `${COMPOSER_MAX_HEIGHT}px`,
+      // iOS WKWebView paints its own UA chrome on a bare <textarea> (white
+      // fill, hairline border, small radius) — a second box INSIDE the shell
+      // (0.13.9 field screenshot). The slot must be stripped explicitly, not
+      // just left to whatever the platform default happens to paint.
+      WebkitAppearance: "none",
+      appearance: "none",
+      backgroundColor: "transparent",
+      borderTopStyle: "none",
+      borderRightStyle: "none",
+      borderBottomStyle: "none",
+      borderLeftStyle: "none",
+      outlineStyle: "none",
     },
   },
   // --- §22.1 ghost autocomplete: the inline greyed continuation. ---
