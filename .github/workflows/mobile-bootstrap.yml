@@ -333,15 +333,23 @@ jobs:
           test -n "$APP" || { echo "::error::no .app inside Payload/"; exit 1; }
           BIN="$APP/$(basename "$APP" .app)"
           test -f "$BIN" || { echo "::error::no app binary at $BIN"; exit 1; }
-          if strings "$BIN" | grep -q '^LHFMBridge$'; then
-            echo "OK: LHFMBridge class metadata present in the app binary"
+          # grep -c (not -q): -q exits at the first match, llvm-strings then
+          # dies with "failed to flush output" on the closed pipe, and under
+          # pipefail that VETOES the match — run 26 failed exactly this way on
+          # a binary that carried the bridge. -c reads to EOF, so the pipe
+          # stays open and the count is the verdict; || true keeps the
+          # no-match exit(1) from tripping set -e before we can report it.
+          FOUND=$(strings "$BIN" | grep -c '^LHFMBridge$' || true)
+          if [ "${FOUND:-0}" -gt 0 ]; then
+            echo "OK: LHFMBridge class metadata present in the app binary (count=$FOUND)"
           else
             echo "::error::LHFMBridge missing from the app binary — the private-model bridge did not compile in"
             rm -rf "$WORK"; exit 1
           fi
           # Informational only: whether the legacy dlsym fallback symbol is in
           # the export trie (the ObjC route above is the one that must hold).
-          if dyld_info -exports "$BIN" 2>/dev/null | grep -q lighthouse_fm_ensure; then
+          EXPORTED=$(dyld_info -exports "$BIN" 2>/dev/null | grep -c lighthouse_fm_ensure || true)
+          if [ "${EXPORTED:-0}" -gt 0 ]; then
             echo "OK: dlsym fallback symbol also exported"
           else
             echo "note: lighthouse_fm_ensure not in the export trie (ObjC route covers it)"
