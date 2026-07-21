@@ -255,9 +255,13 @@ export function AppShell({ sidebar, main }: AppShellProps) {
   const messageCount = useChatStore((s) => s.messages.length);
   const prevMessageCount = useRef(messageCount);
   useEffect(() => {
-    if (messageCount > prevMessageCount.current && layout.drawerVisible) setCompactTab("chat");
+    // Any compact page yields to Chat when an ask lands — Settings included
+    // (its inline ViewsNav/SemanticNav can fire asks that would otherwise
+    // stream invisibly under the page).
+    if (messageCount > prevMessageCount.current && layout.compact && compactTab !== "chat")
+      setCompactTab("chat");
     prevMessageCount.current = messageCount;
-  }, [messageCount, layout.drawerVisible]);
+  }, [messageCount, layout.compact, compactTab]);
 
   // fp3 §3: edge-swipe-RIGHT on the files page goes back to chat — the iOS
   // "back" gesture, the mirror of the old swipe-left drawer dismiss. Esc is the

@@ -235,11 +235,20 @@ export function FileTileGrid() {
 
   const [folderId, setFolderId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
+  // The egress shield's "hidden from cloud" reveal (lighthouse:filter-local-only)
+  // narrows the grid to private files until dismissed.
+  const [localOnlyFilter, setLocalOnlyFilter] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState(false);
   const scrollerRef = useRef<HTMLDivElement>(null);
   const searchRowRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const pressTimer = useRef<number | null>(null);
+  // True only when a long-press actually FIRED the inspector — the browser
+  // still synthesizes a click after touchend, and that click must be
+  // swallowed. A null timer can NOT stand in for this (the timer is also
+  // null when cancelled by touchend/move and when never started at all —
+  // conflating those swallowed every normal tap and mouse click).
+  const pressFired = useRef(false);
 
   const nodeById = useMemo(() => new Map(nodes.map((n) => [n.id, n])), [nodes]);
   const childrenOf = useMemo(() => {
@@ -259,10 +268,12 @@ export function FileTileGrid() {
 
   const current = folderId ? (nodeById.get(folderId) ?? null) : null;
   const tiles = useMemo(() => {
-    const listed = childrenOf.get(folderId ?? null) ?? [];
+    let listed = childrenOf.get(folderId ?? null) ?? [];
+    if (localOnlyFilter)
+      listed = listed.filter((n) => (n.kind === "folder" ? true : Boolean(n.localOnly)));
     const q = query.trim().toLowerCase();
     return q ? listed.filter((n) => n.name.toLowerCase().includes(q)) : listed;
-  }, [childrenOf, folderId, query]);
+  }, [childrenOf, folderId, query, localOnlyFilter]);
 
   const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
   const allIncluded =
@@ -271,12 +282,49 @@ export function FileTileGrid() {
     selectedIds.length > 0 && selectedIds.every((id) => nodeById.get(id)?.localOnly);
 
   // Park the search field above the fold: revealed by pulling down (the iOS
-  // idiom). Re-parks when the folder changes so drilling in starts clean.
+  // idiom). Once per FOLDER VISIT, and only after content exists — parking on
+  // an empty async-loading grid clamps to 0 and silently fails, and parking
+  // on query transitions would yank the focused field off-screen mid-typing.
+  const parkedFor = useRef<string | null>(null);
   useEffect(() => {
+    if (tiles.length === 0) return;
+    const key = folderId ?? "__root__";
+    if (parkedFor.current === key) return;
     const el = scrollerRef.current;
     const row = searchRowRef.current;
-    if (el && row && !query) el.scrollTop = row.offsetHeight;
-  }, [folderId, query]);
+    if (el && row) {
+      el.scrollTop = row.offsetHeight;
+      parkedFor.current = key;
+    }
+  }, [folderId, tiles.length]);
+
+  // The window events the tree explorer honors work here too (the compact
+  // surface must not orphan them): active-tab retap scrolls to top, quick-open
+  // reveal navigates to the node's folder, the egress shield's reveal filters
+  // to private files, and browse-files opens the picker.
+  useEffect(() => {
+    const onScrollTop = () => scrollerRef.current?.scrollTo({ top: 0, behavior: "auto" });
+    const onReveal = (e: Event) => {
+      const id = (e as CustomEvent<{ id?: string }>).detail?.id;
+      const node = id ? useRagStore.getState().nodes.find((n) => n.id === id) : undefined;
+      if (!node) return;
+      setFolderId(node.kind === "folder" ? node.id : (node.parentId ?? null));
+      setQuery("");
+      setLocalOnlyFilter(false);
+    };
+    const onFilterLocalOnly = () => setLocalOnlyFilter(true);
+    const onBrowse = () => fileInputRef.current?.click();
+    window.addEventListener("lighthouse:explorer-scroll-top", onScrollTop);
+    window.addEventListener("lighthouse:reveal-node", onReveal);
+    window.addEventListener("lighthouse:filter-local-only", onFilterLocalOnly);
+    window.addEventListener("lighthouse:browse-files", onBrowse);
+    return () => {
+      window.removeEventListener("lighthouse:explorer-scroll-top", onScrollTop);
+      window.removeEventListener("lighthouse:reveal-node", onReveal);
+      window.removeEventListener("lighthouse:filter-local-only", onFilterLocalOnly);
+      window.removeEventListener("lighthouse:browse-files", onBrowse);
+    };
+  }, []);
 
   // Arming a remove and then changing the selection would confirm the WRONG
   // set — disarm on any selection change.
@@ -287,8 +335,10 @@ export function FileTileGrid() {
   const startPress = (node: FileNode) => {
     cancelPress();
     if (node.kind === "folder") return;
+    pressFired.current = false;
     pressTimer.current = window.setTimeout(() => {
       pressTimer.current = null;
+      pressFired.current = true;
       window.dispatchEvent(new CustomEvent(INSPECT_FILE_EVENT, { detail: { id: node.id } }));
     }, LONG_PRESS_MS);
   };
@@ -298,8 +348,8 @@ export function FileTileGrid() {
       pressTimer.current = null;
     }
   };
-  /** True when the long-press already fired (the tap must then do nothing). */
-  const pressConsumed = () => pressTimer.current === null;
+  // A pending press must not outlive the grid (folder auto-close, tab switch).
+  useEffect(() => cancelPress, []);
 
   const tapTile = (node: FileNode) => {
     if (node.kind === "folder") {
@@ -365,6 +415,11 @@ export function FileTileGrid() {
             onChange={(_, d) => setQuery(d.value)}
           />
         </div>
+        {localOnlyFilter && (
+          <Button size="small" appearance="secondary" onClick={() => setLocalOnlyFilter(false)}>
+            Showing private files only — clear
+          </Button>
+        )}
         {tiles.length === 0 ? (
           <Text className={styles.empty}>
             {query ? "No files match your search." : "Nothing here yet — tap Add."}
@@ -388,8 +443,13 @@ export function FileTileGrid() {
                   aria-selected={selected || undefined}
                   className={mergeClasses(styles.tile, selected && styles.tileSelected)}
                   onClick={() => {
-                    if (node.kind !== "folder" && pressConsumed()) return;
                     cancelPress();
+                    // Swallow ONLY the click synthesized after a fired
+                    // long-press — every other click/tap selects or opens.
+                    if (pressFired.current) {
+                      pressFired.current = false;
+                      return;
+                    }
                     tapTile(node);
                   }}
                   onTouchStart={() => startPress(node)}

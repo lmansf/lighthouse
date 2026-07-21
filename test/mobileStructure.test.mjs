@@ -2,7 +2,7 @@
  * 0.13.10 (§30) pins: the mobile-native structure — Sections retired with its
  * capabilities relocated, and the compact Files page as a tile grid. Source
  * pins in the house style (the JSX can't load under node); the pure verdicts
- * live in paneLayout.test.mjs and live behavior in the E2E pass.
+ * live in paneLayout.test.mjs and live behavior is verified on-device.
  *
  * Run: `node --test test/mobileStructure.test.mjs`
  */
@@ -74,13 +74,60 @@ test("tile grid: tap selects (never flips visibility), long-press inspects, fold
   // Tap = direct multi-select through the SAME store selection the
   // investigation scope reads.
   assert.match(grid, /setSelectionMode\(true\);\s*\n\s*toggleSelected\(node\.id\);/, "tap toggles selection");
-  // The tap path must never call the visibility ops — only the action row may.
-  const tapFn = grid.slice(grid.indexOf("const tapTile"), grid.indexOf("const clearAll"));
-  assert.ok(!tapFn.includes("applySelection") && !tapFn.includes("applyLocalOnly"),
-    "a tap never silently changes rag_included/local_only");
+  // The review-confirmed 0.13.10 regression: a null-timer sentinel swallowed
+  // EVERY tap and click (touchend nulls the timer before the synthesized
+  // click; mouse clicks never start one). Only a fired long-press may swallow
+  // its own synthesized click — a dedicated boolean set inside the timeout.
+  assert.doesNotMatch(grid, /pressConsumed/, "the conflating null-timer sentinel stays gone");
+  assert.match(grid, /pressFired\.current = true;/, "the timeout marks a FIRED press");
+  assert.match(
+    grid,
+    /if \(pressFired\.current\) \{\s*\n\s*pressFired\.current = false;\s*\n\s*return;\s*\n\s*\}\s*\n\s*tapTile\(node\);/,
+    "onClick swallows only the fired-press click, then always reaches tapTile",
+  );
+  // The visibility ops exist ONLY inside the action row — nowhere on the tap
+  // path or anywhere else in the grid.
+  const actionRowAt = grid.indexOf("styles.actionRow");
+  const beforeRow = grid.slice(0, actionRowAt);
+  assert.ok(
+    !beforeRow.includes("applySelection(") && !beforeRow.includes("applyLocalOnly("),
+    "no visibility op is invoked anywhere before the action row block",
+  );
   assert.match(grid, /setFolderId\(node\.id\);/, "folder tap drills in");
   assert.match(grid, /const LONG_PRESS_MS = 500;/, "long-press threshold");
   assert.match(grid, /new CustomEvent\(INSPECT_FILE_EVENT, \{ detail: \{ id: node\.id \} \}\)/, "long-press → inspector");
+});
+
+test("the Sheet's Esc actually closes it — no bare role=dialog in the overlay-yield selector", () => {
+  // The review-confirmed 0.13.10 regression: OVERLAY_SELECTOR contained
+  // [role="dialog"], which the Sheet's own root carries, so the Esc handler
+  // always yielded to itself and only the X worked.
+  const sheet = read("src/shell/Sheet.tsx");
+  const selector = sheet.match(/OVERLAY_SELECTOR =\s*\n?\s*'([^']+)'/)?.[1] ?? "";
+  assert.ok(selector.length > 0, "the selector literal is extractable");
+  assert.ok(!selector.includes('[role="dialog"]'), "no bare dialog role in the selector");
+  assert.ok(selector.includes(".fui-DialogSurface"), "portaled Fluent dialogs still yield Esc (by class)");
+  assert.match(sheet, /onCloseRef\.current\(\);/, "Esc reaches the close");
+});
+
+test("the compact grid honors the tree's window events (scroll-top, reveal, filter, browse)", () => {
+  for (const ev of [
+    "lighthouse:explorer-scroll-top",
+    "lighthouse:reveal-node",
+    "lighthouse:filter-local-only",
+    "lighthouse:browse-files",
+  ]) {
+    assert.ok(grid.includes(`window.addEventListener("${ev}"`), `grid listens for ${ev}`);
+  }
+});
+
+test("§1's runtime signal is the media-query PAIR (the width-only query was the actual bug)", () => {
+  const pane = read("src/shell/paneLayout.ts");
+  assert.match(
+    pane,
+    /COMPACT_QUERY = `\(max-width: \$\{COMPACT_BREAKPOINT - 0\.02\}px\), \(max-height: \$\{COMPACT_BREAKPOINT - 0\.02\}px\)`/,
+    "the matchMedia query ORs max-width and max-height — short side, not width",
+  );
 });
 
 test("tile grid: the action row batch-applies through the same store ops", () => {

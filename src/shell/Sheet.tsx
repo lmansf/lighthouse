@@ -26,11 +26,15 @@ import { LAYOUT } from "./theme";
 
 /**
  * Portaled Fluent overlays a sheet's content may open (dialogs, menus,
- * popovers, tooltips) mount OUTSIDE the sheet DOM. Esc must reach them first —
- * the close path spares anything inside one of these surfaces.
+ * popovers, listboxes) mount OUTSIDE the sheet DOM. Esc must reach them
+ * first — the close path spares anything inside one of these surfaces.
+ * Deliberately no bare dialog-role selector here: the Sheet's own root (and
+ * the shell's compact pages) carry that role, so a bare selector matched the
+ * sheet itself and Esc could never close it. Fluent's portaled dialogs are
+ * covered by their .fui-DialogSurface class.
  */
 export const OVERLAY_SELECTOR =
-  '.fui-DialogSurface, .fui-MenuPopover, .fui-PopoverSurface, [role="dialog"], [role="menu"], [role="listbox"], [role="tooltip"]';
+  '.fui-DialogSurface, .fui-MenuPopover, .fui-PopoverSurface, [role="menu"], [role="listbox"], [role="tooltip"]';
 
 // --- The "any sheet open" signal ---------------------------------------------
 let openCount = 0;

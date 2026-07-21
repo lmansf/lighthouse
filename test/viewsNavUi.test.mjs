@@ -129,7 +129,12 @@ test("0.13.10 §3: ViewsNav mounts in Settings — the page group and the deskto
   assert.match(page, /import \{ ViewsNav \} from "@\/features\/views\/ViewsNav";/);
   assert.match(page, />\s*Saved views\s*</, "the group is labeled Saved views");
   const menu = read("src/features/settings/SettingsMenu.tsx");
-  assert.match(menu, /Saved views/, "the desktop gear menu reaches the same surface");
+  assert.match(menu, />\s*Saved views\s*</, "the gear menu ITEM exists (not just prose)");
+  assert.match(
+    menu,
+    /<NavDialog title="Saved views"[\s\S]{0,120}<ViewsNav \/>/,
+    "…and its dialog mounts ViewsNav",
+  );
 });
 
 test("the local-only badge is sourced lazily from inspectView and cached", () => {

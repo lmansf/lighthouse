@@ -4100,7 +4100,9 @@ export function ChatPanel() {
   // old visual caps (4 asks, 3 recipes) at the consumption site. ---
   const validatedChips = useValidatedChips(includedFileIds);
   const engineAsks = useMemo(() => validatedChips.asks.slice(0, 4), [validatedChips.asks]);
-  const recipeChips = useMemo(() => validatedChips.recipes.slice(0, 3), [validatedChips.recipes]);
+  // 0.13.10 §3: chips are the ONLY recipe surface now (RecipesNav, the
+  // uncapped path, is retired) — every applicable recipe gets its chip.
+  const recipeChips = validatedChips.recipes;
 
   // --- §22.1 ghost autocomplete: the single best inline continuation of the
   //     draft, greyed after the caret; Right Arrow at the end accepts it. ---

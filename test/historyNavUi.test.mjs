@@ -4,7 +4,7 @@
 // real (the conversationsAllContexts selector; grouping has its own suite in
 // historyGrouping.test.mjs); the JSX surfaces (HistoryNav, ChatPanel) can't
 // load in node, so their guarantees are asserted structurally against the
-// source. Live behavior is the E2E pass.
+// source. Live behavior is verified on-device.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
