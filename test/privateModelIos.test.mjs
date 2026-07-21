@@ -109,3 +109,12 @@ test("the Rust probe returns per-code honest reasons for the roster to show", ()
   assert.match(commands, /"the on-device model is still preparing — try again shortly"/);
   assert.match(commands, /"reason": reason/, "the unavailable reply carries the reason");
 });
+
+test("the boot probe's verdict lands in shell.log (field diagnosability)", () => {
+  const lib = read("native/crates/lighthouse-desktop/src/lib.rs");
+  assert.match(
+    lib,
+    /let verdict = commands::private_model_availability_impl\(\);\s*\n\s*shell_log\(app\.handle\(\), &format!\("private-model probe: \{verdict\}"\)\);/,
+    "every mobile boot logs the FM verdict — the opt-in bug report attaches shell.log",
+  );
+});
