@@ -249,7 +249,7 @@ function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean
   // again (and is the default). platformKind() is primed from the first
   // capability payload, long before Settings can open; the store probes once.
   const platform = platformKind();
-  const { available: onDeviceBackend, tier: onDeviceTier } = useOnDeviceModel();
+  const { available: onDeviceBackend, tier: onDeviceTier, reason: onDeviceReason } = useOnDeviceModel();
   const roster = modelProvidersFor(platform, onDeviceBackend);
   const [providerId, setProviderId] = useState(onboarding.providerId ?? roster[0].id);
   const [modelId, setModelId] = useState(onboarding.modelId ?? firstModelFor(providerId));
@@ -546,6 +546,17 @@ function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean
                 <>
                   {!onboarding.providerId && (
                     <Text className={styles.prefHint}>{MOBILE_NO_PROVIDER_TRUTHS}</Text>
+                  )}
+                  {onDeviceReason && (
+                    // iOS field report (0.13.8): when this device COULD carry the
+                    // on-device private model but the backend reports unavailable,
+                    // say the shell's honest reason ("Apple Intelligence is not
+                    // enabled…", "still preparing…") instead of silently hiding
+                    // the option — the store re-probes when the user returns from
+                    // the Settings app, so fixing it lights the provider up live.
+                    <Text className={styles.prefHint}>
+                      Private model on this device: {onDeviceReason}.
+                    </Text>
                   )}
                   {strayBytes > 0 && (
                     <div className={styles.testKeyRow}>

@@ -309,6 +309,7 @@
 					"$(inherited)",
 					"-weak_framework",
 					FoundationModels,
+					"-Wl,-exported_symbol,_lighthouse_fm_ensure",
 				);
 				OTHER_SWIFT_FLAGS = (
 					"$(inherited)",
@@ -472,6 +473,7 @@
 					"$(inherited)",
 					"-weak_framework",
 					FoundationModels,
+					"-Wl,-exported_symbol,_lighthouse_fm_ensure",
 				);
 				OTHER_SWIFT_FLAGS = (
 					"$(inherited)",

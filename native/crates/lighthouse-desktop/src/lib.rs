@@ -485,9 +485,13 @@ pub fn run() {
             // Models loopback responder). Runs inline — binding a resident
             // Tier-1 model's loopback socket is instant, and the first ask must
             // never race the probe. Desktop owns llama-server and never needs it.
+            // The verdict goes to shell.log (iOS field report: private model
+            // absent with zero clues) — the opt-in bug report attaches that
+            // log, so the FM result behind any "unavailable" is diagnosable.
             #[cfg(not(desktop))]
             {
-                let _ = commands::private_model_availability_impl();
+                let verdict = commands::private_model_availability_impl();
+                shell_log(app.handle(), &format!("private-model probe: {verdict}"));
             }
 
             // --- Pinned-question rechecks (openspec: add-pinned-questions):
