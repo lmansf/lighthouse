@@ -315,6 +315,38 @@ jobs:
           fi
           rm -rf "$WORK"
           echo "OCR models boarded the payload at the engine-resolved path (assets/ocr)."
+      - name: Assert the private-model bridge boarded the app binary (0.13.9 tripwire)
+        # The on-device private model is reached from Rust via the ObjC-runtime
+        # class LHFMBridge (PrivateModelServer.swift). 0.13.8 shipped a binary
+        # whose bridge was unreachable at runtime — every iPhone read a false
+        # "requires iOS 26 or later" — so this guard makes that failure mode
+        # fail the BUILD instead of reaching testers. The class name lives in
+        # the binary's ObjC metadata (__objc_classname) and survives symbol
+        # stripping, so its absence means the bridge did not compile in.
+        run: |
+          set -euo pipefail
+          IPA=build/ios/Lighthouse.ipa
+          test -f "$IPA" || { echo "::error::no .ipa at $IPA"; exit 1; }
+          WORK=$(mktemp -d)
+          unzip -q "$IPA" -d "$WORK"
+          APP=$(find "$WORK/Payload" -maxdepth 1 -name '*.app' -type d | head -1)
+          test -n "$APP" || { echo "::error::no .app inside Payload/"; exit 1; }
+          BIN="$APP/$(basename "$APP" .app)"
+          test -f "$BIN" || { echo "::error::no app binary at $BIN"; exit 1; }
+          if strings "$BIN" | grep -q '^LHFMBridge$'; then
+            echo "OK: LHFMBridge class metadata present in the app binary"
+          else
+            echo "::error::LHFMBridge missing from the app binary — the private-model bridge did not compile in"
+            rm -rf "$WORK"; exit 1
+          fi
+          # Informational only: whether the legacy dlsym fallback symbol is in
+          # the export trie (the ObjC route above is the one that must hold).
+          if dyld_info -exports "$BIN" 2>/dev/null | grep -q lighthouse_fm_ensure; then
+            echo "OK: dlsym fallback symbol also exported"
+          else
+            echo "note: lighthouse_fm_ensure not in the export trie (ObjC route covers it)"
+          fi
+          rm -rf "$WORK"
       - name: Upload to TestFlight
         if: ${{ inputs.task == 'ios-beta' }}
         env:

@@ -118,3 +118,68 @@ test("the boot probe's verdict lands in shell.log (field diagnosability)", () =>
     "every mobile boot logs the FM verdict — the opt-in bug report attaches shell.log",
   );
 });
+
+// --- 4. The ObjC-runtime bridge (0.13.9 — the dlsym route failed ON DEVICE) --
+// 0.13.8 shipped with the export-trie pin applied (verified in the build log)
+// and STILL read the symbol-absent verdict on an iPhone 17 / iOS 26.5.2 / SDK
+// 26.5 build — runtime symbol lookup into the main executable is unreliable in
+// release archives. The ObjC runtime finds class metadata BY NAME
+// (__objc_classlist), immune to symbol tables, export tries, and stripping.
+
+test("the bridge is reachable through the ObjC runtime, not just dlsym", () => {
+  assert.ok(swift.includes('@objc(LHFMBridge)'), "the Swift bridge class pins its ObjC name");
+  assert.ok(swift.includes('@objc(ensure:)'), "the selector is pinned against Swift renames");
+  assert.ok(
+    commands.includes('objc_getClass(b"LHFMBridge\\0"'),
+    "Rust resolves the bridge class by name FIRST",
+  );
+  assert.ok(
+    commands.includes('sel_registerName(b"ensure:\\0"'),
+    "Rust messages the pinned selector",
+  );
+  assert.match(
+    commands,
+    /class_getClassMethod\(cls, sel\)/,
+    "the selector is verified before objc_msgSend — the probe can never raise",
+  );
+  assert.ok(
+    commands.includes('libc::dlsym(libc::RTLD_DEFAULT, name)'),
+    "the dlsym route stays as a fallback behind the ObjC lookup",
+  );
+});
+
+test("a missing bridge reads as a BUILD defect (-6), never as the phone's OS", () => {
+  assert.match(swift, /FM_BUILD_UNSUPPORTED: Int32 = -6/, "Swift names the build-defect code");
+  assert.match(
+    swift,
+    /return FM_BUILD_UNSUPPORTED\s*\n\s*#endif/,
+    "compiled-without-FM returns the build-defect code, not FM_OS_TOO_OLD",
+  );
+  assert.match(
+    commands,
+    /return -6; \/\/ shim absent from this binary/,
+    "an unresolvable shim is -6 in Rust too",
+  );
+  assert.ok(
+    commands.includes(
+      `"this app build doesn't include on-device model support — update the app"`,
+    ),
+    "-6 maps to copy that names the build, not the phone",
+  );
+  assert.ok(
+    commands.includes('"the on-device private model requires iOS 26 or later"'),
+    "-3 keeps its meaning for the genuine old-OS case",
+  );
+});
+
+test("CI asserts the bridge boarded the app binary before TestFlight upload", () => {
+  const wf = read(".github/workflows/mobile-bootstrap.yml");
+  const guard = wf.indexOf("Assert the private-model bridge boarded the app binary");
+  const upload = wf.indexOf("name: Upload to TestFlight");
+  assert.ok(guard !== -1, "the bridge tripwire step exists");
+  assert.ok(upload !== -1 && guard < upload, "the tripwire gates the TestFlight upload");
+  assert.ok(
+    wf.includes("grep -q '^LHFMBridge$'"),
+    "the guard checks the ObjC class name in the shipped binary (survives stripping)",
+  );
+});
