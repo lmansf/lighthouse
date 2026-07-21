@@ -12,6 +12,8 @@ import {
   DialogTitle,
   DialogTrigger,
   Field,
+  Radio,
+  RadioGroup,
   Text,
   Textarea,
   Tooltip,
@@ -19,8 +21,13 @@ import {
   shorthands,
   tokens,
 } from "@fluentui/react-components";
-import { ChatHelpRegular, MailRegular, OpenRegular } from "@fluentui/react-icons";
-import { buildFeedbackMailto, buildFeedbackIssueUrl } from "@/lib/feedbackLinks";
+import { LightbulbRegular, MailRegular, OpenRegular } from "@fluentui/react-icons";
+import {
+  buildFeedbackMailto,
+  buildFeedbackIssueUrl,
+  feedbackKindLabel,
+  type FeedbackKind,
+} from "@/lib/feedbackLinks";
 
 /**
  * The single "Send feedback" flow. A quiet FAB in the corner (and a "Send
@@ -101,6 +108,7 @@ function openExternal(url: string) {
 export function BugReport() {
   const styles = useStyles();
   const [open, setOpen] = useState(false);
+  const [kind, setKind] = useState<FeedbackKind>("idea");
   const [where, setWhere] = useState("");
   const [what, setWhat] = useState("");
   const [includeLog, setIncludeLog] = useState(false);
@@ -120,6 +128,7 @@ export function BugReport() {
   }, []);
 
   function reset() {
+    setKind("idea");
     setWhere("");
     setWhat("");
     setIncludeLog(false);
@@ -143,6 +152,7 @@ export function BugReport() {
   }
 
   const report = {
+    kind,
     where,
     what,
     version,
@@ -151,6 +161,14 @@ export function BugReport() {
   };
   const canSend = Boolean(what.trim());
   const hasLog = includeLog && logLoaded && Boolean(log.trim());
+  // The primary prompt follows the chosen kind so the form reads as real
+  // feedback, not a bug report with a generic box.
+  const whatLabel =
+    kind === "problem"
+      ? "What went wrong?"
+      : kind === "praise"
+        ? "What's working well?"
+        : "What's your idea?";
 
   return (
     <Dialog
@@ -165,7 +183,7 @@ export function BugReport() {
           <Button
             className={styles.fab}
             appearance="subtle"
-            icon={<ChatHelpRegular />}
+            icon={<LightbulbRegular />}
             aria-label="Send feedback"
           />
         </Tooltip>
@@ -175,10 +193,21 @@ export function BugReport() {
           <DialogTitle>Send feedback</DialogTitle>
           <DialogContent>
             <div className={styles.fields}>
+              <Field label="What kind of feedback?">
+                <RadioGroup
+                  layout="horizontal"
+                  value={kind}
+                  onChange={(_, d) => setKind(d.value as FeedbackKind)}
+                >
+                  <Radio value="idea" label={feedbackKindLabel("idea")} />
+                  <Radio value="problem" label={feedbackKindLabel("problem")} />
+                  <Radio value="praise" label={feedbackKindLabel("praise")} />
+                </RadioGroup>
+              </Field>
               <Field label="Where in the app? (optional)">
                 <Textarea value={where} onChange={(_, d) => setWhere(d.value)} />
               </Field>
-              <Field label="What happened, or what would you change?" required>
+              <Field label={whatLabel} required>
                 <Textarea value={what} onChange={(_, d) => setWhat(d.value)} />
               </Field>
 

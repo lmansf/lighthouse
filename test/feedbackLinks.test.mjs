@@ -15,6 +15,7 @@ const {
   composeFeedbackBody,
   buildFeedbackMailto,
   buildFeedbackIssueUrl,
+  feedbackKindLabel,
 } = await import("../src/lib/feedbackLinks.ts");
 
 const report = {
@@ -67,4 +68,14 @@ test("no message → a bare subject, still a valid handoff", () => {
   const url = buildFeedbackMailto({ what: "" });
   const q = new URLSearchParams(url.slice(url.indexOf("?") + 1));
   assert.equal(q.get("subject"), "Lighthouse feedback");
+});
+
+test("the feedback kind rides along in the body when set (not the subject)", () => {
+  const body = composeFeedbackBody({ ...report, kind: "idea" });
+  assert.ok(body.startsWith("Kind: Idea"), "kind line missing or mislabeled");
+  assert.ok(body.includes("chart axis labels overlap"), "message still present");
+  assert.equal(feedbackKindLabel("problem"), "Problem");
+  assert.equal(feedbackKindLabel("praise"), "Praise");
+  // A bare report (no kind) has no Kind: line — keeps the exact-subject case.
+  assert.ok(!composeFeedbackBody({ what: "hi" }).includes("Kind:"), "kindless body stays clean");
 });

@@ -74,6 +74,15 @@ fn tabular_inspection_reports_all_rust_fields_and_scoped_test_search() {
     assert_eq!(cols[2].kind, ColumnKind::Text);
     assert_eq!(cols[3].kind, ColumnKind::Numeric);
 
+    // CSV/TSV get a parsed table preview (header + first rows) — a SHARED field.
+    let pt = insp.preview_table.as_ref().expect("a csv gets a parsed table preview");
+    let header: Vec<&str> = pt.header.iter().map(String::as_str).collect();
+    assert_eq!(header, vec!["date", "region", "product", "amount"]);
+    assert_eq!(pt.rows.len(), 3);
+    let row0: Vec<&str> = pt.rows[0].iter().map(String::as_str).collect();
+    assert_eq!(row0, vec!["2025-01-02", "NE", "widgets", "10"]);
+    assert!(!pt.truncated, "the small fixture is not truncated");
+
     // The serialized payload carries every Rust-only key (the node twin asserts
     // these SAME keys are absent on its side — the parity contract).
     let v = serde_json::to_value(&insp).unwrap();

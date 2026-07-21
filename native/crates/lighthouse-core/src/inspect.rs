@@ -26,6 +26,21 @@ pub struct InspectHit {
     pub score: f64,
 }
 
+/// A bounded, parsed preview of a delimited (CSV/TSV) file: the header row and
+/// the first few data rows, columns capped — a glance at the table's SHAPE, not
+/// the whole file. Shared field (CSV/TSV parse in pure JS too, so the TS twin
+/// fills it identically) — KEEP IN SYNC with `PreviewTable` in
+/// src/contracts/types.ts.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewTable {
+    pub header: Vec<String>,
+    pub rows: Vec<Vec<String>>,
+    /// True when the file has more rows or columns than shown — the preview is a
+    /// glance, never a claim of completeness.
+    pub truncated: bool,
+}
+
 /// A read-only view of what the engine holds for one file. All fields are
 /// optional so the TS twin can omit what it cannot compute (never a fake
 /// value). KEEP IN SYNC with the `FileInspection` shape in
@@ -45,6 +60,11 @@ pub struct FileInspection {
     /// file has no extractable text (it stays findable by name only).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extract_preview: Option<String>,
+    /// For a CSV/TSV file, a tiny parsed table preview — header + first rows,
+    /// columns capped — so the panel shows the table's shape, not just a raw
+    /// text slice. Shared field; None for non-delimited files.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preview_table: Option<PreviewTable>,
     /// Rust-only (OCR is a Rust-engine capability): the preview text came from
     /// OCR (an image, or a scanned-PDF fallback). PARITY: the TS twin omits it.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -94,6 +114,12 @@ pub struct FileInspection {
 
 /// Preview slice cap — a glance at the extracted text, not the whole document.
 const PREVIEW_CHARS: usize = 600;
+/// CSV/TSV parsed-preview bounds — a glance at the table's shape, not the file.
+const PREVIEW_TABLE_ROWS: usize = 5;
+const PREVIEW_TABLE_COLS: usize = 8;
+/// A larger head than the prose preview so the parsed rows aren't clipped mid-
+/// table (PREVIEW_CHARS can cut inside the first data row of a wide sheet).
+const PREVIEW_TABLE_CHARS: usize = 2000;
 /// Test-search top-K (bounded — the panel is a glance, not a full search UI).
 const TEST_SEARCH_K: usize = 5;
 /// Per-hit text cap (matches the retrieval snippet cap).
@@ -105,6 +131,54 @@ fn ext_of(name: &str) -> String {
         Some((stem, ext)) if !stem.is_empty() => format!(".{}", ext.to_lowercase()),
         _ => String::new(),
     }
+}
+
+/// Parse the head of a delimited file into a bounded (header, rows) preview.
+/// Pure and cheap — the SAME logic the TS twin runs, so the field is byte-shaped
+/// alike across engines. `truncated` reflects a source longer than the slice, a
+/// row beyond the cap, or more columns than the cap — never a completeness
+/// claim. None when there isn't at least a 2-column header plus one data row.
+fn parse_preview_table(text: &str, delim: char) -> Option<PreviewTable> {
+    // The bounded slice may end mid-line; keep only whole lines so a partial
+    // trailing row never shows (the caller still flags `truncated`).
+    let source_truncated = text.len() >= PREVIEW_TABLE_CHARS;
+    let mut whole: Vec<&str> = text.lines().collect();
+    if source_truncated && whole.len() > 1 {
+        whole.pop();
+    }
+    let mut lines = whole.into_iter().filter(|l| !l.trim().is_empty());
+    let split = |line: &str| -> Vec<String> {
+        line.split(delim)
+            .take(PREVIEW_TABLE_COLS)
+            .map(|c| c.trim().to_string())
+            .collect()
+    };
+    let header_line = lines.next()?;
+    let header = split(header_line);
+    if header.len() < 2 {
+        return None;
+    }
+    let width = header.len();
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    let mut more_rows = false;
+    for line in lines {
+        if rows.len() >= PREVIEW_TABLE_ROWS {
+            more_rows = true;
+            break;
+        }
+        let mut cells = split(line);
+        cells.resize(width, String::new()); // align every row to header width
+        rows.push(cells);
+    }
+    if rows.is_empty() {
+        return None;
+    }
+    let wide = header_line.split(delim).count() > PREVIEW_TABLE_COLS;
+    Some(PreviewTable {
+        header,
+        rows,
+        truncated: source_truncated || more_rows || wide,
+    })
 }
 
 /// Read-only inspection of `file_id`. When `query` is non-empty it ALSO runs the
@@ -169,6 +243,17 @@ pub fn inspect(file_id: &str, query: Option<&str>) -> FileInspection {
             if let Some(fc) = cols.into_iter().next() {
                 out.columns = Some(fc.columns);
             }
+        }
+    }
+
+    // CSV/TSV also get a small parsed table preview (header + first rows) so the
+    // panel shows the table's SHAPE, not just a raw text slice. A pure parse of a
+    // bounded head — shared with the TS twin. Non-delimited tabular files (xlsx)
+    // keep the text preview only (their doc_text is extracted text, not raw rows).
+    if ext == ".csv" || ext == ".tsv" {
+        let delim = if ext == ".tsv" { '\t' } else { ',' };
+        if let Some((_, text)) = crate::vault::doc_text(file_id, Some(PREVIEW_TABLE_CHARS)) {
+            out.preview_table = parse_preview_table(&text, delim);
         }
     }
 

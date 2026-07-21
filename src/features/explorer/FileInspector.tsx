@@ -80,6 +80,34 @@ const useStyles = makeStyles({
   muted: { color: tokens.colorNeutralForeground3, fontStyle: "italic" },
   ocr: { color: tokens.colorPaletteDarkOrangeForeground1 },
   cols: { display: "flex", flexWrap: "wrap", ...shorthands.gap("6px") },
+  // CSV/TSV parsed table preview — scrolls horizontally so a wide sheet never
+  // pushes the panel out of bounds.
+  tableWrap: {
+    overflowX: "auto",
+    ...shorthands.borderRadius(tokens.borderRadiusMedium),
+    ...shorthands.border("1px", "solid", tokens.colorNeutralStroke2),
+  },
+  table: {
+    borderCollapse: "collapse",
+    fontSize: tokens.fontSizeBase200,
+    fontFamily: tokens.fontFamilyMonospace,
+  },
+  th: {
+    textAlign: "left",
+    whiteSpace: "nowrap",
+    ...shorthands.padding("4px", "8px"),
+    backgroundColor: tokens.colorNeutralBackground3,
+    color: tokens.colorNeutralForeground2,
+    fontWeight: tokens.fontWeightSemibold,
+  },
+  td: {
+    whiteSpace: "nowrap",
+    maxWidth: "200px",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    ...shorthands.padding("4px", "8px"),
+    ...shorthands.borderTop("1px", "solid", tokens.colorNeutralStroke2),
+  },
   searchRow: { display: "flex", ...shorthands.gap("8px") },
   // Chunk navigation header: "Chunk k of n" + the ‹ › steppers.
   navRow: {
@@ -366,6 +394,43 @@ export function FileInspector({
                     </Text>
                   )}
                 </div>
+
+                {/* CSV/TSV parsed table preview — the table's SHAPE, not just a
+                    text slice. Shared field (both engines parse delimited text). */}
+                {data.previewTable && (
+                  <div className={styles.section}>
+                    <Text className={styles.label}>Table preview</Text>
+                    <div className={styles.tableWrap}>
+                      <table className={styles.table}>
+                        <thead>
+                          <tr>
+                            {data.previewTable.header.map((h, i) => (
+                              <th key={`h-${i}-${h}`} className={styles.th}>
+                                {h}
+                              </th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {data.previewTable.rows.map((row, r) => (
+                            <tr key={`r-${r}`}>
+                              {row.map((cell, c) => (
+                                <td key={`c-${r}-${c}`} className={styles.td}>
+                                  {cell}
+                                </td>
+                              ))}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                    {data.previewTable.truncated && (
+                      <Text size={200} className={styles.muted}>
+                        First rows shown — the file has more.
+                      </Text>
+                    )}
+                  </div>
+                )}
 
                 {/* Chunking mode + count. */}
                 <div className={styles.section}>

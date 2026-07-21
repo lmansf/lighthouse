@@ -39,10 +39,13 @@ test("down waits only for an installed model within the spawn grace", () => {
   assert.equal(warmWaitVerdict("down", false, 0), "proceed");
 });
 
-test("warming label is byte-identical to the Rust twin", () => {
+test("warming label is byte-identical to the Rust twin (staged, progressive)", () => {
   assert.equal(warmingLabel(0), "Private model warming up…");
-  assert.equal(warmingLabel(4_500), "Private model warming up… (4s)");
-  assert.equal(warmingLabel(61_000), "Private model warming up… (61s)");
+  assert.equal(warmingLabel(4_500), "Private model warming up…");
+  assert.equal(warmingLabel(8_000), "Loading the private model into memory…");
+  assert.equal(warmingLabel(19_999), "Loading the private model into memory…");
+  assert.equal(warmingLabel(20_000), "Almost ready — the first private answer takes a moment…");
+  assert.equal(warmingLabel(61_000), "Almost ready — the first private answer takes a moment…");
 });
 
 test("health URL derives from the chat-completions origin", () => {

@@ -330,12 +330,14 @@ export function warmWaitVerdict(
   return installed && waitedMs < LOCAL_SPAWN_GRACE_MS ? "wait" : "proceed";
 }
 
-/** The user-visible warming status. KEEP IN SYNC (byte-identical) with
- *  synth.rs::warming_label. */
+/** The user-visible warming status — staged, progressive copy (faster &
+ *  calmer): the message advances through reassuring phases instead of a raw
+ *  ticking seconds counter, so a cold model load reads as steady progress, not
+ *  a stopwatch. KEEP IN SYNC (byte-identical) with synth.rs::warming_label. */
 export function warmingLabel(waitedMs: number): string {
-  return waitedMs === 0
-    ? "Private model warming up…"
-    : `Private model warming up… (${Math.floor(waitedMs / 1000)}s)`;
+  if (waitedMs < 8000) return "Private model warming up…";
+  if (waitedMs < 20000) return "Loading the private model into memory…";
+  return "Almost ready — the first private answer takes a moment…";
 }
 
 /** §22.4 queue-not-fail: when the PRIVATE model is the active provider but its

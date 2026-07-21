@@ -16,8 +16,13 @@ pub const DEFAULT_SUMMON_SHORTCUT: &str = "ctrl+super+shift+space";
 
 /// The Beam multi-step analytics loop's default step budget (openspec:
 /// add-beam-loop §2) — the number of sequential verified SQL steps the loop may
-/// run when `beam_max_steps` is unset. Replaces the former hardcoded 3.
-pub const DEFAULT_BEAM_MAX_STEPS: usize = 5;
+/// run when `beam_max_steps` is unset. Lowered 5 → 2 (faster & calmer): the
+/// overwhelming majority of asks resolve in one or two verified steps, so a
+/// smaller default trims idle loop latency and the "still working…" tail;
+/// raise `beam_max_steps` (up to the ceiling) when a question needs a deeper
+/// chain. Bounds unchanged, so no answer the old default could reach is lost —
+/// only the automatic step budget for an unset preference moves.
+pub const DEFAULT_BEAM_MAX_STEPS: usize = 2;
 
 /// Hard ceiling on the configurable Beam step budget. Keeps the accumulated
 /// per-step context (STEP_RESULT_CAP × N) a small fraction of any remote model

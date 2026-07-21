@@ -171,6 +171,19 @@ class MockRagService implements RagService {
       chunkMode: tabular ? "tabular" : "prose",
       extractPreview: `…extracted text preview for ${node.name}…`,
     };
+    // CSV/TSV also carry a small parsed table preview (shared field) so the
+    // inspector renders its table shape end to end offline.
+    if (/\.(csv|tsv)$/i.test(node.name)) {
+      out.previewTable = {
+        header: ["month", "region", "revenue"],
+        rows: [
+          ["Jan", "West", "48200"],
+          ["Feb", "West", "51330"],
+          ["Mar", "East", "44190"],
+        ],
+        truncated: true,
+      };
+    }
     // Like the twin (src/server/inspect.ts): no OCR in this engine, reported
     // honestly for the files OCR could apply to (images + PDFs).
     if (/\.(png|jpe?g|webp|bmp|tiff?|pdf)$/i.test(node.name)) out.ocrAvailability = "unsupported";
