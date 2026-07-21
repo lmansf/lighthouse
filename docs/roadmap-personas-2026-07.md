@@ -4947,7 +4947,8 @@ evidence to analyze — and never pay for anything the engine already
 renders. Everything below is shared-engine work (both twins) except
 one staged bridge upgrade.
 
-### Prompt
+### Prompt v1 (superseded 2026-07-21 — adversarial review found six
+defects; run the v2 block below instead. v1 kept for the record.)
 
 ```
 You are working on Lighthouse (github.com/lmansf/lighthouse), a
@@ -5139,4 +5140,250 @@ applies (grep-verified Swift, ios-build lane as gate, device run
 recorded in the PR). One commit per numbered section. Open ONE PR
 titled "On-device token diet: tiered budgeter, fact-sheet narration,
 quote-digest RAG"; stop at the PR.
+```
+
+### Adversarial review of v1 (2026-07-21) — why v2 exists
+
+1. **meta.table blast radius unhandled.** Six shipped features parse
+   the result table FROM THE ANSWER TEXT (RefineChips eligibility via
+   parseMarkdownTable(content), ChartItRow, chartFromTable, "Save as
+   view", the evidence pack, boards add-to-board). v1 moved the table
+   off the text without migrating any of them — the §22.6 regression
+   class (which needed a live-turn discriminator + consumer pins).
+2. **Cloud contract change smuggled in.** "Cloud adopts prose-only"
+   rewrites how every desktop/cloud answer reads, invalidates §28
+   pins and eval goldens, and puts the new renderer on every critical
+   path at once — inside a token patch.
+3. **chars/4 lies on numeric data** (~2.5-3 chars/token): a "fitting"
+   fact sheet can still overflow — the exact silent failure being
+   fixed. Needs a margin + an exact-count second defense.
+4. **Drop order starves refinements**: shrinking prior-SQL "when
+   budget-tight" breaks "now show it as %".
+5. **"The why" over a pruned fact sheet invites speculation**; and
+   unlabeled aggregates over truncated rows invite false hedging.
+6. **TSV micro-format mandated on vibes** — a 1-3B model may read
+   markdown pipes MORE reliably; the A/B should decide, not fiat.
+7. Also: no device-free way to verify the 4k budget (fixed via a
+   forced-tier override); /health shape is test-pinned + twin-
+   mirrored; one 900-tok reserve over-reserves the SQL call; warm +
+   report-framing calls still ride the fat system prompt; naive
+   sentence splitting breaks abbreviations/citation anchors; flipping
+   the desktop 7B to compact in the same PR risks the primary
+   platform.
+
+### Prompt v2 (run this)
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first, local-first analytics AI harness: Rust engine
+(native/crates/lighthouse-core) in a Tauri 2 shell (same crate is the
+iOS app; the on-device model is Apple Foundation Models behind an
+OpenAI-compatible loopback bridge,
+gen/apple/Sources/lighthouse-desktop/PrivateModelServer.swift),
+byte-compatible TS twin (src/server/), React UI (src/). Read
+CLAUDE.md, docs/ts-twin.md, docs/ios-private-model.md, and roadmap
+§32 IN FULL — the measured token ledger AND the adversarial-review
+list; v2 exists because v1 had the six defects listed there. GOAL:
+every ask on the on-device tier fits its window (4,096 iOS 26 / 8,192
+iOS 27, input+output) with an output reserve, quality holds or
+improves, and overflow becomes rare + observable. HARD SCOPE RAILS
+for this PR: cloud-model prompt behavior is BYTE-IDENTICAL to main;
+the desktop 7B keeps its FULL system prompt (it gains the budgeter
+only); the new narration contract applies to the apple-fm tiers
+alone. The cloud/desktop flips are recorded follow-ups, not riders.
+
+1. Tiered token budgeter (one seam, both twins). Replace the
+   6,144-tuned char constants (llm.rs:1063-1123
+   clamp_local_contexts/clamp_local_history + the doc-budget family;
+   KEEP IN SYNC llm.ts) with per-tier budgets. Tier resolution table
+   (pin it in a test): health payload advertises a context size →
+   apple-fm-4096 or apple-fm-8192; local provider with NO
+   advertisement (desktop llama-server, Ollama/LM Studio) →
+   llama-6144; cloud → remote-large. Add LIGHTHOUSE_FORCE_TIER (env)
+   overriding resolution — the desktop 7B under apple-fm-4096 is the
+   device-free acceptance rig. The budgeter: per-segment ceilings
+   (system, task instruction, reliability_blocks, semantic, schema,
+   evidence, history, question, message-framing overhead — count ALL
+   of them), PER-CALL-TYPE output reserves (narration ≥900 on 4k;
+   NL→SQL ~300; report framing ~400), estimate = chars/4 BUT budget
+   only to 90% of the advertised window (numeric-heavy text runs
+   2.5-3 chars/token — the margin absorbs estimator drift; the
+   bridge's exact pre-check in §7 is the backstop). Degradation is
+   deterministic, PER CALL TYPE, and protects a REFINEMENT KERNEL:
+   on refine-classified asks the clamped prior SQL outranks evidence
+   and semantic entries (a refinement that can't see its prior query
+   is wrong by construction). Order for fresh asks: few-shots →
+   history middle → unmatched semantic → lowest-scored evidence →
+   schema sample values. Pure functions, unit-pinned in cargo + node.
+
+2. Compact prompt profile — apple-fm tiers ONLY this PR. Author
+   SYSTEM_PROMPT_COMPACT (~1,100-1,300 chars ≈ 300 tok): grounded-
+   numbers-only, cite sources, honest uncertainty, plain concise
+   style, and the fact-sheet contract line from §3. Everything the
+   engine enforces deterministically leaves it (charts ride
+   meta.chart; footers are engine-stamped; HTML rules irrelevant).
+   Selection is model-class-driven at the §1 seam, in SHARED engine
+   code, byte-pinned across twins with a parity test. The desktop 7B
+   and cloud keep today's SYSTEM_PROMPT byte-for-byte (llama-6144
+   flips to compact ONLY as a follow-up if the §8 A/B says so). The
+   warm call (llm.rs:1330) and the two report-framing calls ride the
+   same profile selection — no call type is left on the fat prompt
+   on a 4k tier.
+
+3. Narration on apple-fm tiers: prose over a fact sheet, table on
+   the structured channel — with the consumer migration done FIRST.
+   a. ChunkMeta gains `table` beside `chart` (serde-default, twins,
+      KEEP IN SYNC comment). The engine emits it ONLY when the
+      prose-only contract is active (apple-fm tiers), mirroring
+      meta.chart's semantics; the renderer draws it at the answer's
+      table position; the answer cache replays it (§22.6 idiom —
+      reread that section's live-turn/legacy handling before
+      coding).
+   b. BEFORE changing any prompt: introduce ONE accessor
+      (answerTable(m) → m.meta?.table ?? parseMarkdownTable(content))
+      and migrate every consumer that parses tables from answer
+      text — RefineChips eligibility, ChartItRow, the chartFromTable
+      path, "Save as view", the evidence-pack export, boards
+      add-to-board. Grep for parseMarkdownTable call sites to catch
+      stragglers; pin each migration. Legacy chats and all
+      cloud/desktop answers keep working via the fallback arm.
+   c. The narration call on apple-fm tiers then: NO schema cards
+      (they inform SQL, not prose); a compact engine-built FACT
+      SHEET — tier-capped result rows, row/col counts, engine-
+      computed headlines (totals/top-mover/min-max, insights.rs
+      style) each LABELED as computed over the FULL N rows, plus the
+      truncation truth ("you see 12 of 200; aggregates cover all
+      200"). Every number the model may cite is in the sheet. Row
+      micro-format (markdown pipes vs TSV vs key:value) is decided
+      by the §8 A/B on the real small model — budget is law,
+      format is evidence.
+   d. The contract line: the table and chart are ALREADY DISPLAYED;
+      write 3-6 sentences — the answer, what the data shows, the
+      caveat; state a "why" only when the fact sheet contains the
+      supporting comparison (reuse §29's honesty guardrails:
+      correlated-not-caused, no invented/extrapolated numbers).
+   Cloud and llama-6144 narration prompts: byte-identical to main.
+
+4. NL→SQL diet (apple-fm tiers; llama-6144 keeps today's sizes via
+   its tier). Schema cards: rank tables AND columns against the
+   question via the lexical scorer + semantic synonyms; top 2-3
+   tables; each card = matched + key columns with types, ONE sample
+   value per matched column. PRUNING FLOOR: never prune a column
+   named in the question or matched by a synonym — golden-SQL
+   fixtures gate this. Semantic block: matched-to-question entries
+   only (applicableSemantics), budget-capped. Few-shots: ONE on
+   apple tiers (cloud keeps 5). Prior SQL: protected by the §1
+   refinement kernel, clamped not summarized.
+
+5. RAG evidence: quotes, not chunks (apple-fm tiers). At the
+   retrieval seam (vault::retrieve post-.take(k) / synth.rs context
+   assembly): dedupe the ~20% overlap between neighboring 120-word
+   chunks; rank sentences within top chunks by the same lexical
+   scorer; emit quoted snippets UP TO the evidence budget (top-K
+   becomes budget-driven). Splitter is CONSERVATIVE: split on
+   terminator + whitespace + capital heuristic, keep the whole chunk
+   when unsure; torture-test it (abbreviations, decimals, "U.S.",
+   numbered lists — the streamingMarkdown-torture idiom). Every
+   quote carries its chunk/citation id; a fixture proves citation
+   RENDERING AND JUMP still work from quoted answers. History:
+   last exchange verbatim (small clamp, INCLUDING its fact sheet —
+   follow-ups reference prior answers) + a 1-2 line deterministic
+   summary of older turns. Extractive fallback path untouched.
+
+6. Reports: per-section caps in report_findings_ctx (headline + a
+   few rows per section) so both framing calls fit the 4k tier with
+   reserve; framing calls use the §2 profile selection. Structure
+   and the deterministic report body untouched.
+
+7. The bridge: advertise, pre-check, observe, and (fenced) constrain.
+   - ADVERTISE: the /health JSON body gains contextSize (from
+     SystemLanguageModel contextSize / tokenCount APIs when the SDK
+     has them, else 4096). The /health shape is TEST-PINNED and
+     twin-mirrored: update local_health (llm.rs/llm.ts), the
+     providerSwitch test mock, and any §22.4 pins in the same
+     commit. Non-advertising endpoints resolve per the §1 table.
+   - EXACT PRE-CHECK: before calling FM, the bridge measures the
+     final joined prompt with tokenCount(for:) (where available);
+     if it exceeds window minus reserve, it does NOT call — it
+     returns the overflow signal immediately. Two-layer defense:
+     engine estimate (90% budget) + bridge exact check.
+   - OBSERVE: the empty catch and the pre-check both emit a final
+     SSE marker distinguishing FM_OVERFLOW and FM_GUARDRAIL from a
+     clean end. Engine: honest one-line footer on overflow + a
+     local diagnostics counter (shell.log only, no telemetry).
+     After §1-§6 the counter should read 0 in acceptance.
+   - FENCED SPIKE (own commit, must not block the PR): guided
+     generation for intent — a structured-intent endpoint on the
+     loopback contract (@Generable form over ENUMERATED schema
+     elements; the ENGINE compiles + validates SQL, single-SELECT
+     guard intact), capability-probed, landing DARK (present,
+     unused) or behind a setting. Record the verdict in
+     docs/ios-private-model.md either way.
+
+8. Prove it (deterministic floors + a device-free rig).
+   - Budget floor: per call type, assembled apple-fm-4096 prompts
+     fit budget-minus-reserve (pure-function tests, both twins);
+     drop order pinned; refinement kernel pinned.
+   - Fact floor: fact sheet contains every number/entity the golden
+     answer cites; citation ids valid; pruned schema retains every
+     golden-SQL column.
+   - FORCED-TIER RIG (no Apple device needed): desktop 7B with
+     LIGHTHOUSE_FORCE_TIER=apple-fm-4096 runs the acceptance
+     scenarios — a 6-table vault (eval fixtures), a 24+24 semantic
+     store, a 6-turn conversation with two refinements, a 200-row
+     result — every answer model-narrated, overflow counter 0.
+   - A/B (same rig): full vs compact profile, pipes vs the lean row
+     format, over the eval fixtures — factual-coverage parity
+     (golden numbers present + citations valid) decides the §3c
+     micro-format and informs the desktop-flip follow-up; record
+     results in the PR.
+   - DEVICE RUN: repeat the scenarios on an Apple-Intelligence
+     device (or simulator if FM runs there — record which); confirm
+     the /health advertisement and the pre-check path.
+   - Cloud regression: zero — assert the cloud prompt assembly is
+     byte-identical to main (snapshot test), and existing goldens
+     untouched.
+   - Update docs/ios-private-model.md §6 (this IS Phase B) and the
+     stale llm.rs budget comment.
+
+9. Stamps + follow-ups. Patch bump across all SEVEN stamp files per
+   CLAUDE.md; suites + release-smoke + ios-build green; PARITY
+   comments everywhere twin-shared. The PR body lists the three
+   recorded follow-ups (each a one-line future prompt): flip cloud
+   to prose-over-fact-sheet; flip desktop llama-6144 to the compact
+   profile per A/B; adopt guided-gen intent if the spike verdict is
+   positive.
+
+Constraints. No analytics/telemetry/accounts (counter is local-log
+only). Deterministic analytics and grounding unchanged — tokens
+move, truth doesn't. Cloud prompt assembly byte-identical (snapshot-
+pinned); desktop 7B system prompt unchanged. Byte-pinned labels move
+only with their pins. SharePoint plumbing untouched.
+
+Acceptance:
+1. Forced-tier rig: all four scenarios model-narrated, counter 0,
+   refinements correct ("now as %" against a prior answer).
+2. Device run: same outcomes on real FM; /health advertises the
+   window; a deliberately oversized prompt trips the bridge
+   pre-check (signal received, honest footer shown) — and nothing
+   else ever does.
+3. Consumers: on an apple-tier answer, Chart-it / refine chips /
+   Save-as-view / evidence pack all work from meta.table; on legacy
+   and cloud answers they work from text exactly as today (pins).
+4. Budget/fact/golden-SQL floors green in both twins; splitter
+   torture green; citation jump works from quoted answers.
+5. Cloud snapshot test proves byte-identical assembly; desktop 7B
+   behavior unchanged this PR.
+6. Suites + release-smoke + ios-build green; seven stamps bumped;
+   docs updated; A/B results + three follow-ups in the PR body.
+
+Environment. Engine/twin/budgeter/pruner/rig work is fully
+container-testable (the forced-tier rig needs the desktop 7B — run
+where the model exists; otherwise assert the deterministic floors
+and note it). Bridge changes need macOS + Xcode; the device run
+needs Apple-Intelligence hardware — house convention (grep-verified
+Swift, ios-build gate, device run recorded in the PR). One commit
+per numbered section, consumer migration (3b) BEFORE the contract
+change (3c). Open ONE PR titled "On-device token diet v2: tiered
+budgeter, fact-sheet narration, quote-digest RAG"; stop at the PR.
 ```
