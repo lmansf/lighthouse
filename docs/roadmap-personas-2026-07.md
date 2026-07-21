@@ -4508,3 +4508,401 @@ coverage); grep-verify desktop-crate call sites. One commit per numbered
 section. Open ONE PR titled "Report templates: Scientific method &
 Business report"; stop at the PR.
 ```
+
+## 30. Mobile-native structure: phone-true compact, three real tabs, Sections retired, tile Files (2026-07-20)
+
+Owner reports @ 0.13.9: landscape iPhone shows the desktop side nav;
+"Sections" earns a tab but nothing in it matters except maybe History;
+Settings deserves the tab instead; the Files page is the desktop left
+bar crammed into one screen. Diagnosis:
+- **Landscape**: `paneLayout` is purely width×platform (`compact =
+  platform !== "desktop" && width < 700`, paneLayout.ts) — iPhone
+  landscape is 844–932pt ≥ 700, so it flips to the column+rail and
+  drops the tab bar. There is no phone-vs-iPad distinction (both report
+  "ios"). `min(innerWidth, innerHeight) < 700` is the no-engine-change
+  phone signal: every iPhone's short side is <700 in both orientations;
+  iPad's is ≥744, and narrow Split View stays compact since min ≤ width.
+- **Sections, audited against the owner's bar** ("remove everywhere
+  unless proven high-impact to result quality") — the evidence:
+
+  | Section | Verdict | Where the capability survives |
+  |---|---|---|
+  | History | NAV-ONLY | browse; persist-toggle + New-chat relocate |
+  | Investigations | RESULT-IMPACTING (scope_file_ids scope the query; providerPolicy local-only swaps the model — resolve_ask_context) | nowhere else today — chat header is display-only; MUST re-home |
+  | What stands out | NAV-ONLY (never enters a prompt/query) | nothing depends on it |
+  | Business definitions | RESULT-IMPACTING (semantic::prompt_block injects metrics/synonyms into NL→SQL; certified answers + trust reconcile) | metric-from-answer = "Define metric" chip; synonyms/rename/delete need a home |
+  | What you can do | NAV-ONLY (launcher; map data never re-enters a prompt) | suggested asks = chat chips; Investigate→report entry re-homes |
+  | Recipes | NAV-ONLY | fully survives as ChatPanel empty-state chips (same useValidatedChips) |
+  | Library (views) | RESULT-IMPACTING (views are queryable tables) | create = "Save as view" chip; ask = "Ask about this view"; only manage needs a home |
+
+  So: the Sections UI can die on ALL platforms; three capabilities
+  relocate (investigation switching → chat header; definitions +
+  views management → Settings), the rest is deletion.
+- **Files page**: the mobile page is desktop `FileExplorer` verbatim —
+  34px-lineage tree rows, a "Selection mode" Switch + action bar,
+  filter/sort bar, per-row eye/lock/⋯. A real card grid already exists
+  to reuse (BoardPanel/BoardCard: auto-fill minmax(220px,1fr), Beam
+  radius-10 cards). Engine per-file axes are exactly two: rag_included
+  (eye) and local_only (lock).
+
+### Prompt
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first, local-first analytics AI harness for analysts: Rust
+engine (native/crates/lighthouse-core) in a Tauri 2 shell (same crate
+is the iOS app), byte-compatible TS twin (src/server/), React UI
+(src/). Read CLAUDE.md, docs/ts-twin.md, and
+docs/roadmap-personas-2026-07.md §14 + §30 (the Sections evidence
+table) before writing code. This patch makes the app's STRUCTURE
+mobile-native: a phone is always compact, three real tabs, Sections
+retired everywhere (capabilities relocated per the audit), and a tile
+Files page. ENGINE UNTOUCHED — investigations/semantic/views/recipes
+ops keep working exactly as today; this is UI surface restructuring.
+The §31 design-language pass stacks on this; keep the two PRs separate.
+
+1. A phone is always compact (landscape included). Change the compact
+   signal from width to the SHORT side: compact = platform !==
+   "desktop" && min(viewport width, height) < COMPACT_BREAKPOINT (700).
+   Implement in usePaneLayout/useCompactViewport (a media-query pair or
+   resize-observed min-dimension — keep the single-signal discipline);
+   paneLayout() itself stays pure (pass the min dimension as its width
+   param or add a minDim param — pick one, update the tests). Result:
+   iPhone portrait AND landscape = compact (tab bar, pages, no side
+   nav, no resize handle); iPad full/half = regular; iPad narrow Split
+   View/Slide Over = compact exactly as today. Desktop NEVER compact
+   (pin stays). Add paneLayout.test cases for 844×390 (phone landscape
+   → compact) and 1180×820 (iPad landscape → regular).
+
+2. Three real tabs: Chat · Files · Settings. In paneLayout.ts
+   COMPACT_TABS, replace "sections" with "settings"
+   (CompactTab type, CompactTabBar TAB_ICONS gains a Settings
+   glyph). The Settings tab opens Settings as a full-screen PAGE (the
+   §25 page primitive), not the footer Menu popup: reorganize
+   SettingsMenu's content into a scrollable settings page component
+   (grouped list; §31 restyles it iOS-grouped — here just structure).
+   The "lighthouse:open-preferences" event routes to the page on
+   compact and the existing surface on desktop. History gets a BUTTON
+   on the chat page header (a small clock/history icon beside New
+   chat) on ALL platforms — it opens the existing History surface
+   (HistoryNav) as a sheet on compact and an anchored surface on
+   desktop. New chat stays in the header. The chat-store persist
+   toggle ("Save chats on this device") moves into Settings.
+
+3. Retire Sections everywhere — with the relocations the audit
+   requires. Delete the Sections tab/page, SectionRail,
+   sidebarSections registry, and the SectionFlyout section-hosting
+   role (keep whatever sheet/page primitive §25 extracted — it hosts
+   History and Settings now). Per the §30 verdict table:
+   - Investigations (RESULT-IMPACTING): the chat header's
+     investigation title becomes a real PICKER (tap → switch
+     investigation, create new, and the existing per-investigation
+     actions: scope from selection, local-only policy, rename/branch/
+     archive — fold InvestigationsNav's operations into this picker
+     surface). Scope selection still sources from the Files page
+     selection (§4). Nothing about resolve_ask_context changes.
+   - Business definitions (RESULT-IMPACTING): a "Business
+     definitions" group/page inside Settings hosting SemanticNav's
+     management content (metrics + synonyms list, rename/delete,
+     suggested proposals). The chat "Define metric" chip keeps
+     working; semantic::prompt_block untouched.
+   - Library/views (RESULT-IMPACTING data): a "Saved views" group/
+     page inside Settings for manage (list/rename/delete/inspect);
+     "Save as view" and "Ask about this view" chips keep working.
+   - History: relocated in §2. Recipes: already chat chips — delete
+     RecipesNav surface. What stands out + What you can do: DELETE
+     (nav-only; the Investigate→report-template launcher folds into
+     the §29 report chips, which already gate on data shape — verify
+     the imrad/bluf entry survives via chips, note it in the PR).
+   Desktop: the sidebar simplifies to Files + the Settings footer —
+   no rail. Grep-sweep every reference (sidebarSections, SectionRail,
+   section ids, flyout ids) so nothing dangles; delete the dead nav
+   components and their tests; add removal pins (no "Sections" string
+   in nav surfaces).
+
+4. The Files page becomes a tile grid (iOS-friendly, direct
+   multi-select). Rebuild the compact Files page on the BoardCard
+   grid primitive (auto-fill minmax; ~2-3 columns on phone):
+   - Each FILE is a tile: type icon (extend fileIcon's map for
+     csv/xlsx/parquet/md/image), name, one metadata line (size),
+     and TWO state badges — in-the-beam (rag_included, amber eye) and
+     private (local_only, lock) — visible at rest.
+   - TAP = select/deselect (checkmark badge, iOS Files idiom).
+     Multi-select is direct — the "Selection mode" Switch, hover
+     checkboxes, and the old action-bar apparatus are DELETED. When
+     ≥1 selected, a bottom action row slides up: Visible to AI
+     on/off · Private on/off · Add to investigation scope · Remove
+     (confirm) · Clear. These call the same batch ops as today
+     (applySelection/applyLocalOnly semantics; investigation scope
+     keeps reading the selection). Tap NEVER silently changes
+     rag_included — visibility changes only via the action row
+     (preserves the stray-tap invariant with fewer surfaces).
+   - LONG-PRESS a tile = the inspector (INSPECT_FILE_EVENT — "what
+     the AI sees"), where per-file eye/lock/rename/remove live.
+   - FOLDERS are tiles that tap-OPEN (drill in, title becomes a
+     back-able breadcrumb); their tiles show aggregate state. No
+     chevron tree on compact.
+   - Strip everything else from the page: the "N of M visible"
+     Badge, New-folder button, Refresh, filter/sort bar, and the
+     toolbar SearchBox are removed on compact. Search survives as
+     the iOS pull-down-to-reveal search field over the grid (hidden
+     at rest). The add control (the §26 label/overlay picker) stays
+     prominent — top-right "Add".
+   - Desktop keeps the current tree explorer UNCHANGED (this grid is
+     the compact presentation; paneLayout decides). Structural pin:
+     desktop FileExplorer render byte-identical to 0.13.9.
+
+5. Coherence + cleanup. The compact drawer/page auto-return behaviors
+   keep working (open file → inspector/back; send ask → Chat tab).
+   Quick-open: keep the launcher on the Files page header (it is the
+   keyboardless finder) or fold it into pull-down search — pick one,
+   delete the other. Update the first-run tour/onboarding references
+   to Sections if any exist (grep). Widget mode unaffected.
+
+6. Tests + stamps. paneLayout min-dimension cases (§1), tab-set pin
+   (chat/files/settings), Sections-removal pins, tile-grid behavior
+   tests (tap=select, long-press=inspect, action-row batch ops wired
+   to the same store calls), relocation pins (investigation picker
+   ops present in header surface; definitions + views pages present
+   in Settings). Desktop render pins. Engine/twin suites untouched
+   and green. Bump the version one patch across all SEVEN stamp
+   files per CLAUDE.md (0.13.9 → 0.13.10 or current+1 at run time).
+
+Constraints. No analytics/telemetry/accounts. ENGINE UNTOUCHED (no
+.rs/src/server behavior change; deletions are UI-only). Labels
+byte-pinned where twins share them; PARITY comments. SharePoint
+plumbing untouched (its dormant connector code is not a Section).
+Desktop loses ONLY the rail/sections; everything else pixel-identical
+— pin it. Scope = these four reports; the design-language pass is §31.
+
+Acceptance:
+1. iPhone landscape (844×390): tab bar + compact pages, NO side nav;
+   iPad landscape (1180×820): regular column; desktop unchanged.
+2. Tabs read Chat · Files · Settings; Settings opens as a full page;
+   History opens from the chat header on phone AND desktop; persist
+   toggle lives in Settings.
+3. No Sections surface anywhere on any platform; investigation
+   switch/create/scope/local-only work from the chat-header picker;
+   definitions and saved-views management work from Settings; recipe
+   and report chips still appear in chat; an ask scoped to an
+   investigation still queries only its files (engine untouched).
+4. The Files page is a tile grid: tap selects (multi, direct),
+   long-press inspects, folders drill in, the action row batch-applies
+   visibility/privacy/scope/remove, pull-down reveals search; none of
+   the removed chrome renders on compact; desktop explorer identical.
+5. All suites + release-smoke green; seven stamps bumped in lockstep.
+
+Environment. macOS + Xcode for phone/iPad verification (simulator
+fine); container fallback per house convention (logic + tests here,
+grep-verified shell bits, ios-build lane as gate). One commit per
+numbered section. Open ONE PR titled "Mobile-native structure: phone
+compact, three tabs, Sections retired, tile Files"; stop at the PR.
+```
+
+## 31. The Apple-feel pass: Beam, spoken with an Apple accent (2026-07-20)
+
+The owner's headline: "the UI still feels like it's for desktop… I'd
+like the whole thing to feel like an Apple product" (desktop should get
+sleeker too). Diagnosis @ 0.13.9: the UI is Fluent UI v9 end to end —
+43 files, ~25 component families, 89 Fluent icon glyphs / 467 refs —
+i.e. Microsoft's design language, which reads "Windows app" regardless
+of the Beam amber/paper palette. The good news: ONE FluentProvider, ONE
+theme file (src/shell/theme.ts), token-pure features (contrast-script
+enforced) — a skin layer lands centrally. What token theming CANNOT
+change: Fluent's control geometry/motion (Switch thumb, Menu open,
+Dialog surface, 32px heights, 4px radii, focus rectangles, hover-first
+affordances) — those need targeted replacement. Strategy: token/skin
+layer for the 80%, surgical control swaps for the rest. Research notes
+(2026): Apple's current language is iOS 26 "Liquid Glass" (shipped
+2025-09; iOS 27 beta refines it and makes glass intensity USER-TUNABLE
+— ship intensity as a token, not a constant). Legal rail: SF
+Symbols/San Francisco fonts are licensed for Apple-OS-running software
+only — the same bundle ships to Windows/Linux, so NEVER embed either;
+use the OS-resolved `-apple-system` stack + an MIT SF-flavored icon
+set. Stacks on §30 (structure first, then skin).
+
+### Prompt
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first, local-first analytics AI harness for analysts: Rust
+engine in a Tauri 2 shell (same crate is the iOS app), TS twin
+(src/server/), React UI (src/) on Fluent UI v9 (one FluentProvider in
+app/providers.tsx; one theme file src/shell/theme.ts holding the 0.12.0
+Beam identity — beamAmber brand ramp, warm-paper/ink neutrals, RADII,
+LAYOUT). Read CLAUDE.md, docs/roadmap-personas-2026-07.md §14 + §31,
+and the §30 PR (this stacks on it) before writing code. GOAL: the whole
+product — iPhone, iPad, desktop — reads as an Apple-quality product.
+Keep the Beam identity (amber tint, ink/paper warmth); change the
+ACCENT it speaks with. Two-phase strategy: a central token/skin layer
+first, then replace only the controls whose geometry still reads
+Fluent. Author the spec as docs/design-language.md so future sessions
+inherit it.
+
+1. The token layer (theme.ts + app/globals.css — one place).
+   - Type: font stack `-apple-system, system-ui, "Segoe UI", Roboto,
+     "Helvetica Neue", sans-serif` (drop "Segoe UI Variable" from
+     first position — SF must win on Apple platforms; Segoe/Roboto are
+     the honest Windows/Linux fallbacks). Hook Dynamic Type on iOS:
+     `font: -apple-system-body` on :root, ALL other sizes in rem (an
+     explicit px on the hooked element severs the link). Adopt the HIG
+     scale: Body 17/22, Subhead 15/20, Footnote 13/18, Caption 12/16,
+     Title3 20/25, Title2 22/28, Title1 28/34; weights regular/medium/
+     semibold/bold only; nothing under 11pt. Map these onto the Fluent
+     type tokens in themeFor() so token-pure features inherit.
+   - Color: keep Beam amber as the ONE tint; re-derive neutrals as
+     semantic pairs (background/secondary/grouped; label 4-step;
+     separator; fill) for light AND dark — dark uses base-vs-elevated
+     surfaces (layered dark gets LIGHTER), never inverted light.
+     `color-scheme: light dark` declared so native controls/scrollbars
+     match. Color sparingly on glass.
+   - Shape: radius tokens 8/12/16/26 + capsule(999). Concentric rule
+     (child = parent − gap) as a CSS custom-property helper.
+     `@supports (corner-shape: squircle)` progressive enhancement only
+     (Chromium/Windows — gate it so platforms stay consistent).
+   - Hairlines: 0.5px separators/borders, inset to the text edge in
+     lists. Shadows: near-invisible ambient (0 8px 24px rgba(0,0,0,.08)
+     cards; slightly stronger sheets) — depth from layering, not dark
+     shadows.
+   - Motion: spring tokens via CSS linear() curves (Safari 17.2+),
+     150-400ms; fades under prefers-reduced-motion. Scrolling stays
+     native (never emulate momentum/rubber-band).
+   - Touch feel: -webkit-tap-highlight-color transparent;
+     touch-action: manipulation on controls; :active scale(0.97)/dim
+     as THE press feedback; hover states strictly behind
+     @media (hover: hover). Haptics via tauri-plugin-haptics:
+     selectionFeedback on select/segment changes, light impact on
+     sheet detent snaps — iOS only, no-op elsewhere.
+   - Transparency: a glass-intensity token (0 = solid) + a
+     reduce-transparency root attribute. WKWebView exposes no
+     prefers-reduced-transparency: read the OS Reduce Transparency
+     setting natively in the shell (iOS UIAccessibility / macOS
+     equivalent), stamp `data-reduce-transparency`, and expose an
+     in-app intensity setting (doubles as the iOS-27-style slider).
+
+2. Glass, spent sparingly (the two floating surfaces ONLY). Apply the
+   Liquid-Glass-flavored material to exactly: the compact TAB BAR and
+   SHEETS (History, pickers, detail sheets). Recipe: translucent
+   surface (~62% color-mix) + backdrop-filter blur(12-18px)
+   saturate(180%) + 0.5px inner highlight; solid fallback when
+   reduce-transparency or intensity=0. Budget: ≤2-3 glass surfaces
+   per viewport, blur ≤16px on mobile, NEVER glass on the content
+   layer. Tab bar floats (inset, capsule), minimizes on scroll-down
+   and restores on scroll-up/scroll-to-top (JS direction tracking,
+   spring transition). Sheets get the full idiom: 36×5px grabber,
+   medium/large detents with snap, swipe-to-dismiss,
+   overscroll-behavior: contain, concentric top radius (26), scrim
+   rgba(0,0,0,.2). Profile on an older-device simulator; if glass
+   janks, lower blur before shipping.
+
+3. Replace the five Fluent-shaped controls (geometry, not color, is
+   what still reads Windows). Hand-roll or use a headless primitive
+   (Base UI/Radix) with the token skin — do NOT import a whole design
+   system:
+   - Switch → iOS switch (51×31 capsule, sliding thumb, tint track,
+     selectionFeedback).
+   - Menu / context menu → on touch: an action SHEET (§2 idiom); on
+     desktop: a restyled quiet menu (12 radius, hairline, no Fluent
+     open animation). The FileExplorer/Investigations context menus
+     route through this.
+   - Dialog → on compact: a sheet; on desktop: a floating 16-radius
+     card with springs. One shared component; the ~7 existing dialogs
+     migrate.
+   - Dropdown/Select → iOS-style: a menu-on-tap with checkmark-marked
+     options (chevron.up.down affordance), sheet on compact.
+   - Segmented control (new primitive) for the 2-4-option
+     Radio/ToggleButton rows (e.g. sentiment, view modes).
+   Everything else stays Fluent under the token skin (Button, Field,
+   Input, Textarea, Badge, Spinner, Tooltip-on-desktop, etc.) —
+   restyled via Griffel overrides in ONE shared styles module, not
+   per-feature edits.
+4. Icons: one module, one metaphor set. Create src/shell/icons.ts as
+   the single icon registry (semantic names → glyphs); migrate all 36
+   files/467 refs to import from it (mechanical, grep-driven). Swap
+   the Fluent glyph set for an MIT SF-flavored set (Framework7 Icons;
+   Lucide acceptable where a glyph is missing — keep ONE stroke
+   weight). NEVER embed SF Symbols or SF fonts (Apple-OS-only
+   license; this bundle ships to Windows/Linux). Active/rest pairs
+   (filled/regular) preserved for the tab bar.
+
+5. The Apple idioms on the §30 surfaces:
+   - Settings (now a tab/page): inset-grouped lists — rounded-12
+     group cards on grouped background, 44pt rows, chevron
+     disclosure, inset hairlines, footnote group footers. The §30
+     relocations (Business definitions, Saved views, persist toggle)
+     render as groups here.
+   - Files tile grid: tiles get the token treatment (thumbnail/icon,
+     middle-truncated 2-line name, footnote metadata), circular
+     check badges (28pt+) in tint, bottom action bar on selection
+     replacing the tab bar (Files-app idiom). Desktop marquee +
+     Cmd/Shift-click still work.
+   - Chat: bubbles/cards on 12-16 radii, hairline separations, the
+     composer as a capsule field, provenance/assumption sheets on
+     compact.
+   - History sheet, investigation picker (§30): sheet + grouped-list
+     idioms.
+
+6. Desktop gets sleek, not glassy. Same tokens everywhere (SF on
+   macOS, Segoe/Roboto fallback BY DESIGN on Windows/Linux — it
+   should look intentional, not half-Apple). Density: keep desktop
+   rows compact but move heights/radii/type onto the new scale;
+   soften focus to a 2px tint ring shown only on :focus-visible
+   (keyboard users keep it); quiet the scrollbars via color-scheme;
+   kill hover-only affordances where §30 didn't already (persistent
+   quiet icons at rest, full strength on hover). No glass on desktop
+   except (optionally, macOS only) the sheet surface. The net: the
+   Mac build should look at home next to native Mac apps; Windows
+   should look like the same calm product, not a Segoe re-skin.
+
+7. Accessibility + performance gates. Extend scripts/check-contrast
+   to assert 4.5:1 on glass surfaces at every intensity step and on
+   both themes; axe/tap-target pass (≥44pt touch); Dynamic Type
+   smoke (bump the iOS text size two steps — nothing clips);
+   prefers-reduced-motion and reduce-transparency paths verified;
+   blur budget documented in docs/design-language.md. Screenshot set
+   in the PR: iPhone (chat/files/settings/sheet), iPad regular,
+   macOS, Windows-fallback rendering.
+
+8. Spec + stamps. Write docs/design-language.md (the token table,
+   the glass budget, the control inventory: replaced vs re-skinned,
+   the icon registry policy, the licensing rail). Version: PATCH
+   bump by default per CLAUDE.md; the owner may designate this
+   release the 0.14.0 overhaul — if and only if the owner has said
+   so, stamp 0.14.0 (and note it in CLAUDE.md's versioning section);
+   otherwise current+1 across all SEVEN stamp files.
+
+Constraints. No analytics/telemetry/accounts. Engine + twin untouched
+(pure presentation; byte-pinned labels unchanged — this PR changes NO
+strings except where a control swap forces an aria-label, updated
+with its pin). §30's structure is the base — do not restructure
+navigation here. SharePoint plumbing untouched. Keep the Beam
+identity: amber tint, ink/paper, the beacon — this is an accent
+change, not a rebrand. One design language, three platforms, no
+platform cosplay (Windows never pretends to be a Mac; it shares the
+calm, the scale, and the tint).
+
+Acceptance:
+1. iPhone: floating glass tab bar (minimize-on-scroll), sheets with
+   grabber/detents/swipe-dismiss, iOS switches/action
+   sheets/segmented controls, inset-grouped Settings, 17pt body on
+   the HIG scale, springs, :active press feel, haptics on selection
+   — side by side with a native iOS app it reads as family.
+2. iPad regular: same language at desktop density; popovers stay;
+   hardware keyboard/trackpad unaffected.
+3. Desktop macOS: SF type, calm chrome, soft focus-visible ring,
+   no Fluent geometry anywhere the eye lands; Windows/Linux: same
+   product in Segoe/Roboto, no SF/SF-Symbols assets shipped
+   (license pin: repo contains no SF font/symbol files).
+4. Reduce Transparency (OS) and the in-app intensity setting both
+   yield solid surfaces; reduced-motion yields fades; contrast
+   gates pass on glass at every step; Dynamic Type +2 doesn't clip.
+5. No Fluent icon imports remain outside src/shell/icons.ts; the
+   five replaced controls carry their own tests; all suites +
+   release-smoke + ios-build green; stamps bumped per §8.
+
+Environment. macOS + Xcode for the visual verification (simulator
+fine; one older-device profile run for glass perf). Container
+fallback per house convention. One commit per numbered section. Open
+ONE PR titled "Apple-feel pass: token layer, glass chrome, control
+swaps, icon registry"; stop at the PR — include the screenshot set.
+```
