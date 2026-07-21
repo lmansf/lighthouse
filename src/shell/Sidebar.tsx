@@ -187,19 +187,25 @@ export function Sidebar({
               <Text weight="semibold">Lighthouse</Text>
             </span>
             <span className={styles.headerActions}>
-              <Tooltip content="Quick open a file" relationship="label">
-                <Button
-                  appearance="subtle"
-                  className={styles.quickOpenBtn}
-                  icon={<SearchRegular />}
-                  aria-label="Quick open a file"
-                  // Reuses the exact event the Ctrl/Cmd+P shortcut dispatches,
-                  // so the fuzzy finder is reachable without a keyboard.
-                  onClick={() =>
-                    window.dispatchEvent(new CustomEvent("lighthouse:quick-open"))
-                  }
-                />
-              </Tooltip>
+              {/* 0.13.10 §5: the compact files PAGE (backControl set) uses the
+                  tile grid's pull-down search instead — one finder per surface.
+                  The launcher stays for iPad-regular / desktop-touch, where the
+                  tree has no pull-down field. */}
+              {!backControl && (
+                <Tooltip content="Quick open a file" relationship="label">
+                  <Button
+                    appearance="subtle"
+                    className={styles.quickOpenBtn}
+                    icon={<SearchRegular />}
+                    aria-label="Quick open a file"
+                    // Reuses the exact event the Ctrl/Cmd+P shortcut dispatches,
+                    // so the fuzzy finder is reachable without a keyboard.
+                    onClick={() =>
+                      window.dispatchEvent(new CustomEvent("lighthouse:quick-open"))
+                    }
+                  />
+                </Tooltip>
+              )}
               {backControl ? (
                 // fp3 §3: the compact files-page Back control (44pt).
                 <Button
