@@ -1,5 +1,5 @@
 /** Real RagService — talks to the local `/api/rag` route (filesystem-backed). */
-import type { PlatformKind, RagService } from "../services";
+import type { PlatformKind, RagService, ReportTemplate } from "../services";
 // Relative (not "@/") so the node test loader can resolve this file — the
 // contracts barrel is imported by engine-level suites without webpack aliases.
 import { rememberPlatform } from "../../shell/desktopBridge";
@@ -315,12 +315,14 @@ class RealRagService implements RagService {
   async investigate(
     table: string,
     investigationId?: string,
+    template?: ReportTemplate,
   ): Promise<{ savedId: string; savedName: string }> {
     // Runs the recipe battery + writes the report note in the Rust engine.
     // PARITY: the dev twin answers `{available:false}` (analytics is Rust-only);
     // a write failure rides back as `{error}`. Either surfaces as an honest throw
-    // so the caller shows the error, never a fake saved note.
-    const res = await post({ op: "investigate", table, investigationId });
+    // so the caller shows the error, never a fake saved note. `template` prescribes
+    // a structured shape (add-report-templates); omitted ⇒ the Standard report.
+    const res = await post({ op: "investigate", table, investigationId, template });
     if (res.available === false || res.error || !res.savedId) {
       throw new Error(
         (res.reason as string) ||

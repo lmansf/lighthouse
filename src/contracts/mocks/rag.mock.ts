@@ -1,4 +1,4 @@
-import type { RagService } from "../services";
+import type { RagService, ReportTemplate } from "../services";
 import type {
   Board,
   BoardCardRef,
@@ -475,11 +475,23 @@ class MockRagService implements RagService {
     };
   }
 
-  async investigate(table: string): Promise<{ savedId: string; savedName: string }> {
+  async investigate(
+    table: string,
+    _investigationId?: string,
+    template?: ReportTemplate,
+  ): Promise<{ savedId: string; savedName: string }> {
     // A fake saved note so the gallery's Investigate affordance is exercisable
     // offline. PARITY: the real web dev twin throws (deep analysis is Rust-only);
-    // the desktop engine writes the real report under Lighthouse Reports/.
-    const name = `Investigate ${table}.md`;
+    // the desktop engine writes the real report under Lighthouse Reports/. The
+    // saved name mirrors the Rust `ReportTemplate::title_suffix` so a templated
+    // mock reveal shows the same titled note the desktop engine would write.
+    const suffix =
+      template === "imrad"
+        ? " — Scientific method"
+        : template === "bluf"
+          ? " — Business report"
+          : "";
+    const name = `Investigate ${table}${suffix}.md`;
     return { savedId: `Lighthouse Reports/${name}`, savedName: name };
   }
 

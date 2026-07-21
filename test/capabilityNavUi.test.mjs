@@ -69,6 +69,17 @@ test("investigate returns a saved note (id + name) the affordance can reveal", a
   assert.equal(typeof saved.savedId, "string");
   assert.ok(saved.savedId.length > 0, "a saved node id comes back");
   assert.ok(/\.md$/.test(saved.savedName), "the saved artifact is a markdown note");
+  // The Standard report carries no template suffix.
+  assert.equal(saved.savedName, "Investigate capmap.csv.md", "Standard note is unsuffixed");
+});
+
+test("a templated investigate names the note with the template suffix (mirrors the engine)", async () => {
+  // The mock's saved name mirrors the Rust `ReportTemplate::title_suffix`, so a
+  // templated reveal shows the same titled note the desktop engine would write.
+  const imrad = await ragService.investigate("capmap.csv", undefined, "imrad");
+  assert.equal(imrad.savedName, "Investigate capmap.csv — Scientific method.md");
+  const bluf = await ragService.investigate("capmap.csv", undefined, "bluf");
+  assert.equal(bluf.savedName, "Investigate capmap.csv — Business report.md");
 });
 
 // --- The gallery: fetch, tables, Investigate affordance, asks, empty ---------
@@ -91,11 +102,35 @@ test("CapabilityNav shows the Investigate affordance ONLY for an investigable ta
 });
 
 test("investigating runs the op then reveals the written note in the tree", () => {
-  assert.match(nav, /ragService\s*\n?\s*\.investigate\(table\)|ragService\.investigate\(table\)/, "it calls the investigate op");
+  assert.match(
+    nav,
+    /ragService\.investigate\(table, undefined, template\)/,
+    "it calls the investigate op, threading the optional template",
+  );
   assert.match(
     nav,
     /new CustomEvent\("lighthouse:reveal-node", \{ detail: \{ id: savedId \} \}\)/,
     "the saved note is revealed via the chat-citation reveal seam",
+  );
+});
+
+test("the Investigate affordance offers the Standard report + both templates (add-report-templates)", () => {
+  // The affordance is a menu: Standard (no template), Scientific method (imrad),
+  // Business report (bluf) — the three shapes the engine's investigate_templated
+  // renders. The engine numbers are identical across them; a template only adds
+  // narrated framing, so the UI passes only the wire tag.
+  assert.match(nav, /investigate\(t\.name\)/, "Standard report runs the untemplated op");
+  assert.match(nav, /investigate\(t\.name, "imrad"\)/, "Scientific method passes the imrad tag");
+  assert.match(nav, /investigate\(t\.name, "bluf"\)/, "Business report passes the bluf tag");
+  assert.ok(
+    nav.includes("Scientific method") && nav.includes("Business report") && nav.includes("Standard report"),
+    "all three shapes are labeled in the menu",
+  );
+  // The signature carries the optional template through (typed by the contract).
+  assert.match(
+    nav,
+    /function investigate\(table: string, template\?: ReportTemplate\)/,
+    "the handler threads an optional ReportTemplate",
   );
 });
 
