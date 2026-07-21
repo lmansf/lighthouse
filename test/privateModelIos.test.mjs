@@ -179,7 +179,20 @@ test("CI asserts the bridge boarded the app binary before TestFlight upload", ()
   assert.ok(guard !== -1, "the bridge tripwire step exists");
   assert.ok(upload !== -1 && guard < upload, "the tripwire gates the TestFlight upload");
   assert.ok(
-    wf.includes("grep -q '^LHFMBridge$'"),
+    wf.includes("grep -c '^LHFMBridge$'"),
     "the guard checks the ObjC class name in the shipped binary (survives stripping)",
+  );
+  // grep -q exits at the first match; llvm-strings then errors on the closed
+  // pipe and pipefail vetoes the hit (run 26 failed a healthy binary this
+  // way). The guard must count to EOF instead — a -q anywhere in the step is
+  // a regression to the SIGPIPE-vulnerable shape.
+  const step = wf.slice(guard, upload);
+  assert.ok(
+    !step.includes("grep -q"),
+    "the tripwire never uses grep -q (early exit breaks the strings pipe under pipefail)",
+  );
+  assert.ok(
+    step.includes('FOUND=$(strings "$BIN" | grep -c \'^LHFMBridge$\' || true)'),
+    "the verdict is a counted read-to-EOF, guarded against the zero-match exit",
   );
 });
