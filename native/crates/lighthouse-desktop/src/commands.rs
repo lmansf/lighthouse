@@ -847,8 +847,14 @@ pub async fn rag_op(app: AppHandle, body: Value) -> Result<Value, String> {
             };
             let table = table.to_string();
             let investigation_id = body["investigationId"].as_str().map(String::from);
-            let is_cloud =
-                lighthouse_core::synth::is_cloud_provider(&lighthouse_core::profile::model_config());
+            // Optional structured shape (openspec: add-report-templates). Absent or
+            // unknown ⇒ Standard, whose path is byte-identical to before. A template
+            // narrates its framing with the configured model over the verified
+            // findings; the core report stays deterministic and on-device.
+            let template =
+                lighthouse_core::reports::ReportTemplate::from_wire(body["template"].as_str());
+            let cfg = lighthouse_core::profile::model_config();
+            let is_cloud = lighthouse_core::synth::is_cloud_provider(&cfg);
             let files: Vec<(String, String, std::path::PathBuf)> =
                 lighthouse_core::vault::active_included_file_ids()
                     .into_iter()
@@ -857,7 +863,10 @@ pub async fn rag_op(app: AppHandle, body: Value) -> Result<Value, String> {
                     })
                     .filter(|(_, name, _)| lighthouse_core::analytics::is_tabular(name))
                     .collect();
-            let report = lighthouse_core::reports::investigate(&table, &files, is_cloud).await;
+            let report = lighthouse_core::reports::investigate_templated(
+                &table, &files, is_cloud, template, cfg,
+            )
+            .await;
             let written = tokio::task::spawn_blocking(move || {
                 lighthouse_core::reports::write_report(&report, investigation_id.as_deref())
             })

@@ -42,6 +42,46 @@ use crate::{ledger, recipes};
 /// `insights::INSIGHT_CHANGEPOINT_MIN_MAG`.
 const CHANGEPOINT_HEADLINE_MIN: f64 = 1.0;
 
+/// Which structured-report shape to render (openspec: add-report-templates). The
+/// STANDARD report is the deterministic, model-free document assembled today —
+/// byte-stable and unchanged. The two templates prescribe a familiar STRUCTURE
+/// around the SAME engine-verified sections: the deterministic analyses carry
+/// every figure, and (when a narration model is available) the model writes only
+/// the connective framing — never a number. PARITY: Rust-only, like the whole
+/// report/recipes branch (the TS twin's `investigate` op returns
+/// `{available:false}`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReportTemplate {
+    /// Today's deep-analysis report: Summary / one section per analysis / Caveats.
+    #[default]
+    Standard,
+    /// Scientific method (IMRaD): Introduction / Methods / Results / Discussion.
+    ScientificMethod,
+    /// Business report: Bottom Line Up Front, then Minto-pyramid supporting detail.
+    BusinessReport,
+}
+
+impl ReportTemplate {
+    /// Parse the wire value threaded from the `investigate` op body. Unknown or
+    /// absent → the Standard report (the safe, deterministic default).
+    pub fn from_wire(v: Option<&str>) -> ReportTemplate {
+        match v {
+            Some("imrad") | Some("scientific") => ReportTemplate::ScientificMethod,
+            Some("bluf") | Some("business") => ReportTemplate::BusinessReport,
+            _ => ReportTemplate::Standard,
+        }
+    }
+
+    /// The title suffix that names the template in the saved note.
+    fn title_suffix(self) -> &'static str {
+        match self {
+            ReportTemplate::Standard => "",
+            ReportTemplate::ScientificMethod => " — Scientific method",
+            ReportTemplate::BusinessReport => " — Business report",
+        }
+    }
+}
+
 /// One executed sub-analysis handed to the assembler: the recipe's name and human
 /// summary, its VERIFIED result table (already rendered to markdown), the exact
 /// query, and a one-line finding for the report summary (engine numbers only, or
@@ -74,6 +114,17 @@ pub struct Report {
     pub summary: Vec<String>,
     pub sections: Vec<ReportSection>,
     pub caveats: Vec<String>,
+    /// The structured shape to render. Default `Standard` keeps the deterministic
+    /// document byte-identical; the templates reorganize the SAME sections.
+    pub template: ReportTemplate,
+    /// Model-narrated FRAMING for a template — the IMRaD Introduction / the BLUF
+    /// bottom line. `None` on the Standard report and whenever no narration model
+    /// is available (a deterministic framing line is used instead). Never carries
+    /// a figure the engine didn't compute.
+    pub intro: Option<String>,
+    /// Model-narrated interpretation for a template — the IMRaD Discussion / the
+    /// BLUF "What this means". `None` when unavailable. Figures are the engine's.
+    pub discussion: Option<String>,
 }
 
 /// Assemble a report from already-executed sub-analyses. Pure: the summary is the
@@ -101,17 +152,33 @@ pub fn assemble(
             sql: s.sql,
         })
         .collect();
-    Report { title: title.into(), generated_ms, summary, sections, caveats }
+    Report {
+        title: title.into(),
+        generated_ms,
+        summary,
+        sections,
+        caveats,
+        template: ReportTemplate::Standard,
+        intro: None,
+        discussion: None,
+    }
 }
 
 /// Render the report to a standalone markdown document (the `briefings.rs:245`
 /// idiom, extended with the summary/SQL/caveats blocks). Byte-stable for a fixed
 /// `Report` — the generation time formats from the carried `generated_ms`.
 pub fn render_markdown(report: &Report) -> String {
-    let generated = chrono::DateTime::from_timestamp_millis(report.generated_ms)
-        .map(|d| d.format("%Y-%m-%d %H:%M UTC").to_string())
-        .unwrap_or_default();
-    let mut out = format!("# {}\n\n_Generated {generated} — every figure computed by Lighthouse._\n", report.title);
+    match report.template {
+        ReportTemplate::Standard => render_standard(report),
+        ReportTemplate::ScientificMethod => render_imrad(report),
+        ReportTemplate::BusinessReport => render_bluf(report),
+    }
+}
+
+/// The Standard deep-analysis document — byte-identical to the pre-templates
+/// render (the `reports_test.rs` byte-stability contract pins this exact shape).
+fn render_standard(report: &Report) -> String {
+    let mut out = report_header(report);
 
     out.push_str("\n## Summary\n\n");
     for line in &report.summary {
@@ -119,27 +186,143 @@ pub fn render_markdown(report: &Report) -> String {
     }
 
     for s in &report.sections {
-        out.push_str(&format!("\n## {}\n\n{}\n\n", s.heading, s.question));
-        if s.result_markdown.trim().is_empty() {
-            out.push_str("_no rows_\n");
-        } else {
-            out.push_str(s.result_markdown.trim_end());
-            out.push('\n');
-        }
-        // Display-formatted (§1): the report's SQL is laid out for reading;
-        // the stored/executed `s.sql` is untouched.
+        push_section(&mut out, s, "##");
+    }
+
+    render_caveats(&mut out, &report.caveats, "##");
+    out
+}
+
+/// The `# {title}` + deterministic generation stamp — shared by every template.
+fn report_header(report: &Report) -> String {
+    let generated = chrono::DateTime::from_timestamp_millis(report.generated_ms)
+        .map(|d| d.format("%Y-%m-%d %H:%M UTC").to_string())
+        .unwrap_or_default();
+    format!(
+        "# {}\n\n_Generated {generated} — every figure computed by Lighthouse._\n",
+        report.title
+    )
+}
+
+/// One analysis section at the given heading level (`##` standard, `###` nested
+/// under a template's Results). The evidence table + display-formatted SQL come
+/// from the engine; nothing here is model text. A section with an empty `sql`
+/// (a narrated framing block) omits the "Query used" block.
+fn push_section(out: &mut String, s: &ReportSection, level: &str) {
+    out.push_str(&format!("\n{level} {}\n\n{}\n\n", s.heading, s.question));
+    if s.result_markdown.trim().is_empty() {
+        out.push_str("_no rows_\n");
+    } else {
+        out.push_str(s.result_markdown.trim_end());
+        out.push('\n');
+    }
+    if !s.sql.trim().is_empty() {
+        // Display-formatted (§1): the report's SQL is laid out for reading; the
+        // stored/executed `s.sql` is untouched.
         out.push_str(&format!(
             "\n*Query used:*\n```sql\n{}\n```\n",
             crate::sqlfmt::format_sql(&s.sql)
         ));
     }
+}
 
-    if !report.caveats.is_empty() {
-        out.push_str("\n## Caveats\n\n");
-        for c in &report.caveats {
+/// The shared `## Caveats` block (omitted when there are none).
+fn render_caveats(out: &mut String, caveats: &[String], level: &str) {
+    if !caveats.is_empty() {
+        out.push_str(&format!("\n{level} Caveats\n\n"));
+        for c in caveats {
             out.push_str(&format!("- {c}\n"));
         }
     }
+}
+
+/// Scientific method (IMRaD). Introduction + Discussion are model narration when
+/// present (`report.intro`/`report.discussion`), else a deterministic framing
+/// line — never a figure. Methods is deterministic (which analyses ran); Results
+/// are the engine-verified sections; Caveats are the engine's.
+fn render_imrad(report: &Report) -> String {
+    let mut out = report_header(report);
+
+    out.push_str("\n## Introduction\n\n");
+    out.push_str(report.intro.as_deref().unwrap_or(
+        "This report investigates the table below using Lighthouse's verified analyses. \
+         Every figure is computed by the engine, not estimated.",
+    ));
+    out.push('\n');
+
+    out.push_str("\n## Methods\n\n");
+    if report.sections.is_empty() {
+        out.push_str("No dated numeric series was available to analyze.\n");
+    } else {
+        out.push_str(&format!(
+            "Lighthouse ran {} verified {} over the table — {}. Each figure below is a query \
+             result, and the exact SQL is shown with it.\n",
+            report.sections.len(),
+            if report.sections.len() == 1 { "analysis" } else { "analyses" },
+            report
+                .sections
+                .iter()
+                .map(|s| s.heading.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+        ));
+    }
+
+    out.push_str("\n## Results\n");
+    if report.sections.is_empty() {
+        out.push_str("\n_no rows_\n");
+    } else {
+        for s in &report.sections {
+            push_section(&mut out, s, "###");
+        }
+    }
+
+    out.push_str("\n## Discussion\n\n");
+    out.push_str(report.discussion.as_deref().unwrap_or(
+        "See the verified results above; each figure is the engine's, and the caveats below \
+         note the limits of the underlying data.",
+    ));
+    out.push('\n');
+
+    render_caveats(&mut out, &report.caveats, "##");
+    out
+}
+
+/// Business report (BLUF + Minto). The Bottom line leads (model narration when
+/// present, else the top deterministic headline); the verified analyses follow
+/// as supporting detail; "What this means" + Caveats close. Numbers are the
+/// engine's throughout.
+fn render_bluf(report: &Report) -> String {
+    let mut out = report_header(report);
+
+    out.push_str("\n## Bottom line\n\n");
+    let bottom = report.intro.clone().or_else(|| report.summary.first().cloned());
+    out.push_str(bottom.as_deref().unwrap_or("No single figure stood out; see the detail below."));
+    out.push('\n');
+
+    if report.summary.len() > 1 {
+        out.push_str("\n## Key findings\n\n");
+        for line in &report.summary {
+            out.push_str(&format!("- {line}\n"));
+        }
+    }
+
+    out.push_str("\n## Supporting analysis\n");
+    if report.sections.is_empty() {
+        out.push_str("\n_no rows_\n");
+    } else {
+        for s in &report.sections {
+            push_section(&mut out, s, "###");
+        }
+    }
+
+    if let Some(d) = &report.discussion {
+        out.push_str("\n## What this means\n\n");
+        out.push_str(d);
+        out.push('\n');
+    }
+
+    render_caveats(&mut out, &report.caveats, "##");
     out
 }
 
@@ -249,6 +432,97 @@ pub async fn investigate(table: &str, files: &[(String, String, PathBuf)], is_cl
     }
 
     assemble(title, generated_ms, subs, caveats)
+}
+
+// --- Report templates (openspec: add-report-templates) ---------------------------
+
+/// The narration prompts for the two templates. Report EXECUTION is Rust-only, so
+/// these are Rust-side constants pinned by `reports_test.rs` (not the twinned
+/// `promptParity` set). Each asks for plain framing prose over the verified
+/// findings — the model narrates the structure; the engine's numbers are the
+/// only figures (the grounded SYSTEM_PROMPT forbids inventing any other).
+const IMRAD_INTRO_PROMPT: &str = "Write the INTRODUCTION for a scientific-method (IMRaD) report on this data, in 2-3 sentences: what is being investigated and why it matters. Use ONLY the findings in the context; state no figure that is not present there. Plain prose only — no heading, no bullet list, no bracket citations.";
+const IMRAD_DISCUSSION_PROMPT: &str = "Write the DISCUSSION for a scientific-method (IMRaD) report, in 3-5 sentences: interpret the verified findings — what they mean, what stands out, and what to watch next. Use ONLY the numbers in the findings; never invent or recompute a figure. Plain prose only — no heading, no bullet list, no bracket citations.";
+const BLUF_BOTTOM_LINE_PROMPT: &str = "Write the BOTTOM LINE UP FRONT for a business report, in 1-2 sentences: the single most important takeaway for a decision-maker, stated plainly and first. Use ONLY the numbers in the findings; invent nothing. Plain prose only — no heading, no bullet list, no bracket citations.";
+const BLUF_MEANING_PROMPT: &str = "Write a short 'What this means' for a business report, in 2-3 sentences: the implication of the findings and where to focus. Use ONLY the numbers in the findings; never invent or recompute a figure. Plain prose only — no heading, no bullet list, no bracket citations.";
+
+/// A framing narration longer than this reads as a runaway / error response
+/// rather than a paragraph; discard it and fall back to deterministic framing.
+const NARRATION_CHAR_CAP: usize = 1200;
+
+/// Run the deterministic `investigate` battery, then render it in the requested
+/// template. STANDARD is returned unchanged (byte-stable). For a template the
+/// SAME engine-verified sections carry every figure; the model narrates only the
+/// framing (Introduction/Discussion, or Bottom line/What-this-means) over those
+/// findings as ground truth — and only when a narration model is configured. No
+/// model (or an empty report) ⇒ the deterministic framing lines stand in, so a
+/// report is never blocked on a model.
+pub async fn investigate_templated(
+    table: &str,
+    files: &[(String, String, PathBuf)],
+    is_cloud: bool,
+    template: ReportTemplate,
+    cfg: crate::llm::ModelCfg,
+) -> Report {
+    let mut report = investigate(table, files, is_cloud).await;
+    if template == ReportTemplate::Standard {
+        return report;
+    }
+    report.template = template;
+    report.title = format!("{}{}", report.title, template.title_suffix());
+    if !report.sections.is_empty() && cfg.provider_id.is_some() {
+        let ctx = report_findings_ctx(&report);
+        match template {
+            ReportTemplate::ScientificMethod => {
+                report.intro = narrate(IMRAD_INTRO_PROMPT, &ctx, &cfg).await;
+                report.discussion = narrate(IMRAD_DISCUSSION_PROMPT, &ctx, &cfg).await;
+            }
+            ReportTemplate::BusinessReport => {
+                report.intro = narrate(BLUF_BOTTOM_LINE_PROMPT, &ctx, &cfg).await;
+                report.discussion = narrate(BLUF_MEANING_PROMPT, &ctx, &cfg).await;
+            }
+            ReportTemplate::Standard => {}
+        }
+    }
+    report
+}
+
+/// The verified findings as ONE grounding context block for narration — the
+/// summary headlines plus each section's result table. The model may narrate over
+/// this but (per the SYSTEM_PROMPT grounding rules) must invent no figure not
+/// present here.
+fn report_findings_ctx(report: &Report) -> Vec<crate::llm::Ctx> {
+    let mut text = String::new();
+    if !report.summary.is_empty() {
+        text.push_str("Key findings:\n");
+        for line in &report.summary {
+            text.push_str(&format!("- {line}\n"));
+        }
+        text.push('\n');
+    }
+    for s in &report.sections {
+        text.push_str(&format!("{}:\n{}\n\n", s.heading, s.result_markdown.trim()));
+    }
+    vec![crate::llm::Ctx { name: format!("verified findings for {}", report.title), text, score: 1.0 }]
+}
+
+/// Collect a model narration to a string (the synth.rs streaming-collect idiom
+/// with no UI sink). Empty or over-long ⇒ None, so the render falls back to the
+/// deterministic framing.
+async fn narrate(prompt: &str, ctx: &[crate::llm::Ctx], cfg: &crate::llm::ModelCfg) -> Option<String> {
+    use futures::StreamExt;
+    let mut stream =
+        crate::llm::stream_answer(prompt.to_string(), ctx.to_vec(), cfg.clone(), Vec::new(), None);
+    let mut buf = String::new();
+    while let Some(d) = stream.next().await {
+        buf.push_str(&d);
+    }
+    let trimmed = buf.trim();
+    if trimmed.is_empty() || trimmed.chars().count() > NARRATION_CHAR_CAP {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 /// The default vault subfolder for a standalone report (no named investigation) —

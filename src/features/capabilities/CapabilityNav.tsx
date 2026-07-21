@@ -29,9 +29,27 @@
  */
 
 import { useEffect, useMemo, useState } from "react";
-import { Badge, Button, Spinner, Text, makeStyles, shorthands, tokens } from "@fluentui/react-components";
-import { SearchRegular } from "@fluentui/react-icons";
-import type { CapabilityMap } from "@/contracts";
+import {
+  Badge,
+  Button,
+  Menu,
+  MenuItem,
+  MenuList,
+  MenuPopover,
+  MenuTrigger,
+  Spinner,
+  Text,
+  makeStyles,
+  shorthands,
+  tokens,
+} from "@fluentui/react-components";
+import {
+  BeakerRegular,
+  BriefcaseRegular,
+  DocumentRegular,
+  SearchRegular,
+} from "@fluentui/react-icons";
+import type { CapabilityMap, ReportTemplate } from "@/contracts";
 import { EMPTY_CAPABILITY_MAP, ragService } from "@/contracts";
 import { useRagStore } from "@/stores/useRagStore";
 
@@ -169,12 +187,14 @@ export function CapabilityNav() {
 
   // Run the recipe battery + write the report, then reveal the saved note in the
   // tree (the chat-citation reveal seam). Rust-only, so the web twin throws — the
-  // panel then shows an honest note instead of a fake saved file.
-  async function investigate(table: string) {
+  // panel then shows an honest note instead of a fake saved file. `template`
+  // (add-report-templates) optionally prescribes a structured shape — the engine
+  // numbers are unchanged; a template only adds narrated framing over them.
+  async function investigate(table: string, template?: ReportTemplate) {
     setBusy(table);
     setNote(null);
     try {
-      const { savedId, savedName } = await ragService.investigate(table);
+      const { savedId, savedName } = await ragService.investigate(table, undefined, template);
       setNote(`Saved ${savedName}`);
       if (typeof window !== "undefined" && savedId) {
         window.dispatchEvent(new CustomEvent("lighthouse:reveal-node", { detail: { id: savedId } }));
@@ -208,15 +228,43 @@ export function CapabilityNav() {
                   {t.name}
                 </Text>
                 {t.investigable ? (
-                  <Button
-                    size="small"
-                    appearance="subtle"
-                    icon={<SearchRegular />}
-                    disabled={busy === t.name}
-                    onClick={() => investigate(t.name)}
-                  >
-                    {busy === t.name ? "Investigating…" : "Investigate"}
-                  </Button>
+                  <Menu>
+                    <MenuTrigger disableButtonEnhancement>
+                      <Button
+                        size="small"
+                        appearance="subtle"
+                        icon={<SearchRegular />}
+                        disabled={busy === t.name}
+                      >
+                        {busy === t.name ? "Investigating…" : "Investigate"}
+                      </Button>
+                    </MenuTrigger>
+                    <MenuPopover>
+                      <MenuList>
+                        {/* Standard: the deterministic report, unchanged. */}
+                        <MenuItem
+                          icon={<DocumentRegular />}
+                          onClick={() => investigate(t.name)}
+                        >
+                          Standard report
+                        </MenuItem>
+                        {/* IMRaD — Introduction / Methods / Results / Discussion. */}
+                        <MenuItem
+                          icon={<BeakerRegular />}
+                          onClick={() => investigate(t.name, "imrad")}
+                        >
+                          Scientific method
+                        </MenuItem>
+                        {/* BLUF — Bottom line up front + Minto-pyramid detail. */}
+                        <MenuItem
+                          icon={<BriefcaseRegular />}
+                          onClick={() => investigate(t.name, "bluf")}
+                        >
+                          Business report
+                        </MenuItem>
+                      </MenuList>
+                    </MenuPopover>
+                  </Menu>
                 ) : (
                   <Badge appearance="outline" color="informative" size="small">
                     reference

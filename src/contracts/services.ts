@@ -13,6 +13,15 @@
  */
 export type PlatformKind = "desktop" | "ios" | "android";
 
+/**
+ * The structured shape for a deep-analysis report (openspec: add-report-templates).
+ * `"imrad"` → Scientific method (Introduction/Methods/Results/Discussion);
+ * `"bluf"` → Business report (Bottom line up front + Minto pyramid). Omitting the
+ * argument yields the Standard deterministic report. The wire values match the
+ * Rust `ReportTemplate::from_wire` parser. Rust-only, like the whole report engine.
+ */
+export type ReportTemplate = "imrad" | "bluf";
+
 import type {
   Board,
   BoardCardRef,
@@ -564,8 +573,19 @@ export interface RagService {
    * caller can reveal it. Rust-only (DataFusion + recipes); the web dev twin
    * throws (unavailable). `investigationId` optionally files the note under that
    * investigation's notes folder instead of `Lighthouse Reports`.
+   *
+   * `template` (openspec: add-report-templates) optionally prescribes a
+   * structured shape — `"imrad"` (Scientific method: Introduction/Methods/
+   * Results/Discussion) or `"bluf"` (Business report: Bottom line up front +
+   * Minto pyramid). Omitted ⇒ the Standard deterministic report (byte-identical
+   * to before). The engine numbers are unchanged either way; a template only
+   * adds model-narrated FRAMING over the same verified findings.
    */
-  investigate(table: string, investigationId?: string): Promise<{ savedId: string; savedName: string }>;
+  investigate(
+    table: string,
+    investigationId?: string,
+    template?: ReportTemplate,
+  ): Promise<{ savedId: string; savedName: string }>;
   /**
    * Provider sign-in (0.12.1 §3): status of the generic, registration-gated
    * OAuth device flow. `available` is false on a stock build (no endpoints

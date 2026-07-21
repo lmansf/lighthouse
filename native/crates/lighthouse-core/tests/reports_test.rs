@@ -7,7 +7,10 @@
 
 use std::path::PathBuf;
 
-use lighthouse_core::reports::{investigate, render_markdown, write_report};
+use lighthouse_core::llm::ModelCfg;
+use lighthouse_core::reports::{
+    investigate, investigate_templated, render_markdown, write_report, ReportTemplate,
+};
 
 mod common;
 
@@ -175,4 +178,104 @@ async fn investigate_writes_the_report_under_the_reports_allowlist() {
     assert!(written.starts_with("# Investigate sales.csv\n"), "the rendered report: {written:.40}");
     assert!(written.contains("## Summary"));
     assert!(written.contains("## Anomaly scan"));
+}
+
+// --- Report templates (openspec: add-report-templates) ----------------------------
+// All template tests pass an EMPTY `ModelCfg` (no provider), so `investigate_templated`
+// takes the deterministic-framing path — no narration model is called and the suite
+// stays zero-network by construction, exactly like the Standard tests above. They
+// prove the STRUCTURE (the IMRaD / BLUF skeleton) and that every figure is still an
+// engine cell carried from the SAME verified sections.
+
+/// A no-provider config: `provider_id.is_none()` ⇒ the deterministic framing path.
+fn no_model() -> ModelCfg {
+    ModelCfg { provider_id: None, model_id: None, api_key: None }
+}
+
+#[tokio::test]
+async fn scientific_method_template_renders_imrad_structure() {
+    let dir = tempfile::tempdir().unwrap();
+    let files = vec![write_csv(dir.path(), "sales.csv", SPIKE_CSV)];
+
+    let report =
+        investigate_templated("sales.csv", &files, false, ReportTemplate::ScientificMethod, no_model())
+            .await;
+
+    // The template names itself in the title; the sections are the SAME verified ones.
+    assert_eq!(report.title, "Investigate sales.csv — Scientific method");
+    assert_eq!(report.template, ReportTemplate::ScientificMethod);
+    assert!(report.sections.len() >= 3, "the verified sections carry over");
+    assert!(report.intro.is_none(), "no provider ⇒ no model narration, deterministic framing");
+    assert!(report.discussion.is_none());
+
+    let md = render_markdown(&report);
+    // The IMRaD skeleton, in order.
+    assert!(md.starts_with("# Investigate sales.csv — Scientific method\n"));
+    let intro = md.find("## Introduction").expect("has an Introduction");
+    let methods = md.find("## Methods").expect("has a Methods");
+    let results = md.find("## Results").expect("has a Results");
+    let discussion = md.find("## Discussion").expect("has a Discussion");
+    assert!(intro < methods && methods < results && results < discussion, "IMRaD order: {md}");
+    // Deterministic framing stands in for the absent model narration.
+    assert!(md.contains("Every figure is computed by the engine, not estimated."));
+    // Results nest the verified sections at ### and keep their Query-used block.
+    assert!(md.contains("### Anomaly scan"));
+    assert!(md.contains("```sql"), "the verified section keeps its SQL");
+    assert!(md.contains("## Caveats"));
+    // The every-number invariant holds through the template: the engine anomaly
+    // figure is present, and no model introduced any figure (no provider ran).
+    assert!(md.contains("2024-10"), "the engine's October figure survives templating");
+}
+
+#[tokio::test]
+async fn business_report_template_renders_bluf_structure() {
+    let dir = tempfile::tempdir().unwrap();
+    let files = vec![write_csv(dir.path(), "sales.csv", SPIKE_CSV)];
+
+    let report =
+        investigate_templated("sales.csv", &files, false, ReportTemplate::BusinessReport, no_model())
+            .await;
+
+    assert_eq!(report.title, "Investigate sales.csv — Business report");
+    assert_eq!(report.template, ReportTemplate::BusinessReport);
+    assert!(report.intro.is_none(), "no provider ⇒ no model narration");
+    assert!(report.discussion.is_none());
+
+    let md = render_markdown(&report);
+    assert!(md.starts_with("# Investigate sales.csv — Business report\n"));
+    let bottom = md.find("## Bottom line").expect("leads with the Bottom line");
+    let support = md.find("## Supporting analysis").expect("has Supporting analysis");
+    assert!(bottom < support, "BLUF: the bottom line leads the detail: {md}");
+    // With no model, the bottom line falls back to the top deterministic headline —
+    // an engine figure (the October spike), never model text.
+    assert!(md.contains("2024-10"), "the bottom line is the engine's top finding");
+    // Supporting analyses nest at ### with their Query-used block.
+    assert!(md.contains("### Anomaly scan"));
+    assert!(md.contains("```sql"));
+    assert!(md.contains("## Caveats"));
+    // No model ⇒ no "What this means" block (discussion stays None, gated out).
+    assert!(!md.contains("## What this means"), "no narration ⇒ no What-this-means block");
+}
+
+#[tokio::test]
+async fn templated_standard_is_byte_identical_to_investigate() {
+    // The Standard template must be the UNCHANGED deterministic document — the
+    // byte-stability contract the whole render split preserves.
+    let dir = tempfile::tempdir().unwrap();
+    let files = vec![write_csv(dir.path(), "sales.csv", SPIKE_CSV)];
+
+    let mut plain = investigate("sales.csv", &files, false).await;
+    let mut templated =
+        investigate_templated("sales.csv", &files, false, ReportTemplate::Standard, no_model()).await;
+    // Independent runs differ only in the generation timestamp; pin both.
+    plain.generated_ms = 1_700_000_000_000;
+    templated.generated_ms = 1_700_000_000_000;
+
+    assert_eq!(templated.template, ReportTemplate::Standard);
+    assert_eq!(templated.title, "Investigate sales.csv", "Standard carries no title suffix");
+    assert_eq!(
+        render_markdown(&plain),
+        render_markdown(&templated),
+        "the Standard template is the byte-identical deterministic document"
+    );
 }
