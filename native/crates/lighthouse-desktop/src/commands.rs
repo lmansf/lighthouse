@@ -2109,28 +2109,59 @@ pub async fn open_explorer(app: AppHandle) {
 // The reply shape { available, tier, reason } is exactly what the mobile roster
 // probes once to light up the "private" provider (src/stores/useOnDeviceModel.ts).
 
-// The Swift shim's probe-and-ensure entry point (PrivateModelServer.swift,
-// `@_cdecl("lighthouse_fm_ensure")`). Resolved at RUNTIME via dlsym, NOT a
-// link-time `extern` block: the Swift symbol is defined in the iOS APP target,
-// which links AFTER this crate's cdylib — so a link-time reference leaves the
-// cdylib with an undefined symbol and the build fails (a plain `extern` broke
-// `cargo build --target aarch64-apple-ios`). `RTLD_DEFAULT` searches the whole
-// process image, including the main executable where the `@_cdecl` symbol lives,
-// so the lookup resolves at first call with zero link-time coupling. Returns the
-// FM_* result code; on success writes the bound 127.0.0.1 port through `out_port`.
+// The Swift shim's probe-and-ensure entry point (PrivateModelServer.swift).
+// Resolved at RUNTIME through the OBJECTIVE-C RUNTIME first — a link-time
+// `extern` is impossible (the Swift symbol is defined in the iOS APP target,
+// which links after this crate, so a plain `extern` broke
+// `cargo build --target aarch64-apple-ios`), and the 0.13.8 field report
+// proved dlsym-into-the-main-executable unreliable in release archives even
+// with `-Wl,-exported_symbol` pinning the export-trie entry (an iPhone 17 on
+// iOS 26.5.2, built with SDK 26.5, still read the symbol-absent verdict).
+// ObjC class metadata is found BY NAME via the runtime's class list
+// (`__objc_classlist`) — no symbol table, no export trie, no dead-strip
+// exposure — so `objc_getClass("LHFMBridge")` + `+[LHFMBridge ensure:]`
+// always reaches the shim when it compiled in (the ios-build tripwire asserts
+// it did). dlsym stays as a belt-and-suspenders fallback; when NEITHER
+// resolves, the shim is genuinely absent from this binary — a BUILD defect
+// reported as -6, never as the phone's OS being too old. Returns the FM_*
+// result code; on success writes the bound 127.0.0.1 port through `out_port`.
 #[cfg(all(not(desktop), target_os = "ios"))]
 fn lighthouse_fm_ensure(out_port: *mut u16) -> i32 {
-    type EnsureFn = unsafe extern "C" fn(*mut u16) -> i32;
-    // dlsym adds the leading underscore itself; the trailing NUL makes a C string.
-    let name = b"lighthouse_fm_ensure\0".as_ptr() as *const libc::c_char;
-    let sym = unsafe { libc::dlsym(libc::RTLD_DEFAULT, name) };
-    if sym.is_null() {
-        return -3; // symbol absent (SDK/OS without the shim) → treat as unavailable
+    use libc::{c_char, c_void};
+    extern "C" {
+        fn objc_getClass(name: *const c_char) -> *mut c_void;
+        fn sel_registerName(name: *const c_char) -> *mut c_void;
+        fn class_getClassMethod(cls: *mut c_void, sel: *mut c_void) -> *mut c_void;
+        fn objc_msgSend();
     }
-    // SAFETY: the symbol is the Swift @_cdecl fn with exactly this signature; it
-    // only writes `out_port` (a valid local) and returns a small integer code.
-    let f: EnsureFn = unsafe { std::mem::transmute::<*mut libc::c_void, EnsureFn>(sym) };
-    unsafe { f(out_port) }
+    type EnsureFn = unsafe extern "C" fn(*mut u16) -> i32;
+    unsafe {
+        let cls = objc_getClass(b"LHFMBridge\0".as_ptr() as *const c_char);
+        if !cls.is_null() {
+            let sel = sel_registerName(b"ensure:\0".as_ptr() as *const c_char);
+            // Verify the selector before messaging — an unrecognized selector
+            // would raise, and this probe must never be able to crash the app.
+            if !class_getClassMethod(cls, sel).is_null() {
+                // +[LHFMBridge ensure:]: a class method takes the class object
+                // as the receiver; the transmute gives objc_msgSend its true
+                // shape for this call (the standard msgSend idiom).
+                let send: unsafe extern "C" fn(*mut c_void, *mut c_void, *mut u16) -> i32 =
+                    std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+                return send(cls, sel, out_port);
+            }
+        }
+        // Fallback: the direct @_cdecl symbol, when the export trie carries it.
+        // dlsym adds the leading underscore; the trailing NUL makes a C string.
+        let name = b"lighthouse_fm_ensure\0".as_ptr() as *const c_char;
+        let sym = libc::dlsym(libc::RTLD_DEFAULT, name);
+        if sym.is_null() {
+            return -6; // shim absent from this binary — a build defect, not the OS
+        }
+        // SAFETY: the symbol is the Swift @_cdecl fn with exactly this signature;
+        // it only writes `out_port` (a valid local) and returns a small int code.
+        let f: EnsureFn = std::mem::transmute::<*mut c_void, EnsureFn>(sym);
+        f(out_port)
+    }
 }
 
 /// Shared body for the `private_model_availability` command AND the iOS startup
@@ -2167,6 +2198,10 @@ pub(crate) fn private_model_availability_impl() -> Value {
             -2 => "the on-device model is still preparing — try again shortly",
             -3 => "the on-device private model requires iOS 26 or later",
             -5 => "the on-device private model could not be started",
+            // -6: the bridge is absent from this BINARY (compiled without FM
+            // support, or unreachable) — 0.13.8 shipped exactly this and every
+            // iPhone read a false OS message; name the build, not the phone.
+            -6 => "this app build doesn't include on-device model support — update the app",
             _ => "the on-device private model is unavailable on this device",
         };
         return json!({ "available": false, "tier": "none", "reason": reason });

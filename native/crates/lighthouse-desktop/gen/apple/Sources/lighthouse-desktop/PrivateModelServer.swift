@@ -37,9 +37,10 @@ private let FM_AVAILABLE: Int32 = 1
 private let FM_AI_NOT_ENABLED: Int32 = 0 // Apple Intelligence off
 private let FM_DEVICE_INELIGIBLE: Int32 = -1 // hardware not eligible
 private let FM_MODEL_NOT_READY: Int32 = -2 // still downloading / preparing
-private let FM_OS_TOO_OLD: Int32 = -3 // < iOS 26 or framework absent from SDK
+private let FM_OS_TOO_OLD: Int32 = -3 // the RUNTIME OS is < iOS 26
 private let FM_UNAVAILABLE_OTHER: Int32 = -4 // future/unknown reason
 private let FM_SERVER_FAILED: Int32 = -5 // available, but the listener failed
+private let FM_BUILD_UNSUPPORTED: Int32 = -6 // compiled without FM support — a BUILD defect, never the phone's OS
 
 /// In-process HTTP/1.1 loopback responder backing the private-model contract.
 /// One shared instance for the app; the listener binds once and is reused.
@@ -104,8 +105,9 @@ final class PrivateModelServer {
             return FM_OS_TOO_OLD
         }
         #else
-        // Built against an SDK without Foundation Models — no Tier-1 here.
-        return FM_OS_TOO_OLD
+        // Built against an SDK without Foundation Models — a BUILD defect
+        // (0.13.8 field lesson: never blame the phone's OS for it).
+        return FM_BUILD_UNSUPPORTED
         #endif
     }
 
@@ -386,6 +388,26 @@ final class PrivateModelServer {
 @_cdecl("lighthouse_fm_ensure")
 func lighthouse_fm_ensure(_ outPort: UnsafeMutablePointer<UInt16>) -> Int32 {
     return PrivateModelServer.shared.ensure(outPort)
+}
+
+// MARK: - ObjC-runtime bridge (the lookup that cannot be stripped)
+
+/// 0.13.9: the dlsym route above proved unreliable in release archives ON
+/// DEVICE — the 0.13.8 field report (iPhone 17, iOS 26.5.2, SDK 26.5) still
+/// read the symbol-absent verdict even with `-exported_symbol` pinning the
+/// export-trie entry at link time. The Objective-C runtime is the lookup that
+/// cannot break this way: class metadata lives in `__objc_classlist` and is
+/// found BY NAME at runtime — no symbol table, no export trie, no dead-strip
+/// exposure. Rust resolves `objc_getClass("LHFMBridge")` +
+/// `+[LHFMBridge ensure:]` FIRST and keeps dlsym only as a fallback. The
+/// explicit @objc names pin the runtime contract against Swift renames; the
+/// ios-build tripwire asserts this class boarded the shipped binary.
+@objc(LHFMBridge)
+final class LHFMBridge: NSObject {
+    @objc(ensure:)
+    static func ensure(_ outPort: UnsafeMutablePointer<UInt16>) -> Int32 {
+        return PrivateModelServer.shared.ensure(outPort)
+    }
 }
 
 #endif
