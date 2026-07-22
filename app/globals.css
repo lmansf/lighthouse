@@ -3,6 +3,9 @@
 }
 
 :root {
+  /* §35: rem is the ONE text-scaling channel (Dynamic Type drives the root);
+     WebKit's legacy auto-inflation would stack a third multiplier on top. */
+  -webkit-text-size-adjust: 100%;
   /* Safe-area insets, exposed as vars so Griffel makeStyles (which can't call
      env() through its typed API cleanly) can reference them. Fall back to 0 on
      platforms without notches/home-indicators (all desktop). Requires

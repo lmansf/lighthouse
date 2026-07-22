@@ -2176,6 +2176,38 @@ fn lighthouse_fm_ensure(out_port: *mut u16) -> i32 {
 /// Shared body for the `private_model_availability` command AND the iOS startup
 /// hook (lib.rs), so the availability verdict + the `LIGHTHOUSE_LOCAL_LLM_URL`
 /// env var are set before the first ask. Sync so the setup hook runs it inline.
+/// §35 §1: start the Dynamic Type observer (LHContentSizeObserver.swift) —
+/// WKWebView fixes the resolved root font size at load, so the Swift side
+/// reloads the webview when UIContentSizeCategory changes. Same ObjC-runtime
+/// lookup idiom as the FM bridge (class metadata cannot be dead-stripped);
+/// a missing class or selector is a silent no-op, never a crash.
+#[cfg(all(not(desktop), target_os = "ios"))]
+pub(crate) fn start_content_size_observer() {
+    use libc::{c_char, c_void};
+    extern "C" {
+        fn objc_getClass(name: *const c_char) -> *mut c_void;
+        fn sel_registerName(name: *const c_char) -> *mut c_void;
+        fn class_getClassMethod(cls: *mut c_void, sel: *mut c_void) -> *mut c_void;
+        fn objc_msgSend();
+    }
+    unsafe {
+        let cls = objc_getClass(b"LHContentSizeObserver\0".as_ptr() as *const c_char);
+        if cls.is_null() {
+            return;
+        }
+        let sel = sel_registerName(b"startShared\0".as_ptr() as *const c_char);
+        if class_getClassMethod(cls, sel).is_null() {
+            return;
+        }
+        let send: unsafe extern "C" fn(*mut c_void, *mut c_void) =
+            std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+        send(cls, sel);
+    }
+}
+
+#[cfg(all(not(desktop), not(target_os = "ios")))]
+pub(crate) fn start_content_size_observer() {}
+
 pub(crate) fn private_model_availability_impl() -> Value {
     #[cfg(desktop)]
     {

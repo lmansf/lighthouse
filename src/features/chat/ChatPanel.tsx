@@ -102,10 +102,12 @@ import { chatHistoryLocked } from "@/stores/managedLocks";
 import { modKey } from "@/features/onboarding/ModeChooser";
 import { LhDialogSurface, LhMenuPopover } from "@/shell/controls";
 import { publishChatStreaming, USER_ASK_EVENT } from "@/shell/shellSignals";
-import { ACCENTS, BEAM_SWEEP } from "@/shell/theme";
+import { ACCENTS, BEAM_SWEEP, CONTENT_TYPE } from "@/shell/theme";
 import { FILE_DRAG_MIME, parseDraggedFiles, type DraggedFile } from "@/shell/dnd";
 import { isDesktopShell, pathsForFiles, platformKind } from "@/shell/desktopBridge";
 import { openExternal } from "@/lib/openExternal";
+import { detectStatRun } from "@/lib/statRun";
+import { COLLAPSED_SECTION_CLASS, remarkCollapseSections } from "@/lib/collapseSections";
 import { useCoarsePointer, usePaneLayout } from "@/shell/paneLayout";
 import { Sheet } from "@/shell/Sheet";
 import { HistoryNav } from "./HistoryNav";
@@ -375,30 +377,45 @@ const useStyles = makeStyles({
     whiteSpace: "pre-wrap",
   },
   answer: {
-    fontSize: tokens.fontSizeBase400,
-    lineHeight: tokens.lineHeightBase400,
+    // §35: answers are CONTENT, not chrome — the reading scale (16px/24px,
+    // rem so Dynamic Type scales it 1:1) instead of the HIG UI ramp. This
+    // RESTORES the pre-#203 content size on desktop too (20px was the silent
+    // remap, not a design decision).
+    fontSize: CONTENT_TYPE.body,
+    lineHeight: CONTENT_TYPE.bodyLineHeight,
     // Tame the Markdown block elements react-markdown emits so answers read as a
     // tight, well-spaced block rather than with browser-default margins.
     // Prose keeps a generous document measure (~72ch) so answers read like
     // pages on the paper canvas; data surfaces (tables, code, charts) keep
     // the full column.
-    "& p": { marginTop: 0, marginBottom: tokens.spacingVerticalS, maxWidth: "72ch" },
+    // §35 rhythm: 0.75em paragraph spacing (no indents), list items at the
+    // body leading with a small gap, markers in a ~20px gutter, 12px around
+    // each list.
+    "& p": { marginTop: 0, marginBottom: "0.75em", maxWidth: "72ch" },
     "& p:last-child": { marginBottom: 0 },
     "& ul, & ol": {
-      marginTop: 0,
-      marginBottom: tokens.spacingVerticalS,
-      paddingLeft: tokens.spacingHorizontalXL,
+      marginTop: "12px",
+      marginBottom: "12px",
+      paddingLeft: "20px",
       maxWidth: "72ch",
     },
-    "& li": { marginBottom: tokens.spacingVerticalXXS },
+    "& li": { marginBottom: "5px", lineHeight: CONTENT_TYPE.bodyLineHeight },
+    // §35 heading ramp: hierarchy via weight + space (1.25em above, 0.4em
+    // below), not size jumps; min(rem, px) clamps each level so Dynamic Type
+    // AX sizes scale the body 1:1 without ever inverting the hierarchy.
     "& h1, & h2, & h3, & h4": {
-      marginTop: tokens.spacingVerticalM,
-      marginBottom: tokens.spacingVerticalXS,
-      lineHeight: tokens.lineHeightBase300,
+      marginTop: "1.25em",
+      marginBottom: "0.4em",
+      lineHeight: 1.3,
       maxWidth: "72ch",
+      fontWeight: 600,
     },
-    "& h1": { fontSize: tokens.fontSizeBase500 },
-    "& h2, & h3, & h4": { fontSize: tokens.fontSizeBase400 },
+    "& h1": { fontSize: `min(${CONTENT_TYPE.h1}, ${CONTENT_TYPE.h1Max})` },
+    "& h2": { fontSize: `min(${CONTENT_TYPE.h2}, ${CONTENT_TYPE.h2Max})` },
+    "& h3, & h4": {
+      fontSize: `min(${CONTENT_TYPE.h3}, ${CONTENT_TYPE.h3Max})`,
+      fontWeight: tokens.fontWeightSemibold,
+    },
     "& a": { color: tokens.colorBrandForegroundLink },
     "& code": {
       fontFamily: tokens.fontFamilyMonospace,
@@ -499,6 +516,70 @@ const useStyles = makeStyles({
       marginBottom: tokens.spacingVerticalXXS,
       fontVariantNumeric: "tabular-nums",
     },
+  },
+  // §35: the compact reading measure — real side padding (16px each side →
+  // ~45 CPL at 16px on a 390pt phone) and smaller data cells so result
+  // tables stay scannable; tables pan horizontally without rubber-banding
+  // the page (overscroll containment on the wrap below).
+  answerCompact: {
+    paddingLeft: "16px",
+    paddingRight: "16px",
+    "& th, & td": { fontSize: CONTENT_TYPE.tableCellCompact },
+  },
+  // §35 §3: a detected stat run renders as a two-column key-value grid (a
+  // semantic <dl>) — label column sized to its content, hairline separators
+  // between rows, none after the last. Same treatment desktop and compact.
+  statRun: {
+    display: "grid",
+    gridTemplateColumns: "minmax(96px, max-content) 1fr",
+    columnGap: "16px",
+    marginTop: "12px",
+    marginBottom: "12px",
+    maxWidth: "72ch",
+  },
+  statRunLabel: {
+    fontWeight: tokens.fontWeightSemibold,
+    fontSize: CONTENT_TYPE.statLabel,
+    color: tokens.colorNeutralForeground2,
+    paddingTop: "6px",
+    paddingBottom: "6px",
+    ...shorthands.margin("0"),
+    borderBottomWidth: "1px",
+    borderBottomStyle: "solid",
+    borderBottomColor: tokens.colorNeutralStroke2,
+    "&:last-of-type": { borderBottomStyle: "none" },
+  },
+  statRunValue: {
+    paddingTop: "6px",
+    paddingBottom: "6px",
+    ...shorthands.margin("0"),
+    fontVariantNumeric: "tabular-nums",
+    borderBottomWidth: "1px",
+    borderBottomStyle: "solid",
+    borderBottomColor: tokens.colorNeutralStroke2,
+    "&:last-of-type": { borderBottomStyle: "none" },
+  },
+  // §35 §4: the quiet fold control of a collapsed section — text-shaped, brand
+  // colored, and a full 44px touch target on the phone where it lives.
+  showMoreBtn: {
+    display: "flex",
+    alignItems: "center",
+    minHeight: "44px",
+    ...shorthands.padding("0"),
+    ...shorthands.border("0"),
+    backgroundColor: "transparent",
+    color: tokens.colorBrandForeground1,
+    fontSize: tokens.fontSizeBase300,
+    fontFamily: "inherit",
+    cursor: "pointer",
+    ":hover": { color: tokens.colorBrandForeground2 },
+  },
+  // The revealed remainder fades in — unless the user asked for no motion.
+  collapsedReveal: {
+    animationName: { from: { opacity: 0 }, to: { opacity: 1 } },
+    animationDuration: tokens.durationNormal,
+    animationTimingFunction: tokens.curveEasyEase,
+    "@media (prefers-reduced-motion: reduce)": { animationName: "none" },
   },
   // [n] citation markers rendered as clickable superscript chips that jump to
   // the matching reference card below the answer.
@@ -2099,6 +2180,32 @@ function isChartPre(node: unknown): boolean {
 }
 
 /**
+ * §35 §4: the renderer half of a collapsed section. The remark transform
+ * (remarkCollapseSections) moved a long section's tail into an
+ * `lh-collapsed-section` div; this swap shows a quiet 44px "Show more" until
+ * tapped, then renders the real children. State is a plain useState — per
+ * message instance, reset on remount, never persisted — and the reveal's
+ * fade obeys prefers-reduced-motion (see collapsedReveal).
+ */
+function CollapsedSection({ children }: { children: ReactNode }) {
+  const styles = useStyles();
+  const [open, setOpen] = useState(false);
+  if (!open) {
+    return (
+      <button
+        type="button"
+        className={styles.showMoreBtn}
+        aria-expanded={false}
+        onClick={() => setOpen(true)}
+      >
+        Show more
+      </button>
+    );
+  }
+  return <div className={styles.collapsedReveal}>{children}</div>;
+}
+
+/**
  * Renders an assistant answer's Markdown, upgrading [n] citation markers into
  * clickable superscript chips that jump to the matching reference card below.
  * Analytics extras (Phase C): ```lighthouse-chart fences render as theme-aware
@@ -2114,6 +2221,7 @@ const AnswerMarkdown = memo(function AnswerMarkdown({
   metaChart,
   metaTable,
   legacyFences = true,
+  collapseSections = false,
 }: {
   content: string;
   turnId: string;
@@ -2131,6 +2239,10 @@ const AnswerMarkdown = memo(function AnswerMarkdown({
    *  rendered. True (default) only for legacy saved chats with no meta, which
    *  still render their persisted engine fence. */
   legacyFences?: boolean;
+  /** §35 §4: true ONLY for a settled answer on the compact layout — long
+   *  h2/h3 sections fold behind "Show more". The streaming path (StreamBlock)
+   *  and desktop never pass it, so they never collapse. */
+  collapseSections?: boolean;
 }) {
   const styles = useStyles();
   // Belt-and-braces (chart-directive): the engine already withholds
@@ -2241,6 +2353,42 @@ const AnswerMarkdown = memo(function AnswerMarkdown({
           </code>
         );
       },
+      // §35 §4: the collapse transform (compact + settled only) parks a long
+      // section's tail in an lh-collapsed-section div; swap THAT div for the
+      // interactive fold and pass every other div through untouched.
+      div: ({ node, children, className, ...props }) => {
+        if (className?.split(" ").includes(COLLAPSED_SECTION_CLASS)) {
+          return <CollapsedSection>{children}</CollapsedSection>;
+        }
+        return (
+          <div {...props} className={className}>
+            {children}
+          </div>
+        );
+      },
+      // §35 §3: a stat run (≥3 items, every one `**Label:** value` with plain
+      // text on both sides) reads as a key-value grid instead of bullets. The
+      // detector is deliberately doubtful — any link, citation, nested list,
+      // or off-shape item keeps the ordinary <ul>, so rich content always
+      // survives. Same treatment at every width.
+      ul: ({ node, children, ...props }) => {
+        const run = detectStatRun(node);
+        if (!run) {
+          return <ul {...props}>{children}</ul>;
+        }
+        return (
+          <dl className={styles.statRun}>
+            {run.flatMap((item, i) => [
+              <dt key={`label-${i}`} className={styles.statRunLabel}>
+                {item.label}
+              </dt>,
+              <dd key={`value-${i}`} className={styles.statRunValue}>
+                {item.value}
+              </dd>,
+            ])}
+          </dl>
+        );
+      },
       table: ({ node, children, ...props }) => {
         const rows = hastTableRows(node);
         // Sort only PLAIN data tables (the analytics result tables). A
@@ -2266,7 +2414,13 @@ const AnswerMarkdown = memo(function AnswerMarkdown({
     <MarkdownView
       content={cleaned}
       components={components}
-      remarkPlugins={[remarkCitations, [remarkAnswerCard, { chart: metaChart, table: metaTable }]]}
+      remarkPlugins={[
+        remarkCitations,
+        [remarkAnswerCard, { chart: metaChart, table: metaTable }],
+        // §35 §4: LAST, so it sees the card/disclosure folds already in place
+        // and its section splices can't disturb their anchors.
+        [remarkCollapseSections, { enabled: collapseSections }],
+      ]}
     />
   );
 });
@@ -5332,7 +5486,7 @@ export function ChatPanel() {
                   ) : (
                     <>
                       {m.content && (
-                        <div className={styles.answer}>
+                        <div className={mergeClasses(styles.answer, compactLayout && styles.answerCompact)}>
                           {streaming && m.id === lastId ? (
                             // §2: the live turn renders progressively — completed
                             // blocks as markdown, the growing block held to a safe
@@ -5351,6 +5505,7 @@ export function ChatPanel() {
                               metaChart={m.meta?.chart}
                               metaTable={m.meta?.table}
                               legacyFences={!liveTurnIds.current.has(m.id)}
+                              collapseSections={compactLayout}
                             />
                           )}
                           {streaming && m.id === lastId && <span className={styles.beaconInline} />}
@@ -5715,11 +5870,12 @@ export function ChatPanel() {
                 </div>
               )}
               {sqlOutcome?.content && (
-                <div className={mergeClasses(styles.answer, styles.sqlResult)}>
+                <div className={mergeClasses(styles.answer, styles.sqlResult, compactLayout && styles.answerCompact)}>
                   <AnswerMarkdown
                     content={sqlOutcome.content}
                     turnId="sql-editor"
                     onCite={handleCitationClick}
+                    collapseSections={compactLayout}
                   />
                 </div>
               )}

@@ -86,6 +86,31 @@ const FONT_STACK =
  * bold — Fluent's 400/500/600/700 already match the HIG set.
  */
 const rem = (px: number) => `${Math.round((px / 17) * 10000) / 10000}rem`;
+
+/**
+ * §35: CONTENT type — the reading scale for ANSWER prose, distinct from UI
+ * chrome (which stays on the HIG ramp in `tokens` below). Answers read at the
+ * web-content standard 16px/24px; headings ride a compact ramp whose
+ * hierarchy comes from weight + space, not big size jumps. Everything is rem
+ * so Dynamic Type scales the body 1:1 with the root; the *Max values are the
+ * per-level clamp ceilings (min(rem, px) in the renderer) so accessibility
+ * sizes never invert the hierarchy. KEEP the content-vs-chrome distinction —
+ * documented in docs/design-language.md.
+ */
+export const CONTENT_TYPE = {
+  body: rem(16),
+  bodyLineHeight: rem(24),
+  h1: rem(20),
+  h2: rem(17.5),
+  h3: rem(16),
+  h1Max: "28px",
+  h2Max: "24px",
+  h3Max: "22px",
+  /** Compact result-table cells (data stays scannable at phone width). */
+  tableCellCompact: rem(13),
+  /** §3: stat-run grid labels — a step under body so values carry the eye. */
+  statLabel: rem(14.5),
+} as const;
 const TYPE_TOKENS = {
   fontSizeBase100: rem(12),
   fontSizeBase200: rem(13),

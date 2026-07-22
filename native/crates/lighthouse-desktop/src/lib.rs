@@ -498,6 +498,8 @@ pub fn run() {
             {
                 let verdict = commands::private_model_availability_impl();
                 shell_log(app.handle(), &format!("private-model probe: {verdict}"));
+                // §35 §1: Dynamic Type changes re-resolve without an app kill.
+                commands::start_content_size_observer();
             }
 
             // --- Pinned-question rechecks (openspec: add-pinned-questions):
