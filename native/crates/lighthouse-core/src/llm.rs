@@ -1880,6 +1880,34 @@ mod tests {
         assert!(llama.iter().all(|t| !t.content.starts_with("Earlier in")));
     }
 
+    // §32 §8: THE BUDGET FLOOR — for each call type, a maximally-packed
+    // apple-fm-4096 prompt (active system prompt + every segment budget at
+    // its cap + a generous question + framing overhead) fits the call's
+    // input budget, so the §1 output reserve is structurally guaranteed.
+    // The forced-tier rig re-proves this against the real 7B where a model
+    // exists; this floor is the container-provable half.
+    #[test]
+    fn apple_prompt_budget_floor_holds_per_call_type() {
+        let tier = Tier::AppleFm4096;
+        let b = budget::segment_budgets(tier);
+        let sys = system_prompt_for(tier).chars().count();
+        let question = 500; // generous typed-question allowance
+        let overhead = 600; // message/block framing + task instruction
+        for call in [CallType::Narration, CallType::NlToSql, CallType::ReportFraming] {
+            let total = sys + b.ctx_total_max + b.history_max + question + overhead;
+            assert!(
+                total <= budget::input_char_budget(tier, call),
+                "{call:?}: packed {total} chars exceeds the input budget {}",
+                budget::input_char_budget(tier, call)
+            );
+        }
+        // And the same arithmetic on the 8k tier (same segment caps today).
+        for call in [CallType::Narration, CallType::NlToSql, CallType::ReportFraming] {
+            let total = sys + b.ctx_total_max + b.history_max + question + overhead;
+            assert!(total <= budget::input_char_budget(Tier::AppleFm8192, call));
+        }
+    }
+
     #[test]
     fn narration_tier_maps_providers_to_tiers() {
         // Cloud providers can never change assembly shape (§32 hard rail).

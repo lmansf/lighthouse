@@ -4109,6 +4109,18 @@ mod tests {
         }
     }
 
+    // §32 §8: THE FACT FLOOR — every number and entity a golden answer could
+    // cite is present in the sheet (values, the engine total, labels), so a
+    // grounded narration can never need a figure the sheet withheld.
+    #[test]
+    fn fact_floor_every_golden_number_and_entity_is_in_the_sheet() {
+        let res = qr_of(batch(&["West", "East"], &[42.0, 58.0]), 2, false, Some(2));
+        let sheet = fact_sheet(&res);
+        for golden in ["West", "East", "42", "58", "100", "2 rows"] {
+            assert!(sheet.contains(golden), "golden \"{golden}\" missing from:\n{sheet}");
+        }
+    }
+
     #[test]
     fn meta_table_json_mirrors_the_rendered_cells() {
         let res = qr_of(batch(&["West", "East"], &[10.0, 30.5]), 2, false, Some(2));
