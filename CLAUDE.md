@@ -16,8 +16,9 @@ overhaul.)
 - Version stamps live in SEVEN files and must move together:
   `package.json`, `package-lock.json` (×2 stamps), `native/Cargo.toml`
   (workspace version), `native/crates/lighthouse-desktop/tauri.conf.json`,
-  `native/Cargo.lock` (every `lighthouse-*` crate — FIVE as of 0.12.6;
-  the workspace grew past the original three, so bump by pattern, not count),
+  `native/Cargo.lock` (every `lighthouse-*` crate — SIX as of 0.14.6 with
+  the §40 lighthouse-shell split; the workspace keeps growing past the
+  original three, so bump by pattern, not count),
   and the two committed iOS project stamps:
   `native/crates/lighthouse-desktop/gen/apple/project.yml`
   (CFBundleShortVersionString + CFBundleVersion) and
