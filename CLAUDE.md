@@ -1,5 +1,8 @@
 # Lighthouse — working agreements
 
+Read docs/CONVENTIONS.md before changing shared systems — the house patterns,
+each with its canonical example and the tripwire that enforces it.
+
 ## Versioning policy (owner directive, 2026-07-14)
 
 Stay on the current line (**0.14.x** as of the Apple-feel release): every

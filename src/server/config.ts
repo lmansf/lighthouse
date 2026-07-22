@@ -27,6 +27,24 @@ export function stateDir(): string {
   return dir;
 }
 
+/**
+ * §39 §5: the running app's version — the state-file guard's reference point.
+ * PARITY with config.rs::app_version: npm_package_version (set under npm
+ * scripts) wins; otherwise the repo's package.json stamp.
+ */
+export function appVersion(): string {
+  const env = process.env.npm_package_version?.trim();
+  if (env) return env;
+  try {
+    const pkg = JSON.parse(
+      fs.readFileSync(path.join(process.cwd(), "package.json"), "utf8"),
+    ) as { version?: string };
+    return pkg.version ?? "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+}
+
 export const STATE_FILE = "state.json";
 export const PROFILE_FILE = "profile.json";
 

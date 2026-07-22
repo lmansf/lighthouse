@@ -86,6 +86,14 @@ pub struct VaultState {
     /// un-versioned migration story. KEEP IN SYNC with vault.ts.
     #[serde(default)]
     pub rules: Vec<CurationRule>,
+    /// §39 §5: the app version that last WROTE this file. Absent on pre-§39
+    /// files (serde-default keeps them loading unchanged); every save stamps
+    /// it. The guard: an app OLDER than the writer goes READ-ONLY on this
+    /// state — answers work, writes refuse with one honest log line —
+    /// instead of re-serializing a struct that silently DROPS every field it
+    /// doesn't know. KEEP IN SYNC with vault.ts (JSON key `writtenBy`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub written_by: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -100,8 +108,52 @@ impl Default for VaultState {
             local_only: HashMap::new(),
             references: HashMap::new(),
             rules: Vec::new(),
+            written_by: None,
         }
     }
+}
+
+/// §39 §5: parse "x.y.z" into a comparable triple; extra parts and
+/// pre-release tags are ignored, and anything unparseable reads (0,0,0) so a
+/// garbage stamp can never look NEWER than the running app — the guard fails
+/// open for junk, closed only for a genuinely newer writer. Pure.
+fn version_triple(v: &str) -> (u64, u64, u64) {
+    let mut parts = v.trim().split('.').map(|p| {
+        p.chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect::<String>()
+            .parse::<u64>()
+            .unwrap_or(0)
+    });
+    (
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+    )
+}
+
+/// True when the state file's writer is strictly newer than the running app
+/// — the read-only trigger. Absent stamp (pre-§39 file) ⇒ writable. Pure;
+/// KEEP IN SYNC with vault.ts::stateWrittenByNewer.
+pub fn state_written_by_newer(written_by: Option<&str>, running: &str) -> bool {
+    match written_by {
+        Some(w) => version_triple(w) > version_triple(running),
+        None => false,
+    }
+}
+
+/// Whether the loaded state at `state_path()` is read-only (written by a
+/// newer app). Computed by `load_state`, consumed by `save_state`.
+static STATE_READ_ONLY: Mutex<Option<(PathBuf, bool)>> = Mutex::new(None);
+static READ_ONLY_LOGGED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn state_read_only(path: &Path) -> bool {
+    STATE_READ_ONLY
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .as_ref()
+        .is_some_and(|(p, ro)| p == path && *ro)
 }
 
 // The vault state (inclusion flags + references) was re-read and JSON-parsed
@@ -122,15 +174,37 @@ fn load_state() -> VaultState {
         }
     }
     let s = read_json(&path, VaultState::default());
+    // §39 §5: a file written by a NEWER app flips this path read-only —
+    // reads (and answers) work; save_state refuses instead of dropping
+    // fields this build doesn't know exist.
+    let ro = state_written_by_newer(s.written_by.as_deref(), &crate::config::app_version());
+    *STATE_READ_ONLY.lock().unwrap_or_else(|p| p.into_inner()) = Some((path.clone(), ro));
     *STATE_CACHE.lock().unwrap_or_else(|p| p.into_inner()) = Some((path, s.clone()));
     s
 }
 
 fn save_state(s: &VaultState) {
     let path = state_path();
-    write_json(&path, s);
+    // §39 §5: refuse to clobber a newer writer's file — one honest line,
+    // once. (load_state populated the verdict for this path; a path never
+    // loaded is writable by definition.)
+    if state_read_only(&path) {
+        if !READ_ONLY_LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            eprintln!(
+                "state.json was written by a newer Lighthouse than this build ({}) — \
+                 leaving it untouched (read-only) rather than dropping fields this \
+                 build doesn't know.",
+                crate::config::app_version()
+            );
+        }
+        return;
+    }
+    // Every save stamps the writer (the §39 §5 guard's other half).
+    let mut stamped = s.clone();
+    stamped.written_by = Some(crate::config::app_version());
+    write_json(&path, &stamped);
     // Keep the cache warm with what we just wrote (sole writer ⇒ coherent).
-    *STATE_CACHE.lock().unwrap_or_else(|p| p.into_inner()) = Some((path, s.clone()));
+    *STATE_CACHE.lock().unwrap_or_else(|p| p.into_inner()) = Some((path, stamped));
     invalidate_walk_cache(); // inclusion flags and references feed the walked tree
 }
 
