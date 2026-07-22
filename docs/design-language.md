@@ -30,6 +30,24 @@ the root** — it severs the Dynamic Type link):
 Weights: regular/medium/semibold/bold only; nothing renders under 11pt.
 `fontScale`/`density` settings still work — `scaleTheme` scales rem too.
 
+**Content type (§35 — content is not chrome).** The HIG ramp above is for
+UI CHROME: bars, buttons, labels, settings rows. ANSWER PROSE — the thing
+the user actually reads — has its own additive scale, `CONTENT_TYPE` in
+theme.ts, and the two never trade slots. Answers read at the web-content
+standard **16px body on 24px leading** (`body`/`bodyLineHeight`), measure
+capped at 72ch (16px side padding at compact ≈ 45 CPL), 0.75em paragraph
+rhythm, 20px list gutters. Headings ride a compact weight-and-space ramp —
+h1 20/600, h2 17.5/600, h3+h4 16/semibold, ~1.25em above / ~0.4em below —
+sized `min(token, ceilingPx)` against the per-level `*Max` ceilings
+(28/24/22px) so Dynamic Type accessibility sizes can never invert the
+hierarchy. Body tracks the root 1:1 (rem); `-webkit-text-size-adjust: 100%`
+kills the legacy inflater, and the iOS shell's `LHContentSizeObserver`
+reloads the webview on a type-size change so rem re-resolves live. Data:
+`tableCellCompact` (13px) keeps result tables scannable at phone width;
+`statLabel` (14.5px semibold) is the stat-run grid's label column. Chrome
+never uses `CONTENT_TYPE`; answers never use the Base ramp for prose.
+Pinned by `test/contentType.test.mjs`.
+
 **Color.** One tint (`--lh-tint`, accent-aware through the Fluent brand
 tokens). Semantic pairs per theme in globals.css: `--lh-bg/-secondary/
 -grouped/-elevated`, the 4-step label ramp (`--lh-label…-quaternary` —
