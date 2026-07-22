@@ -12,7 +12,9 @@ import { register } from "node:module";
 
 register("./_ts-extensionless-hook.mjs", import.meta.url);
 
-const { draftAnswer } = await import("../src/server/llm.ts");
+const { draftAnswer, RELIABILITY_CONFIRMED_NAME, RELIABILITY_PREAMBLE_NAME } = await import(
+  "../src/server/llm.ts"
+);
 
 test("renders the top 3 passages, trimmed and clamped", () => {
   const ctxs = [
@@ -35,4 +37,25 @@ test("renders the top 3 passages, trimmed and clamped", () => {
 
 test("empty contexts render an empty draft", () => {
   assert.equal(draftAnswer("anything", []), "");
+});
+
+// 0.14.1 field report: the §4 reliability assists lead the context list
+// (score 1, prepended by reliabilityBlocks), and a dead local server's
+// passages fallback rendered them as the answer's first "passage" — prompt
+// scaffolding leaked into the visible answer. Extractive renderings must skip
+// them by name; real passages only, numbered from [1].
+test("reliability scaffolding never renders as a passage", () => {
+  const ctxs = [
+    { name: RELIABILITY_PREAMBLE_NAME, text: "You currently have 2 file(s)…", score: 1 },
+    { name: RELIABILITY_CONFIRMED_NAME, text: 'The file "a.csv" IS available…', score: 1 },
+    { name: "a.csv", text: "north 100", score: 0.9 },
+    { name: "b.md", text: "notes", score: 0.8 },
+  ];
+  const out = draftAnswer("key points?", ctxs);
+  assert.ok(out.startsWith("[1] **a.csv**"), `first real passage leads: ${out}`);
+  assert.ok(out.includes("[2] **b.md**"), "second real passage keeps its slot");
+  assert.ok(!out.includes(RELIABILITY_PREAMBLE_NAME), "preamble block skipped");
+  assert.ok(!out.includes(RELIABILITY_CONFIRMED_NAME), "confirmed block skipped");
+  // Scaffolding alone → an EMPTY draft (never a scaffold-only "answer").
+  assert.equal(draftAnswer("q", ctxs.slice(0, 2)), "");
 });

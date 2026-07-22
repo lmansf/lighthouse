@@ -1122,6 +1122,15 @@ pub async fn chat_ask(
     approved_plan: Option<String>,
     on_chunk: Channel<ChatChunk>,
 ) -> Result<(), String> {
+    // 0.14.1 field report: iOS tears the private-model loopback listener down
+    // with app suspension, so the first ask after resume hit a dead port
+    // (connection refused) and fell back to passages. Re-ensuring per ask is a
+    // lock + state check when the bridge is healthy, and re-binds + re-points
+    // LIGHTHOUSE_LOCAL_LLM_URL (fresh ephemeral port) + the backend verdict
+    // when it died — so an ask never races a dead bridge. Desktop's
+    // llama-server has its own supervisor and never needs this.
+    #[cfg(not(desktop))]
+    let _ = private_model_availability_impl();
     let history: Vec<ChatTurn> = {
         let turns: Vec<ChatTurn> = history
             .iter()

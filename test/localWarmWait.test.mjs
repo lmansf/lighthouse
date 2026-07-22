@@ -48,6 +48,26 @@ test("warming label is byte-identical to the Rust twin (staged, progressive)", (
   assert.equal(warmingLabel(61_000), "Almost ready — the first private answer takes a moment…");
 });
 
+// 0.14.1 field report: on a mobile shell the "installed model" that makes a
+// Down server worth waiting on is the on-device bridge (the shell re-ensures
+// its loopback listener at every ask after iOS suspension tears it down; the
+// re-bind lands within a poll tick). Structural pin on BOTH twins' warm-wait
+// installed input — the desktop-gguf check alone proceeded straight into the
+// passages fallback on iOS.
+test("warm-wait treats a reported on-device backend as an installed model (both twins)", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { fileURLToPath } = await import("node:url");
+  const path = await import("node:path");
+  const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const ts = readFileSync(path.join(ROOT, "src/server/synth.ts"), "utf8");
+  const rs = readFileSync(path.join(ROOT, "native/crates/lighthouse-core/src/synth.rs"), "utf8");
+  assert.match(ts, /const installed = isModelInstalled\(\) \|\| onDeviceBackend\(\);/);
+  assert.match(
+    rs,
+    /let installed = crate::local_model::find_installed_model\(\)\.is_some\(\)\s*\n\s*\|\| crate::local_model::on_device_backend\(\);/,
+  );
+});
+
 test("health URL derives from the chat-completions origin", () => {
   assert.equal(
     healthUrlFor("http://127.0.0.1:8080/v1/chat/completions"),

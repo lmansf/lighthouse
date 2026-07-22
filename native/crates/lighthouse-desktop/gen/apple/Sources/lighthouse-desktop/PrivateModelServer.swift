@@ -56,14 +56,27 @@ final class PrivateModelServer {
 
     /// Idempotent probe-and-ensure. Returns a result code; on `FM_AVAILABLE`
     /// writes the bound loopback port through `outPort`. Safe to call repeatedly
-    /// (startup + first ask + UI refresh): once bound it just returns the port.
+    /// (startup + every ask + UI refresh): a live listener just returns its
+    /// port; a dead one is replaced with a fresh bind.
     func ensure(_ outPort: UnsafeMutablePointer<UInt16>) -> Int32 {
         lock.lock()
         defer { lock.unlock() }
 
         if let port = boundPort {
-            outPort.pointee = port
-            return FM_AVAILABLE
+            // A cached port only proves a PAST bind. iOS tears loopback
+            // listeners down with app suspension (0.14.1 field report:
+            // connection-refused at the first ask after resume), leaving
+            // `boundPort` pointing at a dead socket. `.ready` is the only
+            // state that still accepts connections — anything else drops the
+            // corpse and falls through to a fresh bind (new ephemeral port;
+            // the Rust caller re-points LIGHTHOUSE_LOCAL_LLM_URL from it).
+            if let live = listener, case .ready = live.state {
+                outPort.pointee = port
+                return FM_AVAILABLE
+            }
+            listener?.cancel()
+            listener = nil
+            boundPort = nil
         }
 
         let availability = availabilityCode()
