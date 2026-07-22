@@ -286,6 +286,16 @@ pub fn partition_segments(chunks: &[String], seg_budget: usize) -> Vec<String> {
     segs
 }
 
+/// §35 §2: the doc-focus reduce synthesizes a WHOLE document, so left
+/// uncapped it happily writes a wall. The reduce ask carries one extra
+/// sentence naming the target length; a question that asks for depth
+/// overrides it because the note says so. Applied ONLY at the doc-focus
+/// reduce call site — the map extracts and every other ask are untouched.
+/// Pure; mirrors synth.ts::reduceQuestion.
+pub fn reduce_question(question: &str) -> String {
+    format!("{question}\n\n(Target length: a focused summary runs about 120-250 words — go longer only when the question itself asks for depth or detail.)")
+}
+
 /// Evenly-spaced sample of at most `max` segments (all of them when they
 /// fit), plus the pre-sample total for the honesty note. First and last
 /// segments are always kept. Pure; mirrors synth.ts::sampleSegments.
@@ -2797,7 +2807,7 @@ fn live_pipeline(
                         })
                         .collect();
                     let mut answer = llm::stream_answer(
-                        question.clone(),
+                        reduce_question(&question),
                         reduce_ctxs,
                         cfg.clone(),
                         history.clone(),
@@ -3274,6 +3284,15 @@ mod tests {
         assert_eq!(partition_segments(&big, 350).len(), 1);
         // Empty in, empty out.
         assert!(partition_segments(&[], 350).is_empty());
+    }
+
+    #[test]
+    fn reduce_question_appends_the_length_note_after_the_verbatim_ask() {
+        let q = reduce_question("What does the lease say about renewal?");
+        assert!(q.starts_with("What does the lease say about renewal?\n\n(Target length:"));
+        assert!(q.ends_with("asks for depth or detail.)"));
+        // One note, not stacked (the helper is applied at exactly one site).
+        assert_eq!(q.matches("(Target length:").count(), 1);
     }
 
     #[test]

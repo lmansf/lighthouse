@@ -135,6 +135,10 @@ test("Style section matches the reviewed snapshot (lead with the number)", () =>
     "Style:",
     '- Lead with the answer itself: for a numeric ask the FIRST line is the figure with its unit and label (e.g. "$4.2M — total Q3 revenue."); otherwise it is one direct sentence. Elaborate after that line, as concisely as the question allows.',
     "- Format for readability with Markdown: headings, **bold**, bullet/numbered lists, tables, and `code`/fenced code where they help. The interface renders Markdown.",
+    "- Write short paragraphs: 1-3 sentences carrying one idea each, most sentences under ~20 words. A blank line between ideas beats a long block.",
+    "- Use a bulleted list when you enumerate 3 or more parallel facts; give each bullet one line of substance. Keep connected reasoning as prose — do not shred it into fragments.",
+    "- Bold ONLY the key figures and the 1-2 load-bearing phrases a skimmer must catch — never whole sentences. Write numbers as digits (7, not seven).",
+    "- Add headings only when an answer genuinely has multiple sections, never for a single-topic answer, and never more than two levels.",
     "- Keep tables short and honest: show at most the ~10 rows that answer the question and note when you have trimmed the rest — never invent or pad rows to make a table look complete.",
     "- Inline HTML also renders (sanitized to a safe allowlist), so reach for it when Markdown falls short: <sub>/<sup> for units and footnote marks, <br> for line breaks inside table cells, <details><summary> to fold long detail, <mark> to highlight the key figure, <kbd> for keys. Scripts, images, iframes, styles, and event handlers are stripped — never rely on them.",
   ].join("\n");
@@ -153,5 +157,36 @@ test("lead-with-the-number composes with the chart directive contract", () => {
     charts,
     /end your answer with ONE lighthouse-chart-request fence/,
     "Charts section no longer pins the fence to the end of the answer",
+  );
+});
+
+test("§35 §2: the doc-focus reduce length note is byte-identical across the twins", () => {
+  // The note rides the reduce QUESTION (buildPrompt and SYSTEM_PROMPT stay
+  // byte-pinned above), so the parity surface is the helper's literal.
+  const NOTE =
+    "\\n\\n(Target length: a focused summary runs about 120-250 words — go longer only when the question itself asks for depth or detail.)";
+  const ts = readFileSync(fileURLToPath(new URL("../src/server/synth.ts", import.meta.url)), "utf8");
+  const rust = readFileSync(
+    fileURLToPath(new URL("../native/crates/lighthouse-core/src/synth.rs", import.meta.url)),
+    "utf8",
+  );
+  assert.ok(
+    ts.includes("`${question}" + NOTE + "`"),
+    "synth.ts reduceQuestion carries the canonical note",
+  );
+  assert.ok(
+    rust.includes('format!("{question}' + NOTE + '")'),
+    "synth.rs reduce_question carries the SAME bytes",
+  );
+  // Applied at the doc-focus reduce only: exactly one call site per engine.
+  assert.equal(
+    (ts.match(/reduceQuestion\(/g) ?? []).length,
+    2,
+    "TS: one declaration + one call (the doc-focus reduce)",
+  );
+  assert.equal(
+    (rust.match(/reduce_question\(/g) ?? []).length,
+    3,
+    "Rust: one declaration + one call + one unit test",
   );
 });

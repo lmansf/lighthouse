@@ -241,6 +241,18 @@ export function partitionSegments(chunks: string[], segBudget: number): string[]
 }
 
 /**
+ * §35 §2: the doc-focus reduce synthesizes a WHOLE document, so left uncapped
+ * it happily writes a wall. The reduce ask carries one extra sentence naming
+ * the target length; a question that asks for depth overrides it because the
+ * note says so. Applied ONLY at the doc-focus reduce call site — the map
+ * extracts and every other ask are untouched. Pure; KEEP IN SYNC with
+ * synth.rs::reduce_question.
+ */
+export function reduceQuestion(question: string): string {
+  return `${question}\n\n(Target length: a focused summary runs about 120-250 words — go longer only when the question itself asks for depth or detail.)`;
+}
+
+/**
  * Evenly-spaced sample of at most `max` segments (all of them when they fit),
  * plus the pre-sample total for the honesty note. First and last segments are
  * always kept. Pure; KEEP IN SYNC with synth.rs::sample_segments.
@@ -997,7 +1009,7 @@ async function* answerPipelineLive(
           fileId: reference.fileId,
           score: c.score,
         }));
-        for await (const delta of streamAnswer(question, reduceCtxs, cfg, history)) {
+        for await (const delta of streamAnswer(reduceQuestion(question), reduceCtxs, cfg, history)) {
           yield { delta, done: false };
         }
         yield finalChunk([reference], reduceCtxs.length, origin, manifest);
