@@ -19,8 +19,9 @@ overhaul.)
 - Version stamps live in SEVEN files and must move together:
   `package.json`, `package-lock.json` (×2 stamps), `native/Cargo.toml`
   (workspace version), `native/crates/lighthouse-desktop/tauri.conf.json`,
-  `native/Cargo.lock` (every `lighthouse-*` crate — FIVE as of 0.12.6;
-  the workspace grew past the original three, so bump by pattern, not count),
+  `native/Cargo.lock` (every `lighthouse-*` crate — SIX as of 0.14.6 with
+  the §40 lighthouse-shell split; the workspace keeps growing past the
+  original three, so bump by pattern, not count),
   and the two committed iOS project stamps:
   `native/crates/lighthouse-desktop/gen/apple/project.yml`
   (CFBundleShortVersionString + CFBundleVersion) and
@@ -46,8 +47,15 @@ overhaul.)
   `src/server/extract.ts`, and the assertion in
   `native/.../tests/extract_test.rs` — bump all three or native CI goes red.
 - The desktop crate (`lighthouse-desktop`) does NOT compile in the dev
-  container (no webkit/gtk); grep every call site when changing a shared
-  engine signature — a missed one only surfaces in the desktop-release build.
+  container (no webkit/gtk). Since the §40 crate split its tauri-free command
+  bodies live in `lighthouse-shell`, which DOES check here — run
+  `cargo check -p lighthouse-core -p lighthouse-shell -p lighthouse-cli
+  -p lighthouse-server -p lighthouse-mcp` (CI runs the same as native.yml's
+  container-check job). The grep-verify blind spot is only what remains in
+  the wrapper: its delegation layer, the tauri-dependent stay-list bodies
+  (chat_ask, upload_file, settings/model/widget/window commands), lib.rs,
+  and src/desktop/* — grep those call sites when changing a shared engine
+  signature; a missed one only surfaces in the desktop-release build.
 - The two engines are twins: Rust (`native/crates/lighthouse-core`) ships;
   TS (`src/server/`) mirrors it byte-compatibly. Prompts/labels/trigger rules
   stay byte-identical; PARITY comments mark deliberate divergences.

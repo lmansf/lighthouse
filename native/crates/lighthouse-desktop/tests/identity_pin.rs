@@ -38,7 +38,8 @@ fn app_data_path_stays_pinned_to_the_legacy_identifier() {
 
     // boot_guard's pre-Tauri state dir (read before any webview exists) must use
     // the same pinned literal, or safe-mode/boot markers desync from the data.
-    let boot = include_str!("../src/desktop/boot_guard.rs");
+    // (§40: boot_guard lives in the tauri-free lighthouse-shell crate.)
+    let boot = include_str!("../../lighthouse-shell/src/boot_guard.rs");
     assert!(
         boot.contains("com.lighthouse.app"),
         "boot_guard.rs state_dir must stay pinned to com.lighthouse.app"

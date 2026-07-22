@@ -77,7 +77,8 @@ test("Dynamic Type end-to-end: no legacy inflation, live re-resolve on iOS", () 
   assert.match(swift, /UIContentSizeCategory\.didChangeNotification/, "the observer watches the real signal");
   assert.match(swift, /@objc\(LHContentSizeObserver\)/, "ObjC-visible (the dead-strip-proof lookup)");
   assert.match(swift, /webView\.reload\(\)/, "a reload is the size re-resolve");
-  const commands = read("native/crates/lighthouse-desktop/src/commands.rs");
+  // §40 crate split: the observer-start body lives in tauri-free lighthouse-shell.
+  const commands = read("native/crates/lighthouse-shell/src/commands.rs");
   assert.match(commands, /objc_getClass\(b"LHContentSizeObserver\\0"/, "Rust starts it via the runtime idiom");
   assert.match(read("native/crates/lighthouse-desktop/src/lib.rs"), /start_content_size_observer\(\);/, "started at iOS boot");
 });

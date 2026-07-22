@@ -6,7 +6,10 @@
 //! is the entire shell. Bodies are byte-identical to the pre-split `lib.rs`;
 //! only the module boundaries are new.
 
-pub mod boot_guard;
+// §40: boot_guard's body is tauri-free and lives in lighthouse-shell so the
+// dev container checks it; the re-export keeps every `boot_guard::` path here
+// and the `crate::boot_guard` compat alias in lib.rs working unchanged.
+pub use lighthouse_shell::boot_guard;
 pub mod supervise;
 pub mod tray;
 pub mod whisper;
