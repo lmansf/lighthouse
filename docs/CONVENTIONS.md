@@ -177,3 +177,10 @@ app's version, and an app OLDER than the file's writer goes READ-ONLY on that
 state (answers work; writes refuse with one honest log line) instead of
 clobbering fields it doesn't know. Never remove or re-type an existing field;
 never write a state file you only partially understand.
+
+Open owner decision (doc-only, flagged by §39): on iOS the `.rag-vault` state
+directory lives INSIDE the user-visible Documents tree — visible in Files and
+eligible for iCloud sync, which invites sync conflicts on `state.json`
+(exactly the multi-writer scenario the guard can only soften, not solve).
+Moving it to Application Support trades that risk for invisibility. Owner
+call; neither this doc nor the guard takes it.
