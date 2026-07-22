@@ -3862,6 +3862,7 @@ dependencies = [
  "libc",
  "lighthouse-core",
  "lighthouse-server",
+ "lighthouse-shell",
  "objc2",
  "objc2-app-kit",
  "rand 0.8.6",
@@ -3911,6 +3912,16 @@ dependencies = [
  "tempfile",
  "tokio",
  "url",
+]
+
+[[package]]
+name = "lighthouse-shell"
+version = "0.14.5"
+dependencies = [
+ "anyhow",
+ "lighthouse-core",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

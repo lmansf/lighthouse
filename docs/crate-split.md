@@ -10,7 +10,7 @@ doc without updating it.
 | Module | Lines | tauri refs | Class | Verdict |
 |---|---|---|---|---|
 | src/commands.rs | 2,303 | 41 | mixed (a)+(b) | SPLIT: core-only bodies move; tauri-typed commands stay |
-| src/lib.rs | 771 | 15 | (b) builder/setup + (a) bootstrap_env logic | mostly stays; pure env/dir helpers of `bootstrap_env` move |
+| src/lib.rs | 771 | 15 | (b) builder/setup + (a) bootstrap_env logic | stays whole (Phase B correction: every env/dir helper threads `app: &AppHandle` — app_data_base, document_dir — so extraction is a seam rewrite, not a move; 80% rule) |
 | src/main.rs | 11 | 1 | (b) | stays |
 | src/desktop/boot_guard.rs | 130 | 0 | (a) — pure, zero tauri | MOVES (its module cfg gate disappears) |
 | src/desktop/mod.rs | 462 | 22 | (c) | stays |
@@ -30,7 +30,11 @@ MOVE to lighthouse-shell (core-only bodies; the wrapper keeps a thin
 `start_content_size_observer` (their `#[cfg(target_os = "ios")]` objc arms
 are cfg'd out on Linux, and `cargo check` does not link — container-checkable
 by construction), plus the pure helpers (`string_array`, `err_string`,
-`percent_decode`).
+`percent_decode`). Phase B addition: `open_with_os` (widget.rs, pure std) also
+moves — to the SHELL CRATE ROOT so the moved `open_node` body's
+`crate::open_with_os(&abs)` call stays byte-identical — and widget.rs
+re-exports it (`pub use lighthouse_shell::open_with_os;`) so the wrapper's
+tray/supervise/reveal call sites resolve unchanged.
 
 STAY in the wrapper (the 80%-that-ships list — each body is dominated by a
 tauri plugin/type, and a trait seam would be a rewrite, not a move):
@@ -46,10 +50,14 @@ tauri plugin/type, and a trait seam would be a rewrite, not a move):
   `update_state`/`update_now` (updater plugin), `widget_*`/`show_main`
   (desktop window management).
 
-Where a moved body needs to LOG, it takes a plain `&dyn Fn(&str)` (or an
-`Option<>` of it) supplied by the wrapper's `shell_log` — a function
-argument, not a trait framework. No other capability seam proved necessary
-in the spike; if Phase B finds one, this doc gains it first.
+Seams (Phase B ground truth): exactly ONE proved necessary — the
+vault-changed seam. `rag_op` broadcasts `app.emit("vault-changed", ())` at
+20 sites; the moved body takes
+`vault_changed: &(dyn Fn() + Send + Sync)` and calls it at those same 20
+sites, and the wrapper's delegation supplies the emit closure. A function
+argument, not a trait framework. The log seam this section originally
+presumed was NOT needed — no moved body calls `shell_log` (logging lives in
+the stay-list bodies and lib.rs).
 
 ## The mined branch — origin/claude/mobile-s2-crate-split (c56ccc9)
 
@@ -75,12 +83,19 @@ deeper: crate boundary instead of module boundary.
   hard constraint). It shrinks to: the builder/setup (lib.rs), the
   `#[tauri::command]` delegations, the stay-list commands above, and
   `src/desktop/*` behind the single `#[cfg(desktop)] mod desktop;` gate.
-- Gate accounting: cfg gates that guarded whole MOVED modules disappear
-  (boot_guard's, and every `#[cfg]` fork inside moved bodies that existed
-  only to separate platform-neutral logic). The one `mod desktop` gate
-  remains BY DESIGN: the wrapper crate is both the desktop and the iOS app,
-  so its desktop-only module tree keeps exactly one gate at the root —
-  down from per-module/per-body soup.
+- Gate accounting (Phase B correction): boot_guard's module gate disappears
+  (the re-export sits inside the already-gated `mod desktop`). The `#[cfg]`
+  forks INSIDE moved bodies (`desktop` / `not(desktop) + ios` arms of
+  open_node, private_model_availability_impl, start_content_size_observer)
+  move WITH the bodies, byte-identical. That requires the shell crate to
+  define the `desktop`/`mobile` cfg aliases itself: tauri-build emits them
+  for the APP crate only and cfgs never cross crate boundaries, so
+  lighthouse-shell has a 5-line `build.rs` re-deriving them from the same
+  rule (mobile = ios | android). Without it every `#[cfg(desktop)]` arm
+  would silently compile out — a behavior change. The one `mod desktop`
+  gate in the wrapper remains BY DESIGN: the wrapper crate is both the
+  desktop and the iOS app, so its desktop-only module tree keeps exactly
+  one gate at the root — down from per-module/per-body soup.
 
 ## The container gate (Phase B §2)
 

@@ -444,24 +444,10 @@ pub fn register_summon_shortcut(app: &AppHandle) -> bool {
     ok
 }
 
-/// Launch the platform's default opener for a path, detached. Desktop-only:
-/// the mobile shells have no spawnable `open`/`xdg-open` equivalent (§3 will
-/// route "open" gestures through the OS share/viewer intents instead).
-pub fn open_with_os(abs: &Path) {
-    let (cmd, arg) = if cfg!(windows) {
-        ("explorer.exe", abs.as_os_str().to_owned())
-    } else if cfg!(target_os = "macos") {
-        ("open", abs.as_os_str().to_owned())
-    } else {
-        ("xdg-open", abs.as_os_str().to_owned())
-    };
-    let _ = std::process::Command::new(cmd)
-        .arg(arg)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
-}
+// §40: open_with_os moved to lighthouse-shell (the moved open_node body calls
+// it); re-exported here so `super::widget::open_with_os` (tray) and the
+// `crate::open_with_os` glob path (supervise, commands) stay valid.
+pub use lighthouse_shell::open_with_os;
 
 /// Reveal a path in the OS file manager, *selecting* it inside its containing
 /// folder where the platform supports that (Windows Explorer, macOS Finder).
