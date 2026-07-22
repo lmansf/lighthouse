@@ -6266,3 +6266,138 @@ numbered section. Open ONE PR titled "Reports you can find: answer,
 file, and hero doors for Scientific & Business reports"; stop at
 the PR.
 ```
+
+## 38. Window-proof report framing: consistent reports on the 4k tier (2026-07-22)
+
+Owner question before surfacing reports (§37): how do the long-form
+IMRaD/BLUF reports perform inside the on-device model's 4k window —
+and can they be specially handled for consistent, useful results?
+Verified state @ 0.14.4 (reports.rs): the architecture is already
+right — the report BODY is 100% deterministic (the recipe battery
+computes every section model-free; window-immune, byte-stable). The
+model writes only TWO short framing passages per templated report
+(IMRaD intro+discussion / BLUF bottom-line+meaning), grounded on
+report_findings_ctx which #204 made tier-aware (apple-fm: each
+section's table caps to header + 5 rows + an honest note;
+cloud/llama byte-identical), output-capped at NARRATION_CHAR_CAP=
+1200 with runaway-discard, riding stream_answer→stream_local (so the
+compact profile applies, and §36's estimator/budget/retry fixes will
+cover these calls). And the fallback exists: no model / refusal /
+empty ⇒ deterministic framing lines stand in — "a report is never
+blocked on a model." The framing prompts already forbid invented
+numbers. Remaining gaps: (1) per-section caps count ROWS, not
+tokens, and nobody sums the WHOLE framing prompt — a many-section
+report can still exceed 4k (the §36 leak, applied here); (2) the
+deterministic-framing fallback is SILENT — a model-framed and an
+engine-framed report are indistinguishable, which reads as
+inconsistency; (3) no floor asserts the framing actually contains
+the battery's headline numbers; (4) §36's retry ladder covering the
+ReportFraming call type is implied, not pinned. Run this WITH or
+right after §36 (it uses §36's digit-aware estimator), BEFORE §37
+surfaces the doors.
+
+### Prompt
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first, local-first analytics AI harness: Rust engine
+(native/crates/lighthouse-core) in a Tauri 2 shell (same crate is
+the iOS app), byte-compatible TS twin (src/server/), React UI
+(src/). Read CLAUDE.md, docs/ts-twin.md, and roadmap §29 + §36 +
+§38 before writing code. PREREQUISITE: §36 (digit-aware estimator,
+wired whole-prompt budget, retry ladder) — rebase onto it; this
+patch extends those exact mechanisms to the report-framing calls.
+GOAL: templated reports (Scientific method / Business report)
+produce CONSISTENT, USEFUL results on the 4k on-device tier — the
+deterministic body always; model framing whenever it fits; honest,
+labeled fallback when it doesn't. Report generation semantics and
+the deterministic battery are UNTOUCHED.
+
+1. Budget-driven findings, not row-count-driven. report_findings_ctx
+   (reports.rs) currently caps apple-fm sections to header+5 rows —
+   a ROW heuristic. Make it BUDGET-driven with §36's digit-aware
+   estimator against input_char_budget(tier, ReportFraming): pack
+   per-section digests (headline + capped rows) largest-value-first
+   until the budget minus the 400-token framing reserve is spent;
+   when tight, degrade PER SECTION to headline-only (the headline
+   IS the computed finding — a framing pass over headlines alone is
+   still grounded and useful). A many-section report therefore
+   ALWAYS fits by construction. Cloud/llama tiers stay
+   byte-identical (existing pins hold). Pure packing fn, twins
+   where twinned, unit tests: 12-section fixture fits the 4k
+   ReportFraming budget under the digit-aware estimate; 3-section
+   fixture keeps its 5-row digests unchanged.
+
+2. Pin the whole-prompt and the ladder for framing. Extend §36's
+   end-to-end budget pin with a ReportFraming case (compact system
+   prompt + framing instruction + the §1 packed findings ≤ 90% of
+   4,096 minus reserve — cargo AND node). Extend §36's
+   overflow_retry_verdict coverage: on FM_OVERFLOW during a framing
+   call, retry once with headline-only findings; a second refusal ⇒
+   the deterministic framing fallback (no third call). Test the
+   ladder for the framing call type explicitly.
+
+3. Label the framing honestly (kill the invisible inconsistency).
+   The rendered report's footer gains ONE quiet line stating how the
+   framing was written: "Framing narrated by <the private model /
+   your model> from the computed findings." vs "Framing written by
+   the engine from the computed findings (model unavailable)." —
+   byte-pinned, both templates, render_imrad + render_bluf +
+   render_markdown tests updated. Same numbers either way; now the
+   prose provenance is visible, so run-to-run differences read as
+   labeled variation, not flakiness.
+
+4. A consistency floor for framing content. New fixture test (both
+   twins where the narrate seam is twinned): given a fixed battery
+   result, ANY accepted framing must contain the report's headline
+   numbers (digit-match against the summary headlines — reuse the
+   §32 fact-floor idiom); a framing that omits them or introduces a
+   digit not present in the findings is DISCARDED like a runaway
+   (extend the NARRATION_CHAR_CAP accept/reject gate with this
+   digit-subset check — deterministic, cheap, engine-side). This
+   turns "use only the numbers in the findings" from a request into
+   a gate, on every tier including cloud.
+
+5. Determinism statement + docs. Document in reports.rs' header (and
+   docs/analytics-beam.md if it covers reports): body = byte-stable
+   for identical inputs; framing = model-variable but gated (digit
+   subset, length caps) and labeled (§3); fallback = deterministic.
+   Note the §37 surfacing depends on this contract.
+
+6. Stamps + gates. Bump current+1 across all SEVEN stamp files per
+   CLAUDE.md. Suites + release-smoke + ios-build green. On the
+   forced-tier rig (LIGHTHOUSE_FORCE_TIER=apple-fm-4096, desktop
+   7B): generate a Scientific AND a Business report over a
+   12-section-scale table — both save with model framing, overflow
+   counter 0; kill the model mid-run → the report still saves with
+   the engine-framing footer line.
+
+Constraints. The deterministic battery, section rendering, save
+location, and the two-call framing design are UNCHANGED. Cloud and
+llama framing grounding stays byte-identical (pins). Grounding/
+honesty rules unchanged — §4 tightens enforcement, never loosens.
+No telemetry. SharePoint plumbing untouched. Scope = framing
+robustness only; §37's surfacing is separate.
+
+Acceptance:
+1. 12-section templated reports generate on the 4k tier with model
+   framing and counter 0 (rig + device); headline-only degradation
+   engages on a deliberately bloated fixture and the report still
+   frames.
+2. With the model unavailable, both templates save complete reports
+   with the engine-framing footer line — never blocked, never
+   silent about it.
+3. The digit-subset gate discards a framing containing an invented
+   number (fixture) and accepts a faithful one; headline numbers
+   provably present in accepted framings.
+4. Cloud/llama report grounding byte-identical to main (pins);
+   report body byte-stable across two runs of the same battery.
+5. Suites + release-smoke + ios-build green; seven stamps bumped;
+   docs updated.
+
+Environment. Fully container-testable except the device run (house
+convention; rig needs the desktop 7B). One commit per numbered
+section. Open ONE PR titled "Window-proof report framing:
+budget-packed findings, labeled fallback, digit-gated narration";
+stop at the PR.
+```
