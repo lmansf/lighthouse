@@ -3995,6 +3995,120 @@ mod tests {
         assert!(sheet.contains("over all 20 computed rows"), "{sheet}");
     }
 
+    // --- §32 §4: the NL→SQL diet --------------------------------------------------
+
+    fn reg_with(table: &str, file: &str, cols: &[&str]) -> TableReg {
+        let card = format!(
+            "table {table} — 100 rows\ncolumns: {}\nsample rows:\n| {} |\n| {} |\n| {} |",
+            cols.iter().map(|c| format!("{c} Utf8")).collect::<Vec<_>>().join(", "),
+            cols.join(" | "),
+            cols.iter().map(|_| "---").collect::<Vec<_>>().join(" | "),
+            cols.iter().map(|c| format!("v-{c}")).collect::<Vec<_>>().join(" | "),
+        );
+        TableReg {
+            table: table.into(),
+            file_id: format!("{table}-id"),
+            file_name: file.into(),
+            card,
+            modified_ms: None,
+            columns: cols.iter().map(|c| c.to_lowercase()).collect(),
+            group: None,
+            capped_rows: None,
+        }
+    }
+
+    #[test]
+    fn rank_tables_puts_column_matched_tables_first_and_caps_at_three() {
+        let regs = vec![
+            reg_with("notes", "notes.csv", &["body", "author"]),
+            reg_with("sales", "sales.csv", &["region", "units", "order_date"]),
+            reg_with("hr", "hr.csv", &["employee", "salary"]),
+            reg_with("misc", "misc.csv", &["thing"]),
+        ];
+        let ranked = rank_tables(&regs, "total units by region", &[]);
+        assert_eq!(ranked.len(), 3, "cap at PLAN_TABLE_CAP");
+        assert_eq!(ranked[0].table, "sales", "column-matched table ranks first");
+        // No signal at all: still returns tables (registration order).
+        let none = rank_tables(&regs, "zzz qqq", &[]);
+        assert_eq!(none[0].table, "notes");
+        assert_eq!(none.len(), 3);
+    }
+
+    #[test]
+    fn pruned_card_keeps_the_floor_and_one_sample_per_matched_column() {
+        let reg = reg_with(
+            "sales",
+            "sales.csv",
+            &["order_id", "order_date", "region", "units", "notes", "internal_code"],
+        );
+        let card = pruned_schema_card(&reg, "total units by region", &[]);
+        // Matched columns survive with their types (the §4 floor)…
+        assert!(card.contains("region Utf8"), "{card}");
+        assert!(card.contains("units Utf8"), "{card}");
+        // …key (leading) columns survive…
+        assert!(card.contains("order_id Utf8"), "{card}");
+        assert!(card.contains("order_date Utf8"), "{card}");
+        // …unmatched non-key columns are pruned, with an honest note.
+        assert!(!card.contains("internal_code"), "{card}");
+        assert!(card.contains("more columns not relevant"), "{card}");
+        // ONE sample value per MATCHED column, none for key-only columns.
+        assert!(card.contains("sample values: region = v-region; units = v-units"), "{card}");
+        assert!(card.contains("table sales — 100 rows"), "head line intact: {card}");
+    }
+
+    #[test]
+    fn pruning_floor_honors_synonyms_and_never_loses_on_parse_failure() {
+        let reg = reg_with("sales", "sales.csv", &["order_id", "order_date", "gmv", "region"]);
+        // "revenue" isn't a column, but the synonym maps it to gmv → protected.
+        let syns = vec![("revenue".to_string(), "gmv".to_string())];
+        let card = pruned_schema_card(&reg, "total revenue by region", &syns);
+        assert!(card.contains("gmv Utf8"), "synonym-matched column survives: {card}");
+        // A card in an unexpected format falls back to the FULL card.
+        let weird = TableReg { card: "something else entirely".into(), ..reg };
+        assert_eq!(
+            pruned_schema_card(&weird, "total revenue", &syns),
+            "something else entirely"
+        );
+    }
+
+    #[test]
+    fn sql_question_teaches_one_example_on_apple_and_five_elsewhere() {
+        use crate::budget::Tier;
+        let apple = sql_question_for(Tier::AppleFm4096, "total by region", None);
+        let full = sql_question_for(Tier::Llama6144, "total by region", None);
+        assert_eq!(apple.lines().filter(|l| l.starts_with("Q: ")).count(), 1);
+        assert_eq!(full.lines().filter(|l| l.starts_with("Q: ")).count(), SQL_FEWSHOTS.len());
+        // The full arm is byte-identical to the legacy prompt (hard rail).
+        assert_eq!(full, sql_question("total by region", None));
+        // Prior SQL rides both tiers (the refinement kernel's raw material).
+        let refine = sql_question_for(Tier::AppleFm4096, "now as %", Some("SELECT 1"));
+        assert!(refine.contains("SELECT 1"), "prior sql rides the apple prompt");
+    }
+
+    #[test]
+    fn golden_sql_columns_survive_pruning() {
+        // The §4 floor against the golden few-shots: every column their SQL
+        // reads must survive a prune driven by their own question.
+        let sales = reg_with("sales", "sales.csv", &["region", "units", "filler_a", "filler_b"]);
+        let card = pruned_schema_card(
+            &sales,
+            "what share of total units does each region hold?",
+            &[],
+        );
+        for col in ["region", "units"] {
+            assert!(card.contains(&format!("{col} Utf8")), "golden column {col} pruned: {card}");
+        }
+        let orders = reg_with(
+            "orders",
+            "orders.csv",
+            &["customer", "amount", "order_date", "filler_c"],
+        );
+        let card = pruned_schema_card(&orders, "top 5 customers by total revenue", &[]);
+        for col in ["customer"] {
+            assert!(card.contains(&format!("{col} Utf8")), "golden column {col} pruned: {card}");
+        }
+    }
+
     #[test]
     fn meta_table_json_mirrors_the_rendered_cells() {
         let res = qr_of(batch(&["West", "East"], &[10.0, 30.5]), 2, false, Some(2));
@@ -5407,6 +5521,155 @@ pub const SQL_FEWSHOTS: &[(&str, &str)] = &[
     ),
 ];
 
+// --- §32 §4: the NL→SQL diet (apple-fm tiers) --------------------------------------
+//
+// The shared-window tiers cannot afford five few-shots and every table's full
+// schema card. Planning context is dieted deterministically: tables AND
+// columns rank against the question (lexical tokens + the semantic layer's
+// synonyms), the top tables ride PRUNED cards (matched + key columns with
+// types, ONE sample value per matched column), and the prompt teaches ONE
+// example. PRUNING FLOOR: a column named in the question or matched by a
+// synonym is NEVER pruned — golden-SQL tests gate this. Cloud and llama-6144
+// keep today's full cards and all five shots byte-for-byte.
+
+/// Tables the apple-fm planning prompt may carry.
+pub const PLAN_TABLE_CAP: usize = 3;
+/// Leading columns every pruned card keeps (ids/dates tend to lead).
+const PRUNE_KEY_COLS: usize = 2;
+
+/// Lowercased alphanumeric question tokens (length ≥ 3 — the lexical-scorer
+/// idiom; shorter tokens match everything and prune nothing).
+pub fn question_tokens(q: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for raw in q.to_lowercase().split(|c: char| !c.is_alphanumeric()) {
+        if raw.len() >= 3 && !out.iter().any(|t| t == raw) {
+            out.push(raw.to_string());
+        }
+    }
+    out
+}
+
+/// True when a column is PROTECTED for this question: a question token names
+/// it (containment either way, ≥3-char tokens) or an eligible synonym whose
+/// term appears in the question resolves to it. The §4 pruning floor.
+fn column_matched(col: &str, tokens: &[String], q_lower: &str, synonyms: &[(String, String)]) -> bool {
+    let col = col.to_lowercase();
+    if tokens.iter().any(|t| col.contains(t.as_str()) || t.contains(col.as_str())) {
+        return true;
+    }
+    synonyms.iter().any(|(term, canonical)| {
+        canonical.to_lowercase() == col && q_lower.contains(&term.to_lowercase())
+    })
+}
+
+/// Rank registered tables against the question: column matches score highest
+/// (the floor's signal), then table/file-name matches. Deterministic and
+/// stable — ties keep registration order — and NEVER empty: with no signal at
+/// all the first `PLAN_TABLE_CAP` tables ride (the planner still needs
+/// schemas to write SQL against).
+pub fn rank_tables<'a>(
+    regs: &'a [TableReg],
+    question: &str,
+    synonyms: &[(String, String)],
+) -> Vec<&'a TableReg> {
+    let tokens = question_tokens(question);
+    let q_lower = question.to_lowercase();
+    let mut scored: Vec<(usize, i64)> = regs
+        .iter()
+        .enumerate()
+        .map(|(i, r)| {
+            let col_hits = r
+                .columns
+                .iter()
+                .filter(|c| column_matched(c, &tokens, &q_lower, synonyms))
+                .count() as i64;
+            let name = format!("{} {}", r.table, r.file_name).to_lowercase();
+            let name_hits =
+                tokens.iter().filter(|t| name.contains(t.as_str())).count() as i64;
+            (i, col_hits * 3 + name_hits * 2)
+        })
+        .collect();
+    scored.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    scored.into_iter().take(PLAN_TABLE_CAP).map(|(i, _)| &regs[i]).collect()
+}
+
+/// The pruned planning card for one table: matched + key columns with their
+/// types, ONE sample value per MATCHED column. Parses the engine's own
+/// deterministic card format ("table … — … rows" / "columns: …" /
+/// "sample rows:" + GFM sample table); anything unexpected (clipped wide
+/// cards, format drift) falls back to the FULL card — pruning must never
+/// LOSE schema because of a parse, only trim it on purpose.
+pub fn pruned_schema_card(reg: &TableReg, question: &str, synonyms: &[(String, String)]) -> String {
+    let tokens = question_tokens(question);
+    let q_lower = question.to_lowercase();
+    let mut lines = reg.card.lines();
+    let Some(head) = lines.next().filter(|l| l.starts_with("table ")) else {
+        return reg.card.clone();
+    };
+    let Some(cols_line) = lines.next().and_then(|l| l.strip_prefix("columns: ")) else {
+        return reg.card.clone();
+    };
+    // "name TYPE" pairs — the type is the last space-separated piece; names
+    // with spaces keep everything before it.
+    let cols: Vec<(String, String)> = cols_line
+        .split(", ")
+        .filter_map(|p| p.rsplit_once(' ').map(|(n, t)| (n.to_string(), t.to_string())))
+        .collect();
+    if cols.is_empty() {
+        return reg.card.clone();
+    }
+    // First data row of the sample table (header | align | row …), for the
+    // one-sample-per-matched-column line.
+    let sample_cells: Vec<String> = {
+        let mut rest = lines.skip_while(|l| !l.starts_with('|'));
+        let header = rest.next();
+        let _align = rest.next();
+        match (header, rest.next()) {
+            (Some(_), Some(row)) if row.trim_start().starts_with('|') => {
+                let t = row.trim().trim_start_matches('|').trim_end_matches('|');
+                t.split('|').map(|c| c.trim().to_string()).collect()
+            }
+            _ => Vec::new(),
+        }
+    };
+    let matched: Vec<bool> = cols
+        .iter()
+        .map(|(n, _)| column_matched(n, &tokens, &q_lower, synonyms))
+        .collect();
+    let keep: Vec<usize> = (0..cols.len())
+        .filter(|&i| i < PRUNE_KEY_COLS || matched[i])
+        .collect();
+    let omitted = cols.len() - keep.len();
+    let kept_line = keep
+        .iter()
+        .map(|&i| format!("{} {}", cols[i].0, cols[i].1))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut out = format!("{head}\ncolumns: {kept_line}");
+    if omitted > 0 {
+        out.push_str(&format!(" (+{omitted} more columns not relevant to this question)"));
+    }
+    let samples: Vec<String> = keep
+        .iter()
+        .filter(|&&i| matched[i])
+        .filter_map(|&i| sample_cells.get(i).map(|v| format!("{} = {v}", cols[i].0)))
+        .collect();
+    if !samples.is_empty() {
+        out.push_str(&format!("\nsample values: {}", samples.join("; ")));
+    }
+    out
+}
+
+/// §4: the tier-aware SQL-writing ask. Apple-fm tiers teach ONE example (the
+/// canonical aggregate shape); every other tier keeps all five byte-for-byte.
+pub fn sql_question_for(tier: crate::budget::Tier, question: &str, prior_sql: Option<&str>) -> String {
+    if tier.is_apple_fm() {
+        sql_question_with(&SQL_FEWSHOTS[..1], question, prior_sql)
+    } else {
+        sql_question(question, prior_sql)
+    }
+}
+
 /// Prior-query context is clamped — the local model's 6144-token window pays
 /// for every char of it.
 const PRIOR_SQL_MAX_CHARS: usize = 800;
@@ -5452,7 +5715,18 @@ pub fn last_query_used(history: &[ChatTurn]) -> Option<String> {
 /// conversation already produced a query, it rides along so refinements
 /// ("same thing but monthly") adapt it instead of starting over.
 pub fn sql_question(question: &str, prior_sql: Option<&str>) -> String {
-    let examples = SQL_FEWSHOTS
+    sql_question_with(SQL_FEWSHOTS, question, prior_sql)
+}
+
+/// The shared prompt body over an explicit few-shot slice (§4: the apple-fm
+/// tiers pass ONE example; everyone else passes all of SQL_FEWSHOTS, keeping
+/// `sql_question`'s bytes exactly as before).
+fn sql_question_with(
+    fewshots: &[(&str, &str)],
+    question: &str,
+    prior_sql: Option<&str>,
+) -> String {
+    let examples = fewshots
         .iter()
         .map(|(q, sql)| format!("Q: {q}\nSQL: {sql}"))
         .collect::<Vec<_>>()

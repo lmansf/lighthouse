@@ -1548,10 +1548,40 @@ fn live_pipeline(
                     // prompt string below is byte-identical to today.
                     let view_regs =
                         crate::analytics::register_views(&ctx, &regs, is_cloud).await;
-                    let mut sql_ctxs: Vec<Ctx> = regs
-                        .iter()
-                        .map(|r| Ctx { name: r.file_name.clone(), text: r.card.clone(), score: 1.0 })
-                        .collect();
+                    // §32 §4: the planning tier decides the schema diet. On the
+                    // apple-fm shared-window tiers the question ranks the tables
+                    // (top 3 ride) and each card is PRUNED to matched + key
+                    // columns with one sample value per matched column — the
+                    // floor: a question-named or synonym-matched column is never
+                    // pruned. Cloud/llama keep every full card byte-for-byte.
+                    let plan_tier = llm::narration_tier(&cfg);
+                    let plan_synonyms: Vec<(String, String)> = if plan_tier.is_apple_fm() {
+                        crate::semantic::planning_synonyms(is_cloud)
+                    } else {
+                        Vec::new()
+                    };
+                    let mut sql_ctxs: Vec<Ctx> = if plan_tier.is_apple_fm() {
+                        crate::analytics::rank_tables(&regs, &question, &plan_synonyms)
+                            .into_iter()
+                            .map(|r| Ctx {
+                                name: r.file_name.clone(),
+                                text: crate::analytics::pruned_schema_card(
+                                    r,
+                                    &question,
+                                    &plan_synonyms,
+                                ),
+                                score: 1.0,
+                            })
+                            .collect()
+                    } else {
+                        regs.iter()
+                            .map(|r| Ctx {
+                                name: r.file_name.clone(),
+                                text: r.card.clone(),
+                                score: 1.0,
+                            })
+                            .collect()
+                    };
                     // Deterministic prompt order: file cards, view cards, the
                     // semantic business-definitions block, the vault brief, then
                     // join hints.
@@ -1571,13 +1601,19 @@ fn live_pipeline(
                     // prompt (pinned by a test). PARITY: this analytics-branch
                     // injection is Rust-only (the TS twin has no analytics
                     // branch); semantic.ts::renderBlock mirrors the labels.
-                    let has_semantic =
-                        if let Some(block) = crate::semantic::prompt_block(is_cloud) {
-                            sql_ctxs.push(block);
-                            true
-                        } else {
-                            false
-                        };
+                    // §4: apple tiers carry only the QUESTION-MATCHED semantic
+                    // entries (applicable definitions, not the whole store).
+                    let semantic_block = if plan_tier.is_apple_fm() {
+                        crate::semantic::prompt_block_matched(is_cloud, &question)
+                    } else {
+                        crate::semantic::prompt_block(is_cloud)
+                    };
+                    let has_semantic = if let Some(block) = semantic_block {
+                        sql_ctxs.push(block);
+                        true
+                    } else {
+                        false
+                    };
                     // The vault brief (openspec: field-patch-0.12.5 §3.5): a
                     // deterministic, engine-drafted summary of the vault being
                     // answered over — file composition + the queryable tables in
@@ -1588,8 +1624,12 @@ fn live_pipeline(
                     // prose. Empty facts ⇒ None ⇒ nothing pushed. PARITY: Rust-only
                     // injection (the TS twin has no analytics branch);
                     // vaultBrief.ts::renderBrief mirrors the renderer.
-                    if let Some(brief) = crate::vault_brief::draft_brief(&regs) {
-                        sql_ctxs.push(brief);
+                    // §4: the vault brief is orientation prose, not SQL signal —
+                    // the shared-window tiers spend those chars on schemas.
+                    if !plan_tier.is_apple_fm() {
+                        if let Some(brief) = crate::vault_brief::draft_brief(&regs) {
+                            sql_ctxs.push(brief);
+                        }
                     }
                     // Auto-derived join hints (columns shared across registered
                     // tables). The declared/curated join hints that used to win
@@ -1643,7 +1683,9 @@ fn live_pipeline(
                         let planner = if multi {
                             crate::analytics::step_question(&question, &[], max_steps)
                         } else {
-                            crate::analytics::sql_question(
+                            // §4: one few-shot on apple tiers, all five elsewhere.
+                            crate::analytics::sql_question_for(
+                                plan_tier,
                                 &question,
                                 crate::analytics::last_query_used(&history).as_deref(),
                             )
@@ -2058,7 +2100,11 @@ fn live_pipeline(
                             None => {
                                 yield progress("Writing a query…".to_string(), 2, 4);
                                 let raw = collect(llm::stream_answer(
-                                    crate::analytics::sql_question(&question, prior_sql.as_deref()),
+                                    crate::analytics::sql_question_for(
+                                        plan_tier,
+                                        &question,
+                                        prior_sql.as_deref(),
+                                    ),
                                     sql_ctxs.clone(),
                                     cfg.clone(),
                                     history.clone(),
@@ -2081,7 +2127,11 @@ fn live_pipeline(
                                 // One correction round with the engine's error.
                                 let retry_q = format!(
                                     "{}\n\nYour previous SQL failed.\nPrevious SQL: {sql}\nError: {err}\nWrite a corrected single SELECT statement.",
-                                    crate::analytics::sql_question(&question, prior_sql.as_deref())
+                                    crate::analytics::sql_question_for(
+                                        plan_tier,
+                                        &question,
+                                        prior_sql.as_deref(),
+                                    )
                                 );
                                 let raw2 = collect(llm::stream_answer(
                                     retry_q,

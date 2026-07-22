@@ -469,6 +469,48 @@ pub fn prompt_block(is_cloud: bool) -> Option<Ctx> {
     render_block(&eligible_for_posture(is_cloud))
 }
 
+/// §32 §4: the QUESTION-MATCHED subset of a semantic set — the apple-fm
+/// planning prompt carries only definitions this ask can use. A metric rides
+/// when its name (or a synonym term resolving to it) appears in the question;
+/// a synonym rides when its term appears. Pure, so the filter is testable
+/// without a store.
+pub fn matched_subset(set: SemanticSet, question: &str) -> SemanticSet {
+    let q = question.to_lowercase();
+    let term_in_q =
+        |term: &str| !term.trim().is_empty() && q.contains(term.to_lowercase().as_str());
+    let metrics: Vec<Metric> = set
+        .metrics
+        .iter()
+        .filter(|m| {
+            term_in_q(&m.name)
+                || set.synonyms.iter().any(|s| {
+                    s.canonical.eq_ignore_ascii_case(&m.name) && term_in_q(&s.term)
+                })
+        })
+        .cloned()
+        .collect();
+    let synonyms: Vec<Synonym> =
+        set.synonyms.iter().filter(|s| term_in_q(&s.term)).cloned().collect();
+    SemanticSet { metrics, synonyms }
+}
+
+/// §32 §4: the apple-fm planning block — posture-eligible AND matched to the
+/// question. Same renderer, so labels stay byte-identical; an ask that
+/// matches nothing carries no block at all.
+pub fn prompt_block_matched(is_cloud: bool, question: &str) -> Option<Ctx> {
+    render_block(&matched_subset(eligible_for_posture(is_cloud), question))
+}
+
+/// §32 §4: (term, canonical) pairs of the posture-eligible synonyms — the
+/// pruning floor's match source for schema-card pruning.
+pub fn planning_synonyms(is_cloud: bool) -> Vec<(String, String)> {
+    eligible_for_posture(is_cloud)
+        .synonyms
+        .into_iter()
+        .map(|s| (s.term, s.canonical))
+        .collect()
+}
+
 /// The pure renderer over an already-posture-filtered set (testable without a
 /// vault). Fixed section order: metrics, synonyms, then examples (only when a
 /// metric is present — they demonstrate metric expansion). An all-empty set
@@ -1171,6 +1213,37 @@ mod tests {
         // The byte-identical-prompt invariant's foundation: nothing eligible ⇒
         // no block ⇒ synth.rs pushes nothing.
         assert!(render_block(&SemanticSet::default()).is_none());
+    }
+
+    // --- §32 §4: the question-matched subset ---------------------------------
+
+    #[test]
+    fn matched_subset_keeps_only_what_the_question_can_use() {
+        let set = SemanticSet {
+            metrics: vec![
+                metric("net revenue", "SUM(amount) - SUM(refunds)", "", 1),
+                metric("headcount", "COUNT(DISTINCT employee)", "", 2),
+            ],
+            synonyms: vec![
+                Synonym { term: "GMV".into(), canonical: "net revenue".into() },
+                Synonym { term: "staff".into(), canonical: "employee".into() },
+            ],
+        };
+        // Direct name match keeps the metric; unmentioned ones drop.
+        let m = matched_subset(set.clone(), "net revenue by region this year");
+        assert_eq!(m.metrics.len(), 1);
+        assert_eq!(m.metrics[0].name, "net revenue");
+        assert!(m.synonyms.is_empty(), "no synonym TERM appears in the question");
+        // A synonym term in the question carries both the synonym and the
+        // metric it resolves to (case-insensitive).
+        let g = matched_subset(set.clone(), "what was gmv last month?");
+        assert_eq!(g.metrics.len(), 1, "GMV resolves to the net revenue metric");
+        assert_eq!(g.synonyms.len(), 1);
+        assert_eq!(g.synonyms[0].term, "GMV");
+        // Nothing matched ⇒ empty set ⇒ render_block(None) ⇒ no block at all.
+        let none = matched_subset(set, "how many files are included?");
+        assert!(none.metrics.is_empty() && none.synonyms.is_empty());
+        assert!(render_block(&none).is_none());
     }
 
     #[test]
