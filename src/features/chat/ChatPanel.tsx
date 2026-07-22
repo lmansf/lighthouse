@@ -106,6 +106,7 @@ import { ACCENTS, BEAM_SWEEP, CONTENT_TYPE } from "@/shell/theme";
 import { FILE_DRAG_MIME, parseDraggedFiles, type DraggedFile } from "@/shell/dnd";
 import { isDesktopShell, pathsForFiles, platformKind } from "@/shell/desktopBridge";
 import { openExternal } from "@/lib/openExternal";
+import { detectStatRun } from "@/lib/statRun";
 import { useCoarsePointer, usePaneLayout } from "@/shell/paneLayout";
 import { Sheet } from "@/shell/Sheet";
 import { HistoryNav } from "./HistoryNav";
@@ -523,6 +524,39 @@ const useStyles = makeStyles({
     paddingLeft: "16px",
     paddingRight: "16px",
     "& th, & td": { fontSize: CONTENT_TYPE.tableCellCompact },
+  },
+  // §35 §3: a detected stat run renders as a two-column key-value grid (a
+  // semantic <dl>) — label column sized to its content, hairline separators
+  // between rows, none after the last. Same treatment desktop and compact.
+  statRun: {
+    display: "grid",
+    gridTemplateColumns: "minmax(96px, max-content) 1fr",
+    columnGap: "16px",
+    marginTop: "12px",
+    marginBottom: "12px",
+    maxWidth: "72ch",
+  },
+  statRunLabel: {
+    fontWeight: tokens.fontWeightSemibold,
+    fontSize: CONTENT_TYPE.statLabel,
+    color: tokens.colorNeutralForeground2,
+    paddingTop: "6px",
+    paddingBottom: "6px",
+    ...shorthands.margin("0"),
+    borderBottomWidth: "1px",
+    borderBottomStyle: "solid",
+    borderBottomColor: tokens.colorNeutralStroke2,
+    "&:last-of-type": { borderBottomStyle: "none" },
+  },
+  statRunValue: {
+    paddingTop: "6px",
+    paddingBottom: "6px",
+    ...shorthands.margin("0"),
+    fontVariantNumeric: "tabular-nums",
+    borderBottomWidth: "1px",
+    borderBottomStyle: "solid",
+    borderBottomColor: tokens.colorNeutralStroke2,
+    "&:last-of-type": { borderBottomStyle: "none" },
   },
   // [n] citation markers rendered as clickable superscript chips that jump to
   // the matching reference card below the answer.
@@ -2263,6 +2297,29 @@ const AnswerMarkdown = memo(function AnswerMarkdown({
           <code {...props} className={className}>
             {children}
           </code>
+        );
+      },
+      // §35 §3: a stat run (≥3 items, every one `**Label:** value` with plain
+      // text on both sides) reads as a key-value grid instead of bullets. The
+      // detector is deliberately doubtful — any link, citation, nested list,
+      // or off-shape item keeps the ordinary <ul>, so rich content always
+      // survives. Same treatment at every width.
+      ul: ({ node, children, ...props }) => {
+        const run = detectStatRun(node);
+        if (!run) {
+          return <ul {...props}>{children}</ul>;
+        }
+        return (
+          <dl className={styles.statRun}>
+            {run.flatMap((item, i) => [
+              <dt key={`label-${i}`} className={styles.statRunLabel}>
+                {item.label}
+              </dt>,
+              <dd key={`value-${i}`} className={styles.statRunValue}>
+                {item.value}
+              </dd>,
+            ])}
+          </dl>
         );
       },
       table: ({ node, children, ...props }) => {

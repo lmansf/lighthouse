@@ -108,6 +108,8 @@ export const CONTENT_TYPE = {
   h3Max: "22px",
   /** Compact result-table cells (data stays scannable at phone width). */
   tableCellCompact: rem(13),
+  /** §3: stat-run grid labels — a step under body so values carry the eye. */
+  statLabel: rem(14.5),
 } as const;
 const TYPE_TOKENS = {
   fontSizeBase100: rem(12),
