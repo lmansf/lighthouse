@@ -63,9 +63,6 @@ const useStyles = makeStyles({
       minHeight: "44px",
     },
   },
-  // fp3 §3: the files-page Back control (replaces the collapse chevron when the
-  // sidebar is the full-screen compact page). A thumb-sized ≥44pt target with an
-  // explicit label so "go back to chat" reads unambiguously on a phone/iPad.
   brand: {
     display: "flex",
     alignItems: "center",
