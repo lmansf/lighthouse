@@ -136,6 +136,8 @@ const useStyles = makeStyles({
     borderBottomStyle: "solid",
     borderBottomColor: tokens.colorNeutralStroke2,
   },
+  // §31 §5: the Settings page floats its group cards on the grouped canvas.
+  pageBodyGrouped: { backgroundColor: "var(--lh-bg-grouped)" },
   pageBody: {
     flex: 1,
     minHeight: 0,
@@ -683,7 +685,7 @@ export function AppShell({ sidebar, main }: AppShellProps) {
                   Back
                 </Button>
               </div>
-              <div className={styles.pageBody} ref={settingsScrollRef}>
+              <div className={mergeClasses(styles.pageBody, styles.pageBodyGrouped)} ref={settingsScrollRef}>
                 <SettingsPage />
               </div>
             </div>

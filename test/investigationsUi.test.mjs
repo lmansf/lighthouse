@@ -122,7 +122,7 @@ test("0.13.10 §3: the nav mounts in the chat-header PICKER (Sheet on compact, p
   );
   assert.match(
     chat,
-    /<Sheet title="Investigations" onClose=\{\(\) => setInvOpen\(false\)\}>\s*\n\s*<InvestigationsNav \/>/,
+    /<Sheet title="Investigations" onClose=\{\(\) => setInvOpen\(false\)\} initialDetent="medium">\s*\n\s*<InvestigationsNav \/>/,
     "compact opens the full InvestigationsNav in a Sheet",
   );
   assert.match(

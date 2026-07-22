@@ -1,21 +1,33 @@
 "use client";
 
 /**
- * 0.13.10 §2: Settings as a full-screen compact PAGE — the third tab. The
- * grouped, scrollable reorganization of SettingsMenu's popup content (§31
- * restyles it iOS-grouped; here just structure): every destination is a 44pt
- * row that opens the same dialog / fires the same event the desktop gear menu
- * does, so the two hosts can never drift. 0.13.10 §3: the relocated
- * Business definitions (SemanticNav) and Saved views (ViewsNav) management
- * groups render inline — their result-impacting CRUD stays reachable with
- * the Sections rail retired.
+ * 0.13.10 §2 → §31 §5: Settings as a full-screen compact PAGE in the
+ * inset-grouped idiom — rounded group cards floating on the grouped canvas,
+ * 44pt rows with chevron disclosure, hairline separators inset to the label
+ * edge, and footnote footers under the groups that need a word of context.
+ * Every destination row opens the same dialog / fires the same event the
+ * desktop gear menu does, so the two hosts can never drift. 0.13.10 §3: the
+ * relocated Business definitions (SemanticNav) and Saved views (ViewsNav)
+ * management groups render inline — their result-impacting CRUD stays
+ * reachable with the Sections rail retired.
  *
  * History is NOT here — it lives on the chat header (both platforms, §2).
  * The "Save chats on this device" switch lives in Preferences (§2).
  */
 import { useState } from "react";
-import { Button, Text, makeStyles, shorthands, tokens } from "@fluentui/react-components";
-import { IconAI, IconBoard, IconHelp, IconHistory, IconInfo, IconInsight, IconOpen, IconOptions, IconPin } from "@/shell/icons";
+import { Text, makeStyles, mergeClasses, shorthands, tokens } from "@fluentui/react-components";
+import {
+  IconAI,
+  IconBoard,
+  IconChevronRight,
+  IconHelp,
+  IconHistory,
+  IconInfo,
+  IconInsight,
+  IconOpen,
+  IconOptions,
+  IconPin,
+} from "@/shell/icons";
 import {
   AboutDialog,
   AiModelsDialog,
@@ -27,31 +39,89 @@ import { START_TOUR_EVENT } from "@/features/help/FirstRunTour";
 import { SemanticNav } from "@/features/semantic/SemanticNav";
 import { ViewsNav } from "@/features/views/ViewsNav";
 
+/** The icon gutter width — the inset hairlines align to the label edge. */
+const ICON_GUTTER = 40;
+
 const useStyles = makeStyles({
+  // The grouped canvas: the §1 semantic pair, distinct from the cards on it.
   page: {
     display: "flex",
     flexDirection: "column",
-    gap: tokens.spacingVerticalS,
+    gap: tokens.spacingVerticalXS,
     paddingTop: tokens.spacingVerticalM,
     paddingBottom: tokens.spacingVerticalXXL,
+    backgroundColor: "var(--lh-bg-grouped)",
   },
   groupLabel: {
     color: tokens.colorNeutralForeground3,
-    paddingLeft: tokens.spacingHorizontalS,
-    marginTop: tokens.spacingVerticalM,
+    paddingLeft: tokens.spacingHorizontalM,
+    marginTop: tokens.spacingVerticalL,
+    fontSize: tokens.fontSizeBase200,
+    lineHeight: tokens.lineHeightBase200,
   },
+  // The inset group card: elevated surface, 12pt corners, hairline ring.
   group: {
     display: "flex",
     flexDirection: "column",
     ...shorthands.borderRadius(tokens.borderRadiusLarge),
-    backgroundColor: tokens.colorNeutralBackground1,
+    backgroundColor: "var(--lh-bg-elevated)",
+    boxShadow: "0 0 0 0.5px var(--lh-separator)",
     overflow: "hidden",
   },
-  // A 44pt tappable settings row: icon + label, full width, quiet.
+  // §31 §5: the footnote footer — quiet context under a group.
+  groupFooter: {
+    color: tokens.colorNeutralForeground3,
+    fontSize: tokens.fontSizeBase200,
+    lineHeight: tokens.lineHeightBase200,
+    ...shorthands.padding(tokens.spacingVerticalXS, tokens.spacingHorizontalM, 0),
+  },
+  // A 44pt destination row: icon gutter · label · chevron disclosure, with
+  // the separator inset to the label edge (iOS-grouped, not full-bleed).
   row: {
-    justifyContent: "flex-start",
+    position: "relative",
+    display: "flex",
+    alignItems: "center",
+    gap: tokens.spacingHorizontalS,
     minHeight: "44px",
-    ...shorthands.borderRadius(0),
+    width: "100%",
+    ...shorthands.padding(0, tokens.spacingHorizontalM),
+    ...shorthands.borderStyle("none"),
+    backgroundColor: "transparent",
+    color: tokens.colorNeutralForeground1,
+    fontFamily: "inherit",
+    fontSize: tokens.fontSizeBase300,
+    textAlign: "left",
+    cursor: "pointer",
+    outlineStyle: "none",
+    "::after": {
+      content: '""',
+      position: "absolute",
+      left: `${ICON_GUTTER + 12}px`,
+      right: 0,
+      bottom: 0,
+      height: "var(--lh-hairline)",
+      backgroundColor: "var(--lh-separator)",
+    },
+    ":last-child": { "::after": { display: "none" } },
+    ":focus-visible": {
+      outlineWidth: "2px",
+      outlineStyle: "solid",
+      outlineColor: tokens.colorStrokeFocus2,
+      outlineOffset: "-2px",
+    },
+  },
+  rowIcon: {
+    display: "inline-flex",
+    width: `${ICON_GUTTER}px`,
+    flexShrink: 0,
+    fontSize: "20px",
+    color: tokens.colorNeutralForeground2,
+  },
+  rowLabel: { flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+  rowChevron: {
+    display: "inline-flex",
+    fontSize: "14px",
+    color: "var(--lh-label-quaternary)",
   },
   // The relocated management surfaces render inline inside their group card.
   inline: {
@@ -59,7 +129,7 @@ const useStyles = makeStyles({
   },
 });
 
-/** One tappable destination row. */
+/** One tappable destination row (44pt, chevron disclosure, inset hairline). */
 function Row({
   icon,
   label,
@@ -71,9 +141,15 @@ function Row({
 }) {
   const styles = useStyles();
   return (
-    <Button appearance="subtle" icon={icon} className={styles.row} onClick={onClick}>
-      {label}
-    </Button>
+    <button type="button" className={mergeClasses("lh-press", styles.row)} onClick={onClick}>
+      <span className={styles.rowIcon} aria-hidden>
+        {icon}
+      </span>
+      <span className={styles.rowLabel}>{label}</span>
+      <span className={styles.rowChevron} aria-hidden>
+        <IconChevronRight />
+      </span>
+    </button>
   );
 }
 
@@ -101,6 +177,9 @@ export function SettingsPage() {
         />
         <Row icon={<IconHistory />} label="Audit log" onClick={() => setAuditDlg(true)} />
       </div>
+      <Text as="p" className={styles.groupFooter}>
+        Everything runs on this device unless you connect a cloud model.
+      </Text>
 
       {/* 0.13.10 §3: Business definitions — SemanticNav's management content
           (metrics + synonyms, rename/delete, proposals) relocated from the
@@ -114,6 +193,9 @@ export function SettingsPage() {
           <SemanticNav />
         </div>
       </div>
+      <Text as="p" className={styles.groupFooter}>
+        Definitions shape how new answers read your data. Files are never changed.
+      </Text>
 
       {/* 0.13.10 §3: Saved views — ViewsNav's manage surface (list/rename/
           delete/inspect) relocated from the Library section. "Save as view"

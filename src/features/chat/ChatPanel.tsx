@@ -874,7 +874,10 @@ const useStyles = makeStyles({
     // IS the field; the Textarea inside is stripped bare (composerField) so
     // the shell carries the whole look.
     backgroundColor: tokens.colorNeutralBackground1,
-    ...shorthands.borderRadius(tokens.borderRadiusXLarge),
+    // §31 §5: the capsule field — a true pill at one line (44pt tall, 22px
+    // radius = half), softening rather than ballooning as the draft grows
+    // multiline (the Messages idiom; a 999px capsule looks inflated there).
+    ...shorthands.borderRadius("22px"),
     boxShadow: tokens.shadow8,
     ...shorthands.padding(
       tokens.spacingVerticalS,
@@ -4356,7 +4359,7 @@ export function ChatPanel() {
     ) : null;
   const investigationsSheet =
     compactLayout && invOpen ? (
-      <Sheet title="Investigations" onClose={() => setInvOpen(false)}>
+      <Sheet title="Investigations" onClose={() => setInvOpen(false)} initialDetent="medium">
         <InvestigationsNav />
       </Sheet>
     ) : null;
