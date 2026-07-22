@@ -5387,3 +5387,209 @@ per numbered section, consumer migration (3b) BEFORE the contract
 change (3c). Open ONE PR titled "On-device token diet v2: tiered
 budgeter, fact-sheet narration, quote-digest RAG"; stop at the PR.
 ```
+
+## 33. Mobile polish: a gentle nudge, links that open, a tour that points at real things (2026-07-21)
+
+Three owner reports @ 0.13.10 (screenshot-confirmed), diagnosed:
+- **The feedback nudge doesn't switch tabs — it COVERS them.** No
+  tab-switching code exists anywhere near it. FeedbackNudge.tsx (last
+  touched #151 — it predates the tab bar) renders a fixed pill at
+  `bottom: spacingVerticalL, zIndex: 900, maxWidth: 320px` with NO
+  `--lh-tabbar-h`/`--lh-safe-bottom` offset (the fix the bug-report
+  FAB got in #195 was never ported), so on a 390pt phone it sits on
+  the tab bar's left half and occludes the Chat(home)/Files tab
+  targets — taps meant for tabs hit the pill. Cadence is a 5-min
+  visible-time timer with localStorage keys (SHOWN permanent-on-open;
+  3-day snooze on X); it already avoids open dialogs and the tour
+  (`data-tourActive`). AppShell already exposes every signal a gentle
+  version needs: the compactTab==="chat" transition, useAnySheetOpen,
+  keyboardInset/editableFocused, and #202's Sheet primitive.
+- **The feedback buttons are dead on iOS because window.open is dead
+  on iOS — everywhere.** Both buttons call bare
+  `window.open(url,"_blank")` (BugReport.tsx:104); desktop webviews
+  route that to the OS browser, iOS WKWebView silently ignores it,
+  and the shell installs no navigation handler. NOTHING opens an
+  external URL on iOS today: answer links (ChatPanel.tsx:2165
+  target=_blank), SettingsMenu/SettingsPage links, provider sign-in —
+  same pattern. tauri-plugin-opener 2.5.4 IS registered un-gated
+  (lib.rs:422-425) and `opener:default` IS granted to the main
+  window — nothing ever calls it.
+- **The first-run tour is device-blind below the copy layer.** Five
+  steps; only strings branch on platform. On compact first-run,
+  `explorer` and `settings` anchors are in UNMOUNTED surfaces (the
+  Files page and Sidebar don't exist on the Chat tab) → the 8-frame
+  retry silently degrades them to centered modals pointing at
+  nothing; steps 2/3/4 all pile on the one chat screen; the `beam`
+  step anchors the hero TITLE (semantic mismatch on every platform);
+  replay from the compact Settings page popover-points at occluded
+  elements. The mobile "models" copy still says the private model is
+  desktop-only — STALE since #196-#200 shipped the on-device model.
+  Only the composer has a stable compact anchor; tab-bar tabs, the
+  tile-grid Add button, the History clock, and the shield have no
+  data attributes. Housekeeping the audit surfaced: ChatPanel.tsx
+  contains a stray NUL byte (~offset 170644) that makes ripgrep
+  treat it as binary (use `grep -a`; three anchors live past it);
+  `data-tour="investigations"` is an orphan with no step (pinned by
+  investigationsUi.test.mjs:143); openspec field-patch-0.12.5 tasks
+  1.6/1.7 (keep tour anchors accurate) are still unchecked.
+
+### Prompt
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first, local-first analytics AI harness: Rust engine
+(native/crates/lighthouse-core) in a Tauri 2 shell (same crate is
+the iOS app), byte-compatible TS twin (src/server/), React UI
+(src/). Read CLAUDE.md, docs/ts-twin.md, and roadmap §33 (the
+diagnosis above) before writing code. Three mobile-polish items +
+hygiene, one PR. NOTE BEFORE YOU GREP: ChatPanel.tsx contains a NUL
+byte that makes ripgrep treat it as binary — use `grep -a` until §4
+removes it, or you will falsely conclude anchors are missing.
+
+1. The feedback nudge becomes gentle on compact (and never occludes
+   navigation anywhere).
+   - Root cause: the fixed pill predates the tab bar and has no
+     --lh-tabbar-h/--lh-safe-bottom offset. On COMPACT, stop
+     rendering the pill entirely. Instead: when the existing
+     eligibility fires (keep the 5-min visible-time timer and the
+     localStorage keys exactly — SHOWN permanent-on-open, 3-day
+     snooze), set a PENDING flag; present it only when ALL hold: the
+     user is on (or next arrives at) the Chat tab, ~3s dwell has
+     passed, no sheet is open (useAnySheetOpen), the keyboard is
+     down (keyboardInset === 0, no editableFocused), the tour isn't
+     active (data-tourActive), and no answer is streaming. Present as
+     a small centered modal (the house Dialog; #202's Sheet is
+     acceptable if it reads calmer) — title "What do you think so
+     far?", one line of body, [Share feedback] [Not now]. "Not now"
+     = the existing 3-day snooze; "Share feedback" = the existing
+     SHOWN semantics + the lighthouse:open-feedback event. Gentle
+     fade/scale in; prefers-reduced-motion = fade.
+   - DESKTOP keeps the corner pill unchanged — but give it the same
+     tabbar/safe-area offset expression the FAB uses anyway
+     (defensive; evaluates to 0 on desktop).
+   - Pins: on compact, no nudge surface may use position:fixed
+     without the tab-bar offset (structural test); the modal's
+     gating conditions unit-tested as a pure verdict function
+     (nudgePresentVerdict(state) — the house pattern).
+
+2. External links actually open — one seam, every call site.
+   - Create ONE helper (src/lib/openExternal.ts): inside the Tauri
+     shell it routes through tauri-plugin-opener (invoke
+     plugin:opener|open_url via @tauri-apps/plugin-opener), on plain
+     web it falls back to window.open. The plugin is already
+     registered and permission-granted; verify the capability set
+     actually allows open_url (add opener:allow-open-url to
+     capabilities/default.json if the default set doesn't) and that
+     it works ON DEVICE for both https:// (→ Safari) and mailto:
+     (→ Mail). If the pinned opener version cannot open a scheme on
+     iOS, add a minimal shell command (open_external_url) using
+     UIApplication.open via the ObjC-runtime idiom (#200's house
+     pattern), cfg'd for mobile — do NOT fork the UI seam.
+   - Migrate EVERY external-open call site through the helper:
+     BugReport's two buttons, SettingsMenu (openExternal + GitHub
+     link + provider sign-in), SettingsPage, and ANSWER LINKS
+     (ChatPanel's anchor renderer: in-shell clicks route through the
+     helper; plain-web keeps target=_blank). Grep-pin: no bare
+     window.open outside the helper.
+   - The owner's rule for the feedback buttons: plug them in or
+     remove them. Primary path is plugging in (verified on device).
+     If EITHER button cannot be verified working on a platform, it
+     does not render there — no dead buttons — and in all cases add
+     a tertiary "Copy feedback" action that writes the composed
+     report body + destination address to the clipboard (always
+     works, zero-backend). feedbackLinks.ts constants and their
+     byte-pin tests are unchanged.
+
+3. A tour that points at real things on every device.
+   - Targeting becomes mode-aware: stepsFor(platform, compact) — the
+     presentation (TeachingPopover + centered fallback, tourShown
+     setting, replay events) stays.
+   - COMPACT step list (first-run lands on the Chat tab; every
+     anchor must be IN THE DOM there — tabs are always visible, so
+     point at tabs for surfaces that live behind them):
+     1. Ask box (data-tour="chat", exists) — ask in your own words;
+        grounded answers with citations.
+     2. Files TAB (new data-tour on the CompactTabBar tab —
+        map t.id → attribute in the existing .map) — add files from
+        the Files app; they stay on this device; the eye controls
+        what the AI sees.
+     3. Suggestions/recipe chips row on the hero (new
+        data-tour="suggestions") — tap a suggested ask; Beam
+        computes every number itself and shows its work. (This
+        REPLACES the old `beam` step's title-anchor everywhere —
+        desktop too; the step finally points at something real.)
+     4. The provenance line (data-tour="models", exists) — copy must
+        reflect TODAY'S truth: on-device private model where the
+        device supports it, cloud only when you add a key; replace
+        the stale "private model runs on the desktop app" line —
+        source the wording from the availability-driven roster
+        truths, byte-pinned.
+     5. Settings TAB (new data-tour on the tab) — everything else
+        lives here; History is the clock button up top (mention, or
+        make History its own step anchored to the clock button — new
+        attribute either way; pick 5 steps total, calm over
+        complete).
+   - DESKTOP keeps its five steps with two fixes: the beam→
+     suggestions retarget (above) and the models-copy truth update.
+   - Replay on compact: "Take the tour" from Settings first returns
+     to the Chat tab (setCompactTab("chat")) and closes overlays so
+     no popover ever anchors an occluded element.
+   - Anchor floor (the missing regression guard): a structural test
+     asserting every step's data-tour target exists in the component
+     that is MOUNTED in that step's mode (source-pin per mode, the
+     chartIt.test.mjs house style) — dead anchors become a red test,
+     not a silent centered modal. The centered fallback stays as
+     last-resort behavior.
+4. Hygiene the audit surfaced (small, do them):
+   - Remove the NUL byte from ChatPanel.tsx (one-byte fix) and add a
+     tripwire test asserting no source file under src/ contains
+     \x00 — this un-breaks ripgrep for every future session.
+   - Delete the orphan data-tour="investigations"
+     (InvestigationsNav.tsx:321) and update its pin
+     (investigationsUi.test.mjs:143) — or, if the investigations
+     picker deserves a tour step later, note it in the PR instead of
+     leaving a dangling anchor.
+   - Check off openspec field-patch-0.12.5 tasks 1.6/1.7 (tour
+     anchors kept accurate) with a pointer to this PR.
+
+5. Stamps + gates. Bump 0.13.10 → 0.13.11 across all SEVEN stamp
+   files per CLAUDE.md. Full node + cargo suites, release-smoke, and
+   the ios-build lane green.
+
+Constraints. No analytics/telemetry/accounts — the nudge cadence
+stays local (localStorage), the feedback transport stays zero-backend
+(mailto + GitHub issue + clipboard). Desktop behavior unchanged
+except: the beam→suggestions tour retarget, the models-copy truth
+fix, and the defensive pill offset (evaluates to 0). Byte-pinned
+labels move only with their pins (MOBILE_NO_PROVIDER_TRUTHS and tour
+copy updates included). SharePoint plumbing untouched. Scope = these
+three reports + the listed hygiene; nothing else rides along.
+
+Acceptance (iPhone simulator/device, fresh install unless noted):
+1. Let the nudge become eligible (shorten the timer in a dev build):
+   nothing appears mid-task; on next arrival at the Chat tab, after
+   ~3s of calm (no keyboard, no sheet, no streaming), a small modal
+   fades in; "Not now" snoozes 3 days; nothing EVER overlaps or
+   occludes the tab bar (tap every tab while eligible — all
+   navigate). Desktop still shows the corner pill.
+2. On device: "Open a GitHub issue" opens Safari on the prefilled
+   issue; "Email us" opens Mail composed; answer links open Safari;
+   "Copy feedback" fills the clipboard. Any button that could not be
+   verified on a platform is absent there — zero dead buttons.
+3. First-run tour on iPhone: five steps, every one visually anchored
+   to a real on-screen element (no centered-modal fallbacks — the
+   anchor floor test is green); the models step tells today's truth;
+   replay from Settings works without occluded popovers. Desktop
+   tour: five steps, suggestions step anchors the chips row.
+4. NUL-byte tripwire green (and ripgrep finds all five data-tour
+   anchors in ChatPanel.tsx without -a); orphan anchor gone; suites
+   + release-smoke + ios-build green; seven stamps read 0.13.11.
+
+Environment. macOS + Xcode for device verification of §2 (the opener
+schemes) and the visual passes; container fallback per house
+convention (logic + structural pins here, grep-verified shell bits,
+ios-build as gate — and remember `grep -a` for ChatPanel until §4
+lands). One commit per numbered section. Open ONE PR titled "Mobile
+polish: gentle feedback nudge, working external links, mobile-native
+tour"; stop at the PR.
+```
