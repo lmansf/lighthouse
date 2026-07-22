@@ -6560,3 +6560,344 @@ section. Open ONE PR titled "Codify the conventions: house patterns,
 stamp tripwire, budget registry, twin contract, state guard"; stop
 at the PR.
 ```
+
+## 40. The mobile crate split: close the container blind spot (2026-07-22)
+
+Owner decision (from the §39 review): land the split. Today
+lighthouse-desktop is one crate serving desktop AND iOS via cfg
+gates, and it cannot compile in the dev container (no webkit/gtk) —
+so every shared-signature change is grep-verified and only truly
+checked at CI/release, a standing blind spot that has already
+produced only-surfaces-in-release-build bugs. A stale split attempt
+exists (origin/claude/mobile-s2-crate-split, ~0.13.x base — MINE it
+for shape, do not merge it). Sequencing: run AFTER the queued
+§36→§38→§37 and §39 land (this refactor touches the same shell
+files); run §41 and §42 after this one so their code lands in the
+final layout.
+
+### Prompt
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first, local-first analytics AI harness: Rust engine
+(native/crates/lighthouse-core) + a Tauri 2 shell crate
+(native/crates/lighthouse-desktop) that is BOTH the desktop app and
+the iOS app (mobile_entry_point; desktop-only code under
+src/desktop/ behind #[cfg(desktop)]), TS twin (src/server/), React
+UI (src/). Read CLAUDE.md, docs/CONVENTIONS.md (from §39),
+docs/ts-twin.md, and roadmap §39 + §40 before writing code. GOAL: a
+crate layout where EVERYTHING except the thin Tauri wrapper compiles
+in the Linux dev container (`cargo check` — no webkit/gtk), desktop-
+only code is physically separated (no cfg soup), and behavior is
+BYTE-IDENTICAL. This is a mechanical refactor: zero feature change,
+zero engine change.
+
+PHASE A — Spike & decide (one doc commit, docs/crate-split.md).
+  - Inventory every module in lighthouse-desktop by its real
+    dependency surface: (a) pure logic that only needs
+    lighthouse-core (candidates: command bodies, bootstrap_env
+    logic, budget/bridge glue, boot_guard), (b) tauri-typed but
+    platform-neutral (AppHandle wrappers, plugin init), (c) desktop-
+    only (src/desktop/*: supervise, tray, widget, whisper,
+    autostart), (d) iOS-side (gen/apple Swift — unaffected).
+  - Mine origin/claude/mobile-s2-crate-split for its cut line and
+    record what to keep/discard from it.
+  - Decide the layout with THE constraint stated as the acceptance:
+    the container must cargo-check all moved code. The expected
+    shape (adjust with evidence): a new lighthouse-shell crate
+    holding (a) — command bodies refactored to take thin
+    capability/handle traits instead of tauri types where trivial,
+    or plain functions the wrapper calls; lighthouse-desktop remains
+    the Tauri app crate but shrinks to the (b) wrapper + (c)
+    desktop modules; `tauri ios build` keeps working (the app crate
+    name, gen/apple, and tauri.conf.json stay put — verify, this is
+    the hard constraint). If the spike shows a trait seam would
+    force behavior-risking rewrites in some module, LEAVE that
+    module in the wrapper and say so — an 80% extraction that ships
+    beats a 100% extraction that breaks.
+  - Nothing in Phase B contradicts the doc without updating it.
+
+PHASE B — Execute.
+1. Create lighthouse-shell (workspace member; version.workspace).
+   Move the (a) modules verbatim where possible — mechanical moves,
+   imports adjusted, no logic edits (any forced signature change is
+   listed in the PR body with its reason). The wrapper crate's
+   command fns become thin delegations.
+2. Keep the blind spot closed forever: add the container-runnable
+   check to the JS/native check suite — `cargo check -p
+   lighthouse-core -p lighthouse-shell` (and -p lighthouse-cli/
+   -server/-mcp as today) runs in the dev container AND as a per-PR
+   CI job (not just release-smoke). The remaining grep-verify
+   surface is ONLY the thin wrapper — update CLAUDE.md's "desktop
+   crate does not compile in the container" note to name the new,
+   smaller reality.
+3. Stamps + docs: the Cargo.lock lighthouse-* crate count changes
+   (FIVE → SIX) — CLAUDE.md's stamp section already says "bump by
+   pattern, not count"; update its parenthetical count note and
+   verify the §39 check-stamps tripwire passes (it asserts
+   agreement, not count — confirm). ios-build lane path filters
+   updated if they name crate paths.
+4. Gates: full node + cargo suites, release-smoke (3-OS), ios-build
+   — all green. The PR diff must review as moves: use git log
+   --follow evidence in the PR body; any non-move hunk is listed
+   explicitly. Bump current+1 across all SEVEN stamp files.
+
+Constraints. Behavior byte-identical (release-smoke + the settings
+round-trip + wire-protocol tests are the proof); engine untouched;
+TS twin untouched; no cfg(desktop) added to lighthouse-core; the
+Swift side untouched. No version of this "improves" logic in
+passing — mechanical only. SharePoint plumbing untouched.
+
+Acceptance:
+1. `cargo check -p lighthouse-shell` succeeds in the Linux dev
+   container; the per-PR CI job runs it.
+2. Desktop release-smoke (3-OS) and ios-build both green; a local
+   desktop boot answers the zero-network smoke ask exactly as
+   before.
+3. lighthouse-desktop contains only the Tauri wrapper + desktop-only
+   modules; src/desktop/ cfg gates that guarded whole modules are
+   gone (the crate boundary IS the gate now).
+4. CLAUDE.md updated (blind-spot note + crate-count note);
+   docs/crate-split.md records the cut line and the exceptions.
+5. Seven stamps bumped; §39 tripwire green.
+
+Environment. The container runs everything except the wrapper
+build; release-smoke/ios-build are the wrapper's gate (house
+convention). Commit per phase/section. Open ONE PR titled "Crate
+split: lighthouse-shell — the container-checkable shell"; stop at
+the PR.
+```
+
+## 41. .rag-vault out of Documents on iOS: engine state gets a safe home (2026-07-22)
+
+Owner decision (from §39): clean up .rag-vault on iOS. Today
+vault_dir = the app's Documents folder (deliberate — §23's "On My
+iPhone → Lighthouse" Files-app door for USER FILES), and the engine
+keeps its state INSIDE it: Documents/.rag-vault (state.json, index,
+extraction cache). That makes engine state user-deletable in the
+Files app and iCloud-sync-conflictable ("state 2.json" duplicates).
+The split: USER FILES STAY in Documents (the visible-folder feature
+is untouched); ENGINE STATE moves to Application Support. Run AFTER
+§39 (the written_by guard is used by the migration) and after §40
+(final crate layout); before §42 (the Tier-2 model download should
+land in the final storage layout).
+
+### Prompt
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first, local-first analytics AI harness: Rust engine
+(native/crates/lighthouse-core) in a Tauri 2 shell (desktop + iOS),
+TS twin (src/server/), React UI (src/). Read CLAUDE.md,
+docs/CONVENTIONS.md, and roadmap §23 + §39 + §41 before writing
+code. GOAL on iOS ONLY: engine state (the .rag-vault dir —
+state.json, index, extraction cache) moves from the user-visible
+Documents folder to Application Support, with a bulletproof
+migration for existing installs. User files stay in Documents — the
+Files-app door ("On My iPhone → Lighthouse") is a FEATURE and is
+untouched. Desktop is byte-identical (its .rag-vault-inside-vault
+convention stays).
+
+1. The platform seam. config.rs: state_dir() becomes platform-aware
+   — desktop: vault_dir().join(".rag-vault") exactly as today (pin
+   byte-identical); iOS: the app's Application Support directory
+   (via the existing bootstrap_env dir plumbing — extend
+   LIGHTHOUSE_APP_STATE_DIR usage rather than inventing a new env).
+   TS twin mirrors the seam shape (web behavior unchanged — no fs).
+   The extraction cache under the new location is marked
+   do-not-back-up (isExcludedFromBackup — it is regenerable by
+   CACHE_VERSION design; state.json and the index STAY backed up).
+2. The migration (the careful part — existing TestFlight installs
+   have real data in Documents/.rag-vault).
+   On iOS boot, BEFORE the engine opens state: if legacy
+   Documents/.rag-vault exists and the new location is empty →
+   migrate: copy file-by-file, fsync, verify (size/count), then
+   remove the legacy dir; write a one-line marker + log. Handle the
+   iCloud-conflict reality: duplicate variants ("state 2.json",
+   conflicted copies) — choose the newest by the §39 written_by
+   stamp (fall back to mtime), and PRESERVE the losers as
+   .rag-vault-legacy-bak/ under Application Support (never silently
+   discard user state). The migration is IDEMPOTENT (a re-run
+   no-ops), and on ANY failure it falls back to running from the
+   legacy location with one honest log line — never a data-loss
+   path, never a refuse-to-boot. Express the decision logic
+   (fresh/migrate/conflict/fallback) as a pure verdict fn
+   (state_home_verdict — the house pattern) with exhaustive tests:
+   clean move, partial previous copy, conflicted duplicates, both-
+   locations-populated (newest wins, other preserved), read-only fs.
+3. Files-app hygiene after the move: Documents shows ONLY user
+   files (plus the legacy dir until migrated); nothing user-visible
+   references .rag-vault; the §23 doors, §26 add path, and the tile
+   grid behave identically (their tests stay green untouched).
+   Uploads/vault file writes keep landing in Documents.
+4. Secrets/settings: verify secrets.json and settings already live
+   under app-state (they do — confirm, don't move them twice); the
+   §42 model download directory is documented to live under
+   Application Support too (a one-line note in the §41 doc for §42
+   to consume).
+5. Tests + stamps. Engine tests for the verdict fn + migration
+   fixtures (cargo; simulate legacy layouts under temp dirs);
+   desktop state_dir pin byte-identical; ios-build green; a
+   simulator pass: seed a legacy Documents/.rag-vault (with a
+   conflicted duplicate), update-launch, assert state intact +
+   Files app shows only user files + ask still answers. Bump
+   current+1 across all SEVEN stamps per CLAUDE.md. Document the
+   final layout in docs/CONVENTIONS.md's state section and
+   docs/ios-private-model.md if it references paths.
+
+Constraints. Desktop byte-identical (pins). No engine behavior
+change beyond the path seam + migration. User files never move,
+never deleted; conflict losers preserved, not discarded. No
+telemetry. SharePoint plumbing untouched. Scope = iOS state
+relocation only.
+
+Acceptance:
+1. Fresh iOS install: state lives under Application Support from
+   first boot; Documents contains only user files; everything
+   works.
+2. Upgrade path: a seeded legacy install (incl. a conflicted
+   "state 2.json") migrates losslessly — newest state wins, losers
+   preserved in the bak dir, engine answers from migrated state,
+   legacy dir gone, second launch no-ops.
+3. A forced migration failure (read-only target fixture) runs from
+   the legacy location with the honest log line — no data loss, no
+   boot failure.
+4. Extraction cache excluded from backup; state/index not; desktop
+   state_dir byte-identical (pin).
+5. Suites + release-smoke + ios-build green; seven stamps bumped.
+
+Environment. Verdict/migration logic fully container-testable
+(temp-dir fixtures); the simulator pass needs macOS/Xcode (house
+convention). One commit per numbered section. Open ONE PR titled
+"iOS: engine state moves to Application Support (lossless
+migration)"; stop at the PR.
+```
+
+## 42. Tier-2 ships: the fallback private model for older iPhones (2026-07-22)
+
+Owner decision (from §39): ship it. Apple Foundation Models requires
+iPhone 15 Pro+/M-series — today every older device has NO private
+model (honest roster, absent capability). Tier-2 = a small
+Apache-2.0 GGUF running IN-PROCESS via llama.cpp+Metal (no child
+processes on iOS), behind the SAME loopback contract the bridge
+already serves, downloaded on demand (~1 GB — never bundled in the
+.ipa). The §27 Phase-A doc (docs/ios-private-model.md) governs:
+planned model Qwen2.5-1.5B-Instruct Q4 (Apache-2.0; SmolLM2-1.7B the
+alternate), increased-memory-limit entitlement, no JIT. Run AFTER
+§40 (code lands in the final crates) and §41 (model storage under
+Application Support); §36's tier/budget/retry machinery is assumed
+landed.
+
+### Prompt
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first, local-first analytics AI harness: Rust engine
+(native/crates/lighthouse-core) + shell crates (per §40's split), a
+loopback bridge serving the on-device model
+(gen/apple/Sources/…/PrivateModelServer.swift), TS twin
+(src/server/), React UI (src/). Read CLAUDE.md, docs/CONVENTIONS.md,
+docs/ios-private-model.md (Phase-A decisions), docs/crate-split.md,
+and roadmap §27 + §36 + §39 + §42 before writing code. GOAL: devices
+WITHOUT Apple Foundation Models get a real private model — a small
+Apache-2.0 GGUF running in-process (llama.cpp + Metal) behind the
+SAME OpenAI-compatible loopback contract — downloaded on demand with
+explicit consent. Tier-1 devices are untouched (FM stays preferred;
+never both).
+
+PHASE A — Spike refresh (one commit, updates ios-private-model.md).
+  Confirm on the current toolchain: llama.cpp builds for
+  aarch64-apple-ios with Metal (the xcframework route) and links
+  from our crate layout (llama-cpp-2 vs static-lib FFI — pick with
+  evidence; NO JIT paths); the model choice per the Phase-A doc
+  (Qwen2.5-1.5B-Instruct Q4_K_M ~1 GB, Apache-2.0 — record license
+  + attribution text; SmolLM2-1.7B fallback choice); its REAL
+  context window and memory footprint under the
+  increased-memory-limit entitlement on a 4 GB device
+  (os_proc_available_memory before load — pick the minimum device
+  bar with evidence); TestFlight/App-Store review notes for the
+  entitlement. Record all of it; Phase B follows the doc.
+
+PHASE B — Build.
+1. The backend behind the existing contract. The bridge (or a
+   sibling in-process server in the same listener) serves
+   /v1/chat/completions + /health for the llama backend when FM is
+   unavailable: same SSE framing, same FM_OVERFLOW/GUARDRAIL marker
+   vocabulary (overflow from llama = context-full), /health
+   advertises the model's REAL context size (the §36 tier machinery
+   consumes it — register the tier + call-type budgets in
+   budget.rs/ts per the §39 registry floor; digit-aware estimator
+   applies). Selection order: FM available → FM; else llama backend
+   if the model file is present; else unavailable. ONE backend per
+   session; the §38 framing gates and §36 retry ladder apply
+   unchanged (they key on the contract, not the backend).
+2. Download with consent (never bundled). Reuse the
+   local_model.rs download machinery (resumable ranges, GGUF magic
+   validation, byte-progress UI) pointed at the chosen model URL,
+   storing under Application Support (§41's layout). Explicit
+   user consent states the size before any bytes move; wifi-only
+   by default with a cellular opt-in; the download is user-
+   initiated egress — record it honestly in the egress ledger
+   (host + purpose) exactly like the desktop model download.
+   Resume/validate/uninstall paths tested. The .ipa gains ~no size.
+3. Memory + warm honesty. Before load: os_proc_available_memory
+   check → below the bar, the option reports "this device can't
+   hold the private model" (honest state, no download offer, no
+   spinner-to-nowhere). Load reuses the §22.4 warm machinery (real
+   warm: weights paging — the rotating honest labels apply);
+   jetsam/background eviction handled by the §22.4 health→respawn
+   semantics (in-process: re-init on next ask with the warm wait).
+4. Roster + copy, availability-driven (§27 idiom, now three-state):
+   FM device → private model, zero download (unchanged); non-FM
+   capable device → "Private model — download (~1 GB)" appears in
+   AI models + onboarding model slide with one honest line (runs
+   on this device, nothing leaves it); below-the-bar device → the
+   §24 empty-provider truths stand. Byte-pinned copy, twins; the
+   tour/models step truth-line already reads from availability
+   (verify, don't fork). Apache-2.0 attribution lands in About.
+5. Tests + gates. Tier + budgets registered (registry floor);
+   availability verdict (fm/llama/none × installed/absent/below-
+   bar) as a pure fn, twins; warm-wait reuse pins; forced-tier rig:
+   the llama-mobile tier passes the §36 budget floors; contract
+   tests: the llama backend speaks the identical wire shapes
+   (reuse the wire-protocol grounded-ask test against it where
+   runnable). DEVICE acceptance on a non-FM iPhone (or FM-disabled
+   build): consent → download (resumable across a kill) → warm →
+   airplane-mode ask answers with "Answered on this device";
+   overflow counter 0 on the standard scenarios; uninstall frees
+   the space. ios-build lane gains the llama xcframework build +
+   a payload assertion (the §25 OCR-lesson pattern: assert the
+   .ipa does NOT balloon and the framework is present).
+6. Stamps + docs. Bump current+1 across all SEVEN stamps;
+   CLAUDE.md untouched except any build-lane note; the §27/§39
+   "Tier-2 deferred" language updated to shipped.
+
+Constraints. Privacy first: the model download is the only network
+touch, user-initiated, egress-recorded; inference is fully
+on-device; no telemetry. Tier-1/FM path byte-identical. Engine
+prompt/budget behavior changes ONLY via the new tier registration.
+No JIT; no child processes; no bundled weights. Desktop untouched.
+SharePoint plumbing untouched.
+
+Acceptance:
+1. iPhone 12-14-class device (or FM-disabled build): download with
+   consent → airplane-mode ask answers on-device; egress ledger
+   shows exactly the one download; counter 0 on the scenario set.
+2. FM device: behavior byte-identical to today (never offered the
+   download; FM preferred).
+3. Below-the-bar device/fixture: honest "can't hold it" state — no
+   download offer, no dead ends.
+4. Kill mid-download → resume completes; uninstall frees space;
+   GGUF validation rejects a corrupt file.
+5. Budget floors green for the new tier (rig); §38 framing +
+   §36 ladder behave identically on the llama backend (tests).
+6. Suites + release-smoke + ios-build (with payload assertion)
+   green; seven stamps bumped; docs updated; attribution visible.
+
+Environment. Engine/twin/verdict/budget work is container-testable;
+the xcframework build + device acceptance need macOS/Xcode + a
+non-FM test device (house convention; record device results in the
+PR). Commit per numbered section (Phase A first). Open ONE PR
+titled "Tier-2: the on-device fallback model for older iPhones";
+stop at the PR.
+```
