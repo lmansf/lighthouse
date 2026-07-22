@@ -141,8 +141,10 @@ test("0.13.10 §3: the nav mounts in the chat-header PICKER (Sheet on compact, p
   );
 });
 
-test("the nav is calm and non-destructive: tour anchor, plain Archive, neutral selection", () => {
-  assert.match(nav, /data-tour="investigations"/, "tour anchor present");
+test("the nav is calm and non-destructive: plain Archive, neutral selection", () => {
+  // §33 §4: the anchor was an orphan — no tour step ever targeted it (the
+  // anchor floor in tourAnchors.test.mjs now guards the whole registry).
+  assert.doesNotMatch(nav, /data-tour=/, "no dangling tour anchor");
   assert.match(nav, />\s*Archive\s*</, 'the menu says "Archive", plainly');
   assert.match(nav, /setInvestigationArchived\(id, true\)/, "archive is the visibility flag op");
   assert.doesNotMatch(

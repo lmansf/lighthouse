@@ -228,7 +228,7 @@ export function EgressShield({
                   </Text>
                   <div className={styles.list}>
                     {egress.destinations.map((d) => (
-                      <div className={styles.row} key={`${d.host} ${d.purpose}`}>
+                      <div className={styles.row} key={`${d.host}\x00${d.purpose}`}>
                         <div className={styles.rowTop}>
                           <Text className={styles.host}>{d.host}</Text>
                           <Text className={styles.sub}>

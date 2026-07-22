@@ -309,7 +309,7 @@ export function InvestigationsNav() {
   const globalActive = currentInvestigationId === null;
 
   return (
-    <nav aria-label="Investigations" data-tour="investigations" className={styles.section}>
+    <nav aria-label="Investigations" className={styles.section}>
       <div className={styles.header}>
         <Text size={200} weight="semibold" className={styles.headerLabel}>
           Investigations

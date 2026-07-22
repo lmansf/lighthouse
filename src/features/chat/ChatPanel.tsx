@@ -4102,7 +4102,7 @@ export function ChatPanel() {
       .filter((c) => c.kind === "file" && !attachedIds.has(c.id))
       .slice(0, 8);
   }, [mention, nodes, attachedIds]);
-  const mentionKey = mention ? `${mention.start} ${mention.query}` : null;
+  const mentionKey = mention ? `${mention.start}\x00${mention.query}` : null;
   const mentionShown =
     mention !== null && mentionMatches.length > 0 && mentionKey !== mentionDismissed;
   const mentionSelClamped =
