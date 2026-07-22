@@ -80,6 +80,8 @@
   --lh-glass-level: 1;
   --lh-glass-blur: 14px;
   --lh-glass-saturate: 180%;
+  /* The 0.5px inner top highlight that sells the material's edge. */
+  --lh-glass-highlight: rgba(255, 255, 255, 0.5);
 
   /* --- §31 semantic pairs (Paper) --------------------------------------------
      iOS-style semantic names over the existing Beam palette for hand-rolled
@@ -130,6 +132,7 @@
   --lh-tint: #FFC24D;
   --lh-shadow-card: 0 8px 24px rgba(0, 0, 0, 0.35);
   --lh-shadow-sheet: 0 12px 32px rgba(0, 0, 0, 0.45);
+  --lh-glass-highlight: rgba(255, 255, 255, 0.12);
 }
 
 /* 1x displays can't paint half a pixel — round the hairline up, not away. */

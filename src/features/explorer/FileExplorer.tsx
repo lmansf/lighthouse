@@ -111,7 +111,6 @@ const useStyles = makeStyles({
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: tokens.colorNeutralBackgroundAlpha2,
-    backdropFilter: "blur(3px)",
     ...shorthands.borderRadius(tokens.borderRadiusLarge),
   },
   // A calm, self-contained progress card — a determinate bar that eases as it
@@ -166,7 +165,6 @@ const useStyles = makeStyles({
     justifyContent: "center",
     ...shorthands.padding(tokens.spacingHorizontalL),
     backgroundColor: tokens.colorBrandBackground2,
-    backdropFilter: "blur(2px)",
     ...shorthands.borderRadius(tokens.borderRadiusLarge),
     pointerEvents: "none", // the panel underneath owns the real drop events
     animationName: { from: { opacity: 0 }, to: { opacity: 1 } },

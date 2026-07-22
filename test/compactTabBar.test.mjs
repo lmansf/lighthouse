@@ -23,14 +23,15 @@ const shell = read("src/shell/AppShell.tsx");
 const chat = read("src/features/chat/ChatPanel.tsx");
 const pane = read("src/shell/paneLayout.ts");
 
-test("the bar is fixed to the bottom and safe-area-inset-bottom aware", () => {
+test("the bar floats: fixed, inset from the edges, above the home indicator (§31 §2)", () => {
   assert.match(bar, /position:\s*"fixed"/, "fixed to the viewport");
-  assert.match(bar, /bottom:\s*0/, "pinned to the bottom edge");
   assert.match(
     bar,
-    /paddingBottom:\s*"var\(--lh-safe-bottom/,
-    "pads the home-indicator inset so the row never rides under it",
+    /bottom:\s*`calc\(var\(--lh-safe-bottom, 0px\) \+ \$\{TAB_BAR_FLOAT_GAP\}px\)`/,
+    "hovers the float gap above the safe area (never under the indicator)",
   );
+  assert.match(bar, /borderRadius\("var\(--lh-capsule\)"\)/, "the floating capsule shape");
+  assert.match(bar, /maxWidth:\s*"420px"/, "a pill on landscape phones, not a plank");
 });
 
 test("targets are ≥44pt and the tab set comes from paneLayout data", () => {
@@ -48,10 +49,29 @@ test("the active tab is marked and uses a filled glyph", () => {
   );
 });
 
-test("hidden slides fully off-screen, stops intercepting taps, and honors reduced motion", () => {
-  assert.match(bar, /hidden:\s*\{[^}]*transform:\s*"translateY\(100%\)"/s, "parks below the viewport");
-  assert.match(bar, /hidden:\s*\{[^}]*pointerEvents:\s*"none"/s, "never intercepts while parked");
-  assert.match(bar, /prefers-reduced-motion/, "the slide is honored off for reduced motion");
+test("hidden slides fully off-screen, stops intercepting taps, and rides the motion tokens", () => {
+  assert.match(
+    bar,
+    /hidden:\s*\{[^}]*transform:\s*`translateY\(calc\(100% \+ var\(--lh-safe-bottom, 0px\)/s,
+    "parks below the viewport, clearing the float inset",
+  );
+  assert.match(bar, /hidden:\s*\{[\s\S]{0,400}?pointerEvents:\s*"none"/, "never intercepts while parked");
+  // Motion rides the §1 spring/duration tokens, which prefers-reduced-motion
+  // collapses globally (pinned in appleTokens.test.mjs).
+  assert.match(bar, /transitionTimingFunction:\s*"var\(--lh-spring\)"/, "springs, not easings");
+  assert.match(bar, /transitionDuration:\s*"var\(--lh-dur\)"/, "token duration (PRM-collapsible)");
+});
+
+test("§31 §2: glass capsule + scroll-minimize with top-restore", () => {
+  assert.match(bar, /color-mix\(in srgb, var\(--lh-bg-secondary\) calc\(100% - 38% \* var\(--lh-glass-level\)\), transparent\)/, "the translucent mix solidifies at level 0");
+  assert.match(bar, /blur\(calc\(var\(--lh-glass-blur\) \* var\(--lh-glass-level\)\)\)/, "blur scales with the level (0 = none)");
+  assert.match(bar, /inset 0 0\.5px 0 var\(--lh-glass-highlight\)/, "the 0.5px inner highlight");
+  assert.match(bar, /window\.addEventListener\("scroll", onScroll, true\)/, "capture-phase direction tracking (element scrolls don't bubble)");
+  assert.match(bar, /if \(y <= TOP_RESTORE\)/, "scroll-to-top restores");
+  assert.match(bar, /if \(dy > SCROLL_DELTA\) setMinimized\(true\);/, "scroll-down minimizes");
+  assert.match(bar, /else if \(dy < -SCROLL_DELTA\) setMinimized\(false\);/, "scroll-up restores");
+  assert.match(bar, /labelMinimized/, "labels collapse in the minimized capsule");
+  assert.match(bar, /"lh-press"/, "tabs carry the §1 press compression");
 });
 
 test("AppShell hosts the bar, hides it for keyboard/sheet, and opens Settings as a page", () => {

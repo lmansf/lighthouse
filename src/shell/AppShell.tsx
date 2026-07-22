@@ -6,7 +6,7 @@ import { ArrowLeftRegular } from "@fluentui/react-icons";
 import { Sidebar } from "./Sidebar";
 import { LAYOUT } from "./theme";
 import { usePaneLayout, type CompactTab } from "./paneLayout";
-import { CompactTabBar, TAB_BAR_CONTENT_HEIGHT } from "./CompactTabBar";
+import { CompactTabBar, TAB_BAR_CONTENT_HEIGHT, TAB_BAR_FLOAT_GAP } from "./CompactTabBar";
 import { useVaultTree } from "./useVaultTree";
 import { anySheetOpen, useAnySheetOpen } from "./Sheet";
 import { useChatStore } from "@/stores/useChatStore";
@@ -405,7 +405,7 @@ export function AppShell({ sidebar, main }: AppShellProps) {
   useEffect(() => {
     if (typeof document === "undefined") return;
     const el = document.documentElement;
-    el.style.setProperty("--lh-tabbar-h", tabBarShown ? `${TAB_BAR_CONTENT_HEIGHT}px` : "0px");
+    el.style.setProperty("--lh-tabbar-h", tabBarShown ? `${TAB_BAR_CONTENT_HEIGHT + TAB_BAR_FLOAT_GAP}px` : "0px");
     return () => el.style.setProperty("--lh-tabbar-h", "0px");
   }, [tabBarShown]);
 
