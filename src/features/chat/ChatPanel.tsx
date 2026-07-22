@@ -4989,7 +4989,7 @@ export function ChatPanel() {
         {pinAlertBanner}
         <div className={styles.hero}>
           <span className={styles.beacon} />
-          <Title3 data-tour="beam">
+          <Title3>
             {currentInvestigation ? currentInvestigation.name : "Ask Lighthouse"}
           </Title3>
           {/* Hero context line (openspec: add-investigations §4.2): name is the
@@ -5036,7 +5036,7 @@ export function ChatPanel() {
           {includedFileIds.length === 0 && attachments.length === 0 ? (
             // Pre-flight: nothing is visible to AI yet. Inform gently and offer
             // the fix, but never block asking.
-            <div className={styles.noFilesCard}>
+            <div className={styles.noFilesCard} data-tour="suggestions">
               <IconWarning fontSize={20} />
               <Text size={300}>
                 The AI can&apos;t see any files yet. Answers will be generic until you add
@@ -5051,7 +5051,7 @@ export function ChatPanel() {
               </Button>
             </div>
           ) : (
-            <div className={styles.suggestRow}>
+            <div className={styles.suggestRow} data-tour="suggestions">
               {engineAsks.length > 0
                 ? // Catalog-derived asks submit immediately — every one is a
                   // real, answerable question about a real included file.
@@ -5252,7 +5252,7 @@ export function ChatPanel() {
           </div>
         </div>
 
-        <div className={styles.bodyWrap} data-tour="beam">
+        <div className={styles.bodyWrap}>
           <div
             className={styles.body}
             ref={bodyRef}

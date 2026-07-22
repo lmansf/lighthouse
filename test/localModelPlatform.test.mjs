@@ -102,9 +102,12 @@ test("modelProvidersFor: availability-driven — desktop full, mobile local iff 
 });
 
 test("the mobile empty-provider copy says exactly the two truths", () => {
+  // §33 §3: availability-driven — the state only exists when no on-device
+  // backend reported, so the truth is about THIS device, not "the desktop app"
+  // (stale since the Foundation-Models bridge landed).
   assert.equal(
     MOBILE_NO_PROVIDER_TRUTHS,
-    "Add a cloud API key to enable narrated answers — the private model runs on the desktop app.",
+    "Add a cloud API key to enable narrated answers — the on-device private model isn't available on this device.",
   );
 });
 

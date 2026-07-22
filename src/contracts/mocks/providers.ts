@@ -88,14 +88,16 @@ export function modelProvidersFor(platform: PlatformKind, onDeviceBackend = fals
 }
 
 /**
- * §3: the two truths of the mobile empty-provider state, byte-identical
- * everywhere it appears (chat header switcher, Settings → AI models, the
- * onboarding model slide, and the first-run tour's models step): narrated
- * answers need a cloud key, and the private model lives in the desktop app.
- * Deterministic asks answer either way — this line is about narration only.
+ * §3 → §33 §3: the two truths of the mobile empty-provider state,
+ * byte-identical everywhere it appears (chat header switcher, Settings → AI
+ * models, the onboarding model slide, and the first-run tour's models step):
+ * narrated answers need a cloud key, and the on-device private model is not
+ * available on THIS device (the state only exists when no backend reported —
+ * availability-driven, not platform dogma; a Foundation-Models device never
+ * shows it). Deterministic asks answer either way — narration only.
  */
 export const MOBILE_NO_PROVIDER_TRUTHS =
-  "Add a cloud API key to enable narrated answers — the private model runs on the desktop app.";
+  "Add a cloud API key to enable narrated answers — the on-device private model isn't available on this device.";
 
 /**
  * add-mobile-local-inference: how the on-device private model is described when
