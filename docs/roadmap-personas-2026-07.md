@@ -5552,9 +5552,11 @@ removes it, or you will falsely conclude anchors are missing.
    - Check off openspec field-patch-0.12.5 tasks 1.6/1.7 (tour
      anchors kept accurate) with a pointer to this PR.
 
-5. Stamps + gates. Bump 0.13.10 → 0.13.11 across all SEVEN stamp
-   files per CLAUDE.md. Full node + cargo suites, release-smoke, and
-   the ios-build lane green.
+5. Stamps + gates. Bump the version ONE PATCH from whatever main
+   reads at run time (the 0.13.11 originally written here predates
+   the owner-designated 0.14.0; follow CLAUDE.md's current line)
+   across all SEVEN stamp files. Full node + cargo suites,
+   release-smoke, and the ios-build lane green.
 
 Constraints. No analytics/telemetry/accounts — the nudge cadence
 stays local (localStorage), the feedback transport stays zero-backend
@@ -5583,7 +5585,7 @@ Acceptance (iPhone simulator/device, fresh install unless noted):
    tour: five steps, suggestions step anchors the chips row.
 4. NUL-byte tripwire green (and ripgrep finds all five data-tour
    anchors in ChatPanel.tsx without -a); orphan anchor gone; suites
-   + release-smoke + ios-build green; seven stamps read 0.13.11.
+   + release-smoke + ios-build green; seven stamps read current+1.
 
 Environment. macOS + Xcode for device verification of §2 (the opener
 schemes) and the visual passes; container fallback per house
@@ -5592,4 +5594,153 @@ ios-build as gate — and remember `grep -a` for ChatPanel until §4
 lands). One commit per numbered section. Open ONE PR titled "Mobile
 polish: gentle feedback nudge, working external links, mobile-native
 tour"; stop at the PR.
+```
+
+## 34. Field patch: stop the tab yank, drop the redundant chrome (2026-07-22)
+
+Three owner reports on the 0.14.1 build (screenshot: the new grouped
+Settings page), diagnosed on main:
+- **"It switches me to chat at random times / when I scroll" — the
+  edge-swipe handler is the culprit.** AppShell.tsx:274-283: the
+  compact pages' "swipe right to go back" is a bare
+  `end - start > 40` check on touchend — NO axis lock (a vertical
+  scroll flick whose thumb arcs rightward qualifies), NO edge-zone
+  arming (any touch anywhere on the page), NO drift rejection — and
+  it wraps BOTH the Files and Settings scroll containers
+  (onTouchStart/onTouchEnd at lines 651-652 and 672-673). Any
+  touchend ≥40px right of its touchstart = `setCompactTab("chat")`
+  mid-scroll. Secondary: the auto-return observer (lines 257-266)
+  watches `messages.length` — streaming does NOT grow length (writes
+  are length-stable maps; +2 happens once at ask start), so chunks
+  don't yank, but the length-watching pattern means ANY future
+  background append would; the legit triggers today are inline asks
+  from the Settings page's own ViewsNav/SemanticNav chips (which
+  SHOULD return to chat) — the mechanism just needs to be explicit
+  intent, not length observation.
+- **Back buttons on tab roots are pure redundancy.** Settings' header
+  Back (AppShell.tsx:676-687 → setCompactTab("chat")) and Files'
+  (Sidebar backControl, Sidebar.tsx:204-214, wired at
+  AppShell:654-658) both sit on TAB-REACHED roots with the tab bar
+  always visible; every Settings sub-destination is a
+  self-dismissing dialog (LhDialogSurface) or an event — nothing is
+  a pushed page needing Back.
+- **The Files-page footer gear is a leftover.** Sidebar.tsx:235-242
+  always mounts `<SettingsMenu/>` + a "Settings" label in the
+  footer; on compact the Files page reuses that Sidebar, so a
+  Settings button renders under the Files tab even though Settings
+  is a devoted tab. On DESKTOP that same footer gear is the ONLY
+  Settings entry point — it must be preserved byte-for-byte there.
+  (The v0.14.1 label near the tab bar is VersionBadge, separate —
+  untouched.)
+- Coordination: §33 (nudge/links/tour) is in flight and also touches
+  AppShell (tour-replay setCompactTab("chat")), SettingsPage, and
+  CompactTabBar. §34 must rebase onto whatever has merged and
+  preserve §33's listeners if present.
+
+### Prompt
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first, local-first analytics AI harness: Rust engine
+(native/crates/lighthouse-core) in a Tauri 2 shell (same crate is
+the iOS app), byte-compatible TS twin (src/server/), React UI
+(src/). Read CLAUDE.md (versioning is the 0.14.x line now) and
+roadmap §34 (the diagnosis above) before writing code. Three
+compact-shell fixes, one PR, engine untouched. All compact tab
+state lives in AppShell.tsx (setCompactTab appears nowhere else in
+src/) — this patch is a careful rewrite of that one file's compact
+branch plus two small Sidebar edits. If roadmap §33's PR has merged,
+rebase onto it and PRESERVE its listeners (the tour-replay
+setCompactTab("chat") path and any data-tour attributes); if it has
+not, avoid gratuitous edits to the lines it names so it lands
+cleanly after you.
+
+1. Kill the tab yank (the bug that matters).
+   a. DELETE the naive edge-swipe on the tab-reached pages: remove
+      onDrawerTouchStart/onDrawerTouchEnd (AppShell.tsx:274-283) and
+      their wiring from both the Files and Settings page elements
+      (lines 651-652, 672-673). Rationale: tab roots have no "back"
+      — the tab bar IS the navigation (iOS idiom: edge-swipe-back
+      belongs to pushed nav stacks, which compact Lighthouse does
+      not have; sheets keep their own proper pointer-captured
+      swipe-dismiss in Sheet.tsx, untouched). Do NOT try to harden
+      the gesture with axis locks — delete it; if a genuinely
+      pushed sub-page ever ships, a real gesture (edge-zone arm ≤
+      24px + axis lock + drift rejection) comes back with it.
+   b. Make auto-return explicit-intent, not length-observation.
+      Replace the messages.length observer (AppShell.tsx:257-266)
+      with an explicit signal: ChatPanel's sendQuestion (the ONE
+      user-ask entry, including the lighthouse:ask-question event
+      path and chip-fired asks) dispatches a
+      "lighthouse:user-ask" CustomEvent (or sets an
+      askInitiatedAt stamp in the chat store — pick one, keep it
+      tiny); AppShell returns to the Chat tab on THAT signal when
+      compact and not already on chat. Result: "Ask about this
+      view" / "Define metric" from the Settings page still land you
+      on Chat (intended), while NO store-level message append —
+      background, hydration, future features — can ever switch
+      tabs. Pin it: a test appends a message to the store directly
+      and asserts the tab does not change; another fires the ask
+      signal and asserts it does.
+   c. Add the guard-rail inventory test: a structural pin listing
+      the ONLY allowed setCompactTab call sites in AppShell (tab
+      tap, Esc, open-drawer, reveal-node, open-preferences, the
+      user-ask signal, §33's tour replay if present) so a future
+      stray trigger goes red in review.
+
+2. Remove Back from the tab roots. Delete the Settings header Back
+   button (AppShell.tsx:678-686 — keep the "Settings" title text)
+   and the Files page's backControl (drop the prop at
+   AppShell:654-658 and the backControl branch in
+   Sidebar.tsx:204-214, or repurpose the prop name for §3's gating
+   — your call, no dangling code). Esc keeps returning to Chat
+   (hardware-keyboard affordance, iPad). Every Settings
+   sub-destination (Preferences, AI models, Audit log, Business
+   definitions, Saved views dialogs; Pinned/Board events) is
+   self-dismissing and unaffected — verify each opens and closes.
+   iPad-regular and desktop render byte-identically (no Back exists
+   there today — pin).
+
+3. No Settings button under the Files tab. Gate the Sidebar footer
+   (<SettingsMenu/> + the "Settings" label, Sidebar.tsx:235-242)
+   OFF for the compact Files page — using whatever compact-page
+   signal survives §2's refactor (the old backControl prop's
+   truthiness was exactly this condition; if you removed the prop,
+   pass an explicit compactPage flag). DESKTOP keeps the footer
+   gear byte-for-byte (it is desktop's only Settings entry — pin
+   its presence in the desktop render). UpdateNotice and
+   VersionBadge are untouched.
+
+4. Stamps + gates. Bump 0.14.1 → 0.14.2 (or current+1 at run time)
+   across all SEVEN stamp files per CLAUDE.md. Full node + cargo
+   suites, release-smoke, and the ios-build lane green.
+
+Constraints. Engine + twin untouched (UI shell only). No
+analytics/telemetry. Desktop and iPad-regular pixel-identical (pins).
+Byte-pinned labels unchanged (removed controls take their aria-labels
+with them; update any pins that referenced them). SharePoint plumbing
+untouched. Scope = these three reports; nothing else rides along —
+§33's items land in their own PR.
+
+Acceptance (iPhone simulator/device):
+1. Scroll torture: two minutes of vigorous vertical scrolling on the
+   Settings AND Files pages — including fast flicks that arc
+   rightward and stray taps on rows — never leaves the page. The
+   direct-append test proves background messages can't yank; the
+   ask-signal test proves chip asks still return to Chat.
+2. Settings and Files pages show titles with NO Back; the tab bar
+   navigates; Esc still returns to Chat with a hardware keyboard;
+   every Settings sub-dialog opens and closes normally.
+3. The Files page shows no footer Settings button or label on
+   compact; desktop's sidebar footer gear renders exactly as 0.14.1
+   (pin green).
+4. The setCompactTab inventory pin is green (and lists §33's replay
+   path if merged); suites + release-smoke + ios-build green; seven
+   stamps read the bumped version.
+
+Environment. macOS + Xcode for the scroll-torture pass (simulator
+fine); container fallback per house convention (logic + structural
+pins here; ios-build as gate). One commit per numbered section. Open
+ONE PR titled "Compact shell: no tab yank, no redundant Back, no
+stray Settings gear"; stop at the PR.
 ```
