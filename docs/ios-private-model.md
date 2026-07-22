@@ -282,6 +282,21 @@ availability verdict (Tier-1 available OR Tier-2 present). Below-floor → still
     the poll loop shows the honest "Private model warming up… (Ns)" during the GGUF
     load, then proceeds. `warming_label` strings stay byte-identical across twins.
 
+### Guided-generation spike — verdict (0.14.1, §32 §7)
+
+The loopback contract now carries a **dark** `POST /v1/intent` endpoint
+(PrivateModelServer.swift) for structured-intent planning: the design is a
+`@Generable` form over ENUMERATED schema elements (tables/columns the engine
+supplies) from which the ENGINE compiles and validates SQL — the model never
+writes SQL text and the single-SELECT guard stays intact. **Verdict: deferred,
+endpoint dark.** The `@Generable` macro / `GenerationSchema` surface is not in
+the stable-signature set PrivateModelServer.swift deliberately sticks to
+across the iOS 26/27 SDKs (no-arg `LanguageModelSession` + String
+`streamResponse` are), so the endpoint answers
+`501 {"spike":"guided-gen","status":"dark"}` as a capability probe until that
+surface stabilizes. No engine call site exists. Adopting guided generation for
+NL→SQL intent is a recorded follow-up on the 0.14.1 PR.
+
 ---
 
 ## 7. Roster & honest copy (availability-driven)

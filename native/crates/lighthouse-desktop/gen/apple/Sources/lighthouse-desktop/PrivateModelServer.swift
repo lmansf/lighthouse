@@ -242,6 +242,27 @@ final class PrivateModelServer {
             streamCompletion(connection, body: body)
             return
         }
+        if method == "POST", route == "/v1/intent" {
+            // §32 §7 FENCED SPIKE — guided generation for STRUCTURED INTENT,
+            // landing DARK (present, unused; no engine call site). The design:
+            // a @Generable form over ENUMERATED schema elements (tables and
+            // columns the engine supplies) from which the ENGINE compiles and
+            // validates SQL — the single-SELECT guard stays intact, the model
+            // never writes SQL text. VERDICT (recorded in
+            // docs/ios-private-model.md): the @Generable macro and
+            // GenerationSchema surface are NOT yet in the stable-signature
+            // set this file deliberately sticks to across the iOS 26/27 SDKs
+            // (the no-arg session + String streamResponse), so the endpoint
+            // ships as a capability probe answering 501 until that surface
+            // stabilizes. Adopting it is a recorded follow-up, not a rider.
+            sendSimple(
+                connection,
+                status: "501 Not Implemented",
+                contentType: "application/json",
+                body: "{\"spike\":\"guided-gen\",\"status\":\"dark\",\"reason\":\"generable-api-surface-unstable\"}"
+            )
+            return
+        }
         sendSimple(connection, status: "404 Not Found", contentType: "text/plain", body: "not found")
     }
 
