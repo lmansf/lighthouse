@@ -2819,6 +2819,24 @@ fn live_pipeline(
             .iter()
             .map(|c| Ctx { name: ctx_label(c), text: c.text.clone(), score: c.score })
             .collect();
+        // §32 §5: on the apple-fm tiers the retrieved chunks digest to
+        // question-relevant QUOTES (block count/order/names preserved — the
+        // [n] citation contract is untouched; only each block's text shrinks
+        // to verbatim quoted sentences). Engine-built blocks appended below
+        // (table profiles, reliability assists) are never digested. The §1
+        // clamp still runs in stream_local as the last line of defense.
+        {
+            let tier = llm::narration_tier(&cfg);
+            if tier.is_apple_fm() {
+                let b = crate::budget::segment_budgets(tier);
+                contexts = crate::quotes::digest_contexts(
+                    contexts,
+                    &question,
+                    b.ctx_block_max,
+                    b.ctx_total_max,
+                );
+            }
+        }
         // Manifest (§5): the retrieved chunks (attributed to their files via the
         // flowing references), grown alongside `contexts` with a schema-card entry
         // per appended table profile below. Metadata only.

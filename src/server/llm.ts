@@ -142,6 +142,21 @@ function localTier(): Tier {
   return resolveTier(false, onDeviceBackend(), null);
 }
 
+/**
+ * §32 §3c: the tier a NARRATION call for `cfg` runs under — the seam the
+ * twin's RAG assembly gates its §5 quote digest on. Cloud providers resolve
+ * remote-large so their assembly can never change shape. PARITY:
+ * narration_tier in llm.rs.
+ */
+export function narrationTier(cfg: {
+  providerId: string | null;
+  modelId: string | null;
+  apiKey: string | null;
+}): Tier {
+  const cloud = cfg.providerId === "anthropic" || Boolean(remoteProvider(cfg.providerId));
+  return resolveTier(cloud, onDeviceBackend(), null);
+}
+
 /** Whole-document inclusion threshold: a doc at or under this rides complete. */
 export function fullDocCharBudget(cfg: {
   providerId: string | null;

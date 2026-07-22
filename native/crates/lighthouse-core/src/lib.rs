@@ -33,6 +33,7 @@ pub mod pdf_tables;
 pub mod pins;
 pub mod profile;
 pub mod provider_auth;
+pub mod quotes;
 pub mod recipes;
 pub mod reports;
 pub mod policy;

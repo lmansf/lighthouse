@@ -30,9 +30,12 @@ import {
   docSegmentCharBudget,
   maxDocSegments,
   localHealth,
+  narrationTier,
   type LocalHealth,
   type Ctx,
 } from "./llm";
+import { isAppleFm, segmentBudgets } from "./budget";
+import { digestContexts } from "./quotes";
 import { isInstalled as isModelInstalled, localModelAvailable, onDeviceBackend } from "./localModel";
 import { platformKind } from "./config";
 import { readDesktopSettings } from "./settings";
@@ -999,11 +1002,22 @@ async function* answerPipelineLive(
   }
 
   // --- Single-shot path (today's behavior) + exact table stats for CSV hits ---
-  const contexts: Ctx[] = initial.contexts.map((c) => ({
+  let contexts: Ctx[] = initial.contexts.map((c) => ({
     name: ctxLabel(c),
     text: c.text,
     score: c.score,
   }));
+  // §32 §5: on the apple-fm tiers the retrieved chunks digest to
+  // question-relevant QUOTES (count/order/names preserved — the [n] citation
+  // contract is untouched). Engine-built blocks appended below are never
+  // digested. KEEP IN SYNC with synth.rs.
+  {
+    const tier = narrationTier(cfg);
+    if (isAppleFm(tier)) {
+      const b = segmentBudgets(tier);
+      contexts = digestContexts(contexts, question, b.ctxBlockMax, b.ctxTotalMax);
+    }
+  }
   // Manifest (§5): the retrieved chunks (attributed to their files via the
   // flowing references), grown alongside `contexts` with a schema-card entry per
   // appended table profile below. Metadata only.

@@ -1203,8 +1203,14 @@ fn clamp_local_contexts(contexts: &[Ctx], tier: Tier) -> Vec<Ctx> {
 }
 
 /// Newest prior turns whose combined size fits the local history budget.
+/// §32 §5: the apple-fm tiers digest instead — the LAST exchange verbatim
+/// (follow-ups reference the prior answer, its fact sheet included) plus one
+/// deterministic summary line of the older asks.
 fn clamp_local_history(history: &[ChatTurn], tier: Tier) -> Vec<ChatTurn> {
     let max = budget::segment_budgets(tier).history_max;
+    if tier.is_apple_fm() {
+        return digest_history(history, max);
+    }
     let mut kept: Vec<ChatTurn> = Vec::new();
     let mut used = 0usize;
     for t in history.iter().rev() {
@@ -1217,6 +1223,45 @@ fn clamp_local_history(history: &[ChatTurn], tier: Tier) -> Vec<ChatTurn> {
     }
     kept.reverse();
     kept
+}
+
+/// §32 §5: shared-window history — last exchange verbatim (tail-clipped only
+/// if it alone overflows), older turns as ONE deterministic line naming what
+/// the user asked (first words of each ask, oldest first). Deterministic and
+/// model-free; an empty history stays empty.
+fn digest_history(history: &[ChatTurn], max: usize) -> Vec<ChatTurn> {
+    if history.is_empty() {
+        return Vec::new();
+    }
+    // The last exchange: everything from the final user turn onward.
+    let split = history.iter().rposition(|t| t.role == "user").unwrap_or(0);
+    let (older, last) = history.split_at(split);
+    let mut out: Vec<ChatTurn> = Vec::new();
+    let asks: Vec<String> = older
+        .iter()
+        .filter(|t| t.role == "user" && !t.content.trim().is_empty())
+        .map(|t| t.content.split_whitespace().take(8).collect::<Vec<_>>().join(" "))
+        .collect();
+    if !asks.is_empty() {
+        let line = format!("Earlier in this conversation I asked about: {}.", asks.join("; "));
+        out.push(ChatTurn { role: "user".into(), content: line.chars().take(300).collect() });
+    }
+    let mut remaining =
+        max.saturating_sub(out.iter().map(|t| t.content.chars().count()).sum::<usize>());
+    for t in last {
+        if remaining == 0 {
+            break;
+        }
+        let n = t.content.chars().count();
+        let content = if n > remaining {
+            t.content.chars().take(remaining).collect::<String>() + "…"
+        } else {
+            t.content.clone()
+        };
+        remaining = remaining.saturating_sub(n.min(remaining));
+        out.push(ChatTurn { role: t.role.clone(), content });
+    }
+    out
 }
 
 /// Stream from a local OpenAI-compatible chat-completions endpoint. Only the
@@ -1756,6 +1801,33 @@ mod tests {
         assert_eq!(SYSTEM_PROMPT_COMPACT, fixture, "twin drift — the TS test pins the same file");
         let n = SYSTEM_PROMPT_COMPACT.chars().count();
         assert!((1_000..=1_300).contains(&n), "compact profile is {n} chars (spec: ~1,100-1,300)");
+    }
+
+    // §32 §5: apple-fm history is a digest — last exchange verbatim, older
+    // asks as one deterministic line — and always fits the tier budget.
+    #[test]
+    fn apple_history_digest_keeps_last_exchange_and_summarizes_the_rest() {
+        let turns = vec![
+            ChatTurn { role: "user".into(), content: "total revenue by region please".into() },
+            ChatTurn { role: "assistant".into(), content: "West led with 42.".into() },
+            ChatTurn { role: "user".into(), content: "and monthly trend for 2024?".into() },
+            ChatTurn { role: "assistant".into(), content: "Rising all year.".into() },
+            ChatTurn { role: "user".into(), content: "now as a percent of total".into() },
+            ChatTurn { role: "assistant".into(), content: "West holds 38 percent.".into() },
+        ];
+        let kept = clamp_local_history(&turns, Tier::AppleFm4096);
+        // One summary line + the final exchange (2 turns) = 3.
+        assert_eq!(kept.len(), 3, "{kept:?}");
+        assert!(kept[0].content.starts_with("Earlier in this conversation I asked about:"));
+        assert!(kept[0].content.contains("total revenue by region"), "{}", kept[0].content);
+        assert!(kept[0].content.contains("monthly trend"), "{}", kept[0].content);
+        assert_eq!(kept[1].content, "now as a percent of total", "last ask verbatim");
+        assert_eq!(kept[2].content, "West holds 38 percent.", "last answer verbatim");
+        let used: usize = kept.iter().map(|t| t.content.chars().count()).sum();
+        assert!(used <= budget::segment_budgets(Tier::AppleFm4096).history_max);
+        // The llama arm is untouched: newest-fit, no summary line.
+        let llama = clamp_local_history(&turns, Tier::Llama6144);
+        assert!(llama.iter().all(|t| !t.content.starts_with("Earlier in")));
     }
 
     #[test]
