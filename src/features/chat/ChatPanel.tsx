@@ -105,6 +105,7 @@ import { publishChatStreaming } from "@/shell/shellSignals";
 import { ACCENTS, BEAM_SWEEP } from "@/shell/theme";
 import { FILE_DRAG_MIME, parseDraggedFiles, type DraggedFile } from "@/shell/dnd";
 import { isDesktopShell, pathsForFiles, platformKind } from "@/shell/desktopBridge";
+import { openExternal } from "@/lib/openExternal";
 import { useCoarsePointer, usePaneLayout } from "@/shell/paneLayout";
 import { Sheet } from "@/shell/Sheet";
 import { HistoryNav } from "./HistoryNav";
@@ -2171,7 +2172,21 @@ const AnswerMarkdown = memo(function AnswerMarkdown({
           );
         }
         return (
-          <a {...props} href={href} target="_blank" rel="noopener noreferrer">
+          <a
+            {...props}
+            href={href}
+            target="_blank"
+            rel="noopener noreferrer"
+            // §33 §2: in the shell, _blank is not a reliable escape (iOS does
+            // nothing) — route through the one external-open seam; plain web
+            // keeps the ordinary new-tab anchor behavior.
+            onClick={(e) => {
+              if (href && isDesktopShell()) {
+                e.preventDefault();
+                openExternal(href);
+              }
+            }}
+          >
             {children}
           </a>
         );

@@ -41,6 +41,7 @@ import {
   type SigninStatus,
 } from "@/contracts";
 import { platformKind } from "@/shell/desktopBridge";
+import { openExternal } from "@/lib/openExternal";
 import { LocalModelInstallPanel, humanBytes } from "@/features/localModel/LocalModelOption";
 import { apiKeyBillingNote, signinBillingNote } from "@/lib/billingNotes";
 import { RULE_ACTION_LABEL } from "@/features/explorer/FolderRulesDialog";
@@ -203,12 +204,7 @@ function firstModelFor(pid: string): string {
   return (MODEL_PROVIDERS.find((p) => p.id === pid) ?? MODEL_PROVIDERS[0]).models[0];
 }
 
-/** External hand-off in the user's own browser — the feedback flow's idiom
- *  (BugReport.tsx openExternal): a plain window.open the desktop shell routes
- *  to the OS browser; Lighthouse itself transmits nothing here. */
-function openExternal(url: string) {
-  window.open(url, "_blank", "noopener,noreferrer");
-}
+
 
 /**
  * Manage the active model provider/model and API key after onboarding. Reuses
@@ -1907,7 +1903,7 @@ export function SettingsMenu() {
             </MenuItem>
             <MenuItem
               icon={<IconOpen />}
-              onClick={() => window.open(LH_REPO, "_blank", "noopener,noreferrer")}
+              onClick={() => openExternal(LH_REPO)}
             >
               Lighthouse on GitHub
             </MenuItem>
