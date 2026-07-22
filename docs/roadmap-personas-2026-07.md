@@ -5919,3 +5919,195 @@ per numbered section. Open ONE PR titled "Readable answers:
 content type scale, scannable stats, calmer output"; stop at the
 PR.
 ```
+
+## 36. Make the overflow footer rare: finish the budgeter, count digits, retry before surrendering (2026-07-22)
+
+Owner report @ 0.14.3 (screenshot): the honest §32 overflow footer —
+"didn't fit the on-device model's window… Answering from the most
+relevant passages instead" — fires on a doc-style ask over a CSV. It
+should be rare; a code trace found why it isn't. Ranked leaks:
+1. **chars/4 lies hardest exactly here.** budget.rs CHARS_PER_TOKEN=4
+   and the bridge's estimatedTokens = count/4
+   (PrivateModelServer.swift:300) both use it; numeric/tabular text
+   runs ~2-2.7 chars/token, so the engine's 11,144-char narration
+   budget is really ~4,100-4,450 REAL tokens — over the full 4,096
+   window before the 900 reserve. The 90% margin absorbs 10%; the
+   miss is 40-60%. The prompt passes BOTH chars/4 gates, then the FM
+   runtime itself rejects it (the Swift catch → FM_OVERFLOW).
+2. **The §32 whole-prompt planner shipped as DEAD CODE for
+   narration.** plan_keep/input_char_budget exist and are tested
+   (budget.rs) but have no production narration call site; the live
+   clamp (clamp_local_contexts, llm.rs:1201-1227) bounds context
+   blocks to 5,000 chars and NEVER accounts for system (+~320 tok
+   compact) + history (≤2,000 chars) + question + framing — segments
+   sum to ~8.6KB with nobody checking the whole.
+3. **The digest's 280-char per-block floor × many blocks can exceed
+   ctx_total_max, and tabular chunks bypass sentence selection** —
+   quotes.rs digest_text has no tabular branch; CSV rows produce <2
+   "sentences" so chunks are HEAD-CLIPPED to the share (first rows,
+   not question-relevant rows) — maximally dense evidence retained.
+4. **The compact deterministic table_profile block (≤1,200 chars) is
+   scored 0.0 (synth.rs:2878) → clamp_local_contexts evicts it
+   FIRST** under pressure — the cheap fact block dies, the raw rows
+   stay. Exactly backwards.
+5. **Doc-style CSV asks route to raw-chunk RAG**: analytics_cue is
+   narrow (how many/how much/group by…), whole-doc focus EXCLUDES
+   profileable CSVs (synth.rs:2664) — so the densest evidence is
+   what gets packed.
+Also: there is NO shrink-and-retry (the first overestimate is
+terminal — llm.rs:589-632 has no re-call); an `emitted`-gate bug
+means an overflow with no standing draft yields a FOOTER-ONLY answer
+(extractive() is skipped because the footer set emitted=true); the
+extractive draft cuts mid-sentence (draft_answer llm.rs:1443, raw
+300-char slice); the bridge HARDCODES contextWindowSize()=4096
+(swift:289) so AppleFm8192 is unreachable on any device; and the
+advertised window is stored but never logged.
+
+### Prompt
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first, local-first analytics AI harness: Rust engine
+(native/crates/lighthouse-core) in a Tauri 2 shell (same crate is
+the iOS app; on-device model = Apple Foundation Models behind the
+OpenAI-compatible loopback bridge,
+gen/apple/Sources/lighthouse-desktop/PrivateModelServer.swift),
+byte-compatible TS twin (src/server/), React UI (src/). Read
+CLAUDE.md, docs/ts-twin.md, docs/ios-private-model.md, and roadmap
+§32 + §36 (the leak trace above — file:line for every claim) before
+writing code. GOAL: the on-device overflow footer becomes RARE — the
+§32 acceptance ("counter reads 0") finally holds on real tabular
+asks — by fixing the estimator, actually wiring the whole-prompt
+budget, packing smarter evidence, and retrying before surrendering.
+Grounding/honesty rules unchanged; the footer STAYS for the cases
+that legitimately remain. Coordinate: §35 (readable-answers) is in
+flight touching ChatPanel/theme only — no file overlap expected;
+rebase onto whatever has merged.
+
+1. A digit-aware token estimator — ONE function, three call sites.
+   Replace the bare CHARS_PER_TOKEN=4 with estimate_tokens(text) in
+   budget.rs (+ budget.ts twin, PARITY): blended rate by content —
+   e.g. count digit/separator-dense characters at ~2.6 chars/token
+   and prose at ~4, or a two-band rule keyed on digit+punct density
+   (>25% → 2.7). Keep it pure, deterministic, and CHEAP (single
+   pass). Mirror the SAME rule in the bridge's estimatedTokens
+   (swift — KEEP IN SYNC comment both sides). Fixture tests: a
+   numeric CSV block where chars/4 says "fits" and the digit-aware
+   estimate says "doesn't" (both twins); calibration comment noting
+   the observed 2-2.7 range for tabular text.
+
+2. Wire the whole-prompt budget for real (finish §32 §1 — the
+   planner is currently dead code on the narration path; find out
+   why in git history, note it in the PR, then wire it). At the
+   narration assembly seam, compute the FULL prompt cost with the
+   §1 estimator — system prompt + reliability blocks + history +
+   question + framing overhead + contexts — against
+   input_char_budget(tier, call_type), and drive the context/
+   history allocation from what REMAINS (connect plan_keep, or make
+   clamp_local_contexts take remaining_budget as its ceiling —
+   pick the smaller diff, delete the dead path either way; twins).
+   End-to-end pin: assemble the worst-case fixture prompt (6-table
+   vault, full semantic store, 6-turn history, wide-CSV evidence)
+   and assert total estimated tokens ≤ 90% of 4,096 minus the
+   reserve — in cargo AND node.
+
+3. Pack smarter tabular evidence (the screenshot's case).
+   - Promote the table_profile blocks: score them ABOVE raw chunks
+     (synth.rs:2878 — 0.0 → high), so under pressure the compact
+     deterministic fact block SURVIVES and raw rows are what drop.
+   - Give digest_text a tabular branch (quotes.rs): for is_tabular
+     chunks keep the header + the K rows that lexically match the
+     question (reuse the existing lexical scorer over rows), not a
+     head-clip; K from the block budget. When a table_profile block
+     is present for the same file, halve that file's raw-chunk
+     share (the profile carries the summary truth).
+   - Fix the digest floor math: the 280-char per-block floor must
+     not let count × floor exceed ctx_total_max — drop lowest-
+     scored blocks first until the floor fits (pure fn + test).
+   - Do NOT rewrite ask routing in this patch (widening
+     analytics_cue changes which engine answers — out of scope;
+     note it as a §37 candidate in the PR body).
+
+4. Retry before surrendering, and fix the fallback bugs.
+   - On FM_OVERFLOW (marker or runtime), the engine retries ONCE
+     with contexts halved (profile blocks retained first), and if
+     refused again, ONCE more with profile-blocks-only + question.
+     Only then extractive + footer. The refusal is free (no tokens
+     were spent) — express the ladder as a pure verdict fn
+     (overflow_retry_verdict, the house pattern), twins + tests.
+     Streaming UX: keep the existing progress label while retrying
+     (no flicker); total added latency budget ~2 quick round-trips.
+   - Fix the emitted-gate bug (llm.rs:589-632): on overflow with NO
+     standing draft, extractive() MUST still run — footer-only
+     answers are a bug. Test: overflow with draftAnswers off yields
+     passages + footer, never footer alone.
+   - Sentence-trim the extractive draft (llm.rs:1443): run the
+     existing quotes::split_sentences over the 300-char window and
+     cut at the last complete sentence (hard-cap fallback if the
+     first sentence alone exceeds it). No more "quantity,".
+   - The footer text itself stays byte-pinned; it should now say
+     the truth more rarely, not differently.
+
+5. The bridge tells the real window. Stop hardcoding
+   contextWindowSize()=4096: query the SDK's context size where
+   available (the §32 research: SystemLanguageModel contextSize /
+   tokenCount APIs, iOS 26.4+) and advertise THAT via /health
+   (AppleFm8192 becomes reachable on iOS 27 devices); default 4096
+   when the API is absent. Log the advertised window + resolved
+   tier ONCE at startup to shell.log (local only, no telemetry) —
+   today advertised_ctx is stored and never logged, so device
+   diagnostics are blind. The bridge pre-check switches to the §1
+   shared estimator. /health shape change: update local_health
+   twins + the providerSwitch test mock + pins in the same commit.
+
+6. Prove it. Re-run the §32 forced-tier rig scenarios
+   (LIGHTHOUSE_FORCE_TIER=apple-fm-4096 on the desktop 7B) PLUS a
+   new tabular scenario reproducing the screenshot: a wide numeric
+   CSV (~60 rows × 10+ cols), doc-style ask ("what does this data
+   say about X"), 3-turn follow-ups — every answer model-narrated,
+   overflow counter 0, retry ladder unused or ≤1 rung. Fixture
+   tests for the estimator, floor math, tabular digest, retry
+   verdict, emitted-gate, sentence trim — both twins where twinned.
+   On device: the same CSV ask answers without the footer; a
+   deliberately absurd ask (paste a huge text) still shows the
+   honest footer after the ladder exhausts.
+
+7. Stamps + PR. Bump current+1 across all SEVEN stamp files per
+   CLAUDE.md. Suites + release-smoke + ios-build green. PR body
+   records: why the planner was dead (git archaeology), the
+   estimator calibration numbers, and the §37 candidate (routing
+   profileable-file doc-asks to the deterministic path).
+
+Constraints. Grounding/honesty unchanged — the footer survives for
+legitimate overflow; nothing fabricates fit. No telemetry (logs are
+local). Cloud and desktop-llama prompt behavior byte-identical
+(snapshot pins from §32 still green). Deterministic analytics
+untouched. SharePoint plumbing untouched. Scope = these leaks;
+routing changes explicitly deferred.
+
+Acceptance:
+1. The sleep-CSV repro (wide numeric CSV, doc-style ask, follow-ups)
+   answers from the MODEL on the 4k tier — no footer, counter 0 —
+   on the forced-tier rig and on device.
+2. Worst-case fixture prompt fits under the digit-aware whole-prompt
+   budget in both twins (end-to-end pin); the dead planner path is
+   gone or wired — no orphan budget code remains.
+3. Under pressure the table-profile block survives while raw rows
+   drop (pin); tabular digests keep question-relevant rows (fixture
+   where the matching row is NOT in the first 30 lines).
+4. Overflow with no draft yields passages + footer (never footer
+   alone); extractive snippets end at sentence boundaries; a forced
+   double-refusal walks the retry ladder then falls back honestly.
+5. /health advertises the SDK-reported window (8192 reachable where
+   the OS provides it), the startup log line shows window + tier,
+   and all /health pins are green.
+6. Suites + release-smoke + ios-build green; seven stamps bumped.
+
+Environment. Engine/twin/estimator/digest/retry work is fully
+container-testable; the forced-tier rig needs the desktop 7B; the
+bridge change + device runs need macOS/Xcode + an Apple-Intelligence
+device (house convention: grep-verified Swift, ios-build as gate,
+device results in the PR). One commit per numbered section. Open ONE
+PR titled "Overflow made rare: digit-aware budget, wired planner,
+profile-first packing, retry ladder"; stop at the PR.
+```
