@@ -18,14 +18,13 @@ import {
   DialogActions,
   DialogBody,
   DialogContent,
-  DialogSurface,
   DialogTitle,
-  Switch,
   Text,
   makeStyles,
   tokens,
 } from "@fluentui/react-components";
 import { useRagStore } from "@/stores/useRagStore";
+import { LhDialogSurface, LhSwitch } from "@/shell/controls";
 
 /** Active (window-visible) time before the startup question is asked. */
 const PROMPT_AFTER_MS = 2.5 * 60 * 1000;
@@ -125,7 +124,7 @@ export function StartupPrompt() {
         if (!d.open) void persist(on);
       }}
     >
-      <DialogSurface>
+      <LhDialogSurface>
         <DialogBody>
           <DialogTitle>Open Lighthouse at startup?</DialogTitle>
           <DialogContent>
@@ -134,7 +133,7 @@ export function StartupPrompt() {
                 Lighthouse can open automatically when you sign in to your computer, so
                 your vault is always ready in the background. You can change this anytime.
               </Text>
-              <Switch
+              <LhSwitch
                 checked={on}
                 onChange={(_, d) => setOn(Boolean(d.checked))}
                 label="Open Lighthouse when I sign in to my computer"
@@ -147,7 +146,7 @@ export function StartupPrompt() {
             </Button>
           </DialogActions>
         </DialogBody>
-      </DialogSurface>
+      </LhDialogSurface>
     </Dialog>
   );
 }

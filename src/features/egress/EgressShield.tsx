@@ -19,7 +19,6 @@ import {
   Badge,
   Button,
   Dialog,
-  DialogSurface,
   DialogBody,
   DialogTitle,
   DialogContent,
@@ -35,6 +34,7 @@ import {
   LockClosedRegular,
 } from "@fluentui/react-icons";
 import { useRagStore } from "@/stores/useRagStore";
+import { LhDialogSurface } from "@/shell/controls";
 import { usePaneLayout } from "@/shell/paneLayout";
 import { hiddenFromCloudLabel } from "@/lib/privacyState";
 
@@ -159,7 +159,7 @@ export function EgressShield({
       </Button>
 
       <Dialog open={open} onOpenChange={(_, d) => setOpen(d.open)}>
-        <DialogSurface>
+        <LhDialogSurface>
           <DialogBody>
             <DialogTitle>{hasStatus ? "Privacy status" : "What left this machine"}</DialogTitle>
             <DialogContent>
@@ -254,7 +254,7 @@ export function EgressShield({
               </Button>
             </DialogActions>
           </DialogBody>
-        </DialogSurface>
+        </LhDialogSurface>
       </Dialog>
     </>
   );

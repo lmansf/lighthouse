@@ -29,7 +29,6 @@ import {
   DialogActions,
   DialogBody,
   DialogContent,
-  DialogSurface,
   DialogTitle,
   TeachingPopover,
   TeachingPopoverSurface,
@@ -48,6 +47,7 @@ import { shouldAutoOpenTour } from "./tourGating";
 import { BEAM_SWEEP } from "@/shell/theme";
 import { platformKind, type PlatformKind } from "@/shell/desktopBridge";
 import { MOBILE_NO_PROVIDER_TRUTHS } from "@/contracts";
+import { LhDialogSurface } from "@/shell/controls";
 
 /**
  * The former Quick Start's localStorage once-flag. SummonHint keys its "wait
@@ -367,7 +367,7 @@ export function FirstRunTour() {
         if (!data.open) close();
       }}
     >
-      <DialogSurface className={styles.fallbackSurface} data-tour-step={index + 1}>
+      <LhDialogSurface className={styles.fallbackSurface} data-tour-step={index + 1}>
         <DialogBody>
           <DialogTitle>
             <span className={styles.dialogTitleStack}>
@@ -385,7 +385,7 @@ export function FirstRunTour() {
           </DialogContent>
           <DialogActions>{footer}</DialogActions>
         </DialogBody>
-      </DialogSurface>
+      </LhDialogSurface>
     </Dialog>
   );
 }

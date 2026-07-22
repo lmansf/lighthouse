@@ -30,7 +30,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Button,
   SearchBox,
-  Switch,
   Text,
   makeStyles,
   mergeClasses,
@@ -54,6 +53,7 @@ import {
 import type { FileNode } from "@/contracts";
 import { useRagStore } from "@/stores/useRagStore";
 import { usePaneLayout } from "@/shell/paneLayout";
+import { LhSwitch } from "@/shell/controls";
 import { INSPECT_FILE_EVENT } from "@/lib/citePreview";
 import { FileExplorer } from "./FileExplorer";
 
@@ -499,12 +499,12 @@ export function FileTileGrid() {
           <Text size={200} className={styles.actionCount}>
             {selectedIds.length} selected
           </Text>
-          <Switch
+          <LhSwitch
             checked={allIncluded}
             onChange={(_, d) => void applySelection(Boolean(d.checked))}
             label="Visible to AI"
           />
-          <Switch
+          <LhSwitch
             checked={allLocalOnly}
             onChange={(_, d) => void applyLocalOnly(Boolean(d.checked))}
             label="Private"

@@ -13,20 +13,11 @@
  * answers {available:false}, so the chips degrade to an honest note.
  */
 import { useEffect, useMemo, useState } from "react";
-import {
-  Button,
-  Menu,
-  MenuItem,
-  MenuList,
-  MenuPopover,
-  MenuTrigger,
-  Text,
-  makeStyles,
-  tokens,
-} from "@fluentui/react-components";
+import { Button, Text, makeStyles, tokens } from "@fluentui/react-components";
 import { BeakerRegular, BriefcaseRegular, DocumentRegular, SearchRegular } from "@fluentui/react-icons";
 import type { CapabilityMap, ReportTemplate } from "@/contracts";
 import { EMPTY_CAPABILITY_MAP, ragService } from "@/contracts";
+import { LhMenu } from "@/shell/controls";
 
 const useStyles = makeStyles({
   note: { color: tokens.colorNeutralForeground3 },
@@ -97,8 +88,9 @@ export function InvestigateChips({ includedFileIds }: { includedFileIds: string[
   return (
     <>
       {investigable.map((t) => (
-        <Menu key={`investigate:${t.name}`}>
-          <MenuTrigger disableButtonEnhancement>
+        <LhMenu
+          key={`investigate:${t.name}`}
+          trigger={
             <Button
               appearance="secondary"
               size="small"
@@ -109,24 +101,32 @@ export function InvestigateChips({ includedFileIds }: { includedFileIds: string[
             >
               {busy === t.name ? "Investigating…" : `Investigate ${t.name}`}
             </Button>
-          </MenuTrigger>
-          <MenuPopover>
-            <MenuList>
-              {/* Standard: the deterministic report, unchanged. */}
-              <MenuItem icon={<DocumentRegular />} onClick={() => void investigate(t.name)}>
-                Standard report
-              </MenuItem>
-              {/* IMRaD — Introduction / Methods / Results / Discussion. */}
-              <MenuItem icon={<BeakerRegular />} onClick={() => void investigate(t.name, "imrad")}>
-                Scientific method
-              </MenuItem>
-              {/* BLUF — Bottom line up front + Minto-pyramid detail. */}
-              <MenuItem icon={<BriefcaseRegular />} onClick={() => void investigate(t.name, "bluf")}>
-                Business report
-              </MenuItem>
-            </MenuList>
-          </MenuPopover>
-        </Menu>
+          }
+          items={[
+            // Standard: the deterministic report, unchanged.
+            {
+              key: "standard",
+              label: "Standard report",
+              icon: <DocumentRegular />,
+              onClick: () => void investigate(t.name),
+            },
+            // IMRaD — Introduction / Methods / Results / Discussion.
+            {
+              key: "imrad",
+              label: "Scientific method",
+              icon: <BeakerRegular />,
+              onClick: () => void investigate(t.name, "imrad"),
+            },
+            // BLUF — Bottom line up front + Minto-pyramid detail.
+            {
+              key: "bluf",
+              label: "Business report",
+              icon: <BriefcaseRegular />,
+              onClick: () => void investigate(t.name, "bluf"),
+            },
+          ]}
+          aria-label={`Investigate ${t.name}`}
+        />
       ))}
       {note && (
         <Text size={200} className={styles.note} role="status">

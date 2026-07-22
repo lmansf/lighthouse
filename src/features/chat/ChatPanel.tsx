@@ -29,7 +29,6 @@ import {
   DialogActions,
   DialogBody,
   DialogContent,
-  DialogSurface,
   DialogTitle,
   Divider,
   Link,
@@ -132,6 +131,7 @@ import { refineEligibility, type RefineEligibility } from "@/lib/refineChips";
 import { useInvestigationsStore } from "@/stores/useInvestigationsStore";
 import { chatHistoryLocked } from "@/stores/managedLocks";
 import { modKey } from "@/features/onboarding/ModeChooser";
+import { LhDialogSurface } from "@/shell/controls";
 import { ACCENTS, BEAM_SWEEP } from "@/shell/theme";
 import { FILE_DRAG_MIME, parseDraggedFiles, type DraggedFile } from "@/shell/dnd";
 import { isDesktopShell, pathsForFiles, platformKind } from "@/shell/desktopBridge";
@@ -4842,7 +4842,7 @@ export function ChatPanel() {
         if (!data.open) setPinsOpen(false);
       }}
     >
-      <DialogSurface className={styles.pinDialogSurface}>
+      <LhDialogSurface className={styles.pinDialogSurface}>
         <DialogBody>
           <DialogTitle>Pinned questions</DialogTitle>
           <DialogContent className={styles.sqlDialogContent}>
@@ -4944,7 +4944,7 @@ export function ChatPanel() {
             </Button>
           </DialogActions>
         </DialogBody>
-      </DialogSurface>
+      </LhDialogSurface>
     </Dialog>
   );
 
@@ -5597,7 +5597,7 @@ export function ChatPanel() {
           if (!data.open) closeSqlEditor();
         }}
       >
-        <DialogSurface className={styles.sqlDialogSurface}>
+        <LhDialogSurface className={styles.sqlDialogSurface}>
           <DialogBody>
             <DialogTitle>Edit SQL</DialogTitle>
             <DialogContent className={styles.sqlDialogContent}>
@@ -5656,7 +5656,7 @@ export function ChatPanel() {
               </Button>
             </DialogActions>
           </DialogBody>
-        </DialogSurface>
+        </LhDialogSurface>
       </Dialog>
 
       {/* Save as view (openspec: add-shaped-views §3.1): a name-only dialog

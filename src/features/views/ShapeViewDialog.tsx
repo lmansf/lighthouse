@@ -26,12 +26,9 @@ import {
   DialogActions,
   DialogBody,
   DialogContent,
-  DialogSurface,
   DialogTitle,
-  Dropdown,
   Field,
   Input,
-  Option,
   Spinner,
   Text,
   Textarea,
@@ -43,6 +40,7 @@ import dynamic from "next/dynamic";
 import type { ShapeProposal } from "@/contracts";
 import { ragService } from "@/contracts";
 import { formatSql } from "@/lib/sqlFormat";
+import { LhDialogSurface, LhSelect } from "@/shell/controls";
 
 // The markdown stack loads on demand (the ChatPanel idiom) — only a rendered
 // proposal needs it, never the empty form.
@@ -215,7 +213,7 @@ export function ShapeViewDialog({
         if (!data.open) onClose();
       }}
     >
-      <DialogSurface className={styles.surface}>
+      <LhDialogSurface className={styles.surface}>
         <DialogBody>
           <DialogTitle>Shape a view</DialogTitle>
           <DialogContent className={styles.content}>
@@ -227,19 +225,13 @@ export function ShapeViewDialog({
                   nothing is saved until you say so. Your files are never modified.
                 </Text>
                 <Field label="Source">
-                  <Dropdown
+                  <LhSelect
+                    options={sources.map((s) => ({ value: s, label: s }))}
                     value={source}
-                    selectedOptions={source ? [source] : []}
-                    onOptionSelect={(_, data) => setSource(data.optionValue ?? "")}
+                    onChange={(v) => setSource(v)}
                     aria-label="Source table or view"
                     disabled={phase.kind === "proposing"}
-                  >
-                    {sources.map((s) => (
-                      <Option key={s} value={s}>
-                        {s}
-                      </Option>
-                    ))}
-                  </Dropdown>
+                  />
                 </Field>
                 <Field label="What should change?">
                   <Textarea
@@ -348,7 +340,7 @@ export function ShapeViewDialog({
             )}
           </DialogActions>
         </DialogBody>
-      </DialogSurface>
+      </LhDialogSurface>
     </Dialog>
   );
 }

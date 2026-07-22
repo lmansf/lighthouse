@@ -44,7 +44,6 @@ import {
   DialogActions,
   DialogBody,
   DialogContent,
-  DialogSurface,
   DialogTitle,
   Text,
   makeStyles,
@@ -71,6 +70,7 @@ import {
   withoutCard,
 } from "@/features/boards/boardModel";
 import { BOARD_CARD_MIME, BoardCard } from "@/features/boards/BoardCard";
+import { LhDialogSurface } from "@/shell/controls";
 
 const useStyles = makeStyles({
   // The pins dialog's surface, sized for a dashboard: v1 is a large dialog,
@@ -411,7 +411,7 @@ export function BoardHost() {
         if (!data.open) close();
       }}
     >
-      <DialogSurface className={styles.surface}>
+      <LhDialogSurface className={styles.surface}>
         <DialogBody>
           <DialogTitle>{board ? board.name : "Board"}</DialogTitle>
           <DialogContent className={styles.content}>
@@ -493,7 +493,7 @@ export function BoardHost() {
             </Button>
           </DialogActions>
         </DialogBody>
-      </DialogSurface>
+      </LhDialogSurface>
     </Dialog>
   );
 }

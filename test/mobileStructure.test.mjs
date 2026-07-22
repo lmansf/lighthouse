@@ -46,9 +46,11 @@ test("the report-template launcher survives as chat chips, labels byte-identical
   assert.match(chips, /ragService\s*\n?\s*\.capabilityMap\(|ragService\.capabilityMap\(/, "gated on the capability map");
   assert.match(chips, /t\.investigable/ , "only investigable tables chip");
   assert.match(chips, /ragService\.investigate\(table, undefined, template\)/, "same engine op");
-  assert.match(chips, />\s*Standard report\s*</, "Standard report entry");
-  assert.match(chips, />\s*Scientific method\s*</, "IMRaD entry");
-  assert.match(chips, />\s*Business report\s*</, "BLUF entry");
+  // §31 §3: the template picker is an LhMenu item list now; the three labels
+  // stay byte-identical as item labels.
+  assert.match(chips, /label: "Standard report",/, "Standard report entry");
+  assert.match(chips, /label: "Scientific method",/, "IMRaD entry");
+  assert.match(chips, /label: "Business report",/, "BLUF entry");
   assert.match(chips, /"imrad"/, "imrad template id");
   assert.match(chips, /"bluf"/, "bluf template id");
   assert.match(chat, /<InvestigateChips includedFileIds=\{includedFileIds\} \/>/, "mounted in the hero");

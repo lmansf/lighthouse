@@ -25,7 +25,6 @@ import {
   DialogActions,
   DialogBody,
   DialogContent,
-  DialogSurface,
   DialogTitle,
   DialogTrigger,
   Input,
@@ -33,7 +32,6 @@ import {
   MenuDivider,
   MenuItem,
   MenuList,
-  MenuPopover,
   MenuTrigger,
   SearchBox,
   Switch,
@@ -83,6 +81,7 @@ import { FolderRulesDialog } from "./FolderRulesDialog";
 import { useRagStore } from "@/stores/useRagStore";
 import { useAuthStore } from "@/stores/useAuthStore";
 import { cloudProviderActive } from "@/lib/privacyState";
+import { LhDialogSurface, LhMenuPopover, LhSwitch } from "@/shell/controls";
 import { FILE_DRAG_MIME, parseDraggedFiles, serializeDraggedFiles } from "@/shell/dnd";
 import { desktopBridge, isDesktopShell, pathsForFiles, platformKind } from "@/shell/desktopBridge";
 import { usePaneLayout } from "@/shell/paneLayout";
@@ -895,7 +894,7 @@ function TreeRowImpl({
         </Tooltip>
       </div>
         </MenuTrigger>
-        <MenuPopover>
+        <LhMenuPopover>
           <MenuList>
             {openable && (
               <MenuItem icon={<OpenRegular />} onClick={() => onOpen(node.id)}>
@@ -917,7 +916,7 @@ function TreeRowImpl({
                 <MenuTrigger disableButtonEnhancement>
                   <MenuItem icon={<FolderArrowRightRegular />}>Move to…</MenuItem>
                 </MenuTrigger>
-                <MenuPopover>
+                <LhMenuPopover>
                   <MenuList>
                     {moveTargets.map((t) => (
                       <MenuItem
@@ -929,7 +928,7 @@ function TreeRowImpl({
                       </MenuItem>
                     ))}
                   </MenuList>
-                </MenuPopover>
+                </LhMenuPopover>
               </Menu>
             )}
             {editable && (
@@ -977,7 +976,7 @@ function TreeRowImpl({
               Remove from vault
             </MenuItem>
           </MenuList>
-        </MenuPopover>
+        </LhMenuPopover>
       </Menu>
       {/* Children are no longer rendered here: the tree is flattened once at the
           panel level (respecting this row's `expanded`) and the flat list is
@@ -1971,7 +1970,7 @@ export function FileExplorer() {
                 Browse…
               </Button>
             </MenuTrigger>
-            <MenuPopover>
+            <LhMenuPopover>
               <MenuList>
                 {/* Link-first on the desktop: files stay where they are and are
                     read in place - no duplicate copy is made. Copying in stays
@@ -2037,7 +2036,7 @@ export function FileExplorer() {
                   </>
                 )}
               </MenuList>
-            </MenuPopover>
+            </LhMenuPopover>
           </Menu>
           )}
           <Tooltip content="Create a new folder in the vault" relationship="label">
@@ -2072,7 +2071,7 @@ export function FileExplorer() {
               onClick={() => void refresh()}
             />
           </Tooltip>
-          <Switch
+          <LhSwitch
             checked={selectionMode}
             onChange={(_, d) => setSelectionMode(d.checked)}
             label="Selection mode"
@@ -2216,7 +2215,7 @@ export function FileExplorer() {
             Select all
           </Button>
           <span className={styles.spacer} />
-          <Switch
+          <LhSwitch
             checked={Boolean(allSelectedVisible)}
             disabled={selectedIds.length === 0}
             onChange={(_, d) => void applySelection(d.checked)}
@@ -2278,7 +2277,7 @@ export function FileExplorer() {
                 <Button size="small" appearance="subtle" icon={<ArrowSortRegular />} aria-label="Sort" />
               </Tooltip>
             </MenuTrigger>
-            <MenuPopover>
+            <LhMenuPopover>
               <MenuList>
                 {(["name", "size", "type"] as const).map((key) => {
                   const active = sort.key === key;
@@ -2300,7 +2299,7 @@ export function FileExplorer() {
                   );
                 })}
               </MenuList>
-            </MenuPopover>
+            </LhMenuPopover>
           </Menu>
         </div>
       )}
@@ -2428,7 +2427,7 @@ export function FileExplorer() {
           }
         }}
       >
-        <DialogSurface>
+        <LhDialogSurface>
           <DialogBody>
             <DialogTitle>Remove from vault?</DialogTitle>
             <DialogContent>
@@ -2468,7 +2467,7 @@ export function FileExplorer() {
               </Button>
             </DialogActions>
           </DialogBody>
-        </DialogSurface>
+        </LhDialogSurface>
       </Dialog>
 
       {/* Shared Rename / New-folder name dialog. */}
@@ -2478,7 +2477,7 @@ export function FileExplorer() {
           if (!d.open) setNamePrompt(null);
         }}
       >
-        <DialogSurface>
+        <LhDialogSurface>
           <DialogBody>
             <DialogTitle>{namePrompt?.mode === "rename" ? "Rename" : "New folder"}</DialogTitle>
             <DialogContent>
@@ -2511,7 +2510,7 @@ export function FileExplorer() {
               </Button>
             </DialogActions>
           </DialogBody>
-        </DialogSurface>
+        </LhDialogSurface>
       </Dialog>
 
       {/* Read-only "What the AI sees" inspector (openspec: add-file-inspector). */}

@@ -26,13 +26,11 @@ import {
   DialogActions,
   DialogBody,
   DialogContent,
-  DialogSurface,
   DialogTitle,
   Input,
   Menu,
   MenuItem,
   MenuList,
-  MenuPopover,
   MenuTrigger,
   Switch,
   Text,
@@ -56,6 +54,7 @@ import { ragService } from "@/contracts";
 import { useChatStore } from "@/stores/useChatStore";
 import { useInvestigationsStore } from "@/stores/useInvestigationsStore";
 import { useRagStore } from "@/stores/useRagStore";
+import { LhDialogSurface, LhMenuPopover } from "@/shell/controls";
 
 const useStyles = makeStyles({
   // A quiet section above the file tree: hairline below, breathing room, and
@@ -406,7 +405,7 @@ export function InvestigationsNav() {
                 </div>
               </button>
             </MenuTrigger>
-            <MenuPopover>
+            <LhMenuPopover>
               <MenuList>
                 <MenuItem
                   icon={<RenameRegular />}
@@ -434,7 +433,7 @@ export function InvestigationsNav() {
                   Archive
                 </MenuItem>
               </MenuList>
-            </MenuPopover>
+            </LhMenuPopover>
           </Menu>
         );
       })}
@@ -471,7 +470,7 @@ export function InvestigationsNav() {
           if (!d.open) setCreateOpen(false);
         }}
       >
-        <DialogSurface>
+        <LhDialogSurface>
           <DialogBody>
             <DialogTitle>New investigation</DialogTitle>
             <DialogContent className={styles.dialogContent}>
@@ -531,7 +530,7 @@ export function InvestigationsNav() {
               </Button>
             </DialogActions>
           </DialogBody>
-        </DialogSurface>
+        </LhDialogSurface>
       </Dialog>
 
       {/* Branch dialog: a fork copies STRUCTURE only (scope, provider policy,
@@ -543,7 +542,7 @@ export function InvestigationsNav() {
           if (!d.open) setForkOpen(false);
         }}
       >
-        <DialogSurface>
+        <LhDialogSurface>
           <DialogBody>
             <DialogTitle>Branch investigation</DialogTitle>
             <DialogContent className={styles.dialogContent}>
@@ -580,7 +579,7 @@ export function InvestigationsNav() {
               </Button>
             </DialogActions>
           </DialogBody>
-        </DialogSurface>
+        </LhDialogSurface>
       </Dialog>
     </nav>
   );

@@ -40,7 +40,6 @@ import {
   MenuItem,
   MenuItemRadio,
   MenuList,
-  MenuPopover,
   MenuTrigger,
   Spinner,
   Text,
@@ -74,6 +73,7 @@ import {
   spanForSize,
   statDelta,
 } from "@/features/boards/boardModel";
+import { LhMenuPopover } from "@/shell/controls";
 
 /** Internal drag payload (the FileExplorer FILE_DRAG_MIME idiom): the dragged
  *  card's index, so a drop reorders without any global drag state. */
@@ -447,7 +447,7 @@ export function BoardCard(props: BoardCardProps) {
               aria-label={`Card options: ${question ?? "removed pin"}`}
             />
           </MenuTrigger>
-          <MenuPopover>
+          <LhMenuPopover>
             <MenuList>
               {/* Keyboard-first reorder: these controls are the primary path;
                   pointer drag is only an enhancement. */}
@@ -485,7 +485,7 @@ export function BoardCard(props: BoardCardProps) {
                 Remove card
               </MenuItem>
             </MenuList>
-          </MenuPopover>
+          </LhMenuPopover>
         </Menu>
       </div>
       <div

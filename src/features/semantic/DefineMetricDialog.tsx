@@ -23,7 +23,6 @@ import {
   DialogActions,
   DialogBody,
   DialogContent,
-  DialogSurface,
   DialogTitle,
   Field,
   Input,
@@ -33,6 +32,7 @@ import {
 } from "@fluentui/react-components";
 import { ErrorCircleRegular } from "@fluentui/react-icons";
 import { ragService } from "@/contracts";
+import { LhDialogSurface } from "@/shell/controls";
 
 const useStyles = makeStyles({
   surface: { maxWidth: "480px", width: "92vw" },
@@ -155,7 +155,7 @@ export function DefineMetricDialog({
         if (!data.open) onClose();
       }}
     >
-      <DialogSurface className={styles.surface}>
+      <LhDialogSurface className={styles.surface}>
         <DialogBody>
           <DialogTitle>Define as metric</DialogTitle>
           <DialogContent className={styles.content}>
@@ -217,7 +217,7 @@ export function DefineMetricDialog({
             )}
           </DialogActions>
         </DialogBody>
-      </DialogSurface>
+      </LhDialogSurface>
     </Dialog>
   );
 }

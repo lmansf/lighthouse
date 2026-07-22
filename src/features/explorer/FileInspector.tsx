@@ -29,7 +29,6 @@ import {
   DialogActions,
   DialogBody,
   DialogContent,
-  DialogSurface,
   DialogTitle,
   Input,
   Spinner,
@@ -53,6 +52,7 @@ import { ragService, type FileInspection } from "@/contracts";
 import { useRagStore } from "@/stores/useRagStore";
 import { useAuthStore } from "@/stores/useAuthStore";
 import { cloudProviderActive } from "@/lib/privacyState";
+import { LhDialogSurface } from "@/shell/controls";
 import {
   citedChunkIndex,
   INSPECT_FILE_EVENT,
@@ -320,7 +320,7 @@ export function FileInspector({
 
   return (
     <Dialog open={fileId !== null} onOpenChange={(_, d) => { if (!d.open) onClose(); }}>
-      <DialogSurface aria-describedby={undefined}>
+      <LhDialogSurface aria-describedby={undefined}>
         <DialogBody>
           <DialogTitle>What the AI sees — {name}</DialogTitle>
           <DialogContent className={styles.body}>
@@ -585,7 +585,7 @@ export function FileInspector({
             </Button>
           </DialogActions>
         </DialogBody>
-      </DialogSurface>
+      </LhDialogSurface>
     </Dialog>
   );
 }

@@ -23,7 +23,6 @@ import {
   MenuItem,
   MenuItemRadio,
   MenuList,
-  MenuPopover,
   MenuTrigger,
   Text,
   Tooltip,
@@ -38,6 +37,7 @@ import { useOnDeviceModel } from "@/stores/useOnDeviceModel";
 import { shortProviderLabel, switchArgs, switchChoices } from "@/lib/providerSwitch";
 import { apiKeyBillingNote } from "@/lib/billingNotes";
 import { MOBILE_NO_PROVIDER_TRUTHS } from "@/contracts";
+import { LhMenuPopover } from "@/shell/controls";
 import { platformKind } from "@/shell/desktopBridge";
 import { usePaneLayout } from "@/shell/paneLayout";
 
@@ -171,7 +171,7 @@ export function ProviderSwitch({
           </MenuButton>
         </Tooltip>
       </MenuTrigger>
-      <MenuPopover>
+      <LhMenuPopover>
         <MenuList>
           {choices.map((c) => (
             <MenuItemRadio
@@ -215,7 +215,7 @@ export function ProviderSwitch({
             Manage…
           </MenuItem>
         </MenuList>
-      </MenuPopover>
+      </LhMenuPopover>
     </Menu>
   );
 }

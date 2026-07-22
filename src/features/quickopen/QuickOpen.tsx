@@ -21,7 +21,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Dialog,
-  DialogSurface,
   Input,
   Text,
   makeStyles,
@@ -41,6 +40,7 @@ import {
 import { useRagStore } from "@/stores/useRagStore";
 import { quickOpenMatches, type QuickOpenCandidate } from "@/lib/quickOpen";
 import { modKey } from "@/features/onboarding/ModeChooser";
+import { LhDialogSurface } from "@/shell/controls";
 
 const useStyles = makeStyles({
   // A palette, not a modal form: pinned near the top (command-palette
@@ -234,7 +234,7 @@ export function QuickOpen() {
 
   return (
     <Dialog open={open} onOpenChange={(_, d) => setOpen(d.open)}>
-      <DialogSurface className={styles.surface} aria-label="Quick open — find a file">
+      <LhDialogSurface className={styles.surface} aria-label="Quick open — find a file">
         <div className={styles.box}>
           <Input
             className={styles.input}
@@ -316,7 +316,7 @@ export function QuickOpen() {
             </Text>
           </div>
         </div>
-      </DialogSurface>
+      </LhDialogSurface>
     </Dialog>
   );
 }

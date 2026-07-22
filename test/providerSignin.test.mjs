@@ -62,8 +62,11 @@ test("the sign-in control is gated on engine-reported availability (stock builds
 test("the key path's UI is untouched under method \"key\" and only steps aside for the pane", () => {
   assert.match(menu, /\{!signinPane && \(/, "the API-key field is gated on !signinPane only");
   assert.match(menu, /placeholder=\{\s*providerHasSavedKey/s, "the existing key field survives");
-  assert.match(menu, /<Radio value="key" label="Use API key" \/>/);
-  assert.match(menu, /<Radio value="signin" label="Sign in" \/>/);
+  // §31 §3: the method chooser is the segmented control now; the two labels
+  // stay byte-identical as its options.
+  assert.match(menu, /\{ value: "key", label: "Use API key" \},/);
+  assert.match(menu, /\{ value: "signin", label: "Sign in" \},/);
+  assert.match(menu, /<LhSegmented/, "the chooser is the §3 segmented primitive");
 });
 
 test("the user code renders LARGE with tabular numerals, and the browser opens via the feedback flow's idiom", () => {

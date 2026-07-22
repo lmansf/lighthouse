@@ -8,12 +8,9 @@ import {
   DialogActions,
   DialogBody,
   DialogContent,
-  DialogSurface,
   DialogTitle,
   DialogTrigger,
   Field,
-  Radio,
-  RadioGroup,
   Text,
   Textarea,
   Tooltip,
@@ -28,6 +25,7 @@ import {
   feedbackKindLabel,
   type FeedbackKind,
 } from "@/lib/feedbackLinks";
+import { LhDialogSurface, LhSegmented } from "@/shell/controls";
 
 /**
  * The single "Send feedback" flow. A quiet FAB in the corner (and a "Send
@@ -188,21 +186,22 @@ export function BugReport() {
           />
         </Tooltip>
       </DialogTrigger>
-      <DialogSurface>
+      <LhDialogSurface>
         <DialogBody>
           <DialogTitle>Send feedback</DialogTitle>
           <DialogContent>
             <div className={styles.fields}>
               <Field label="What kind of feedback?">
-                <RadioGroup
-                  layout="horizontal"
+                <LhSegmented
+                  options={[
+                    { value: "idea", label: feedbackKindLabel("idea") },
+                    { value: "problem", label: feedbackKindLabel("problem") },
+                    { value: "praise", label: feedbackKindLabel("praise") },
+                  ]}
                   value={kind}
-                  onChange={(_, d) => setKind(d.value as FeedbackKind)}
-                >
-                  <Radio value="idea" label={feedbackKindLabel("idea")} />
-                  <Radio value="problem" label={feedbackKindLabel("problem")} />
-                  <Radio value="praise" label={feedbackKindLabel("praise")} />
-                </RadioGroup>
+                  onChange={(v) => setKind(v as FeedbackKind)}
+                  aria-label="What kind of feedback?"
+                />
               </Field>
               <Field label="Where in the app? (optional)">
                 <Textarea value={where} onChange={(_, d) => setWhere(d.value)} />
@@ -268,7 +267,7 @@ export function BugReport() {
             </div>
           </DialogActions>
         </DialogBody>
-      </DialogSurface>
+      </LhDialogSurface>
     </Dialog>
   );
 }

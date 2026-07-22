@@ -29,15 +29,9 @@ import {
   DialogActions,
   DialogBody,
   DialogContent,
-  DialogSurface,
   DialogTitle,
   Field,
   Input,
-  Menu,
-  MenuItem,
-  MenuList,
-  MenuPopover,
-  MenuTrigger,
   Text,
   Textarea,
   makeStyles,
@@ -55,6 +49,7 @@ import {
 import type { MetricCard, SuggestedMetric, SynonymCard } from "@/contracts";
 import { ragService } from "@/contracts";
 import { useRagStore } from "@/stores/useRagStore";
+import { LhDialogSurface, LhMenu } from "@/shell/controls";
 
 const useStyles = makeStyles({
   // The Library-sibling chrome — the exact ViewsNav treatment.
@@ -421,8 +416,8 @@ export function SemanticNav() {
               />
             )}
           </div>
-          <Menu>
-            <MenuTrigger disableButtonEnhancement>
+          <LhMenu
+            trigger={
               <Button
                 appearance="subtle"
                 size="small"
@@ -430,24 +425,29 @@ export function SemanticNav() {
                 aria-label={`Actions for ${m.name}`}
                 className={styles.rowMenuBtn}
               />
-            </MenuTrigger>
-            <MenuPopover>
-              <MenuList>
-                <MenuItem icon={<ChatRegular />} onClick={() => askAbout(m.name)}>
-                  Ask about this metric
-                </MenuItem>
-                <MenuItem
-                  icon={<RenameRegular />}
-                  onClick={() => setRename({ id: m.id, name: m.name, busy: false, error: null })}
-                >
-                  Rename
-                </MenuItem>
-                <MenuItem icon={<DeleteRegular />} onClick={() => openDeleteMetric(m)}>
-                  Delete
-                </MenuItem>
-              </MenuList>
-            </MenuPopover>
-          </Menu>
+            }
+            items={[
+              {
+                key: "ask",
+                label: "Ask about this metric",
+                icon: <ChatRegular />,
+                onClick: () => askAbout(m.name),
+              },
+              {
+                key: "rename",
+                label: "Rename",
+                icon: <RenameRegular />,
+                onClick: () => setRename({ id: m.id, name: m.name, busy: false, error: null }),
+              },
+              {
+                key: "delete",
+                label: "Delete",
+                icon: <DeleteRegular />,
+                onClick: () => openDeleteMetric(m),
+              },
+            ]}
+            aria-label={`Actions for ${m.name}`}
+          />
         </div>
       ))}
 
@@ -568,7 +568,7 @@ export function SemanticNav() {
           if (!d.open) setNewMetric(null);
         }}
       >
-        <DialogSurface className={styles.dialogSurface}>
+        <LhDialogSurface className={styles.dialogSurface}>
           <DialogBody>
             <DialogTitle>New metric</DialogTitle>
             <DialogContent className={styles.dialogContent}>
@@ -630,7 +630,7 @@ export function SemanticNav() {
               </Button>
             </DialogActions>
           </DialogBody>
-        </DialogSurface>
+        </LhDialogSurface>
       </Dialog>
 
       {/* New synonym */}
@@ -640,7 +640,7 @@ export function SemanticNav() {
           if (!d.open) setNewSynonym(null);
         }}
       >
-        <DialogSurface className={styles.dialogSurface}>
+        <LhDialogSurface className={styles.dialogSurface}>
           <DialogBody>
             <DialogTitle>New synonym</DialogTitle>
             <DialogContent className={styles.dialogContent}>
@@ -685,7 +685,7 @@ export function SemanticNav() {
               </Button>
             </DialogActions>
           </DialogBody>
-        </DialogSurface>
+        </LhDialogSurface>
       </Dialog>
 
       {/* Rename metric — a dependents refusal shows verbatim. */}
@@ -695,7 +695,7 @@ export function SemanticNav() {
           if (!d.open) setRename(null);
         }}
       >
-        <DialogSurface className={styles.dialogSurface}>
+        <LhDialogSurface className={styles.dialogSurface}>
           <DialogBody>
             <DialogTitle>Rename metric</DialogTitle>
             <DialogContent className={styles.dialogContent}>
@@ -731,7 +731,7 @@ export function SemanticNav() {
               </Button>
             </DialogActions>
           </DialogBody>
-        </DialogSurface>
+        </LhDialogSurface>
       </Dialog>
 
       {/* Delete metric — plain confirm, or an explicit cascade that shows the
@@ -742,7 +742,7 @@ export function SemanticNav() {
           if (!d.open) setDelMetric(null);
         }}
       >
-        <DialogSurface className={styles.dialogSurface}>
+        <LhDialogSurface className={styles.dialogSurface}>
           <DialogBody>
             <DialogTitle>
               {cascade
@@ -785,7 +785,7 @@ export function SemanticNav() {
               </Button>
             </DialogActions>
           </DialogBody>
-        </DialogSurface>
+        </LhDialogSurface>
       </Dialog>
     </nav>
   );
