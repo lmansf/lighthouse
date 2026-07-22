@@ -41,8 +41,8 @@ test("the sheet is a floating bottom panel: scrim, 26pt top radius, glass that s
   assert.match(sheet, /borderTopLeftRadius: "var\(--lh-radius-sheet\)"/, "the 26pt concentric top");
   assert.match(
     sheet,
-    /color-mix\(in srgb, var\(--lh-bg-elevated\) calc\(100% - 38% \* var\(--lh-glass-level\)\), transparent\)/,
-    "the shared recipe — solid at level 0 / Reduce Transparency",
+    /color-mix\(in srgb, var\(--lh-bg-elevated\) calc\(100% - var\(--lh-glass-sheet-mix\) \* var\(--lh-glass-level\)\), transparent\)/,
+    "the theme-aware sheet floor (§7: 10% light / 3% dark) — solid at level 0",
   );
   assert.match(sheet, /overscrollBehavior: "contain"/, "body overscroll never chains to the page");
 });

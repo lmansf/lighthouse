@@ -82,6 +82,11 @@
   --lh-glass-saturate: 180%;
   /* The 0.5px inner top highlight that sells the material's edge. */
   --lh-glass-highlight: rgba(255, 255, 255, 0.5);
+  /* Sheet translucency (mixed toward transparent at full glass): 10% light,
+     3% dark — the §7 contrast-on-glass floor (dark materials run near-opaque
+     so interior secondary text keeps 4.5:1; scripts/check-contrast.mjs
+     asserts the composite at every intensity step). */
+  --lh-glass-sheet-mix: 10%;
 
   /* --- §31 semantic pairs (Paper) --------------------------------------------
      iOS-style semantic names over the existing Beam palette for hand-rolled
@@ -133,6 +138,7 @@
   --lh-shadow-card: 0 8px 24px rgba(0, 0, 0, 0.35);
   --lh-shadow-sheet: 0 12px 32px rgba(0, 0, 0, 0.45);
   --lh-glass-highlight: rgba(255, 255, 255, 0.12);
+  --lh-glass-sheet-mix: 3%;
 }
 
 /* 1x displays can't paint half a pixel — round the hairline up, not away. */

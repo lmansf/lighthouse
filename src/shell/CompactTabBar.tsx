@@ -107,7 +107,9 @@ const useStyles = makeStyles({
     ...shorthands.borderRadius("var(--lh-capsule)"),
     ...shorthands.padding(tokens.spacingVerticalXS, 0),
     backgroundColor: "transparent",
-    color: tokens.colorNeutralForeground3,
+    // fg2, not fg3: the §7 contrast-on-glass gate — fg3 cannot clear 4.5:1
+    // composited over worst-case blurred content at full glass; fg2 does.
+    color: tokens.colorNeutralForeground2,
     cursor: "pointer",
     fontFamily: "inherit",
     // No tap-highlight flash; the active state is the affordance.

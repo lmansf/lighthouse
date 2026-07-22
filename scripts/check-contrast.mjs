@@ -153,6 +153,59 @@ for (const [name, v] of Object.entries(ACCENTS)) {
   runChecks(`${name} accent · Paper`, { ...PAPER, ...v.paper });
   runChecks(`${name} accent · Ink`, { ...INK, ...v.ink });
 }
+// ---------------------------------------------------------------------------
+// §31 §7: contrast ON GLASS. The two glass surfaces (compact tab bar, Sheet)
+// composite their translucent surface over BLURRED app content; text on them
+// must clear 4.5:1 at EVERY intensity step, both themes. Model (documented in
+// docs/design-language.md):
+//   backdrop  = the theme canvas carrying a DENSE transcript — 30% fg1 glyph
+//               coverage blur-averaged into bg1 (worse than real transcripts);
+//   composite = alpha·surface + (1−alpha)·backdrop, per sRGB channel;
+//   tab bar   alpha = 1 − 0.38·level over bg2 (labels: fg2 rest, mark active);
+//   sheet     alpha = 1 − mix·level over elevated, mix = 0.10 light / 0.03
+//             dark (--lh-glass-sheet-mix — dark materials run near-opaque, as
+//             Apple's do, so interior fg3 metadata stays readable).
+// Keep the vars in app/globals.css and the mixes in CompactTabBar/Sheet in
+// sync with these numbers.
+// ---------------------------------------------------------------------------
+const mixc = (a, b, t) => {
+  const [ar, ag, ab_] = hex(a), [br, bg_, bb] = hex(b);
+  const ch = (x, y) => Math.round(x * t + y * (1 - t));
+  return (
+    "#" + [ch(ar, br), ch(ag, bg_), ch(ab_, bb)].map((v) => v.toString(16).padStart(2, "0")).join("")
+  );
+};
+const GLASS_SURFACES = (P, ink) => {
+  const backdrop = mixc(P.fg1, P.bg1, 0.3); // dense-transcript blur average
+  const elevated = ink ? "#1E2126" : "#FFFFFF";
+  const sheetMix = ink ? 0.03 : 0.10;
+  const out = [];
+  for (const level of [0, 0.5, 1]) {
+    const barAlpha = 1 - 0.38 * level;
+    const bar = mixc(P.bg2, backdrop, barAlpha);
+    out.push([`tab bar label (fg2) @ glass ${level}`, P.fg2, bar, 4.5]);
+    out.push([`tab bar active mark @ glass ${level}`, P.mark, bar, 3]);
+    const sheetAlpha = 1 - sheetMix * level;
+    const sheet = mixc(elevated, backdrop, sheetAlpha);
+    out.push([`sheet body (fg1) @ glass ${level}`, P.fg1, sheet, 4.5]);
+    out.push([`sheet secondary (fg2) @ glass ${level}`, P.fg2, sheet, 4.5]);
+    out.push([`sheet metadata (fg3) @ glass ${level}`, P.fg3, sheet, 4.5]);
+  }
+  return out;
+};
+const runGlass = (heading, P, ink) => {
+  console.log(`\n== ${heading} ==`);
+  for (const [label, fg, bg, min] of GLASS_SURFACES(P, ink)) {
+    const r = ratio(fg, bg);
+    const pass = r >= min;
+    if (!pass) allPass = false;
+    total += 1;
+    console.log(`${pass ? "PASS" : "FAIL"}  ${r.toFixed(2).padStart(5)} (min ${min})  ${label}`);
+  }
+};
+runGlass("glass · Paper", PAPER, false);
+runGlass("glass · Ink", INK, true);
+
 console.log(
   allPass
     ? `\nAll ${total} pairings meet WCAG AA in both themes.`

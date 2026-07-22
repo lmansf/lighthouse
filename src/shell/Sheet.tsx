@@ -116,8 +116,12 @@ const useStyles = makeStyles({
     borderTopLeftRadius: "var(--lh-radius-sheet)",
     borderTopRightRadius: "var(--lh-radius-sheet)",
     // The glass recipe (shared tokens; solid at level 0 / Reduce Transparency).
+    // The sheet's translucency floor is THEME-AWARE (--lh-glass-sheet-mix:
+    // 10% light / 3% dark) — dark materials must run near-opaque for interior
+    // fg3 text to clear the §7 contrast-on-glass gate, exactly as Apple's
+    // dark system materials do; the blur still reads at the edges.
     backgroundColor:
-      "color-mix(in srgb, var(--lh-bg-elevated) calc(100% - 38% * var(--lh-glass-level)), transparent)",
+      "color-mix(in srgb, var(--lh-bg-elevated) calc(100% - var(--lh-glass-sheet-mix) * var(--lh-glass-level)), transparent)",
     backdropFilter:
       "blur(calc(var(--lh-glass-blur) * var(--lh-glass-level))) saturate(calc(100% + 80% * var(--lh-glass-level)))",
     boxShadow:
