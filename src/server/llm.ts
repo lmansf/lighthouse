@@ -265,7 +265,21 @@ export const SYSTEM_PROMPT = [
   "- When a \"chart options\" context block is present, the app charts this result automatically whenever its shape fits. You may end your answer with ONE lighthouse-chart-request fence to refine that chart (kind, label column, series, title) as that block instructs; the app builds the chart itself from the verified result. Request \"none\" only when you believe the shape is genuinely uncomparable (a single number, id/SKU/code labels) — the app still decides either way.",
 ].join("\n");
 
-function buildPrompt(question: string, contexts: Ctx[]): string {
+/** Prior turns with empty content dropped and the sequence trimmed to begin
+ * with a user turn (Anthropic rejects otherwise; mirrored for the local path)
+ * — ONE helper for all three call paths, exported for the §32 cloud-snapshot
+ * rail. PARITY: prior_turns in llm.rs. */
+export function priorTurns(history: ChatTurn[]): ChatTurn[] {
+  const turns = history.filter(
+    (t) => typeof t.content === "string" && t.content.trim() !== "",
+  );
+  while (turns.length > 0 && turns[0].role !== "user") turns.shift();
+  return turns;
+}
+
+/** Exported for the §32 cloud-snapshot rail (test/cloudSnapshot.test.mjs) —
+ * the assembly must stay byte-identical while the on-device tiers move. */
+export function buildPrompt(question: string, contexts: Ctx[]): string {
   // Fence each block's text in triple quotes so the model can tell the retrieved
   // (untrusted) document content apart from the instructions/question. The `[n]`
   // header is preserved for the citation contract.
@@ -424,10 +438,7 @@ async function* streamOpenAICompat(
   model: string,
   history: ChatTurn[] = [],
 ): AsyncGenerator<string> {
-  const priorTurns = history.filter(
-    (t) => typeof t.content === "string" && t.content.trim() !== "",
-  );
-  while (priorTurns.length > 0 && priorTurns[0].role !== "user") priorTurns.shift();
+  const turns = priorTurns(history);
   recordEgress(provider.chatUrl, PURPOSE_AI_PROVIDER);
   const res = await fetch(provider.chatUrl, {
     method: "POST",
@@ -445,7 +456,7 @@ async function* streamOpenAICompat(
       // it back in.
       messages: [
         { role: "system", content: SYSTEM_PROMPT },
-        ...priorTurns.map((t) => ({ role: t.role, content: t.content })),
+        ...turns.map((t) => ({ role: t.role, content: t.content })),
         { role: "user", content: buildPrompt(question, contexts) },
       ],
     }),
@@ -529,12 +540,9 @@ async function* streamClaude(
   // Prior turns first (so the model has the thread), then the current question
   // with its freshly-retrieved context grounded in. Anthropic rejects
   // empty-content turns and requires the sequence to begin with a user turn.
-  const priorTurns = history.filter(
-    (t) => typeof t.content === "string" && t.content.trim() !== "",
-  );
-  while (priorTurns.length > 0 && priorTurns[0].role !== "user") priorTurns.shift();
+  const turns = priorTurns(history);
   const messages = [
-    ...priorTurns.map((t) => ({ role: t.role, content: t.content })),
+    ...turns.map((t) => ({ role: t.role, content: t.content })),
     { role: "user" as const, content: buildPrompt(question, contexts) },
   ];
   recordEgress(ANTHROPIC_URL, PURPOSE_AI_PROVIDER);
@@ -594,10 +602,7 @@ async function* streamLocal(
   model: string,
   history: ChatTurn[] = [],
 ): AsyncGenerator<string> {
-  const priorTurns = history.filter(
-    (t) => typeof t.content === "string" && t.content.trim() !== "",
-  );
-  while (priorTurns.length > 0 && priorTurns[0].role !== "user") priorTurns.shift();
+  const turns = priorTurns(history);
   // Bound only the connect/headers phase: a freshly auto-spawned llama-server can
   // accept the TCP connection while still loading the GGUF (tens of seconds), so
   // without this the request hangs instead of failing fast into the fallback. The
@@ -626,7 +631,7 @@ async function* streamLocal(
         cache_prompt: true,
         messages: [
           { role: "system", content: SYSTEM_PROMPT },
-          ...priorTurns.map((t) => ({ role: t.role, content: t.content })),
+          ...turns.map((t) => ({ role: t.role, content: t.content })),
           { role: "user", content: buildPrompt(question, contexts) },
         ],
       }),

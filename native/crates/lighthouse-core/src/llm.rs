@@ -1689,4 +1689,66 @@ mod tests {
         let echo = Layer("connect failed: connection refused", Some(Box::new(inner)));
         assert_eq!(error_chain(&echo), "connect failed: connection refused");
     }
+
+    // --- §32 §0: the cloud-snapshot rail -------------------------------------
+    // The hosted assembly (SYSTEM_PROMPT / build_prompt / prior_turns) asserts
+    // against the SAME canonical files the TS twin pins
+    // (test/fixtures/cloud-snapshot/, test/cloudSnapshot.test.mjs), so cloud
+    // drift AND twin drift both fail loud. Regenerating the fixtures IS the
+    // act of changing the cloud prompt — only when a spec says so.
+
+    fn snapshot_path(name: &str) -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../test/fixtures/cloud-snapshot")
+            .join(name)
+    }
+
+    fn ctx_named(name: &str, text: &str) -> Ctx {
+        Ctx { name: name.to_string(), text: text.to_string(), score: 1.0 }
+    }
+
+    fn snapshot(name: &str) -> String {
+        std::fs::read_to_string(snapshot_path(name)).expect("snapshot fixture present")
+    }
+
+    #[test]
+    fn cloud_snapshot_system_prompt_is_byte_identical() {
+        assert_eq!(SYSTEM_PROMPT, snapshot("system-prompt.txt"));
+    }
+
+    #[test]
+    fn cloud_snapshot_build_prompt_is_byte_identical() {
+        let inputs: serde_json::Value =
+            serde_json::from_str(&snapshot("inputs.json")).expect("inputs parse");
+        let contexts: Vec<Ctx> = inputs["contexts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| ctx_named(c["name"].as_str().unwrap(), c["text"].as_str().unwrap()))
+            .collect();
+        let built = build_prompt(inputs["question"].as_str().unwrap(), &contexts);
+        assert_eq!(built, snapshot("expected-prompt.txt"));
+    }
+
+    #[test]
+    fn cloud_snapshot_prior_turns_match() {
+        let inputs: serde_json::Value =
+            serde_json::from_str(&snapshot("inputs.json")).expect("inputs parse");
+        let history: Vec<ChatTurn> = inputs["history"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| ChatTurn {
+                role: t["role"].as_str().unwrap().to_string(),
+                content: t["content"].as_str().unwrap().to_string(),
+            })
+            .collect();
+        let got: Vec<serde_json::Value> = prior_turns(&history)
+            .iter()
+            .map(|t| serde_json::json!({ "role": t.role, "content": t.content }))
+            .collect();
+        let expected: serde_json::Value =
+            serde_json::from_str(&snapshot("expected-turns.json")).expect("expected parse");
+        assert_eq!(serde_json::Value::Array(got), expected);
+    }
 }

@@ -1,0 +1,14 @@
+[
+  {
+    "role": "user",
+    "content": "First real question about the vault."
+  },
+  {
+    "role": "assistant",
+    "content": "An answer citing [1]."
+  },
+  {
+    "role": "user",
+    "content": "A follow-up with unicode — naïve café ¥50,000."
+  }
+]
