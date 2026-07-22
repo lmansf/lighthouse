@@ -3800,7 +3800,7 @@ dependencies = [
 
 [[package]]
 name = "lighthouse-cli"
-version = "0.14.2"
+version = "0.14.3"
 dependencies = [
  "futures",
  "lighthouse-core",
@@ -3812,7 +3812,7 @@ dependencies = [
 
 [[package]]
 name = "lighthouse-core"
-version = "0.14.2"
+version = "0.14.3"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -3851,7 +3851,7 @@ dependencies = [
 
 [[package]]
 name = "lighthouse-desktop"
-version = "0.14.2"
+version = "0.14.3"
 dependencies = [
  "anyhow",
  "axum",
@@ -3885,7 +3885,7 @@ dependencies = [
 
 [[package]]
 name = "lighthouse-mcp"
-version = "0.14.2"
+version = "0.14.3"
 dependencies = [
  "futures",
  "lighthouse-core",
@@ -3897,7 +3897,7 @@ dependencies = [
 
 [[package]]
 name = "lighthouse-server"
-version = "0.14.2"
+version = "0.14.3"
 dependencies = [
  "anyhow",
  "async-stream",
