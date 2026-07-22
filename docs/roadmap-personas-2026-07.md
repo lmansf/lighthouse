@@ -6111,3 +6111,158 @@ device results in the PR). One commit per numbered section. Open ONE
 PR titled "Overflow made rare: digit-aware budget, wired planner,
 profile-first packing, retry ladder"; stop at the PR.
 ```
+
+## 37. Reports you can find: three doors for Scientific & Business reports (2026-07-22)
+
+Owner ask: make the business/scientific report ability CLEAR somewhere.
+Audit @ 0.14.4 — current discoverability is one nearly-invisible door:
+- The only entry is InvestigateChips (ChatPanel.tsx:5103) in the hero
+  suggestion row: a magnifier chip labeled "Investigate <table>" — the
+  word "report" appears ONLY inside its unopened LhMenu (Standard /
+  Scientific method / Business report). It renders solely when
+  messages.length === 0 (the empty hero, ChatPanel.tsx:4984), with
+  visible files whose tables are `investigable` (Date+Numeric, max 3)
+  — and VANISHES the moment any question is asked (back only via New
+  chat). Desktop and compact alike; Rust-engine only (web twin shows
+  the "Deep analysis runs in the desktop engine" note).
+- No other surface leads to a report: not the per-answer RefineChips
+  row (Top-10/Monthly/As-%/Chart/Edit-SQL/CSV/Evidence-pack/Pin/
+  Save-view/Define-metric — none report), not the composer, not the
+  Files inspector ("Open in app" + search only), not Settings, not
+  the tour (the suggestions step never says "report").
+- A finished report never appears in chat: investigate_templated →
+  write_report saves a markdown note under "Lighthouse Reports/" (or
+  the investigation's Notes) and fires lighthouse:reveal-node; the
+  chip shows "Saved <name>". Easy to miss entirely on compact.
+- Mechanical fact for the fix: reports are per-TABLE —
+  ragService.investigate(table, investigationId?, template?) runs the
+  whole-table recipe battery (reports.rs investigate_templated); an
+  answer's AnalyticsMeta carries sql/table/chart but NOT the source
+  table name, so a per-answer report action needs the engine to
+  expose it. ("run-report:" cues from the §29 sketch were never built
+  — the direct command is the shipped mechanism; keep it.)
+- Pins that must move with any relabel: test/mobileStructure.test.mjs
+  :45-56 asserts the three menu labels byte-identically AND the exact
+  hero mount line.
+
+### Prompt
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first, local-first analytics AI harness: Rust engine
+(native/crates/lighthouse-core) in a Tauri 2 shell (same crate is
+the iOS app), byte-compatible TS twin (src/server/), React UI
+(src/). Read CLAUDE.md, docs/ts-twin.md, and roadmap §29 + §37 (the
+discoverability audit above) before writing code. GOAL: the
+Scientific-method and Business-report ability becomes findable at
+the three moments it matters — looking at an answer, looking at a
+file, and starting fresh — without clutter. Everything stays
+validated (never offer a report a table's shape can't support),
+calm (menus/sheets, not button rows), and honest (Rust-engine-only
+reality preserved on the web twin). Coordinate: §35
+(readable-answers) and §36 (overflow) are in flight — §37 touches
+ChatPanel's RefineChips region and FileInspector; rebase onto
+whatever has merged and keep their changes intact.
+
+1. Door 1 — from the answer you're looking at (the big one).
+   a. Engine first: AnalyticsMeta gains the SOURCE TABLE name(s) the
+      SQL ran over — source_tables: Vec<String> (serde-default,
+      twins llm/contracts + src/contracts/types.ts, PARITY, KEEP IN
+      SYNC comments) — populated at the registration/planning seam
+      where the engine already knows which registered tables the
+      query touched. Answer-cache replay carries it (§22.6 idiom).
+   b. RefineChips (analytics answers) gains ONE action: "Report…" —
+      gated on: the answer's first source table resolves to an
+      `investigable` entry in capabilityMap (shape-valid), engine
+      present (desktop/Tauri — same gate Evidence-pack uses). Tap →
+      the existing LhMenu on desktop / a sheet on compact:
+      "Scientific method" · "Business report" · "Standard report".
+      Selecting runs ragService.investigate(sourceTable,
+      currentInvestigationId, template) with the existing progress
+      affordance (chip shows a spinner state; no new machinery).
+   c. When the report saves: render an inline confirmation in the
+      transcript at that answer — a quiet system chip "Saved
+      <name> — Open" that opens the report (FileInspector preview /
+      reveal-node on desktop; on compact it must NOT silently switch
+      tabs — the Open action navigates deliberately, §34's rules).
+      Never a silent save again.
+
+2. Door 2 — from the file. The Files inspector (FileInspector.tsx)
+   gains a "Generate report…" action for tabular files whose table
+   is investigable (same capabilityMap gate): the same three-choice
+   menu/sheet → investigate(table, currentInvestigationId,
+   template) → the same saved-report confirmation with Open.
+   Non-investigable tabular files show nothing (no disabled
+   buttons). Web twin: the action is absent (Rust-only honesty —
+   reuse the existing engine-note pattern if a placeholder is
+   wanted, else omit).
+
+3. Door 3 — the hero, renamed so it reads as what it is. The
+   InvestigateChips chip label changes "Investigate <table>" →
+   "Report on <table>" with a document/report icon (registry icon,
+   §31 rules); the menu keeps its three items verbatim. Move the
+   byte-pins (test/mobileStructure.test.mjs:45-56 — labels + mount
+   line) in the same commit. Keep the max-3 cap and the
+   empty-hero-only placement (the hero is for starting points;
+   Doors 1-2 now cover mid-conversation) — but add one caption line
+   under the row when report chips are present: "One tap builds a
+   structured report — computed by the engine, saved to your
+   files." (byte-pinned).
+
+4. Teach it once, quietly. The §33 tour's suggestions step body
+   gains one clause: "…or turn a table into a Scientific or
+   Business report — every number computed by the engine." (both
+   platform variants, byte-pinned, tour pins updated). No new tour
+   step; no onboarding changes.
+
+5. Reading the report. The saved report opens in the existing
+   FileInspector/MarkdownView preview and inherits §35's content
+   type scale (verify a generated IMRaD/BLUF note renders with the
+   16px body + compressed headings + key-stat grid treatment on
+   compact — fix the preview path if it bypasses the content
+   tokens). The §29 evidence-pack/export path is unchanged.
+
+6. Tests + stamps. Pins: the Report… action appears on an analytics
+   answer whose source table is investigable and NOT otherwise
+   (fixture with a non-investigable shape); source_tables round-trip
+   in both twins (serde-default tolerated by old payloads); the
+   inspector action gating; the renamed hero labels + caption; the
+   saved-confirmation chip with Open (and no tab switch on compact
+   without tap — §34's inventory pin gains the deliberate Open
+   navigation as an allowed path). Engine reports_test.rs untouched
+   (behavior unchanged — this is surfacing). Bump current+1 across
+   all SEVEN stamp files per CLAUDE.md; suites + release-smoke +
+   ios-build green.
+
+Constraints. Report GENERATION is unchanged (same investigate
+command, same deterministic battery + 2 framing calls, same save
+location) — this patch is pure surfacing. Validated-only chips (no
+disabled buttons, no dead ends). Labels byte-pinned; twins PARITY.
+No analytics/telemetry. SharePoint plumbing untouched. Desktop and
+compact both get all three doors; web twin keeps its honest
+engine-note degradation.
+
+Acceptance:
+1. Ask an analytics question over a dated/numeric table → the
+   answer's action row shows "Report…" → choosing Business report
+   produces the saved note AND an inline "Saved — Open" chip that
+   opens it; a non-investigable answer shows no Report action.
+2. Long-press/open a tabular file in Files → Generate report… →
+   same flow, on iPhone and desktop.
+3. A fresh chat with an investigable table shows "Report on
+   <table>" chips + the one-line caption; the menu still offers the
+   three templates byte-identically.
+4. The tour's suggestions step mentions reports; all moved pins
+   green.
+5. A generated report renders on compact with §35's content
+   typography (16px body, compressed headings, stat grid where
+   applicable).
+6. Suites + release-smoke + ios-build green; seven stamps bumped.
+
+Environment. Container-testable throughout (UI + engine meta field +
+pins; grep-verify desktop-crate call sites per CLAUDE.md); a
+simulator pass for the compact sheets/navigation. One commit per
+numbered section. Open ONE PR titled "Reports you can find: answer,
+file, and hero doors for Scientific & Business reports"; stop at
+the PR.
+```
