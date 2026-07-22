@@ -101,7 +101,7 @@ import { useInvestigationsStore } from "@/stores/useInvestigationsStore";
 import { chatHistoryLocked } from "@/stores/managedLocks";
 import { modKey } from "@/features/onboarding/ModeChooser";
 import { LhDialogSurface, LhMenuPopover } from "@/shell/controls";
-import { publishChatStreaming } from "@/shell/shellSignals";
+import { publishChatStreaming, USER_ASK_EVENT } from "@/shell/shellSignals";
 import { ACCENTS, BEAM_SWEEP } from "@/shell/theme";
 import { FILE_DRAG_MIME, parseDraggedFiles, type DraggedFile } from "@/shell/dnd";
 import { isDesktopShell, pathsForFiles, platformKind } from "@/shell/desktopBridge";
@@ -3207,6 +3207,9 @@ export function ChatPanel() {
     opts?: { bypassCache?: boolean; attachmentsOverride?: { id: string }[] },
   ) {
     if (!q || streaming) return;
+    // §34 §1b: announce the user's ask intent (AppShell's compact navigation
+    // returns to the Chat tab on this — never on message-list observation).
+    window.dispatchEvent(new CustomEvent(USER_ASK_EVENT));
     // Warm the split markdown chunk now, while the answer streams as plain text,
     // so it's ready the instant the turn settles into a full markdown render.
     warmMarkdown();

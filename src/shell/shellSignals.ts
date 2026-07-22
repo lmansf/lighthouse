@@ -13,6 +13,15 @@
 import { useSyncExternalStore } from "react";
 import type { CompactTab } from "./paneLayout";
 
+/**
+ * §34 §1b: the explicit "the USER asked" signal. ChatPanel's sendQuestion (the
+ * ONE ask entry — typed asks, chip asks, and the lighthouse:ask-question event
+ * path all funnel through it) dispatches this; AppShell returns compact
+ * navigation to the Chat tab on it. Intent, not observation: a store-level
+ * message append (hydration, background work) can never switch tabs.
+ */
+export const USER_ASK_EVENT = "lighthouse:user-ask";
+
 export interface ShellUi {
   /** Below the breakpoint (the tab-bar arrangement). */
   compact: boolean;

@@ -9,7 +9,7 @@ import {
   shorthands,
   tokens,
 } from "@fluentui/react-components";
-import { IconBack, IconSearch, IconSidebarCollapse, IconSidebarExpand } from "@/shell/icons";
+import { IconSearch, IconSidebarCollapse, IconSidebarExpand } from "@/shell/icons";
 import { LAYOUT, ACCENTS } from "./theme";
 import { SettingsMenu } from "@/features/settings/SettingsMenu";
 import { UpdateNotice } from "@/features/update/UpdateNotice";
@@ -63,10 +63,6 @@ const useStyles = makeStyles({
       minHeight: "44px",
     },
   },
-  // fp3 §3: the files-page Back control (replaces the collapse chevron when the
-  // sidebar is the full-screen compact page). A thumb-sized ≥44pt target with an
-  // explicit label so "go back to chat" reads unambiguously on a phone/iPad.
-  backBtn: { minWidth: "44px", minHeight: "44px" },
   brand: {
     display: "flex",
     alignItems: "center",
@@ -121,12 +117,13 @@ interface SidebarProps {
    *  transition so the edge tracks the cursor instead of easing behind it. */
   resizing?: boolean;
   /**
-   * fp3 §3: render the trailing header control as a full-screen-page "Back"
-   * button (a 44pt back arrow + label) instead of the desktop collapse chevron.
-   * Set by AppShell only in the compact files-page branch; desktop/widget/
-   * explorer callers omit it and keep the collapse affordance byte-for-byte.
+   * fp3 §3 → §34: this sidebar is the compact Files PAGE — a tab root. Set by
+   * AppShell only in that branch; it drops the desktop collapse chevron (the
+   * tab bar is the navigation; the old page "Back" button is gone with it) and
+   * the footer Settings gear (Settings is its own tab there). Desktop/widget/
+   * explorer callers omit it and keep both byte-for-byte.
    */
-  backControl?: boolean;
+  compactPage?: boolean;
 }
 
 /**
@@ -142,7 +139,7 @@ export function Sidebar({
   children,
   width,
   resizing,
-  backControl,
+  compactPage,
 }: SidebarProps) {
   const styles = useStyles();
 
@@ -182,11 +179,11 @@ export function Sidebar({
               <Text weight="semibold">Lighthouse</Text>
             </span>
             <span className={styles.headerActions}>
-              {/* 0.13.10 §5: the compact files PAGE (backControl set) uses the
+              {/* 0.13.10 §5: the compact files PAGE (compactPage set) uses the
                   tile grid's pull-down search instead — one finder per surface.
                   The launcher stays for iPad-regular / desktop-touch, where the
                   tree has no pull-down field. */}
-              {!backControl && (
+              {!compactPage && (
                 <Tooltip content="Quick open a file" relationship="label">
                   <Button
                     appearance="subtle"
@@ -201,18 +198,9 @@ export function Sidebar({
                   />
                 </Tooltip>
               )}
-              {backControl ? (
-                // fp3 §3: the compact files-page Back control (44pt).
-                <Button
-                  appearance="subtle"
-                  className={styles.backBtn}
-                  icon={<IconBack />}
-                  aria-label="Back to chat"
-                  onClick={onToggleCollapsed}
-                >
-                  Back
-                </Button>
-              ) : (
+              {/* §34: a tab root gets NO trailing control — the tab bar is
+                  the navigation; desktop keeps its collapse chevron. */}
+              {!compactPage && (
                 <Tooltip content={`Collapse files ${toggleHint}`} relationship="label">
                   <Button
                     appearance="subtle"
@@ -232,14 +220,18 @@ export function Sidebar({
           compact dot in the collapsed rail so it isn't hidden just because the
           sidebar is thin. */}
       {collapsed ? <UpdateNotice collapsed /> : <UpdateNotice />}
-      <div className={mergeClasses(styles.footer, collapsed && styles.footerCollapsed)}>
-        <SettingsMenu />
-        {!collapsed && (
-          <Text size={200} className={styles.footerLabel}>
-            Settings
-          </Text>
-        )}
-      </div>
+      {/* §34 §3: the compact Files page carries no footer gear — Settings is
+          its own tab there. Desktop keeps its ONE Settings entry byte-for-byte. */}
+      {!compactPage && (
+        <div className={mergeClasses(styles.footer, collapsed && styles.footerCollapsed)}>
+          <SettingsMenu />
+          {!collapsed && (
+            <Text size={200} className={styles.footerLabel}>
+              Settings
+            </Text>
+          )}
+        </div>
+      )}
     </div>
   );
 }

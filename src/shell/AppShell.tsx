@@ -2,16 +2,14 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button, Text, makeStyles, mergeClasses, tokens } from "@fluentui/react-components";
-import { IconBack } from "@/shell/icons";
 import { Sidebar } from "./Sidebar";
 import { LAYOUT } from "./theme";
 import { usePaneLayout, type CompactTab } from "./paneLayout";
 import { CompactTabBar, TAB_BAR_CONTENT_HEIGHT, TAB_BAR_FLOAT_GAP } from "./CompactTabBar";
-import { publishShellUi } from "./shellSignals";
+import { publishShellUi, USER_ASK_EVENT } from "./shellSignals";
 import { START_TOUR_EVENT } from "@/features/help/FirstRunTour";
 import { useVaultTree } from "./useVaultTree";
 import { anySheetOpen, useAnySheetOpen } from "./Sheet";
-import { useChatStore } from "@/stores/useChatStore";
 import { INSPECT_FILE_EVENT } from "@/lib/citePreview";
 import { StartupPrompt } from "@/features/startup/StartupPrompt";
 import { SettingsPage } from "@/features/settings/SettingsPage";
@@ -148,8 +146,6 @@ const useStyles = makeStyles({
     paddingRight: tokens.spacingHorizontalM,
     paddingTop: tokens.spacingVerticalS,
   },
-  // The page's 44pt Back control (mirrors the Sidebar's fp3 §3 backBtn).
-  backBtn: { minWidth: "44px", minHeight: "44px" },
 });
 
 interface AppShellProps {
@@ -256,33 +252,19 @@ export function AppShell({ sidebar, main }: AppShellProps) {
     window.addEventListener(INSPECT_FILE_EVENT, close);
     return () => window.removeEventListener(INSPECT_FILE_EVENT, close);
   }, [layout.drawerVisible]);
-  const messageCount = useChatStore((s) => s.messages.length);
-  const prevMessageCount = useRef(messageCount);
+  // §34 §1b: any compact page yields to Chat when the USER asks — Settings
+  // included (its inline ViewsNav/SemanticNav fire asks that would otherwise
+  // stream invisibly under the page). The signal is ChatPanel's explicit
+  // ask-intent event, never an observation of the message list — so a
+  // store-level append (hydration, background work, future features) can
+  // never switch tabs out from under a reading user.
   useEffect(() => {
-    // Any compact page yields to Chat when an ask lands — Settings included
-    // (its inline ViewsNav/SemanticNav can fire asks that would otherwise
-    // stream invisibly under the page).
-    if (messageCount > prevMessageCount.current && layout.compact && compactTab !== "chat")
-      setCompactTab("chat");
-    prevMessageCount.current = messageCount;
-  }, [messageCount, layout.compact, compactTab]);
-
-  // fp3 §3: edge-swipe-RIGHT on the files page goes back to chat — the iOS
-  // "back" gesture, the mirror of the old swipe-left drawer dismiss. Esc is the
-  // other path (there is no scrim to tap now — the page is full-screen). A plain
-  // horizontal-delta check, no gesture library.
-  // Shared by both compact pages (files + sections): a rightward edge swipe is
-  // the iOS "back" gesture → return to chat.
-  const touchStartX = useRef<number | null>(null);
-  const onDrawerTouchStart = (e: React.TouchEvent) => {
-    touchStartX.current = e.touches[0]?.clientX ?? null;
-  };
-  const onDrawerTouchEnd = (e: React.TouchEvent) => {
-    const start = touchStartX.current;
-    touchStartX.current = null;
-    const end = e.changedTouches[0]?.clientX;
-    if (start != null && typeof end === "number" && end - start > 40) setCompactTab("chat");
-  };
+    const onUserAsk = () => {
+      if (compactRef.current) setCompactTab("chat");
+    };
+    window.addEventListener(USER_ASK_EVENT, onUserAsk);
+    return () => window.removeEventListener(USER_ASK_EVENT, onUserAsk);
+  }, []);
 
   // fp3 §3: page-entrance animation — mount parked off-screen-left, then clear
   // on the next frame so it eases in (mirrors the Sheet primitive's entrance).
@@ -654,8 +636,9 @@ export function AppShell({ sidebar, main }: AppShellProps) {
   if (layout.compact) {
     // fp3 §3 compact arrangement: the chat pane IS the screen. The sidebar is a
     // full-screen PAGE that slides in from the left edge (no scrim, no overlay;
-    // Esc / edge-swipe-right / the header Back control dismiss it; auto-closes
-    // when a file opens or an ask is sent), sections are full-width sheets, and
+    // it is a TAB root — the tab bar navigates, Esc returns to Chat for
+    // hardware keyboards, and it auto-closes when a file opens or the user
+    // asks), sections are full-width sheets, and
     // none of the resize machinery exists — the persisted explorerWidth is
     // neither applied (the page is viewport-sized) nor ever written (no handle).
     // This branch is unreachable on the desktop platform at any width
@@ -671,13 +654,12 @@ export function AppShell({ sidebar, main }: AppShellProps) {
             // The Sidebar reads --sidebar-w for its width; 100% fills the page
             // instead of any remembered desktop width.
             style={{ "--sidebar-w": "100%" } as React.CSSProperties}
-            onTouchStart={onDrawerTouchStart}
-            onTouchEnd={onDrawerTouchEnd}
           >
             <Sidebar
               collapsed={false}
-              // The header control is the page's 44pt Back-to-chat button (§3).
-              backControl
+              // §34: a TAB root — no Back, no collapse chevron, no footer gear
+              // (the tab bar is the navigation; Settings is its own tab).
+              compactPage
               onToggleCollapsed={() => setCompactTab("chat")}
             >
               {sidebar}
@@ -692,21 +674,10 @@ export function AppShell({ sidebar, main }: AppShellProps) {
             role="dialog"
             aria-modal="true"
             aria-label="Settings"
-            onTouchStart={onDrawerTouchStart}
-            onTouchEnd={onDrawerTouchEnd}
           >
             <div className={styles.pagePane}>
               <div className={styles.pageHeader}>
                 <Text weight="semibold">Settings</Text>
-                <Button
-                  appearance="subtle"
-                  className={styles.backBtn}
-                  icon={<IconBack />}
-                  aria-label="Back to chat"
-                  onClick={() => setCompactTab("chat")}
-                >
-                  Back
-                </Button>
               </div>
               <div className={mergeClasses(styles.pageBody, styles.pageBodyGrouped)} ref={settingsScrollRef}>
                 <SettingsPage />
