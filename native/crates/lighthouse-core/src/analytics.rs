@@ -2027,6 +2027,171 @@ pub struct QueryResult {
     pub batches: Vec<RecordBatch>,
 }
 
+// --- §32 §3c: the apple-fm fact sheet + structured display table ----------------
+//
+// Under the prose-only contract the small on-device model narrates over a
+// compact FACT SHEET instead of SQL + the raw result table + schema cards,
+// and the ENGINE ships the verified rows to the renderer on `meta.table`.
+// Both are deterministic and engine-computed — the model can only cite
+// numbers the sheet contains, and the drawn table can never be model text.
+
+/// Rows the fact sheet lists (the aggregates still cover every computed row —
+/// the sheet says so). Small on purpose: the sheet must fit ONE apple-fm
+/// context block with room for the headlines. §8's A/B retunes.
+const FACT_SHEET_MAX_ROWS: usize = 12;
+/// Whole-line cap for the sheet's row table (same cut idiom as the
+/// NARRATE_MAX_CHARS clamp in `run_query`) — headline room inside the
+/// 3,500-char apple block ceiling.
+const FACT_SHEET_TABLE_MAX_CHARS: usize = 2_200;
+
+/// Numeric reading of a rendered cell ("$1,200", "42.5%", "7") — the
+/// reports.rs `parse_cell` idiom. None for non-numeric text.
+fn cell_num(s: &str) -> Option<f64> {
+    let t = s.trim().trim_start_matches('$').replace(',', "");
+    let t = t.trim_end_matches('%');
+    if t.is_empty() {
+        return None;
+    }
+    t.parse::<f64>().ok()
+}
+
+/// Engine number rendering for the sheet: integers stay integers, everything
+/// else keeps two decimals — never scientific notation the model might echo.
+fn fmt_num(v: f64) -> String {
+    if v.fract() == 0.0 && v.abs() < 1e15 { format!("{}", v as i64) } else { format!("{v:.2}") }
+}
+
+/// The §32 `meta.table` JSON (`{"columns":[…],"rows":[[…]]}`) for a result:
+/// the SAME row cap and arrow cell formatting as the narration markdown, so
+/// what the renderer draws equals what the engine rendered everywhere else.
+/// KEEP IN SYNC with parseTableJson in src/lib/answerTable.ts.
+pub fn meta_table_json(res: &QueryResult) -> Option<String> {
+    let first = res.batches.first()?;
+    let columns: Vec<String> =
+        first.schema().fields().iter().map(|f| f.name().to_string()).collect();
+    if columns.is_empty() {
+        return None;
+    }
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    'outer: for b in &res.batches {
+        for row in 0..b.num_rows() {
+            if rows.len() >= NARRATE_MAX_ROWS.min(MAX_RESULT_ROWS) {
+                break 'outer;
+            }
+            rows.push(
+                (0..b.num_columns())
+                    .take(MAX_RESULT_COLS)
+                    .map(|c| array_value_to_string(b.column(c), row).unwrap_or_default())
+                    .collect(),
+            );
+        }
+    }
+    let columns: Vec<String> = columns.into_iter().take(MAX_RESULT_COLS).collect();
+    Some(serde_json::json!({ "columns": columns, "rows": rows }).to_string())
+}
+
+/// The compact fact sheet the apple-fm narration sees (§3c): row/col counts,
+/// a small sample of rows, engine-computed aggregates over EVERY computed
+/// row, and the truncation truth — every number the model may cite, nothing
+/// it must not. Deterministic; byte-stable for the same result.
+pub fn fact_sheet(res: &QueryResult) -> String {
+    let computed = res.shown;
+    let cols: Vec<String> = res
+        .batches
+        .first()
+        .map(|b| b.schema().fields().iter().map(|f| f.name().to_string()).collect())
+        .unwrap_or_default();
+    let mut out = format!(
+        "Result: {computed} rows × {} columns ({}).\n",
+        cols.len(),
+        cols.join(", ")
+    );
+    // The truncation truth, phrased over the ENGINE-computed rows (never the
+    // display cap): aggregates below cover exactly what was computed.
+    match (res.truncated, res.total) {
+        (true, Some(t)) => out.push_str(&format!(
+            "This query matched {t} rows in total; the engine computed the first {computed}. Every figure below covers those {computed} rows.\n"
+        )),
+        (true, None) => out.push_str(&format!(
+            "The result was truncated at {computed} computed rows. Every figure below covers those {computed} rows.\n"
+        )),
+        _ => out.push_str(&format!("Every figure below covers all {computed} rows.\n")),
+    }
+    // A small row sample (the full display table rides meta.table — the
+    // contract line says so), cut whole lines to the char cap.
+    let (table, mut listed, _) =
+        batches_to_markdown(&res.batches, FACT_SHEET_MAX_ROWS.min(computed), MAX_RESULT_COLS);
+    let mut table = table;
+    if table.chars().count() > FACT_SHEET_TABLE_MAX_CHARS {
+        let mut kept = String::with_capacity(FACT_SHEET_TABLE_MAX_CHARS);
+        for line in table.lines() {
+            if kept.chars().count() + line.chars().count() + 1 > FACT_SHEET_TABLE_MAX_CHARS {
+                break;
+            }
+            kept.push_str(line);
+            kept.push('\n');
+        }
+        table = kept.trim_end().to_string();
+        listed = table.lines().count().saturating_sub(2);
+    }
+    if listed < computed {
+        out.push_str(&format!("Sample — the first {listed} of {computed} computed rows (the app already displays the full table):\n"));
+    } else {
+        out.push_str(&format!("All {computed} rows:\n"));
+    }
+    out.push_str(&table);
+    out.push('\n');
+    // Engine aggregates per numeric column: a column counts as numeric when
+    // every non-empty cell parses. Totals/min/max only — deterministic and
+    // label-honest; richer headlines stay insights.rs territory.
+    let mut agg_lines: Vec<String> = Vec::new();
+    for (ci, name) in cols.iter().enumerate().take(MAX_RESULT_COLS) {
+        let mut vals: Vec<f64> = Vec::new();
+        let mut non_numeric = false;
+        for b in &res.batches {
+            if ci >= b.num_columns() {
+                continue;
+            }
+            for row in 0..b.num_rows() {
+                let raw = array_value_to_string(b.column(ci), row).unwrap_or_default();
+                if raw.trim().is_empty() {
+                    continue;
+                }
+                match cell_num(&raw) {
+                    Some(v) => vals.push(v),
+                    None => {
+                        non_numeric = true;
+                        break;
+                    }
+                }
+            }
+            if non_numeric {
+                break;
+            }
+        }
+        if non_numeric || vals.is_empty() {
+            continue;
+        }
+        let sum: f64 = vals.iter().sum();
+        let min = vals.iter().cloned().fold(f64::INFINITY, f64::min);
+        let max = vals.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        agg_lines.push(format!(
+            "- {name}: total {}, min {}, max {}",
+            fmt_num(sum),
+            fmt_num(min),
+            fmt_num(max)
+        ));
+    }
+    if !agg_lines.is_empty() {
+        out.push_str(&format!(
+            "Aggregates — computed by the engine over all {computed} computed rows:\n"
+        ));
+        out.push_str(&agg_lines.join("\n"));
+        out.push('\n');
+    }
+    out
+}
+
 /// Run a guarded query with a hard timeout and result caps.
 pub async fn run_query(ctx: &SessionContext, sql: &str) -> Result<QueryResult, String> {
     guard_sql(sql)?;
@@ -3770,6 +3935,84 @@ mod tests {
             ],
         )
         .unwrap()
+    }
+
+    // --- §32 §3c: the fact sheet + meta.table ------------------------------------
+
+    fn qr_of(b: RecordBatch, shown: usize, truncated: bool, total: Option<usize>) -> QueryResult {
+        QueryResult {
+            markdown: String::new(),
+            shown,
+            truncated,
+            total,
+            chart: None,
+            digest: String::new(),
+            batches: vec![b],
+        }
+    }
+
+    #[test]
+    fn fact_sheet_pins_counts_aggregates_and_labels_them_over_all_rows() {
+        let res = qr_of(batch(&["West", "East", "North"], &[10.0, 30.5, 2.0]), 3, false, Some(3));
+        let sheet = fact_sheet(&res);
+        assert!(sheet.contains("Result: 3 rows × 2 columns (label, total)."), "{sheet}");
+        assert!(sheet.contains("Every figure below covers all 3 rows."), "{sheet}");
+        assert!(sheet.contains("All 3 rows:"), "{sheet}");
+        assert!(sheet.contains("| West | 10.0 |"), "row sample present: {sheet}");
+        // Aggregates: numeric column only, labeled over the FULL computed rows.
+        assert!(
+            sheet.contains("Aggregates — computed by the engine over all 3 computed rows:"),
+            "{sheet}"
+        );
+        assert!(sheet.contains("- total: total 42.50, min 2, max 30.50"), "{sheet}");
+        assert!(!sheet.contains("- label:"), "text column gets no aggregate: {sheet}");
+        // Byte-stable for the same result (the sheet is deterministic).
+        assert_eq!(sheet, fact_sheet(&res));
+    }
+
+    #[test]
+    fn fact_sheet_tells_the_truncation_truth_and_samples_rows() {
+        let labels: Vec<String> = (0..20).map(|i| format!("r{i}")).collect();
+        let refs: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
+        let vals: Vec<f64> = (0..20).map(|i| i as f64).collect();
+        let res = qr_of(batch(&refs, &vals), 20, true, Some(200));
+        let sheet = fact_sheet(&res);
+        assert!(
+            sheet.contains(
+                "This query matched 200 rows in total; the engine computed the first 20."
+            ),
+            "{sheet}"
+        );
+        assert!(sheet.contains("Every figure below covers those 20 rows."), "{sheet}");
+        assert!(
+            sheet.contains("Sample — the first 12 of 20 computed rows"),
+            "sheet caps its sample at FACT_SHEET_MAX_ROWS: {sheet}"
+        );
+        // 12 data rows: header + align + 12.
+        let table_lines =
+            sheet.lines().filter(|l| l.trim_start().starts_with('|')).count();
+        assert_eq!(table_lines, 14, "{sheet}");
+        assert!(sheet.contains("over all 20 computed rows"), "{sheet}");
+    }
+
+    #[test]
+    fn meta_table_json_mirrors_the_rendered_cells() {
+        let res = qr_of(batch(&["West", "East"], &[10.0, 30.5]), 2, false, Some(2));
+        let json = meta_table_json(&res).expect("table json");
+        let v: serde_json::Value = serde_json::from_str(&json).expect("valid json");
+        assert_eq!(v["columns"], serde_json::json!(["label", "total"]));
+        assert_eq!(v["rows"], serde_json::json!([["West", "10.0"], ["East", "30.5"]]));
+        // Empty results carry no table.
+        let empty = QueryResult {
+            markdown: String::new(),
+            shown: 0,
+            truncated: false,
+            total: Some(0),
+            chart: None,
+            digest: String::new(),
+            batches: vec![],
+        };
+        assert!(meta_table_json(&empty).is_none());
     }
 
     /// A forecast-shaped batch: period, value (the line), and a SPARSE lower/upper

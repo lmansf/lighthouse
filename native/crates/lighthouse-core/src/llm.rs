@@ -1115,6 +1115,20 @@ fn local_tier() -> Tier {
     budget::resolve_tier(false, crate::local_model::on_device_backend(), None)
 }
 
+/// §32 §3c: the tier a NARRATION call for `cfg` will run under — the seam
+/// synth.rs gates its context assembly on (fact sheet vs raw table + schema
+/// cards). Cloud providers resolve remote-large so their assembly can never
+/// change shape; everything else resolves per the §1 table (force honored —
+/// the rig runs the desktop 7B under apple-fm with zero Apple hardware).
+pub fn narration_tier(cfg: &ModelCfg) -> Tier {
+    let cloud = match cfg.provider_id.as_deref() {
+        Some("anthropic") => true,
+        Some(id) => remote_provider(id).is_some(),
+        None => false,
+    };
+    budget::resolve_tier(cloud, crate::local_model::on_device_backend(), None)
+}
+
 // --- Single-document focus budgets (synth doc-focus, 0.11) -----------------------
 //
 // How much of ONE document can ride in a prompt, in chars (~4 chars/token —
@@ -1742,6 +1756,22 @@ mod tests {
         assert_eq!(SYSTEM_PROMPT_COMPACT, fixture, "twin drift — the TS test pins the same file");
         let n = SYSTEM_PROMPT_COMPACT.chars().count();
         assert!((1_000..=1_300).contains(&n), "compact profile is {n} chars (spec: ~1,100-1,300)");
+    }
+
+    #[test]
+    fn narration_tier_maps_providers_to_tiers() {
+        // Cloud providers can never change assembly shape (§32 hard rail).
+        let cfg = |id: Option<&str>| ModelCfg {
+            provider_id: id.map(String::from),
+            model_id: None,
+            api_key: None,
+        };
+        assert_eq!(narration_tier(&cfg(Some("anthropic"))), Tier::RemoteLarge);
+        assert_eq!(narration_tier(&cfg(Some("openai"))), Tier::RemoteLarge);
+        // Local (and keyless) resolve per the §1 table — llama-6144 while the
+        // on-device flag is off in this process and no tier is forced.
+        assert_eq!(narration_tier(&cfg(Some("local"))), Tier::Llama6144);
+        assert_eq!(narration_tier(&cfg(None)), Tier::Llama6144);
     }
 
     #[test]
