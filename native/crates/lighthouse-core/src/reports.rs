@@ -508,15 +508,39 @@ pub async fn investigate_templated(
         // grounding is the §38 §2 overflow-retry fallback.
         let ctx = report_findings_ctx(&report, crate::llm::narration_tier(&cfg));
         let headline_ctx = headline_findings_ctx(&report);
+        // §38 §4: the digit gate's ground truth, computed ONCE from the whole
+        // report (not just the packed slice — echoing a packed-out row is
+        // still faithful to the findings).
+        let findings_nums = findings_number_set(&report);
+        let summary_nums = summary_number_set(&report);
         match template {
             ReportTemplate::ScientificMethod => {
-                report.intro = narrate(IMRAD_INTRO_PROMPT, &ctx, &headline_ctx, &cfg).await;
-                report.discussion =
-                    narrate(IMRAD_DISCUSSION_PROMPT, &ctx, &headline_ctx, &cfg).await;
+                report.intro =
+                    narrate(IMRAD_INTRO_PROMPT, &ctx, &headline_ctx, &findings_nums, &summary_nums, &cfg)
+                        .await;
+                report.discussion = narrate(
+                    IMRAD_DISCUSSION_PROMPT,
+                    &ctx,
+                    &headline_ctx,
+                    &findings_nums,
+                    &summary_nums,
+                    &cfg,
+                )
+                .await;
             }
             ReportTemplate::BusinessReport => {
-                report.intro = narrate(BLUF_BOTTOM_LINE_PROMPT, &ctx, &headline_ctx, &cfg).await;
-                report.discussion = narrate(BLUF_MEANING_PROMPT, &ctx, &headline_ctx, &cfg).await;
+                report.intro = narrate(
+                    BLUF_BOTTOM_LINE_PROMPT,
+                    &ctx,
+                    &headline_ctx,
+                    &findings_nums,
+                    &summary_nums,
+                    &cfg,
+                )
+                .await;
+                report.discussion =
+                    narrate(BLUF_MEANING_PROMPT, &ctx, &headline_ctx, &findings_nums, &summary_nums, &cfg)
+                        .await;
             }
             ReportTemplate::Standard => {}
         }
@@ -687,6 +711,97 @@ fn capped_section_table(markdown: &str) -> String {
     out.join("\n")
 }
 
+/// §38 §4: extract the NUMBER tokens of a text — maximal digit runs with
+/// their interior decimal points, thousands separators stripped, leading/
+/// trailing dots trimmed ("$4,200.50" → "4200.50"; "2024-10" → "2024" and
+/// "10"; "+2.85σ" → "2.85"). Deterministic and cheap — the fact-floor idiom
+/// (§32 §8) turned from a test assertion into a runtime gate.
+fn number_tokens(text: &str) -> std::collections::BTreeSet<String> {
+    let mut out = std::collections::BTreeSet::new();
+    let mut cur = String::new();
+    let mut flush = |cur: &mut String, out: &mut std::collections::BTreeSet<String>| {
+        if cur.is_empty() {
+            return;
+        }
+        let cleaned = cur.replace(',', "");
+        let trimmed = cleaned.trim_matches('.');
+        if trimmed.chars().any(|c| c.is_ascii_digit()) {
+            out.insert(trimmed.to_string());
+        }
+        cur.clear();
+    };
+    for c in text.chars() {
+        if c.is_ascii_digit() || ((c == '.' || c == ',') && !cur.is_empty()) {
+            cur.push(c);
+        } else {
+            flush(&mut cur, &mut out);
+        }
+    }
+    flush(&mut cur, &mut out);
+    out
+}
+
+/// The numbers a framing may cite: every number token in the report's
+/// computed content (summary, section headings/tables/headlines, caveats),
+/// PLUS each token's integer part — so "400" faithfully cites "400.25"
+/// without loosening the gate to arbitrary rounding.
+fn findings_number_set(report: &Report) -> std::collections::BTreeSet<String> {
+    let mut text = report.summary.join("\n");
+    for s in &report.sections {
+        text.push('\n');
+        text.push_str(&s.heading);
+        text.push('\n');
+        text.push_str(&s.result_markdown);
+        if let Some(h) = &s.headline {
+            text.push('\n');
+            text.push_str(h);
+        }
+    }
+    text.push('\n');
+    text.push_str(&report.caveats.join("\n"));
+    with_integer_parts(number_tokens(&text))
+}
+
+/// The summary headlines' own numbers (the "omits them" arm of the gate).
+fn summary_number_set(report: &Report) -> std::collections::BTreeSet<String> {
+    with_integer_parts(number_tokens(&report.summary.join("\n")))
+}
+
+fn with_integer_parts(
+    tokens: std::collections::BTreeSet<String>,
+) -> std::collections::BTreeSet<String> {
+    let mut out = tokens.clone();
+    for t in &tokens {
+        if let Some((int, _)) = t.split_once('.') {
+            if !int.is_empty() {
+                out.insert(int.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// §38 §4: the framing consistency floor, as a GATE. An accepted framing
+/// must (a) introduce NO number outside the findings set — an invented digit
+/// is discarded exactly like a runaway — and (b) engage the computed
+/// headlines: when the summary carries numbers, a framing citing none of
+/// them is ungrounded fluff and falls back to deterministic framing. Every
+/// tier passes through here, cloud included.
+fn framing_number_gate(
+    framing: &str,
+    findings: &std::collections::BTreeSet<String>,
+    summary: &std::collections::BTreeSet<String>,
+) -> bool {
+    let cited = number_tokens(framing);
+    if !cited.is_subset(findings) {
+        return false;
+    }
+    if !summary.is_empty() && cited.is_disjoint(summary) {
+        return false;
+    }
+    true
+}
+
 /// A framing call's raw outcome, before the accept gates.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum NarrateRaw {
@@ -755,12 +870,16 @@ where
 
 /// One templated framing narration: the §2 ladder over the packed/headline
 /// grounding, then the accept gates — the runaway length cap (a narration
-/// past `NARRATION_CHAR_CAP` reads as an error response, not a paragraph).
-/// Any rejection ⇒ None, so the render falls back to deterministic framing.
+/// past `NARRATION_CHAR_CAP` reads as an error response, not a paragraph)
+/// and the §4 digit-subset gate (an invented number, or a framing that
+/// ignores every headline figure, is discarded the same way). Any rejection
+/// ⇒ None, so the render falls back to deterministic framing.
 async fn narrate(
     prompt: &str,
     packed_ctx: &[crate::llm::Ctx],
     headline_ctx: &[crate::llm::Ctx],
+    findings_nums: &std::collections::BTreeSet<String>,
+    summary_nums: &std::collections::BTreeSet<String>,
     cfg: &crate::llm::ModelCfg,
 ) -> Option<String> {
     let text = narrate_ladder(|headline_only| {
@@ -769,6 +888,9 @@ async fn narrate(
     })
     .await?;
     if text.chars().count() > NARRATION_CHAR_CAP {
+        return None;
+    }
+    if !framing_number_gate(&text, findings_nums, summary_nums) {
         return None;
     }
     Some(text)
@@ -1240,6 +1362,48 @@ mod tests {
         assert!(report.sections.is_empty());
         assert_eq!(report.summary.len(), 1);
         assert!(report.summary[0].contains("Nothing to analyze"));
+    }
+
+    #[test]
+    fn number_tokens_normalize_the_shapes_findings_actually_carry() {
+        let toks = number_tokens("$4,200.50 rose +2.85σ over 2024-10; see row 7.");
+        for t in ["4200.50", "2.85", "2024", "10", "7"] {
+            assert!(toks.contains(t), "{t} missing from {toks:?}");
+        }
+        assert!(!toks.contains("4,200.50"), "separators are stripped");
+        assert!(!toks.contains("7."), "sentence punctuation is trimmed");
+        assert!(number_tokens("no digits here").is_empty());
+    }
+
+    #[test]
+    fn digit_gate_discards_invention_and_headline_free_fluff_accepts_faithful() {
+        // §38 §4 / acceptance 3: a fixed battery result…
+        let report = report_with_sections(2, 3);
+        let findings = findings_number_set(&report);
+        let summary = summary_number_set(&report);
+        // …accepts a faithful framing (its numbers are the report's own, and
+        // a headline figure is present)…
+        let faithful = "Analysis 0 peaks at 1009, the strongest movement in the series.";
+        assert!(framing_number_gate(faithful, &findings, &summary), "faithful framing accepted");
+        // …and the integer part of a findings decimal counts as faithful.
+        assert!(
+            framing_number_gate("The delta held near 106 across periods, peaking at 1009.", &findings, &summary),
+            "integer part of 106.3512 cites faithfully"
+        );
+        // An INVENTED number (present nowhere in the findings) is discarded…
+        assert!(
+            !framing_number_gate("Analysis 0 peaks at 1009, roughly 37% above trend.", &findings, &summary),
+            "37 appears nowhere in the findings"
+        );
+        // …and so is number-free fluff that engages no headline figure.
+        assert!(
+            !framing_number_gate("The data shows interesting trends worth watching.", &findings, &summary),
+            "a framing citing no headline number is ungrounded fluff"
+        );
+        // Headline numbers provably present in accepted framings: acceptance
+        // requires a non-empty intersection with the summary set.
+        let cited = number_tokens(faithful);
+        assert!(!cited.is_disjoint(&summary), "the accepted framing carries a headline number");
     }
 
     #[test]
