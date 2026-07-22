@@ -5744,3 +5744,178 @@ pins here; ios-build as gate). One commit per numbered section. Open
 ONE PR titled "Compact shell: no tab yank, no redundant Back, no
 stray Settings gear"; stop at the PR.
 ```
+
+## 35. Readable on phones: the answer-typography fix (2026-07-22)
+
+Owner report @ 0.14.3/0.14.4 (screenshot): answers read as a wall of
+text on iPhone — body too big, ~33 characters per line. Diagnosis on
+main + a typography research pass:
+- **Root cause: the §31 token remap silently inflated answer prose.**
+  `styles.answer` (ChatPanel.tsx:377-379) sets the container to
+  `fontSizeBase400` — which was 16px in Fluent when that line was
+  written, and which #203 remapped to Title3 = 20px. Nobody
+  re-audited consumers. Answer body therefore renders at 20px at the
+  default Dynamic Type size (21-22px one-two notches up — the
+  screenshot), on the TITLE token. There is NO CSS double-scaling
+  defect (the -apple-system-body root hook is correct; rem×root is
+  the single intended multiply) — it's a token-consumer miss.
+- Compounding: headings inside answers are h1=22px and
+  h2/h3/h4=20px — IDENTICAL to body, so no hierarchy; the `72ch`
+  measure cap cannot bind at 390pt (text runs viewport-wide, ~33
+  CPL at 20px vs the ~35-50 mobile-workable band, WCAG 1.4.8 max
+  80); line-height is 25/20 = 1.25 (WCAG wants ≥1.5 for passages).
+- Structure: the full SYSTEM_PROMPT *encourages* headings/tables/
+  lists (llm.ts:298) and the calm 3-6-sentence compact profile
+  (SYSTEM_PROMPT_COMPACT) keys on MODEL TIER, not viewport — an
+  iPhone on a cloud provider gets the structure-heavy prompt. The
+  doc-focus reduce path has no output length cap. No show-more/
+  collapse machinery exists.
+- Research spec (HIG + Material 3 + WCAG 1.4.8 + Butterick/NN/g/
+  Baymard; AI-app convention ChatGPT≈16px): long-form content body
+  16px @ line-height 1.5, 16px side margins → ~45 CPL at 390pt;
+  compressed heading ramp inside answers (h1 20/600, h2 17-18/600,
+  h3 = bold body); paragraph spacing not indents; digits are
+  fixation magnets (bold key figures, sparsely); 1-3 sentence
+  paragraphs; bullets for ≥3 parallel facts; progressive disclosure
+  OK on mobile if the lead is never collapsed. Dynamic Type: body
+  tracks 1:1 via rem, but headings must be CLAMPED (Apple's own
+  curves are non-linear — Body grows 3.1× to AX5 while Title3 grows
+  far less; fixed rem multiples blow up at accessibility sizes).
+
+### Prompt
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first, local-first analytics AI harness: Rust engine
+(native/crates/lighthouse-core) in a Tauri 2 shell (same crate is
+the iOS app), byte-compatible TS twin (src/server/), React UI
+(src/). Read CLAUDE.md, docs/design-language.md, docs/ts-twin.md,
+and roadmap §35 (diagnosis + research spec) before writing code.
+GOAL: answers become comfortably readable on phones — right size,
+right measure, real hierarchy, scannable structure — while desktop
+regains the pre-#203 content size it silently lost. One seam per
+half: renderer typography in ChatPanel's `styles.answer`; output
+shape in the byte-pinned system prompts.
+
+1. Fix the content type scale (all platforms — this RESTORES intent;
+   answers were 16px before #203's token remap).
+   In styles.answer (ChatPanel.tsx:377-502):
+   - Container: fontSize 16px equivalent (0.941rem — express via a
+     new CONTENT type token pair in theme.ts, e.g.
+     contentBody/contentBodyLineHeight = rem(16)/rem(24), so the
+     intent is named, not magic); lineHeight 1.5 (24px). Do NOT
+     touch fontSizeBase300/400 themselves — UI chrome stays on the
+     HIG scale; answers get the content tokens.
+   - Headings inside answers: h1 → rem(20)/600/lh 1.3; h2 →
+     rem(17.5)/600/lh 1.3; h3+h4 → rem(16)/semibold (hierarchy via
+     weight + space, not size — the ChatGPT-class convention).
+     Spacing: ~1.25em above / ~0.4em below each heading.
+   - Dynamic Type safety: body tracks the root 1:1 (rem); CLAMP the
+     answer headings (e.g. clamp(…, 28px) or the per-element
+     -apple-system-title3 keyword) so accessibility sizes don't
+     invert the hierarchy — Apple's own curves compress display
+     styles at AX sizes. Add -webkit-text-size-adjust: 100% at the
+     root if absent (kills WebKit's legacy third multiplier), and
+     have the iOS shell observe UIContentSizeCategory changes and
+     re-resolve (WKWebView fixes the resolved size at load — a
+     reload nudge or CSS reinject on the notification).
+   - Measure + rhythm: give the answer column real side padding on
+     compact (16px each side → ~358pt ≈ 45 CPL at 16px; keep 72ch
+     as the desktop bound); paragraph spacing 0.75em, no indents;
+     list items lh 1.5 with 4-6px between items, 12px around the
+     list, markers in a ~20px gutter; sqlResult and meta.table
+     renderers inherit the content tokens (compact table cells
+     13-14px, horizontal pan with overscroll containment; >3-col
+     tables may stack to key-value rows on compact).
+   - fontScale (s/m/l) keeps composing on top; density untouched.
+   - Pins: structural tests on the container tokens + heading ramp
+     + the clamp presence (the chartIt house style); a desktop
+     screenshot pair (before/after) in the PR showing chrome
+     unchanged, content restored.
+
+2. Shape the output (prompt half — good on every platform; walls of
+   text are bad on desktop too, the wide measure just hides them).
+   Revise the Style block of the FULL SYSTEM_PROMPT (llm.ts ~:298 +
+   byte-identical llm.rs twin, parity tests move in the same
+   commit):
+   - Lead with the direct answer in the first sentence (keep).
+   - Paragraphs are 1-3 sentences, one idea each; prefer sentences
+     under ~20 words.
+   - Use a bulleted list whenever enumerating 3+ parallel facts;
+     keep each bullet to one line of substance.
+   - Bold ONLY the key figures and 1-2 load-bearing phrases per
+     answer — never whole sentences; write numbers as digits.
+   - Use headings only when an answer genuinely has multiple
+     sections; never for a single-topic answer; never more than two
+     heading levels.
+   - Keep the existing table/≤10-row honesty rules.
+   SYSTEM_PROMPT_COMPACT (apple-fm) is already terse — unchanged.
+   Add ONE output cap where none exists: the doc-focus reduce stage
+   (synth.rs partition/reduce path) gains a target-length
+   instruction consistent with the Style block (a summary is ~120-
+   250 words unless the user asked for depth) — twins, byte-pinned.
+
+3. Make stat runs scannable (the screenshot's exact shape). A pure
+   detector over the rendered list AST: a <ul> whose items (≥3)
+   match the "**Label:** numbers…" pattern renders as a two-column
+   key-value grid (label left at semibold 14-15px, value right,
+   token-styled, hairline separators) instead of prose bullets —
+   digits become the scan anchors the research says they are.
+   Plain-function detector, unit-tested (matching and NON-matching
+   fixtures: mixed lists, links in labels, single-item lists stay
+   bullets); renderer falls back to the normal list on any doubt.
+   Desktop gets the same treatment (it reads better there too).
+
+4. Progressive disclosure, modestly (compact only). On settle (never
+   mid-stream), an answer SECTION (h2/h3-delimited, never the lead
+   block before the first heading) longer than ~1,200 rendered
+   characters collapses to its first two blocks + a quiet "Show
+   more" (44pt target); state is per-message, not persisted;
+   prefers-reduced-motion = no animation. The lead/answer is NEVER
+   collapsed (NN/g: disclosure must not hide the primary answer).
+   Desktop: no collapse. If the §2 prompt rules make this rarely
+   trigger — good; it's the safety net, not the fix.
+
+5. Stamps + gates. Bump current+1 (0.14.4 → 0.14.5 at authoring)
+   across all SEVEN stamp files per CLAUDE.md. Full node + cargo
+   suites, release-smoke, ios-build green. Update
+   docs/design-language.md with the content-type tokens (the
+   content-vs-chrome distinction is now part of the system).
+
+Constraints. Engine analytics untouched (prompt Style block + one
+reduce-stage length line only — grounding/honesty rules unchanged;
+PARITY twins byte-identical). UI chrome typography (HIG tokens)
+untouched — content tokens are NEW, additive. No
+analytics/telemetry. SharePoint plumbing untouched. Desktop content
+size CHANGES deliberately (20→16px restoration) — call it out in
+the PR body with the before/after pair; everything else desktop
+stays pixel-identical.
+
+Acceptance:
+1. iPhone (390pt, default Dynamic Type): answer body measures 16px
+   with ~44-46 chars per line and 1.5 leading; the screenshot's
+   doc-summary answer re-rendered shows a clear hierarchy (20px
+   section heading, 16px prose, key-stat grid) and no wall.
+2. Dynamic Type +2 notches and an AX size: body scales 1:1,
+   headings clamp, hierarchy never inverts, nothing clips; iOS
+   text-size changes take effect without killing the app.
+3. A stat-run list renders as the key-value grid; mixed/normal
+   lists stay bullets (fixture tests green).
+4. A long multi-section answer on compact collapses trailing
+   sections behind Show more, lead always visible; desktop shows
+   everything; streaming never collapses.
+5. New answers from a cloud provider follow the Style rules
+   (short paragraphs, sparse bold, digits, headings only when
+   multi-section) — spot-check three eval-fixture asks; prompt
+   parity tests green.
+6. Suites + release-smoke + ios-build green; seven stamps bumped;
+   design-language.md updated; PR carries the before/after
+   screenshot pairs (iPhone + desktop).
+
+Environment. macOS + Xcode for the visual passes (simulator fine);
+container fallback per house convention (tokens/detector/prompt
+work + all structural pins run here; ios-build as gate). One commit
+per numbered section. Open ONE PR titled "Readable answers:
+content type scale, scannable stats, calmer output"; stop at the
+PR.
+```
