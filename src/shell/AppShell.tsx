@@ -7,6 +7,7 @@ import { Sidebar } from "./Sidebar";
 import { LAYOUT } from "./theme";
 import { usePaneLayout, type CompactTab } from "./paneLayout";
 import { CompactTabBar, TAB_BAR_CONTENT_HEIGHT, TAB_BAR_FLOAT_GAP } from "./CompactTabBar";
+import { publishShellUi } from "./shellSignals";
 import { useVaultTree } from "./useVaultTree";
 import { anySheetOpen, useAnySheetOpen } from "./Sheet";
 import { useChatStore } from "@/stores/useChatStore";
@@ -410,6 +411,16 @@ export function AppShell({ sidebar, main }: AppShellProps) {
     el.style.setProperty("--lh-tabbar-h", tabBarShown ? `${TAB_BAR_CONTENT_HEIGHT + TAB_BAR_FLOAT_GAP}px` : "0px");
     return () => el.style.setProperty("--lh-tabbar-h", "0px");
   }, [tabBarShown]);
+
+  // §33 §1: publish the shell signals the calm-moment surfaces gate on (the
+  // feedback nudge mounts outside this subtree — see shellSignals.ts).
+  useEffect(() => {
+    publishShellUi({
+      compact: layout.compact,
+      activeTab: compactTab,
+      keyboardUp: keyboardInset > 0 || editableFocused,
+    });
+  }, [layout.compact, compactTab, keyboardInset, editableFocused]);
 
   // fp4 §3: tapping the already-active tab scrolls that surface to top (the iOS
   // convention). Chat + the files explorer own their own scroll containers, so

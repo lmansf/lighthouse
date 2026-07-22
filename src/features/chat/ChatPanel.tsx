@@ -101,6 +101,7 @@ import { useInvestigationsStore } from "@/stores/useInvestigationsStore";
 import { chatHistoryLocked } from "@/stores/managedLocks";
 import { modKey } from "@/features/onboarding/ModeChooser";
 import { LhDialogSurface, LhMenuPopover } from "@/shell/controls";
+import { publishChatStreaming } from "@/shell/shellSignals";
 import { ACCENTS, BEAM_SWEEP } from "@/shell/theme";
 import { FILE_DRAG_MIME, parseDraggedFiles, type DraggedFile } from "@/shell/dnd";
 import { isDesktopShell, pathsForFiles, platformKind } from "@/shell/desktopBridge";
@@ -2591,6 +2592,11 @@ export function ChatPanel() {
   const openConversation = useChatStore((s) => s.openConversation);
   const historyPersistEnabled = useChatStore((s) => s.persistEnabled);
   const [streaming, setStreaming] = useState(false);
+  // §33 §1: mirror onto the shell bus — the compact feedback nudge holds its
+  // calm-moment modal while an answer streams (see shellSignals.ts).
+  useEffect(() => {
+    publishChatStreaming(streaming);
+  }, [streaming]);
   // Pre-answer stage note from the engine ("Reading q3.csv (2/5)…") — shown in
   // the loader while multi-document synthesis works; cleared on the first token.
   const [progressLabel, setProgressLabel] = useState<string | null>(null);
