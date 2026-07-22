@@ -2,11 +2,14 @@
 
 ## Versioning policy (owner directive, 2026-07-14)
 
-Stay on the current line (**0.13.x** as of the iPad/touch release): every
-release is a PATCH bump — 0.13.1, 0.13.2, … — regardless of whether it
+Stay on the current line (**0.14.x** as of the Apple-feel release): every
+release is a PATCH bump — 0.14.1, 0.14.2, … — regardless of whether it
 carries fixes or new features. Only a **major overhaul** (a rewrite-scale
-change, explicitly approved by the owner) moves the minor version (0.14.0).
+change, explicitly approved by the owner) moves the minor version.
 Do not bump minor for ordinary feature releases.
+(Owner designation, 2026-07-22: the §31 Apple-feel pass — token layer,
+glass chrome, control swaps, icon registry — was designated the 0.14.0
+overhaul.)
 
 ## Release mechanics (post-0.11.0 — Electron retired; iOS added in 0.13.x)
 

@@ -1,6 +1,6 @@
 {
   "name": "rag-vault",
-  "version": "0.13.10",
+  "version": "0.14.0",
   "private": true,
   "description": "Lighthouse — a local-first RAG vault for your documents.",
   "author": "Lighthouse",
