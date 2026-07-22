@@ -225,6 +225,13 @@ async fn scientific_method_template_renders_imrad_structure() {
     // The every-number invariant holds through the template: the engine anomaly
     // figure is present, and no model introduced any figure (no provider ran).
     assert!(md.contains("2024-10"), "the engine's October figure survives templating");
+    // §38 §3: the footer names the framing's author — the engine, honestly.
+    assert!(
+        md.ends_with(
+            "\n_Framing written by the engine from the computed findings (model unavailable)._\n"
+        ),
+        "the engine-framing footer closes the document: {md}"
+    );
 }
 
 #[tokio::test]
@@ -255,6 +262,13 @@ async fn business_report_template_renders_bluf_structure() {
     assert!(md.contains("## Caveats"));
     // No model ⇒ no "What this means" block (discussion stays None, gated out).
     assert!(!md.contains("## What this means"), "no narration ⇒ no What-this-means block");
+    // §38 §3: the same honest footer on the business template.
+    assert!(
+        md.ends_with(
+            "\n_Framing written by the engine from the computed findings (model unavailable)._\n"
+        ),
+        "the engine-framing footer closes the document: {md}"
+    );
 }
 
 #[tokio::test]

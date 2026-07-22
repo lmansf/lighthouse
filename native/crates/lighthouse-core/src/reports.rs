@@ -131,6 +131,11 @@ pub struct Report {
     /// Model-narrated interpretation for a template — the IMRaD Discussion / the
     /// BLUF "What this means". `None` when unavailable. Figures are the engine's.
     pub discussion: Option<String>,
+    /// §38 §3: WHO wrote the framing prose, for the templates' footer line —
+    /// `Some(label)` ("the private model" / "your model") when any narration
+    /// was accepted, `None` when the deterministic engine framing stands in.
+    /// The Standard render never reads it (byte-stability holds).
+    pub framing_by: Option<String>,
 }
 
 /// Assemble a report from already-executed sub-analyses. Pure: the summary is the
@@ -168,6 +173,7 @@ pub fn assemble(
         template: ReportTemplate::Standard,
         intro: None,
         discussion: None,
+        framing_by: None,
     }
 }
 
@@ -243,6 +249,21 @@ fn render_caveats(out: &mut String, caveats: &[String], level: &str) {
     }
 }
 
+/// §38 §3: the templates' ONE quiet provenance line — how the framing prose
+/// was written. Byte-pinned by the render tests; the SAME engine numbers
+/// stand either way, so run-to-run prose differences read as labeled
+/// variation, not flakiness. The Standard render never calls this.
+fn render_framing_footer(out: &mut String, framing_by: &Option<String>) {
+    match framing_by {
+        Some(label) => out.push_str(&format!(
+            "\n_Framing narrated by {label} from the computed findings._\n"
+        )),
+        None => out.push_str(
+            "\n_Framing written by the engine from the computed findings (model unavailable)._\n",
+        ),
+    }
+}
+
 /// Scientific method (IMRaD). Introduction + Discussion are model narration when
 /// present (`report.intro`/`report.discussion`), else a deterministic framing
 /// line — never a figure. Methods is deterministic (which analyses ran); Results
@@ -292,6 +313,7 @@ fn render_imrad(report: &Report) -> String {
     out.push('\n');
 
     render_caveats(&mut out, &report.caveats, "##");
+    render_framing_footer(&mut out, &report.framing_by);
     out
 }
 
@@ -330,6 +352,7 @@ fn render_bluf(report: &Report) -> String {
     }
 
     render_caveats(&mut out, &report.caveats, "##");
+    render_framing_footer(&mut out, &report.framing_by);
     out
 }
 
@@ -496,6 +519,19 @@ pub async fn investigate_templated(
                 report.discussion = narrate(BLUF_MEANING_PROMPT, &ctx, &headline_ctx, &cfg).await;
             }
             ReportTemplate::Standard => {}
+        }
+        // §38 §3: name the framing's author for the footer line. Any accepted
+        // narration ⇒ the model label (local tiers are "the private model" —
+        // the roster's own language; a hosted provider is "your model");
+        // both rejected/unavailable ⇒ None, the engine-framing line.
+        if report.intro.is_some() || report.discussion.is_some() {
+            report.framing_by = Some(
+                if crate::llm::narration_tier(&cfg) == crate::budget::Tier::RemoteLarge {
+                    "your model".to_string()
+                } else {
+                    "the private model".to_string()
+                },
+            );
         }
     }
     report
@@ -928,6 +964,7 @@ mod tests {
             template: ReportTemplate::Standard,
             intro: None,
             discussion: None,
+            framing_by: None,
             summary: vec!["headline".into()],
             caveats: Vec::new(),
             sections: vec![ReportSection {
@@ -979,6 +1016,7 @@ mod tests {
             template: ReportTemplate::Standard,
             intro: None,
             discussion: None,
+            framing_by: None,
         }
     }
 
@@ -1202,6 +1240,42 @@ mod tests {
         assert!(report.sections.is_empty());
         assert_eq!(report.summary.len(), 1);
         assert!(report.summary[0].contains("Nothing to analyze"));
+    }
+
+    #[test]
+    fn framing_footer_names_the_author_on_both_templates_only() {
+        // §38 §3: model-framed templates carry the narrated-by line; the
+        // engine-framed ones the model-unavailable line; Standard carries
+        // NEITHER (its byte-stability contract predates the footer).
+        let mut report = report_with_sections(1, 3);
+        for template in [ReportTemplate::ScientificMethod, ReportTemplate::BusinessReport] {
+            report.template = template;
+            report.framing_by = Some("the private model".into());
+            report.intro = Some("A framed introduction.".into());
+            let md = render_markdown(&report);
+            assert!(
+                md.ends_with("\n_Framing narrated by the private model from the computed findings._\n"),
+                "model footer on {template:?}: {md}"
+            );
+            report.framing_by = Some("your model".into());
+            assert!(
+                render_markdown(&report)
+                    .ends_with("\n_Framing narrated by your model from the computed findings._\n"),
+                "the hosted-provider label renders"
+            );
+            report.framing_by = None;
+            report.intro = None;
+            let md = render_markdown(&report);
+            assert!(
+                md.ends_with(
+                    "\n_Framing written by the engine from the computed findings (model unavailable)._\n"
+                ),
+                "engine footer on {template:?}: {md}"
+            );
+        }
+        report.template = ReportTemplate::Standard;
+        let md = render_markdown(&report);
+        assert!(!md.contains("Framing "), "the Standard render carries no framing footer: {md}");
     }
 
     #[test]
