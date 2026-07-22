@@ -23,7 +23,7 @@ import {
   segmentBudgets,
   type Tier,
 } from "./budget";
-import { onDeviceBackend } from "./localModel";
+import { advertisedCtx, onDeviceBackend, setAdvertisedCtx } from "./localModel";
 
 const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_MODELS_URL = "https://api.anthropic.com/v1/models";
@@ -139,7 +139,7 @@ const REMOTE_MAX_TOKENS = 4096;
  * LIGHTHOUSE_FORCE_TIER (the device-free acceptance rig) overrides inside.
  */
 function localTier(): Tier {
-  return resolveTier(false, onDeviceBackend(), null);
+  return resolveTier(false, onDeviceBackend(), advertisedCtx());
 }
 
 /**
@@ -154,7 +154,7 @@ export function narrationTier(cfg: {
   apiKey: string | null;
 }): Tier {
   const cloud = cfg.providerId === "anthropic" || Boolean(remoteProvider(cfg.providerId));
-  return resolveTier(cloud, onDeviceBackend(), null);
+  return resolveTier(cloud, onDeviceBackend(), advertisedCtx());
 }
 
 /** Whole-document inclusion threshold: a doc at or under this rides complete. */
@@ -241,7 +241,19 @@ export async function localHealth(): Promise<LocalHealth> {
   const timer = setTimeout(() => controller.abort(), 1_500);
   try {
     const res = await fetch(healthUrlFor(LOCAL_LLM_URL), { signal: controller.signal });
-    return res.status === 503 ? "loading" : "ready";
+    if (res.status === 503) return "loading";
+    // §32 §7 ADVERTISE: a JSON body may carry the endpoint's context window
+    // ({"contextSize": n} — the private-model bridge sends it; llama-server /
+    // Ollama answer plain text and simply don't parse). Best-effort; the
+    // verdict is unchanged. KEEP IN SYNC with llm.rs::local_health.
+    try {
+      const body = (await res.json()) as { contextSize?: unknown };
+      const n = typeof body?.contextSize === "number" && body.contextSize > 0 ? body.contextSize : null;
+      setAdvertisedCtx(n);
+    } catch {
+      setAdvertisedCtx(null);
+    }
+    return "ready";
   } catch {
     return "down";
   } finally {

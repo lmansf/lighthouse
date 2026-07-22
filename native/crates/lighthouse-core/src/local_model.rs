@@ -152,6 +152,42 @@ pub fn on_device_backend() -> bool {
     ON_DEVICE_BACKEND.load(Ordering::Relaxed)
 }
 
+/// §32 §7 ADVERTISE: the context window the local endpoint's /health body
+/// advertised (`contextSize`), in tokens. 0 = nothing advertised — the §1
+/// resolution then falls to the on-device flag's 4096 default or llama-6144.
+/// Written by `llm::local_health`'s probe; read by the tier resolution.
+static ADVERTISED_CTX: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+pub fn set_advertised_ctx(tokens: Option<u32>) {
+    ADVERTISED_CTX.store(tokens.unwrap_or(0), Ordering::Relaxed);
+}
+
+pub fn advertised_ctx() -> Option<u32> {
+    match ADVERTISED_CTX.load(Ordering::Relaxed) {
+        0 => None,
+        n => Some(n),
+    }
+}
+
+/// §32 §7 OBSERVE: local diagnostics counters for the bridge's terminal
+/// markers — shell.log only (the shell captures engine stderr), NO telemetry.
+/// After §1-§6 the overflow counter should read 0 in acceptance.
+static FM_OVERFLOWS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static FM_GUARDRAILS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub fn note_fm_marker(kind: &str) {
+    let (counter, label) = match kind {
+        "FM_OVERFLOW" => (&FM_OVERFLOWS, "overflow"),
+        _ => (&FM_GUARDRAILS, "guardrail"),
+    };
+    let n = counter.fetch_add(1, Ordering::Relaxed) + 1;
+    eprintln!("[lighthouse] on-device {label} marker #{n} (local diagnostics only)");
+}
+
+pub fn fm_overflow_count() -> u64 {
+    FM_OVERFLOWS.load(Ordering::Relaxed)
+}
+
 /// §3 / add-mobile-local-inference verdict (pure, host-testable): can a PRIVATE,
 /// on-device model answer on this form factor? The desktop shell always can — it
 /// owns llama-server and the weights. A mobile shell can ONLY when its plugin has

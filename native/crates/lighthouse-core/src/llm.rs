@@ -185,7 +185,22 @@ pub async fn local_health() -> LocalHealth {
         .await
     {
         Ok(r) if r.status().as_u16() == 503 => LocalHealth::Loading,
-        Ok(_) => LocalHealth::Ready,
+        Ok(r) => {
+            // §32 §7 ADVERTISE: a JSON body may carry the endpoint's context
+            // window ({"contextSize": n} — the private-model bridge sends it;
+            // llama-server/Ollama answer plain text and simply don't parse).
+            // Best-effort and non-blocking for health: the tier resolution
+            // reads the stored value, the verdict below is unchanged.
+            let advertised = r
+                .json::<serde_json::Value>()
+                .await
+                .ok()
+                .and_then(|v| v["contextSize"].as_u64())
+                .and_then(|n| u32::try_from(n).ok())
+                .filter(|n| *n > 0);
+            crate::local_model::set_advertised_ctx(advertised);
+            LocalHealth::Ready
+        }
         Err(_) => LocalHealth::Down,
     }
 }
@@ -1108,11 +1123,16 @@ async fn stream_claude(
 // last line of defense. The cloud paths never clamp (§0 pins their bytes).
 
 /// The active LOCAL tier. Cloud is decided by the provider tables before any
-/// caller reaches this, so `cloud=false`; §7 will feed the /health-advertised
-/// context size — until then the on-device flag alone picks the apple arm.
+/// caller reaches this, so `cloud=false`. §7: the /health-advertised context
+/// size (stored by `local_health`'s probe) feeds the resolution, so an
+/// 8,192-window bridge picks apple-fm-8192 from measurement.
 /// LIGHTHOUSE_FORCE_TIER (the device-free acceptance rig) overrides inside.
 fn local_tier() -> Tier {
-    budget::resolve_tier(false, crate::local_model::on_device_backend(), None)
+    budget::resolve_tier(
+        false,
+        crate::local_model::on_device_backend(),
+        crate::local_model::advertised_ctx(),
+    )
 }
 
 /// §32 §3c: the tier a NARRATION call for `cfg` will run under — the seam
@@ -1126,7 +1146,11 @@ pub fn narration_tier(cfg: &ModelCfg) -> Tier {
         Some(id) => remote_provider(id).is_some(),
         None => false,
     };
-    budget::resolve_tier(cloud, crate::local_model::on_device_backend(), None)
+    budget::resolve_tier(
+        cloud,
+        crate::local_model::on_device_backend(),
+        crate::local_model::advertised_ctx(),
+    )
 }
 
 // --- Single-document focus budgets (synth doc-focus, 0.11) -----------------------
@@ -1333,12 +1357,38 @@ async fn stream_local(
         }
         let mut inner = sse_deltas(
             res,
-            |evt| evt["choices"][0]["delta"]["content"].as_str().map(String::from),
+            |evt| {
+                // §32 §7 OBSERVE: the bridge's terminal marker frame
+                // ({"lighthouse":{"final":"FM_OVERFLOW"|"FM_GUARDRAIL"}})
+                // carries no choices; surface it as a NUL-fenced sentinel a
+                // model can never emit, stripped from display below.
+                if let Some(kind) = evt["lighthouse"]["final"].as_str() {
+                    return Some(format!("\u{0}{kind}\u{0}"));
+                }
+                evt["choices"][0]["delta"]["content"].as_str().map(String::from)
+            },
             UsageDialect::OpenAiCompat,
             usage,
         );
+        let mut marker: Option<String> = None;
         while let Some(item) = inner.next().await {
-            yield item;
+            match item {
+                Ok(d) if d.starts_with('\u{0}') => {
+                    marker = Some(d.trim_matches('\u{0}').to_string());
+                }
+                other => yield other,
+            }
+        }
+        // §7: the honest footer — one engine-stamped line (never model text)
+        // naming which silence this was, plus the shell.log-only counter.
+        if let Some(kind) = marker {
+            crate::local_model::note_fm_marker(&kind);
+            let note = if kind == "FM_GUARDRAIL" {
+                "\n\n_(The on-device model declined this request — its built-in safety guardrail stopped the answer. Answering from the most relevant passages instead.)_\n\n"
+            } else {
+                "\n\n_(This question plus its context didn't fit the on-device model's window — the bridge refused the call before wasting it. Answering from the most relevant passages instead.)_\n\n"
+            };
+            yield Ok(note.to_string());
         }
     })
 }

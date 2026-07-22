@@ -226,7 +226,16 @@ final class PrivateModelServer {
         let route = path.split(separator: "?", maxSplits: 1).first.map(String.init) ?? path
         if method == "GET", route == "/health" {
             // Any non-503 status reads as Ready in local_health(); 200 is honest.
-            sendSimple(connection, status: "200 OK", contentType: "text/plain", body: "ok")
+            // §32 §7 ADVERTISE: the body carries the model's context window so
+            // the engine's §1 tier resolution can pick apple-fm-4096 vs -8192
+            // from measurement, not assumption. KEEP IN SYNC with the
+            // contextSize parse in llm.rs::local_health / llm.ts::localHealth.
+            sendSimple(
+                connection,
+                status: "200 OK",
+                contentType: "application/json",
+                body: "{\"status\":\"ok\",\"contextSize\":\(Self.contextWindowSize())}"
+            )
             return
         }
         if method == "POST", route == "/v1/chat/completions" {
@@ -234,6 +243,35 @@ final class PrivateModelServer {
             return
         }
         sendSimple(connection, status: "404 Not Found", contentType: "text/plain", body: "not found")
+    }
+
+    // MARK: - §32 §7: window facts + the two-layer overflow defense
+
+    /// The on-device model's context window, in tokens. iOS 26 Foundation
+    /// Models documents a 4,096-token window shared between prompt and
+    /// answer; when a future SDK exposes the size (or an 8,192 window)
+    /// directly, read it here — the /health advertisement and the pre-check
+    /// both follow automatically. Deliberately a static fact, not a guess.
+    static func contextWindowSize() -> Int { 4096 }
+
+    /// Answer room the pre-check protects (the engine's §1 narration reserve
+    /// for the 4k tier — KEEP IN SYNC with budget.rs output_reserve).
+    static func outputReserve() -> Int { 900 }
+
+    /// Estimated prompt tokens (chars/4 — the engine's §1 estimator). The
+    /// exact `tokenCount(for:)` API is not in the stable-signature set this
+    /// file deliberately sticks to across the iOS 26/27 SDKs; when it
+    /// stabilizes, swap the estimate for the measurement here — the engine's
+    /// 90%-budget margin absorbs the estimator's drift meanwhile.
+    static func estimatedTokens(_ prompt: String) -> Int { prompt.count / 4 }
+
+    /// §7 OBSERVE: a terminal SSE frame the engine can tell apart from a
+    /// clean end — `{"lighthouse":{"final":"FM_OVERFLOW"|"FM_GUARDRAIL"}}`.
+    /// It carries no `choices`, so an SSE consumer that only reads deltas
+    /// ignores it; the engine's local dialect watches for it and renders the
+    /// honest footer + bumps the local diagnostics counter.
+    private func sendFinalMarker(_ connection: NWConnection, kind: String) {
+        send(connection, string: "data: {\"lighthouse\":{\"final\":\"\(kind)\"}}\n\n", done: false)
     }
 
     // MARK: - Streaming completion (snapshot -> delta)
@@ -248,6 +286,18 @@ final class PrivateModelServer {
         send(connection, string: headers, done: false)
 
         let prompt = Self.buildPrompt(fromBody: body)
+
+        // §7 EXACT PRE-CHECK (second layer after the engine's 90% budget):
+        // an oversized prompt is REFUSED before Foundation Models is ever
+        // called — the marker tells the engine exactly why the stream is
+        // empty, instead of burning the model's time on a doomed call.
+        if Self.estimatedTokens(prompt)
+            > Self.contextWindowSize() - Self.outputReserve()
+        {
+            sendFinalMarker(connection, kind: "FM_OVERFLOW")
+            finishStream(connection)
+            return
+        }
 
         #if canImport(FoundationModels)
         if #available(iOS 26, *), !prompt.isEmpty {
@@ -282,12 +332,20 @@ final class PrivateModelServer {
                         }
                     }
                 } catch {
-                    // Overflow (exceededContextWindowSize / contextSizeExceeded,
-                    // whichever spelling this OS uses) OR a guardrail refusal OR
-                    // anything else: END cleanly with zero extra content. A
-                    // caught error before any delta = an empty completion, which
-                    // is exactly what makes the engine fall back to extractive
-                    // narration. Never a 500, never raw error text.
+                    // §7 OBSERVE: the empty catch becomes an HONEST catch. The
+                    // stream still ends cleanly (never a 500, never raw error
+                    // text), but a terminal marker now tells the engine WHICH
+                    // silence this is: window overflow, guardrail refusal, or
+                    // a plain failure (no marker — the engine's extractive
+                    // fallback reads it as before).
+                    let desc = String(describing: error).lowercased()
+                    if desc.contains("context") || desc.contains("exceed") {
+                        self.sendFinalMarker(connection, kind: "FM_OVERFLOW")
+                    } else if desc.contains("guardrail") || desc.contains("unsafe")
+                        || desc.contains("safety")
+                    {
+                        self.sendFinalMarker(connection, kind: "FM_GUARDRAIL")
+                    }
                 }
                 self.finishStream(connection)
             }
