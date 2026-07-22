@@ -122,7 +122,7 @@ test("0.13.10 §3: the nav mounts in the chat-header PICKER (Sheet on compact, p
   );
   assert.match(
     chat,
-    /<Sheet title="Investigations" onClose=\{\(\) => setInvOpen\(false\)\}>\s*\n\s*<InvestigationsNav \/>/,
+    /<Sheet title="Investigations" onClose=\{\(\) => setInvOpen\(false\)\} initialDetent="medium">\s*\n\s*<InvestigationsNav \/>/,
     "compact opens the full InvestigationsNav in a Sheet",
   );
   assert.match(
@@ -145,7 +145,7 @@ test("the nav is calm and non-destructive: tour anchor, plain Archive, neutral s
   assert.match(nav, /setInvestigationArchived\(id, true\)/, "archive is the visibility flag op");
   assert.doesNotMatch(
     nav,
-    /deleteInvestigation|removeInvestigation|removeFromVault|DeleteRegular/,
+    /deleteInvestigation|removeInvestigation|removeFromVault|IconTrash/,
     "no delete operation or affordance anywhere in the nav",
   );
   // The active row is the calmed explorer inset — neutral fill + hairline —

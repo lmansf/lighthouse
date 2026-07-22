@@ -22,21 +22,19 @@ import {
   DialogActions,
   DialogBody,
   DialogContent,
-  DialogSurface,
   DialogTitle,
-  Dropdown,
   Field,
   Input,
-  Option,
   Text,
   Tooltip,
   makeStyles,
   shorthands,
   tokens,
 } from "@fluentui/react-components";
-import { AddRegular, DeleteRegular } from "@fluentui/react-icons";
+import { IconAdd, IconTrash } from "@/shell/icons";
 import type { CurationRuleAction, CurationRuleInput, CurationRuleKind } from "@/contracts";
 import { useRagStore } from "@/stores/useRagStore";
+import { LhDialogSurface, LhSelect } from "@/shell/controls";
 
 /** Plain-language labels for a rule's action — shared with the Preferences
  *  rule list so the two surfaces never word the same action differently. */
@@ -47,11 +45,21 @@ export const RULE_ACTION_LABEL: Record<CurationRuleAction, string> = {
   clear: "Use the default",
 };
 
+const RULE_ACTION_OPTIONS = (Object.keys(RULE_ACTION_LABEL) as CurationRuleAction[]).map((a) => ({
+  value: a,
+  label: RULE_ACTION_LABEL[a],
+}));
+
 const KIND_LABEL: Record<CurationRuleKind, string> = {
   tabular: "Spreadsheets",
   document: "Documents",
   image: "Images",
 };
+
+const KIND_OPTIONS = (Object.keys(KIND_LABEL) as CurationRuleKind[]).map((k) => ({
+  value: k,
+  label: KIND_LABEL[k],
+}));
 
 type PredicateChoice = "kind" | "ext" | "glob";
 
@@ -60,6 +68,11 @@ const PREDICATE_LABEL: Record<PredicateChoice, string> = {
   ext: "Extensions",
   glob: "Path pattern",
 };
+
+const PREDICATE_OPTIONS = (Object.keys(PREDICATE_LABEL) as PredicateChoice[]).map((p) => ({
+  value: p,
+  label: PREDICATE_LABEL[p],
+}));
 
 const useStyles = makeStyles({
   body: { display: "flex", flexDirection: "column", ...shorthands.gap("14px"), minWidth: "min(520px, 80vw)" },
@@ -168,7 +181,7 @@ export function FolderRulesDialog({
         if (!d.open) onClose();
       }}
     >
-      <DialogSurface aria-describedby={undefined}>
+      <LhDialogSurface aria-describedby={undefined}>
         <DialogBody>
           <DialogTitle>Rules for {scopeName || "this folder"}</DialogTitle>
           <DialogContent className={styles.body}>
@@ -191,7 +204,7 @@ export function FolderRulesDialog({
                       <Button
                         size="small"
                         appearance="subtle"
-                        icon={<DeleteRegular />}
+                        icon={<IconTrash />}
                         aria-label={`Remove rule ${r.name}`}
                         onClick={() => void removeRule(r.id)}
                       />
@@ -203,36 +216,24 @@ export function FolderRulesDialog({
 
             <div className={styles.formRow}>
               <Field label="Match" size="small">
-                <Dropdown
-                  size="small"
-                  value={PREDICATE_LABEL[predicate]}
-                  selectedOptions={[predicate]}
-                  onOptionSelect={(_, d) => {
-                    setPredicate((d.optionValue as PredicateChoice) ?? "kind");
+                <LhSelect
+                  options={PREDICATE_OPTIONS}
+                  value={predicate}
+                  onChange={(v) => {
+                    setPredicate(v as PredicateChoice);
                     setError(null);
                   }}
-                >
-                  {(Object.keys(PREDICATE_LABEL) as PredicateChoice[]).map((p) => (
-                    <Option key={p} value={p}>
-                      {PREDICATE_LABEL[p]}
-                    </Option>
-                  ))}
-                </Dropdown>
+                  aria-label="Match"
+                />
               </Field>
               {predicate === "kind" && (
                 <Field label="Kind" size="small">
-                  <Dropdown
-                    size="small"
-                    value={KIND_LABEL[kind]}
-                    selectedOptions={[kind]}
-                    onOptionSelect={(_, d) => setKind((d.optionValue as CurationRuleKind) ?? "tabular")}
-                  >
-                    {(Object.keys(KIND_LABEL) as CurationRuleKind[]).map((k) => (
-                      <Option key={k} value={k}>
-                        {KIND_LABEL[k]}
-                      </Option>
-                    ))}
-                  </Dropdown>
+                  <LhSelect
+                    options={KIND_OPTIONS}
+                    value={kind}
+                    onChange={(v) => setKind(v as CurationRuleKind)}
+                    aria-label="Kind"
+                  />
                 </Field>
               )}
               {predicate === "ext" && (
@@ -258,23 +259,17 @@ export function FolderRulesDialog({
                 </Field>
               )}
               <Field label="Then" size="small">
-                <Dropdown
-                  size="small"
-                  value={RULE_ACTION_LABEL[action]}
-                  selectedOptions={[action]}
-                  onOptionSelect={(_, d) => setAction((d.optionValue as CurationRuleAction) ?? "include")}
-                >
-                  {(Object.keys(RULE_ACTION_LABEL) as CurationRuleAction[]).map((a) => (
-                    <Option key={a} value={a}>
-                      {RULE_ACTION_LABEL[a]}
-                    </Option>
-                  ))}
-                </Dropdown>
+                <LhSelect
+                  options={RULE_ACTION_OPTIONS}
+                  value={action}
+                  onChange={(v) => setAction(v as CurationRuleAction)}
+                  aria-label="Then"
+                />
               </Field>
               <Button
                 appearance="primary"
                 size="small"
-                icon={<AddRegular />}
+                icon={<IconAdd />}
                 disabled={busy}
                 onClick={submit}
               >
@@ -297,7 +292,7 @@ export function FolderRulesDialog({
             </Button>
           </DialogActions>
         </DialogBody>
-      </DialogSurface>
+      </LhDialogSurface>
     </Dialog>
   );
 }

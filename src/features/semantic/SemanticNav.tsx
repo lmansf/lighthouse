@@ -29,32 +29,20 @@ import {
   DialogActions,
   DialogBody,
   DialogContent,
-  DialogSurface,
   DialogTitle,
   Field,
   Input,
-  Menu,
-  MenuItem,
-  MenuList,
-  MenuPopover,
-  MenuTrigger,
   Text,
   Textarea,
   makeStyles,
   shorthands,
   tokens,
 } from "@fluentui/react-components";
-import {
-  AddRegular,
-  ChatRegular,
-  DeleteRegular,
-  LockClosedRegular,
-  MoreHorizontalRegular,
-  RenameRegular,
-} from "@fluentui/react-icons";
+import { IconAdd, IconChat, IconLock, IconMore, IconRename, IconTrash } from "@/shell/icons";
 import type { MetricCard, SuggestedMetric, SynonymCard } from "@/contracts";
 import { ragService } from "@/contracts";
 import { useRagStore } from "@/stores/useRagStore";
+import { LhDialogSurface, LhMenu } from "@/shell/controls";
 
 const useStyles = makeStyles({
   // The Library-sibling chrome — the exact ViewsNav treatment.
@@ -414,40 +402,45 @@ export function SemanticNav() {
               </Text>
             </div>
             {m.localOnly && (
-              <LockClosedRegular
+              <IconLock
                 className={styles.lock}
                 aria-label="Private — this device only"
                 title="Private — this device only"
               />
             )}
           </div>
-          <Menu>
-            <MenuTrigger disableButtonEnhancement>
+          <LhMenu
+            trigger={
               <Button
                 appearance="subtle"
                 size="small"
-                icon={<MoreHorizontalRegular />}
+                icon={<IconMore />}
                 aria-label={`Actions for ${m.name}`}
                 className={styles.rowMenuBtn}
               />
-            </MenuTrigger>
-            <MenuPopover>
-              <MenuList>
-                <MenuItem icon={<ChatRegular />} onClick={() => askAbout(m.name)}>
-                  Ask about this metric
-                </MenuItem>
-                <MenuItem
-                  icon={<RenameRegular />}
-                  onClick={() => setRename({ id: m.id, name: m.name, busy: false, error: null })}
-                >
-                  Rename
-                </MenuItem>
-                <MenuItem icon={<DeleteRegular />} onClick={() => openDeleteMetric(m)}>
-                  Delete
-                </MenuItem>
-              </MenuList>
-            </MenuPopover>
-          </Menu>
+            }
+            items={[
+              {
+                key: "ask",
+                label: "Ask about this metric",
+                icon: <IconChat />,
+                onClick: () => askAbout(m.name),
+              },
+              {
+                key: "rename",
+                label: "Rename",
+                icon: <IconRename />,
+                onClick: () => setRename({ id: m.id, name: m.name, busy: false, error: null }),
+              },
+              {
+                key: "delete",
+                label: "Delete",
+                icon: <IconTrash />,
+                onClick: () => openDeleteMetric(m),
+              },
+            ]}
+            aria-label={`Actions for ${m.name}`}
+          />
         </div>
       ))}
 
@@ -466,7 +459,7 @@ export function SemanticNav() {
           <Button
             appearance="subtle"
             size="small"
-            icon={<DeleteRegular />}
+            icon={<IconTrash />}
             aria-label={`Delete synonym ${s.term}`}
             className={styles.rowMenuBtn}
             onClick={() => void deleteSynonym(s.term)}
@@ -499,7 +492,7 @@ export function SemanticNav() {
           <Button
             appearance="subtle"
             size="small"
-            icon={<AddRegular />}
+            icon={<IconAdd />}
             aria-label={`Save ${p.expression} as a metric`}
             className={styles.rowMenuBtn}
             onClick={() => acceptSuggestedMetric(p)}
@@ -518,7 +511,7 @@ export function SemanticNav() {
           <Button
             appearance="subtle"
             size="small"
-            icon={<AddRegular />}
+            icon={<IconAdd />}
             aria-label={`Add synonym ${s.term}`}
             className={styles.rowMenuBtn}
             onClick={() => void acceptSuggestedSynonym(s.term, s.canonical)}
@@ -542,7 +535,7 @@ export function SemanticNav() {
         <Button
           appearance="subtle"
           size="small"
-          icon={<AddRegular />}
+          icon={<IconAdd />}
           className={styles.newButton}
           onClick={() =>
             setNewMetric({ name: "", expression: "", entity: "", description: "", busy: false, error: null })
@@ -553,7 +546,7 @@ export function SemanticNav() {
         <Button
           appearance="subtle"
           size="small"
-          icon={<AddRegular />}
+          icon={<IconAdd />}
           className={styles.newButton}
           onClick={() => setNewSynonym({ term: "", canonical: "", busy: false, error: null })}
         >
@@ -568,7 +561,7 @@ export function SemanticNav() {
           if (!d.open) setNewMetric(null);
         }}
       >
-        <DialogSurface className={styles.dialogSurface}>
+        <LhDialogSurface className={styles.dialogSurface}>
           <DialogBody>
             <DialogTitle>New metric</DialogTitle>
             <DialogContent className={styles.dialogContent}>
@@ -630,7 +623,7 @@ export function SemanticNav() {
               </Button>
             </DialogActions>
           </DialogBody>
-        </DialogSurface>
+        </LhDialogSurface>
       </Dialog>
 
       {/* New synonym */}
@@ -640,7 +633,7 @@ export function SemanticNav() {
           if (!d.open) setNewSynonym(null);
         }}
       >
-        <DialogSurface className={styles.dialogSurface}>
+        <LhDialogSurface className={styles.dialogSurface}>
           <DialogBody>
             <DialogTitle>New synonym</DialogTitle>
             <DialogContent className={styles.dialogContent}>
@@ -685,7 +678,7 @@ export function SemanticNav() {
               </Button>
             </DialogActions>
           </DialogBody>
-        </DialogSurface>
+        </LhDialogSurface>
       </Dialog>
 
       {/* Rename metric — a dependents refusal shows verbatim. */}
@@ -695,7 +688,7 @@ export function SemanticNav() {
           if (!d.open) setRename(null);
         }}
       >
-        <DialogSurface className={styles.dialogSurface}>
+        <LhDialogSurface className={styles.dialogSurface}>
           <DialogBody>
             <DialogTitle>Rename metric</DialogTitle>
             <DialogContent className={styles.dialogContent}>
@@ -731,7 +724,7 @@ export function SemanticNav() {
               </Button>
             </DialogActions>
           </DialogBody>
-        </DialogSurface>
+        </LhDialogSurface>
       </Dialog>
 
       {/* Delete metric — plain confirm, or an explicit cascade that shows the
@@ -742,7 +735,7 @@ export function SemanticNav() {
           if (!d.open) setDelMetric(null);
         }}
       >
-        <DialogSurface className={styles.dialogSurface}>
+        <LhDialogSurface className={styles.dialogSurface}>
           <DialogBody>
             <DialogTitle>
               {cascade
@@ -785,7 +778,7 @@ export function SemanticNav() {
               </Button>
             </DialogActions>
           </DialogBody>
-        </DialogSurface>
+        </LhDialogSurface>
       </Dialog>
     </nav>
   );

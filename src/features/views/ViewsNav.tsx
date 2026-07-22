@@ -29,28 +29,14 @@ import {
   DialogActions,
   DialogBody,
   DialogContent,
-  DialogSurface,
   DialogTitle,
   Input,
-  Menu,
-  MenuItem,
-  MenuList,
-  MenuPopover,
-  MenuTrigger,
   Text,
   makeStyles,
   shorthands,
   tokens,
 } from "@fluentui/react-components";
-import {
-  AddRegular,
-  ChatRegular,
-  DeleteRegular,
-  EyeRegular,
-  LockClosedRegular,
-  MoreHorizontalRegular,
-  RenameRegular,
-} from "@fluentui/react-icons";
+import { IconAdd, IconChat, IconEye, IconLock, IconMore, IconRename, IconTrash } from "@/shell/icons";
 import type { View } from "@/contracts";
 import { ragService } from "@/contracts";
 import { useViewsStore } from "@/stores/useViewsStore";
@@ -62,6 +48,7 @@ import {
   requestViewInspect,
   type InspectViewDetail,
 } from "@/features/views/ViewInspector";
+import { LhDialogSurface, LhMenu } from "@/shell/controls";
 
 const useStyles = makeStyles({
   // A quiet section mirroring InvestigationsNav: hairline below, breathing room.
@@ -329,40 +316,51 @@ export function ViewsNav() {
                 {v.name}
               </Text>
               {isPrivate && (
-                <LockClosedRegular
+                <IconLock
                   className={styles.lock}
                   aria-label="Private — this device only"
                   title="Private — this device only"
                 />
               )}
             </button>
-            <Menu>
-              <MenuTrigger disableButtonEnhancement>
+            <LhMenu
+              trigger={
                 <Button
                   appearance="subtle"
                   size="small"
-                  icon={<MoreHorizontalRegular />}
+                  icon={<IconMore />}
                   aria-label={`Actions for ${v.name}`}
                   className={styles.rowMenuBtn}
                 />
-              </MenuTrigger>
-              <MenuPopover>
-                <MenuList>
-                  <MenuItem icon={<EyeRegular />} onClick={() => requestViewInspect(v.id)}>
-                    Inspect
-                  </MenuItem>
-                  <MenuItem icon={<RenameRegular />} onClick={() => openRename(v)}>
-                    Rename
-                  </MenuItem>
-                  <MenuItem icon={<ChatRegular />} onClick={() => askAbout(v)}>
-                    Ask about this view
-                  </MenuItem>
-                  <MenuItem icon={<DeleteRegular />} onClick={() => void openDelete(v)}>
-                    Delete
-                  </MenuItem>
-                </MenuList>
-              </MenuPopover>
-            </Menu>
+              }
+              items={[
+                {
+                  key: "inspect",
+                  label: "Inspect",
+                  icon: <IconEye />,
+                  onClick: () => requestViewInspect(v.id),
+                },
+                {
+                  key: "rename",
+                  label: "Rename",
+                  icon: <IconRename />,
+                  onClick: () => openRename(v),
+                },
+                {
+                  key: "ask",
+                  label: "Ask about this view",
+                  icon: <IconChat />,
+                  onClick: () => askAbout(v),
+                },
+                {
+                  key: "delete",
+                  label: "Delete",
+                  icon: <IconTrash />,
+                  onClick: () => void openDelete(v),
+                },
+              ]}
+              aria-label={`Actions for ${v.name}`}
+            />
           </div>
         );
       })}
@@ -381,7 +379,7 @@ export function ViewsNav() {
       <Button
         appearance="subtle"
         size="small"
-        icon={<AddRegular />}
+        icon={<IconAdd />}
         className={styles.newButton}
         onClick={() => setShapeOpen(true)}
       >
@@ -408,7 +406,7 @@ export function ViewsNav() {
           if (!d.open) setRename(null);
         }}
       >
-        <DialogSurface className={styles.dialogSurface}>
+        <LhDialogSurface className={styles.dialogSurface}>
           <DialogBody>
             <DialogTitle>Rename view</DialogTitle>
             <DialogContent className={styles.dialogContent}>
@@ -444,7 +442,7 @@ export function ViewsNav() {
               </Button>
             </DialogActions>
           </DialogBody>
-        </DialogSurface>
+        </LhDialogSurface>
       </Dialog>
 
       {/* Delete — the two-step lifecycle (design.md "Cascade delete is
@@ -456,7 +454,7 @@ export function ViewsNav() {
           if (!d.open) setDel(null);
         }}
       >
-        <DialogSurface className={styles.dialogSurface}>
+        <LhDialogSurface className={styles.dialogSurface}>
           <DialogBody>
             <DialogTitle>
               {cascade ? `Delete “${del?.name ?? ""}” and its dependents?` : `Delete view “${del?.name ?? ""}”?`}
@@ -496,7 +494,7 @@ export function ViewsNav() {
               </Button>
             </DialogActions>
           </DialogBody>
-        </DialogSurface>
+        </LhDialogSurface>
       </Dialog>
 
       {/* The single read-only inspector, driven by inspect-view + delete-close. */}

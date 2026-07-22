@@ -15,7 +15,7 @@
  */
 import { useEffect, useRef, useState } from "react";
 import { Button, makeStyles, shorthands, tokens } from "@fluentui/react-components";
-import { ChatSparkleRegular, DismissRegular } from "@fluentui/react-icons";
+import { IconChatAI, IconClose } from "@/shell/icons";
 
 /** Active (window-visible) time before the nudge surfaces. */
 const NUDGE_AFTER_MS = 5 * 60 * 1000;
@@ -137,7 +137,7 @@ export function FeedbackNudge() {
       <Button
         className={styles.prompt}
         appearance="transparent"
-        icon={<ChatSparkleRegular />}
+        icon={<IconChatAI />}
         onClick={openFeedback}
       >
         What do you think so far?
@@ -145,7 +145,7 @@ export function FeedbackNudge() {
       <Button
         className={styles.dismiss}
         appearance="subtle"
-        icon={<DismissRegular />}
+        icon={<IconClose />}
         aria-label="Dismiss"
         onClick={snooze}
       />

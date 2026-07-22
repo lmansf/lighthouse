@@ -21,7 +21,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Dialog,
-  DialogSurface,
   Input,
   Text,
   makeStyles,
@@ -29,18 +28,11 @@ import {
   shorthands,
   tokens,
 } from "@fluentui/react-components";
-import {
-  DatabaseRegular,
-  DocumentPdfRegular,
-  DocumentRegular,
-  EyeOffRegular,
-  EyeRegular,
-  LockClosedRegular,
-  SearchRegular,
-} from "@fluentui/react-icons";
+import { IconDatabase, IconDoc, IconDocPdf, IconEye, IconEyeOff, IconLock, IconSearch } from "@/shell/icons";
 import { useRagStore } from "@/stores/useRagStore";
 import { quickOpenMatches, type QuickOpenCandidate } from "@/lib/quickOpen";
 import { modKey } from "@/features/onboarding/ModeChooser";
+import { LhDialogSurface } from "@/shell/controls";
 
 const useStyles = makeStyles({
   // A palette, not a modal form: pinned near the top (command-palette
@@ -124,9 +116,9 @@ const useStyles = makeStyles({
 
 /** Row icon by kind (files only reach here; databases are the tree's leaves). */
 function rowIcon(c: QuickOpenCandidate, className: string) {
-  if (c.kind === "database") return <DatabaseRegular className={className} />;
-  if (c.mimeType === "application/pdf") return <DocumentPdfRegular className={className} />;
-  return <DocumentRegular className={className} />;
+  if (c.kind === "database") return <IconDatabase className={className} />;
+  if (c.mimeType === "application/pdf") return <IconDocPdf className={className} />;
+  return <IconDoc className={className} />;
 }
 
 /** Name with the matched characters subtly emphasized (indices from the
@@ -234,12 +226,12 @@ export function QuickOpen() {
 
   return (
     <Dialog open={open} onOpenChange={(_, d) => setOpen(d.open)}>
-      <DialogSurface className={styles.surface} aria-label="Quick open — find a file">
+      <LhDialogSurface className={styles.surface} aria-label="Quick open — find a file">
         <div className={styles.box}>
           <Input
             className={styles.input}
             autoFocus
-            contentBefore={<SearchRegular />}
+            contentBefore={<IconSearch />}
             placeholder="Find a file by name or path…"
             aria-label="Find a file by name or path"
             value={query}
@@ -295,14 +287,14 @@ export function QuickOpen() {
                   <span className={styles.rowState}>
                     <span title={m.ragIncluded ? "Visible to AI" : "Hidden from AI"}>
                       {m.ragIncluded ? (
-                        <EyeRegular className={styles.eyeOn} />
+                        <IconEye className={styles.eyeOn} />
                       ) : (
-                        <EyeOffRegular className={styles.eyeOff} />
+                        <IconEyeOff className={styles.eyeOff} />
                       )}
                     </span>
                     {m.localOnly && (
                       <span title="Private — this device only">
-                        <LockClosedRegular className={styles.lockOn} />
+                        <IconLock className={styles.lockOn} />
                       </span>
                     )}
                   </span>
@@ -316,7 +308,7 @@ export function QuickOpen() {
             </Text>
           </div>
         </div>
-      </DialogSurface>
+      </LhDialogSurface>
     </Dialog>
   );
 }

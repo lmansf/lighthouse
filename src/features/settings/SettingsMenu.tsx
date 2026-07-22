@@ -8,7 +8,6 @@ import {
   DialogActions,
   DialogBody,
   DialogContent,
-  DialogSurface,
   DialogTitle,
   DialogTrigger,
   Dropdown,
@@ -18,36 +17,19 @@ import {
   Menu,
   MenuItem,
   MenuList,
-  MenuPopover,
   MenuTrigger,
   Option,
   Radio,
   RadioGroup,
   Spinner,
-  Switch,
   Text,
   makeStyles,
   mergeClasses,
   shorthands,
   tokens,
 } from "@fluentui/react-components";
-import {
-  BoardRegular,
-  BookRegular,
-  BrainCircuitRegular,
-  DeleteRegular,
-  HistoryRegular,
-  InfoRegular,
-  LibraryRegular,
-  LightbulbRegular,
-  OpenRegular,
-  OptionsRegular,
-  PinRegular,
-  QuestionCircleRegular,
-  SettingsRegular,
-  ShieldTaskRegular,
-  WarningRegular,
-} from "@fluentui/react-icons";
+import { IconAI, IconBoard, IconBook, IconHelp, IconHistory, IconInfo, IconInsight, IconLibrary, IconOpen, IconOptions, IconPin, IconSettings, IconShieldTask, IconTrash, IconWarning } from "@/shell/icons";
+import { LhDialogSurface, LhMenuPopover, LhSegmented, LhSelect, LhSwitch } from "@/shell/controls";
 import {
   MODEL_PROVIDERS,
   MOBILE_NO_PROVIDER_TRUTHS,
@@ -507,7 +489,7 @@ export function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: 
 
   return (
     <Dialog open={open} onOpenChange={(_, d) => setOpen(d.open)}>
-      <DialogSurface>
+      <LhDialogSurface>
         <DialogBody>
           <DialogTitle>AI models</DialogTitle>
           <DialogContent>
@@ -618,19 +600,14 @@ export function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: 
                     </Dropdown>
                   </Field>
                   <Field label="Model">
-                    <Dropdown
+                    <LhSelect
+                      options={provider.models.map((m) => ({ value: m, label: m }))}
                       value={modelId}
-                      selectedOptions={[modelId]}
-                      onOptionSelect={(_, d) => {
-                        setModelId(d.optionValue!);
+                      onChange={(v) => {
+                        setModelId(v);
                       }}
-                    >
-                      {provider.models.map((m) => (
-                        <Option key={m} value={m}>
-                          {m}
-                        </Option>
-                      ))}
-                    </Dropdown>
+                      aria-label="Model"
+                    />
                   </Field>
                   {/* Provider sign-in (0.12.1 §3), OpenAI only: renders ONLY
                       when the engine reports the registration-gated flow as
@@ -638,16 +615,15 @@ export function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: 
                       invisibility, the code-signing pattern). */}
                   {signinControl && (
                     <Field label="Connect with">
-                      <RadioGroup
-                        layout="horizontal"
+                      <LhSegmented
+                        options={[
+                          { value: "key", label: "Use API key" },
+                          { value: "signin", label: "Sign in" },
+                        ]}
                         value={signin.method}
-                        onChange={(_, d) =>
-                          updateAuthMethod(d.value === "signin" ? "signin" : "key")
-                        }
-                      >
-                        <Radio value="key" label="Use API key" />
-                        <Radio value="signin" label="Sign in" />
-                      </RadioGroup>
+                        onChange={(v) => updateAuthMethod(v === "signin" ? "signin" : "key")}
+                        aria-label="Connect with"
+                      />
                     </Field>
                   )}
                   {signinPane && (
@@ -789,7 +765,7 @@ export function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: 
             </Button>
           </DialogActions>
         </DialogBody>
-      </DialogSurface>
+      </LhDialogSurface>
     </Dialog>
   );
 }
@@ -874,7 +850,7 @@ export function AuditLogDialog({ open, setOpen }: { open: boolean; setOpen: (b: 
 
   return (
     <Dialog open={open} onOpenChange={(_, d) => setOpen(d.open)}>
-      <DialogSurface>
+      <LhDialogSurface>
         <DialogBody>
           <DialogTitle>Audit log</DialogTitle>
           <DialogContent>
@@ -894,11 +870,11 @@ export function AuditLogDialog({ open, setOpen }: { open: boolean; setOpen: (b: 
                     Logging is {enabled ? "on" : "off"}
                   </Text>
                   {intact ? (
-                    <Badge appearance="tint" color="success" icon={<ShieldTaskRegular />}>
+                    <Badge appearance="tint" color="success" icon={<IconShieldTask />}>
                       Chain verified
                     </Badge>
                   ) : (
-                    <Badge appearance="tint" color="danger" icon={<WarningRegular />}>
+                    <Badge appearance="tint" color="danger" icon={<IconWarning />}>
                       Tampering detected
                     </Badge>
                   )}
@@ -995,7 +971,7 @@ export function AuditLogDialog({ open, setOpen }: { open: boolean; setOpen: (b: 
             </Button>
           </DialogActions>
         </DialogBody>
-      </DialogSurface>
+      </LhDialogSurface>
     </Dialog>
   );
 }
@@ -1357,7 +1333,7 @@ export function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (
 
   return (
     <Dialog open={open} onOpenChange={(_, d) => setOpen(d.open)}>
-      <DialogSurface>
+      <LhDialogSurface>
         <DialogBody>
           <DialogTitle>Preferences</DialogTitle>
           <DialogContent>
@@ -1376,52 +1352,54 @@ export function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (
               {/* First: appearance is the most-reached-for preference. Applies
                   instantly via the theme store — no save step. */}
               <Field label="Appearance">
-                <RadioGroup
-                  layout="horizontal"
+                <LhSegmented
+                  options={[
+                    { value: "light", label: "Light" },
+                    { value: "dark", label: "Dark" },
+                    { value: "system", label: "Match system" },
+                  ]}
                   value={themeMode}
-                  onChange={(_, d) =>
-                    setThemeMode(d.value === "light" || d.value === "dark" ? d.value : "system")
-                  }
-                >
-                  <Radio value="light" label="Light" />
-                  <Radio value="dark" label="Dark" />
-                  <Radio value="system" label="Match system" />
-                </RadioGroup>
+                  onChange={(v) => setThemeMode(v === "light" || v === "dark" ? v : "system")}
+                  aria-label="Appearance"
+                />
               </Field>
 
               {/* Accent, density, font scale (openspec §3): each applies live via
                   the theme; accents are AA-validated on both themes. */}
               <Field label="Accent">
-                <RadioGroup
-                  layout="horizontal"
+                <LhSegmented
+                  options={[
+                    { value: "amber", label: "Amber" },
+                    { value: "teal", label: "Teal" },
+                    { value: "orchid", label: "Orchid" },
+                  ]}
                   value={accent}
-                  onChange={(_, d) => setAppearance({ accent: d.value as typeof accent })}
-                >
-                  <Radio value="amber" label="Amber" />
-                  <Radio value="teal" label="Teal" />
-                  <Radio value="orchid" label="Orchid" />
-                </RadioGroup>
+                  onChange={(v) => setAppearance({ accent: v as typeof accent })}
+                  aria-label="Accent"
+                />
               </Field>
               <Field label="Density">
-                <RadioGroup
-                  layout="horizontal"
+                <LhSegmented
+                  options={[
+                    { value: "comfortable", label: "Comfortable" },
+                    { value: "compact", label: "Compact" },
+                  ]}
                   value={density}
-                  onChange={(_, d) => setAppearance({ density: d.value as typeof density })}
-                >
-                  <Radio value="comfortable" label="Comfortable" />
-                  <Radio value="compact" label="Compact" />
-                </RadioGroup>
+                  onChange={(v) => setAppearance({ density: v as typeof density })}
+                  aria-label="Density"
+                />
               </Field>
               <Field label="Text size">
-                <RadioGroup
-                  layout="horizontal"
+                <LhSegmented
+                  options={[
+                    { value: "s", label: "Small" },
+                    { value: "m", label: "Medium" },
+                    { value: "l", label: "Large" },
+                  ]}
                   value={fontScale}
-                  onChange={(_, d) => setAppearance({ fontScale: d.value as typeof fontScale })}
-                >
-                  <Radio value="s" label="Small" />
-                  <Radio value="m" label="Medium" />
-                  <Radio value="l" label="Large" />
-                </RadioGroup>
+                  onChange={(v) => setAppearance({ fontScale: v as typeof fontScale })}
+                  aria-label="Text size"
+                />
               </Field>
 
               <Field label="When you add files, should the AI see them by default?">
@@ -1483,7 +1461,7 @@ export function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (
                         <Button
                           size="small"
                           appearance="subtle"
-                          icon={<DeleteRegular />}
+                          icon={<IconTrash />}
                           aria-label={`Remove rule ${r.name}`}
                           onClick={() => void removeRule(r.id)}
                         />
@@ -1499,7 +1477,7 @@ export function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (
                 )}
               </Field>
 
-              <Switch
+              <LhSwitch
                 checked={locks?.chatHistoryOff ? false : saveChats}
                 disabled={locks?.chatHistoryOff === true}
                 onChange={(_, d) => {
@@ -1543,7 +1521,7 @@ export function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (
               )}
 
               {desktop && (
-                <Switch
+                <LhSwitch
                   checked={runOnStartup}
                   onChange={(_, d) => updateStartup(Boolean(d.checked))}
                   label="Open Lighthouse when I sign in to my computer"
@@ -1551,7 +1529,7 @@ export function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (
               )}
 
               {desktop && (
-                <Switch
+                <LhSwitch
                   checked={semanticSearch}
                   onChange={(_, d) => updateSemantic(Boolean(d.checked))}
                   label="Semantic search — a small bundled model (runs entirely on this computer) helps questions find files by meaning, not just matching words"
@@ -1559,7 +1537,7 @@ export function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (
               )}
 
               {desktop && (
-                <Switch
+                <LhSwitch
                   checked={draftAnswers}
                   onChange={(_, d) => updateDraftAnswers(Boolean(d.checked))}
                   label="Show an instant draft answer while the private model works — an extractive preview from your files, replaced in place the moment the verified answer is ready"
@@ -1567,7 +1545,7 @@ export function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (
               )}
 
               {desktop && (
-                <Switch
+                <LhSwitch
                   checked={briefingNotify}
                   onChange={(_, d) => updateBriefingNotify(Boolean(d.checked))}
                   label="Notify me when the daily briefing note updates — a Lighthouse Notes file that refreshes when a pinned question's answer changes (the note is always written; this only controls the notification)"
@@ -1594,7 +1572,7 @@ export function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (
 
               {desktop && (
                 <>
-                  <Switch
+                  <LhSwitch
                     checked={locks?.ocrOff ? false : ocrEnabled}
                     disabled={locks?.ocrOff === true}
                     onChange={(_, d) => updateOcr(Boolean(d.checked))}
@@ -1608,7 +1586,7 @@ export function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (
 
               {desktop && (
                 <>
-                  <Switch
+                  <LhSwitch
                     checked={locks?.auditLogOn ? true : auditEnabled}
                     disabled={locks?.auditLogOn === true}
                     onChange={(_, d) => updateAudit(Boolean(d.checked))}
@@ -1621,7 +1599,7 @@ export function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (
               )}
 
               {desktop && uiMode !== "widget" && (
-                <Switch
+                <LhSwitch
                   checked={backgroundConserve}
                   onChange={(_, d) => updateConserve(Boolean(d.checked))}
                   label="Conserve resources in the background — free up the local AI's memory and CPU while Lighthouse sits in the tray or unfocused, and bring it back when you return (adds a couple of seconds to the first answer after you come back)"
@@ -1704,7 +1682,7 @@ export function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (
 
               {desktop && whisperCapable && !locks?.widgetHotkeysOff && (
                 <Field label="Whisper summon (experimental)">
-                  <Switch
+                  <LhSwitch
                     checked={whisperMode}
                     onChange={(_, d) => updateWhisper(Boolean(d.checked))}
                     label={`Tap ${whisperChord} — all three together, nothing else — to summon the search bar`}
@@ -1745,7 +1723,7 @@ export function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (
             </Button>
           </DialogActions>
         </DialogBody>
-      </DialogSurface>
+      </LhDialogSurface>
     </Dialog>
   );
 }
@@ -1762,7 +1740,7 @@ export function AboutDialog({ open, setOpen }: { open: boolean; setOpen: (b: boo
   const version = process.env.NEXT_PUBLIC_APP_VERSION;
   return (
     <Dialog open={open} onOpenChange={(_, d) => setOpen(d.open)}>
-      <DialogSurface>
+      <LhDialogSurface>
         <DialogBody>
           <DialogTitle>About Lighthouse</DialogTitle>
           <DialogContent>
@@ -1800,7 +1778,7 @@ export function AboutDialog({ open, setOpen }: { open: boolean; setOpen: (b: boo
             </DialogTrigger>
           </DialogActions>
         </DialogBody>
-      </DialogSurface>
+      </LhDialogSurface>
     </Dialog>
   );
 }
@@ -1823,7 +1801,7 @@ function NavDialog({
 }) {
   return (
     <Dialog open={open} onOpenChange={(_, d) => setOpen(d.open)}>
-      <DialogSurface>
+      <LhDialogSurface>
         <DialogBody>
           <DialogTitle>{title}</DialogTitle>
           <DialogContent>{children}</DialogContent>
@@ -1833,7 +1811,7 @@ function NavDialog({
             </DialogTrigger>
           </DialogActions>
         </DialogBody>
-      </DialogSurface>
+      </LhDialogSurface>
     </Dialog>
   );
 }
@@ -1869,24 +1847,24 @@ export function SettingsMenu() {
           <Button
             appearance="subtle"
             size="small"
-            icon={<SettingsRegular />}
+            icon={<IconSettings />}
             aria-label="Settings"
             data-tour="settings"
           />
         </MenuTrigger>
-        <MenuPopover>
+        <LhMenuPopover>
           <MenuList>
-            <MenuItem icon={<OptionsRegular />} onClick={() => setPrefDlg(true)}>
+            <MenuItem icon={<IconOptions />} onClick={() => setPrefDlg(true)}>
               <span className={styles.menuItemRow}>
                 Preferences
                 <span className={styles.menuShortcut}>{modKey()}+,</span>
               </span>
             </MenuItem>
-            <MenuItem icon={<BrainCircuitRegular />} onClick={() => setAiDlg(true)}>
+            <MenuItem icon={<IconAI />} onClick={() => setAiDlg(true)}>
               AI models
             </MenuItem>
             <MenuItem
-              icon={<PinRegular />}
+              icon={<IconPin />}
               onClick={() =>
                 // The chat panel owns pin data + the dialog; open it by event
                 // (same cross-feature seam as new-chat / browse-files).
@@ -1896,7 +1874,7 @@ export function SettingsMenu() {
               Pinned questions
             </MenuItem>
             <MenuItem
-              icon={<BoardRegular />}
+              icon={<IconBoard />}
               onClick={() =>
                 // The board host (app/page.tsx) owns the panel; same seam
                 // as open-pins (openspec: add-boards §2.2).
@@ -1906,38 +1884,38 @@ export function SettingsMenu() {
               Board
             </MenuItem>
             {/* 0.13.10 §3: the relocated management surfaces. */}
-            <MenuItem icon={<BookRegular />} onClick={() => setSemanticDlg(true)}>
+            <MenuItem icon={<IconBook />} onClick={() => setSemanticDlg(true)}>
               Business definitions
             </MenuItem>
-            <MenuItem icon={<LibraryRegular />} onClick={() => setViewsDlg(true)}>
+            <MenuItem icon={<IconLibrary />} onClick={() => setViewsDlg(true)}>
               Saved views
             </MenuItem>
             <MenuItem
-              icon={<LightbulbRegular />}
+              icon={<IconInsight />}
               onClick={() => window.dispatchEvent(new Event("lighthouse:open-feedback"))}
             >
               Send feedback
             </MenuItem>
-            <MenuItem icon={<HistoryRegular />} onClick={() => setAuditDlg(true)}>
+            <MenuItem icon={<IconHistory />} onClick={() => setAuditDlg(true)}>
               Audit log
             </MenuItem>
             <MenuItem
-              icon={<QuestionCircleRegular />}
+              icon={<IconHelp />}
               onClick={() => window.dispatchEvent(new Event(START_TOUR_EVENT))}
             >
               Take the tour
             </MenuItem>
             <MenuItem
-              icon={<OpenRegular />}
+              icon={<IconOpen />}
               onClick={() => window.open(LH_REPO, "_blank", "noopener,noreferrer")}
             >
               Lighthouse on GitHub
             </MenuItem>
-            <MenuItem icon={<InfoRegular />} onClick={() => setAboutDlg(true)}>
+            <MenuItem icon={<IconInfo />} onClick={() => setAboutDlg(true)}>
               About Lighthouse
             </MenuItem>
           </MenuList>
-        </MenuPopover>
+        </LhMenuPopover>
       </Menu>
       <AiModelsDialog open={aiDlg} setOpen={setAiDlg} />
       <PreferencesDialog open={prefDlg} setOpen={setPrefDlg} />

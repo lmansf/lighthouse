@@ -46,9 +46,11 @@ test("the report-template launcher survives as chat chips, labels byte-identical
   assert.match(chips, /ragService\s*\n?\s*\.capabilityMap\(|ragService\.capabilityMap\(/, "gated on the capability map");
   assert.match(chips, /t\.investigable/ , "only investigable tables chip");
   assert.match(chips, /ragService\.investigate\(table, undefined, template\)/, "same engine op");
-  assert.match(chips, />\s*Standard report\s*</, "Standard report entry");
-  assert.match(chips, />\s*Scientific method\s*</, "IMRaD entry");
-  assert.match(chips, />\s*Business report\s*</, "BLUF entry");
+  // §31 §3: the template picker is an LhMenu item list now; the three labels
+  // stay byte-identical as item labels.
+  assert.match(chips, /label: "Standard report",/, "Standard report entry");
+  assert.match(chips, /label: "Scientific method",/, "IMRaD entry");
+  assert.match(chips, /label: "Business report",/, "BLUF entry");
   assert.match(chips, /"imrad"/, "imrad template id");
   assert.match(chips, /"bluf"/, "bluf template id");
   assert.match(chat, /<InvestigateChips includedFileIds=\{includedFileIds\} \/>/, "mounted in the hero");
@@ -140,8 +142,8 @@ test("tile grid: the action row batch-applies through the same store ops", () =>
 });
 
 test("tile grid: at-rest badges, pull-down search, prominent Add", () => {
-  assert.match(grid, /EyeRegular/, "in-the-beam badge");
-  assert.match(grid, /LockClosedRegular/, "private badge");
+  assert.match(grid, /IconEye/, "in-the-beam badge");
+  assert.match(grid, /IconLock/, "private badge");
   assert.match(grid, /el\.scrollTop = row\.offsetHeight/, "search parks above the fold (pull-down reveals)");
   assert.match(grid, />\s*Add\s*<\/Button>/, "the add control stays prominent");
   assert.match(grid, /repeat\(auto-fill, minmax\(148px, 1fr\)\)/, "auto-fill tile columns");

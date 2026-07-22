@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/mobile-schema.json",
+  "identifier": "mobile",
+  "description": "§31 touch feel, mobile shells only: the two haptic touches (selection tick, light impact). The plugin registers solely on iOS/Android — this capability is skipped entirely on desktop builds, and the plugin has no default set, so the two commands are allowed explicitly.",
+  "platforms": ["iOS", "android"],
+  "windows": ["main"],
+  "permissions": [
+    "haptics:allow-selection-feedback",
+    "haptics:allow-impact-feedback"
+  ]
+}

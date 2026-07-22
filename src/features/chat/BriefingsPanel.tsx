@@ -12,25 +12,24 @@ import { useCallback, useEffect, useState } from "react";
 import {
   Button,
   Checkbox,
-  Dropdown,
   Field,
   Input,
-  Option,
   Text,
   makeStyles,
   shorthands,
   tokens,
 } from "@fluentui/react-components";
-import { DismissRegular } from "@fluentui/react-icons";
+import { IconClose } from "@/shell/icons";
 import dynamic from "next/dynamic";
 import { ragService } from "@/contracts";
 import type { Briefing, BriefingReport, Cadence, Pin } from "@/contracts";
+import { LhSelect } from "@/shell/controls";
 
 // The ONE configured markdown renderer (remark-gfm applied inside), loaded on
 // demand (the ChatPanel idiom) — only a composed report ever needs it.
 const MarkdownView = dynamic(() => import("@/shell/MarkdownView"), { ssr: false });
 
-/** Cadence choices for the create form, in the order the Dropdown lists them. */
+/** Cadence choices for the create form, in the order the select lists them. */
 const CADENCE_OPTIONS: { value: Cadence; label: string }[] = [
   { value: "manual", label: "Manual" },
   { value: "daily", label: "Daily" },
@@ -190,8 +189,6 @@ export function BriefingsPanel({ pins }: { pins: Pin[] }) {
     }
   }
 
-  const cadenceLabel = CADENCE_OPTIONS.find((o) => o.value === cadence)?.label ?? "Manual";
-
   return (
     <div className={styles.root}>
       {pins.length === 0 ? (
@@ -208,20 +205,15 @@ export function BriefingsPanel({ pins }: { pins: Pin[] }) {
             />
           </Field>
           <Field label="Cadence">
-            <Dropdown
-              value={cadenceLabel}
-              selectedOptions={[cadence]}
-              onOptionSelect={(_, d) => {
-                const opt = CADENCE_OPTIONS.find((o) => o.value === d.optionValue);
+            <LhSelect
+              options={CADENCE_OPTIONS}
+              value={cadence}
+              onChange={(v) => {
+                const opt = CADENCE_OPTIONS.find((o) => o.value === v);
                 if (opt) setCadence(opt.value);
               }}
-            >
-              {CADENCE_OPTIONS.map((o) => (
-                <Option key={o.value} value={o.value} text={o.label}>
-                  {o.label}
-                </Option>
-              ))}
-            </Dropdown>
+              aria-label="Cadence"
+            />
           </Field>
           <div>
             <Text weight="semibold" size={200}>
@@ -274,7 +266,7 @@ export function BriefingsPanel({ pins }: { pins: Pin[] }) {
               <Button
                 size="small"
                 appearance="subtle"
-                icon={<DismissRegular />}
+                icon={<IconClose />}
                 aria-label={`Remove briefing: ${b.title}`}
                 onClick={() => void remove(b.id)}
               />

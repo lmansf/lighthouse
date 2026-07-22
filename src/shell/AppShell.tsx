@@ -2,11 +2,11 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button, Text, makeStyles, mergeClasses, tokens } from "@fluentui/react-components";
-import { ArrowLeftRegular } from "@fluentui/react-icons";
+import { IconBack } from "@/shell/icons";
 import { Sidebar } from "./Sidebar";
 import { LAYOUT } from "./theme";
 import { usePaneLayout, type CompactTab } from "./paneLayout";
-import { CompactTabBar, TAB_BAR_CONTENT_HEIGHT } from "./CompactTabBar";
+import { CompactTabBar, TAB_BAR_CONTENT_HEIGHT, TAB_BAR_FLOAT_GAP } from "./CompactTabBar";
 import { useVaultTree } from "./useVaultTree";
 import { anySheetOpen, useAnySheetOpen } from "./Sheet";
 import { useChatStore } from "@/stores/useChatStore";
@@ -136,6 +136,8 @@ const useStyles = makeStyles({
     borderBottomStyle: "solid",
     borderBottomColor: tokens.colorNeutralStroke2,
   },
+  // §31 §5: the Settings page floats its group cards on the grouped canvas.
+  pageBodyGrouped: { backgroundColor: "var(--lh-bg-grouped)" },
   pageBody: {
     flex: 1,
     minHeight: 0,
@@ -405,7 +407,7 @@ export function AppShell({ sidebar, main }: AppShellProps) {
   useEffect(() => {
     if (typeof document === "undefined") return;
     const el = document.documentElement;
-    el.style.setProperty("--lh-tabbar-h", tabBarShown ? `${TAB_BAR_CONTENT_HEIGHT}px` : "0px");
+    el.style.setProperty("--lh-tabbar-h", tabBarShown ? `${TAB_BAR_CONTENT_HEIGHT + TAB_BAR_FLOAT_GAP}px` : "0px");
     return () => el.style.setProperty("--lh-tabbar-h", "0px");
   }, [tabBarShown]);
 
@@ -676,14 +678,14 @@ export function AppShell({ sidebar, main }: AppShellProps) {
                 <Button
                   appearance="subtle"
                   className={styles.backBtn}
-                  icon={<ArrowLeftRegular />}
+                  icon={<IconBack />}
                   aria-label="Back to chat"
                   onClick={() => setCompactTab("chat")}
                 >
                   Back
                 </Button>
               </div>
-              <div className={styles.pageBody} ref={settingsScrollRef}>
+              <div className={mergeClasses(styles.pageBody, styles.pageBodyGrouped)} ref={settingsScrollRef}>
                 <SettingsPage />
               </div>
             </div>

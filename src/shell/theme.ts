@@ -56,33 +56,84 @@ const beamAmber: BrandVariants = {
 };
 
 /**
- * Platform-native UI text: whatever the OS renders its own chrome with
- * (San Francisco on macOS via -apple-system, Segoe UI Variable/Segoe UI on
- * Windows, the system default elsewhere). Mirrored by app/globals.css for the
+ * Platform-native UI text: San Francisco FIRST on Apple platforms
+ * (-apple-system must outrank any named family or WebKit falls back), then the
+ * honest platform defaults — system-ui, Segoe UI on Windows, Roboto on
+ * Linux/Android. §31 dropped "Segoe UI Variable" from the front so SF wins on
+ * every Apple build; Windows/Linux keep their native faces BY DESIGN (one calm
+ * product, no platform cosplay). Mirrored by app/globals.css for the
  * pre-hydration frame; keep the two lists identical.
  */
-const FONT_STACK = '-apple-system, "Segoe UI Variable", "Segoe UI", system-ui, sans-serif';
+const FONT_STACK =
+  '-apple-system, system-ui, "Segoe UI", Roboto, "Helvetica Neue", sans-serif';
 
 /**
- * Exactly two elevation levels: a hairline ring (the border and the shadow
- * are one thing) plus a soft ambient shade. "Rest" for cards and inline
- * surfaces, "raised" for anything floating (menus, popovers, dialogs, the
- * jump pill). Every Fluent shadow token collapses onto these two.
+ * The HIG type scale (§31), mapped monotonically onto Fluent's size slots and
+ * expressed in REM so every size rides the root font-size. app/globals.css
+ * hooks the root to `font: -apple-system-body` where WebKit supports it (iOS
+ * Dynamic Type — the user's text-size setting scales the whole app) and to
+ * 106.25% (17px) elsewhere, so 1rem = the 17pt HIG Body everywhere and an
+ * explicit px never severs the Dynamic Type link. Fluent's own px defaults are
+ * fully overridden — every consumer of the type tokens lands on this scale:
+ *
+ *   Base200 → Footnote 13/18  ·  Base300 → Body 17/22 (THE body)
+ *   Base400 → Title3 20/25    ·  Base500 → Title2 22/28
+ *   Base600 → Title1 28/34    ·  Hero700 → Large Title 34/41
+ *   Base100 → Caption 12/16 (nothing renders under 11pt)
+ *
+ * Subhead 15/20 has no Fluent slot; it lives as --lh-type-subhead in
+ * globals.css for hand-rolled styles. Weights stay regular/medium/semibold/
+ * bold — Fluent's 400/500/600/700 already match the HIG set.
+ */
+const rem = (px: number) => `${Math.round((px / 17) * 10000) / 10000}rem`;
+const TYPE_TOKENS = {
+  fontSizeBase100: rem(12),
+  fontSizeBase200: rem(13),
+  fontSizeBase300: rem(17),
+  fontSizeBase400: rem(20),
+  fontSizeBase500: rem(22),
+  fontSizeBase600: rem(28),
+  fontSizeHero700: rem(34),
+  fontSizeHero800: rem(40),
+  fontSizeHero900: rem(48),
+  fontSizeHero1000: rem(68),
+  lineHeightBase100: rem(16),
+  lineHeightBase200: rem(18),
+  lineHeightBase300: rem(22),
+  lineHeightBase400: rem(25),
+  lineHeightBase500: rem(28),
+  lineHeightBase600: rem(34),
+  lineHeightHero700: rem(41),
+  lineHeightHero800: rem(48),
+  lineHeightHero900: rem(58),
+  lineHeightHero1000: rem(82),
+} as const;
+
+/**
+ * §31 shadows: depth comes from layering and hairline rings, not dark smears.
+ * "Rest" is a hairline ring + a whisper of ambient; "raised" adds the
+ * near-invisible 8/24 ambient (sheets/menus float a touch stronger on Ink,
+ * where the elevated surface color itself carries most of the depth).
  */
 const PAPER_SHADOW_REST =
-  "0 0 0 1px rgba(27, 27, 31, 0.05), 0 1px 2px rgba(27, 27, 31, 0.06)";
+  "0 0 0 0.5px rgba(27, 27, 31, 0.06), 0 1px 2px rgba(27, 27, 31, 0.04)";
 const PAPER_SHADOW_RAISED =
-  "0 0 0 1px rgba(27, 27, 31, 0.05), 0 8px 24px rgba(27, 27, 31, 0.12)";
+  "0 0 0 0.5px rgba(27, 27, 31, 0.05), 0 8px 24px rgba(27, 27, 31, 0.08)";
 const INK_SHADOW_REST =
-  "0 0 0 1px rgba(236, 236, 234, 0.06), 0 1px 2px rgba(0, 0, 0, 0.40)";
+  "0 0 0 0.5px rgba(236, 236, 234, 0.07), 0 1px 2px rgba(0, 0, 0, 0.30)";
 const INK_SHADOW_RAISED =
-  "0 0 0 1px rgba(236, 236, 234, 0.07), 0 12px 32px rgba(0, 0, 0, 0.55)";
+  "0 0 0 0.5px rgba(236, 236, 234, 0.08), 0 8px 24px rgba(0, 0, 0, 0.45)";
 
-/** Beam radii: large surfaces 12, cards 10, controls 8 (the 8px grid's kin). */
+/**
+ * §31 radius scale: controls 8, cards 12, floating surfaces 16 (sheets ride
+ * the 26pt top radius + capsule(999) via the --lh-radius-* vars in
+ * app/globals.css — Fluent has no slots for those two). The concentric rule
+ * (child = parent − gap) is the --lh-radius-concentric helper there.
+ */
 const RADII = {
   borderRadiusMedium: "8px",
-  borderRadiusLarge: "10px",
-  borderRadiusXLarge: "12px",
+  borderRadiusLarge: "12px",
+  borderRadiusXLarge: "16px",
 } as const;
 
 const base = createLightTheme(beamAmber);
@@ -95,6 +146,7 @@ const base = createLightTheme(beamAmber);
 export const lighthouseTheme: Theme = {
   ...base,
   fontFamilyBase: FONT_STACK,
+  ...TYPE_TOKENS,
   ...RADII,
   shadow2: PAPER_SHADOW_REST,
   shadow4: PAPER_SHADOW_REST,
@@ -163,6 +215,7 @@ const darkBase = createDarkTheme(beamAmber);
 export const darkLighthouseTheme: Theme = {
   ...darkBase,
   fontFamilyBase: FONT_STACK,
+  ...TYPE_TOKENS,
   ...RADII,
   shadow2: INK_SHADOW_REST,
   shadow4: INK_SHADOW_REST,
@@ -300,19 +353,23 @@ const ACCENT_THEMES: Record<Exclude<Accent, "amber">, { light: BrandTokens; dark
 
 /** Scale a theme's text (font size + line height) and/or vertical spacing tokens
  *  by a factor — the mechanism behind fontScale (openspec §3) and density.
- *  Non-px and zero values pass through untouched. */
+ *  Type tokens are rem (§31 — they ride the Dynamic-Type root) and spacing is
+ *  px; both units scale, everything else passes through untouched. The two
+ *  factors COMPOSE with Dynamic Type: rem × root size × fontScale. */
 function scaleTheme(theme: Theme, fontFactor: number, spaceFactor: number): Theme {
   if (fontFactor === 1 && spaceFactor === 1) return theme;
   const next: Record<string, string> = { ...(theme as unknown as Record<string, string>) };
-  const scalePx = (v: string, f: number): string => {
-    if (typeof v !== "string" || !v.endsWith("px")) return v;
+  const scaleLength = (v: string, f: number): string => {
+    if (typeof v !== "string") return v;
+    const unit = v.endsWith("rem") ? "rem" : v.endsWith("px") ? "px" : null;
+    if (!unit) return v;
     const n = parseFloat(v);
     if (!Number.isFinite(n) || n === 0) return v;
-    return `${Math.round(n * f * 100) / 100}px`;
+    return `${Math.round(n * f * 10000) / 10000}${unit}`;
   };
   for (const key of Object.keys(next)) {
-    if (/^(fontSizeBase|fontSizeHero|lineHeightBase)/.test(key)) next[key] = scalePx(next[key], fontFactor);
-    else if (/^spacingVertical/.test(key)) next[key] = scalePx(next[key], spaceFactor);
+    if (/^(fontSizeBase|fontSizeHero|lineHeight)/.test(key)) next[key] = scaleLength(next[key], fontFactor);
+    else if (/^spacingVertical/.test(key)) next[key] = scaleLength(next[key], spaceFactor);
   }
   return next as unknown as Theme;
 }

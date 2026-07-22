@@ -19,7 +19,6 @@ import {
   DialogActions,
   DialogBody,
   DialogContent,
-  DialogSurface,
   DialogTitle,
   Field,
   Input,
@@ -27,9 +26,10 @@ import {
   makeStyles,
   tokens,
 } from "@fluentui/react-components";
-import { ErrorCircleRegular } from "@fluentui/react-icons";
+import { IconError } from "@/shell/icons";
 import type { View } from "@/contracts";
 import { ragService } from "@/contracts";
+import { LhDialogSurface } from "@/shell/controls";
 
 const useStyles = makeStyles({
   surface: { maxWidth: "480px", width: "92vw" },
@@ -112,7 +112,7 @@ export function SaveViewDialog({
         if (!data.open) onClose();
       }}
     >
-      <DialogSurface className={styles.surface}>
+      <LhDialogSurface className={styles.surface}>
         <DialogBody>
           <DialogTitle>Save as view</DialogTitle>
           <DialogContent className={styles.content}>
@@ -137,7 +137,7 @@ export function SaveViewDialog({
             </Field>
             {error && (
               <div className={styles.errorNote}>
-                <ErrorCircleRegular fontSize={16} />
+                <IconError fontSize={16} />
                 <Text size={200}>{error}</Text>
               </div>
             )}
@@ -155,7 +155,7 @@ export function SaveViewDialog({
             </Button>
           </DialogActions>
         </DialogBody>
-      </DialogSurface>
+      </LhDialogSurface>
     </Dialog>
   );
 }

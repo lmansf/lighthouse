@@ -54,6 +54,7 @@ import { useOnDeviceModel } from "@/stores/useOnDeviceModel";
 import { useRagStore } from "@/stores/useRagStore";
 import { ModeChooserAuto } from "./ModeChooser";
 import { isDesktopShell, rememberPlatform, type PlatformKind } from "@/shell/desktopBridge";
+import { LhSelect } from "@/shell/controls";
 import { BEAM_SWEEP } from "@/shell/theme";
 
 const useStyles = makeStyles({
@@ -434,17 +435,12 @@ export function OnboardingPanel() {
               </Dropdown>
             </Field>
             <Field label="Model">
-              <Dropdown
+              <LhSelect
+                options={provider.models.map((m) => ({ value: m, label: m }))}
                 value={modelId}
-                selectedOptions={[modelId]}
-                onOptionSelect={(_, d) => setModelId(d.optionValue!)}
-              >
-                {provider.models.map((m) => (
-                  <Option key={m} value={m}>
-                    {m}
-                  </Option>
-                ))}
-              </Dropdown>
+                onChange={setModelId}
+                aria-label="Model"
+              />
             </Field>
             {/* Billing clarity (0.12.1 §4): name the vendor's products so a
                 user doesn't assume a chat subscription covers API-key use. */}

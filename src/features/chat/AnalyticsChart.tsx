@@ -2,7 +2,7 @@
 
 import { useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { Button, Text, Tooltip, makeStyles, tokens } from "@fluentui/react-components";
-import { ArrowDownloadRegular, CheckmarkRegular } from "@fluentui/react-icons";
+import { IconCheck, IconDownload } from "@/shell/icons";
 import {
   detectGranularity,
   formatTick,
@@ -296,7 +296,7 @@ export function AnalyticsChart({ spec }: { spec: ChartSpec }) {
           size="small"
           appearance="secondary"
           className={`${styles.pngBtn} lh-chart-png`}
-          icon={exported ? <CheckmarkRegular /> : <ArrowDownloadRegular />}
+          icon={exported ? <IconCheck /> : <IconDownload />}
           aria-label="Download chart as PNG"
           onClick={() => {
             if (!svgRef.current) return;

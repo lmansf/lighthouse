@@ -19,13 +19,7 @@ import {
   shorthands,
   tokens,
 } from "@fluentui/react-components";
-import {
-  AddRegular,
-  ArrowDownloadRegular,
-  CheckmarkCircleFilled,
-  DeleteRegular,
-  PauseRegular,
-} from "@fluentui/react-icons";
+import { IconAdd, IconCheckCircleFilled, IconDownload, IconPause, IconTrash } from "@/shell/icons";
 
 // "unsupported" (§3) is what a mobile engine reports — these components never
 // mount there (the platform-filtered roster has no local entry), so it needs
@@ -298,7 +292,7 @@ export function LocalModelInstallPanel({ onboarding = false }: { onboarding?: bo
         <span className={styles.panelTitle}>
           {status === "ready" ? (
             <span className={styles.panelReady}>
-              <CheckmarkCircleFilled fontSize={18} />
+              <IconCheckCircleFilled fontSize={18} />
               Local model installed
             </span>
           ) : (
@@ -311,7 +305,7 @@ export function LocalModelInstallPanel({ onboarding = false }: { onboarding?: bo
             content="Uninstall the private model (~4.2 GB) to free space or re-test the download"
             relationship="label"
           >
-            <Button size="small" appearance="subtle" icon={<DeleteRegular />} onClick={() => void uninstall()}>
+            <Button size="small" appearance="subtle" icon={<IconTrash />} onClick={() => void uninstall()}>
               Uninstall
             </Button>
           </Tooltip>
@@ -325,7 +319,7 @@ export function LocalModelInstallPanel({ onboarding = false }: { onboarding?: bo
               content="Pause the download — what's already downloaded is kept, and installing again resumes right where it left off"
               relationship="label"
             >
-              <Button size="small" appearance="subtle" icon={<PauseRegular />} onClick={() => void pause()}>
+              <Button size="small" appearance="subtle" icon={<IconPause />} onClick={() => void pause()}>
                 Pause
               </Button>
             </Tooltip>
@@ -336,7 +330,7 @@ export function LocalModelInstallPanel({ onboarding = false }: { onboarding?: bo
           <Button
             appearance="primary"
             size="small"
-            icon={<ArrowDownloadRegular />}
+            icon={<IconDownload />}
             onClick={() => void install()}
           >
             {partialBytes
@@ -441,7 +435,7 @@ export function LocalModelOption({ label }: { label: string }) {
       <span>{label}</span>
       {status === "ready" ? (
         <span className={styles.installed}>
-          <CheckmarkCircleFilled fontSize={16} />
+          <IconCheckCircleFilled fontSize={16} />
           Installed
           <Tooltip
             content="Uninstall the private model (~4.2 GB) to free space or re-test the download"
@@ -451,7 +445,7 @@ export function LocalModelOption({ label }: { label: string }) {
               className={styles.iconBtn}
               size="small"
               appearance="subtle"
-              icon={<DeleteRegular />}
+              icon={<IconTrash />}
               aria-label="Uninstall the private model"
               {...act(uninstall)}
             />
@@ -485,7 +479,7 @@ export function LocalModelOption({ label }: { label: string }) {
                 className={styles.iconBtn}
                 size="small"
                 appearance="subtle"
-                icon={<DeleteRegular />}
+                icon={<IconTrash />}
                 aria-label="Remove the leftover model file"
                 {...act(uninstall)}
               />
@@ -507,7 +501,7 @@ export function LocalModelOption({ label }: { label: string }) {
               className={styles.iconBtn}
               size="small"
               appearance="subtle"
-              icon={<AddRegular />}
+              icon={<IconAdd />}
               aria-label="Install the private model"
               {...act(install)}
             />

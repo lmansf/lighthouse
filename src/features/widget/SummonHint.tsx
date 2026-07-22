@@ -13,7 +13,7 @@
  */
 import { useCallback, useEffect, useState } from "react";
 import { Button, Text, makeStyles, shorthands, tokens } from "@fluentui/react-components";
-import { DismissRegular, SearchSparkleRegular } from "@fluentui/react-icons";
+import { IconClose, IconSearchAI } from "@/shell/icons";
 import { isDesktopShell } from "@/shell/desktopBridge";
 import { prettyShortcut } from "@/features/onboarding/ModeChooser";
 
@@ -127,7 +127,7 @@ export function SummonHint() {
 
   return (
     <div className={styles.banner} role="status">
-      <SearchSparkleRegular className={styles.icon} aria-hidden />
+      <IconSearchAI className={styles.icon} aria-hidden />
       <Text size={300} className={styles.text}>
         Tip: press <span className={styles.chord}>{prettyShortcut(shortcut)}</span> anywhere to
         summon Lighthouse&apos;s search bar.
@@ -138,7 +138,7 @@ export function SummonHint() {
       <Button
         size="small"
         appearance="subtle"
-        icon={<DismissRegular />}
+        icon={<IconClose />}
         aria-label="Dismiss"
         onClick={dismiss}
       />

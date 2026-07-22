@@ -23,7 +23,6 @@ import {
   MenuItem,
   MenuItemRadio,
   MenuList,
-  MenuPopover,
   MenuTrigger,
   Text,
   Tooltip,
@@ -31,13 +30,14 @@ import {
   shorthands,
   tokens,
 } from "@fluentui/react-components";
-import { BrainCircuitRegular, SettingsRegular } from "@fluentui/react-icons";
+import { IconAI, IconSettings } from "@/shell/icons";
 import { useAuthStore } from "@/stores/useAuthStore";
 import { useRagStore } from "@/stores/useRagStore";
 import { useOnDeviceModel } from "@/stores/useOnDeviceModel";
 import { shortProviderLabel, switchArgs, switchChoices } from "@/lib/providerSwitch";
 import { apiKeyBillingNote } from "@/lib/billingNotes";
 import { MOBILE_NO_PROVIDER_TRUTHS } from "@/contracts";
+import { LhMenuPopover } from "@/shell/controls";
 import { platformKind } from "@/shell/desktopBridge";
 import { usePaneLayout } from "@/shell/paneLayout";
 
@@ -160,7 +160,7 @@ export function ProviderSwitch({
             appearance="subtle"
             size={compact ? "medium" : "small"}
             className={compact ? styles.triggerCompact : styles.trigger}
-            icon={<BrainCircuitRegular />}
+            icon={<IconAI />}
             disabled={busy}
             disabledFocusable={disabledReason !== undefined}
             aria-label={disabledReason ?? `AI model: ${label} — switch`}
@@ -171,7 +171,7 @@ export function ProviderSwitch({
           </MenuButton>
         </Tooltip>
       </MenuTrigger>
-      <MenuPopover>
+      <LhMenuPopover>
         <MenuList>
           {choices.map((c) => (
             <MenuItemRadio
@@ -209,13 +209,13 @@ export function ProviderSwitch({
           )}
           <MenuDivider />
           <MenuItem
-            icon={<SettingsRegular />}
+            icon={<IconSettings />}
             onClick={() => window.dispatchEvent(new CustomEvent("lighthouse:open-ai-models"))}
           >
             Manage…
           </MenuItem>
         </MenuList>
-      </MenuPopover>
+      </LhMenuPopover>
     </Menu>
   );
 }

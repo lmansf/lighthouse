@@ -24,7 +24,6 @@ import {
   DialogActions,
   DialogBody,
   DialogContent,
-  DialogSurface,
   DialogTitle,
   Spinner,
   Text,
@@ -33,8 +32,9 @@ import {
   shorthands,
   tokens,
 } from "@fluentui/react-components";
-import { SearchSparkleRegular, WindowRegular } from "@fluentui/react-icons";
+import { IconSearchAI, IconWindow } from "@/shell/icons";
 import { isDesktopShell } from "@/shell/desktopBridge";
+import { LhDialogSurface } from "@/shell/controls";
 
 type UiMode = "window" | "widget";
 
@@ -340,7 +340,7 @@ export function ModeChooserAuto({ onSettled }: { onSettled: () => void }) {
         if (!d.open) dismiss();
       }}
     >
-      <DialogSurface>
+      <LhDialogSurface>
         <DialogBody>
           <DialogTitle>How should Lighthouse live on your desktop?</DialogTitle>
           <DialogContent>
@@ -349,14 +349,14 @@ export function ModeChooserAuto({ onSettled }: { onSettled: () => void }) {
                 <ModeCard
                   selected={selected === "window"}
                   onSelect={() => setSelected("window")}
-                  icon={<WindowRegular />}
+                  icon={<IconWindow />}
                   title="Window mode"
                   body="The classic app window — your files and chat side by side, and the floating search bar one hotkey away."
                 />
                 <ModeCard
                   selected={selected === "widget"}
                   onSelect={() => setSelected("widget")}
-                  icon={<SearchSparkleRegular />}
+                  icon={<IconSearchAI />}
                   title="Widget mode"
                   badge={
                     <Badge size="small" appearance="tint" color="warning">
@@ -389,7 +389,7 @@ export function ModeChooserAuto({ onSettled }: { onSettled: () => void }) {
             </Button>
           </DialogActions>
         </DialogBody>
-      </DialogSurface>
+      </LhDialogSurface>
     </Dialog>
 
     {/* Widget hand-off: confirm the move to the tray so the disappearing main
@@ -404,7 +404,7 @@ export function ModeChooserAuto({ onSettled }: { onSettled: () => void }) {
         }
       }}
     >
-      <DialogSurface>
+      <LhDialogSurface>
         <DialogBody>
           <DialogTitle>Lighthouse is now in your tray</DialogTitle>
           <DialogContent>
@@ -426,7 +426,7 @@ export function ModeChooserAuto({ onSettled }: { onSettled: () => void }) {
             </Button>
           </DialogActions>
         </DialogBody>
-      </DialogSurface>
+      </LhDialogSurface>
     </Dialog>
     </>
   );

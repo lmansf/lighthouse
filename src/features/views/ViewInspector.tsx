@@ -27,7 +27,6 @@ import {
   DialogActions,
   DialogBody,
   DialogContent,
-  DialogSurface,
   DialogTitle,
   Spinner,
   Text,
@@ -35,8 +34,9 @@ import {
   shorthands,
   tokens,
 } from "@fluentui/react-components";
-import { LockClosedRegular } from "@fluentui/react-icons";
+import { IconLock } from "@/shell/icons";
 import { ragService, type ViewInspection } from "@/contracts";
+import { LhDialogSurface } from "@/shell/controls";
 
 /** DOM CustomEvent that opens the Library's view inspector. Dispatched by the
  *  ViewsNav rows/menu (requestViewInspect); listened for in ViewsNav, which
@@ -140,7 +140,7 @@ export function ViewInspector({
         if (!d.open) onClose();
       }}
     >
-      <DialogSurface aria-describedby={undefined}>
+      <LhDialogSurface aria-describedby={undefined}>
         <DialogBody>
           <DialogTitle>Saved view{title ? ` — ${title}` : ""}</DialogTitle>
           <DialogContent className={styles.body}>
@@ -219,7 +219,7 @@ export function ViewInspector({
                 {localOnly && (
                   <div className={styles.section}>
                     <span className={styles.privatePill}>
-                      <LockClosedRegular />
+                      <IconLock />
                       <Text>Private — this device only</Text>
                     </span>
                     <Text size={200} className={styles.footNote}>
@@ -249,7 +249,7 @@ export function ViewInspector({
             </Button>
           </DialogActions>
         </DialogBody>
-      </DialogSurface>
+      </LhDialogSurface>
     </Dialog>
   );
 }

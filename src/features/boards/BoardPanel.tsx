@@ -44,13 +44,12 @@ import {
   DialogActions,
   DialogBody,
   DialogContent,
-  DialogSurface,
   DialogTitle,
   Text,
   makeStyles,
   tokens,
 } from "@fluentui/react-components";
-import { ArrowClockwiseRegular, DocumentRegular } from "@fluentui/react-icons";
+import { IconDoc, IconRefresh } from "@/shell/icons";
 import type {
   Board,
   BoardCardRef,
@@ -71,6 +70,7 @@ import {
   withoutCard,
 } from "@/features/boards/boardModel";
 import { BOARD_CARD_MIME, BoardCard } from "@/features/boards/BoardCard";
+import { LhDialogSurface } from "@/shell/controls";
 
 const useStyles = makeStyles({
   // The pins dialog's surface, sized for a dashboard: v1 is a large dialog,
@@ -411,7 +411,7 @@ export function BoardHost() {
         if (!data.open) close();
       }}
     >
-      <DialogSurface className={styles.surface}>
+      <LhDialogSurface className={styles.surface}>
         <DialogBody>
           <DialogTitle>{board ? board.name : "Board"}</DialogTitle>
           <DialogContent className={styles.content}>
@@ -475,7 +475,7 @@ export function BoardHost() {
                 export honestly on the twin). */}
             <Button
               appearance="subtle"
-              icon={<DocumentRegular />}
+              icon={<IconDoc />}
               disabled={
                 loading || busy || packNote?.pending || !board || board.cards.length === 0
               }
@@ -485,7 +485,7 @@ export function BoardHost() {
             </Button>
             <Button
               appearance="primary"
-              icon={<ArrowClockwiseRegular />}
+              icon={<IconRefresh />}
               disabled={loading || busy || !board || board.cards.length === 0}
               onClick={() => void refreshAll()}
             >
@@ -493,7 +493,7 @@ export function BoardHost() {
             </Button>
           </DialogActions>
         </DialogBody>
-      </DialogSurface>
+      </LhDialogSurface>
     </Dialog>
   );
 }

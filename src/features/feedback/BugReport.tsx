@@ -8,12 +8,9 @@ import {
   DialogActions,
   DialogBody,
   DialogContent,
-  DialogSurface,
   DialogTitle,
   DialogTrigger,
   Field,
-  Radio,
-  RadioGroup,
   Text,
   Textarea,
   Tooltip,
@@ -21,13 +18,14 @@ import {
   shorthands,
   tokens,
 } from "@fluentui/react-components";
-import { LightbulbRegular, MailRegular, OpenRegular } from "@fluentui/react-icons";
+import { IconInsight, IconMail, IconOpen } from "@/shell/icons";
 import {
   buildFeedbackMailto,
   buildFeedbackIssueUrl,
   feedbackKindLabel,
   type FeedbackKind,
 } from "@/lib/feedbackLinks";
+import { LhDialogSurface, LhSegmented } from "@/shell/controls";
 
 /**
  * The single "Send feedback" flow. A quiet FAB in the corner (and a "Send
@@ -183,26 +181,27 @@ export function BugReport() {
           <Button
             className={styles.fab}
             appearance="subtle"
-            icon={<LightbulbRegular />}
+            icon={<IconInsight />}
             aria-label="Send feedback"
           />
         </Tooltip>
       </DialogTrigger>
-      <DialogSurface>
+      <LhDialogSurface>
         <DialogBody>
           <DialogTitle>Send feedback</DialogTitle>
           <DialogContent>
             <div className={styles.fields}>
               <Field label="What kind of feedback?">
-                <RadioGroup
-                  layout="horizontal"
+                <LhSegmented
+                  options={[
+                    { value: "idea", label: feedbackKindLabel("idea") },
+                    { value: "problem", label: feedbackKindLabel("problem") },
+                    { value: "praise", label: feedbackKindLabel("praise") },
+                  ]}
                   value={kind}
-                  onChange={(_, d) => setKind(d.value as FeedbackKind)}
-                >
-                  <Radio value="idea" label={feedbackKindLabel("idea")} />
-                  <Radio value="problem" label={feedbackKindLabel("problem")} />
-                  <Radio value="praise" label={feedbackKindLabel("praise")} />
-                </RadioGroup>
+                  onChange={(v) => setKind(v as FeedbackKind)}
+                  aria-label="What kind of feedback?"
+                />
               </Field>
               <Field label="Where in the app? (optional)">
                 <Textarea value={where} onChange={(_, d) => setWhere(d.value)} />
@@ -251,7 +250,7 @@ export function BugReport() {
             <div className={styles.handoffs}>
               <Button
                 appearance="secondary"
-                icon={<OpenRegular />}
+                icon={<IconOpen />}
                 disabled={!canSend}
                 onClick={() => openExternal(buildFeedbackIssueUrl(report))}
               >
@@ -259,7 +258,7 @@ export function BugReport() {
               </Button>
               <Button
                 appearance="primary"
-                icon={<MailRegular />}
+                icon={<IconMail />}
                 disabled={!canSend}
                 onClick={() => openExternal(buildFeedbackMailto(report))}
               >
@@ -268,7 +267,7 @@ export function BugReport() {
             </div>
           </DialogActions>
         </DialogBody>
-      </DialogSurface>
+      </LhDialogSurface>
     </Dialog>
   );
 }
