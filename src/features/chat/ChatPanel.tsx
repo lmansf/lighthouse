@@ -107,6 +107,7 @@ import { FILE_DRAG_MIME, parseDraggedFiles, type DraggedFile } from "@/shell/dnd
 import { isDesktopShell, pathsForFiles, platformKind } from "@/shell/desktopBridge";
 import { openExternal } from "@/lib/openExternal";
 import { detectStatRun } from "@/lib/statRun";
+import { COLLAPSED_SECTION_CLASS, remarkCollapseSections } from "@/lib/collapseSections";
 import { useCoarsePointer, usePaneLayout } from "@/shell/paneLayout";
 import { Sheet } from "@/shell/Sheet";
 import { HistoryNav } from "./HistoryNav";
@@ -557,6 +558,28 @@ const useStyles = makeStyles({
     borderBottomStyle: "solid",
     borderBottomColor: tokens.colorNeutralStroke2,
     "&:last-of-type": { borderBottomStyle: "none" },
+  },
+  // §35 §4: the quiet fold control of a collapsed section — text-shaped, brand
+  // colored, and a full 44px touch target on the phone where it lives.
+  showMoreBtn: {
+    display: "flex",
+    alignItems: "center",
+    minHeight: "44px",
+    ...shorthands.padding("0"),
+    ...shorthands.border("0"),
+    backgroundColor: "transparent",
+    color: tokens.colorBrandForeground1,
+    fontSize: tokens.fontSizeBase300,
+    fontFamily: "inherit",
+    cursor: "pointer",
+    ":hover": { color: tokens.colorBrandForeground2 },
+  },
+  // The revealed remainder fades in — unless the user asked for no motion.
+  collapsedReveal: {
+    animationName: { from: { opacity: 0 }, to: { opacity: 1 } },
+    animationDuration: tokens.durationNormal,
+    animationTimingFunction: tokens.curveEasyEase,
+    "@media (prefers-reduced-motion: reduce)": { animationName: "none" },
   },
   // [n] citation markers rendered as clickable superscript chips that jump to
   // the matching reference card below the answer.
@@ -2165,6 +2188,32 @@ function isChartPre(node: unknown): boolean {
  * and every table gets a hover copy-as-CSV button.
  * Memoized so finished turns don't re-render on every streamed token.
  */
+/**
+ * §35 §4: the renderer half of a collapsed section. The remark transform
+ * (remarkCollapseSections) moved a long section's tail into an
+ * `lh-collapsed-section` div; this swap shows a quiet 44px "Show more" until
+ * tapped, then renders the real children. State is a plain useState — per
+ * message instance, reset on remount, never persisted — and the reveal's
+ * fade obeys prefers-reduced-motion (see collapsedReveal).
+ */
+function CollapsedSection({ children }: { children: ReactNode }) {
+  const styles = useStyles();
+  const [open, setOpen] = useState(false);
+  if (!open) {
+    return (
+      <button
+        type="button"
+        className={styles.showMoreBtn}
+        aria-expanded={false}
+        onClick={() => setOpen(true)}
+      >
+        Show more
+      </button>
+    );
+  }
+  return <div className={styles.collapsedReveal}>{children}</div>;
+}
+
 const AnswerMarkdown = memo(function AnswerMarkdown({
   content,
   turnId,
@@ -2172,6 +2221,7 @@ const AnswerMarkdown = memo(function AnswerMarkdown({
   metaChart,
   metaTable,
   legacyFences = true,
+  collapseSections = false,
 }: {
   content: string;
   turnId: string;
@@ -2189,6 +2239,10 @@ const AnswerMarkdown = memo(function AnswerMarkdown({
    *  rendered. True (default) only for legacy saved chats with no meta, which
    *  still render their persisted engine fence. */
   legacyFences?: boolean;
+  /** §35 §4: true ONLY for a settled answer on the compact layout — long
+   *  h2/h3 sections fold behind "Show more". The streaming path (StreamBlock)
+   *  and desktop never pass it, so they never collapse. */
+  collapseSections?: boolean;
 }) {
   const styles = useStyles();
   // Belt-and-braces (chart-directive): the engine already withholds
@@ -2299,6 +2353,19 @@ const AnswerMarkdown = memo(function AnswerMarkdown({
           </code>
         );
       },
+      // §35 §4: the collapse transform (compact + settled only) parks a long
+      // section's tail in an lh-collapsed-section div; swap THAT div for the
+      // interactive fold and pass every other div through untouched.
+      div: ({ node, children, className, ...props }) => {
+        if (className?.split(" ").includes(COLLAPSED_SECTION_CLASS)) {
+          return <CollapsedSection>{children}</CollapsedSection>;
+        }
+        return (
+          <div {...props} className={className}>
+            {children}
+          </div>
+        );
+      },
       // §35 §3: a stat run (≥3 items, every one `**Label:** value` with plain
       // text on both sides) reads as a key-value grid instead of bullets. The
       // detector is deliberately doubtful — any link, citation, nested list,
@@ -2347,7 +2414,13 @@ const AnswerMarkdown = memo(function AnswerMarkdown({
     <MarkdownView
       content={cleaned}
       components={components}
-      remarkPlugins={[remarkCitations, [remarkAnswerCard, { chart: metaChart, table: metaTable }]]}
+      remarkPlugins={[
+        remarkCitations,
+        [remarkAnswerCard, { chart: metaChart, table: metaTable }],
+        // §35 §4: LAST, so it sees the card/disclosure folds already in place
+        // and its section splices can't disturb their anchors.
+        [remarkCollapseSections, { enabled: collapseSections }],
+      ]}
     />
   );
 });
@@ -5432,6 +5505,7 @@ export function ChatPanel() {
                               metaChart={m.meta?.chart}
                               metaTable={m.meta?.table}
                               legacyFences={!liveTurnIds.current.has(m.id)}
+                              collapseSections={compactLayout}
                             />
                           )}
                           {streaming && m.id === lastId && <span className={styles.beaconInline} />}
@@ -5801,6 +5875,7 @@ export function ChatPanel() {
                     content={sqlOutcome.content}
                     turnId="sql-editor"
                     onCite={handleCitationClick}
+                    collapseSections={compactLayout}
                   />
                 </div>
               )}
