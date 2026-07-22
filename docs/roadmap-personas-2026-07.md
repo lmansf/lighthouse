@@ -6487,24 +6487,51 @@ this PR codifies its lessons. Docs + tripwires + two small guards;
 NO feature or behavior changes beyond the state-file guard.
 
 1. Write docs/CONVENTIONS.md — the house patterns, each ~5-10 lines
-   with a pointer to its canonical example: the pure verdict-fn
-   pattern (warm_wait_verdict et al.); meta-channel additions + the
-   answer-cache REPLAY CHECKLIST (§22.6/§32/§37); capability flags
-   (one flag one meaning; platform vs shell vs availability); the
-   WKWebView web-API checklist (file inputs need label/overlay, no
-   bare window.open — route openExternal, no JIT, no child
-   processes, loopback rules); the fixed/bottom-anchored surface
-   registry (tab bar, FAB, nudge, composer — every fixed-bottom
-   surface MUST consume --lh-tabbar-h/--lh-safe-bottom; list them);
-   pins policy (byte-pins for contracts/labels/prompts; behavior
-   tests for behavior; end-to-end assembly pins for integration —
-   cite the §36 lesson); the model-call BUDGET RULE (every new
-   stream_answer call site declares a call type registered in the
-   §36 budget floor); token-semantics rule (changing a design
-   token's VALUE = consumer audit); diagnose-before-prescribe (a §
-   patch starts from a code trace, not a symptom). Link it from
-   CLAUDE.md with one line ("read docs/CONVENTIONS.md before
-   changing shared systems").
+   with a pointer to its canonical example. ALL TEN bitten §39
+   patterns must appear, plus the standing disciplines:
+   - the pure verdict-fn pattern (warm_wait_verdict et al.);
+   - meta-channel additions + the answer-cache REPLAY CHECKLIST
+     (§22.6/§32/§37);
+   - capability flags (one flag one meaning; platform vs shell vs
+     availability — the §24 lesson);
+   - the WKWebView web-API checklist (file inputs need
+     label/overlay, no bare window.open — route openExternal, no
+     JIT, no child processes, loopback rules);
+   - the fixed/bottom-anchored surface REGISTRY (tab bar, FAB,
+     nudge, composer — every fixed-bottom surface MUST consume
+     --lh-tabbar-h/--lh-safe-bottom; enumerate them) AND a global
+     structural pin: any position:fixed in src/ with a bottom
+     offset must reference the tab-bar/safe-area vars or appear on
+     the registry's allowlist (the §33 nudge class, made
+     un-repeatable);
+   - pins policy (byte-pins for contracts/labels/prompts; behavior
+     tests for behavior; END-TO-END ASSEMBLY PINS for integration —
+     the §36 dead-planner lesson);
+   - the model-call BUDGET RULE (every new stream_answer call site
+     declares a call type registered in the §36 budget floor);
+   - token-semantics rule (changing a design token's VALUE = a
+     consumer audit — the §35 lesson);
+   - END-OF-CHAIN ASSERTIONS for multi-layer supply chains (fetch →
+     stage → resolve: CI asserts the final artifact, the §25 OCR /
+     §42 payload pattern);
+   - CROSS-FEATURE STRUCTURAL FLOORS (a feature referencing another
+     feature's DOM/structure ships a per-mode structural test — the
+     §33 tour-anchor lesson);
+   - the FINDABILITY rule (relocating a capability requires it be
+     findable at the moment of relevance — "it exists somewhere" is
+     not acceptance; the §37 lesson);
+   - SENTINEL HYGIENE (no magic scores/values with implicit meaning
+     feeding generic algorithms — name the semantics in a type or
+     constant with its interaction documented; the §36 score-0
+     lesson);
+   - INTERACTION SPECS (a prompt naming a gesture states its
+     discrimination rules — axis lock, edge zone, thresholds — or
+     the implementing session must propose them before coding; the
+     §34 edge-swipe lesson);
+   - diagnose-before-prescribe (a § patch starts from a code trace,
+     not a symptom).
+   Link it from CLAUDE.md with one line ("read docs/CONVENTIONS.md
+   before changing shared systems").
 2. Stamp-lockstep tripwire: scripts/check-stamps.mjs asserting all
    SEVEN version stamps agree (per CLAUDE.md's list), wired into
    the JS check suite/CI so any drift is red on the PR that causes
