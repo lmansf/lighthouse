@@ -67,6 +67,7 @@ function switchedNote(providerId: string, label: string): string {
 export function ProviderSwitch({
   onSwitched,
   disabledReason,
+  submenu = false,
 }: {
   /** House-style transient strip host (ChatPanel renders it by the composer). */
   onSwitched: (note: { ok: boolean; text: string }) => void;
@@ -78,6 +79,13 @@ export function ProviderSwitch({
    * the engine enforces the policy regardless — this is honesty, not the gate.
    */
   disabledReason?: string;
+  /**
+   * 0.14.2 compact header (field report IMG_1672): render as a nested
+   * "AI model" submenu item for the header's More menu instead of a standalone
+   * header button — same Menu state, roster, probe, and switching seam; only
+   * the trigger changes.
+   */
+  submenu?: boolean;
 }) {
   const styles = useStyles();
   const onboarding = useAuthStore((s) => s.onboarding);
@@ -149,27 +157,39 @@ export function ProviderSwitch({
       }}
     >
       <MenuTrigger disableButtonEnhancement>
-        <Tooltip
-          content={
-            disabledReason ??
-            `Answering with ${label}. Switch the AI model — applies from your next ask.`
-          }
-          relationship="description"
-        >
-          <MenuButton
-            appearance="subtle"
-            size={compact ? "medium" : "small"}
-            className={compact ? styles.triggerCompact : styles.trigger}
+        {submenu ? (
+          <MenuItem
             icon={<IconAI />}
             disabled={busy}
             disabledFocusable={disabledReason !== undefined}
+            secondaryContent={label}
             aria-label={disabledReason ?? `AI model: ${label} — switch`}
           >
-            {/* §2: label only where it fits; the compact trigger is the brain
-                icon alone (the open menu names every choice). */}
-            {compact ? null : label}
-          </MenuButton>
-        </Tooltip>
+            AI model
+          </MenuItem>
+        ) : (
+          <Tooltip
+            content={
+              disabledReason ??
+              `Answering with ${label}. Switch the AI model — applies from your next ask.`
+            }
+            relationship="description"
+          >
+            <MenuButton
+              appearance="subtle"
+              size={compact ? "medium" : "small"}
+              className={compact ? styles.triggerCompact : styles.trigger}
+              icon={<IconAI />}
+              disabled={busy}
+              disabledFocusable={disabledReason !== undefined}
+              aria-label={disabledReason ?? `AI model: ${label} — switch`}
+            >
+              {/* §2: label only where it fits; the compact trigger is the brain
+                  icon alone (the open menu names every choice). */}
+              {compact ? null : label}
+            </MenuButton>
+          </Tooltip>
+        )}
       </MenuTrigger>
       <LhMenuPopover>
         <MenuList>

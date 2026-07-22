@@ -32,6 +32,10 @@ import {
   DialogTitle,
   Divider,
   Link,
+  Menu,
+  MenuItem,
+  MenuList,
+  MenuTrigger,
   Popover,
   PopoverSurface,
   PopoverTrigger,
@@ -46,7 +50,7 @@ import {
   shorthands,
   tokens,
 } from "@fluentui/react-components";
-import { IconAdd, IconArrowDown, IconAttach, IconBoard, IconChat, IconCheck, IconChevronDown, IconClose, IconCode, IconCopy, IconDoc, IconDocAdd, IconEdit, IconError, IconFilter, IconHistory, IconLock, IconOpen, IconPin, IconPlay, IconRefresh, IconSave, IconSend, IconSettings, IconShield, IconSparkle, IconStop, IconTable, IconTag, IconThumbDown, IconThumbUp, IconTrash, IconUndo, IconWarning } from "@/shell/icons";
+import { IconAdd, IconArrowDown, IconAttach, IconBoard, IconChat, IconCheck, IconChevronDown, IconClose, IconCode, IconCopy, IconDoc, IconDocAdd, IconEdit, IconError, IconFilter, IconHistory, IconLock, IconMore, IconOpen, IconPin, IconPlay, IconRefresh, IconSave, IconSend, IconSettings, IconShield, IconSparkle, IconStop, IconTable, IconTag, IconThumbDown, IconThumbUp, IconTrash, IconUndo, IconWarning } from "@/shell/icons";
 import dynamic from "next/dynamic";
 import { type Components } from "react-markdown";
 import type { DragEvent, ReactNode } from "react";
@@ -96,7 +100,7 @@ import { refineEligibility, type RefineEligibility } from "@/lib/refineChips";
 import { useInvestigationsStore } from "@/stores/useInvestigationsStore";
 import { chatHistoryLocked } from "@/stores/managedLocks";
 import { modKey } from "@/features/onboarding/ModeChooser";
-import { LhDialogSurface } from "@/shell/controls";
+import { LhDialogSurface, LhMenuPopover } from "@/shell/controls";
 import { ACCENTS, BEAM_SWEEP } from "@/shell/theme";
 import { FILE_DRAG_MIME, parseDraggedFiles, type DraggedFile } from "@/shell/dnd";
 import { isDesktopShell, pathsForFiles, platformKind } from "@/shell/desktopBridge";
@@ -5140,43 +5144,90 @@ export function ChatPanel() {
             )}
           </div>
           <div className={styles.headerMeta}>
-            {/* Quick provider switch (time-savers): configured providers only;
-                selection applies from the NEXT ask — provenance + local-only
-                enforcement follow the active provider automatically. Inside a
-                local-only investigation the switch is moot (the engine forces
-                the private path), so it renders disabled with the reason. */}
-            <ProviderSwitch
-              onSwitched={noteProviderSwitch}
-              disabledReason={
-                investigationLocalOnly ? "This investigation always answers on-device" : undefined
-              }
-            />
-            {/* §22.2: the ONE status popover — the egress shield's dialog now
-                carries the visible-files count, the on-device policy line, and
-                the hidden-from-cloud reveal (0.12.1 §2 — its click still flips
-                the explorer's "Hidden from cloud" filter via the same events).
-                History moved to the sidebar section; Save-to-note and New chat
-                stay as the header's quiet actions. */}
-            {statusShield}
-            {historyButton}
-            <Tooltip content="Save this chat as a note in your vault" relationship="label">
-              <Button
-                appearance="subtle"
-                icon={<IconSave />}
-                aria-label="Save chat to a vault note"
-                disabled={streaming || exportBusy}
-                onClick={() => void exportChatToNote()}
-              />
-            </Tooltip>
-            <Button
-              appearance="subtle"
-              icon={<IconAdd />}
-              disabled={streaming}
-              onClick={newChat}
-              title={`Start a fresh conversation (${modKey()}+N)`}
-            >
-              New chat
-            </Button>
+            {compactLayout ? (
+              /* 0.14.2 (field report IMG_1672): a 400pt header cannot seat five
+                 controls plus a text button — the title starved down to one
+                 letter. The fp3 §4 keep/cut rule applies: the shield (privacy
+                 pillar), History, and New chat (icon-only) stay one tap; the
+                 provider switch and Save-to-note demote into the More menu.
+                 Desktop keeps every control inline below, unchanged. */
+              <>
+                {statusShield}
+                {historyButton}
+                <Tooltip content="Start a fresh conversation" relationship="label">
+                  <Button
+                    appearance="subtle"
+                    icon={<IconAdd />}
+                    aria-label="New chat"
+                    disabled={streaming}
+                    onClick={newChat}
+                  />
+                </Tooltip>
+                <Menu>
+                  <MenuTrigger disableButtonEnhancement>
+                    <Button appearance="subtle" icon={<IconMore />} aria-label="More chat actions" />
+                  </MenuTrigger>
+                  <LhMenuPopover>
+                    <MenuList>
+                      <ProviderSwitch
+                        submenu
+                        onSwitched={noteProviderSwitch}
+                        disabledReason={
+                          investigationLocalOnly ? "This investigation always answers on-device" : undefined
+                        }
+                      />
+                      <MenuItem
+                        icon={<IconSave />}
+                        disabled={streaming || exportBusy}
+                        onClick={() => void exportChatToNote()}
+                      >
+                        Save chat to note
+                      </MenuItem>
+                    </MenuList>
+                  </LhMenuPopover>
+                </Menu>
+              </>
+            ) : (
+              <>
+                {/* Quick provider switch (time-savers): configured providers only;
+                    selection applies from the NEXT ask — provenance + local-only
+                    enforcement follow the active provider automatically. Inside a
+                    local-only investigation the switch is moot (the engine forces
+                    the private path), so it renders disabled with the reason. */}
+                <ProviderSwitch
+                  onSwitched={noteProviderSwitch}
+                  disabledReason={
+                    investigationLocalOnly ? "This investigation always answers on-device" : undefined
+                  }
+                />
+                {/* §22.2: the ONE status popover — the egress shield's dialog now
+                    carries the visible-files count, the on-device policy line, and
+                    the hidden-from-cloud reveal (0.12.1 §2 — its click still flips
+                    the explorer's "Hidden from cloud" filter via the same events).
+                    History moved to the sidebar section; Save-to-note and New chat
+                    stay as the header's quiet actions. */}
+                {statusShield}
+                {historyButton}
+                <Tooltip content="Save this chat as a note in your vault" relationship="label">
+                  <Button
+                    appearance="subtle"
+                    icon={<IconSave />}
+                    aria-label="Save chat to a vault note"
+                    disabled={streaming || exportBusy}
+                    onClick={() => void exportChatToNote()}
+                  />
+                </Tooltip>
+                <Button
+                  appearance="subtle"
+                  icon={<IconAdd />}
+                  disabled={streaming}
+                  onClick={newChat}
+                  title={`Start a fresh conversation (${modKey()}+N)`}
+                >
+                  New chat
+                </Button>
+              </>
+            )}
           </div>
         </div>
 
