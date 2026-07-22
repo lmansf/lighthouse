@@ -15,6 +15,7 @@
 import type { ChatTurn } from "@/contracts";
 import { providerAllowed } from "./policy";
 import { recordEgress, PURPOSE_AI_PROVIDER } from "./egress";
+import { docSegmentBudget, outputReserve, resolveTier, segmentBudgets, type Tier } from "./budget";
 import { onDeviceBackend } from "./localModel";
 
 const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
@@ -109,19 +110,30 @@ export const remoteProvider = (id: string | null): RemoteProvider | undefined =>
  */
 const REMOTE_MAX_TOKENS = 4096;
 
-// --- Single-document focus budgets (synth doc-focus, 0.11) -----------------------
+// --- Single-document focus budgets (synth doc-focus, 0.11; §32 tiered) -----------
 //
 // How much of ONE document can ride in a prompt, in chars (~4 chars/token).
-// KEEP IN SYNC with native/crates/lighthouse-core/src/llm.rs. Providers:
-//   - local: the local server runs a fixed 6144-token window. PARITY: the TS
-//     local path has no context clamp (the Rust one clips contexts to
-//     LOCAL_CTX_TOTAL_MAX_CHARS=11_000 total / 6_000 per block as a last line
-//     of defense), but these budgets mirror those constants — full-doc
-//     inclusion fills the total; a sweep SEGMENT must fit in ONE block — so
-//     both engines feed the model the same amount of document.
+// The local arms now read the §32 tier tables in ./budget — KEEP IN SYNC with
+// native/crates/lighthouse-core/src/llm.rs. Providers:
+//   - local: the active tier's ctxTotalMax is what contexts may fill. PARITY:
+//     the TS local path has no context clamp (the Rust one clips contexts to
+//     the tier's segment budgets as a last line of defense), but these doc
+//     budgets mirror the same tables — full-doc inclusion fills the total; a
+//     sweep SEGMENT must fit in ONE block — so both engines feed the model
+//     the same amount of document.
 //   - anthropic: 200k-token window → half for the document, generous headroom.
 //   - openai-compat: the smallest advertised window in the default set is
 //     ~128k tokens (mistral/deepseek) → a shared conservative ~60k tokens.
+
+/**
+ * The active LOCAL tier. Cloud is decided by the provider checks before any
+ * caller reaches this, so `cloud=false`; §7 will feed the /health-advertised
+ * context size — until then the on-device flag alone picks the apple arm.
+ * LIGHTHOUSE_FORCE_TIER (the device-free acceptance rig) overrides inside.
+ */
+function localTier(): Tier {
+  return resolveTier(false, onDeviceBackend(), null);
+}
 
 /** Whole-document inclusion threshold: a doc at or under this rides complete. */
 export function fullDocCharBudget(cfg: {
@@ -131,11 +143,10 @@ export function fullDocCharBudget(cfg: {
 }): number {
   if (cfg.providerId === "anthropic") return 400_000;
   if (remoteProvider(cfg.providerId)) return 240_000;
-  // Apple's on-device Foundation model runs a 4096-token window shared
-  // between prompt and answer — the desktop local budget packed into it
-  // starves the answer, so the on-device tier sizes down.
-  // ON_DEVICE_CTX_TOTAL_MAX_CHARS / LOCAL_CTX_TOTAL_MAX_CHARS in llm.rs.
-  return onDeviceBackend() ? 5_000 : 11_000;
+  // Apple's on-device Foundation model runs a shared prompt+answer window —
+  // the desktop local budget packed into it starves the answer, so the
+  // apple-fm arms size down (tables in ./budget, pinned by both twins).
+  return segmentBudgets(localTier()).ctxTotalMax;
 }
 
 /** Per-segment budget for the sweep fallback (each segment is one map call). */
@@ -146,9 +157,9 @@ export function docSegmentCharBudget(cfg: {
 }): number {
   if (cfg.providerId === "anthropic") return 400_000;
   if (remoteProvider(cfg.providerId)) return 240_000;
-  // Under the Rust single-block clip of the active tier (6,000 desktop /
-  // 3,500 on-device) so no segment text is lost.
-  return onDeviceBackend() ? 3_000 : 5_500;
+  // Under the Rust single-block clip of the active tier (6,000 llama /
+  // 3,500 apple-fm) so no segment text is lost.
+  return docSegmentBudget(localTier());
 }
 
 /**
@@ -617,7 +628,10 @@ async function* streamLocal(
       signal: controller.signal,
       body: JSON.stringify({
         model,
-        max_tokens: 1024,
+        // The tier's narration reserve IS the answer cap (llama stays 1024
+        // byte-for-byte; the shared-window apple arms cap tighter). Keep in
+        // sync with stream_local in llm.rs.
+        max_tokens: outputReserve(localTier(), "narration"),
         stream: true,
         // PARITY (openspec: add-beam-loop §1): the Rust engine adds
         // `stream_options: { include_usage: true }` here to meter tokens; the

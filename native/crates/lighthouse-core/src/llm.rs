@@ -15,6 +15,7 @@ use futures::Stream;
 use futures::StreamExt;
 use serde_json::json;
 
+use crate::budget::{self, CallType, Tier};
 use crate::contracts::ChatTurn;
 
 const ANTHROPIC_URL: &str = "https://api.anthropic.com/v1/messages";
@@ -1060,45 +1061,23 @@ async fn stream_claude(
     })
 }
 
-// --- Local prompt budget -----------------------------------------------------------
+// --- Local prompt budget (§32: the tiered seam) --------------------------------------
 //
-// The local server runs a FIXED 6144-token window (supervise.rs) and rejects
-// oversized prompts with a 400 instead of answering — a 0.6.0 field report hit
-// 12.6k prompt tokens from an analytics result table. The Claude path has a
-// 200k window and keeps the unbounded TS-parity packing; the LOCAL path clamps
-// here as a last line of defense (analytics also caps its own payloads).
-// Budgets are chars, sized at ~4 chars/token: system (~0.9k tok) + history
-// (≤1.5k) + contexts (≤2.8k) + question leaves >1k tokens for the answer.
+// Every local-path budget number now comes from ONE place: crate::budget's
+// tier tables (llama-6144 carries the 0.6.x field-tuned constants byte-for-
+// byte; the apple-fm arms carry the 0.13.10 on-device numbers). The local
+// server rejects oversized prompts with a 400 instead of answering — a 0.6.0
+// field report hit 12.6k prompt tokens from an analytics result table — and
+// Apple's Foundation model shares its window between prompt AND answer
+// (0.13.9 "works but does a poor job"), so the LOCAL path clamps here as a
+// last line of defense. The cloud paths never clamp (§0 pins their bytes).
 
-/// Per context block / all blocks combined, chars.
-const LOCAL_CTX_BLOCK_MAX_CHARS: usize = 6_000;
-const LOCAL_CTX_TOTAL_MAX_CHARS: usize = 11_000;
-/// Prior-turn history kept for the local prompt, chars (newest turns win).
-const LOCAL_HISTORY_MAX_CHARS: usize = 6_000;
-
-// Apple's on-device Foundation model (the iOS/iPadOS private path) runs a
-// 4096-token window shared between prompt AND answer. The desktop budget
-// above packs ~5k prompt tokens — inside 4096 that leaves the model a few
-// hundred tokens to answer in (or overflows outright), which reads as
-// "works but does a poor job" (0.13.9 field report). This tier sizes down:
-// system (4,636 chars ≈ 1.16k tok, measured) + history (≤0.5k) + contexts
-// (≤1.25k) + question keeps ~1.1k tokens of answer headroom inside the
-// window — the on-device tier test pins that arithmetic.
-const ON_DEVICE_CTX_BLOCK_MAX_CHARS: usize = 3_500;
-const ON_DEVICE_CTX_TOTAL_MAX_CHARS: usize = 5_000;
-const ON_DEVICE_HISTORY_MAX_CHARS: usize = 2_000;
-
-/// Budget selectors — pure so tests pin both tiers without touching the
-/// process-global backend flag; production call sites pass
-/// `local_model::on_device_backend()`.
-fn local_ctx_block_max(on_device: bool) -> usize {
-    if on_device { ON_DEVICE_CTX_BLOCK_MAX_CHARS } else { LOCAL_CTX_BLOCK_MAX_CHARS }
-}
-fn local_ctx_total_max(on_device: bool) -> usize {
-    if on_device { ON_DEVICE_CTX_TOTAL_MAX_CHARS } else { LOCAL_CTX_TOTAL_MAX_CHARS }
-}
-fn local_history_max(on_device: bool) -> usize {
-    if on_device { ON_DEVICE_HISTORY_MAX_CHARS } else { LOCAL_HISTORY_MAX_CHARS }
+/// The active LOCAL tier. Cloud is decided by the provider tables before any
+/// caller reaches this, so `cloud=false`; §7 will feed the /health-advertised
+/// context size — until then the on-device flag alone picks the apple arm.
+/// LIGHTHOUSE_FORCE_TIER (the device-free acceptance rig) overrides inside.
+fn local_tier() -> Tier {
+    budget::resolve_tier(false, crate::local_model::on_device_backend(), None)
 }
 
 // --- Single-document focus budgets (synth doc-focus, 0.11) -----------------------
@@ -1106,9 +1085,9 @@ fn local_history_max(on_device: bool) -> usize {
 // How much of ONE document can ride in a prompt, in chars (~4 chars/token —
 // same arithmetic as the local clamp above). KEEP IN SYNC with
 // src/server/llm.ts. Providers:
-//   - local: the fixed 6144-token window leaves LOCAL_CTX_TOTAL_MAX_CHARS for
-//     contexts — full-doc inclusion simply fills that; a sweep SEGMENT must
-//     fit in ONE block, so it stays under LOCAL_CTX_BLOCK_MAX_CHARS.
+//   - local: the active tier's ctx_total_max is what contexts may fill —
+//     full-doc inclusion simply fills that; a sweep SEGMENT must fit in ONE
+//     block, so it stays under the tier's ctx_block_max.
 //   - anthropic: 200k-token window → half for the document, generous headroom.
 //   - openai-compat: the smallest advertised window in the default set is
 //     ~128k tokens (mistral/deepseek) → a shared conservative ~60k tokens.
@@ -1118,7 +1097,7 @@ pub fn full_doc_char_budget(cfg: &ModelCfg) -> usize {
     match cfg.provider_id.as_deref() {
         Some("anthropic") => 400_000,
         Some(id) if remote_provider(id).is_some() => 240_000,
-        _ => local_ctx_total_max(crate::local_model::on_device_backend()),
+        _ => budget::segment_budgets(local_tier()).ctx_total_max,
     }
 }
 
@@ -1127,15 +1106,9 @@ pub fn doc_segment_char_budget(cfg: &ModelCfg) -> usize {
     match cfg.provider_id.as_deref() {
         Some("anthropic") => 400_000,
         Some(id) if remote_provider(id).is_some() => 240_000,
-        // Under the single-block clip of the active tier (6,000 desktop /
-        // 3,500 on-device) so no segment text is lost.
-        _ => {
-            if crate::local_model::on_device_backend() {
-                3_000
-            } else {
-                5_500
-            }
-        }
+        // Under the single-block clip of the active tier (6,000 llama /
+        // 3,500 apple-fm) so no segment text is lost.
+        _ => budget::doc_segment_budget(local_tier()),
     }
 }
 
@@ -1152,9 +1125,9 @@ pub fn max_doc_segments(cfg: &ModelCfg) -> usize {
 /// Clamp contexts to the local budget: each block clipped, then whole blocks
 /// dropped lowest-score-first until the total fits. Order is preserved (the
 /// numbered citations must keep matching what the answer refers to).
-fn clamp_local_contexts(contexts: &[Ctx], on_device: bool) -> Vec<Ctx> {
-    let block_max = local_ctx_block_max(on_device);
-    let total_max = local_ctx_total_max(on_device);
+fn clamp_local_contexts(contexts: &[Ctx], tier: Tier) -> Vec<Ctx> {
+    let budget::SegmentBudgets { ctx_block_max: block_max, ctx_total_max: total_max, .. } =
+        budget::segment_budgets(tier);
     let mut out: Vec<Ctx> = contexts
         .iter()
         .map(|c| {
@@ -1181,8 +1154,8 @@ fn clamp_local_contexts(contexts: &[Ctx], on_device: bool) -> Vec<Ctx> {
 }
 
 /// Newest prior turns whose combined size fits the local history budget.
-fn clamp_local_history(history: &[ChatTurn], on_device: bool) -> Vec<ChatTurn> {
-    let max = local_history_max(on_device);
+fn clamp_local_history(history: &[ChatTurn], tier: Tier) -> Vec<ChatTurn> {
+    let max = budget::segment_budgets(tier).history_max;
     let mut kept: Vec<ChatTurn> = Vec::new();
     let mut used = 0usize;
     for t in history.iter().rev() {
@@ -1206,9 +1179,9 @@ async fn stream_local(
     history: &[ChatTurn],
     usage: Option<UsageSink>,
 ) -> DeltaStream {
-    let on_device = crate::local_model::on_device_backend();
-    let contexts = clamp_local_contexts(contexts, on_device);
-    let history = clamp_local_history(history, on_device);
+    let tier = local_tier();
+    let contexts = clamp_local_contexts(contexts, tier);
+    let history = clamp_local_history(history, tier);
     let mut messages: Vec<serde_json::Value> =
         vec![json!({ "role": "system", "content": SYSTEM_PROMPT })];
     for t in prior_turns(&history) {
@@ -1217,7 +1190,10 @@ async fn stream_local(
     messages.push(json!({ "role": "user", "content": build_prompt(question, &contexts) }));
     let body = json!({
         "model": model,
-        "max_tokens": 1024,
+        // The tier's narration reserve IS the answer cap: input was sized to
+        // protect exactly this room (llama stays 1024 byte-for-byte; the
+        // shared-window apple arms cap tighter so the window can't blow).
+        "max_tokens": budget::output_reserve(tier, CallType::Narration),
         "stream": true,
         // Ask for a terminal usage chunk (openspec: add-beam-loop §1). Local
         // llama-server reports tokens (and $0 — loopback is not egress); a
@@ -1404,17 +1380,18 @@ mod tests {
 
     #[test]
     fn local_context_budget_clips_blocks_and_drops_lowest_scores() {
+        let b = budget::segment_budgets(Tier::Llama6144);
         // One oversized block is clipped to the per-block cap (+ellipsis).
-        let clipped = clamp_local_contexts(&[ctx("big", 50_000, 1.0)], false);
+        let clipped = clamp_local_contexts(&[ctx("big", 50_000, 1.0)], Tier::Llama6144);
         assert_eq!(clipped.len(), 1);
-        assert!(clipped[0].text.chars().count() <= LOCAL_CTX_BLOCK_MAX_CHARS + 1);
+        assert!(clipped[0].text.chars().count() <= b.ctx_block_max + 1);
 
         // Six 5k blocks exceed the total budget: lowest scores drop, the top
         // block survives, relative order is preserved, and it never empties.
         let many: Vec<Ctx> = (0..6).map(|i| ctx(&format!("c{i}"), 5_000, i as f64)).collect();
-        let packed = clamp_local_contexts(&many, false);
+        let packed = clamp_local_contexts(&many, Tier::Llama6144);
         let total: usize = packed.iter().map(|c| c.text.chars().count()).sum();
-        assert!(total <= LOCAL_CTX_TOTAL_MAX_CHARS, "total {total}");
+        assert!(total <= b.ctx_total_max, "total {total}");
         assert!(!packed.is_empty());
         assert!(packed.iter().any(|c| c.name == "c5"), "highest score must survive");
         let names: Vec<&str> = packed.iter().map(|c| c.name.as_str()).collect();
@@ -1423,46 +1400,45 @@ mod tests {
         assert_eq!(names, sorted, "citation order must be preserved");
     }
 
-    // The on-device tier packs for Apple FM's 4096-token window (prompt AND
-    // answer share it): tighter blocks, tighter total, tighter history — the
-    // arithmetic in the constants' comment must leave ~1k tokens of answer
-    // headroom. The tier flag is an argument, so this pins both tiers without
+    // The apple-fm tier packs for a 4096-token window SHARED between prompt
+    // and answer: tighter blocks, tighter total, tighter history — and the
+    // whole-prompt arithmetic must leave at least the tier's narration
+    // reserve. The tier is an argument, so this pins both tiers without
     // touching the process-global backend flag.
     #[test]
     fn on_device_tier_packs_for_the_4096_token_shared_window() {
+        let b = budget::segment_budgets(Tier::AppleFm4096);
         // Per-block clip is the tighter on-device cap.
-        let clipped = clamp_local_contexts(&[ctx("big", 50_000, 1.0)], true);
-        assert!(clipped[0].text.chars().count() <= ON_DEVICE_CTX_BLOCK_MAX_CHARS + 1);
+        let clipped = clamp_local_contexts(&[ctx("big", 50_000, 1.0)], Tier::AppleFm4096);
+        assert!(clipped[0].text.chars().count() <= b.ctx_block_max + 1);
 
         // Total budget is the tighter cap; highest score still survives.
         let many: Vec<Ctx> = (0..6).map(|i| ctx(&format!("c{i}"), 3_000, i as f64)).collect();
-        let packed = clamp_local_contexts(&many, true);
+        let packed = clamp_local_contexts(&many, Tier::AppleFm4096);
         let total: usize = packed.iter().map(|c| c.text.chars().count()).sum();
-        assert!(total <= ON_DEVICE_CTX_TOTAL_MAX_CHARS, "total {total}");
+        assert!(total <= b.ctx_total_max, "total {total}");
         assert!(packed.iter().any(|c| c.name == "c5"), "highest score must survive");
 
         // History keeps only the newest turns under the on-device cap.
         let turns: Vec<ChatTurn> = (0..10)
             .map(|i| ChatTurn { role: "user".into(), content: format!("{i}-{}", "y".repeat(1_000)) })
             .collect();
-        let kept = clamp_local_history(&turns, true);
+        let kept = clamp_local_history(&turns, Tier::AppleFm4096);
         let used: usize = kept.iter().map(|t| t.content.chars().count()).sum();
-        assert!(used <= ON_DEVICE_HISTORY_MAX_CHARS, "used {used}");
+        assert!(used <= b.history_max, "used {used}");
         assert!(kept.last().unwrap().content.starts_with("9-"), "newest turn kept");
 
-        // Whole-prompt arithmetic: system (~0.9k tok) + the packed budgets at
-        // ~4 chars/token must leave at least 900 tokens inside 4096.
+        // Whole-prompt arithmetic: system (~1.2k tok measured) + the packed
+        // budgets at ~4 chars/token must leave at least the tier's narration
+        // OUTPUT RESERVE inside the window — the reserve is the §1 guarantee,
+        // and stream_local sends it as max_tokens so the cap is coherent.
+        let reserve = budget::output_reserve(Tier::AppleFm4096, CallType::Narration);
         let system_tokens = SYSTEM_PROMPT.chars().count() / 4;
-        let input_tokens = system_tokens
-            + ON_DEVICE_HISTORY_MAX_CHARS / 4
-            + ON_DEVICE_CTX_TOTAL_MAX_CHARS / 4
-            + 100; // question allowance
-        assert!(4096usize.saturating_sub(input_tokens) >= 900, "input {input_tokens} tokens");
-
-        // The budget selectors are the single source for both tiers.
-        assert_eq!(local_ctx_block_max(false), LOCAL_CTX_BLOCK_MAX_CHARS);
-        assert_eq!(local_ctx_total_max(true), ON_DEVICE_CTX_TOTAL_MAX_CHARS);
-        assert_eq!(local_history_max(true), ON_DEVICE_HISTORY_MAX_CHARS);
+        let input_tokens = system_tokens + b.history_max / 4 + b.ctx_total_max / 4 + 100;
+        assert!(
+            Tier::AppleFm4096.window().saturating_sub(input_tokens) >= reserve,
+            "input {input_tokens} tokens vs reserve {reserve}"
+        );
     }
 
     #[test]
@@ -1497,9 +1473,9 @@ mod tests {
                 content: format!("{i}-{}", "y".repeat(1_500)),
             })
             .collect();
-        let kept = clamp_local_history(&turns, false);
+        let kept = clamp_local_history(&turns, Tier::Llama6144);
         let used: usize = kept.iter().map(|t| t.content.chars().count()).sum();
-        assert!(used <= LOCAL_HISTORY_MAX_CHARS, "used {used}");
+        assert!(used <= budget::segment_budgets(Tier::Llama6144).history_max, "used {used}");
         assert!(kept.last().unwrap().content.starts_with("9-"), "newest turn kept");
         assert!(kept.iter().all(|t| !t.content.starts_with("0-")), "oldest dropped");
     }

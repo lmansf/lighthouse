@@ -12,6 +12,7 @@ pub mod ask;
 pub mod beam;
 pub mod boards;
 pub mod briefings;
+pub mod budget;
 pub mod catalog;
 pub mod config;
 pub mod contracts;

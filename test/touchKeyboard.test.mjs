@@ -28,6 +28,8 @@ const shell = read("src/shell/AppShell.tsx");
 const chat = read("src/features/chat/ChatPanel.tsx");
 const llmRs = read("native/crates/lighthouse-core/src/llm.rs");
 const llmTs = read("src/server/llm.ts");
+const budgetRs = read("native/crates/lighthouse-core/src/budget.rs");
+const budgetTs = read("src/server/budget.ts");
 
 test("keyboard detection survives resize-mode WKWebViews: editable focus hides the tab bar", () => {
   // The overlay-mode inset math stays (it pads the main column on webviews
@@ -103,43 +105,52 @@ test("the composer textarea slot paints nothing of its own — on every platform
 });
 
 test("on-device tier: the engine packs for Apple FM's 4096-token shared window", () => {
-  // Rust constants — the tier that answers on iPhones/iPads.
-  assert.match(llmRs, /const ON_DEVICE_CTX_BLOCK_MAX_CHARS: usize = 3_500;/);
-  assert.match(llmRs, /const ON_DEVICE_CTX_TOTAL_MAX_CHARS: usize = 5_000;/);
-  assert.match(llmRs, /const ON_DEVICE_HISTORY_MAX_CHARS: usize = 2_000;/);
+  // §32 §1: the numbers moved into the tiered budgeter — the apple-fm arms
+  // carry the 0.13.10 on-device packing (behavioral pin in budget.test.mjs
+  // and the cargo tests; this is the source pin tying it to the iOS report).
+  assert.match(
+    budgetRs,
+    /Tier::AppleFm4096 \| Tier::AppleFm8192 => SegmentBudgets \{\s*\n\s*ctx_block_max: 3_500,\s*\n\s*ctx_total_max: 5_000,\s*\n\s*history_max: 2_000,/,
+    "apple-fm segment budgets pack for the shared window",
+  );
   // The clamps take the tier as an argument (pure, testable) and the ONE
-  // production call site reads the process-global backend flag.
-  assert.match(llmRs, /fn clamp_local_contexts\(contexts: &\[Ctx\], on_device: bool\)/);
-  assert.match(llmRs, /fn clamp_local_history\(history: &\[ChatTurn\], on_device: bool\)/);
+  // production call site resolves it from the backend flag (+ force rig).
+  assert.match(llmRs, /fn clamp_local_contexts\(contexts: &\[Ctx\], tier: Tier\)/);
+  assert.match(llmRs, /fn clamp_local_history\(history: &\[ChatTurn\], tier: Tier\)/);
   assert.match(
     llmRs,
-    /let on_device = crate::local_model::on_device_backend\(\);\s*\n\s*let contexts = clamp_local_contexts\(contexts, on_device\);\s*\n\s*let history = clamp_local_history\(history, on_device\);/,
+    /let tier = local_tier\(\);\s*\n\s*let contexts = clamp_local_contexts\(contexts, tier\);\s*\n\s*let history = clamp_local_history\(history, tier\);/,
     "stream_local resolves the tier once and threads it through both clamps",
   );
   // Doc-focus budgets follow the tier too.
   assert.match(
     llmRs,
-    /_ => local_ctx_total_max\(crate::local_model::on_device_backend\(\)\),/,
+    /_ => budget::segment_budgets\(local_tier\(\)\)\.ctx_total_max,/,
     "full-doc budget follows the active local tier",
   );
 });
 
 test("TS twin mirrors the on-device doc budgets (PARITY with llm.rs)", () => {
-  assert.match(llmTs, /import \{ onDeviceBackend \} from "\.\/localModel";/);
+  assert.match(llmTs, /from "\.\/budget";/, "llm.ts reads the shared tier tables");
   assert.match(
     llmTs,
-    /return onDeviceBackend\(\) \? 5_000 : 11_000;/,
-    "fullDocCharBudget mirrors ON_DEVICE_CTX_TOTAL_MAX_CHARS / LOCAL_CTX_TOTAL_MAX_CHARS",
+    /return segmentBudgets\(localTier\(\)\)\.ctxTotalMax;/,
+    "fullDocCharBudget follows the active local tier's total",
   );
   assert.match(
     llmTs,
-    /return onDeviceBackend\(\) \? 3_000 : 5_500;/,
-    "docSegmentCharBudget mirrors the Rust segment arms",
+    /return docSegmentBudget\(localTier\(\)\);/,
+    "docSegmentCharBudget follows the active local tier's segment arm",
   );
-  // Cross-engine number lock: the TS on-device numbers must equal the Rust
+  // Cross-engine number lock: the TS apple-fm numbers must equal the Rust
   // ones, so a future retune can't move one engine without the other.
-  const rsTotal = llmRs.match(/ON_DEVICE_CTX_TOTAL_MAX_CHARS: usize = (\d[\d_]*)/)?.[1];
-  const rsSegment = llmRs.match(/if crate::local_model::on_device_backend\(\) \{\s*\n\s*(\d[\d_]*)\s*\n\s*\} else \{\s*\n\s*5_500/)?.[1];
-  assert.equal(rsTotal, "5_000", "Rust on-device total is the number TS mirrors");
-  assert.equal(rsSegment, "3_000", "Rust on-device segment is the number TS mirrors");
+  assert.match(
+    budgetTs,
+    /case "apple-fm-4096":\s*\n\s*case "apple-fm-8192":\s*\n\s*return \{ ctxBlockMax: 3_500, ctxTotalMax: 5_000, historyMax: 2_000 \};/,
+    "TS apple-fm segment budgets equal the Rust arm",
+  );
+  const rsSegment = budgetRs.match(/Tier::AppleFm4096 \| Tier::AppleFm8192 => (\d[\d_]*),\s*\n\s*Tier::Llama6144 => 5_500,/)?.[1];
+  const tsSegment = budgetTs.match(/case "apple-fm-8192":\s*\n\s*return (\d[\d_]*);\s*\n\s*case "llama-6144":\s*\n\s*return 5_500;/)?.[1];
+  assert.equal(rsSegment, "3_000", "Rust on-device doc segment is the number TS mirrors");
+  assert.equal(tsSegment, "3_000", "TS on-device doc segment equals the Rust arm");
 });
