@@ -102,6 +102,12 @@ pub struct ReportSection {
     pub question: String,
     pub result_markdown: String,
     pub sql: String,
+    /// The section's one-line engine finding, carried through from the
+    /// sub-analysis (§38 §1: the headline-only degradation digest — when a
+    /// packed findings context runs tight, this line IS the section's
+    /// grounding). `None` when the analysis had no material headline; the
+    /// renderers never read it, so rendered bytes are unchanged.
+    pub headline: Option<String>,
 }
 
 /// A deep-analysis report — deterministic, engine-verified, ready to render + write.
@@ -150,6 +156,7 @@ pub fn assemble(
             question: s.question,
             result_markdown: s.result_markdown,
             sql: s.sql,
+            headline: s.headline,
         })
         .collect();
     Report {
@@ -496,13 +503,42 @@ pub async fn investigate_templated(
 /// this but (per the SYSTEM_PROMPT grounding rules) must invent no figure not
 /// present here.
 ///
-/// §32 §6: on the apple-fm tiers each section is CAPPED — its heading plus
-/// the first `REPORT_SECTION_MAX_ROWS` table rows with an honest "(first N
-/// rows of the section's table)" note — so BOTH framing calls fit the shared
-/// 4k window with the §1 output reserve intact. The full tables still render
-/// deterministically in the report body; only the model's grounding slice
-/// shrinks. Cloud/llama keep every row byte-for-byte.
+/// §38 §1: on the apple-fm tiers the findings are BUDGET-packed (see
+/// `pack_findings`) against the tier's `ReportFraming` token budget with the
+/// §36 digit-aware estimate — a many-section report fits BY CONSTRUCTION,
+/// degrading per section to its headline line instead of overflowing. The
+/// full tables still render deterministically in the report body; only the
+/// model's grounding slice shrinks. Cloud/llama keep every row byte-for-byte
+/// (the §32 pins hold).
 fn report_findings_ctx(report: &Report, tier: crate::budget::Tier) -> Vec<crate::llm::Ctx> {
+    let text = if tier.is_apple_fm() {
+        let budget = crate::budget::input_token_budget(tier, crate::budget::CallType::ReportFraming)
+            .saturating_sub(framing_overhead_tokens());
+        pack_findings(report, budget)
+    } else {
+        let mut text = findings_summary_block(report);
+        for s in &report.sections {
+            text.push_str(&format!("{}:\n{}\n\n", s.heading, s.result_markdown.trim()));
+        }
+        text
+    };
+    vec![crate::llm::Ctx { name: format!("verified findings for {}", report.title), text, score: 1.0 }]
+}
+
+/// The headline-only findings context — the §38 §2 overflow-retry grounding:
+/// the summary block plus ONE line per section. Always tiny (a dozen lines),
+/// so the retry fits any tier's window by construction.
+fn headline_findings_ctx(report: &Report) -> Vec<crate::llm::Ctx> {
+    let mut text = findings_summary_block(report);
+    for s in &report.sections {
+        text.push_str(&section_headline_line(s));
+    }
+    vec![crate::llm::Ctx { name: format!("verified findings for {}", report.title), text, score: 1.0 }]
+}
+
+/// The "Key findings:" block every findings context leads with — the summary
+/// headlines are the report's computed spine and always ride whole.
+fn findings_summary_block(report: &Report) -> String {
     let mut text = String::new();
     if !report.summary.is_empty() {
         text.push_str("Key findings:\n");
@@ -511,15 +547,71 @@ fn report_findings_ctx(report: &Report, tier: crate::budget::Tier) -> Vec<crate:
         }
         text.push('\n');
     }
-    for s in &report.sections {
-        let body = if tier.is_apple_fm() {
-            capped_section_table(&s.result_markdown)
-        } else {
-            s.result_markdown.trim().to_string()
-        };
-        text.push_str(&format!("{}:\n{body}\n\n", s.heading));
+    text
+}
+
+/// A section's one-line degraded digest: its heading plus its engine headline
+/// (the computed finding), or an honest pointer when the analysis had none.
+fn section_headline_line(s: &ReportSection) -> String {
+    match &s.headline {
+        Some(h) => format!("{}: {h}\n", s.heading),
+        None => format!("{}: (no single headline figure; full table in the report)\n", s.heading),
     }
-    vec![crate::llm::Ctx { name: format!("verified findings for {}", report.title), text, score: 1.0 }]
+}
+
+/// A section's FULL digest — heading plus its row-capped table (the §32 §6
+/// shape, unchanged bytes, so small reports ground identically to before).
+fn section_full_digest(s: &ReportSection) -> String {
+    format!("{}:\n{}\n\n", s.heading, capped_section_table(&s.result_markdown))
+}
+
+/// Prompt-side overhead reserved OUT of the findings budget: the compact
+/// system prompt (measured, not guessed) plus a fixed allowance for the
+/// framing instruction and the context-block wrapper ("[1] verified findings
+/// for …" + question framing). The allowance is deliberately generous — the
+/// §2 whole-prompt pin proves the assembled call fits with it.
+fn framing_overhead_tokens() -> usize {
+    const INSTRUCTION_AND_WRAPPER_TOKENS: usize = 220;
+    crate::budget::estimate_tokens(crate::llm::SYSTEM_PROMPT_COMPACT) + INSTRUCTION_AND_WRAPPER_TOKENS
+}
+
+/// §38 §1: pack the findings into `budget_tokens` (digit-aware estimate).
+/// The summary block and EVERY section's headline line always ride — that
+/// floor is a dozen short lines, so a many-section report fits by
+/// construction. Sections then upgrade from their headline line to their full
+/// digest (heading + capped rows) LARGEST-VALUE-FIRST — first-fit-decreasing
+/// on the digest's token cost, so the budget takes the biggest evidence
+/// tables it can hold and the leftovers stay headline-only. Output preserves
+/// document order regardless of packing order. Pure and deterministic
+/// (stable tie-break on section index).
+fn pack_findings(report: &Report, budget_tokens: usize) -> String {
+    use crate::budget::estimate_tokens;
+
+    let floor: Vec<String> = report.sections.iter().map(section_headline_line).collect();
+    let full: Vec<String> = report.sections.iter().map(section_full_digest).collect();
+    let summary = findings_summary_block(report);
+
+    let mut used = estimate_tokens(&summary)
+        + floor.iter().map(|l| estimate_tokens(l)).sum::<usize>();
+
+    // Largest full digest first, stable on index.
+    let mut order: Vec<usize> = (0..report.sections.len()).collect();
+    order.sort_by_key(|&i| std::cmp::Reverse(estimate_tokens(&full[i])));
+
+    let mut upgraded = vec![false; report.sections.len()];
+    for i in order {
+        let delta = estimate_tokens(&full[i]).saturating_sub(estimate_tokens(&floor[i]));
+        if used + delta <= budget_tokens {
+            upgraded[i] = true;
+            used += delta;
+        }
+    }
+
+    let mut text = summary;
+    for (i, _) in report.sections.iter().enumerate() {
+        text.push_str(if upgraded[i] { &full[i] } else { &floor[i] });
+    }
+    text
 }
 
 /// Data rows one report section may hand the apple-fm framing calls.
@@ -772,6 +864,7 @@ mod tests {
                 question: "q".into(),
                 result_markdown: md.clone(),
                 sql: "SELECT 1".into(),
+                headline: None,
             }],
         };
         let llama = report_findings_ctx(&report, crate::budget::Tier::Llama6144);
@@ -779,6 +872,146 @@ mod tests {
         let apple = report_findings_ctx(&report, crate::budget::Tier::AppleFm4096);
         assert!(!apple[0].text.contains("| r9 | 9 |"), "apple grounding is capped");
         assert!(apple[0].text.contains("Key findings:"), "headlines always ride");
+    }
+
+    /// A section with a `rows`-row DIGIT-HEAVY table (five wide numeric
+    /// columns — the §36 motivation: even the 5-row capped digest of such a
+    /// table is expensive under the digit-aware estimate) and an engine
+    /// headline — the §38 §1 fixtures.
+    fn section_with_rows(i: usize, rows: usize) -> ReportSection {
+        let mut md =
+            String::from("| period | total | prior | delta | cumulative |\n| --- | --- | --- | --- | --- |\n");
+        for r in 0..rows {
+            md.push_str(&format!(
+                "| 2024-{:02} | {v}00214.55 | {v}00108.20 | 106.3512 | {v}9021475.07 |\n",
+                (r % 12) + 1,
+                v = 100 + i * 10 + r
+            ));
+        }
+        ReportSection {
+            heading: format!("Analysis {i}"),
+            question: format!("What does analysis {i} show?"),
+            result_markdown: md,
+            sql: "SELECT 1".into(),
+            headline: Some(format!("Analysis {i} peaks at {}9", 100 + i)),
+        }
+    }
+
+    fn report_with_sections(n: usize, rows: usize) -> Report {
+        let sections: Vec<ReportSection> = (0..n).map(|i| section_with_rows(i, rows)).collect();
+        Report {
+            title: "Investigate wide.csv".into(),
+            generated_ms: 0,
+            summary: sections.iter().filter_map(|s| s.headline.clone()).collect(),
+            sections,
+            caveats: Vec::new(),
+            template: ReportTemplate::Standard,
+            intro: None,
+            discussion: None,
+        }
+    }
+
+    #[test]
+    fn twelve_sections_fit_the_4k_framing_budget_by_construction() {
+        // §38 §1: the packed findings PLUS the measured prompt overhead sit
+        // inside the tier's whole-input token budget under the digit-aware
+        // estimate — the row heuristic could not promise this; packing does.
+        let report = report_with_sections(12, 40);
+        let ctx = report_findings_ctx(&report, crate::budget::Tier::AppleFm4096);
+        let budget = crate::budget::input_token_budget(
+            crate::budget::Tier::AppleFm4096,
+            crate::budget::CallType::ReportFraming,
+        );
+        let total = framing_overhead_tokens() + crate::budget::estimate_tokens(&ctx[0].text);
+        assert!(total <= budget, "packed findings + overhead {total} > budget {budget}");
+        // EVERY section is present (at least as its headline line), and the
+        // summary spine always rides.
+        assert!(ctx[0].text.contains("Key findings:"));
+        for i in 0..12 {
+            assert!(ctx[0].text.contains(&format!("Analysis {i}")), "section {i} vanished");
+        }
+    }
+
+    #[test]
+    fn a_deliberately_bloated_report_degrades_per_section_yet_still_fits() {
+        // §38 §1/acceptance 1: past what the budget can hold, sections fall
+        // back to their headline lines INSTEAD of overflowing — the packed
+        // text still fits by construction and no section vanishes.
+        let report = report_with_sections(24, 40);
+        let ctx = report_findings_ctx(&report, crate::budget::Tier::AppleFm4096);
+        let budget = crate::budget::input_token_budget(
+            crate::budget::Tier::AppleFm4096,
+            crate::budget::CallType::ReportFraming,
+        );
+        let total = framing_overhead_tokens() + crate::budget::estimate_tokens(&ctx[0].text);
+        assert!(total <= budget, "packed findings + overhead {total} > budget {budget}");
+        let full_digests = ctx[0].text.matches("| period | total |").count();
+        assert!(
+            full_digests < 24,
+            "a bloated report cannot carry every full digest — got {full_digests}"
+        );
+        assert!(full_digests > 0, "the budget still holds the largest digests");
+        for i in 0..24 {
+            assert!(ctx[0].text.contains(&format!("Analysis {i}")), "section {i} vanished");
+        }
+    }
+
+    #[test]
+    fn three_sections_keep_their_five_row_digests_unchanged() {
+        // §38 §1: a small report packs everything — byte-identical to the
+        // §32 §6 shape (summary block + per-section capped digests, in
+        // document order), so the existing grounding pins hold.
+        let report = report_with_sections(3, 10);
+        let ctx = report_findings_ctx(&report, crate::budget::Tier::AppleFm4096);
+        let mut expected = findings_summary_block(&report);
+        for s in &report.sections {
+            expected.push_str(&section_full_digest(s));
+        }
+        assert_eq!(ctx[0].text, expected, "small reports ground exactly as before");
+        assert_eq!(
+            ctx[0].text.matches("first 5 rows of the section's table").count(),
+            3,
+            "each 10-row table caps to its 5-row digest"
+        );
+    }
+
+    #[test]
+    fn packing_upgrades_largest_first_and_keeps_document_order() {
+        // Two sections: a big table and a small one. With a budget that fits
+        // the floor plus ONLY the big digest's upgrade, largest-value-first
+        // upgrades the big one and leaves the small one headline-only…
+        let report = {
+            let mut r = report_with_sections(2, 0);
+            r.sections[0] = section_with_rows(0, 40); // big
+            r.sections[1] = section_with_rows(1, 3); // small
+            r
+        };
+        let floor: usize = report
+            .sections
+            .iter()
+            .map(|s| crate::budget::estimate_tokens(&section_headline_line(s)))
+            .sum::<usize>()
+            + crate::budget::estimate_tokens(&findings_summary_block(&report));
+        let big_delta = crate::budget::estimate_tokens(&section_full_digest(&report.sections[0]))
+            - crate::budget::estimate_tokens(&section_headline_line(&report.sections[0]));
+        let packed = pack_findings(&report, floor + big_delta);
+        assert!(
+            packed.contains("Analysis 0:\n| period | total |"),
+            "the largest digest won the budget: {packed}"
+        );
+        assert!(
+            packed.contains("Analysis 1: Analysis 1 peaks at 1019\n"),
+            "the small section stayed headline-only: {packed}"
+        );
+        // …and document order is preserved regardless of packing order.
+        assert!(
+            packed.find("Analysis 0").unwrap() < packed.find("Analysis 1").unwrap(),
+            "document order survives"
+        );
+        // A floor-only budget degrades EVERY section to its headline line.
+        let all_floor = pack_findings(&report, floor);
+        assert!(!all_floor.contains("| period | total |"), "no digest fits: {all_floor}");
+        assert!(all_floor.contains("Analysis 0: Analysis 0 peaks at 1009\n"));
     }
 
     #[test]
