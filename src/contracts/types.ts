@@ -499,6 +499,15 @@ export interface ChatChunk {
      *  chats). Engine-built from query batches / profiled tables, never model
      *  text. KEEP IN SYNC with contracts.rs ChunkMeta::chart. */
     chart?: string;
+    /** §32 §3: the answer's result table (JSON
+     *  `{"columns":[…],"rows":[[…]]}`), moved OFF the streamed markdown
+     *  exactly like `chart` — under the apple-fm prose-only contract the
+     *  model narrates over a fact sheet and the ENGINE carries the verified
+     *  rows; the renderer draws them at the answer's table position and
+     *  consumers read them via answerTable(). Emitted ONLY when that
+     *  contract is active; cloud/desktop answers keep markdown tables and
+     *  omit this. KEEP IN SYNC with contracts.rs ChunkMeta::table. */
+    table?: string;
   };
   /** True on the last chunk of a response. */
   done: boolean;

@@ -602,6 +602,9 @@ fn final_chunk(
             // §22.6: branches that chart set this AFTER building the chunk
             // (the mutate-after pattern `done.analytics` already uses).
             chart: None,
+            // §32 §3: same mutate-after pattern — only the apple-fm prose
+            // contract attaches the structured table.
+            table: None,
         }),
         done: true,
     }
@@ -642,6 +645,7 @@ fn plan_chunk(
             manifest: (!manifest.is_empty()).then_some(manifest),
             // A plan preview draws nothing — charts belong to executed answers.
             chart: None,
+            table: None,
         }),
         done: true,
     }

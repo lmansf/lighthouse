@@ -47,6 +47,7 @@ fn entry(text: &str) -> CachedAnswer {
             cost: None,
             manifest: None,
             chart: None,
+            table: None,
         },
     }
 }
@@ -293,6 +294,40 @@ fn a_cache_replay_shows_the_original_manifest_not_a_blank() {
     let replay_meta = ChunkMeta { cached_at: Some(hit.created_ms), ..hit.meta };
     let m = replay_meta.manifest.expect("the original manifest rides the replay");
     assert_eq!(m.len(), 2, "a replay shows the original manifest, not an empty one");
+}
+
+#[test]
+fn the_structured_table_rides_the_replay_like_the_chart_does() {
+    // §32 §3: `meta.table` (the apple-fm prose contract's verified rows) rides
+    // `ChunkMeta` exactly like `meta.chart` — stored whole on the cached answer
+    // and re-emitted by the `..hit.meta` replay spread, so a cached prose
+    // answer replays WITH its table, and a legacy cache entry (no field)
+    // deserializes to None instead of failing.
+    let dir = tempfile::tempdir().unwrap();
+    let _guard = common::lock_env(dir.path());
+    std::env::remove_var("LIGHTHOUSE_APP_STATE_DIR");
+    answer_cache::reset_store();
+
+    let mut e = entry("prose answer over a fact sheet");
+    e.meta.chart = Some(r#"{"kind":"bar"}"#.into());
+    e.meta.table = Some(r#"{"columns":["region","total"],"rows":[["West","42"]]}"#.into());
+    answer_cache::insert("kt", e, ALLOWED);
+
+    let hit = answer_cache::lookup("kt", ALLOWED).expect("stored");
+    let replay = ChunkMeta { cached_at: Some(hit.created_ms), ..hit.meta };
+    assert_eq!(replay.chart.as_deref(), Some(r#"{"kind":"bar"}"#));
+    assert_eq!(
+        replay.table.as_deref(),
+        Some(r#"{"columns":["region","total"],"rows":[["West","42"]]}"#),
+        "the original table rides the replay"
+    );
+
+    // Legacy shape: a pre-§32 meta JSON (no `table` key) still deserializes.
+    let legacy: ChunkMeta = serde_json::from_str(
+        r#"{"origin":"device","excerptCount":1,"sourceFileCount":1,"chart":"{}"}"#,
+    )
+    .expect("legacy meta parses");
+    assert!(legacy.table.is_none(), "missing field defaults to None");
 }
 
 #[test]

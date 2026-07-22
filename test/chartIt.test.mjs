@@ -28,12 +28,13 @@ const refineRegion = chat.slice(
 
 test("the chip is offered from the real parsers: table → heuristic → validated spec", () => {
   assert.ok(refineRegion.length > 0, "RefineChips region found");
-  // (a) the answer's GFM table via the boards module's EXPORTED parser…
-  assert.match(refineRegion, /const table = parseMarkdownTable\(content\);/);
+  // (a) the answer's table via the §3b accessor — meta.table preferred, GFM
+  //     parse fallback, so apple-fm prose answers still offer the chip…
   assert.match(
-    chat,
-    /import \{ parseMarkdownTable \} from "@\/features\/boards\/boardModel";/,
+    refineRegion,
+    /const table = answerTable\(\{ content, meta: \{ table: metaTable \} \}\);/,
   );
+  assert.match(chat, /import \{ answerTable, parseTableJson \} from "@\/lib\/answerTable";/);
   // (b) …through the client heuristic (which round-trips parseChartSpec)…
   assert.match(refineRegion, /chartSpecFromTable\(table\)/);
   // (c) …and never when the engine already charted this answer.
@@ -93,7 +94,7 @@ test("ANY tabular answer gets the chip: a standalone mount covers answers withou
   );
   assert.ok(rowRegion.length > 0, "ChartItRow found");
   assert.match(rowRegion, /if \(metaChart \|\| hasEngineChartFence\(content\)\) return null;/);
-  assert.match(rowRegion, /parseMarkdownTable\(content\)/);
+  assert.match(rowRegion, /answerTable\(\{ content, meta: \{ table: metaTable \} \}\)/);
   assert.match(rowRegion, /chartSpecFromTable\(table\)/);
   assert.match(rowRegion, /<AnalyticsChart spec=\{tableChart\} \/>/);
   // …and is mounted exactly where analytics answers are NOT (prose answers),

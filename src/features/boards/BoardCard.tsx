@@ -61,9 +61,9 @@ import { pinChartData } from "@/lib/pinChart";
 import { AnalyticsChart } from "@/features/chat/AnalyticsChart";
 import { PinMiniChart } from "@/features/chat/PinMiniChart";
 import {
+  answerTable,
   cardFreshness,
   detectStat,
-  parseMarkdownTable,
   spanForSize,
   statDelta,
 } from "@/features/boards/boardModel";
@@ -248,7 +248,9 @@ function LiveBody({
       </>
     );
   }
-  const table = parseMarkdownTable(markdown);
+  // §3b accessor: board refreshes carry engine result markdown (CardRefresh
+  // has no meta channel), so this is the parse-fallback arm by design.
+  const table = answerTable({ content: markdown });
   if (table) {
     return (
       <div className={styles.tableWrap}>
