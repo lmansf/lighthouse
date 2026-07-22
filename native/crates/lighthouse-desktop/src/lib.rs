@@ -497,6 +497,8 @@ pub fn run() {
             #[cfg(not(desktop))]
             {
                 let verdict = commands::private_model_availability_impl();
+                // §35 §1: Dynamic Type changes re-resolve without an app kill.
+                commands::start_content_size_observer();
                 shell_log(app.handle(), &format!("private-model probe: {verdict}"));
             }
 

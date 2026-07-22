@@ -102,7 +102,7 @@ import { chatHistoryLocked } from "@/stores/managedLocks";
 import { modKey } from "@/features/onboarding/ModeChooser";
 import { LhDialogSurface, LhMenuPopover } from "@/shell/controls";
 import { publishChatStreaming, USER_ASK_EVENT } from "@/shell/shellSignals";
-import { ACCENTS, BEAM_SWEEP } from "@/shell/theme";
+import { ACCENTS, BEAM_SWEEP, CONTENT_TYPE } from "@/shell/theme";
 import { FILE_DRAG_MIME, parseDraggedFiles, type DraggedFile } from "@/shell/dnd";
 import { isDesktopShell, pathsForFiles, platformKind } from "@/shell/desktopBridge";
 import { openExternal } from "@/lib/openExternal";
@@ -375,30 +375,45 @@ const useStyles = makeStyles({
     whiteSpace: "pre-wrap",
   },
   answer: {
-    fontSize: tokens.fontSizeBase400,
-    lineHeight: tokens.lineHeightBase400,
+    // §35: answers are CONTENT, not chrome — the reading scale (16px/24px,
+    // rem so Dynamic Type scales it 1:1) instead of the HIG UI ramp. This
+    // RESTORES the pre-#203 content size on desktop too (20px was the silent
+    // remap, not a design decision).
+    fontSize: CONTENT_TYPE.body,
+    lineHeight: CONTENT_TYPE.bodyLineHeight,
     // Tame the Markdown block elements react-markdown emits so answers read as a
     // tight, well-spaced block rather than with browser-default margins.
     // Prose keeps a generous document measure (~72ch) so answers read like
     // pages on the paper canvas; data surfaces (tables, code, charts) keep
     // the full column.
-    "& p": { marginTop: 0, marginBottom: tokens.spacingVerticalS, maxWidth: "72ch" },
+    // §35 rhythm: 0.75em paragraph spacing (no indents), list items at the
+    // body leading with a small gap, markers in a ~20px gutter, 12px around
+    // each list.
+    "& p": { marginTop: 0, marginBottom: "0.75em", maxWidth: "72ch" },
     "& p:last-child": { marginBottom: 0 },
     "& ul, & ol": {
-      marginTop: 0,
-      marginBottom: tokens.spacingVerticalS,
-      paddingLeft: tokens.spacingHorizontalXL,
+      marginTop: "12px",
+      marginBottom: "12px",
+      paddingLeft: "20px",
       maxWidth: "72ch",
     },
-    "& li": { marginBottom: tokens.spacingVerticalXXS },
+    "& li": { marginBottom: "5px", lineHeight: CONTENT_TYPE.bodyLineHeight },
+    // §35 heading ramp: hierarchy via weight + space (1.25em above, 0.4em
+    // below), not size jumps; min(rem, px) clamps each level so Dynamic Type
+    // AX sizes scale the body 1:1 without ever inverting the hierarchy.
     "& h1, & h2, & h3, & h4": {
-      marginTop: tokens.spacingVerticalM,
-      marginBottom: tokens.spacingVerticalXS,
-      lineHeight: tokens.lineHeightBase300,
+      marginTop: "1.25em",
+      marginBottom: "0.4em",
+      lineHeight: 1.3,
       maxWidth: "72ch",
+      fontWeight: 600,
     },
-    "& h1": { fontSize: tokens.fontSizeBase500 },
-    "& h2, & h3, & h4": { fontSize: tokens.fontSizeBase400 },
+    "& h1": { fontSize: `min(${CONTENT_TYPE.h1}, ${CONTENT_TYPE.h1Max})` },
+    "& h2": { fontSize: `min(${CONTENT_TYPE.h2}, ${CONTENT_TYPE.h2Max})` },
+    "& h3, & h4": {
+      fontSize: `min(${CONTENT_TYPE.h3}, ${CONTENT_TYPE.h3Max})`,
+      fontWeight: tokens.fontWeightSemibold,
+    },
     "& a": { color: tokens.colorBrandForegroundLink },
     "& code": {
       fontFamily: tokens.fontFamilyMonospace,
@@ -499,6 +514,15 @@ const useStyles = makeStyles({
       marginBottom: tokens.spacingVerticalXXS,
       fontVariantNumeric: "tabular-nums",
     },
+  },
+  // §35: the compact reading measure — real side padding (16px each side →
+  // ~45 CPL at 16px on a 390pt phone) and smaller data cells so result
+  // tables stay scannable; tables pan horizontally without rubber-banding
+  // the page (overscroll containment on the wrap below).
+  answerCompact: {
+    paddingLeft: "16px",
+    paddingRight: "16px",
+    "& th, & td": { fontSize: CONTENT_TYPE.tableCellCompact },
   },
   // [n] citation markers rendered as clickable superscript chips that jump to
   // the matching reference card below the answer.
@@ -5332,7 +5356,7 @@ export function ChatPanel() {
                   ) : (
                     <>
                       {m.content && (
-                        <div className={styles.answer}>
+                        <div className={mergeClasses(styles.answer, compactLayout && styles.answerCompact)}>
                           {streaming && m.id === lastId ? (
                             // §2: the live turn renders progressively — completed
                             // blocks as markdown, the growing block held to a safe
@@ -5715,7 +5739,7 @@ export function ChatPanel() {
                 </div>
               )}
               {sqlOutcome?.content && (
-                <div className={mergeClasses(styles.answer, styles.sqlResult)}>
+                <div className={mergeClasses(styles.answer, styles.sqlResult, compactLayout && styles.answerCompact)}>
                   <AnswerMarkdown
                     content={sqlOutcome.content}
                     turnId="sql-editor"
