@@ -40,7 +40,9 @@ import { IconAI, IconChart, IconChatAI, IconDocAdd, IconSettings } from "@/shell
 import { shouldAutoOpenTour } from "./tourGating";
 import { BEAM_SWEEP } from "@/shell/theme";
 import { platformKind, type PlatformKind } from "@/shell/desktopBridge";
-import { MOBILE_NO_PROVIDER_TRUTHS } from "@/contracts";
+import { MOBILE_NO_PROVIDER_TRUTHS, ON_DEVICE_MODEL_COPY } from "@/contracts";
+import { usePaneLayout } from "@/shell/paneLayout";
+import { useOnDeviceModel } from "@/stores/useOnDeviceModel";
 import { LhDialogSurface } from "@/shell/controls";
 
 /**
@@ -67,58 +69,108 @@ interface TourStep {
   position: TourPosition;
 }
 
-const stepsFor = (platform: PlatformKind): TourStep[] => [
-  {
-    anchor: "explorer",
-    icon: <IconDocAdd />,
-    title: "Add files, choose what's visible",
-    body:
-      platform === "desktop"
-        ? "Drag files and folders in, or browse to them — they stay on this device. The eye toggle on each row controls exactly what the AI can see, so nothing is read unless you choose it. The lock toggle keeps a file private to this device — hidden from cloud models, while the private model can always read it."
-        : "Add files and they stay on this device. The eye toggle on each row controls exactly what the AI can see, so nothing is read unless you choose it. The lock toggle keeps a file hidden from cloud models.",
-    position: "after",
-  },
-  {
-    anchor: "chat",
-    icon: <IconChatAI />,
-    title: "Ask, and get grounded answers",
-    // §2: the keyboard-shortcut line renders only where a hardware keyboard
-    // is the norm; mobile copy names the send button instead.
-    body:
-      platform === "desktop"
-        ? "Ask in plain language. Answers are built only from your visible files and cite the exact sources — click a citation to jump to it. Enter sends; Shift+Enter adds a line."
-        : "Ask in plain language. Answers are built only from your visible files and cite the exact sources — tap a citation to jump to it. Tap Send to ask.",
-    position: "above",
-  },
-  {
-    anchor: "beam",
-    icon: <IconChart />,
-    title: "Beam: analytics you can verify",
-    body: "Ask for a number and Beam, the built-in analytics engine, computes it from your data — then shows the exact SQL it ran. Verified figures you can check, not guesses.",
-    position: "below",
-  },
-  {
-    anchor: "models",
-    icon: <IconAI />,
-    title: "Private on-device, or cloud",
-    // §3: the private model does not exist on mobile — the tour must not
-    // advertise it there. The two truths are the shared canonical string
-    // (byte-identical with the empty-provider states in the chat header
-    // switcher, Settings → AI models, and the onboarding model slide).
-    body:
-      platform === "desktop"
-        ? "Choose who answers: a model that runs entirely on this device, or a cloud provider. This line always tells you whether anything leaves this device."
-        : `${MOBILE_NO_PROVIDER_TRUTHS} This line always tells you whether anything leaves this device.`,
-    position: "above",
-  },
-  {
-    anchor: "settings",
-    icon: <IconSettings />,
-    title: "Everything else lives here",
-    body: "The gear opens Preferences, AI models, and Send feedback — and you can replay this tour anytime from “Take the tour”.",
-    position: "after",
-  },
-];
+/**
+ * §33 §3: targeting is MODE-aware — every step's anchor must be in the DOM in
+ * the mode that shows it (test/tourAnchors.test.mjs is the anchor floor).
+ * Compact's first-run lands on the Chat tab, where the tab bar is always on
+ * screen — so surfaces that live behind tabs (Files, Settings) are pointed at
+ * their TABS. The models step tells today's truth per device: on-device where
+ * a backend reported (`onDevice` — the availability-driven roster truths),
+ * cloud only when you add a key.
+ */
+const stepsFor = (platform: PlatformKind, compact: boolean, onDevice = false): TourStep[] =>
+  compact
+    ? [
+        {
+          anchor: "chat",
+          icon: <IconChatAI />,
+          title: "Ask, and get grounded answers",
+          body: "Ask in plain language. Answers are built only from your visible files and cite the exact sources — tap a citation to jump to it. Tap Send to ask.",
+          position: "above",
+        },
+        {
+          anchor: "tab-files",
+          icon: <IconDocAdd />,
+          title: "Add files, choose what's visible",
+          body: "The Files tab adds documents from the Files app — they stay on this device. The eye toggle on each row controls exactly what the AI can see, so nothing is read unless you choose it.",
+          position: "above",
+        },
+        {
+          anchor: "suggestions",
+          icon: <IconChart />,
+          title: "Beam: analytics you can verify",
+          body: "Tap a suggested ask and Beam, the built-in analytics engine, computes the numbers from your data — then shows the exact SQL it ran. Verified figures you can check, not guesses.",
+          position: "below",
+        },
+        {
+          anchor: "models",
+          icon: <IconAI />,
+          title: "Private on-device, or cloud",
+          body: onDevice
+            ? `${ON_DEVICE_MODEL_COPY.foundation} — cloud models join only when you add a key. This line always tells you whether anything leaves this device.`
+            : `${MOBILE_NO_PROVIDER_TRUTHS} This line always tells you whether anything leaves this device.`,
+          position: "above",
+        },
+        {
+          anchor: "tab-settings",
+          icon: <IconSettings />,
+          title: "Everything else lives here",
+          body: "The Settings tab holds Preferences, AI models, and Send feedback — History is the clock button up top, and you can replay this tour anytime from “Take the tour”.",
+          position: "above",
+        },
+      ]
+    : [
+        {
+          anchor: "explorer",
+          icon: <IconDocAdd />,
+          title: "Add files, choose what's visible",
+          body:
+            platform === "desktop"
+              ? "Drag files and folders in, or browse to them — they stay on this device. The eye toggle on each row controls exactly what the AI can see, so nothing is read unless you choose it. The lock toggle keeps a file private to this device — hidden from cloud models, while the private model can always read it."
+              : "Add files and they stay on this device. The eye toggle on each row controls exactly what the AI can see, so nothing is read unless you choose it. The lock toggle keeps a file hidden from cloud models.",
+          position: "after",
+        },
+        {
+          anchor: "chat",
+          icon: <IconChatAI />,
+          title: "Ask, and get grounded answers",
+          // §2: the keyboard-shortcut line renders only where a hardware keyboard
+          // is the norm; mobile copy names the send button instead.
+          body:
+            platform === "desktop"
+              ? "Ask in plain language. Answers are built only from your visible files and cite the exact sources — click a citation to jump to it. Enter sends; Shift+Enter adds a line."
+              : "Ask in plain language. Answers are built only from your visible files and cite the exact sources — tap a citation to jump to it. Tap Send to ask.",
+          position: "above",
+        },
+        {
+          // §33 §3: retargeted from the old title-anchored `beam` step — the
+          // suggestions/recipes row is the thing you can actually tap.
+          anchor: "suggestions",
+          icon: <IconChart />,
+          title: "Beam: analytics you can verify",
+          body: "Try a suggested ask — Beam, the built-in analytics engine, computes the numbers from your data, then shows the exact SQL it ran. Verified figures you can check, not guesses.",
+          position: "below",
+        },
+        {
+          anchor: "models",
+          icon: <IconAI />,
+          title: "Private on-device, or cloud",
+          body:
+            platform === "desktop"
+              ? "Choose who answers: a model that runs entirely on this device, or a cloud provider. This line always tells you whether anything leaves this device."
+              : onDevice
+                ? `${ON_DEVICE_MODEL_COPY.foundation} — cloud models join only when you add a key. This line always tells you whether anything leaves this device.`
+                : `${MOBILE_NO_PROVIDER_TRUTHS} This line always tells you whether anything leaves this device.`,
+          position: "above",
+        },
+        {
+          anchor: "settings",
+          icon: <IconSettings />,
+          title: "Everything else lives here",
+          body: "The gear opens Preferences, AI models, and Send feedback — and you can replay this tour anytime from “Take the tour”.",
+          position: "after",
+        },
+      ];
 
 const useStyles = makeStyles({
   // Neutral TeachingPopover surface: it rides the Paper/Ink tokens (raised
@@ -173,8 +225,12 @@ export function FirstRunTour() {
 
   // Platform-aware copy (§2): platformKind() is primed well before the tour
   // can open (the vault tree loads first), and the value never changes within
-  // a session — reading it at render is stable.
-  const STEPS = stepsFor(platformKind());
+  // a session — reading it at render is stable. §33 §3: targeting follows the
+  // ARRANGEMENT (compact vs not — live, so an iPad rotation retargets) and the
+  // models step follows the availability-driven backend verdict.
+  const compact = usePaneLayout(false).compact;
+  const { available: onDevice } = useOnDeviceModel();
+  const STEPS = stepsFor(platformKind(), compact, onDevice);
   const step = STEPS[index];
   const isLast = index === STEPS.length - 1;
 
@@ -231,10 +287,14 @@ export function FirstRunTour() {
 
   // Manual re-entry from the settings menu — replays the tour, ignoring
   // `tourShown` (and never re-persisting, since it's already true by now).
+  // §33 §3: activation defers one frame so AppShell's same-event listener
+  // (return to the Chat tab on compact) commits before anchors resolve.
   useEffect(() => {
     const onStart = () => {
-      setIndex(0);
-      setActive(true);
+      requestAnimationFrame(() => {
+        setIndex(0);
+        setActive(true);
+      });
     };
     window.addEventListener(START_TOUR_EVENT, onStart);
     return () => window.removeEventListener(START_TOUR_EVENT, onStart);

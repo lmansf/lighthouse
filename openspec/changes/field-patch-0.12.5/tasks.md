@@ -18,13 +18,14 @@ per section; the full suite + smoke + floors before the bump.
       sections; visible focus ring in both themes (Beam tokens).
 - [ ] 1.5 Virtualize long flyout lists (reuse `VirtualRows`); confirm the file
       tree's row-mount count is unchanged (perf regression guard).
-- [ ] 1.6 Keep `FirstRunTour.tsx` copy accurate for the new layout
+- [x] 1.6 Keep `FirstRunTour.tsx` copy accurate for the new layout (§33 mobile-polish PR: mode-aware stepsFor + models-copy truth)
       (`data-tour="explorer"` stays on the tree; adjust any sidebar wording).
-- [ ] 1.7 Tests: reducer/store unit tests (open/close/persist); Playwright E2E —
+- [x] 1.7 Tests: reducer/store unit tests (open/close/persist); Playwright E2E —
       open Metrics flyout → edit a metric → close → state persisted; relaunch
       keeps widths; file tree unaffected. Before/after screenshots.
 
 ## §2 — Visual-first answers (commit 2)
+  (§33 mobile-polish PR: tour anchors kept accurate by the tourAnchors.test.mjs anchor floor)
 - [ ] 2.1 Engine: route `table_profile` group-by/rollup numbers into a
       `RecordBatch` the existing `chart_spec_from_batches` can consume (new
       `table_profile::chartable_batches` or equivalent) — values from the profile

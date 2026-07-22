@@ -198,6 +198,9 @@ export function CompactTabBar({ active, onSelect, hidden = false }: CompactTabBa
             className={mergeClasses("lh-press", styles.tab, isActive && styles.tabActive)}
             aria-current={isActive ? "page" : undefined}
             aria-label={t.label}
+            // §33 §3: the compact tour points at tabs for surfaces that live
+            // behind them (Files, Settings) — the bar is always on screen.
+            data-tour={`tab-${t.id}`}
             tabIndex={hidden ? -1 : 0}
             onClick={() => {
               setMinimized(false);

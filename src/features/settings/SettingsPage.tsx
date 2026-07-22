@@ -35,6 +35,7 @@ import {
   PreferencesDialog,
   LH_REPO,
 } from "./SettingsMenu";
+import { openExternal } from "@/lib/openExternal";
 import { START_TOUR_EVENT } from "@/features/help/FirstRunTour";
 import { SemanticNav } from "@/features/semantic/SemanticNav";
 import { ViewsNav } from "@/features/views/ViewsNav";
@@ -226,7 +227,7 @@ export function SettingsPage() {
         <Row
           icon={<IconOpen />}
           label="Lighthouse on GitHub"
-          onClick={() => window.open(LH_REPO, "_blank", "noopener,noreferrer")}
+          onClick={() => openExternal(LH_REPO)}
         />
         <Row icon={<IconInfo />} label="About Lighthouse" onClick={() => setAboutDlg(true)} />
       </div>

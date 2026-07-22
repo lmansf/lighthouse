@@ -94,3 +94,12 @@ export function buildFeedbackIssueUrl(r: FeedbackReport): string {
   const body = encodeURIComponent(composeFeedbackBody(r, { capLog: true }));
   return `${FEEDBACK_ISSUES_URL}?title=${title}&body=${body}&labels=feedback`;
 }
+
+/**
+ * §33 §2: the always-works handoff — the FULL report body plus where to send
+ * it, for the clipboard. No URL caps apply (nothing navigates); the user can
+ * paste it into any mail app or browser themselves. Zero-backend like the rest.
+ */
+export function buildFeedbackClipboard(r: FeedbackReport): string {
+  return `${composeFeedbackBody(r)}\n\n—\nEmail this to: ${FEEDBACK_EMAIL}\nor open an issue: ${FEEDBACK_ISSUES_URL}`;
+}

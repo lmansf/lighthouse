@@ -101,9 +101,11 @@ import { useInvestigationsStore } from "@/stores/useInvestigationsStore";
 import { chatHistoryLocked } from "@/stores/managedLocks";
 import { modKey } from "@/features/onboarding/ModeChooser";
 import { LhDialogSurface, LhMenuPopover } from "@/shell/controls";
+import { publishChatStreaming } from "@/shell/shellSignals";
 import { ACCENTS, BEAM_SWEEP } from "@/shell/theme";
 import { FILE_DRAG_MIME, parseDraggedFiles, type DraggedFile } from "@/shell/dnd";
 import { isDesktopShell, pathsForFiles, platformKind } from "@/shell/desktopBridge";
+import { openExternal } from "@/lib/openExternal";
 import { useCoarsePointer, usePaneLayout } from "@/shell/paneLayout";
 import { Sheet } from "@/shell/Sheet";
 import { HistoryNav } from "./HistoryNav";
@@ -2170,7 +2172,21 @@ const AnswerMarkdown = memo(function AnswerMarkdown({
           );
         }
         return (
-          <a {...props} href={href} target="_blank" rel="noopener noreferrer">
+          <a
+            {...props}
+            href={href}
+            target="_blank"
+            rel="noopener noreferrer"
+            // §33 §2: in the shell, _blank is not a reliable escape (iOS does
+            // nothing) — route through the one external-open seam; plain web
+            // keeps the ordinary new-tab anchor behavior.
+            onClick={(e) => {
+              if (href && isDesktopShell()) {
+                e.preventDefault();
+                openExternal(href);
+              }
+            }}
+          >
             {children}
           </a>
         );
@@ -2591,6 +2607,11 @@ export function ChatPanel() {
   const openConversation = useChatStore((s) => s.openConversation);
   const historyPersistEnabled = useChatStore((s) => s.persistEnabled);
   const [streaming, setStreaming] = useState(false);
+  // §33 §1: mirror onto the shell bus — the compact feedback nudge holds its
+  // calm-moment modal while an answer streams (see shellSignals.ts).
+  useEffect(() => {
+    publishChatStreaming(streaming);
+  }, [streaming]);
   // Pre-answer stage note from the engine ("Reading q3.csv (2/5)…") — shown in
   // the loader while multi-document synthesis works; cleared on the first token.
   const [progressLabel, setProgressLabel] = useState<string | null>(null);
@@ -4081,7 +4102,7 @@ export function ChatPanel() {
       .filter((c) => c.kind === "file" && !attachedIds.has(c.id))
       .slice(0, 8);
   }, [mention, nodes, attachedIds]);
-  const mentionKey = mention ? `${mention.start} ${mention.query}` : null;
+  const mentionKey = mention ? `${mention.start}\x00${mention.query}` : null;
   const mentionShown =
     mention !== null && mentionMatches.length > 0 && mentionKey !== mentionDismissed;
   const mentionSelClamped =
@@ -4968,7 +4989,7 @@ export function ChatPanel() {
         {pinAlertBanner}
         <div className={styles.hero}>
           <span className={styles.beacon} />
-          <Title3 data-tour="beam">
+          <Title3>
             {currentInvestigation ? currentInvestigation.name : "Ask Lighthouse"}
           </Title3>
           {/* Hero context line (openspec: add-investigations §4.2): name is the
@@ -5015,7 +5036,7 @@ export function ChatPanel() {
           {includedFileIds.length === 0 && attachments.length === 0 ? (
             // Pre-flight: nothing is visible to AI yet. Inform gently and offer
             // the fix, but never block asking.
-            <div className={styles.noFilesCard}>
+            <div className={styles.noFilesCard} data-tour="suggestions">
               <IconWarning fontSize={20} />
               <Text size={300}>
                 The AI can&apos;t see any files yet. Answers will be generic until you add
@@ -5030,7 +5051,7 @@ export function ChatPanel() {
               </Button>
             </div>
           ) : (
-            <div className={styles.suggestRow}>
+            <div className={styles.suggestRow} data-tour="suggestions">
               {engineAsks.length > 0
                 ? // Catalog-derived asks submit immediately — every one is a
                   // real, answerable question about a real included file.
@@ -5231,7 +5252,7 @@ export function ChatPanel() {
           </div>
         </div>
 
-        <div className={styles.bodyWrap} data-tour="beam">
+        <div className={styles.bodyWrap}>
           <div
             className={styles.body}
             ref={bodyRef}

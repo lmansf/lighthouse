@@ -18,8 +18,10 @@ import {
   shorthands,
   tokens,
 } from "@fluentui/react-components";
-import { IconInsight, IconMail, IconOpen } from "@/shell/icons";
+import { IconCopy, IconInsight, IconMail, IconOpen } from "@/shell/icons";
+import { openExternal } from "@/lib/openExternal";
 import {
+  buildFeedbackClipboard,
   buildFeedbackMailto,
   buildFeedbackIssueUrl,
   feedbackKindLabel,
@@ -97,11 +99,7 @@ function detectOs(): string {
   return "";
 }
 
-/** Open an external target (mail client / browser) — the same escape the
- *  settings-menu GitHub link uses, so the webview never navigates itself. */
-function openExternal(url: string) {
-  window.open(url, "_blank", "noopener,noreferrer");
-}
+
 
 export function BugReport() {
   const styles = useStyles();
@@ -112,6 +110,8 @@ export function BugReport() {
   const [includeLog, setIncludeLog] = useState(false);
   const [log, setLog] = useState("");
   const [logLoaded, setLogLoaded] = useState(false);
+  // §33 §2: transient "Copied" confirmation for the clipboard handoff.
+  const [copied, setCopied] = useState(false);
 
   // Version is injected at build time; OS is read client-side. Neither needs a
   // server round-trip — only the optional shell.log excerpt does (desktop only).
@@ -248,6 +248,24 @@ export function BugReport() {
               <Button appearance="secondary">Close</Button>
             </DialogTrigger>
             <div className={styles.handoffs}>
+              {/* §33 §2: the always-works handoff — the composed body + both
+                  destinations onto the clipboard; no scheme support needed. */}
+              <Button
+                appearance="subtle"
+                icon={<IconCopy />}
+                disabled={!canSend}
+                onClick={() => {
+                  void navigator.clipboard
+                    ?.writeText(buildFeedbackClipboard(report))
+                    .then(() => {
+                      setCopied(true);
+                      window.setTimeout(() => setCopied(false), 2000);
+                    })
+                    .catch(() => {});
+                }}
+              >
+                {copied ? "Copied" : "Copy feedback"}
+              </Button>
               <Button
                 appearance="secondary"
                 icon={<IconOpen />}

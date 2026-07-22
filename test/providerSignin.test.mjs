@@ -73,10 +73,12 @@ test("the user code renders LARGE with tabular numerals, and the browser opens v
   assert.match(menu, /signinCode: \{[^}]*fontFamily: tokens\.fontFamilyMonospace/s);
   assert.match(menu, /fontVariantNumeric: "tabular-nums"/);
   assert.match(menu, /fontSize: tokens\.fontSizeHero800/, "the code is display-sized");
+  // §33 §2: the hand-off rides the ONE external-open seam (in-shell it routes
+  // through the opener plugin; plain web keeps window.open inside the seam).
   assert.match(
     menu,
-    /window\.open\(url, "_blank", "noopener,noreferrer"\)/,
-    "openExternal mirrors BugReport.tsx's hand-off exactly",
+    /import \{ openExternal \} from "@\/lib\/openExternal";/,
+    "the sign-in hand-off imports the shared seam",
   );
   assert.match(menu, /openExternal\(signinFlow\.verificationUri\)/);
 });
