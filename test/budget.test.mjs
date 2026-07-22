@@ -136,3 +136,12 @@ test("the framing overflow ladder retries once headline-only, then engine framin
   assert.equal(overflowRetryVerdict(1), "engine-fallback");
   assert.equal(overflowRetryVerdict(7), "engine-fallback");
 });
+
+test("reports.rs wires the framing budget + ladder (source pin — the seam is Rust-only)", async () => {
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(new URL("../native/crates/lighthouse-core/src/reports.rs", import.meta.url), "utf8");
+  assert.match(src, /input_token_budget\(tier, crate::budget::CallType::ReportFraming\)/);
+  assert.match(src, /overflow_retry_verdict\(overflows\)/);
+  assert.match(src, /OverflowStep::RetryHeadlineOnly => overflows \+= 1,/);
+  assert.match(src, /OverflowStep::EngineFallback => return None,/);
+});

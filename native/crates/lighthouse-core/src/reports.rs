@@ -478,19 +478,22 @@ pub async fn investigate_templated(
     report.template = template;
     report.title = format!("{}{}", report.title, template.title_suffix());
     if !report.sections.is_empty() && cfg.provider_id.is_some() {
-        // §32 §6: the framing calls ride the same tier seam as narration —
-        // capped grounding on apple-fm, byte-identical elsewhere. (The §2
-        // profile selection already covers their system prompt via
-        // stream_answer → stream_local.)
+        // §32 §6 / §38 §1: the framing calls ride the same tier seam as
+        // narration — budget-packed grounding on apple-fm, byte-identical
+        // elsewhere. (The §2 profile selection already covers their system
+        // prompt via stream_answer → stream_local.) The headline-only
+        // grounding is the §38 §2 overflow-retry fallback.
         let ctx = report_findings_ctx(&report, crate::llm::narration_tier(&cfg));
+        let headline_ctx = headline_findings_ctx(&report);
         match template {
             ReportTemplate::ScientificMethod => {
-                report.intro = narrate(IMRAD_INTRO_PROMPT, &ctx, &cfg).await;
-                report.discussion = narrate(IMRAD_DISCUSSION_PROMPT, &ctx, &cfg).await;
+                report.intro = narrate(IMRAD_INTRO_PROMPT, &ctx, &headline_ctx, &cfg).await;
+                report.discussion =
+                    narrate(IMRAD_DISCUSSION_PROMPT, &ctx, &headline_ctx, &cfg).await;
             }
             ReportTemplate::BusinessReport => {
-                report.intro = narrate(BLUF_BOTTOM_LINE_PROMPT, &ctx, &cfg).await;
-                report.discussion = narrate(BLUF_MEANING_PROMPT, &ctx, &cfg).await;
+                report.intro = narrate(BLUF_BOTTOM_LINE_PROMPT, &ctx, &headline_ctx, &cfg).await;
+                report.discussion = narrate(BLUF_MEANING_PROMPT, &ctx, &headline_ctx, &cfg).await;
             }
             ReportTemplate::Standard => {}
         }
@@ -648,10 +651,27 @@ fn capped_section_table(markdown: &str) -> String {
     out.join("\n")
 }
 
-/// Collect a model narration to a string (the synth.rs streaming-collect idiom
-/// with no UI sink). Empty or over-long ⇒ None, so the render falls back to the
-/// deterministic framing.
-async fn narrate(prompt: &str, ctx: &[crate::llm::Ctx], cfg: &crate::llm::ModelCfg) -> Option<String> {
+/// A framing call's raw outcome, before the accept gates.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NarrateRaw {
+    /// The model produced text (still subject to the accept gates).
+    Text(String),
+    /// The bridge refused the call: the collected stream carries the
+    /// engine-stamped FM_OVERFLOW note (§32 §7) — the ladder's retry signal.
+    Overflow,
+    /// Nothing usable came back (empty stream, guardrail, transport error).
+    Unavailable,
+}
+
+/// Collect one framing call to a raw outcome (the synth.rs streaming-collect
+/// idiom with no UI sink). The FM_OVERFLOW silence note is recognized as
+/// `Overflow` so the §2 ladder can retry; a guardrail refusal or an empty
+/// stream is `Unavailable` — retrying those with less context has no basis.
+async fn collect_narration(
+    prompt: &str,
+    ctx: &[crate::llm::Ctx],
+    cfg: &crate::llm::ModelCfg,
+) -> NarrateRaw {
     use futures::StreamExt;
     let mut stream =
         crate::llm::stream_answer(prompt.to_string(), ctx.to_vec(), cfg.clone(), Vec::new(), None);
@@ -659,12 +679,63 @@ async fn narrate(prompt: &str, ctx: &[crate::llm::Ctx], cfg: &crate::llm::ModelC
     while let Some(d) = stream.next().await {
         buf.push_str(&d);
     }
-    let trimmed = buf.trim();
-    if trimmed.is_empty() || trimmed.chars().count() > NARRATION_CHAR_CAP {
-        None
-    } else {
-        Some(trimmed.to_string())
+    if buf.contains(crate::llm::FM_OVERFLOW_NOTE) {
+        return NarrateRaw::Overflow;
     }
+    if buf.contains(crate::llm::FM_GUARDRAIL_NOTE) {
+        return NarrateRaw::Unavailable;
+    }
+    let trimmed = buf.trim();
+    if trimmed.is_empty() {
+        NarrateRaw::Unavailable
+    } else {
+        NarrateRaw::Text(trimmed.to_string())
+    }
+}
+
+/// §38 §2: the framing overflow ladder, generic over the model call so the
+/// policy is testable without a model. Attempt 1 uses the packed findings;
+/// on an FM_OVERFLOW refusal, `budget::overflow_retry_verdict` grants ONE
+/// retry with the headline-only findings; a second refusal is the
+/// deterministic engine framing — there is never a third call. Text
+/// outcomes return for the accept gates; `Unavailable` falls back at once.
+async fn narrate_ladder<F, Fut>(mut call: F) -> Option<String>
+where
+    F: FnMut(bool) -> Fut,
+    Fut: std::future::Future<Output = NarrateRaw>,
+{
+    let mut overflows: u32 = 0;
+    loop {
+        match call(overflows > 0).await {
+            NarrateRaw::Text(t) => return Some(t),
+            NarrateRaw::Unavailable => return None,
+            NarrateRaw::Overflow => match crate::budget::overflow_retry_verdict(overflows) {
+                crate::budget::OverflowStep::RetryHeadlineOnly => overflows += 1,
+                crate::budget::OverflowStep::EngineFallback => return None,
+            },
+        }
+    }
+}
+
+/// One templated framing narration: the §2 ladder over the packed/headline
+/// grounding, then the accept gates — the runaway length cap (a narration
+/// past `NARRATION_CHAR_CAP` reads as an error response, not a paragraph).
+/// Any rejection ⇒ None, so the render falls back to deterministic framing.
+async fn narrate(
+    prompt: &str,
+    packed_ctx: &[crate::llm::Ctx],
+    headline_ctx: &[crate::llm::Ctx],
+    cfg: &crate::llm::ModelCfg,
+) -> Option<String> {
+    let text = narrate_ladder(|headline_only| {
+        let ctx = if headline_only { headline_ctx } else { packed_ctx };
+        collect_narration(prompt, ctx, cfg)
+    })
+    .await?;
+    if text.chars().count() > NARRATION_CHAR_CAP {
+        return None;
+    }
+    Some(text)
 }
 
 /// The default vault subfolder for a standalone report (no named investigation) —
@@ -973,6 +1044,101 @@ mod tests {
             3,
             "each 10-row table caps to its 5-row digest"
         );
+    }
+
+    #[test]
+    fn whole_framing_prompt_fits_the_4k_window_end_to_end() {
+        // §38 §2: the ASSEMBLED call — compact system prompt + the longest
+        // framing instruction + the context wrapper + the §1 packed findings
+        // — sits inside 90% of 4,096 minus the framing reserve, under the
+        // digit-aware estimate. (test/budget.test.mjs pins the token
+        // arithmetic and the reserve on the node side.)
+        let report = report_with_sections(12, 40);
+        let ctx = report_findings_ctx(&report, crate::budget::Tier::AppleFm4096);
+        let instruction = [
+            IMRAD_INTRO_PROMPT,
+            IMRAD_DISCUSSION_PROMPT,
+            BLUF_BOTTOM_LINE_PROMPT,
+            BLUF_MEANING_PROMPT,
+        ]
+        .iter()
+        .map(|p| crate::budget::estimate_tokens(p))
+        .max()
+        .unwrap();
+        let wrapper = format!("[1] {}\n\nQuestion: \n", ctx[0].name);
+        let total = crate::budget::estimate_tokens(crate::llm::SYSTEM_PROMPT_COMPACT)
+            + instruction
+            + crate::budget::estimate_tokens(&wrapper)
+            + crate::budget::estimate_tokens(&ctx[0].text);
+        let budget = crate::budget::input_token_budget(
+            crate::budget::Tier::AppleFm4096,
+            crate::budget::CallType::ReportFraming,
+        );
+        assert!(total <= budget, "assembled framing call {total} > budget {budget}");
+        // And the packing's reserved overhead was honest: the real
+        // instruction + wrapper fit inside the fixed allowance.
+        let reserved = framing_overhead_tokens()
+            - crate::budget::estimate_tokens(crate::llm::SYSTEM_PROMPT_COMPACT);
+        assert!(
+            instruction + crate::budget::estimate_tokens(&wrapper) <= reserved,
+            "instruction+wrapper exceed the packing allowance ({reserved})"
+        );
+    }
+
+    #[test]
+    fn framing_ladder_retries_once_headline_only_then_engine_framing() {
+        // §38 §2: FM_OVERFLOW → ONE retry with headline-only findings; a
+        // second refusal ⇒ None (deterministic framing) — never a third call.
+        use std::cell::RefCell;
+        let calls: RefCell<Vec<bool>> = RefCell::new(Vec::new());
+        let out = futures::executor::block_on(narrate_ladder(|headline_only| {
+            calls.borrow_mut().push(headline_only);
+            std::future::ready(NarrateRaw::Overflow)
+        }));
+        assert_eq!(out, None, "two refusals fall back to engine framing");
+        assert_eq!(*calls.borrow(), vec![false, true], "packed first, headline retry, no third");
+
+        // Overflow then success: the retry's text comes back.
+        let calls2: RefCell<u32> = RefCell::new(0);
+        let out2 = futures::executor::block_on(narrate_ladder(|headline_only| {
+            *calls2.borrow_mut() += 1;
+            std::future::ready(if headline_only {
+                NarrateRaw::Text("Framed from headlines.".into())
+            } else {
+                NarrateRaw::Overflow
+            })
+        }));
+        assert_eq!(out2.as_deref(), Some("Framed from headlines."));
+        assert_eq!(*calls2.borrow(), 2);
+
+        // A guardrail/empty outcome never retries — straight to fallback.
+        let calls3: RefCell<u32> = RefCell::new(0);
+        let out3 = futures::executor::block_on(narrate_ladder(|_| {
+            *calls3.borrow_mut() += 1;
+            std::future::ready(NarrateRaw::Unavailable)
+        }));
+        assert_eq!(out3, None);
+        assert_eq!(*calls3.borrow(), 1, "Unavailable is terminal");
+    }
+
+    #[test]
+    fn overflow_note_is_recognized_and_headline_ctx_is_tiny() {
+        // The ladder's retry signal is the engine-stamped §32 §7 note…
+        assert!(crate::llm::FM_OVERFLOW_NOTE.contains("didn't fit the on-device model's window"));
+        // …and the retry grounding always fits: headline-only over a bloated
+        // report is a dozen short lines, far under any tier's budget.
+        let report = report_with_sections(24, 40);
+        let ctx = headline_findings_ctx(&report);
+        assert!(
+            crate::budget::estimate_tokens(&ctx[0].text)
+                < crate::budget::input_token_budget(
+                    crate::budget::Tier::AppleFm4096,
+                    crate::budget::CallType::ReportFraming,
+                ) / 2,
+            "headline-only grounding must fit with room to spare"
+        );
+        assert!(ctx[0].text.contains("Analysis 23:"), "every section is present");
+        assert!(!ctx[0].text.contains("| period |"), "no tables in the retry grounding");
     }
 
     #[test]
