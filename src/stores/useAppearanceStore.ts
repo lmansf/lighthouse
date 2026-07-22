@@ -24,10 +24,23 @@ interface Appearance {
   accent: Accent;
   density: Density;
   fontScale: FontScale;
+  /**
+   * §31 glass intensity, 0 (solid) … 1 (full). CLIENT-side only, like the
+   * theme mode: it styles two chrome surfaces and never rides the engine
+   * settings file or the appearance directive — the engine/twin whitelist is
+   * deliberately untouched (the fence can't express it, by construction).
+   * providers.tsx stamps it as --lh-glass-level; the OS Reduce Transparency
+   * attribute overrides it to solid regardless.
+   */
+  glass: number;
 }
 
-const DEFAULTS: Appearance = { accent: "amber", density: "comfortable", fontScale: "m" };
+const DEFAULTS: Appearance = { accent: "amber", density: "comfortable", fontScale: "m", glass: 1 };
 const KEY = "lighthouse.appearance";
+
+/** Clamp to the 0..1 slider range; anything non-numeric falls to the default. */
+const normGlass = (v: unknown): number =>
+  typeof v === "number" && Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : DEFAULTS.glass;
 
 function load(): Appearance {
   if (typeof window === "undefined") return DEFAULTS;
@@ -37,6 +50,7 @@ function load(): Appearance {
       accent: isAccent(o.accent) ? o.accent : DEFAULTS.accent,
       density: isDensity(o.density) ? o.density : DEFAULTS.density,
       fontScale: isFontScale(o.fontScale) ? o.fontScale : DEFAULTS.fontScale,
+      glass: normGlass(o.glass),
     };
   } catch {
     return DEFAULTS;
@@ -67,14 +81,19 @@ export const useAppearanceStore = create<AppearanceStore>((zset, get) => ({
       accent: isAccent(patch.accent) ? patch.accent : cur.accent,
       density: isDensity(patch.density) ? patch.density : cur.density,
       fontScale: isFontScale(patch.fontScale) ? patch.fontScale : cur.fontScale,
+      glass: patch.glass !== undefined ? normGlass(patch.glass) : cur.glass,
     };
     save(next);
     zset(next);
-    // Durable persist (desktop settings file). A 400 on the web build is fine.
+    // Durable persist (desktop settings file) of the ENGINE-whitelisted keys.
+    // `glass` stays client-side by design (§31) — the engine whitelist is
+    // untouched, so it is not sent rather than sent-and-dropped.
     void fetch("/api/settings", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ appearance: next }),
+      body: JSON.stringify({
+        appearance: { accent: next.accent, density: next.density, fontScale: next.fontScale },
+      }),
     }).catch(() => {
       /* web build / offline — the cache is enough */
     });

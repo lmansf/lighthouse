@@ -13,6 +13,7 @@ import { themeFor } from "@/shell/theme";
 import { useThemeStore } from "@/stores/useThemeStore";
 import { useAppearanceStore } from "@/stores/useAppearanceStore";
 import { installTauriTransport } from "@/shell/tauriTransport";
+import { readReduceTransparency } from "@/shell/systemAppearance";
 
 /**
  * Fluent UI v9 (Griffel) SSR wiring for the Next.js App Router.
@@ -32,6 +33,7 @@ export function Providers({ children }: { children: React.ReactNode }) {
   const accent = useAppearanceStore((s) => s.accent);
   const density = useAppearanceStore((s) => s.density);
   const fontScale = useAppearanceStore((s) => s.fontScale);
+  const glass = useAppearanceStore((s) => s.glass);
 
   // Mirror the resolved theme onto <html> so surfaces Fluent doesn't own
   // follow along: globals.css keys the body off it, and `color-scheme` makes
@@ -41,6 +43,33 @@ export function Providers({ children }: { children: React.ReactNode }) {
     document.documentElement.dataset.theme = resolved;
     document.documentElement.style.colorScheme = resolved;
   }, [resolved]);
+
+  // §31 glass: the in-app intensity rides a root var (globals.css declares 1);
+  // the OS Reduce Transparency setting stamps the attribute that forces solid
+  // regardless. The OS value is re-read when the app returns to the
+  // foreground, so flipping the setting mid-session lands without a relaunch.
+  useEffect(() => {
+    document.documentElement.style.setProperty("--lh-glass-level", String(glass));
+  }, [glass]);
+  useEffect(() => {
+    let alive = true;
+    const sync = () => {
+      void readReduceTransparency().then((on) => {
+        if (!alive) return;
+        if (on) document.documentElement.dataset.reduceTransparency = "true";
+        else delete document.documentElement.dataset.reduceTransparency;
+      });
+    };
+    sync();
+    const onVisible = () => {
+      if (document.visibilityState === "visible") sync();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      alive = false;
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, []);
 
   // React flushes inserted-HTML several times per page during the static
   // export, and `renderToStyleElements` re-serializes Griffel's ENTIRE

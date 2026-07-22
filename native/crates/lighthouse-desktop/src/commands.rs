@@ -2229,3 +2229,34 @@ pub(crate) fn private_model_availability_impl() -> Value {
 pub async fn private_model_availability() -> Value {
     private_model_availability_impl()
 }
+
+/// §31: the OS "Reduce Transparency" accessibility setting. WKWebView exposes
+/// no `prefers-reduced-transparency` media query, so the shell answers
+/// natively and the UI stamps `data-reduce-transparency` on the document root
+/// (globals.css turns that into solid chrome surfaces). macOS asks
+/// NSWorkspace, iOS asks UIAccessibility; Windows/Linux have no equivalent
+/// queryable toggle — answer false there and the in-app glass slider rules.
+/// Re-queried by the UI on every return to foreground, so mid-session flips
+/// land without a relaunch.
+#[tauri::command]
+pub fn reduce_transparency() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2_app_kit::NSWorkspace;
+        // Read-only accessibility query on the shared workspace (the same
+        // objc2 unsafe idiom as whisper.rs's NSEvent monitors).
+        unsafe { NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceTransparency() }
+    }
+    #[cfg(target_os = "ios")]
+    {
+        // UIKit C symbol — present in every iOS process; no header dance.
+        extern "C" {
+            fn UIAccessibilityIsReduceTransparencyEnabled() -> bool;
+        }
+        unsafe { UIAccessibilityIsReduceTransparencyEnabled() }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+    {
+        false
+    }
+}

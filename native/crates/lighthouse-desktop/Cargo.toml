@@ -43,6 +43,10 @@ reqwest = { workspace = true, features = ["rustls-tls-native-roots"] }
 
 [target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
 reqwest = { workspace = true, features = ["rustls-tls-webpki-roots"] }
+# §31 touch feel: selection ticks + light impacts (src/shell/haptics.ts calls
+# the plugin commands directly over invoke — the npm wrapper is just that shim).
+# Mobile-only: desktop has no taptic hardware and never registers the plugin.
+tauri-plugin-haptics = "2"
 
 # add-mobile-local-inference: dlsym the Swift @_cdecl private-model shim at
 # RUNTIME (commands.rs) rather than a link-time extern — the Swift lives in the
@@ -70,7 +74,8 @@ windows-sys = { version = "0.60", features = [
 # trust check (whisper.rs). Versions match what tauri/tao already lock.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3", features = ["NSEvent", "block2"] }
+# NSWorkspace: the §31 Reduce Transparency read (commands::reduce_transparency).
+objc2-app-kit = { version = "0.3", features = ["NSEvent", "NSWorkspace", "block2"] }
 block2 = "0.6"
 core-foundation = "0.10"
 

@@ -16,6 +16,160 @@
      the bar is on screen; the compact pages, the chat composer, and the bug FAB
      read it. 0 everywhere the bar isn't shown — desktop is untouched. */
   --lh-tabbar-h: 0px;
+
+  /* §31: native controls, scrollbars, and form widgets follow the app theme.
+     Pre-hydration this declares both; app/providers.tsx narrows it to the
+     resolved theme after mount (the explicit colorScheme style wins). */
+  color-scheme: light dark;
+
+  /* --- §31 type: the Dynamic-Type root ---------------------------------------
+     1rem = HIG Body (17pt). The @supports block below hooks the root to the OS
+     body text style on WebKit so the iOS text-size setting scales the whole
+     app; everywhere else this 106.25% of the browser default (= 17px) is the
+     root. Every size in the app is rem (src/shell/theme.ts maps the Fluent
+     type tokens onto the HIG scale) — an explicit px on the hooked element
+     would sever the Dynamic Type link; never add one. Subhead has no Fluent
+     slot, so hand-rolled styles take it from these vars. */
+  font-size: 106.25%;
+  --lh-type-subhead: 0.8824rem; /* 15pt */
+  --lh-type-subhead-lh: 1.1765rem; /* 20pt */
+
+  /* --- §31 shape: the radius scale + concentric helper -----------------------
+     Controls 8 · cards 12 · floating surfaces 16 · sheet tops 26 · capsule.
+     Concentric rule: a child hugging a rounded parent uses parent − gap; set
+     --lh-parent-radius/--lh-gap on the parent, read the helper on the child. */
+  --lh-radius-control: 8px;
+  --lh-radius-card: 12px;
+  --lh-radius-surface: 16px;
+  --lh-radius-sheet: 26px;
+  --lh-capsule: 999px;
+  --lh-parent-radius: 16px;
+  --lh-gap: 4px;
+  --lh-radius-concentric: calc(var(--lh-parent-radius) - var(--lh-gap));
+
+  /* Hairlines: true 0.5px on retina; the low-density fallback below rounds up
+     so 1x desktops don't drop the line entirely. List separators inset to the
+     text edge, not the screen edge. */
+  --lh-hairline: 0.5px;
+  --lh-hairline-inset: 16px;
+
+  /* §31 ambient shadows — depth from layering, not dark smears. */
+  --lh-shadow-card: 0 8px 24px rgba(0, 0, 0, 0.08);
+  --lh-shadow-sheet: 0 12px 32px rgba(0, 0, 0, 0.12);
+
+  /* --- §31 motion: springs as linear() curves (Safari 17.2+, Chromium) -------
+     --lh-spring: a critically-damped settle (no overshoot) for most movement;
+     --lh-spring-bounce: one soft ~3% overshoot for sheet detent snaps and the
+     tab bar's return. Sampled from the damped-oscillator solution (ζ=1 and
+     ζ=0.72, ω=20rad/s). Engines without linear() fall back through the
+     comma-free var to their default easing — movement still happens. */
+  --lh-spring: linear(0, 0.4963 8.33%, 0.8454 16.67%, 0.9596 25%, 0.9902 33.33%, 0.9978 41.67%, 1 50%, 1);
+  --lh-spring-bounce: linear(0, 0.5927 8.33%, 0.992 16.67%, 1.035 25%, 1.0092 33.33%, 0.9991 41.67%, 0.9998 58.33%, 1);
+  --lh-dur-fast: 150ms;
+  --lh-dur: 250ms;
+  --lh-dur-slow: 400ms;
+  --lh-dur-fade: 150ms;
+
+  /* --- §31 glass -------------------------------------------------------------
+     --lh-glass-level: the in-app intensity (0 = solid, 1 = full), stamped by
+     app/providers.tsx from the appearance store; the reduce-transparency
+     override below forces solid regardless of the slider. Glass consumers
+     (the compact tab bar and sheets ONLY — the §2 budget) derive their
+     surface from these; blur stays ≤16px on mobile (docs/design-language.md
+     carries the budget). */
+  --lh-glass-level: 1;
+  --lh-glass-blur: 14px;
+  --lh-glass-saturate: 180%;
+
+  /* --- §31 semantic pairs (Paper) --------------------------------------------
+     iOS-style semantic names over the existing Beam palette for hand-rolled
+     CSS: background/secondary/grouped/elevated surfaces, the 4-step label
+     ramp, separator, fills, the one tint. Same gated colors as
+     src/shell/theme.ts — never introduce a new hue here. Quaternary is
+     decorative-only (below the contrast gate; never text). */
+  --lh-bg: #FAFAF8;
+  --lh-bg-secondary: #F4F4F1;
+  --lh-bg-grouped: #F0F0EC;
+  --lh-bg-elevated: #FFFFFF;
+  --lh-label: #1B1B1F;
+  --lh-label-secondary: #5A5A60;
+  --lh-label-tertiary: #68686F;
+  --lh-label-quaternary: #A9A9AE;
+  --lh-separator: #E7E7E2;
+  --lh-fill: #ECECE7;
+  --lh-fill-secondary: #F0F0EC;
+  --lh-tint: #E8A317;
+}
+
+/* WebKit only: ride the OS body text style — the iOS Dynamic Type hook (macOS
+   resolves it to the fixed system body; other engines skip the block). The
+   font shorthand resets family and size together; body below re-asserts the
+   family, so only the SIZE survives from here — which is the point. */
+@supports (font: -apple-system-body) {
+  :root {
+    font: -apple-system-body;
+  }
+}
+
+/* Ink (dark): the same semantic names on the night palette. Dark depth is
+   base-vs-elevated — a layered surface gets LIGHTER than its base, never an
+   inverted light theme. [data-theme] is stamped by providers.tsx after mount;
+   the prefers-color-scheme frame below covers pre-hydration paint only. */
+:root[data-theme="dark"] {
+  --lh-bg: #0E0F12;
+  --lh-bg-secondary: #16181C;
+  --lh-bg-grouped: #0E0F12;
+  --lh-bg-elevated: #1E2126;
+  --lh-label: #ECECEA;
+  --lh-label-secondary: #A2A2A8;
+  --lh-label-tertiary: #8A8A91;
+  --lh-label-quaternary: #5C5C63;
+  --lh-separator: #26282E;
+  --lh-fill: #22252B;
+  --lh-fill-secondary: #1A1D22;
+  --lh-tint: #FFC24D;
+  --lh-shadow-card: 0 8px 24px rgba(0, 0, 0, 0.35);
+  --lh-shadow-sheet: 0 12px 32px rgba(0, 0, 0, 0.45);
+}
+
+/* 1x displays can't paint half a pixel — round the hairline up, not away. */
+@media (max-resolution: 1.5dppx) {
+  :root {
+    --lh-hairline: 1px;
+  }
+}
+
+/* Reduce Transparency — the OS accessibility setting (stamped natively by the
+   shell via providers.tsx) or intensity 0 from the in-app slider. Solid
+   surfaces, no backdrop blur; glass consumers read only these vars, so the
+   fallback is total rather than per-call-site. */
+:root[data-reduce-transparency="true"] {
+  --lh-glass-level: 0;
+  --lh-glass-blur: 0px;
+  --lh-glass-saturate: 100%;
+}
+
+/* Reduced motion: movement collapses to near-instant while cross-fades keep a
+   short duration — fades ARE the reduced-motion vocabulary (--lh-dur-fade
+   deliberately stays). */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --lh-spring: linear(0, 1);
+    --lh-spring-bounce: linear(0, 1);
+    --lh-dur-fast: 0.01ms;
+    --lh-dur: 0.01ms;
+    --lh-dur-slow: 0.01ms;
+  }
+}
+
+/* §31 squircle: continuous corners where the engine supports them (Chromium/
+   Windows today). Behind @supports + an opt-in class so Apple platforms —
+   whose native look plain radii already match — render identically to their
+   OS, and unsupporting engines change nothing. */
+@supports (corner-shape: squircle) {
+  .lh-squircle {
+    corner-shape: squircle;
+  }
 }
 
 html,
@@ -28,13 +182,17 @@ body {
 body {
   /* Platform-native UI text - keep identical to FONT_STACK in
      src/shell/theme.ts (fontFamilyBase) so Fluent tokens and the
-     pre-hydration frame agree. */
-  font-family: -apple-system, "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+     pre-hydration frame agree. (This re-asserts the FAMILY after the root's
+     -apple-system-body shorthand; the root keeps only the size.) */
+  font-family: -apple-system, system-ui, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
   /* Match the light theme's paper canvas (colorNeutralBackground1 in
      src/shell/theme.ts) so the pre-hydration frame doesn't flash a wrong
      color before Fluent paints. */
   background-color: #FAFAF8;
   color: #1B1B1F;
+  /* §31 touch feel: no grey WebKit tap flash — the :active press treatment
+     (.lh-press) is THE feedback vocabulary. */
+  -webkit-tap-highlight-color: transparent;
 }
 
 /* Dark-OS pre-hydration frame: match darkLighthouseTheme's ink canvas.
@@ -46,6 +204,31 @@ body {
   body {
     background-color: #0E0F12;
     color: #ECECEA;
+  }
+}
+
+/* §31 touch feel: interactive elements never wait out the double-tap-zoom
+   delay; pinch-zoom on controls is off while page scroll stays native. */
+button,
+a,
+input,
+select,
+textarea,
+[role="button"],
+[role="tab"],
+[role="menuitem"],
+[role="option"] {
+  touch-action: manipulation;
+}
+
+/* The §31 press treatment: on touch, an active control compresses slightly.
+   Applied BY the control layer (tab bar, tiles, the swapped controls) rather
+   than globally, so Fluent's own pressed styles aren't fought where they
+   stand; desktop pointers keep hover/pressed color states instead. */
+@media (hover: none) {
+  .lh-press:active {
+    transform: scale(0.97);
+    transition: transform var(--lh-dur-fast) var(--lh-spring);
   }
 }
 

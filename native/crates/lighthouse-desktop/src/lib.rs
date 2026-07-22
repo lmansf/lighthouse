@@ -419,10 +419,15 @@ pub fn run() {
     // global-shortcut), widget/supervision state, and menu/window handlers.
     #[cfg(desktop)]
     let builder = desktop::configure(builder);
-    builder
+    let builder = builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_notification::init()) // G5 briefing-note alerts
+        .plugin(tauri_plugin_notification::init()); // G5 briefing-note alerts
+    // §31 touch feel: haptics exist only where there's a taptic engine — the
+    // plugin (and its capability, capabilities/mobile.json) is mobile-only.
+    #[cfg(mobile)]
+    let builder = builder.plugin(tauri_plugin_haptics::init());
+    builder
         .manage(ServerPort::default())
         .invoke_handler(tauri::generate_handler![
             commands::rag_list,
@@ -456,6 +461,7 @@ pub fn run() {
             commands::show_main,
             commands::open_vault_dir,
             commands::open_explorer,
+            commands::reduce_transparency,
         ])
         .setup(|app| {
             let handle = app.handle().clone();
