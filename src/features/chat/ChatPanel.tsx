@@ -2180,15 +2180,6 @@ function isChartPre(node: unknown): boolean {
 }
 
 /**
- * Renders an assistant answer's Markdown, upgrading [n] citation markers into
- * clickable superscript chips that jump to the matching reference card below.
- * Analytics extras (Phase C): ```lighthouse-chart fences render as theme-aware
- * SVG charts (the spec is engine-built from the verified query result — a
- * malformed spec falls back to a visible code block, never a broken drawing),
- * and every table gets a hover copy-as-CSV button.
- * Memoized so finished turns don't re-render on every streamed token.
- */
-/**
  * §35 §4: the renderer half of a collapsed section. The remark transform
  * (remarkCollapseSections) moved a long section's tail into an
  * `lh-collapsed-section` div; this swap shows a quiet 44px "Show more" until
@@ -2214,6 +2205,15 @@ function CollapsedSection({ children }: { children: ReactNode }) {
   return <div className={styles.collapsedReveal}>{children}</div>;
 }
 
+/**
+ * Renders an assistant answer's Markdown, upgrading [n] citation markers into
+ * clickable superscript chips that jump to the matching reference card below.
+ * Analytics extras (Phase C): ```lighthouse-chart fences render as theme-aware
+ * SVG charts (the spec is engine-built from the verified query result — a
+ * malformed spec falls back to a visible code block, never a broken drawing),
+ * and every table gets a hover copy-as-CSV button.
+ * Memoized so finished turns don't re-render on every streamed token.
+ */
 const AnswerMarkdown = memo(function AnswerMarkdown({
   content,
   turnId,
