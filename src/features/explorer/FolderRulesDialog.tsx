@@ -31,7 +31,7 @@ import {
   shorthands,
   tokens,
 } from "@fluentui/react-components";
-import { AddRegular, DeleteRegular } from "@fluentui/react-icons";
+import { IconAdd, IconTrash } from "@/shell/icons";
 import type { CurationRuleAction, CurationRuleInput, CurationRuleKind } from "@/contracts";
 import { useRagStore } from "@/stores/useRagStore";
 import { LhDialogSurface, LhSelect } from "@/shell/controls";
@@ -204,7 +204,7 @@ export function FolderRulesDialog({
                       <Button
                         size="small"
                         appearance="subtle"
-                        icon={<DeleteRegular />}
+                        icon={<IconTrash />}
                         aria-label={`Remove rule ${r.name}`}
                         onClick={() => void removeRule(r.id)}
                       />
@@ -269,7 +269,7 @@ export function FolderRulesDialog({
               <Button
                 appearance="primary"
                 size="small"
-                icon={<AddRegular />}
+                icon={<IconAdd />}
                 disabled={busy}
                 onClick={submit}
               >

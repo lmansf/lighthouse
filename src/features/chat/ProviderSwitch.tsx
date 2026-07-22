@@ -30,7 +30,7 @@ import {
   shorthands,
   tokens,
 } from "@fluentui/react-components";
-import { BrainCircuitRegular, SettingsRegular } from "@fluentui/react-icons";
+import { IconAI, IconSettings } from "@/shell/icons";
 import { useAuthStore } from "@/stores/useAuthStore";
 import { useRagStore } from "@/stores/useRagStore";
 import { useOnDeviceModel } from "@/stores/useOnDeviceModel";
@@ -160,7 +160,7 @@ export function ProviderSwitch({
             appearance="subtle"
             size={compact ? "medium" : "small"}
             className={compact ? styles.triggerCompact : styles.trigger}
-            icon={<BrainCircuitRegular />}
+            icon={<IconAI />}
             disabled={busy}
             disabledFocusable={disabledReason !== undefined}
             aria-label={disabledReason ?? `AI model: ${label} — switch`}
@@ -209,7 +209,7 @@ export function ProviderSwitch({
           )}
           <MenuDivider />
           <MenuItem
-            icon={<SettingsRegular />}
+            icon={<IconSettings />}
             onClick={() => window.dispatchEvent(new CustomEvent("lighthouse:open-ai-models"))}
           >
             Manage…

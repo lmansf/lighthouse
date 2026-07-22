@@ -46,42 +46,7 @@ import {
   shorthands,
   tokens,
 } from "@fluentui/react-components";
-import {
-  AddRegular,
-  ArrowClockwiseRegular,
-  ChevronDownRegular,
-  ArrowDownRegular,
-  ArrowUndoRegular,
-  AttachRegular,
-  BoardRegular,
-  CheckmarkRegular,
-  CodeRegular,
-  CopyRegular,
-  DeleteRegular,
-  ChatRegular,
-  DismissRegular,
-  DocumentAddRegular,
-  DocumentRegular,
-  EditRegular,
-  ErrorCircleRegular,
-  FilterRegular,
-  HistoryRegular,
-  LockClosedRegular,
-  OpenRegular,
-  SparkleRegular,
-  PinRegular,
-  PlayRegular,
-  SaveRegular,
-  SendRegular,
-  SettingsRegular,
-  ShieldRegular,
-  SquareRegular,
-  TableRegular,
-  TagRegular,
-  ThumbDislikeRegular,
-  ThumbLikeRegular,
-  WarningRegular,
-} from "@fluentui/react-icons";
+import { IconAdd, IconArrowDown, IconAttach, IconBoard, IconChat, IconCheck, IconChevronDown, IconClose, IconCode, IconCopy, IconDoc, IconDocAdd, IconEdit, IconError, IconFilter, IconHistory, IconLock, IconOpen, IconPin, IconPlay, IconRefresh, IconSave, IconSend, IconSettings, IconShield, IconSparkle, IconStop, IconTable, IconTag, IconThumbDown, IconThumbUp, IconTrash, IconUndo, IconWarning } from "@/shell/icons";
 import dynamic from "next/dynamic";
 import { type Components } from "react-markdown";
 import type { DragEvent, ReactNode } from "react";
@@ -1640,7 +1605,7 @@ function CopyCsvButton({ rows }: { rows: string[][] }) {
         size="small"
         appearance="secondary"
         className={mergeClasses(styles.copyCsvBtn, "lh-copy-csv")}
-        icon={copied ? <CheckmarkRegular /> : <CopyRegular />}
+        icon={copied ? <IconCheck /> : <IconCopy />}
         aria-label="Copy table as CSV"
         onClick={() => {
           void navigator.clipboard
@@ -1898,7 +1863,7 @@ function RefineChips({
         size="small"
         shape="circular"
         className={styles.quietChip}
-        icon={<CodeRegular />}
+        icon={<IconCode />}
         disabled={disabled}
         onClick={() => onEditSql(meta)}
       >
@@ -1910,7 +1875,7 @@ function RefineChips({
           size="small"
           shape="circular"
           className={styles.quietChip}
-          icon={<SaveRegular />}
+          icon={<IconSave />}
           disabled={disabled || savePending}
           onClick={() => onSave(meta)}
         >
@@ -1923,7 +1888,7 @@ function RefineChips({
           size="small"
           shape="circular"
           className={styles.quietChip}
-          icon={<DocumentRegular />}
+          icon={<IconDoc />}
           disabled={disabled || packPending}
           onClick={() => onEvidencePack(meta)}
         >
@@ -1936,7 +1901,7 @@ function RefineChips({
           size="small"
           shape="circular"
           className={styles.quietChip}
-          icon={<PinRegular />}
+          icon={<IconPin />}
           disabled={disabled || pinPending}
           onClick={() => onPin(meta)}
         >
@@ -1949,7 +1914,7 @@ function RefineChips({
           size="small"
           shape="circular"
           className={styles.quietChip}
-          icon={<TableRegular />}
+          icon={<IconTable />}
           disabled={disabled}
           onClick={() => onSaveView(meta)}
         >
@@ -1962,7 +1927,7 @@ function RefineChips({
           size="small"
           shape="circular"
           className={styles.quietChip}
-          icon={<TagRegular />}
+          icon={<IconTag />}
           disabled={disabled}
           onClick={() => onDefineMetric(meta)}
         >
@@ -2011,7 +1976,7 @@ function TrustBadges({ meta }: { meta: AnalyticsMeta }) {
         content="The engine parsed this answer's SQL and confirmed it computes the blessed definition."
         relationship="description"
       >
-        <Badge appearance="tint" color="success" icon={<ShieldRegular />}>
+        <Badge appearance="tint" color="success" icon={<IconShield />}>
           Certified: {certifiedNames.join(", ")}
         </Badge>
       </Tooltip>
@@ -2021,7 +1986,7 @@ function TrustBadges({ meta }: { meta: AnalyticsMeta }) {
         </Text>
       )}
       {reconcileFailed && (
-        <Badge appearance="tint" color="danger" icon={<WarningRegular />}>
+        <Badge appearance="tint" color="danger" icon={<IconWarning />}>
           Couldn&apos;t reconcile{trust?.metric ? ` ${trust.metric}` : ""}
         </Badge>
       )}
@@ -2179,7 +2144,7 @@ const AnswerMarkdown = memo(function AnswerMarkdown({
         if (LOCAL_ONLY_SKIP_NOTE_RE.test(hastText(node))) {
           return (
             <span className={styles.skipNoteCallout}>
-              <LockClosedRegular fontSize={14} className={styles.skipNoteIcon} />
+              <IconLock fontSize={14} className={styles.skipNoteIcon} />
               <span>{children}</span>
             </span>
           );
@@ -2397,9 +2362,9 @@ const References = memo(function References({
               {i + 1}
             </Badge>
             {r.kind === "conversation" ? (
-              <ChatRegular fontSize={14} />
+              <IconChat fontSize={14} />
             ) : (
-              <DocumentRegular fontSize={14} />
+              <IconDoc fontSize={14} />
             )}
             <span className={styles.refChipName}>{middleTruncateName(r.name)}</span>
             <span className={styles.refChipPct}>· {Math.round(r.score * 100)}%</span>
@@ -2419,7 +2384,7 @@ const References = memo(function References({
                   void onOpen(r.fileId);
                 }}
               >
-                <OpenRegular fontSize={14} />
+                <IconOpen fontSize={14} />
               </span>
             )}
           </span>
@@ -2436,7 +2401,7 @@ const References = memo(function References({
             title="Re-ask this question drawing on all of these files together"
             onClick={() => onSynthesize(turnId, references)}
           >
-            <SparkleRegular fontSize={14} /> Synthesize
+            <IconSparkle fontSize={14} /> Synthesize
           </button>
         )}
       </div>
@@ -4363,7 +4328,7 @@ export function ChatPanel() {
     <Tooltip content="Chat history" relationship="label">
       <Button
         appearance="subtle"
-        icon={<HistoryRegular />}
+        icon={<IconHistory />}
         aria-label="Chat history"
         onClick={() => setHistoryOpen(true)}
       />
@@ -4373,7 +4338,7 @@ export function ChatPanel() {
       <PopoverTrigger disableButtonEnhancement>
         <Button
           appearance="subtle"
-          icon={<HistoryRegular />}
+          icon={<IconHistory />}
           aria-label="Chat history"
           title="Chat history"
         />
@@ -4404,7 +4369,7 @@ export function ChatPanel() {
     currentInvestigation && scopeCount !== null ? (
       <div className={styles.attachBar}>
         <Text size={200} className={styles.attachHint}>
-          <FilterRegular fontSize={14} />
+          <IconFilter fontSize={14} />
           {scopeLabel} · {currentInvestigation.name}
         </Text>
       </div>
@@ -4414,12 +4379,12 @@ export function ChatPanel() {
     attachments.length > 0 ? (
       <div className={styles.attachBar}>
         <Text size={200} className={styles.attachHint}>
-          <AttachRegular fontSize={14} />
+          <IconAttach fontSize={14} />
           Asking about:
         </Text>
         {attachments.map((a) => (
           <span key={a.id} className={styles.attachChip}>
-            <DocumentRegular fontSize={14} />
+            <IconDoc fontSize={14} />
             <span className={styles.attachName} title={a.name}>
               {a.name}
             </span>
@@ -4433,7 +4398,7 @@ export function ChatPanel() {
                 (e.key === "Enter" || e.key === " ") && removeAttachment(a.id)
               }
             >
-              <DismissRegular fontSize={12} />
+              <IconClose fontSize={12} />
             </span>
           </span>
         ))}
@@ -4452,7 +4417,7 @@ export function ChatPanel() {
     >
       <PopoverTrigger disableButtonEnhancement>
         <Tooltip content="Attach files to this question" relationship="label">
-          <Button appearance="subtle" icon={<AttachRegular />} aria-label="Attach files" />
+          <Button appearance="subtle" icon={<IconAttach />} aria-label="Attach files" />
         </Tooltip>
       </PopoverTrigger>
       <PopoverSurface className={styles.attachSurface}>
@@ -4480,7 +4445,7 @@ export function ChatPanel() {
                   setAttachSearch("");
                 }}
               >
-                <DocumentRegular fontSize={16} />
+                <IconDoc fontSize={16} />
                 <span className={styles.attachItemName} title={n.name}>
                   {n.name}
                 </span>
@@ -4491,7 +4456,7 @@ export function ChatPanel() {
         <Button
           appearance="subtle"
           size="small"
-          icon={<DocumentAddRegular />}
+          icon={<IconDocAdd />}
           onClick={() => {
             setAttachOpen(false);
             window.dispatchEvent(new CustomEvent("lighthouse:browse-files"));
@@ -4507,7 +4472,7 @@ export function ChatPanel() {
     <div>
       {showUndo && (
         <div className={styles.undoBar}>
-          <ArrowUndoRegular fontSize={16} />
+          <IconUndo fontSize={16} />
           <Text size={200}>Started a new chat — the previous one is saved in your history.</Text>
           <span style={{ flex: 1 }} />
           <Button size="small" appearance="primary" onClick={undoNewChat}>
@@ -4516,7 +4481,7 @@ export function ChatPanel() {
           <Button
             size="small"
             appearance="subtle"
-            icon={<DismissRegular />}
+            icon={<IconClose />}
             aria-label="Dismiss"
             onClick={() => {
               if (undoTimer.current !== null) window.clearTimeout(undoTimer.current);
@@ -4529,12 +4494,12 @@ export function ChatPanel() {
         <div className={styles.undoBar}>
           {exportNote.error ? (
             <>
-              <ErrorCircleRegular fontSize={16} />
+              <IconError fontSize={16} />
               <Text size={200}>Couldn&apos;t save the note — {exportNote.error}</Text>
             </>
           ) : (
             <>
-              <CheckmarkRegular fontSize={16} />
+              <IconCheck fontSize={16} />
               <Text size={200}>Saved “{exportNote.name}” to Lighthouse Notes in your vault.</Text>
             </>
           )}
@@ -4551,7 +4516,7 @@ export function ChatPanel() {
           <Button
             size="small"
             appearance="subtle"
-            icon={<DismissRegular />}
+            icon={<IconClose />}
             aria-label="Dismiss"
             onClick={() => {
               if (exportNoteTimer.current !== null) window.clearTimeout(exportNoteTimer.current);
@@ -4563,16 +4528,16 @@ export function ChatPanel() {
       {providerNote && (
         <div className={styles.undoBar} role="status">
           {providerNote.ok ? (
-            <CheckmarkRegular fontSize={16} />
+            <IconCheck fontSize={16} />
           ) : (
-            <ErrorCircleRegular fontSize={16} />
+            <IconError fontSize={16} />
           )}
           <Text size={200}>{providerNote.text}</Text>
           <span style={{ flex: 1 }} />
           <Button
             size="small"
             appearance="subtle"
-            icon={<DismissRegular />}
+            icon={<IconClose />}
             aria-label="Dismiss"
             onClick={() => {
               if (providerNoteTimer.current !== null)
@@ -4587,7 +4552,7 @@ export function ChatPanel() {
           <Text size={200}>{addNotice}</Text>
           <span style={{ flex: 1 }} />
           <Button
-            icon={<DismissRegular />}
+            icon={<IconClose />}
             size="small"
             appearance="subtle"
             aria-label="Dismiss"
@@ -4645,7 +4610,7 @@ export function ChatPanel() {
                 onMouseDown={(e) => e.preventDefault()}
                 onClick={() => acceptMention(m)}
               >
-                <DocumentRegular fontSize={14} className={styles.askSuggestIcon} />
+                <IconDoc fontSize={14} className={styles.askSuggestIcon} />
                 <span className={styles.askSuggestText}>
                   {emphasize(m.name, m.nameHits, styles.mentionHit)}
                 </span>
@@ -4680,9 +4645,9 @@ export function ChatPanel() {
                 onClick={() => acceptSuggestion(s.text)}
               >
                 {s.source === "pin" ? (
-                  <PinRegular fontSize={14} className={styles.askSuggestIcon} />
+                  <IconPin fontSize={14} className={styles.askSuggestIcon} />
                 ) : (
-                  <HistoryRegular fontSize={14} className={styles.askSuggestIcon} />
+                  <IconHistory fontSize={14} className={styles.askSuggestIcon} />
                 )}
                 <span className={styles.askSuggestText}>{s.text}</span>
               </div>
@@ -4743,11 +4708,11 @@ export function ChatPanel() {
             />
           </div>
           {streaming ? (
-            <Button appearance="secondary" icon={<SquareRegular />} onClick={stopStreaming}>
+            <Button appearance="secondary" icon={<IconStop />} onClick={stopStreaming}>
               Stop
             </Button>
           ) : (
-            <Button appearance="primary" icon={<SendRegular />} onClick={() => ask()}>
+            <Button appearance="primary" icon={<IconSend />} onClick={() => ask()}>
               Ask
             </Button>
           )}
@@ -4775,7 +4740,7 @@ export function ChatPanel() {
             className={styles.ghostAcceptTouch}
             onClick={() => applySuggestion(question + ghostText)}
           >
-            <CheckmarkRegular fontSize={14} />
+            <IconCheck fontSize={14} />
             <span>Complete:</span>
             <span className={styles.ghostAcceptText}>{ghostText.trim()}</span>
           </button>
@@ -4793,7 +4758,7 @@ export function ChatPanel() {
   const pinAlertBanner =
     pinAlerts.length > 0 ? (
       <div className={styles.pinBanner} role="status">
-        <PinRegular fontSize={16} />
+        <IconPin fontSize={16} />
         <Text size={200} weight="semibold">
           {pinAlerts.length === 1 ? "A pinned answer changed:" : "Pinned answers changed:"}
         </Text>
@@ -4826,7 +4791,7 @@ export function ChatPanel() {
         <Button
           size="small"
           appearance="subtle"
-          icon={<DismissRegular />}
+          icon={<IconClose />}
           aria-label="Dismiss pin alerts"
           onClick={() => setPinAlerts([])}
         />
@@ -4858,7 +4823,7 @@ export function ChatPanel() {
               <div className={styles.pinList}>
                 {pinList.map((p) => (
                   <div key={p.id} className={styles.pinRow}>
-                    <PinRegular fontSize={16} />
+                    <IconPin fontSize={16} />
                     <div className={styles.pinRowMain}>
                       <Text size={300} weight="semibold">
                         {p.question}
@@ -4892,7 +4857,7 @@ export function ChatPanel() {
                       <Button
                         size="small"
                         appearance="subtle"
-                        icon={<BoardRegular />}
+                        icon={<IconBoard />}
                         aria-label={`Add to board: ${p.question}`}
                         disabled={pinsBusy}
                         onClick={() => void addPinRowToBoard(p.id)}
@@ -4901,7 +4866,7 @@ export function ChatPanel() {
                     <Button
                       size="small"
                       appearance="subtle"
-                      icon={<DeleteRegular />}
+                      icon={<IconTrash />}
                       aria-label={`Remove pin: ${p.question}`}
                       disabled={pinsBusy}
                       onClick={() => void removePin(p.id)}
@@ -4986,7 +4951,7 @@ export function ChatPanel() {
               <Button
                 appearance="subtle"
                 size="small"
-                icon={<ChevronDownRegular />}
+                icon={<IconChevronDown />}
                 onClick={() => setInvOpen(true)}
               >
                 Investigations
@@ -4994,7 +4959,7 @@ export function ChatPanel() {
             ) : (
               <Popover open={invOpen} onOpenChange={(_, d) => setInvOpen(d.open)} positioning="below-start">
                 <PopoverTrigger disableButtonEnhancement>
-                  <Button appearance="subtle" size="small" icon={<ChevronDownRegular />}>
+                  <Button appearance="subtle" size="small" icon={<IconChevronDown />}>
                     Investigations
                   </Button>
                 </PopoverTrigger>
@@ -5008,14 +4973,14 @@ export function ChatPanel() {
             // Pre-flight: nothing is visible to AI yet. Inform gently and offer
             // the fix, but never block asking.
             <div className={styles.noFilesCard}>
-              <WarningRegular fontSize={20} />
+              <IconWarning fontSize={20} />
               <Text size={300}>
                 The AI can&apos;t see any files yet. Answers will be generic until you add
                 files and make them visible.
               </Text>
               <Button
                 appearance="primary"
-                icon={<DocumentAddRegular />}
+                icon={<IconDocAdd />}
                 onClick={() => window.dispatchEvent(new CustomEvent("lighthouse:browse-files"))}
               >
                 Add files
@@ -5112,7 +5077,7 @@ export function ChatPanel() {
                 <Title3 className={styles.headerTitleName}>
                   {currentInvestigation ? currentInvestigation.name : "Ask"}
                 </Title3>
-                <ChevronDownRegular fontSize={16} aria-hidden />
+                <IconChevronDown fontSize={16} aria-hidden />
               </button>
             ) : (
               <Popover open={invOpen} onOpenChange={(_, d) => setInvOpen(d.open)} positioning="below-start">
@@ -5121,7 +5086,7 @@ export function ChatPanel() {
                     <Title3 className={styles.headerTitleName}>
                       {currentInvestigation ? currentInvestigation.name : "Ask"}
                     </Title3>
-                    <ChevronDownRegular fontSize={16} aria-hidden />
+                    <IconChevronDown fontSize={16} aria-hidden />
                   </button>
                 </PopoverTrigger>
                 <PopoverSurface className={styles.invSurface}>
@@ -5158,7 +5123,7 @@ export function ChatPanel() {
             <Tooltip content="Save this chat as a note in your vault" relationship="label">
               <Button
                 appearance="subtle"
-                icon={<SaveRegular />}
+                icon={<IconSave />}
                 aria-label="Save chat to a vault note"
                 disabled={streaming || exportBusy}
                 onClick={() => void exportChatToNote()}
@@ -5166,7 +5131,7 @@ export function ChatPanel() {
             </Tooltip>
             <Button
               appearance="subtle"
-              icon={<AddRegular />}
+              icon={<IconAdd />}
               disabled={streaming}
               onClick={newChat}
               title={`Start a fresh conversation (${modKey()}+N)`}
@@ -5211,7 +5176,7 @@ export function ChatPanel() {
                         <Button
                           size="small"
                           appearance="primary"
-                          icon={<SendRegular />}
+                          icon={<IconSend />}
                           onClick={() => saveEdit(m.id)}
                         >
                           Update
@@ -5228,7 +5193,7 @@ export function ChatPanel() {
                               size="small"
                               appearance="subtle"
                               className={styles.actionBtn}
-                              icon={<EditRegular />}
+                              icon={<IconEdit />}
                               aria-label="Edit question"
                               onClick={() => startEdit(m.id, m.content)}
                             />
@@ -5294,7 +5259,7 @@ export function ChatPanel() {
                       )}
                       {m.error && (
                         <div className={styles.errorNotice}>
-                          <ErrorCircleRegular fontSize={16} />
+                          <IconError fontSize={16} />
                           <Text size={200}>Couldn&apos;t get an answer — {m.error}.</Text>
                           <span style={{ flex: 1 }} />
                           <Button
@@ -5308,7 +5273,7 @@ export function ChatPanel() {
                           <Button
                             size="small"
                             appearance="subtle"
-                            icon={<SettingsRegular />}
+                            icon={<IconSettings />}
                             onClick={() =>
                               window.dispatchEvent(new CustomEvent("lighthouse:open-ai-models"))
                             }
@@ -5328,7 +5293,7 @@ export function ChatPanel() {
                               className={styles.actionBtn}
                               appearance="subtle"
                               size="small"
-                              icon={copiedId === m.id ? <CheckmarkRegular /> : <CopyRegular />}
+                              icon={copiedId === m.id ? <IconCheck /> : <IconCopy />}
                               aria-label="Copy answer"
                               onClick={() => void copyAnswer(m.id, m.content)}
                             />
@@ -5338,7 +5303,7 @@ export function ChatPanel() {
                               className={styles.actionBtn}
                               appearance="subtle"
                               size="small"
-                              icon={<ArrowClockwiseRegular />}
+                              icon={<IconRefresh />}
                               aria-label="Regenerate answer"
                               disabled={streaming}
                               onClick={() => regenerate(m.id)}
@@ -5349,7 +5314,7 @@ export function ChatPanel() {
                               className={ratings[m.id] === "up" ? styles.thumbActive : styles.actionBtn}
                               appearance="subtle"
                               size="small"
-                              icon={<ThumbLikeRegular />}
+                              icon={<IconThumbUp />}
                               aria-label="Good answer"
                               aria-pressed={ratings[m.id] === "up"}
                               onClick={() => rateAnswer(m.id, "up")}
@@ -5362,7 +5327,7 @@ export function ChatPanel() {
                               }
                               appearance="subtle"
                               size="small"
-                              icon={<ThumbDislikeRegular />}
+                              icon={<IconThumbDown />}
                               aria-label="Bad answer"
                               aria-pressed={ratings[m.id] === "down"}
                               onClick={() => rateAnswer(m.id, "down")}
@@ -5401,7 +5366,7 @@ export function ChatPanel() {
                           />
                           {pinNotes[m.id]?.ok && (
                             <div className={styles.savedNote}>
-                              <PinRegular fontSize={14} />
+                              <IconPin fontSize={14} />
                               <Text size={200}>
                                 Pinned — Lighthouse will flag this question when the underlying
                                 files change.
@@ -5421,7 +5386,7 @@ export function ChatPanel() {
                                 <Button
                                   size="small"
                                   appearance="subtle"
-                                  icon={<BoardRegular />}
+                                  icon={<IconBoard />}
                                   onClick={() => void addPinNoteToBoard(m.id)}
                                 >
                                   Add to board
@@ -5431,13 +5396,13 @@ export function ChatPanel() {
                           )}
                           {pinNotes[m.id]?.error && (
                             <div className={styles.savedNote}>
-                              <ErrorCircleRegular fontSize={14} />
+                              <IconError fontSize={14} />
                               <Text size={200}>Couldn&apos;t pin — {pinNotes[m.id].error}</Text>
                             </div>
                           )}
                           {savedNotes[m.id]?.name && (
                             <div className={styles.savedNote}>
-                              <CheckmarkRegular fontSize={14} />
+                              <IconCheck fontSize={14} />
                               <Text size={200}>
                                 Saved “{savedNotes[m.id].name}” to Lighthouse Results — now a
                                 queryable vault file.
@@ -5453,13 +5418,13 @@ export function ChatPanel() {
                           )}
                           {savedNotes[m.id]?.error && (
                             <div className={styles.savedNote}>
-                              <ErrorCircleRegular fontSize={14} />
+                              <IconError fontSize={14} />
                               <Text size={200}>Couldn&apos;t save — {savedNotes[m.id].error}</Text>
                             </div>
                           )}
                           {packNotes[m.id]?.name && (
                             <div className={styles.savedNote}>
-                              <CheckmarkRegular fontSize={14} />
+                              <IconCheck fontSize={14} />
                               <Text size={200}>
                                 Saved “{packNotes[m.id].name}” to Lighthouse Results — a
                                 self-contained evidence pack you can share.
@@ -5475,7 +5440,7 @@ export function ChatPanel() {
                           )}
                           {packNotes[m.id]?.error && (
                             <div className={styles.savedNote}>
-                              <ErrorCircleRegular fontSize={14} />
+                              <IconError fontSize={14} />
                               <Text size={200}>
                                 Couldn&apos;t save the evidence pack — {packNotes[m.id].error}
                               </Text>
@@ -5486,7 +5451,7 @@ export function ChatPanel() {
                               inline pattern; refusals show in the dialog. */}
                           {viewNotes[m.id]?.name && (
                             <div className={styles.savedNote}>
-                              <CheckmarkRegular fontSize={14} />
+                              <IconCheck fontSize={14} />
                               <Text size={200}>
                                 Saved view “{viewNotes[m.id].name}” — ask against it like any
                                 table.
@@ -5577,7 +5542,7 @@ export function ChatPanel() {
               appearance="subtle"
               size="small"
               shape="circular"
-              icon={<ArrowDownRegular />}
+              icon={<IconArrowDown />}
               onClick={jumpToLatest}
             >
               Jump to latest
@@ -5628,7 +5593,7 @@ export function ChatPanel() {
               )}
               {sqlOutcome?.error && (
                 <div className={styles.errorNotice}>
-                  <ErrorCircleRegular fontSize={16} />
+                  <IconError fontSize={16} />
                   <Text size={200}>{sqlOutcome.error}</Text>
                 </div>
               )}
@@ -5648,7 +5613,7 @@ export function ChatPanel() {
               </Button>
               <Button
                 appearance="primary"
-                icon={<PlayRegular />}
+                icon={<IconPlay />}
                 disabled={sqlRunning || !sqlDraft.trim()}
                 onClick={() => void runSqlDraft()}
               >

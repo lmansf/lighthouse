@@ -34,7 +34,7 @@ import {
   shorthands,
   tokens,
 } from "@fluentui/react-components";
-import { LockClosedRegular } from "@fluentui/react-icons";
+import { IconLock } from "@/shell/icons";
 import { ragService, type ViewInspection } from "@/contracts";
 import { LhDialogSurface } from "@/shell/controls";
 
@@ -219,7 +219,7 @@ export function ViewInspector({
                 {localOnly && (
                   <div className={styles.section}>
                     <span className={styles.privatePill}>
-                      <LockClosedRegular />
+                      <IconLock />
                       <Text>Private — this device only</Text>
                     </span>
                     <Text size={200} className={styles.footNote}>

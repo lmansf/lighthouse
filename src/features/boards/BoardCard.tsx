@@ -49,13 +49,7 @@ import {
   shorthands,
   tokens,
 } from "@fluentui/react-components";
-import {
-  ArrowDownRegular,
-  ArrowUpRegular,
-  DeleteRegular,
-  MoreHorizontalRegular,
-  ReOrderDotsVerticalRegular,
-} from "@fluentui/react-icons";
+import { IconArrowDown, IconArrowUp, IconDragHandle, IconMore, IconTrash } from "@/shell/icons";
 import type {
   BoardCardRef,
   BoardCardRefresh,
@@ -369,7 +363,7 @@ export function BoardCard(props: BoardCardProps) {
         <Button
           size="small"
           appearance="secondary"
-          icon={<DeleteRegular />}
+          icon={<IconTrash />}
           disabled={busy}
           onClick={() => props.onRemove(index)}
         >
@@ -414,7 +408,7 @@ export function BoardCard(props: BoardCardProps) {
       onDrop={(e) => props.onDropCard(index, e)}
     >
       <div className={styles.header}>
-        <ReOrderDotsVerticalRegular fontSize={14} className={styles.dragHandle} aria-hidden />
+        <IconDragHandle fontSize={14} className={styles.dragHandle} aria-hidden />
         <Text size={300} weight="semibold" className={styles.question} title={question}>
           {tombstone ? "Removed pin" : question ?? "…"}
         </Text>
@@ -443,7 +437,7 @@ export function BoardCard(props: BoardCardProps) {
             <Button
               size="small"
               appearance="subtle"
-              icon={<MoreHorizontalRegular />}
+              icon={<IconMore />}
               aria-label={`Card options: ${question ?? "removed pin"}`}
             />
           </MenuTrigger>
@@ -452,14 +446,14 @@ export function BoardCard(props: BoardCardProps) {
               {/* Keyboard-first reorder: these controls are the primary path;
                   pointer drag is only an enhancement. */}
               <MenuItem
-                icon={<ArrowUpRegular />}
+                icon={<IconArrowUp />}
                 disabled={busy || index === 0}
                 onClick={() => props.onMove(index, -1)}
               >
                 Move up
               </MenuItem>
               <MenuItem
-                icon={<ArrowDownRegular />}
+                icon={<IconArrowDown />}
                 disabled={busy || index === count - 1}
                 onClick={() => props.onMove(index, 1)}
               >
@@ -478,7 +472,7 @@ export function BoardCard(props: BoardCardProps) {
               <MenuDivider />
               {/* A card is a reference — removing it never touches the pin. */}
               <MenuItem
-                icon={<DeleteRegular />}
+                icon={<IconTrash />}
                 disabled={busy}
                 onClick={() => props.onRemove(index)}
               >

@@ -145,7 +145,7 @@ test("the nav is calm and non-destructive: tour anchor, plain Archive, neutral s
   assert.match(nav, /setInvestigationArchived\(id, true\)/, "archive is the visibility flag op");
   assert.doesNotMatch(
     nav,
-    /deleteInvestigation|removeInvestigation|removeFromVault|DeleteRegular/,
+    /deleteInvestigation|removeInvestigation|removeFromVault|IconTrash/,
     "no delete operation or affordance anywhere in the nav",
   );
   // The active row is the calmed explorer inset — neutral fill + hairline —

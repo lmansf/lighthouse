@@ -25,14 +25,7 @@
  */
 import { useEffect, useState } from "react";
 import { makeStyles, mergeClasses, shorthands, tokens } from "@fluentui/react-components";
-import {
-  ChatRegular,
-  ChatFilled,
-  FolderRegular,
-  FolderFilled,
-  SettingsRegular,
-  SettingsFilled,
-} from "@fluentui/react-icons";
+import { IconChat, IconChatFilled, IconFolder, IconFolderFilled, IconSettings, IconSettingsFilled } from "@/shell/icons";
 import { COMPACT_TABS, type CompactTab } from "./paneLayout";
 
 /** The bar's content height in px (the capsule row; the float gap and
@@ -47,9 +40,9 @@ export const TAB_BAR_FLOAT_GAP = 8;
 /** Outline glyph (inactive) + filled glyph (active) per destination — the iOS
  *  tab-bar idiom. Kept here, not in paneLayout, so the verdict stays Fluent-free. */
 const TAB_ICONS: Record<CompactTab, { rest: React.ReactNode; active: React.ReactNode }> = {
-  chat: { rest: <ChatRegular />, active: <ChatFilled /> },
-  files: { rest: <FolderRegular />, active: <FolderFilled /> },
-  settings: { rest: <SettingsRegular />, active: <SettingsFilled /> },
+  chat: { rest: <IconChat />, active: <IconChatFilled /> },
+  files: { rest: <IconFolder />, active: <IconFolderFilled /> },
+  settings: { rest: <IconSettings />, active: <IconSettingsFilled /> },
 };
 
 const useStyles = makeStyles({

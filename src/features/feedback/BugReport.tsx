@@ -18,7 +18,7 @@ import {
   shorthands,
   tokens,
 } from "@fluentui/react-components";
-import { LightbulbRegular, MailRegular, OpenRegular } from "@fluentui/react-icons";
+import { IconInsight, IconMail, IconOpen } from "@/shell/icons";
 import {
   buildFeedbackMailto,
   buildFeedbackIssueUrl,
@@ -181,7 +181,7 @@ export function BugReport() {
           <Button
             className={styles.fab}
             appearance="subtle"
-            icon={<LightbulbRegular />}
+            icon={<IconInsight />}
             aria-label="Send feedback"
           />
         </Tooltip>
@@ -250,7 +250,7 @@ export function BugReport() {
             <div className={styles.handoffs}>
               <Button
                 appearance="secondary"
-                icon={<OpenRegular />}
+                icon={<IconOpen />}
                 disabled={!canSend}
                 onClick={() => openExternal(buildFeedbackIssueUrl(report))}
               >
@@ -258,7 +258,7 @@ export function BugReport() {
               </Button>
               <Button
                 appearance="primary"
-                icon={<MailRegular />}
+                icon={<IconMail />}
                 disabled={!canSend}
                 onClick={() => openExternal(buildFeedbackMailto(report))}
               >

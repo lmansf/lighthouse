@@ -26,7 +26,7 @@ import {
   makeStyles,
   tokens,
 } from "@fluentui/react-components";
-import { ErrorCircleRegular } from "@fluentui/react-icons";
+import { IconError } from "@/shell/icons";
 import type { View } from "@/contracts";
 import { ragService } from "@/contracts";
 import { LhDialogSurface } from "@/shell/controls";
@@ -137,7 +137,7 @@ export function SaveViewDialog({
             </Field>
             {error && (
               <div className={styles.errorNote}>
-                <ErrorCircleRegular fontSize={16} />
+                <IconError fontSize={16} />
                 <Text size={200}>{error}</Text>
               </div>
             )}

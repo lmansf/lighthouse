@@ -15,17 +15,7 @@
  */
 import { useState } from "react";
 import { Button, Text, makeStyles, shorthands, tokens } from "@fluentui/react-components";
-import {
-  BoardRegular,
-  BrainCircuitRegular,
-  HistoryRegular,
-  InfoRegular,
-  LightbulbRegular,
-  OpenRegular,
-  OptionsRegular,
-  PinRegular,
-  QuestionCircleRegular,
-} from "@fluentui/react-icons";
+import { IconAI, IconBoard, IconHelp, IconHistory, IconInfo, IconInsight, IconOpen, IconOptions, IconPin } from "@/shell/icons";
 import {
   AboutDialog,
   AiModelsDialog,
@@ -97,19 +87,19 @@ export function SettingsPage() {
   return (
     <div className={styles.page} aria-label="Settings">
       <div className={styles.group}>
-        <Row icon={<OptionsRegular />} label="Preferences" onClick={() => setPrefDlg(true)} />
-        <Row icon={<BrainCircuitRegular />} label="AI models" onClick={() => setAiDlg(true)} />
+        <Row icon={<IconOptions />} label="Preferences" onClick={() => setPrefDlg(true)} />
+        <Row icon={<IconAI />} label="AI models" onClick={() => setAiDlg(true)} />
         <Row
-          icon={<PinRegular />}
+          icon={<IconPin />}
           label="Pinned questions"
           onClick={() => window.dispatchEvent(new CustomEvent("lighthouse:open-pins"))}
         />
         <Row
-          icon={<BoardRegular />}
+          icon={<IconBoard />}
           label="Board"
           onClick={() => window.dispatchEvent(new CustomEvent("lighthouse:open-board"))}
         />
-        <Row icon={<HistoryRegular />} label="Audit log" onClick={() => setAuditDlg(true)} />
+        <Row icon={<IconHistory />} label="Audit log" onClick={() => setAuditDlg(true)} />
       </div>
 
       {/* 0.13.10 §3: Business definitions — SemanticNav's management content
@@ -142,21 +132,21 @@ export function SettingsPage() {
       </Text>
       <div className={styles.group}>
         <Row
-          icon={<LightbulbRegular />}
+          icon={<IconInsight />}
           label="Send feedback"
           onClick={() => window.dispatchEvent(new Event("lighthouse:open-feedback"))}
         />
         <Row
-          icon={<QuestionCircleRegular />}
+          icon={<IconHelp />}
           label="Take the tour"
           onClick={() => window.dispatchEvent(new Event(START_TOUR_EVENT))}
         />
         <Row
-          icon={<OpenRegular />}
+          icon={<IconOpen />}
           label="Lighthouse on GitHub"
           onClick={() => window.open(LH_REPO, "_blank", "noopener,noreferrer")}
         />
-        <Row icon={<InfoRegular />} label="About Lighthouse" onClick={() => setAboutDlg(true)} />
+        <Row icon={<IconInfo />} label="About Lighthouse" onClick={() => setAboutDlg(true)} />
       </div>
 
       <AiModelsDialog open={aiDlg} setOpen={setAiDlg} />

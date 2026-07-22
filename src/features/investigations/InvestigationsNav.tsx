@@ -40,15 +40,7 @@ import {
   shorthands,
   tokens,
 } from "@fluentui/react-components";
-import {
-  AddRegular,
-  ArchiveRegular,
-  ArrowExportRegular,
-  BranchRegular,
-  CheckmarkRegular,
-  DismissRegular,
-  RenameRegular,
-} from "@fluentui/react-icons";
+import { IconAdd, IconArchive, IconBranch, IconCheck, IconClose, IconExport, IconRename } from "@/shell/icons";
 import type { Investigation } from "@/contracts";
 import { ragService } from "@/contracts";
 import { useChatStore } from "@/stores/useChatStore";
@@ -361,7 +353,7 @@ export function InvestigationsNav() {
               <Button
                 size="small"
                 appearance="primary"
-                icon={<CheckmarkRegular />}
+                icon={<IconCheck />}
                 aria-label="Save name"
                 disabled={busy || !renameText.trim()}
                 onClick={() => void commitRename(inv.id)}
@@ -369,7 +361,7 @@ export function InvestigationsNav() {
               <Button
                 size="small"
                 appearance="subtle"
-                icon={<DismissRegular />}
+                icon={<IconClose />}
                 aria-label="Cancel rename"
                 onClick={() => {
                   setRenamingId(null);
@@ -408,7 +400,7 @@ export function InvestigationsNav() {
             <LhMenuPopover>
               <MenuList>
                 <MenuItem
-                  icon={<RenameRegular />}
+                  icon={<IconRename />}
                   onClick={() => {
                     setRenamingId(inv.id);
                     setRenameText(inv.name);
@@ -419,17 +411,17 @@ export function InvestigationsNav() {
                 </MenuItem>
                 {/* Branch: a fresh line seeded with this one's scope, policy,
                     and conversation context — its own id and empty notes. */}
-                <MenuItem icon={<BranchRegular />} onClick={() => openFork(inv)}>
+                <MenuItem icon={<IconBranch />} onClick={() => openFork(inv)}>
                   Branch
                 </MenuItem>
                 {/* Export: a references-only markdown note (structure +
                     membership, never transcripts) into this investigation's
                     own notes folder. */}
-                <MenuItem icon={<ArrowExportRegular />} onClick={() => void exportNow(inv)}>
+                <MenuItem icon={<IconExport />} onClick={() => void exportNow(inv)}>
                   Export
                 </MenuItem>
                 {/* Archive hides it from this list; chats, pins, and notes stay. */}
-                <MenuItem icon={<ArchiveRegular />} onClick={() => void archiveNow(inv.id)}>
+                <MenuItem icon={<IconArchive />} onClick={() => void archiveNow(inv.id)}>
                   Archive
                 </MenuItem>
               </MenuList>
@@ -457,7 +449,7 @@ export function InvestigationsNav() {
       <Button
         appearance="subtle"
         size="small"
-        icon={<AddRegular />}
+        icon={<IconAdd />}
         className={styles.newButton}
         onClick={openCreate}
       >

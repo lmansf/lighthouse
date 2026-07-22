@@ -35,7 +35,7 @@ import {
   makeStyles,
   tokens,
 } from "@fluentui/react-components";
-import { CheckmarkRegular, ErrorCircleRegular } from "@fluentui/react-icons";
+import { IconCheck, IconError } from "@/shell/icons";
 import dynamic from "next/dynamic";
 import type { ShapeProposal } from "@/contracts";
 import { ragService } from "@/contracts";
@@ -302,7 +302,7 @@ export function ShapeViewDialog({
 
             {phase.kind === "saved" && (
               <div className={styles.savedNote}>
-                <CheckmarkRegular fontSize={14} />
+                <IconCheck fontSize={14} />
                 <Text size={200}>
                   Saved view “{phase.name}” — ask against it like any table.
                 </Text>
@@ -311,7 +311,7 @@ export function ShapeViewDialog({
 
             {error && (
               <div className={styles.errorNote}>
-                <ErrorCircleRegular fontSize={16} />
+                <IconError fontSize={16} />
                 <Text size={200}>{error}</Text>
               </div>
             )}

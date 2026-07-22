@@ -21,7 +21,7 @@ import {
   shorthands,
   tokens,
 } from "@fluentui/react-components";
-import { CheckmarkRegular, ChevronUpDownRegular } from "@fluentui/react-icons";
+import { IconCheck, IconChevronUpDown } from "@/shell/icons";
 import { Sheet } from "../Sheet";
 import { usePaneLayout } from "../paneLayout";
 import { selectionChanged } from "../haptics";
@@ -134,7 +134,7 @@ export function LhSelect({
     >
       <span className={styles.triggerValue}>{current?.label ?? ""}</span>
       <span className={styles.triggerChevron} aria-hidden>
-        <ChevronUpDownRegular />
+        <IconChevronUpDown />
       </span>
     </button>
   );
@@ -148,7 +148,7 @@ export function LhSelect({
             {options.map((o) => (
               <MenuItem
                 key={o.value}
-                icon={o.value === value ? <CheckmarkRegular /> : <span style={{ width: 20 }} />}
+                icon={o.value === value ? <IconCheck /> : <span style={{ width: 20 }} />}
                 onClick={() => pick(o.value)}
               >
                 {o.label}
@@ -176,7 +176,7 @@ export function LhSelect({
                 onClick={() => pick(o.value)}
               >
                 <span className={styles.check} aria-hidden>
-                  {o.value === value ? <CheckmarkRegular /> : null}
+                  {o.value === value ? <IconCheck /> : null}
                 </span>
                 <span className={styles.rowLabel}>{o.label}</span>
               </button>

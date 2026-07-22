@@ -28,23 +28,7 @@ import {
   shorthands,
   tokens,
 } from "@fluentui/react-components";
-import {
-  BoardRegular,
-  BookRegular,
-  BrainCircuitRegular,
-  DeleteRegular,
-  HistoryRegular,
-  InfoRegular,
-  LibraryRegular,
-  LightbulbRegular,
-  OpenRegular,
-  OptionsRegular,
-  PinRegular,
-  QuestionCircleRegular,
-  SettingsRegular,
-  ShieldTaskRegular,
-  WarningRegular,
-} from "@fluentui/react-icons";
+import { IconAI, IconBoard, IconBook, IconHelp, IconHistory, IconInfo, IconInsight, IconLibrary, IconOpen, IconOptions, IconPin, IconSettings, IconShieldTask, IconTrash, IconWarning } from "@/shell/icons";
 import { LhDialogSurface, LhMenuPopover, LhSegmented, LhSelect, LhSwitch } from "@/shell/controls";
 import {
   MODEL_PROVIDERS,
@@ -886,11 +870,11 @@ export function AuditLogDialog({ open, setOpen }: { open: boolean; setOpen: (b: 
                     Logging is {enabled ? "on" : "off"}
                   </Text>
                   {intact ? (
-                    <Badge appearance="tint" color="success" icon={<ShieldTaskRegular />}>
+                    <Badge appearance="tint" color="success" icon={<IconShieldTask />}>
                       Chain verified
                     </Badge>
                   ) : (
-                    <Badge appearance="tint" color="danger" icon={<WarningRegular />}>
+                    <Badge appearance="tint" color="danger" icon={<IconWarning />}>
                       Tampering detected
                     </Badge>
                   )}
@@ -1477,7 +1461,7 @@ export function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (
                         <Button
                           size="small"
                           appearance="subtle"
-                          icon={<DeleteRegular />}
+                          icon={<IconTrash />}
                           aria-label={`Remove rule ${r.name}`}
                           onClick={() => void removeRule(r.id)}
                         />
@@ -1863,24 +1847,24 @@ export function SettingsMenu() {
           <Button
             appearance="subtle"
             size="small"
-            icon={<SettingsRegular />}
+            icon={<IconSettings />}
             aria-label="Settings"
             data-tour="settings"
           />
         </MenuTrigger>
         <LhMenuPopover>
           <MenuList>
-            <MenuItem icon={<OptionsRegular />} onClick={() => setPrefDlg(true)}>
+            <MenuItem icon={<IconOptions />} onClick={() => setPrefDlg(true)}>
               <span className={styles.menuItemRow}>
                 Preferences
                 <span className={styles.menuShortcut}>{modKey()}+,</span>
               </span>
             </MenuItem>
-            <MenuItem icon={<BrainCircuitRegular />} onClick={() => setAiDlg(true)}>
+            <MenuItem icon={<IconAI />} onClick={() => setAiDlg(true)}>
               AI models
             </MenuItem>
             <MenuItem
-              icon={<PinRegular />}
+              icon={<IconPin />}
               onClick={() =>
                 // The chat panel owns pin data + the dialog; open it by event
                 // (same cross-feature seam as new-chat / browse-files).
@@ -1890,7 +1874,7 @@ export function SettingsMenu() {
               Pinned questions
             </MenuItem>
             <MenuItem
-              icon={<BoardRegular />}
+              icon={<IconBoard />}
               onClick={() =>
                 // The board host (app/page.tsx) owns the panel; same seam
                 // as open-pins (openspec: add-boards §2.2).
@@ -1900,34 +1884,34 @@ export function SettingsMenu() {
               Board
             </MenuItem>
             {/* 0.13.10 §3: the relocated management surfaces. */}
-            <MenuItem icon={<BookRegular />} onClick={() => setSemanticDlg(true)}>
+            <MenuItem icon={<IconBook />} onClick={() => setSemanticDlg(true)}>
               Business definitions
             </MenuItem>
-            <MenuItem icon={<LibraryRegular />} onClick={() => setViewsDlg(true)}>
+            <MenuItem icon={<IconLibrary />} onClick={() => setViewsDlg(true)}>
               Saved views
             </MenuItem>
             <MenuItem
-              icon={<LightbulbRegular />}
+              icon={<IconInsight />}
               onClick={() => window.dispatchEvent(new Event("lighthouse:open-feedback"))}
             >
               Send feedback
             </MenuItem>
-            <MenuItem icon={<HistoryRegular />} onClick={() => setAuditDlg(true)}>
+            <MenuItem icon={<IconHistory />} onClick={() => setAuditDlg(true)}>
               Audit log
             </MenuItem>
             <MenuItem
-              icon={<QuestionCircleRegular />}
+              icon={<IconHelp />}
               onClick={() => window.dispatchEvent(new Event(START_TOUR_EVENT))}
             >
               Take the tour
             </MenuItem>
             <MenuItem
-              icon={<OpenRegular />}
+              icon={<IconOpen />}
               onClick={() => window.open(LH_REPO, "_blank", "noopener,noreferrer")}
             >
               Lighthouse on GitHub
             </MenuItem>
-            <MenuItem icon={<InfoRegular />} onClick={() => setAboutDlg(true)}>
+            <MenuItem icon={<IconInfo />} onClick={() => setAboutDlg(true)}>
               About Lighthouse
             </MenuItem>
           </MenuList>

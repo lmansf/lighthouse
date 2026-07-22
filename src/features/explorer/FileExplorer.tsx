@@ -44,36 +44,7 @@ import {
   shorthands,
   tokens,
 } from "@fluentui/react-components";
-import {
-  ArrowDownloadRegular,
-  ArrowSortRegular,
-  ArrowSyncRegular,
-  CheckmarkCircleFilled,
-  ChevronDownRegular,
-  ChevronRightRegular,
-  CloudArrowUpRegular,
-  DatabaseRegular,
-  DeleteRegular,
-  DismissRegular,
-  DocumentRegular,
-  DocumentPdfRegular,
-  EyeOffRegular,
-  EyeRegular,
-  FilterRegular,
-  FolderArrowRightRegular,
-  FolderRegular,
-  FolderAddRegular,
-  FolderOpenRegular,
-  LinkRegular,
-  LockClosedRegular,
-  LockOpenRegular,
-  MoreHorizontalRegular,
-  OpenRegular,
-  RenameRegular,
-  ShieldKeyholeRegular,
-  SparkleFilled,
-  SparkleRegular,
-} from "@fluentui/react-icons";
+import { IconCheckCircleFilled, IconChevronDown, IconChevronRight, IconClose, IconCloudUp, IconDatabase, IconDoc, IconDocPdf, IconDownload, IconEye, IconEyeOff, IconFilter, IconFolder, IconFolderAdd, IconFolderOpen, IconLink, IconLock, IconLockOpen, IconMore, IconMoveTo, IconOpen, IconRename, IconShieldKey, IconSort, IconSparkle, IconSparkleFilled, IconSync, IconTrash } from "@/shell/icons";
 import type { FileNode } from "@/contracts";
 import { flattenVisible, type FlatRow } from "./flatten";
 import { FileInspector } from "./FileInspector";
@@ -510,11 +481,11 @@ function makeComparator(sort: SortState): (a: FileNode, b: FileNode) => number {
 }
 
 function fileIcon(node: FileNode, className: string) {
-  if (node.kind === "database") return <DatabaseRegular className={className} />;
-  if (node.kind === "folder") return <FolderRegular className={className} />;
+  if (node.kind === "database") return <IconDatabase className={className} />;
+  if (node.kind === "folder") return <IconFolder className={className} />;
   if (node.mimeType === "application/pdf")
-    return <DocumentPdfRegular className={className} />;
-  return <DocumentRegular className={className} />;
+    return <IconDocPdf className={className} />;
+  return <IconDoc className={className} />;
 }
 
 interface TreeRowProps {
@@ -788,7 +759,7 @@ function TreeRowImpl({
           }}
         >
           {node.kind === "folder" ? (
-            expanded ? <ChevronDownRegular /> : <ChevronRightRegular />
+            expanded ? <IconChevronDown /> : <IconChevronRight />
           ) : null}
         </span>
         {(selectionMode || selected || hovered) && (
@@ -812,7 +783,7 @@ function TreeRowImpl({
         </Text>
         {node.external && (
           <Tooltip content="Linked in place (not copied)" relationship="label">
-            <Badge size="small" appearance="outline" icon={<LinkRegular />}>
+            <Badge size="small" appearance="outline" icon={<IconLink />}>
               linked
             </Badge>
           </Tooltip>
@@ -822,7 +793,7 @@ function TreeRowImpl({
             <Button
               appearance="subtle"
               size="small"
-              icon={<DismissRegular />}
+              icon={<IconClose />}
               aria-label="Unlink"
               onClick={(e) => {
                 e.stopPropagation();
@@ -843,7 +814,7 @@ function TreeRowImpl({
             className={
               isLocalOnly ? (cloudActive ? styles.lockOn : styles.lockDormant) : undefined
             }
-            icon={isLocalOnly ? <LockClosedRegular /> : <LockOpenRegular />}
+            icon={isLocalOnly ? <IconLock /> : <IconLockOpen />}
             aria-label={lockLabel}
             aria-pressed={isLocalOnly}
             onClick={(e) => {
@@ -857,7 +828,7 @@ function TreeRowImpl({
             appearance="subtle"
             size="small"
             className={partialVis ? styles.eyePartial : eyeShown ? styles.eyeOn : undefined}
-            icon={eyeShown ? <EyeRegular /> : <EyeOffRegular />}
+            icon={eyeShown ? <IconEye /> : <IconEyeOff />}
             aria-label={eyeLabel}
             aria-pressed={folderVis ? folderVis === "all" : node.ragIncluded}
             onClick={(e) => {
@@ -875,7 +846,7 @@ function TreeRowImpl({
             appearance="subtle"
             size="small"
             className={styles.rowMenuBtn}
-            icon={<MoreHorizontalRegular />}
+            icon={<IconMore />}
             aria-label={`Actions for ${node.name}`}
             onClick={(e) => {
               e.stopPropagation();
@@ -897,12 +868,12 @@ function TreeRowImpl({
         <LhMenuPopover>
           <MenuList>
             {openable && (
-              <MenuItem icon={<OpenRegular />} onClick={() => onOpen(node.id)}>
+              <MenuItem icon={<IconOpen />} onClick={() => onOpen(node.id)}>
                 Open
               </MenuItem>
             )}
             {revealable && (
-              <MenuItem icon={<FolderOpenRegular />} onClick={() => onReveal(node.id)}>
+              <MenuItem icon={<IconFolderOpen />} onClick={() => onReveal(node.id)}>
                 Open containing folder
               </MenuItem>
             )}
@@ -914,14 +885,14 @@ function TreeRowImpl({
             {movable && !compactRow && (
               <Menu>
                 <MenuTrigger disableButtonEnhancement>
-                  <MenuItem icon={<FolderArrowRightRegular />}>Move to…</MenuItem>
+                  <MenuItem icon={<IconMoveTo />}>Move to…</MenuItem>
                 </MenuTrigger>
                 <LhMenuPopover>
                   <MenuList>
                     {moveTargets.map((t) => (
                       <MenuItem
                         key={t.id ?? "__root__"}
-                        icon={<FolderRegular />}
+                        icon={<IconFolder />}
                         onClick={() => onMove(node.id, t.id)}
                       >
                         {t.name}
@@ -932,18 +903,18 @@ function TreeRowImpl({
               </Menu>
             )}
             {editable && (
-              <MenuItem icon={<RenameRegular />} onClick={() => onRename(node.id, node.name)}>
+              <MenuItem icon={<IconRename />} onClick={() => onRename(node.id, node.name)}>
                 Rename…
               </MenuItem>
             )}
             {editable && node.kind === "folder" && (
-              <MenuItem icon={<FolderAddRegular />} onClick={() => onNewFolderInside(node.id)}>
+              <MenuItem icon={<IconFolderAdd />} onClick={() => onNewFolderInside(node.id)}>
                 New folder inside…
               </MenuItem>
             )}
             {(openable || revealable || (movable && !compactRow) || editable) && <MenuDivider />}
             {node.kind === "file" && (
-              <MenuItem icon={<SparkleRegular />} onClick={() => onInspect(node.id, node.name)}>
+              <MenuItem icon={<IconSparkle />} onClick={() => onInspect(node.id, node.name)}>
                 What the AI sees
               </MenuItem>
             )}
@@ -951,28 +922,28 @@ function TreeRowImpl({
                 predicate rules scoped to this folder. Local + linked folders
                 only — cloud nodes resolve connector-side. */}
             {node.kind === "folder" && !isRemote && !compactRow && (
-              <MenuItem icon={<FilterRegular />} onClick={() => onFolderRules(node.id, node.name)}>
+              <MenuItem icon={<IconFilter />} onClick={() => onFolderRules(node.id, node.name)}>
                 Rules for this folder…
               </MenuItem>
             )}
             <MenuItem
-              icon={node.ragIncluded ? <EyeOffRegular /> : <EyeRegular />}
+              icon={node.ragIncluded ? <IconEyeOff /> : <IconEye />}
               onClick={toggleVisibility}
             >
               {node.ragIncluded ? "Hide from AI" : "Visible to AI"}
             </MenuItem>
             <MenuItem
-              icon={isLocalOnly ? <LockOpenRegular /> : <LockClosedRegular />}
+              icon={isLocalOnly ? <IconLockOpen /> : <IconLock />}
               onClick={toggleLocalOnly}
             >
               {isLocalOnly ? "Allow cloud models" : "Keep private (this device only)"}
             </MenuItem>
             {node.external && node.parentId === null && !compactRow && (
-              <MenuItem icon={<DismissRegular />} onClick={() => onUnlink(node.id)}>
+              <MenuItem icon={<IconClose />} onClick={() => onUnlink(node.id)}>
                 Unlink (leave files in place)
               </MenuItem>
             )}
-            <MenuItem icon={<DeleteRegular />} onClick={() => onRemove(node.id)}>
+            <MenuItem icon={<IconTrash />} onClick={() => onRemove(node.id)}>
               Remove from vault
             </MenuItem>
           </MenuList>
@@ -1830,7 +1801,7 @@ export function FileExplorer() {
    */
   const mobileAddControl = (label: string) => (
     <label className={styles.mobileAddBtn} data-mobile-add>
-      <FolderOpenRegular />
+      <IconFolderOpen />
       <span>{label}</span>
       <input
         type="file"
@@ -1966,7 +1937,7 @@ export function FileExplorer() {
           ) : (
           <Menu>
             <MenuTrigger disableButtonEnhancement>
-              <Button icon={<FolderOpenRegular />} appearance="primary" size="small">
+              <Button icon={<IconFolderOpen />} appearance="primary" size="small">
                 Browse…
               </Button>
             </MenuTrigger>
@@ -1979,11 +1950,11 @@ export function FileExplorer() {
                     a mobile shell, and these were dead rows there. */}
                 {desktopOS && (
                   <>
-                    <MenuItem icon={<LinkRegular />} onClick={browseForFiles}>
+                    <MenuItem icon={<IconLink />} onClick={browseForFiles}>
                       Files… (linked in place)
                     </MenuItem>
                     <MenuItem
-                      icon={<LinkRegular />}
+                      icon={<IconLink />}
                       onClick={() => {
                         void desktopBridge()?.linkDialog(true).then((paths) => {
                           if (paths.length) void linkAndReport(paths);
@@ -1996,7 +1967,7 @@ export function FileExplorer() {
                   </>
                 )}
                 <MenuItem
-                  icon={<DocumentRegular />}
+                  icon={<IconDoc />}
                   onClick={() => fileInputRef.current?.click()}
                 >
                   {desktopOS ? "Copy files in…" : "Files…"}
@@ -2008,7 +1979,7 @@ export function FileExplorer() {
                     Lighthouse" tree. */}
                 {platformKind() === "desktop" && (
                   <MenuItem
-                    icon={<FolderAddRegular />}
+                    icon={<IconFolderAdd />}
                     onClick={() => folderInputRef.current?.click()}
                   >
                     {desktopOS ? "Copy folder in…" : "Folder…"}
@@ -2021,7 +1992,7 @@ export function FileExplorer() {
                   <>
                     <MenuDivider />
                     <MenuItem
-                      icon={<CloudArrowUpRegular />}
+                      icon={<IconCloudUp />}
                       onClick={() =>
                         registerInterest("SharePoint isn't ready yet — it's on the way.")
                       }
@@ -2041,7 +2012,7 @@ export function FileExplorer() {
           )}
           <Tooltip content="Create a new folder in the vault" relationship="label">
             <Button
-              icon={<FolderAddRegular />}
+              icon={<IconFolderAdd />}
               size="small"
               appearance="subtle"
               aria-label="New folder"
@@ -2054,7 +2025,7 @@ export function FileExplorer() {
           {desktopOS && (
             <Tooltip content="Open the vault folder in your file manager" relationship="label">
               <Button
-                icon={<FolderOpenRegular />}
+                icon={<IconFolderOpen />}
                 size="small"
                 appearance="subtle"
                 aria-label="Open vault folder"
@@ -2064,7 +2035,7 @@ export function FileExplorer() {
           )}
           <Tooltip content="Re-scan the vault for new files" relationship="label">
             <Button
-              icon={<ArrowSyncRegular />}
+              icon={<IconSync />}
               size="small"
               appearance="subtle"
               aria-label="Refresh"
@@ -2081,14 +2052,14 @@ export function FileExplorer() {
 
       {includeByDefault && !controlNoteDismissed && (
         <div className={styles.controlNote}>
-          <ShieldKeyholeRegular fontSize={20} className={styles.controlNoteIcon} />
+          <IconShieldKey fontSize={20} className={styles.controlNoteIcon} />
           <Text size={200}>
             Your files are visible to AI by default - <b>you control what it sees</b>.
             Use the eye on any file or folder to hide it.
           </Text>
           <span className={styles.spacer} />
           <Button
-            icon={<DismissRegular />}
+            icon={<IconClose />}
             size="small"
             appearance="subtle"
             aria-label="Dismiss"
@@ -2101,7 +2072,7 @@ export function FileExplorer() {
       {dragging && (
         <div className={styles.dropOverlay} aria-hidden>
           <div className={styles.dropRing}>
-            <ArrowDownloadRegular className={styles.dropIcon} />
+            <IconDownload className={styles.dropIcon} />
             <Text size={500} weight="semibold">
               Drop to add
             </Text>
@@ -2116,7 +2087,7 @@ export function FileExplorer() {
 
       {addFlash !== null && (
         <div className={styles.addFlash} role="status" aria-live="polite">
-          <CheckmarkCircleFilled className={styles.addFlashIcon} />
+          <IconCheckCircleFilled className={styles.addFlashIcon} />
           <Text size={300} weight="semibold">
             Added {addFlash} {addFlash === 1 ? "file" : "files"}
           </Text>
@@ -2125,7 +2096,7 @@ export function FileExplorer() {
 
       {removedCount !== null && (
         <div className={styles.controlNote} role="status" aria-live="polite">
-          <DeleteRegular fontSize={18} className={styles.controlNoteIcon} />
+          <IconTrash fontSize={18} className={styles.controlNoteIcon} />
           <Text size={200}>
             Removed {removedCount} {removedCount === 1 ? "item" : "items"} — moved to the
             vault&apos;s trash.
@@ -2139,7 +2110,7 @@ export function FileExplorer() {
 
       {interestNote && (
         <div className={styles.addFlash} role="status" aria-live="polite">
-          <SparkleFilled className={styles.addFlashIcon} />
+          <IconSparkleFilled className={styles.addFlashIcon} />
           <Text size={300} weight="semibold">
             {interestNote}
           </Text>
@@ -2151,7 +2122,7 @@ export function FileExplorer() {
           <Text size={200}>{addNotice}</Text>
           <span className={styles.spacer} />
           <Button
-            icon={<DismissRegular />}
+            icon={<IconClose />}
             size="small"
             appearance="subtle"
             aria-label="Dismiss"
@@ -2163,7 +2134,7 @@ export function FileExplorer() {
       {processing && (
         <div className={styles.processingOverlay} role="status" aria-live="polite">
           <div className={styles.progressCard}>
-            <ArrowDownloadRegular className={styles.progressIcon} />
+            <IconDownload className={styles.progressIcon} />
             <Text size={400} weight="semibold" className={styles.progressCount}>
               {processing.label} {Math.min(processing.done + 1, processing.total)} of {processing.total}
             </Text>
@@ -2223,7 +2194,7 @@ export function FileExplorer() {
           />
           {bulkLock}
           <Button
-            icon={<DeleteRegular />}
+            icon={<IconTrash />}
             size="small"
             disabled={selectedIds.length === 0}
             onClick={() => setPendingRemove(selectedIds)}
@@ -2253,7 +2224,7 @@ export function FileExplorer() {
           <ToggleButton
             size="small"
             appearance="subtle"
-            icon={<EyeRegular />}
+            icon={<IconEye />}
             checked={onlyVisible}
             onClick={() => setOnlyVisible((v) => !v)}
           >
@@ -2265,7 +2236,7 @@ export function FileExplorer() {
           <ToggleButton
             size="small"
             appearance="subtle"
-            icon={<LockClosedRegular />}
+            icon={<IconLock />}
             checked={onlyLocalOnly}
             onClick={() => setOnlyLocalOnly((v) => !v)}
           >
@@ -2274,7 +2245,7 @@ export function FileExplorer() {
           <Menu>
             <MenuTrigger disableButtonEnhancement>
               <Tooltip content="Sort files" relationship="label">
-                <Button size="small" appearance="subtle" icon={<ArrowSortRegular />} aria-label="Sort" />
+                <Button size="small" appearance="subtle" icon={<IconSort />} aria-label="Sort" />
               </Tooltip>
             </MenuTrigger>
             <LhMenuPopover>
@@ -2310,7 +2281,7 @@ export function FileExplorer() {
           // one-liners would just repeat themselves - show one real call to
           // action instead. Drag-drop onto the whole panel still works.
           <div className={mergeClasses(styles.emptyState, isMobile && styles.emptyStateMobile)}>
-            <FolderAddRegular className={styles.emptyStateIcon} />
+            <IconFolderAdd className={styles.emptyStateIcon} />
             <Text size={400} weight="semibold">
               Add your first files
             </Text>
@@ -2327,7 +2298,7 @@ export function FileExplorer() {
             {isMobile ? (
               mobileAddControl("Add files…")
             ) : (
-              <Button appearance="primary" icon={<FolderOpenRegular />} onClick={browseForFiles}>
+              <Button appearance="primary" icon={<IconFolderOpen />} onClick={browseForFiles}>
                 Browse…
               </Button>
             )}
@@ -2357,7 +2328,7 @@ export function FileExplorer() {
             return (
               <div key={source.id}>
                 <div className={styles.sourceLabel}>
-                  {source.kind === "database" ? <DatabaseRegular /> : <FolderRegular />}
+                  {source.kind === "database" ? <IconDatabase /> : <IconFolder />}
                   <Text weight="semibold">{source.name}</Text>
                   {!source.available && (
                     <Badge appearance="outline" color="danger">

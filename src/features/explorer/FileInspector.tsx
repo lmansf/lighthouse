@@ -38,16 +38,7 @@ import {
   shorthands,
   tokens,
 } from "@fluentui/react-components";
-import {
-  ChevronLeftRegular,
-  ChevronRightRegular,
-  EyeOffRegular,
-  EyeRegular,
-  LockClosedRegular,
-  LockOpenRegular,
-  OpenRegular,
-  SearchRegular,
-} from "@fluentui/react-icons";
+import { IconChevronLeft, IconChevronRight, IconEye, IconEyeOff, IconLock, IconLockOpen, IconOpen, IconSearch } from "@/shell/icons";
 import { ragService, type FileInspection } from "@/contracts";
 import { useRagStore } from "@/stores/useRagStore";
 import { useAuthStore } from "@/stores/useAuthStore";
@@ -335,11 +326,11 @@ export function FileInspector({
                   <Text className={styles.label}>Status</Text>
                   <div className={styles.stateRow}>
                     <span className={styles.pill}>
-                      {included ? <EyeRegular /> : <EyeOffRegular />}
+                      {included ? <IconEye /> : <IconEyeOff />}
                       <Text>{included ? "Visible to AI" : "Hidden from AI"}</Text>
                     </span>
                     <span className={styles.pill}>
-                      {localOnly ? <LockClosedRegular /> : <LockOpenRegular />}
+                      {localOnly ? <IconLock /> : <IconLockOpen />}
                       <Text>{privatePill}</Text>
                     </span>
                   </div>
@@ -482,7 +473,7 @@ export function FileInspector({
                       value={query}
                       placeholder="See which chunks a question would retrieve…"
                       aria-label="Test a search against this file"
-                      contentBefore={<SearchRegular />}
+                      contentBefore={<IconSearch />}
                       onChange={(_, d) => setQuery(d.value)}
                       onKeyDown={(e) => {
                         if (e.key === "Enter") {
@@ -516,7 +507,7 @@ export function FileInspector({
                             <Button
                               size="small"
                               appearance="subtle"
-                              icon={<ChevronLeftRegular />}
+                              icon={<IconChevronLeft />}
                               aria-label="Previous chunk (left arrow)"
                               title="Previous chunk (←)"
                               disabled={active === null || active === 0}
@@ -525,7 +516,7 @@ export function FileInspector({
                             <Button
                               size="small"
                               appearance="subtle"
-                              icon={<ChevronRightRegular />}
+                              icon={<IconChevronRight />}
                               aria-label="Next chunk (right arrow)"
                               title="Next chunk (→)"
                               disabled={active !== null && active >= hits.length - 1}
@@ -576,7 +567,7 @@ export function FileInspector({
           <DialogActions>
             {/* Secondary action: the old cold-open, one click away. */}
             {desktop && (
-              <Button appearance="secondary" icon={<OpenRegular />} onClick={openInApp}>
+              <Button appearance="secondary" icon={<IconOpen />} onClick={openInApp}>
                 Open in app
               </Button>
             )}

@@ -28,11 +28,7 @@ import {
   tokens,
   shorthands,
 } from "@fluentui/react-components";
-import {
-  ShieldCheckmarkRegular,
-  GlobeRegular,
-  LockClosedRegular,
-} from "@fluentui/react-icons";
+import { IconGlobe, IconLock, IconShieldCheck } from "@/shell/icons";
 import { useRagStore } from "@/stores/useRagStore";
 import { LhDialogSurface } from "@/shell/controls";
 import { usePaneLayout } from "@/shell/paneLayout";
@@ -140,7 +136,7 @@ export function EgressShield({
         appearance="subtle"
         size={compact ? "medium" : "small"}
         className={compact ? styles.triggerCompact : styles.trigger}
-        icon={local ? <ShieldCheckmarkRegular /> : <GlobeRegular />}
+        icon={local ? <IconShieldCheck /> : <IconGlobe />}
         onClick={() => setOpen(true)}
         aria-label={
           local
@@ -202,7 +198,7 @@ export function EgressShield({
                           size="small"
                           appearance="secondary"
                           className={styles.revealBtn}
-                          icon={<LockClosedRegular />}
+                          icon={<IconLock />}
                           onClick={() => {
                             onRevealHidden();
                             setOpen(false);
@@ -217,7 +213,7 @@ export function EgressShield({
               )}
               {local ? (
                 <div className={styles.allLocal}>
-                  <ShieldCheckmarkRegular />
+                  <IconShieldCheck />
                   <Text>
                     Nothing has left this machine this session. Retrieval, the
                     index, embeddings, OCR, and (with the private model) the AI

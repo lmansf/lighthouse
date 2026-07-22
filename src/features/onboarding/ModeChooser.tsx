@@ -32,7 +32,7 @@ import {
   shorthands,
   tokens,
 } from "@fluentui/react-components";
-import { SearchSparkleRegular, WindowRegular } from "@fluentui/react-icons";
+import { IconSearchAI, IconWindow } from "@/shell/icons";
 import { isDesktopShell } from "@/shell/desktopBridge";
 import { LhDialogSurface } from "@/shell/controls";
 
@@ -349,14 +349,14 @@ export function ModeChooserAuto({ onSettled }: { onSettled: () => void }) {
                 <ModeCard
                   selected={selected === "window"}
                   onSelect={() => setSelected("window")}
-                  icon={<WindowRegular />}
+                  icon={<IconWindow />}
                   title="Window mode"
                   body="The classic app window — your files and chat side by side, and the floating search bar one hotkey away."
                 />
                 <ModeCard
                   selected={selected === "widget"}
                   onSelect={() => setSelected("widget")}
-                  icon={<SearchSparkleRegular />}
+                  icon={<IconSearchAI />}
                   title="Widget mode"
                   badge={
                     <Badge size="small" appearance="tint" color="warning">

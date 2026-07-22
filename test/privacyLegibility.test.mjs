@@ -99,7 +99,7 @@ test("row lock: red stays for enforcement; dormant drops to a neutral token", ()
     "the enforcing red treatment is untouched",
   );
   // The closed-lock glyph is kept for BOTH marked states.
-  assert.match(explorer, /icon=\{isLocalOnly \? <LockClosedRegular \/> : <LockOpenRegular \/>\}/);
+  assert.match(explorer, /icon=\{isLocalOnly \? <IconLock \/> : <IconLockOpen \/>\}/);
 });
 
 test("row lock a11y: aria-pressed kept, aria-label carries the state", () => {
@@ -253,7 +253,7 @@ test("skip-note callout: em renderer branches on the stable prefix, others untou
   );
   assert.match(
     chat,
-    /LOCAL_ONLY_SKIP_NOTE_RE\.test\(hastText\(node\)\)[\s\S]{0,400}<LockClosedRegular/,
+    /LOCAL_ONLY_SKIP_NOTE_RE\.test\(hastText\(node\)\)[\s\S]{0,400}<IconLock/,
     "the callout carries the small closed lock",
   );
   assert.match(

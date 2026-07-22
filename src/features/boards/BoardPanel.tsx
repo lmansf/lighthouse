@@ -49,7 +49,7 @@ import {
   makeStyles,
   tokens,
 } from "@fluentui/react-components";
-import { ArrowClockwiseRegular, DocumentRegular } from "@fluentui/react-icons";
+import { IconDoc, IconRefresh } from "@/shell/icons";
 import type {
   Board,
   BoardCardRef,
@@ -475,7 +475,7 @@ export function BoardHost() {
                 export honestly on the twin). */}
             <Button
               appearance="subtle"
-              icon={<DocumentRegular />}
+              icon={<IconDoc />}
               disabled={
                 loading || busy || packNote?.pending || !board || board.cards.length === 0
               }
@@ -485,7 +485,7 @@ export function BoardHost() {
             </Button>
             <Button
               appearance="primary"
-              icon={<ArrowClockwiseRegular />}
+              icon={<IconRefresh />}
               disabled={loading || busy || !board || board.cards.length === 0}
               onClick={() => void refreshAll()}
             >

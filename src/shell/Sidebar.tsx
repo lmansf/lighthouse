@@ -9,12 +9,7 @@ import {
   shorthands,
   tokens,
 } from "@fluentui/react-components";
-import {
-  ArrowLeftRegular,
-  PanelLeftContractRegular,
-  PanelLeftExpandRegular,
-  SearchRegular,
-} from "@fluentui/react-icons";
+import { IconBack, IconSearch, IconSidebarCollapse, IconSidebarExpand } from "@/shell/icons";
 import { LAYOUT, ACCENTS } from "./theme";
 import { SettingsMenu } from "@/features/settings/SettingsMenu";
 import { UpdateNotice } from "@/features/update/UpdateNotice";
@@ -175,7 +170,7 @@ export function Sidebar({
             <Button
               appearance="subtle"
               size="small"
-              icon={<PanelLeftExpandRegular />}
+              icon={<IconSidebarExpand />}
               aria-label="Expand sidebar"
               onClick={onToggleCollapsed}
             />
@@ -196,7 +191,7 @@ export function Sidebar({
                   <Button
                     appearance="subtle"
                     className={styles.quickOpenBtn}
-                    icon={<SearchRegular />}
+                    icon={<IconSearch />}
                     aria-label="Quick open a file"
                     // Reuses the exact event the Ctrl/Cmd+P shortcut dispatches,
                     // so the fuzzy finder is reachable without a keyboard.
@@ -211,7 +206,7 @@ export function Sidebar({
                 <Button
                   appearance="subtle"
                   className={styles.backBtn}
-                  icon={<ArrowLeftRegular />}
+                  icon={<IconBack />}
                   aria-label="Back to chat"
                   onClick={onToggleCollapsed}
                 >
@@ -222,7 +217,7 @@ export function Sidebar({
                   <Button
                     appearance="subtle"
                     size="small"
-                    icon={<PanelLeftContractRegular />}
+                    icon={<IconSidebarCollapse />}
                     aria-label="Collapse sidebar"
                     onClick={onToggleCollapsed}
                   />

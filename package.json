@@ -2,9 +2,9 @@
   "name": "rag-vault",
   "version": "0.13.10",
   "private": true,
-  "description": "Lighthouse \u2014 a local-first RAG vault for your documents.",
+  "description": "Lighthouse — a local-first RAG vault for your documents.",
   "author": "Lighthouse",
-  "//browserslist": "The UI only ever runs in the bundled Tauri webviews (WebView2 / WKWebView / WebKitGTK) and modern desktop browsers for dev \u2014 all evergreen. Declaring modern targets stops Next/SWC from emitting the ~110 KB core-js legacy-polyfill bundle (Symbol/URL/Reflect/Promise/fetch are all native here).",
+  "//browserslist": "The UI only ever runs in the bundled Tauri webviews (WebView2 / WKWebView / WebKitGTK) and modern desktop browsers for dev — all evergreen. Declaring modern targets stops Next/SWC from emitting the ~110 KB core-js legacy-polyfill bundle (Symbol/URL/Reflect/Promise/fetch are all native here).",
   "browserslist": [
     "last 2 Chrome versions",
     "last 2 Edge versions",
@@ -26,7 +26,6 @@
   },
   "dependencies": {
     "@fluentui/react-components": "^9.54.0",
-    "@fluentui/react-icons": "^2.0.245",
     "@tauri-apps/api": "^2.11.1",
     "mammoth": "^1.12.0",
     "next": "^15.5.19",

@@ -34,7 +34,7 @@ import {
   shorthands,
   tokens,
 } from "@fluentui/react-components";
-import { DismissRegular } from "@fluentui/react-icons";
+import { IconClose } from "@/shell/icons";
 import { impactLight } from "./haptics";
 
 /**
@@ -338,7 +338,7 @@ export function Sheet({ title, onClose, children, initialDetent = "large" }: She
             <Button
               appearance="subtle"
               className={styles.close}
-              icon={<DismissRegular />}
+              icon={<IconClose />}
               aria-label="Close"
               onClick={close}
             />

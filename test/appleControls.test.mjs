@@ -69,8 +69,8 @@ test("LhMenu: compact action sheet with submenu pages; desktop popover skin kill
 
 test("LhSelect: chevron-up-down affordance, checkmarks, sheet on compact", () => {
   const sel = read("src/shell/controls/LhSelect.tsx");
-  assert.match(sel, /ChevronUpDownRegular/);
-  assert.match(sel, /CheckmarkRegular/);
+  assert.match(sel, /IconChevronUpDown/);
+  assert.match(sel, /IconCheck/);
   assert.match(sel, /role="option"/);
   assert.match(sel, /aria-selected=\{o\.value === value\}/);
 });

@@ -19,7 +19,7 @@ import {
   shorthands,
   tokens,
 } from "@fluentui/react-components";
-import { DismissRegular } from "@fluentui/react-icons";
+import { IconClose } from "@/shell/icons";
 import dynamic from "next/dynamic";
 import { ragService } from "@/contracts";
 import type { Briefing, BriefingReport, Cadence, Pin } from "@/contracts";
@@ -266,7 +266,7 @@ export function BriefingsPanel({ pins }: { pins: Pin[] }) {
               <Button
                 size="small"
                 appearance="subtle"
-                icon={<DismissRegular />}
+                icon={<IconClose />}
                 aria-label={`Remove briefing: ${b.title}`}
                 onClick={() => void remove(b.id)}
               />

@@ -36,20 +36,7 @@ import {
   shorthands,
   tokens,
 } from "@fluentui/react-components";
-import {
-  AddRegular,
-  ArrowLeftRegular,
-  CheckmarkCircleFilled,
-  DatabaseRegular,
-  DocumentPdfRegular,
-  DocumentRegular,
-  DocumentTextRegular,
-  EyeRegular,
-  FolderRegular,
-  ImageRegular,
-  LockClosedRegular,
-  TableRegular,
-} from "@fluentui/react-icons";
+import { IconAdd, IconBack, IconCheckCircleFilled, IconDatabase, IconDoc, IconDocPdf, IconDocText, IconEye, IconFolder, IconImage, IconLock, IconTable } from "@/shell/icons";
 import type { FileNode } from "@/contracts";
 import { useRagStore } from "@/stores/useRagStore";
 import { usePaneLayout } from "@/shell/paneLayout";
@@ -64,17 +51,17 @@ const LONG_PRESS_MS = 500;
  *  table, markdown/txt a text page, rasters an image). The desktop tree's own
  *  fileIcon is deliberately untouched (its render is pinned byte-identical). */
 function tileIcon(node: FileNode, className: string) {
-  if (node.kind === "database") return <DatabaseRegular className={className} />;
-  if (node.kind === "folder") return <FolderRegular className={className} />;
+  if (node.kind === "database") return <IconDatabase className={className} />;
+  if (node.kind === "folder") return <IconFolder className={className} />;
   const ext = (node.name.split(".").pop() ?? "").toLowerCase();
   if (node.mimeType === "application/pdf" || ext === "pdf")
-    return <DocumentPdfRegular className={className} />;
+    return <IconDocPdf className={className} />;
   if (["csv", "tsv", "xlsx", "xls", "parquet"].includes(ext))
-    return <TableRegular className={className} />;
-  if (["md", "txt"].includes(ext)) return <DocumentTextRegular className={className} />;
+    return <IconTable className={className} />;
+  if (["md", "txt"].includes(ext)) return <IconDocText className={className} />;
   if (["png", "jpg", "jpeg", "gif", "webp", "heic", "bmp", "tif", "tiff"].includes(ext))
-    return <ImageRegular className={className} />;
-  return <DocumentRegular className={className} />;
+    return <IconImage className={className} />;
+  return <IconDoc className={className} />;
 }
 
 /** The tree's size formatting, duplicated verbatim (the tree file is pinned). */
@@ -375,7 +362,7 @@ export function FileTileGrid() {
           <Button
             appearance="subtle"
             className={styles.crumbBtn}
-            icon={<ArrowLeftRegular />}
+            icon={<IconBack />}
             aria-label="Back to the enclosing folder"
             onClick={() => {
               setFolderId(current.parentId ?? null);
@@ -389,7 +376,7 @@ export function FileTileGrid() {
         {/* §26: the add control stays prominent — top-right. */}
         <Button
           appearance="primary"
-          icon={<AddRegular />}
+          icon={<IconAdd />}
           onClick={() => fileInputRef.current?.click()}
         >
           Add
@@ -466,18 +453,18 @@ export function FileTileGrid() {
                     );
                   }}
                 >
-                  {selected && <CheckmarkCircleFilled className={styles.check} aria-hidden />}
+                  {selected && <IconCheckCircleFilled className={styles.check} aria-hidden />}
                   <span className={styles.tileTop}>
                     {tileIcon(node, styles.icon)}
                     <span className={styles.badgeSpacer} />
                     {beam && (
-                      <EyeRegular
+                      <IconEye
                         className={beamPartial ? styles.beamBadgePartial : styles.beamBadge}
                         aria-label={beamPartial ? "Partly visible to AI" : "Visible to AI"}
                       />
                     )}
                     {locked && (
-                      <LockClosedRegular className={styles.lockBadge} aria-label="Private — never leaves this device" />
+                      <IconLock className={styles.lockBadge} aria-label="Private — never leaves this device" />
                     )}
                   </span>
                   <Text size={300} className={styles.name}>

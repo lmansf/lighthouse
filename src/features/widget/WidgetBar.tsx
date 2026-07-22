@@ -31,22 +31,7 @@ import {
   shorthands,
   tokens,
 } from "@fluentui/react-components";
-import {
-  ChatSparkleRegular,
-  CheckmarkRegular,
-  CopyRegular,
-  DismissRegular,
-  DocumentPdfRegular,
-  DocumentRegular,
-  EyeOffRegular,
-  EyeRegular,
-  FolderOpenRegular,
-  FolderRegular,
-  OpenRegular,
-  PinFilled,
-  PinRegular,
-  SquareRegular,
-} from "@fluentui/react-icons";
+import { IconChatAI, IconCheck, IconClose, IconCopy, IconDoc, IconDocPdf, IconEye, IconEyeOff, IconFolder, IconFolderOpen, IconOpen, IconPin, IconPinFilled, IconStop } from "@/shell/icons";
 import dynamic from "next/dynamic";
 import type { ChatChunk, ChatTurn, FileNode, RagReference } from "@/contracts";
 import { chatService, MODEL_PROVIDERS, ragService } from "@/contracts";
@@ -325,8 +310,8 @@ function widgetProvenance(meta: NonNullable<ChatChunk["meta"]>): string {
  * (name matches are file-kind nodes only, so no folder/database branches).
  */
 function rowIcon(node: FileNode, className: string) {
-  if (node.mimeType === "application/pdf") return <DocumentPdfRegular className={className} />;
-  return <DocumentRegular className={className} />;
+  if (node.mimeType === "application/pdf") return <IconDocPdf className={className} />;
+  return <IconDoc className={className} />;
 }
 
 /** One entry in the flat, keyboard-navigable results list. */
@@ -612,7 +597,7 @@ export function WidgetBar() {
         size="small"
         appearance="subtle"
         className={included ? styles.actionOn : styles.actionBtn}
-        icon={included ? <EyeRegular /> : <EyeOffRegular />}
+        icon={included ? <IconEye /> : <IconEyeOff />}
         aria-label={included ? "Hide from AI" : "Show to AI"}
         aria-pressed={included}
         title={included ? "Visible to AI — click to hide" : "Hidden from AI — click to show"}
@@ -627,7 +612,7 @@ export function WidgetBar() {
           size="small"
           appearance="subtle"
           className={styles.actionBtn}
-          icon={<FolderOpenRegular />}
+          icon={<IconFolderOpen />}
           aria-label="Open containing folder"
           title="Open containing folder"
           onMouseDown={(e) => e.preventDefault()}
@@ -848,7 +833,7 @@ export function WidgetBar() {
         <Button
           className={mergeClasses(styles.iconBtn, pinned && styles.pinOn)}
           appearance="subtle"
-          icon={pinned ? <PinFilled /> : <PinRegular />}
+          icon={pinned ? <IconPinFilled /> : <IconPin />}
           aria-label={pinned ? "Unpin — normal stacking" : "Pin — keep above other windows"}
           aria-pressed={pinned}
           title={
@@ -861,7 +846,7 @@ export function WidgetBar() {
         <Button
           className={styles.iconBtn}
           appearance="subtle"
-          icon={<FolderRegular />}
+          icon={<IconFolder />}
           aria-label="Open vault explorer"
           title="Open vault explorer — see what's in your vault and what the AI can read"
           onClick={() => void invokeShell("open_explorer")}
@@ -869,7 +854,7 @@ export function WidgetBar() {
         <Button
           className={styles.iconBtn}
           appearance="subtle"
-          icon={<DismissRegular />}
+          icon={<IconClose />}
           aria-label="Hide (Esc)"
           title="Hide (Esc)"
           onClick={hide}
@@ -919,7 +904,7 @@ export function WidgetBar() {
                   )}
                   {row.kind === "content" && (
                     <>
-                      <DocumentRegular className={styles.rowIcon} />
+                      <IconDoc className={styles.rowIcon} />
                       <div className={styles.rowMeta}>
                         <Text size={300} className={styles.truncated}>
                           {row.ref.name}
@@ -940,7 +925,7 @@ export function WidgetBar() {
                   )}
                   {row.kind === "ask" && (
                     <>
-                      <ChatSparkleRegular className={styles.rowIcon} />
+                      <IconChatAI className={styles.rowIcon} />
                       <Text size={300} className={styles.rowLabel}>
                         {`Ask Lighthouse → "${query.trim()}"`}
                       </Text>
@@ -968,7 +953,7 @@ export function WidgetBar() {
         <div ref={answerElRef} className={styles.answerWrap} data-lh-widget-answer>
           <div className={styles.answer}>
             <div className={styles.answerHead}>
-              <ChatSparkleRegular className={styles.rowIcon} />
+              <IconChatAI className={styles.rowIcon} />
               <Text size={200} className={styles.answerQ} title={answer.question}>
                 {answer.question}
               </Text>
@@ -976,7 +961,7 @@ export function WidgetBar() {
                 <Button
                   size="small"
                   appearance="subtle"
-                  icon={<SquareRegular />}
+                  icon={<IconStop />}
                   aria-label="Stop answering"
                   title="Stop answering"
                   onClick={() => abortRef.current?.abort()}
@@ -985,7 +970,7 @@ export function WidgetBar() {
                 <Button
                   size="small"
                   appearance="subtle"
-                  icon={copied ? <CheckmarkRegular /> : <CopyRegular />}
+                  icon={copied ? <IconCheck /> : <IconCopy />}
                   aria-label="Copy answer"
                   title="Copy answer"
                   onClick={copyAnswer}
@@ -994,7 +979,7 @@ export function WidgetBar() {
               <Button
                 size="small"
                 appearance="subtle"
-                icon={<OpenRegular />}
+                icon={<IconOpen />}
                 aria-label="Continue in Lighthouse"
                 title="Continue in Lighthouse — reopens this question in the full app"
                 onClick={continueInApp}
@@ -1002,7 +987,7 @@ export function WidgetBar() {
               <Button
                 size="small"
                 appearance="subtle"
-                icon={<DismissRegular />}
+                icon={<IconClose />}
                 aria-label="Clear answer (Esc)"
                 title="Clear answer (Esc)"
                 onClick={clearAnswer}

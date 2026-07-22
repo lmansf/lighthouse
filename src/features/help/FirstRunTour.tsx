@@ -36,13 +36,7 @@ import {
   makeStyles,
   tokens,
 } from "@fluentui/react-components";
-import {
-  BrainCircuitRegular,
-  ChatSparkleRegular,
-  DataBarVerticalRegular,
-  DocumentAddRegular,
-  SettingsRegular,
-} from "@fluentui/react-icons";
+import { IconAI, IconChart, IconChatAI, IconDocAdd, IconSettings } from "@/shell/icons";
 import { shouldAutoOpenTour } from "./tourGating";
 import { BEAM_SWEEP } from "@/shell/theme";
 import { platformKind, type PlatformKind } from "@/shell/desktopBridge";
@@ -76,7 +70,7 @@ interface TourStep {
 const stepsFor = (platform: PlatformKind): TourStep[] => [
   {
     anchor: "explorer",
-    icon: <DocumentAddRegular />,
+    icon: <IconDocAdd />,
     title: "Add files, choose what's visible",
     body:
       platform === "desktop"
@@ -86,7 +80,7 @@ const stepsFor = (platform: PlatformKind): TourStep[] => [
   },
   {
     anchor: "chat",
-    icon: <ChatSparkleRegular />,
+    icon: <IconChatAI />,
     title: "Ask, and get grounded answers",
     // §2: the keyboard-shortcut line renders only where a hardware keyboard
     // is the norm; mobile copy names the send button instead.
@@ -98,14 +92,14 @@ const stepsFor = (platform: PlatformKind): TourStep[] => [
   },
   {
     anchor: "beam",
-    icon: <DataBarVerticalRegular />,
+    icon: <IconChart />,
     title: "Beam: analytics you can verify",
     body: "Ask for a number and Beam, the built-in analytics engine, computes it from your data — then shows the exact SQL it ran. Verified figures you can check, not guesses.",
     position: "below",
   },
   {
     anchor: "models",
-    icon: <BrainCircuitRegular />,
+    icon: <IconAI />,
     title: "Private on-device, or cloud",
     // §3: the private model does not exist on mobile — the tour must not
     // advertise it there. The two truths are the shared canonical string
@@ -119,7 +113,7 @@ const stepsFor = (platform: PlatformKind): TourStep[] => [
   },
   {
     anchor: "settings",
-    icon: <SettingsRegular />,
+    icon: <IconSettings />,
     title: "Everything else lives here",
     body: "The gear opens Preferences, AI models, and Send feedback — and you can replay this tour anytime from “Take the tour”.",
     position: "after",

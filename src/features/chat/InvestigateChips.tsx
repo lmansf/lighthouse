@@ -14,7 +14,7 @@
  */
 import { useEffect, useMemo, useState } from "react";
 import { Button, Text, makeStyles, tokens } from "@fluentui/react-components";
-import { BeakerRegular, BriefcaseRegular, DocumentRegular, SearchRegular } from "@fluentui/react-icons";
+import { IconBeaker, IconBriefcase, IconDoc, IconSearch } from "@/shell/icons";
 import type { CapabilityMap, ReportTemplate } from "@/contracts";
 import { EMPTY_CAPABILITY_MAP, ragService } from "@/contracts";
 import { LhMenu } from "@/shell/controls";
@@ -95,7 +95,7 @@ export function InvestigateChips({ includedFileIds }: { includedFileIds: string[
               appearance="secondary"
               size="small"
               shape="circular"
-              icon={<SearchRegular />}
+              icon={<IconSearch />}
               disabled={busy === t.name}
               title={`Run a deep analysis of ${t.name} and save the report to your vault`}
             >
@@ -107,21 +107,21 @@ export function InvestigateChips({ includedFileIds }: { includedFileIds: string[
             {
               key: "standard",
               label: "Standard report",
-              icon: <DocumentRegular />,
+              icon: <IconDoc />,
               onClick: () => void investigate(t.name),
             },
             // IMRaD — Introduction / Methods / Results / Discussion.
             {
               key: "imrad",
               label: "Scientific method",
-              icon: <BeakerRegular />,
+              icon: <IconBeaker />,
               onClick: () => void investigate(t.name, "imrad"),
             },
             // BLUF — Bottom line up front + Minto-pyramid detail.
             {
               key: "bluf",
               label: "Business report",
-              icon: <BriefcaseRegular />,
+              icon: <IconBriefcase />,
               onClick: () => void investigate(t.name, "bluf"),
             },
           ]}

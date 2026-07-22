@@ -30,7 +30,7 @@ import {
   makeStyles,
   tokens,
 } from "@fluentui/react-components";
-import { ErrorCircleRegular } from "@fluentui/react-icons";
+import { IconError } from "@/shell/icons";
 import { ragService } from "@/contracts";
 import { LhDialogSurface } from "@/shell/controls";
 
@@ -165,7 +165,7 @@ export function DefineMetricDialog({
               </Text>
             ) : unavailable ? (
               <div className={styles.errorNote}>
-                <ErrorCircleRegular fontSize={16} />
+                <IconError fontSize={16} />
                 <Text size={200}>{unavailable}</Text>
               </div>
             ) : (
@@ -195,7 +195,7 @@ export function DefineMetricDialog({
                 </Field>
                 {error && (
                   <div className={styles.errorNote}>
-                    <ErrorCircleRegular fontSize={16} />
+                    <IconError fontSize={16} />
                     <Text size={200}>{error}</Text>
                   </div>
                 )}

@@ -38,14 +38,7 @@ import {
   shorthands,
   tokens,
 } from "@fluentui/react-components";
-import {
-  AddRegular,
-  ChatRegular,
-  DeleteRegular,
-  LockClosedRegular,
-  MoreHorizontalRegular,
-  RenameRegular,
-} from "@fluentui/react-icons";
+import { IconAdd, IconChat, IconLock, IconMore, IconRename, IconTrash } from "@/shell/icons";
 import type { MetricCard, SuggestedMetric, SynonymCard } from "@/contracts";
 import { ragService } from "@/contracts";
 import { useRagStore } from "@/stores/useRagStore";
@@ -409,7 +402,7 @@ export function SemanticNav() {
               </Text>
             </div>
             {m.localOnly && (
-              <LockClosedRegular
+              <IconLock
                 className={styles.lock}
                 aria-label="Private — this device only"
                 title="Private — this device only"
@@ -421,7 +414,7 @@ export function SemanticNav() {
               <Button
                 appearance="subtle"
                 size="small"
-                icon={<MoreHorizontalRegular />}
+                icon={<IconMore />}
                 aria-label={`Actions for ${m.name}`}
                 className={styles.rowMenuBtn}
               />
@@ -430,19 +423,19 @@ export function SemanticNav() {
               {
                 key: "ask",
                 label: "Ask about this metric",
-                icon: <ChatRegular />,
+                icon: <IconChat />,
                 onClick: () => askAbout(m.name),
               },
               {
                 key: "rename",
                 label: "Rename",
-                icon: <RenameRegular />,
+                icon: <IconRename />,
                 onClick: () => setRename({ id: m.id, name: m.name, busy: false, error: null }),
               },
               {
                 key: "delete",
                 label: "Delete",
-                icon: <DeleteRegular />,
+                icon: <IconTrash />,
                 onClick: () => openDeleteMetric(m),
               },
             ]}
@@ -466,7 +459,7 @@ export function SemanticNav() {
           <Button
             appearance="subtle"
             size="small"
-            icon={<DeleteRegular />}
+            icon={<IconTrash />}
             aria-label={`Delete synonym ${s.term}`}
             className={styles.rowMenuBtn}
             onClick={() => void deleteSynonym(s.term)}
@@ -499,7 +492,7 @@ export function SemanticNav() {
           <Button
             appearance="subtle"
             size="small"
-            icon={<AddRegular />}
+            icon={<IconAdd />}
             aria-label={`Save ${p.expression} as a metric`}
             className={styles.rowMenuBtn}
             onClick={() => acceptSuggestedMetric(p)}
@@ -518,7 +511,7 @@ export function SemanticNav() {
           <Button
             appearance="subtle"
             size="small"
-            icon={<AddRegular />}
+            icon={<IconAdd />}
             aria-label={`Add synonym ${s.term}`}
             className={styles.rowMenuBtn}
             onClick={() => void acceptSuggestedSynonym(s.term, s.canonical)}
@@ -542,7 +535,7 @@ export function SemanticNav() {
         <Button
           appearance="subtle"
           size="small"
-          icon={<AddRegular />}
+          icon={<IconAdd />}
           className={styles.newButton}
           onClick={() =>
             setNewMetric({ name: "", expression: "", entity: "", description: "", busy: false, error: null })
@@ -553,7 +546,7 @@ export function SemanticNav() {
         <Button
           appearance="subtle"
           size="small"
-          icon={<AddRegular />}
+          icon={<IconAdd />}
           className={styles.newButton}
           onClick={() => setNewSynonym({ term: "", canonical: "", busy: false, error: null })}
         >

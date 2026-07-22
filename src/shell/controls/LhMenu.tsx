@@ -28,7 +28,7 @@ import {
   shorthands,
   tokens,
 } from "@fluentui/react-components";
-import { ChevronRightRegular, ArrowLeftRegular } from "@fluentui/react-icons";
+import { IconBack, IconChevronRight } from "@/shell/icons";
 import { Sheet } from "../Sheet";
 import { usePaneLayout } from "../paneLayout";
 
@@ -199,7 +199,7 @@ export function LhMenu({ trigger, items, "aria-label": ariaLabel }: LhMenuProps)
         <span className={styles.rowLabel}>{it.label}</span>
         {it.submenu && (
           <span className={styles.rowChevron} aria-hidden>
-            <ChevronRightRegular />
+            <IconChevronRight />
           </span>
         )}
       </button>
@@ -218,7 +218,7 @@ export function LhMenu({ trigger, items, "aria-label": ariaLabel }: LhMenuProps)
             {page && (
               <button type="button" className={mergeClasses("lh-press", styles.row)} onClick={() => setPage(null)}>
                 <span className={styles.rowIcon} aria-hidden>
-                  <ArrowLeftRegular />
+                  <IconBack />
                 </span>
                 <span className={styles.rowLabel}>Back</span>
               </button>

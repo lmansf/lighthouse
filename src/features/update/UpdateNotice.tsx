@@ -15,7 +15,7 @@
  */
 import { useEffect, useState } from "react";
 import { Button, Link, Text, Tooltip, makeStyles, shorthands, tokens } from "@fluentui/react-components";
-import { ArrowDownloadRegular } from "@fluentui/react-icons";
+import { IconDownload } from "@/shell/icons";
 import { isDesktopShell } from "@/shell/desktopBridge";
 
 /** Releases page — the fallback when an in-app update can't start. */
@@ -115,7 +115,7 @@ export function UpdateNotice({ collapsed }: { collapsed?: boolean }) {
           size="small"
           appearance="primary"
           shape="circular"
-          icon={<ArrowDownloadRegular />}
+          icon={<IconDownload />}
           aria-label={`Update to Lighthouse ${update.version}`}
           disabled={busy}
           onClick={() => void install()}
@@ -132,7 +132,7 @@ export function UpdateNotice({ collapsed }: { collapsed?: boolean }) {
       <Button
         size="small"
         appearance="primary"
-        icon={<ArrowDownloadRegular />}
+        icon={<IconDownload />}
         disabled={busy}
         onClick={() => void install()}
       >

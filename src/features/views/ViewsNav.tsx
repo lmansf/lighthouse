@@ -36,15 +36,7 @@ import {
   shorthands,
   tokens,
 } from "@fluentui/react-components";
-import {
-  AddRegular,
-  ChatRegular,
-  DeleteRegular,
-  EyeRegular,
-  LockClosedRegular,
-  MoreHorizontalRegular,
-  RenameRegular,
-} from "@fluentui/react-icons";
+import { IconAdd, IconChat, IconEye, IconLock, IconMore, IconRename, IconTrash } from "@/shell/icons";
 import type { View } from "@/contracts";
 import { ragService } from "@/contracts";
 import { useViewsStore } from "@/stores/useViewsStore";
@@ -324,7 +316,7 @@ export function ViewsNav() {
                 {v.name}
               </Text>
               {isPrivate && (
-                <LockClosedRegular
+                <IconLock
                   className={styles.lock}
                   aria-label="Private — this device only"
                   title="Private — this device only"
@@ -336,7 +328,7 @@ export function ViewsNav() {
                 <Button
                   appearance="subtle"
                   size="small"
-                  icon={<MoreHorizontalRegular />}
+                  icon={<IconMore />}
                   aria-label={`Actions for ${v.name}`}
                   className={styles.rowMenuBtn}
                 />
@@ -345,25 +337,25 @@ export function ViewsNav() {
                 {
                   key: "inspect",
                   label: "Inspect",
-                  icon: <EyeRegular />,
+                  icon: <IconEye />,
                   onClick: () => requestViewInspect(v.id),
                 },
                 {
                   key: "rename",
                   label: "Rename",
-                  icon: <RenameRegular />,
+                  icon: <IconRename />,
                   onClick: () => openRename(v),
                 },
                 {
                   key: "ask",
                   label: "Ask about this view",
-                  icon: <ChatRegular />,
+                  icon: <IconChat />,
                   onClick: () => askAbout(v),
                 },
                 {
                   key: "delete",
                   label: "Delete",
-                  icon: <DeleteRegular />,
+                  icon: <IconTrash />,
                   onClick: () => void openDelete(v),
                 },
               ]}
@@ -387,7 +379,7 @@ export function ViewsNav() {
       <Button
         appearance="subtle"
         size="small"
-        icon={<AddRegular />}
+        icon={<IconAdd />}
         className={styles.newButton}
         onClick={() => setShapeOpen(true)}
       >

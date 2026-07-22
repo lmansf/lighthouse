@@ -142,8 +142,8 @@ test("tile grid: the action row batch-applies through the same store ops", () =>
 });
 
 test("tile grid: at-rest badges, pull-down search, prominent Add", () => {
-  assert.match(grid, /EyeRegular/, "in-the-beam badge");
-  assert.match(grid, /LockClosedRegular/, "private badge");
+  assert.match(grid, /IconEye/, "in-the-beam badge");
+  assert.match(grid, /IconLock/, "private badge");
   assert.match(grid, /el\.scrollTop = row\.offsetHeight/, "search parks above the fold (pull-down reveals)");
   assert.match(grid, />\s*Add\s*<\/Button>/, "the add control stays prominent");
   assert.match(grid, /repeat\(auto-fill, minmax\(148px, 1fr\)\)/, "auto-fill tile columns");

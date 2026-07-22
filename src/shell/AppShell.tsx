@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button, Text, makeStyles, mergeClasses, tokens } from "@fluentui/react-components";
-import { ArrowLeftRegular } from "@fluentui/react-icons";
+import { IconBack } from "@/shell/icons";
 import { Sidebar } from "./Sidebar";
 import { LAYOUT } from "./theme";
 import { usePaneLayout, type CompactTab } from "./paneLayout";
@@ -676,7 +676,7 @@ export function AppShell({ sidebar, main }: AppShellProps) {
                 <Button
                   appearance="subtle"
                   className={styles.backBtn}
-                  icon={<ArrowLeftRegular />}
+                  icon={<IconBack />}
                   aria-label="Back to chat"
                   onClick={() => setCompactTab("chat")}
                 >

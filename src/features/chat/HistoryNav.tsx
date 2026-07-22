@@ -36,13 +36,7 @@ import {
   shorthands,
   tokens,
 } from "@fluentui/react-components";
-import {
-  AddRegular,
-  CheckmarkRegular,
-  DeleteRegular,
-  DismissRegular,
-  EditRegular,
-} from "@fluentui/react-icons";
+import { IconAdd, IconCheck, IconClose, IconEdit, IconTrash } from "@/shell/icons";
 import {
   conversationsAllContexts,
   conversationsForContext,
@@ -196,7 +190,7 @@ export function HistoryNav({ onClose }: { onClose?: () => void } = {}) {
       </Text>
       <Button
         appearance="secondary"
-        icon={<AddRegular />}
+        icon={<IconAdd />}
         className={styles.newChat}
         disabled={messages.length === 0}
         onClick={() => {
@@ -263,14 +257,14 @@ export function HistoryNav({ onClose }: { onClose?: () => void } = {}) {
                         <Button
                           size="small"
                           appearance="primary"
-                          icon={<CheckmarkRegular />}
+                          icon={<IconCheck />}
                           aria-label="Save name"
                           onClick={() => commitRename(c.id)}
                         />
                         <Button
                           size="small"
                           appearance="subtle"
-                          icon={<DismissRegular />}
+                          icon={<IconClose />}
                           aria-label="Cancel rename"
                           onClick={() => setRenamingId(null)}
                         />
@@ -331,7 +325,7 @@ export function HistoryNav({ onClose }: { onClose?: () => void } = {}) {
                       <Button
                         size="small"
                         appearance="subtle"
-                        icon={<EditRegular />}
+                        icon={<IconEdit />}
                         aria-label="Rename chat"
                         onClick={() => {
                           setRenamingId(c.id);
@@ -342,7 +336,7 @@ export function HistoryNav({ onClose }: { onClose?: () => void } = {}) {
                       <Button
                         size="small"
                         appearance="subtle"
-                        icon={<DeleteRegular />}
+                        icon={<IconTrash />}
                         aria-label="Delete chat"
                         onClick={() => setConfirmDeleteId(c.id)}
                       />
