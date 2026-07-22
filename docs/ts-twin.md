@@ -21,30 +21,56 @@ deliberately lacks. Verified against a full PARITY-marker sweep of both trees.*
      been how engine bugs were caught; the node test suite doubles as an
      executable spec that the Rust side mirrors (and vice versa).
 
-## The parity rules
+## The twin contract (two lists — §39 codification)
 
-1. **Shared behavior lands in BOTH engines.** Retrieval, chunking, synthesis
-   orchestration, prompts, extraction for shared formats, licensing,
-   settings/profile/secrets handling — a change to one side without the other
-   is a bug unless rule 3 applies.
-2. **Prompts, labels, and trigger rules are byte-identical.** The system
-   prompt, the context/question wrapper, user-visible notice templates
-   (e.g. the named-but-excluded notice, doc-focus progress labels), and cue
-   tables must match byte-for-byte across `synth.rs`/`synth.ts`,
-   `llm.rs`/`llm.ts`, `meta.rs`/`meta.ts`. When touching one, diff the other.
-3. **Deliberate divergence carries a `PARITY:` comment** on both sides where
-   sensible, stating what diverges and why. "The TS twin lacks X" is a valid
-   permanent state only for the capabilities listed below.
-4. **`CACHE_VERSION` moves in lockstep** across
-   `native/crates/lighthouse-core/src/extract.rs`, `src/server/extract.ts`,
-   and the assertion in `native/crates/lighthouse-core/tests/extract_test.rs`
-   — bump all three or native CI goes red. This holds even when the change
-   motivating the bump is Rust-only (the cache format is shared).
-5. **Parity fixtures are byte-pinned in both suites.** The chunker windows
-   (`vault.rs` ⇄ `test/chunker.test.mjs`), the table-profile block
-   (`table_profile.rs` ⇄ `test/tableProfile.test.mjs`), and the meta cue
-   table (`meta.rs` ⇄ `test/meta.cues.test.mjs`). Touch one side → the other
-   suite fails.
+Every shared module is in exactly ONE of two buckets. If you cannot say which
+bucket your change touches, stop and read this section again.
+
+**BYTE-TWINNED** — the bytes are the contract; each entry names the parity
+test that fails when the twins drift. Changing one side means changing the
+other side and the pin IN THE SAME COMMIT.
+
+| Surface | Rust ⇄ TS | Parity test |
+|---|---|---|
+| FULL system prompt + buildPrompt + priorTurns | llm.rs ⇄ llm.ts | test/promptParity.test.mjs + test/cloudSnapshot.test.mjs (+ the Rust `cloud_snapshot` tests — both engines pin the same fixture files) |
+| Compact system prompt (apple-fm tiers) | llm.rs ⇄ llm.ts | test/compactPrompt.test.mjs + test/fixtures/compact-prompt.txt (both engines) |
+| Budget tables, digit-aware estimator, overflow ladder | budget.rs ⇄ budget.ts | test/budget.test.mjs ⇄ the cargo `budget::` tests (same cases) |
+| Chunker windows | vault.rs ⇄ vault.ts | test/chunker.test.mjs |
+| Table-profile block | table_profile.rs ⇄ tableProfile.ts | test/tableProfile.test.mjs |
+| Meta cue table | meta.rs ⇄ meta.ts | test/meta.cues.test.mjs |
+| Reliability block names + templates (§4 assists) | synth.rs ⇄ synth.ts | test/draftAnswer.test.mjs + test/privacyLegibility.test.mjs |
+| Local-only skip-note template | synth.rs ⇄ synth.ts | test/privacyLegibility.test.mjs (pins both engine templates) |
+| Doc-focus reduce length note (§35 §2) | synth.rs ⇄ synth.ts | test/promptParity.test.mjs (byte pin + one-call-site counts) |
+| Pure verdict fns (warm-wait, overflow retry) | synth.rs/budget.rs ⇄ synth.ts/budget.ts | test/localWarmWait.test.mjs, test/budget.test.mjs |
+| Settings file surface | settings.rs ⇄ settings.ts | native settings_test.rs (no-`..` destructuring makes a new field a compile error until covered) + the twin round-trip tests |
+| CACHE_VERSION | extract.rs ⇄ extract.ts | the assertion in native tests/extract_test.rs — moves in lockstep even for Rust-only changes (the cache format is shared) |
+
+**WIRE-COMPATIBLE-ONLY** — the twins agree on the wire shape (ops, chunk
+framing, JSON fields) but implementations may diverge; every deliberate
+divergence carries a `PARITY:` comment at the seam. This bucket is everything
+not listed above, notably: the routes/op dispatch (app/api/rag/route.ts vs
+lighthouse-server), vault walk/inclusion/curation evaluation (mirrored
+BEHAVIOR, no byte pins), extraction for shared formats (different libraries,
+compatible output), the answer cache, egress/audit registries, local-model
+management, provider auth (desktop-only by design, fail-closed stub in the
+twin), and the whole Rust-engine-only capability list below.
+
+**Ambiguous today — flagged for the owner** (each claims parity in comments
+but has NO cross-engine enforcing test; promote to byte-twinned with a pin,
+or demote to wire-compatible and soften the comment):
+
+1. `REMOTE_PROVIDERS` ⇄ `OPENAI_COMPAT_PROVIDERS` (llm.ts ⇄ llm.rs) — "KEEP
+   IN SYNC" comment; test/providers.test.mjs exercises the TS table only.
+2. The §32 §5 quote digest (quotes.ts ⇄ the Rust digest in synth.rs/quotes) —
+   PARITY comments claim byte-identical digesting; test/quotes.test.mjs
+   behavior-tests the TS side only.
+3. The reliability preamble's exact prose (synth twins) — the names are
+   pinned, the full template bytes are asserted structurally, not
+   cross-engine byte-for-byte.
+
+The old numbered rules still hold where they don't conflict: shared behavior
+lands in BOTH engines unless the capability list says otherwise, and
+deliberate divergence always carries the `PARITY:` comment.
 
 ## Rust-engine-only capabilities (canonical list)
 
