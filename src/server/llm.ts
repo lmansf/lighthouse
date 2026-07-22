@@ -773,11 +773,28 @@ async function* streamLocal(
  */
 export function draftAnswer(question: string, contexts: Ctx[]): string {
   void question;
-  return contexts
-    .slice(0, 3)
-    .map((c, i) => `[${i + 1}] **${c.name}** — ${c.text.slice(0, 300).trim()}…`)
-    .join("\n\n");
+  return (
+    contexts
+      // The §4 reliability assists are prompt scaffolding, not passages —
+      // rendered here they leak instructions into the visible answer (0.14.1
+      // field report: a dead iOS bridge fell back to passages and the answer
+      // opened with "[1] what you can see — …"). KEEP IN SYNC with llm.rs.
+      .filter((c) => c.name !== RELIABILITY_PREAMBLE_NAME && c.name !== RELIABILITY_CONFIRMED_NAME)
+      .slice(0, 3)
+      .map((c, i) => `[${i + 1}] **${c.name}** — ${c.text.slice(0, 300).trim()}…`)
+      .join("\n\n")
+  );
 }
+
+/**
+ * The names of the engine-authored context blocks `synth.ts::reliabilityBlocks`
+ * prepends for the LOCAL model (§4 small-model handholding). They ride the
+ * normal context list into prompts, but they are scaffolding, not document
+ * passages: every extractive rendering (`draftAnswer` — the G2 draft and all
+ * passages fallbacks) must skip them by these names. KEEP IN SYNC with llm.rs.
+ */
+export const RELIABILITY_PREAMBLE_NAME = "what you can see";
+export const RELIABILITY_CONFIRMED_NAME = "confirmed available";
 
 async function* extractive(question: string, contexts: Ctx[], noKey: boolean): AsyncGenerator<string> {
   const head = noKey

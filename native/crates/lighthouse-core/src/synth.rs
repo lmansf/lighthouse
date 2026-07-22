@@ -126,10 +126,11 @@ pub fn reliability_blocks(question: &str, cfg: &ModelCfg, included_file_ids: &[S
         "If something you'd need is genuinely not present, say what's missing, but do not deny that a listed file or column exists.".to_string(),
     ]
     .join(" ");
-    let mut out = vec![Ctx { name: "what you can see".to_string(), text: preamble, score: 1.0 }];
+    let mut out =
+        vec![Ctx { name: llm::RELIABILITY_PREAMBLE_NAME.to_string(), text: preamble, score: 1.0 }];
     if let Some((_, name)) = vault::named_file_target(question, included_file_ids) {
         out.push(Ctx {
-            name: "confirmed available".to_string(),
+            name: llm::RELIABILITY_CONFIRMED_NAME.to_string(),
             text: format!(
                 "The file \"{name}\" IS available to you right now — use it to answer; never say it is missing or that you cannot open it."
             ),
@@ -451,22 +452,28 @@ fn warming_label(waited_ms: u64) -> String {
 /// healthy server) it ends immediately. Cancellation is inherited: dropping
 /// the outer answer stream drops this stream mid-sleep.
 fn local_warm_wait(cfg: &ModelCfg) -> Pin<Box<dyn Stream<Item = ChatChunk> + Send>> {
-    // §3 structural pin: on a mobile shell the private model can never become
-    // healthy (local_model::local_model_supported), so no ask may ever hold
-    // for a warm-up — "warming up…" is unreachable there by construction.
-    // Mobile profiles are already normalized off "local" (profile.rs load);
-    // this guard makes the property hold for ANY cfg a caller passes.
+    // Guard: a warm-up only ever holds where the private model can actually
+    // become healthy — the desktop shell, or a mobile shell whose plugin
+    // reports an on-device backend (supported_here() folds both). Where no
+    // backend exists, "warming up…" is unreachable by construction (such
+    // profiles are normalized off "local" in profile.rs load; this guard makes
+    // the property hold for ANY cfg a caller passes).
     let is_local =
         cfg.provider_id.as_deref() == Some("local") && crate::local_model::supported_here();
     Box::pin(async_stream::stream! {
         if !is_local {
             return;
         }
-        // Waiting for a spawn only makes sense when the desktop supervisor has
-        // a model to spawn (≤ one reconcile tick away). A BYO endpoint that is
-        // simply absent (Ollama not running, web twin) keeps today's immediate
-        // fallback via the Down arm of the verdict.
-        let installed = crate::local_model::find_installed_model().is_some();
+        // Waiting for a Down server only makes sense when something can bring
+        // it up: the desktop supervisor with an installed model to spawn (≤ one
+        // reconcile tick away), or — 0.14.1 field report — a mobile on-device
+        // bridge, which the shell re-ensures at every ask (chat_ask) after iOS
+        // tears its loopback listener down with app suspension; the re-bind
+        // lands within a poll tick. A BYO endpoint that is simply absent
+        // (Ollama not running, web twin) keeps today's immediate fallback via
+        // the Down arm of the verdict.
+        let installed = crate::local_model::find_installed_model().is_some()
+            || crate::local_model::on_device_backend();
         let mut waited: u64 = 0;
         loop {
             match warm_wait_verdict(llm::local_health().await, installed, waited) {

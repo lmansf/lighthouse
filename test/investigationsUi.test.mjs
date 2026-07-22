@@ -79,10 +79,12 @@ test("policy surfaces: provider switch disabled inside local-only, on-device pro
     /onDeviceLocalOnly=\{investigationLocalOnly\}/,
     "the shield receives the local-only policy flag",
   );
+  // Hero + BOTH conversation-header arrangements (0.14.2 split the header
+  // into compact and desktop branches; the shield is a keeper in each).
   assert.equal(
     (chat.match(/\{statusShield\}/g) ?? []).length,
-    2,
-    "the status shield renders in both headers",
+    3,
+    "the status shield renders in the hero and both header branches",
   );
   const shield = read("src/features/egress/EgressShield.tsx");
   assert.match(

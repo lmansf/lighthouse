@@ -1432,6 +1432,11 @@ fn split_keep_ws(s: &str) -> Vec<String> {
 pub fn draft_answer(_question: &str, contexts: &[Ctx]) -> String {
     contexts
         .iter()
+        // The §4 reliability assists are prompt scaffolding, not passages —
+        // rendered here they leak instructions into the visible answer
+        // (0.14.1 field report: a dead iOS bridge fell back to passages and
+        // the answer opened with "[1] what you can see — …").
+        .filter(|c| c.name != RELIABILITY_PREAMBLE_NAME && c.name != RELIABILITY_CONFIRMED_NAME)
         .take(3)
         .enumerate()
         .map(|(i, c)| {
@@ -1441,6 +1446,14 @@ pub fn draft_answer(_question: &str, contexts: &[Ctx]) -> String {
         .collect::<Vec<_>>()
         .join("\n\n")
 }
+
+/// The names of the engine-authored context blocks `synth::reliability_blocks`
+/// prepends for the LOCAL model (§4 small-model handholding). They ride the
+/// normal context list into prompts, but they are scaffolding, not document
+/// passages: every extractive rendering (`draft_answer` — the G2 draft and all
+/// passages fallbacks) must skip them by these names. KEEP IN SYNC with llm.ts.
+pub const RELIABILITY_PREAMBLE_NAME: &str = "what you can see";
+pub const RELIABILITY_CONFIRMED_NAME: &str = "confirmed available";
 
 /// Local, no-network answer: stream the top passages with citations.
 fn extractive(question: &str, contexts: &[Ctx], no_key: bool) -> AnswerStream {
@@ -1649,6 +1662,36 @@ mod tests {
         // 300-char snippet clamp on the long one (+ the trailing ellipsis char).
         let snippet_len = blocks[1].chars().count() - "[2] **q2.csv** — ".chars().count() - 1;
         assert_eq!(snippet_len, 300, "snippet clamped to 300 chars");
+    }
+
+    // 0.14.1 field report: the §4 reliability assists lead the context list
+    // (score 1.0, prepended by synth::reliability_blocks), and a dead local
+    // server's passages fallback rendered them as the answer's first "passage"
+    // — prompt scaffolding leaked into the visible answer. Extractive
+    // renderings must skip them by name; real passages only, numbered from [1].
+    #[test]
+    fn draft_answer_skips_reliability_scaffolding() {
+        let ctxs = vec![
+            Ctx {
+                name: RELIABILITY_PREAMBLE_NAME.into(),
+                text: "You currently have 2 file(s)…".into(),
+                score: 1.0,
+            },
+            Ctx {
+                name: RELIABILITY_CONFIRMED_NAME.into(),
+                text: "The file \"a.csv\" IS available…".into(),
+                score: 1.0,
+            },
+            Ctx { name: "a.csv".into(), text: "north 100".into(), score: 0.9 },
+            Ctx { name: "b.md".into(), text: "notes".into(), score: 0.8 },
+        ];
+        let out = draft_answer("key points?", &ctxs);
+        assert!(out.starts_with("[1] **a.csv**"), "first real passage leads: {out}");
+        assert!(out.contains("[2] **b.md**"), "second real passage keeps its slot");
+        assert!(!out.contains(RELIABILITY_PREAMBLE_NAME), "preamble block skipped");
+        assert!(!out.contains(RELIABILITY_CONFIRMED_NAME), "confirmed block skipped");
+        // Scaffolding alone → an EMPTY draft (never a scaffold-only "answer").
+        assert_eq!(draft_answer("q", &ctxs[..2]), "");
     }
 
     // --- Engine-reported token accounting (openspec: add-beam-loop §1) ---------

@@ -31,6 +31,8 @@ import {
   maxDocSegments,
   localHealth,
   narrationTier,
+  RELIABILITY_CONFIRMED_NAME,
+  RELIABILITY_PREAMBLE_NAME,
   type LocalHealth,
   type Ctx,
 } from "./llm";
@@ -147,11 +149,11 @@ export function reliabilityBlocks(
     "Everything shown to you here IS available — never tell the user that a file or a column that appears in your context is missing or that you cannot access it.",
     "If something you'd need is genuinely not present, say what's missing, but do not deny that a listed file or column exists.",
   ].join(" ");
-  const out: Ctx[] = [{ name: "what you can see", text: preamble, score: 1 }];
+  const out: Ctx[] = [{ name: RELIABILITY_PREAMBLE_NAME, text: preamble, score: 1 }];
   const named = namedFileTarget(question, includedFileIds);
   if (named) {
     out.push({
-      name: "confirmed available",
+      name: RELIABILITY_CONFIRMED_NAME,
       text: `The file "${named[1]}" IS available to you right now — use it to answer; never say it is missing or that you cannot open it.`,
       score: 1,
     });
@@ -358,7 +360,12 @@ async function* localWarmWait(cfg: ModelCfg): AsyncGenerator<ChatChunk> {
   // construction. PARITY: mirrors synth.rs::local_warm_wait's supported_here()
   // guard (dead on the twin: platformKind() is constant "desktop").
   if (cfg.providerId !== "local" || !localModelAvailable(platformKind(), onDeviceBackend())) return;
-  const installed = isModelInstalled();
+  // A Down server is worth waiting on when something can bring it up: the
+  // desktop supervisor with an installed model to spawn, or — 0.14.1 field
+  // report — a mobile on-device bridge, which the shell re-ensures at every
+  // ask after iOS tears its loopback listener down with app suspension; the
+  // re-bind lands within a poll tick. PARITY: synth.rs::local_warm_wait.
+  const installed = isModelInstalled() || onDeviceBackend();
   let waited = 0;
   for (;;) {
     if (warmWaitVerdict(await localHealth(), installed, waited) === "proceed") return;
