@@ -20,6 +20,20 @@
 //! section's `run_query` result, and each summary line is a `headline` the engine
 //! templated from those cells — so the summary is reproducible from the SQL.
 //!
+//! DETERMINISM CONTRACT (§38 §5 — §37's surfacing depends on this):
+//! - BODY: byte-stable for identical inputs. The battery, section rendering,
+//!   summary, and caveats are model-free; two runs over the same table render
+//!   identically once stamped to the same `generated_ms` (pinned by
+//!   `reports_test.rs`).
+//! - FRAMING (templates only): model-VARIABLE prose, but bounded — grounded
+//!   on the budget-packed findings (§1), retried once on overflow then
+//!   surrendered (§2), gated on length (`NARRATION_CHAR_CAP`) and on the
+//!   digit-subset floor (§4: no number outside the findings, at least one
+//!   headline figure), and LABELED by the §3 footer line naming its author.
+//! - FALLBACK: deterministic. Every rejected/unavailable narration renders
+//!   the fixed engine framing lines — a report is never blocked on a model
+//!   and never silent about which prose it carries.
+//!
 //! Render idiom: `# title` / `## Summary` / `## {section}` / `## Caveats`,
 //! matching `briefings::render_markdown` (`briefings.rs:245`).
 //!
