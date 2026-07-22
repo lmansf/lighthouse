@@ -19,12 +19,15 @@ use lighthouse_core::contracts::{ChatChunk, ChatTurn, CostMeta};
 use lighthouse_core::{local_model, profile, settings, vault};
 use lighthouse_shell::commands::{err_string, percent_decode};
 
-// Re-exports so the wrapper's internal callers (lib.rs's iOS boot probe and
-// the private_model_availability command below) keep their pre-split
-// `commands::` paths.
-pub(crate) use lighthouse_shell::commands::{
-    private_model_availability_impl, start_content_size_observer,
-};
+// Re-exports so the wrapper's internal callers (lib.rs's mobile boot probe
+// and the private_model_availability command below) keep their pre-split
+// `commands::` paths. The observer exists only on mobile targets (both shell
+// variants are `not(desktop)`-gated, exactly as pre-split), so its re-export
+// carries the same gate as its one call site — ungated, it fails E0432 on
+// every desktop build.
+pub(crate) use lighthouse_shell::commands::private_model_availability_impl;
+#[cfg(not(desktop))]
+pub(crate) use lighthouse_shell::commands::start_content_size_observer;
 
 #[tauri::command]
 pub async fn rag_list() -> Value {
