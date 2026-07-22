@@ -6401,3 +6401,162 @@ section. Open ONE PR titled "Window-proof report framing:
 budget-packed findings, labeled fallback, digit-gated narration";
 stop at the PR.
 ```
+
+## 39. Architecture review: pitfalls, structural risks, and the conventions to codify (2026-07-22)
+
+Owner ask: the pitfalls and potential pitfalls of the architecture
+decisions so far, plus recommendations. First consolidation audit of
+the §23–§38 arc (the previous one was §2, pre-mobile). Condensed for
+future sessions; the full analysis was delivered in-session.
+
+**Pitfalls that already bit — the patterns:**
+1. Design tokens are an API (§35): remapping fontSizeBase400's VALUE
+   broke a consumer styled against its old meaning — answers rendered
+   at title size for two releases. Token semantic changes need a
+   consumer audit; content-vs-chrome token split is the guard.
+2. Tested ≠ wired (§36): the §32 whole-prompt planner shipped with
+   green unit tests and zero production call sites. Unit pins prove
+   existence, not connection — END-TO-END ASSEMBLY PINS are the
+   default acceptance now.
+3. Calibrate heuristics on the product's corpus (§36): chars/4 token
+   estimation in an app that processes numeric tables (~2.5 c/t).
+4. The iOS webview is not a browser (§26, §33): hidden-input .click()
+   and window.open were silently dead; each found by field report.
+   One-seam fixes (openExternal, label/overlay picker) + a WKWebView
+   web-API checklist.
+5. One flag, one meaning (§24): desktop:true carried both "embedded
+   shell" and "desktop form factor" — the phone got desktop
+   onboarding and an unrunnable model.
+6. Supply chains need end-of-chain assertions (§25): OCR models were
+   fetched by CI and findable by the runtime — and never staged into
+   the bundle. The unzip-the-artifact CI check is the template.
+7. Loosely specified interactions get naive implementations (§34
+   edge-swipe with no axis lock; §33 nudge over the tab bar). Fixed
+   surfaces need a shared registry; gestures need their
+   discrimination rules stated.
+8. Cross-feature structural coupling needs floors (§33): the tour
+   pointed at surfaces §30 deleted; silent degradation. Anchor-floor
+   structural tests per mode.
+9. "The capability survives somewhere" is not findability (§37): the
+   report launcher was re-homed to the empty hero only and vanished
+   after the first ask. UX acceptance = findable at the moment of
+   relevance.
+10. Sentinels meet generic algorithms (§36): score-0 "extra" blocks
+    were exactly what lowest-score-first eviction dropped first.
+
+**Structural risks (watch/decide):**
+- The byte-twin is a growing tax; its contract (byte-twinned modules
+  vs wire-compatible-only) is undocumented — drift risk in un-twinned
+  corners.
+- Structural regex pins used for BEHAVIOR verification (the dead-
+  planner enabler); reserve pins for byte-contracts.
+- The loopback HTTP bridge fights structured/guided generation; the
+  designed-unbuilt PrivateModel trait is the seam to build WHEN
+  guided-gen/MLX lands — don't accrete onto the bridge.
+- The 4k window is a permanent tax: new model call sites need a
+  registered call type + budget or CI fails (call-type registry).
+- The cfg(desktop) monolith + a desktop crate that can't compile in
+  the dev container = standing blind spot; land or kill the crate
+  split.
+- state.json serde-default migration can't express semantic changes;
+  older builds clobber newer state; .rag-vault lives inside the
+  user-visible/iCloud-synced Documents on iOS. Write-version guard +
+  placement review.
+- TIER-2 IS A PRODUCT DECISION: Apple-FM floor (iPhone 15 Pro+) means
+  a large device slice has NO private model; ship the ~1GB fallback
+  or declare the floor in onboarding copy — stop carrying it as an
+  implicit promise.
+- Apple FM churns per OS release (windows, guardrails): every
+  assumption behind a probe, never a constant.
+- Prompt-driven development failure modes are now catalogued (dead
+  code, naive readings, same-file collisions, doc drift, no holistic
+  UX owner). Diagnose-first stays non-negotiable; consolidation
+  audits every ~8-10 sections (next ≈ §45).
+- Every ChunkMeta addition requires the answer-cache replay audit —
+  currently tribal knowledge.
+
+### Prompt (the mechanical subset — conventions, tripwires, contracts)
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first, local-first analytics AI harness: Rust engine
+(native/crates/lighthouse-core) in a Tauri 2 shell (same crate is
+the iOS app), byte-compatible TS twin (src/server/), React UI
+(src/). Read CLAUDE.md, docs/ts-twin.md, and roadmap §39 IN FULL —
+this PR codifies its lessons. Docs + tripwires + two small guards;
+NO feature or behavior changes beyond the state-file guard.
+
+1. Write docs/CONVENTIONS.md — the house patterns, each ~5-10 lines
+   with a pointer to its canonical example: the pure verdict-fn
+   pattern (warm_wait_verdict et al.); meta-channel additions + the
+   answer-cache REPLAY CHECKLIST (§22.6/§32/§37); capability flags
+   (one flag one meaning; platform vs shell vs availability); the
+   WKWebView web-API checklist (file inputs need label/overlay, no
+   bare window.open — route openExternal, no JIT, no child
+   processes, loopback rules); the fixed/bottom-anchored surface
+   registry (tab bar, FAB, nudge, composer — every fixed-bottom
+   surface MUST consume --lh-tabbar-h/--lh-safe-bottom; list them);
+   pins policy (byte-pins for contracts/labels/prompts; behavior
+   tests for behavior; end-to-end assembly pins for integration —
+   cite the §36 lesson); the model-call BUDGET RULE (every new
+   stream_answer call site declares a call type registered in the
+   §36 budget floor); token-semantics rule (changing a design
+   token's VALUE = consumer audit); diagnose-before-prescribe (a §
+   patch starts from a code trace, not a symptom). Link it from
+   CLAUDE.md with one line ("read docs/CONVENTIONS.md before
+   changing shared systems").
+2. Stamp-lockstep tripwire: scripts/check-stamps.mjs asserting all
+   SEVEN version stamps agree (per CLAUDE.md's list), wired into
+   the JS check suite/CI so any drift is red on the PR that causes
+   it. (It would have caught the §33-era staleness class.)
+3. Budget call-type registry floor: a test that enumerates
+   stream_answer/stream_local call sites (grep-driven inventory pin,
+   the §34 setCompactTab idiom) and asserts each maps to a declared
+   budget call type in budget.rs/budget.ts — a NEW call site without
+   a registered type fails with a message pointing at CONVENTIONS.md.
+4. Twin contract: rewrite docs/ts-twin.md's contract section into an
+   explicit two-list table — BYTE-TWINNED (prompts, labels, verdict
+   fns, budget math, digest/packing logic — each with its parity
+   test) vs WIRE-COMPATIBLE-ONLY (everything else; divergence
+   allowed, PARITY comment at the seam). Audit current modules into
+   the two lists; fix nothing — just document reality and mark the
+   two-three ambiguous cases for the owner.
+5. State-file guard (the one behavior change): state.json gains a
+   written_by version stamp (serde-default; old files load
+   unchanged). On load, if written_by is NEWER than the running app,
+   the engine goes READ-ONLY on that state (answers work; writes
+   refuse with one honest log line) instead of clobbering fields it
+   doesn't know. Twins + tests (older-reads-newer fixture; normal
+   path byte-identical). Document the additive-only discipline +
+   this guard in the CONVENTIONS state section. Note (doc-only, no
+   code): the .rag-vault-inside-Documents placement on iOS is
+   flagged for an owner decision (iCloud conflicts vs visibility).
+6. Stamps + gates. Bump current+1 across all SEVEN stamp files (the
+   new tripwire proves it). Suites + release-smoke + ios-build
+   green.
+
+Constraints. No feature changes; no UI changes; the state guard is
+the only behavior change and it only ever REFUSES writes it would
+previously have corrupted. No telemetry. SharePoint plumbing
+untouched. Owner decisions explicitly NOT taken here: Tier-2 GGUF,
+the mobile crate split, .rag-vault placement — §39 lists them; this
+PR only documents.
+
+Acceptance:
+1. docs/CONVENTIONS.md exists, linked from CLAUDE.md; every pattern
+   names its canonical example file.
+2. check-stamps.mjs is in the gate and goes red on a deliberate
+   one-file drift (prove in a scratch commit, then revert).
+3. The call-type inventory pin is green and fails informatively on a
+   synthetic unregistered call site (prove, revert).
+4. ts-twin.md carries the two-list contract; ambiguous modules
+   flagged.
+5. An older-build-reads-newer-state fixture goes read-only with the
+   honest log line; current-version round-trips byte-identical.
+6. Suites + release-smoke + ios-build green; seven stamps bumped.
+
+Environment. Fully container-testable. One commit per numbered
+section. Open ONE PR titled "Codify the conventions: house patterns,
+stamp tripwire, budget registry, twin contract, state guard"; stop
+at the PR.
+```
