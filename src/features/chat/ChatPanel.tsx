@@ -534,7 +534,7 @@ const useStyles = makeStyles({
     position: "absolute",
     top: "2px",
     right: "2px",
-    opacity: 0,
+    opacity: 0.55,
     transitionProperty: "opacity",
     transitionDuration: tokens.durationFaster,
     // Touch has no hover to reveal this, so show it outright on no-hover
@@ -775,7 +775,7 @@ const useStyles = makeStyles({
     animationTimingFunction: "ease-out",
     "@media (prefers-reduced-motion: reduce)": { animationName: "none" },
   },
-  openIcon: { opacity: 0, transition: "opacity 120ms ease", color: tokens.colorNeutralForeground3, "@media (hover: none)": { opacity: 1 } },
+  openIcon: { opacity: 0.55, transition: "opacity 120ms ease", color: tokens.colorNeutralForeground3, "@media (hover: none)": { opacity: 1 } },
   refMeta: { display: "flex", flexDirection: "column", flex: 1, minWidth: 0 },
   // §3: related files as compact GitHub-tag-style chips on a wrapping row.
   // fp3 §2: the row WRAPS (never shrinks its chips) so touch targets stay full
@@ -817,7 +817,7 @@ const useStyles = makeStyles({
   refChipName: { fontWeight: tokens.fontWeightSemibold, whiteSpace: "nowrap" },
   refChipPct: { color: tokens.colorNeutralForeground3, fontVariantNumeric: "tabular-nums" },
   refChipOpen: {
-    opacity: 0,
+    opacity: 0.55,
     "@media (hover: none)": { opacity: 1 },
     transition: "opacity 120ms ease",
     color: tokens.colorNeutralForeground3,
@@ -1087,7 +1087,7 @@ const useStyles = makeStyles({
   questionActions: {
     display: "flex",
     gap: "0",
-    opacity: 0,
+    opacity: 0.55,
     transition: "opacity 120ms ease",
     "@media (hover: none)": { opacity: 1 },
   },

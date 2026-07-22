@@ -224,6 +224,15 @@ textarea,
   touch-action: manipulation;
 }
 
+/* §31 §6: the soft keyboard focus ring — a 2px tint ring on :focus-visible
+   only (pointer focus never draws it). The baseline for bare/native elements;
+   Fluent components and the Lh* controls carry their own identical ring via
+   colorStrokeFocus2, whose class-level declarations win over this rule. */
+:focus-visible {
+  outline: 2px solid var(--lh-tint);
+  outline-offset: 2px;
+}
+
 /* The §31 press treatment: on touch, an active control compresses slightly.
    Applied BY the control layer (tab bar, tiles, the swapped controls) rather
    than globally, so Fluent's own pressed styles aren't fought where they

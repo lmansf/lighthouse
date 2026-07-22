@@ -106,7 +106,7 @@ const useStyles = makeStyles({
   rowTime: { color: tokens.colorNeutralForeground3 },
   // Touch has no hover to reveal rename/delete (the only path to them), so show
   // them outright on no-hover pointers; desktop keeps the hover-gated reveal.
-  rowActions: { display: "flex", gap: "0", opacity: 0, transition: "opacity 120ms ease", "@media (hover: none)": { opacity: 1 } },
+  rowActions: { display: "flex", gap: "0", opacity: 0.55, transition: "opacity 120ms ease", "@media (hover: none)": { opacity: 1 } },
   editRow: { display: "flex", alignItems: "center", gap: tokens.spacingHorizontalXS, flex: 1 },
   confirm: {
     display: "flex",
