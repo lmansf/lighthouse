@@ -543,6 +543,7 @@ mod tests {
             cost: Some(reported_cost(100, 50, Some(0.01))),
             manifest: None,
             chart: None,
+            table: None,
         };
         assert_eq!(ask_new_cost(&live).map(|c| c.total_tokens), Some(150));
         // Same stored figures, but a replay stamp ⇒ 0 new tokens / $0.

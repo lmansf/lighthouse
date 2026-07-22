@@ -187,6 +187,19 @@ pub struct ChunkMeta {
     /// ChatChunk["meta"]["chart"] field in src/contracts/types.ts.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub chart: Option<String>,
+    /// §32 §3: the answer's result table (JSON: `{"columns":[…],"rows":[[…]]}`),
+    /// moved OFF the streamed markdown exactly like `chart` — under the apple-fm
+    /// prose-only contract the model narrates over a fact sheet and never types
+    /// the table, so the ENGINE carries the verified rows on the structured
+    /// channel and the renderer draws them at the answer's table position.
+    /// Engine-built from query results, never model text. Emitted ONLY when the
+    /// prose-only contract is active; cloud/desktop answers keep their markdown
+    /// tables and this stays None. Rides `ChunkMeta` so the answer cache replays
+    /// it automatically (`..hit.meta`). `#[serde(default)]` keeps older cached
+    /// entries (no field) valid. KEEP IN SYNC with the
+    /// ChatChunk["meta"]["table"] field in src/contracts/types.ts.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub table: Option<String>,
 }
 
 /// The cost meter for one answer (openspec: add-beam-loop §3.1), stamped on the

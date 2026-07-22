@@ -471,7 +471,11 @@ pub async fn investigate_templated(
     report.template = template;
     report.title = format!("{}{}", report.title, template.title_suffix());
     if !report.sections.is_empty() && cfg.provider_id.is_some() {
-        let ctx = report_findings_ctx(&report);
+        // §32 §6: the framing calls ride the same tier seam as narration —
+        // capped grounding on apple-fm, byte-identical elsewhere. (The §2
+        // profile selection already covers their system prompt via
+        // stream_answer → stream_local.)
+        let ctx = report_findings_ctx(&report, crate::llm::narration_tier(&cfg));
         match template {
             ReportTemplate::ScientificMethod => {
                 report.intro = narrate(IMRAD_INTRO_PROMPT, &ctx, &cfg).await;
@@ -491,7 +495,14 @@ pub async fn investigate_templated(
 /// summary headlines plus each section's result table. The model may narrate over
 /// this but (per the SYSTEM_PROMPT grounding rules) must invent no figure not
 /// present here.
-fn report_findings_ctx(report: &Report) -> Vec<crate::llm::Ctx> {
+///
+/// §32 §6: on the apple-fm tiers each section is CAPPED — its heading plus
+/// the first `REPORT_SECTION_MAX_ROWS` table rows with an honest "(first N
+/// rows of the section's table)" note — so BOTH framing calls fit the shared
+/// 4k window with the §1 output reserve intact. The full tables still render
+/// deterministically in the report body; only the model's grounding slice
+/// shrinks. Cloud/llama keep every row byte-for-byte.
+fn report_findings_ctx(report: &Report, tier: crate::budget::Tier) -> Vec<crate::llm::Ctx> {
     let mut text = String::new();
     if !report.summary.is_empty() {
         text.push_str("Key findings:\n");
@@ -501,9 +512,48 @@ fn report_findings_ctx(report: &Report) -> Vec<crate::llm::Ctx> {
         text.push('\n');
     }
     for s in &report.sections {
-        text.push_str(&format!("{}:\n{}\n\n", s.heading, s.result_markdown.trim()));
+        let body = if tier.is_apple_fm() {
+            capped_section_table(&s.result_markdown)
+        } else {
+            s.result_markdown.trim().to_string()
+        };
+        text.push_str(&format!("{}:\n{body}\n\n", s.heading));
     }
     vec![crate::llm::Ctx { name: format!("verified findings for {}", report.title), text, score: 1.0 }]
+}
+
+/// Data rows one report section may hand the apple-fm framing calls.
+const REPORT_SECTION_MAX_ROWS: usize = 5;
+
+/// The section's table cut to header + alignment + the first N data rows,
+/// with an honest note when rows were cut. Non-table bodies ride whole
+/// (they are already headline-sized).
+fn capped_section_table(markdown: &str) -> String {
+    let trimmed = markdown.trim();
+    let lines: Vec<&str> = trimmed.lines().collect();
+    let table_rows = lines.iter().filter(|l| l.trim_start().starts_with('|')).count();
+    if table_rows <= 2 + REPORT_SECTION_MAX_ROWS {
+        return trimmed.to_string();
+    }
+    let mut out: Vec<String> = Vec::new();
+    let mut kept = 0usize;
+    let mut cut = 0usize;
+    for l in lines {
+        if l.trim_start().starts_with('|') {
+            if kept < 2 + REPORT_SECTION_MAX_ROWS {
+                out.push(l.to_string());
+                kept += 1;
+            } else {
+                cut += 1;
+            }
+        } else {
+            out.push(l.to_string());
+        }
+    }
+    out.push(format!(
+        "(first {REPORT_SECTION_MAX_ROWS} rows of the section's table; {cut} more rows are in the report itself)"
+    ));
+    out.join("\n")
 }
 
 /// Collect a model narration to a string (the synth.rs streaming-collect idiom
@@ -689,6 +739,46 @@ mod tests {
             sql: "SELECT period, total FROM t".to_string(),
             headline: headline.map(str::to_string),
         }
+    }
+
+    #[test]
+    fn section_cap_keeps_five_rows_and_tells_the_truth() {
+        // §32 §6: a tall section table caps to header + align + 5 rows with an
+        // honest note; small tables and non-table bodies ride byte-identical.
+        let mut md = String::from("| a | b |\n| --- | --- |\n");
+        for i in 0..10 {
+            md.push_str(&format!("| r{i} | {i} |\n"));
+        }
+        let capped = capped_section_table(&md);
+        let rows = capped.lines().filter(|l| l.trim_start().starts_with('|')).count();
+        assert_eq!(rows, 7, "header + align + 5 data rows: {capped}");
+        assert!(capped.contains("first 5 rows of the section's table; 5 more rows"), "{capped}");
+        let small = "| a |\n| --- |\n| only |";
+        assert_eq!(capped_section_table(small), small, "small tables untouched");
+        assert_eq!(capped_section_table("Just a headline."), "Just a headline.");
+
+        // The tier gate: llama grounding is byte-identical to the old shape;
+        // apple grounding carries the capped body.
+        let report = Report {
+            title: "t".into(),
+            generated_ms: 0,
+            template: ReportTemplate::Standard,
+            intro: None,
+            discussion: None,
+            summary: vec!["headline".into()],
+            caveats: Vec::new(),
+            sections: vec![ReportSection {
+                heading: "By region".into(),
+                question: "q".into(),
+                result_markdown: md.clone(),
+                sql: "SELECT 1".into(),
+            }],
+        };
+        let llama = report_findings_ctx(&report, crate::budget::Tier::Llama6144);
+        assert!(llama[0].text.contains("| r9 | 9 |"), "llama keeps every row");
+        let apple = report_findings_ctx(&report, crate::budget::Tier::AppleFm4096);
+        assert!(!apple[0].text.contains("| r9 | 9 |"), "apple grounding is capped");
+        assert!(apple[0].text.contains("Key findings:"), "headlines always ride");
     }
 
     #[test]

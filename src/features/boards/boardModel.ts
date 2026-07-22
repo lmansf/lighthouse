@@ -114,44 +114,12 @@ export function appendCard(
 
 // --- Result-shape detection (markdown table → card body) --------------------
 
-export interface ParsedTable {
-  header: string[];
-  rows: string[][];
-}
-
-/** Split a `| a | b |` markdown table row into trimmed cell strings. */
-function tableCells(line: string): string[] {
-  const t = line.trim().replace(/^\|/, "").replace(/\|$/, "");
-  return t.split("|").map((c) => c.trim());
-}
-
-/** True when a line is a GFM alignment row (`| --- | :---: |`). */
-function isAlignRow(line: string): boolean {
-  const cells = tableCells(line);
-  return cells.length > 0 && cells.every((c) => /^:?-{3,}:?$/.test(c));
-}
-
-/**
- * The FIRST GFM table in the engine's result markdown (header row + alignment
- * row + data rows), or null when none parses. The engine already row-caps the
- * table it returns, so the board renders it as-is — no re-truncation. Same
- * `|`-row grammar as evidencePack.answerMarkdownToHtml, kept pure here so the
- * card can render real DOM (and the stat detector can inspect cells) without
- * an HTML string round-trip.
- */
-export function parseMarkdownTable(md: string): ParsedTable | null {
-  const lines = md.split("\n");
-  for (let i = 0; i + 1 < lines.length; i += 1) {
-    if (!lines[i].trim().startsWith("|") || !isAlignRow(lines[i + 1])) continue;
-    const header = tableCells(lines[i]);
-    const rows: string[][] = [];
-    for (let j = i + 2; j < lines.length && lines[j].trim().startsWith("|"); j += 1) {
-      rows.push(tableCells(lines[j]));
-    }
-    return { header, rows };
-  }
-  return null;
-}
+// §32 §3b: the GFM table parser moved to src/lib/answerTable.ts (the ONE
+// accessor seam for answer tables) so lib code never imports this feature
+// module; re-exported here so existing board/test importers keep working.
+// Relative path for the same node-test-runner reason as the imports above.
+export { answerTable, parseMarkdownTable, type ParsedTable } from "../../lib/answerTable";
+import { answerTable } from "../../lib/answerTable";
 
 export interface StatValue {
   /** The value exactly as the engine printed it ("$1,200", "42.5%"). */
@@ -177,7 +145,9 @@ export interface StatValue {
  */
 export function detectStat(markdown?: string, summary?: string): StatValue | null {
   if (markdown !== undefined) {
-    const table = parseMarkdownTable(markdown);
+    // Through the §3b accessor: board refreshes carry engine result markdown
+    // (no meta on this path), so this is the parse-fallback arm by design.
+    const table = answerTable({ content: markdown });
     if (!table || table.rows.length !== 1) return null;
     const row = table.rows[0];
     if (row.length === 1) {

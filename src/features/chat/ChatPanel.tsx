@@ -63,7 +63,7 @@ import {
   LOCAL_ONLY_SKIP_NOTE_RE,
 } from "@/lib/privacyState";
 import { chartSpecFromTable, hasEngineChartFence } from "@/lib/chartFromTable";
-import { parseMarkdownTable } from "@/features/boards/boardModel";
+import { answerTable, parseTableJson } from "@/lib/answerTable";
 import {
   sortRows,
   truncationCaption,
@@ -1342,29 +1342,47 @@ function isFooterish(node: MdNode): boolean {
  * Prose-only answers (no disclosure, no chart) are left completely alone, so
  * an ordinary markdown table in a document summary renders as before.
  */
-function remarkAnswerCard(options?: { chart?: string }) {
+function remarkAnswerCard(options?: { chart?: string; table?: string }) {
   return (tree: unknown) => {
     const root = tree as MdNode;
     const children = root.children;
     if (!children) return;
 
-    // §22.6: the engine's validated chart spec now arrives on the final
-    // chunk's meta, not as a fence in the text. Re-materialize it HERE as a
-    // synthetic code node so the whole downstream path — card anchoring, the
-    // code-override renderer, styling — behaves byte-identically to the fence
-    // era. Placed before the SQL disclosure (the fence's historic position);
-    // appended when there is no disclosure.
+    // §22.6 (chart) / §32 §3 (table): the engine's validated structures now
+    // arrive on the final chunk's meta, not as text. Re-materialize them HERE
+    // as synthetic nodes so the whole downstream path — card anchoring, the
+    // code/table overrides, styling, copy-as-CSV — behaves byte-identically
+    // to the in-text era. Placed before the SQL disclosure (the historic
+    // position), table before chart (the answer's table position); appended
+    // when there is no disclosure.
+    const injected: MdNode[] = [];
+    if (options?.table) {
+      const parsed = parseTableJson(options.table);
+      if (parsed) {
+        const cell = (value: string): MdNode =>
+          ({ type: "tableCell", children: [{ type: "text", value }] }) as MdNode;
+        const row = (cells: string[]): MdNode =>
+          ({ type: "tableRow", children: cells.map(cell) }) as MdNode;
+        injected.push({
+          type: "table",
+          align: parsed.header.map(() => null),
+          children: [row(parsed.header), ...parsed.rows.map(row)],
+        } as MdNode);
+      }
+    }
     if (options?.chart) {
-      const chartNode: MdNode = {
+      injected.push({
         type: "code",
         lang: "lighthouse-chart",
         value: options.chart,
-      } as MdNode;
+      } as MdNode);
+    }
+    if (injected.length > 0) {
       // This runs BEFORE step 1 folds the disclosure, so anchor on the raw
       // "*Query used:*" label paragraph, not the not-yet-created details node.
       const beforeLabel = children.findIndex((n) => isQueryLabel(n));
-      if (beforeLabel >= 0) children.splice(beforeLabel, 0, chartNode);
-      else children.push(chartNode);
+      if (beforeLabel >= 0) children.splice(beforeLabel, 0, ...injected);
+      else children.push(...injected);
     }
 
     // 1) Fold the SQL fence(s) behind their engine-written label. The plural
@@ -1770,6 +1788,7 @@ function RefineChips({
   meta,
   content,
   metaChart,
+  metaTable,
   isLast,
   disabled,
   onAsk,
@@ -1791,6 +1810,9 @@ function RefineChips({
   /** §22.6: the engine chart from the final chunk's meta — when present the
    *  answer is already charted, so "Chart it" must not double-offer. */
   metaChart?: string;
+  /** §32 §3: the engine's structured result table — the accessor prefers it
+   *  over parsing the (possibly prose-only) answer markdown. */
+  metaTable?: string;
   isLast: boolean;
   disabled: boolean;
   onAsk: (q: string) => void;
@@ -1816,21 +1838,25 @@ function RefineChips({
   onDefineMetric?: (meta: AnalyticsMeta) => void;
 }) {
   const styles = useStyles();
-  // "Chart it": offered only when (a) the answer carries a parseable GFM
-  // table, (b) the client heuristic builds a spec the REAL parser accepts,
-  // and (c) the engine didn't already chart this answer — meta chart (§22.6)
-  // or legacy fence. Pure computation over the displayed markdown — no
-  // rag/chat service is ever consulted.
+  // "Chart it": offered only when (a) the answer carries a table — the §3b
+  // accessor prefers the engine's structured meta.table (apple-fm prose
+  // answers) and falls back to the GFM parse — (b) the client heuristic
+  // builds a spec the REAL parser accepts, and (c) the engine didn't already
+  // chart this answer — meta chart (§22.6) or legacy fence. Pure computation
+  // over displayed data — no rag/chat service is ever consulted.
   const tableChart = useMemo(() => {
     if (metaChart || hasEngineChartFence(content)) return null;
-    const table = parseMarkdownTable(content);
+    const table = answerTable({ content, meta: { table: metaTable } });
     return table ? chartSpecFromTable(table) : null;
-  }, [content, metaChart]);
+  }, [content, metaChart, metaTable]);
   // §22.3: gate each canned chip on the answer's OWN result table — pure
-  // computation (refineEligibility over the parsed GFM table), no service.
-  // A prose-only answer parses to null and keeps every chip (unknown shape
-  // is not known-bad — see src/lib/refineChips.ts).
-  const refine = useMemo(() => refineEligibility(parseMarkdownTable(content)), [content]);
+  // computation (refineEligibility over the §3b accessor's table), no
+  // service. A prose-only answer with no meta.table resolves null and keeps
+  // every chip (unknown shape is not known-bad — see src/lib/refineChips.ts).
+  const refine = useMemo(
+    () => refineEligibility(answerTable({ content, meta: { table: metaTable } })),
+    [content, metaTable],
+  );
   // Quiet secondary actions (Beam): subtle + hairline, never a filled chip —
   // the answer stays the loudest thing on the card.
   return (
@@ -2014,21 +2040,25 @@ function TrustBadges({ meta }: { meta: AnalyticsMeta }) {
 function ChartItRow({
   content,
   metaChart,
+  metaTable,
   chartShown,
   onToggleChart,
 }: {
   content: string;
   /** §22.6: engine chart on the final chunk's meta — already charted. */
   metaChart?: string;
+  /** §32 §3: engine table on the final chunk's meta — the accessor's
+   *  preferred source (prose answers carry no markdown table to parse). */
+  metaTable?: string;
   chartShown: boolean;
   onToggleChart: () => void;
 }) {
   const styles = useStyles();
   const tableChart = useMemo(() => {
     if (metaChart || hasEngineChartFence(content)) return null;
-    const table = parseMarkdownTable(content);
+    const table = answerTable({ content, meta: { table: metaTable } });
     return table ? chartSpecFromTable(table) : null;
-  }, [content, metaChart]);
+  }, [content, metaChart, metaTable]);
   if (!tableChart) return null;
   return (
     <>
@@ -2076,6 +2106,7 @@ const AnswerMarkdown = memo(function AnswerMarkdown({
   turnId,
   onCite,
   metaChart,
+  metaTable,
   legacyFences = true,
 }: {
   content: string;
@@ -2084,6 +2115,11 @@ const AnswerMarkdown = memo(function AnswerMarkdown({
   /** §22.6: the engine-validated chart spec from the final chunk's meta —
    *  re-materialized as a synthetic AST node inside remarkAnswerCard. */
   metaChart?: string;
+  /** §32 §3: the engine's structured result table from the final chunk's
+   *  meta — re-materialized as a synthetic GFM table node at the answer's
+   *  table position, so SortableTable/copy-as-CSV treat it exactly like a
+   *  markdown table the model would have typed. */
+  metaTable?: string;
   /** §22.6: false for NEW-ERA turns (the final chunk carried `meta`), where a
    *  chart fence in TEXT can only be model-injected and is stripped, never
    *  rendered. True (default) only for legacy saved chats with no meta, which
@@ -2210,7 +2246,7 @@ const AnswerMarkdown = memo(function AnswerMarkdown({
     <MarkdownView
       content={cleaned}
       components={components}
-      remarkPlugins={[remarkCitations, [remarkAnswerCard, { chart: metaChart }]]}
+      remarkPlugins={[remarkCitations, [remarkAnswerCard, { chart: metaChart, table: metaTable }]]}
     />
   );
 });
@@ -5238,6 +5274,7 @@ export function ChatPanel() {
                               turnId={m.id}
                               onCite={handleCitationClick}
                               metaChart={m.meta?.chart}
+                              metaTable={m.meta?.table}
                               legacyFences={!liveTurnIds.current.has(m.id)}
                             />
                           )}
@@ -5346,6 +5383,7 @@ export function ChatPanel() {
                             meta={m.analytics}
                             content={m.content}
                             metaChart={m.meta?.chart}
+                            metaTable={m.meta?.table}
                             isLast={m.id === lastId}
                             disabled={streaming}
                             onAsk={(q) => void sendQuestion(q)}
@@ -5471,6 +5509,7 @@ export function ChatPanel() {
                         <ChartItRow
                           content={m.content}
                           metaChart={m.meta?.chart}
+                          metaTable={m.meta?.table}
                           chartShown={!!inlineCharts[m.id]}
                           onToggleChart={() =>
                             setInlineCharts((prev) => ({ ...prev, [m.id]: !prev[m.id] }))

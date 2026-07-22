@@ -54,8 +54,8 @@ test("RefineChips renders only chips whose eligibility holds for the answer's ow
   );
   assert.match(
     chat,
-    /const refine = useMemo\(\(\) => refineEligibility\(parseMarkdownTable\(content\)\), \[content\]\);/,
-    "eligibility = this lib over the answer's parsed table (pure, no service)",
+    /const refine = useMemo\(\s*\(\) => refineEligibility\(answerTable\(\{ content, meta: \{ table: metaTable \} \}\)\),\s*\[content, metaTable\],\s*\);/,
+    "eligibility = this lib over the §3b accessor's table (meta.table preferred, parse fallback — pure, no service)",
   );
   assert.match(
     chat,

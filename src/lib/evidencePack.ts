@@ -26,6 +26,7 @@
 // without a DOM or bundler. providers.ts is a plain constant table.
 import { MODEL_PROVIDERS } from "../contracts/mocks/providers";
 import type { AnalyticsMeta, ChatChunk, RagReference } from "../contracts/types";
+import { parseTableJson } from "./answerTable";
 import { formatSql } from "./sqlFormat";
 
 /** The provenance stamp payload of a settled answer (ChatChunk's final meta). */
@@ -120,6 +121,16 @@ function tableCells(line: string): string[] {
   return t.split("|").map((c) => c.trim());
 }
 
+/** One result table's HTML — shared by the in-text GFM walk and the §32 §3
+ *  structured `meta.table` append, so both eras export identical markup. */
+function tableHtml(header: string[], rows: string[][]): string {
+  const th = header.map((c) => `<th>${inlineHtml(c)}</th>`).join("");
+  const trs = rows
+    .map((r) => `<tr>${r.map((c) => `<td>${inlineHtml(c)}</td>`).join("")}</tr>`)
+    .join("\n");
+  return `<div class="tablewrap"><table>\n<thead><tr>${th}</tr></thead>\n<tbody>\n${trs}\n</tbody>\n</table></div>`;
+}
+
 /** True when a line is a GFM alignment row (`| --- | :---: |`). */
 function isAlignRow(line: string): boolean {
   const cells = tableCells(line);
@@ -169,13 +180,7 @@ export function answerMarkdownToHtml(md: string): string {
         rows.push(tableCells(lines[i]));
         i += 1;
       }
-      const th = header.map((c) => `<th>${inlineHtml(c)}</th>`).join("");
-      const trs = rows
-        .map((r) => `<tr>${r.map((c) => `<td>${inlineHtml(c)}</td>`).join("")}</tr>`)
-        .join("\n");
-      out.push(
-        `<div class="tablewrap"><table>\n<thead><tr>${th}</tr></thead>\n<tbody>\n${trs}\n</tbody>\n</table></div>`,
-      );
+      out.push(tableHtml(header, rows));
       continue;
     }
     const heading = /^(#{1,6})\s+(.*)$/.exec(line);
@@ -366,9 +371,15 @@ export function composeEvidencePack(input: EvidencePackInput): string {
 
   // (b) The narrative + result table — the answer as the analyst saw it,
   // honesty footers and all, minus the chart fence (embedded below as SVG).
+  // §32 §3: under the apple-fm prose contract the verified rows arrive on
+  // meta.table instead of in the text — append them where the chat renderer
+  // draws them (after the narrative, before the chart/SQL sections), through
+  // the same tableHtml the in-text walk uses.
   parts.push(`<section>`);
   parts.push(`<h2>Answer</h2>`);
   parts.push(answerMarkdownToHtml(contentMarkdown));
+  const structured = meta?.table ? parseTableJson(meta.table) : null;
+  if (structured) parts.push(tableHtml(structured.header, structured.rows));
   parts.push(`</section>`);
 
   // (c) The chart, exactly as rendered — inline SVG, no external resources.

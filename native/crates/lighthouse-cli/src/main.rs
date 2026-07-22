@@ -647,6 +647,7 @@ mod tests {
             cost: None,
             manifest: None,
             chart: None,
+            table: None,
         }
     }
 
@@ -766,6 +767,7 @@ mod tests {
             }),
             manifest: None,
             chart: None,
+            table: None,
         };
         let line = provenance_line(Some(&meta));
         assert!(line.contains("answered via anthropic"), "{line}");

@@ -155,6 +155,20 @@ export function onDeviceBackend(): boolean {
 }
 
 /**
+ * §32 §7 ADVERTISE: the context window the local endpoint's /health body
+ * advertised (contextSize, tokens), or null. Written by llm.ts::localHealth;
+ * read by the §1 tier resolution. KEEP IN SYNC with
+ * local_model.rs::set_advertised_ctx.
+ */
+let ADVERTISED_CTX: number | null = null;
+export function setAdvertisedCtx(tokens: number | null): void {
+  ADVERTISED_CTX = tokens;
+}
+export function advertisedCtx(): number | null {
+  return ADVERTISED_CTX;
+}
+
+/**
  * §3 / add-mobile-local-inference verdict (pure): can a PRIVATE, on-device model
  * answer on this form factor? The desktop shell always can — it owns llama-server
  * and the weights. A mobile shell can ONLY when its plugin has reported a usable

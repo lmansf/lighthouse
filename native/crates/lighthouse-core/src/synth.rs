@@ -602,6 +602,9 @@ fn final_chunk(
             // §22.6: branches that chart set this AFTER building the chunk
             // (the mutate-after pattern `done.analytics` already uses).
             chart: None,
+            // §32 §3: same mutate-after pattern — only the apple-fm prose
+            // contract attaches the structured table.
+            table: None,
         }),
         done: true,
     }
@@ -642,6 +645,7 @@ fn plan_chunk(
             manifest: (!manifest.is_empty()).then_some(manifest),
             // A plan preview draws nothing — charts belong to executed answers.
             chart: None,
+            table: None,
         }),
         done: true,
     }
@@ -1220,6 +1224,12 @@ fn live_pipeline(
                     }
                 }
                 yield progress("Summarizing results…".to_string(), 4, 4);
+                // §32 §3c: apple-fm tiers narrate the (already compact) step
+                // results WITHOUT schema cards — they inform SQL, not prose.
+                // The recipe's tables stream deterministically above, so no
+                // meta.table is needed (it would duplicate the displayed
+                // tables). Cloud/llama keep today's assembly byte-for-byte.
+                let tier = llm::narration_tier(&cfg);
                 let mut ctxs: Vec<Ctx> = steps
                     .iter()
                     .zip(&labels)
@@ -1229,14 +1239,21 @@ fn live_pipeline(
                         score: 1.0,
                     })
                     .collect();
-                ctxs.extend(regs.iter().map(|r| Ctx {
-                    name: format!("{} — schema", r.file_name),
-                    text: r.card.clone(),
-                    score: 0.0,
-                }));
-                // Metadata of the narration context (result cards + schema cards),
-                // built before `ctxs` is handed to the model below.
-                manifest = analytics_manifest(&ctxs, steps.len(), &regs);
+                if !tier.is_apple_fm() {
+                    ctxs.extend(regs.iter().map(|r| Ctx {
+                        name: format!("{} — schema", r.file_name),
+                        text: r.card.clone(),
+                        score: 0.0,
+                    }));
+                }
+                // Metadata of the narration context (result cards + schema cards
+                // — none of the latter on apple tiers), built before `ctxs` is
+                // handed to the model below.
+                manifest = if tier.is_apple_fm() {
+                    analytics_manifest(&ctxs, steps.len(), &[])
+                } else {
+                    analytics_manifest(&ctxs, steps.len(), &regs)
+                };
                 let mut scrub = crate::analytics::DirectiveScrubber::new();
                 let mut answer = llm::stream_answer(
                     recipe.narration_prompt.to_string(),
@@ -1531,10 +1548,40 @@ fn live_pipeline(
                     // prompt string below is byte-identical to today.
                     let view_regs =
                         crate::analytics::register_views(&ctx, &regs, is_cloud).await;
-                    let mut sql_ctxs: Vec<Ctx> = regs
-                        .iter()
-                        .map(|r| Ctx { name: r.file_name.clone(), text: r.card.clone(), score: 1.0 })
-                        .collect();
+                    // §32 §4: the planning tier decides the schema diet. On the
+                    // apple-fm shared-window tiers the question ranks the tables
+                    // (top 3 ride) and each card is PRUNED to matched + key
+                    // columns with one sample value per matched column — the
+                    // floor: a question-named or synonym-matched column is never
+                    // pruned. Cloud/llama keep every full card byte-for-byte.
+                    let plan_tier = llm::narration_tier(&cfg);
+                    let plan_synonyms: Vec<(String, String)> = if plan_tier.is_apple_fm() {
+                        crate::semantic::planning_synonyms(is_cloud)
+                    } else {
+                        Vec::new()
+                    };
+                    let mut sql_ctxs: Vec<Ctx> = if plan_tier.is_apple_fm() {
+                        crate::analytics::rank_tables(&regs, &question, &plan_synonyms)
+                            .into_iter()
+                            .map(|r| Ctx {
+                                name: r.file_name.clone(),
+                                text: crate::analytics::pruned_schema_card(
+                                    r,
+                                    &question,
+                                    &plan_synonyms,
+                                ),
+                                score: 1.0,
+                            })
+                            .collect()
+                    } else {
+                        regs.iter()
+                            .map(|r| Ctx {
+                                name: r.file_name.clone(),
+                                text: r.card.clone(),
+                                score: 1.0,
+                            })
+                            .collect()
+                    };
                     // Deterministic prompt order: file cards, view cards, the
                     // semantic business-definitions block, the vault brief, then
                     // join hints.
@@ -1554,13 +1601,19 @@ fn live_pipeline(
                     // prompt (pinned by a test). PARITY: this analytics-branch
                     // injection is Rust-only (the TS twin has no analytics
                     // branch); semantic.ts::renderBlock mirrors the labels.
-                    let has_semantic =
-                        if let Some(block) = crate::semantic::prompt_block(is_cloud) {
-                            sql_ctxs.push(block);
-                            true
-                        } else {
-                            false
-                        };
+                    // §4: apple tiers carry only the QUESTION-MATCHED semantic
+                    // entries (applicable definitions, not the whole store).
+                    let semantic_block = if plan_tier.is_apple_fm() {
+                        crate::semantic::prompt_block_matched(is_cloud, &question)
+                    } else {
+                        crate::semantic::prompt_block(is_cloud)
+                    };
+                    let has_semantic = if let Some(block) = semantic_block {
+                        sql_ctxs.push(block);
+                        true
+                    } else {
+                        false
+                    };
                     // The vault brief (openspec: field-patch-0.12.5 §3.5): a
                     // deterministic, engine-drafted summary of the vault being
                     // answered over — file composition + the queryable tables in
@@ -1571,8 +1624,12 @@ fn live_pipeline(
                     // prose. Empty facts ⇒ None ⇒ nothing pushed. PARITY: Rust-only
                     // injection (the TS twin has no analytics branch);
                     // vaultBrief.ts::renderBrief mirrors the renderer.
-                    if let Some(brief) = crate::vault_brief::draft_brief(&regs) {
-                        sql_ctxs.push(brief);
+                    // §4: the vault brief is orientation prose, not SQL signal —
+                    // the shared-window tiers spend those chars on schemas.
+                    if !plan_tier.is_apple_fm() {
+                        if let Some(brief) = crate::vault_brief::draft_brief(&regs) {
+                            sql_ctxs.push(brief);
+                        }
                     }
                     // Auto-derived join hints (columns shared across registered
                     // tables). The declared/curated join hints that used to win
@@ -1626,7 +1683,9 @@ fn live_pipeline(
                         let planner = if multi {
                             crate::analytics::step_question(&question, &[], max_steps)
                         } else {
-                            crate::analytics::sql_question(
+                            // §4: one few-shot on apple tiers, all five elsewhere.
+                            crate::analytics::sql_question_for(
+                                plan_tier,
                                 &question,
                                 crate::analytics::last_query_used(&history).as_deref(),
                             )
@@ -1685,6 +1744,11 @@ fn live_pipeline(
                     if remote_keyed && crate::analytics::multi_step_cue(&question) {
                         let mut steps: Vec<crate::analytics::StepRecord> = Vec::new();
                         let mut last_chart: Option<String> = None;
+                        // §32 §3c: the last step's verified rows for meta.table
+                        // (apple-fm tiers only — gated where the final chunk is
+                        // built; captured here because steps keep markdown, not
+                        // batches).
+                        let mut last_table: Option<String> = None;
                         // The last step's row facts for the assumption ledger:
                         // StepRecord keeps only result_markdown, and `res` is
                         // consumed into it below, so capture the three scalars
@@ -1775,6 +1839,7 @@ fn live_pipeline(
                                 match crate::analytics::run_query(&ctx, &attempt).await {
                                     Ok(res) => {
                                         last_chart = res.chart.clone();
+                                        last_table = crate::analytics::meta_table_json(&res);
                                         last_rows = Some(crate::ledger::RowFacts {
                                             shown: res.shown,
                                             truncated: res.truncated,
@@ -1837,6 +1902,12 @@ fn live_pipeline(
                         }
                         if !steps.is_empty() {
                             yield progress("Summarizing results…".to_string(), 4, 4);
+                            // §32 §3c: on the apple-fm tiers the step results
+                            // (already compact aggregates) narrate WITHOUT the
+                            // schema cards — they inform SQL, not prose — and
+                            // the last step's verified rows ride meta.table.
+                            // Cloud/llama keep today's assembly byte-for-byte.
+                            let tier = llm::narration_tier(&cfg);
                             let mut ctxs: Vec<Ctx> = steps
                                 .iter()
                                 .enumerate()
@@ -1852,17 +1923,24 @@ fn live_pipeline(
                                     score: 1.0,
                                 })
                                 .collect();
-                            ctxs.extend(regs.iter().map(|r| Ctx {
-                                name: format!("{} — schema", r.file_name),
-                                text: r.card.clone(),
-                                score: 0.0,
-                            }));
+                            if !tier.is_apple_fm() {
+                                ctxs.extend(regs.iter().map(|r| Ctx {
+                                    name: format!("{} — schema", r.file_name),
+                                    text: r.card.clone(),
+                                    score: 0.0,
+                                }));
+                            }
                             let excerpt_count = ctxs.len();
                             // Manifest (§5): the per-step query results then the
                             // schema cards — metadata of exactly what the narration
                             // saw (the already-gated set), built before `ctxs` moves
-                            // into the model call below.
-                            let manifest = analytics_manifest(&ctxs, steps.len(), &regs);
+                            // into the model call below. On apple tiers no schema
+                            // card was handed over, so none is listed.
+                            let manifest = if tier.is_apple_fm() {
+                                analytics_manifest(&ctxs, steps.len(), &[])
+                            } else {
+                                analytics_manifest(&ctxs, steps.len(), &regs)
+                            };
                             // No chart card rides multi-step (its chart is the
                             // last step's heuristic), but the fence scrub still
                             // applies: a stray chart request must never reach
@@ -1993,6 +2071,11 @@ fn live_pipeline(
                             };
                             if let Some(m) = done.meta.as_mut() {
                                 m.chart = last_chart.clone();
+                                // §32 §3c: the last step's verified rows — the
+                                // prose contract's display table (apple only).
+                                if tier.is_apple_fm() {
+                                    m.table = last_table.clone();
+                                }
                             }
                             done.analytics = Some(AnalyticsMeta {
                                 sql: last_sql,
@@ -2017,7 +2100,11 @@ fn live_pipeline(
                             None => {
                                 yield progress("Writing a query…".to_string(), 2, 4);
                                 let raw = collect(llm::stream_answer(
-                                    crate::analytics::sql_question(&question, prior_sql.as_deref()),
+                                    crate::analytics::sql_question_for(
+                                        plan_tier,
+                                        &question,
+                                        prior_sql.as_deref(),
+                                    ),
                                     sql_ctxs.clone(),
                                     cfg.clone(),
                                     history.clone(),
@@ -2040,7 +2127,11 @@ fn live_pipeline(
                                 // One correction round with the engine's error.
                                 let retry_q = format!(
                                     "{}\n\nYour previous SQL failed.\nPrevious SQL: {sql}\nError: {err}\nWrite a corrected single SELECT statement.",
-                                    crate::analytics::sql_question(&question, prior_sql.as_deref())
+                                    crate::analytics::sql_question_for(
+                                        plan_tier,
+                                        &question,
+                                        prior_sql.as_deref(),
+                                    )
                                 );
                                 let raw2 = collect(llm::stream_answer(
                                     retry_q,
@@ -2057,6 +2148,15 @@ fn live_pipeline(
                     }
                     if let Some((sql, res)) = outcome {
                         yield progress("Summarizing results…".to_string(), 4, 4);
+                        // §32 §3c: the narration tier decides the assembly. The
+                        // apple-fm shared-window tiers narrate over a compact
+                        // FACT SHEET — no SQL text, no raw result table, no
+                        // schema cards (they inform SQL, not prose), no chart
+                        // card (the compact profile forbids chart markup) —
+                        // and the verified rows ride `meta.table` for the
+                        // renderer. Cloud and llama-6144 keep today's assembly
+                        // byte-for-byte.
+                        let tier = llm::narration_tier(&cfg);
                         // Never present the cap as the total: when truncated the
                         // true count (from run_query's uncapped COUNT) rides here
                         // so the narration can state it honestly.
@@ -2065,36 +2165,57 @@ fn live_pipeline(
                             (true, None) => format!("first {} rows, truncated", res.shown),
                             _ => format!("{} row(s)", res.shown),
                         };
-                        let mut ctxs: Vec<Ctx> = vec![Ctx {
-                            name: "query result — computed exactly by Lighthouse".to_string(),
-                            text: format!("SQL:\n{sql}\n\nResult ({count_desc}):\n{}", res.markdown),
-                            score: 1.0,
-                        }];
-                        ctxs.extend(regs.iter().map(|r| Ctx {
-                            name: format!("{} — schema", r.file_name),
-                            text: r.card.clone(),
-                            score: 0.0,
-                        }));
-                        // Chart card (openspec: add-chart-directive): the same
-                        // mechanism as join hints — one low-score Ctx — added
-                        // ONLY when the result is untruncated and its shape
-                        // could chart, so the ~200 tokens are never spent on a
-                        // doomed directive. Truncated results never chart.
-                        if !res.truncated {
-                            if let Some(card) = crate::analytics::chart_card(&res.batches) {
-                                ctxs.push(Ctx {
-                                    name: "chart options".to_string(),
-                                    text: card,
-                                    score: 0.0,
-                                });
+                        let mut ctxs: Vec<Ctx> = if tier.is_apple_fm() {
+                            vec![Ctx {
+                                name: "fact sheet — computed exactly by Lighthouse".to_string(),
+                                text: crate::analytics::fact_sheet(&res),
+                                score: 1.0,
+                            }]
+                        } else {
+                            vec![Ctx {
+                                name: "query result — computed exactly by Lighthouse".to_string(),
+                                text: format!("SQL:\n{sql}\n\nResult ({count_desc}):\n{}", res.markdown),
+                                score: 1.0,
+                            }]
+                        };
+                        if !tier.is_apple_fm() {
+                            ctxs.extend(regs.iter().map(|r| Ctx {
+                                name: format!("{} — schema", r.file_name),
+                                text: r.card.clone(),
+                                score: 0.0,
+                            }));
+                            // Chart card (openspec: add-chart-directive): the same
+                            // mechanism as join hints — one low-score Ctx — added
+                            // ONLY when the result is untruncated and its shape
+                            // could chart, so the ~200 tokens are never spent on a
+                            // doomed directive. Truncated results never chart.
+                            if !res.truncated {
+                                if let Some(card) = crate::analytics::chart_card(&res.batches) {
+                                    ctxs.push(Ctx {
+                                        name: "chart options".to_string(),
+                                        text: card,
+                                        score: 0.0,
+                                    });
+                                }
                             }
                         }
+                        // §3c: the structured display table (apple tiers only —
+                        // elsewhere the model types tables as before).
+                        let meta_table = if tier.is_apple_fm() {
+                            crate::analytics::meta_table_json(&res)
+                        } else {
+                            None
+                        };
                         let excerpt_count = ctxs.len();
-                        // Manifest (§5): one query-result, the schema cards, and
-                        // (when present) the trailing chart-options card — metadata
-                        // of exactly what the narration saw, built before `ctxs`
-                        // moves into the model call below.
-                        let manifest = analytics_manifest(&ctxs, 1, &regs);
+                        // Manifest (§5): metadata of exactly what the narration
+                        // saw. On apple tiers that is ONE query-result block (the
+                        // fact sheet) — schema cards were never handed over, so
+                        // none are listed.
+                        let manifest = if tier.is_apple_fm() {
+                            analytics_manifest(&ctxs, 1, &[])
+                        } else {
+                            analytics_manifest(&ctxs, 1, &regs)
+                        };
                         // The narration streams through the directive scrubber:
                         // prose forwards as it arrives, chart-request fence
                         // bytes never do (the UI strip is a second net, not
@@ -2244,6 +2365,9 @@ fn live_pipeline(
                         });
                         if let Some(m) = done.meta.as_mut() {
                             m.chart = chart;
+                            // §32 §3c: the verified rows for the renderer —
+                            // Some only on apple-fm tiers (set above).
+                            m.table = meta_table;
                         }
                         yield done;
                         return;
@@ -2695,6 +2819,24 @@ fn live_pipeline(
             .iter()
             .map(|c| Ctx { name: ctx_label(c), text: c.text.clone(), score: c.score })
             .collect();
+        // §32 §5: on the apple-fm tiers the retrieved chunks digest to
+        // question-relevant QUOTES (block count/order/names preserved — the
+        // [n] citation contract is untouched; only each block's text shrinks
+        // to verbatim quoted sentences). Engine-built blocks appended below
+        // (table profiles, reliability assists) are never digested. The §1
+        // clamp still runs in stream_local as the last line of defense.
+        {
+            let tier = llm::narration_tier(&cfg);
+            if tier.is_apple_fm() {
+                let b = crate::budget::segment_budgets(tier);
+                contexts = crate::quotes::digest_contexts(
+                    contexts,
+                    &question,
+                    b.ctx_block_max,
+                    b.ctx_total_max,
+                );
+            }
+        }
         // Manifest (§5): the retrieved chunks (attributed to their files via the
         // flowing references), grown alongside `contexts` with a schema-card entry
         // per appended table profile below. Metadata only.

@@ -268,12 +268,21 @@ availability verdict (Tier-1 available OR Tier-2 present). Below-floor → still
 
 ## 6. Context budget + warm-start
 
-- **Pre-summarize to the 4096-token window** (§3.3): the engine already feeds
-  narration the **step results / aggregated top-N table, never raw rows**
-  (`synth.rs:1199`). Phase B re-derives the local prompt budget for the 1–4B tier
-  (the proposal notes `llm.rs:976-1075` was tuned to 6144/7B and "must be re-derived
-  … recorded [in add-mobile-local-inference]"). If the summarized context still
-  overflows, catch the overflow error (§3.4) → extractive fallback.
+- **Phase B LANDED (0.14.1, §32 "token diet v2")** — the re-derived budget is
+  the tiered budgeter, one seam in BOTH engines (`budget.rs` /
+  `src/server/budget.ts`): tiers `apple-fm-4096` / `apple-fm-8192` /
+  `llama-6144` / `remote-large`, per-call-type OUTPUT reserves (narration 900
+  on the 4k tier), input sized to 90% of the window minus the reserve at
+  chars/4, per-segment ceilings, and a deterministic drop planner with a
+  refinement kernel. The tier resolves from the bridge's `/health`
+  `contextSize` advertisement (this section's §3.3 pre-summarize note is now
+  the §3c FACT SHEET: narration sees engine-computed counts + a row sample +
+  labeled aggregates, never raw rows; the verified table rides `meta.table`).
+  Overflow is a TWO-LAYER defense: the engine's 90% budget, then the bridge's
+  pre-check, with `FM_OVERFLOW`/`FM_GUARDRAIL` terminal markers → an honest
+  engine footer + a shell.log-only counter (zero expected in acceptance).
+  `LIGHTHOUSE_FORCE_TIER` runs any local model under any tier — the
+  device-free acceptance rig.
 - **Warm-start** reuses the existing state machine (`warm_wait_verdict` /
   `warming_label`, `synth.rs:418-440`; pinned in `test/localWarmWait.test.mjs`):
   - **Tier-1 is resident** → `availability == .available` means no load latency →
@@ -281,6 +290,21 @@ availability verdict (Tier-1 available OR Tier-2 present). Below-floor → still
   - **Tier-2 loads weights** → a *real* warm; the `is_local` guard (§5.1) flips on so
     the poll loop shows the honest "Private model warming up… (Ns)" during the GGUF
     load, then proceeds. `warming_label` strings stay byte-identical across twins.
+
+### Guided-generation spike — verdict (0.14.1, §32 §7)
+
+The loopback contract now carries a **dark** `POST /v1/intent` endpoint
+(PrivateModelServer.swift) for structured-intent planning: the design is a
+`@Generable` form over ENUMERATED schema elements (tables/columns the engine
+supplies) from which the ENGINE compiles and validates SQL — the model never
+writes SQL text and the single-SELECT guard stays intact. **Verdict: deferred,
+endpoint dark.** The `@Generable` macro / `GenerationSchema` surface is not in
+the stable-signature set PrivateModelServer.swift deliberately sticks to
+across the iOS 26/27 SDKs (no-arg `LanguageModelSession` + String
+`streamResponse` are), so the endpoint answers
+`501 {"spike":"guided-gen","status":"dark"}` as a capability probe until that
+surface stabilizes. No engine call site exists. Adopting guided generation for
+NL→SQL intent is a recorded follow-up on the 0.14.1 PR.
 
 ---
 
