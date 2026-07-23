@@ -36,7 +36,7 @@ import {
   shorthands,
   tokens,
 } from "@fluentui/react-components";
-import { IconAdd, IconCheck, IconClose, IconEdit, IconTrash } from "@/shell/icons";
+import { IconCheck, IconClose, IconEdit, IconTrash } from "@/shell/icons";
 import {
   conversationsAllContexts,
   conversationsForContext,
@@ -55,7 +55,6 @@ const useStyles = makeStyles({
   // The persistence posture line (the control itself lives in Settings →
   // Preferences, 0.13.10 §2).
   persistHint: { color: tokens.colorNeutralForeground3 },
-  newChat: { width: "100%" },
   search: { width: "100%" },
   // The scoped/all view toggle sits under the search, quiet until engaged.
   scopeRow: {
@@ -123,7 +122,6 @@ export function HistoryNav({ onClose }: { onClose?: () => void } = {}) {
   const conversations = useChatStore((s) => s.conversations);
   const currentId = useChatStore((s) => s.currentId);
   const currentInvestigationId = useChatStore((s) => s.currentInvestigationId);
-  const messages = useChatStore((s) => s.messages);
   const openConversation = useChatStore((s) => s.openConversation);
   const renameConversation = useChatStore((s) => s.renameConversation);
   const deleteConversation = useChatStore((s) => s.deleteConversation);
@@ -188,20 +186,6 @@ export function HistoryNav({ onClose }: { onClose?: () => void } = {}) {
           ? "Kept on this device and cleared automatically after two weeks. Delete any chat with its trash icon."
           : "Chats aren't being saved — they clear when you close the app. Turn on “Save chats on this device” in Settings to keep them here."}
       </Text>
-      <Button
-        appearance="secondary"
-        icon={<IconAdd />}
-        className={styles.newChat}
-        disabled={messages.length === 0}
-        onClick={() => {
-          // The existing cross-feature seam (settings menu / Mod+N): the
-          // ChatPanel owns the draft/attachment cleanup and the Undo strip.
-          window.dispatchEvent(new CustomEvent("lighthouse:new-chat"));
-          close();
-        }}
-      >
-        New chat
-      </Button>
       <SearchBox
         className={styles.search}
         placeholder="Search chats…"

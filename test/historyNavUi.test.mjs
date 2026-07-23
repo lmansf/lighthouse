@@ -124,9 +124,14 @@ test("the current chat is highlighted; opening a conversation dismisses the surf
   assert.match(nav, /const close = onClose \?\? \(\(\) => \{\}\);/, "close is the onClose prop");
 });
 
-test("New chat rides the existing lighthouse:new-chat seam (ChatPanel keeps its cleanup)", () => {
-  assert.match(nav, /new CustomEvent\("lighthouse:new-chat"\)/);
-  assert.doesNotMatch(nav, /newConversation/, "no store call — one New-chat path");
+test("§43 §2: History carries NO New chat — the header is the sole entry", () => {
+  // The dead duplicate in the History panel is gone; the chat header's New
+  // chat (compact icon-only + desktop label, pinned in compactHeader.test.mjs)
+  // is the one working entry. HistoryNav neither dispatches the seam nor calls
+  // the store — one New-chat path, not two.
+  assert.doesNotMatch(nav, /new CustomEvent\("lighthouse:new-chat"\)/, "no New-chat button in History");
+  assert.doesNotMatch(nav, /newConversation|newChat/, "no store call and no dead style");
+  assert.doesNotMatch(nav, />\s*New chat\s*</, "no New chat label in the History panel");
 });
 
 // --- The ChatPanel side: the old entry points are gone -----------------------
