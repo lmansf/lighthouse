@@ -104,6 +104,53 @@ pub fn output_reserve(tier: Tier, call: CallType) -> usize {
 /// absorbs numeric-heavy text running 2.5-3).
 pub const CHARS_PER_TOKEN: usize = 4;
 
+/// §36 (prerequisite subset, built with §38 — no fuller §36 has landed): the
+/// DIGIT-AWARE token estimator. Prose averages ~4 chars/token, but digit runs
+/// tokenize at ~2 — a findings block that is mostly numbers can overflow the
+/// very window a flat `len/4` estimate promised to protect. Two classes:
+/// ASCII digits at 2 chars/token, everything else at 4, each rounded UP, so
+/// the estimate errs high and the 90% window margin stays a second belt, not
+/// the only one. PARITY: mirrored by src/server/budget.ts::estimateTokens
+/// (test/budget.test.mjs pins the same cases as the cargo tests below).
+pub fn estimate_tokens(text: &str) -> usize {
+    let total = text.chars().count();
+    let digits = text.chars().filter(|c| c.is_ascii_digit()).count();
+    let other = total - digits;
+    digits.div_ceil(2) + other.div_ceil(4)
+}
+
+/// Whole-INPUT token budget for a call on a tier: 90% of the window minus the
+/// call's output reserve. The char-space `input_char_budget` below stays for
+/// the flat-estimate callers; budget-PACKED callers (§38's report framing)
+/// size their text with `estimate_tokens` against THIS. Remote is unbounded.
+pub fn input_token_budget(tier: Tier, call: CallType) -> usize {
+    if tier == Tier::RemoteLarge {
+        return usize::MAX;
+    }
+    (tier.window() * 9 / 10).saturating_sub(output_reserve(tier, call))
+}
+
+/// §38 §2: the framing-call overflow ladder — ONE retry with headline-only
+/// findings, then the deterministic engine framing. Pure so the policy is a
+/// table, not scattered control flow: `prior_overflows` is how many
+/// FM_OVERFLOW refusals this framing call has already eaten. PARITY:
+/// mirrored by src/server/budget.ts::overflowRetryVerdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverflowStep {
+    /// First refusal: retry once with the headline-only findings context.
+    RetryHeadlineOnly,
+    /// Second refusal: fall back to deterministic framing — no third call.
+    EngineFallback,
+}
+
+pub fn overflow_retry_verdict(prior_overflows: u32) -> OverflowStep {
+    if prior_overflows == 0 {
+        OverflowStep::RetryHeadlineOnly
+    } else {
+        OverflowStep::EngineFallback
+    }
+}
+
 /// Total INPUT char budget for a call on a tier: 90% of the window minus the
 /// call's output reserve, in chars. Remote is unbounded.
 pub fn input_char_budget(tier: Tier, call: CallType) -> usize {
@@ -311,6 +358,37 @@ mod tests {
         // NL→SQL keeps a smaller reserve → more input room.
         assert_eq!(input_char_budget(Tier::AppleFm4096, CallType::NlToSql), 13_544);
         assert_eq!(input_char_budget(Tier::RemoteLarge, CallType::Narration), usize::MAX);
+    }
+
+    #[test]
+    fn digit_aware_estimate_charges_numbers_double() {
+        // 16 prose chars → 4 tokens; the same length all-digits → 8.
+        assert_eq!(estimate_tokens("sixteen ch text!"), 4);
+        assert_eq!(estimate_tokens("1234567890123456"), 8);
+        // Mixed: 8 digits (→4) + 8 others (→2); classes round up separately.
+        assert_eq!(estimate_tokens("12345678 prose!"), 4 + 2);
+        assert_eq!(estimate_tokens(""), 0);
+        // The flat estimate under-counts numeric text — the §36 motivation:
+        // a digit-heavy line costs MORE tokens than len/4 claims.
+        let numeric = "| 2024-10 | 400.25 | +2.85 | 118203 |";
+        assert!(estimate_tokens(numeric) > numeric.chars().count() / CHARS_PER_TOKEN);
+    }
+
+    #[test]
+    fn token_budget_is_ninety_percent_minus_reserve() {
+        // apple-fm-4096 framing: 4096*0.9 − 400 = 3,286 tokens of input room.
+        assert_eq!(input_token_budget(Tier::AppleFm4096, CallType::ReportFraming), 3_286);
+        assert_eq!(input_token_budget(Tier::AppleFm4096, CallType::Narration), 2_786);
+        assert_eq!(input_token_budget(Tier::RemoteLarge, CallType::ReportFraming), usize::MAX);
+    }
+
+    #[test]
+    fn overflow_ladder_retries_once_then_falls_back() {
+        // §38 §2: first FM_OVERFLOW → headline-only retry; second → engine
+        // framing; there is never a third call.
+        assert_eq!(overflow_retry_verdict(0), OverflowStep::RetryHeadlineOnly);
+        assert_eq!(overflow_retry_verdict(1), OverflowStep::EngineFallback);
+        assert_eq!(overflow_retry_verdict(7), OverflowStep::EngineFallback);
     }
 
     #[test]

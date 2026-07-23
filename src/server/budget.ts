@@ -90,6 +90,19 @@ export function outputReserve(tier: Tier, call: CallType): number {
 export const CHARS_PER_TOKEN = 4;
 
 /**
+ * §36 (prerequisite subset, built with §38): the DIGIT-AWARE token estimator.
+ * Prose ≈4 chars/token, digit runs ≈2 — numeric-heavy text under a flat len/4
+ * estimate overflows the window it was sized for. Each class rounds UP so the
+ * estimate errs high. KEEP IN SYNC with budget.rs::estimate_tokens.
+ */
+export function estimateTokens(text: string): number {
+  const chars = [...text];
+  const digits = chars.filter((c) => c >= "0" && c <= "9").length;
+  const other = chars.length - digits;
+  return Math.ceil(digits / 2) + Math.ceil(other / 4);
+}
+
+/**
  * Total INPUT char budget for a call on a tier: 90% of the window minus the
  * call's output reserve, in chars. Remote is unbounded.
  */
@@ -97,6 +110,30 @@ export function inputCharBudget(tier: Tier, call: CallType): number {
   if (tier === "remote-large") return Infinity;
   const window90 = Math.floor((tierWindow(tier) * 9) / 10);
   return Math.max(0, window90 - outputReserve(tier, call)) * CHARS_PER_TOKEN;
+}
+
+/**
+ * Whole-INPUT token budget: 90% of the window minus the call's output
+ * reserve. Budget-packed callers (§38 report framing — Rust-only at the
+ * narrate seam) size with `estimateTokens` against this; the twin carries the
+ * same table so the budget arithmetic is pinned on both sides. KEEP IN SYNC
+ * with budget.rs::input_token_budget.
+ */
+export function inputTokenBudget(tier: Tier, call: CallType): number {
+  if (tier === "remote-large") return Infinity;
+  const window90 = Math.floor((tierWindow(tier) * 9) / 10);
+  return Math.max(0, window90 - outputReserve(tier, call));
+}
+
+/**
+ * §38 §2: the framing-call overflow ladder — one retry with headline-only
+ * findings, then the deterministic engine framing (no third call). KEEP IN
+ * SYNC with budget.rs::overflow_retry_verdict.
+ */
+export type OverflowStep = "retry-headline-only" | "engine-fallback";
+
+export function overflowRetryVerdict(priorOverflows: number): OverflowStep {
+  return priorOverflows === 0 ? "retry-headline-only" : "engine-fallback";
 }
 
 /**

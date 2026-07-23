@@ -1290,6 +1290,14 @@ fn digest_history(history: &[ChatTurn], max: usize) -> Vec<ChatTurn> {
 
 /// Stream from a local OpenAI-compatible chat-completions endpoint. Only the
 /// connect/headers phase is bounded; a long generation stream is never cut.
+/// §32 §7 / §38 §2: the engine-stamped silence notes for the bridge's
+/// terminal markers — BYTE-STABLE constants (never model text). Named so the
+/// report-framing ladder can RECOGNIZE an overflow refusal in a collected
+/// narration: the bridge refuses an oversized call before generating, so the
+/// note is the whole response.
+pub(crate) const FM_GUARDRAIL_NOTE: &str = "\n\n_(The on-device model declined this request — its built-in safety guardrail stopped the answer. Answering from the most relevant passages instead.)_\n\n";
+pub(crate) const FM_OVERFLOW_NOTE: &str = "\n\n_(This question plus its context didn't fit the on-device model's window — the bridge refused the call before wasting it. Answering from the most relevant passages instead.)_\n\n";
+
 async fn stream_local(
     question: &str,
     contexts: &[Ctx],
@@ -1383,11 +1391,7 @@ async fn stream_local(
         // naming which silence this was, plus the shell.log-only counter.
         if let Some(kind) = marker {
             crate::local_model::note_fm_marker(&kind);
-            let note = if kind == "FM_GUARDRAIL" {
-                "\n\n_(The on-device model declined this request — its built-in safety guardrail stopped the answer. Answering from the most relevant passages instead.)_\n\n"
-            } else {
-                "\n\n_(This question plus its context didn't fit the on-device model's window — the bridge refused the call before wasting it. Answering from the most relevant passages instead.)_\n\n"
-            };
+            let note = if kind == "FM_GUARDRAIL" { FM_GUARDRAIL_NOTE } else { FM_OVERFLOW_NOTE };
             yield Ok(note.to_string());
         }
     })
