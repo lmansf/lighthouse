@@ -30,20 +30,40 @@ import { isDesktopShell, isMobileShell } from "@/shell/desktopBridge";
  * honest `reason` is KEPT (not discarded) so Settings can say what to do
  * instead of silently hiding the private option.
  */
-export type OnDeviceTier = "foundation" | "gguf" | "llama-server" | "none";
+// §42: "llama" is the Tier-2 in-process GGUF backend (llama.cpp + Metal) on a
+// non-FM iPhone — distinct from "llama-server" (the desktop supervised server).
+export type OnDeviceTier = "foundation" | "gguf" | "llama" | "llama-server" | "none";
 
 export interface OnDeviceModelState {
   available: boolean;
   tier: OnDeviceTier;
   /** The shell's honest unavailability reason (null when available/unknown). */
   reason: string | null;
+  /**
+   * §42 §4: the device is CAPABLE of the Tier-2 model but the ~1.1 GB GGUF
+   * isn't downloaded yet (bridge code -7). The roster shows a download CTA in
+   * exactly this state — never on a below-the-bar device, where the
+   * empty-provider truths stand instead.
+   */
+  download: boolean;
 }
 
-const DEFAULT: OnDeviceModelState = { available: false, tier: "none", reason: null };
+const DEFAULT: OnDeviceModelState = {
+  available: false,
+  tier: "none",
+  reason: null,
+  download: false,
+};
 
 const useStore = create<OnDeviceModelState>(() => ({ ...DEFAULT }));
 
-const TIERS: readonly OnDeviceTier[] = ["foundation", "gguf", "llama-server", "none"];
+const TIERS: readonly OnDeviceTier[] = [
+  "foundation",
+  "gguf",
+  "llama",
+  "llama-server",
+  "none",
+];
 
 /** Minimum ms between re-probes while the verdict is unavailable. */
 const RETRY_MS = 4_000;
@@ -66,7 +86,7 @@ async function invokeShell(cmd: string): Promise<unknown> {
 
 async function probe(): Promise<void> {
   const reply = (await invokeShell("private_model_availability")) as
-    | { available?: unknown; tier?: unknown; reason?: unknown }
+    | { available?: unknown; tier?: unknown; reason?: unknown; download?: unknown }
     | undefined;
   if (!reply || typeof reply !== "object") return; // failure ⇒ stay at the default
   const tier =
@@ -74,11 +94,15 @@ async function probe(): Promise<void> {
       ? (reply.tier as OnDeviceTier)
       : "none";
   const available = reply.available === true;
+  const download = reply.download === true;
+  // §42 §4: the download-offer state (-7) is NOT "settled" — the model can be
+  // installed mid-session, after which the next probe finds the live backend.
   if (available) settled = true; // a wired backend is stable for the session
   useStore.setState({
     available,
     tier,
     reason: !available && typeof reply.reason === "string" ? reply.reason : null,
+    download,
   });
 }
 

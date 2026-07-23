@@ -355,6 +355,51 @@ jobs:
             echo "note: lighthouse_fm_ensure not in the export trie (ObjC route covers it)"
           fi
           rm -rf "$WORK"
+      - name: Assert the Tier-2 model weights are NOT bundled (§42 payload guard)
+        # §42 §5 (the §25 OCR-lesson pattern, inverted): the on-device fallback
+        # model is DOWNLOADED on demand, never shipped — so the .ipa must carry
+        # NO .gguf and must not balloon. This is the standing guard against an
+        # accidental weight-bundling that would blow the App Store size limit
+        # and defeat the download-with-consent design. Runs BEFORE the upload.
+        run: |
+          set -euo pipefail
+          IPA=build/ios/Lighthouse.ipa
+          test -f "$IPA" || { echo "::error::no .ipa at $IPA"; exit 1; }
+          WORK=$(mktemp -d)
+          unzip -q "$IPA" -d "$WORK"
+          APP=$(find "$WORK/Payload" -maxdepth 1 -name '*.app' -type d | head -1)
+          test -n "$APP" || { echo "::error::no .app inside Payload/"; exit 1; }
+          # No model weights anywhere in the payload (weights are user-downloaded).
+          # Count with `wc -l` (read to EOF) rather than an early-exit match, which
+          # can SIGPIPE-veto under pipefail (the bridge-tripwire lesson).
+          GGUF=$(find "$APP" -iname '*.gguf' -print | wc -l | tr -d ' ')
+          if [ "${GGUF:-0}" -gt 0 ]; then
+            echo "::error::a .gguf shipped in the .ipa — the Tier-2 model must be downloaded, never bundled"
+            find "$APP" -iname '*.gguf' -print
+            rm -rf "$WORK"; exit 1
+          fi
+          # Non-balloon: the .ipa stays well under the App Store cellular ceiling.
+          # A weightless build is tens of MB; 200 MB is a generous roof that a
+          # bundled ~1 GB model would smash through.
+          SIZE_MB=$(( $(stat -f%z "$IPA" 2>/dev/null || stat -c%s "$IPA") / 1024 / 1024 ))
+          echo "ipa size: ${SIZE_MB} MB (no .gguf bundled)"
+          if [ "$SIZE_MB" -gt 200 ]; then
+            echo "::error::.ipa is ${SIZE_MB} MB — ballooned past the 200 MB roof (a model may have been bundled)"
+            rm -rf "$WORK"; exit 1
+          fi
+          # Diagnostic (not a gate): whether the llama xcframework linked in. The
+          # framework/pbxproj wiring + on-device model run are macOS/device
+          # acceptance items (docs/ios-private-model.md §4.1); the app builds and
+          # ships FM-only until it is wired (#if canImport(llama) guards it), so
+          # this reports presence without blocking the working pipeline.
+          BIN="$APP/$(basename "$APP" .app)"
+          LLAMA=$(strings "$BIN" | grep -ci 'llama_decode\|ggml_metal' || true)
+          if [ "${LLAMA:-0}" -gt 0 ]; then
+            echo "note: llama backend symbols present — the Tier-2 framework linked in"
+          else
+            echo "note: llama backend not linked yet (FM-only build) — xcframework wiring is a device-acceptance item"
+          fi
+          rm -rf "$WORK"
       - name: Upload to TestFlight
         if: ${{ inputs.task == 'ios-beta' }}
         env:

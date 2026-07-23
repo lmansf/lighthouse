@@ -168,7 +168,11 @@ export function OnboardingPanel() {
   // (this component primes platformKind() below, so the probe fires as soon as
   // the form factor resolves); false/"none" on desktop and on a mobile shell
   // without a backend, keeping both byte-identical.
-  const { available: onDeviceBackend, tier: onDeviceTier } = useOnDeviceModel();
+  const {
+    available: onDeviceBackend,
+    tier: onDeviceTier,
+    download: onDeviceDownload,
+  } = useOnDeviceModel();
   useEffect(() => {
     setIsDesktop(isDesktopShell());
     let alive = true;
@@ -202,11 +206,14 @@ export function OnboardingPanel() {
   // (or on desktop) local stays offered, so this never fires. A user who already
   // picked a cloud provider keeps their pick.
   useEffect(() => {
-    if (platform === "desktop" || onDeviceBackend || providerId !== "local") return;
-    const first = modelProvidersFor(platform, onDeviceBackend)[0];
+    // §42: a download-offer device KEEPS "local" (the download CTA); only a
+    // below-the-bar device (no backend, no offer) re-points to cloud.
+    if (platform === "desktop" || onDeviceBackend || onDeviceDownload || providerId !== "local")
+      return;
+    const first = modelProvidersFor(platform, onDeviceBackend, onDeviceDownload)[0];
     setProviderId(first.id);
     setModelId(first.models[0]);
-  }, [platform, onDeviceBackend, providerId]);
+  }, [platform, onDeviceBackend, onDeviceDownload, providerId]);
 
   const provider = MODEL_PROVIDERS.find((p) => p.id === providerId)!;
 

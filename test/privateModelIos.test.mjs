@@ -29,6 +29,11 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { register } from "node:module";
+
+// The §42 twin imports (.ts with extensionless internal imports) resolve
+// through the same hook the budget twin tests use.
+register("./_ts-extensionless-hook.mjs", import.meta.url);
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const read = (p) => readFileSync(path.join(ROOT, p), "utf8");
@@ -172,6 +177,109 @@ test("a missing bridge reads as a BUILD defect (-6), never as the phone's OS", (
     commands.includes('"the on-device private model requires iOS 26 or later"'),
     "-3 keeps its meaning for the genuine old-OS case",
   );
+});
+
+// --- 5. §42 Tier-2: the llama fallback speaks the same contract -------------
+
+test("the Tier-2 selection is additive and the FM path is untouched", () => {
+  const server = read(`${APPLE}/Sources/lighthouse-desktop/PrivateModelServer.swift`);
+  // The new codes exist with the documented meanings.
+  assert.match(server, /LLAMA_AVAILABLE: Int32 = 2/);
+  assert.match(server, /LLAMA_MODEL_ABSENT: Int32 = -7/);
+  assert.match(server, /LLAMA_BELOW_BAR: Int32 = -8/);
+  assert.match(server, /LLAMA_MEMORY_TIGHT: Int32 = -9/);
+  // Selection order: FM first; the llama arms live INSIDE the FM-unavailable
+  // branch and only when the xcframework is present — a build without it
+  // behaves exactly like today's.
+  assert.match(server, /#if canImport\(llama\)/);
+  assert.match(server, /LlamaBackend\.deviceBelowBar\(\)/);
+  assert.match(server, /LlamaBackend\.modelPresent\(\)/);
+  assert.match(server, /LlamaBackend\.memoryClearsBar\(\)/);
+  // The llama /health declares itself; the FM body is byte-identical.
+  assert.match(server, /"backend\\":\\"llama\\"/);
+  // Overflow from llama speaks the SAME marker vocabulary.
+  const backend = read(`${APPLE}/Sources/lighthouse-desktop/LlamaBackend.swift`);
+  assert.match(server, /kind: "FM_OVERFLOW"/);
+  assert.match(backend, /case overflow/);
+  // The GGUF filename is ONE shared literal across Swift and the doc's pick.
+  assert.match(backend, /qwen2\.5-1\.5b-instruct-q4_k_m\.gguf/);
+  // The §4.3 bar is measured, never assumed from the entitlement.
+  assert.match(backend, /os_proc_available_memory/);
+});
+
+test("the availability verdict table is twinned (Rust ↔ TS)", async () => {
+  // Rust source pins (the strings the roster shows).
+  assert.ok(commands.includes(`"the private model for this device is a ~1.1 GB download"`));
+  assert.ok(commands.includes(`"this device can't hold the private model"`));
+  assert.ok(commands.includes("pub fn private_model_verdict"));
+  // TS twin returns the same table for the §42 cases.
+  const { privateModelVerdict } = await import("../src/contracts/onDeviceAvailability.ts");
+  assert.deepEqual(privateModelVerdict(2, true), {
+    available: true,
+    tier: "llama",
+    reason: null,
+    download: false,
+  });
+  assert.equal(privateModelVerdict(-7, false).download, true);
+  assert.equal(
+    privateModelVerdict(-7, false).reason,
+    "the private model for this device is a ~1.1 GB download",
+  );
+  assert.equal(privateModelVerdict(-8, false).download, false);
+  assert.equal(privateModelVerdict(-8, false).reason, "this device can't hold the private model");
+  // An available code without a port is a failed listener on BOTH sides.
+  assert.equal(privateModelVerdict(2, false).available, false);
+});
+
+test("§42 §2: the Tier-2 artifact is ONE literal across Rust, TS, and Swift", async () => {
+  const rust = read("native/crates/lighthouse-core/src/local_model.rs");
+  const backend = read(`${APPLE}/Sources/lighthouse-desktop/LlamaBackend.swift`);
+  const NAME = "qwen2.5-1.5b-instruct-q4_k_m.gguf";
+  assert.ok(rust.includes(`IOS_TIER2_GGUF: &str = "${NAME}"`));
+  assert.ok(backend.includes(`modelFileName = "${NAME}"`));
+  const { IOS_TIER2_GGUF, IOS_TIER2_URL, modelOpsAllowed } = await import(
+    "../src/server/localModel.ts"
+  );
+  assert.equal(IOS_TIER2_GGUF, NAME);
+  assert.ok(IOS_TIER2_URL.endsWith(NAME));
+  assert.ok(IOS_TIER2_URL.startsWith("https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/"));
+  // The ops gate mirrors local_model.rs::model_ops_allowed.
+  assert.equal(modelOpsAllowed("desktop", false, false), true);
+  assert.equal(modelOpsAllowed("ios", true, false), true);
+  assert.equal(modelOpsAllowed("ios", false, true), true);
+  assert.equal(modelOpsAllowed("ios", false, false), false);
+  assert.equal(modelOpsAllowed("android", false, true), false);
+});
+
+test("§42 §3: the llama backend narrates its REAL warm via /health", () => {
+  const server = read(`${APPLE}/Sources/lighthouse-desktop/PrivateModelServer.swift`);
+  const backend = read(`${APPLE}/Sources/lighthouse-desktop/LlamaBackend.swift`);
+  // The listener kicks the weight paging the moment it comes up.
+  assert.match(server, /LlamaBackend\.shared\.beginLoad\(\)/);
+  // /health reports 503 (loading) until the weights are resident — the
+  // warm-wait's Loading verdict shows "Private model warming up…".
+  assert.match(
+    server,
+    /if backend == \.llama, !LlamaBackend\.shared\.isLoaded\(\)/,
+    "llama /health is 503 while paging so the warm is honest",
+  );
+  assert.match(server, /503 Service Unavailable/);
+  // FM stays resident → always 200 (no false warm on the Tier-1 path).
+  assert.match(backend, /func isLoaded\(\) -> Bool/);
+  assert.match(backend, /func beginLoad\(\)/);
+});
+
+test("§42 §5: CI guards the Tier-2 model weights are never bundled", () => {
+  const wf = read(".github/workflows/mobile-bootstrap.yml");
+  const guard = wf.indexOf("Assert the Tier-2 model weights are NOT bundled");
+  const upload = wf.indexOf("name: Upload to TestFlight");
+  assert.ok(guard !== -1, "the §42 payload guard step exists");
+  assert.ok(upload !== -1 && guard < upload, "the guard gates the TestFlight upload");
+  const step = wf.slice(guard, upload);
+  // Weights must not board the .ipa (downloaded on demand).
+  assert.match(step, /iname '\*\.gguf'/, "the guard looks for a stray .gguf in the payload");
+  // Non-balloon roof catches an accidental weight bundling.
+  assert.match(step, /ballooned past the 200 MB roof/);
 });
 
 test("CI asserts the bridge boarded the app binary before TestFlight upload", () => {

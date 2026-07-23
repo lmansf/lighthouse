@@ -114,4 +114,30 @@ test("the mobile empty-provider copy says exactly the two truths", () => {
 test("ON_DEVICE_MODEL_COPY: the per-tier on-device descriptions are byte-exact", () => {
   assert.equal(ON_DEVICE_MODEL_COPY.foundation, "Runs on this device using Apple's on-device model");
   assert.equal(ON_DEVICE_MODEL_COPY.gguf, "Runs on this device using a built-in private model");
+  // §42: the Tier-2 downloaded model's honest line.
+  assert.equal(ON_DEVICE_MODEL_COPY.llama, "Runs on this device — nothing leaves your iPhone");
+});
+
+test("§42 §4: the download-offer state shows local, below-bar keeps it gone", async () => {
+  const { modelProvidersFor, ON_DEVICE_MODEL_DOWNLOAD_CTA, TIER2_MODEL_ATTRIBUTION } = await import(
+    "../src/contracts/mocks/providers.ts"
+  );
+  // A capable non-FM device with the model NOT yet downloaded (download-offer)
+  // shows the FULL catalog so the download CTA is tappable — even though the
+  // backend isn't live yet (onDeviceBackend false).
+  const offered = modelProvidersFor("ios", false, true);
+  assert.equal(offered[0].id, "local", "download-offer: local leads so the CTA shows");
+  assert.deepEqual(
+    offered.map((p) => p.id),
+    MODEL_PROVIDERS.map((p) => p.id),
+  );
+  // Below the bar (no backend, no offer) → local stays GONE, truths stand.
+  const belowBar = modelProvidersFor("ios", false, false);
+  assert.ok(!belowBar.some((p) => p.id === "local"), "below-bar: local must be GONE");
+  // The CTA + attribution are byte-pinned.
+  assert.equal(ON_DEVICE_MODEL_DOWNLOAD_CTA, "Private model — download (~1 GB)");
+  assert.equal(
+    TIER2_MODEL_ATTRIBUTION,
+    "Includes Qwen2.5-1.5B-Instruct © Alibaba Cloud, used under the Apache License 2.0.",
+  );
 });

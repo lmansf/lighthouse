@@ -149,8 +149,16 @@ test("TS twin mirrors the on-device doc budgets (PARITY with llm.rs)", () => {
     /case "apple-fm-4096":\s*\n\s*case "apple-fm-8192":\s*\n\s*return \{ ctxBlockMax: 3_500, ctxTotalMax: 5_000, historyMax: 2_000 \};/,
     "TS apple-fm segment budgets equal the Rust arm",
   );
-  const rsSegment = budgetRs.match(/Tier::AppleFm4096 \| Tier::AppleFm8192 => (\d[\d_]*),\s*\n\s*Tier::Llama6144 => 5_500,/)?.[1];
-  const tsSegment = budgetTs.match(/case "apple-fm-8192":\s*\n\s*return (\d[\d_]*);\s*\n\s*case "llama-6144":\s*\n\s*return 5_500;/)?.[1];
+  // §42: the mobile llama tier shares the on-device doc-segment arm, so the
+  // apple arms now read `AppleFm4096 | AppleFm8192 | LlamaMobile6144 => 3_000`
+  // (Rust) / three stacked cases (TS). The pin still locks the NUMBER across
+  // engines; the regex just tolerates the added arm before the llama-6144 case.
+  const rsSegment = budgetRs.match(
+    /Tier::AppleFm4096 \| Tier::AppleFm8192 \| Tier::LlamaMobile6144 => (\d[\d_]*),\s*\n\s*Tier::Llama6144 => 5_500,/,
+  )?.[1];
+  const tsSegment = budgetTs.match(
+    /case "apple-fm-8192":\s*\n\s*case "llama-mobile-6144":\s*\n\s*return (\d[\d_]*);\s*\n\s*case "llama-6144":\s*\n\s*return 5_500;/,
+  )?.[1];
   assert.equal(rsSegment, "3_000", "Rust on-device doc segment is the number TS mirrors");
   assert.equal(tsSegment, "3_000", "TS on-device doc segment equals the Rust arm");
 });
