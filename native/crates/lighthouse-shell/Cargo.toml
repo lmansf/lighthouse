@@ -9,3 +9,12 @@ lighthouse-core = { path = "../lighthouse-core" }
 anyhow.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+
+# The iOS arms §40 moved here (the FM-bridge ensure glue and the Dynamic Type
+# observer start in commands.rs) reach the ObjC runtime through libc — the
+# same iOS-only declaration the wrapper crate carries. §40 landed without it;
+# no per-PR job compiles the shell for iOS (the android tripwire's arms are
+# cfg'd out of the libc paths), so the first ios-build would have been the
+# discovery point.
+[target.'cfg(target_os = "ios")'.dependencies]
+libc = "0.2"

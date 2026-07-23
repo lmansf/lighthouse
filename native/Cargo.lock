@@ -3919,6 +3919,7 @@ name = "lighthouse-shell"
 version = "0.14.7"
 dependencies = [
  "anyhow",
+ "libc",
  "lighthouse-core",
  "serde_json",
  "tokio",
