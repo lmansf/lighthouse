@@ -29,6 +29,11 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { register } from "node:module";
+
+// The §42 twin imports (.ts with extensionless internal imports) resolve
+// through the same hook the budget twin tests use.
+register("./_ts-extensionless-hook.mjs", import.meta.url);
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const read = (p) => readFileSync(path.join(ROOT, p), "utf8");
@@ -224,6 +229,26 @@ test("the availability verdict table is twinned (Rust ↔ TS)", async () => {
   assert.equal(privateModelVerdict(-8, false).reason, "this device can't hold the private model");
   // An available code without a port is a failed listener on BOTH sides.
   assert.equal(privateModelVerdict(2, false).available, false);
+});
+
+test("§42 §2: the Tier-2 artifact is ONE literal across Rust, TS, and Swift", async () => {
+  const rust = read("native/crates/lighthouse-core/src/local_model.rs");
+  const backend = read(`${APPLE}/Sources/lighthouse-desktop/LlamaBackend.swift`);
+  const NAME = "qwen2.5-1.5b-instruct-q4_k_m.gguf";
+  assert.ok(rust.includes(`IOS_TIER2_GGUF: &str = "${NAME}"`));
+  assert.ok(backend.includes(`modelFileName = "${NAME}"`));
+  const { IOS_TIER2_GGUF, IOS_TIER2_URL, modelOpsAllowed } = await import(
+    "../src/server/localModel.ts"
+  );
+  assert.equal(IOS_TIER2_GGUF, NAME);
+  assert.ok(IOS_TIER2_URL.endsWith(NAME));
+  assert.ok(IOS_TIER2_URL.startsWith("https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/"));
+  // The ops gate mirrors local_model.rs::model_ops_allowed.
+  assert.equal(modelOpsAllowed("desktop", false, false), true);
+  assert.equal(modelOpsAllowed("ios", true, false), true);
+  assert.equal(modelOpsAllowed("ios", false, true), true);
+  assert.equal(modelOpsAllowed("ios", false, false), false);
+  assert.equal(modelOpsAllowed("android", false, true), false);
 });
 
 test("CI asserts the bridge boarded the app binary before TestFlight upload", () => {

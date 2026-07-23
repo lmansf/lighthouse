@@ -1437,6 +1437,10 @@ pub fn private_model_availability_impl() -> Value {
         // ensures the loopback responder is up; a small integer result code back.
         let code = lighthouse_fm_ensure(&mut port as *mut u16);
         let v = private_model_verdict(code, port != 0);
+        // §42 §2: the -7 state opens the model ops (status/install) so the
+        // download can happen BEFORE any backend is live; every other code
+        // closes them again. The verdict's download flag IS the signal.
+        local_model::set_download_offer(v.download);
         if v.available {
             // Point the engine's local transport at the in-process responder
             // BEFORE returning, so the very next ask streams through it, then

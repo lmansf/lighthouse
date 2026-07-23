@@ -25,13 +25,28 @@ use serde::Serialize;
 
 use crate::config::resources_dir;
 
+/// §42 §2: the iOS Tier-2 artifact — ONE shared literal with the Swift
+/// backend (LlamaBackend.swift `modelFileName`; test/privateModelIos.test.mjs
+/// pins both sides) and the Phase-A doc's pick (docs/ios-private-model.md
+/// §4.2: official repo, 1.12 GB, Apache-2.0).
+pub const IOS_TIER2_GGUF: &str = "qwen2.5-1.5b-instruct-q4_k_m.gguf";
+pub const IOS_TIER2_URL: &str =
+    "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf";
+
+/// The download target, platform-aware (§42 §2): iOS fetches the Tier-2
+/// 1.5B artifact; desktop keeps its 7B. The env override still wins
+/// everywhere — it is the smoke rig's seam.
 fn model_url() -> String {
     std::env::var("LIGHTHOUSE_LOCAL_MODEL_URL")
         .ok()
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| {
-            "https://huggingface.co/bartowski/Mistral-7B-Instruct-v0.3-GGUF/resolve/main/Mistral-7B-Instruct-v0.3-Q4_K_M.gguf".to_string()
+            if cfg!(target_os = "ios") {
+                IOS_TIER2_URL.to_string()
+            } else {
+                "https://huggingface.co/bartowski/Mistral-7B-Instruct-v0.3-GGUF/resolve/main/Mistral-7B-Instruct-v0.3-Q4_K_M.gguf".to_string()
+            }
         })
 }
 
@@ -40,7 +55,13 @@ fn model_file() -> String {
         .ok()
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| "Mistral-7B-Instruct-v0.3-Q4_K_M.gguf".to_string())
+        .unwrap_or_else(|| {
+            if cfg!(target_os = "ios") {
+                IOS_TIER2_GGUF.to_string()
+            } else {
+                "Mistral-7B-Instruct-v0.3-Q4_K_M.gguf".to_string()
+            }
+        })
 }
 
 /// A real model is hundreds of MB; guards against counting a stub as ready.
@@ -184,6 +205,35 @@ pub fn set_advertised_llama_backend(is_llama: bool) {
 
 pub fn advertised_llama_backend() -> bool {
     ADVERTISED_LLAMA_BACKEND.load(Ordering::Relaxed)
+}
+
+/// §42 §2: the download-offer signal — the bridge reported code -7 (a CAPABLE
+/// non-FM device whose Tier-2 GGUF is not on disk yet). Model ops (status /
+/// install / uninstall) must work in exactly this state, before any backend is
+/// live — the chicken the `on_device_backend` egg cannot hatch without. Set
+/// beside `set_on_device_backend` by the availability probe; never true on a
+/// below-the-bar device (the bridge answers -8 there and the roster shows the
+/// honest truths instead). KEEP IN SYNC with
+/// src/server/localModel.ts::setDownloadOffer.
+static DOWNLOAD_OFFER: AtomicBool = AtomicBool::new(false);
+
+pub fn set_download_offer(offer: bool) {
+    DOWNLOAD_OFFER.store(offer, Ordering::Relaxed);
+}
+
+pub fn download_offer() -> bool {
+    DOWNLOAD_OFFER.load(Ordering::Relaxed)
+}
+
+/// §42 §2: the gate every model op uses — a live backend OR the -7 offer
+/// state. Pure core exposed for the verdict tests; `supported_here()` stays
+/// the ask-path guard (an offered-but-absent model still cannot ANSWER).
+pub fn model_ops_allowed(platform_kind: &str, on_device_backend: bool, offer: bool) -> bool {
+    local_model_available(platform_kind, on_device_backend) || (platform_kind == "ios" && offer)
+}
+
+pub(crate) fn ops_allowed_here() -> bool {
+    model_ops_allowed(crate::config::platform_kind(), on_device_backend(), download_offer())
 }
 
 /// §32 §7 OBSERVE: local diagnostics counters for the bridge's terminal
@@ -401,7 +451,9 @@ pub fn model_status() -> Progress {
     // §3: on a mobile shell the private model is UNSUPPORTED — a first-class
     // status, not an error the UI retries. Reported before anything else so
     // no mobile caller ever sees "absent" (which reads as "installable").
-    if !supported_here() {
+    // §42 §2: the -7 download-offer state also reads REAL status — a capable
+    // iOS device mid-install must see its own progress, not "unsupported".
+    if !ops_allowed_here() {
         return unsupported_status();
     }
     if uninstall_pending() {
@@ -500,8 +552,10 @@ pub fn start_download() -> Progress {
     // §3 refusal: phone-class hardware can't run the ~4.2 GB private model,
     // so the engine never starts the download there. The UI already offers no
     // Install affordance on mobile (the roster drops the local entry) — this
-    // is the engine-side guarantee for any other caller.
-    if !supported_here() {
+    // is the engine-side guarantee for any other caller. §42 §2: the ONE
+    // mobile state that MAY install is the bridge's -7 (capable device,
+    // Tier-2 GGUF absent) — the download-offer signal opens exactly it.
+    if !ops_allowed_here() {
         return unsupported_status();
     }
     let gen;
@@ -766,5 +820,30 @@ mod tests {
             supported_here(),
             crate::config::platform_kind() == "desktop"
         );
+    }
+
+    /// §42 §2: the ops gate — a live backend OR the iOS -7 offer state.
+    #[test]
+    fn model_ops_gate_opens_for_the_download_offer_only_on_ios() {
+        // Desktop: always (backend and offer irrelevant).
+        assert!(model_ops_allowed("desktop", false, false));
+        // iOS with a live backend: yes (unchanged).
+        assert!(model_ops_allowed("ios", true, false));
+        // iOS, no backend, WITH the -7 offer: the §42 install state.
+        assert!(model_ops_allowed("ios", false, true));
+        // iOS, no backend, no offer (below-bar / preparing / too-old): closed.
+        assert!(!model_ops_allowed("ios", false, false));
+        // The offer never opens ops off-iOS (fail closed, unknown platforms too).
+        assert!(!model_ops_allowed("android", false, true));
+        assert!(!model_ops_allowed("web", false, true));
+    }
+
+    /// §42 §2: the Tier-2 artifact literals — one name across Rust, Swift,
+    /// and the doc (the node pins hold Swift; this holds Rust).
+    #[test]
+    fn ios_tier2_artifact_is_the_phase_a_pick() {
+        assert_eq!(IOS_TIER2_GGUF, "qwen2.5-1.5b-instruct-q4_k_m.gguf");
+        assert!(IOS_TIER2_URL.starts_with("https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/"));
+        assert!(IOS_TIER2_URL.ends_with(IOS_TIER2_GGUF));
     }
 }

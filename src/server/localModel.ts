@@ -185,6 +185,42 @@ export function advertisedLlamaBackend(): boolean {
 }
 
 /**
+ * §42 §2: the iOS Tier-2 artifact — ONE shared literal with the Rust config
+ * (local_model.rs::IOS_TIER2_GGUF) and the Swift backend
+ * (LlamaBackend.swift::modelFileName); test/privateModelIos.test.mjs pins all
+ * three. Web/dev never downloads it — shape parity only.
+ */
+export const IOS_TIER2_GGUF = "qwen2.5-1.5b-instruct-q4_k_m.gguf";
+export const IOS_TIER2_URL =
+  "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf";
+
+/**
+ * §42 §2: the download-offer signal — the bridge reported code -7 (capable
+ * non-FM device, Tier-2 GGUF absent). Model ops must work in exactly this
+ * state, before any backend is live. KEEP IN SYNC with
+ * local_model.rs::set_download_offer.
+ */
+let DOWNLOAD_OFFER = false;
+export function setDownloadOffer(offer: boolean): void {
+  DOWNLOAD_OFFER = offer;
+}
+export function downloadOffer(): boolean {
+  return DOWNLOAD_OFFER;
+}
+
+/**
+ * §42 §2: the gate every model op uses — a live backend OR the iOS -7 offer
+ * state. KEEP IN SYNC with local_model.rs::model_ops_allowed.
+ */
+export function modelOpsAllowed(
+  platformKind: string,
+  onDeviceBackend: boolean,
+  offer: boolean,
+): boolean {
+  return localModelAvailable(platformKind, onDeviceBackend) || (platformKind === "ios" && offer);
+}
+
+/**
  * §3 / add-mobile-local-inference verdict (pure): can a PRIVATE, on-device model
  * answer on this form factor? The desktop shell always can — it owns llama-server
  * and the weights. A mobile shell can ONLY when its plugin has reported a usable
