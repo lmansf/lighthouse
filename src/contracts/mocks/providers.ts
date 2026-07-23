@@ -81,8 +81,16 @@ export const MODEL_PROVIDERS: ModelProvider[] = [
  * local_model_available / localModel.ts::localModelAvailable — below-floor
  * refuses downloads and reports "unsupported").
  */
-export function modelProvidersFor(platform: PlatformKind, onDeviceBackend = false): ModelProvider[] {
-  return platform === "desktop" || onDeviceBackend
+export function modelProvidersFor(
+  platform: PlatformKind,
+  onDeviceBackend = false,
+  // §42 §4: a CAPABLE non-FM device that hasn't downloaded its Tier-2 model
+  // yet (bridge code -7) shows the local entry TOO — so the user can see and
+  // tap the "download (~1 GB)" CTA. Below the bar this stays false and the
+  // entry remains GONE (the empty-provider truths stand).
+  downloadOffer = false,
+): ModelProvider[] {
+  return platform === "desktop" || onDeviceBackend || downloadOffer
     ? MODEL_PROVIDERS
     : MODEL_PROVIDERS.filter((p) => p.id !== "local");
 }
@@ -104,7 +112,25 @@ export const MOBILE_NO_PROVIDER_TRUTHS =
  * it IS available on a mobile shell, per backend tier — honest about what runs.
  * Byte-pinned (test/localModelPlatform.test.mjs). Desktop keeps the catalog label.
  */
-export const ON_DEVICE_MODEL_COPY: Record<"foundation" | "gguf", string> = {
+export const ON_DEVICE_MODEL_COPY: Record<"foundation" | "gguf" | "llama", string> = {
   foundation: "Runs on this device using Apple's on-device model",
   gguf: "Runs on this device using a built-in private model",
+  // §42: the Tier-2 downloaded model on a non-FM iPhone. Honest about where
+  // it runs and that nothing leaves the device.
+  llama: "Runs on this device — nothing leaves your iPhone",
 };
+
+/**
+ * §42 §4: the roster CTA on a CAPABLE non-FM device whose Tier-2 model isn't
+ * downloaded yet (bridge code -7). Byte-pinned (test/localModelPlatform).
+ */
+export const ON_DEVICE_MODEL_DOWNLOAD_CTA = "Private model — download (~1 GB)";
+export const ON_DEVICE_MODEL_DOWNLOAD_HINT =
+  "A one-time ~1.1 GB download. Runs entirely on this device — nothing leaves your iPhone.";
+
+/**
+ * §42 §4: Apache-2.0 attribution shown in About. Byte-pinned so a model swap
+ * cannot silently drop the required notice (docs/ios-private-model.md §4.2).
+ */
+export const TIER2_MODEL_ATTRIBUTION =
+  "Includes Qwen2.5-1.5B-Instruct © Alibaba Cloud, used under the Apache License 2.0.";

@@ -6,6 +6,9 @@ export {
   MODEL_PROVIDERS,
   MOBILE_NO_PROVIDER_TRUTHS,
   ON_DEVICE_MODEL_COPY,
+  ON_DEVICE_MODEL_DOWNLOAD_CTA,
+  ON_DEVICE_MODEL_DOWNLOAD_HINT,
+  TIER2_MODEL_ATTRIBUTION,
   modelProvidersFor,
 } from "./mocks/providers";
 export { SEED_NODES, SEED_SOURCES } from "./mocks/files";

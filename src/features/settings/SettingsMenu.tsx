@@ -34,6 +34,8 @@ import {
   MODEL_PROVIDERS,
   MOBILE_NO_PROVIDER_TRUTHS,
   ON_DEVICE_MODEL_COPY,
+  ON_DEVICE_MODEL_DOWNLOAD_CTA,
+  TIER2_MODEL_ATTRIBUTION,
   modelProvidersFor,
   ragService,
   type AuditSnapshot,
@@ -231,8 +233,13 @@ export function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: 
   // again (and is the default). platformKind() is primed from the first
   // capability payload, long before Settings can open; the store probes once.
   const platform = platformKind();
-  const { available: onDeviceBackend, tier: onDeviceTier, reason: onDeviceReason } = useOnDeviceModel();
-  const roster = modelProvidersFor(platform, onDeviceBackend);
+  const {
+    available: onDeviceBackend,
+    tier: onDeviceTier,
+    reason: onDeviceReason,
+    download: onDeviceDownload,
+  } = useOnDeviceModel();
+  const roster = modelProvidersFor(platform, onDeviceBackend, onDeviceDownload);
   const [providerId, setProviderId] = useState(onboarding.providerId ?? roster[0].id);
   const [modelId, setModelId] = useState(onboarding.modelId ?? firstModelFor(providerId));
   const [apiKey, setApiKey] = useState("");
@@ -379,16 +386,22 @@ export function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: 
   // with a reported on-device backend); mobile-without-a-backend still has no
   // local entry, so it never renders the radio (and never mounts the desktop
   // install panel below, which stays `platform === "desktop"`-gated).
-  const localOffered = platform === "desktop" || onDeviceBackend;
+  const localOffered = platform === "desktop" || onDeviceBackend || onDeviceDownload;
   const isLocal = localOffered && providerId === "local";
   // The private model's description line: the catalog label on desktop
-  // (tier "llama-server"), the honest per-tier copy on a mobile shell.
+  // (tier "llama-server"), the honest per-tier copy on a mobile shell. §42:
+  // the Tier-2 "llama" tier gets its own honest line; a capable device that
+  // hasn't downloaded the model yet shows the download CTA instead.
   const localModelLabel =
     platform === "desktop"
       ? "Private — runs on this device. No API key; nothing leaves this device. (Recommended)"
-      : onDeviceTier === "gguf"
-        ? ON_DEVICE_MODEL_COPY.gguf
-        : ON_DEVICE_MODEL_COPY.foundation;
+      : onDeviceDownload
+        ? ON_DEVICE_MODEL_DOWNLOAD_CTA
+        : onDeviceTier === "llama"
+          ? ON_DEVICE_MODEL_COPY.llama
+          : onDeviceTier === "gguf"
+            ? ON_DEVICE_MODEL_COPY.gguf
+            : ON_DEVICE_MODEL_COPY.foundation;
   const cloudProviders = roster.filter((p) => p.id !== "local");
   const isAllowed = (id: string) => (allowedProviders ? allowedProviders.includes(id) : true);
   const firstAllowedCloud = cloudProviders.find((p) => isAllowed(p.id)) ?? cloudProviders[0];
@@ -1766,6 +1779,8 @@ export function AboutDialog({ open, setOpen }: { open: boolean; setOpen: (b: boo
               <Link href="https://lhvault.app" target="_blank" rel="noreferrer">
                 lhvault.app
               </Link>
+              {/* §42 §4: the Apache-2.0 attribution the Tier-2 model requires. */}
+              <Text className={styles.aboutVersion}>{TIER2_MODEL_ATTRIBUTION}</Text>
             </div>
           </DialogContent>
           <DialogActions>
