@@ -6,8 +6,17 @@
  * Intentionally low-contrast and non-interactive — a quiet build marker, not a UI
  * control. The version is injected at build time from package.json via
  * next.config.mjs.
+ *
+ * §43 §4: this is a fixed bottom-anchored corner stamp that does NOT consume the
+ * compact shell's --lh-tabbar-h / --lh-safe-bottom vars, so per the CONVENTIONS
+ * "Fixed/bottom-anchored surfaces" rule it must NOT render on compact — there it
+ * would float over the bottom tab bar. The version moves to the Settings page on
+ * compact (SettingsPage's Help & about footer). Desktop AND iPad-regular are the
+ * non-compact arrangement (no tab bar), so both keep the corner stamp unchanged —
+ * this is the registry allowlist's "not mounted on compact" made true.
  */
 import { makeStyles, tokens } from "@fluentui/react-components";
+import { usePaneLayout } from "./paneLayout";
 
 const useStyles = makeStyles({
   badge: {
@@ -28,7 +37,10 @@ const useStyles = makeStyles({
 
 export function VersionBadge() {
   const styles = useStyles();
+  // The compact arrangement (mobile shell under the breakpoint) owns the bottom
+  // edge with its fixed tab bar; the corner stamp stands down there.
+  const { compact } = usePaneLayout(false);
   const version = process.env.NEXT_PUBLIC_APP_VERSION;
-  if (!version) return null;
+  if (compact || !version) return null;
   return <span className={styles.badge}>v{version}</span>;
 }
