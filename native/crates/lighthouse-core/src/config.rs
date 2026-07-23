@@ -50,8 +50,34 @@ pub fn vault_dir() -> PathBuf {
 }
 
 /// Hidden state directory for inclusion flags, profile, and indexes.
+///
+/// §41: platform-aware. Desktop (and the web/dev twin) keeps the historical
+/// in-vault `.rag-vault` — byte-identical behavior. iOS moves engine state
+/// OUT of the user-visible Documents vault into the app's Application
+/// Support container: the shell's `bootstrap_env` points
+/// `LIGHTHOUSE_APP_STATE_DIR` there before any engine call, so the Files-app
+/// door ("On My iPhone → Lighthouse") shows only the user's documents. The
+/// env var is read directly — NOT via [`app_state_dir`], whose fallback is
+/// this very function (a cycle). Unset env on iOS (bare engine under a test
+/// harness) falls back to the historical in-vault location so the engine
+/// still boots; the shell always sets it in the app. The one-shot CLI
+/// `--vault` flow (ask.rs) re-points LIGHTHOUSE_APP_STATE_DIR in-vault —
+/// desktop-only (no CLI ships on iOS), so the iOS arm never sees it.
+/// `LIGHTHOUSE_STATE_HOME_LEGACY=1` is the migration's fail-open switch
+/// (lighthouse-shell::state_home): a failed Documents→App Support migration
+/// keeps this launch running from the legacy dir — never a refuse-to-boot.
 pub fn state_dir() -> PathBuf {
-    let dir = vault_dir().join(".rag-vault");
+    let dir = if cfg!(target_os = "ios") {
+        let legacy = std::env::var("LIGHTHOUSE_STATE_HOME_LEGACY")
+            .map(|v| v == "1")
+            .unwrap_or(false);
+        match env_trimmed("LIGHTHOUSE_APP_STATE_DIR") {
+            Some(p) if !legacy => PathBuf::from(p).join(".rag-vault"),
+            _ => vault_dir().join(".rag-vault"),
+        }
+    } else {
+        vault_dir().join(".rag-vault")
+    };
     let _ = fs::create_dir_all(&dir);
     dir
 }
@@ -270,6 +296,51 @@ mod tests {
             assert_eq!(k, "android");
         } else {
             assert_eq!(k, "desktop");
+        }
+    }
+
+    /// §41 pin: everywhere EXCEPT iOS the state home is the historical
+    /// in-vault `.rag-vault` — and neither the app-state env var nor the
+    /// migration's fail-open switch may leak into that resolution. On an iOS
+    /// cross-compile (`cargo test --target aarch64-apple-ios`) the same test
+    /// pins the RELOCATED home instead: `LIGHTHOUSE_APP_STATE_DIR/.rag-vault`,
+    /// with the legacy switch restoring the in-vault dir.
+    #[test]
+    fn state_dir_platform_seam() {
+        // Process-global env: mutate under distinctive values and restore, so
+        // parallel tests that also read VAULT_DIR see it back untouched.
+        let prev_vault = std::env::var("VAULT_DIR").ok();
+        let prev_app = std::env::var("LIGHTHOUSE_APP_STATE_DIR").ok();
+        let prev_legacy = std::env::var("LIGHTHOUSE_STATE_HOME_LEGACY").ok();
+        let vault = std::env::temp_dir().join("lh-s41-vault");
+        let appstate = std::env::temp_dir().join("lh-s41-appstate");
+        std::env::set_var("VAULT_DIR", &vault);
+        std::env::set_var("LIGHTHOUSE_APP_STATE_DIR", &appstate);
+        std::env::remove_var("LIGHTHOUSE_STATE_HOME_LEGACY");
+
+        let resolved = state_dir();
+        if cfg!(target_os = "ios") {
+            assert_eq!(resolved, appstate.join(".rag-vault"));
+            std::env::set_var("LIGHTHOUSE_STATE_HOME_LEGACY", "1");
+            assert_eq!(state_dir(), vault.join(".rag-vault"));
+        } else {
+            // Desktop/web byte-identical: in-vault, env vars irrelevant here.
+            assert_eq!(resolved, vault.join(".rag-vault"));
+            std::env::set_var("LIGHTHOUSE_STATE_HOME_LEGACY", "1");
+            assert_eq!(state_dir(), vault.join(".rag-vault"));
+        }
+
+        match prev_vault {
+            Some(v) => std::env::set_var("VAULT_DIR", v),
+            None => std::env::remove_var("VAULT_DIR"),
+        }
+        match prev_app {
+            Some(v) => std::env::set_var("LIGHTHOUSE_APP_STATE_DIR", v),
+            None => std::env::remove_var("LIGHTHOUSE_APP_STATE_DIR"),
+        }
+        match prev_legacy {
+            Some(v) => std::env::set_var("LIGHTHOUSE_STATE_HOME_LEGACY", v),
+            None => std::env::remove_var("LIGHTHOUSE_STATE_HOME_LEGACY"),
         }
     }
 }
