@@ -3800,7 +3800,7 @@ dependencies = [
 
 [[package]]
 name = "lighthouse-cli"
-version = "0.14.6"
+version = "0.14.7"
 dependencies = [
  "futures",
  "lighthouse-core",
@@ -3812,7 +3812,7 @@ dependencies = [
 
 [[package]]
 name = "lighthouse-core"
-version = "0.14.6"
+version = "0.14.7"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -3851,7 +3851,7 @@ dependencies = [
 
 [[package]]
 name = "lighthouse-desktop"
-version = "0.14.6"
+version = "0.14.7"
 dependencies = [
  "anyhow",
  "axum",
@@ -3862,6 +3862,7 @@ dependencies = [
  "libc",
  "lighthouse-core",
  "lighthouse-server",
+ "lighthouse-shell",
  "objc2",
  "objc2-app-kit",
  "rand 0.8.6",
@@ -3885,7 +3886,7 @@ dependencies = [
 
 [[package]]
 name = "lighthouse-mcp"
-version = "0.14.6"
+version = "0.14.7"
 dependencies = [
  "futures",
  "lighthouse-core",
@@ -3897,7 +3898,7 @@ dependencies = [
 
 [[package]]
 name = "lighthouse-server"
-version = "0.14.6"
+version = "0.14.7"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -3911,6 +3912,17 @@ dependencies = [
  "tempfile",
  "tokio",
  "url",
+]
+
+[[package]]
+name = "lighthouse-shell"
+version = "0.14.7"
+dependencies = [
+ "anyhow",
+ "libc",
+ "lighthouse-core",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

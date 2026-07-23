@@ -44,6 +44,28 @@ jobs:
       - name: Chart eval floor (model-free)
         run: cargo run -p lighthouse-core --example chart_eval --locked
 
+  # §40 crate-split tripwire: the tauri-free crates must cargo check WITHOUT
+  # webkit/gtk system deps — the dev-container reality this split exists for.
+  # Deliberately no apt-get here: a tauri (or any system-lib) dependency
+  # creeping into lighthouse-shell or its siblings fails THIS fast job
+  # instead of surfacing as "works in CI, dead in the container".
+  container-check:
+    name: container parity (tauri-free crates)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: native
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native
+      - name: cargo check the container-checkable crates (no system deps)
+        run: >
+          cargo check -p lighthouse-core -p lighthouse-shell -p lighthouse-cli
+          -p lighthouse-server -p lighthouse-mcp --locked
+
   # add-mobile-apps §2.3: per-PR Android portability tripwire. Keeps
   # lighthouse-core — and, since the §2.1 cfg(desktop) split, the
   # lighthouse-desktop LIBRARY (the shared shell the mobile targets link) —

@@ -12,6 +12,7 @@ import { createHash, randomBytes } from "node:crypto";
 import type { DataSource, FileNode, RagReference } from "@/contracts";
 import {
   VAULT_SOURCE_ID,
+  appVersion,
   vaultDir,
   stateDir,
   statePath,
@@ -78,18 +79,60 @@ interface VaultState {
    * un-versioned migration story. KEEP IN SYNC with vault.rs.
    */
   rules: CurationRule[];
+  /**
+   * §39 §5: the app version that last WROTE this file. Absent on pre-§39
+   * files; every save stamps it. An app OLDER than the writer goes READ-ONLY
+   * on this state (saveState refuses with one honest line) instead of
+   * re-serializing an interface that silently DROPS every field it doesn't
+   * know. KEEP IN SYNC with vault.rs (JSON key `writtenBy`).
+   */
+  writtenBy?: string;
 }
+
+/** §39 §5: "x.y.z" → comparable triple; junk reads (0,0,0) — never newer. */
+function versionTriple(v: string): [number, number, number] {
+  const parts = v.trim().split(".");
+  const num = (i: number) => {
+    const digits = /^\d+/.exec(parts[i] ?? "");
+    return digits ? Number(digits[0]) : 0;
+  };
+  return [num(0), num(1), num(2)];
+}
+
+/**
+ * True when the state file's writer is strictly newer than the running app —
+ * the read-only trigger. Absent stamp (pre-§39 file) ⇒ writable. Pure; KEEP
+ * IN SYNC with vault.rs::state_written_by_newer.
+ */
+export function stateWrittenByNewer(writtenBy: string | undefined, running: string): boolean {
+  if (!writtenBy) return false;
+  const [wa, wb, wc] = versionTriple(writtenBy);
+  const [ra, rb, rc] = versionTriple(running);
+  return wa !== ra ? wa > ra : wb !== rb ? wb > rb : wc > rc;
+}
+
+/** Read-only verdict for the currently loaded state path (set by loadState). */
+let stateReadOnly: { path: string; ro: boolean } | null = null;
+let readOnlyLogged = false;
 
 function loadState(): VaultState {
   // Construct fresh objects each call so a missing state file never aliases a
   // shared default that setIncluded() would then mutate for the process life.
   const raw = readJson<Partial<VaultState>>(statePath(), {});
+  // §39 §5: a file written by a NEWER app flips this path read-only — reads
+  // (and answers) work; saveState refuses instead of dropping fields this
+  // build doesn't know exist.
+  stateReadOnly = {
+    path: statePath(),
+    ro: stateWrittenByNewer(raw.writtenBy, appVersion()),
+  };
   return {
     sourceAvailable: raw.sourceAvailable ?? true,
     included: { ...(raw.included ?? {}) },
     localOnly: { ...(raw.localOnly ?? {}) },
     references: { ...(raw.references ?? {}) },
     rules: [...(raw.rules ?? [])],
+    ...(raw.writtenBy !== undefined ? { writtenBy: raw.writtenBy } : {}),
   };
 }
 
@@ -143,7 +186,19 @@ function resolveAbs(id: string, state: VaultState): string {
   return abs;
 }
 function saveState(s: VaultState): void {
-  writeJson(statePath(), s);
+  // §39 §5: refuse to clobber a newer writer's file — one honest line, once.
+  if (stateReadOnly?.path === statePath() && stateReadOnly.ro) {
+    if (!readOnlyLogged) {
+      readOnlyLogged = true;
+      console.warn(
+        `state.json was written by a newer Lighthouse than this build ` +
+          `(${appVersion()}) — leaving it untouched (read-only) rather than ` +
+          `dropping fields this build doesn't know.`,
+      );
+    }
+    return;
+  }
+  writeJson(statePath(), { ...s, writtenBy: appVersion() });
   invalidateWalkCache(); // inclusion flags and references feed the walked tree
 }
 

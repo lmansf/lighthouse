@@ -10,6 +10,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 lighthouse-core = { path = "../lighthouse-core" }
+lighthouse-shell = { path = "../lighthouse-shell" }
 lighthouse-server = { path = "../lighthouse-server" }
 anyhow = { workspace = true }
 serde = { workspace = true }

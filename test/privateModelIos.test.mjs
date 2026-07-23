@@ -37,7 +37,9 @@ const APPLE = "native/crates/lighthouse-desktop/gen/apple";
 const pbxproj = read(`${APPLE}/lighthouse-desktop.xcodeproj/project.pbxproj`);
 const projectYml = read(`${APPLE}/project.yml`);
 const swift = read(`${APPLE}/Sources/lighthouse-desktop/PrivateModelServer.swift`);
-const commands = read("native/crates/lighthouse-desktop/src/commands.rs");
+// §40 crate split: the availability impl + FM-bridge glue live in the
+// tauri-free lighthouse-shell crate (the wrapper keeps a thin delegation).
+const commands = read("native/crates/lighthouse-shell/src/commands.rs");
 const store = read("src/stores/useOnDeviceModel.ts");
 const settings = read("src/features/settings/SettingsMenu.tsx");
 
