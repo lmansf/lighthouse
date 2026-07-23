@@ -31,10 +31,26 @@
  * same "never clamps" semantics under comparison, different representation.
  */
 
-/** The four prompt-budget tiers. Ids are the LIGHTHOUSE_FORCE_TIER vocabulary. */
-export type Tier = "apple-fm-4096" | "apple-fm-8192" | "llama-6144" | "remote-large";
+import { advertisedLlamaBackend } from "./localModel";
 
-const TIERS: readonly Tier[] = ["apple-fm-4096", "apple-fm-8192", "llama-6144", "remote-large"];
+/** The five prompt-budget tiers. Ids are the LIGHTHOUSE_FORCE_TIER vocabulary.
+ * §42: "llama-mobile-6144" is the iOS Tier-2 in-process llama backend — its
+ * OWN registry entry (phone-tuned segments), never borrowed from the desktop
+ * llama arm. KEEP IN SYNC with budget.rs::Tier. */
+export type Tier =
+  | "apple-fm-4096"
+  | "apple-fm-8192"
+  | "llama-6144"
+  | "llama-mobile-6144"
+  | "remote-large";
+
+const TIERS: readonly Tier[] = [
+  "apple-fm-4096",
+  "apple-fm-8192",
+  "llama-6144",
+  "llama-mobile-6144",
+  "remote-large",
+];
 
 export function parseTier(s: string): Tier | null {
   return (TIERS as readonly string[]).includes(s) ? (s as Tier) : null;
@@ -48,6 +64,7 @@ export function tierWindow(tier: Tier): number {
     case "apple-fm-8192":
       return 8_192;
     case "llama-6144":
+    case "llama-mobile-6144":
       return 6_144;
     case "remote-large":
       return Infinity;
@@ -79,7 +96,10 @@ export function outputReserve(tier: Tier, call: CallType): number {
       return 900;
     case "apple-fm-8192":
       return 1_200;
+    // §42: the mobile llama backend keeps the desktop llama arm's proven
+    // answer room — same window, same narration shape.
     case "llama-6144":
+    case "llama-mobile-6144":
       return 1_024;
     case "remote-large":
       return 4_096;
@@ -158,6 +178,10 @@ export function segmentBudgets(tier: Tier): SegmentBudgets {
       return { ctxBlockMax: 3_500, ctxTotalMax: 5_000, historyMax: 2_000 };
     case "llama-6144":
       return { ctxBlockMax: 6_000, ctxTotalMax: 11_000, historyMax: 6_000 };
+    // §42: phone-class prefill — the MEASURED on-device segment ceilings
+    // (the 0.13.10 apple-arm numbers), not the desktop 7B's.
+    case "llama-mobile-6144":
+      return { ctxBlockMax: 3_500, ctxTotalMax: 5_000, historyMax: 2_000 };
     case "remote-large":
       return { ctxBlockMax: Infinity, ctxTotalMax: Infinity, historyMax: Infinity };
   }
@@ -172,6 +196,7 @@ export function docSegmentBudget(tier: Tier): number {
   switch (tier) {
     case "apple-fm-4096":
     case "apple-fm-8192":
+    case "llama-mobile-6144":
       return 3_000;
     case "llama-6144":
       return 5_500;
@@ -182,18 +207,23 @@ export function docSegmentBudget(tier: Tier): number {
 
 /**
  * Tier resolution — the PURE core (`force` injected so tests never touch
- * process env). Order: forced tier → cloud → advertised window (the §7
- * /health contextSize) → the on-device flag's 4096 default → llama.
+ * process env). Order: forced tier → cloud → llama-backend advertisement
+ * (§42: /health `"backend":"llama"` — the backend field is the truth, never
+ * the window size alone) → advertised window (the §7 /health contextSize) →
+ * the on-device flag's 4096 default → llama. KEEP IN SYNC with
+ * budget.rs::resolve_tier_with.
  */
 export function resolveTierWith(
   force: string | null | undefined,
   cloud: boolean,
   onDevice: boolean,
   advertisedCtx: number | null,
+  llamaBackend: boolean,
 ): Tier {
   const forced = force ? parseTier(force) : null;
   if (forced) return forced;
   if (cloud) return "remote-large";
+  if (llamaBackend && advertisedCtx != null) return "llama-mobile-6144";
   if (advertisedCtx != null) return advertisedCtx >= 8_192 ? "apple-fm-8192" : "apple-fm-4096";
   return onDevice ? "apple-fm-4096" : "llama-6144";
 }
@@ -203,7 +233,13 @@ export function resolveTierWith(
  * runs the desktop 7B under apple-fm-4096 with zero Apple hardware).
  */
 export function resolveTier(cloud: boolean, onDevice: boolean, advertisedCtx: number | null): Tier {
-  return resolveTierWith(process.env.LIGHTHOUSE_FORCE_TIER, cloud, onDevice, advertisedCtx);
+  return resolveTierWith(
+    process.env.LIGHTHOUSE_FORCE_TIER,
+    cloud,
+    onDevice,
+    advertisedCtx,
+    advertisedLlamaBackend(),
+  );
 }
 
 // --- The deterministic degradation planner -----------------------------------

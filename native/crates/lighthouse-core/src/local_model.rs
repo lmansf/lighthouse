@@ -169,6 +169,23 @@ pub fn advertised_ctx() -> Option<u32> {
     }
 }
 
+/// §42 §1: whether the local endpoint's /health body declared the Tier-2
+/// llama backend (`"backend":"llama"` — the iOS in-process GGUF). The tier
+/// resolution consults this so the mobile llama tier registers on the
+/// BACKEND's word, never inferred from a window size. Written beside
+/// `set_advertised_ctx` by the same probe; false when nothing declared
+/// (desktop llama-server, Ollama, and the FM bridge send no backend field).
+static ADVERTISED_LLAMA_BACKEND: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_advertised_llama_backend(is_llama: bool) {
+    ADVERTISED_LLAMA_BACKEND.store(is_llama, Ordering::Relaxed);
+}
+
+pub fn advertised_llama_backend() -> bool {
+    ADVERTISED_LLAMA_BACKEND.load(Ordering::Relaxed)
+}
+
 /// §32 §7 OBSERVE: local diagnostics counters for the bridge's terminal
 /// markers — shell.log only (the shell captures engine stderr), NO telemetry.
 /// After §1-§6 the overflow counter should read 0 in acceptance.

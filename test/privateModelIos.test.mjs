@@ -174,6 +174,58 @@ test("a missing bridge reads as a BUILD defect (-6), never as the phone's OS", (
   );
 });
 
+// --- 5. §42 Tier-2: the llama fallback speaks the same contract -------------
+
+test("the Tier-2 selection is additive and the FM path is untouched", () => {
+  const server = read(`${APPLE}/Sources/lighthouse-desktop/PrivateModelServer.swift`);
+  // The new codes exist with the documented meanings.
+  assert.match(server, /LLAMA_AVAILABLE: Int32 = 2/);
+  assert.match(server, /LLAMA_MODEL_ABSENT: Int32 = -7/);
+  assert.match(server, /LLAMA_BELOW_BAR: Int32 = -8/);
+  assert.match(server, /LLAMA_MEMORY_TIGHT: Int32 = -9/);
+  // Selection order: FM first; the llama arms live INSIDE the FM-unavailable
+  // branch and only when the xcframework is present — a build without it
+  // behaves exactly like today's.
+  assert.match(server, /#if canImport\(llama\)/);
+  assert.match(server, /LlamaBackend\.deviceBelowBar\(\)/);
+  assert.match(server, /LlamaBackend\.modelPresent\(\)/);
+  assert.match(server, /LlamaBackend\.memoryClearsBar\(\)/);
+  // The llama /health declares itself; the FM body is byte-identical.
+  assert.match(server, /"backend\\":\\"llama\\"/);
+  // Overflow from llama speaks the SAME marker vocabulary.
+  const backend = read(`${APPLE}/Sources/lighthouse-desktop/LlamaBackend.swift`);
+  assert.match(server, /kind: "FM_OVERFLOW"/);
+  assert.match(backend, /case overflow/);
+  // The GGUF filename is ONE shared literal across Swift and the doc's pick.
+  assert.match(backend, /qwen2\.5-1\.5b-instruct-q4_k_m\.gguf/);
+  // The §4.3 bar is measured, never assumed from the entitlement.
+  assert.match(backend, /os_proc_available_memory/);
+});
+
+test("the availability verdict table is twinned (Rust ↔ TS)", async () => {
+  // Rust source pins (the strings the roster shows).
+  assert.ok(commands.includes(`"the private model for this device is a ~1.1 GB download"`));
+  assert.ok(commands.includes(`"this device can't hold the private model"`));
+  assert.ok(commands.includes("pub fn private_model_verdict"));
+  // TS twin returns the same table for the §42 cases.
+  const { privateModelVerdict } = await import("../src/contracts/onDeviceAvailability.ts");
+  assert.deepEqual(privateModelVerdict(2, true), {
+    available: true,
+    tier: "llama",
+    reason: null,
+    download: false,
+  });
+  assert.equal(privateModelVerdict(-7, false).download, true);
+  assert.equal(
+    privateModelVerdict(-7, false).reason,
+    "the private model for this device is a ~1.1 GB download",
+  );
+  assert.equal(privateModelVerdict(-8, false).download, false);
+  assert.equal(privateModelVerdict(-8, false).reason, "this device can't hold the private model");
+  // An available code without a port is a failed listener on BOTH sides.
+  assert.equal(privateModelVerdict(2, false).available, false);
+});
+
 test("CI asserts the bridge boarded the app binary before TestFlight upload", () => {
   const wf = read(".github/workflows/mobile-bootstrap.yml");
   const guard = wf.indexOf("Assert the private-model bridge boarded the app binary");

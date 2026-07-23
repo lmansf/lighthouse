@@ -169,6 +169,22 @@ export function advertisedCtx(): number | null {
 }
 
 /**
+ * §42 §1: whether the local endpoint's /health body declared the Tier-2
+ * llama backend ({"backend":"llama"} — the iOS in-process GGUF). The tier
+ * resolution consults this so the mobile llama tier registers on the
+ * BACKEND's word, never inferred from a window size. False when nothing
+ * declared (desktop llama-server, Ollama, and the FM bridge send no backend
+ * field). KEEP IN SYNC with local_model.rs::set_advertised_llama_backend.
+ */
+let ADVERTISED_LLAMA_BACKEND = false;
+export function setAdvertisedLlamaBackend(isLlama: boolean): void {
+  ADVERTISED_LLAMA_BACKEND = isLlama;
+}
+export function advertisedLlamaBackend(): boolean {
+  return ADVERTISED_LLAMA_BACKEND;
+}
+
+/**
  * §3 / add-mobile-local-inference verdict (pure): can a PRIVATE, on-device model
  * answer on this form factor? The desktop shell always can — it owns llama-server
  * and the weights. A mobile shell can ONLY when its plugin has reported a usable

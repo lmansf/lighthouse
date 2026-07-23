@@ -191,14 +191,23 @@ pub async fn local_health() -> LocalHealth {
             // llama-server/Ollama answer plain text and simply don't parse).
             // Best-effort and non-blocking for health: the tier resolution
             // reads the stored value, the verdict below is unchanged.
-            let advertised = r
-                .json::<serde_json::Value>()
-                .await
-                .ok()
+            let body = r.json::<serde_json::Value>().await.ok();
+            let advertised = body
+                .as_ref()
                 .and_then(|v| v["contextSize"].as_u64())
                 .and_then(|n| u32::try_from(n).ok())
                 .filter(|n| *n > 0);
             crate::local_model::set_advertised_ctx(advertised);
+            // §42 §1: the bridge's Tier-2 llama mode also declares itself
+            // ({"backend":"llama"}) so the tier resolution registers the
+            // mobile llama tier on the backend's word. Absent everywhere
+            // else (FM bridge, desktop llama-server, Ollama) → false.
+            let llama = body
+                .as_ref()
+                .and_then(|v| v["backend"].as_str())
+                .map(|b| b == "llama")
+                .unwrap_or(false);
+            crate::local_model::set_advertised_llama_backend(llama);
             LocalHealth::Ready
         }
         Err(_) => LocalHealth::Down,

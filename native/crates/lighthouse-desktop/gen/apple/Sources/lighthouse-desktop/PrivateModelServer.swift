@@ -41,6 +41,12 @@ private let FM_OS_TOO_OLD: Int32 = -3 // the RUNTIME OS is < iOS 26
 private let FM_UNAVAILABLE_OTHER: Int32 = -4 // future/unknown reason
 private let FM_SERVER_FAILED: Int32 = -5 // available, but the listener failed
 private let FM_BUILD_UNSUPPORTED: Int32 = -6 // compiled without FM support — a BUILD defect, never the phone's OS
+// §42 Tier-2 (docs/ios-private-model.md §4): the in-process llama backend's
+// codes, additive to the FM_* vocabulary above (commands.rs mirrors them).
+private let LLAMA_AVAILABLE: Int32 = 2 // listener running in llama mode, *outPort valid
+private let LLAMA_MODEL_ABSENT: Int32 = -7 // capable device, GGUF not downloaded — roster offers the download
+private let LLAMA_BELOW_BAR: Int32 = -8 // device cannot hold the model — honest state, never an offer
+private let LLAMA_MEMORY_TIGHT: Int32 = -9 // model present, not enough free memory RIGHT NOW — re-probe
 
 /// In-process HTTP/1.1 loopback responder backing the private-model contract.
 /// One shared instance for the app; the listener binds once and is reused.
@@ -51,6 +57,16 @@ final class PrivateModelServer {
     private let queue = DispatchQueue(label: "app.lhvault.private-model", attributes: .concurrent)
     private var listener: NWListener?
     private var boundPort: UInt16?
+
+    /// §42: which backend the listener answers for. ONE backend per session
+    /// (the spec's rule): selection happens in `ensure()` and never flips
+    /// while the listener lives — FM stays preferred, never both.
+    private enum Backend {
+        case foundationModels
+        case llama
+    }
+
+    private var backend: Backend = .foundationModels
 
     private init() {}
 
@@ -72,7 +88,8 @@ final class PrivateModelServer {
             // the Rust caller re-points LIGHTHOUSE_LOCAL_LLM_URL from it).
             if let live = listener, case .ready = live.state {
                 outPort.pointee = port
-                return FM_AVAILABLE
+                // §42: a live listener answers with ITS backend's code.
+                return backend == .llama ? LLAMA_AVAILABLE : FM_AVAILABLE
             }
             listener?.cancel()
             listener = nil
@@ -81,12 +98,40 @@ final class PrivateModelServer {
 
         let availability = availabilityCode()
         if availability != FM_AVAILABLE {
+            // §42 Tier-2 selection: FM unavailable on this device → try the
+            // in-process llama backend, in the SAME listener. Order of the
+            // honest states: a device that can never hold the model is told
+            // so (and never offered the download); a capable device without
+            // the file is offered it; a capable device with the file but no
+            // headroom right now is a transient re-probe, not a dead end.
+            // Builds without the llama xcframework skip all of this and
+            // report the FM reason exactly as before.
+            #if canImport(llama)
+            if LlamaBackend.deviceBelowBar() {
+                return LLAMA_BELOW_BAR
+            }
+            if !LlamaBackend.modelPresent() {
+                return LLAMA_MODEL_ABSENT
+            }
+            if !LlamaBackend.memoryClearsBar() {
+                return LLAMA_MEMORY_TIGHT
+            }
+            guard let port = startListener() else {
+                return FM_SERVER_FAILED
+            }
+            backend = .llama
+            boundPort = port
+            outPort.pointee = port
+            return LLAMA_AVAILABLE
+            #else
             return availability
+            #endif
         }
 
         guard let port = startListener() else {
             return FM_SERVER_FAILED
         }
+        backend = .foundationModels
         boundPort = port
         outPort.pointee = port
         return FM_AVAILABLE
@@ -243,11 +288,17 @@ final class PrivateModelServer {
             // the engine's §1 tier resolution can pick apple-fm-4096 vs -8192
             // from measurement, not assumption. KEEP IN SYNC with the
             // contextSize parse in llm.rs::local_health / llm.ts::localHealth.
+            // §42: the llama backend ALSO declares itself ("backend":"llama")
+            // so the resolution registers llama-mobile-6144 on the backend's
+            // word — the FM body is byte-identical to before.
+            let body = backend == .llama
+                ? "{\"status\":\"ok\",\"contextSize\":\(Self.llamaContextWindowSize()),\"backend\":\"llama\"}"
+                : "{\"status\":\"ok\",\"contextSize\":\(Self.contextWindowSize())}"
             sendSimple(
                 connection,
                 status: "200 OK",
                 contentType: "application/json",
-                body: "{\"status\":\"ok\",\"contextSize\":\(Self.contextWindowSize())}"
+                body: body
             )
             return
         }
@@ -288,9 +339,16 @@ final class PrivateModelServer {
     /// both follow automatically. Deliberately a static fact, not a guess.
     static func contextWindowSize() -> Int { 4096 }
 
+    /// §42: the llama backend's window — matches LlamaBackend.contextTokens
+    /// and the registered llama-mobile-6144 tier.
+    static func llamaContextWindowSize() -> Int { 6144 }
+
     /// Answer room the pre-check protects (the engine's §1 narration reserve
     /// for the 4k tier — KEEP IN SYNC with budget.rs output_reserve).
     static func outputReserve() -> Int { 900 }
+
+    /// §42: the llama tier's narration reserve (budget.rs llama arms).
+    static func llamaOutputReserve() -> Int { 1024 }
 
     /// Estimated prompt tokens (chars/4 — the engine's §1 estimator). The
     /// exact `tokenCount(for:)` API is not in the stable-signature set this
@@ -322,16 +380,41 @@ final class PrivateModelServer {
         let prompt = Self.buildPrompt(fromBody: body)
 
         // §7 EXACT PRE-CHECK (second layer after the engine's 90% budget):
-        // an oversized prompt is REFUSED before Foundation Models is ever
-        // called — the marker tells the engine exactly why the stream is
-        // empty, instead of burning the model's time on a doomed call.
-        if Self.estimatedTokens(prompt)
-            > Self.contextWindowSize() - Self.outputReserve()
-        {
+        // an oversized prompt is REFUSED before the model is ever called —
+        // the marker tells the engine exactly why the stream is empty,
+        // instead of burning the model's time on a doomed call. §42: the
+        // window and reserve are the ACTIVE backend's.
+        let window = backend == .llama ? Self.llamaContextWindowSize() : Self.contextWindowSize()
+        let reserve = backend == .llama ? Self.llamaOutputReserve() : Self.outputReserve()
+        if Self.estimatedTokens(prompt) > window - reserve {
             sendFinalMarker(connection, kind: "FM_OVERFLOW")
             finishStream(connection)
             return
         }
+
+        // §42: the llama backend answers the SAME contract — deltas, then a
+        // clean end; context-full speaks the same FM_OVERFLOW vocabulary the
+        // engine already understands (overflow from llama = context-full).
+        #if canImport(llama)
+        if backend == .llama {
+            queue.async { [weak self] in
+                guard let self = self else { return }
+                let end = LlamaBackend.shared.stream(
+                    prompt: prompt,
+                    maxTokens: Int32(Self.llamaOutputReserve())
+                ) { delta in
+                    self.sendDelta(connection, delta: delta)
+                }
+                if case .overflow = end {
+                    self.sendFinalMarker(connection, kind: "FM_OVERFLOW")
+                }
+                // .failed ends the stream empty — the engine's extractive
+                // fallback reads the silence exactly as it does for FM.
+                self.finishStream(connection)
+            }
+            return
+        }
+        #endif
 
         #if canImport(FoundationModels)
         if #available(iOS 26, *), !prompt.isEmpty {

@@ -1377,6 +1377,52 @@ pub fn start_content_size_observer() {
 #[cfg(all(not(desktop), not(target_os = "ios")))]
 pub fn start_content_size_observer() {}
 
+/// §42 §1: the PURE availability verdict — the Swift bridge's result code →
+/// the roster reply shape. Cfg-free so the container's cargo tests cover the
+/// whole table (the pure-verdict-fn house pattern). PARITY: mirrored by
+/// src/contracts/onDeviceAvailability.ts (test/privateModelIos.test.mjs pins
+/// the same cases on both sides).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrivateModelVerdict {
+    pub available: bool,
+    /// "foundation" (Tier-1) | "llama" (§42 Tier-2) | "none".
+    pub tier: &'static str,
+    pub reason: Option<&'static str>,
+    /// §42: the roster may offer the ~1.1 GB model download (ONLY the
+    /// capable-device, file-absent state — never below the bar).
+    pub download: bool,
+}
+
+pub fn private_model_verdict(code: i32, port_ok: bool) -> PrivateModelVerdict {
+    if (code == 1 || code == 2) && port_ok {
+        return PrivateModelVerdict {
+            available: true,
+            tier: if code == 2 { "llama" } else { "foundation" },
+            reason: None,
+            download: false,
+        };
+    }
+    let (reason, download) = match code {
+        // An "available" code without a usable port is a failed listener.
+        1 | 2 => ("the on-device private model could not be started", false),
+        0 => ("Apple Intelligence is not enabled on this device", false),
+        -1 => ("this device is not eligible for Apple Intelligence", false),
+        -2 => ("the on-device model is still preparing — try again shortly", false),
+        -3 => ("the on-device private model requires iOS 26 or later", false),
+        -5 => ("the on-device private model could not be started", false),
+        // -6: the bridge is absent from this BINARY (compiled without FM
+        // support, or unreachable) — 0.13.8 shipped exactly this and every
+        // iPhone read a false OS message; name the build, not the phone.
+        -6 => ("this app build doesn't include on-device model support — update the app", false),
+        // §42 Tier-2 states (docs/ios-private-model.md §4.3):
+        -7 => ("the private model for this device is a ~1.1 GB download", true),
+        -8 => ("this device can't hold the private model", false),
+        -9 => ("not enough free memory for the private model right now — try again after closing some apps", false),
+        _ => ("the on-device private model is unavailable on this device", false),
+    };
+    PrivateModelVerdict { available: false, tier: "none", reason: Some(reason), download }
+}
+
 pub fn private_model_availability_impl() -> Value {
     #[cfg(desktop)]
     {
@@ -1390,31 +1436,23 @@ pub fn private_model_availability_impl() -> Value {
         // Resolves the Swift shim at runtime (dlsym, see above), then probes +
         // ensures the loopback responder is up; a small integer result code back.
         let code = lighthouse_fm_ensure(&mut port as *mut u16);
-        if code == 1 && port != 0 {
+        let v = private_model_verdict(code, port != 0);
+        if v.available {
             // Point the engine's local transport at the in-process responder
             // BEFORE returning, so the very next ask streams through it, then
-            // flip the runtime seam the engine's local branch reads.
+            // flip the runtime seam the engine's local branch reads. Identical
+            // for both backends — the engine reads /health for the difference.
             let url = format!("http://127.0.0.1:{port}/v1/chat/completions");
             std::env::set_var("LIGHTHOUSE_LOCAL_LLM_URL", url);
             local_model::set_on_device_backend(true);
-            return json!({ "available": true, "tier": "foundation", "reason": null });
+            return json!({ "available": true, "tier": v.tier, "reason": null });
         }
         // Fail closed: the private provider stays hidden until a backend proves
-        // usable. The reason maps the Swift result code to honest roster copy.
+        // usable. The reason maps the Swift result code to honest roster copy;
+        // `download` lights the §42 roster offer (capable device, file absent).
         local_model::set_on_device_backend(false);
-        let reason = match code {
-            0 => "Apple Intelligence is not enabled on this device",
-            -1 => "this device is not eligible for Apple Intelligence",
-            -2 => "the on-device model is still preparing — try again shortly",
-            -3 => "the on-device private model requires iOS 26 or later",
-            -5 => "the on-device private model could not be started",
-            // -6: the bridge is absent from this BINARY (compiled without FM
-            // support, or unreachable) — 0.13.8 shipped exactly this and every
-            // iPhone read a false OS message; name the build, not the phone.
-            -6 => "this app build doesn't include on-device model support — update the app",
-            _ => "the on-device private model is unavailable on this device",
-        };
-        return json!({ "available": false, "tier": "none", "reason": reason });
+        let reason = v.reason.unwrap_or("the on-device private model is unavailable on this device");
+        return json!({ "available": false, "tier": "none", "reason": reason, "download": v.download });
     }
     #[cfg(all(not(desktop), not(target_os = "ios")))]
     {
@@ -1427,5 +1465,49 @@ pub fn private_model_availability_impl() -> Value {
             "tier": "none",
             "reason": "the on-device private model is not available on this platform",
         });
+    }
+}
+
+#[cfg(test)]
+mod availability_tests {
+    use super::{private_model_verdict, PrivateModelVerdict};
+
+    /// §42 §1: the full verdict table, pinned (PARITY:
+    /// src/contracts/onDeviceAvailability.ts mirrors these exact cases).
+    #[test]
+    fn verdict_table_is_pinned() {
+        // Available codes with a usable port.
+        assert_eq!(
+            private_model_verdict(1, true),
+            PrivateModelVerdict { available: true, tier: "foundation", reason: None, download: false }
+        );
+        assert_eq!(
+            private_model_verdict(2, true),
+            PrivateModelVerdict { available: true, tier: "llama", reason: None, download: false }
+        );
+        // An "available" code WITHOUT a port is a failed listener, honestly.
+        assert!(!private_model_verdict(1, false).available);
+        assert!(!private_model_verdict(2, false).available);
+        // The §42 three states: download offer ONLY for capable-and-absent.
+        let absent = private_model_verdict(-7, false);
+        assert!(!absent.available && absent.download);
+        assert_eq!(absent.reason, Some("the private model for this device is a ~1.1 GB download"));
+        let below = private_model_verdict(-8, false);
+        assert!(!below.available && !below.download);
+        assert_eq!(below.reason, Some("this device can't hold the private model"));
+        let tight = private_model_verdict(-9, false);
+        assert!(!tight.available && !tight.download);
+        // The FM reasons are unchanged (the 0.13.8 lesson strings).
+        assert_eq!(
+            private_model_verdict(-6, false).reason,
+            Some("this app build doesn't include on-device model support — update the app")
+        );
+        assert_eq!(
+            private_model_verdict(-3, false).reason,
+            Some("the on-device private model requires iOS 26 or later")
+        );
+        // Unknown codes fall to the generic honest reason, never panic.
+        assert!(!private_model_verdict(-99, false).available);
+        assert!(!private_model_verdict(-99, false).download);
     }
 }

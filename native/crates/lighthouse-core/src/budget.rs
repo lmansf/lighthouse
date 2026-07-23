@@ -27,12 +27,18 @@
 //! the estimator's drift. The bridge's exact tokenCount pre-check (§7) is the
 //! backstop, never the first line.
 
-/// The four prompt-budget tiers. Ids are the LIGHTHOUSE_FORCE_TIER vocabulary.
+/// The five prompt-budget tiers. Ids are the LIGHTHOUSE_FORCE_TIER vocabulary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tier {
     AppleFm4096,
     AppleFm8192,
     Llama6144,
+    /// §42: the iOS Tier-2 in-process llama backend (1.5B GGUF + Metal).
+    /// Same 6144-token window the bridge's /health advertises, but its OWN
+    /// registry entry: phone-class prefill wants the measured on-device
+    /// segment ceilings, not the desktop 7B's — and the §39 registry floor
+    /// says a new backend registers a tier, never borrows one.
+    LlamaMobile6144,
     RemoteLarge,
 }
 
@@ -42,6 +48,7 @@ impl Tier {
             Tier::AppleFm4096 => "apple-fm-4096",
             Tier::AppleFm8192 => "apple-fm-8192",
             Tier::Llama6144 => "llama-6144",
+            Tier::LlamaMobile6144 => "llama-mobile-6144",
             Tier::RemoteLarge => "remote-large",
         }
     }
@@ -51,6 +58,7 @@ impl Tier {
             "apple-fm-4096" => Some(Tier::AppleFm4096),
             "apple-fm-8192" => Some(Tier::AppleFm8192),
             "llama-6144" => Some(Tier::Llama6144),
+            "llama-mobile-6144" => Some(Tier::LlamaMobile6144),
             "remote-large" => Some(Tier::RemoteLarge),
             _ => None,
         }
@@ -62,7 +70,7 @@ impl Tier {
         match self {
             Tier::AppleFm4096 => 4_096,
             Tier::AppleFm8192 => 8_192,
-            Tier::Llama6144 => 6_144,
+            Tier::Llama6144 | Tier::LlamaMobile6144 => 6_144,
             Tier::RemoteLarge => usize::MAX,
         }
     }
@@ -93,7 +101,9 @@ pub fn output_reserve(tier: Tier, call: CallType) -> usize {
     match (tier, call) {
         (Tier::AppleFm4096, CallType::Narration) => 900,
         (Tier::AppleFm8192, CallType::Narration) => 1_200,
-        (Tier::Llama6144, CallType::Narration) => 1_024,
+        // §42: the mobile llama backend keeps the desktop llama arm's proven
+        // answer room — same window, same narration shape.
+        (Tier::Llama6144 | Tier::LlamaMobile6144, CallType::Narration) => 1_024,
         (Tier::RemoteLarge, CallType::Narration) => 4_096,
         (_, CallType::NlToSql) => 300,
         (_, CallType::ReportFraming) => 400,
@@ -192,6 +202,16 @@ pub fn segment_budgets(tier: Tier) -> SegmentBudgets {
             ctx_total_max: 11_000,
             history_max: 6_000,
         },
+        // §42: phone-class prefill — a 1.5B on Metal pays for every prompt
+        // char in latency, so the mobile llama arm carries the MEASURED
+        // on-device segment ceilings (the 0.13.10 apple-arm numbers), not
+        // the desktop 7B's. The 6144 window still gives narration more
+        // input room than apple-fm-4096 (the reserve math below).
+        Tier::LlamaMobile6144 => SegmentBudgets {
+            ctx_block_max: 3_500,
+            ctx_total_max: 5_000,
+            history_max: 2_000,
+        },
         Tier::RemoteLarge => SegmentBudgets {
             ctx_block_max: usize::MAX,
             ctx_total_max: usize::MAX,
@@ -202,29 +222,37 @@ pub fn segment_budgets(tier: Tier) -> SegmentBudgets {
 
 /// Sweep-segment ceiling (chars) for single-document focus: each segment is
 /// one map call and must fit ONE context block of the tier with framing
-/// headroom. The llama arm is the 0.11 desktop number byte-for-byte.
+/// headroom. The llama arm is the 0.11 desktop number byte-for-byte; the
+/// mobile llama arm rides the phone-tuned apple number (§42).
 pub fn doc_segment_budget(tier: Tier) -> usize {
     match tier {
-        Tier::AppleFm4096 | Tier::AppleFm8192 => 3_000,
+        Tier::AppleFm4096 | Tier::AppleFm8192 | Tier::LlamaMobile6144 => 3_000,
         Tier::Llama6144 => 5_500,
         Tier::RemoteLarge => usize::MAX,
     }
 }
 
 /// Tier resolution — the PURE core (`force` injected so tests never touch
-/// process env). Order: forced tier → cloud → advertised window (the §7
-/// /health `contextSize`) → the on-device flag's 4096 default → llama.
+/// process env). Order: forced tier → cloud → llama-backend advertisement
+/// (§42: the bridge's /health says `"backend":"llama"` when the Tier-2
+/// in-process GGUF answers the contract — the backend field is the truth,
+/// never the window size alone) → advertised window (the §7 /health
+/// `contextSize`) → the on-device flag's 4096 default → llama.
 pub fn resolve_tier_with(
     force: Option<&str>,
     cloud: bool,
     on_device: bool,
     advertised_ctx: Option<u32>,
+    llama_backend: bool,
 ) -> Tier {
     if let Some(f) = force.and_then(Tier::parse) {
         return f;
     }
     if cloud {
         return Tier::RemoteLarge;
+    }
+    if llama_backend && advertised_ctx.is_some() {
+        return Tier::LlamaMobile6144;
     }
     match advertised_ctx {
         Some(n) if n >= 8_192 => Tier::AppleFm8192,
@@ -238,7 +266,13 @@ pub fn resolve_tier_with(
 /// runs the desktop 7B under apple-fm-4096 with zero Apple hardware).
 pub fn resolve_tier(cloud: bool, on_device: bool, advertised_ctx: Option<u32>) -> Tier {
     let force = std::env::var("LIGHTHOUSE_FORCE_TIER").ok();
-    resolve_tier_with(force.as_deref(), cloud, on_device, advertised_ctx)
+    resolve_tier_with(
+        force.as_deref(),
+        cloud,
+        on_device,
+        advertised_ctx,
+        crate::local_model::advertised_llama_backend(),
+    )
 }
 
 // --- The deterministic degradation planner -----------------------------------
@@ -316,20 +350,60 @@ mod tests {
     fn resolution_table_is_pinned() {
         // Forced tier wins over everything (the device-free rig).
         assert_eq!(
-            resolve_tier_with(Some("apple-fm-4096"), true, false, Some(200_000)),
+            resolve_tier_with(Some("apple-fm-4096"), true, false, Some(200_000), false),
             Tier::AppleFm4096
         );
         // Unknown force strings fall through, never panic.
-        assert_eq!(resolve_tier_with(Some("nonsense"), true, false, None), Tier::RemoteLarge);
+        assert_eq!(
+            resolve_tier_with(Some("nonsense"), true, false, None, false),
+            Tier::RemoteLarge
+        );
         // Cloud → remote-large.
-        assert_eq!(resolve_tier_with(None, true, false, None), Tier::RemoteLarge);
+        assert_eq!(resolve_tier_with(None, true, false, None, false), Tier::RemoteLarge);
         // Advertised context sizes pick the apple tier (§7 /health).
-        assert_eq!(resolve_tier_with(None, false, true, Some(8_192)), Tier::AppleFm8192);
-        assert_eq!(resolve_tier_with(None, false, true, Some(4_096)), Tier::AppleFm4096);
+        assert_eq!(resolve_tier_with(None, false, true, Some(8_192), false), Tier::AppleFm8192);
+        assert_eq!(resolve_tier_with(None, false, true, Some(4_096), false), Tier::AppleFm4096);
         // On-device with no advertisement (today's bridge) → 4096.
-        assert_eq!(resolve_tier_with(None, false, true, None), Tier::AppleFm4096);
+        assert_eq!(resolve_tier_with(None, false, true, None, false), Tier::AppleFm4096);
         // A silent local server (desktop llama, Ollama, LM Studio) → llama.
-        assert_eq!(resolve_tier_with(None, false, false, None), Tier::Llama6144);
+        assert_eq!(resolve_tier_with(None, false, false, None, false), Tier::Llama6144);
+        // §42: the bridge advertising the llama backend wins its own tier —
+        // the backend field decides, not the window size.
+        assert_eq!(
+            resolve_tier_with(None, false, true, Some(6_144), true),
+            Tier::LlamaMobile6144
+        );
+        // A llama-backend flag with NO advertisement is a half-broken health
+        // body — fall through to the ordinary arms rather than mis-tier.
+        assert_eq!(resolve_tier_with(None, false, true, None, true), Tier::AppleFm4096);
+        // The forced-tier rig can force the mobile tier on any hardware.
+        assert_eq!(
+            resolve_tier_with(Some("llama-mobile-6144"), false, false, None, false),
+            Tier::LlamaMobile6144
+        );
+    }
+
+    #[test]
+    fn llama_mobile_registration_is_pinned() {
+        // §42 §1: the mobile llama tier's registry entry (the §39 floor).
+        let t = Tier::LlamaMobile6144;
+        assert_eq!(t.id(), "llama-mobile-6144");
+        assert_eq!(Tier::parse("llama-mobile-6144"), Some(t));
+        assert_eq!(t.window(), 6_144);
+        assert_eq!(output_reserve(t, CallType::Narration), 1_024);
+        assert_eq!(output_reserve(t, CallType::NlToSql), 300);
+        assert_eq!(output_reserve(t, CallType::ReportFraming), 400);
+        // Phone-tuned segments (the measured 0.13.10 numbers), NOT the
+        // desktop 7B's — prefill latency is the constraint on a phone.
+        let b = segment_budgets(t);
+        assert_eq!((b.ctx_block_max, b.ctx_total_max, b.history_max), (3_500, 5_000, 2_000));
+        assert_eq!(doc_segment_budget(t), 3_000);
+        // More narration input room than apple-fm-4096 (bigger window, same
+        // 90% rule) — the point of the 6144 advertisement.
+        assert!(
+            input_token_budget(t, CallType::Narration)
+                > input_token_budget(Tier::AppleFm4096, CallType::Narration)
+        );
     }
 
     #[test]

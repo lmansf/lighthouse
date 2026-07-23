@@ -35,18 +35,46 @@ const {
 
 test("resolution table is pinned (mirrors budget.rs)", () => {
   // Forced tier wins over everything (the device-free rig).
-  assert.equal(resolveTierWith("apple-fm-4096", true, false, 200_000), "apple-fm-4096");
+  assert.equal(resolveTierWith("apple-fm-4096", true, false, 200_000, false), "apple-fm-4096");
   // Unknown force strings fall through, never throw.
-  assert.equal(resolveTierWith("nonsense", true, false, null), "remote-large");
+  assert.equal(resolveTierWith("nonsense", true, false, null, false), "remote-large");
   // Cloud → remote-large.
-  assert.equal(resolveTierWith(null, true, false, null), "remote-large");
+  assert.equal(resolveTierWith(null, true, false, null, false), "remote-large");
   // Advertised context sizes pick the apple tier (§7 /health).
-  assert.equal(resolveTierWith(null, false, true, 8_192), "apple-fm-8192");
-  assert.equal(resolveTierWith(null, false, true, 4_096), "apple-fm-4096");
+  assert.equal(resolveTierWith(null, false, true, 8_192, false), "apple-fm-8192");
+  assert.equal(resolveTierWith(null, false, true, 4_096, false), "apple-fm-4096");
   // On-device with no advertisement (today's bridge) → 4096.
-  assert.equal(resolveTierWith(null, false, true, null), "apple-fm-4096");
+  assert.equal(resolveTierWith(null, false, true, null, false), "apple-fm-4096");
   // A silent local server (desktop llama, Ollama, LM Studio) → llama.
-  assert.equal(resolveTierWith(null, false, false, null), "llama-6144");
+  assert.equal(resolveTierWith(null, false, false, null, false), "llama-6144");
+  // §42: the bridge advertising the llama backend wins its own tier — the
+  // backend field decides, not the window size.
+  assert.equal(resolveTierWith(null, false, true, 6_144, true), "llama-mobile-6144");
+  // A llama flag with NO advertisement is a half-broken health body — fall
+  // through to the ordinary arms rather than mis-tier.
+  assert.equal(resolveTierWith(null, false, true, null, true), "apple-fm-4096");
+  // The forced-tier rig can force the mobile tier on any hardware.
+  assert.equal(resolveTierWith("llama-mobile-6144", false, false, null, false), "llama-mobile-6144");
+});
+
+test("llama-mobile registration is pinned (§42 §1, mirrors budget.rs)", () => {
+  assert.equal(parseTier("llama-mobile-6144"), "llama-mobile-6144");
+  assert.equal(tierWindow("llama-mobile-6144"), 6_144);
+  assert.equal(outputReserve("llama-mobile-6144", "narration"), 1_024);
+  assert.equal(outputReserve("llama-mobile-6144", "nl-to-sql"), 300);
+  assert.equal(outputReserve("llama-mobile-6144", "report-framing"), 400);
+  // Phone-tuned segments (the measured 0.13.10 numbers), NOT the desktop 7B's.
+  assert.deepEqual(segmentBudgets("llama-mobile-6144"), {
+    ctxBlockMax: 3_500,
+    ctxTotalMax: 5_000,
+    historyMax: 2_000,
+  });
+  assert.equal(docSegmentBudget("llama-mobile-6144"), 3_000);
+  // More narration input room than apple-fm-4096 (bigger window, same 90% rule).
+  assert.ok(
+    inputTokenBudget("llama-mobile-6144", "narration") >
+      inputTokenBudget("apple-fm-4096", "narration"),
+  );
 });
 
 test("llama arm is the legacy constants byte-for-byte (desktop unchanged)", () => {
