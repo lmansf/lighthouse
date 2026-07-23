@@ -733,7 +733,7 @@ fn capped_section_table(markdown: &str) -> String {
 fn number_tokens(text: &str) -> std::collections::BTreeSet<String> {
     let mut out = std::collections::BTreeSet::new();
     let mut cur = String::new();
-    let mut flush = |cur: &mut String, out: &mut std::collections::BTreeSet<String>| {
+    let flush = |cur: &mut String, out: &mut std::collections::BTreeSet<String>| {
         if cur.is_empty() {
             return;
         }
