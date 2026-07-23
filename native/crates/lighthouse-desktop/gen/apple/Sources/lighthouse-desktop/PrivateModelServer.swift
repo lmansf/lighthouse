@@ -122,6 +122,9 @@ final class PrivateModelServer {
             backend = .llama
             boundPort = port
             outPort.pointee = port
+            // §42 §3: start paging the weights NOW so /health can narrate the
+            // real warm — the first ask no longer blocks silently on load.
+            LlamaBackend.shared.beginLoad()
             return LLAMA_AVAILABLE
             #else
             return availability
@@ -291,6 +294,20 @@ final class PrivateModelServer {
             // §42: the llama backend ALSO declares itself ("backend":"llama")
             // so the resolution registers llama-mobile-6144 on the backend's
             // word — the FM body is byte-identical to before.
+            // §42 §3: while the llama weights are still paging in, answer 503
+            // (LocalHealth::Loading) so the §22.4 warm-wait narrates the REAL
+            // warm; 200 once resident. FM weights are always resident → 200.
+            #if canImport(llama)
+            if backend == .llama, !LlamaBackend.shared.isLoaded() {
+                sendSimple(
+                    connection,
+                    status: "503 Service Unavailable",
+                    contentType: "application/json",
+                    body: "{\"status\":\"loading\",\"backend\":\"llama\"}"
+                )
+                return
+            }
+            #endif
             let body = backend == .llama
                 ? "{\"status\":\"ok\",\"contextSize\":\(Self.llamaContextWindowSize()),\"backend\":\"llama\"}"
                 : "{\"status\":\"ok\",\"contextSize\":\(Self.contextWindowSize())}"

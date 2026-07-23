@@ -251,6 +251,24 @@ test("§42 §2: the Tier-2 artifact is ONE literal across Rust, TS, and Swift", 
   assert.equal(modelOpsAllowed("android", false, true), false);
 });
 
+test("§42 §3: the llama backend narrates its REAL warm via /health", () => {
+  const server = read(`${APPLE}/Sources/lighthouse-desktop/PrivateModelServer.swift`);
+  const backend = read(`${APPLE}/Sources/lighthouse-desktop/LlamaBackend.swift`);
+  // The listener kicks the weight paging the moment it comes up.
+  assert.match(server, /LlamaBackend\.shared\.beginLoad\(\)/);
+  // /health reports 503 (loading) until the weights are resident — the
+  // warm-wait's Loading verdict shows "Private model warming up…".
+  assert.match(
+    server,
+    /if backend == \.llama, !LlamaBackend\.shared\.isLoaded\(\)/,
+    "llama /health is 503 while paging so the warm is honest",
+  );
+  assert.match(server, /503 Service Unavailable/);
+  // FM stays resident → always 200 (no false warm on the Tier-1 path).
+  assert.match(backend, /func isLoaded\(\) -> Bool/);
+  assert.match(backend, /func beginLoad\(\)/);
+});
+
 test("CI asserts the bridge boarded the app binary before TestFlight upload", () => {
   const wf = read(".github/workflows/mobile-bootstrap.yml");
   const guard = wf.indexOf("Assert the private-model bridge boarded the app binary");
