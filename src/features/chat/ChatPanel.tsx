@@ -954,7 +954,10 @@ const useStyles = makeStyles({
     // The textarea grows downward as the draft gets longer; keep the send
     // button anchored to its bottom edge rather than stretching it.
     alignItems: "flex-end",
-    gap: tokens.spacingHorizontalS,
+    // §43 §1: a reserved right gutter so typed text never abuts the Ask button.
+    // The larger gap (M, not S) is the breathing room; the pill radius + shadow8
+    // look is unchanged.
+    gap: tokens.spacingHorizontalM,
     marginTop: tokens.spacingVerticalM,
     // The ask box is the focal point — Spotlight-calm: ONE raised paper
     // surface (generous 12px radius, level-2 elevation, roomy padding) that
@@ -979,11 +982,21 @@ const useStyles = makeStyles({
       outlineOffset: "1px",
     },
   },
+  // §43 §1: the Ask/Stop button never yields. flexShrink:0 keeps it whole no
+  // matter how long the single-line draft or how tall the multi-line one (the
+  // field shrinks via composerField.minWidth:0 instead). Structural floor —
+  // the two together are what the pin guards.
+  composerAction: { flexShrink: 0 },
   // Multiline composer: starts one line tall (matching the Input it replaced)
   // and auto-grows with the draft up to COMPOSER_MAX_HEIGHT. The min/max here
   // override the Textarea's built-in medium-size bounds.
   composerField: {
     flexGrow: 1,
+    // §43 §1 (CONVENTIONS "Cross-feature structural floors"): the field is the
+    // flex child that YIELDS — minWidth:0 lets a long draft shrink the textarea
+    // instead of squeezing the Ask/Stop button off its own text. Pairs with
+    // composerAction's flexShrink:0 below; the two are the structural floor.
+    minWidth: 0,
     minHeight: "32px",
     // Bare inside the shell: no own border, fill, or focus underline — the
     // composer shell above carries the box and the amber focus ring.
@@ -4929,11 +4942,21 @@ export function ChatPanel() {
             />
           </div>
           {streaming ? (
-            <Button appearance="secondary" icon={<IconStop />} onClick={stopStreaming}>
+            <Button
+              appearance="secondary"
+              className={styles.composerAction}
+              icon={<IconStop />}
+              onClick={stopStreaming}
+            >
               Stop
             </Button>
           ) : (
-            <Button appearance="primary" icon={<IconSend />} onClick={() => ask()}>
+            <Button
+              appearance="primary"
+              className={styles.composerAction}
+              icon={<IconSend />}
+              onClick={() => ask()}
+            >
               Ask
             </Button>
           )}

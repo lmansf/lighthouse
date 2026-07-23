@@ -160,6 +160,10 @@ export function SettingsPage() {
   const [prefDlg, setPrefDlg] = useState(false);
   const [auditDlg, setAuditDlg] = useState(false);
   const [aboutDlg, setAboutDlg] = useState(false);
+  // §43 §4: the build-time version stamp (the same one AboutDialog/VersionBadge
+  // read); shown as the Help & about footer so compact keeps an always-visible
+  // number even though the corner badge stands down there.
+  const appVersion = process.env.NEXT_PUBLIC_APP_VERSION;
 
   return (
     <div className={styles.page} aria-label="Settings">
@@ -231,6 +235,16 @@ export function SettingsPage() {
         />
         <Row icon={<IconInfo />} label="About Lighthouse" onClick={() => setAboutDlg(true)} />
       </div>
+      {/* §43 §4: the always-visible version number. On compact the corner
+          VersionBadge stands down (it can't consume the tab-bar vars), so the
+          build number lives here — the same build-time NEXT_PUBLIC_APP_VERSION
+          the About dialog shows, in the quiet footer treatment. The About row
+          above still opens the dialog with the full detail. */}
+      {appVersion && (
+        <Text as="p" className={styles.groupFooter}>
+          Lighthouse v{appVersion}
+        </Text>
+      )}
 
       <AiModelsDialog open={aiDlg} setOpen={setAiDlg} />
       <PreferencesDialog open={prefDlg} setOpen={setPrefDlg} />

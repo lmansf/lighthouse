@@ -5,6 +5,13 @@ import { Button, Text, makeStyles, mergeClasses, tokens } from "@fluentui/react-
 import { Sidebar } from "./Sidebar";
 import { LAYOUT } from "./theme";
 import { usePaneLayout, type CompactTab } from "./paneLayout";
+import {
+  compactPageLayers,
+  isCompactPageTab,
+  PAGE_SLIDE_MS,
+  PAGE_SLIDE_SLACK_MS,
+  type CompactPageLayer,
+} from "./compactTransition";
 import { CompactTabBar, TAB_BAR_CONTENT_HEIGHT, TAB_BAR_FLOAT_GAP } from "./CompactTabBar";
 import { publishShellUi, USER_ASK_EVENT } from "./shellSignals";
 import { START_TOUR_EVENT } from "@/features/help/FirstRunTour";
@@ -108,6 +115,15 @@ const useStyles = makeStyles({
   // Pre-entrance: parked one screen to the left (reduced-motion: just faded);
   // cleared on the next frame so the page eases in.
   pageEntering: {
+    transform: "translateX(-100%)",
+    opacity: 0,
+    "@media (prefers-reduced-motion: reduce)": { transform: "none" },
+  },
+  // §43 §3: the exit target — mirrors pageEntering. A page yielding to Chat is
+  // at rest (translateX 0) and gets this on the switch, so it slides back out to
+  // the left (reduced-motion: cross-fades out) revealing the Chat base beneath,
+  // then unmounts once the slide ends.
+  pageExiting: {
     transform: "translateX(-100%)",
     opacity: 0,
     "@media (prefers-reduced-motion: reduce)": { transform: "none" },
@@ -266,30 +282,67 @@ export function AppShell({ sidebar, main }: AppShellProps) {
     return () => window.removeEventListener(USER_ASK_EVENT, onUserAsk);
   }, []);
 
-  // fp3 §3: page-entrance animation — mount parked off-screen-left, then clear
-  // on the next frame so it eases in (mirrors the Sheet primitive's entrance).
-  const [pageEntered, setPageEntered] = useState(false);
-  useEffect(() => {
-    if (!layout.drawerVisible) {
-      setPageEntered(false);
-      return;
+  // §43 §3: the compact page transition. `compactTab` is the destination; the
+  // OUTGOING page stays mounted for the slide so the Chat base never flashes
+  // between two pages (Files→Settings shows Files beneath), and a page yielding
+  // to Chat slides OUT instead of vanishing. compactPageLayers
+  // (src/shell/compactTransition) is the pure verdict for WHAT mounts and HOW;
+  // the state below wires it to React's frame timing:
+  //   - `leavingTab` is the tab we're sliding away from (kept mounted), null
+  //     once settled;
+  //   - `prevTab` mirrors the destination so the transition begins DURING render
+  //     (React's adjust-state-on-change pattern) — the outgoing page lands in
+  //     the SAME commit as the switch and never blinks out first;
+  //   - `pageEntered` releases the parked incoming page on the next frame so it
+  //     eases in (the fp3 §3 mechanic, now shared by both pages).
+  const settingsScrollRef = useRef<HTMLDivElement>(null);
+  const [leavingTab, setLeavingTab] = useState<CompactTab | null>(null);
+  const [prevTab, setPrevTab] = useState<CompactTab>(compactTab);
+  const [pageEntered, setPageEntered] = useState(true);
+  if (compactTab !== prevTab) {
+    setPrevTab(compactTab);
+    if (layout.compact) {
+      setLeavingTab(prevTab);
+      // Into a page → park it off-left (the release effect eases it in); into
+      // chat → nothing to park, the outgoing page slides OUT instead.
+      setPageEntered(!isCompactPageTab(compactTab));
+    } else {
+      // Desktop / iPad-regular has no compact pages — never animate.
+      setLeavingTab(null);
+      setPageEntered(true);
     }
+  }
+  // Release the parked incoming page one frame after it mounts so it slides in.
+  useEffect(() => {
+    if (pageEntered) return;
     const r = requestAnimationFrame(() => setPageEntered(true));
     return () => cancelAnimationFrame(r);
-  }, [layout.drawerVisible]);
-
-  // 0.13.10 §2: the Settings page shares the files page's slide-in entrance.
-  const settingsVisible = layout.compact && compactTab === "settings";
-  const settingsScrollRef = useRef<HTMLDivElement>(null);
-  const [settingsEntered, setSettingsEntered] = useState(false);
+  }, [pageEntered]);
+  // End the slide: transitionend on the animating page wins (onPageSettled
+  // below); this timeout is the fallback so a dropped event can't strand the
+  // outgoing page mounted forever.
   useEffect(() => {
-    if (!settingsVisible) {
-      setSettingsEntered(false);
-      return;
-    }
-    const r = requestAnimationFrame(() => setSettingsEntered(true));
-    return () => cancelAnimationFrame(r);
-  }, [settingsVisible]);
+    if (leavingTab === null) return;
+    const t = setTimeout(() => setLeavingTab(null), PAGE_SLIDE_MS + PAGE_SLIDE_SLACK_MS);
+    return () => clearTimeout(t);
+  }, [leavingTab]);
+  // The compact page layers to mount this frame (bottom-to-top), and the class
+  // for each: an unreleased `enter` layer and every `exit` layer sit parked
+  // off-left; a `rest` layer is at its home position.
+  const pageLayers = layout.compact ? compactPageLayers(compactTab, leavingTab) : [];
+  const filesLayer = pageLayers.find((l) => l.tab === "files");
+  const settingsLayer = pageLayers.find((l) => l.tab === "settings");
+  const pageClass = (layer: CompactPageLayer) =>
+    mergeClasses(
+      styles.page,
+      layer.phase === "enter" && !pageEntered && styles.pageEntering,
+      layer.phase === "exit" && styles.pageExiting,
+    );
+  // A page's own slide finishing ends the transition (drops the outgoing page).
+  // Guard on the page element itself so a descendant's transition never fires it.
+  const onPageSettled = (e: React.TransitionEvent<HTMLDivElement>) => {
+    if (e.target === e.currentTarget) setLeavingTab(null);
+  };
 
   // 0.13.10 §2: "open preferences" routes to the Settings PAGE on compact (the
   // desktop gear menu keeps opening its dialog — SettingsMenu listens there).
@@ -645,15 +698,23 @@ export function AppShell({ sidebar, main }: AppShellProps) {
     // (paneLayout's structural pin), so the return below stays the desktop tree.
     return (
       <main className={styles.root}>
-        {layout.drawerVisible && (
+        {/* §43 §3: the compact pages are z-21 layers over the always-mounted
+            Chat base. compactPageLayers decides which mount and how — the
+            OUTGOING page stays put beneath the incoming during a slide (Chat
+            never flashes between two pages), and a page yielding to Chat slides
+            OUT (pageExiting) rather than vanishing. Each page's transitionend
+            (onPageSettled) ends the slide and drops the outgoing. */}
+        {filesLayer && (
           <div
-            className={mergeClasses(styles.page, !pageEntered && styles.pageEntering)}
+            className={pageClass(filesLayer)}
             role="dialog"
             aria-modal="true"
             aria-label="Files"
             // The Sidebar reads --sidebar-w for its width; 100% fills the page
-            // instead of any remembered desktop width.
-            style={{ "--sidebar-w": "100%" } as React.CSSProperties}
+            // instead of any remembered desktop width. zIndex is the layer's —
+            // 21 at rest (today's geometry), 22 while sliding in over another page.
+            style={{ "--sidebar-w": "100%", zIndex: filesLayer.z } as React.CSSProperties}
+            onTransitionEnd={onPageSettled}
           >
             <Sidebar
               collapsed={false}
@@ -668,12 +729,14 @@ export function AppShell({ sidebar, main }: AppShellProps) {
         )}
         {/* 0.13.10 §2: the Settings tab opens Settings as its own full page —
             the grouped reorganization of the desktop gear menu's content. */}
-        {settingsVisible && (
+        {settingsLayer && (
           <div
-            className={mergeClasses(styles.page, !settingsEntered && styles.pageEntering)}
+            className={pageClass(settingsLayer)}
             role="dialog"
             aria-modal="true"
             aria-label="Settings"
+            style={{ zIndex: settingsLayer.z }}
+            onTransitionEnd={onPageSettled}
           >
             <div className={styles.pagePane}>
               <div className={styles.pageHeader}>

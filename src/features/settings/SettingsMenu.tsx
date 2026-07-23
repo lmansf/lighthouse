@@ -1593,7 +1593,17 @@ export function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (
                 </>
               )}
 
-              {desktop && (
+              {/* §43 §5 (CONVENTIONS one-flag-one-meaning): the desktop-SHELL
+                  cluster below — audit log, background-conserve/tray, the
+                  Interface (window/widget) choice, the global summon shortcut
+                  and whisper — is form-factor-gated on platformKind(), NOT the
+                  `desktop` capability flag. `desktop` is true on the iOS Tauri
+                  shell too, so it wrongly surfaced the floating-bar/tray options
+                  there; these all drive the desktop floating bar + tray + global
+                  key listeners, inert on iOS. (The feature toggles above —
+                  semantic search, OCR, draft, briefings — stay `desktop`-gated;
+                  they are not shell chrome.) */}
+              {platformKind() === "desktop" && (
                 <>
                   <LhSwitch
                     checked={locks?.auditLogOn ? true : auditEnabled}
@@ -1607,7 +1617,7 @@ export function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (
                 </>
               )}
 
-              {desktop && uiMode !== "widget" && (
+              {platformKind() === "desktop" && uiMode !== "widget" && (
                 <LhSwitch
                   checked={backgroundConserve}
                   onChange={(_, d) => updateConserve(Boolean(d.checked))}
@@ -1615,7 +1625,7 @@ export function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (
                 />
               )}
 
-              {desktop && (
+              {platformKind() === "desktop" && (
                 <Field label="Interface">
                   <RadioGroup
                     value={uiMode}
@@ -1637,7 +1647,7 @@ export function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (
 
               {/* Managed policy: with hotkeys locked, the recorder is replaced
                   by the managed note — the shell never registers the chord. */}
-              {desktop && locks?.widgetHotkeysOff && (
+              {platformKind() === "desktop" && locks?.widgetHotkeysOff && (
                 <Field label="Summon shortcut">
                   <Text className={styles.prefHint}>
                     Summon shortcuts are managed off by your organization.
@@ -1646,7 +1656,7 @@ export function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (
               )}
               {/* Only when a keyed shortcut can actually register — hidden on
                   Wayland (summonHotkeyOk === false), where no global hotkey works. */}
-              {desktop && hotkeyOk && !locks?.widgetHotkeysOff && (
+              {platformKind() === "desktop" && hotkeyOk && !locks?.widgetHotkeysOff && (
                 <Field label="Summon shortcut">
                   {recording ? (
                     <div className={styles.shortcutRow}>
@@ -1689,7 +1699,7 @@ export function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (
                 </Field>
               )}
 
-              {desktop && whisperCapable && !locks?.widgetHotkeysOff && (
+              {platformKind() === "desktop" && whisperCapable && !locks?.widgetHotkeysOff && (
                 <Field label="Whisper summon (experimental)">
                   <LhSwitch
                     checked={whisperMode}
