@@ -9,3 +9,16 @@ lighthouse-core = { path = "../lighthouse-core" }
 anyhow.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+
+# The iOS arms (FM-bridge ensure glue in commands.rs, the §41 backup-exclusion
+# mark in state_home.rs) reach the ObjC runtime through libc — iOS-only,
+# matching the wrapper crate's declaration. §40 moved the FM glue here without
+# this line; nothing compiles the shell for iOS per-PR, so it only would have
+# surfaced in the next ios-build.
+[target.'cfg(target_os = "ios")'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+# state_home's read-only-target fixture asks geteuid whether mode bits can
+# even force a failure (root ignores them and the test skips honestly).
+libc = "0.2"
