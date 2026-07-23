@@ -6928,3 +6928,193 @@ PR). Commit per numbered section (Phase A first). Open ONE PR
 titled "Tier-2: the on-device fallback model for older iPhones";
 stop at the PR.
 ```
+
+## 43. Compact-shell polish: composer, tab transitions, sheet dismiss, chrome (2026-07-22)
+
+Six iPhone field reports @ 0.14.9, all compact-shell, diagnosed on
+main (§39's CONVENTIONS.md is now merged — several of these ARE its
+rules, un-followed in older code):
+1. Composer crowds the Ask button. styles.composer is flex; the
+   Ask/Stop button (ChatPanel.tsx ~4931-4939) has no flexShrink:0
+   and composerField (~985-992) lacks minWidth:0, so on a narrow
+   phone Fluent's textarea min-width squeezes the button until its
+   label abuts the typed text across the ~8px gap. Not
+   absolute-stacking, not vertical push — shrink/crowd.
+2. History "New chat" is dead. HistoryNav.tsx:191-204 gates the
+   button disabled on messages.length===0 (exactly when a user
+   opens History to start over) and is redundant with the chat
+   header's New chat when messages exist. Remove it (+ unused
+   styles.newChat / IconAdd).
+3. Every tab transition flashes Chat underneath (architectural).
+   AppShell.tsx compact branch: Chat is the permanently-mounted
+   flow base (styles.main); Files and Settings are mutually-
+   exclusive position:fixed inset:0 z-21 overlays with an
+   ENTRANCE-ONLY slide (pageEntering translateX(-100%)→0) and NO
+   exit — so on any switch the outgoing page unmounts instantly and
+   the incoming slides over the Chat base, never over the outgoing
+   tab.
+4. VersionBadge crowds the corner. Mounted globally
+   (app/page.tsx:92), position:fixed bottom-right with NO
+   --lh-tabbar-h/--lh-safe-bottom (a §39 fixed-surface-registry
+   violation), so on compact it paints over the tab bar and
+   collides with the FAB (which DOES track the bar). Version is
+   already in AboutDialog via SettingsPage's "About Lighthouse" row.
+5. The "Interface / Widget mode" option leaks onto iOS. The
+   PreferencesDialog Interface Field (SettingsMenu.tsx:1605) gates
+   on `desktop` — the SHELL flag (truthy on iOS) — not
+   platformKind() (the form-factor signal, ALREADY imported at
+   SettingsMenu.tsx:43 — the §24/§39 one-flag-one-meaning rule).
+   widget/tray/window are desktop concepts; inert on iOS.
+6. Preferences "sheet" bounces back on swipe-down. Compact
+   Preferences is a Fluent Dialog (LhDialog.tsx) dressed as a
+   sheet — fixed-bottom panel + a decorative aria-hidden grabber +
+   spring slide-up — but with NO pointer/swipe-dismiss handler
+   (the real Sheet.tsx has one; the dialog never got it). A
+   downward drag is eaten by the panel's overflowY:auto +
+   overscroll-behavior:contain and rubber-bands back open. Shared
+   primitive → fixing it fixes every compact dialog.
+Note (deferred, not this patch): the owner's "offer a real mobile
+widget that's just chat, integrated for iPhone/iPad" is a native
+WidgetKit extension (App Group, widget target) — a §44 candidate,
+out of scope here; §43 only REMOVES the desktop interface option on
+mobile.
+
+### Prompt
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first, local-first analytics AI harness: Rust engine +
+Tauri 2 shell (same crate family is the iOS app), TS twin
+(src/server/), React UI (src/). Read CLAUDE.md, docs/CONVENTIONS.md,
+and roadmap §43 before writing code. Six compact-shell polish fixes,
+one PR, engine untouched — several are CONVENTIONS rules applied to
+older code; cite the rule in each commit. Platform truth is
+platformKind() (src/shell/desktopBridge.ts), NOT the `desktop` shell
+flag. No file overlap with in-flight §42 (engine/server only);
+proceed.
+
+1. The composer never crowds the Ask button. In ChatPanel.tsx
+   styles.composer / composerField / the Ask-Stop button: add
+   flexShrink:0 to the Ask/Stop button, minWidth:0 to composerField
+   (so the field yields, not the button), and a reserved right
+   gutter so the button never abuts typed text (a small paddingRight
+   on the field or a larger gap — keep the 22px pill + shadow8 look).
+   Verify at 320pt (iPhone SE) with a long single-line draft and at
+   the 132px max-height multi-line state: the button stays whole and
+   separated in both. Pin the flexShrink:0 + minWidth:0 structurally.
+
+2. Remove the dead History "New chat". Delete HistoryNav.tsx:191-204
+   (the button), the now-unused styles.newChat (~58) and the IconAdd
+   import (~39); keep the persistHint copy above it. The chat
+   header's New chat (compact ~5336, desktop ~5398) is the sole,
+   working entry — confirm it still works from an empty and a
+   populated chat. Update any HistoryNav test that pinned the
+   button's presence.
+
+3. The outgoing tab stays underneath the incoming during the slide
+   (the architectural fix). Today Chat is the always-mounted base
+   and Files/Settings unmount instantly on tab change, so every
+   transition reveals Chat. Change the compact transition so the
+   OUTGOING page remains mounted beneath the INCOMING page for the
+   duration of the slide, then unmounts — i.e. Files→Settings shows
+   Files underneath (never Chat); Settings→Chat slides the Settings
+   page OUT to reveal Chat (an exit animation, not an instant
+   vanish); Chat→Files slides Files over Chat (unchanged). Implement
+   with a small transition state (track prevTab + an "exiting"
+   class mirroring pageEntering, unmount on animationend/transitionend
+   with a timeout fallback) OR a keep-previous-mounted transition
+   group — your call, but express the mount/exit decision as a pure
+   verdict/reducer (the house pattern, testable) and respect
+   prefers-reduced-motion (cross-fade or instant, no slide). Files
+   and Settings pages keep their z-21/inset:0 geometry; the incoming
+   is above the outgoing during the transition. Acceptance is
+   visual + a unit test on the transition reducer (from each tab to
+   each other tab, the layer beneath the incoming is the outgoing
+   tab, and after the animation only the destination is mounted).
+
+4. Version leaves the corner on compact. Hide VersionBadge when
+   platformKind() !== "desktop" (gate at app/page.tsx:92 or return
+   null inside VersionBadge on compact — desktop unchanged). Surface
+   the version on the Settings page: add a quiet footer line under
+   the "Help & about" group in SettingsPage.tsx (the same
+   process.env.NEXT_PUBLIC_APP_VERSION the AboutDialog shows), e.g.
+   "Lighthouse v0.14.x" in secondaryLabel — the About row already
+   opens AboutDialog with full detail, this is just the always-
+   visible number. (CONVENTIONS fixed-surface rule: a compact
+   fixed-bottom element must consume the tab-bar/safe-area vars or
+   not render — VersionBadge now doesn't render on compact.)
+
+5. Remove the desktop Interface/Widget option on mobile. Change the
+   Interface Field guard (SettingsMenu.tsx:1605) from `desktop &&`
+   to `platformKind() === "desktop" &&`; do the same for the
+   sibling desktop-only blocks in PreferencesDialog (tray/summon-
+   hotkey/whisper/background-conserve/audit-log-open — the
+   1583/1597/1627/1636/1679 cluster) so the whole desktop-shell
+   cluster is form-factor-gated, not shell-gated. Confirm nothing
+   iOS-relevant is inside those blocks (uiMode/widget only drive
+   the desktop floating bar + tray — inert on iOS). Byte-pinned
+   copy unchanged; the §24 platform pins style covers this. Do NOT
+   build a mobile widget here — leave a one-line PR note that a real
+   iPhone/iPad WidgetKit chat widget is a separate §44.
+
+6. Compact dialogs dismiss by swipe (fix the primitive, once). In
+   LhDialog.tsx's compact `sheet` branch: wire the decorative
+   grabber + header region to a pointer-drag dismissal that calls
+   the dialog's onOpenChange(false) — port Sheet.tsx's proven
+   handler (pointer capture on the handle region, translateY follows
+   the drag, dismiss on velocity > threshold OR drag past a slack
+   offset, else spring back, animated exit). CRITICAL discrimination
+   (CONVENTIONS interaction-spec rule): the drag-to-dismiss arms
+   ONLY from the grabber/header OR when the scroll container is at
+   scrollTop 0 — a downward swipe mid-content scrolls the content,
+   it does not dismiss; overscroll-behavior:contain stays. Because
+   LhDialog is the shared compact-dialog primitive, this fixes
+   Preferences AND every other compact dialog (AI models, Audit log,
+   About, Business definitions, Saved views) — verify two of them
+   dismiss by swipe and that their internal scrolling still works.
+   Make the grabber non-aria-hidden / focusable-appropriate now that
+   it's interactive. Test the dismiss verdict (velocity/offset/at-
+   top) as a pure fn.
+
+7. Stamps + gates. Bump 0.14.9 → 0.14.10 (or current+1) across all
+   SEVEN stamp files per CLAUDE.md; the §39 check-stamps tripwire
+   proves it. Full node + cargo suites, release-smoke, ios-build
+   green.
+
+Constraints. Engine + twin untouched (pure UI shell). Desktop and
+iPad-regular pixel-identical except the transition group (which
+must render identically to today when not mid-transition) — pin it.
+Byte-pinned labels move only with their pins. No new
+analytics/telemetry. SharePoint plumbing untouched. Follow
+docs/CONVENTIONS.md (fixed-surface registry, interaction specs,
+one-flag-one-meaning) and cite the relevant rule in each commit
+message. Scope = these six + stamp; the mobile widget is §44.
+
+Acceptance (iPhone simulator/device):
+1. At 320pt and at multi-line max height, the Ask/Stop button stays
+   whole and clearly separated from the text — no crowding.
+2. History has no New chat button; the header's still works from
+   empty and populated chats.
+3. Slow-mo any tab switch: the layer beneath the sliding page is the
+   tab you left (Files→Settings shows Files, Settings→Chat slides
+   Settings out to reveal Chat) — Chat never flashes under an
+   unrelated switch; reduced-motion cross-fades; the reducer test is
+   green.
+4. No version badge floats over the tab bar on compact; the Settings
+   page shows the version under Help & about; desktop badge
+   unchanged.
+5. Preferences on iOS shows no Interface/Widget option (nor
+   tray/hotkey/whisper); desktop shows all of them.
+6. Preferences (and another compact dialog) dismiss with a
+   swipe-down from the grabber; a mid-content downward swipe scrolls
+   instead of dismissing; both spring back correctly.
+7. Suites + release-smoke + ios-build green; seven stamps read
+   0.14.10.
+
+Environment. macOS + Xcode for the visual/gesture passes (simulator
+fine); container fallback per house convention (reducer/verdict
+tests + structural pins here; ios-build as gate). One commit per
+numbered section. Open ONE PR titled "Compact-shell polish:
+composer, tab transitions, swipe-dismiss, version, widget option";
+stop at the PR.
+```
