@@ -269,6 +269,19 @@ test("§42 §3: the llama backend narrates its REAL warm via /health", () => {
   assert.match(backend, /func beginLoad\(\)/);
 });
 
+test("§42 §5: CI guards the Tier-2 model weights are never bundled", () => {
+  const wf = read(".github/workflows/mobile-bootstrap.yml");
+  const guard = wf.indexOf("Assert the Tier-2 model weights are NOT bundled");
+  const upload = wf.indexOf("name: Upload to TestFlight");
+  assert.ok(guard !== -1, "the §42 payload guard step exists");
+  assert.ok(upload !== -1 && guard < upload, "the guard gates the TestFlight upload");
+  const step = wf.slice(guard, upload);
+  // Weights must not board the .ipa (downloaded on demand).
+  assert.match(step, /iname '\*\.gguf'/, "the guard looks for a stray .gguf in the payload");
+  // Non-balloon roof catches an accidental weight bundling.
+  assert.match(step, /ballooned past the 200 MB roof/);
+});
+
 test("CI asserts the bridge boarded the app binary before TestFlight upload", () => {
   const wf = read(".github/workflows/mobile-bootstrap.yml");
   const guard = wf.indexOf("Assert the private-model bridge boarded the app binary");
