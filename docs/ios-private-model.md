@@ -52,14 +52,18 @@ existing `LIGHTHOUSE_LOCAL_LLM_URL` / `LIGHTHOUSE_EMBED_URL` seams"* and a
 | **Download** | **zero** (weights are the OS's) | ~1 GB via **Background Assets** (opt-in, cellular-aware) | — |
 | **Roster** | "private" provider present (sensible default — zero-setup, fully private) | "private" provider present after the model is on device | "private" **absent** — the existing empty-provider truths stand |
 
-- **Ship Tier-1 first** behind the engine seam; **Tier-2 is a stageable
-  follow-up** — but the seam **and** the availability verdict ship together in
-  0.13.5, so the roster is honest from day one. **0.13.5 scope = Tier-1
-  (Foundation Models) + the seam + the availability reversal.** Tier-2's bundled
-  GGUF, its `increased-memory-limit` entitlement (§4), and Background Assets
-  delivery (§5) land in a follow-up (0.13.6+) — none of them are needed for a
-  Tier-1 device, and deferring them keeps 0.13.5 free of the llama.cpp-iOS build
-  and the ~1 GB payload.
+- **Tier-1 shipped first** behind the engine seam in 0.13.5 (Foundation
+  Models + the seam + the availability reversal). **Tier-2 SHIPPED in
+  0.14.10** (§42, owner-ordered): the in-process llama.cpp backend behind the
+  same loopback contract, its own `llama-mobile-6144` budget tier, the
+  download-with-consent flow (reusing the engine's resumable/validated
+  download machinery, stored under Application Support per §41, egress-ledger
+  recorded), the `os_proc_available_memory` memory bar, and the three-state
+  roster. Delivery is the engine's own downloader, NOT Background Assets
+  (owner decision, §4.4); the model is **downloaded on demand, never bundled**
+  (CI payload guard). The `increased-memory-limit` entitlement and the
+  xcframework/pbxproj wiring + on-device model run are the macOS/device
+  acceptance items recorded on the §42 PR.
 - **`PrivateCloudComputeLanguageModel` is EXCLUDED** — it is off-device. Staying on
   `SystemLanguageModel.default` guarantees we never construct it (§3.6).
 - **App floor stays where it is today** (whatever the committed
