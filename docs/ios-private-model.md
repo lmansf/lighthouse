@@ -3,6 +3,11 @@
 **Status:** decided (spike gate). **Target release:** 0.13.5 (patch, per CLAUDE.md
 versioning policy — an on-device narration backend is a feature, not a rewrite).
 **Author dated:** 2026-07-20. **Owner sign-off:** pending.
+**§42 Phase-A refresh (2026-07-23):** §4 re-verified on the current toolchain for
+the Tier-2 build (owner-queued §42, full-ship order). Tier-1 shipped in 0.13.5+
+as decided; the loopback bridge (§5 option 1) is live as
+`PrivateModelServer.swift`, and the §6 tiered budgeter is live (§32). Refreshed
+facts below are marked "(§42 refresh)".
 
 This is the decision gate for re-enabling a **private, on-device model on
 iOS/iPadOS** — nothing leaves the device — as a **narration-tier** backend:
@@ -164,20 +169,44 @@ For eligible-OS-but-below-Apple-Intelligence devices (and as the deterministic
 fallback wherever Tier-1 is unavailable but the device has the RAM).
 
 ### 4.1 Feasibility — confirmed, with cost
-- llama.cpp **cross-compiles for `aarch64-apple-ios` with Metal** via CMake
-  (`-DCMAKE_SYSTEM_NAME=iOS -DGGML_METAL_EMBED_LIBRARY=ON`; `build-xcframework.sh`
-  produces device+simulator static libs). Embedding the Metal shader library avoids
-  a loose `.metallib` (an App-Store validation trap). Static-link/dyld pitfalls are
-  known and manageable (llama.cpp #10747/#10922).
-  [build.md](https://github.com/ggml-org/llama.cpp/blob/master/docs/build.md)
-- **`llama-cpp-2` (utilityai) has no iOS support** — its mobile feature is Android
-  only, and `llama-cpp-sys-2`'s cmake/bindgen build is not wired for the iOS
-  toolchain (needs `xcrun`/macOS). **Decision: build llama.cpp ourselves as a static
-  lib / XCFramework and FFI directly through a thin `-sys` shim** (full control of
-  iOS+Metal flags), rather than depend on `llama-cpp-2`. This is real engineering
-  cost — flagged, and the reason Tier-2 is stageable behind Tier-1.
+
+**(§42 refresh, verified 2026-07-23 against llama.cpp master):**
+
+- `build-xcframework.sh` exists at the repo root and is the canonical Apple
+  route (note: `docs/build.md` no longer documents iOS at all — cite the script,
+  not the doc). It builds iOS **device** (`-DCMAKE_SYSTEM_NAME=iOS
+  -DCMAKE_OSX_SYSROOT=iphoneos -DCMAKE_OSX_ARCHITECTURES="arm64"`) and
+  **simulator** (`-DCMAKE_OSX_SYSROOT=iphonesimulator
+  -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"`) slices with **`-DGGML_METAL=ON
+  -DGGML_METAL_EMBED_LIBRARY=ON`** on both, combines the static libs into
+  per-platform dynamic libraries, generates dSYMs "for App Store validation",
+  and assembles the XCFramework. Embedding the Metal shader library avoids a
+  loose `.metallib` (an App-Store validation trap).
+  [build-xcframework.sh](https://github.com/ggml-org/llama.cpp/blob/master/build-xcframework.sh)
+- **Deployment-floor conflict (new finding):** the script pins
+  `IOS_MIN_OS_VERSION=16.4`, while our committed `project.yml`
+  `deploymentTarget` is **iOS 14.0**. Embedding a framework whose minOS
+  exceeds the app's trips store validation. Phase B decision rule: **first**
+  try overriding `IOS_MIN_OS_VERSION` to our floor (it is a plain variable; no
+  evidence llama.cpp needs ≥16.4 APIs) and let the ios-build lane prove it;
+  **only if that fails**, raising the app floor is an owner decision (it would
+  drop iPhone 6s/7/SE1-class devices from the whole app — all 2–3 GB devices
+  that are below the Tier-2 memory bar anyway, but the app itself currently
+  supports them). Do not raise the floor silently.
+- **`llama-cpp-2` (utilityai) still has no iOS support** (re-checked
+  2026-07-23: `llama-cpp-sys-2`'s build.rs wires Android NDK cross-compiles
+  only; nothing for the iOS toolchain). **Decision reaffirmed: build llama.cpp
+  ourselves via `build-xcframework.sh` and FFI directly through a thin
+  in-repo `-sys` shim** (full control of iOS+Metal flags, no third-party build
+  script between us and the store).
+  [llama-cpp-sys-2 build.rs](https://docs.rs/crate/llama-cpp-sys-2/latest/source/build.rs)
+- **No JIT anywhere**: llama.cpp inference is ahead-of-time compiled code +
+  Metal shaders (embedded, compiled by the OS's Metal stack) — no runtime
+  code generation, satisfying iOS's no-JIT rule by construction.
 - Metal compute in-process needs **no entitlement**; the constraint is **memory**
-  (§4.3). [llama-cpp-rs](https://github.com/utilityai/llama-cpp-rs)
+  (§4.3). The xcframework compile itself is macOS-only — the dev container
+  verifies flags/routes from upstream; the `ios-build` lane is where the
+  framework actually builds (same CI split as §3.7).
 
 ### 4.2 Model choice (Apache-2.0 only)
 Narration-tier (fluent prose over a handed table, low world-knowledge demand) →
@@ -193,22 +222,90 @@ smallest clean model wins.
 **Decision: default Tier-2 = Qwen2.5-1.5B-Instruct** (smallest, no reasoning
 traces, clean narration); Granite-3.3-2B is the upgrade if narration quality proves
 insufficient. **Explicitly avoid Llama-3.2-1B and Gemma** — custom licenses, not
-Apache/MIT (matches the proposal's "no Gemma-term encumbrance"). The exact GGUF +
-its byte size + license text are pinned in Phase B when the asset is chosen.
+Apache/MIT (matches the proposal's "no Gemma-term encumbrance").
+
+**(§42 refresh — asset pinned, 2026-07-23):**
+
+- **Primary:** `qwen2.5-1.5b-instruct-q4_k_m.gguf` from the **official**
+  `Qwen/Qwen2.5-1.5B-Instruct-GGUF` repo — **1.12 GB**, **Apache-2.0**.
+  Consent copy says "~1.1 GB" (the earlier 0.9–1.0 GB estimate was low).
+- **Fallback:** `HuggingFaceTB/SmolLM2-1.7B-Instruct-GGUF` Q4_K_M —
+  **1.06 GB**, **Apache-2.0**.
+- **Attribution (About screen, verbatim):** "Includes Qwen2.5-1.5B-Instruct ©
+  Alibaba Cloud, used under the Apache License 2.0." (If the fallback ships
+  instead: "Includes SmolLM2-1.7B-Instruct © Hugging Face, used under the
+  Apache License 2.0.") Apache-2.0 obligations: ship the license text and
+  preserve the copyright/NOTICE attribution — the license text lands beside
+  the existing third-party notices.
+- **Byte-exact size + SHA256 of the download artifact are pinned in Phase B
+  §2** from the macOS lane: `huggingface.co` is egress-blocked in the dev
+  container (policy 403 — recorded honestly, not routed around). The user's
+  device downloads from the official repo's resolve URL; the egress-ledger
+  entry records the real final host (Hugging Face CDN) + purpose, mirroring
+  the desktop model download's ledger shape.
 
 ### 4.3 Memory
+
 Add **`com.apple.developer.kernel.increased-memory-limit`** (the iOS entitlements
 file is currently empty) — justified in the Phase B PR as needed to hold a ~1 GB
 model + KV cache. It is honored only on some devices, so Tier-2 **must** call
 `os_proc_available_memory()` before load and **degrade to extractive** if the budget
 is short. No JIT anywhere (iOS forbids it). [entitlement](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.developer.kernel.increased-memory-limit)
 
+**(§42 refresh — the real numbers and the bar, 2026-07-23):**
+
+- **KV-cache math** (Qwen2.5-1.5B: 28 layers, GQA 2 KV heads, head_dim 128,
+  f16 KV): 2 × 28 × 2 × 128 × 2 B = **28,672 B/token ≈ 28 KiB/token**. At the
+  chosen context that is **168 MiB @ 6144** (224 MiB @ 8192, 112 MiB @ 4096).
+- **Chosen advertised context: 6144.** The model natively supports far more,
+  but 6144 keeps KV ≤ 168 MiB, matches the desktop llama tier's proven §36
+  budget shape, and `/health` advertises it so the tier machinery resolves
+  honestly. Phase B registers a **distinct `llama-mobile` tier** (its own
+  per-call-type output reserves per the §39 registry floor) rather than
+  borrowing the desktop tier's entry.
+- **Peak load estimate:** weights ~1,043 MiB (1.12 GB) + KV 168 MiB + Metal
+  compute/scratch ~250 MiB + safety margin ~200 MiB ≈ **1.7 GiB required
+  AVAILABLE at load time** (`os_proc_available_memory()` returns remaining
+  headroom, so the app baseline is already excluded). **The Phase-A bar:
+  refuse below 1.7 GiB available** — tune on device in Phase B, never lower
+  than the measured real peak.
+- **What that bar means in devices:** a 4 GB iPhone's default per-app limit
+  (~2 GiB) minus a running app baseline leaves *just under* the bar — the
+  entitlement is what clears it (raising the cap to ~3 GiB-class on 4 GB
+  devices). 3 GB devices (iPhone XR/XS/SE2-class) cannot clear it even with
+  the entitlement → honest "can't hold it" state. **Minimum device bar:
+  4 GB-RAM iPhones (iPhone 11 and later, excluding 3 GB SE models)** — the
+  "iPhone 12–14-class" acceptance target sits comfortably inside it.
+- **Entitlement honesty (field-verified risk):** developer-forum reports show
+  the raised limit sometimes **not taking effect in App Store/TestFlight
+  builds** ([thread 770868](https://developer.apple.com/forums/thread/770868)).
+  Consequence: the entitlement is a *request*, never an assumption — the
+  pre-load `os_proc_available_memory()` check is the only truth, and the
+  below-bar honest state must be reachable on ANY device. TestFlight
+  acceptance must verify the raised limit on a real device build, not assume
+  it from the entitlements file.
+
 ### 4.4 Delivery
-Base app stays slim; the ~1 GB model ships via **Background Assets** (iOS 16+;
-system-managed, optionally Apple-hosted; essential/prefetched/on-demand policies) —
-Apple's current path over the legacy On-Demand Resources — respecting the
-cellular-download opt-in. **Not** bundled in the base `.ipa`.
-[Background Assets](https://developer.apple.com/documentation/backgroundassets)
+
+**(§42 refresh — OWNER DECISION 2026-07-23, supersedes Background Assets):**
+the model is delivered by **reusing the engine's own `local_model.rs` download
+machinery** — resumable range requests, GGUF magic validation, byte-progress
+UI — pointed at the pinned official model URL and storing under **Application
+Support (the §41 state layout)**. Explicit user consent states the size
+(~1.1 GB) before any bytes move; **wifi-only by default with a cellular
+opt-in**; the download is user-initiated egress **recorded in the egress
+ledger** (host + purpose) exactly like the desktop model download.
+Resume/validate/uninstall paths are all first-class and tested. **Never
+bundled** — the `.ipa` gains ~no size (CI payload assertion, §25 pattern).
+
+Why not Background Assets (recorded for the record): one proven download
+machinery across desktop + iOS (resume, validation, progress, ledger already
+built and tested), full visibility in our own egress ledger, and no
+system-managed downloader semantics between the user's consent and the bytes.
+The prior paragraph's Background Assets route stays viable if App Review ever
+objects — nothing in the engine seam cares which downloader filled the file.
+App Review posture: model weights are **data, not executable code** (no JIT,
+§4.1), downloaded after explicit consent — the standard ML-app pattern.
 
 ---
 
@@ -361,9 +458,20 @@ The Phase A doc commit itself carries no stamp bump; Phase B §6 bumps.
    beta — the Swift backend handles both spellings; confirm the final symbol at GA.
 2. **`MLXLanguageModel`** concrete symbol/owner (§3.8) — protocol is real, conformer
    illustrative; verify against the shipping SDK before any Tier-1.5 work.
-3. **Exact Tier-2 GGUF byte size + license text** — pinned when the specific asset
-   is selected in Phase B.
-4. **Which bridge** (§5, loopback vs channel) — decide on device by smallest diff /
-   best latency; both preserve the engine contract.
+3. **Exact Tier-2 GGUF byte size + license text** — RESOLVED (§42 refresh):
+   asset + published size + license pinned in §4.2; the byte-exact size and
+   SHA256 of the artifact are captured in Phase B §2 from the macOS lane
+   (the dev container cannot reach huggingface.co — egress policy).
+4. **Which bridge** (§5, loopback vs channel) — RESOLVED: loopback shipped
+   (`PrivateModelServer.swift`); the Tier-2 llama backend answers the same
+   in-process listener contract.
 5. **Tier-1 generation** cannot be validated in CI (§3.7) — requires a physical
    Apple-Intelligence device; Phase B records this gap rather than faking a CI proof.
+6. **(§42) Deployment-floor conflict** — `build-xcframework.sh` defaults to
+   `IOS_MIN_OS_VERSION=16.4` vs our committed floor of iOS 14.0 (§4.1).
+   Phase B tries overriding to our floor first; raising the app floor is an
+   owner decision, never silent.
+7. **(§42) Entitlement effectiveness in store builds** — field reports of the
+   increased-memory-limit not applying in App Store builds (§4.3). The
+   pre-load `os_proc_available_memory()` bar is the only truth; TestFlight
+   device acceptance must verify the raised limit rather than assume it.
