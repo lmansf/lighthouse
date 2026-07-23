@@ -28,6 +28,9 @@ const {
   docSegmentBudget,
   resolveTierWith,
   planKeep,
+  estimateTokens,
+  inputTokenBudget,
+  overflowRetryVerdict,
 } = await import("../src/server/budget.ts");
 
 test("resolution table is pinned (mirrors budget.rs)", () => {
@@ -106,4 +109,39 @@ test("the refinement kernel protects prior SQL to the last", () => {
   // Tight budget: evidence AND semantic AND schema all drop before the
   // prior SQL is even considered — the refinement keeps its query.
   assert.deepEqual(planKeep(400, segs, 1_300, true), ["prior-sql"]);
+});
+
+// --- §36 prerequisite subset + §38 §2 (mirrors the cargo cases) --------------
+
+test("the digit-aware estimate charges numbers double (mirrors budget.rs)", () => {
+  // 16 prose chars → 4 tokens; the same length all-digits → 8.
+  assert.equal(estimateTokens("sixteen ch text!"), 4);
+  assert.equal(estimateTokens("1234567890123456"), 8);
+  // Mixed: 8 digits (→4) + 7 others (→2); classes round up separately.
+  assert.equal(estimateTokens("12345678 prose!"), 6);
+  assert.equal(estimateTokens(""), 0);
+  // The flat estimate under-counts numeric text — the §36 motivation.
+  const numeric = "| 2024-10 | 400.25 | +2.85 | 118203 |";
+  assert.ok(estimateTokens(numeric) > Math.floor(numeric.length / CHARS_PER_TOKEN));
+});
+
+test("token budget is 90% of the window minus the reserve (mirrors budget.rs)", () => {
+  assert.equal(inputTokenBudget("apple-fm-4096", "report-framing"), 3_286);
+  assert.equal(inputTokenBudget("apple-fm-4096", "narration"), 2_786);
+  assert.equal(inputTokenBudget("remote-large", "report-framing"), Infinity);
+});
+
+test("the framing overflow ladder retries once headline-only, then engine framing", () => {
+  assert.equal(overflowRetryVerdict(0), "retry-headline-only");
+  assert.equal(overflowRetryVerdict(1), "engine-fallback");
+  assert.equal(overflowRetryVerdict(7), "engine-fallback");
+});
+
+test("reports.rs wires the framing budget + ladder (source pin — the seam is Rust-only)", async () => {
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(new URL("../native/crates/lighthouse-core/src/reports.rs", import.meta.url), "utf8");
+  assert.match(src, /input_token_budget\(tier, crate::budget::CallType::ReportFraming\)/);
+  assert.match(src, /overflow_retry_verdict\(overflows\)/);
+  assert.match(src, /OverflowStep::RetryHeadlineOnly => overflows \+= 1,/);
+  assert.match(src, /OverflowStep::EngineFallback => return None,/);
 });

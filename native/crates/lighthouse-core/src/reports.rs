@@ -20,6 +20,20 @@
 //! section's `run_query` result, and each summary line is a `headline` the engine
 //! templated from those cells — so the summary is reproducible from the SQL.
 //!
+//! DETERMINISM CONTRACT (§38 §5 — §37's surfacing depends on this):
+//! - BODY: byte-stable for identical inputs. The battery, section rendering,
+//!   summary, and caveats are model-free; two runs over the same table render
+//!   identically once stamped to the same `generated_ms` (pinned by
+//!   `reports_test.rs`).
+//! - FRAMING (templates only): model-VARIABLE prose, but bounded — grounded
+//!   on the budget-packed findings (§1), retried once on overflow then
+//!   surrendered (§2), gated on length (`NARRATION_CHAR_CAP`) and on the
+//!   digit-subset floor (§4: no number outside the findings, at least one
+//!   headline figure), and LABELED by the §3 footer line naming its author.
+//! - FALLBACK: deterministic. Every rejected/unavailable narration renders
+//!   the fixed engine framing lines — a report is never blocked on a model
+//!   and never silent about which prose it carries.
+//!
 //! Render idiom: `# title` / `## Summary` / `## {section}` / `## Caveats`,
 //! matching `briefings::render_markdown` (`briefings.rs:245`).
 //!
@@ -102,6 +116,12 @@ pub struct ReportSection {
     pub question: String,
     pub result_markdown: String,
     pub sql: String,
+    /// The section's one-line engine finding, carried through from the
+    /// sub-analysis (§38 §1: the headline-only degradation digest — when a
+    /// packed findings context runs tight, this line IS the section's
+    /// grounding). `None` when the analysis had no material headline; the
+    /// renderers never read it, so rendered bytes are unchanged.
+    pub headline: Option<String>,
 }
 
 /// A deep-analysis report — deterministic, engine-verified, ready to render + write.
@@ -125,6 +145,11 @@ pub struct Report {
     /// Model-narrated interpretation for a template — the IMRaD Discussion / the
     /// BLUF "What this means". `None` when unavailable. Figures are the engine's.
     pub discussion: Option<String>,
+    /// §38 §3: WHO wrote the framing prose, for the templates' footer line —
+    /// `Some(label)` ("the private model" / "your model") when any narration
+    /// was accepted, `None` when the deterministic engine framing stands in.
+    /// The Standard render never reads it (byte-stability holds).
+    pub framing_by: Option<String>,
 }
 
 /// Assemble a report from already-executed sub-analyses. Pure: the summary is the
@@ -150,6 +175,7 @@ pub fn assemble(
             question: s.question,
             result_markdown: s.result_markdown,
             sql: s.sql,
+            headline: s.headline,
         })
         .collect();
     Report {
@@ -161,6 +187,7 @@ pub fn assemble(
         template: ReportTemplate::Standard,
         intro: None,
         discussion: None,
+        framing_by: None,
     }
 }
 
@@ -236,6 +263,21 @@ fn render_caveats(out: &mut String, caveats: &[String], level: &str) {
     }
 }
 
+/// §38 §3: the templates' ONE quiet provenance line — how the framing prose
+/// was written. Byte-pinned by the render tests; the SAME engine numbers
+/// stand either way, so run-to-run prose differences read as labeled
+/// variation, not flakiness. The Standard render never calls this.
+fn render_framing_footer(out: &mut String, framing_by: &Option<String>) {
+    match framing_by {
+        Some(label) => out.push_str(&format!(
+            "\n_Framing narrated by {label} from the computed findings._\n"
+        )),
+        None => out.push_str(
+            "\n_Framing written by the engine from the computed findings (model unavailable)._\n",
+        ),
+    }
+}
+
 /// Scientific method (IMRaD). Introduction + Discussion are model narration when
 /// present (`report.intro`/`report.discussion`), else a deterministic framing
 /// line — never a figure. Methods is deterministic (which analyses ran); Results
@@ -285,6 +327,7 @@ fn render_imrad(report: &Report) -> String {
     out.push('\n');
 
     render_caveats(&mut out, &report.caveats, "##");
+    render_framing_footer(&mut out, &report.framing_by);
     out
 }
 
@@ -323,6 +366,7 @@ fn render_bluf(report: &Report) -> String {
     }
 
     render_caveats(&mut out, &report.caveats, "##");
+    render_framing_footer(&mut out, &report.framing_by);
     out
 }
 
@@ -471,21 +515,61 @@ pub async fn investigate_templated(
     report.template = template;
     report.title = format!("{}{}", report.title, template.title_suffix());
     if !report.sections.is_empty() && cfg.provider_id.is_some() {
-        // §32 §6: the framing calls ride the same tier seam as narration —
-        // capped grounding on apple-fm, byte-identical elsewhere. (The §2
-        // profile selection already covers their system prompt via
-        // stream_answer → stream_local.)
+        // §32 §6 / §38 §1: the framing calls ride the same tier seam as
+        // narration — budget-packed grounding on apple-fm, byte-identical
+        // elsewhere. (The §2 profile selection already covers their system
+        // prompt via stream_answer → stream_local.) The headline-only
+        // grounding is the §38 §2 overflow-retry fallback.
         let ctx = report_findings_ctx(&report, crate::llm::narration_tier(&cfg));
+        let headline_ctx = headline_findings_ctx(&report);
+        // §38 §4: the digit gate's ground truth, computed ONCE from the whole
+        // report (not just the packed slice — echoing a packed-out row is
+        // still faithful to the findings).
+        let findings_nums = findings_number_set(&report);
+        let summary_nums = summary_number_set(&report);
         match template {
             ReportTemplate::ScientificMethod => {
-                report.intro = narrate(IMRAD_INTRO_PROMPT, &ctx, &cfg).await;
-                report.discussion = narrate(IMRAD_DISCUSSION_PROMPT, &ctx, &cfg).await;
+                report.intro =
+                    narrate(IMRAD_INTRO_PROMPT, &ctx, &headline_ctx, &findings_nums, &summary_nums, &cfg)
+                        .await;
+                report.discussion = narrate(
+                    IMRAD_DISCUSSION_PROMPT,
+                    &ctx,
+                    &headline_ctx,
+                    &findings_nums,
+                    &summary_nums,
+                    &cfg,
+                )
+                .await;
             }
             ReportTemplate::BusinessReport => {
-                report.intro = narrate(BLUF_BOTTOM_LINE_PROMPT, &ctx, &cfg).await;
-                report.discussion = narrate(BLUF_MEANING_PROMPT, &ctx, &cfg).await;
+                report.intro = narrate(
+                    BLUF_BOTTOM_LINE_PROMPT,
+                    &ctx,
+                    &headline_ctx,
+                    &findings_nums,
+                    &summary_nums,
+                    &cfg,
+                )
+                .await;
+                report.discussion =
+                    narrate(BLUF_MEANING_PROMPT, &ctx, &headline_ctx, &findings_nums, &summary_nums, &cfg)
+                        .await;
             }
             ReportTemplate::Standard => {}
+        }
+        // §38 §3: name the framing's author for the footer line. Any accepted
+        // narration ⇒ the model label (local tiers are "the private model" —
+        // the roster's own language; a hosted provider is "your model");
+        // both rejected/unavailable ⇒ None, the engine-framing line.
+        if report.intro.is_some() || report.discussion.is_some() {
+            report.framing_by = Some(
+                if crate::llm::narration_tier(&cfg) == crate::budget::Tier::RemoteLarge {
+                    "your model".to_string()
+                } else {
+                    "the private model".to_string()
+                },
+            );
         }
     }
     report
@@ -496,13 +580,42 @@ pub async fn investigate_templated(
 /// this but (per the SYSTEM_PROMPT grounding rules) must invent no figure not
 /// present here.
 ///
-/// §32 §6: on the apple-fm tiers each section is CAPPED — its heading plus
-/// the first `REPORT_SECTION_MAX_ROWS` table rows with an honest "(first N
-/// rows of the section's table)" note — so BOTH framing calls fit the shared
-/// 4k window with the §1 output reserve intact. The full tables still render
-/// deterministically in the report body; only the model's grounding slice
-/// shrinks. Cloud/llama keep every row byte-for-byte.
+/// §38 §1: on the apple-fm tiers the findings are BUDGET-packed (see
+/// `pack_findings`) against the tier's `ReportFraming` token budget with the
+/// §36 digit-aware estimate — a many-section report fits BY CONSTRUCTION,
+/// degrading per section to its headline line instead of overflowing. The
+/// full tables still render deterministically in the report body; only the
+/// model's grounding slice shrinks. Cloud/llama keep every row byte-for-byte
+/// (the §32 pins hold).
 fn report_findings_ctx(report: &Report, tier: crate::budget::Tier) -> Vec<crate::llm::Ctx> {
+    let text = if tier.is_apple_fm() {
+        let budget = crate::budget::input_token_budget(tier, crate::budget::CallType::ReportFraming)
+            .saturating_sub(framing_overhead_tokens());
+        pack_findings(report, budget)
+    } else {
+        let mut text = findings_summary_block(report);
+        for s in &report.sections {
+            text.push_str(&format!("{}:\n{}\n\n", s.heading, s.result_markdown.trim()));
+        }
+        text
+    };
+    vec![crate::llm::Ctx { name: format!("verified findings for {}", report.title), text, score: 1.0 }]
+}
+
+/// The headline-only findings context — the §38 §2 overflow-retry grounding:
+/// the summary block plus ONE line per section. Always tiny (a dozen lines),
+/// so the retry fits any tier's window by construction.
+fn headline_findings_ctx(report: &Report) -> Vec<crate::llm::Ctx> {
+    let mut text = findings_summary_block(report);
+    for s in &report.sections {
+        text.push_str(&section_headline_line(s));
+    }
+    vec![crate::llm::Ctx { name: format!("verified findings for {}", report.title), text, score: 1.0 }]
+}
+
+/// The "Key findings:" block every findings context leads with — the summary
+/// headlines are the report's computed spine and always ride whole.
+fn findings_summary_block(report: &Report) -> String {
     let mut text = String::new();
     if !report.summary.is_empty() {
         text.push_str("Key findings:\n");
@@ -511,15 +624,71 @@ fn report_findings_ctx(report: &Report, tier: crate::budget::Tier) -> Vec<crate:
         }
         text.push('\n');
     }
-    for s in &report.sections {
-        let body = if tier.is_apple_fm() {
-            capped_section_table(&s.result_markdown)
-        } else {
-            s.result_markdown.trim().to_string()
-        };
-        text.push_str(&format!("{}:\n{body}\n\n", s.heading));
+    text
+}
+
+/// A section's one-line degraded digest: its heading plus its engine headline
+/// (the computed finding), or an honest pointer when the analysis had none.
+fn section_headline_line(s: &ReportSection) -> String {
+    match &s.headline {
+        Some(h) => format!("{}: {h}\n", s.heading),
+        None => format!("{}: (no single headline figure; full table in the report)\n", s.heading),
     }
-    vec![crate::llm::Ctx { name: format!("verified findings for {}", report.title), text, score: 1.0 }]
+}
+
+/// A section's FULL digest — heading plus its row-capped table (the §32 §6
+/// shape, unchanged bytes, so small reports ground identically to before).
+fn section_full_digest(s: &ReportSection) -> String {
+    format!("{}:\n{}\n\n", s.heading, capped_section_table(&s.result_markdown))
+}
+
+/// Prompt-side overhead reserved OUT of the findings budget: the compact
+/// system prompt (measured, not guessed) plus a fixed allowance for the
+/// framing instruction and the context-block wrapper ("[1] verified findings
+/// for …" + question framing). The allowance is deliberately generous — the
+/// §2 whole-prompt pin proves the assembled call fits with it.
+fn framing_overhead_tokens() -> usize {
+    const INSTRUCTION_AND_WRAPPER_TOKENS: usize = 220;
+    crate::budget::estimate_tokens(crate::llm::SYSTEM_PROMPT_COMPACT) + INSTRUCTION_AND_WRAPPER_TOKENS
+}
+
+/// §38 §1: pack the findings into `budget_tokens` (digit-aware estimate).
+/// The summary block and EVERY section's headline line always ride — that
+/// floor is a dozen short lines, so a many-section report fits by
+/// construction. Sections then upgrade from their headline line to their full
+/// digest (heading + capped rows) LARGEST-VALUE-FIRST — first-fit-decreasing
+/// on the digest's token cost, so the budget takes the biggest evidence
+/// tables it can hold and the leftovers stay headline-only. Output preserves
+/// document order regardless of packing order. Pure and deterministic
+/// (stable tie-break on section index).
+fn pack_findings(report: &Report, budget_tokens: usize) -> String {
+    use crate::budget::estimate_tokens;
+
+    let floor: Vec<String> = report.sections.iter().map(section_headline_line).collect();
+    let full: Vec<String> = report.sections.iter().map(section_full_digest).collect();
+    let summary = findings_summary_block(report);
+
+    let mut used = estimate_tokens(&summary)
+        + floor.iter().map(|l| estimate_tokens(l)).sum::<usize>();
+
+    // Largest full digest first, stable on index.
+    let mut order: Vec<usize> = (0..report.sections.len()).collect();
+    order.sort_by_key(|&i| std::cmp::Reverse(estimate_tokens(&full[i])));
+
+    let mut upgraded = vec![false; report.sections.len()];
+    for i in order {
+        let delta = estimate_tokens(&full[i]).saturating_sub(estimate_tokens(&floor[i]));
+        if used + delta <= budget_tokens {
+            upgraded[i] = true;
+            used += delta;
+        }
+    }
+
+    let mut text = summary;
+    for (i, _) in report.sections.iter().enumerate() {
+        text.push_str(if upgraded[i] { &full[i] } else { &floor[i] });
+    }
+    text
 }
 
 /// Data rows one report section may hand the apple-fm framing calls.
@@ -556,10 +725,118 @@ fn capped_section_table(markdown: &str) -> String {
     out.join("\n")
 }
 
-/// Collect a model narration to a string (the synth.rs streaming-collect idiom
-/// with no UI sink). Empty or over-long ⇒ None, so the render falls back to the
-/// deterministic framing.
-async fn narrate(prompt: &str, ctx: &[crate::llm::Ctx], cfg: &crate::llm::ModelCfg) -> Option<String> {
+/// §38 §4: extract the NUMBER tokens of a text — maximal digit runs with
+/// their interior decimal points, thousands separators stripped, leading/
+/// trailing dots trimmed ("$4,200.50" → "4200.50"; "2024-10" → "2024" and
+/// "10"; "+2.85σ" → "2.85"). Deterministic and cheap — the fact-floor idiom
+/// (§32 §8) turned from a test assertion into a runtime gate.
+fn number_tokens(text: &str) -> std::collections::BTreeSet<String> {
+    let mut out = std::collections::BTreeSet::new();
+    let mut cur = String::new();
+    let flush = |cur: &mut String, out: &mut std::collections::BTreeSet<String>| {
+        if cur.is_empty() {
+            return;
+        }
+        let cleaned = cur.replace(',', "");
+        let trimmed = cleaned.trim_matches('.');
+        if trimmed.chars().any(|c| c.is_ascii_digit()) {
+            out.insert(trimmed.to_string());
+        }
+        cur.clear();
+    };
+    for c in text.chars() {
+        if c.is_ascii_digit() || ((c == '.' || c == ',') && !cur.is_empty()) {
+            cur.push(c);
+        } else {
+            flush(&mut cur, &mut out);
+        }
+    }
+    flush(&mut cur, &mut out);
+    out
+}
+
+/// The numbers a framing may cite: every number token in the report's
+/// computed content (summary, section headings/tables/headlines, caveats),
+/// PLUS each token's integer part — so "400" faithfully cites "400.25"
+/// without loosening the gate to arbitrary rounding.
+fn findings_number_set(report: &Report) -> std::collections::BTreeSet<String> {
+    let mut text = report.summary.join("\n");
+    for s in &report.sections {
+        text.push('\n');
+        text.push_str(&s.heading);
+        text.push('\n');
+        text.push_str(&s.result_markdown);
+        if let Some(h) = &s.headline {
+            text.push('\n');
+            text.push_str(h);
+        }
+    }
+    text.push('\n');
+    text.push_str(&report.caveats.join("\n"));
+    with_integer_parts(number_tokens(&text))
+}
+
+/// The summary headlines' own numbers (the "omits them" arm of the gate).
+fn summary_number_set(report: &Report) -> std::collections::BTreeSet<String> {
+    with_integer_parts(number_tokens(&report.summary.join("\n")))
+}
+
+fn with_integer_parts(
+    tokens: std::collections::BTreeSet<String>,
+) -> std::collections::BTreeSet<String> {
+    let mut out = tokens.clone();
+    for t in &tokens {
+        if let Some((int, _)) = t.split_once('.') {
+            if !int.is_empty() {
+                out.insert(int.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// §38 §4: the framing consistency floor, as a GATE. An accepted framing
+/// must (a) introduce NO number outside the findings set — an invented digit
+/// is discarded exactly like a runaway — and (b) engage the computed
+/// headlines: when the summary carries numbers, a framing citing none of
+/// them is ungrounded fluff and falls back to deterministic framing. Every
+/// tier passes through here, cloud included.
+fn framing_number_gate(
+    framing: &str,
+    findings: &std::collections::BTreeSet<String>,
+    summary: &std::collections::BTreeSet<String>,
+) -> bool {
+    let cited = number_tokens(framing);
+    if !cited.is_subset(findings) {
+        return false;
+    }
+    if !summary.is_empty() && cited.is_disjoint(summary) {
+        return false;
+    }
+    true
+}
+
+/// A framing call's raw outcome, before the accept gates.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NarrateRaw {
+    /// The model produced text (still subject to the accept gates).
+    Text(String),
+    /// The bridge refused the call: the collected stream carries the
+    /// engine-stamped FM_OVERFLOW note (§32 §7) — the ladder's retry signal.
+    Overflow,
+    /// Nothing usable came back (empty stream, guardrail, transport error).
+    Unavailable,
+}
+
+/// Collect one framing call to a raw outcome (the synth.rs streaming-collect
+/// idiom with no UI sink). The FM_OVERFLOW silence note is recognized as
+/// `Overflow` so the §2 ladder can retry; a guardrail refusal or an empty
+/// stream is `Unavailable` — retrying those with less context has no basis.
+async fn collect_narration(
+    prompt: &str,
+    ctx: &[crate::llm::Ctx],
+    cfg: &crate::llm::ModelCfg,
+) -> NarrateRaw {
     use futures::StreamExt;
     let mut stream =
         crate::llm::stream_answer(prompt.to_string(), ctx.to_vec(), cfg.clone(), Vec::new(), None);
@@ -567,12 +844,70 @@ async fn narrate(prompt: &str, ctx: &[crate::llm::Ctx], cfg: &crate::llm::ModelC
     while let Some(d) = stream.next().await {
         buf.push_str(&d);
     }
-    let trimmed = buf.trim();
-    if trimmed.is_empty() || trimmed.chars().count() > NARRATION_CHAR_CAP {
-        None
-    } else {
-        Some(trimmed.to_string())
+    if buf.contains(crate::llm::FM_OVERFLOW_NOTE) {
+        return NarrateRaw::Overflow;
     }
+    if buf.contains(crate::llm::FM_GUARDRAIL_NOTE) {
+        return NarrateRaw::Unavailable;
+    }
+    let trimmed = buf.trim();
+    if trimmed.is_empty() {
+        NarrateRaw::Unavailable
+    } else {
+        NarrateRaw::Text(trimmed.to_string())
+    }
+}
+
+/// §38 §2: the framing overflow ladder, generic over the model call so the
+/// policy is testable without a model. Attempt 1 uses the packed findings;
+/// on an FM_OVERFLOW refusal, `budget::overflow_retry_verdict` grants ONE
+/// retry with the headline-only findings; a second refusal is the
+/// deterministic engine framing — there is never a third call. Text
+/// outcomes return for the accept gates; `Unavailable` falls back at once.
+async fn narrate_ladder<F, Fut>(mut call: F) -> Option<String>
+where
+    F: FnMut(bool) -> Fut,
+    Fut: std::future::Future<Output = NarrateRaw>,
+{
+    let mut overflows: u32 = 0;
+    loop {
+        match call(overflows > 0).await {
+            NarrateRaw::Text(t) => return Some(t),
+            NarrateRaw::Unavailable => return None,
+            NarrateRaw::Overflow => match crate::budget::overflow_retry_verdict(overflows) {
+                crate::budget::OverflowStep::RetryHeadlineOnly => overflows += 1,
+                crate::budget::OverflowStep::EngineFallback => return None,
+            },
+        }
+    }
+}
+
+/// One templated framing narration: the §2 ladder over the packed/headline
+/// grounding, then the accept gates — the runaway length cap (a narration
+/// past `NARRATION_CHAR_CAP` reads as an error response, not a paragraph)
+/// and the §4 digit-subset gate (an invented number, or a framing that
+/// ignores every headline figure, is discarded the same way). Any rejection
+/// ⇒ None, so the render falls back to deterministic framing.
+async fn narrate(
+    prompt: &str,
+    packed_ctx: &[crate::llm::Ctx],
+    headline_ctx: &[crate::llm::Ctx],
+    findings_nums: &std::collections::BTreeSet<String>,
+    summary_nums: &std::collections::BTreeSet<String>,
+    cfg: &crate::llm::ModelCfg,
+) -> Option<String> {
+    let text = narrate_ladder(|headline_only| {
+        let ctx = if headline_only { headline_ctx } else { packed_ctx };
+        collect_narration(prompt, ctx, cfg)
+    })
+    .await?;
+    if text.chars().count() > NARRATION_CHAR_CAP {
+        return None;
+    }
+    if !framing_number_gate(&text, findings_nums, summary_nums) {
+        return None;
+    }
+    Some(text)
 }
 
 /// The default vault subfolder for a standalone report (no named investigation) —
@@ -765,6 +1100,7 @@ mod tests {
             template: ReportTemplate::Standard,
             intro: None,
             discussion: None,
+            framing_by: None,
             summary: vec!["headline".into()],
             caveats: Vec::new(),
             sections: vec![ReportSection {
@@ -772,6 +1108,7 @@ mod tests {
                 question: "q".into(),
                 result_markdown: md.clone(),
                 sql: "SELECT 1".into(),
+                headline: None,
             }],
         };
         let llama = report_findings_ctx(&report, crate::budget::Tier::Llama6144);
@@ -779,6 +1116,242 @@ mod tests {
         let apple = report_findings_ctx(&report, crate::budget::Tier::AppleFm4096);
         assert!(!apple[0].text.contains("| r9 | 9 |"), "apple grounding is capped");
         assert!(apple[0].text.contains("Key findings:"), "headlines always ride");
+    }
+
+    /// A section with a `rows`-row DIGIT-HEAVY table (five wide numeric
+    /// columns — the §36 motivation: even the 5-row capped digest of such a
+    /// table is expensive under the digit-aware estimate) and an engine
+    /// headline — the §38 §1 fixtures.
+    fn section_with_rows(i: usize, rows: usize) -> ReportSection {
+        let mut md =
+            String::from("| period | total | prior | delta | cumulative |\n| --- | --- | --- | --- | --- |\n");
+        for r in 0..rows {
+            md.push_str(&format!(
+                "| 2024-{:02} | {v}00214.55 | {v}00108.20 | 106.3512 | {v}9021475.07 |\n",
+                (r % 12) + 1,
+                v = 100 + i * 10 + r
+            ));
+        }
+        ReportSection {
+            heading: format!("Analysis {i}"),
+            question: format!("What does analysis {i} show?"),
+            result_markdown: md,
+            sql: "SELECT 1".into(),
+            headline: Some(format!("Analysis {i} peaks at {}9", 100 + i)),
+        }
+    }
+
+    fn report_with_sections(n: usize, rows: usize) -> Report {
+        let sections: Vec<ReportSection> = (0..n).map(|i| section_with_rows(i, rows)).collect();
+        Report {
+            title: "Investigate wide.csv".into(),
+            generated_ms: 0,
+            summary: sections.iter().filter_map(|s| s.headline.clone()).collect(),
+            sections,
+            caveats: Vec::new(),
+            template: ReportTemplate::Standard,
+            intro: None,
+            discussion: None,
+            framing_by: None,
+        }
+    }
+
+    #[test]
+    fn twelve_sections_fit_the_4k_framing_budget_by_construction() {
+        // §38 §1: the packed findings PLUS the measured prompt overhead sit
+        // inside the tier's whole-input token budget under the digit-aware
+        // estimate — the row heuristic could not promise this; packing does.
+        let report = report_with_sections(12, 40);
+        let ctx = report_findings_ctx(&report, crate::budget::Tier::AppleFm4096);
+        let budget = crate::budget::input_token_budget(
+            crate::budget::Tier::AppleFm4096,
+            crate::budget::CallType::ReportFraming,
+        );
+        let total = framing_overhead_tokens() + crate::budget::estimate_tokens(&ctx[0].text);
+        assert!(total <= budget, "packed findings + overhead {total} > budget {budget}");
+        // EVERY section is present (at least as its headline line), and the
+        // summary spine always rides.
+        assert!(ctx[0].text.contains("Key findings:"));
+        for i in 0..12 {
+            assert!(ctx[0].text.contains(&format!("Analysis {i}")), "section {i} vanished");
+        }
+    }
+
+    #[test]
+    fn a_deliberately_bloated_report_degrades_per_section_yet_still_fits() {
+        // §38 §1/acceptance 1: past what the budget can hold, sections fall
+        // back to their headline lines INSTEAD of overflowing — the packed
+        // text still fits by construction and no section vanishes.
+        let report = report_with_sections(24, 40);
+        let ctx = report_findings_ctx(&report, crate::budget::Tier::AppleFm4096);
+        let budget = crate::budget::input_token_budget(
+            crate::budget::Tier::AppleFm4096,
+            crate::budget::CallType::ReportFraming,
+        );
+        let total = framing_overhead_tokens() + crate::budget::estimate_tokens(&ctx[0].text);
+        assert!(total <= budget, "packed findings + overhead {total} > budget {budget}");
+        let full_digests = ctx[0].text.matches("| period | total |").count();
+        assert!(
+            full_digests < 24,
+            "a bloated report cannot carry every full digest — got {full_digests}"
+        );
+        assert!(full_digests > 0, "the budget still holds the largest digests");
+        for i in 0..24 {
+            assert!(ctx[0].text.contains(&format!("Analysis {i}")), "section {i} vanished");
+        }
+    }
+
+    #[test]
+    fn three_sections_keep_their_five_row_digests_unchanged() {
+        // §38 §1: a small report packs everything — byte-identical to the
+        // §32 §6 shape (summary block + per-section capped digests, in
+        // document order), so the existing grounding pins hold.
+        let report = report_with_sections(3, 10);
+        let ctx = report_findings_ctx(&report, crate::budget::Tier::AppleFm4096);
+        let mut expected = findings_summary_block(&report);
+        for s in &report.sections {
+            expected.push_str(&section_full_digest(s));
+        }
+        assert_eq!(ctx[0].text, expected, "small reports ground exactly as before");
+        assert_eq!(
+            ctx[0].text.matches("first 5 rows of the section's table").count(),
+            3,
+            "each 10-row table caps to its 5-row digest"
+        );
+    }
+
+    #[test]
+    fn whole_framing_prompt_fits_the_4k_window_end_to_end() {
+        // §38 §2: the ASSEMBLED call — compact system prompt + the longest
+        // framing instruction + the context wrapper + the §1 packed findings
+        // — sits inside 90% of 4,096 minus the framing reserve, under the
+        // digit-aware estimate. (test/budget.test.mjs pins the token
+        // arithmetic and the reserve on the node side.)
+        let report = report_with_sections(12, 40);
+        let ctx = report_findings_ctx(&report, crate::budget::Tier::AppleFm4096);
+        let instruction = [
+            IMRAD_INTRO_PROMPT,
+            IMRAD_DISCUSSION_PROMPT,
+            BLUF_BOTTOM_LINE_PROMPT,
+            BLUF_MEANING_PROMPT,
+        ]
+        .iter()
+        .map(|p| crate::budget::estimate_tokens(p))
+        .max()
+        .unwrap();
+        let wrapper = format!("[1] {}\n\nQuestion: \n", ctx[0].name);
+        let total = crate::budget::estimate_tokens(crate::llm::SYSTEM_PROMPT_COMPACT)
+            + instruction
+            + crate::budget::estimate_tokens(&wrapper)
+            + crate::budget::estimate_tokens(&ctx[0].text);
+        let budget = crate::budget::input_token_budget(
+            crate::budget::Tier::AppleFm4096,
+            crate::budget::CallType::ReportFraming,
+        );
+        assert!(total <= budget, "assembled framing call {total} > budget {budget}");
+        // And the packing's reserved overhead was honest: the real
+        // instruction + wrapper fit inside the fixed allowance.
+        let reserved = framing_overhead_tokens()
+            - crate::budget::estimate_tokens(crate::llm::SYSTEM_PROMPT_COMPACT);
+        assert!(
+            instruction + crate::budget::estimate_tokens(&wrapper) <= reserved,
+            "instruction+wrapper exceed the packing allowance ({reserved})"
+        );
+    }
+
+    #[test]
+    fn framing_ladder_retries_once_headline_only_then_engine_framing() {
+        // §38 §2: FM_OVERFLOW → ONE retry with headline-only findings; a
+        // second refusal ⇒ None (deterministic framing) — never a third call.
+        use std::cell::RefCell;
+        let calls: RefCell<Vec<bool>> = RefCell::new(Vec::new());
+        let out = futures::executor::block_on(narrate_ladder(|headline_only| {
+            calls.borrow_mut().push(headline_only);
+            std::future::ready(NarrateRaw::Overflow)
+        }));
+        assert_eq!(out, None, "two refusals fall back to engine framing");
+        assert_eq!(*calls.borrow(), vec![false, true], "packed first, headline retry, no third");
+
+        // Overflow then success: the retry's text comes back.
+        let calls2: RefCell<u32> = RefCell::new(0);
+        let out2 = futures::executor::block_on(narrate_ladder(|headline_only| {
+            *calls2.borrow_mut() += 1;
+            std::future::ready(if headline_only {
+                NarrateRaw::Text("Framed from headlines.".into())
+            } else {
+                NarrateRaw::Overflow
+            })
+        }));
+        assert_eq!(out2.as_deref(), Some("Framed from headlines."));
+        assert_eq!(*calls2.borrow(), 2);
+
+        // A guardrail/empty outcome never retries — straight to fallback.
+        let calls3: RefCell<u32> = RefCell::new(0);
+        let out3 = futures::executor::block_on(narrate_ladder(|_| {
+            *calls3.borrow_mut() += 1;
+            std::future::ready(NarrateRaw::Unavailable)
+        }));
+        assert_eq!(out3, None);
+        assert_eq!(*calls3.borrow(), 1, "Unavailable is terminal");
+    }
+
+    #[test]
+    fn overflow_note_is_recognized_and_headline_ctx_is_tiny() {
+        // The ladder's retry signal is the engine-stamped §32 §7 note…
+        assert!(crate::llm::FM_OVERFLOW_NOTE.contains("didn't fit the on-device model's window"));
+        // …and the retry grounding always fits: headline-only over a bloated
+        // report is a dozen short lines, far under any tier's budget.
+        let report = report_with_sections(24, 40);
+        let ctx = headline_findings_ctx(&report);
+        assert!(
+            crate::budget::estimate_tokens(&ctx[0].text)
+                < crate::budget::input_token_budget(
+                    crate::budget::Tier::AppleFm4096,
+                    crate::budget::CallType::ReportFraming,
+                ) / 2,
+            "headline-only grounding must fit with room to spare"
+        );
+        assert!(ctx[0].text.contains("Analysis 23:"), "every section is present");
+        assert!(!ctx[0].text.contains("| period |"), "no tables in the retry grounding");
+    }
+
+    #[test]
+    fn packing_upgrades_largest_first_and_keeps_document_order() {
+        // Two sections: a big table and a small one. With a budget that fits
+        // the floor plus ONLY the big digest's upgrade, largest-value-first
+        // upgrades the big one and leaves the small one headline-only…
+        let report = {
+            let mut r = report_with_sections(2, 0);
+            r.sections[0] = section_with_rows(0, 40); // big
+            r.sections[1] = section_with_rows(1, 3); // small
+            r
+        };
+        let floor: usize = report
+            .sections
+            .iter()
+            .map(|s| crate::budget::estimate_tokens(&section_headline_line(s)))
+            .sum::<usize>()
+            + crate::budget::estimate_tokens(&findings_summary_block(&report));
+        let big_delta = crate::budget::estimate_tokens(&section_full_digest(&report.sections[0]))
+            - crate::budget::estimate_tokens(&section_headline_line(&report.sections[0]));
+        let packed = pack_findings(&report, floor + big_delta);
+        assert!(
+            packed.contains("Analysis 0:\n| period | total |"),
+            "the largest digest won the budget: {packed}"
+        );
+        assert!(
+            packed.contains("Analysis 1: Analysis 1 peaks at 1019\n"),
+            "the small section stayed headline-only: {packed}"
+        );
+        // …and document order is preserved regardless of packing order.
+        assert!(
+            packed.find("Analysis 0").unwrap() < packed.find("Analysis 1").unwrap(),
+            "document order survives"
+        );
+        // A floor-only budget degrades EVERY section to its headline line.
+        let all_floor = pack_findings(&report, floor);
+        assert!(!all_floor.contains("| period | total |"), "no digest fits: {all_floor}");
+        assert!(all_floor.contains("Analysis 0: Analysis 0 peaks at 1009\n"));
     }
 
     #[test]
@@ -803,6 +1376,84 @@ mod tests {
         assert!(report.sections.is_empty());
         assert_eq!(report.summary.len(), 1);
         assert!(report.summary[0].contains("Nothing to analyze"));
+    }
+
+    #[test]
+    fn number_tokens_normalize_the_shapes_findings_actually_carry() {
+        let toks = number_tokens("$4,200.50 rose +2.85σ over 2024-10; see row 7.");
+        for t in ["4200.50", "2.85", "2024", "10", "7"] {
+            assert!(toks.contains(t), "{t} missing from {toks:?}");
+        }
+        assert!(!toks.contains("4,200.50"), "separators are stripped");
+        assert!(!toks.contains("7."), "sentence punctuation is trimmed");
+        assert!(number_tokens("no digits here").is_empty());
+    }
+
+    #[test]
+    fn digit_gate_discards_invention_and_headline_free_fluff_accepts_faithful() {
+        // §38 §4 / acceptance 3: a fixed battery result…
+        let report = report_with_sections(2, 3);
+        let findings = findings_number_set(&report);
+        let summary = summary_number_set(&report);
+        // …accepts a faithful framing (its numbers are the report's own, and
+        // a headline figure is present)…
+        let faithful = "Analysis 0 peaks at 1009, the strongest movement in the series.";
+        assert!(framing_number_gate(faithful, &findings, &summary), "faithful framing accepted");
+        // …and the integer part of a findings decimal counts as faithful.
+        assert!(
+            framing_number_gate("The delta held near 106 across periods, peaking at 1009.", &findings, &summary),
+            "integer part of 106.3512 cites faithfully"
+        );
+        // An INVENTED number (present nowhere in the findings) is discarded…
+        assert!(
+            !framing_number_gate("Analysis 0 peaks at 1009, roughly 37% above trend.", &findings, &summary),
+            "37 appears nowhere in the findings"
+        );
+        // …and so is number-free fluff that engages no headline figure.
+        assert!(
+            !framing_number_gate("The data shows interesting trends worth watching.", &findings, &summary),
+            "a framing citing no headline number is ungrounded fluff"
+        );
+        // Headline numbers provably present in accepted framings: acceptance
+        // requires a non-empty intersection with the summary set.
+        let cited = number_tokens(faithful);
+        assert!(!cited.is_disjoint(&summary), "the accepted framing carries a headline number");
+    }
+
+    #[test]
+    fn framing_footer_names_the_author_on_both_templates_only() {
+        // §38 §3: model-framed templates carry the narrated-by line; the
+        // engine-framed ones the model-unavailable line; Standard carries
+        // NEITHER (its byte-stability contract predates the footer).
+        let mut report = report_with_sections(1, 3);
+        for template in [ReportTemplate::ScientificMethod, ReportTemplate::BusinessReport] {
+            report.template = template;
+            report.framing_by = Some("the private model".into());
+            report.intro = Some("A framed introduction.".into());
+            let md = render_markdown(&report);
+            assert!(
+                md.ends_with("\n_Framing narrated by the private model from the computed findings._\n"),
+                "model footer on {template:?}: {md}"
+            );
+            report.framing_by = Some("your model".into());
+            assert!(
+                render_markdown(&report)
+                    .ends_with("\n_Framing narrated by your model from the computed findings._\n"),
+                "the hosted-provider label renders"
+            );
+            report.framing_by = None;
+            report.intro = None;
+            let md = render_markdown(&report);
+            assert!(
+                md.ends_with(
+                    "\n_Framing written by the engine from the computed findings (model unavailable)._\n"
+                ),
+                "engine footer on {template:?}: {md}"
+            );
+        }
+        report.template = ReportTemplate::Standard;
+        let md = render_markdown(&report);
+        assert!(!md.contains("Framing "), "the Standard render carries no framing footer: {md}");
     }
 
     #[test]
