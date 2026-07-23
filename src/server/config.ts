@@ -20,7 +20,17 @@ export function vaultDir(): string {
   return dir;
 }
 
-/** Hidden state directory for inclusion flags, profile, and indexes. */
+/**
+ * Hidden state directory for inclusion flags, profile, and indexes.
+ *
+ * §41: the Rust engine is platform-aware here — on iOS the state home moves
+ * out of the Documents vault into the app's Application Support container
+ * (LIGHTHOUSE_APP_STATE_DIR, with LIGHTHOUSE_STATE_HOME_LEGACY=1 as the
+ * migration's fail-open switch). The TS twin never runs on iOS, so this
+ * mirrors the seam's SHAPE only: web/dev behavior is unchanged (the
+ * in-vault `.rag-vault`, exactly as before). PARITY: config.rs::state_dir —
+ * wire-compatible, deliberately not byte-twinned (platform arms differ).
+ */
 export function stateDir(): string {
   const dir = path.join(vaultDir(), ".rag-vault");
   fs.mkdirSync(dir, { recursive: true });

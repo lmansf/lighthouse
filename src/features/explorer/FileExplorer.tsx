@@ -2403,8 +2403,8 @@ export function FileExplorer() {
             <DialogTitle>Remove from vault?</DialogTitle>
             <DialogContent>
               {pendingRemove?.length === 1
-                ? "This item will be moved to the vault's trash and dropped from the index. Linked items are only unlinked — your real files stay where they are. You can Undo right after, or restore later from .rag-vault/trash."
-                : `These ${pendingRemove?.length ?? 0} items will be moved to the vault's trash and dropped from the index. Linked items are only unlinked. You can Undo right after, or restore later from .rag-vault/trash.`}
+                ? "This item will be moved to the vault's trash and dropped from the index. Linked items are only unlinked — your real files stay where they are. You can Undo right after."
+                : `These ${pendingRemove?.length ?? 0} items will be moved to the vault's trash and dropped from the index. Linked items are only unlinked. You can Undo right after.`}
               {removeError && (
                 <Text as="p" className={styles.removeError}>
                   {removeError}

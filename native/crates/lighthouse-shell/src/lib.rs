@@ -6,6 +6,7 @@
 
 pub mod boot_guard;
 pub mod commands;
+pub mod state_home;
 
 /// Launch the platform's default opener for a path, detached. Desktop-only:
 /// the mobile shells have no spawnable `open`/`xdg-open` equivalent (§3 will

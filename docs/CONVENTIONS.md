@@ -178,9 +178,24 @@ state (answers work; writes refuse with one honest log line) instead of
 clobbering fields it doesn't know. Never remove or re-type an existing field;
 never write a state file you only partially understand.
 
-Open owner decision (doc-only, flagged by §39): on iOS the `.rag-vault` state
-directory lives INSIDE the user-visible Documents tree — visible in Files and
-eligible for iCloud sync, which invites sync conflicts on `state.json`
-(exactly the multi-writer scenario the guard can only soften, not solve).
-Moving it to Application Support trades that risk for invisibility. Owner
-call; neither this doc nor the guard takes it.
+## Where state lives (§41): Documents is the user's, app-state is ours
+
+One rule: the vault (on iOS, Documents) holds the USER'S files; everything
+the app derives or must keep private is app-state under the shell's private
+data dir (`LIGHTHOUSE_APP_STATE_DIR` — the Application Support container on
+iOS, the pinned `com.lighthouse.app` base on desktop). Secrets, settings,
+the signed-in profile, connector tokens, and downloaded models were ALWAYS
+app-state — `bootstrap_env` derives every one of those env vars from that
+same base — so §41 moved none of them, and nothing is ever migrated twice.
+What §41 did move (iOS ONLY) is the last straggler: the engine's
+`.rag-vault` home (state.json, index, extraction cache) left the Documents
+tree for Application Support behind a lossless, idempotent migration
+(`lighthouse-shell::state_home`): durable copies, iCloud conflict variants
+resolved newest-by-`written_by` with an mtime tiebreak, every loser
+preserved in `.rag-vault-legacy-bak/`, and ANY failure runs that launch
+from the legacy dir with one honest log line — never a refused boot, never
+data loss. Desktop state paths are byte-identical to pre-§41; the TS twin
+mirrors the shape only. Within the relocated home the extraction cache is
+marked do-not-back-up (regenerable); state.json and the index stay backed
+up. §42 note: iOS model downloads belong under Application Support too
+(`LIGHTHOUSE_MODELS_DIR` already points there) — never under Documents.

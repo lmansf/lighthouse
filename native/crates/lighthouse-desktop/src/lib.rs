@@ -349,6 +349,23 @@ fn bootstrap_env(app: &AppHandle) {
             let _ = fs::remove_file(data.join(name));
         }
         std::env::set_var("LIGHTHOUSE_APP_STATE_DIR", &data);
+
+        // §41 (iOS only): move the engine state home out of the user-visible
+        // Documents vault into this Application Support container — BEFORE
+        // any engine call opens state. The migration is lossless and
+        // idempotent; on ANY failure it flips LIGHTHOUSE_STATE_HOME_LEGACY=1
+        // so this launch runs from the legacy dir (never a refuse-to-boot).
+        // The one-line outcome goes to shell.log for field diagnosability,
+        // and the regenerable extraction cache under the new home is marked
+        // do-not-back-up (state.json and the index stay backed up).
+        #[cfg(all(not(desktop), target_os = "ios"))]
+        {
+            let legacy = lighthouse_shell::state_home::legacy_state_dir(&vault_dir_setting(app));
+            let new_home = data.join(".rag-vault");
+            let outcome = lighthouse_shell::state_home::ensure_state_home(&legacy, &new_home);
+            shell_log(app, &outcome);
+            lighthouse_shell::state_home::mark_cache_no_backup(&new_home);
+        }
     }
     // Bundled offline assets (llama-server, embed + OCR models). Packaged
     // builds have them under the resource dir; dev runs fall back to the
