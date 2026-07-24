@@ -7118,3 +7118,333 @@ numbered section. Open ONE PR titled "Compact-shell polish:
 composer, tab transitions, swipe-dismiss, version, widget option";
 stop at the PR.
 ```
+
+## 44. Never report an unverified number: close the silent RAG fall-through (2026-07-23)
+
+The most important report in the arc — a violation of the constitution
+("the model never does arithmetic; every number is SQL-verified"). On
+mobile, stats come out wrong and no SQL is shown. Diagnosis on main @
+0.14.11 CORRECTED the obvious hypothesis:
+- **Analytics is NOT cloud-gated.** NL→SQL→DataFusion→narrate runs
+  on-device (has_real_model is true for "local"; synth.rs:1513, 366-374;
+  the branch is shot through with tier.is_apple_fm() handling; is_cloud
+  is a privacy filter, a no-op on device).
+- **The bug is a SILENT FALL-THROUGH.** The design comment says it
+  plainly (synth.rs:1509-1512): "Any failure falls through silently to
+  the paths below — analytics can only add capability." On the weakest
+  tier the on-device model is handed a STARVED SQL prompt (one few-shot
+  SQL_FEWSHOTS[..1] + a pruned schema card; analytics.rs:5678,
+  synth.rs:1580); when it emits no parseable SELECT (extract_sql→None,
+  after a 2-round retry), outcome=None and control falls to raw-chunk
+  RAG — where the model reads/miscomputes numbers from raw CSV CELL
+  VALUES with NO deterministic guard (only the soft prompt line
+  llm.rs:249). Both symptoms are the SAME event: the ask landed on RAG,
+  not analytics — so there's no SQL (none ran) and the numbers are the
+  model's, not the engine's.
+- **The invariant holds only on the analytics SUCCESS path.** The
+  digit-gate that enforces "only findings numbers" exists ONLY in
+  reports.rs (§38), never wrapping general RAG narration.
+  certified_metrics/reconcile_metric live only on the analytics path.
+- **Build-on already exists:** table_profile() (table_profile.rs:243)
+  computes AUTHORITATIVE sum/mean/min/max/count per numeric column
+  ("computed exactly by Lighthouse … authoritative") — but it's only
+  injected as ADVISORY context in the multi-doc map path
+  (synth.rs:2522), and profileable files are EXCLUDED from single-doc
+  focus (synth.rs:2673). insights.rs has deterministic detectors. The
+  §36/§37 "route tabular doc-asks to the deterministic path" was never
+  built (docs-only).
+
+The fix is the invariant made real: a numeric claim about a data file
+either comes from the engine (SQL result / table_profile /
+certified_metric) or is not presented as fact — never bare model
+numbers, never silent RAG.
+
+### Prompt
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first, local-first analytics AI harness: Rust engine
+(native/crates/lighthouse-core, lighthouse-shell), byte-compatible
+TS twin (src/server/), React UI (src/). Read CLAUDE.md,
+docs/CONVENTIONS.md, docs/analytics-beam.md, and roadmap §44 before
+writing code. THIS IS A TRUST FIX — the constitution says every
+number is SQL-verified; today the on-device path silently violates
+it. GOAL: a numeric claim about a data file is NEVER presented as
+fact unless the ENGINE produced it (a DataFusion SQL result, a
+table_profile computation, or a certified metric); the verifying
+SQL/computation is shown by default; and the fix holds on the
+apple-fm and Tier-2 tiers where it's breaking. Deterministic
+analytics semantics unchanged — this widens their reach and stops
+the leak.
+
+1. Widen deterministic coverage so stat asks LAND on a verified path
+   (two complementary routes).
+   a. Strengthen on-device NL→SQL so it succeeds far more often:
+      give apple-fm/llama tiers more than one few-shot
+      (analytics.rs:5678 SQL_FEWSHOTS[..1] → a tier-appropriate set
+      that still fits the §36/§38 budget), and enrich the pruned
+      schema card (synth.rs:1580) with the column types + one
+      example value per candidate column the question mentions (the
+      model fails for lack of schema, not reasoning). Add one more
+      execute-retry round (synth.rs:2135) with the DataFusion error
+      fed back as a correction hint. Budget-checked (register the
+      call type per §39; digit-aware estimator).
+   b. Deterministic PROFILE as a first-class ANSWER for tabular
+      files (not advisory context). For a profileable file + a
+      numeric/stat ask, when NL→SQL does not produce an executed
+      query, answer FROM table_profile()/certified_metrics
+      (authoritative sum/mean/min/max/count, per-column) — reverse
+      the single-doc exclusion (synth.rs:2673-2674) and promote the
+      profile from context (synth.rs:2522-2534) to the answer, with
+      its computation shown as provenance (the columns + operations
+      the engine ran — a "computed exactly by Lighthouse" block that
+      reads like the SQL disclosure). This is the robust on-device
+      verified path for exactly the sleep-CSV case.
+
+2. Close the silent fall-through — the numeric guard (the invariant).
+   At the seam where analytics produced no outcome
+   (synth.rs:1509-1512, 2166, 2391): if the question is
+   numeric/statistical (analytics_cue matched OR it targets a
+   tabular/profileable source) and neither SQL nor the §1b profile
+   answered it, the model MUST NOT narrate numbers from raw chunks.
+   Enforce with a deterministic post-generation guard (port the
+   reports.rs digit-gate — findings_number_set — into a shared
+   engine helper, twins): on the non-analytics path over a tabular
+   source, any numeric token in the answer that is not present
+   verbatim in an ENGINE-verified value (SQL result / profile /
+   certified metric) means the answer is not verified → the engine
+   degrades to an honest, number-free response ("I can read this
+   file but couldn't compute a verified statistic for that — try
+   phrasing it as 'average <column>' or 'total <x> by <y>'", naming
+   the columns it sees) rather than presenting the model's figures.
+   Never silently. A qualitative (non-numeric) RAG answer over prose
+   documents is unaffected — the guard triggers ONLY on
+   numeric-claims-about-tabular-data.
+
+3. SQL/computation shown by default on every verified numeric answer.
+   The *Query used:* disclosure (streamed at synth.rs:2260, tier-
+   independent) and the §1b profile-computation block render on every
+   engine-verified numeric answer, on mobile as on desktop (no
+   compact gate hides them — confirm, and if the §35 collapse ever
+   touches lh-query-used, exclude it). A verified answer always shows
+   its provenance; an unverified one says so.
+
+4. The invariant as a test (this is the acceptance floor, both twins
+   where twinned). An on-device (forced-tier apple-fm-4096, desktop
+   7B rig) stat ask over a numeric CSV: the answer EITHER shows
+   engine provenance (executed SQL or the profile computation) with
+   numbers that match the engine's exactly, OR is the honest
+   number-free degradation — NEVER bare model numbers with no
+   provenance. Fixture: the sleep-CSV "summarize / what's the
+   average X" ask answers with a verified profile + shown
+   computation, numbers equal to table_profile()'s, counter 0.
+   Adversarial fixture: force SQL-fail + a non-profileable numeric
+   ask → the number-free degradation, asserted to contain no
+   free-floating figure.
+
+5. Codify the invariant. Add to docs/CONVENTIONS.md (the constitution
+   section): "Numbers about data are engine-verified or not shown —
+   the model narrates the engine's figures, it never emits its own;
+   the non-analytics path is forbidden numeric claims about tabular
+   sources (the §44 guard)." Cite this as the canonical trust rule.
+
+6. Stamps + gates. Bump 0.14.11 → 0.14.12 across all SEVEN stamps.
+   Full node + cargo suites, release-smoke, ios-build green; the
+   forced-tier rig scenarios (incl. the §44 fixtures) pass. PARITY
+   twins; byte-pinned degradation copy.
+
+Constraints. Deterministic analytics numbers unchanged (this widens
+reach + guards the leak; it never changes a computed value). Cloud
+tiers keep today's behavior except gaining §1a's stronger prompt and
+the §2 guard (which should almost never trigger on cloud — pin that
+a cloud stat ask still runs SQL). No telemetry. SharePoint plumbing
+untouched. The guard degrades honestly — it never fabricates a
+verified answer to satisfy itself.
+
+Acceptance:
+1. On-device stat ask over a CSV: verified answer with shown SQL or
+   profile computation, numbers exactly the engine's; the sleep-CSV
+   repro no longer shows wrong stats or missing provenance.
+2. When neither SQL nor profile can verify a numeric ask, the answer
+   is honestly number-free (fixture-asserted no free figures) — never
+   silent RAG numbers.
+3. Verified numeric answers show SQL/computation by default on
+   mobile and desktop.
+4. The invariant test is green on the forced-tier rig; cloud stat
+   asks still run SQL (pin).
+5. CONVENTIONS.md carries the trust rule; suites + release-smoke +
+   ios-build green; seven stamps read 0.14.12.
+
+Environment. Engine/twin/guard/profile-route + fixtures fully
+container-testable (the forced-tier rig needs the desktop 7B); a
+device confirmation of the sleep-CSV ask (house convention). Note
+the in-flight origin/claude/next-15-5-21 prunes test/statRun.test.mjs
+— rebase and reconcile. One commit per numbered section. Open ONE PR
+titled "Trust: never report an unverified number (close the silent
+RAG fall-through)"; stop at the PR.
+```
+
+## 45. Follow-ups stay in view: center the chat when the keyboard opens (2026-07-23)
+
+Report @ 0.14.11: typing a follow-up on mobile, the chat you're
+replying to is scrolled out of view. Diagnosis: the transcript
+(ChatPanel bodyRef) is a separate scroll container from the shell;
+AppShell reserves keyboard space (keyboardInset padding, AppShell.tsx
+:753) and pins the window against wedging (unwedge → window.scrollTo(0,0),
+:412-429), but NOTHING scrolls bodyRef on composer focus. The
+read-from-top hold (ChatPanel.tsx:3199-3246) is dormant when no ask is
+in flight and deliberately parks the answer's TOP (tail below the fold),
+so when the keyboard shrinks the viewport the latest answer is hidden.
+The composer-focus handlers only .focus() (coarse-pointer suppressed) —
+none scroll the transcript. AppShell already publishes editableFocused/
+keyboardInset via publishShellUi (:453) which ChatPanel doesn't consume.
+
+### Prompt
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first analytics harness: Tauri 2 shell (iOS via WKWebView),
+React UI (src/). Read CLAUDE.md, docs/CONVENTIONS.md, and roadmap §45.
+GOAL: on mobile, when the keyboard opens for a follow-up, the latest
+answer's tail AND the composer are brought into the reduced
+visualViewport so the user sees what they're replying to and typing.
+Engine untouched; desktop unchanged.
+
+1. Consume the shell keyboard signal in ChatPanel. AppShell already
+   publishes editableFocused + keyboardInset (publishShellUi,
+   AppShell.tsx:453-458). Subscribe in ChatPanel; when the composer
+   gains focus on compact/coarse OR keyboardUp turns true, drive the
+   TRANSCRIPT container (bodyRef) — never window (AppShell's unwedge
+   resets window) — to bring the last data-lh-turn row's BOTTOM to
+   just above keyboardInset, with the composer visible. Reuse the
+   existing programmatic writeScrollTop (ChatPanel.tsx:3173-3176) so
+   handleBodyScroll (:3248) recognizes it as our echo and does not
+   cancel a hold; reuse the jumpToLatest mechanism (:3269-3276) or
+   anchor the last turn's bottom. Debounce to the visualViewport
+   resize settling (the keyboard animates in ~250ms — scroll after
+   it settles, and on visualViewport 'resize').
+2. Don't fight the read-from-top hold. While an ask is IN FLIGHT the
+   hold owns scroll (parks the answer top so streaming reads top-
+   down) — the follow-up centering applies when NO ask is in flight
+   (the settled state where the user is composing). Gate on
+   !streaming. prefers-reduced-motion: instant, no smooth scroll (the
+   §22.4/§35 instant-scrollTop discipline).
+3. Tests + stamps. A verdict/behavior test for the focus→scroll
+   trigger (fires on compact composer-focus when settled, not during
+   streaming, targets bodyRef not window). Bump current+1 across all
+   SEVEN stamps. Suites + release-smoke + ios-build green.
+
+Constraints. Desktop/iPad-regular unchanged (the trigger is
+compact+coarse only — pin). No engine change. Never scroll window on
+compact. No telemetry.
+
+Acceptance:
+1. iPhone: tap the composer after an answer settles → the answer's
+   tail + composer are visible above the keyboard; typing shows what
+   you write. During streaming, the read-from-top behavior is
+   unchanged. Reduced-motion is instant. Desktop unchanged.
+2. Suites + release-smoke + ios-build green; seven stamps bumped.
+
+Environment. macOS + Xcode for the device/simulator keyboard pass;
+container fallback (the trigger verdict test here). Note the in-flight
+origin/claude/next-15-5-21 prunes test/touchKeyboard.test.mjs — rebase
+and reconcile. One commit per section. Open ONE PR titled "Follow-ups
+stay in view: keyboard-aware chat centering"; stop at the PR.
+```
+
+## 46. Report buttons in the investigation picker, seeded by your hypothesis (2026-07-23)
+
+Owner ask: two direct buttons — Business report, Scientific report —
+in the Investigations surface, each prompting for a hypothesis/focus
+before it runs. Diagnosis: post-§30 there is no Investigations tab —
+switching lives in the chat-header investigation PICKER (ChatPanel.tsx
+:247, :2683; opens InvestigationsNav's operations surface via
+lighthouse:open-investigations). That surface (create/switch/scope/
+rename/fork/export) is where the buttons belong. investigate_templated
+(reports.rs:504) takes NO user input today — fixed battery + template
+framing; the framing prompts (IMRAD_INTRO_PROMPT/BLUF_BOTTOM_LINE_PROMPT,
+reports.rs:488) already run through the digit-gate (findings_number_set,
+:523-533), so a user hypothesis CANNOT smuggle unverified numbers — the
+§44 trust invariant survives by construction. §37's per-answer doors are
+docs-only (unbuilt) — reuse the same investigate() entry so §37 shares it
+later. DefineMetricDialog.tsx is the input-dialog precedent; §43's
+LhDialog is the compact sheet host.
+
+### Prompt
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first analytics harness: Rust engine (native/crates/
+lighthouse-core), TS twin (src/server/), React UI (src/). Read
+CLAUDE.md, docs/CONVENTIONS.md, roadmap §29 + §44 + §46. GOAL: two
+direct report buttons — "Business report" and "Scientific report" —
+in the investigation operations surface, each opening a short
+hypothesis/focus prompt, then generating the templated report seeded
+by that input. Report GENERATION stays deterministic-body + gated
+framing (§29/§38); the user's hypothesis only seeds the framing prose,
+never a number (the §44/reports digit-gate guarantees it).
+
+1. Thread an optional hypothesis into the engine. investigate_templated
+   (reports.rs:504) gains hypothesis: Option<String> (twins + wire
+   type, serde-default, KEEP IN SYNC). Pass it into the narrate calls
+   (reports.rs:533/547) so it seeds IMRAD_INTRO_PROMPT (the "what is
+   being investigated and why" clause — §29's "ground in something
+   tangible" is still the verified findings) / BLUF_BOTTOM_LINE_PROMPT
+   (the focus/decision framing). The existing digit-gate
+   (findings_number_set, reports.rs:523-533) is UNCHANGED and still
+   refuses any figure not in the verified findings — assert in a test
+   that a hypothesis containing a bogus number ("prove revenue is
+   $9,999,999") cannot inject it into the report. If hypothesis is
+   None, behavior is byte-identical to today (pin).
+2. The two buttons. In the investigation operations surface
+   (InvestigationsNav — reached via the header picker
+   lighthouse:open-investigations), add a "Reports" action row with
+   two buttons: Scientific report / Business report (registry icons,
+   §31). Gate on: the investigation resolves a profileable, investigable
+   table (Date+Numeric — reuse capabilityMap().tables[].investigable and
+   the investigation's scope_file_ids; if scope resolves multiple
+   investigable tables, the button first asks which table — a simple
+   menu — else uses the one). No investigable table → the row explains
+   ("Add a dated, numeric table to this investigation to generate a
+   report") rather than dead buttons.
+3. The hypothesis prompt. Tapping a button opens an input surface —
+   DefineMetricDialog.tsx pattern via §43's LhDialog (a compact sheet
+   on mobile, a dialog on desktop): a title ("Scientific report —
+   state your hypothesis" / "Business report — what's the focus?"), one
+   multiline field with placeholder guidance, and Generate / Cancel.
+   The field is OPTIONAL (Generate works empty → today's behavior);
+   copy byte-pinned. Generate → ragService.investigate(table,
+   currentInvestigationId, template, hypothesis) → the §37/§43 "Saved
+   <name> — Open" confirmation (reuse if present; else the existing
+   reveal-node + a saved toast). Never a silent save.
+4. Tests + stamps. Wire: the two buttons present when investigable,
+   explained-away otherwise; the hypothesis threads to
+   investigate_templated and reaches the framing prompt (both twins);
+   the digit-gate blocks a numeric hypothesis (trust pin); None ==
+   byte-identical (pin). reports_test.rs extended, not rewritten. Bump
+   current+1 across all SEVEN stamps; suites + release-smoke + ios-build
+   green.
+
+Constraints. Report body + framing determinism unchanged; the
+hypothesis seeds prose only and cannot introduce numbers (§44
+invariant). Reuse investigate()/reports.rs/LhDialog — new code only for
+the buttons + input + the hypothesis param. Byte-pinned copy; twins
+PARITY. No telemetry. SharePoint untouched. Desktop + compact both.
+
+Acceptance:
+1. The investigation surface shows Scientific/Business report buttons
+   when the investigation has an investigable table; each opens a
+   hypothesis prompt; Generate produces the saved report with the
+   hypothesis reflected in the Introduction/Bottom-line framing.
+2. A hypothesis asserting a false number does NOT appear in the report
+   (digit-gate pin); an empty hypothesis == today's report (pin).
+3. No investigable table → an explanation, not dead buttons.
+4. Suites + release-smoke + ios-build green; seven stamps bumped.
+
+Environment. Container-testable (engine param + twins + wire pins;
+grep-verify desktop-crate call sites); a simulator pass for the
+compact sheet. Note origin/claude/next-15-5-21 prunes
+test/investigationsUi.test.mjs — rebase and reconcile. One commit per
+section. Open ONE PR titled "Investigation reports: Scientific &
+Business buttons seeded by a hypothesis"; stop at the PR.
+```
