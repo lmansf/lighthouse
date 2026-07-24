@@ -78,6 +78,18 @@ impl Tier {
     pub fn is_apple_fm(self) -> bool {
         matches!(self, Tier::AppleFm4096 | Tier::AppleFm8192)
     }
+
+    /// §44 §1a: the SHARED-WINDOW on-device planning tiers — apple-fm AND the
+    /// §42 Tier-2 mobile llama (1.5B on a 6144 phone window). Both plan NL→SQL
+    /// under a tight budget, so both ride the compact schema diet (ranked +
+    /// pruned cards) and the tier-appropriate few-shot slice instead of the
+    /// desktop's full cards + all five shots. Desktop llama-6144 and cloud are
+    /// NOT compact — they keep every full card and all five shots byte-for-byte
+    /// (the analytics.rs hard rail). The distinction is "does the plan prompt
+    /// have to fit a phone-class window", which is exactly these three ids.
+    pub fn wants_pruned_plan(self) -> bool {
+        self.is_apple_fm() || matches!(self, Tier::LlamaMobile6144)
+    }
 }
 
 /// The prompt-building call types the budgeter differentiates. Each carries

@@ -1565,19 +1565,22 @@ fn live_pipeline(
                     // prompt string below is byte-identical to today.
                     let view_regs =
                         crate::analytics::register_views(&ctx, &regs, is_cloud).await;
-                    // §32 §4: the planning tier decides the schema diet. On the
-                    // apple-fm shared-window tiers the question ranks the tables
-                    // (top 3 ride) and each card is PRUNED to matched + key
-                    // columns with one sample value per matched column — the
-                    // floor: a question-named or synonym-matched column is never
-                    // pruned. Cloud/llama keep every full card byte-for-byte.
+                    // §32 §4 / §44 §1a: the planning tier decides the schema
+                    // diet. On the shared-window on-device tiers (apple-fm AND
+                    // the §42 mobile llama) the question ranks the tables (top 3
+                    // ride) and each card is PRUNED to matched + key columns
+                    // with one sample value per matched column — the floor: a
+                    // question-named or synonym-matched column is never pruned.
+                    // §44 §1a folded mobile llama in (it plans on a phone-class
+                    // 6144 window, so it needs the same diet). Cloud and desktop
+                    // llama-6144 keep every full card byte-for-byte.
                     let plan_tier = llm::narration_tier(&cfg);
-                    let plan_synonyms: Vec<(String, String)> = if plan_tier.is_apple_fm() {
+                    let plan_synonyms: Vec<(String, String)> = if plan_tier.wants_pruned_plan() {
                         crate::semantic::planning_synonyms(is_cloud)
                     } else {
                         Vec::new()
                     };
-                    let mut sql_ctxs: Vec<Ctx> = if plan_tier.is_apple_fm() {
+                    let mut sql_ctxs: Vec<Ctx> = if plan_tier.wants_pruned_plan() {
                         crate::analytics::rank_tables(&regs, &question, &plan_synonyms)
                             .into_iter()
                             .map(|r| Ctx {
@@ -2132,7 +2135,14 @@ fn live_pipeline(
                             }
                         };
                     let mut outcome: Option<(String, crate::analytics::QueryResult)> = None;
-                    for round in 0..2 {
+                    // §44 §1a: up to TWO correction rounds (was one). A weak
+                    // on-device model often fixes a bad column/function name once
+                    // the engine's own error is fed back; a second corrected
+                    // attempt meaningfully lifts the on-device SQL success rate
+                    // (so the §1b profile fallback and the §2 guard fire less).
+                    // Round 3's failure gives up and falls through — the trust
+                    // fix guarantees the fall-through never narrates a number.
+                    for round in 0..3 {
                         let Some(sql) = attempt.clone() else { break };
                         yield progress("Running the query…".to_string(), 3, 4);
                         match crate::analytics::run_query(&ctx, &sql).await {
@@ -2140,8 +2150,8 @@ fn live_pipeline(
                                 outcome = Some((sql, res));
                                 break;
                             }
-                            Err(err) if round == 0 => {
-                                // One correction round with the engine's error.
+                            Err(err) if round < 2 => {
+                                // Feed the engine's error back as a correction hint.
                                 let retry_q = format!(
                                     "{}\n\nYour previous SQL failed.\nPrevious SQL: {sql}\nError: {err}\nWrite a corrected single SELECT statement.",
                                     crate::analytics::sql_question_for(
