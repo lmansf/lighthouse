@@ -198,7 +198,7 @@ async fn scientific_method_template_renders_imrad_structure() {
     let files = vec![write_csv(dir.path(), "sales.csv", SPIKE_CSV)];
 
     let report =
-        investigate_templated("sales.csv", &files, false, ReportTemplate::ScientificMethod, no_model())
+        investigate_templated("sales.csv", &files, false, ReportTemplate::ScientificMethod, None, no_model())
             .await;
 
     // The template names itself in the title; the sections are the SAME verified ones.
@@ -240,7 +240,7 @@ async fn business_report_template_renders_bluf_structure() {
     let files = vec![write_csv(dir.path(), "sales.csv", SPIKE_CSV)];
 
     let report =
-        investigate_templated("sales.csv", &files, false, ReportTemplate::BusinessReport, no_model())
+        investigate_templated("sales.csv", &files, false, ReportTemplate::BusinessReport, None, no_model())
             .await;
 
     assert_eq!(report.title, "Investigate sales.csv — Business report");
@@ -280,7 +280,8 @@ async fn templated_standard_is_byte_identical_to_investigate() {
 
     let mut plain = investigate("sales.csv", &files, false).await;
     let mut templated =
-        investigate_templated("sales.csv", &files, false, ReportTemplate::Standard, no_model()).await;
+        investigate_templated("sales.csv", &files, false, ReportTemplate::Standard, None, no_model())
+            .await;
     // Independent runs differ only in the generation timestamp; pin both.
     plain.generated_ms = 1_700_000_000_000;
     templated.generated_ms = 1_700_000_000_000;
@@ -291,5 +292,43 @@ async fn templated_standard_is_byte_identical_to_investigate() {
         render_markdown(&plain),
         render_markdown(&templated),
         "the Standard template is the byte-identical deterministic document"
+    );
+}
+
+#[tokio::test]
+async fn a_hypothesis_never_touches_the_deterministic_body_without_a_model() {
+    // §46: the analyst's hypothesis seeds ONLY the model-narrated framing. With no
+    // provider configured (the deterministic path), passing a hypothesis must
+    // produce the byte-identical document as passing none — proof the hypothesis
+    // never reaches a number, a section, or the report body. (The model path's
+    // safety is the unchanged framing digit gate, pinned by the reports.rs unit
+    // test.)
+    let dir = tempfile::tempdir().unwrap();
+    let files = vec![write_csv(dir.path(), "sales.csv", SPIKE_CSV)];
+
+    let mut plain = investigate_templated(
+        "sales.csv",
+        &files,
+        false,
+        ReportTemplate::ScientificMethod,
+        None,
+        no_model(),
+    )
+    .await;
+    let mut seeded = investigate_templated(
+        "sales.csv",
+        &files,
+        false,
+        ReportTemplate::ScientificMethod,
+        Some("the October spike is a one-off, not a trend"),
+        no_model(),
+    )
+    .await;
+    plain.generated_ms = 1_700_000_000_000;
+    seeded.generated_ms = 1_700_000_000_000;
+    assert_eq!(
+        render_markdown(&plain),
+        render_markdown(&seeded),
+        "a hypothesis with no narration model leaves the deterministic report byte-identical",
     );
 }

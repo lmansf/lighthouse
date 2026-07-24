@@ -579,12 +579,15 @@ export interface RagService {
    * Results/Discussion) or `"bluf"` (Business report: Bottom line up front +
    * Minto pyramid). Omitted ⇒ the Standard deterministic report (byte-identical
    * to before). The engine numbers are unchanged either way; a template only
-   * adds model-narrated FRAMING over the same verified findings.
+   * adds model-narrated FRAMING over the same verified findings. §46: an optional
+   * `hypothesis` seeds that framing's angle only — never a figure (the report's
+   * digit gate is unchanged).
    */
   investigate(
     table: string,
     investigationId?: string,
     template?: ReportTemplate,
+    hypothesis?: string,
   ): Promise<{ savedId: string; savedName: string }>;
   /**
    * Provider sign-in (0.12.1 §3): status of the generic, registration-gated

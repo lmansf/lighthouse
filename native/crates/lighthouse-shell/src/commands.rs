@@ -852,6 +852,13 @@ pub async fn rag_op(
             // findings; the core report stays deterministic and on-device.
             let template =
                 lighthouse_core::reports::ReportTemplate::from_wire(body["template"].as_str());
+            // §46: the analyst's optional working hypothesis seeds the template's
+            // FRAMING only (never a figure — the report's digit gate is unchanged).
+            let hypothesis = body["hypothesis"]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from);
             let cfg = lighthouse_core::profile::model_config();
             let is_cloud = lighthouse_core::synth::is_cloud_provider(&cfg);
             let files: Vec<(String, String, std::path::PathBuf)> =
@@ -863,7 +870,7 @@ pub async fn rag_op(
                     .filter(|(_, name, _)| lighthouse_core::analytics::is_tabular(name))
                     .collect();
             let report = lighthouse_core::reports::investigate_templated(
-                &table, &files, is_cloud, template, cfg,
+                &table, &files, is_cloud, template, hypothesis.as_deref(), cfg,
             )
             .await;
             let written = tokio::task::spawn_blocking(move || {
