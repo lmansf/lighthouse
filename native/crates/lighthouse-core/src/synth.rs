@@ -838,6 +838,22 @@ async fn collect(mut s: llm::AnswerStream) -> String {
     out
 }
 
+/// §44 §2: vet an ARMED numeric-tabular answer post-generation. Called only
+/// when the trust guard is armed (the caller streams unchanged otherwise), so
+/// this always buffers. If the model stated a figure the engine did not
+/// produce (not in the profiles' verified set, citations ignored), the whole
+/// answer degrades to the honest number-free reply; a faithful answer (only
+/// engine figures, or none) passes through unchanged.
+fn vet_numbers(raw: String, profiles: &[String], file: &str, columns: &[String]) -> String {
+    let refs: Vec<&str> = profiles.iter().map(String::as_str).collect();
+    let verified = crate::numguard::verified_set(&refs);
+    if crate::numguard::answer_has_unverified_number(&raw, &verified) {
+        crate::numguard::number_free_degradation(file, columns)
+    } else {
+        raw
+    }
+}
+
 fn take_chars(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
 }
@@ -1506,10 +1522,23 @@ fn live_pipeline(
             }
         }
 
+        // §44 §2: the numeric TRUST GUARD's state. When the analytics branch is
+        // entered for a statistical ask over tabular data but produces no
+        // verified answer (no executed SQL, no §1b profile), these arm the
+        // deterministic post-generation guard on every downstream RAG narration:
+        // any figure the engine never produced degrades to an honest number-free
+        // reply. `guard_profiles` collects the authoritative sources (table
+        // profiles injected as context) whose figures the guard DOES trust.
+        let mut guard_armed = false;
+        let mut guard_file = String::new();
+        let mut guard_columns: Vec<String> = Vec::new();
+        let mut guard_profiles: Vec<String> = Vec::new();
+
         // --- Analytics branch (docs/analytics-beam.md): aggregate ask over
         //     tabular files → model writes SQL, DataFusion executes, the model
-        //     narrates the verified result. Any failure falls through silently
-        //     to the paths below — analytics can only add capability. ---
+        //     narrates the verified result. A failure no longer falls through
+        //     SILENTLY: §1b answers profileable tables from their exact profile,
+        //     and §2 guards any remaining numeric narration. ---
         if has_real_model(&cfg) && crate::analytics::analytics_cue(&question) {
             // §22.4 queue-not-fail: this branch is about to ask the model to
             // write SQL — if the PRIVATE model's server is still starting or
@@ -1558,6 +1587,16 @@ fn live_pipeline(
                 let ctx = datafusion::prelude::SessionContext::new();
                 let regs = crate::analytics::register_tables(&ctx, &files, is_cloud).await;
                 if !regs.is_empty() {
+                    // §44 §2: we're answering a statistical ask over registered
+                    // tabular data. Arm the trust guard now: if neither SQL nor
+                    // the §1b profile produces a verified answer, every
+                    // downstream RAG narration is gated so it cannot state a
+                    // figure the engine never computed. Naming the first table
+                    // and its columns lets the honest degradation suggest a
+                    // runnable rephrase.
+                    guard_armed = true;
+                    guard_file = regs.first().map(|r| r.file_name.clone()).unwrap_or_default();
+                    guard_columns = regs.first().map(|r| r.columns.clone()).unwrap_or_default();
                     // Saved views resolve as virtual tables AFTER the files
                     // (openspec: add-shaped-views §2): each eligible view
                     // registers under the shared table caps and contributes a
@@ -1565,19 +1604,22 @@ fn live_pipeline(
                     // prompt string below is byte-identical to today.
                     let view_regs =
                         crate::analytics::register_views(&ctx, &regs, is_cloud).await;
-                    // §32 §4: the planning tier decides the schema diet. On the
-                    // apple-fm shared-window tiers the question ranks the tables
-                    // (top 3 ride) and each card is PRUNED to matched + key
-                    // columns with one sample value per matched column — the
-                    // floor: a question-named or synonym-matched column is never
-                    // pruned. Cloud/llama keep every full card byte-for-byte.
+                    // §32 §4 / §44 §1a: the planning tier decides the schema
+                    // diet. On the shared-window on-device tiers (apple-fm AND
+                    // the §42 mobile llama) the question ranks the tables (top 3
+                    // ride) and each card is PRUNED to matched + key columns
+                    // with one sample value per matched column — the floor: a
+                    // question-named or synonym-matched column is never pruned.
+                    // §44 §1a folded mobile llama in (it plans on a phone-class
+                    // 6144 window, so it needs the same diet). Cloud and desktop
+                    // llama-6144 keep every full card byte-for-byte.
                     let plan_tier = llm::narration_tier(&cfg);
-                    let plan_synonyms: Vec<(String, String)> = if plan_tier.is_apple_fm() {
+                    let plan_synonyms: Vec<(String, String)> = if plan_tier.wants_pruned_plan() {
                         crate::semantic::planning_synonyms(is_cloud)
                     } else {
                         Vec::new()
                     };
-                    let mut sql_ctxs: Vec<Ctx> = if plan_tier.is_apple_fm() {
+                    let mut sql_ctxs: Vec<Ctx> = if plan_tier.wants_pruned_plan() {
                         crate::analytics::rank_tables(&regs, &question, &plan_synonyms)
                             .into_iter()
                             .map(|r| Ctx {
@@ -2132,7 +2174,14 @@ fn live_pipeline(
                             }
                         };
                     let mut outcome: Option<(String, crate::analytics::QueryResult)> = None;
-                    for round in 0..2 {
+                    // §44 §1a: up to TWO correction rounds (was one). A weak
+                    // on-device model often fixes a bad column/function name once
+                    // the engine's own error is fed back; a second corrected
+                    // attempt meaningfully lifts the on-device SQL success rate
+                    // (so the §1b profile fallback and the §2 guard fire less).
+                    // Round 3's failure gives up and falls through — the trust
+                    // fix guarantees the fall-through never narrates a number.
+                    for round in 0..3 {
                         let Some(sql) = attempt.clone() else { break };
                         yield progress("Running the query…".to_string(), 3, 4);
                         match crate::analytics::run_query(&ctx, &sql).await {
@@ -2140,8 +2189,8 @@ fn live_pipeline(
                                 outcome = Some((sql, res));
                                 break;
                             }
-                            Err(err) if round == 0 => {
-                                // One correction round with the engine's error.
+                            Err(err) if round < 2 => {
+                                // Feed the engine's error back as a correction hint.
                                 let retry_q = format!(
                                     "{}\n\nYour previous SQL failed.\nPrevious SQL: {sql}\nError: {err}\nWrite a corrected single SELECT statement.",
                                     crate::analytics::sql_question_for(
@@ -2389,6 +2438,45 @@ fn live_pipeline(
                         yield done;
                         return;
                     }
+                    // §44 §1b: NL→SQL produced no executed query (reaching here
+                    // means the outcome above was None — every attempt failed to
+                    // run). Before falling through to raw-chunk RAG, answer a
+                    // numeric ask over a profileable table (.csv/.tsv) from its
+                    // EXACT profile — a first-class VERIFIED answer with a shown
+                    // computation (§3). This is the robust on-device path for the
+                    // sleep-CSV "average X" case: the figures are table_profile()'s,
+                    // never the model's, so the constitution holds even when the
+                    // weak local model can't write runnable SQL.
+                    if let Some((pf_id, pf_name, _)) =
+                        files.iter().find(|(_, n, _)| is_profileable(n)).cloned()
+                    {
+                        if let Some((_, pf_full)) = vault::doc_text(&pf_id, None) {
+                            if let Some(pf_ans) =
+                                crate::table_profile::profile_answer(&pf_name, &pf_full)
+                            {
+                                yield delta(pf_ans);
+                                let reference = RagReference {
+                                    file_id: pf_id.clone(),
+                                    name: pf_name.clone(),
+                                    snippet: String::new(),
+                                    score: 1.0,
+                                    kind: crate::vault::source_kind_of(&pf_id),
+                                };
+                                let mut done = final_chunk(
+                                    vec![reference],
+                                    1,
+                                    &origin,
+                                    cost_meta(&cfg, sink.total()),
+                                    Vec::new(),
+                                );
+                                if let Some(m) = done.meta.as_mut() {
+                                    m.chart = profile_chart(&pf_name, &pf_full);
+                                }
+                                yield done;
+                                return;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -2405,6 +2493,11 @@ fn live_pipeline(
         if cfg.provider_id.as_deref() == Some("local")
             && crate::settings::read_desktop_settings().draft_answers != Some(false)
             && !initial.contexts.is_empty()
+            // §44 §2: an armed numeric-tabular ask must not flash an extractive
+            // draft that quotes an unverified figure from raw chunks — the guard
+            // below can only vet the FINAL answer. Suppress the transient draft
+            // so no unverified number is ever shown, even for a moment.
+            && !guard_armed
         {
             let ctxs: Vec<Ctx> = initial
                 .contexts
@@ -2530,6 +2623,9 @@ fn live_pipeline(
                             text: p.clone(),
                             score: 0.0,
                         });
+                        // §44 §2: this profile's figures are engine-computed, so
+                        // the guard trusts them if this synthesis is armed.
+                        guard_profiles.push(p.clone());
                     }
                 }
 
@@ -2602,8 +2698,15 @@ fn live_pipeline(
                     history.clone(),
                     Some(sink.clone()),
                 );
-                while let Some(d) = answer.next().await {
-                    yield delta(d);
+                // §44 §2: gate the synthesized numbers when this is an armed
+                // numeric-tabular ask; otherwise stream unchanged.
+                if guard_armed {
+                    let raw = collect(answer).await;
+                    yield delta(vet_numbers(raw, &guard_profiles, &guard_file, &guard_columns));
+                } else {
+                    while let Some(d) = answer.next().await {
+                        yield delta(d);
+                    }
                 }
                 yield final_chunk(
                     extracts.into_iter().map(|(r, _)| r).collect(),
@@ -2670,6 +2773,46 @@ fn live_pipeline(
                 }
                 None => None,
             };
+            // §44 §1b: reverse the single-doc exclusion. A profileable target
+            // (.csv/.tsv) is answered from its EXACT profile — a first-class
+            // verified answer with a shown computation (§3) — instead of being
+            // dropped to the single-shot path where its numbers rode only as
+            // advisory context a weak model could paraphrase into fiction. This
+            // covers the numeric single-doc ask that never matched the analytics
+            // cue (e.g. "what does this sleep log show"): the figures are
+            // table_profile()'s, never the model's.
+            if let Some((doc_id, name, _)) =
+                doc.clone().filter(|(_, n, c)| is_profileable(n) && !c.is_empty())
+            {
+                if let Some((_, full)) = vault::doc_text(&doc_id, None) {
+                    if let Some(ans) = crate::table_profile::profile_answer(&name, &full) {
+                        yield progress(format!("Reading all of {name}…"), 1, 1);
+                        yield delta(ans);
+                        let reference = RagReference {
+                            file_id: doc_id.clone(),
+                            name: name.clone(),
+                            snippet: String::new(),
+                            score: 1.0,
+                            kind: crate::vault::source_kind_of(&doc_id),
+                        };
+                        let mut done = final_chunk(
+                            vec![reference],
+                            1,
+                            &origin,
+                            cost_meta(&cfg, sink.total()),
+                            Vec::new(),
+                        );
+                        if let Some(m) = done.meta.as_mut() {
+                            m.chart = profile_chart(&name, &full);
+                        }
+                        yield done;
+                        return;
+                    }
+                }
+                // A profileable file that didn't yield a profile (too few rows,
+                // not really tabular) falls through to the single-shot path,
+                // where the §2 guard still protects any numeric narration.
+            }
             if let Some((doc_id, name, chunks)) =
                 doc.filter(|(_, n, c)| !is_profileable(n) && !c.is_empty())
             {
@@ -2726,8 +2869,16 @@ fn live_pipeline(
                         history.clone(),
                         Some(sink.clone()),
                     );
-                    while let Some(d) = answer.next().await {
-                        yield delta(d);
+                    // §44 §2: whole-file focus over a non-profileable tabular
+                    // target (profileable ones are answered by §1b) — gate its
+                    // numbers when armed.
+                    if guard_armed {
+                        let raw = collect(answer).await;
+                        yield delta(vet_numbers(raw, &guard_profiles, &guard_file, &guard_columns));
+                    } else {
+                        while let Some(d) = answer.next().await {
+                            yield delta(d);
+                        }
                     }
                     yield final_chunk(
                         vec![reference],
@@ -2813,8 +2964,15 @@ fn live_pipeline(
                         history.clone(),
                         Some(sink.clone()),
                     );
-                    while let Some(d) = answer.next().await {
-                        yield delta(d);
+                    // §44 §2: long-document sweep reduce — gate its numbers when
+                    // this is an armed numeric-tabular ask.
+                    if guard_armed {
+                        let raw = collect(answer).await;
+                        yield delta(vet_numbers(raw, &guard_profiles, &guard_file, &guard_columns));
+                    } else {
+                        while let Some(d) = answer.next().await {
+                            yield delta(d);
+                        }
                     }
                     yield final_chunk(
                         vec![reference],
@@ -2885,6 +3043,8 @@ fn live_pipeline(
                     0.0,
                     Some(r.file_id.clone()),
                 ));
+                // §44 §2: engine-computed figures the guard trusts if armed.
+                guard_profiles.push(p.clone());
                 contexts.push(Ctx { name: pname, text: p, score: 0.0 });
                 profiled += 1;
                 if profile_chart_spec.is_none() {
@@ -2904,8 +3064,17 @@ fn live_pipeline(
         // the sink only carries this call's usage once the stream has drained.
         let mut answer =
             llm::stream_answer(question, contexts, cfg.clone(), history, Some(sink.clone()));
-        while let Some(d) = answer.next().await {
-            yield delta(d);
+        // §44 §2: the terminal catch-all. When this is an armed numeric-tabular
+        // ask that reached the fall-through, gate the answer: any figure absent
+        // from the injected profiles' verified set degrades to the honest
+        // number-free reply. Non-armed asks stream unchanged (byte-identical).
+        if guard_armed {
+            let raw = collect(answer).await;
+            yield delta(vet_numbers(raw, &guard_profiles, &guard_file, &guard_columns));
+        } else {
+            while let Some(d) = answer.next().await {
+                yield delta(d);
+            }
         }
         // §2 visual-first: the profiled table's chart, drawn from the engine's
         // own aggregates (see profile_chart_spec above). Deterministic engine

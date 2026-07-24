@@ -28,6 +28,7 @@ pub mod ledger;
 pub mod llm;
 pub mod local_model;
 pub mod meta;
+pub mod numguard;
 pub mod ocr;
 pub mod pdf_tables;
 pub mod pins;

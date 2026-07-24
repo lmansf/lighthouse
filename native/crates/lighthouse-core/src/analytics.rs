@@ -4072,17 +4072,65 @@ mod tests {
     }
 
     #[test]
-    fn sql_question_teaches_one_example_on_apple_and_five_elsewhere() {
+    fn sql_question_teaches_compact_set_on_device_and_five_elsewhere() {
         use crate::budget::Tier;
+        // §44 §1a: the shared-window on-device tiers (apple-fm + mobile llama)
+        // teach the COMPACT_SQL_FEWSHOTS set; desktop llama-6144 and cloud keep
+        // all five, byte-identical to the legacy prompt.
         let apple = sql_question_for(Tier::AppleFm4096, "total by region", None);
+        let apple8 = sql_question_for(Tier::AppleFm8192, "total by region", None);
+        let mobile = sql_question_for(Tier::LlamaMobile6144, "total by region", None);
         let full = sql_question_for(Tier::Llama6144, "total by region", None);
-        assert_eq!(apple.lines().filter(|l| l.starts_with("Q: ")).count(), 1);
-        assert_eq!(full.lines().filter(|l| l.starts_with("Q: ")).count(), SQL_FEWSHOTS.len());
+        let cloud = sql_question_for(Tier::RemoteLarge, "total by region", None);
+        for (name, prompt) in [("apple4096", &apple), ("apple8192", &apple8), ("mobile", &mobile)] {
+            assert_eq!(
+                prompt.lines().filter(|l| l.starts_with("Q: ")).count(),
+                COMPACT_SQL_FEWSHOTS,
+                "{name} teaches the compact few-shot set",
+            );
+        }
+        for (name, prompt) in [("llama6144", &full), ("cloud", &cloud)] {
+            assert_eq!(
+                prompt.lines().filter(|l| l.starts_with("Q: ")).count(),
+                SQL_FEWSHOTS.len(),
+                "{name} teaches all five",
+            );
+        }
         // The full arm is byte-identical to the legacy prompt (hard rail).
         assert_eq!(full, sql_question("total by region", None));
-        // Prior SQL rides both tiers (the refinement kernel's raw material).
+        // Prior SQL rides every tier (the refinement kernel's raw material).
         let refine = sql_question_for(Tier::AppleFm4096, "now as %", Some("SELECT 1"));
-        assert!(refine.contains("SELECT 1"), "prior sql rides the apple prompt");
+        assert!(refine.contains("SELECT 1"), "prior sql rides the on-device prompt");
+    }
+
+    #[test]
+    fn compact_sql_plan_prompt_fits_the_shared_window() {
+        // §44 §1a: the stronger on-device SQL prompt (COMPACT_SQL_FEWSHOTS shots
+        // + a refinement's prior SQL) must still fit the shared-window tiers
+        // ALONGSIDE their full context budget, under the reserve the plan call
+        // actually rides (Narration — stream_answer's shape). Sized with the
+        // DIGIT-AWARE estimator (SQL is punctuation- and number-heavy, ~2-3
+        // chars/token) so a numeric example can't quietly overflow a flat len/4
+        // promise. Cards ride the ctx budget; history the history budget.
+        use crate::budget::{self, CallType, Tier};
+        for tier in [Tier::AppleFm4096, Tier::AppleFm8192, Tier::LlamaMobile6144] {
+            let prompt = sql_question_for(
+                tier,
+                "average nightly sleep hours by weekday over the last year",
+                Some("SELECT sleep_hours FROM sleep_log WHERE weekday = 'Mon'"),
+            );
+            let b = budget::segment_budgets(tier);
+            let plan_tokens = budget::estimate_tokens(&prompt);
+            let card_tokens = b.ctx_total_max / budget::CHARS_PER_TOKEN;
+            let history_tokens = b.history_max / budget::CHARS_PER_TOKEN;
+            let total = plan_tokens + card_tokens + history_tokens;
+            let cap = budget::input_token_budget(tier, CallType::Narration);
+            assert!(
+                total <= cap,
+                "{tier:?}: compact SQL plan needs {total} tok (plan {plan_tokens} + \
+                 cards {card_tokens} + history {history_tokens}) but budget is {cap}",
+            );
+        }
     }
 
     #[test]
@@ -5672,11 +5720,23 @@ pub fn pruned_schema_card(reg: &TableReg, question: &str, synonyms: &[(String, S
     out
 }
 
-/// §4: the tier-aware SQL-writing ask. Apple-fm tiers teach ONE example (the
-/// canonical aggregate shape); every other tier keeps all five byte-for-byte.
+/// §44 §1a: the compact-tier few-shot budget. The shared-window on-device
+/// tiers (apple-fm + mobile llama) teach a THREE-example set — the aggregate,
+/// the monthly trend, and the windowed month-over-month shapes — instead of
+/// the single canonical example the §32 diet started with. Three is the
+/// tier-appropriate lift the trust fix earns: enough shape coverage to raise
+/// the on-device SQL success rate (so the §1b profile fallback and the §2
+/// guard fire less often), still a contiguous prefix so the desktop's
+/// all-five prompt stays byte-identical, and provably inside the phone window
+/// (the digit-aware `estimate_tokens` floor test pins it).
+pub const COMPACT_SQL_FEWSHOTS: usize = 3;
+
+/// §4 / §44 §1a: the tier-aware SQL-writing ask. The shared-window on-device
+/// tiers (apple-fm + mobile llama) teach the compact few-shot slice; desktop
+/// llama-6144 and cloud keep all five byte-for-byte (the hard rail).
 pub fn sql_question_for(tier: crate::budget::Tier, question: &str, prior_sql: Option<&str>) -> String {
-    if tier.is_apple_fm() {
-        sql_question_with(&SQL_FEWSHOTS[..1], question, prior_sql)
+    if tier.wants_pruned_plan() {
+        sql_question_with(&SQL_FEWSHOTS[..COMPACT_SQL_FEWSHOTS], question, prior_sql)
     } else {
         sql_question(question, prior_sql)
     }

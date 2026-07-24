@@ -13,9 +13,8 @@ import { register } from "node:module";
 
 register("./_ts-extensionless-hook.mjs", import.meta.url);
 
-const { tableProfile, parseDelimited, isProfileable, fmtNum, profileChart } = await import(
-  "../src/server/tableProfile.ts"
-);
+const { tableProfile, parseDelimited, isProfileable, fmtNum, profileChart, profileAnswer } =
+  await import("../src/server/tableProfile.ts");
 
 test("fmtNum rounds negatives away from zero (parity with the Rust twin)", () => {
   // Was Math.round (half toward +∞), which diverged from Rust's f64::round.
@@ -45,6 +44,22 @@ const SALES_PROFILE = [
 
 test("PARITY FIXTURE: sales.csv profile matches the pinned string exactly", () => {
   assert.equal(tableProfile("sales.csv", SALES_CSV), SALES_PROFILE);
+});
+
+test("§44 §1b: profileAnswer promotes the profile with a shown computation (parity)", () => {
+  // Byte-identical to table_profile.rs::profile_answer_promotes_the_profile_…:
+  // a first-class lead, the "Computed exactly by Lighthouse" label, and the
+  // exact profile carried verbatim inside the fence (so the shown numbers are
+  // precisely the ones the §2 guard trusts).
+  const ans = profileAnswer("sales.csv", SALES_CSV);
+  assert.ok(
+    ans.startsWith("Here are the exact figures Lighthouse computed from **sales.csv** — read "),
+    "byte-pinned first-class lead",
+  );
+  assert.ok(ans.includes("*Computed exactly by Lighthouse:*"), "the shown-computation label");
+  assert.ok(ans.includes(SALES_PROFILE), "the fence carries tableProfile() verbatim");
+  // A non-table yields null — the caller falls through to the guarded path.
+  assert.equal(profileAnswer("notes.csv", "just prose\nno table here"), null);
 });
 
 test("parseDelimited handles quoted fields, escaped quotes, CRLF", () => {

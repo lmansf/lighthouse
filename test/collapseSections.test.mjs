@@ -125,6 +125,34 @@ test("only the over-threshold sections of a multi-section answer fold", () => {
   assert.equal(tree.children[shortIdx + 1].type, "paragraph");
 });
 
+test("§44 §3: the engine provenance footer is never parked behind Show more", () => {
+  // In the real pipeline remarkAnswerCard folds "*Query used:*" into an
+  // `lhQueryDetails` node (and leaves "Computed from:" as a raw line) BEFORE
+  // this transform runs. A long section that ends with those deterministic
+  // footers still folds its PROSE tail, but the proof of a verified number is
+  // shown by default — the footers stay visible siblings, never collapsed.
+  const nodeText = (n) =>
+    typeof n.value === "string" ? n.value : (n.children ?? []).map(nodeText).join("");
+  const tree = parse(["Lead.", "## Findings", para(1), para(2), para(3), para(4)].join("\n\n"));
+  tree.children.push({
+    type: "lhQueryDetails",
+    data: { hName: "details", hProperties: { className: ["lh-query-used"] } },
+    children: [{ type: "paragraph", children: [{ type: "text", value: "Query used:" }] }],
+  });
+  tree.children.push({
+    type: "paragraph",
+    children: [{ type: "emphasis", children: [{ type: "text", value: "Computed from: sleep.csv" }] }],
+  });
+  remarkCollapseSections({ enabled: true })(tree);
+  const wrappers = tree.children.filter((n) => n.type === "lhCollapsedSection");
+  assert.equal(wrappers.length, 1, "the long section still folds its prose tail");
+  const wrappedTypes = wrappers[0].children.map((n) => n.type);
+  assert.ok(!wrappedTypes.includes("lhQueryDetails"), "the Query-used disclosure is NOT parked");
+  const topTypes = tree.children.map((n) => n.type);
+  assert.ok(topTypes.includes("lhQueryDetails"), "Query-used is a visible sibling by default");
+  assert.match(nodeText(tree.children[tree.children.length - 1]), /Computed from:/, "Computed-from stays visible");
+});
+
 test("the tuning constants stay what the spec named", () => {
   assert.equal(COLLAPSE_THRESHOLD_CHARS, 1200);
   assert.equal(COLLAPSE_VISIBLE_BLOCKS, 2);

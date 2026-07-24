@@ -1121,6 +1121,54 @@ async fn main() {
         );
     }
 
+    // --- §44: the trust invariant in the forced-tier rig (model-free) -----
+    // The on-device acceptance floor: a numeric ask over tabular data is shown
+    // with engine provenance whose figures match the engine's, or degraded to a
+    // number-free reply — never a bare model number. Deterministic, so it gates
+    // CI beside the golden SQL above (and is proven in full in
+    // tests/trust_invariant_test.rs). The forced-tier MODEL rig (§4) exercises
+    // the same fixtures end-to-end when a provider / on-device model is present.
+    {
+        const SLEEP: &str = "date,sleep_hours,quality\n\
+            2024-01-01,7.5,good\n2024-01-02,6.0,fair\n2024-01-03,8.0,good\n\
+            2024-01-04,7.0,good\n2024-01-05,6.5,fair";
+        record(
+            &mut card,
+            "[§44] sleep-CSV answers from the verified profile (numbers == table_profile)",
+            match (
+                lighthouse_core::table_profile::table_profile("sleep.csv", SLEEP),
+                lighthouse_core::table_profile::profile_answer("sleep.csv", SLEEP),
+            ) {
+                (Some(p), Some(a)) => {
+                    let verified = lighthouse_core::numguard::verified_set(&[&p]);
+                    if !a.contains("*Computed exactly by Lighthouse:*") {
+                        Err("the profile answer hides its computation".to_string())
+                    } else if lighthouse_core::numguard::answer_has_unverified_number(&a, &verified) {
+                        Err("the profile answer states a figure table_profile() never computed".to_string())
+                    } else {
+                        Ok(())
+                    }
+                }
+                _ => Err("sleep.csv did not profile".to_string()),
+            },
+        );
+        let degraded = lighthouse_core::numguard::number_free_degradation(
+            "data.xlsx",
+            &["sleep_hours".to_string(), "quality".to_string()],
+        );
+        record(
+            &mut card,
+            "[§44] a non-profileable numeric ask degrades with no free figure",
+            if lighthouse_core::numguard::number_tokens(&degraded).is_empty()
+                && degraded.contains("average sleep_hours")
+            {
+                Ok(())
+            } else {
+                Err(format!("degradation leaked a figure or lost its hint: {degraded}"))
+            },
+        );
+    }
+
     // --- Section 2: provider NL scorecard (opt-in; never a CI gate) -------
     println!("\n== provider NL scorecard ==");
     match provider_from_env() {

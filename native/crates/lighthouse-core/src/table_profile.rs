@@ -360,6 +360,26 @@ pub fn table_profile(name: &str, text: &str) -> Option<String> {
     }
 }
 
+/// §44 §1b: the table profile promoted from advisory CONTEXT to a first-class
+/// ANSWER. When on-device NL→SQL produces no executed query, a numeric or
+/// statistical ask over a CSV/TSV is answered from THESE exact figures —
+/// every one computed by Lighthouse from the file, never written by the model
+/// — introduced by a byte-pinned lead and shown inside a "Computed exactly by
+/// Lighthouse" fence that reads like the SQL "Query used" disclosure (§3). The
+/// verified digits the §2 guard trusts are precisely the ones displayed here,
+/// because the fence carries `table_profile()`'s output verbatim. Returns None
+/// for a non-profileable / non-tabular file (the `table_profile` gate), so the
+/// caller falls through to the guarded RAG path.
+/// KEEP IN SYNC with src/server/tableProfile.ts::profileAnswer (byte-identical).
+pub fn profile_answer(name: &str, text: &str) -> Option<String> {
+    let profile = table_profile(name, text)?;
+    Some(format!(
+        "Here are the exact figures Lighthouse computed from **{name}** — read \
+         straight from the file, not written by the model:\n\n\
+         *Computed exactly by Lighthouse:*\n```\n{profile}\n```\n"
+    ))
+}
+
 /// Whether a file name is profileable (delimiter files only in Phase 1).
 pub fn is_profileable(name: &str) -> bool {
     let n = name.to_lowercase();
@@ -535,6 +555,38 @@ mod tests {
         ]
         .join("\n");
         assert_eq!(table_profile("sales.csv", &csv), Some(expected));
+    }
+
+    #[test]
+    fn profile_answer_promotes_the_profile_with_a_shown_computation() {
+        // §44 §1b: the profile answer leads with the byte-pinned first-class
+        // framing, then shows the EXACT table_profile() computation inside a
+        // fence that reads like the SQL "Query used" disclosure. Critically,
+        // every figure displayed is one the §2 guard trusts, because the fence
+        // carries table_profile()'s output verbatim.
+        let csv = [
+            "Date,Region,Sales",
+            "2016-01-05,NE,100.50",
+            "2016-03-10,NW,200",
+            "2016-11-20,NE,49.50",
+            "2017-02-14,SE,300",
+            "2017-06-30,NE,150.25",
+            "2017-09-01,NW,174.75",
+        ]
+        .join("\n");
+        let ans = profile_answer("sales.csv", &csv).expect("a real table profiles");
+        let profile = table_profile("sales.csv", &csv).unwrap();
+        assert!(
+            ans.starts_with(
+                "Here are the exact figures Lighthouse computed from **sales.csv** — read "
+            ),
+            "byte-pinned first-class lead: {ans}"
+        );
+        assert!(ans.contains("*Computed exactly by Lighthouse:*"), "the shown-computation label");
+        assert!(ans.contains(&profile), "the fence carries table_profile() verbatim");
+        // A non-table yields no answer — the caller falls through to the guarded
+        // RAG path rather than presenting an empty or invented profile.
+        assert_eq!(profile_answer("notes.csv", "just prose\nno table here"), None);
     }
 
     #[test]
