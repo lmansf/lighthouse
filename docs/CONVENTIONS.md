@@ -6,6 +6,42 @@ you can copy a working shape instead of reinventing one. Roadmap § numbers
 refer to the owner's roadmap; where a § is not represented in-repo the nearest
 shipped example is named instead.
 
+## Numbers about data are engine-verified or not shown
+
+The constitution's load-bearing promise: a numeric claim about a data file is
+NEVER presented as fact unless the ENGINE produced it — a DataFusion SQL result,
+a `table_profile()` computation, or a certified metric. The model NARRATES the
+engine's figures; it never emits its own. This holds on every tier, and hardest
+on the weak on-device models where it was silently breaking (§44).
+
+Three rules follow, and each has a canonical shape to copy:
+
+1. **Verified answer or none.** When NL→SQL executes, the answer narrates the
+   result table and the executed SQL is disclosed (`*Query used:*`, tier-
+   independent, synth.rs). When it does not, a profileable table is answered
+   from its EXACT profile — `table_profile::profile_answer` (twinned in
+   `tableProfile.ts`), shown under a "Computed exactly by Lighthouse" fence that
+   reads like the SQL disclosure (§44 §1b).
+
+2. **The non-analytics path is forbidden numeric claims about tabular sources.**
+   When neither SQL nor a profile answered, any downstream RAG narration is
+   vetted by the deterministic post-generation guard: a numeric token absent
+   from the engine-verified set degrades the whole answer to an honest number-
+   free reply. Canonical: `numguard` (native/crates/lighthouse-core/src +
+   src/server/numguard.ts, one tokenizer shared with the report framer's
+   digit-gate), armed in `synth.rs` at the analytics fall-through. Qualitative
+   RAG over prose is untouched — the guard arms ONLY on an analytics ask over
+   tabular data. Analytics is Rust-only, so the guard's enforcement is too; the
+   twin ships the byte-identical helper (the ledger/certified/trust precedent).
+
+3. **The proof is shown by default, mobile as desktop.** The SQL/computation
+   disclosure is never behind a compact gate; the §35 progressive-collapse
+   excludes the provenance footers (`collapseSections.ts`, §44 §3).
+
+Acceptance floor: `tests/trust_invariant_test.rs` + the §44 block of the
+`analytics_eval` rig. Never change a computed value to satisfy the guard — the
+guard protects the engine's numbers, it does not invent or round them.
+
 ## The pure verdict-fn pattern
 
 Any decision a stream/loop/retry path takes gets extracted into a PURE
