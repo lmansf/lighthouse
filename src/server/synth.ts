@@ -42,7 +42,7 @@ import { isInstalled as isModelInstalled, localModelAvailable, onDeviceBackend }
 import { platformKind } from "./config";
 import { readDesktopSettings } from "./settings";
 import { metaIntent, renderMeta } from "./meta";
-import { isProfileable, profileChart, tableProfile } from "./tableProfile";
+import { isProfileable, profileAnswer, profileChart, tableProfile } from "./tableProfile";
 import {
   cacheKey,
   insert as cacheInsert,
@@ -922,6 +922,33 @@ async function* answerPipelineLive(
         : namedFileTarget(question, shareableSubset(includedFileIds, isCloud)) ??
           dominantDoc(initial.contexts.map((c) => c.name), initial.references);
     const doc = target ? await docChunks(target[0]) : null;
+    // §44 §1b: reverse the single-doc exclusion. A profileable target
+    // (.csv/.tsv) is answered from its EXACT profile — a first-class verified
+    // answer with a shown computation (§3) — instead of being dropped to the
+    // single-shot path where its numbers rode only as advisory context a weak
+    // model could paraphrase into fiction. Mirrors synth.rs. (Analytics is
+    // Rust-only, so this doc-focus reversal is the twin's whole §1b surface.)
+    if (target && doc && isProfileable(doc[0]) && doc[1].length > 0) {
+      const [pname] = doc;
+      const full = await docText(target[0]);
+      const ans = full ? profileAnswer(pname, full.text) : null;
+      if (ans) {
+        yield progress(`Reading all of ${pname}…`, 1, 1);
+        yield { delta: ans, done: false };
+        const reference: RagReference = {
+          fileId: target[0],
+          name: pname,
+          snippet: "",
+          score: 1,
+          kind: sourceKindOf(target[0]),
+        };
+        yield finalChunk([reference], 1, origin, []);
+        return;
+      }
+      // A profileable file that didn't yield a profile (too few rows, not
+      // really tabular) falls through to the single-shot path, where any
+      // numeric narration is still protected by the §2 guard.
+    }
     if (target && doc && !isProfileable(doc[0]) && doc[1].length > 0) {
       const [name, chunks] = doc;
       const reference: RagReference = {

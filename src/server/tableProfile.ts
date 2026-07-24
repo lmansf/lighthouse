@@ -220,6 +220,28 @@ export function tableProfile(name: string, text: string): string | null {
   return out;
 }
 
+/**
+ * §44 §1b: the table profile promoted from advisory CONTEXT to a first-class
+ * ANSWER. When on-device NL→SQL produces no executed query, a numeric or
+ * statistical ask over a CSV/TSV is answered from THESE exact figures — every
+ * one computed by Lighthouse from the file, never written by the model —
+ * introduced by a byte-pinned lead and shown inside a "Computed exactly by
+ * Lighthouse" fence that reads like the SQL "Query used" disclosure (§3). The
+ * verified digits the §2 guard trusts are exactly the ones displayed, because
+ * the fence carries tableProfile()'s output verbatim. Returns null for a
+ * non-profileable / non-tabular file (the tableProfile gate).
+ * KEEP IN SYNC with table_profile.rs::profile_answer (byte-identical).
+ */
+export function profileAnswer(name: string, text: string): string | null {
+  const profile = tableProfile(name, text);
+  if (profile === null) return null;
+  return (
+    `Here are the exact figures Lighthouse computed from **${name}** — read ` +
+    `straight from the file, not written by the model:\n\n` +
+    `*Computed exactly by Lighthouse:*\n\`\`\`\n${profile}\n\`\`\`\n`
+  );
+}
+
 /** Whether a file name is profileable (delimiter files only in Phase 1). */
 export function isProfileable(name: string): boolean {
   const n = name.toLowerCase();

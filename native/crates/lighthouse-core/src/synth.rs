@@ -2399,6 +2399,45 @@ fn live_pipeline(
                         yield done;
                         return;
                     }
+                    // §44 §1b: NL→SQL produced no executed query (reaching here
+                    // means the outcome above was None — every attempt failed to
+                    // run). Before falling through to raw-chunk RAG, answer a
+                    // numeric ask over a profileable table (.csv/.tsv) from its
+                    // EXACT profile — a first-class VERIFIED answer with a shown
+                    // computation (§3). This is the robust on-device path for the
+                    // sleep-CSV "average X" case: the figures are table_profile()'s,
+                    // never the model's, so the constitution holds even when the
+                    // weak local model can't write runnable SQL.
+                    if let Some((pf_id, pf_name, _)) =
+                        files.iter().find(|(_, n, _)| is_profileable(n)).cloned()
+                    {
+                        if let Some((_, pf_full)) = vault::doc_text(&pf_id, None) {
+                            if let Some(pf_ans) =
+                                crate::table_profile::profile_answer(&pf_name, &pf_full)
+                            {
+                                yield delta(pf_ans);
+                                let reference = RagReference {
+                                    file_id: pf_id.clone(),
+                                    name: pf_name.clone(),
+                                    snippet: String::new(),
+                                    score: 1.0,
+                                    kind: crate::vault::source_kind_of(&pf_id),
+                                };
+                                let mut done = final_chunk(
+                                    vec![reference],
+                                    1,
+                                    &origin,
+                                    cost_meta(&cfg, sink.total()),
+                                    Vec::new(),
+                                );
+                                if let Some(m) = done.meta.as_mut() {
+                                    m.chart = profile_chart(&pf_name, &pf_full);
+                                }
+                                yield done;
+                                return;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -2680,6 +2719,46 @@ fn live_pipeline(
                 }
                 None => None,
             };
+            // §44 §1b: reverse the single-doc exclusion. A profileable target
+            // (.csv/.tsv) is answered from its EXACT profile — a first-class
+            // verified answer with a shown computation (§3) — instead of being
+            // dropped to the single-shot path where its numbers rode only as
+            // advisory context a weak model could paraphrase into fiction. This
+            // covers the numeric single-doc ask that never matched the analytics
+            // cue (e.g. "what does this sleep log show"): the figures are
+            // table_profile()'s, never the model's.
+            if let Some((doc_id, name, _)) =
+                doc.clone().filter(|(_, n, c)| is_profileable(n) && !c.is_empty())
+            {
+                if let Some((_, full)) = vault::doc_text(&doc_id, None) {
+                    if let Some(ans) = crate::table_profile::profile_answer(&name, &full) {
+                        yield progress(format!("Reading all of {name}…"), 1, 1);
+                        yield delta(ans);
+                        let reference = RagReference {
+                            file_id: doc_id.clone(),
+                            name: name.clone(),
+                            snippet: String::new(),
+                            score: 1.0,
+                            kind: crate::vault::source_kind_of(&doc_id),
+                        };
+                        let mut done = final_chunk(
+                            vec![reference],
+                            1,
+                            &origin,
+                            cost_meta(&cfg, sink.total()),
+                            Vec::new(),
+                        );
+                        if let Some(m) = done.meta.as_mut() {
+                            m.chart = profile_chart(&name, &full);
+                        }
+                        yield done;
+                        return;
+                    }
+                }
+                // A profileable file that didn't yield a profile (too few rows,
+                // not really tabular) falls through to the single-shot path,
+                // where the §2 guard still protects any numeric narration.
+            }
             if let Some((doc_id, name, chunks)) =
                 doc.filter(|(_, n, c)| !is_profileable(n) && !c.is_empty())
             {
