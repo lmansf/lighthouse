@@ -838,6 +838,22 @@ async fn collect(mut s: llm::AnswerStream) -> String {
     out
 }
 
+/// §44 §2: vet an ARMED numeric-tabular answer post-generation. Called only
+/// when the trust guard is armed (the caller streams unchanged otherwise), so
+/// this always buffers. If the model stated a figure the engine did not
+/// produce (not in the profiles' verified set, citations ignored), the whole
+/// answer degrades to the honest number-free reply; a faithful answer (only
+/// engine figures, or none) passes through unchanged.
+fn vet_numbers(raw: String, profiles: &[String], file: &str, columns: &[String]) -> String {
+    let refs: Vec<&str> = profiles.iter().map(String::as_str).collect();
+    let verified = crate::numguard::verified_set(&refs);
+    if crate::numguard::answer_has_unverified_number(&raw, &verified) {
+        crate::numguard::number_free_degradation(file, columns)
+    } else {
+        raw
+    }
+}
+
 fn take_chars(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
 }
@@ -1506,10 +1522,23 @@ fn live_pipeline(
             }
         }
 
+        // §44 §2: the numeric TRUST GUARD's state. When the analytics branch is
+        // entered for a statistical ask over tabular data but produces no
+        // verified answer (no executed SQL, no §1b profile), these arm the
+        // deterministic post-generation guard on every downstream RAG narration:
+        // any figure the engine never produced degrades to an honest number-free
+        // reply. `guard_profiles` collects the authoritative sources (table
+        // profiles injected as context) whose figures the guard DOES trust.
+        let mut guard_armed = false;
+        let mut guard_file = String::new();
+        let mut guard_columns: Vec<String> = Vec::new();
+        let mut guard_profiles: Vec<String> = Vec::new();
+
         // --- Analytics branch (docs/analytics-beam.md): aggregate ask over
         //     tabular files → model writes SQL, DataFusion executes, the model
-        //     narrates the verified result. Any failure falls through silently
-        //     to the paths below — analytics can only add capability. ---
+        //     narrates the verified result. A failure no longer falls through
+        //     SILENTLY: §1b answers profileable tables from their exact profile,
+        //     and §2 guards any remaining numeric narration. ---
         if has_real_model(&cfg) && crate::analytics::analytics_cue(&question) {
             // §22.4 queue-not-fail: this branch is about to ask the model to
             // write SQL — if the PRIVATE model's server is still starting or
@@ -1558,6 +1587,16 @@ fn live_pipeline(
                 let ctx = datafusion::prelude::SessionContext::new();
                 let regs = crate::analytics::register_tables(&ctx, &files, is_cloud).await;
                 if !regs.is_empty() {
+                    // §44 §2: we're answering a statistical ask over registered
+                    // tabular data. Arm the trust guard now: if neither SQL nor
+                    // the §1b profile produces a verified answer, every
+                    // downstream RAG narration is gated so it cannot state a
+                    // figure the engine never computed. Naming the first table
+                    // and its columns lets the honest degradation suggest a
+                    // runnable rephrase.
+                    guard_armed = true;
+                    guard_file = regs.first().map(|r| r.file_name.clone()).unwrap_or_default();
+                    guard_columns = regs.first().map(|r| r.columns.clone()).unwrap_or_default();
                     // Saved views resolve as virtual tables AFTER the files
                     // (openspec: add-shaped-views §2): each eligible view
                     // registers under the shared table caps and contributes a
@@ -2454,6 +2493,11 @@ fn live_pipeline(
         if cfg.provider_id.as_deref() == Some("local")
             && crate::settings::read_desktop_settings().draft_answers != Some(false)
             && !initial.contexts.is_empty()
+            // §44 §2: an armed numeric-tabular ask must not flash an extractive
+            // draft that quotes an unverified figure from raw chunks — the guard
+            // below can only vet the FINAL answer. Suppress the transient draft
+            // so no unverified number is ever shown, even for a moment.
+            && !guard_armed
         {
             let ctxs: Vec<Ctx> = initial
                 .contexts
@@ -2579,6 +2623,9 @@ fn live_pipeline(
                             text: p.clone(),
                             score: 0.0,
                         });
+                        // §44 §2: this profile's figures are engine-computed, so
+                        // the guard trusts them if this synthesis is armed.
+                        guard_profiles.push(p.clone());
                     }
                 }
 
@@ -2651,8 +2698,15 @@ fn live_pipeline(
                     history.clone(),
                     Some(sink.clone()),
                 );
-                while let Some(d) = answer.next().await {
-                    yield delta(d);
+                // §44 §2: gate the synthesized numbers when this is an armed
+                // numeric-tabular ask; otherwise stream unchanged.
+                if guard_armed {
+                    let raw = collect(answer).await;
+                    yield delta(vet_numbers(raw, &guard_profiles, &guard_file, &guard_columns));
+                } else {
+                    while let Some(d) = answer.next().await {
+                        yield delta(d);
+                    }
                 }
                 yield final_chunk(
                     extracts.into_iter().map(|(r, _)| r).collect(),
@@ -2815,8 +2869,16 @@ fn live_pipeline(
                         history.clone(),
                         Some(sink.clone()),
                     );
-                    while let Some(d) = answer.next().await {
-                        yield delta(d);
+                    // §44 §2: whole-file focus over a non-profileable tabular
+                    // target (profileable ones are answered by §1b) — gate its
+                    // numbers when armed.
+                    if guard_armed {
+                        let raw = collect(answer).await;
+                        yield delta(vet_numbers(raw, &guard_profiles, &guard_file, &guard_columns));
+                    } else {
+                        while let Some(d) = answer.next().await {
+                            yield delta(d);
+                        }
                     }
                     yield final_chunk(
                         vec![reference],
@@ -2902,8 +2964,15 @@ fn live_pipeline(
                         history.clone(),
                         Some(sink.clone()),
                     );
-                    while let Some(d) = answer.next().await {
-                        yield delta(d);
+                    // §44 §2: long-document sweep reduce — gate its numbers when
+                    // this is an armed numeric-tabular ask.
+                    if guard_armed {
+                        let raw = collect(answer).await;
+                        yield delta(vet_numbers(raw, &guard_profiles, &guard_file, &guard_columns));
+                    } else {
+                        while let Some(d) = answer.next().await {
+                            yield delta(d);
+                        }
                     }
                     yield final_chunk(
                         vec![reference],
@@ -2974,6 +3043,8 @@ fn live_pipeline(
                     0.0,
                     Some(r.file_id.clone()),
                 ));
+                // §44 §2: engine-computed figures the guard trusts if armed.
+                guard_profiles.push(p.clone());
                 contexts.push(Ctx { name: pname, text: p, score: 0.0 });
                 profiled += 1;
                 if profile_chart_spec.is_none() {
@@ -2993,8 +3064,17 @@ fn live_pipeline(
         // the sink only carries this call's usage once the stream has drained.
         let mut answer =
             llm::stream_answer(question, contexts, cfg.clone(), history, Some(sink.clone()));
-        while let Some(d) = answer.next().await {
-            yield delta(d);
+        // §44 §2: the terminal catch-all. When this is an armed numeric-tabular
+        // ask that reached the fall-through, gate the answer: any figure absent
+        // from the injected profiles' verified set degrades to the honest
+        // number-free reply. Non-armed asks stream unchanged (byte-identical).
+        if guard_armed {
+            let raw = collect(answer).await;
+            yield delta(vet_numbers(raw, &guard_profiles, &guard_file, &guard_columns));
+        } else {
+            while let Some(d) = answer.next().await {
+                yield delta(d);
+            }
         }
         // §2 visual-first: the profiled table's chart, drawn from the engine's
         // own aggregates (see profile_chart_spec above). Deterministic engine

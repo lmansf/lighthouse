@@ -1048,6 +1048,14 @@ async function* answerPipelineLive(
   }
 
   // --- Single-shot path (today's behavior) + exact table stats for CSV hits ---
+  // PARITY (§44 §2): the numeric trust guard's ENFORCEMENT is Rust-only, like
+  // the whole analytics branch it protects — synth.rs arms it only when an
+  // `analytics_cue` ask over registered tabular data produced no verified
+  // answer, a seam the twin (no analytics branch) never reaches. The shared
+  // digit-gate lives in numguard.ts (byte-identical to numguard.rs, pinned by
+  // test/numguard.test.mjs); wiring a broader arm here would DIVERGE from
+  // synth.rs, which does not gate a non-analytics RAG answer. The twin's whole
+  // §44 surface is the profileAnswer promotion above.
   let contexts: Ctx[] = initial.contexts.map((c) => ({
     name: ctxLabel(c),
     text: c.text,

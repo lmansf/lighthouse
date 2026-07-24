@@ -48,6 +48,10 @@ use datafusion::prelude::SessionContext;
 use crate::analytics::{register_tables, run_query, QueryResult};
 use crate::catalog::{columns_for, ColumnKind};
 use crate::config::now_ms;
+// §44 §2: the digit-gate tokenizer is shared with the analytics/RAG trust
+// guard — one definition of "what counts as a number in prose", ported to
+// `numguard` so the report framer and the guard can never drift.
+use crate::numguard::{number_tokens, with_integer_parts};
 use crate::{ledger, recipes};
 
 /// A changepoint headline is surfaced to the SUMMARY only when its normalized
@@ -730,31 +734,6 @@ fn capped_section_table(markdown: &str) -> String {
 /// trailing dots trimmed ("$4,200.50" → "4200.50"; "2024-10" → "2024" and
 /// "10"; "+2.85σ" → "2.85"). Deterministic and cheap — the fact-floor idiom
 /// (§32 §8) turned from a test assertion into a runtime gate.
-fn number_tokens(text: &str) -> std::collections::BTreeSet<String> {
-    let mut out = std::collections::BTreeSet::new();
-    let mut cur = String::new();
-    let flush = |cur: &mut String, out: &mut std::collections::BTreeSet<String>| {
-        if cur.is_empty() {
-            return;
-        }
-        let cleaned = cur.replace(',', "");
-        let trimmed = cleaned.trim_matches('.');
-        if trimmed.chars().any(|c| c.is_ascii_digit()) {
-            out.insert(trimmed.to_string());
-        }
-        cur.clear();
-    };
-    for c in text.chars() {
-        if c.is_ascii_digit() || ((c == '.' || c == ',') && !cur.is_empty()) {
-            cur.push(c);
-        } else {
-            flush(&mut cur, &mut out);
-        }
-    }
-    flush(&mut cur, &mut out);
-    out
-}
-
 /// The numbers a framing may cite: every number token in the report's
 /// computed content (summary, section headings/tables/headlines, caveats),
 /// PLUS each token's integer part — so "400" faithfully cites "400.25"
@@ -779,20 +758,6 @@ fn findings_number_set(report: &Report) -> std::collections::BTreeSet<String> {
 /// The summary headlines' own numbers (the "omits them" arm of the gate).
 fn summary_number_set(report: &Report) -> std::collections::BTreeSet<String> {
     with_integer_parts(number_tokens(&report.summary.join("\n")))
-}
-
-fn with_integer_parts(
-    tokens: std::collections::BTreeSet<String>,
-) -> std::collections::BTreeSet<String> {
-    let mut out = tokens.clone();
-    for t in &tokens {
-        if let Some((int, _)) = t.split_once('.') {
-            if !int.is_empty() {
-                out.insert(int.to_string());
-            }
-        }
-    }
-    out
 }
 
 /// §38 §4: the framing consistency floor, as a GATE. An accepted framing
