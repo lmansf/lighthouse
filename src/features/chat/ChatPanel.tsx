@@ -3309,6 +3309,10 @@ export function ChatPanel() {
         compact: compactLayout,
         coarse: coarsePointer,
         keyboardUp: shellUi.keyboardUp,
+        // §2: while an ask is in flight the read-from-top hold owns scroll —
+        // centering waits for the settled composing state, so the two never
+        // fight over the transcript's scrollTop.
+        streaming,
       })
     ) {
       return;
@@ -3337,7 +3341,7 @@ export function ChatPanel() {
       window.clearTimeout(timer);
       vv?.removeEventListener("resize", center);
     };
-  }, [compactLayout, coarsePointer, shellUi.keyboardUp, writeScrollTop]);
+  }, [compactLayout, coarsePointer, shellUi.keyboardUp, streaming, writeScrollTop]);
 
   // Auto-grow the composer with the draft (one line up to ~six); beyond the cap
   // the textarea scrolls internally. Measured off scrollHeight, so pasted

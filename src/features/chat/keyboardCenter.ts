@@ -7,16 +7,18 @@
  * shell state makes it a table the tests pin, not control flow buried in an
  * effect.
  *
- * TRUE only on the compact + coarse arrangement with the keyboard up:
+ * TRUE only on the compact + coarse arrangement with the keyboard up and NO ask
+ * in flight:
  *  - compact: the phone/narrow arrangement — desktop and iPad-regular (both
  *    NOT compact) never center, so the desktop tree is untouched.
  *  - coarse: a touch pointer — a fine pointer (mouse/trackpad) summons no
  *    on-screen keyboard, so there is nothing to clear.
  *  - keyboardUp: the software keyboard is up (visualViewport shrank OR an
  *    editable holds focus — the shell's combined signal).
- *
- * [§2 adds the `!streaming` gate: while an ask is in flight the read-from-top
- *  hold owns scroll; the follow-up centering is for the settled composing state.]
+ *  - !streaming: no ask is in flight. While an answer streams, the read-from-top
+ *    hold owns scroll (it parks the answer's top so streaming reads top-down);
+ *    the follow-up centering is for the SETTLED state where the user is composing
+ *    a reply. Gating here keeps the two from fighting over scrollTop.
  */
 export interface KeyboardCenterInput {
   /** The phone/narrow arrangement (desktop + iPad-regular are false). */
@@ -25,9 +27,11 @@ export interface KeyboardCenterInput {
   coarse: boolean;
   /** The software keyboard is up (visualViewport inset OR an editable focused). */
   keyboardUp: boolean;
+  /** An answer is streaming — an ask is in flight, so the read-from-top hold owns scroll. */
+  streaming: boolean;
 }
 
 /** Whether ChatPanel should center the last answer + composer above the keyboard. */
 export function keyboardCenterVerdict(input: KeyboardCenterInput): boolean {
-  return input.compact && input.coarse && input.keyboardUp;
+  return input.compact && input.coarse && input.keyboardUp && !input.streaming;
 }
