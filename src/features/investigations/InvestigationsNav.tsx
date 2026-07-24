@@ -34,15 +34,26 @@ import {
   MenuTrigger,
   Switch,
   Text,
+  Textarea,
   Tooltip,
   makeStyles,
   mergeClasses,
   shorthands,
   tokens,
 } from "@fluentui/react-components";
-import { IconAdd, IconArchive, IconBranch, IconCheck, IconClose, IconExport, IconRename } from "@/shell/icons";
-import type { Investigation } from "@/contracts";
-import { ragService } from "@/contracts";
+import {
+  IconAdd,
+  IconArchive,
+  IconBeaker,
+  IconBranch,
+  IconBriefcase,
+  IconCheck,
+  IconClose,
+  IconExport,
+  IconRename,
+} from "@/shell/icons";
+import type { CapabilityMap, Investigation, ReportTemplate } from "@/contracts";
+import { EMPTY_CAPABILITY_MAP, ragService } from "@/contracts";
 import { useChatStore } from "@/stores/useChatStore";
 import { useInvestigationsStore } from "@/stores/useInvestigationsStore";
 import { useRagStore } from "@/stores/useRagStore";
@@ -114,6 +125,13 @@ const useStyles = makeStyles({
     gap: tokens.spacingVerticalS,
   },
   dialogHint: { color: tokens.colorNeutralForeground3 },
+  // §46: the two report launchers sit as a quiet row under "New investigation".
+  reportRow: {
+    display: "flex",
+    flexWrap: "wrap",
+    gap: tokens.spacingHorizontalXS,
+    marginTop: tokens.spacingVerticalXXS,
+  },
 });
 
 /** "Whole vault" or the LIVE count of still-present scope files — dangling
@@ -163,6 +181,14 @@ export function InvestigationsNav() {
   const [forkError, setForkError] = useState<string | null>(null);
   const [navNote, setNavNote] = useState<string | null>(null);
 
+  // §46 report launcher: which tables are investigable, plus the hypothesis
+  // dialog's template (null ⇒ closed), text, and in-flight/error state.
+  const [reportMap, setReportMap] = useState<CapabilityMap>(EMPTY_CAPABILITY_MAP);
+  const [hypoTemplate, setHypoTemplate] = useState<ReportTemplate | null>(null);
+  const [hypoText, setHypoText] = useState("");
+  const [reportBusy, setReportBusy] = useState(false);
+  const [reportError, setReportError] = useState<string | null>(null);
+
   useEffect(() => {
     ensureLoaded();
   }, [ensureLoaded]);
@@ -179,6 +205,35 @@ export function InvestigationsNav() {
 
   // Archive hides, never deletes: the nav lists live records only.
   const visible = useMemo(() => investigations.filter((i) => !i.archived), [investigations]);
+
+  // §46: the report launchers are data-gated on an investigable table — the same
+  // Date+Numeric shape the chat Investigate chips use (capabilityMap over the
+  // currently-included files). No qualifying table ⇒ no buttons.
+  const includedFileIds = useRagStore((s) => s.includedFileIds);
+  const includedKey = useMemo(() => includedFileIds().join("\n"), [includedFileIds, nodes]);
+  useEffect(() => {
+    if (!includedKey) {
+      setReportMap(EMPTY_CAPABILITY_MAP);
+      return;
+    }
+    let cancelled = false;
+    ragService
+      .capabilityMap(includedKey.split("\n"))
+      .then((m) => {
+        if (!cancelled) setReportMap(m ?? EMPTY_CAPABILITY_MAP);
+      })
+      .catch(() => {
+        if (!cancelled) setReportMap(EMPTY_CAPABILITY_MAP);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [includedKey]);
+  // The primary investigable table — the report's target (named in the dialog).
+  const reportTable = useMemo(
+    () => reportMap.tables.find((t) => t.investigable)?.name ?? null,
+    [reportMap],
+  );
 
   function openCreate() {
     setCreateName("");
@@ -303,6 +358,40 @@ export function InvestigationsNav() {
       setNavError(err instanceof Error ? err.message : "the investigation could not be exported");
     } finally {
       setBusy(false);
+    }
+  }
+
+  // §46: open the hypothesis prompt for a template, then generate the report over
+  // the primary investigable table. The engine's numbers are unchanged; the
+  // hypothesis only seeds the model-narrated framing (never a figure).
+  function openReport(template: ReportTemplate) {
+    setHypoTemplate(template);
+    setHypoText("");
+    setReportError(null);
+    setNavNote(null);
+  }
+
+  async function generateReport() {
+    if (!reportTable || !hypoTemplate || reportBusy) return;
+    setReportBusy(true);
+    setReportError(null);
+    try {
+      const { savedId, savedName } = await ragService.investigate(
+        reportTable,
+        currentInvestigationId ?? undefined,
+        hypoTemplate,
+        hypoText.trim() || undefined,
+      );
+      setHypoTemplate(null);
+      setNavNote(`Saved ${savedName}`);
+      if (typeof window !== "undefined" && savedId) {
+        window.dispatchEvent(new CustomEvent("lighthouse:reveal-node", { detail: { id: savedId } }));
+      }
+    } catch {
+      // Rust-only: the web twin throws — degrade to an honest note, never a fake save.
+      setReportError("Deep analysis runs in the desktop engine.");
+    } finally {
+      setReportBusy(false);
     }
   }
 
@@ -456,6 +545,32 @@ export function InvestigationsNav() {
         New investigation
       </Button>
 
+      {/* §46: the two hypothesis-seeded report launchers, data-gated on an
+          investigable table in the current context. Each opens a hypothesis
+          prompt; the report body is deterministic, the hypothesis frames only. */}
+      {reportTable && (
+        <div className={styles.reportRow}>
+          <Button
+            appearance="subtle"
+            size="small"
+            icon={<IconBeaker />}
+            onClick={() => openReport("imrad")}
+            title={`Generate a scientific-method report on ${reportTable}`}
+          >
+            Scientific report
+          </Button>
+          <Button
+            appearance="subtle"
+            size="small"
+            icon={<IconBriefcase />}
+            onClick={() => openReport("bluf")}
+            title={`Generate a business report on ${reportTable}`}
+          >
+            Business report
+          </Button>
+        </div>
+      )}
+
       <Dialog
         open={createOpen}
         onOpenChange={(_, d) => {
@@ -568,6 +683,55 @@ export function InvestigationsNav() {
                 onClick={() => void forkNow()}
               >
                 Branch
+              </Button>
+            </DialogActions>
+          </DialogBody>
+        </LhDialogSurface>
+      </Dialog>
+
+      {/* §46: the hypothesis prompt. Open ⇔ a template is chosen; Generate runs
+          the deterministic report over the primary investigable table, seeding
+          only the framing with the (optional) hypothesis. */}
+      <Dialog
+        open={hypoTemplate !== null}
+        onOpenChange={(_, d) => {
+          if (!d.open) setHypoTemplate(null);
+        }}
+      >
+        <LhDialogSurface>
+          <DialogBody>
+            <DialogTitle>
+              {hypoTemplate === "bluf" ? "Business report" : "Scientific report"}
+            </DialogTitle>
+            <DialogContent className={styles.dialogContent}>
+              <Text size={200} className={styles.dialogHint}>
+                A deep analysis of {reportTable} saved to your vault. Every figure is computed by
+                the engine — an optional hypothesis only frames the write-up, never the numbers.
+              </Text>
+              <Textarea
+                value={hypoText}
+                onChange={(_, d) => setHypoText(d.value)}
+                placeholder="Optional hypothesis to frame around, e.g. “churn rose after the price change”"
+                aria-label="Working hypothesis"
+                autoFocus
+                resize="vertical"
+              />
+              {reportError && (
+                <Text size={200} className={styles.errorNote} role="status">
+                  {reportError}
+                </Text>
+              )}
+            </DialogContent>
+            <DialogActions>
+              <Button appearance="secondary" onClick={() => setHypoTemplate(null)}>
+                Cancel
+              </Button>
+              <Button
+                appearance="primary"
+                disabled={reportBusy}
+                onClick={() => void generateReport()}
+              >
+                {reportBusy ? "Generating…" : "Generate"}
               </Button>
             </DialogActions>
           </DialogBody>

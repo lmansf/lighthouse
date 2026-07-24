@@ -479,6 +479,7 @@ class MockRagService implements RagService {
     table: string,
     _investigationId?: string,
     template?: ReportTemplate,
+    _hypothesis?: string,
   ): Promise<{ savedId: string; savedName: string }> {
     // A fake saved note so the gallery's Investigate affordance is exercisable
     // offline. PARITY: the real web dev twin throws (deep analysis is Rust-only);

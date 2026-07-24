@@ -191,3 +191,33 @@ test("the widget stays global: no investigation machinery leaks into WidgetBar",
     "WidgetBar asks in the global context (design: the widget ignores investigations in v1)",
   );
 });
+
+test("§46: the nav offers hypothesis-seeded Scientific/Business reports, gated on an investigable table", () => {
+  // Data-gated on an investigable table via the same capabilityMap shape the
+  // chat chips use — no qualifying table ⇒ no launcher row.
+  assert.match(
+    nav,
+    /reportMap\.tables\.find\(\(t\) => t\.investigable\)\?\.name \?\? null/,
+    "the primary investigable table is the report target (null ⇒ no launchers)",
+  );
+  assert.match(nav, /\{reportTable && \(/, "the launcher row is gated on an investigable table");
+  assert.match(nav, />\s*Scientific report\s*</, "a Scientific report launcher");
+  assert.match(nav, />\s*Business report\s*</, "a Business report launcher");
+  assert.match(nav, /onClick=\{\(\) => openReport\("imrad"\)\}/, "Scientific opens the IMRaD hypothesis prompt");
+  assert.match(nav, /onClick=\{\(\) => openReport\("bluf"\)\}/, "Business opens the BLUF hypothesis prompt");
+  // The hypothesis prompt (a Textarea) → Generate calls investigate with the
+  // template + the current investigation + the (optional, trimmed) hypothesis.
+  assert.match(nav, /aria-label="Working hypothesis"/, "the prompt takes a working hypothesis");
+  assert.match(
+    nav,
+    /ragService\.investigate\(\s*reportTable,\s*currentInvestigationId \?\? undefined,\s*hypoTemplate,\s*hypoText\.trim\(\) \|\| undefined,\s*\)/,
+    "Generate seeds the templated report with the hypothesis in the current context",
+  );
+  // The report body stays deterministic — the copy promises engine-computed
+  // figures; the hypothesis frames only (the §44/reports digit gate enforces it).
+  assert.match(
+    nav,
+    /Every figure is computed by\s+the engine — an optional hypothesis only frames the write-up, never the numbers\./,
+    "the dialog states the numbers are engine-computed, the hypothesis frames only",
+  );
+});

@@ -316,13 +316,15 @@ class RealRagService implements RagService {
     table: string,
     investigationId?: string,
     template?: ReportTemplate,
+    hypothesis?: string,
   ): Promise<{ savedId: string; savedName: string }> {
     // Runs the recipe battery + writes the report note in the Rust engine.
     // PARITY: the dev twin answers `{available:false}` (analytics is Rust-only);
     // a write failure rides back as `{error}`. Either surfaces as an honest throw
     // so the caller shows the error, never a fake saved note. `template` prescribes
     // a structured shape (add-report-templates); omitted ⇒ the Standard report.
-    const res = await post({ op: "investigate", table, investigationId, template });
+    // §46: `hypothesis` seeds the template framing's angle only (never a figure).
+    const res = await post({ op: "investigate", table, investigationId, template, hypothesis });
     if (res.available === false || res.error || !res.savedId) {
       throw new Error(
         (res.reason as string) ||

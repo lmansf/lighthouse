@@ -498,6 +498,21 @@ const BLUF_MEANING_PROMPT: &str = "Write a short 'What this means' for a busines
 /// rather than a paragraph; discard it and fall back to deterministic framing.
 const NARRATION_CHAR_CAP: usize = 1200;
 
+/// §46: fold the analyst's optional working hypothesis into a framing prompt. It
+/// seeds only the narrative's ANGLE — never a finding: the digit gate
+/// (`framing_number_gate`, unchanged) still strips any figure in the model's
+/// output that isn't in the verified findings, and the deterministic report body
+/// is untouched. Blank/whitespace ⇒ the base prompt, byte-identical to the
+/// no-hypothesis path.
+fn frame_with_hypothesis(prompt: &str, hypothesis: Option<&str>) -> String {
+    match hypothesis.map(str::trim).filter(|h| !h.is_empty()) {
+        Some(h) => format!(
+            "{prompt}\n\nThe analyst's working hypothesis for this report is: \"{h}\". Frame the narrative around whether the findings bear on it; do NOT assert it as established, and state no figure that is not already in the context."
+        ),
+        None => prompt.to_string(),
+    }
+}
+
 /// Run the deterministic `investigate` battery, then render it in the requested
 /// template. STANDARD is returned unchanged (byte-stable). For a template the
 /// SAME engine-verified sections carry every figure; the model narrates only the
@@ -510,6 +525,7 @@ pub async fn investigate_templated(
     files: &[(String, String, PathBuf)],
     is_cloud: bool,
     template: ReportTemplate,
+    hypothesis: Option<&str>,
     cfg: crate::llm::ModelCfg,
 ) -> Report {
     let mut report = investigate(table, files, is_cloud).await;
@@ -533,9 +549,15 @@ pub async fn investigate_templated(
         let summary_nums = summary_number_set(&report);
         match template {
             ReportTemplate::ScientificMethod => {
-                report.intro =
-                    narrate(IMRAD_INTRO_PROMPT, &ctx, &headline_ctx, &findings_nums, &summary_nums, &cfg)
-                        .await;
+                report.intro = narrate(
+                    &frame_with_hypothesis(IMRAD_INTRO_PROMPT, hypothesis),
+                    &ctx,
+                    &headline_ctx,
+                    &findings_nums,
+                    &summary_nums,
+                    &cfg,
+                )
+                .await;
                 report.discussion = narrate(
                     IMRAD_DISCUSSION_PROMPT,
                     &ctx,
@@ -548,7 +570,7 @@ pub async fn investigate_templated(
             }
             ReportTemplate::BusinessReport => {
                 report.intro = narrate(
-                    BLUF_BOTTOM_LINE_PROMPT,
+                    &frame_with_hypothesis(BLUF_BOTTOM_LINE_PROMPT, hypothesis),
                     &ctx,
                     &headline_ctx,
                     &findings_nums,
@@ -1182,6 +1204,31 @@ mod tests {
             ctx[0].text.matches("first 5 rows of the section's table").count(),
             3,
             "each 10-row table caps to its 5-row digest"
+        );
+    }
+
+    #[test]
+    fn hypothesis_seeds_the_framing_prompt_but_never_the_numbers() {
+        // §46: a blank/absent hypothesis is byte-identical to the base prompt …
+        assert_eq!(frame_with_hypothesis(IMRAD_INTRO_PROMPT, None), IMRAD_INTRO_PROMPT);
+        assert_eq!(
+            frame_with_hypothesis(BLUF_BOTTOM_LINE_PROMPT, Some("   ")),
+            BLUF_BOTTOM_LINE_PROMPT
+        );
+        // … and a real hypothesis is appended (trimmed), keeps the base prompt, and
+        // carries the "not established / no new figure" guard rail. The digit gate
+        // (framing_number_gate, unchanged) is what actually strips any number.
+        let framed =
+            frame_with_hypothesis(IMRAD_INTRO_PROMPT, Some("  churn rose after the price change  "));
+        assert!(framed.starts_with(IMRAD_INTRO_PROMPT), "base prompt is preserved");
+        assert!(
+            framed.contains("churn rose after the price change") && !framed.contains("  churn rose"),
+            "hypothesis is seeded, trimmed not raw",
+        );
+        assert!(
+            framed.contains("do NOT assert it as established")
+                && framed.contains("state no figure that is not already in the context"),
+            "the framing keeps the hypothesis from becoming a claimed fact or an unverified number",
         );
     }
 
