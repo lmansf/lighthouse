@@ -455,6 +455,9 @@ export function AppShell({ sidebar, main }: AppShellProps) {
       compact: layout.compact,
       activeTab: compactTab,
       keyboardUp: keyboardInset > 0 || editableFocused,
+      // §45: the numeric inset rides alongside the boolean so ChatPanel can
+      // center the last answer + composer just above the keyboard.
+      keyboardInset,
     });
   }, [layout.compact, compactTab, keyboardInset, editableFocused]);
 

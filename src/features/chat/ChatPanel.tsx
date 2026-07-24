@@ -101,7 +101,8 @@ import { useInvestigationsStore } from "@/stores/useInvestigationsStore";
 import { chatHistoryLocked } from "@/stores/managedLocks";
 import { modKey } from "@/features/onboarding/ModeChooser";
 import { LhDialogSurface, LhMenuPopover } from "@/shell/controls";
-import { publishChatStreaming, USER_ASK_EVENT } from "@/shell/shellSignals";
+import { publishChatStreaming, USER_ASK_EVENT, useShellUi } from "@/shell/shellSignals";
+import { keyboardCenterVerdict } from "./keyboardCenter";
 import { ACCENTS, BEAM_SWEEP, CONTENT_TYPE } from "@/shell/theme";
 import { FILE_DRAG_MIME, parseDraggedFiles, type DraggedFile } from "@/shell/dnd";
 import { isDesktopShell, pathsForFiles, platformKind } from "@/shell/desktopBridge";
@@ -2679,6 +2680,13 @@ export function ChatPanel() {
   // 0.13.10 §2: the History surface opens from the chat header on EVERY
   // platform — a full-screen Sheet on compact, an anchored popover on desktop.
   const compactLayout = usePaneLayout(false).compact;
+  // §45: the shell's software-keyboard signals (keyboardUp + the numeric inset)
+  // drive follow-up centering below. The inset rides a ref so the centering
+  // effect reads the latest value on each visualViewport 'resize' without
+  // re-subscribing every animation frame.
+  const shellUi = useShellUi();
+  const keyboardInsetRef = useRef(shellUi.keyboardInset);
+  keyboardInsetRef.current = shellUi.keyboardInset;
   const [historyOpen, setHistoryOpen] = useState(false);
   // 0.13.10 §3: the investigation PICKER — the header title opens the full
   // InvestigationsNav operations surface (switch, create, scope-from-selection,
@@ -3284,6 +3292,52 @@ export function ChatPanel() {
     if (coarsePointer) return;
     composerRef.current?.focus();
   }, [coarsePointer]);
+
+  // §45: keyboard-aware follow-up centering. On a touch phone, when the software
+  // keyboard opens for a follow-up (focusing the composer flips keyboardUp via
+  // the shell's editable-focus signal), bring the last answer's tail AND the
+  // composer into the reduced visualViewport so the user sees what they are
+  // replying to and typing. Drives the TRANSCRIPT (bodyRef) with the same
+  // instant writeScrollTop the read-from-top hold uses — so handleBodyScroll
+  // reads it as our own echo and never cancels a hold, and reduced-motion needs
+  // no special case (there is no smooth scroll). NEVER window: AppShell's unwedge
+  // owns window scroll on compact. The keyboard animates in ~250ms, so center
+  // after it settles and again on each visualViewport 'resize' as the inset lands.
+  useEffect(() => {
+    if (
+      !keyboardCenterVerdict({
+        compact: compactLayout,
+        coarse: coarsePointer,
+        keyboardUp: shellUi.keyboardUp,
+      })
+    ) {
+      return;
+    }
+    const center = () => {
+      const el = bodyRef.current;
+      const row = el?.querySelector<HTMLElement>("[data-lh-turn]:last-of-type");
+      if (!el || !row) return;
+      // The last turn's bottom, in the transcript's own content coordinates
+      // (rect delta + scrollTop — its offsetParent is the positioned bodyWrap).
+      const rowBottom =
+        row.getBoundingClientRect().bottom -
+        el.getBoundingClientRect().top -
+        el.clientTop +
+        el.scrollTop;
+      // Lift that bottom to the visible edge of the transcript, above the slice
+      // the keyboard ate (keyboardInset — ~0 on iOS's resize-mode WKWebView,
+      // which shrinks the webview instead); clamp to the scroll range.
+      const target = rowBottom - (el.clientHeight - keyboardInsetRef.current);
+      writeScrollTop(el, Math.max(0, Math.min(target, el.scrollHeight - el.clientHeight)));
+    };
+    const timer = window.setTimeout(center, 250);
+    const vv = window.visualViewport;
+    vv?.addEventListener("resize", center);
+    return () => {
+      window.clearTimeout(timer);
+      vv?.removeEventListener("resize", center);
+    };
+  }, [compactLayout, coarsePointer, shellUi.keyboardUp, writeScrollTop]);
 
   // Auto-grow the composer with the draft (one line up to ~six); beyond the cap
   // the textarea scrolls internally. Measured off scrollHeight, so pasted
