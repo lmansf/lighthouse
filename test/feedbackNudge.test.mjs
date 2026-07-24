@@ -102,8 +102,8 @@ test("the shell bus is published by its owners (AppShell + ChatPanel)", () => {
   const appShell = read("src/shell/AppShell.tsx");
   assert.match(
     appShell,
-    /publishShellUi\(\{\s*\n\s*compact: layout\.compact,\s*\n\s*activeTab: compactTab,\s*\n\s*keyboardUp: keyboardInset > 0 \|\| editableFocused,\s*\n\s*\}\);/,
-    "AppShell publishes the three signals it owns",
+    /publishShellUi\(\{\s*\n\s*compact: layout\.compact,\s*\n\s*activeTab: compactTab,\s*\n\s*keyboardUp: keyboardInset > 0 \|\| editableFocused,\s*\n[\s\S]*?keyboardInset,\s*\n\s*\}\);/,
+    "AppShell publishes the four signals it owns (compact, tab, keyboardUp, keyboardInset)",
   );
   const chat = read("src/features/chat/ChatPanel.tsx");
   assert.match(chat, /publishChatStreaming\(streaming\);/, "ChatPanel mirrors streaming");

@@ -29,11 +29,22 @@ export interface ShellUi {
   activeTab: CompactTab;
   /** Software keyboard up: visualViewport inset OR an editable holding focus. */
   keyboardUp: boolean;
+  /** §45: the reduced-visualViewport inset in px — how much the keyboard ate off
+   *  the bottom (0 when the keyboard is down or on desktop). The numeric
+   *  companion to `keyboardUp`, so a consumer can position content just above the
+   *  keyboard instead of only knowing it is up. */
+  keyboardInset: number;
   /** An answer is streaming into the transcript right now. */
   streaming: boolean;
 }
 
-const state: ShellUi = { compact: false, activeTab: "chat", keyboardUp: false, streaming: false };
+const state: ShellUi = {
+  compact: false,
+  activeTab: "chat",
+  keyboardUp: false,
+  keyboardInset: 0,
+  streaming: false,
+};
 const listeners = new Set<() => void>();
 let snapshot: ShellUi = { ...state };
 
@@ -42,18 +53,22 @@ function emit(): void {
   listeners.forEach((cb) => cb());
 }
 
-/** AppShell's publisher — call with the three signals it owns, every change. */
-export function publishShellUi(ui: Pick<ShellUi, "compact" | "activeTab" | "keyboardUp">): void {
+/** AppShell's publisher — call with the signals it owns, every change. */
+export function publishShellUi(
+  ui: Pick<ShellUi, "compact" | "activeTab" | "keyboardUp" | "keyboardInset">,
+): void {
   if (
     ui.compact === state.compact &&
     ui.activeTab === state.activeTab &&
-    ui.keyboardUp === state.keyboardUp
+    ui.keyboardUp === state.keyboardUp &&
+    ui.keyboardInset === state.keyboardInset
   ) {
     return;
   }
   state.compact = ui.compact;
   state.activeTab = ui.activeTab;
   state.keyboardUp = ui.keyboardUp;
+  state.keyboardInset = ui.keyboardInset;
   emit();
 }
 
