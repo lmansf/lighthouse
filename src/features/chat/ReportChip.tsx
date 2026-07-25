@@ -11,7 +11,7 @@
  */
 import { useState } from "react";
 import { Button, Text, makeStyles, tokens } from "@fluentui/react-components";
-import { IconBeaker, IconBriefcase, IconDoc, IconSearch } from "@/shell/icons";
+import { IconBeaker, IconBriefcase, IconDoc, IconReport } from "@/shell/icons";
 import type { ReportTemplate } from "@/contracts";
 import { ragService } from "@/contracts";
 import { LhMenu } from "@/shell/controls";
@@ -52,11 +52,11 @@ export function ReportChip({ table }: { table: string }) {
             appearance="secondary"
             size="small"
             shape="circular"
-            icon={<IconSearch />}
+            icon={<IconReport />}
             disabled={busy}
             title={`Run a deep analysis of ${table} and save the report to your vault`}
           >
-            {busy ? "Investigating…" : `Investigate ${table}`}
+            {busy ? "Reporting…" : `Report on ${table}`}
           </Button>
         }
         items={[
@@ -82,7 +82,7 @@ export function ReportChip({ table }: { table: string }) {
             onClick: () => void investigate("bluf"),
           },
         ]}
-        aria-label={`Investigate ${table}`}
+        aria-label={`Report on ${table}`}
       />
       {note && (
         <Text size={200} className={styles.note} role="status">

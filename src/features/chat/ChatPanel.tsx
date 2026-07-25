@@ -114,6 +114,7 @@ import { Sheet } from "@/shell/Sheet";
 import { HistoryNav } from "./HistoryNav";
 import { SuggestionChips } from "./SuggestionChips";
 import { mergeSuggestionChips } from "./suggestionChips";
+import { AnswerReportAction } from "./AnswerReportAction";
 import { InvestigationsNav } from "@/features/investigations/InvestigationsNav";
 
 // The markdown stack (react-markdown + remark-gfm + micromark, ~263 KB) is the
@@ -2073,6 +2074,11 @@ function RefineChips({
           Define as metric
         </Button>
       )}
+      {/* §48 §3b: the always-relevant Report door — a templated report on this
+          answer's source table with the §46 hypothesis prompt and a Saved—Open
+          confirmation. Self-resolving: absent when the answer has no
+          investigable source table (no dead door). */}
+      <AnswerReportAction fileIds={meta.fileIds} />
     </div>
     {/* "Chart it" inline mount: the client-built chart of this answer's own
         table, drawn with the house renderer. Per-turn UI state only — never
