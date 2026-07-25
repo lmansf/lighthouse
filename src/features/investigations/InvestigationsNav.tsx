@@ -54,6 +54,7 @@ import {
 } from "@/shell/icons";
 import type { CapabilityMap, Investigation, ReportTemplate } from "@/contracts";
 import { EMPTY_CAPABILITY_MAP, ragService } from "@/contracts";
+import { openSavedReport } from "@/lib/openReport";
 import { useChatStore } from "@/stores/useChatStore";
 import { useInvestigationsStore } from "@/stores/useInvestigationsStore";
 import { useRagStore } from "@/stores/useRagStore";
@@ -387,6 +388,8 @@ export function InvestigationsNav() {
       if (typeof window !== "undefined" && savedId) {
         window.dispatchEvent(new CustomEvent("lighthouse:reveal-node", { detail: { id: savedId } }));
       }
+      // §49 §3: open the reader on the fresh report — never a silent save.
+      openSavedReport(savedId);
     } catch {
       // Rust-only: the web twin throws — degrade to an honest note, never a fake save.
       setReportError("Deep analysis runs in the desktop engine.");

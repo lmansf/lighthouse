@@ -15,6 +15,7 @@ import { IconBeaker, IconBriefcase, IconDoc, IconReport } from "@/shell/icons";
 import type { ReportTemplate } from "@/contracts";
 import { ragService } from "@/contracts";
 import { LhMenu } from "@/shell/controls";
+import { openSavedReport } from "@/lib/openReport";
 
 const useStyles = makeStyles({
   note: { color: tokens.colorNeutralForeground3 },
@@ -37,6 +38,8 @@ export function ReportChip({ table }: { table: string }) {
       if (typeof window !== "undefined" && savedId) {
         window.dispatchEvent(new CustomEvent("lighthouse:reveal-node", { detail: { id: savedId } }));
       }
+      // §49 §3: open the reader on the fresh report — never a silent save.
+      openSavedReport(savedId);
     } catch {
       setNote("Deep analysis runs in the desktop engine.");
     } finally {
