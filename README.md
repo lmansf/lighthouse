@@ -7,9 +7,8 @@ grounded chat (with citations) that answers only from what you included. The
 engine, the search index, the embeddings, OCR, and — if you
 choose the private model — the AI itself all run **on your machine**.
 
-Built for two people in particular: the **data analyst** who wants trustworthy,
-engine-verified answers over their own spreadsheets and reports, and the **IT
-security director** who needs to approve all of it.
+Built for: the **data analyst** who wants trustworthy,
+engine-verified answers over their own spreadsheets and reports.
 
 ## Install
 
