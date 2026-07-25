@@ -859,6 +859,16 @@ pub async fn rag_op(
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .map(String::from);
+            // §47 §5: on mobile, re-ensure the on-device bridge before the report
+            // runs. iOS tears its loopback responder down on app suspension, and
+            // — unlike chat_ask — the investigate arm never re-bound it, so a
+            // report at a suspended bridge streamed into "Connection refused" and
+            // the digit gate silently dropped the framing (engine framing, no
+            // model). This re-binds it once; investigate_templated then warm-waits
+            // it to Ready. Desktop self-heals via the llama-server supervisor, so
+            // it is skipped there (mirrors chat_ask's gate).
+            #[cfg(not(desktop))]
+            let _ = private_model_availability_impl();
             let cfg = lighthouse_core::profile::model_config();
             let is_cloud = lighthouse_core::synth::is_cloud_provider(&cfg);
             let files: Vec<(String, String, std::path::PathBuf)> =

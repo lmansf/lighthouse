@@ -535,6 +535,21 @@ pub async fn investigate_templated(
     report.template = template;
     report.title = format!("{}{}", report.title, template.title_suffix());
     if !report.sections.is_empty() && cfg.provider_id.is_some() {
+        // §47 §5: share the chat path's warm-wait. Report framing used to call
+        // stream_answer cold; at a suspended/loading private bridge that is a
+        // "Connection refused" note the digit gate silently drops (engine
+        // framing, no model). Hold ONCE here for the private model to become
+        // Ready — or the spawn-grace/cap to elapse — exactly as an ask does, so
+        // the framing model actually runs. A report returns a value, not a
+        // stream, so the warming chunks are drained and discarded, not surfaced;
+        // for any non-local provider (or a healthy server) the stream ends at
+        // once and this is a no-op. On a Down bridge the verdict's 20s spawn
+        // grace gives the desktop supervisor a reconcile tick to respawn.
+        {
+            use futures::StreamExt;
+            let mut warm = crate::synth::local_warm_wait(&cfg);
+            while warm.next().await.is_some() {}
+        }
         // §32 §6 / §38 §1: the framing calls ride the same tier seam as
         // narration — budget-packed grounding on apple-fm, byte-identical
         // elsewhere. (The §2 profile selection already covers their system

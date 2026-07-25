@@ -461,7 +461,12 @@ fn warming_label(waited_ms: u64) -> String {
 /// "Local model unavailable → passages" fallback. For any other provider (or a
 /// healthy server) it ends immediately. Cancellation is inherited: dropping
 /// the outer answer stream drops this stream mid-sleep.
-fn local_warm_wait(cfg: &ModelCfg) -> Pin<Box<dyn Stream<Item = ChatChunk> + Send>> {
+///
+/// §47 §5: shared with the report path (`reports::investigate_templated`), which
+/// DRAINS this stream for its effect — a report returns a value, not a stream,
+/// so its "warming…" chunks are discarded, but the health-poll + spawn-grace
+/// wait is exactly what keeps report framing from streaming into a cold bridge.
+pub(crate) fn local_warm_wait(cfg: &ModelCfg) -> Pin<Box<dyn Stream<Item = ChatChunk> + Send>> {
     // Guard: a warm-up only ever holds where the private model can actually
     // become healthy — the desktop shell, or a mobile shell whose plugin
     // reports an on-device backend (supported_here() folds both). Where no
