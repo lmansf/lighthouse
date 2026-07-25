@@ -611,14 +611,18 @@ export function InvestigationsNav() {
                   explorer first.
                 </Text>
               )}
+              {/* §51 §3: this is an investigation-scope POLICY (every answer in
+                  the investigation uses the on-device model), NOT a per-file
+                  privacy lock — the label says "policy" so it never reads as a
+                  repeat of the explorer's per-file "Keep private" control. */}
               <Tooltip
-                content="Answers in this investigation always use the private on-device model."
+                content="A policy for the whole investigation: every answer here is generated only by the private on-device model, never a cloud provider."
                 relationship="description"
               >
                 <Switch
                   checked={localOnly}
                   onChange={(_, d) => setLocalOnly(Boolean(d.checked))}
-                  label="Keep this investigation on-device"
+                  label="Investigation policy: answer only with the on-device model"
                 />
               </Tooltip>
               {createError && (

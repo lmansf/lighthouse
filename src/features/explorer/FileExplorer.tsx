@@ -926,18 +926,11 @@ function TreeRowImpl({
                 Rules for this folder…
               </MenuItem>
             )}
-            <MenuItem
-              icon={node.ragIncluded ? <IconEyeOff /> : <IconEye />}
-              onClick={toggleVisibility}
-            >
-              {node.ragIncluded ? "Hide from AI" : "Visible to AI"}
-            </MenuItem>
-            <MenuItem
-              icon={isLocalOnly ? <IconLockOpen /> : <IconLock />}
-              onClick={toggleLocalOnly}
-            >
-              {isLocalOnly ? "Allow cloud models" : "Keep private (this device only)"}
-            </MenuItem>
+            {/* §51 §3: the "Visible to AI" and "Keep private" menu items are
+                gone — each duplicated a direct control the row already carries
+                inline (the eye at line ~827 and the lock at line ~811), and the
+                bulk switch covers multi-select. One direct entry + one bulk entry
+                per privacy decision; no capability lost. */}
             {node.external && node.parentId === null && !compactRow && (
               <MenuItem icon={<IconClose />} onClick={() => onUnlink(node.id)}>
                 Unlink (leave files in place)
