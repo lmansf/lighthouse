@@ -496,6 +496,46 @@ class MockRagService implements RagService {
     return { savedId: `Lighthouse Reports/${name}`, savedName: name };
   }
 
+  async readNote(id: string): Promise<{ markdown: string; name: string }> {
+    // §49: a believable saved-report markdown so the in-app report reader
+    // renders end to end offline — a heading, a summary, a ```lighthouse-chart
+    // fence (so the key chart draws), a section table, and caveats. PARITY: the
+    // desktop engine returns the ACTUAL saved note via vault read; this mock is
+    // what the offline/test flow drives against. The name derives from the id
+    // the mock investigate() saved under (`Lighthouse Reports/<name>`).
+    const name = id.split("/").pop() ?? "Report.md";
+    const title = name.replace(/\.md$/, "");
+    const markdown = [
+      `# ${title}`,
+      "",
+      "_Generated just now — every figure computed by Lighthouse._",
+      "",
+      "## Summary",
+      "",
+      "- Revenue rose 18% in the latest month.",
+      "",
+      "```lighthouse-chart",
+      '{"kind":"bar","x":["Q1","Q2","Q3"],"series":[{"name":"revenue","values":[120,150,177]}]}',
+      "```",
+      "",
+      "## By quarter",
+      "",
+      "What does revenue by quarter show?",
+      "",
+      "| quarter | revenue |",
+      "| --- | --- |",
+      "| Q1 | 120 |",
+      "| Q2 | 150 |",
+      "| Q3 | 177 |",
+      "",
+      "## Caveats",
+      "",
+      "- The most recent quarter may be partial.",
+      "",
+    ].join("\n");
+    return { markdown, name };
+  }
+
   async insights(): Promise<InsightsScan> {
     // A small fixed sample so the proactive "What stands out" panel renders in
     // the offline/mock flow. The findings arrive pre-ranked (most notable first)

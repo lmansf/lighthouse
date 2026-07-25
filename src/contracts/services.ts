@@ -116,6 +116,14 @@ export interface RagService {
    */
   inspect(fileId: string, query?: string): Promise<FileInspection>;
   /**
+   * §49: read a saved report note's FULL markdown by its vault node id — the
+   * backing for the in-app report reader. Returns the RAW markdown (the
+   * ```lighthouse-chart fence intact, so the reader draws the key chart) + the
+   * note name. PURE READ. Desktop engine only; the web dev twin returns its
+   * mock saved note. `markdown` is empty for an unknown/removed id.
+   */
+  readNote(id: string): Promise<{ markdown: string; name: string }>;
+  /**
    * Re-run an analytics answer's SQL over exactly the files it read — the
    * guarded, model-free path behind Edit SQL. Returns the (capped) result
    * table, the chart spec when chartable, and the provenance footer; a guard

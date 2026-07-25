@@ -493,6 +493,19 @@ pub async fn rag_post(headers: HeaderMap, body: Option<Json<Value>>) -> Response
             let inspection = sources::inspect(file_id, body["query"].as_str()).await;
             Json(inspection).into_response()
         }
+        // §49: read a saved report note's full markdown by id — the in-app
+        // report reader's backing (§2). PURE READ.
+        Some("readNote") => {
+            let Some(id) = body["id"].as_str().filter(|s| !s.is_empty()) else {
+                return bad_request("id required");
+            };
+            match lighthouse_core::reports::read_note(id) {
+                Some((name, markdown)) => {
+                    Json(json!({ "name": name, "markdown": markdown })).into_response()
+                }
+                None => Json(json!({ "error": "not found" })).into_response(),
+            }
+        }
         Some("move") => {
             let Some(from) = body["from"].as_str() else {
                 return bad_request("from required");

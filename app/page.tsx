@@ -46,6 +46,10 @@ const BoardHost = dynamic(
   () => import("@/features/boards/BoardPanel").then((m) => m.BoardHost),
   { ssr: false },
 );
+const ReportReaderHost = dynamic(
+  () => import("@/features/chat/ReportReaderHost").then((m) => m.ReportReaderHost),
+  { ssr: false },
+);
 
 /**
  * Composition root. The shell owns layout; each feature team replaces its own
@@ -116,6 +120,11 @@ export default function Home() {
               open) so its pins-changed listener retains change badges while
               the board is closed. */}
           <BoardHost />
+          {/* §49 §2: the in-app report reader — opened by lighthouse:open-report
+              {id} from every report door (generate, per-answer, Reports home).
+              Mounted here (not lazily on open) so its listener persists while
+              closed; reading a report is a local vault read, never egress. */}
+          <ReportReaderHost />
         </>
       )}
     </>

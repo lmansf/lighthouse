@@ -130,6 +130,18 @@ class RealRagService implements RagService {
     })) as unknown as FileInspection;
   }
 
+  async readNote(id: string): Promise<{ markdown: string; name: string }> {
+    // §49: full-markdown read of a saved report note for the in-app reader.
+    // The engine returns `{name, markdown}` (or `{error}` for an unknown id);
+    // surface an empty read rather than throwing, so the reader shows an honest
+    // empty state instead of an error overlay.
+    const res = await post({ op: "readNote", id });
+    return {
+      markdown: (res.markdown as string) ?? "",
+      name: (res.name as string) ?? "",
+    };
+  }
+
   async analyticsSql(
     sql: string,
     fileIds: string[],

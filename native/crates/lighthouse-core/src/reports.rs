@@ -963,6 +963,25 @@ async fn narrate(
 /// Notes`.
 pub const REPORTS_SUBDIR: &str = "Lighthouse Reports";
 
+/// §49: a generous cap for reading a saved report note back for the in-app
+/// reader. Reports are text (a few KB to tens of KB); 8 MiB is far above any
+/// real report yet bounds a pathological file.
+const NOTE_READ_CAP: u64 = 8 * 1024 * 1024;
+
+/// §49: read a saved report note's FULL markdown by its vault node id — the
+/// backing for the in-app report reader (§2). Returns `(name, markdown)` with
+/// the raw bytes intact (the ```lighthouse-chart fence survives, so the reader
+/// draws the key chart). `None` for an unknown/removed id. PURE READ — never
+/// mutates the vault, so it is safe on any tier and egresses nothing.
+pub fn read_note(file_id: &str) -> Option<(String, String)> {
+    let node = crate::vault::list_nodes()
+        .into_iter()
+        .find(|n| n.kind == crate::contracts::NodeKind::File && n.id == file_id)?;
+    let abs = crate::vault::resolve_node_path(file_id).ok()?;
+    let markdown = crate::vault::read_text_abs_capped(&abs, NOTE_READ_CAP);
+    Some((node.name, markdown))
+}
+
 /// Render `report` to markdown and write it into the vault as a NON-EGRESS note
 /// (openspec add-deep-analysis §2.4) — the `exportChat`/briefing precedent. When
 /// `investigation_id` names a known investigation, the note lands in that
