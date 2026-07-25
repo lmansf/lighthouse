@@ -838,22 +838,6 @@ async fn collect(mut s: llm::AnswerStream) -> String {
     out
 }
 
-/// §44 §2: vet an ARMED numeric-tabular answer post-generation. Called only
-/// when the trust guard is armed (the caller streams unchanged otherwise), so
-/// this always buffers. If the model stated a figure the engine did not
-/// produce (not in the profiles' verified set, citations ignored), the whole
-/// answer degrades to the honest number-free reply; a faithful answer (only
-/// engine figures, or none) passes through unchanged.
-fn vet_numbers(raw: String, profiles: &[String], file: &str, columns: &[String]) -> String {
-    let refs: Vec<&str> = profiles.iter().map(String::as_str).collect();
-    let verified = crate::numguard::verified_set(&refs);
-    if crate::numguard::answer_has_unverified_number(&raw, &verified) {
-        crate::numguard::number_free_degradation(file, columns)
-    } else {
-        raw
-    }
-}
-
 /// §47 §1+§2: narrate a numeric answer over a VERIFIED fact sheet, gated by a
 /// LADDER rather than the §44 guillotine. The model writes the prose; its
 /// numbers are accepted iff a subset of `verified` (numguard). A stray triggers
@@ -926,6 +910,56 @@ fn profile_narration_fallback(name: &str) -> String {
          risking an inexact number, so the engine's exact figures are shown below — those are \
          the verified values."
     )
+}
+
+/// §47 §2: the RAG-fallback ladder — replaces the §44 all-or-nothing vet. The
+/// model narrates over its retrieval context; a numeric answer is accepted iff
+/// its figures ⊆ the injected profiles' verified set. A stray triggers ONE
+/// tightened retry naming the permitted figures; a persistent stray degrades to
+/// the deterministic column-naming reply (`number_free_degradation`, a readable
+/// sentence — never a raw block, never a fabricated number). A good paragraph
+/// with one slip is retried, not discarded.
+async fn narrate_gated(
+    prompt: String,
+    ctxs: Vec<Ctx>,
+    profiles: &[String],
+    file: &str,
+    columns: &[String],
+    history: &[ChatTurn],
+    cfg: &ModelCfg,
+    sink: &llm::UsageSink,
+) -> String {
+    let refs: Vec<&str> = profiles.iter().map(String::as_str).collect();
+    let verified = crate::numguard::verified_set(&refs);
+    let raw = collect(llm::stream_answer(
+        prompt.clone(),
+        ctxs.clone(),
+        cfg.clone(),
+        history.to_vec(),
+        Some(sink.clone()),
+    ))
+    .await;
+    if !crate::numguard::answer_has_unverified_number(&raw, &verified) {
+        return raw;
+    }
+    let allowed: Vec<String> = verified.iter().cloned().collect();
+    let tightened = format!(
+        "{prompt}\n\nImportant: use ONLY these figures, exactly as written, and state no other \
+         number: {}. If a number you would write is not in that list, leave it out.",
+        allowed.join(", ")
+    );
+    let raw2 = collect(llm::stream_answer(
+        tightened,
+        ctxs,
+        cfg.clone(),
+        history.to_vec(),
+        Some(sink.clone()),
+    ))
+    .await;
+    if !crate::numguard::answer_has_unverified_number(&raw2, &verified) {
+        return raw2;
+    }
+    crate::numguard::number_free_degradation(file, columns)
 }
 
 fn take_chars(s: &str, n: usize) -> String {
@@ -2785,19 +2819,32 @@ fn live_pipeline(
                         manifest_entry("retrieved-chunk", &r.name, t.len(), r.score, Some(r.file_id.clone()))
                     })
                     .collect();
-                let mut answer = llm::stream_answer(
-                    question.clone(),
-                    reduce_ctxs,
-                    cfg.clone(),
-                    history.clone(),
-                    Some(sink.clone()),
-                );
-                // §44 §2: gate the synthesized numbers when this is an armed
-                // numeric-tabular ask; otherwise stream unchanged.
+                // §47 §2: the RAG-fallback ladder replaces the §44 guillotine —
+                // a good paragraph with one stray figure is retried (tightened),
+                // then degrades to the deterministic column-naming reply, never
+                // nuked whole. Non-armed asks stream unchanged (byte-identical).
                 if guard_armed {
-                    let raw = collect(answer).await;
-                    yield delta(vet_numbers(raw, &guard_profiles, &guard_file, &guard_columns));
+                    yield delta(
+                        narrate_gated(
+                            question.clone(),
+                            reduce_ctxs,
+                            &guard_profiles,
+                            &guard_file,
+                            &guard_columns,
+                            &history,
+                            &cfg,
+                            &sink,
+                        )
+                        .await,
+                    );
                 } else {
+                    let mut answer = llm::stream_answer(
+                        question.clone(),
+                        reduce_ctxs,
+                        cfg.clone(),
+                        history.clone(),
+                        Some(sink.clone()),
+                    );
                     while let Some(d) = answer.next().await {
                         yield delta(d);
                     }
@@ -2971,20 +3018,32 @@ fn live_pipeline(
                             )
                         })
                         .collect();
-                    let mut answer = llm::stream_answer(
-                        question.clone(),
-                        ctxs,
-                        cfg.clone(),
-                        history.clone(),
-                        Some(sink.clone()),
-                    );
-                    // §44 §2: whole-file focus over a non-profileable tabular
-                    // target (profileable ones are answered by §1b) — gate its
-                    // numbers when armed.
+                    // §47 §2: whole-file focus over a non-profileable tabular
+                    // target (profileable ones are answered by §1b) — the RAG-
+                    // fallback ladder (retry then deterministic reply) replaces
+                    // the §44 guillotine when armed.
                     if guard_armed {
-                        let raw = collect(answer).await;
-                        yield delta(vet_numbers(raw, &guard_profiles, &guard_file, &guard_columns));
+                        yield delta(
+                            narrate_gated(
+                                question.clone(),
+                                ctxs,
+                                &guard_profiles,
+                                &guard_file,
+                                &guard_columns,
+                                &history,
+                                &cfg,
+                                &sink,
+                            )
+                            .await,
+                        );
                     } else {
+                        let mut answer = llm::stream_answer(
+                            question.clone(),
+                            ctxs,
+                            cfg.clone(),
+                            history.clone(),
+                            Some(sink.clone()),
+                        );
                         while let Some(d) = answer.next().await {
                             yield delta(d);
                         }
@@ -3066,19 +3125,31 @@ fn live_pipeline(
                             )
                         })
                         .collect();
-                    let mut answer = llm::stream_answer(
-                        reduce_question(&question),
-                        reduce_ctxs,
-                        cfg.clone(),
-                        history.clone(),
-                        Some(sink.clone()),
-                    );
-                    // §44 §2: long-document sweep reduce — gate its numbers when
-                    // this is an armed numeric-tabular ask.
+                    // §47 §2: long-document sweep reduce — the RAG-fallback
+                    // ladder (retry then deterministic reply) replaces the §44
+                    // guillotine when this is an armed numeric-tabular ask.
                     if guard_armed {
-                        let raw = collect(answer).await;
-                        yield delta(vet_numbers(raw, &guard_profiles, &guard_file, &guard_columns));
+                        yield delta(
+                            narrate_gated(
+                                reduce_question(&question),
+                                reduce_ctxs,
+                                &guard_profiles,
+                                &guard_file,
+                                &guard_columns,
+                                &history,
+                                &cfg,
+                                &sink,
+                            )
+                            .await,
+                        );
                     } else {
+                        let mut answer = llm::stream_answer(
+                            reduce_question(&question),
+                            reduce_ctxs,
+                            cfg.clone(),
+                            history.clone(),
+                            Some(sink.clone()),
+                        );
                         while let Some(d) = answer.next().await {
                             yield delta(d);
                         }
@@ -3171,16 +3242,27 @@ fn live_pipeline(
         let excerpt_count = contexts.len();
         // `cfg.clone()` (not a move) keeps `cfg` alive for the cost meter below —
         // the sink only carries this call's usage once the stream has drained.
-        let mut answer =
-            llm::stream_answer(question, contexts, cfg.clone(), history, Some(sink.clone()));
-        // §44 §2: the terminal catch-all. When this is an armed numeric-tabular
-        // ask that reached the fall-through, gate the answer: any figure absent
-        // from the injected profiles' verified set degrades to the honest
-        // number-free reply. Non-armed asks stream unchanged (byte-identical).
+        // §47 §2: the terminal catch-all. When this is an armed numeric-tabular
+        // ask that reached the fall-through, the RAG-fallback ladder replaces the
+        // §44 guillotine — one tightened retry, then the deterministic column-
+        // naming reply. Non-armed asks stream unchanged (byte-identical).
         if guard_armed {
-            let raw = collect(answer).await;
-            yield delta(vet_numbers(raw, &guard_profiles, &guard_file, &guard_columns));
+            yield delta(
+                narrate_gated(
+                    question,
+                    contexts,
+                    &guard_profiles,
+                    &guard_file,
+                    &guard_columns,
+                    &history,
+                    &cfg,
+                    &sink,
+                )
+                .await,
+            );
         } else {
+            let mut answer =
+                llm::stream_answer(question, contexts, cfg.clone(), history, Some(sink.clone()));
             while let Some(d) = answer.next().await {
                 yield delta(d);
             }
