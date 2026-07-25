@@ -111,8 +111,12 @@ test("row lock a11y: aria-pressed kept, aria-label carries the state", () => {
   );
 });
 
-test("context menu actions stay byte-identical; bulk switch gains the state tooltip", () => {
-  assert.match(explorer, /"Allow cloud models" : "Keep private \(this device only\)"/);
+test("§51 §3: the redundant lock menu item is gone; inline lock + bulk switch remain", () => {
+  // §51 §3: the row context-menu "Keep private / Allow cloud" item was removed —
+  // it duplicated the adjacent inline row lock. One direct entry (inline) + one
+  // bulk entry (the switch below); no capability lost.
+  assert.doesNotMatch(explorer, /"Allow cloud models" : "Keep private \(this device only\)"/, "no menu duplicate of the inline lock");
+  assert.match(explorer, /toggleLocalOnly\(\);/, "the inline row lock still toggles local-only");
   // The bulk "Private (this device)" switch: label unchanged, and when the
   // whole selection is marked a tooltip says what the mark is doing right now.
   assert.match(explorer, /label="Private \(this device\)"/);
@@ -214,9 +218,13 @@ test("explorer filter: onlyLocalOnly beside onlyVisible, honest and clearable in
     /\(!onlyVisible \|\| n\.ragIncluded\) &&\s*\(!onlyLocalOnly \|\| n\.localOnly\)/,
     "the keep predicate gains the lock axis beside the eye axis",
   );
-  // The filter-bar toggle: the state is visible and clearable where it acts.
-  assert.match(explorer, /checked=\{onlyLocalOnly\}/);
-  assert.match(explorer, /Hidden from cloud\s*<\/ToggleButton>/);
+  // §51 §4: the lock filter moved into the "View" menu as a checkable item; the
+  // View button stays tinted while it's on, so the state is still visible and
+  // clearable where it acts (incl. when set by the header's hidden-from-cloud
+  // count).
+  assert.match(explorer, /<MenuItemCheckbox name="filters" value="localOnly"/, "the lock filter is a checkable View-menu item");
+  assert.match(explorer, /Hidden from cloud\s*<\/MenuItemCheckbox>/, "labeled 'Hidden from cloud'");
+  assert.match(explorer, /checked=\{onlyVisible \|\| onlyLocalOnly\}/, "the View button reflects an active filter");
   // The header's event flips it on and clears the search so the filtered view
   // is honestly "everything hidden from cloud", not "∩ a stale search".
   assert.match(

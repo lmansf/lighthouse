@@ -28,7 +28,7 @@ import {
   shorthands,
   tokens,
 } from "@fluentui/react-components";
-import { IconAI, IconBoard, IconBook, IconHelp, IconHistory, IconInfo, IconInsight, IconLibrary, IconOpen, IconOptions, IconPin, IconSettings, IconShieldTask, IconTrash, IconWarning } from "@/shell/icons";
+import { IconAI, IconBoard, IconBook, IconChevronDown, IconChevronRight, IconHelp, IconHistory, IconInfo, IconInsight, IconLibrary, IconOpen, IconOptions, IconPin, IconSettings, IconShieldTask, IconTrash, IconWarning } from "@/shell/icons";
 import { LhDialogSurface, LhMenuPopover, LhSegmented, LhSelect, LhSwitch } from "@/shell/controls";
 import {
   MODEL_PROVIDERS,
@@ -90,6 +90,9 @@ const useStyles = makeStyles({
   savedNote: { color: tokens.colorPaletteGreenForeground1, fontSize: tokens.fontSizeBase200 },
   // Preferences dialog: sections separated by a little vertical air.
   prefFields: { display: "flex", flexDirection: "column", gap: tokens.spacingVerticalL },
+  // §51 §2: the "Advanced" disclosure toggle — a quiet left-aligned button that
+  // reveals everything past the two essentials (collapsed by default).
+  advancedToggle: { alignSelf: "flex-start", color: tokens.colorNeutralForeground2 },
   prefHint: { color: tokens.colorNeutralForeground3, fontSize: tokens.fontSizeBase200 },
   // G5: the briefing-note hour picker row (label + dropdown, inline).
   prefRow: { display: "flex", alignItems: "center", gap: tokens.spacingHorizontalS },
@@ -1097,6 +1100,11 @@ export function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (
   // vanish (indistinguishable from unsupported) on a transient error.
   const [settingsLoad, setSettingsLoad] = useState<"loading" | "ready" | "error">("loading");
   const [reloadKey, setReloadKey] = useState(0);
+  // §51 §2: the Preferences dialog opens showing only the two essentials
+  // (Appearance + Text size); everything else lives under this "Advanced"
+  // disclosure, collapsed by default. Presentation only — no setting is removed
+  // or re-defaulted, and the forced first-run decision count stays zero.
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   // Surfaced when an optimistic settings write fails and is rolled back, so a
   // control never lies about a change that didn't actually persist.
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -1358,8 +1366,12 @@ export function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (
                   Some settings are managed by your organization.
                 </Text>
               )}
-              {/* First: appearance is the most-reached-for preference. Applies
-                  instantly via the theme store — no save step. */}
+              {/* §51 §2: the essentials — Appearance + Text size — are the two a
+                  typical user reaches for, so they open on top. Everything else
+                  (accent, density, the inclusion default, curation rules, and the
+                  desktop feature/shell toggles) lives under the "Advanced"
+                  disclosure below, collapsed by default. Applies instantly via
+                  the theme store — no save step. */}
               <Field label="Appearance">
                 <LhSegmented
                   options={[
@@ -1372,9 +1384,36 @@ export function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (
                   aria-label="Appearance"
                 />
               </Field>
+              <Field label="Text size">
+                <LhSegmented
+                  options={[
+                    { value: "s", label: "Small" },
+                    { value: "m", label: "Medium" },
+                    { value: "l", label: "Large" },
+                  ]}
+                  value={fontScale}
+                  onChange={(v) => setAppearance({ fontScale: v as typeof fontScale })}
+                  aria-label="Text size"
+                />
+              </Field>
 
-              {/* Accent, density, font scale (openspec §3): each applies live via
-                  the theme; accents are AA-validated on both themes. */}
+              {/* §51 §2: the Advanced disclosure — closed by default, so the
+                  dialog opens showing just the two essentials above. Nothing
+                  inside is removed or re-defaulted; it only stops being always
+                  on screen. */}
+              <Button
+                appearance="subtle"
+                className={styles.advancedToggle}
+                icon={advancedOpen ? <IconChevronDown /> : <IconChevronRight />}
+                aria-expanded={advancedOpen}
+                onClick={() => setAdvancedOpen((o) => !o)}
+              >
+                Advanced
+              </Button>
+              {advancedOpen && (
+                <>
+              {/* Accent, density (openspec §3): each applies live via the theme;
+                  accents are AA-validated on both themes. */}
               <Field label="Accent">
                 <LhSegmented
                   options={[
@@ -1396,18 +1435,6 @@ export function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (
                   value={density}
                   onChange={(v) => setAppearance({ density: v as typeof density })}
                   aria-label="Density"
-                />
-              </Field>
-              <Field label="Text size">
-                <LhSegmented
-                  options={[
-                    { value: "s", label: "Small" },
-                    { value: "m", label: "Medium" },
-                    { value: "l", label: "Large" },
-                  ]}
-                  value={fontScale}
-                  onChange={(v) => setAppearance({ fontScale: v as typeof fontScale })}
-                  aria-label="Text size"
                 />
               </Field>
 
@@ -1733,6 +1760,8 @@ export function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (
                 <Text size={200} className={styles.error}>
                   {saveError}
                 </Text>
+              )}
+                </>
               )}
             </div>
           </DialogContent>
