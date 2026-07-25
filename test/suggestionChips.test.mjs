@@ -13,7 +13,7 @@ import { register } from "node:module";
 register("./_ts-extensionless-hook.mjs", import.meta.url);
 
 const { mergeSuggestionChips, SUGGESTION_CAP } = await import(
-  "../src/features/chat/suggestionChips.ts"
+  "../src/features/chat/suggestionChipModel.ts"
 );
 
 const ask = (n) => ({ label: `ask${n}`, question: `q${n}` });

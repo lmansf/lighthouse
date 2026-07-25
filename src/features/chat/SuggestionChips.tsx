@@ -10,7 +10,7 @@
  */
 import { Button } from "@fluentui/react-components";
 import { runRecipeQuestion } from "@/contracts/types";
-import type { SuggestionChip } from "./suggestionChips";
+import type { SuggestionChip } from "./suggestionChipModel";
 import { ReportChip } from "./ReportChip";
 
 export function SuggestionChips({

@@ -113,7 +113,7 @@ import { useCoarsePointer, usePaneLayout } from "@/shell/paneLayout";
 import { Sheet } from "@/shell/Sheet";
 import { HistoryNav } from "./HistoryNav";
 import { SuggestionChips } from "./SuggestionChips";
-import { mergeSuggestionChips } from "./suggestionChips";
+import { mergeSuggestionChips } from "./suggestionChipModel";
 import { AnswerReportAction } from "./AnswerReportAction";
 import { InvestigationsNav } from "@/features/investigations/InvestigationsNav";
 
