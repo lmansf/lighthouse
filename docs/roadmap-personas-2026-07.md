@@ -7702,3 +7702,157 @@ desktop call sites); a simulator pass for the per-answer action + menu
 on compact. One commit per numbered section. Open ONE PR titled
 "Findable reports, fewer steadier suggestions"; stop at the PR.
 ```
+
+## 49. Reports as a main feature: an in-app reader + a Reports home (2026-07-23)
+
+Owner: after Generate, offer to open/preview the report in Lighthouse;
+and make the two report types MAIN features on mobile and desktop
+alike. Diagnosis @ 0.14.15:
+- **Post-generate is a silent save.** investigate() → write_report
+  saves a .md note to "Lighthouse Reports/" (or an investigation's
+  Notes); the UI shows a small "Saved <name>" status note + a
+  reveal-node highlight in the file tree. NO open/preview affordance
+  (InvestigationsNav.tsx:374 generateReport, InvestigateChips.tsx:69).
+- **No reader.** Tapping the saved note opens FileInspector — "What
+  the AI sees", which renders the report as RAW 12px monospace text
+  (extractPreview, FileInspector.tsx:369, capped 180px), tables as
+  raw pipes, no chart. MarkdownView (the real GFM renderer) is used by
+  chat/BriefingsPanel but not for report notes.
+- **No reports home, no library.** Reports are loose .md files; a past
+  report is found only by browsing the tree or QuickOpen. Mobile tabs
+  are Chat/Files/Settings (paneLayout.ts COMPACT_TABS); desktop
+  sidebar is Files+Settings — neither has a reports surface.
+- **The chart isn't persisted.** reports.rs render_markdown emits
+  section tables + SQL only; the Report/ReportSection model has no
+  chart field (§29's "key chart in the report" was never persisted) —
+  a reader would show tables, not the chart, until the model carries
+  one.
+- Building blocks ready: BriefingsPanel.tsx (a multi-section report
+  reader layout over MarkdownView), LhDialogSurface (§43: card
+  desktop / swipe sheet compact), the overlay-host pattern
+  (FileInspectorHost/QuickOpen/BoardHost in app/page.tsx),
+  reportExport.ts (exportReportHtml/Markdown/printReport) +
+  evidencePack.ts (composeReportHtml), the §46 hypothesis dialog, §35
+  content typography. Coordination: §48 (unmerged) adds a per-answer
+  "Report…" action + hero relabel + suggestion cap; §49 SUPERSEDES
+  §48's report-door parts (folds the per-answer action in, now opening
+  the reader) — §48's suggestion cap-of-3 remains its own independent
+  work.
+
+### Prompt
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first analytics AI harness: Rust engine
+(native/crates/lighthouse-core), byte-compatible TS twin
+(src/server/), React UI (src/). Read CLAUDE.md, docs/CONVENTIONS.md,
+docs/analytics-beam.md, and roadmap §29 + §46 + §48 + §49 before
+writing code. GOAL: reports become a first-class feature — after
+Generate you can open a real in-app READER (rendered sections,
+tables, and the key chart), past reports live in a browsable Reports
+HOME reachable prominently on mobile AND desktop, and the two report
+types are surfaced as main features. Report GENERATION semantics
+(the deterministic battery + §47 narrated framing) are unchanged
+except persisting the chart. Reuse investigate()/§46 hypothesis
+flow, LhDialogSurface, MarkdownView + §35 typography, BriefingsPanel
+layout, reportExport/evidencePack — new code only for the reader,
+the home, and the chart-persist.
+
+1. Persist the report's key chart (completes §29). Add a chart field
+   to the Report/ReportSection model (reports.rs — an Option<String>
+   chart spec in the §22.6 meta.chart format, serde-default, twins,
+   KEEP IN SYNC). Populate it from the analytics the battery already
+   runs (the key finding's chart — Results section for Scientific,
+   under the Bottom line for Business, §29's placement). render_markdown
+   embeds it as a fenced lighthouse-chart block (the renderer already
+   materializes those) so the note is self-contained. A report with no
+   chartable finding simply has None (pin). No new model calls.
+2. The in-app report reader (ReportReaderHost). Add an event-driven
+   overlay host in app/page.tsx beside FileInspectorHost, opened by a
+   new "lighthouse:open-report" { id } event, rendering through
+   LhDialogSurface (floating card on desktop / full-screen swipe sheet
+   on compact — §43). It reads the saved report note by id (a
+   getReport(id) op or the existing file-read) and renders it with
+   MarkdownView + the §35 ChatPanel content typography and
+   remarkAnswerCard (so headings/tables render at the reading scale and
+   the §1 chart draws) — mirror BriefingsPanel's multi-section layout.
+   Header: the report title, "Generated <when>", and actions — Export
+   (reportExport.ts: HTML / Markdown / Print), Reveal in Files, and
+   Close (44pt). Compact: swipe-to-dismiss (the §43 primitive), safe-
+   area padded. Reading a report NEVER egresses.
+3. Open, don't just save silently (the owner's ask). After
+   investigate() resolves (InvestigationsNav.generateReport:374,
+   InvestigateChips.investigate:69, and §48's per-answer action if
+   present), the confirmation becomes actionable: "Report saved —
+   Open" (a button/toast action) → dispatch lighthouse:open-report
+   {savedId} → the reader. Keep the reveal-node highlight too. On
+   compact the Open action navigates deliberately (no silent tab
+   switch — §34). Never a silent save again; byte-pinned copy.
+4. A Reports HOME, prominent on both platforms (the "main feature"
+   surfacing).
+   a. A Reports library surface: lists generated reports (scoped to
+      the "Lighthouse Reports/" folder + each investigation's Notes),
+      newest first, each row (title · template · when) → opens the
+      reader; a prominent "New report" action at the top → pick a
+      table (investigable tables from capabilityMap) → Scientific /
+      Business / Standard → the §46 hypothesis prompt → generate →
+      the reader. Empty state explains what a report is and needs.
+   b. MOBILE: add a 4th "reports" tab — extend CompactTab /
+      COMPACT_TABS (paneLayout.ts) with a report icon; the tab opens
+      the Reports home; update the pinned paneLayout.test /
+      mobileStructure.test. (This is the honest "main feature"
+      placement — a 4th tab. OWNER NOTE in the PR: if 3 tabs must be
+      kept, the fallback is a prominent "Reports" entry in the chat
+      hero + a Reports filter in Files — implement the tab by default
+      and flag the choice.)
+   c. DESKTOP: add a "Reports" entry to Sidebar.tsx (a button/section
+      above the Settings footer) opening the same Reports home.
+   Both platforms reach the identical Reports home + reader.
+5. Fold in §48's report door (supersede §48 §3). The per-answer
+   "Report…" action on a tabular analytics answer (from §48) lands
+   here and now opens the reader after generate; the hero
+   InvestigateChips chip reads "Report on <table>". (§48's
+   suggestion cap-of-3 and mid-conversation availability are
+   independent — leave them for §48; do not duplicate.) All report
+   entry points converge on one investigate() call and one reader.
+6. Tests + stamps. The reader renders a saved report with headings,
+   tables, AND the §1 chart (fixture note); Open-after-generate
+   dispatches open-report; the reports tab (mobile) + Sidebar entry
+   (desktop) present and open the home; the library lists reports
+   from the reports folder; Export produces HTML/Markdown; the chart
+   round-trips in the report model (twins). paneLayout/mobileStructure
+   pins updated for the 4th tab. Bump 0.14.15 → 0.14.16 across all
+   SEVEN stamps; suites + release-smoke + ios-build green.
+
+Constraints. Report generation numbers/framing unchanged (§44/§47
+trust invariant holds — the reader only DISPLAYS the saved note; the
+chart is drawn from persisted engine data). Reuse investigate()/
+LhDialog/MarkdownView/reportExport — minimal new surface. Validated-
+only (no report entry when no investigable table). Byte-pinned copy;
+twins PARITY. No telemetry; reading a report is fully local.
+SharePoint untouched. Desktop + compact both get the reader + home.
+
+Acceptance:
+1. Generate a Business or Scientific report → a "Saved — Open"
+   action opens an in-app reader showing rendered sections, tables,
+   and the key chart with the §35 reading typography; Export outputs
+   HTML/Markdown; Reveal shows it in Files.
+2. A "Reports" home is reachable prominently on mobile (a tab) and
+   desktop (a sidebar entry); it lists past reports newest-first,
+   each opening the reader; "New report" runs the full pick →
+   hypothesis → generate → reader flow.
+3. A tabular answer offers "Report…" that generates and opens the
+   reader; all report entry points converge on one investigate() +
+   one reader.
+4. The report note carries its chart (round-trip pin); a
+   no-chartable-finding report reads fine without one.
+5. Suites + release-smoke + ios-build green; paneLayout/mobileStructure
+   pins updated; seven stamps read 0.14.16.
+
+Environment. Engine chart-persist + twins + reader logic are
+container-testable; a simulator/desktop pass for the reader surface,
+the 4th tab, and the Sidebar entry (house convention; grep-verify
+desktop-crate call sites). One commit per numbered section. Open ONE
+PR titled "Reports as a main feature: in-app reader + Reports home";
+stop at the PR.
+```
