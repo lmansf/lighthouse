@@ -7461,3 +7461,244 @@ test/investigationsUi.test.mjs — rebase and reconcile. One commit per
 section. Open ONE PR titled "Investigation reports: Scientific &
 Business buttons seeded by a hypothesis"; stop at the PR.
 ```
+
+## 47. Breathing room: the model narrates over verified facts (rebalance §44) (2026-07-23)
+
+§44 (#218) fixed the trust hole but OVER-ROTATED — the owner now sees
+answers that are raw engine dumps with no prose. Screenshot: "year by
+year breakdown of winners and final match scores" returned ONLY
+"[TABLE PROFILE — computed exactly by Lighthouse … rows: 1248, columns:
+index (number: sum 779376, mean 624.5)…]" — verified numbers, zero
+model writing, and a meaningless index-column sum that doesn't answer
+the question. Diagnosis @ 0.14.14:
+- **The profile-as-answer path dumps raw and skips the model.**
+  table_profile::profile_answer (table_profile.rs:374-381) builds the
+  "read straight from the file, not written by the model … [TABLE
+  PROFILE…]" block and it is `yield delta(...); return;`-ed directly at
+  synth.rs:2454-2477 (analytics §1b) and 2784-2814 (single-doc §1b) —
+  NO stream_answer, so the model writes nothing.
+- **The right pattern already exists, one branch over.** On a
+  SUCCESSFUL SQL run the engine does it correctly (synth.rs:2234-2312):
+  feeds analytics::fact_sheet(res) as a Ctx into llm::stream_answer,
+  streams the model's prose, then APPENDS the "*Query used:*" SQL as a
+  disclosure. Model narrates freely; numbers are grounded in the fact
+  sheet; verified provenance is appended, not substituted.
+- **reports.rs is the reference guard.** narrate()/narrate_ladder
+  (reports.rs:854-898) lets the model write prose and accepts it iff
+  its numbers ⊆ the findings (framing_number_gate), else falls back —
+  that is "breathing room WITH verified numbers," already shipping.
+- **The new numguard (§44) is all-or-nothing.** vet_numbers
+  (synth.rs:844-853) nukes the ENTIRE answer to a stub on a single
+  unverified digit — no retry, no partial. Too blunt.
+- **Answerability is unchecked.** §1b picks the FIRST profileable file
+  relevance-blind (synth.rs:2450, 2784: is_profileable + non-empty
+  only) — it summed an auto-index column for a question about winners.
+  No gate asks "can this file even answer that?".
+Fix: make EVERY numeric answer (SQL success AND profile fallback) work
+like the successful SQL path — the model narrates over an
+engine-verified fact sheet, numbers gated to that set via a
+reports-style ladder (not an all-or-nothing nuke), the raw
+computed block appended as a collapsible disclosure. Plus graceful
+degradation for the recipe-empty and model-down dead-ends the other
+screenshots showed.
+
+### Prompt
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first analytics AI harness: Rust engine
+(native/crates/lighthouse-core), byte-compatible TS twin
+(src/server/), React UI (src/). Read CLAUDE.md, docs/CONVENTIONS.md
+(the §44 trust rule), docs/analytics-beam.md, and roadmap §32 + §44 +
+§47 before writing code. GOAL: give the model breathing room to write
+a real, meaningful answer, while EVERY number it states comes from the
+engine (SQL result / table_profile / certified metric). The §44 trust
+invariant is PRESERVED — numbers are verified — but the model narrates
+the facts instead of the engine dumping them. This unifies all numeric
+answers onto the pattern the successful-SQL path already uses.
+
+1. Narrate the profile, don't dump it (the core fix). In the two §1b
+   branches — synth.rs:2454-2477 (analytics fallback) and 2784-2814
+   (single-doc) — replace `yield delta(profile_answer(...)); return;`
+   with the SUCCESSFUL-SQL pattern (synth.rs:2234-2312): feed the
+   table_profile as a fact-sheet Ctx ("fact sheet — computed exactly
+   by Lighthouse") into llm::stream_answer, stream the model's prose
+   answer, then APPEND the "*Computed exactly by Lighthouse:*" profile
+   block as a collapsible disclosure (the lh-query-used idiom), NOT as
+   the whole answer. The model now writes the year-by-year prose; the
+   verified figures back it. table_profile::profile_answer's raw
+   string becomes the disclosure content, not the answer.
+2. Gate numbers with a ladder, not a guillotine. Replace vet_numbers'
+   all-or-nothing nuke (synth.rs:844-853) with a reports.rs-style
+   narrate() ladder (reports.rs:854-898): the model narrates; accept
+   iff its numbers ⊆ the verified set (numguard::answer_has_unverified_
+   number); on a violation, retry ONCE with a tightened instruction
+   ("use only these figures: …"); only if it still strays, fall back
+   to a concise deterministic summary of the fact sheet (a readable
+   sentence built from the profile, NOT the raw block, NOT the stub).
+   A good paragraph with one stray number is retried, not discarded.
+   The successful-SQL path keeps trusting the fact sheet (no change);
+   this is for the fallback paths.
+3. Answerability gate (stop answering the wrong question). Before §1b
+   makes a profile the answer, check the profile can PLAUSIBLY address
+   the question: the question references a column/dimension the profile
+   has (name/synonym match against the schema), OR the ask is a
+   whole-table summary. If not — e.g. "winners and final match scores"
+   over a squads roster with only an index+roster columns — do NOT
+   dump a profile; the model answers qualitatively from the schema
+   ("This file has columns X, Y, Z; it doesn't contain match scores or
+   winners, so I can't compute that — try …") with NO invented
+   numbers. Pure answerability fn, tested (relevant-column hit vs the
+   index-sum mismatch fixture).
+4. Recipe-empty degrades gracefully (screenshot C). At synth.rs:1230-
+   1237 (recipe produced no steps), replace the dead-end "couldn't
+   compute … its queries returned nothing" with a helpful line naming
+   the SHAPE the recipe needs and the columns the file actually has
+   (mirror numguard::number_free_degradation's column-naming), e.g.
+   "Top movers needs a date column and a numeric measure; 2026_team_
+   summaries.csv has {columns} — try {suggestion}." Never a 0-of-0
+   dead end.
+5. Report path shares the warm-wait (screenshot B). reports.rs
+   narration (collect_narration/stream_answer, ~822-846) never calls
+   local_warm_wait — a report fired at a cold/suspended bridge hits
+   "Connection refused". Route report framing through the same
+   local_warm_wait (synth.rs:464-498) the ask path uses; and when the
+   bridge is Down after the spawn grace (warm_wait_verdict,
+   synth.rs:429-441, LOCAL_SPAWN_GRACE_MS=20s), attempt a bridge
+   respawn/re-poll once before proceeding into a dead loopback rather
+   than immediately falling to passages (the iOS listener re-binds
+   within a poll tick after suspension — give it that tick). If the
+   deeper bridge-lifecycle respawn is more than this PR should carry,
+   land the warm-wait sharing + a longer Down grace and note the
+   respawn as a follow-up.
+6. Refine the CONVENTIONS trust rule. Update docs/CONVENTIONS.md: the
+   model ALWAYS narrates numeric answers; the engine provides a
+   verified fact sheet; numbers in the prose ⊆ the fact sheet (ladder-
+   gated); the raw engine block is a DISCLOSURE, never the answer.
+   "Verified numbers, model's words" — cite this as the refined trust
+   rule (it supersedes any "dump the profile" reading of §44).
+7. Stamps + gates. Bump 0.14.14 → 0.14.15 across all SEVEN stamps.
+   Full node + cargo suites, release-smoke, ios-build green; the
+   forced-tier rig (apple-fm-4096 on the desktop 7B) runs the
+   sleep-CSV/world-cup fixtures: a real narrated answer whose numbers
+   equal the engine's, with the computation shown as a disclosure.
+
+Constraints. The §44 invariant HOLDS — no number reaches the user
+that the engine didn't compute (fixtures assert numbers ⊆ verified).
+Deterministic computed values unchanged. Successful-SQL path behavior
+unchanged (it already narrates). Cloud tiers keep narrating; the
+ladder retry applies to all tiers. Byte-pinned degradation/disclosure
+copy; PARITY twins. No telemetry. SharePoint untouched.
+
+Acceptance:
+1. The world-cup/sleep-CSV asks return a MEANINGFUL narrated answer
+   (prose, structure), with numbers exactly the engine's and the
+   "Computed exactly by Lighthouse" block as a collapsible disclosure
+   — not a raw dump, not a stub.
+2. A model answer with one stray number is retried then gracefully
+   summarized — never the all-or-nothing stub; numbers ⊆ verified
+   (fixture).
+3. A question the file can't answer gets an honest, number-free,
+   schema-based reply — not an index-column sum.
+4. An empty recipe result explains the missing shape + names columns;
+   never 0-of-0 dead-ended.
+5. A report fired at a cold bridge warm-waits (and re-polls a
+   suspended listener) instead of "Connection refused".
+6. CONVENTIONS refined; suites + release-smoke + ios-build green;
+   seven stamps read 0.14.15.
+
+Environment. Engine/twin/ladder/answerability + fixtures fully
+container-testable (forced-tier rig needs the desktop 7B); a device
+confirmation of the world-cup narrated answer (house convention). One
+commit per numbered section. Open ONE PR titled "Breathing room: the
+model narrates over verified facts (rebalance §44)"; stop at the PR.
+```
+
+## 48. Findable reports, fewer & steadier suggestions (2026-07-23)
+
+Owner: "reports still aren't clear to find; suggested questions aren't
+always available; too many suggestions (limit to 3)." Diagnosis @
+0.14.14:
+- **Reports are two taps deep and mislabeled.** #220 put the
+  Scientific/Business buttons ONLY in InvestigationsNav
+  (reportRow), reachable solely via the header investigation-picker
+  Popover (ChatPanel.tsx:5262) and only when an investigable table is
+  in scope. §37's per-answer/hero doors were never built (grep:
+  no runReportQuestion/"Report…"/source_tables in ChatPanel). The one
+  near-visible door — InvestigateChips in the hero — is labeled
+  "Investigate <table>", empty-hero-only, and its report items hide
+  inside a menu.
+- **Suggestions render only on the empty hero.** The whole chip row is
+  behind `messages.length === 0 && !streaming` (ChatPanel.tsx:5219) —
+  gone the moment a conversation starts.
+- **Too many chips, no combined cap.** engineAsks .slice(0,4)
+  (ChatPanel.tsx:4359) + recipeChips UNCAPPED (4362) + InvestigateChips
+  .slice(0,3) — worst case 7+. No single cap.
+
+### Prompt
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first analytics harness: Rust engine, TS twin (src/server/),
+React UI (src/). Read CLAUDE.md, docs/CONVENTIONS.md, roadmap §29 +
+§37 + §46 + §48. GOAL: make reports genuinely findable and calm the
+suggestion row to ~3 steady chips. Reuse ragService.investigate (no
+new report engine). Coordinate: §47 is in flight on the engine only —
+no overlap; rebase onto it.
+
+1. One combined suggestion cap of 3. At the chip-consumption seam
+   (ChatPanel.tsx:4358-4362 / the suggestRow render 5292-5339),
+   concatenate the chosen ask set + recipe chips + report chips into a
+   single ordered, de-duplicated list and .slice(0, 3) — a TOTAL of 3
+   across all types, priority order asks > report > recipe (tune with
+   a pinned test). Remove the per-type independent caps that let the
+   total reach 7+. Pin the total-≤3 invariant.
+2. Suggestions available beyond the empty hero. Lift the
+   messages.length===0 gate (ChatPanel.tsx:5219) so a compact
+   suggestion affordance is reachable mid-conversation too — e.g. the
+   3 chips render above the composer (or behind a small "Suggestions"
+   toggle) when a conversation is ongoing and files are in scope, not
+   only on the fresh hero. Keep it calm (the same ≤3 cap; no row when
+   there's nothing valid). Validated-only (useValidatedChips) — a chip
+   shown is a question that will succeed.
+3. A visible Report door (build the §37 idea, minimally). Two places:
+   a. Hero: relabel the InvestigateChips chip "Report on <table>"
+      with a report icon (the §37/§46 wording) so the report is named,
+      not hidden behind "Investigate"; keep its Standard/Scientific/
+      Business menu. It counts toward the §1 cap of 3.
+   b. Per-answer: on a tabular analytics answer (m.analytics with a
+      resolved source table), add a "Report…" action to the answer
+      action row (beside Chart-it/Save-view) → the same
+      Scientific/Business/Standard menu → ragService.investigate(
+      sourceTable, currentInvestigationId, template) with the §46
+      hypothesis prompt and the "Saved <name> — Open" confirmation.
+      Reuse #220's investigate() + hypothesis dialog; if the answer's
+      source table isn't resolvable, the action is absent (no dead
+      door). This is the always-relevant entry the owner is missing.
+   The InvestigationsNav buttons from #220 stay (a third path).
+4. Tests + stamps. Pins: total chips ≤3 (worst-case fixture); the
+   ongoing-conversation affordance renders when valid; the hero chip
+   reads "Report on <table>"; the per-answer Report action appears on
+   a tabular answer with a source table and not otherwise; investigate
+   wiring reused. Bump current+1 across all SEVEN stamps; suites +
+   release-smoke + ios-build green.
+
+Constraints. Report generation unchanged (reuse investigate()/§46
+hypothesis). Validated-only chips. Byte-pinned labels; twins PARITY.
+Desktop + compact. No telemetry. SharePoint untouched. Scope = these
+three; the report ENGINE is untouched.
+
+Acceptance:
+1. The hero shows at most 3 chips total; one reads "Report on
+   <table>" when an investigable table is in scope.
+2. Suggestions are reachable mid-conversation, still ≤3, still
+   validated.
+3. A tabular answer offers a "Report…" action that runs the templated
+   report with the hypothesis prompt and the Saved—Open confirmation.
+4. Suites + release-smoke + ios-build green; seven stamps bumped.
+
+Environment. Container-testable (chip caps + wiring pins; grep-verify
+desktop call sites); a simulator pass for the per-answer action + menu
+on compact. One commit per numbered section. Open ONE PR titled
+"Findable reports, fewer steadier suggestions"; stop at the PR.
+```
