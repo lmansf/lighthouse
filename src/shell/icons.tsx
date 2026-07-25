@@ -313,6 +313,9 @@ export const IconFolderAdd = makeIcon(G_FOLDER_BADGE_PLUS);
 export const IconMoveTo = makeIcon(G_ARROW_TURN_UP_RIGHT);
 export const IconDoc = makeIcon(G_DOC);
 export const IconDocText = makeIcon(G_DOC_TEXT);
+// §48 §3: the report door's own glyph — a written document, so "Report on
+// <table>" reads as a report, not a search.
+export const IconReport = makeIcon(G_DOC_TEXT);
 export const IconDocPdf = makeIcon(G_DOC_RICHTEXT);
 export const IconDocAdd = makeIcon(G_PLUS_RECTANGLE);
 export const IconImage = makeIcon(G_PHOTO);

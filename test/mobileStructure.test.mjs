@@ -19,7 +19,7 @@ const gone = (p) => !existsSync(path.join(ROOT, p));
 const shell = read("src/shell/AppShell.tsx");
 const grid = read("src/features/explorer/FileTileGrid.tsx");
 const chat = read("src/features/chat/ChatPanel.tsx");
-const chips = read("src/features/chat/InvestigateChips.tsx");
+const chips = read("src/features/chat/ReportChip.tsx");
 const settingsPage = read("src/features/settings/SettingsPage.tsx");
 
 test("the Sections world is deleted — components, registry, store, nav-only surfaces", () => {
@@ -43,17 +43,23 @@ test("the Sections world is deleted — components, registry, store, nav-only su
 });
 
 test("the report-template launcher survives as chat chips, labels byte-identical", () => {
-  assert.match(chips, /ragService\s*\n?\s*\.capabilityMap\(|ragService\.capabilityMap\(/, "gated on the capability map");
-  assert.match(chips, /t\.investigable/ , "only investigable tables chip");
+  // §48 §1: the launcher was relocated out of InvestigateChips into ReportChip
+  // so it can ride the ONE combined ≤3 suggestion list; the capability-map gate
+  // moved into the shared chips hook so the cap sees the report count.
+  const validated = read("src/features/chat/useValidatedChips.ts");
+  assert.match(validated, /ragService\.capabilityMap\(/, "gated on the capability map");
+  assert.match(validated, /t\.investigable/, "only investigable tables chip");
   assert.match(chips, /ragService\.investigate\(table, undefined, template\)/, "same engine op");
-  // §31 §3: the template picker is an LhMenu item list now; the three labels
-  // stay byte-identical as item labels.
+  // The template picker is an LhMenu item list; the three labels stay
+  // byte-identical as item labels.
   assert.match(chips, /label: "Standard report",/, "Standard report entry");
   assert.match(chips, /label: "Scientific method",/, "IMRaD entry");
   assert.match(chips, /label: "Business report",/, "BLUF entry");
   assert.match(chips, /"imrad"/, "imrad template id");
   assert.match(chips, /"bluf"/, "bluf template id");
-  assert.match(chat, /<InvestigateChips includedFileIds=\{includedFileIds\} \/>/, "mounted in the hero");
+  // Report chips ride the ONE combined suggestion list (§48 §1) rendered in the
+  // hero — no separate InvestigateChips group.
+  assert.match(chat, /<SuggestionChips chips=\{mergedChips\}/, "report chips ride the combined suggestion list");
 });
 
 test("relocations: definitions + saved views live in Settings on both hosts", () => {

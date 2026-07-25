@@ -55,7 +55,7 @@ import dynamic from "next/dynamic";
 import { type Components } from "react-markdown";
 import type { DragEvent, ReactNode } from "react";
 import type { AnalyticsMeta, ChangedPin, ChatTurn, Pin, RagReference } from "@/contracts";
-import { chatService, MODEL_PROVIDERS, ragService, runRecipeQuestion } from "@/contracts";
+import { chatService, MODEL_PROVIDERS, ragService } from "@/contracts";
 import { useRagStore } from "@/stores/useRagStore";
 import { useAuthStore } from "@/stores/useAuthStore";
 import { parseChartSpec, stripChartRequestFences, stripChartFences, tableToCsv } from "@/lib/chartSpec";
@@ -112,7 +112,9 @@ import { COLLAPSED_SECTION_CLASS, remarkCollapseSections } from "@/lib/collapseS
 import { useCoarsePointer, usePaneLayout } from "@/shell/paneLayout";
 import { Sheet } from "@/shell/Sheet";
 import { HistoryNav } from "./HistoryNav";
-import { InvestigateChips } from "./InvestigateChips";
+import { SuggestionChips } from "./SuggestionChips";
+import { mergeSuggestionChips } from "./suggestionChipModel";
+import { AnswerReportAction } from "./AnswerReportAction";
 import { InvestigationsNav } from "@/features/investigations/InvestigationsNav";
 
 // The markdown stack (react-markdown + remark-gfm + micromark, ~263 KB) is the
@@ -353,6 +355,14 @@ const useStyles = makeStyles({
     flexWrap: "wrap",
     justifyContent: "center",
     gap: tokens.spacingHorizontalS,
+  },
+  // §48 §2: the mid-conversation suggestion affordance — a calm, left-aligned
+  // ≤3 chip row above the follow-up composer (not centered like the hero).
+  followUpSuggestRow: {
+    display: "flex",
+    flexWrap: "wrap",
+    gap: tokens.spacingHorizontalS,
+    marginBottom: tokens.spacingVerticalS,
   },
 
   turn: { display: "flex", flexDirection: "column", gap: tokens.spacingVerticalXS },
@@ -2064,6 +2074,11 @@ function RefineChips({
           Define as metric
         </Button>
       )}
+      {/* §48 §3b: the always-relevant Report door — a templated report on this
+          answer's source table with the §46 hypothesis prompt and a Saved—Open
+          confirmation. Self-resolving: absent when the answer has no
+          investigable source table (no dead door). */}
+      <AnswerReportAction fileIds={meta.fileIds} />
     </div>
     {/* "Chart it" inline mount: the client-built chart of this answer's own
         table, drawn with the house renderer. Per-turn UI state only — never
@@ -4350,16 +4365,18 @@ export function ChatPanel() {
     return lastAsk({ history: session }) ?? lastAsk({ history: askHistoryItems });
   }, [messages, askHistoryItems]);
 
-  // --- §22.3: validated, PRELOADED suggestion chips (asks + recipes) — the
-  // one shared hook (also RecipesNav's source, same module cache). It re-keys
-  // on the included set, provider, investigation, and the views nonce, so a
-  // posture flip can never serve another posture's chips. The hero keeps its
-  // old visual caps (4 asks, 3 recipes) at the consumption site. ---
+  // --- §22.3: validated, PRELOADED suggestion chips (asks + recipes + report)
+  // — the one shared hook (also RecipesNav's source, same module cache). It
+  // re-keys on the included set, provider, investigation, and the views nonce,
+  // so a posture flip can never serve another posture's chips. ---
   const validatedChips = useValidatedChips(includedFileIds);
-  const engineAsks = useMemo(() => validatedChips.asks.slice(0, 4), [validatedChips.asks]);
-  // 0.13.10 §3: chips are the ONLY recipe surface now (RecipesNav, the
-  // uncapped path, is retired) — every applicable recipe gets its chip.
-  const recipeChips = validatedChips.recipes;
+  // §48 §1: ONE combined suggestion list, capped at 3 TOTAL (priority asks >
+  // report > recipe), replacing the old per-type caps (4 asks + 3 reports +
+  // every recipe = 7+). Every input is engine-validated; this only orders + caps.
+  const mergedChips = useMemo(
+    () => mergeSuggestionChips(validatedChips.asks, validatedChips.reportTables, validatedChips.recipes),
+    [validatedChips],
+  );
 
   // --- §22.1 ghost autocomplete: the single best inline continuation of the
   //     draft, greyed after the caret; Right Arrow at the end accepts it. ---
@@ -5290,52 +5307,26 @@ export function ChatPanel() {
             </div>
           ) : (
             <div className={styles.suggestRow} data-tour="suggestions">
-              {engineAsks.length > 0
-                ? // Catalog-derived asks submit immediately — every one is a
-                  // real, answerable question about a real included file.
-                  engineAsks.map((s) => (
-                    <Button
-                      key={s.label}
-                      appearance="secondary"
-                      size="small"
-                      shape="circular"
-                      onClick={() => void sendQuestion(s.question)}
-                    >
-                      {s.label}
-                    </Button>
-                  ))
-                : suggestions.map((s) => (
-                    <Button
-                      key={s.label}
-                      appearance="secondary"
-                      size="small"
-                      shape="circular"
-                      onClick={() => applySuggestion(s.fill)}
-                    >
-                      {s.label}
-                    </Button>
-                  ))}
-              {/* Applicable-recipe chips (openspec: add-recipes §3.1), beside
-                  the suggested asks and styled identically. Each submits its
-                  recipe-cued question immediately — the engine plans it
-                  model-free before the model gate. */}
-              {recipeChips.map((r) => (
-                <Button
-                  key={`recipe:${r.id}:${r.table}`}
-                  appearance="secondary"
-                  size="small"
-                  shape="circular"
-                  title={r.summary}
-                  onClick={() => void sendQuestion(runRecipeQuestion(r.id, r.table))}
-                >
-                  {r.name}
-                </Button>
-              ))}
-              {/* 0.13.10 §3: the Investigate → report-template launcher (the
-                  retired "What you can do" section's one result-producing
-                  control), data-gated on investigable tables like the recipe
-                  chips beside it. */}
-              <InvestigateChips includedFileIds={includedFileIds} />
+              {/* §48 §1: the ONE combined, ≤3, priority-ordered list (asks >
+                  report > recipe) — a report chip is a first-class member, not
+                  a fourth group. Every chip is engine-validated (it will
+                  succeed). When nothing is validated yet, the static starter
+                  prompts fill the draft (they don't submit). */}
+              {mergedChips.length > 0 ? (
+                <SuggestionChips chips={mergedChips} onAsk={(q) => void sendQuestion(q)} />
+              ) : (
+                suggestions.map((s) => (
+                  <Button
+                    key={s.label}
+                    appearance="secondary"
+                    size="small"
+                    shape="circular"
+                    onClick={() => applySuggestion(s.fill)}
+                  >
+                    {s.label}
+                  </Button>
+                ))
+              )}
             </div>
           )}
           <div className={styles.heroComposer}>{composer("Ask about the files visible to AI…")}</div>
@@ -5903,6 +5894,16 @@ export function ChatPanel() {
           )}
         </div>
 
+        {/* §48 §2: suggestions live beyond the empty hero — a calm, validated,
+            ≤3 chip row above the follow-up composer whenever something is worth
+            suggesting mid-conversation. mergedChips is empty off-scope / when
+            nothing is applicable, so there's no row unless a chip would succeed
+            (the same ≤3 combined cap the hero uses). */}
+        {mergedChips.length > 0 && (
+          <div className={styles.followUpSuggestRow} data-lh-followup-suggest>
+            <SuggestionChips chips={mergedChips} onAsk={(q) => void sendQuestion(q)} />
+          </div>
+        )}
         {composer("Ask a follow-up…")}
       </div>
 

@@ -22,9 +22,14 @@ import { useChatStore } from "@/stores/useChatStore";
 export interface ValidatedChips {
   asks: { label: string; question: string }[];
   recipes: RecipeCard[];
+  // §48 §1: the investigable tables that back the "Report on <table>" chips —
+  // fetched HERE (one place) so the combined ≤3 cap sees all three chip counts
+  // at once. Engine-validated like the rest: capabilityMap only reports a table
+  // investigable when a real report can run over it (empty on the web twin).
+  reportTables: string[];
 }
 
-const EMPTY: ValidatedChips = { asks: [], recipes: [] };
+const EMPTY: ValidatedChips = { asks: [], recipes: [], reportTables: [] };
 
 /** Bounded module cache — key → last validated chip set. Insertion-ordered
  *  (Map), oldest evicted past the cap; a session touches a handful of keys. */
@@ -66,9 +71,13 @@ export function useValidatedChips(includedFileIds: string[]): ValidatedChips {
     Promise.all([
       ragService.suggestedAsks(includedFileIds),
       ragService.applicableRecipes(includedFileIds),
+      ragService.capabilityMap(includedFileIds),
     ])
-      .then(([asks, recipes]) => {
-        const next: ValidatedChips = { asks, recipes };
+      .then(([asks, recipes, map]) => {
+        const reportTables = (map?.tables ?? [])
+          .filter((t) => t.investigable)
+          .map((t) => t.name);
+        const next: ValidatedChips = { asks, recipes, reportTables };
         remember(key, next);
         if (alive) setChips(next);
       })

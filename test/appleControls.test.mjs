@@ -95,5 +95,5 @@ test("known judgment calls hold: tooltip-ref switch stays Fluent; independent fi
 test("the sign-in chooser and feedback kind are segments; template picker is an LhMenu", () => {
   assert.match(read("src/features/settings/SettingsMenu.tsx"), /<LhSegmented/);
   assert.match(read("src/features/feedback/BugReport.tsx"), /<LhSegmented/);
-  assert.match(read("src/features/chat/InvestigateChips.tsx"), /<LhMenu/);
+  assert.match(read("src/features/chat/ReportChip.tsx"), /<LhMenu/);
 });
