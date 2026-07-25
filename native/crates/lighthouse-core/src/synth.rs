@@ -3345,11 +3345,15 @@ fn live_pipeline(
                         .collect();
                     // §47 §2: long-document sweep reduce — the RAG-fallback
                     // ladder (retry then deterministic reply) replaces the §44
-                    // guillotine when this is an armed numeric-tabular ask.
+                    // guillotine when this is an armed numeric-tabular ask. The
+                    // reduce question carries the §35 length note; compute it ONCE
+                    // (one call site per engine, promptParity) and use it in the
+                    // branch that runs.
+                    let reduce_q = reduce_question(&question);
                     if guard_armed {
                         yield delta(
                             narrate_gated(
-                                reduce_question(&question),
+                                reduce_q,
                                 reduce_ctxs,
                                 &guard_profiles,
                                 &guard_file,
@@ -3362,7 +3366,7 @@ fn live_pipeline(
                         );
                     } else {
                         let mut answer = llm::stream_answer(
-                            reduce_question(&question),
+                            reduce_q,
                             reduce_ctxs,
                             cfg.clone(),
                             history.clone(),
