@@ -8027,3 +8027,182 @@ via our CLI, report and stop. One commit per phase/section (Phase A
 first, its own commit). Open ONE PR titled "iOS: the Ask Lighthouse
 home-screen widget"; stop at the PR.
 ```
+
+## 51. Choice-density audit: Socratic reduction of decision load (2026-07-23)
+
+Owner: measure the choices per page/feature and use the Socratic
+method to cut the ones that don't serve the customer. A "highly
+opinionated" tool should MAKE decisions for the user, not offload
+them. Measured inventory @ 0.14.15 (interactive controls per surface):
+
+**The scoreboard (headline numbers):**
+- First-run chat screen: ~11 (compact) / ~11-12 (desktop) — already
+  calm; the empty state deliberately omits the 6-control populated
+  header. NOT the problem.
+- A single analytics ANSWER: ~15-20 desktop / ~13 mobile — THE problem.
+- Settings surface: ~45 distinct; the Preferences dialog alone ~18.
+- Files: desktop toolbar 9 + per-row 3-5 + a ≤11-item row menu.
+
+**The decisive finding — defaults:** ~18/18 Preferences already ship a
+sensible default; NONE blocks first use. The only genuinely forced
+decision in the whole app is cloud-AI setup (provider + key), and even
+that is opt-in over the private-first on-device default. So the entire
+Preferences dialog is "advanced" material presented as front-line.
+
+**Redundancy (same decision, many doors):** local-only offered 6 ways
+(row lock · row menu · bulk-lock · compact "Private" switch ·
+investigation "keep on-device" · file inspector); visible-to-AI 4 ways;
+add-files 4 ways; new-chat 4; report generation 2-3; define-metric,
+save-view, pin each in a chip AND in Settings. Same decision, diluted.
+
+### The Socratic method (applied to every choice)
+1. What decision does this force, and does the user have the context
+   to make it well? (If not, we've offloaded OUR judgment — decide FOR
+   them.)
+2. What's the right default, and how often would anyone change it? (A
+   default that serves ~95% ⇒ the control is advanced, not front-line.)
+3. Does this serve the customer's goal (a trustworthy answer from their
+   data) or our internal model/plumbing? (Plumbing-exposers fail.)
+4. If it vanished, what breaks and for whom? (Nothing for the common
+   user ⇒ clutter; something for a power user ⇒ advanced, not gone.)
+5. Is this the same decision offered elsewhere? (Duplicate doors
+   dilute; converge to one direct + one bulk.)
+
+Each control → KEEP (load-bearing) · DEFAULT (good default, demote to
+advanced) · MERGE (converge duplicates) · CUT.
+
+### Verdicts (highest-value reductions)
+- **The answer surface (~15-20 → ~8).** Reading an answer is a
+  trust-and-refine moment, not a file-management moment. KEEP inline:
+  copy, the eligibility-gated refine chips (Top 10 · Monthly · As % ·
+  Chart it), and the SQL/citations trust affordances. MERGE the six
+  "do something with this later" actions (Save CSV · Evidence pack ·
+  Pin · Save as view · Define as metric · [§49 Report]) into ONE
+  "Save & share…" overflow menu. DEFAULT the two thumbs into a single
+  quiet feedback affordance (or hover). Nothing breaks — the power user
+  taps once more; the reader gets a calm answer.
+- **Preferences (~18 visible → ~4 + Advanced).** All 18 have defaults;
+  surface only what a typical user changes (Appearance: theme · text
+  size), collapse the rest behind an "Advanced" disclosure. Nothing
+  forces a first-run decision.
+- **De-duplicate the privacy controls.** Local-only: 6 → 2 (the inline
+  row lock as direct manipulation + the bulk selection switch; drop the
+  row-menu duplicate — the toggle is right there; the investigation
+  "keep on-device" is a distinct SCOPE policy, keep but label it as
+  policy not a per-file repeat). Visible-to-AI: 4 → 2 (inline eye +
+  bulk). Same decision, one direct + one bulk.
+- **Files desktop toolbar (9 → ~5).** Fold Sort + "Only visible to AI"
+  + "Hidden from cloud" into ONE "View" menu (they're view refinements,
+  not primary actions); keep Browse · New folder · Search · Selection.
+- **Converge redundant doors.** One visible New-chat (header; the
+  Mod+N/event stays for other triggers), one primary Add-files per
+  surface (the event stays), report entry converges per §49.
+
+**Reduced headline:** answer ~15-20 → ~8; Preferences ~18 → ~4 +
+Advanced; Files toolbar 9 → ~5; local-only 6 → 2. The first-run screen
+already calm; the wins are the ANSWER (where the user actually lives)
+and SETTINGS.
+
+### Prompt
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first, HIGHLY OPINIONATED analytics AI harness: React UI
+(src/), Fluent UI v9, a compact tab shell + desktop. Read CLAUDE.md,
+docs/CONVENTIONS.md, and roadmap §51 (the choice-density audit +
+verdicts) before writing code. GOAL: cut decision load where it's
+worst — the analytics ANSWER and SETTINGS — by the Socratic rule: an
+opinionated tool decides for the user; a control earns its place only
+if it serves the customer's goal AND has no good default AND isn't a
+duplicate. Pure UI declutter: NO capability is removed (power actions
+move to overflow/advanced, never deleted), NO engine change. Every
+reduction keeps its function reachable.
+
+1. The analytics answer: split "refine" from "do with it" (the biggest
+   win). In ChatPanel.tsx RefineChips (1965-2066) + the answer-action
+   row (5638-5687):
+   - KEEP inline (the reading/refine moment): Copy; the eligibility-
+     gated refine chips (Top 10 · Monthly · As % · Chart it); the
+     Edit-SQL affordance stays reachable but may live in the overflow
+     (it's power-user); citations unchanged.
+   - MERGE into ONE "Save & share…" overflow menu (a single button →
+     LhMenu): Save as CSV, Evidence pack, Pin, Save as view, Define as
+     metric, and the §49 Report action if present. Each menu item keeps
+     its exact handler + gating (desktop-only stays desktop-only;
+     Define-metric stays sqlHasAggregate-gated). The post-action
+     follow-ups (View pins / Add to board / Reveal) fire from the menu
+     result as today.
+   - Thumbs up/down → ONE quiet feedback affordance (a single "Rate"
+     control that expands to up/down, or hover-revealed) — not two
+     always-on buttons. Copy + Regenerate stay prominent.
+   - Result: a settled analytics answer shows ~8 visible controls, down
+     from ~15-20; a structural test pins the inline set and that the
+     six save/promote actions live under one menu.
+2. Preferences: essentials + Advanced. In SettingsMenu.tsx
+   PreferencesDialog (1355-1743) / SettingsPage: surface only the
+   controls a typical user changes — Appearance (theme) and Text size —
+   at the top; collapse EVERYTHING else (accent, density, the
+   inclusion default, curation rules, all desktop feature/shell toggles,
+   summon shortcut, whisper) behind an "Advanced" disclosure
+   (collapsed by default). Nothing is removed; nothing is re-defaulted;
+   the forced first-run decision count stays zero. Pin: the dialog's
+   top shows ≤4 controls with Advanced collapsed.
+3. De-duplicate the privacy controls (converge, don't remove the
+   capability). Local-only: keep the inline row lock (FileExplorer
+   FileRow:811 / the tile) + the bulk selection switch; REMOVE the
+   redundant row-context-menu "Keep private / Allow cloud" item (the
+   inline lock is adjacent). Visible-to-AI: keep the inline eye + the
+   bulk switch; remove the redundant menu duplicate. The investigation
+   "Keep on-device" (InvestigationsNav:615) is a distinct scope POLICY
+   — keep it, relabel so it reads as an investigation policy, not a
+   per-file repeat. Pin: each privacy decision has exactly one direct +
+   one bulk entry.
+4. Files desktop toolbar: one View menu. In FileExplorer.tsx toolbar
+   (1896-2049), fold Sort (2245) + "Only visible to AI" (2224) +
+   "Hidden from cloud" (2236) into a single "View" menu (sort options +
+   the two filters as checkable items); keep Browse · New folder ·
+   Search · Selection-mode inline. Compact FileTileGrid is already lean
+   (§30) — leave it. Pin the toolbar's reduced top-level count.
+5. Converge redundant doors (visible entry only; events stay). One
+   visible New-chat (the header; keep Mod+N + lighthouse:new-chat for
+   history/other triggers). One primary Add-files per surface (keep the
+   attach popover's add + the events). Do NOT touch report doors here
+   (§49 owns that convergence).
+6. Tests + stamps. Structural pins for each reduction (inline answer set
+   + the Save&share menu contents; Preferences ≤4 top controls +
+   Advanced; one-direct-one-bulk per privacy decision; the View menu).
+   No behavior/engine change — every moved control keeps its handler
+   (assert handlers unchanged). Bump current+1 across all SEVEN stamps;
+   suites + release-smoke + ios-build green.
+
+Constraints. NO capability removed — power actions relocate to
+overflow/advanced, always reachable. NO engine/twin change; NO
+re-defaulting a setting. Desktop + compact both. Byte-pinned labels
+move with their controls. Follow CONVENTIONS (one-flag-one-meaning
+already; this is the choice-density discipline). No telemetry.
+SharePoint untouched. Scope = these five surfaces; the thumbs→single-
+feedback and Edit-SQL→overflow are the two owner-visible judgment calls
+— implement as specified and flag them in the PR for review.
+
+Acceptance:
+1. A settled analytics answer shows ~8 inline controls; Save CSV /
+   Evidence / Pin / Save-view / Define-metric all live under one
+   "Save & share…" menu and still work; feedback is one control.
+2. Preferences opens showing ≤4 controls with everything else under a
+   collapsed "Advanced"; no setting was removed or re-defaulted.
+3. Each privacy decision (visible-to-AI, local-only) has exactly one
+   direct + one bulk entry; the investigation policy reads as policy;
+   no capability lost.
+4. The Files desktop toolbar shows Browse · New folder · Search ·
+   Selection · View(menu) — sort + filters inside View.
+5. Suites + release-smoke + ios-build green; seven stamps bumped;
+   structural pins green.
+
+Environment. Fully container-testable (UI structural pins; grep-verify
+desktop-crate call sites are n/a — pure React). One commit per numbered
+section. Open ONE PR titled "Choice-density: refine vs save, essentials
+vs advanced, one door per decision"; stop at the PR.
+```
+
+(Numbering note: the §50 iOS ControlWidget follow-on, if built, takes
+§52 — this audit claimed §51.)
