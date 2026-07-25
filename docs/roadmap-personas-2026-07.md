@@ -8206,3 +8206,89 @@ vs advanced, one door per decision"; stop at the PR.
 
 (Numbering note: the §50 iOS ControlWidget follow-on, if built, takes
 §52 — this audit claimed §51.)
+
+## 52. A subtle "working…" for investigations (2026-07-23)
+
+Owner: investigations load for a while — add a subtle animated
+loading cue so the user knows we're working. Diagnosis @ 0.14.15
+(InvestigationsNav.tsx): two async loads on open with NO visible
+indication — ensureLoaded() fetches the list (192-194), and
+capabilityMap() (214-231) gates the report buttons, so the report
+launchers pop in LATE after their fetch resolves (reportTable is null
+until then). And the genuinely long wait — report Generate
+(generateReport → ragService.investigate: the deterministic battery +
+§47's two framing model calls) — shows only STATIC text
+"Generating…" (731-734), no motion, so it reads as stuck. The `busy`
+flag disables buttons but shows no spinner. Building blocks: Fluent
+`Spinner` is already used in 14 files; §22.4's rotating honest labels
+(warm-wait) are the pattern for a long, multi-stage wait. (Numbering:
+the §50 ControlWidget follow-on, if built, takes a later number.)
+
+### Prompt
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first analytics harness: React UI (src/), Fluent UI v9. Read
+CLAUDE.md, docs/CONVENTIONS.md, and roadmap §52. GOAL: subtle,
+honest "working…" feedback for the two investigation waits — the
+surface's initial load and the (long) report Generate — reusing the
+Fluent Spinner idiom and §22.4's rotating-label pattern. Subtle, not
+a big spinner; reduced-motion aware. Engine untouched.
+
+1. The investigation surface's initial load. In InvestigationsNav.tsx,
+   while ensureLoaded() (the list) and/or the capabilityMap() fetch
+   (214-231, which gates the report buttons) are in flight, show a
+   subtle loading state instead of an empty/half-rendered surface:
+   a small inline Spinner (SpinnerSize small/tiny) with a quiet
+   "Loading investigations…" label, OR a light skeleton shimmer on
+   the list rows + a placeholder where the report buttons will appear
+   (so they don't pop in unannounced). Track a loading flag for each
+   fetch; clear on resolve/error. Keep it calm — one indicator, not
+   two competing ones.
+2. The report Generate (the long one — animate it honestly). Replace
+   the static "Generating…" (731-734) with motion + honest staged
+   copy: a small inline Spinner beside a rotating label that reflects
+   the real stages (e.g. "Running the analysis…" → "Composing the
+   report…" → "Almost ready…"), reusing the §22.4 warming-label
+   rotation idiom (index by elapsed time; byte-pinned strings). The
+   button stays disabled (reportBusy) with the spinner; on resolve →
+   the §49/existing "Saved — Open" confirmation; on error → the
+   existing reportError. Every label must be TRUE (no fake progress
+   bar); the rotation just signals liveness during a multi-call wait.
+3. Reduced-motion + reuse. Respect prefers-reduced-motion: a static
+   "Working…"/"Generating…" label with no spin/rotation (the spinner
+   already respects it; the label rotation must not animate under
+   reduced-motion — show the first honest label statically). Do NOT
+   invent a new animation system — reuse Fluent Spinner + the §22.4
+   label idiom. If the same subtle-loading treatment fits the
+   investigation SWITCH (setCurrentInvestigation resolving scope) and
+   it's perceptibly slow, apply it there too; otherwise skip (don't
+   add indicators to fast paths — a flash of spinner on a 50ms load
+   is worse than none; gate on a ~200ms delay before showing).
+4. Tests + stamps. A test that the loading flag drives the indicator
+   (present while fetching, gone after) and the report rotation is
+   reduced-motion-aware; byte-pin the staged labels. Bump current+1
+   across all SEVEN stamps; suites + release-smoke + ios-build green.
+
+Constraints. Subtle only — no full-screen spinner, no layout jump
+(reserve the space so the indicator doesn't shift content). Engine/
+twin untouched (pure UI feedback). No fake progress — honest labels.
+prefers-reduced-motion honored. The ~200ms delay-before-show avoids
+spinner-flash on fast loads. Byte-pinned labels. No telemetry.
+Desktop + compact both.
+
+Acceptance:
+1. Opening the investigations surface shows a subtle "loading" cue
+   while the list + capability map fetch; the report buttons don't
+   pop in unannounced (a placeholder holds their space).
+2. Report Generate shows a small spinner + honest rotating stage
+   labels (never a fake bar); reduced-motion shows a static label.
+3. No spinner-flash on fast loads (the delay-before-show); no layout
+   jump.
+4. Suites + release-smoke + ios-build green; seven stamps bumped.
+
+Environment. Fully container-testable (loading-flag + reduced-motion
+structural tests; a simulator/desktop glance for the feel). One
+commit per numbered section. Open ONE PR titled "Investigations: a
+subtle working… indicator"; stop at the PR.
+```
