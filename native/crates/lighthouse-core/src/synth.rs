@@ -875,13 +875,22 @@ async fn narrate_over_facts(
         return raw;
     }
     // A good paragraph with one stray figure is retried, not discarded: one
-    // tightened attempt naming the only permitted numbers.
+    // tightened attempt naming the only permitted numbers. When NOTHING is
+    // verified (the §3 answerability path narrates from the schema alone), the
+    // tightened instruction forbids every number rather than naming an empty set.
     let allowed: Vec<String> = verified.iter().cloned().collect();
-    let tightened = format!(
-        "{question}\n\nImportant: use ONLY these figures, exactly as written, and state no \
-         other number: {}. If a number you would write is not in that list, leave it out.",
-        allowed.join(", ")
-    );
+    let tightened = if allowed.is_empty() {
+        format!(
+            "{question}\n\nImportant: answer in words only — state no numeric figure at all, \
+             since none has been verified for this question."
+        )
+    } else {
+        format!(
+            "{question}\n\nImportant: use ONLY these figures, exactly as written, and state no \
+             other number: {}. If a number you would write is not in that list, leave it out.",
+            allowed.join(", ")
+        )
+    };
     let raw2 = collect(llm::stream_answer(
         tightened,
         ctxs,
@@ -910,6 +919,138 @@ fn profile_narration_fallback(name: &str) -> String {
          risking an inexact number, so the engine's exact figures are shown below — those are \
          the verified values."
     )
+}
+
+/// Generic words that carry no dimension: interrogatives, auxiliaries, articles,
+/// prepositions, table/aggregation vocabulary, summary verbs, fillers. Stripped
+/// before the §47 §3 answerability match so only candidate DIMENSION nouns
+/// remain — an ask made entirely of these is a whole-table summary.
+const GENERIC_WORDS: &[&str] = &[
+    // interrogatives / adverbs
+    "what", "whats", "which", "how", "why", "when", "where", "who", "whom", "whose",
+    // auxiliaries / modals
+    "is", "are", "was", "were", "be", "been", "being", "am", "do", "does", "did", "done",
+    "doing", "has", "have", "had", "having", "can", "could", "will", "would", "shall",
+    "should", "may", "might", "must",
+    // articles / determiners / quantifiers
+    "the", "a", "an", "this", "that", "these", "those", "its", "their", "our", "my", "your",
+    "his", "her", "some", "any", "each", "every", "all", "no", "none", "both", "many", "much",
+    "more", "less", "fewer", "lot", "lots",
+    // prepositions / conjunctions / pronouns
+    "of", "in", "on", "at", "to", "for", "by", "per", "with", "from", "about", "as", "into",
+    "over", "under", "between", "among", "and", "or", "but", "than", "then", "so", "if", "out",
+    "it", "they", "them", "we", "us", "you", "i", "me", "there", "here",
+    // table / data vocabulary
+    "file", "files", "data", "dataset", "datasets", "table", "tables", "csv", "tsv",
+    "spreadsheet", "sheet", "dataframe", "column", "columns", "col", "cols", "row", "rows",
+    "record", "records", "entry", "entries", "field", "fields", "value", "values", "cell",
+    "cells", "figure", "figures", "stat", "stats", "statistic", "statistics",
+    // aggregation / operation vocabulary
+    "sum", "total", "totals", "average", "averages", "avg", "mean", "means", "median", "count",
+    "counts", "max", "maximum", "min", "minimum", "most", "least", "highest", "lowest",
+    "biggest", "smallest", "largest", "top", "bottom", "aggregate", "overall", "typical",
+    "distribution", "breakdown",
+    // summary / instruction verbs
+    "summarize", "summarise", "summary", "overview", "describe", "description", "gist",
+    "explain", "tell", "show", "showing", "shows", "display", "list", "give", "get", "find",
+    "calculate", "compute", "contain", "contains", "containing", "contents", "look", "looks",
+    // analysis-shape / fillers
+    "trend", "trends", "pattern", "patterns", "correlation", "relationship", "insight",
+    "insights", "comparison", "compare", "vs", "versus", "please", "just", "really", "kind",
+    "kinds", "sort", "sorts", "thing", "things", "general", "generally", "roughly",
+    "approximately", "around",
+];
+
+/// Lowercased alphanumeric word tokens of `s`.
+fn word_tokens(s: &str) -> std::collections::BTreeSet<String> {
+    s.split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(|w| w.to_string())
+        .collect()
+}
+
+/// The candidate DIMENSION tokens of a question: word tokens minus the generic
+/// vocabulary. Empty ⇒ a whole-table / summary ask (no specific dimension named).
+fn content_tokens(question: &str) -> std::collections::BTreeSet<String> {
+    word_tokens(&question.to_lowercase())
+        .into_iter()
+        .filter(|w| w.len() >= 2 && !GENERIC_WORDS.contains(&w.as_str()))
+        .collect()
+}
+
+/// The canonical concept a dimension word belongs to, so a question's "revenue"
+/// matches a "Sales" column and "duration" matches an "Hours" column. None for a
+/// word outside the known clusters — two such words never match by concept (that
+/// would collapse everything to one concept).
+fn concept_of(word: &str) -> Option<&'static str> {
+    match word {
+        "revenue" | "sales" | "income" | "earnings" | "turnover" | "proceeds" | "price"
+        | "cost" | "costs" | "amount" | "spend" | "spending" | "expense" | "expenses" => {
+            Some("money")
+        }
+        "profit" | "margin" | "markup" => Some("profit"),
+        "duration" | "length" | "elapsed" | "hours" | "hrs" | "minutes" | "mins" => {
+            Some("duration")
+        }
+        "qty" | "quantity" | "quantities" | "units" | "volume" => Some("quantity"),
+        "date" | "dates" | "day" | "days" | "year" | "years" | "month" | "months" | "week"
+        | "weeks" | "weekday" | "timestamp" => Some("temporal"),
+        "region" | "regions" | "area" | "zone" | "territory" | "location" | "country"
+        | "city" | "state" => Some("place"),
+        "category" | "categories" | "type" | "types" | "class" | "segment" => Some("category"),
+        "score" | "scores" | "rating" | "ratings" | "grade" | "rank" | "ranking" => {
+            Some("score")
+        }
+        "goal" | "goals" => Some("goals"),
+        "team" | "teams" | "club" | "clubs" => Some("team"),
+        _ => None,
+    }
+}
+
+/// §47 §3: can the deterministic profile PLAUSIBLY answer THIS question? A
+/// verified figure is not automatically a RELEVANT one — summing a row-index
+/// column is exact and meaningless. Narration proceeds only when the ask is a
+/// whole-table summary (no dimension survives the generic strip) OR names — by
+/// shared token, substring, or synonym concept — a column the profile carries.
+/// Otherwise the caller answers qualitatively from the schema, stating no number.
+/// PURE: a decision over the question text and the column names — no I/O, no model.
+fn profile_can_address(question: &str, columns: &[String]) -> bool {
+    let content = content_tokens(question);
+    // A generic / whole-table ask ("what does this file show?", "summarize
+    // this") leaves no specific dimension — the profile IS that summary.
+    if content.is_empty() {
+        return true;
+    }
+    let col_tokens: Vec<std::collections::BTreeSet<String>> =
+        columns.iter().map(|c| word_tokens(&c.to_lowercase())).collect();
+    content.iter().any(|qt| {
+        let qc = concept_of(qt);
+        col_tokens.iter().any(|ct| {
+            ct.iter().any(|cw| {
+                cw == qt
+                    || (qt.len() >= 4 && (cw.contains(qt.as_str()) || qt.contains(cw.as_str())))
+                    || (qc.is_some() && concept_of(cw) == qc)
+            })
+        })
+    })
+}
+
+/// §47 §3: the schema-only fact sheet handed to the model when the profile
+/// cannot address the ask. Names the columns so the model can say what the table
+/// holds and what it cannot answer — carries NO computed figure (the empty
+/// verified set gates the narration to words only).
+fn profile_schema_sheet(name: &str, columns: &[String]) -> String {
+    let name = if name.is_empty() { "this file" } else { name };
+    if columns.is_empty() {
+        format!("{name} is a table, but its columns could not be read.")
+    } else {
+        format!(
+            "{name} is a table with these columns: {}. No statistic answering the question has \
+             been computed, so say what the table contains and what it can and cannot answer — \
+             state no numbers.",
+            columns.join(", ")
+        )
+    }
 }
 
 /// §47 §2: the RAG-fallback ladder — replaces the §44 all-or-nothing vet. The
@@ -2568,21 +2709,46 @@ fn live_pipeline(
                                 // keeps every number in the prose ⊆ the profile's
                                 // verified set (else a deterministic sentence), so
                                 // trust holds while the model writes a real answer.
-                                let verified =
-                                    crate::numguard::verified_set(&[pf_ans.as_str()]);
+                                let columns = crate::table_profile::profile_column_names(
+                                    &pf_name, &pf_full,
+                                );
+                                // §47 §3: a verified figure is not automatically a
+                                // RELEVANT one. Narrate the computed profile only
+                                // when it can plausibly address the ask; otherwise
+                                // answer qualitatively from the schema — no number,
+                                // no misleading disclosure of an unrelated sum.
+                                let addressable = profile_can_address(&question, &columns);
                                 yield progress("Summarizing…".to_string(), 1, 1);
-                                let prose = narrate_over_facts(
-                                    &question,
-                                    &pf_ans,
-                                    &verified,
-                                    profile_narration_fallback(&pf_name),
-                                    &history,
-                                    &cfg,
-                                    &sink,
-                                )
-                                .await;
-                                yield delta(prose);
-                                yield delta(format!("\n\n{pf_ans}"));
+                                if addressable {
+                                    let verified =
+                                        crate::numguard::verified_set(&[pf_ans.as_str()]);
+                                    let prose = narrate_over_facts(
+                                        &question,
+                                        &pf_ans,
+                                        &verified,
+                                        profile_narration_fallback(&pf_name),
+                                        &history,
+                                        &cfg,
+                                        &sink,
+                                    )
+                                    .await;
+                                    yield delta(prose);
+                                    yield delta(format!("\n\n{pf_ans}"));
+                                } else {
+                                    let prose = narrate_over_facts(
+                                        &question,
+                                        &profile_schema_sheet(&pf_name, &columns),
+                                        &std::collections::BTreeSet::new(),
+                                        crate::numguard::number_free_degradation(
+                                            &pf_name, &columns,
+                                        ),
+                                        &history,
+                                        &cfg,
+                                        &sink,
+                                    )
+                                    .await;
+                                    yield delta(prose);
+                                }
                                 let reference = RagReference {
                                     file_id: pf_id.clone(),
                                     name: pf_name.clone(),
@@ -2597,8 +2763,14 @@ fn live_pipeline(
                                     cost_meta(&cfg, sink.total()),
                                     Vec::new(),
                                 );
-                                if let Some(m) = done.meta.as_mut() {
-                                    m.chart = profile_chart(&pf_name, &pf_full);
+                                // The chart shows the profile's own aggregates —
+                                // surfaced only when the profile addresses the ask
+                                // (an unrelated group-by would mislead just as a
+                                // narrated unrelated sum would).
+                                if addressable {
+                                    if let Some(m) = done.meta.as_mut() {
+                                        m.chart = profile_chart(&pf_name, &pf_full);
+                                    }
                                 }
                                 yield done;
                                 return;
@@ -2930,20 +3102,40 @@ fn live_pipeline(
                         // §47 §1: narrate over the verified profile, then disclose
                         // the exact figures (the §2 ladder keeps the prose's
                         // numbers ⊆ verified) — not a raw dump.
-                        let verified = crate::numguard::verified_set(&[ans.as_str()]);
+                        let columns =
+                            crate::table_profile::profile_column_names(&name, &full);
+                        // §47 §3: narrate the computed profile only when it can
+                        // plausibly address the ask; otherwise answer qualitatively
+                        // from the schema, stating no number.
+                        let addressable = profile_can_address(&question, &columns);
                         yield progress(format!("Reading all of {name}…"), 1, 1);
-                        let prose = narrate_over_facts(
-                            &question,
-                            &ans,
-                            &verified,
-                            profile_narration_fallback(&name),
-                            &history,
-                            &cfg,
-                            &sink,
-                        )
-                        .await;
-                        yield delta(prose);
-                        yield delta(format!("\n\n{ans}"));
+                        if addressable {
+                            let verified = crate::numguard::verified_set(&[ans.as_str()]);
+                            let prose = narrate_over_facts(
+                                &question,
+                                &ans,
+                                &verified,
+                                profile_narration_fallback(&name),
+                                &history,
+                                &cfg,
+                                &sink,
+                            )
+                            .await;
+                            yield delta(prose);
+                            yield delta(format!("\n\n{ans}"));
+                        } else {
+                            let prose = narrate_over_facts(
+                                &question,
+                                &profile_schema_sheet(&name, &columns),
+                                &std::collections::BTreeSet::new(),
+                                crate::numguard::number_free_degradation(&name, &columns),
+                                &history,
+                                &cfg,
+                                &sink,
+                            )
+                            .await;
+                            yield delta(prose);
+                        }
                         let reference = RagReference {
                             file_id: doc_id.clone(),
                             name: name.clone(),
@@ -2958,8 +3150,10 @@ fn live_pipeline(
                             cost_meta(&cfg, sink.total()),
                             Vec::new(),
                         );
-                        if let Some(m) = done.meta.as_mut() {
-                            m.chart = profile_chart(&name, &full);
+                        if addressable {
+                            if let Some(m) = done.meta.as_mut() {
+                                m.chart = profile_chart(&name, &full);
+                            }
                         }
                         yield done;
                         return;
@@ -3320,6 +3514,52 @@ mod tests {
 
     fn vctx(name: &str, text: &str, score: f64, kind: crate::contracts::SourceKind) -> vault::Context {
         vault::Context { name: name.into(), text: text.into(), score, kind }
+    }
+
+    // --- §47 §3: answerability gate ------------------------------------------------
+
+    #[test]
+    fn answerability_gate_narrates_a_relevant_column_and_declines_an_index_sum() {
+        let sales = vec!["Date".to_string(), "Region".to_string(), "Sales".to_string()];
+
+        // Relevant-column hit: the ask names columns the profile carries (Sales,
+        // Region), so the verified figures may be narrated.
+        assert!(
+            profile_can_address("what were the total sales by region?", &sales),
+            "an ask over present columns is addressable",
+        );
+        // Synonym reach: "revenue" is money, matching the "Sales" column.
+        assert!(
+            profile_can_address("how much revenue did we make?", &sales),
+            "a synonym of a present column is addressable",
+        );
+
+        // Index-sum mismatch: a file whose only numeric column is a row index,
+        // asked for a dimension it does not carry. The profile WOULD report
+        // `id (number: sum …)`, but summing an index is meaningless — narrating
+        // it as "revenue" is exactly the trap the gate must close.
+        let indexed = vec!["id".to_string(), "comment".to_string()];
+        assert!(
+            !profile_can_address("what is the total revenue?", &indexed),
+            "an absent dimension over an index-only table is NOT addressable",
+        );
+
+        // Whole-table summary: no specific dimension survives the generic strip,
+        // so the profile IS the answer and narration proceeds.
+        assert!(
+            profile_can_address("summarize this file", &indexed),
+            "a generic summary ask is always addressable",
+        );
+        assert!(
+            profile_can_address("what does this data show?", &indexed),
+            "a whole-table overview leaves no unmet dimension",
+        );
+
+        // The schema sheet names the columns and forbids figures — the qualitative
+        // reply the caller narrates when the gate declines.
+        let sheet = profile_schema_sheet("ledger.csv", &indexed);
+        assert!(sheet.contains("id, comment"), "the schema sheet names the columns: {sheet}");
+        assert!(sheet.contains("state no numbers"), "the schema sheet forbids figures: {sheet}");
     }
 
     #[test]
