@@ -1395,6 +1395,10 @@ fn live_pipeline(
             // Map the cue's table (a file display name or a view name) to the
             // registered SQL table name + its typed columns.
             let mut resolved: Option<crate::recipes::ResolvedParams> = None;
+            // The target's column NAMES, captured for the §47 §4 empty-result
+            // degradation so it can name what the file has (never a 0-of-0 dead
+            // end). Set from the SAME typed columns `resolve` reads.
+            let mut target_columns: Vec<String> = Vec::new();
             if let Some(fc) = catalog.iter().find(|fc| fc.name == cue.table) {
                 // A union-family member maps to the family's registered table.
                 let sql_table = regs
@@ -1407,6 +1411,7 @@ fn live_pipeline(
                 if let Some(sql_table) = sql_table {
                     let cols: Vec<(String, crate::catalog::ColumnKind)> =
                         fc.columns.iter().map(|c| (c.name.clone(), c.kind)).collect();
+                    target_columns = cols.iter().map(|(n, _)| n.clone()).collect();
                     resolved = recipe.resolve(&sql_table, &cols);
                 }
             }
@@ -1417,6 +1422,7 @@ fn live_pipeline(
                     .map(|vr| vr.name.clone())
                 {
                     let cols = crate::meta::view_typed_columns(&ctx, &name).await;
+                    target_columns = cols.iter().map(|(n, _)| n.clone()).collect();
                     resolved = recipe.resolve(&name, &cols);
                 }
             }
@@ -1477,10 +1483,23 @@ fn live_pipeline(
                 }
             }
             if steps.is_empty() {
+                // §47 §4: never a 0-of-0 dead end. The recipe DID resolve (the
+                // schema matched), so its queries ran but found nothing to report
+                // — name the SHAPE it works over and the columns this file has, so
+                // the reply is a direction, not a shrug (mirrors number_free_
+                // degradation's column-naming).
+                let shape = recipe.needs.describe();
+                let cols = if target_columns.is_empty() {
+                    "the columns I could read".to_string()
+                } else {
+                    target_columns.join(", ")
+                };
                 yield delta(format!(
-                    "The **{}** recipe couldn't compute a result over “{}” — its queries \
-                     returned nothing.\n",
-                    recipe.name, cue.table,
+                    "The **{}** recipe ran over “{}”, but its queries returned no rows — there \
+                     may simply be nothing in the data for it to report. It works over {shape}; \
+                     “{}” has these columns: {cols}. Try another table, or ask directly about one \
+                     of those columns.\n",
+                    recipe.name, cue.table, cue.table,
                 ));
                 yield final_chunk(Vec::new(), 0, &origin, cost_meta(&cfg, sink.total()), Vec::new());
                 return;
