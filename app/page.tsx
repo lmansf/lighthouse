@@ -50,6 +50,10 @@ const ReportReaderHost = dynamic(
   () => import("@/features/chat/ReportReaderHost").then((m) => m.ReportReaderHost),
   { ssr: false },
 );
+const ReportsHomeHost = dynamic(
+  () => import("@/features/chat/ReportsHome").then((m) => m.ReportsHomeHost),
+  { ssr: false },
+);
 
 /**
  * Composition root. The shell owns layout; each feature team replaces its own
@@ -125,6 +129,11 @@ export default function Home() {
               Mounted here (not lazily on open) so its listener persists while
               closed; reading a report is a local vault read, never egress. */}
           <ReportReaderHost />
+          {/* §49 §4: the desktop Reports home dialog — opened by
+              lighthouse:open-reports from the Sidebar footer. The compact shell
+              shows the Reports PAGE (a tab) instead; this host is the desktop
+              face of the same library. */}
+          <ReportsHomeHost />
         </>
       )}
     </>

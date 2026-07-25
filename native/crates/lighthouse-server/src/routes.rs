@@ -506,6 +506,21 @@ pub async fn rag_post(headers: HeaderMap, body: Option<Json<Value>>) -> Response
                 None => Json(json!({ "error": "not found" })).into_response(),
             }
         }
+        // §49 §4: the Reports home library — every saved report, newest-first.
+        Some("listReports") => {
+            let reports: Vec<serde_json::Value> = lighthouse_core::reports::list_reports()
+                .into_iter()
+                .map(|r| {
+                    json!({
+                        "id": r.id,
+                        "name": r.name,
+                        "folder": r.folder,
+                        "generatedAtMs": r.generated_ms,
+                    })
+                })
+                .collect();
+            Json(json!({ "reports": reports })).into_response()
+        }
         Some("move") => {
             let Some(from) = body["from"].as_str() else {
                 return bad_request("from required");

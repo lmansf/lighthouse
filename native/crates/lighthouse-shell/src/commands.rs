@@ -448,6 +448,21 @@ pub async fn rag_op(
                 None => Ok(json!({ "error": "not found" })),
             }
         }
+        // §49 §4: the Reports home library — every saved report, newest-first.
+        Some("listReports") => {
+            let reports: Vec<serde_json::Value> = lighthouse_core::reports::list_reports()
+                .into_iter()
+                .map(|r| {
+                    json!({
+                        "id": r.id,
+                        "name": r.name,
+                        "folder": r.folder,
+                        "generatedAtMs": r.generated_ms,
+                    })
+                })
+                .collect();
+            Ok(json!({ "reports": reports }))
+        }
         Some("move") => {
             let Some(from) = body["from"].as_str() else {
                 return Err("from required".into());

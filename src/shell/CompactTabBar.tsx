@@ -2,7 +2,7 @@
 
 /**
  * fp4 §3 → §31 §2: the compact bottom tab bar — THE navigation on a mobile
- * shell below the breakpoint (Chat · Files · Settings). It is deliberately a
+ * shell below the breakpoint (Chat · Files · Reports · Settings). It is deliberately a
  * THIN presentational component: the tab set + order + when-to-show live in
  * `paneLayout` (COMPACT_TABS / showTabBar, pure + tested); this maps each id
  * to an icon, reports taps, and owns its own scroll-minimize state.
@@ -25,7 +25,7 @@
  */
 import { useEffect, useState } from "react";
 import { makeStyles, mergeClasses, shorthands, tokens } from "@fluentui/react-components";
-import { IconChat, IconChatFilled, IconFolder, IconFolderFilled, IconSettings, IconSettingsFilled } from "@/shell/icons";
+import { IconChat, IconChatFilled, IconFolder, IconFolderFilled, IconReport, IconSettings, IconSettingsFilled } from "@/shell/icons";
 import { COMPACT_TABS, type CompactTab } from "./paneLayout";
 
 /** The bar's content height in px (the capsule row; the float gap and
@@ -42,6 +42,9 @@ export const TAB_BAR_FLOAT_GAP = 8;
 const TAB_ICONS: Record<CompactTab, { rest: React.ReactNode; active: React.ReactNode }> = {
   chat: { rest: <IconChat />, active: <IconChatFilled /> },
   files: { rest: <IconFolder />, active: <IconFolderFilled /> },
+  // The report glyph has no filled twin in the registry; the brand tint +
+  // aria-current still mark the active tab (same as any unpaired glyph).
+  reports: { rest: <IconReport />, active: <IconReport /> },
   settings: { rest: <IconSettings />, active: <IconSettingsFilled /> },
 };
 

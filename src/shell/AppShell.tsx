@@ -20,6 +20,7 @@ import { anySheetOpen, useAnySheetOpen } from "./Sheet";
 import { INSPECT_FILE_EVENT } from "@/lib/citePreview";
 import { StartupPrompt } from "@/features/startup/StartupPrompt";
 import { SettingsPage } from "@/features/settings/SettingsPage";
+import { ReportsHome } from "@/features/chat/ReportsHome";
 
 const useStyles = makeStyles({
   root: {
@@ -296,6 +297,7 @@ export function AppShell({ sidebar, main }: AppShellProps) {
   //   - `pageEntered` releases the parked incoming page on the next frame so it
   //     eases in (the fp3 §3 mechanic, now shared by both pages).
   const settingsScrollRef = useRef<HTMLDivElement>(null);
+  const reportsScrollRef = useRef<HTMLDivElement>(null);
   const [leavingTab, setLeavingTab] = useState<CompactTab | null>(null);
   const [prevTab, setPrevTab] = useState<CompactTab>(compactTab);
   const [pageEntered, setPageEntered] = useState(true);
@@ -331,6 +333,7 @@ export function AppShell({ sidebar, main }: AppShellProps) {
   // off-left; a `rest` layer is at its home position.
   const pageLayers = layout.compact ? compactPageLayers(compactTab, leavingTab) : [];
   const filesLayer = pageLayers.find((l) => l.tab === "files");
+  const reportsLayer = pageLayers.find((l) => l.tab === "reports");
   const settingsLayer = pageLayers.find((l) => l.tab === "settings");
   const pageClass = (layer: CompactPageLayer) =>
     mergeClasses(
@@ -479,6 +482,7 @@ export function AppShell({ sidebar, main }: AppShellProps) {
     if (tab === compactTab) {
       if (tab === "chat") window.dispatchEvent(new CustomEvent("lighthouse:chat-scroll-top"));
       else if (tab === "files") window.dispatchEvent(new CustomEvent("lighthouse:explorer-scroll-top"));
+      else if (tab === "reports") reportsScrollRef.current?.scrollTo({ top: 0, behavior: "auto" });
       else settingsScrollRef.current?.scrollTo({ top: 0, behavior: "auto" });
       return;
     }
@@ -747,6 +751,29 @@ export function AppShell({ sidebar, main }: AppShellProps) {
               </div>
               <div className={mergeClasses(styles.pageBody, styles.pageBodyGrouped)} ref={settingsScrollRef}>
                 <SettingsPage />
+              </div>
+            </div>
+          </div>
+        )}
+        {/* §49 §4: the Reports home as its own full page — a peer of the files
+            and settings pages, the compact face of the desktop Reports dialog.
+            A row tap opens the reader (a portal dialog over this page), so the
+            page stays put and the library is there when the reader closes. */}
+        {reportsLayer && (
+          <div
+            className={pageClass(reportsLayer)}
+            role="dialog"
+            aria-modal="true"
+            aria-label="Reports"
+            style={{ zIndex: reportsLayer.z }}
+            onTransitionEnd={onPageSettled}
+          >
+            <div className={styles.pagePane}>
+              <div className={styles.pageHeader}>
+                <Text weight="semibold">Reports</Text>
+              </div>
+              <div className={mergeClasses(styles.pageBody, styles.pageBodyGrouped)} ref={reportsScrollRef}>
+                <ReportsHome />
               </div>
             </div>
           </div>

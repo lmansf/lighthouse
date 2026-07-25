@@ -982,6 +982,92 @@ pub fn read_note(file_id: &str) -> Option<(String, String)> {
     Some((node.name, markdown))
 }
 
+/// §49: a saved report's listing row for the Reports home — the note's vault
+/// node id, its display name, the containing folder segment (the investigation
+/// name, or `Lighthouse Reports` for a standalone report, for the home's
+/// subtitle), and the file's mtime in epoch ms. `FileNode` carries NO timestamp,
+/// so an honest newest-first can only come from the filesystem — here, where
+/// `read_note` already reads. Rust-engine-only, like `write_report`/`read_note`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReportEntry {
+    pub id: String,
+    pub name: String,
+    pub folder: String,
+    pub generated_ms: u64,
+}
+
+/// The report-note signature: every rendered report's preamble (`report_header`,
+/// shared by every template) carries this phrase, so a candidate `.md` under a
+/// report folder that contains it IS a report — and a conversation note or
+/// briefing that happens to sit in the same `Lighthouse Notes/` tree is not.
+const REPORT_SIGNATURE: &str = "every figure computed by Lighthouse";
+
+/// §49: the head-read cap for the signature peek — the preamble is in the first
+/// few hundred bytes; 4 KiB is ample and bounds the scan of each candidate.
+const NOTE_SIGNATURE_PEEK: u64 = 4 * 1024;
+
+/// §49: list the saved reports for the Reports home, NEWEST-FIRST. A report is a
+/// `.md` note under `Lighthouse Reports/` (a standalone report) or an
+/// investigation's `Lighthouse Notes/<folder>/` subdir — EXCLUDING
+/// `Lighthouse Notes/Chats/` (auto-exported conversation notes) — whose head
+/// carries the report signature. Ordered by file mtime descending (the honest
+/// "saved at"; ties broken by name so the order is deterministic). PURE READ —
+/// never mutates the vault and egresses nothing, so it is safe on any tier. The
+/// TS twin has no report engine, so its `listReports` returns `[]`.
+pub fn list_reports() -> Vec<ReportEntry> {
+    let mut out: Vec<ReportEntry> = crate::vault::list_nodes()
+        .into_iter()
+        .filter(|n| n.kind == crate::contracts::NodeKind::File && is_report_path(&n.id))
+        .filter_map(|n| {
+            let abs = crate::vault::resolve_node_path(&n.id).ok()?;
+            // Confirm the report signature (excludes chat notes / briefings that
+            // share the Notes tree) by peeking the file head only.
+            let head = crate::vault::read_text_abs_capped(&abs, NOTE_SIGNATURE_PEEK);
+            if !head.contains(REPORT_SIGNATURE) {
+                return None;
+            }
+            let generated_ms = file_mtime_ms(&abs);
+            let folder = parent_segment(&n.id);
+            Some(ReportEntry { id: n.id, name: n.name, folder, generated_ms })
+        })
+        .collect();
+    out.sort_by(|a, b| b.generated_ms.cmp(&a.generated_ms).then_with(|| a.name.cmp(&b.name)));
+    out
+}
+
+/// A vault id under a report folder: `Lighthouse Reports/…` (standalone) or an
+/// investigation notes subdir `Lighthouse Notes/…` that is NOT the `Chats/`
+/// conversation directory.
+fn is_report_path(id: &str) -> bool {
+    if !id.ends_with(".md") {
+        return false;
+    }
+    if id.starts_with("Lighthouse Reports/") {
+        return true;
+    }
+    id.starts_with("Lighthouse Notes/") && !id.starts_with("Lighthouse Notes/Chats/")
+}
+
+/// The parent folder segment of a vault id (the investigation folder, or
+/// `Lighthouse Reports`) for the home's subtitle. `""` when the id has no parent
+/// segment.
+fn parent_segment(id: &str) -> String {
+    let mut parts: Vec<&str> = id.split('/').collect();
+    parts.pop(); // drop the filename
+    parts.pop().map(str::to_string).unwrap_or_default()
+}
+
+/// File mtime in epoch ms (0 when unavailable) — the honest "saved at" for the
+/// newest-first ordering.
+fn file_mtime_ms(abs: &std::path::Path) -> u64 {
+    std::fs::metadata(abs)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 /// Render `report` to markdown and write it into the vault as a NON-EGRESS note
 /// (openspec add-deep-analysis §2.4) — the `exportChat`/briefing precedent. When
 /// `investigation_id` names a known investigation, the note lands in that

@@ -46,7 +46,7 @@ export interface PaneLayout {
   /** Whether the persisted explorerWidth is applied to the sidebar. In the
    *  drawer it is neither applied nor (with the handle gone) ever persisted. */
   applyExplorerWidth: boolean;
-  /** fp4 §3: the compact bottom tab bar (Chat · Files · Settings) is
+  /** fp4 §3: the compact bottom tab bar (Chat · Files · Reports · Settings) is
    *  THE navigation on a mobile shell below the breakpoint. Desktop and an
    *  iPad-regular (≥700pt) never show it — they keep the persistent column — so
    *  this is `compact` exactly, and the unit tests pin the never-on-desktop
@@ -63,11 +63,13 @@ export interface PaneLayout {
  *
  * - chat: home / the ask surface (the base layer — no page overlaid).
  * - files: the fp3 §3 full-screen files page.
+ * - reports: §49 §4 — the Reports home, a first-class library of saved reports
+ *   as its own full page (a peer of the files/settings pages).
  * - settings: Settings as its own full page (0.13.10 §2 — the Sections tab is
  *   retired; its capabilities relocated to the chat header, Settings, and chat
  *   chips per the §30 audit).
  */
-export type CompactTab = "chat" | "files" | "settings";
+export type CompactTab = "chat" | "files" | "reports" | "settings";
 
 export interface CompactTabDef {
   id: CompactTab;
@@ -78,6 +80,7 @@ export interface CompactTabDef {
 export const COMPACT_TABS: readonly CompactTabDef[] = [
   { id: "chat", label: "Chat" },
   { id: "files", label: "Files" },
+  { id: "reports", label: "Reports" },
   { id: "settings", label: "Settings" },
 ];
 

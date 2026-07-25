@@ -1,4 +1,4 @@
-import type { RagService, ReportTemplate } from "../services";
+import type { RagService, ReportSummary, ReportTemplate } from "../services";
 import type {
   Board,
   BoardCardRef,
@@ -534,6 +534,29 @@ class MockRagService implements RagService {
       "",
     ].join("\n");
     return { markdown, name };
+  }
+
+  async listReports(): Promise<ReportSummary[]> {
+    // §49 §4: a small, believable library so the Reports home renders offline —
+    // a standalone report plus an investigation report, newest-first. PARITY: the
+    // desktop engine lists the ACTUAL saved notes (mtime-ordered); this mock is
+    // what the offline/test flow drives against. Each id feeds the mock
+    // readNote() above (any id yields a believable note), so the row → reader
+    // path works end to end. Fixed timestamps keep the order deterministic.
+    return [
+      {
+        id: "Lighthouse Reports/Investigate Sales.md",
+        name: "Investigate Sales.md",
+        folder: "Lighthouse Reports",
+        generatedAtMs: 1_720_000_200_000,
+      },
+      {
+        id: "Lighthouse Notes/Q3 churn/Investigate Signups — Scientific method.md",
+        name: "Investigate Signups — Scientific method.md",
+        folder: "Q3 churn",
+        generatedAtMs: 1_720_000_100_000,
+      },
+    ];
   }
 
   async insights(): Promise<InsightsScan> {

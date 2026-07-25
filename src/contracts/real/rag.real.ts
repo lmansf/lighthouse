@@ -1,5 +1,5 @@
 /** Real RagService — talks to the local `/api/rag` route (filesystem-backed). */
-import type { PlatformKind, RagService, ReportTemplate } from "../services";
+import type { PlatformKind, RagService, ReportSummary, ReportTemplate } from "../services";
 // Relative (not "@/") so the node test loader can resolve this file — the
 // contracts barrel is imported by engine-level suites without webpack aliases.
 import { rememberPlatform } from "../../shell/desktopBridge";
@@ -140,6 +140,20 @@ class RealRagService implements RagService {
       markdown: (res.markdown as string) ?? "",
       name: (res.name as string) ?? "",
     };
+  }
+
+  async listReports(): Promise<ReportSummary[]> {
+    // §49 §4: the saved-report library for the Reports home. The engine returns
+    // `{ reports: [...] }`, newest-first; an old engine without the op (or a
+    // transport hiccup) yields no array — surface an empty library, never throw.
+    const res = await post({ op: "listReports" });
+    const rows = Array.isArray(res.reports) ? (res.reports as Record<string, unknown>[]) : [];
+    return rows.map((r) => ({
+      id: (r.id as string) ?? "",
+      name: (r.name as string) ?? "",
+      folder: (r.folder as string) ?? "",
+      generatedAtMs: typeof r.generatedAtMs === "number" ? r.generatedAtMs : 0,
+    }));
   }
 
   async analyticsSql(
