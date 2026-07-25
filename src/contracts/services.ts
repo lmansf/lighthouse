@@ -22,6 +22,22 @@ export type PlatformKind = "desktop" | "ios" | "android";
  */
 export type ReportTemplate = "imrad" | "bluf";
 
+/**
+ * §49 §4: one saved report's listing row for the Reports home library. `id` is
+ * the note's vault node id (feed it to `readNote` / the reader open event),
+ * `name` the display filename, `folder` the containing folder segment (the
+ * investigation name, or `"Lighthouse Reports"` for a standalone report — the
+ * home's subtitle), and `generatedAtMs` the file's save time (epoch ms) that
+ * orders the list newest-first. Rust-engine-only, like the whole report engine;
+ * the web dev twin has no reports, so `listReports` returns `[]`.
+ */
+export interface ReportSummary {
+  id: string;
+  name: string;
+  folder: string;
+  generatedAtMs: number;
+}
+
 import type {
   Board,
   BoardCardRef,
@@ -115,6 +131,22 @@ export interface RagService {
    * last-indexed key) rather than faking them; the UI renders those "desktop only".
    */
   inspect(fileId: string, query?: string): Promise<FileInspection>;
+  /**
+   * §49: read a saved report note's FULL markdown by its vault node id — the
+   * backing for the in-app report reader. Returns the RAW markdown (the
+   * ```lighthouse-chart fence intact, so the reader draws the key chart) + the
+   * note name. PURE READ. Desktop engine only; the web dev twin returns its
+   * mock saved note. `markdown` is empty for an unknown/removed id.
+   */
+  readNote(id: string): Promise<{ markdown: string; name: string }>;
+  /**
+   * §49 §4: list every saved report for the Reports home library, NEWEST-FIRST
+   * (by save time). A report is a note under `Lighthouse Reports/` (standalone)
+   * or an investigation's `Lighthouse Notes/<folder>/` subdir carrying the
+   * report signature — conversation notes and briefings are excluded. PURE READ.
+   * Desktop engine only; the web dev twin has no report engine and returns `[]`.
+   */
+  listReports(): Promise<ReportSummary[]>;
   /**
    * Re-run an analytics answer's SQL over exactly the files it read — the
    * guarded, model-free path behind Edit SQL. Returns the (capped) result

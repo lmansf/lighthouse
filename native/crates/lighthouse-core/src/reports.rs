@@ -111,6 +111,10 @@ pub struct SubAnalysis {
     pub result_markdown: String,
     pub sql: String,
     pub headline: Option<String>,
+    /// §49: the section's engine-built chart spec (serialized `ChartSpec` JSON —
+    /// the §22.6 `lighthouse-chart` shape), captured from the query result when
+    /// the result is chartable. `None` when the query produced no chart.
+    pub chart: Option<String>,
 }
 
 /// One rendered section of the report.
@@ -126,6 +130,11 @@ pub struct ReportSection {
     /// grounding). `None` when the analysis had no material headline; the
     /// renderers never read it, so rendered bytes are unchanged.
     pub headline: Option<String>,
+    /// §49: the section's engine-built chart spec (the §22.6 `lighthouse-chart`
+    /// JSON), carried through from the sub-analysis like `headline`. The
+    /// per-section renderers never read it — the report renders ONE key chart
+    /// (`Report.chart`) at the §29 placement — so rendered bytes are unchanged.
+    pub chart: Option<String>,
 }
 
 /// A deep-analysis report — deterministic, engine-verified, ready to render + write.
@@ -138,6 +147,13 @@ pub struct Report {
     pub summary: Vec<String>,
     pub sections: Vec<ReportSection>,
     pub caveats: Vec<String>,
+    /// §49: the report's ONE key chart — the first chartable section's engine
+    /// chart spec (serialized `ChartSpec` JSON, the §22.6 `lighthouse-chart`
+    /// shape). `None` when no section produced a chart. `render_markdown` emits
+    /// it once as a fenced ```lighthouse-chart block at the §29 placement (after
+    /// the Summary / in Results / under the Bottom line), so the saved note is
+    /// self-contained and the reader draws it.
+    pub chart: Option<String>,
     /// The structured shape to render. Default `Standard` keeps the deterministic
     /// document byte-identical; the templates reorganize the SAME sections.
     pub template: ReportTemplate,
@@ -172,6 +188,11 @@ pub fn assemble(
     } else if summary.is_empty() {
         summary.push("No single figure stood out; see the sections below.".to_string());
     }
+    // §49: the report's ONE key chart is the FIRST chartable section's spec (the
+    // battery runs recipes in priority order, so the first chart IS the headline
+    // finding's). `None` when nothing charted — a chart-less report renders
+    // byte-identically to before.
+    let chart = subs.iter().find_map(|s| s.chart.clone());
     let sections = subs
         .into_iter()
         .map(|s| ReportSection {
@@ -180,6 +201,7 @@ pub fn assemble(
             result_markdown: s.result_markdown,
             sql: s.sql,
             headline: s.headline,
+            chart: s.chart,
         })
         .collect();
     Report {
@@ -188,6 +210,7 @@ pub fn assemble(
         summary,
         sections,
         caveats,
+        chart,
         template: ReportTemplate::Standard,
         intro: None,
         discussion: None,
@@ -215,6 +238,8 @@ fn render_standard(report: &Report) -> String {
     for line in &report.summary {
         out.push_str(&format!("- {line}\n"));
     }
+    // §29/§49: the ONE key chart, right under the summary (no-op when None).
+    push_chart(&mut out, &report.chart);
 
     for s in &report.sections {
         push_section(&mut out, s, "##");
@@ -267,6 +292,20 @@ fn render_caveats(out: &mut String, caveats: &[String], level: &str) {
     }
 }
 
+/// §49: the report's ONE key chart as a fenced ```lighthouse-chart block — the
+/// §22.6 shape the UI renders via `AnalyticsChart` — so the saved note is
+/// self-contained. `None`/blank emits NOTHING, so a chart-less report renders
+/// byte-identically (the `reports_test.rs` byte-stability contract holds). Placed
+/// once at the §29 position by each template's renderer, never per-section.
+fn push_chart(out: &mut String, chart: &Option<String>) {
+    if let Some(spec) = chart {
+        let spec = spec.trim();
+        if !spec.is_empty() {
+            out.push_str(&format!("\n```lighthouse-chart\n{spec}\n```\n"));
+        }
+    }
+}
+
 /// §38 §3: the templates' ONE quiet provenance line — how the framing prose
 /// was written. Byte-pinned by the render tests; the SAME engine numbers
 /// stand either way, so run-to-run prose differences read as labeled
@@ -315,6 +354,8 @@ fn render_imrad(report: &Report) -> String {
     }
 
     out.push_str("\n## Results\n");
+    // §29/§49: the key chart leads the Results section (no-op when None).
+    push_chart(&mut out, &report.chart);
     if report.sections.is_empty() {
         out.push_str("\n_no rows_\n");
     } else {
@@ -346,6 +387,8 @@ fn render_bluf(report: &Report) -> String {
     let bottom = report.intro.clone().or_else(|| report.summary.first().cloned());
     out.push_str(bottom.as_deref().unwrap_or("No single figure stood out; see the detail below."));
     out.push('\n');
+    // §29/§49: the key chart sits under the bottom line (no-op when None).
+    push_chart(&mut out, &report.chart);
 
     if report.summary.len() > 1 {
         out.push_str("\n## Key findings\n\n");
@@ -454,6 +497,9 @@ pub async fn investigate(table: &str, files: &[(String, String, PathBuf)], is_cl
             result_markdown: res.markdown,
             sql: q.sql,
             headline,
+            // §49: keep the engine's chart spec for this section — the analytics
+            // engine already computed it (or None when not chartable).
+            chart: res.chart,
         });
     }
 
@@ -917,6 +963,111 @@ async fn narrate(
 /// Notes`.
 pub const REPORTS_SUBDIR: &str = "Lighthouse Reports";
 
+/// §49: a generous cap for reading a saved report note back for the in-app
+/// reader. Reports are text (a few KB to tens of KB); 8 MiB is far above any
+/// real report yet bounds a pathological file.
+const NOTE_READ_CAP: u64 = 8 * 1024 * 1024;
+
+/// §49: read a saved report note's FULL markdown by its vault node id — the
+/// backing for the in-app report reader (§2). Returns `(name, markdown)` with
+/// the raw bytes intact (the ```lighthouse-chart fence survives, so the reader
+/// draws the key chart). `None` for an unknown/removed id. PURE READ — never
+/// mutates the vault, so it is safe on any tier and egresses nothing.
+pub fn read_note(file_id: &str) -> Option<(String, String)> {
+    let node = crate::vault::list_nodes()
+        .into_iter()
+        .find(|n| n.kind == crate::contracts::NodeKind::File && n.id == file_id)?;
+    let abs = crate::vault::resolve_node_path(file_id).ok()?;
+    let markdown = crate::vault::read_text_abs_capped(&abs, NOTE_READ_CAP);
+    Some((node.name, markdown))
+}
+
+/// §49: a saved report's listing row for the Reports home — the note's vault
+/// node id, its display name, the containing folder segment (the investigation
+/// name, or `Lighthouse Reports` for a standalone report, for the home's
+/// subtitle), and the file's mtime in epoch ms. `FileNode` carries NO timestamp,
+/// so an honest newest-first can only come from the filesystem — here, where
+/// `read_note` already reads. Rust-engine-only, like `write_report`/`read_note`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReportEntry {
+    pub id: String,
+    pub name: String,
+    pub folder: String,
+    pub generated_ms: u64,
+}
+
+/// The report-note signature: every rendered report's preamble (`report_header`,
+/// shared by every template) carries this phrase, so a candidate `.md` under a
+/// report folder that contains it IS a report — and a conversation note or
+/// briefing that happens to sit in the same `Lighthouse Notes/` tree is not.
+const REPORT_SIGNATURE: &str = "every figure computed by Lighthouse";
+
+/// §49: the head-read cap for the signature peek — the preamble is in the first
+/// few hundred bytes; 4 KiB is ample and bounds the scan of each candidate.
+const NOTE_SIGNATURE_PEEK: u64 = 4 * 1024;
+
+/// §49: list the saved reports for the Reports home, NEWEST-FIRST. A report is a
+/// `.md` note under `Lighthouse Reports/` (a standalone report) or an
+/// investigation's `Lighthouse Notes/<folder>/` subdir — EXCLUDING
+/// `Lighthouse Notes/Chats/` (auto-exported conversation notes) — whose head
+/// carries the report signature. Ordered by file mtime descending (the honest
+/// "saved at"; ties broken by name so the order is deterministic). PURE READ —
+/// never mutates the vault and egresses nothing, so it is safe on any tier. The
+/// TS twin has no report engine, so its `listReports` returns `[]`.
+pub fn list_reports() -> Vec<ReportEntry> {
+    let mut out: Vec<ReportEntry> = crate::vault::list_nodes()
+        .into_iter()
+        .filter(|n| n.kind == crate::contracts::NodeKind::File && is_report_path(&n.id))
+        .filter_map(|n| {
+            let abs = crate::vault::resolve_node_path(&n.id).ok()?;
+            // Confirm the report signature (excludes chat notes / briefings that
+            // share the Notes tree) by peeking the file head only.
+            let head = crate::vault::read_text_abs_capped(&abs, NOTE_SIGNATURE_PEEK);
+            if !head.contains(REPORT_SIGNATURE) {
+                return None;
+            }
+            let generated_ms = file_mtime_ms(&abs);
+            let folder = parent_segment(&n.id);
+            Some(ReportEntry { id: n.id, name: n.name, folder, generated_ms })
+        })
+        .collect();
+    out.sort_by(|a, b| b.generated_ms.cmp(&a.generated_ms).then_with(|| a.name.cmp(&b.name)));
+    out
+}
+
+/// A vault id under a report folder: `Lighthouse Reports/…` (standalone) or an
+/// investigation notes subdir `Lighthouse Notes/…` that is NOT the `Chats/`
+/// conversation directory.
+fn is_report_path(id: &str) -> bool {
+    if !id.ends_with(".md") {
+        return false;
+    }
+    if id.starts_with("Lighthouse Reports/") {
+        return true;
+    }
+    id.starts_with("Lighthouse Notes/") && !id.starts_with("Lighthouse Notes/Chats/")
+}
+
+/// The parent folder segment of a vault id (the investigation folder, or
+/// `Lighthouse Reports`) for the home's subtitle. `""` when the id has no parent
+/// segment.
+fn parent_segment(id: &str) -> String {
+    let mut parts: Vec<&str> = id.split('/').collect();
+    parts.pop(); // drop the filename
+    parts.pop().map(str::to_string).unwrap_or_default()
+}
+
+/// File mtime in epoch ms (0 when unavailable) — the honest "saved at" for the
+/// newest-first ordering.
+fn file_mtime_ms(abs: &std::path::Path) -> u64 {
+    std::fs::metadata(abs)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 /// Render `report` to markdown and write it into the vault as a NON-EGRESS note
 /// (openspec add-deep-analysis §2.4) — the `exportChat`/briefing precedent. When
 /// `investigation_id` names a known investigation, the note lands in that
@@ -1075,6 +1226,7 @@ mod tests {
             result_markdown: "| period | total |\n|---|---|\n| 2024-10 | 400 |".to_string(),
             sql: "SELECT period, total FROM t".to_string(),
             headline: headline.map(str::to_string),
+            chart: None,
         }
     }
 
@@ -1105,12 +1257,14 @@ mod tests {
             framing_by: None,
             summary: vec!["headline".into()],
             caveats: Vec::new(),
+            chart: None,
             sections: vec![ReportSection {
                 heading: "By region".into(),
                 question: "q".into(),
                 result_markdown: md.clone(),
                 sql: "SELECT 1".into(),
                 headline: None,
+                chart: None,
             }],
         };
         let llama = report_findings_ctx(&report, crate::budget::Tier::Llama6144);
@@ -1140,6 +1294,7 @@ mod tests {
             result_markdown: md,
             sql: "SELECT 1".into(),
             headline: Some(format!("Analysis {i} peaks at {}9", 100 + i)),
+            chart: None,
         }
     }
 
@@ -1151,6 +1306,7 @@ mod tests {
             summary: sections.iter().filter_map(|s| s.headline.clone()).collect(),
             sections,
             caveats: Vec::new(),
+            chart: None,
             template: ReportTemplate::Standard,
             intro: None,
             discussion: None,

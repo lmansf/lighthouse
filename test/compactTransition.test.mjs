@@ -25,14 +25,15 @@ const {
   PAGE_SLIDE_SLACK_MS,
 } = await import("../src/shell/compactTransition.ts");
 
-const TABS = ["chat", "files", "settings"];
-const isPage = (t) => t === "files" || t === "settings";
+const TABS = ["chat", "files", "reports", "settings"];
+const isPage = (t) => t === "files" || t === "reports" || t === "settings";
 
 test("the pinned constants: today's z-21 geometry, the incoming one above, a real fallback budget", () => {
   assert.equal(PAGE_Z_REST, 21, "a resting page keeps today's z-21 geometry (the constraint)");
   assert.equal(PAGE_Z_ENTER, 22, "the incoming page rides exactly one layer above");
   assert.ok(PAGE_Z_ENTER > PAGE_Z_REST, "incoming always stacks above a resting page");
   assert.equal(isCompactPageTab("files"), true);
+  assert.equal(isCompactPageTab("reports"), true, "§49 §4: Reports is a full-screen page tab");
   assert.equal(isCompactPageTab("settings"), true);
   assert.equal(isCompactPageTab("chat"), false, "Chat is the base, not a page layer");
   assert.ok(

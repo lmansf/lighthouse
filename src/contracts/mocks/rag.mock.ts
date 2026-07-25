@@ -1,4 +1,4 @@
-import type { RagService, ReportTemplate } from "../services";
+import type { RagService, ReportSummary, ReportTemplate } from "../services";
 import type {
   Board,
   BoardCardRef,
@@ -494,6 +494,69 @@ class MockRagService implements RagService {
           : "";
     const name = `Investigate ${table}${suffix}.md`;
     return { savedId: `Lighthouse Reports/${name}`, savedName: name };
+  }
+
+  async readNote(id: string): Promise<{ markdown: string; name: string }> {
+    // §49: a believable saved-report markdown so the in-app report reader
+    // renders end to end offline — a heading, a summary, a ```lighthouse-chart
+    // fence (so the key chart draws), a section table, and caveats. PARITY: the
+    // desktop engine returns the ACTUAL saved note via vault read; this mock is
+    // what the offline/test flow drives against. The name derives from the id
+    // the mock investigate() saved under (`Lighthouse Reports/<name>`).
+    const name = id.split("/").pop() ?? "Report.md";
+    const title = name.replace(/\.md$/, "");
+    const markdown = [
+      `# ${title}`,
+      "",
+      "_Generated just now — every figure computed by Lighthouse._",
+      "",
+      "## Summary",
+      "",
+      "- Revenue rose 18% in the latest month.",
+      "",
+      "```lighthouse-chart",
+      '{"kind":"bar","x":["Q1","Q2","Q3"],"series":[{"name":"revenue","values":[120,150,177]}]}',
+      "```",
+      "",
+      "## By quarter",
+      "",
+      "What does revenue by quarter show?",
+      "",
+      "| quarter | revenue |",
+      "| --- | --- |",
+      "| Q1 | 120 |",
+      "| Q2 | 150 |",
+      "| Q3 | 177 |",
+      "",
+      "## Caveats",
+      "",
+      "- The most recent quarter may be partial.",
+      "",
+    ].join("\n");
+    return { markdown, name };
+  }
+
+  async listReports(): Promise<ReportSummary[]> {
+    // §49 §4: a small, believable library so the Reports home renders offline —
+    // a standalone report plus an investigation report, newest-first. PARITY: the
+    // desktop engine lists the ACTUAL saved notes (mtime-ordered); this mock is
+    // what the offline/test flow drives against. Each id feeds the mock
+    // readNote() above (any id yields a believable note), so the row → reader
+    // path works end to end. Fixed timestamps keep the order deterministic.
+    return [
+      {
+        id: "Lighthouse Reports/Investigate Sales.md",
+        name: "Investigate Sales.md",
+        folder: "Lighthouse Reports",
+        generatedAtMs: 1_720_000_200_000,
+      },
+      {
+        id: "Lighthouse Notes/Q3 churn/Investigate Signups — Scientific method.md",
+        name: "Investigate Signups — Scientific method.md",
+        folder: "Q3 churn",
+        generatedAtMs: 1_720_000_100_000,
+      },
+    ];
   }
 
   async insights(): Promise<InsightsScan> {

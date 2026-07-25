@@ -86,14 +86,19 @@ test("§2: tab roots carry NO Back — titles stay, Esc stays, desktop untouched
   assert.match(sidebar, /aria-label="Collapse sidebar"/, "desktop chevron intact");
 });
 
-test("§3: no Settings gear under the Files tab; desktop's footer byte-for-byte", () => {
-  // The footer (gear + label) renders only off the compact page…
+test("§3/§49 §4: no footer under the Files tab; desktop footer is Reports + Settings", () => {
+  // The whole footer renders only off the compact page…
   assert.match(
     sidebar,
-    /\{!compactPage && \(\s*\n\s*<div className=\{mergeClasses\(styles\.footer, collapsed && styles\.footerCollapsed\)\}>\s*\n\s*<SettingsMenu \/>/,
-    "the footer gear is gated off the compact Files page",
+    /\{!compactPage && \(\s*\n\s*<div className=\{mergeClasses\(styles\.footer, collapsed && styles\.footerCollapsed\)\}>/,
+    "the footer is gated off the compact Files page",
   );
-  assert.match(sidebar, />\s*Settings\s*<\/Text>/, "desktop's footer label text unchanged");
+  // …and on desktop it carries BOTH first-class destinations: the §49 §4
+  // Reports entry (opening the desktop Reports dialog) and the Settings gear.
+  assert.match(sidebar, /window\.dispatchEvent\(new CustomEvent\(OPEN_REPORTS_EVENT\)\)/, "§49 §4: Reports entry opens the dialog");
+  assert.match(sidebar, /<SettingsMenu \/>/, "the Settings gear stays in the footer");
+  assert.match(sidebar, />\s*Reports\s*<\/Text>/, "the Reports footer label");
+  assert.match(sidebar, />\s*Settings\s*<\/Text>/, "the Settings footer label");
   // …and AppShell's compact files branch is the ONLY caller that sets the flag.
   assert.equal((shell.match(/compactPage\b/g) ?? []).length, 1, "one compactPage call site (the files page)");
   assert.ok(!read("src/features/widget/WidgetBar.tsx").includes("compactPage"), "widget untouched");

@@ -31,6 +31,7 @@ import { IconBeaker, IconBriefcase, IconDoc, IconReport } from "@/shell/icons";
 import type { CapabilityMap, ReportTemplate } from "@/contracts";
 import { EMPTY_CAPABILITY_MAP, ragService } from "@/contracts";
 import { LhDialogSurface, LhMenu } from "@/shell/controls";
+import { openSavedReport } from "@/lib/openReport";
 import { useChatStore } from "@/stores/useChatStore";
 
 // The UI menu offers three, but the wire template is only "imrad" | "bluf";
@@ -106,6 +107,12 @@ export function AnswerReportAction({ fileIds }: { fileIds: string[] }) {
       );
       setPicked(null);
       setSaved({ id: savedId, name: savedName });
+      // §49 §3: open, don't just save silently — the reader opens on the fresh
+      // report, and the tree still highlights the saved node.
+      openSavedReport(savedId);
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(new CustomEvent("lighthouse:reveal-node", { detail: { id: savedId } }));
+      }
     } catch {
       // Rust-only: the web twin throws — an honest note, never a fake save.
       setError("Deep analysis runs in the desktop engine.");
@@ -144,13 +151,7 @@ export function AnswerReportAction({ fileIds }: { fileIds: string[] }) {
           <Button
             appearance="transparent"
             size="small"
-            onClick={() => {
-              if (typeof window !== "undefined") {
-                window.dispatchEvent(
-                  new CustomEvent("lighthouse:reveal-node", { detail: { id: saved.id } }),
-                );
-              }
-            }}
+            onClick={() => openSavedReport(saved.id)}
           >
             Open
           </Button>

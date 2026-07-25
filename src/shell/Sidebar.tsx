@@ -9,9 +9,10 @@ import {
   shorthands,
   tokens,
 } from "@fluentui/react-components";
-import { IconSearch, IconSidebarCollapse, IconSidebarExpand } from "@/shell/icons";
+import { IconReport, IconSearch, IconSidebarCollapse, IconSidebarExpand } from "@/shell/icons";
 import { LAYOUT, ACCENTS } from "./theme";
 import { SettingsMenu } from "@/features/settings/SettingsMenu";
+import { OPEN_REPORTS_EVENT } from "@/features/chat/ReportsHome";
 import { UpdateNotice } from "@/features/update/UpdateNotice";
 import { modKey } from "@/features/onboarding/ModeChooser";
 
@@ -89,16 +90,22 @@ const useStyles = makeStyles({
     ...shorthands.padding(0, tokens.spacingHorizontalM),
   },
   bodyHidden: { display: "none" },
+  // §49 §4: the footer is now a small vertical stack — a Reports entry above the
+  // Settings entry — so both first-class destinations live pinned bottom-left.
   footer: {
     display: "flex",
-    alignItems: "center",
-    gap: tokens.spacingHorizontalS,
+    flexDirection: "column",
+    gap: tokens.spacingVerticalXXS,
     flexShrink: 0,
     marginTop: "auto",
     ...shorthands.padding(tokens.spacingVerticalS, tokens.spacingHorizontalM),
     ...shorthands.borderTop("1px", "solid", tokens.colorNeutralStroke2),
   },
-  footerCollapsed: { justifyContent: "center", ...shorthands.padding(tokens.spacingVerticalS, 0) },
+  footerCollapsed: { ...shorthands.padding(tokens.spacingVerticalS, 0) },
+  // One footer entry: an icon control + its label on a row (the label drops
+  // when collapsed, so the entry centers to its icon in the thin rail).
+  footerEntry: { display: "flex", alignItems: "center", gap: tokens.spacingHorizontalS },
+  footerEntryCollapsed: { justifyContent: "center" },
   footerLabel: { color: tokens.colorNeutralForeground3 },
 });
 
@@ -220,16 +227,37 @@ export function Sidebar({
           compact dot in the collapsed rail so it isn't hidden just because the
           sidebar is thin. */}
       {collapsed ? <UpdateNotice collapsed /> : <UpdateNotice />}
-      {/* §34 §3: the compact Files page carries no footer gear — Settings is
-          its own tab there. Desktop keeps its ONE Settings entry byte-for-byte. */}
+      {/* §34 §3 / §49 §4: the compact Files page carries no footer — Reports and
+          Settings are their own tabs there. Desktop pins BOTH first-class
+          destinations bottom-left: the §49 Reports library above the Settings gear. */}
       {!compactPage && (
         <div className={mergeClasses(styles.footer, collapsed && styles.footerCollapsed)}>
-          <SettingsMenu />
-          {!collapsed && (
-            <Text size={200} className={styles.footerLabel}>
-              Settings
-            </Text>
-          )}
+          {/* §49 §4: the Reports home — opens the desktop Reports dialog
+              (ReportsHomeHost listens for the event). */}
+          <div className={mergeClasses(styles.footerEntry, collapsed && styles.footerEntryCollapsed)}>
+            <Tooltip content="Reports" relationship="label">
+              <Button
+                appearance="subtle"
+                size="small"
+                icon={<IconReport />}
+                aria-label="Reports"
+                onClick={() => window.dispatchEvent(new CustomEvent(OPEN_REPORTS_EVENT))}
+              />
+            </Tooltip>
+            {!collapsed && (
+              <Text size={200} className={styles.footerLabel}>
+                Reports
+              </Text>
+            )}
+          </div>
+          <div className={mergeClasses(styles.footerEntry, collapsed && styles.footerEntryCollapsed)}>
+            <SettingsMenu />
+            {!collapsed && (
+              <Text size={200} className={styles.footerLabel}>
+                Settings
+              </Text>
+            )}
+          </div>
         </div>
       )}
     </div>

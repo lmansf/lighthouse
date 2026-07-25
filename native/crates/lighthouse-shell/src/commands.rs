@@ -437,6 +437,32 @@ pub async fn rag_op(
             let inspection = sources::inspect(file_id, body["query"].as_str()).await;
             Ok(serde_json::to_value(inspection).unwrap_or_else(|_| json!({})))
         }
+        // §49: read a saved report note's full markdown by id — the in-app
+        // report reader's backing (§2). PURE READ; no vault-changed broadcast.
+        Some("readNote") => {
+            let Some(id) = body["id"].as_str().filter(|s| !s.is_empty()) else {
+                return Err("id required".into());
+            };
+            match lighthouse_core::reports::read_note(id) {
+                Some((name, markdown)) => Ok(json!({ "name": name, "markdown": markdown })),
+                None => Ok(json!({ "error": "not found" })),
+            }
+        }
+        // §49 §4: the Reports home library — every saved report, newest-first.
+        Some("listReports") => {
+            let reports: Vec<serde_json::Value> = lighthouse_core::reports::list_reports()
+                .into_iter()
+                .map(|r| {
+                    json!({
+                        "id": r.id,
+                        "name": r.name,
+                        "folder": r.folder,
+                        "generatedAtMs": r.generated_ms,
+                    })
+                })
+                .collect();
+            Ok(json!({ "reports": reports }))
+        }
         Some("move") => {
             let Some(from) = body["from"].as_str() else {
                 return Err("from required".into());
