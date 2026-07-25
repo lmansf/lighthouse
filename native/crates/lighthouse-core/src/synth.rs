@@ -854,6 +854,80 @@ fn vet_numbers(raw: String, profiles: &[String], file: &str, columns: &[String])
     }
 }
 
+/// §47 §1+§2: narrate a numeric answer over a VERIFIED fact sheet, gated by a
+/// LADDER rather than the §44 guillotine. The model writes the prose; its
+/// numbers are accepted iff a subset of `verified` (numguard). A stray triggers
+/// ONE tightened retry naming the only permitted figures; a persistent stray (or
+/// an empty answer from a weak model) degrades to `fallback` — a concise
+/// deterministic sentence, never a fabricated number and never the raw block
+/// presented as the answer. Buffers by necessity — you cannot un-say a streamed
+/// figure — exactly like the report framer's narrate ladder and the §44 vet
+/// path. The successful-SQL branch does NOT use this: it already trusts its fact
+/// sheet and streams token-by-token.
+async fn narrate_over_facts(
+    question: &str,
+    facts: &str,
+    verified: &std::collections::BTreeSet<String>,
+    fallback: String,
+    history: &[ChatTurn],
+    cfg: &ModelCfg,
+    sink: &llm::UsageSink,
+) -> String {
+    let ctxs = vec![Ctx {
+        name: "fact sheet — computed exactly by Lighthouse".to_string(),
+        text: facts.to_string(),
+        score: 1.0,
+    }];
+    // Attempt 1: the model narrates freely over the verified figures.
+    let raw = collect(llm::stream_answer(
+        question.to_string(),
+        ctxs.clone(),
+        cfg.clone(),
+        history.to_vec(),
+        Some(sink.clone()),
+    ))
+    .await;
+    if !raw.trim().is_empty() && !crate::numguard::answer_has_unverified_number(&raw, verified) {
+        return raw;
+    }
+    // A good paragraph with one stray figure is retried, not discarded: one
+    // tightened attempt naming the only permitted numbers.
+    let allowed: Vec<String> = verified.iter().cloned().collect();
+    let tightened = format!(
+        "{question}\n\nImportant: use ONLY these figures, exactly as written, and state no \
+         other number: {}. If a number you would write is not in that list, leave it out.",
+        allowed.join(", ")
+    );
+    let raw2 = collect(llm::stream_answer(
+        tightened,
+        ctxs,
+        cfg.clone(),
+        history.to_vec(),
+        Some(sink.clone()),
+    ))
+    .await;
+    if !raw2.trim().is_empty() && !crate::numguard::answer_has_unverified_number(&raw2, verified) {
+        return raw2;
+    }
+    // Still straying (or empty): the readable deterministic sentence — the
+    // engine's block below carries the exact figures.
+    fallback
+}
+
+/// §47: the readable fallback when a model persistently strays from the verified
+/// figures of a PROFILEABLE table. Distinct from `numguard::number_free_
+/// degradation` (a non-profileable dead end): here a computed profile IS shown
+/// as the disclosure, so this sentence just points at it, carrying no figure of
+/// its own (trivially subset-safe).
+fn profile_narration_fallback(name: &str) -> String {
+    let name = if name.is_empty() { "this file" } else { name };
+    format!(
+        "Here is what Lighthouse computed from {name}. I couldn't restate it in prose without \
+         risking an inexact number, so the engine's exact figures are shown below — those are \
+         the verified values."
+    )
+}
+
 fn take_chars(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
 }
@@ -2454,7 +2528,27 @@ fn live_pipeline(
                             if let Some(pf_ans) =
                                 crate::table_profile::profile_answer(&pf_name, &pf_full)
                             {
-                                yield delta(pf_ans);
+                                // §47 §1: narrate over the verified profile, then
+                                // disclose the exact figures — instead of dumping
+                                // the profile as the whole answer. The §2 ladder
+                                // keeps every number in the prose ⊆ the profile's
+                                // verified set (else a deterministic sentence), so
+                                // trust holds while the model writes a real answer.
+                                let verified =
+                                    crate::numguard::verified_set(&[pf_ans.as_str()]);
+                                yield progress("Summarizing…".to_string(), 1, 1);
+                                let prose = narrate_over_facts(
+                                    &question,
+                                    &pf_ans,
+                                    &verified,
+                                    profile_narration_fallback(&pf_name),
+                                    &history,
+                                    &cfg,
+                                    &sink,
+                                )
+                                .await;
+                                yield delta(prose);
+                                yield delta(format!("\n\n{pf_ans}"));
                                 let reference = RagReference {
                                     file_id: pf_id.clone(),
                                     name: pf_name.clone(),
@@ -2786,8 +2880,23 @@ fn live_pipeline(
             {
                 if let Some((_, full)) = vault::doc_text(&doc_id, None) {
                     if let Some(ans) = crate::table_profile::profile_answer(&name, &full) {
+                        // §47 §1: narrate over the verified profile, then disclose
+                        // the exact figures (the §2 ladder keeps the prose's
+                        // numbers ⊆ verified) — not a raw dump.
+                        let verified = crate::numguard::verified_set(&[ans.as_str()]);
                         yield progress(format!("Reading all of {name}…"), 1, 1);
-                        yield delta(ans);
+                        let prose = narrate_over_facts(
+                            &question,
+                            &ans,
+                            &verified,
+                            profile_narration_fallback(&name),
+                            &history,
+                            &cfg,
+                            &sink,
+                        )
+                        .await;
+                        yield delta(prose);
+                        yield delta(format!("\n\n{ans}"));
                         let reference = RagReference {
                             file_id: doc_id.clone(),
                             name: name.clone(),
