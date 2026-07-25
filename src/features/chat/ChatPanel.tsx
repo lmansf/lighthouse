@@ -100,7 +100,7 @@ import { refineEligibility, type RefineEligibility } from "@/lib/refineChips";
 import { useInvestigationsStore } from "@/stores/useInvestigationsStore";
 import { chatHistoryLocked } from "@/stores/managedLocks";
 import { modKey } from "@/features/onboarding/ModeChooser";
-import { LhDialogSurface, LhMenuPopover } from "@/shell/controls";
+import { LhDialogSurface, LhMenu, LhMenuPopover, type LhMenuItem } from "@/shell/controls";
 import { publishChatStreaming, USER_ASK_EVENT, useShellUi } from "@/shell/shellSignals";
 import { keyboardCenterVerdict } from "./keyboardCenter";
 import { ACCENTS, BEAM_SWEEP, CONTENT_TYPE } from "@/shell/theme";
@@ -1968,6 +1968,55 @@ function RefineChips({
     () => refineEligibility(answerTable({ content, meta: { table: metaTable } })),
     [content, metaTable],
   );
+  // §51 §1: the five "do with it" actions (Save as CSV · Evidence pack · Pin ·
+  // Save as view · Define as metric) consolidated under ONE "Save & share…"
+  // overflow menu — down from five always-on chips. Each keeps its EXACT handler
+  // and gating: the desktop-only ones (CSV/Evidence/Pin) stay gated by their
+  // handler's presence (absent on the web twin), and Define-as-metric stays
+  // sqlHasAggregate-gated. The refine chips + Chart it + Edit SQL stay inline
+  // (the reading/refine moment); the §49 Report door stays its own self-hiding
+  // control (§49 owns report-door convergence).
+  const shareItems: LhMenuItem[] = [];
+  if (onSave)
+    shareItems.push({
+      key: "csv",
+      label: savePending ? "Saving…" : "Save as CSV",
+      icon: <IconSave />,
+      disabled: disabled || savePending,
+      onClick: () => onSave(meta),
+    });
+  if (onEvidencePack)
+    shareItems.push({
+      key: "evidence",
+      label: packPending ? "Saving…" : "Evidence pack",
+      icon: <IconDoc />,
+      disabled: disabled || packPending,
+      onClick: () => onEvidencePack(meta),
+    });
+  if (onPin)
+    shareItems.push({
+      key: "pin",
+      label: pinPending ? "Pinning…" : "Pin",
+      icon: <IconPin />,
+      disabled: disabled || pinPending,
+      onClick: () => onPin(meta),
+    });
+  if (onSaveView)
+    shareItems.push({
+      key: "view",
+      label: "Save as view",
+      icon: <IconTable />,
+      disabled,
+      onClick: () => onSaveView(meta),
+    });
+  if (onDefineMetric && sqlHasAggregate(meta.sql))
+    shareItems.push({
+      key: "metric",
+      label: "Define as metric",
+      icon: <IconTag />,
+      disabled,
+      onClick: () => onDefineMetric(meta),
+    });
   // Quiet secondary actions (Beam): subtle + hairline, never a filled chip —
   // the answer stays the loudest thing on the card.
   return (
@@ -2009,70 +2058,26 @@ function RefineChips({
       >
         Edit SQL
       </Button>
-      {onSave && (
-        <Button
-          appearance="subtle"
-          size="small"
-          shape="circular"
-          className={styles.quietChip}
-          icon={<IconSave />}
-          disabled={disabled || savePending}
-          onClick={() => onSave(meta)}
-        >
-          {savePending ? "Saving…" : "Save as CSV"}
-        </Button>
-      )}
-      {onEvidencePack && (
-        <Button
-          appearance="subtle"
-          size="small"
-          shape="circular"
-          className={styles.quietChip}
-          icon={<IconDoc />}
-          disabled={disabled || packPending}
-          onClick={() => onEvidencePack(meta)}
-        >
-          {packPending ? "Saving…" : "Evidence pack"}
-        </Button>
-      )}
-      {onPin && (
-        <Button
-          appearance="subtle"
-          size="small"
-          shape="circular"
-          className={styles.quietChip}
-          icon={<IconPin />}
-          disabled={disabled || pinPending}
-          onClick={() => onPin(meta)}
-        >
-          {pinPending ? "Pinning…" : "Pin"}
-        </Button>
-      )}
-      {onSaveView && (
-        <Button
-          appearance="subtle"
-          size="small"
-          shape="circular"
-          className={styles.quietChip}
-          icon={<IconTable />}
-          disabled={disabled}
-          onClick={() => onSaveView(meta)}
-        >
-          Save as view
-        </Button>
-      )}
-      {onDefineMetric && sqlHasAggregate(meta.sql) && (
-        <Button
-          appearance="subtle"
-          size="small"
-          shape="circular"
-          className={styles.quietChip}
-          icon={<IconTag />}
-          disabled={disabled}
-          onClick={() => onDefineMetric(meta)}
-        >
-          Define as metric
-        </Button>
+      {/* §51 §1: one "Save & share…" overflow for the five save/promote actions
+          (built above). Rendered only when ≥1 qualifies — the web twin (no
+          CSV/Evidence/Pin handlers) still shows Save-as-view / Define-metric. */}
+      {shareItems.length > 0 && (
+        <LhMenu
+          trigger={
+            <Button
+              appearance="subtle"
+              size="small"
+              shape="circular"
+              className={styles.quietChip}
+              icon={<IconSave />}
+              disabled={disabled}
+            >
+              Save &amp; share…
+            </Button>
+          }
+          items={shareItems}
+          aria-label="Save and share this answer"
+        />
       )}
       {/* §48 §3b: the always-relevant Report door — a templated report on this
           answer's source table with the §46 hypothesis prompt and a Saved—Open
@@ -5651,30 +5656,45 @@ export function ChatPanel() {
                               onClick={() => regenerate(m.id)}
                             />
                           </Tooltip>
-                          <Tooltip content="Good answer" relationship="label">
-                            <Button
-                              className={ratings[m.id] === "up" ? styles.thumbActive : styles.actionBtn}
-                              appearance="subtle"
-                              size="small"
-                              icon={<IconThumbUp />}
-                              aria-label="Good answer"
-                              aria-pressed={ratings[m.id] === "up"}
-                              onClick={() => rateAnswer(m.id, "up")}
-                            />
-                          </Tooltip>
-                          <Tooltip content="Needs work" relationship="label">
-                            <Button
-                              className={
-                                ratings[m.id] === "down" ? styles.thumbActive : styles.actionBtn
-                              }
-                              appearance="subtle"
-                              size="small"
-                              icon={<IconThumbDown />}
-                              aria-label="Bad answer"
-                              aria-pressed={ratings[m.id] === "down"}
-                              onClick={() => rateAnswer(m.id, "down")}
-                            />
-                          </Tooltip>
+                          {/* §51 §1: ONE quiet feedback affordance — a single
+                              "Rate" control that expands to Good / Needs work —
+                              instead of two always-on thumbs. Copy + Regenerate
+                              stay prominent; the rateAnswer handler + ratings
+                              state are unchanged. (Owner-flagged judgment call.) */}
+                          <LhMenu
+                            trigger={
+                              <Button
+                                className={ratings[m.id] ? styles.thumbActive : styles.actionBtn}
+                                appearance="subtle"
+                                size="small"
+                                icon={
+                                  ratings[m.id] === "down" ? <IconThumbDown /> : <IconThumbUp />
+                                }
+                                aria-label={
+                                  ratings[m.id] === "up"
+                                    ? "Rated: good answer"
+                                    : ratings[m.id] === "down"
+                                      ? "Rated: needs work"
+                                      : "Rate this answer"
+                                }
+                              />
+                            }
+                            items={[
+                              {
+                                key: "up",
+                                label: "Good answer",
+                                icon: <IconThumbUp />,
+                                onClick: () => rateAnswer(m.id, "up"),
+                              },
+                              {
+                                key: "down",
+                                label: "Needs work",
+                                icon: <IconThumbDown />,
+                                onClick: () => rateAnswer(m.id, "down"),
+                              },
+                            ]}
+                            aria-label="Rate this answer"
+                          />
                         </div>
                       )}
                       {/* Refinement chips: only under answers carrying analytics
