@@ -8,39 +8,65 @@ shipped example is named instead.
 
 ## Numbers about data are engine-verified or not shown
 
+**Verified numbers, model's words.**
+
 The constitution's load-bearing promise: a numeric claim about a data file is
 NEVER presented as fact unless the ENGINE produced it — a DataFusion SQL result,
 a `table_profile()` computation, or a certified metric. The model NARRATES the
 engine's figures; it never emits its own. This holds on every tier, and hardest
 on the weak on-device models where it was silently breaking (§44).
 
-Three rules follow, and each has a canonical shape to copy:
+The invariant is about PROVENANCE, not who writes the prose (§47). The engine
+supplies a VERIFIED FACT SHEET; the model writes a real answer over it; every
+number in that answer is a subset of the fact sheet (ladder-gated); and the
+engine's exact block is a DISCLOSURE beneath the prose, never the answer itself.
+"Verified numbers, model's words" supersedes any earlier reading of §44 that had
+the engine DUMP its profile as the whole reply — the trust is unchanged, the
+breathing room is new.
 
-1. **Verified answer or none.** When NL→SQL executes, the answer narrates the
-   result table and the executed SQL is disclosed (`*Query used:*`, tier-
-   independent, synth.rs). When it does not, a profileable table is answered
-   from its EXACT profile — `table_profile::profile_answer` (twinned in
-   `tableProfile.ts`), shown under a "Computed exactly by Lighthouse" fence that
-   reads like the SQL disclosure (§44 §1b).
+Four rules follow, each with a canonical shape to copy:
 
-2. **The non-analytics path is forbidden numeric claims about tabular sources.**
-   When neither SQL nor a profile answered, any downstream RAG narration is
-   vetted by the deterministic post-generation guard: a numeric token absent
-   from the engine-verified set degrades the whole answer to an honest number-
-   free reply. Canonical: `numguard` (native/crates/lighthouse-core/src +
-   src/server/numguard.ts, one tokenizer shared with the report framer's
-   digit-gate), armed in `synth.rs` at the analytics fall-through. Qualitative
-   RAG over prose is untouched — the guard arms ONLY on an analytics ask over
-   tabular data. Analytics is Rust-only, so the guard's enforcement is too; the
-   twin ships the byte-identical helper (the ledger/certified/trust precedent).
+1. **The model narrates; the engine's block is a disclosure.** When NL→SQL
+   executes, the answer narrates the result table and the executed SQL is
+   disclosed (`*Query used:*`, tier-independent, synth.rs). When it does not, a
+   profileable table's EXACT `table_profile()` becomes a fact sheet the model
+   narrates over (`narrate_over_facts`, synth.rs), and
+   `table_profile::profile_answer` (twinned in `tableProfile.ts`) is APPENDED as
+   a "Computed exactly by Lighthouse" disclosure — never streamed as the whole
+   answer (§44 §1b, rebalanced §47 §1).
 
-3. **The proof is shown by default, mobile as desktop.** The SQL/computation
-   disclosure is never behind a compact gate; the §35 progressive-collapse
-   excludes the provenance footers (`collapseSections.ts`, §44 §3).
+2. **A verified figure must also be RELEVANT.** Exactness does not make a number
+   answer the question — summing a row-index column is precise and meaningless.
+   `profile_can_address` (synth.rs, a pure gate) narrates the profile only when
+   the ask is a whole-table summary or names a column the profile carries (by
+   token/synonym); otherwise the model answers qualitatively from the schema,
+   stating no number, and the disclosure/chart are withheld (§47 §3).
 
-Acceptance floor: `tests/trust_invariant_test.rs` + the §44 block of the
-`analytics_eval` rig. Never change a computed value to satisfy the guard — the
-guard protects the engine's numbers, it does not invent or round them.
+3. **Gate numbers with a ladder, not a guillotine.** A narration over a fact
+   sheet is accepted iff its numbers ⊆ the engine-verified set (`numguard`,
+   native/crates/lighthouse-core/src + src/server/numguard.ts, one tokenizer
+   shared with the report framer's digit-gate). A single stray figure triggers
+   ONE tightened retry naming the permitted numbers; a persistent stray degrades
+   to a deterministic column-naming sentence (`number_free_degradation`) — the
+   whole answer is never nuked, and a raw block is never presented as prose.
+   Canonical: `narrate_over_facts` / `narrate_gated` (synth.rs), mirroring the
+   reports.rs narrate ladder. Analytics is Rust-only, so the enforcement is too;
+   the twin ships the byte-identical numguard helper. Qualitative RAG over prose
+   is untouched — the ladder arms ONLY on an analytics ask over tabular data.
+
+4. **Degrade to a direction, never a dead end — and show the proof by default.**
+   A path that cannot compute names what it CAN see: the shape a recipe needs
+   and the columns the file has (`recipes` empty-result, §47 §4;
+   `number_free_degradation`'s column-naming), never a 0-of-0 shrug. The SQL/
+   computation disclosure itself is never behind a compact gate; the §35
+   progressive-collapse excludes the provenance footers (`collapseSections.ts`,
+   §44 §3).
+
+Acceptance floor: `tests/trust_invariant_test.rs`, the answerability-gate unit
+test in `synth.rs`, the `numguard` ladder-decision tests (subset check +
+byte-pinned degradation), and the §44 block of the `analytics_eval` rig. Never
+change a computed value to satisfy the guard — the guard protects the engine's
+numbers, it does not invent or round them.
 
 ## The pure verdict-fn pattern
 

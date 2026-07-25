@@ -30,8 +30,10 @@ const CALL_TYPES = new Set(["Narration", "NlToSql", "ReportFraming"]);
  */
 const MANIFEST = [
   // The whole grounded-ask path (single-shot, map extracts, reduces, warm
-  // call) rides the Narration reserves.
-  { file: "native/crates/lighthouse-core/src/synth.rs", pattern: /llm::stream_answer\(/g, count: 14, callType: "Narration" },
+  // call) rides the Narration reserves. §47 added the profile fact-sheet
+  // narration (narrate_over_facts) and the RAG-fallback ladder (narrate_gated),
+  // each buffering an attempt + a tightened retry — four more Narration sites.
+  { file: "native/crates/lighthouse-core/src/synth.rs", pattern: /llm::stream_answer\(/g, count: 18, callType: "Narration" },
   { file: "native/crates/lighthouse-core/src/views.rs", pattern: /llm::stream_answer\(/g, count: 1, callType: "Narration" },
   // The two report-framing calls (§38) ride the ReportFraming reserve.
   { file: "native/crates/lighthouse-core/src/reports.rs", pattern: /llm::stream_answer\(/g, count: 1, callType: "ReportFraming" },

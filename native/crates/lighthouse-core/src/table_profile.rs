@@ -386,6 +386,19 @@ pub fn is_profileable(name: &str) -> bool {
     n.ends_with(".csv") || n.ends_with(".tsv")
 }
 
+/// The profile's column display names in file order, or empty when the content
+/// is not a profileable table. A structured accessor over the SAME engine-typed
+/// `profile_cols` the text renderer reads — never parsed from the rendered
+/// `[TABLE PROFILE]` string. Feeds the §47 §3 answerability gate and the
+/// number-free degradation copy. PARITY: no TS twin is needed — the analytics
+/// narration that consumes it is Rust-only (see src/server/synth.ts's note);
+/// this accessor emits no user-facing string.
+pub fn profile_column_names(name: &str, text: &str) -> Vec<String> {
+    profile_cols(name, text)
+        .map(|cols| cols.into_iter().map(|c| c.name).collect())
+        .unwrap_or_default()
+}
+
 // --- Chartable aggregates (openspec: field-patch-0.12.5 §2) -----------------------
 //
 // A profiled table's group-by sums and per-year rollups are exactly the shape
