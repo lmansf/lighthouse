@@ -7856,3 +7856,174 @@ desktop-crate call sites). One commit per numbered section. Open ONE
 PR titled "Reports as a main feature: in-app reader + Reports home";
 stop at the PR.
 ```
+
+## 50. The "Ask Lighthouse" iOS widget: a home-screen ask bar (2026-07-23)
+
+Owner: a chat bar the length of an iPhone grid row that works like the
+desktop widget. The §43-deferred WidgetKit surface, now scoped with
+research + a codebase trace. Realities that shape it:
+- **iOS widgets cannot host a text field — ever.** Widgets are static
+  SwiftUI snapshots; iOS 17 interactivity is Button/Toggle only, never
+  typing. So "a chat bar" = a full-width pill styled like the ask box
+  that, on TAP, opens the app to the composer — the Google/Spotlight
+  search-bar pattern. There is no 4×1 family; systemMedium (full width,
+  the search-bar shape) is the target.
+- **The hand-off already exists and already works on iOS.** The desktop
+  widget hands a query to chat via emit_to("main","ask-question",
+  {question}) → transport re-broadcasts lighthouse:ask-question →
+  ChatPanel auto-sends (or prefills if streaming). That transport
+  bridge runs on iOS (isTauri()); show_main/the ask-question emit are
+  NOT desktop-gated. So a widget deep link only needs to emit the SAME
+  lighthouse:ask-question — the whole composer side is reused.
+- **Deep-link plumbing must be BUILT (none exists).** No
+  tauri-plugin-deep-link, no CFBundleURLTypes, no App Group, empty
+  entitlements, single target app.lhvault. Tauri 2's deep-link plugin
+  DOES support iOS custom schemes with appLink:false (auto-generates
+  CFBundleURLTypes, no server — ideal for local-first); RunEvent::Opened
+  / onOpenUrl deliver the URL; manual CFBundleURLTypes + RunEvent::Opened
+  is the guaranteed fallback. Cold-launch race: buffer the URL, replay
+  when the webview signals ready.
+- **The widget extension is a SECOND Xcode target — the risk.** Add a
+  type:app-extension to gen/apple/project.yml; its Swift must live in a
+  SIBLING folder (NOT under Sources/ — that path is a recursive include
+  that would pull it into the app target); own bundle id
+  app.lhvault.widget + own provisioning profile (fastlane match
+  SILENTLY skips it unless listed — the CI trap); App Group
+  group.app.lhvault on BOTH entitlements (share via a container FILE,
+  not UserDefaults — iOS 17 quirk); the widget Info.plist version must
+  INHERIT ($(MARKETING_VERSION)/$(CURRENT_PROJECT_VERSION)) so it never
+  becomes an eighth stamp location. `tauri ios build` is known-good;
+  `tauri ios dev` is flaky with a second target. Spike this first.
+
+### Prompt
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first, local-first analytics AI harness: Tauri 2 shell (iOS
+via WKWebView; gen/apple is an xcodegen project), React UI (src/),
+Rust engine (native/crates/lighthouse-core, lighthouse-shell). Read
+CLAUDE.md, docs/CONVENTIONS.md, docs/widget-scope.md (the desktop
+widget hand-off contract), and roadmap §43 + §50 before writing code.
+GOAL: an iOS/iPadOS Home Screen "Ask Lighthouse" widget — a full-width
+pill styled like the ask box that opens the app straight into the
+composer, mirroring the desktop widget's hand-off. It is a LAUNCHER,
+not a text field (iOS forbids widget text input). Phased: spike the
+integration first (it de-risks the only two uncertain links), then
+build. The desktop widget stays desktop-only; this is net-new iOS
+surface.
+
+PHASE A — Spike & decide (own commit, docs/ios-widget.md). Prove the
+chain end-to-end with a TRIVIAL widget before any real UI:
+  - Add a minimal systemMedium "hello" app-extension target to
+    gen/apple/project.yml (bundle id app.lhvault.widget, team
+    MRT4QD3Z77, SKIP_INSTALL, version settings INHERITED via
+    $(MARKETING_VERSION)/$(CURRENT_PROJECT_VERSION); its Swift in a
+    NEW sibling folder, NOT under Sources/; NSExtension =
+    com.apple.widgetkit-extension; the app target gains a dependency
+    on it so it embeds). Confirm `tauri ios build` builds+embeds it.
+  - Wire the deep link: register the lighthouse:// scheme (prefer
+    tauri-plugin-deep-link with appLink:false → auto CFBundleURLTypes;
+    fallback = manual CFBundleURLTypes in the iOS Info.plist +
+    RunEvent::Opened in setup()). The hello widget's .widgetURL =
+    lighthouse://ask. Confirm ON DEVICE that a tap reaches the app and
+    the URL arrives (log it), including COLD launch (buffer the URL,
+    replay after the webview signals ready — a naive immediate emit
+    drops the first deep link).
+  - Confirm signing: add app.lhvault.widget to fastlane match /
+    Matchfile (a second match(app_identifier:) — match is blind to it
+    otherwise) and confirm the mobile-bootstrap ios-build/ios-beta
+    lanes sign BOTH bundle ids. Confirm the App Group group.app.lhvault
+    on both entitlements.
+  - Record in docs/ios-widget.md: the plugin-vs-manual decision, the
+    target/signing/App-Group setup, the deployment floors (app stays
+    14; the extension its own 17 or 18), and the cold-launch buffering.
+    If `tauri ios build` cannot embed the extension at our pinned CLI,
+    STOP and report — do not fake it.
+
+PHASE B — Build.
+1. The deep-link → composer route (reuse the existing seam). On
+   lighthouse://ask?q=<optional> : emit the SAME lighthouse:ask-question
+   {question} the desktop hand-off uses (ChatPanel already consumes it:
+   auto-send when idle, prefill when streaming — §widget-scope W1). Empty
+   q → open composer focused, no send. lighthouse://new → lighthouse:new-
+   chat. The buffering-until-webview-ready from Phase A applies. All
+   webview/composer code is REUSED unchanged; this is a native→existing-
+   event adapter, not a new composer path.
+2. The systemMedium "Ask Lighthouse" bar. A SwiftUI widget styled as
+   the ask pill — the beacon/spark glyph + "Ask Lighthouse…" placeholder
+   text + a send-style affordance — matching the app's Beam identity
+   (amber/ink/paper; approximate the tokens, widgets can't share CSS).
+   Whole surface .widgetURL(lighthouse://ask). Static, no network. iPad:
+   the same medium widget. (No 4×1 exists; the medium full-width pill IS
+   the grid-row bar the owner pictures — the Google/Spotlight search-bar
+   shape.)
+3. Quick-ask chips (optional zones, medium/large). 2-3 Link zones —
+   "New chat" (lighthouse://new) and up to two suggested asks
+   (lighthouse://ask?q=<suggested>). The suggestions come from the App
+   Group file (§4); if none, show just the bar. Prefer plain Link (works
+   iOS 14) over Button(intent:) unless a control needs it.
+4. App Group sharing (local only). The app writes a small JSON FILE
+   (not UserDefaults) into the group.app.lhvault container — a couple of
+   recent/suggested asks (reuse useValidatedChips/suggestedAsks) — and
+   calls WidgetCenter.shared.reloadTimelines when it changes. The widget
+   TimelineProvider reads ONLY that local file. NEVER network, NEVER
+   telemetry — the widget is as private as the app (add a one-line note
+   to the privacy copy: the widget reads only local suggestions).
+5. Phase 2 (optional, iOS 18, own commit — land only if Phase A/B are
+   solid): a ControlWidget "Ask Lighthouse" for Control Center / Lock
+   Screen / Action Button — a ControlWidgetButton backed by an
+   OpenURLIntent(lighthouse://ask) (the intent lives in the app target).
+   If it risks the release, note it as §51 and stop at the home-screen
+   widget.
+6. Signing, CI, stamps. The widget bundle id is in match/Matchfile;
+   mobile-bootstrap builds+signs both; the widget Info.plist version
+   INHERITS the app's (NOT a new hardcoded stamp — CLAUDE.md's seven
+   stamps are unchanged; confirm the §39 check-stamps tripwire still
+   passes and the widget inherits rather than adding an eighth). Bump
+   current+1 across the SEVEN stamps. release-smoke (desktop) unaffected;
+   ios-build green with the extension embedded+signed.
+7. In-app discoverability (small). A one-time hint / a Settings "Add the
+   Ask Lighthouse widget" help row (iOS only, platformKind()) explaining
+   how to add it from the Home Screen — the widget itself is configured
+   in iOS, not in-app. Do NOT re-add the desktop "Interface/widget mode"
+   option to mobile (§43 removed it); this is a different thing.
+
+Constraints. No text input in the widget (launcher only — a tap opens
+the composer). Widget is 100% local: no network, no telemetry, reads
+only the App Group file. Desktop widget untouched and still desktop-
+only. App deployment floor stays 14 (widget floor its own). Version
+stamps: the widget INHERITS, never a new stamp file. gen/apple widget
+Swift lives OUTSIDE Sources/. Byte-pinned labels where twinned;
+PARITY n/a for Swift. SharePoint untouched. The desktop hand-off
+contract (widget-scope.md / lighthouse:ask-question) is reused, not
+changed.
+
+Acceptance (on device / simulator; the deep-link + cold-launch need a
+real install):
+1. The systemMedium "Ask Lighthouse" bar appears in the widget
+   gallery and on the Home Screen as a full-width pill; tapping it
+   opens Lighthouse to a focused, empty composer.
+2. A quick-ask chip opens the composer pre-filled with that ask and
+   sends it (idle) / prefills (streaming) — same as the desktop
+   hand-off; "New chat" opens a fresh chat.
+3. Cold launch from a widget tap is NOT dropped (the buffered URL
+   replays once the webview is ready).
+4. The widget shows a recent/suggested ask from the App Group when
+   present, nothing networked ever; updating suggestions in the app
+   refreshes the widget.
+5. mobile-bootstrap ios-build embeds+signs both bundle ids; the
+   widget's version matches the app; the §39 stamp tripwire is green;
+   seven stamps bumped.
+6. Desktop unchanged; the desktop widget still works and stays
+   desktop-only.
+
+Environment. This REQUIRES macOS + Xcode + a real device for the
+deep-link/cold-launch/widget-gallery acceptance — the Linux container
+can only grep-verify the Swift/project.yml/entitlements and run the
+JS-side deep-link adapter tests. `tauri ios build` is the known-good
+path; `tauri ios dev` may not render with a second target — don't
+block on it. Phase A is a hard gate: if the extension can't build+sign
+via our CLI, report and stop. One commit per phase/section (Phase A
+first, its own commit). Open ONE PR titled "iOS: the Ask Lighthouse
+home-screen widget"; stop at the PR.
+```
