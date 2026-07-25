@@ -32,6 +32,7 @@ import {
   MenuItem,
   MenuList,
   MenuTrigger,
+  Spinner,
   Switch,
   Text,
   Textarea,
@@ -55,6 +56,7 @@ import {
 import type { CapabilityMap, Investigation, ReportTemplate } from "@/contracts";
 import { EMPTY_CAPABILITY_MAP, ragService } from "@/contracts";
 import { openSavedReport } from "@/lib/openReport";
+import { useDelayedFlag, useReportStageLabel } from "@/lib/workingIndicator";
 import { useChatStore } from "@/stores/useChatStore";
 import { useInvestigationsStore } from "@/stores/useInvestigationsStore";
 import { useRagStore } from "@/stores/useRagStore";
@@ -133,6 +135,16 @@ const useStyles = makeStyles({
     gap: tokens.spacingHorizontalXS,
     marginTop: tokens.spacingVerticalXXS,
   },
+  // §52: a subtle inline "working…" row — a small spinner beside quiet copy,
+  // sitting where its content will (list rows / the report launchers) so the
+  // real thing resolves in place. Foreground3 keeps it from competing.
+  loadingRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: tokens.spacingHorizontalS,
+    color: tokens.colorNeutralForeground3,
+    ...shorthands.padding(tokens.spacingVerticalXS, tokens.spacingHorizontalS),
+  },
 });
 
 /** "Whole vault" or the LIVE count of still-present scope files — dangling
@@ -189,6 +201,9 @@ export function InvestigationsNav() {
   const [hypoText, setHypoText] = useState("");
   const [reportBusy, setReportBusy] = useState(false);
   const [reportError, setReportError] = useState<string | null>(null);
+  // §52 §1: whether the capability probe is in flight — drives the quiet
+  // report-launcher placeholder so the buttons resolve in, never pop in.
+  const [reportMapLoading, setReportMapLoading] = useState(false);
 
   useEffect(() => {
     ensureLoaded();
@@ -215,9 +230,11 @@ export function InvestigationsNav() {
   useEffect(() => {
     if (!includedKey) {
       setReportMap(EMPTY_CAPABILITY_MAP);
+      setReportMapLoading(false);
       return;
     }
     let cancelled = false;
+    setReportMapLoading(true);
     ragService
       .capabilityMap(includedKey.split("\n"))
       .then((m) => {
@@ -225,6 +242,9 @@ export function InvestigationsNav() {
       })
       .catch(() => {
         if (!cancelled) setReportMap(EMPTY_CAPABILITY_MAP);
+      })
+      .finally(() => {
+        if (!cancelled) setReportMapLoading(false);
       });
     return () => {
       cancelled = true;
@@ -235,6 +255,16 @@ export function InvestigationsNav() {
     () => reportMap.tables.find((t) => t.investigable)?.name ?? null,
     [reportMap],
   );
+
+  // §52: subtle, delay-gated "working…" cues. The list cue waits on the store's
+  // first load; the report-launcher placeholder waits on the capability probe —
+  // but only on a COLD probe (no table known yet) and never stacked under the
+  // list cue, so at most one quiet spinner shows. The delay (~200ms) means a
+  // fast load never flashes one. See src/lib/workingIndicator.ts.
+  const showListLoading = useDelayedFlag(!loaded, 200);
+  const showReportLoading =
+    useDelayedFlag(reportMapLoading && !reportTable, 200) && !showListLoading;
+  const generateLabel = useReportStageLabel(reportBusy);
 
   function openCreate() {
     setCreateName("");
@@ -423,6 +453,15 @@ export function InvestigationsNav() {
         </div>
       </button>
 
+      {/* §52: while the store loads its first records, a quiet spinner sits where
+          the rows will — delay-gated, so a fast load never flashes it. */}
+      {showListLoading && (
+        <div className={styles.loadingRow} role="status" aria-live="polite">
+          <Spinner size="tiny" />
+          <Text size={200}>Loading investigations…</Text>
+        </div>
+      )}
+
       {visible.map((inv) => {
         const active = inv.id === currentInvestigationId;
         if (renamingId === inv.id) {
@@ -571,6 +610,16 @@ export function InvestigationsNav() {
           >
             Business report
           </Button>
+        </div>
+      )}
+
+      {/* §52: while the capability probe runs on a fresh context (no table known
+          yet), a quiet placeholder holds the launchers' spot so they resolve in
+          rather than pop in. Cold-probe only, and never under the list cue. */}
+      {showReportLoading && (
+        <div className={styles.loadingRow} role="status" aria-live="polite">
+          <Spinner size="tiny" />
+          <Text size={200}>Checking what’s investigable…</Text>
         </div>
       )}
 
@@ -736,9 +785,13 @@ export function InvestigationsNav() {
               <Button
                 appearance="primary"
                 disabled={reportBusy}
+                icon={reportBusy ? <Spinner size="tiny" /> : undefined}
                 onClick={() => void generateReport()}
               >
-                {reportBusy ? "Generating…" : "Generate"}
+                {/* §52: the long, multi-call generate wait rotates honest stage
+                    copy (spinner + "Running the analysis…" → "Composing…" →
+                    "Almost ready…"); reduced motion holds the first stage. */}
+                {reportBusy ? generateLabel : "Generate"}
               </Button>
             </DialogActions>
           </DialogBody>
