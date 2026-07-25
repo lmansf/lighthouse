@@ -355,6 +355,14 @@ const useStyles = makeStyles({
     justifyContent: "center",
     gap: tokens.spacingHorizontalS,
   },
+  // §48 §2: the mid-conversation suggestion affordance — a calm, left-aligned
+  // ≤3 chip row above the follow-up composer (not centered like the hero).
+  followUpSuggestRow: {
+    display: "flex",
+    flexWrap: "wrap",
+    gap: tokens.spacingHorizontalS,
+    marginBottom: tokens.spacingVerticalS,
+  },
 
   turn: { display: "flex", flexDirection: "column", gap: tokens.spacingVerticalXS },
   // Each Q&A pair after the first opens on a hairline, so the transcript
@@ -5880,6 +5888,16 @@ export function ChatPanel() {
           )}
         </div>
 
+        {/* §48 §2: suggestions live beyond the empty hero — a calm, validated,
+            ≤3 chip row above the follow-up composer whenever something is worth
+            suggesting mid-conversation. mergedChips is empty off-scope / when
+            nothing is applicable, so there's no row unless a chip would succeed
+            (the same ≤3 combined cap the hero uses). */}
+        {mergedChips.length > 0 && (
+          <div className={styles.followUpSuggestRow} data-lh-followup-suggest>
+            <SuggestionChips chips={mergedChips} onAsk={(q) => void sendQuestion(q)} />
+          </div>
+        )}
         {composer("Ask a follow-up…")}
       </div>
 
