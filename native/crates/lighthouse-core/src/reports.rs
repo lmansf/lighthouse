@@ -111,6 +111,10 @@ pub struct SubAnalysis {
     pub result_markdown: String,
     pub sql: String,
     pub headline: Option<String>,
+    /// §49: the section's engine-built chart spec (serialized `ChartSpec` JSON —
+    /// the §22.6 `lighthouse-chart` shape), captured from the query result when
+    /// the result is chartable. `None` when the query produced no chart.
+    pub chart: Option<String>,
 }
 
 /// One rendered section of the report.
@@ -126,6 +130,11 @@ pub struct ReportSection {
     /// grounding). `None` when the analysis had no material headline; the
     /// renderers never read it, so rendered bytes are unchanged.
     pub headline: Option<String>,
+    /// §49: the section's engine-built chart spec (the §22.6 `lighthouse-chart`
+    /// JSON), carried through from the sub-analysis like `headline`. The
+    /// per-section renderers never read it — the report renders ONE key chart
+    /// (`Report.chart`) at the §29 placement — so rendered bytes are unchanged.
+    pub chart: Option<String>,
 }
 
 /// A deep-analysis report — deterministic, engine-verified, ready to render + write.
@@ -138,6 +147,13 @@ pub struct Report {
     pub summary: Vec<String>,
     pub sections: Vec<ReportSection>,
     pub caveats: Vec<String>,
+    /// §49: the report's ONE key chart — the first chartable section's engine
+    /// chart spec (serialized `ChartSpec` JSON, the §22.6 `lighthouse-chart`
+    /// shape). `None` when no section produced a chart. `render_markdown` emits
+    /// it once as a fenced ```lighthouse-chart block at the §29 placement (after
+    /// the Summary / in Results / under the Bottom line), so the saved note is
+    /// self-contained and the reader draws it.
+    pub chart: Option<String>,
     /// The structured shape to render. Default `Standard` keeps the deterministic
     /// document byte-identical; the templates reorganize the SAME sections.
     pub template: ReportTemplate,
@@ -172,6 +188,11 @@ pub fn assemble(
     } else if summary.is_empty() {
         summary.push("No single figure stood out; see the sections below.".to_string());
     }
+    // §49: the report's ONE key chart is the FIRST chartable section's spec (the
+    // battery runs recipes in priority order, so the first chart IS the headline
+    // finding's). `None` when nothing charted — a chart-less report renders
+    // byte-identically to before.
+    let chart = subs.iter().find_map(|s| s.chart.clone());
     let sections = subs
         .into_iter()
         .map(|s| ReportSection {
@@ -180,6 +201,7 @@ pub fn assemble(
             result_markdown: s.result_markdown,
             sql: s.sql,
             headline: s.headline,
+            chart: s.chart,
         })
         .collect();
     Report {
@@ -188,6 +210,7 @@ pub fn assemble(
         summary,
         sections,
         caveats,
+        chart,
         template: ReportTemplate::Standard,
         intro: None,
         discussion: None,
@@ -215,6 +238,8 @@ fn render_standard(report: &Report) -> String {
     for line in &report.summary {
         out.push_str(&format!("- {line}\n"));
     }
+    // §29/§49: the ONE key chart, right under the summary (no-op when None).
+    push_chart(&mut out, &report.chart);
 
     for s in &report.sections {
         push_section(&mut out, s, "##");
@@ -267,6 +292,20 @@ fn render_caveats(out: &mut String, caveats: &[String], level: &str) {
     }
 }
 
+/// §49: the report's ONE key chart as a fenced ```lighthouse-chart block — the
+/// §22.6 shape the UI renders via `AnalyticsChart` — so the saved note is
+/// self-contained. `None`/blank emits NOTHING, so a chart-less report renders
+/// byte-identically (the `reports_test.rs` byte-stability contract holds). Placed
+/// once at the §29 position by each template's renderer, never per-section.
+fn push_chart(out: &mut String, chart: &Option<String>) {
+    if let Some(spec) = chart {
+        let spec = spec.trim();
+        if !spec.is_empty() {
+            out.push_str(&format!("\n```lighthouse-chart\n{spec}\n```\n"));
+        }
+    }
+}
+
 /// §38 §3: the templates' ONE quiet provenance line — how the framing prose
 /// was written. Byte-pinned by the render tests; the SAME engine numbers
 /// stand either way, so run-to-run prose differences read as labeled
@@ -315,6 +354,8 @@ fn render_imrad(report: &Report) -> String {
     }
 
     out.push_str("\n## Results\n");
+    // §29/§49: the key chart leads the Results section (no-op when None).
+    push_chart(&mut out, &report.chart);
     if report.sections.is_empty() {
         out.push_str("\n_no rows_\n");
     } else {
@@ -346,6 +387,8 @@ fn render_bluf(report: &Report) -> String {
     let bottom = report.intro.clone().or_else(|| report.summary.first().cloned());
     out.push_str(bottom.as_deref().unwrap_or("No single figure stood out; see the detail below."));
     out.push('\n');
+    // §29/§49: the key chart sits under the bottom line (no-op when None).
+    push_chart(&mut out, &report.chart);
 
     if report.summary.len() > 1 {
         out.push_str("\n## Key findings\n\n");
@@ -454,6 +497,9 @@ pub async fn investigate(table: &str, files: &[(String, String, PathBuf)], is_cl
             result_markdown: res.markdown,
             sql: q.sql,
             headline,
+            // §49: keep the engine's chart spec for this section — the analytics
+            // engine already computed it (or None when not chartable).
+            chart: res.chart,
         });
     }
 
@@ -1075,6 +1121,7 @@ mod tests {
             result_markdown: "| period | total |\n|---|---|\n| 2024-10 | 400 |".to_string(),
             sql: "SELECT period, total FROM t".to_string(),
             headline: headline.map(str::to_string),
+            chart: None,
         }
     }
 
@@ -1105,12 +1152,14 @@ mod tests {
             framing_by: None,
             summary: vec!["headline".into()],
             caveats: Vec::new(),
+            chart: None,
             sections: vec![ReportSection {
                 heading: "By region".into(),
                 question: "q".into(),
                 result_markdown: md.clone(),
                 sql: "SELECT 1".into(),
                 headline: None,
+                chart: None,
             }],
         };
         let llama = report_findings_ctx(&report, crate::budget::Tier::Llama6144);
@@ -1140,6 +1189,7 @@ mod tests {
             result_markdown: md,
             sql: "SELECT 1".into(),
             headline: Some(format!("Analysis {i} peaks at {}9", 100 + i)),
+            chart: None,
         }
     }
 
@@ -1151,6 +1201,7 @@ mod tests {
             summary: sections.iter().filter_map(|s| s.headline.clone()).collect(),
             sections,
             caveats: Vec::new(),
+            chart: None,
             template: ReportTemplate::Standard,
             intro: None,
             discussion: None,
