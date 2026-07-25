@@ -31,6 +31,7 @@ import {
   Menu,
   MenuDivider,
   MenuItem,
+  MenuItemCheckbox,
   MenuList,
   MenuTrigger,
   SearchBox,
@@ -2214,41 +2215,56 @@ export function FileExplorer() {
             value={query}
             onChange={(_, d) => setQuery(d.value)}
           />
-          <ToggleButton
-            size="small"
-            appearance="subtle"
-            icon={<IconEye />}
-            checked={onlyVisible}
-            onClick={() => setOnlyVisible((v) => !v)}
+          {/* §51 §4: Sort + the two filters (Only visible to AI · Hidden from
+              cloud) fold into ONE "View" menu — the toolbar keeps Search inline
+              and the top-level control count drops from three to one. The filters
+              are checkable items (the menu stays open while toggling); the View
+              button stays tinted while any filter is on, so an externally-set
+              filter (the chat header's hidden-from-cloud count) is still visible
+              and one-click clearable here. Sort is unchanged: re-picking the
+              active key flips direction. */}
+          <Menu
+            checkedValues={{
+              filters: [
+                ...(onlyVisible ? ["visible"] : []),
+                ...(onlyLocalOnly ? ["localOnly"] : []),
+              ],
+            }}
+            onCheckedValueChange={(_, data) => {
+              if (data.name !== "filters") return;
+              setOnlyVisible(data.checkedItems.includes("visible"));
+              setOnlyLocalOnly(data.checkedItems.includes("localOnly"));
+            }}
           >
-            Only visible to AI
-          </ToggleButton>
-          {/* The lock axis of the eye filter above: only nodes marked "Private —
-              this device only". Also switched on by the chat header's hidden-
-              from-cloud count, so that filter is visible and clearable HERE. */}
-          <ToggleButton
-            size="small"
-            appearance="subtle"
-            icon={<IconLock />}
-            checked={onlyLocalOnly}
-            onClick={() => setOnlyLocalOnly((v) => !v)}
-          >
-            Hidden from cloud
-          </ToggleButton>
-          <Menu>
             <MenuTrigger disableButtonEnhancement>
-              <Tooltip content="Sort files" relationship="label">
-                <Button size="small" appearance="subtle" icon={<IconSort />} aria-label="Sort" />
+              <Tooltip content="Sort and filter files" relationship="label">
+                <ToggleButton
+                  size="small"
+                  appearance="subtle"
+                  icon={<IconFilter />}
+                  checked={onlyVisible || onlyLocalOnly}
+                  aria-label="View options — sort and filter"
+                >
+                  View
+                </ToggleButton>
               </Tooltip>
             </MenuTrigger>
             <LhMenuPopover>
               <MenuList>
+                <MenuItemCheckbox name="filters" value="visible" icon={<IconEye />}>
+                  Only visible to AI
+                </MenuItemCheckbox>
+                <MenuItemCheckbox name="filters" value="localOnly" icon={<IconLock />}>
+                  Hidden from cloud
+                </MenuItemCheckbox>
+                <MenuDivider />
                 {(["name", "size", "type"] as const).map((key) => {
                   const active = sort.key === key;
                   const label = key === "name" ? "Name" : key === "size" ? "Size" : "Type";
                   return (
                     <MenuItem
                       key={key}
+                      icon={<IconSort />}
                       // Re-picking the active key flips direction; a new key starts ascending.
                       onClick={() =>
                         setSort((s) => ({
