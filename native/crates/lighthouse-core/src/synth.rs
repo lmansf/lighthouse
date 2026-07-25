@@ -3587,6 +3587,31 @@ mod tests {
     }
 
     #[test]
+    fn answerability_gate_world_cup_fixture() {
+        // §47 §7: the gate on the rig's second fixture. A column the profile
+        // carries is addressable; a dimension the tournament table never had is
+        // not; a generic overview always is.
+        let cols = vec![
+            "year".to_string(),
+            "host".to_string(),
+            "winner".to_string(),
+            "goals".to_string(),
+        ];
+        assert!(
+            profile_can_address("how many goals were scored in total?", &cols),
+            "goals is a present column",
+        );
+        assert!(
+            profile_can_address("give me an overview", &cols),
+            "a generic overview is a whole-table ask",
+        );
+        assert!(
+            !profile_can_address("what was the average rainfall during the tournament?", &cols),
+            "rainfall is a dimension this table never carried",
+        );
+    }
+
+    #[test]
     fn multi_file_span_needs_two_comparable_sources() {
         // §3: two comparably-relevant sources route to synthesis; a weak second
         // source (or a single source) falls through to whole-file focus. KEEP

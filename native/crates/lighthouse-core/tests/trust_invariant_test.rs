@@ -8,7 +8,7 @@
 use lighthouse_core::numguard::{
     answer_has_unverified_number, number_free_degradation, number_tokens, verified_set,
 };
-use lighthouse_core::table_profile::{profile_answer, table_profile};
+use lighthouse_core::table_profile::{profile_answer, profile_column_names, table_profile};
 
 const SLEEP_CSV: &str = "\
 date,sleep_hours,quality
@@ -91,4 +91,53 @@ fn a_faithful_narration_of_the_verified_numbers_is_never_degraded() {
         answer_has_unverified_number(invented, &verified),
         "11 appears nowhere in the profile",
     );
+}
+
+const WORLD_CUP_CSV: &str = "\
+year,host,winner,goals
+2010,South Africa,Spain,145
+2014,Brazil,Germany,171
+2018,Russia,France,169
+2022,Qatar,Argentina,172";
+
+#[test]
+fn world_cup_narration_states_only_engine_figures_over_a_second_dataset() {
+    // §47: the rebalance still upholds §44 on a second fixture (the forced-tier
+    // rig runs this and sleep.csv). The profile is a VERIFIED fact sheet; a
+    // narration over it may state only its figures, and its columns feed the
+    // §3 answerability gate.
+    let profile = table_profile("world_cup.csv", WORLD_CUP_CSV).expect("a real table profiles");
+    let verified = verified_set(&[&profile]);
+
+    // The columns the answerability gate reads (in file order).
+    assert_eq!(
+        profile_column_names("world_cup.csv", WORLD_CUP_CSV),
+        vec!["year", "host", "winner", "goals"],
+    );
+    // Goals are engine-summed: 145+171+169+172 = 657 (min 145, max 172).
+    assert!(profile.contains("goals (number: sum 657"), "engine sums goals: {profile}");
+
+    // The disclosure the model narrates over states only engine figures.
+    let answer = profile_answer("world_cup.csv", WORLD_CUP_CSV).expect("profileable");
+    assert!(
+        !answer_has_unverified_number(&answer, &verified),
+        "the profile answer states only engine figures: {answer}",
+    );
+    // A faithful narration of the verified figures passes…
+    let faithful = "Across these tournaments 657 goals were scored, from 145 to 172.";
+    assert!(
+        !answer_has_unverified_number(faithful, &verified),
+        "657, 145, 172 are all engine figures",
+    );
+    // …but inventing a match count the engine never computed trips the guard —
+    // exactly the §47 §3 trap where a plausible-but-absent figure must not ride.
+    let invented = "657 goals across 500 matches.";
+    assert!(
+        answer_has_unverified_number(invented, &verified),
+        "500 appears nowhere in the profile",
+    );
+    // The number-free degradation over these columns leaks no invented figure.
+    let cols = profile_column_names("world_cup.csv", WORLD_CUP_CSV);
+    let degraded = number_free_degradation("world_cup.csv", &cols);
+    assert!(number_tokens(&degraded).is_empty(), "degradation is number-free: {degraded}");
 }
