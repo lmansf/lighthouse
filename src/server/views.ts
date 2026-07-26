@@ -35,6 +35,7 @@ import type { ViewInspection, ViewSource } from "@/contracts";
 import { stateDir, writeJson } from "./config";
 import { activeIncludedFileIds, listNodes, localOnlySubset, resolveNodePath } from "./vault";
 import { savedAgeLabel } from "./meta";
+import { sanitizeTableName, uniqueTableName } from "../lib/tableName";
 
 /** Envelope version this engine reads and writes. */
 const STORE_VERSION = 1;
@@ -203,41 +204,14 @@ function viewId(name: string, sql: string, createdMs: number): string {
 }
 
 /**
- * Lowercased stem, non-alphanumerics folded to `_`, digit-safe: the SQL
- * table name a vault file registers under. KEEP IN SYNC with
- * analytics.rs::sanitize_table_name (this twin has no analytics module; the
- * views name rules and reads replay need the exact naming pipeline).
+ * `sanitizeTableName` / `uniqueTableName` — the file→table naming pipeline —
+ * now live in the client-safe `@/lib/tableName` so client code (the Reports
+ * composer) can predict a table name without pulling this server module into
+ * the browser bundle. Re-exported here so this module's public surface is
+ * unchanged; the pipeline still must KEEP IN SYNC with
+ * analytics.rs::sanitize_table_name / unique_table_name.
  */
-export function sanitizeTableName(fileName: string): string {
-  const dot = fileName.lastIndexOf(".");
-  const stem = (dot >= 0 ? fileName.slice(0, dot) : fileName).toLowerCase();
-  let out = "";
-  let lastUs = true; // also trims leading underscores
-  for (const ch of stem) {
-    if ((ch >= "a" && ch <= "z") || (ch >= "0" && ch <= "9")) {
-      out += ch;
-      lastUs = false;
-    } else if (!lastUs) {
-      out += "_";
-      lastUs = true;
-    }
-  }
-  out = out.replace(/_+$/, "");
-  if (!out) out = "table";
-  return /^[0-9]/.test(out) ? `t_${out}` : out;
-}
-
-/**
- * A table name not already in `used`: the base, else base_2, base_3, … until
- * free. KEEP IN SYNC with analytics.rs::unique_table_name.
- */
-export function uniqueTableName(base: string, used: string[]): string {
-  if (!used.includes(base)) return base;
-  for (let n = 2; ; n++) {
-    const cand = `${base}_${n}`;
-    if (!used.includes(cand)) return cand;
-  }
-}
+export { sanitizeTableName, uniqueTableName };
 
 /**
  * Normalize a user-entered view name with the SAME character rules as

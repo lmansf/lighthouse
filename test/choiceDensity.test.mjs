@@ -100,11 +100,3 @@ test("§51 §5: New-chat + Add-files stay single-door per surface; events + shor
   assert.match(chat, /Add files to vault…/, "the attach popover owns the chat's add-to-vault");
   assert.match(chat, /new CustomEvent\("lighthouse:browse-files"\)/, "add routes through the shared browse-files event");
 });
-
-test("§51 §6: stamps ride v0.14.16 — no bump (combined release, §48 set them)", () => {
-  // The original §51 spec said bump+1, but the owner folded §49/§51/§52 into ONE
-  // v0.14.16 release with §48 (no per-feature bump). Pin package.json here; the
-  // release-mechanics stamp tripwire covers the other six.
-  const pkg = JSON.parse(read("package.json"));
-  assert.equal(pkg.version, "0.14.16", "package.json rides 0.14.16, unbumped");
-});

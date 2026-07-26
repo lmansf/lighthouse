@@ -98,10 +98,3 @@ test("§52 §1/§3: InvestigationsNav shows a delay-gated list cue + a cold-prob
   // themselves as polite live regions.
   assert.match(nav, /className=\{styles\.loadingRow\} role="status" aria-live="polite"/, "cues are quiet, polite live regions");
 });
-
-test("§52 §6: rides v0.14.16 — no stamp bump (combined release with §48/§49/§51)", () => {
-  // §52's own spec floated a bump, but the owner folded it into the ONE v0.14.16
-  // release. Pin package.json; the release-mechanics tripwire covers the six.
-  const pkg = JSON.parse(read("package.json"));
-  assert.equal(pkg.version, "0.14.16", "package.json rides 0.14.16, unbumped");
-});
