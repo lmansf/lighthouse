@@ -8292,3 +8292,254 @@ structural tests; a simulator/desktop glance for the feel). One
 commit per numbered section. Open ONE PR titled "Investigations: a
 subtle working… indicator"; stop at the PR.
 ```
+
+## 53. The private model as an install-time opt-in (2026-07-23)
+
+Owner: offer installing the private local model as part of the actual
+installer, opt-in/opt-out. Diagnosis @ 0.14.17:
+- The model is NOT bundled — a ~4.2 GB Mistral-7B GGUF fetched
+  post-install to the user-data models dir via local_model.rs
+  (start_download: resumable, Range/206, GGUF-magic + byte-count
+  validated; §22.4 warms llama-server the moment it lands). Robust
+  machinery, reuse it — NEVER block an installer on a 4 GB pull.
+- Onboarding ALREADY has the opt-in: OnboardingPanel select-model →
+  LocalModelInstallPanel "Start download now" (soft-gated, "Continue
+  anyway"). But there is NO "download on first launch" preference seam
+  — it's always a manual click; no setting/marker auto-starts it.
+- Installer-checkbox reality per platform: **Windows NSIS** — feasible
+  but the current bundle.windows.nsis uses installerHooks (macro-only
+  hooks, NO UI pages); a Finish-page checkbox needs an installerTemplate
+  (.nsi) override. **macOS** — .dmg drag-install, no .pkg, ZERO
+  interactive steps → no installer checkbox possible. **Linux** —
+  AppImage has no installer; .deb postinstall is possible but none is
+  configured. So a literal installer checkbox is a WINDOWS-only surface;
+  macOS/Linux use first-run.
+- Seam to reach the app: DesktopSettings has #[serde(flatten)] extra
+  (arbitrary keys survive round-trips) — an installer can write
+  autoInstallModel:true there (or a marker in app_data_base); a boot
+  step reads it and calls start_download() once. No such reader exists
+  yet — it's new.
+
+### Prompt
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first, local-first analytics harness: Tauri 2 desktop
+(Windows NSIS / macOS dmg / Linux deb+appimage), Rust engine
+(native/crates/lighthouse-core), shell (native/crates/lighthouse-
+desktop), React UI (src/). Read CLAUDE.md, docs/CONVENTIONS.md, and
+roadmap §53 before writing code. GOAL: let a user opt IN (or out) of
+installing the private model at install time, so it's ready without a
+manual first-run click. The download NEVER blocks the installer — the
+choice sets a preference the app's existing resumable downloader
+honors on first launch. Honest per-platform: a literal installer
+checkbox is Windows-only; macOS/Linux use a first-run opt-in (which
+mostly exists — elevate it).
+
+1. One preference, one boot action (the shared mechanism). Add an
+   auto-install-model preference (a DesktopSettings field, or the
+   extra map key autoInstallModel — pick a real typed field with a
+   settings_test entry per §39). On first launch, a boot step reads
+   it: if true AND the model isn't already present/downloading, call
+   local_model::start_download() ONCE (guard with a "kicked" marker so
+   a relaunch mid-download doesn't double-fire), then clear/latch the
+   flag so it's a one-time trigger. The download runs in the
+   background via the EXISTING machinery (resumable, validated, §22.4
+   warm on completion) — reuse it, do not reimplement.
+2. The first-run opt-in (cross-platform — the macOS/Linux mechanism,
+   and a safety net on Windows). Elevate the onboarding model step to
+   an explicit, honest choice: "Set up the private model now? — a
+   one-time ~4.2 GB download; runs on this device, nothing leaves it"
+   vs "Skip — use a cloud API key or add it later" (byte-pinned).
+   Choosing "now" sets the §1 preference (or starts the download
+   directly if already past first boot). The existing "Start download
+   now"/"Continue anyway" affordances stay; this makes the CHOICE
+   explicit and persisted rather than a bare button.
+3. The Windows installer checkbox (the "actual installer" opt-in). Add
+   an NSIS Finish-page (or a components) checkbox "Download the private
+   model after installation (~4.2 GB)" via an installerTemplate
+   override (bundle.windows.nsis.installerTemplate — the current
+   installerHooks macros can't add a page). Checked → the installer
+   writes the §1 preference/marker into the app-data location the boot
+   step reads (a default lighthouse-settings.json seed in
+   %APPDATA%\com.lighthouse.app, or a marker file). Unchecked → nothing
+   (the first-run opt-in still offers it). Keep the installer fast — it
+   only writes a flag, never downloads. Verify the NSIS template
+   override still builds under desktop-release.yml and the existing
+   PREINSTALL/PREUNINSTALL taskkill hooks survive.
+4. Default + honesty. Default the checkbox/first-run choice UNCHECKED
+   (a lean install; the model is large and cloud-key users don't need
+   it) — but this is an OWNER call: flag it in the PR (privacy-first
+   could argue default-checked). Never imply the model is required —
+   the app works with a cloud key or, on capable Macs, Apple's
+   on-device model. The copy states the size and that it's optional
+   every place it appears.
+5. Tests + stamps. settings_test covers the new field (the §39 no-`..`
+   tripwire); a test that the boot step calls start_download exactly
+   once when the flag is set and not otherwise (guarded); the NSIS
+   template override is grep-verified (the desktop crate doesn't build
+   in the container — CLAUDE.md). Byte-pin the opt-in copy. Bump
+   current+1 across all SEVEN stamps; suites + release-smoke +
+   ios-build green.
+
+Constraints. The installer NEVER downloads (it only sets a flag). The
+model stays unbundled and opt-in on every platform. macOS/Linux get NO
+installer checkbox (state it — first-run is their path). No engine
+change to the download itself. iOS unaffected (App Store + §42
+on-demand). No telemetry. Byte-pinned copy; twins where shared.
+SharePoint untouched.
+
+Acceptance:
+1. Windows: the installer shows an opt-in "download the private model"
+   checkbox; checking it → the model auto-downloads in the background
+   on first launch (resumable, warms when done); unchecking → no
+   download, and the first-run opt-in still offers it.
+2. macOS/Linux: no installer checkbox (honest); the first-run choice
+   offers the model with the size + optionality stated; choosing it
+   downloads via the existing flow.
+3. The boot trigger fires exactly once (guarded); a mid-download
+   relaunch doesn't re-kick.
+4. The model remains optional everywhere; the app works with a cloud
+   key without it.
+5. Suites + release-smoke + ios-build green; settings tripwire green;
+   seven stamps bumped.
+
+Environment. Engine/settings/boot logic + tests container-testable;
+the NSIS template override + the on-device first-run flow need a
+Windows/mac build (grep-verify + desktop-release as the gate — house
+convention). One commit per numbered section. Open ONE PR titled
+"Private model: an install-time opt-in"; stop at the PR.
+```
+
+## 54. The updater that just updates (verified auto-install) (2026-07-23)
+
+Owner: the updater should update the existing copy in place — no
+release-page trip, no manual reinstall/uninstall — and keep settings
+by default. Diagnosis @ 0.14.17 is the good news: **the hard part is
+already built.**
+- The full check → download → minisign-verify → install → exit path
+  EXISTS (supervise.rs update_now + lighthouse_core::updates; the UI is
+  UpdateNotice.tsx). It is NOT notify-only by construction.
+- It's notify-only in the FIELD only because no signing key is baked:
+  can_install requires updater_pubkey() (option_env!
+  LIGHTHOUSE_UPDATER_PUBKEY) + a release .sig; with neither, the button
+  says "Get it" and opens the releases page. The CI updater-manifest
+  job + createUpdaterArtifacts (.sig) are gated on the
+  TAURI_SIGNING_PRIVATE_KEY secret — currently unset → skipped.
+- "Keep settings by default" is ALREADY TRUE by design: settings,
+  secrets, profile, connectors, the 4.2 GB model, and the vault index
+  all live in the user-data/vault dirs (app_data_base), NEVER the
+  install dir (installer-hooks even scope deletions to boot-state).
+  identity_pin.rs + auto-updater-design.md §9 guarantee it. An
+  in-place update preserves everything.
+- Remaining CODE gaps to "feels automatic": macOS still opens the
+  verified .dmg (manual drag) — real auto-replace needs the
+  .app.tar.gz the CI already produces (platform_asset picks .dmg);
+  .deb can NEVER auto-update (only AppImage/NSIS/app-bundle) → stays
+  notify; the check is boot-time only (no background re-check).
+- This is roadmap F1, whose prompt is STALE (it says "replace
+  notify-only with download+verify+install" — already done). §54 is
+  the accurate remaining work: provision + macOS replace + UX +
+  honest per-platform.
+
+### Prompt
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first, local-first analytics harness: Tauri 2 desktop
+(Windows NSIS / macOS app+dmg / Linux appimage+deb). Read CLAUDE.md,
+docs/CONVENTIONS.md, docs/auto-updater-design.md, docs/signing.md, and
+roadmap §53 + §54 before writing code. GOAL: in-app updates that feel
+automatic — the app updates its existing copy in place and keeps the
+user's settings — no release-page trip, no manual reinstall. CRITICAL:
+the download → minisign-verify → install path ALREADY EXISTS
+(supervise.rs update_now, updates.rs, UpdateNotice.tsx) — DO NOT
+rewrite it. This is provisioning + the macOS in-place gap + UX polish
++ honest per-platform behavior. Supersedes F1's stale updater
+guidance.
+
+1. Owner provisioning (the activation — the session CANNOT set secrets;
+   make it a crisp checklist the PR surfaces). Document in signing.md
+   the exact steps: `tauri signer generate` → set repo secrets
+   TAURI_SIGNING_PRIVATE_KEY + TAURI_SIGNING_PRIVATE_KEY_PASSWORD and
+   repo variable LIGHTHOUSE_UPDATER_PUBKEY (the public key). Verify the
+   CI already consumes them: updater-manifest un-skips, the bundle step
+   sets createUpdaterArtifacts (emitting the .sig beside each
+   installer), and builds bake the pubkey. The feature ships
+   ARMED-BUT-INERT until the owner provisions (exactly today's gate) —
+   so this PR is safe to merge unsigned; it goes live on the first
+   signed release. Add a one-line CI assertion that a signed release
+   carries both the installer AND its .sig (the §25 end-of-chain
+   pattern).
+2. macOS actually replaces the app (close the one real code gap). In
+   update_now's macOS arm, prefer the .app.tar.gz asset (CI already
+   produces it) and do an in-place bundle replace + relaunch — unpack,
+   swap the .app under /Applications (or wherever it runs), verify the
+   .sig, relaunch — instead of opening the .dmg. Keep the .dmg as the
+   fallback when the tar.gz is absent/unsigned. Express the asset
+   choice as a pure fn (pick_update_asset(platform, assets) — the
+   house verdict pattern) with tests for each platform.
+3. "Feels automatic" UX (consent stays, friction goes). Add a
+   background/periodic re-check (not just boot — e.g. a daily check
+   while running, plus on focus), so an available update surfaces
+   without the user hunting. The UpdateNotice action becomes one click:
+   "Update & relaunch" → download (honest progress) → verify → install
+   → relaunch, with a quiet "your settings, files, and model are kept"
+   reassurance. Never silent-forced (privacy-first: the user consents),
+   but never a release-page detour when can_install is true. Failure
+   falls back to the honest "download from Releases" path.
+4. Honest per-platform (pin it). NSIS: the existing halt→run-installer→
+   exit (consider the /S silent flag only if it preserves per-user
+   install + shortcuts — otherwise keep the quick UI installer).
+   macOS: §2 in-place replace. AppImage: the existing chmod+swap.
+   **.deb: stays NOTIFY-ONLY** — it cannot auto-update; UpdateNotice
+   shows deb users an honest "a new .deb is available — download"
+   (never a broken in-place attempt). A test pins that pick_update_asset
+   returns None-installable for .deb.
+5. Settings preservation — confirm and PIN (the "keep settings by
+   default" ask; already true by design). A test asserts the update
+   staging + install never touches the user-data/vault dirs
+   (settings.json, secrets.json, profile.json, models/, .rag-vault) —
+   they resolve under app_data_base/vault, not the install dir
+   (reuse identity_pin.rs's guarantee). Document the preserved set in
+   auto-updater-design.md.
+6. Docs + stamps. Update auto-updater-design.md (accurate status:
+   Phase B built; the remaining gaps this PR closes), signing.md (the
+   §1 checklist), and note in CLAUDE.md's release-mechanics that once
+   provisioned, updates are verified auto-install (macOS/Windows/
+   AppImage) with .deb notify-only. Mark F1's updater step done.
+   Bump current+1 across all SEVEN stamps; suites + release-smoke +
+   ios-build green.
+
+Constraints. DO NOT rewrite the existing download/verify/install path
+— extend it (macOS asset, background check, UX). DO NOT switch to
+tauri-plugin-updater (the app deliberately uses the custom minisign
+path + baked pubkey). Settings/secrets/model/vault preservation is
+non-negotiable (data-dir by design — pin it). Consent stays (no
+silent-forced installs). .deb honestly notify-only. No telemetry.
+iOS unaffected (App Store handles updates). SharePoint untouched.
+
+Acceptance:
+1. On a SIGNED build (owner-provisioned): UpdateNotice offers "Update
+   & relaunch"; clicking it updates in place and relaunches, with
+   settings/secrets/model/vault intact — no release-page trip, no
+   manual reinstall.
+2. macOS replaces the .app in place (from the .app.tar.gz), not a
+   .dmg drag; Windows/AppImage update in place; .deb shows an honest
+   "download the new .deb" (pinned).
+3. A background re-check surfaces an available update while running.
+4. The settings-preservation test is green (update never touches the
+   data/vault dirs); pick_update_asset tests green per platform.
+5. Unsigned builds still ship (armed-but-inert, notify-only) — the PR
+   merges without secrets; the CI .sig assertion is green on a signed
+   release.
+6. Docs updated; F1 marked done; suites + release-smoke + ios-build
+   green; seven stamps bumped.
+
+Environment. pick_update_asset + settings-preservation + CI wiring are
+container-testable; the actual in-place update + relaunch need signed
+Windows/mac/Linux builds (desktop-release as the gate; the owner-
+provisioned signed release is where it goes live — record that in the
+PR). One commit per numbered section. Open ONE PR titled "Updater:
+verified in-place auto-install, settings preserved"; stop at the PR.
+```
