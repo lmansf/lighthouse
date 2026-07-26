@@ -30,6 +30,7 @@ const llmTwin = read("src/server/llm.ts");
 const llmRust = read("native/crates/lighthouse-core/src/llm.rs");
 const providerAuthRust = read("native/crates/lighthouse-core/src/provider_auth.rs");
 const realService = read("src/contracts/real/rag.real.ts");
+const ragTransport = read("src/contracts/real/ragTransport.ts");
 const types = read("src/contracts/types.ts");
 const services = read("src/contracts/services.ts");
 
@@ -265,4 +266,11 @@ test("contracts expose the sign-in surface and the real service posts the provid
       `real service wires action ${action}`,
     );
   }
+});
+
+test("the real RAG service delegates HTTP mechanics to the narrow transport boundary", () => {
+  assert.match(realService, /import \{ ragTransport \} from "\.\/ragTransport";/);
+  assert.doesNotMatch(realService, /\bfetch\(/, "domain operations do not own HTTP requests");
+  assert.match(ragTransport, /export class RagTransport/);
+  assert.match(ragTransport, /headers: \{ "content-type": "application\/json" \}/);
 });
