@@ -1,5 +1,6 @@
 /** Real RagService — talks to the local `/api/rag` route (filesystem-backed). */
 import type { PlatformKind, RagService, ReportSummary, ReportTemplate } from "../services";
+import { ragTransport } from "./ragTransport";
 // Relative (not "@/") so the node test loader can resolve this file — the
 // contracts barrel is imported by engine-level suites without webpack aliases.
 import { rememberPlatform } from "../../shell/desktopBridge";
@@ -44,30 +45,15 @@ import type {
   SigninStatus,
 } from "../types";
 
-async function getTree(): Promise<{
-  sources: DataSource[];
-  nodes: FileNode[];
-  desktop: boolean;
-  platform?: PlatformKind;
-}> {
-  const r = await fetch("/api/rag", { cache: "no-store" });
-  if (!r.ok) throw new Error(`GET /api/rag ${r.status}`);
-  const t = await r.json();
+async function getTree() {
+  const t = await ragTransport.getTree();
   // Prime the ambient platform helper (§1) from the earliest payload every
   // window fetches; absent field (older engine) ⇒ helper stays "desktop".
   rememberPlatform(t.platform);
   return t;
 }
 
-async function post(body: unknown): Promise<Record<string, unknown>> {
-  const r = await fetch("/api/rag", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!r.ok) throw new Error(`POST /api/rag ${r.status}`);
-  return r.json();
-}
+const post = (body: unknown) => ragTransport.post(body);
 
 class RealRagService implements RagService {
   async listSources(): Promise<DataSource[]> {
@@ -96,13 +82,13 @@ class RealRagService implements RagService {
   async addRule(rule: CurationRuleInput): Promise<{ rule?: CurationRule; error?: string }> {
     // Add-time validation failures come back as 400 + {error}; read the body
     // instead of throwing so the create form can show the engine's reason.
-    const r = await fetch("/api/rag", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ op: "rules", action: "add", rule }),
+    const result = await ragTransport.postResult<{ rule?: CurationRule; error?: string }>({
+      op: "rules",
+      action: "add",
+      rule,
     });
-    const data = (await r.json().catch(() => ({}))) as { rule?: CurationRule; error?: string };
-    if (!r.ok) return { error: data.error ?? `POST /api/rag ${r.status}` };
+    const data = result.body;
+    if (!result.ok) return { error: data.error ?? `POST /api/rag ${result.status}` };
     return data;
   }
 
@@ -439,16 +425,12 @@ class RealRagService implements RagService {
   private async investigationsOp(
     body: Record<string, unknown>,
   ): Promise<{ investigation?: Investigation; error?: string }> {
-    const r = await fetch("/api/rag", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ op: "investigations", ...body }),
-    });
-    const data = (await r.json().catch(() => ({}))) as {
+    const result = await ragTransport.postResult<{
       investigation?: Investigation;
       error?: string;
-    };
-    if (!r.ok) return { error: data.error ?? `POST /api/rag ${r.status}` };
+    }>({ op: "investigations", ...body });
+    const data = result.body;
+    if (!result.ok) return { error: data.error ?? `POST /api/rag ${result.status}` };
     return data;
   }
 
@@ -509,22 +491,18 @@ class RealRagService implements RagService {
     // The export op returns {savedId, savedName} or {error} (400 on a bad id /
     // unusable folder, 200 {error} on a write failure — like exportChat); read
     // the body regardless of status so the reason surfaces inline.
-    const r = await fetch("/api/rag", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        op: "investigations",
-        action: "export",
-        id,
-        ...(title ? { title } : {}),
-      }),
-    });
-    const data = (await r.json().catch(() => ({}))) as {
+    const result = await ragTransport.postResult<{
       savedId?: string;
       savedName?: string;
       error?: string;
-    };
-    if (!r.ok) return { error: data.error ?? `POST /api/rag ${r.status}` };
+    }>({
+      op: "investigations",
+      action: "export",
+      id,
+      ...(title ? { title } : {}),
+    });
+    const data = result.body;
+    if (!result.ok) return { error: data.error ?? `POST /api/rag ${result.status}` };
     return data;
   }
 
@@ -536,17 +514,13 @@ class RealRagService implements RagService {
   private async boardsOp(
     body: Record<string, unknown>,
   ): Promise<{ board?: Board; ok?: boolean; error?: string }> {
-    const r = await fetch("/api/rag", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ op: "boards", ...body }),
-    });
-    const data = (await r.json().catch(() => ({}))) as {
+    const result = await ragTransport.postResult<{
       board?: Board;
       ok?: boolean;
       error?: string;
-    };
-    if (!r.ok) return { error: data.error ?? `POST /api/rag ${r.status}` };
+    }>({ op: "boards", ...body });
+    const data = result.body;
+    if (!result.ok) return { error: data.error ?? `POST /api/rag ${result.status}` };
     return data;
   }
 
@@ -596,15 +570,13 @@ class RealRagService implements RagService {
    * (the dialogs catch and show it verbatim — the engine owns the rules).
    */
   private async viewsOp(body: Record<string, unknown>): Promise<Record<string, unknown>> {
-    const r = await fetch("/api/rag", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ op: "views", ...body }),
-    });
-    const data = (await r.json().catch(() => ({}))) as Record<string, unknown>;
-    if (!r.ok) {
+    const result = await ragTransport.postResult({ op: "views", ...body });
+    const data = result.body;
+    if (!result.ok) {
       throw new Error(
-        typeof data.error === "string" && data.error ? data.error : `POST /api/rag ${r.status}`,
+        typeof data.error === "string" && data.error
+          ? data.error
+          : `POST /api/rag ${result.status}`,
       );
     }
     return data;
@@ -665,19 +637,15 @@ class RealRagService implements RagService {
     // Refusals (unknown source, guard rejection, the model's own refusal)
     // come back 400 + {error} and THROW so the dialog shows the reason;
     // {available:false} is a normal answer (extractive provider / dev twin).
-    const r = await fetch("/api/rag", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ op: "shapeView", source, instruction, fileIds }),
-    });
-    const data = (await r.json().catch(() => ({}))) as {
+    const result = await ragTransport.postResult<{
       proposal?: ShapeProposal;
       available?: boolean;
       reason?: string;
       error?: string;
-    };
-    if (!r.ok) {
-      throw new Error(data.error ?? `POST /api/rag ${r.status}`);
+    }>({ op: "shapeView", source, instruction, fileIds });
+    const data = result.body;
+    if (!result.ok) {
+      throw new Error(data.error ?? `POST /api/rag ${result.status}`);
     }
     if (data.available === false) {
       return {
@@ -702,15 +670,13 @@ class RealRagService implements RagService {
    * and show it verbatim — the engine owns the rules).
    */
   private async semanticOp(body: Record<string, unknown>): Promise<Record<string, unknown>> {
-    const r = await fetch("/api/rag", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ op: "semantic", ...body }),
-    });
-    const data = (await r.json().catch(() => ({}))) as Record<string, unknown>;
-    if (!r.ok) {
+    const result = await ragTransport.postResult({ op: "semantic", ...body });
+    const data = result.body;
+    if (!result.ok) {
       throw new Error(
-        typeof data.error === "string" && data.error ? data.error : `POST /api/rag ${r.status}`,
+        typeof data.error === "string" && data.error
+          ? data.error
+          : `POST /api/rag ${result.status}`,
       );
     }
     return data;
@@ -768,20 +734,16 @@ class RealRagService implements RagService {
   async defineMetric(sql: string, fileIds: string[]): Promise<DefineMetricResult> {
     // {available:false} is a normal answer (no aggregate to define / dev twin);
     // a real refusal would ride back as 400 + {error}, so surface that too.
-    const r = await fetch("/api/rag", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ op: "defineMetric", sql, fileIds }),
-    });
-    const data = (await r.json().catch(() => ({}))) as {
+    const result = await ragTransport.postResult<{
       available?: boolean;
       expression?: string;
       entity?: string;
       reason?: string;
       error?: string;
-    };
-    if (!r.ok) {
-      throw new Error(data.error ?? `POST /api/rag ${r.status}`);
+    }>({ op: "defineMetric", sql, fileIds });
+    const data = result.body;
+    if (!result.ok) {
+      throw new Error(data.error ?? `POST /api/rag ${result.status}`);
     }
     if (data.available === true && typeof data.expression === "string" && typeof data.entity === "string") {
       return { available: true, expression: data.expression, entity: data.entity };

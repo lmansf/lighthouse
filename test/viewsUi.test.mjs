@@ -186,8 +186,8 @@ test("the contracts carry the two ops end to end", () => {
     assert.ok(services.includes(sig), `services.ts declares ${sig}`);
   }
   // The real client posts the exact wire ops the three engines answer.
-  assert.match(real, /JSON\.stringify\(\{ op: "views", \.\.\.body \}\)/);
-  assert.match(real, /JSON\.stringify\(\{ op: "shapeView", source, instruction, fileIds \}\)/);
+  assert.match(real, /ragTransport\.postResult\(\{ op: "views", \.\.\.body \}\)/);
+  assert.match(real, /ragTransport\.postResult<\{[\s\S]*?\}>\(\{ op: "shapeView", source, instruction, fileIds \}\)/);
   // The flattened summary rides create; refusals throw the engine's reason.
   assert.match(real, /summaryText: input\.summaryText/);
   assert.match(real, /summarySource: input\.summarySource/);
