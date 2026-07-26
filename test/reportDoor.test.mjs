@@ -111,11 +111,14 @@ test("§49 §4: the Reports home lists saved reports and opens rows in the reade
   const home = read("src/features/chat/ReportsHome.tsx");
   assert.match(home, /ragService\s*\n?\s*\.listReports\(\)/, "lists the saved reports (newest-first)");
   assert.match(home, /openSavedReport\(id\)/, "a row opens the reader");
-  // "New report" is capability-gated on an investigable table (no dead door),
-  // and reuses the same investigate op + hypothesis framing.
-  assert.match(home, /\.filter\(\(t\) => t\.investigable\)/, "gated on an investigable table");
-  assert.match(home, /ragService\.investigate\(table, undefined, wire, hypoText\.trim\(\) \|\| undefined\)/, "reused investigate op");
-  assert.match(home, /disabled=\{tables\.length === 0\}/, "New report is disabled with no investigable table");
+  // "New report" builds from any vault spreadsheet — an already-visible
+  // investigable table, or a hidden one it makes visible on Generate
+  // (make-visible-and-keep) — reusing the same investigate op + hypothesis.
+  assert.match(home, /\.filter\(\(t\) => t\.investigable\)/, "surfaces the investigable tables");
+  assert.match(home, /ragService\.investigate\(tableName, undefined, wire, hypoText\.trim\(\) \|\| undefined\)/, "reused investigate op");
+  assert.match(home, /disabled=\{!canReport\}/, "enabled on an investigable table OR a hidden spreadsheet — never a dead door");
+  assert.match(home, /hiddenSheets/, "offers the vault's hidden spreadsheets");
+  assert.match(home, /toggleIncluded\(opt\.id\)/, "makes a hidden sheet visible before analyzing (make-visible-and-keep)");
   // The desktop dialog host opens on its own event.
   assert.match(home, /export const OPEN_REPORTS_EVENT = "lighthouse:open-reports";/, "the pinned home event");
   assert.match(home, /window\.addEventListener\(OPEN_REPORTS_EVENT, onOpen\)/, "ReportsHomeHost listens for it");
