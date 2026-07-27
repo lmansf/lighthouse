@@ -363,3 +363,38 @@ call site, the boot-phase-gated `ipcMain` handlers, a tray item); `electron/spla
 (+ inline script); `package.json` (`electron-updater` dep, `releaseType`; Phase B:
 mac `zip` target, `win.publisherName`); `.github/workflows/release.yml` (Phase B
 signing — see §3 custody note).
+
+## 11. What an in-place update preserves (Tauri era)
+
+The one-click "Update & relaunch" keeps everything the user cares about. That
+promise rests on two structural invariants, both pinned by
+`test/updaterPreservesData.test.mjs` (a container-testable source-pin — the
+desktop crate's own integration tests only compile in CI):
+
+1. **An update writes only to the app bundle / installer target.** The macOS
+   in-place swap (`install_macos_app_archive`) locates the running `.app` via
+   `current_exe()`, stages the new bundle on that bundle's *own volume*, and
+   swaps it by `fs::rename` — it never touches the app-data base. The download
+   itself stages under `app_data_base()/updates` (co-located with app-data,
+   which an update never deletes), never inside the bundle.
+2. **All user data resolves install-independently.** Every reader/writer routes
+   through `app_data_base()` (pinned to `com.lighthouse.app`, decoupled from the
+   bundle identifier — see `tests/identity_pin.rs`), or the user's Documents for
+   the vault. Nothing is rooted at the running executable's directory, so
+   replacing the bundle can't move it. `lib.rs` derives **no** path from
+   `current_exe()` — the source-pin test fails the build if that ever changes.
+
+**The preserved set** (untouched by any update):
+
+| What | Where it lives | Resolver |
+|---|---|---|
+| Settings (incl. the `vaultDir` pointer, all preferences) | `app_data_base()/lighthouse-settings.json` | `settings_file` |
+| Downloaded local model (~4 GB `.gguf`) | `app_data_base()/models` | `LIGHTHOUSE_MODELS_DIR` (bootstrap_env) |
+| Connector tokens | `app_data_base()/connectors` | `LIGHTHOUSE_CONNECTORS_DIR` (bootstrap_env) |
+| Secrets / sealed keys / signed-in profile | `LIGHTHOUSE_APP_STATE_DIR` under `app_data_base()` | bootstrap_env |
+| The vault folder + its files | the user's Documents (or a policy root) | `vault_dir_setting` |
+
+macOS swaps the bundle in place; Windows/Linux hand the verified installer to
+NSIS / the AppImage, which likewise install *the app*, not the user's data
+(NSIS `perMachine:false` installs elsewhere and never touches app-data). Either
+way the tables above are untouched, so "Update & relaunch" is an honest label.
