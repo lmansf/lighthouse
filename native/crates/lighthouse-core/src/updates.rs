@@ -54,6 +54,83 @@ pub fn verify_update_signature(data: &[u8], sig: &str, pubkey: &str) -> Result<(
         .context("update artifact failed signature verification")
 }
 
+/// The platform an update is being picked for — passed in (not read from
+/// `cfg!`) so the choice is a pure, per-platform table the tests pin, off any
+/// real host (CONVENTIONS "the pure verdict-fn pattern").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UpdatePlatform {
+    Windows,
+    Macos,
+    Linux,
+}
+
+/// How the shell installs a picked asset — the verdict that drives
+/// `update_now`'s per-platform arm. A `.deb` is deliberately absent: it can't
+/// self-install in place (needs `dpkg`/root), so it stays notify-only and
+/// `pick_update_asset` returns `None` for a `.deb`-only Linux release.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InstallKind {
+    /// Windows NSIS installer (`.exe`): halt children → run installer → exit.
+    WindowsInstaller,
+    /// macOS updater archive (`.app.tar.gz`): unpack + in-place bundle swap +
+    /// relaunch — the "feels automatic" path.
+    MacAppArchive,
+    /// macOS disk image (`.dmg`): opened for a manual drag — the FALLBACK when
+    /// no signed `.app.tar.gz` is present (e.g. an unsigned release).
+    MacDmg,
+    /// Linux AppImage: `chmod +x` + swap the file in place.
+    LinuxAppImage,
+}
+
+/// One picked update asset: the release-asset filename to download, and how to
+/// install it once verified.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PickedAsset {
+    pub name: String,
+    pub kind: InstallKind,
+}
+
+/// Choose which release asset this platform installs in place, and how — the
+/// pure verdict behind the shell's per-platform install. `asset_names` are the
+/// release's asset filenames (any case; `.sig` siblings are ignored by the
+/// suffix match). Returns `None` when nothing on the release can self-install
+/// here — the caller then stays notify-only (open the releases page):
+///   - **Linux** with only a `.deb` (needs `dpkg`/root): download the `.deb`;
+///   - a platform whose installer asset is simply absent.
+/// **macOS PREFERS the `.app.tar.gz`** (verified in-place bundle swap) and falls
+/// back to the `.dmg` (manual drag) only when the archive is absent — an
+/// unsigned release carries no `.app.tar.gz`, so it correctly degrades to the
+/// dmg-open path.
+pub fn pick_update_asset(platform: UpdatePlatform, asset_names: &[String]) -> Option<PickedAsset> {
+    // A `.sig` sibling (e.g. `foo.exe.sig`) never matches an installer suffix,
+    // so detached signatures are transparently skipped.
+    let find = |suffix: &str| -> Option<String> {
+        asset_names
+            .iter()
+            .find(|n| n.to_ascii_lowercase().ends_with(suffix))
+            .cloned()
+    };
+    match platform {
+        UpdatePlatform::Windows => find(".exe").map(|name| PickedAsset {
+            name,
+            kind: InstallKind::WindowsInstaller,
+        }),
+        UpdatePlatform::Macos => {
+            if let Some(name) = find(".app.tar.gz") {
+                Some(PickedAsset { name, kind: InstallKind::MacAppArchive })
+            } else {
+                find(".dmg").map(|name| PickedAsset { name, kind: InstallKind::MacDmg })
+            }
+        }
+        // AppImage self-updates in place; a `.deb` cannot, so a release with
+        // ONLY a `.deb` returns None (notify-only) — pinned by test.
+        UpdatePlatform::Linux => find(".appimage").map(|name| PickedAsset {
+            name,
+            kind: InstallKind::LinuxAppImage,
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -109,5 +186,83 @@ mod tests {
         // Garbage inputs → clean errors, no panic.
         assert!(verify_update_signature(data, "not a signature", &pubkey_b64).is_err());
         assert!(verify_update_signature(data, &sig_b64, "not a key").is_err());
+    }
+
+    fn names(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn pick_update_asset_is_a_per_platform_table() {
+        use InstallKind::*;
+        use UpdatePlatform::*;
+        // A full signed release: every platform's installer + its .sig + the
+        // manifests. Each platform picks ITS installer, never a .sig sibling.
+        let full = names(&[
+            "Lighthouse-Setup.exe",
+            "Lighthouse-Setup.exe.sig",
+            "Lighthouse_0.14.19_x64.dmg",
+            "Lighthouse.app.tar.gz",
+            "Lighthouse.app.tar.gz.sig",
+            "Lighthouse_0.14.19_amd64.AppImage",
+            "Lighthouse_0.14.19_amd64.AppImage.sig",
+            "lighthouse_0.14.19_amd64.deb",
+            "latest.json",
+            "latest.yml",
+            "latest-mac.yml",
+        ]);
+        assert_eq!(
+            pick_update_asset(Windows, &full),
+            Some(PickedAsset { name: "Lighthouse-Setup.exe".into(), kind: WindowsInstaller })
+        );
+        // macOS PREFERS the .app.tar.gz over the .dmg (verified in-place swap).
+        assert_eq!(
+            pick_update_asset(Macos, &full),
+            Some(PickedAsset { name: "Lighthouse.app.tar.gz".into(), kind: MacAppArchive })
+        );
+        assert_eq!(
+            pick_update_asset(Linux, &full),
+            Some(PickedAsset {
+                name: "Lighthouse_0.14.19_amd64.AppImage".into(),
+                kind: LinuxAppImage,
+            })
+        );
+    }
+
+    #[test]
+    fn macos_falls_back_to_dmg_when_no_app_archive() {
+        use InstallKind::*;
+        use UpdatePlatform::*;
+        // Unsigned release: no .app.tar.gz, only the first-install .dmg.
+        let unsigned_mac = names(&["Lighthouse_0.14.19_x64.dmg"]);
+        assert_eq!(
+            pick_update_asset(Macos, &unsigned_mac),
+            Some(PickedAsset { name: "Lighthouse_0.14.19_x64.dmg".into(), kind: MacDmg })
+        );
+    }
+
+    #[test]
+    fn deb_only_linux_is_notify_only_and_deb_is_never_picked() {
+        use InstallKind::LinuxAppImage;
+        use UpdatePlatform::*;
+        // A Linux release with ONLY a .deb → not installable in place (None).
+        assert_eq!(pick_update_asset(Linux, &names(&["app_0.14.19_amd64.deb"])), None);
+        // AppImage alongside the .deb → still the AppImage, never the .deb.
+        let both = names(&["app_0.14.19_amd64.AppImage", "app_0.14.19_amd64.deb"]);
+        assert_eq!(pick_update_asset(Linux, &both).unwrap().kind, LinuxAppImage);
+    }
+
+    #[test]
+    fn absent_installer_is_none_and_match_is_case_insensitive() {
+        use UpdatePlatform::*;
+        // No matching installer → None for every platform (notify-only).
+        assert_eq!(pick_update_asset(Windows, &names(&["latest.json"])), None);
+        assert_eq!(pick_update_asset(Macos, &names(&[])), None);
+        assert_eq!(pick_update_asset(Linux, &names(&["notes.txt"])), None);
+        // Case-insensitive suffix match.
+        assert_eq!(
+            pick_update_asset(Linux, &names(&["Lighthouse.AppImage"])).unwrap().name,
+            "Lighthouse.AppImage"
+        );
     }
 }

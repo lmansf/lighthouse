@@ -649,6 +649,11 @@ pub struct UpdateInfo {
     /// produced by CI when the signing key is configured). Verification is
     /// mandatory before install — no sig ⇒ notify-only for that release.
     pub sig_url: Option<String>,
+    /// How the picked asset installs (`lighthouse_core::updates::pick_update_asset`):
+    /// Windows installer / macOS `.app.tar.gz` in-place swap / macOS `.dmg`
+    /// fallback / Linux AppImage. `None` when the release carries no installable
+    /// asset for this platform (a `.deb`-only Linux release stays notify-only).
+    pub kind: Option<lighthouse_core::updates::InstallKind>,
 }
 
 pub struct UpdateState(pub Mutex<Option<UpdateInfo>>);
@@ -659,27 +664,36 @@ impl Default for UpdateState {
     }
 }
 
-/// The installer asset for THIS platform from a GitHub release's asset list
-/// (the names the desktop-release pipeline publishes: Lighthouse-Setup.exe /
-/// Lighthouse.dmg / *.AppImage / *.deb).
-fn platform_asset(assets: &serde_json::Value) -> Option<(String, String)> {
+/// The installer asset for THIS platform + how to install it, chosen by the
+/// pure `lighthouse_core::updates::pick_update_asset` verdict over the release's
+/// asset names — so the per-platform choice (Windows `.exe` / macOS
+/// `.app.tar.gz`-preferred-over-`.dmg` / Linux `.AppImage`, `.deb` never) is a
+/// table the engine's tests pin, not `cfg!` logic scattered in the shell.
+/// Returns `(name, download_url, kind)`.
+fn platform_asset(
+    assets: &serde_json::Value,
+) -> Option<(String, String, lighthouse_core::updates::InstallKind)> {
+    use lighthouse_core::updates::UpdatePlatform;
     let list = assets.as_array()?;
-    let pick = |pred: &dyn Fn(&str) -> bool| {
-        list.iter().find_map(|a| {
-            let name = a["name"].as_str()?;
-            let url = a["browser_download_url"].as_str()?;
-            pred(&name.to_ascii_lowercase()).then(|| (name.to_string(), url.to_string()))
-        })
-    };
-    if cfg!(windows) {
-        pick(&|n| n.ends_with(".exe"))
+    let names: Vec<String> = list
+        .iter()
+        .filter_map(|a| a["name"].as_str().map(String::from))
+        .collect();
+    let platform = if cfg!(windows) {
+        UpdatePlatform::Windows
     } else if cfg!(target_os = "macos") {
-        pick(&|n| n.ends_with(".dmg"))
+        UpdatePlatform::Macos
     } else {
-        // AppImage can at least be downloaded and run; .deb needs dpkg — the
-        // releases page stays the Linux fallback when neither is present.
-        pick(&|n| n.ends_with(".appimage"))
-    }
+        UpdatePlatform::Linux
+    };
+    let picked = lighthouse_core::updates::pick_update_asset(platform, &names)?;
+    // Resolve the download URL for the chosen asset name.
+    let url = list.iter().find_map(|a| {
+        (a["name"].as_str()? == picked.name)
+            .then(|| a["browser_download_url"].as_str().map(String::from))
+            .flatten()
+    })?;
+    Some((picked.name, url, picked.kind))
 }
 
 fn version_tuple(v: &str) -> Option<(u64, u64, u64)> {
@@ -730,7 +744,7 @@ pub async fn check_for_updates(app: AppHandle) {
         let asset = platform_asset(&body["assets"]);
         // The detached signature for this platform's asset, uploaded by CI
         // beside it when release signing is configured.
-        let sig_url = asset.as_ref().and_then(|(name, _)| {
+        let sig_url = asset.as_ref().and_then(|(name, _, _)| {
             let want = format!("{}.sig", name.to_ascii_lowercase());
             body["assets"].as_array()?.iter().find_map(|a| {
                 let n = a["name"].as_str()?;
@@ -745,9 +759,10 @@ pub async fn check_for_updates(app: AppHandle) {
         if let Some(state) = app.try_state::<UpdateState>() {
             *state.0.lock().unwrap_or_else(|p| p.into_inner()) = Some(UpdateInfo {
                 version: latest.trim_start_matches('v').to_string(),
-                asset_url: asset.as_ref().map(|(_, u)| u.clone()),
-                asset_name: asset.as_ref().map(|(n, _)| n.clone()),
+                asset_url: asset.as_ref().map(|(_, u, _)| u.clone()),
+                asset_name: asset.as_ref().map(|(n, _, _)| n.clone()),
                 sig_url,
+                kind: asset.as_ref().map(|(_, _, k)| *k),
             });
         }
         let _ = app.emit(
@@ -768,10 +783,11 @@ pub async fn check_for_updates(app: AppHandle) {
 /// Click-to-update — updater Phase B (download + VERIFY + install-on-consent).
 /// Requires a baked-in updater public key and a `.sig` beside the release
 /// asset: the installer is downloaded, minisign-verified, and only then run
-/// (Windows: launch NSIS + exit so it can replace files; macOS: open the
-/// verified dmg — drag-to-Applications stays manual until builds are signed;
-/// Linux: chmod + open the AppImage). Without a key or signature this is
-/// strictly notify-only and opens the releases page — the previous behavior
+/// (Windows: launch NSIS + exit so it can replace files; macOS: unpack the
+/// verified `.app.tar.gz` and swap the running bundle IN PLACE, then relaunch —
+/// the `.dmg` is the manual-drag fallback only when a release carries no signed
+/// archive; Linux: chmod + open the AppImage). Without a key or signature this
+/// is strictly notify-only and opens the releases page — the previous behavior
 /// of executing an unverifiable download is deliberately removed
 /// (docs/auto-updater-design.md §2).
 pub async fn update_now(app: AppHandle) -> serde_json::Value {
@@ -867,11 +883,105 @@ pub async fn update_now(app: AppHandle) -> serde_json::Value {
             sup.halt();
         }
     }
-    crate::open_with_os(&dest);
-    if cfg!(windows) {
-        // Give the installer a beat to start, then get out of its way.
-        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
-        app.exit(0);
+    // Install per the picked asset's kind. macOS is the one true in-place path:
+    // unpack the (already signature-verified) `.app.tar.gz` and swap the running
+    // bundle, then relaunch — no dmg drag, and the app-data/vault dirs (resolved
+    // under `app_data_base`, never the bundle) are untouched. Everything else
+    // keeps the existing OS hand-off; a macOS `.dmg` (unsigned release, no
+    // `.app.tar.gz`) opens for a manual drag as before.
+    #[cfg(target_os = "macos")]
+    {
+        if matches!(
+            info.kind,
+            Some(lighthouse_core::updates::InstallKind::MacAppArchive)
+        ) {
+            match install_macos_app_archive(&dest) {
+                Ok(bundle) => {
+                    crate::open_with_os(&bundle); // relaunch the freshly-swapped .app
+                    app.exit(0);
+                    return serde_json::json!({ "ok": true, "action": "installed" });
+                }
+                Err(e) => {
+                    eprintln!("in-place app replace failed — falling back to the releases page: {e}");
+                    crate::open_with_os(std::path::Path::new(RELEASE_PAGE_URL));
+                    return serde_json::json!({ "ok": false, "reason": "in-place replace failed", "action": "page" });
+                }
+            }
+        }
+        crate::open_with_os(&dest); // MacDmg: open the verified dmg (manual drag)
+        serde_json::json!({ "ok": true, "action": "installing" })
     }
-    serde_json::json!({ "ok": true, "action": "installing" })
+    #[cfg(not(target_os = "macos"))]
+    {
+        crate::open_with_os(&dest);
+        if cfg!(windows) {
+            // Give the installer a beat to start, then get out of its way.
+            tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+            app.exit(0);
+        }
+        serde_json::json!({ "ok": true, "action": "installing" })
+    }
+}
+
+/// Replace the running `.app` bundle in place with the one inside a
+/// signature-VERIFIED `.app.tar.gz`, returning the bundle path to relaunch.
+/// Fails closed — an unwritable install location (e.g. `/Applications` without
+/// admin), an extraction failure, or no `.app` in the archive leaves the current
+/// bundle untouched so the caller falls back to the releases page; the app is
+/// never left half-swapped. Staging is on the target's own volume, so the swap
+/// is a rename, and it touches ONLY the bundle — the app-data/vault dirs live
+/// elsewhere (`lib.rs::app_data_base`).
+#[cfg(target_os = "macos")]
+fn install_macos_app_archive(archive: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
+    use std::process::Command;
+    let exe = std::env::current_exe().map_err(|e| anyhow::anyhow!("current_exe: {e}"))?;
+    // …/Lighthouse.app/Contents/MacOS/Lighthouse → the enclosing `*.app` dir.
+    let app_dir = exe
+        .ancestors()
+        .find(|p| p.extension().and_then(|e| e.to_str()) == Some("app"))
+        .ok_or_else(|| anyhow::anyhow!("not running from a .app bundle"))?
+        .to_path_buf();
+    let parent = app_dir
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!(".app has no parent directory"))?
+        .to_path_buf();
+    // Fail closed if the install location isn't writable, rather than prompt for
+    // admin mid-update: the caller degrades to notify-only.
+    let probe = parent.join(".lighthouse-update-probe");
+    fs::write(&probe, b"x").map_err(|e| anyhow::anyhow!("install location not writable: {e}"))?;
+    let _ = fs::remove_file(&probe);
+    // Stage on the SAME volume as the target so the swap is a cheap rename.
+    let stage = parent.join(".lighthouse-update-staged");
+    let _ = fs::remove_dir_all(&stage);
+    fs::create_dir_all(&stage).map_err(|e| anyhow::anyhow!("staging dir: {e}"))?;
+    let extracted = Command::new("/usr/bin/tar")
+        .arg("-xzf")
+        .arg(archive)
+        .arg("-C")
+        .arg(&stage)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !extracted {
+        let _ = fs::remove_dir_all(&stage);
+        return Err(anyhow::anyhow!("tar extraction failed"));
+    }
+    let new_app = fs::read_dir(&stage)
+        .map_err(|e| anyhow::anyhow!("read staged dir: {e}"))?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .find(|p| p.extension().and_then(|e| e.to_str()) == Some("app"))
+        .ok_or_else(|| anyhow::anyhow!("no .app inside the updater archive"))?;
+    // Swap: move the current bundle aside, move the new one in. On any failure
+    // restore the old bundle so the app is never left missing.
+    let backup = app_dir.with_extension("app.old");
+    let _ = fs::remove_dir_all(&backup);
+    fs::rename(&app_dir, &backup).map_err(|e| anyhow::anyhow!("move current app aside: {e}"))?;
+    if let Err(e) = fs::rename(&new_app, &app_dir) {
+        let _ = fs::rename(&backup, &app_dir); // restore
+        let _ = fs::remove_dir_all(&stage);
+        return Err(anyhow::anyhow!("install new app: {e}"));
+    }
+    let _ = fs::remove_dir_all(&backup);
+    let _ = fs::remove_dir_all(&stage);
+    Ok(app_dir)
 }
