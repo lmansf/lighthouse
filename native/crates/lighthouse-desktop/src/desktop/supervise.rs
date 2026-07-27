@@ -664,6 +664,26 @@ impl Default for UpdateState {
     }
 }
 
+/// Coalesces update checks so the app can re-check when it returns to the
+/// foreground (an on-focus nudge from the UI) WITHOUT hammering the GitHub API
+/// on every focus edge. Holds the instant of the last check from ANY source —
+/// the 6 h background loop or a focus nudge — so a nudge right after a scheduled
+/// check is a no-op.
+#[derive(Default)]
+pub struct UpdateCheckClock(Mutex<Option<std::time::Instant>>);
+
+impl UpdateCheckClock {
+    /// Record that a check just ran.
+    fn mark(&self) {
+        *self.0.lock().unwrap_or_else(|p| p.into_inner()) = Some(std::time::Instant::now());
+    }
+    /// True when no check has run yet, or at least `min` has elapsed since one.
+    fn due(&self, min: std::time::Duration) -> bool {
+        let last = *self.0.lock().unwrap_or_else(|p| p.into_inner());
+        last.map_or(true, |t| t.elapsed() >= min)
+    }
+}
+
 /// The installer asset for THIS platform + how to install it, chosen by the
 /// pure `lighthouse_core::updates::pick_update_asset` verdict over the release's
 /// asset names — so the per-platform choice (Windows `.exe` / macOS
@@ -708,9 +728,30 @@ fn version_tuple(v: &str) -> Option<(u64, u64, u64)> {
     Some((it.next()??, it.next()??, it.next().flatten().unwrap_or(0)))
 }
 
+/// On-focus update nudge: run a check only if at least `min` has elapsed since
+/// the last one (any source), so returning to the foreground can surface a
+/// freshly-shipped release without waiting for the next 6 h tick or a restart —
+/// while a focus storm can never spam GitHub. Best-effort and non-blocking,
+/// exactly like `check_for_updates` (which stamps the shared clock itself).
+pub async fn check_for_updates_throttled(app: AppHandle, min: std::time::Duration) {
+    let due = app
+        .try_state::<UpdateCheckClock>()
+        .map(|c| c.due(min))
+        .unwrap_or(true);
+    if due {
+        check_for_updates(app).await;
+    }
+}
+
 /// Best-effort check for a newer GitHub release. Never blocks startup, never
 /// downloads, never fails the app — it only arms the tray notice + an event.
 pub async fn check_for_updates(app: AppHandle) {
+    // Stamp the shared clock up front so an on-focus nudge that lands right
+    // after this scheduled check is correctly throttled out (and two nudges
+    // racing collapse to at most one extra request).
+    if let Some(clock) = app.try_state::<UpdateCheckClock>() {
+        clock.mark();
+    }
     let current = env!("CARGO_PKG_VERSION");
     let client = match reqwest::Client::builder()
         .user_agent("lighthouse-app")

@@ -736,6 +736,29 @@ pub async fn update_now(app: AppHandle) -> Value {
     }
 }
 
+/// On-focus update nudge from the webview: the UI calls this when the window
+/// regains focus / becomes visible, so a release that shipped since the last
+/// scheduled (6 h) check is noticed promptly instead of only on the next
+/// restart — "updates that feel automatic". Throttled server-side against a
+/// shared clock (a 20-minute floor) so rapid focus toggling can never spam
+/// GitHub; best-effort and non-blocking. No-op on mobile (updates are
+/// store-mediated there).
+#[tauri::command]
+pub async fn check_updates_now(app: AppHandle) {
+    #[cfg(not(desktop))]
+    {
+        let _ = &app;
+    }
+    #[cfg(desktop)]
+    {
+        crate::supervise::check_for_updates_throttled(
+            app,
+            std::time::Duration::from_secs(20 * 60),
+        )
+        .await;
+    }
+}
+
 #[tauri::command]
 pub fn watch_generation() -> u64 {
     lighthouse_shell::commands::watch_generation()

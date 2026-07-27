@@ -72,6 +72,7 @@ pub fn configure(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::W
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(Supervisor::default())
         .manage(UpdateState::default())
+        .manage(supervise::UpdateCheckClock::default())
         .manage(WidgetPin::default())
         .manage(WidgetResident::default())
         .manage(WidgetHold::default())

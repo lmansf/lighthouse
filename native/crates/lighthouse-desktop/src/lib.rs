@@ -467,6 +467,7 @@ pub fn run() {
             commands::upload_file,
             commands::update_state,
             commands::update_now,
+            commands::check_updates_now,
             commands::watch_generation,
             commands::diag_report,
             commands::smoke_report,
