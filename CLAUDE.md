@@ -46,6 +46,15 @@ overhaul.)
 - `CACHE_VERSION` moves in lockstep across `native/.../extract.rs`,
   `src/server/extract.ts`, and the assertion in
   `native/.../tests/extract_test.rs` — bump all three or native CI goes red.
+- The in-app updater ships **armed-but-inert** (as of the v0.14.19 Phase-B
+  completion): the whole verified-in-place path — download + minisign-verify +
+  install-on-consent, macOS `.app` swap, on-focus recheck, settings preserved —
+  is gated behind `HAS_UPDATER_KEY` (CI) / the baked `LIGHTHOUSE_UPDATER_PUBKEY`
+  (shell). Absent keys → releases stay **notify-only** ("Get it" opens the
+  releases page; nothing is downloaded-and-run). Flipping it live is
+  maintainer-gated (`docs/signing.md`), and the CI installer+`.sig` co-presence
+  assertion only bites once the key is set — so releases keep shipping unsigned
+  until then.
 - The desktop crate (`lighthouse-desktop`) does NOT compile in the dev
   container (no webkit/gtk). Since the §40 crate split its tauri-free command
   bodies live in `lighthouse-shell`, which DOES check here — run

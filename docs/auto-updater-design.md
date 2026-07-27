@@ -13,6 +13,15 @@
 > path was removed). Verification: `lighthouse-core::updates`. CI/secrets:
 > `desktop-release.yml` + `docs/signing.md`.
 
+> **Gaps closed (v0.14.19).** Phase B now installs *in place* and feels
+> automatic: macOS swaps the running `.app` from the verified `.app.tar.gz`
+> (no dmg drag); the app re-checks on window focus, not only every 6 h; the
+> asset choice is the pure `pick_update_asset` per-platform table (tests pin
+> it); CI asserts installer + `.sig` co-presence per signed platform (§0); and
+> a source-pin test proves an update preserves settings/files/model (§11). All
+> of it stays armed-but-inert behind `HAS_UPDATER_KEY` until the maintainer
+> provisions keys — so it ships safely unsigned.
+
 ## 0. Per-platform install behavior (Tauri era — current, and deliberately honest)
 
 An update is always a **verified, consented action**, never a silent background
