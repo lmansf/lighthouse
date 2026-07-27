@@ -954,6 +954,13 @@ pub async fn update_now(app: AppHandle) -> serde_json::Value {
     }
     #[cfg(not(target_os = "macos"))]
     {
+        // Per-platform honesty (docs/auto-updater-design.md §0): Windows launches
+        // the NSIS installer with its NORMAL UI — an update is a visible, consented
+        // install, never a silent `/S` background swap. Linux just launches the
+        // freshly-downloaded, verified AppImage. A `.deb`-only Linux release never
+        // reaches here at all: pick_update_asset returns None for it, so the caller
+        // took the notify-only branch above (a `.deb` needs dpkg/root and touches
+        // the system package DB — in-app apply would misrepresent what it changed).
         crate::open_with_os(&dest);
         if cfg!(windows) {
             // Give the installer a beat to start, then get out of its way.

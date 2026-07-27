@@ -13,6 +13,27 @@
 > path was removed). Verification: `lighthouse-core::updates`. CI/secrets:
 > `desktop-release.yml` + `docs/signing.md`.
 
+## 0. Per-platform install behavior (Tauri era — current, and deliberately honest)
+
+An update is always a **verified, consented action**, never a silent background
+swap of code the user didn't agree to. What "install" means differs per platform,
+and the differences are intentional — the asset choice is the pure
+`lighthouse_core::updates::pick_update_asset` table, pinned by tests:
+
+| Platform | Update asset | How it installs | What the user sees |
+|---|---|---|---|
+| **Windows** | NSIS `-setup.exe` (+ `.sig`) | download → minisign-verify → launch the installer, app exits so it can replace files | **the NSIS installer UI runs** — an update is a visible, consented install, **not** a silent `/S` swap. The children are halted first so no loaded DLL blocks the overwrite (0.6.x field fix). |
+| **macOS** (signed release) | `.app.tar.gz` (+ `.sig`) | download → verify → unpack + swap the running `.app` bundle **in place** → relaunch | the app closes and reopens on the new version — no Finder drag. Fail-closed: an unwritable location or a bad archive restores the old bundle and falls back to the releases page. |
+| **macOS** (no signed archive) | `.dmg` | download → verify → open the dmg | the user drags the app to Applications, as before (the manual fallback). |
+| **Linux** | `.AppImage` (+ `.sig`) | download → verify → `chmod +x` → open | the freshly-downloaded AppImage launches; the user keeps/runs the new file. |
+| **Linux** (`.deb`-only release) | — | **notify-only**: opens the releases page | a `.deb` is **never** auto-installed — it needs `dpkg`/root and integrates with the system package DB, so in-app apply would be dishonest about what it touched. Pinned by `deb_only_linux_is_notify_only_and_deb_is_never_picked`. |
+
+Two honesty invariants hold across the table: (1) **unsigned builds are strictly
+notify-only** — no baked key ⇒ the button reads "Get it" and opens the releases
+page, never a download-and-run (§2: unverified auto-apply is an RCE hand-off);
+(2) **any failure falls through to the releases page**, never a silent retry and
+never a half-swapped app. What an in-place update preserves is detailed in §11.
+
 Status (historical): **Phase A implemented** (notify-only) in the Electron
 shell; **Phase B gated** behind `UPDATER_CAN_AUTO_INSTALL = false` until code
 signing + notarization are live. Builds at the time: **unsigned**.
