@@ -8543,3 +8543,198 @@ provisioned signed release is where it goes live — record that in the
 PR). One commit per numbered section. Open ONE PR titled "Updater:
 verified in-place auto-install, settings preserved"; stop at the PR.
 ```
+
+## 55. Add-files that opens on every mobile surface — the last programmatic .click() (a §30 regression of the §26 fix) (2026-07-27)
+
+Field report: "The add file buttons don't work on mobile." This is a
+regression of §26 (fp4, merged #195), which already fixed "add-files is a
+dead tap on iOS" with the WKWebView-safe label/overlay pattern. §26 fixed
+it in FileExplorer.tsx — but §30 (mobile-native structure, merged #202)
+introduced FileTileGrid.tsx as the compact/mobile Files surface, and it
+never inherited the pattern. Diagnosis (main @ 0.14.18):
+
+- **FileTileGrid is the compact surface, and it opens the picker with a
+  dead `.click()`.** FilesSurface (FileTileGrid.tsx:541-544) routes compact
+  → FileTileGrid, ≥700pt → FileExplorer. The top-right "Add"
+  (FileTileGrid.tsx:376-394) is a Fluent `<Button onClick={() =>
+  fileInputRef.current?.click()}>` (:380) over an `<input type="file"
+  hidden>` (:388) — exactly the pattern iOS WKWebView opens NO picker for.
+  Its comment even cites §26 while doing the opposite. The empty state
+  (:410-413) is bare text pointing back at that dead button. This is the
+  reported bug, and it is compact/iPhone-only.
+
+- **The chat "add files" buttons are broken on BOTH iPhone and iPad — a
+  CustomEvent can never be a user gesture.** The attach popover "Add files
+  to vault…" (ChatPanel.tsx:4770) and the no-files card "Add files"
+  (:5305) both `dispatchEvent("lighthouse:browse-files")`. On iPhone that
+  lands on FileTileGrid.onBrowse (:303) → `.click()` (dead). On iPad-regular
+  it lands on FileExplorer.browseForFiles (:1762-1775), which for a
+  non-desktop shell (desktopOS = desktop && platformKind()==="desktop" is
+  false on iOS) falls through to `.click()` (dead). Only a DIRECT tap on the
+  input is a gesture; an event round-trip is doomed regardless of the
+  receiver. FileExplorer's own toolbar/empty-state buttons (mobileAddControl,
+  :1796-1811) are the working §26 label control and are unaffected — they're
+  just not what the phone renders, and not what the chat buttons reach.
+
+- **Why CI stayed green: the §26 pin reads one file.**
+  test/mobileAddFiles.test.mjs inspects ONLY FileExplorer.tsx; it never
+  sees FileTileGrid.tsx. test/mobileStructure.test.mjs checks that a
+  browse-files listener EXISTS (:126), not that it's a real gesture. So the
+  compact grid's add path had no pin, and §30 shipped the broken pattern
+  under a comment claiming §26. §39 codified "file inputs need
+  label/overlay" as PROSE in CONVENTIONS.md, but a documented rule with no
+  directory-wide tripwire is how this returned.
+
+- **The ingestion chain is fine — only the trigger is broken.**
+  FileTileGrid's input onChange (:389-393) calls upload
+  (useRagStore.ts:473-527) → POST /api/upload → tauriTransport.ts:223 →
+  Rust upload_file → vault. Preserve it verbatim; change only how the tap
+  reaches a file input.
+
+- **A clean navigation seam already exists.** AppShell.tsx:243 listens for
+  `lighthouse:open-drawer` and selects the Files tab. So a compact chat
+  affordance can route the user to the (fixed) Files-tab Add instead of
+  trying to open a picker from a dismissing popover — the safest mobile
+  answer.
+
+### Prompt
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first, local-first analytics AI harness: Rust engine
+(native/crates/lighthouse-core) in a Tauri 2 shell (the SAME crate is
+the iOS app via mobile_entry_point), byte-compatible TS twin
+(src/server/), React UI (src/). Read CLAUDE.md, docs/CONVENTIONS.md (the
+WKWebView web-API checklist), and docs/roadmap-personas-2026-07.md §26,
+§30, §39, §55 before writing code. This fixes a regression: add-files is
+a dead tap on mobile again.
+
+FIRST, confirm the diagnosis on the checked-out code (do not fix a
+ghost): FilesSurface (src/features/explorer/FileTileGrid.tsx) renders
+FileTileGrid on compact; its "Add" button and its lighthouse:browse-files
+handler both call fileInputRef.current?.click() on an <input type="file"
+hidden> — dead in WKWebView. The chat "add files" surfaces
+(src/features/chat/ChatPanel.tsx, the attach popover and the no-files
+card) dispatch lighthouse:browse-files, which on iPhone hits
+FileTileGrid's .click() and on iPad-regular hits FileExplorer's
+browseForFiles .click() fall-through — both dead. The working reference is
+FileExplorer.tsx's mobileAddControl (a <label data-mobile-add> with an
+opacity:0 overlaid, non-hidden <input type="file">). Platform truth is
+platformKind()/isMobileShell() (src/shell/desktopBridge.ts) and the pure
+paneLayout() verdict (COMPACT_BREAKPOINT=700); never a parallel signal.
+
+THE INVARIANT (state it, then enforce it): on any mobile/compact shell,
+every add-files affordance opens the picker by a DIRECT user gesture on a
+rendered <input type="file"> — a <label>/overlay control — never a JS
+.click() and never a CustomEvent round-trip. Desktop keeps its native
+Tauri dialog (desktopOS-gated) exactly as today.
+
+1. One shared WKWebView-safe control. Promote FileExplorer's
+   mobileAddControl into a shared component (e.g.
+   src/features/explorer/MobileAddFiles.tsx) that renders the SAME markup
+   and classNames it does today — <label data-mobile-add> wrapping an
+   opacity:0, hit-testable (NOT display:none/hidden) <input type="file"
+   multiple> — taking a label string and an onFiles(files) callback.
+   FileExplorer renders it for its toolbar/empty-state (mobile branch)
+   exactly as before, so iPad-regular and desktop stay visually identical
+   (only the JSX source moves; update the existing pin's regexes to match
+   the shared usage). accept stays unset; multiple stays.
+
+2. Fix the compact Files surface (the reported button). In FileTileGrid,
+   replace the top-right "Add" Button+.click() AND the bare-text empty
+   state with the shared control. Delete FileTileGrid's fileInputRef and
+   its hidden <input>. Keep the ingestion verbatim: onFiles →
+   upload(files) (useRagStore). A successful add scrolls the newest source
+   into view; an upload error surfaces the existing notice; cancel is a
+   quiet no-op — never a silent nothing. Remove FileTileGrid's
+   lighthouse:browse-files .click() handler (dead once the chat surfaces
+   stop dispatching it on compact — see §3).
+
+3. Fix the chat "add files" surfaces on mobile. Neither may open the
+   picker via lighthouse:browse-files on a mobile shell:
+   - The no-files card (ChatPanel.tsx ~5305) is an inline card, not a
+     dismissing popover — make it the shared direct control on any mobile
+     shell (isMobile). It opens the picker in place.
+   - The attach popover item "Add files to vault…" (ChatPanel.tsx ~4770)
+     lives inside a Fluent popover whose dismissal strips the gesture
+     (the §26 Menu lesson) — so DO NOT open a picker from it on mobile.
+     On a mobile shell it dispatches lighthouse:open-drawer (AppShell
+     already selects the Files tab) so the user lands on the fixed
+     Files-tab control; verify on device that a label inside the popover
+     is not viable before choosing navigation (if device testing shows a
+     label works there, a direct control is acceptable — but the default
+     is navigate). On iPad-regular the persistent FileExplorer already
+     shows a working Add, so the same open-drawer/reveal is fine.
+   - DESKTOP is unchanged: on a desktop shell these still dispatch
+     lighthouse:browse-files → FileExplorer.browseForFiles → the native
+     Tauri dialog (desktopOS). Branch on the shell, not by deleting the
+     desktop path.
+
+4. Retire the dead .click() seams so the class can't come back. Remove
+   FileExplorer's hidden fileInputRef <input> and the browseForFiles
+   .click() fall-through; make browseForFiles desktop-only (early-return
+   the native dialog on desktopOS) and register the lighthouse:browse-files
+   listener only on a desktop shell. After this, NO <input type="file"> in
+   src/features/explorer/ is hidden, and nothing calls .click() on a file
+   input anywhere. (The desktop Menu-item/folder .click()s in
+   FileExplorer's !isMobile branch are unrelated and stay.)
+
+5. The tripwire that makes this un-repeatable (the real reason it
+   regressed). Rewrite test/mobileAddFiles.test.mjs from a single-file pin
+   into a DIRECTORY-WIDE structural pin:
+   - Glob every *.tsx under src/features/explorer/ (readdirSync). For each,
+     assert NO <input type="file"> carries `hidden` (or a display:none
+     style) and NO file-input ref is .click()-ed — so any FUTURE compact
+     Files surface is covered by construction, not by remembering to add a
+     pin.
+   - Assert the shared MobileAddFiles control is a <label data-mobile-add>
+     with an opacity:0 (never display:none) overlaid <input type="file">,
+     and that FileTileGrid renders it for BOTH the header add and the empty
+     state.
+   - Assert ChatPanel's compact/mobile add surfaces do not dispatch
+     lighthouse:browse-files on a mobile shell (the no-files card uses the
+     shared control; the attach popover routes to open-drawer), while the
+     desktop dispatch remains.
+   - Keep test/mobileStructure.test.mjs green (update its browse-files
+     expectations to the new compact behavior).
+   Update docs/CONVENTIONS.md's WKWebView checklist: the file-input pin is
+   now directory-wide across src/features/explorer/ (the §26 single-file
+   pin was the gap that let §30 regress), and add-files never travels over
+   a CustomEvent on mobile.
+
+6. Stamp + loop. Bump 0.14.18 → 0.14.19 across ALL SEVEN stamp files per
+   CLAUDE.md's release-mechanics section (bump the lighthouse-* Cargo.lock
+   crates by pattern; ios-build re-syncs the short version). Full node +
+   cargo suites, release-smoke, and the ios-build lane green. After merge:
+   dispatch mobile-bootstrap.yml task: ios-beta.
+
+Constraints. No analytics/telemetry/accounts. No new entitlements or
+Info.plist keys (a file input needs none). Any user-facing strings stay
+byte-identical across the TS/Rust twins with PARITY comments; pinned
+label tests move with their strings. Desktop and iPad-regular (≥700pt)
+render visually identical to 0.14.18 (the only removed node is the dead
+hidden input) — pin it. SharePoint plumbing untouched. Scope = the
+add-files surfaces + the directory-wide pin + the stamp; nothing else.
+
+Acceptance (iPhone AND iPad simulator/device, fresh install):
+1. On iPhone: the Files-tab top-right "Add" and the empty-state control
+   both open the iOS document picker; choosing files ingests them
+   (onboard → extraction → visible), error surfaced on failure, quiet on
+   cancel.
+2. The chat "add files" affordances work on iPhone and iPad: the no-files
+   card opens the picker in place; the attach popover lands the user on a
+   working add control (Files tab / persistent explorer). No dead taps.
+3. Desktop is unchanged: chat attach and the explorer Browse open the
+   native OS dialog; link-first items intact.
+4. The directory-wide tripwire FAILS if any *.tsx under
+   src/features/explorer/ gains a hidden file input or a file-input
+   .click(), or if a mobile chat add surface dispatches
+   lighthouse:browse-files. All seven stamps read 0.14.19; suites +
+   release-smoke + ios-build green.
+
+Environment. macOS + Xcode for acceptance 1–3 (simulator suffices); the
+Linux container runs the UI-logic pins + suites as the house convention
+(the ios-build lane is the device gate). One commit per numbered section.
+Open ONE PR titled "iOS: add-files opens on every mobile surface (retire
+the last .click())"; stop at the PR.
+```
