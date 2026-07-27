@@ -13,6 +13,36 @@
 > path was removed). Verification: `lighthouse-core::updates`. CI/secrets:
 > `desktop-release.yml` + `docs/signing.md`.
 
+> **Gaps closed (v0.14.19).** Phase B now installs *in place* and feels
+> automatic: macOS swaps the running `.app` from the verified `.app.tar.gz`
+> (no dmg drag); the app re-checks on window focus, not only every 6 h; the
+> asset choice is the pure `pick_update_asset` per-platform table (tests pin
+> it); CI asserts installer + `.sig` co-presence per signed platform (§0); and
+> a source-pin test proves an update preserves settings/files/model (§11). All
+> of it stays armed-but-inert behind `HAS_UPDATER_KEY` until the maintainer
+> provisions keys — so it ships safely unsigned.
+
+## 0. Per-platform install behavior (Tauri era — current, and deliberately honest)
+
+An update is always a **verified, consented action**, never a silent background
+swap of code the user didn't agree to. What "install" means differs per platform,
+and the differences are intentional — the asset choice is the pure
+`lighthouse_core::updates::pick_update_asset` table, pinned by tests:
+
+| Platform | Update asset | How it installs | What the user sees |
+|---|---|---|---|
+| **Windows** | NSIS `-setup.exe` (+ `.sig`) | download → minisign-verify → launch the installer, app exits so it can replace files | **the NSIS installer UI runs** — an update is a visible, consented install, **not** a silent `/S` swap. The children are halted first so no loaded DLL blocks the overwrite (0.6.x field fix). |
+| **macOS** (signed release) | `.app.tar.gz` (+ `.sig`) | download → verify → unpack + swap the running `.app` bundle **in place** → relaunch | the app closes and reopens on the new version — no Finder drag. Fail-closed: an unwritable location or a bad archive restores the old bundle and falls back to the releases page. |
+| **macOS** (no signed archive) | `.dmg` | download → verify → open the dmg | the user drags the app to Applications, as before (the manual fallback). |
+| **Linux** | `.AppImage` (+ `.sig`) | download → verify → `chmod +x` → open | the freshly-downloaded AppImage launches; the user keeps/runs the new file. |
+| **Linux** (`.deb`-only release) | — | **notify-only**: opens the releases page | a `.deb` is **never** auto-installed — it needs `dpkg`/root and integrates with the system package DB, so in-app apply would be dishonest about what it touched. Pinned by `deb_only_linux_is_notify_only_and_deb_is_never_picked`. |
+
+Two honesty invariants hold across the table: (1) **unsigned builds are strictly
+notify-only** — no baked key ⇒ the button reads "Get it" and opens the releases
+page, never a download-and-run (§2: unverified auto-apply is an RCE hand-off);
+(2) **any failure falls through to the releases page**, never a silent retry and
+never a half-swapped app. What an in-place update preserves is detailed in §11.
+
 Status (historical): **Phase A implemented** (notify-only) in the Electron
 shell; **Phase B gated** behind `UPDATER_CAN_AUTO_INSTALL = false` until code
 signing + notarization are live. Builds at the time: **unsigned**.
@@ -342,3 +372,38 @@ call site, the boot-phase-gated `ipcMain` handlers, a tray item); `electron/spla
 (+ inline script); `package.json` (`electron-updater` dep, `releaseType`; Phase B:
 mac `zip` target, `win.publisherName`); `.github/workflows/release.yml` (Phase B
 signing — see §3 custody note).
+
+## 11. What an in-place update preserves (Tauri era)
+
+The one-click "Update & relaunch" keeps everything the user cares about. That
+promise rests on two structural invariants, both pinned by
+`test/updaterPreservesData.test.mjs` (a container-testable source-pin — the
+desktop crate's own integration tests only compile in CI):
+
+1. **An update writes only to the app bundle / installer target.** The macOS
+   in-place swap (`install_macos_app_archive`) locates the running `.app` via
+   `current_exe()`, stages the new bundle on that bundle's *own volume*, and
+   swaps it by `fs::rename` — it never touches the app-data base. The download
+   itself stages under `app_data_base()/updates` (co-located with app-data,
+   which an update never deletes), never inside the bundle.
+2. **All user data resolves install-independently.** Every reader/writer routes
+   through `app_data_base()` (pinned to `com.lighthouse.app`, decoupled from the
+   bundle identifier — see `tests/identity_pin.rs`), or the user's Documents for
+   the vault. Nothing is rooted at the running executable's directory, so
+   replacing the bundle can't move it. `lib.rs` derives **no** path from
+   `current_exe()` — the source-pin test fails the build if that ever changes.
+
+**The preserved set** (untouched by any update):
+
+| What | Where it lives | Resolver |
+|---|---|---|
+| Settings (incl. the `vaultDir` pointer, all preferences) | `app_data_base()/lighthouse-settings.json` | `settings_file` |
+| Downloaded local model (~4 GB `.gguf`) | `app_data_base()/models` | `LIGHTHOUSE_MODELS_DIR` (bootstrap_env) |
+| Connector tokens | `app_data_base()/connectors` | `LIGHTHOUSE_CONNECTORS_DIR` (bootstrap_env) |
+| Secrets / sealed keys / signed-in profile | `LIGHTHOUSE_APP_STATE_DIR` under `app_data_base()` | bootstrap_env |
+| The vault folder + its files | the user's Documents (or a policy root) | `vault_dir_setting` |
+
+macOS swaps the bundle in place; Windows/Linux hand the verified installer to
+NSIS / the AppImage, which likewise install *the app*, not the user's data
+(NSIS `perMachine:false` installs elsewhere and never touches app-data). Either
+way the tables above are untouched, so "Update & relaunch" is an honest label.

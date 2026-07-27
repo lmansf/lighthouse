@@ -230,7 +230,7 @@ then deepen each persona's core loop. Each workstream cites the prompt
 
 | # | Workstream | Why now |
 |---|---|---|
-| F1 | **Sign & notarize everything**; flip updater to verified auto-install (Phase B of the existing design) | Single highest-leverage trust item; unblocks S4 optics and every pilot install |
+| F1 | **Sign & notarize everything**; flip updater to verified auto-install (Phase B of the existing design). **Updater Phase B done + verified (v0.14.19), armed-but-inert; signing/notarization still maintainer-gated** — see the F1 status note below | Single highest-leverage trust item; unblocks S4 optics and every pilot install |
 | F2 | **Retire the legacy surfaces**: delete the Electron shell + `release.yml` (or archive to a branch), stop the tag-triggered legacy build; demote the TS engine to a explicitly-scoped dev twin with a generated parity suite | Ends the double-landing tax and the wrong-artifact risk before new features widen the divergence |
 | F3 | **Release-branch boot smoke**: per-PR cross-platform build + launch + one-question smoke (the 0.2.5/0.10.0 class of regressions dies here) | Stops production-discovered breakage |
 | F4 | **Truth pass on docs/brand**: README theme/claims, rag-vault→lighthouse naming debt, document every network touchpoint in one place | The repo front door currently misdescribes the product |
@@ -272,6 +272,19 @@ engines named, gates named. Feature-sized ones should flow through OpenSpec
 a PR. Each is self-contained — paste it into a fresh session.
 
 ### F1 — Signing & verified updates
+
+> **Status (v0.14.19): updater Phase B complete and verified.** The in-app
+> updater does verified in-place auto-install — macOS unpacks the signature-
+> verified `.app.tar.gz` and swaps the running bundle in place (Windows/Linux
+> hand the verified installer to NSIS / the AppImage), re-checks for a release
+> on window focus (not just the 6 h tick), and preserves settings/files/model
+> (pinned by `test/updaterPreservesData.test.mjs`; see auto-updater-design.md
+> §0/§11). CI asserts installer + `.sig` co-presence per signed platform. The
+> asset choice is a pure per-platform table (`pick_update_asset`) the engine's
+> tests pin. **The whole path is armed-but-inert behind `HAS_UPDATER_KEY`, so
+> it ships safely UNSIGNED.** Remaining and **maintainer-gated**: provision the
+> updater signing key + Windows/macOS certs (`docs/signing.md`) to flip it
+> live — until then builds stay notify-only (button reads "Get it").
 
 > Set up code signing and notarization for Lighthouse's desktop releases, then
 > flip the updater to Phase B per `docs/auto-updater-design.md`. Scope: (1)

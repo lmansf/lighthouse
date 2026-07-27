@@ -13,7 +13,7 @@
  * update_state command at mount (the event can fire before this component
  * exists). On the web build both paths are silent, so it renders nothing.
  */
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button, Link, Text, Tooltip, makeStyles, shorthands, tokens } from "@fluentui/react-components";
 import { IconDownload } from "@/shell/icons";
 import { isDesktopShell } from "@/shell/desktopBridge";
@@ -54,6 +54,9 @@ const useStyles = makeStyles({
     marginBottom: tokens.spacingVerticalS,
   },
   text: { flexGrow: 1, minWidth: 0 },
+  // Quiet reassurance under the button: an in-place update keeps everything the
+  // user cares about, so "Update & relaunch" never reads as "start over".
+  reassure: { flexBasis: "100%", color: tokens.colorNeutralForeground3 },
   // Update-failure line: the reason + a link to the releases page, so a failed
   // click never looks like a dead button.
   errorRow: { flexBasis: "100%", display: "flex", alignItems: "center", gap: tokens.spacingHorizontalXS },
@@ -65,6 +68,9 @@ export function UpdateNotice({ collapsed }: { collapsed?: boolean }) {
   const [update, setUpdate] = useState<UpdateState | null>(null);
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
+  // Wall-clock of the last on-focus nudge — a light guard against IPC on a
+  // focus storm (the shell throttle is the real ceiling).
+  const lastNudge = useRef(0);
 
   useEffect(() => {
     // The boot event may have fired before this mounted — ask once, and keep
@@ -78,7 +84,31 @@ export function UpdateNotice({ collapsed }: { collapsed?: boolean }) {
       if (detail?.phase === "available") setUpdate(detail);
     };
     window.addEventListener("lighthouse:update-state", onState);
-    return () => window.removeEventListener("lighthouse:update-state", onState);
+
+    // Re-check when the app returns to the foreground, so a release that shipped
+    // while it sat in the tray surfaces promptly — not only on the 6 h tick or a
+    // restart ("updates that feel automatic"). The shell throttles this hard (a
+    // shared 20-min clock), so it can't spam GitHub; the 60 s guard here just
+    // avoids needless IPC on a focus storm. A newer release, if found, comes
+    // back as an update-state event (handled above) and raises the banner — so
+    // this stays useful even while the component is rendering null because no
+    // update is known yet (the effect runs regardless of that early return).
+    const nudge = () => {
+      const now = Date.now();
+      if (now - lastNudge.current < 60_000) return;
+      lastNudge.current = now;
+      void invokeShell("check_updates_now");
+    };
+    const onVisible = () => {
+      if (document.visibilityState === "visible") nudge();
+    };
+    window.addEventListener("focus", nudge);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.removeEventListener("lighthouse:update-state", onState);
+      window.removeEventListener("focus", nudge);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
   }, []);
 
   if (!update) return null;
@@ -136,8 +166,13 @@ export function UpdateNotice({ collapsed }: { collapsed?: boolean }) {
         disabled={busy}
         onClick={() => void install()}
       >
-        {busy ? "Downloading…" : update.canInstall ? "Update" : "Get it"}
+        {busy ? "Downloading…" : update.canInstall ? "Update & relaunch" : "Get it"}
       </Button>
+      {update.canInstall && !failed && (
+        <Text size={100} className={styles.reassure}>
+          Updates in place — your settings, files, and local model are kept.
+        </Text>
+      )}
       {failed && (
         <div className={styles.errorRow}>
           <Text size={200} className={styles.errorText}>

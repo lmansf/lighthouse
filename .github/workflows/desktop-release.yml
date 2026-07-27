@@ -280,6 +280,69 @@ jobs:
               ;;
           esac
           ls -la dist-assets
+      - name: Assert installer + signature co-presence (signed platforms)
+        # End-of-chain supply-chain assertion (docs/CONVENTIONS.md §25): the
+        # thing to check is the FINAL artifact set, not an intermediate step.
+        # When the updater key is configured, every installer we are about to
+        # upload MUST carry its minisign `.sig`, and no `.sig` may orphan its
+        # installer. A missing `.sig` is otherwise SILENT: the updater-manifest
+        # job skips any installer whose signature is absent (`if (!inst || !sig)
+        # return null`), so that platform quietly drops out of latest.json and
+        # its users simply never see the update — no error, no signal. Fail the
+        # build loudly here instead. Inert on unsigned builds (gate is false).
+        if: env.HAS_UPDATER_KEY == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist-assets
+          shopt -s nullglob   # a non-matching glob expands to nothing, not itself
+          fail=0
+          # Every installer that IS present must have its co-located signature.
+          need_sig() {
+            for inst in "$@"; do
+              [ -f "$inst" ] || continue
+              if [ ! -f "$inst.sig" ]; then
+                echo "::error::signed build produced $inst without $inst.sig — clients could not verify this update, and this platform would silently drop from latest.json"
+                fail=1
+              fi
+            done
+          }
+          # No signature may exist without the installer it signs.
+          orphan_sig() {
+            for sig in "$@"; do
+              base="${sig%.sig}"
+              if [ ! -f "$base" ]; then
+                echo "::error::orphan signature $sig with no installer $base"
+                fail=1
+              fi
+            done
+          }
+          case "${{ runner.os }}" in
+            Windows)
+              [ -f Lighthouse-Setup.exe ] || { echo "::error::no Windows installer to sign"; fail=1; }
+              need_sig Lighthouse-Setup.exe
+              orphan_sig *.sig
+              ;;
+            macOS)
+              # The updater consumes the .app.tar.gz; a signed mac build must
+              # produce exactly that (the .dmg is the first-install download and
+              # carries no .sig, so it is deliberately not checked here).
+              n=0; for f in *.app.tar.gz; do n=$((n+1)); done
+              [ "$n" -gt 0 ] || { echo "::error::signed macOS build produced no .app.tar.gz updater archive"; fail=1; }
+              need_sig *.app.tar.gz
+              orphan_sig *.app.tar.gz.sig
+              ;;
+            Linux)
+              # The AppImage may legitimately be absent (best-effort build,
+              # `|| true` above) — but whatever installer IS here must be signed,
+              # and no signature may orphan. The .deb is notify-only and unsigned
+              # by design, so it is not part of this check.
+              need_sig *.AppImage
+              orphan_sig *.AppImage.sig
+              ;;
+          esac
+          [ "$fail" -eq 0 ] || { echo "installer/.sig co-presence check FAILED"; exit 1; }
+          echo "installer/.sig co-presence OK for ${{ runner.os }}"
       - name: Generate legacy update manifest (latest*.yml)
         # electron-builder used to emit these; pre-0.3.0 Electron installs poll
         # them (notify-only — the manifest is read for its `version`, nothing
