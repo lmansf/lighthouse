@@ -8738,3 +8738,364 @@ Linux container runs the UI-logic pins + suites as the house convention
 Open ONE PR titled "iOS: add-files opens on every mobile surface (retire
 the last .click())"; stop at the PR.
 ```
+
+## 56. Security release: the nine red-team advisories, then ship it (2026-07-30)
+
+The first `/red-team quick` sweep (report: `docs/security-fixes.md`,
+2026-07-30 entry) attacked the nine invariants `SECURITY.md` states as
+guaranteed-and-tested. 24 findings proposed, 15 refuted by a 3-lens
+skeptic panel, **9 surviving** — 2 unanimous, 7 on a 2-of-3 majority.
+None are patched; none have a failing test yet. This section fixes all
+nine, corrects two places where `SECURITY.md` overclaims, pins the one
+guarantee that has no test, and ships the result.
+
+Timing note that changes the priority order: the sweep ran against
+0.14.18, and **#228 (§54, the verified in-place updater) landed
+afterwards and rewrote `supervise.rs`**. Both updater findings were
+re-verified against the shipped code and are still live, at new lines —
+`let dest = dir.join(&name);` is now `supervise.rs:859` and the
+pre-verification `fs::File::create(&dest)` is `:871`. §54 landing makes
+the staging-path bug **more** urgent, not less: it is currently latent
+only because no build bakes an updater pubkey (the let-else at
+`supervise.rs:841-851` fails closed to notify-only, which the sweep
+confirmed and which must stay). The moment the owner provisions
+`TAURI_SIGNING_PRIVATE_KEY` / `LIGHTHOUSE_UPDATER_PUBKEY` per §54, the
+download path arms and the bug goes live. **Fix it before provisioning
+the key.**
+
+Why this is worth a release of its own: finding 1 lets prompt-injected
+document content leave the machine on one click while the egress shield
+still reads "All local" and the audit record attests to zero egress, and
+it defeats the "Private — this device only" mark. Finding 3 means audit
+truncation and outright deletion verify as INTACT, which contradicts a
+written guarantee.
+
+### Prompt
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first, local-first analytics AI harness: Rust engine
+(native/crates/lighthouse-core) in a Tauri 2 shell (the SAME crate is
+the iOS app via mobile_entry_point), byte-compatible TS twin
+(src/server/), React UI (src/). Read CLAUDE.md, docs/CONVENTIONS.md,
+SECURITY.md, the 2026-07-30 entry in docs/security-fixes.md, and roadmap
+§54 + §56 before writing code. This is a SECURITY RELEASE: nine
+advisories from the red-team sweep, plus doc corrections, plus the ship.
+
+METHOD — non-negotiable, this is the house discipline the sweep itself
+ran on:
+- RE-CONFIRM EACH FINDING FIRST against the current code. The sweep ran
+  at 0.14.18 and #228 has since rewritten supervise.rs; line numbers in
+  the report may have drifted elsewhere too. If a finding no longer
+  reproduces, say so in the PR body and skip it — do not fix a ghost.
+- PROOF BEFORE PATCH. For each finding, write a test that FAILS on
+  current code and demonstrates the unsafe behavior, THEN fix, THEN show
+  the test goes green. No failing test ⇒ no patch: record it as an
+  advisory instead. Tests: test/*.test.mjs (node runner) for TS/UI,
+  #[test] in the owning crate for Rust.
+- Minimal diffs. One commit per numbered item. No refactors, no
+  drive-by cleanups, no new dependencies without an explicit
+  justification line. Prefer failing CLOSED.
+- Twins: where a fixed module has a src/server/ twin, mirror the fix and
+  keep prompts/labels byte-identical, with a PARITY comment on any
+  deliberate divergence.
+- Environment: `npm ci` in this repo can fail on a 403 for
+  cdn.sheetjs.com (xlsx installs from a vendor CDN, not the npm
+  registry). If node_modules is incomplete, prefer a targeted
+  `npm install <pkg>` over `npm ci`, which wipes node_modules before
+  refetching. lighthouse-desktop does NOT compile in the dev container —
+  cargo check -p lighthouse-core -p lighthouse-shell -p lighthouse-cli
+  -p lighthouse-server -p lighthouse-mcp, and grep-verify desktop call
+  sites (desktop-release is the gate).
+
+--- The two unanimous findings (do these first) ---
+
+1. Answer links must not be an unvalidated egress channel. High.
+   src/lib/openExternal.ts:20 is the single choke point every call site
+   already routes through, and it validates NOTHING — no scheme
+   allowlist, no host shown, no confirmation. ANSWER_HTML_SCHEMA
+   (src/lib/answerHtml.ts:31) strips img/picture/source but leaves
+   a[href] navigable, and ChatPanel.tsx (~:2330) treats any href that
+   is not ^#lh-cite-(\d+)$ as external and forwards the raw string.
+   So prompt-injected text inside a document can render a normal-looking
+   link whose query string encodes figures from OTHER files in the same
+   context; one click ships them to an attacker-chosen host. It works
+   with NO cloud provider configured (a local-model answer renders
+   through the same component), it works on files marked "Private —
+   this device only" (that mark governs only what reaches a cloud
+   provider), and nothing records it, so the shield still reads "All
+   local" and the per-answer audit record attests to zero egress.
+   There is also a no-model sub-case: the extractive fallback emits
+   document passages verbatim, so a literal markdown link authored in a
+   malicious file renders live on a keyless install.
+   Fix, in this order:
+   - openExternal parses the URL and accepts ONLY an explicit scheme
+     allowlist (https:, mailto:). Everything else — javascript:, data:,
+     file:, custom schemes, unparseable — is refused. This mirrors the
+     is_graph_host / isGraphHost pattern already in the codebase
+     (native/.../sources/microsoft.rs:349, src/server/sources/microsoft/
+     graph.ts:25), which refuses rather than trusts.
+   - Distinguish APP-AUTHORED destinations (feedback handoff,
+     lhvault.app, settings links, the release page) from ANSWER-ORIGIN
+     hrefs. App-authored open as today. Answer-origin requires an
+     explicit confirmation that DISPLAYS THE FULL HOST before opening.
+     Thread the provenance as an argument — do not sniff the URL to
+     guess where it came from.
+   - Record the destination via the egress registry before handing off,
+     with its own purpose (e.g. PURPOSE_ANSWER_LINK), so a clicked link
+     appears in the shield and in hosts_since()'s per-answer diff
+     instead of being invisible.
+   - STRONGLY PREFERRED, decide explicitly and say why in the PR: drop
+     non-relative-protocol a[href] from ANSWER_HTML_SCHEMA entirely and
+     render remote links as inert text with the host shown. The answer
+     surface has no need to mint navigable remote links, and the offline
+     export path (evidencePack.ts) already emits zero href — the live
+     path being laxer than the export path is the actual inconsistency.
+   Tests: extend test/openExternal.test.mjs beyond plumbing into URL
+   POLICY — javascript:/data:/file:/unparseable are refused, an
+   answer-origin https URL requires confirmation, the host is recorded.
+   Add a remote-anchor case to test/answerHtml.test.mjs; note line ~106
+   currently pins anchor survival as correct and must be updated to
+   match the chosen behavior, or the fix contradicts its own suite.
+
+2. The update manifest must not choose a filesystem path. High.
+   supervise.rs:859 does `let dest = dir.join(&name);` where `name` is
+   info.asset_name straight off the release manifest, and :871 does
+   `fs::File::create(&dest)` — an arbitrary-file WRITE plus
+   truncate-and-delete, strictly BEFORE the signature check, i.e.
+   entirely outside what the pinned key protects. An absolute path or a
+   `..` component escapes the staging dir. Note this is a signature-gate
+   bypass that needs no signing key.
+   Fix: derive the staging filename LOCALLY (e.g.
+   format!("update-{}.exe", info.version) per platform), or at minimum
+   reduce to Path::new(name).file_name() and require the result to be
+   exactly one Component::Normal — no RootDir, no Prefix, no ParentDir —
+   reusing the existing pattern at vault.rs:228-244; then assert
+   dest.starts_with(&dir) before create. Audit the OTHER dir.join(name)
+   at supervise.rs:163 for the same shape while you are here.
+   KEEP the notify-only let-else at :841-851 exactly as is — the sweep
+   confirmed the unsigned build fails CLOSED and that must not regress.
+   Test: unit-test the path derivation against absolute paths, `..`
+   traversal, UNC/Windows prefixes, and a benign name, asserting the
+   result always stays inside the staging dir. Provable in-container
+   (put it in a tauri-free helper so lighthouse-shell can host it).
+
+--- The seven majority findings ---
+
+3. The audit chain must detect truncation and deletion. High.
+   audit.rs:262 verify() has no length or tail anchor and fails OPEN on
+   a missing file, so dropping the newest N records — or the whole
+   month — certifies as INTACT. SECURITY.md says deleting a record SHALL
+   break verification; today it does not.
+   Fix: anchor length and head OUTSIDE the log. On every append,
+   atomically 0600-write app_state_dir()/audit/head.json =
+   {month, count, last_hmac} using the same write_atomic helper
+   settings/secrets already use (config.rs:214). verify()/verify_active()
+   fail when the log is shorter than count, when the final hmac !=
+   last_hmac, or when the file is missing while count > 0.
+   Test: the existing tamper test (audit.rs:438) only covers EDITS — add
+   truncate-the-tail, delete-the-file, and delete-then-recreate-empty.
+
+4. Update signatures must bind identity, not just bytes. High.
+   supervise.rs:725-728 — no version↔artifact binding and no rollback
+   floor, so anyone who can publish or edit a release can force a
+   downgrade to an older VALIDLY SIGNED build (no key compromise),
+   re-arming everything fixed since, while the UI shows a higher
+   version. `current = env!("CARGO_PKG_VERSION")` is read in
+   check_for_updates (:755) but the comparison is NOT re-asserted inside
+   update_now.
+   Fix: (a) re-assert version > current inside update_now, not only at
+   check time; (b) bind identity into what is signed — either sign a
+   manifest carrying version + per-asset sha256 + filename and verify
+   THAT with the pinned key, or require the minisign trusted comment to
+   carry the release version and refuse unless it parses and is strictly
+   greater than the running build; (c) persist a monotonic floor so a
+   later downgrade cannot re-offer an already-superseded version. Pick
+   one of (b)'s two forms, implement it fully, and document the choice
+   in docs/signing.md — do not half-build both.
+   Coordinate with §54: if the signed-release format changes, the
+   updater-manifest CI job and docs/signing.md move with it.
+
+5. guard_sql must bound its own recursion. High.
+   analytics.rs:1630 — the read-only walk recurses without a depth
+   bound, so a chained-set-operation SELECT overflows the stack and
+   aborts the process BEFORE execution: uncatchable, zero-interaction,
+   from provider-controlled bytes.
+   Fix: flatten the SetOperation spine into a work-list/loop, or thread
+   an explicit depth counter rejecting past a small cap (~64), in BOTH
+   set_expr_is_read_only/query_is_read_only (analytics.rs:1621-1648) and
+   views.rs walk_set_expr/walk_query. Also refuse over-long SQL up front
+   in guard_sql (e.g. >64KB). Test: a generated deep UNION chain returns
+   a clean rejection instead of aborting.
+
+6. extract_sql must not slice on a foreign index. Medium.
+   analytics.rs:1587 computes an index on an uppercased COPY and slices
+   the ORIGINAL, so non-ASCII text before the SELECT lands off a char
+   boundary and panics the ask task with nothing surfaced — and PDF
+   extraction routinely yields such text.
+   Fix: search case-insensitively over the original, or use
+   to_ascii_uppercase (byte-length preserving). Test: extend
+   analytics.rs:3703 sql_extraction_handles_fences_and_prose with
+   non-ASCII prose (accented Latin, CJK, emoji) before the SELECT.
+
+7. table_card must be budgeted like every other query. Medium.
+   analytics.rs:1323 runs an uncapped COUNT(*) over each registered view
+   with no timeout, on EVERY analytics ask. One saved model-proposed
+   view (CROSS JOIN or WITH RECURSIVE — both pass guard_sql) makes every
+   subsequent ask hang or OOM, opaquely, re-registering each attempt.
+   Fix: wrap both ctx.sql(...).collect() calls in the same
+   tokio::time::timeout(QUERY_TIMEOUT_SECS) executed queries get, and
+   bound the count (SELECT COUNT(*) FROM (SELECT 1 FROM {table} LIMIT
+   1000001) t, reporting "1,000,000+"); treat timeout as "skip this
+   card" — the surrounding code already degrades cleanly on None/Err.
+   Test: a view whose count would be unbounded yields a skipped card
+   rather than a hang (use a small injected timeout so the test is fast).
+
+8. Reference ids must not be recycled into stale rules. High.
+   vault.rs:1855 — when an `extN` reference id is reused, an orphaned
+   curation rule re-binds to the NEW folder and implicitly includes
+   every matching file, with no per-node flag written and nothing
+   rendering as orphaned. Content the user never included becomes
+   searchable and is sent to the configured provider as context, which
+   breaks the default-excluded guarantee.
+   Fix: treat a reference id as non-reusable identity. In
+   remove_reference (vault.rs:1855) and the reference-root/trash
+   branches of remove_from_vault (vault.rs:1707+), also drop every rule
+   whose scope == removed_id || scope.starts_with("{removed_id}/") — the
+   mirror of the existing remap_rule_scopes (vault.rs:1289) that already
+   makes rules follow a move. Mirror in the TS twin. Test: remove a
+   reference, re-add a different folder that takes the same id, assert
+   no file is implicitly included.
+
+9. iOS: exclude the secrets from the device backup. Medium.
+   lighthouse-desktop/src/lib.rs:367 — the sealing secret and the sealed
+   store are both inside the iCloud/Finder backup, so provider keys and
+   stored OAuth tokens are recoverable in cleartext from a backup with
+   no device access and no malware. That is squarely inside the
+   DOCUMENTED threat model (casual disk/backup/sync inspection), and the
+   exclusion was specified and never implemented.
+   Fix: generalize mark_cache_no_backup (state_home.rs:330) into
+   mark_no_backup(paths) and apply NSURLIsExcludedFromBackupKey to
+   app_state_dir()/secret.key, app_state_dir()/secrets.json, and the
+   state dir — setting it on secret.key immediately after
+   machine_secret() creates it (secrets.rs:130-132) so a freshly
+   generated key is never backed up even once. Device-verification is
+   the real gate; in-container, pin the call sites structurally and say
+   so honestly in the PR.
+
+--- Documentation truth + the missing pin ---
+
+10. Make SECURITY.md true. Two overclaims, both found by the sweep:
+    - §"Security posture" says every non-provider destination is
+      "individually disableable". The UPDATE CHECK IS NOT — no setting,
+      no policy key, not force_local_only; it runs at boot and every 6h
+      (desktop/mod.rs:430-438). RECOMMENDED: make it true in CODE rather
+      than weakening the promise — add a settings flag (default on) plus
+      a managed-policy key, gate the 6h loop and the boot check on it,
+      and have force_local_only imply it off. That means a new settings
+      field, so settings_test.rs's no-`..` destructuring will force
+      coverage — good. If the owner prefers not to add the control,
+      instead correct the wording in SECURITY.md and the in-app privacy
+      copy (SettingsMenu.tsx:1813-1816) to name the update check as
+      always-on. DO NOT leave the doc claiming what the code does not do.
+    - After item 1, that same in-app copy ("Only three kinds of request
+      ever leave this machine") needs a fourth kind, or the confirmed
+      answer-link opener named. Keep it byte-identical across twins.
+    - The §"Security posture" preamble says these invariants are
+      "covered by tests". Guarantee 8 (atomic 0600 writes) HAS NO TEST.
+      The property currently holds — verified on disk, every writer
+      funnels through the one atomic helper — it is simply unpinned.
+
+11. Pin guarantee 8. Add the missing test: assert 0600 on secrets.json,
+    secret.key, and the audit log after a write; assert the write is
+    atomic (no partial content, temp file cleaned up, target replaced by
+    rename); assert the temp file is not created world-readable before
+    the rename. Rust-side in the crate that owns write_atomic
+    (config.rs:214), plus the TS twin's writeJson (src/server/config.ts:
+    189). This closes the gap that let the audit-truncation finding
+    (item 3) survive unnoticed.
+
+--- Ship it ---
+
+12. Stamp. Bump to the NEXT PATCH from whatever main reads at the time
+    you start — do not hardcode: main was 0.14.19 when this section was
+    written (§54/#228), and §55 (the mobile add-files fix) is still
+    pending and will also take a patch number, so read package.json on
+    main and increment. Per CLAUDE.md's versioning policy this stays on
+    the 0.14.x line: a security release is still a PATCH bump. Move ALL
+    SEVEN stamp files together per CLAUDE.md's release-mechanics
+    section, bumping the Cargo.lock lighthouse-* crates BY PATTERN, not
+    by a remembered count.
+
+13. Full green, then the PR. node + cargo suites, release-smoke, and the
+    ios-build lane. Open ONE PR titled "Security: red-team Tier-A
+    remediation + release". Lead the body with items 1 and 2 (the
+    unanimous findings), list every item with its finding, its failing
+    test, and the fix, and explicitly list anything you SKIPPED because
+    it no longer reproduced. STOP AT THE PR — do not merge. Security
+    changes get human review.
+
+14. Release (owner actions AFTER merging the PR — the agent stops at 13,
+    but write these into the PR body as the runbook):
+    a. Squash-merge to main.
+    b. Dispatch desktop-release.yml (workflow_dispatch on main) with an
+       EMPTY release_tag so it derives v<version> from package.json. It
+       runs the JS checks + the 3-OS release-smoke gate, creates the
+       DRAFT release, builds the native bundles, and regenerates the
+       latest*.yml manifests.
+    c. Verify the draft: assets present for every platform, the
+       manifests point at them, and — if signing is provisioned — the
+       .sig assets exist and the updater-manifest job did not skip.
+    d. Dispatch publish-release.yml with release_tag=v<version> and a
+       body (see below) to flip draft → public latest.
+    e. Dispatch mobile-bootstrap.yml task: ios-beta for the TestFlight
+       build.
+    f. Update docs/security-fixes.md: move the nine advisories out of
+       "Known / deferred" into the PATCHED section of a new dated entry,
+       noting the version they shipped in. The 2026-07-30 entry stays as
+       the sweep record; do not rewrite history.
+    RELEASE NOTES DISCIPLINE: describe each fix by CLASS and IMPACT
+    ("answer links are now scheme-allowlisted, confirmed, and recorded";
+    "update staging no longer takes its filename from the manifest").
+    Do NOT publish reproduction steps, payloads, or a weaponization
+    recipe. Credit the sweep. If any advisory ships UNFIXED, say so
+    plainly rather than implying full coverage.
+    ORDERING CONSTRAINT: land this release BEFORE provisioning the
+    updater signing key per §54 — item 2 is latent only while no build
+    bakes a pubkey, and provisioning arms it.
+
+Constraints. No analytics/telemetry/accounts. SharePoint plumbing stays
+dormant, never removed. Labels byte-identical across twins with PARITY
+comments; pinned label tests move with their strings. Desktop and
+iPad-regular render identically except where item 1 deliberately changes
+answer-link presentation. Scope = these fourteen items; nothing else.
+
+Acceptance:
+1. Every one of the nine findings either has a test that failed before
+   the fix and passes after, or is documented as no-longer-reproducing /
+   device-gated with the reason.
+2. openExternal refuses javascript:/data:/file:/unparseable; an
+   answer-origin link shows its host and requires confirmation; the
+   destination lands in the egress registry and in the per-answer diff.
+3. A manifest asset name of `../../evil` or an absolute path cannot
+   place a byte outside the staging dir; the unsigned build still fails
+   closed to notify-only (pinned).
+4. Audit truncation, deletion, and delete-then-empty all FAIL
+   verification.
+5. A deep set-operation SELECT is rejected, not fatal; non-ASCII prose
+   before a SELECT does not panic; a pathological saved view skips its
+   card instead of hanging every ask.
+6. A recycled reference id implicitly includes nothing.
+7. SECURITY.md contains no claim the code does not deliver, and
+   guarantee 8 is pinned by a real test.
+8. All seven stamps read the new version; node + cargo + release-smoke +
+   ios-build green; the draft release carries assets for every platform;
+   the published release notes describe impact without a repro recipe.
+
+Environment. Items 1, 3, 5, 6, 7, 8, 11 are container-testable. Item 2's
+path derivation is container-testable if the helper is tauri-free
+(put it in lighthouse-shell). Item 9 needs a device/simulator — pin it
+structurally and be honest about the residual. Item 4's end-to-end needs
+a signed release; unit-test the version gate in-container and record the
+rest as verified-at-release. One commit per numbered item.
+```
