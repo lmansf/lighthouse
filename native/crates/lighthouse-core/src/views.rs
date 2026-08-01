@@ -244,14 +244,22 @@ pub(crate) fn normalize_view_name(raw: &str) -> String {
 // --- Dependency derivation (AST walk) ---------------------------------------------
 
 /// Accumulator for one pass over the parsed query: every CTE alias declared
-/// in any WITH clause, and every table-factor name, in appearance order.
+/// in any WITH clause, and every table-factor name, in appearance order, plus
+/// the recursion budget the walk below spends (see `walk_set_expr`).
 #[derive(Default)]
 struct TableWalk {
     ctes: Vec<String>,
     names: Vec<String>,
+    depth: usize,
+    too_deep: bool,
 }
 
 fn walk_query(q: &datafusion::sql::sqlparser::ast::Query, w: &mut TableWalk) {
+    if w.depth >= crate::analytics::MAX_QUERY_DEPTH {
+        w.too_deep = true;
+        return;
+    }
+    w.depth += 1;
     if let Some(with) = &q.with {
         for cte in &with.cte_tables {
             w.ctes.push(cte.alias.name.value.to_lowercase());
@@ -259,10 +267,23 @@ fn walk_query(q: &datafusion::sql::sqlparser::ast::Query, w: &mut TableWalk) {
         }
     }
     walk_set_expr(&q.body, w);
+    w.depth -= 1;
 }
 
+/// Every cycle in this walk spends the SAME budget the read-only guard does
+/// (`analytics::MAX_QUERY_DEPTH`). Unbounded it has the guard's bug: sqlparser
+/// builds `a UNION b UNION c …` as a left-deep spine in a LOOP, so a chained-
+/// set-operation definition overflows the stack and ABORTS the process
+/// (security-fixes.md, "`guard_sql` walk is unbounded-recursive"). Running out
+/// marks the pass and `collect_table_names` refuses the whole definition —
+/// never a PARTIAL reads list, which would save an invisible dependency.
 fn walk_set_expr(body: &datafusion::sql::sqlparser::ast::SetExpr, w: &mut TableWalk) {
     use datafusion::sql::sqlparser::ast::SetExpr;
+    if w.depth >= crate::analytics::MAX_QUERY_DEPTH {
+        w.too_deep = true;
+        return;
+    }
+    w.depth += 1;
     match body {
         SetExpr::Select(s) => {
             for twj in &s.from {
@@ -278,6 +299,7 @@ fn walk_set_expr(body: &datafusion::sql::sqlparser::ast::SetExpr, w: &mut TableW
         // that could reach here with table references.
         _ => {}
     }
+    w.depth -= 1;
 }
 
 fn walk_table_with_joins(twj: &datafusion::sql::sqlparser::ast::TableWithJoins, w: &mut TableWalk) {
@@ -289,6 +311,14 @@ fn walk_table_with_joins(twj: &datafusion::sql::sqlparser::ast::TableWithJoins, 
 
 fn walk_table_factor(f: &datafusion::sql::sqlparser::ast::TableFactor, w: &mut TableWalk) {
     use datafusion::sql::sqlparser::ast::TableFactor;
+    // Same budget: PIVOT/UNPIVOT chains and NESTED JOINs are parsed in loops
+    // too, and guard_sql never descends into table factors, so this cycle is
+    // as unbounded as the set-operation spine was.
+    if w.depth >= crate::analytics::MAX_QUERY_DEPTH {
+        w.too_deep = true;
+        return;
+    }
+    w.depth += 1;
     match f {
         // A named relation — table-valued functions land here too (args) and
         // are deliberately COLLECTED: their name resolves to no saved view or
@@ -315,6 +345,7 @@ fn walk_table_factor(f: &datafusion::sql::sqlparser::ast::TableFactor, w: &mut T
         // UNNEST / JSON_TABLE / function factors name no stored table.
         _ => {}
     }
+    w.depth -= 1;
 }
 
 /// The table names a definition references: the sqlparser AST's table
@@ -335,6 +366,12 @@ pub(crate) fn collect_table_names(sql: &str) -> Result<Vec<String>, String> {
                 walk_query(q, &mut w);
             }
         }
+    }
+    // A walk that ran out of budget stopped descending, so `names` may be
+    // missing a real dependency — refuse rather than save a definition with an
+    // invisible one (the same reason table-valued functions are collected).
+    if w.too_deep {
+        return Err("SQL is nested too deeply".into());
     }
     let mut out: Vec<String> = Vec::new();
     for name in w.names {
@@ -1206,6 +1243,27 @@ mod tests {
             vec!["sales"]
         );
         assert!(collect_table_names("not sql at all").is_err());
+    }
+
+    #[test]
+    fn table_walk_refuses_a_chain_deeper_than_the_budget() {
+        // The dependency walk recurses over the same left-deep set-operation
+        // spine guard_sql does; past MAX_QUERY_DEPTH it must REFUSE — not
+        // return a partial reads list, and not overflow the stack.
+        let chain = |arms: usize| {
+            let mut sql = String::from("SELECT a FROM t0");
+            for i in 1..arms {
+                sql.push_str(&format!(" UNION ALL SELECT a FROM t{i}"));
+            }
+            sql
+        };
+        assert_eq!(
+            collect_table_names(&chain(2_000)),
+            Err("SQL is nested too deeply".to_string())
+        );
+        // The widest chain the app generates (data-quality, DQ_MAX_COLS = 40
+        // arms) still resolves every dependency.
+        assert_eq!(collect_table_names(&chain(40)).unwrap().len(), 40);
     }
 
     #[test]

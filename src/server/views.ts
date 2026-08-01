@@ -301,6 +301,13 @@ function scrubSqlText(sql: string): string {
   return out;
 }
 
+/**
+ * Longest SQL the guard will look at. KEEP IN SYNC with
+ * analytics.rs::MAX_SQL_BYTES — without it this twin saves a definition the
+ * Rust engine then refuses to register (silently skipped at ask time).
+ */
+const MAX_SQL_BYTES = 64 * 1024;
+
 /** Statement kinds that write — word-boundary matched outside literals. */
 const FORBIDDEN_WORDS =
   /\b(insert|update|delete|create|drop|alter|attach|copy|merge|truncate|replace|grant|set)\b/i;
@@ -317,6 +324,11 @@ const FORBIDDEN_WORDS =
  * where Rust would allow it (e.g. the REPLACE() scalar function).
  */
 export function guardViewSql(sql: string): string | null {
+  // PARITY: the byte cap is shared with analytics.rs::guard_sql (byteLength,
+  // not .length, so both engines measure the same thing) and runs FIRST, as it
+  // does there. Its companion depth cap has no twin: this guard and
+  // collectTableNames are iterative scans with no recursion to overflow.
+  if (Buffer.byteLength(sql, "utf8") > MAX_SQL_BYTES) return "SQL is too long";
   const text = scrubSqlText(sql);
   // Exactly one statement: a `;` may be followed only by more semicolons
   // and whitespace (a trailing terminator), never by further content.

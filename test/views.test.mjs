@@ -161,6 +161,12 @@ test("the textual guard refuses anything but one read-only SELECT", () => {
   assert.equal(views.guardViewSql("SELECT 1 -- drop table x\nFROM logs"), null);
   assert.equal(views.guardViewSql("SELECT 1 /* update t */ FROM logs"), null);
   assert.equal(views.guardViewSql("SELECT * FROM t WHERE a = 'it''s; fine'"), null);
+  // Shared byte ceiling (analytics.rs::MAX_SQL_BYTES): the Rust guard would
+  // refuse this, so the twin must too or the save is silently unusable.
+  assert.equal(
+    views.guardViewSql(`SELECT 1${" UNION ALL SELECT 1".repeat(5000)}`),
+    "SQL is too long",
+  );
 
   // The guard runs at save: refusals persist nothing.
   assert.throws(

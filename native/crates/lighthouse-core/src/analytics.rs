@@ -44,6 +44,11 @@ const SAMPLE_ROWS: usize = 3;
 /// Per schema card (prompt block), chars. Wide sheets get their sample rows
 /// clipped rather than eating the context window.
 const MAX_CARD_CHARS: usize = 1200;
+/// Row ceiling for a card's count. The count is taken THROUGH a limit so one
+/// expensive registered view can't make an uncapped COUNT(*) walk a multiplied
+/// join on every ask (red-team: tablecard-cost); past the ceiling the card
+/// reports a floor ("1,000,000+"), never a total the engine stopped short of.
+const MAX_CARD_ROWS: usize = 1_000_000;
 /// The narration prompt sees at most this much of the result — enough to
 /// answer and quote from; the 200-row execution cap is for correctness
 /// semantics, not for stuffing the model's context.
@@ -1301,6 +1306,17 @@ fn table_from_matrix(
 /// Schema + row count + sample rows for the planning prompt (never the data),
 /// plus the lowercased column names for deterministic join hints.
 async fn table_card(ctx: &SessionContext, table: &str) -> Option<(String, Vec<String>)> {
+    table_card_within(ctx, table, Duration::from_secs(QUERY_TIMEOUT_SECS)).await
+}
+
+/// The same card with its per-collect budget injected, so a test can prove the
+/// give-up without waiting a real one out (house seam: `saved_age_label`'s
+/// `now_ms`). Production always enters through the wrapper above.
+async fn table_card_within(
+    ctx: &SessionContext,
+    table: &str,
+    budget: Duration,
+) -> Option<(String, Vec<String>)> {
     let df = ctx
         .sql(&format!("SELECT * FROM {table} LIMIT {SAMPLE_ROWS}"))
         .await
@@ -1318,26 +1334,34 @@ async fn table_card(ctx: &SessionContext, table: &str) -> Option<(String, Vec<St
         .map(|f| format!("{} {}", f.name(), f.data_type()))
         .collect::<Vec<_>>()
         .join(", ");
-    let sample = df.collect().await.ok()?;
+    // A card is rebuilt for EVERY registered table on EVERY ask, and a saved
+    // view can be arbitrarily expensive — a CROSS JOIN or WITH RECURSIVE passes
+    // guard_sql untouched (red-team: tablecard-cost). Both collects take the
+    // same budget the executed path takes, and a miss SKIPS the card: every
+    // caller already degrades on None rather than blocking the ask. The budget
+    // can only be OBSERVED where the plan yields (a cooperative leaf/exchange
+    // node), and an aborted task keeps running until its current poll returns —
+    // see the residual note in docs/security-fixes.md.
+    let sample = tokio::time::timeout(budget, df.collect()).await.ok()?.ok()?;
     let (sample_md, _, _) = batches_to_markdown(&sample, SAMPLE_ROWS, MAX_RESULT_COLS);
-    let count = ctx
-        .sql(&format!("SELECT COUNT(*) AS n FROM {table}"))
+    // Count THROUGH a limit so a sequential scan stops at the ceiling instead
+    // of walking a multiplied join to the end.
+    let capped = ctx
+        .sql(&format!("SELECT * FROM {table}"))
         .await
         .ok()?
-        .collect()
-        .await
+        .limit(0, Some(MAX_CARD_ROWS + 1))
         .ok()?;
-    let n = count
-        .first()
-        .and_then(|b| {
-            b.column(0)
-                .as_any()
-                .downcast_ref::<datafusion::arrow::array::Int64Array>()
-        })
-        .map(|a| a.value(0))
-        .unwrap_or(0);
+    let n = tokio::time::timeout(budget, capped.count()).await.ok()?.ok()? as i64;
+    // A capped count is a FLOOR, not a total — the card is what the model
+    // narrates from, so it must not print a number the engine stopped short of.
+    let rows = if n > MAX_CARD_ROWS as i64 {
+        format!("{}+", commafy(MAX_CARD_ROWS))
+    } else {
+        n.to_string()
+    };
     let card =
-        format!("table {table} — {n} rows\ncolumns: {schema_line}\nsample rows:\n{sample_md}");
+        format!("table {table} — {rows} rows\ncolumns: {schema_line}\nsample rows:\n{sample_md}");
     // Wide sheets can render enormous sample rows; a card is a prompt block,
     // so clip it rather than let one table eat the local model's window.
     let card = if card.chars().count() > MAX_CARD_CHARS {
@@ -1578,7 +1602,18 @@ pub fn extract_sql(raw: &str) -> Option<String> {
     } else {
         cleaned
     };
-    let upper = body.to_uppercase();
+    // ASCII-only uppercase. `str::to_uppercase` is the full Unicode mapping and
+    // is NOT byte-length preserving in either direction (`ﬁ`→`FI` shrinks 3
+    // bytes to 2, `ΐ`→`Ϊ́` grows 2 to 6), so an offset found in the mapped copy
+    // does not address the same byte of `body`: the slice below panicked
+    // mid-char — killing the ask task with nothing surfaced — on the typographic
+    // ligatures PDF text extraction emits verbatim ("identiﬁed", "cash ﬂow"), or
+    // sliced the wrong SQL when the shift happened to land on an ASCII byte.
+    // Only ASCII bytes move here and both keywords are ASCII, so `at` is always
+    // a char boundary in `body`. Closed by construction: a keyword spelled with
+    // a letter whose Unicode uppercase is ASCII (`ſelect`) now extracts nothing
+    // — SQL the guard rejected anyway.
+    let upper = body.to_ascii_uppercase();
     let at = upper
         .find("SELECT")
         .into_iter()
@@ -1592,23 +1627,56 @@ pub fn extract_sql(raw: &str) -> Option<String> {
     }
 }
 
+/// Longest SQL the guard will even look at. The statement is provider-
+/// controlled text (a model reply, or a MITM'd one), so the cheapest ceiling
+/// goes FIRST: it bounds the parse and the AST that parse allocates.
+///
+/// It does NOT bound AST DEPTH in general: sqlparser builds infix operator
+/// chains in a loop too (`parse_subexpr`), and `+1` costs 2 bytes per level, so
+/// 65,532 bytes of `SELECT 1+1+1…` still overflows the stack on drop (measured:
+/// aborts on a 2 MiB thread, debug). What it does bound is the SET-OPERATION
+/// spine this guard walks — ~19 B/arm, so ~3.4k arms, measured survivable —
+/// and it stops the multi-MB case outright. The expression-chain residual is
+/// recorded in docs/security-fixes.md; it cannot be closed by lowering this
+/// number, because the data-quality recipe's own worst case is ~25 KB.
+/// KEEP IN SYNC with views.ts::MAX_SQL_BYTES.
+const MAX_SQL_BYTES: usize = 64 * 1024;
+
+/// Deepest query/set-expression nesting the read-only walk descends before
+/// refusing. The walk is recursive and sqlparser builds `a UNION b UNION c …`
+/// as a LEFT-DEEP spine in a LOOP — its own recursion counter never fires for
+/// a set-operation chain — so unbounded, one chained-set-operation SELECT
+/// overflows the stack and ABORTS the process before anything executes:
+/// uncatchable, zero interaction (security-fixes.md, "`guard_sql` walk is
+/// unbounded-recursive"). Legitimate depth is small — the deepest SQL this app
+/// generates is the data-quality recipe's DQ_MAX_COLS (40) UNION ALL arms.
+/// `pub(crate)` so views.rs's dependency walk spends the SAME CONSTANT, so
+/// neither can drift past the other; views.rs spends it faster (query /
+/// set-expr / table-factor), so a chain near the ceiling can pass the guard
+/// and still be refused at save.
+pub(crate) const MAX_QUERY_DEPTH: usize = 64;
+
 /// Read-only by construction: exactly one statement, and it must parse as a
 /// plain query (SELECT / WITH…SELECT) that reads only. Everything else is
 /// rejected up front. A structural `Query(_)` match is NOT enough — sqlparser
 /// wraps `SELECT … INTO` (which DataFusion executes as a CreateMemoryTable DDL,
 /// dodging the timeout + row cap) and data-modifying CTE/query bodies
 /// (INSERT/UPDATE/… — only DataFusion's current non-support keeps them inert)
-/// inside `Statement::Query`, so the body and every CTE are checked recursively.
+/// inside `Statement::Query`, so the body and every CTE are checked recursively
+/// — under `MAX_QUERY_DEPTH`, and only after the `MAX_SQL_BYTES` ceiling.
 pub fn guard_sql(sql: &str) -> Result<(), String> {
     use datafusion::sql::parser::{DFParser, Statement as DFStatement};
     use datafusion::sql::sqlparser::ast::Statement as SqlStatement;
+    if sql.len() > MAX_SQL_BYTES {
+        return Err("SQL is too long".into());
+    }
     let stmts = DFParser::parse_sql(sql).map_err(|e| format!("SQL parse error: {e}"))?;
     if stmts.len() != 1 {
         return Err("expected exactly one SQL statement".into());
     }
     match stmts.front() {
         Some(DFStatement::Statement(s)) => match &**s {
-            SqlStatement::Query(q) => query_is_read_only(q),
+            SqlStatement::Query(q) => query_is_read_only(q, 0),
             _ => Err("only SELECT queries are allowed".into()),
         },
         _ => Err("only SELECT queries are allowed".into()),
@@ -1617,18 +1685,32 @@ pub fn guard_sql(sql: &str) -> Result<(), String> {
 
 /// Recursively confirm a parsed query reads only: no `SELECT … INTO`, and no
 /// data-modifying set-expression as a body or CTE. Whitelists the read-only
-/// body shapes so a future sqlparser variant can't silently pass.
-fn query_is_read_only(q: &datafusion::sql::sqlparser::ast::Query) -> Result<(), String> {
+/// body shapes so a future sqlparser variant can't silently pass. `depth` is
+/// the nesting spent so far — both halves check it, because a nested WITH
+/// recurses query→query without passing through the set-expression arm.
+fn query_is_read_only(
+    q: &datafusion::sql::sqlparser::ast::Query,
+    depth: usize,
+) -> Result<(), String> {
+    if depth > MAX_QUERY_DEPTH {
+        return Err("SQL is nested too deeply".into());
+    }
     if let Some(with) = &q.with {
         for cte in &with.cte_tables {
-            query_is_read_only(&cte.query)?;
+            query_is_read_only(&cte.query, depth + 1)?;
         }
     }
-    set_expr_is_read_only(&q.body)
+    set_expr_is_read_only(&q.body, depth + 1)
 }
 
-fn set_expr_is_read_only(body: &datafusion::sql::sqlparser::ast::SetExpr) -> Result<(), String> {
+fn set_expr_is_read_only(
+    body: &datafusion::sql::sqlparser::ast::SetExpr,
+    depth: usize,
+) -> Result<(), String> {
     use datafusion::sql::sqlparser::ast::SetExpr;
+    if depth > MAX_QUERY_DEPTH {
+        return Err("SQL is nested too deeply".into());
+    }
     match body {
         SetExpr::Select(s) => {
             if s.into.is_some() {
@@ -1636,10 +1718,10 @@ fn set_expr_is_read_only(body: &datafusion::sql::sqlparser::ast::SetExpr) -> Res
             }
             Ok(())
         }
-        SetExpr::Query(inner) => query_is_read_only(inner),
+        SetExpr::Query(inner) => query_is_read_only(inner, depth + 1),
         SetExpr::SetOperation { left, right, .. } => {
-            set_expr_is_read_only(left)?;
-            set_expr_is_read_only(right)
+            set_expr_is_read_only(left, depth + 1)?;
+            set_expr_is_read_only(right, depth + 1)
         }
         SetExpr::Values(_) => Ok(()),
         // INSERT / UPDATE / TABLE / any modifying or unrecognized body.
@@ -1684,6 +1766,14 @@ pub fn guard_metric_expression(expression: &str, entity: &str) -> Result<Vec<Str
 /// PARITY: SQL parsing is Rust-only (analytics/DataFusion), so the TS twin
 /// answers `{available:false}` for op:"defineMetric".
 pub fn propose_metric(sql: &str) -> Option<(String, String)> {
+    // The same ceiling `guard_sql` applies, for the same reason: `answer_select`
+    // parses AND clones the body, so a deep spine is a recursive clone plus two
+    // recursive drops — an uncatchable process abort, not a `None` (measured).
+    // This is the only `DFParser::parse_sql` on this surface that does not go
+    // through the guard; over the cap there is honestly nothing to propose.
+    if sql.len() > MAX_SQL_BYTES {
+        return None;
+    }
     let select = answer_select(sql)?;
     let entity = sole_base_table(&select.from)?;
     let expression = select
@@ -3714,6 +3804,31 @@ mod tests {
             Some("with c as (select 1) select * from c")
         );
         assert_eq!(extract_sql("no query here"), None);
+
+        // Non-ASCII prose ahead of the keyword. The offset used to come from a
+        // `to_uppercase` copy whose byte length is not the body's, so the slice
+        // landed mid-char and panicked the ask task with nothing surfaced (`ﬂ`
+        // ahead of an emoji), or shifted onto an ASCII byte and returned the
+        // wrong SQL (`ﬁ` backward, `ΐ` forward). The ligatures are escapes on
+        // purpose: in source they are indistinguishable from "fi"/"fl", and
+        // normalizing them away would silently disarm this test.
+        for prose in [
+            "Résumé du trimestre :\n",
+            "季度销售汇总：\n",
+            "📈 revenue is up 12%\n",
+            "Identi\u{FB01}ed pro\u{FB01}t rows:\n",
+            "Cash \u{FB02}ow \u{FB01}gures 📊\n",
+            "Σύνολο πωλήσεων αν\u{0390} τρίμηνο\n",
+        ] {
+            assert_eq!(
+                extract_sql(&format!("{prose}SELECT a FROM t")).as_deref(),
+                Some("SELECT a FROM t"),
+                "{prose:?}"
+            );
+        }
+        // …and inside the fence, where the body is what gets sliced.
+        let fenced = "Here you go:\n```sql\n-- \u{FB01}nal \u{FB02}ow 📊\nSELECT a FROM t;\n```";
+        assert_eq!(extract_sql(fenced).as_deref(), Some("SELECT a FROM t"));
     }
 
     #[test]
@@ -5285,6 +5400,64 @@ mod tests {
             card.chars().count()
         );
         assert_eq!(columns.len(), n, "join hints need every column name");
+    }
+
+    #[tokio::test]
+    async fn table_card_row_counts_stop_at_the_cap() {
+        // red-team "tablecard-cost": the count is taken THROUGH a limit, so a
+        // card can never pay for an uncapped COUNT(*). Past the ceiling the
+        // card reports a floor, not a total the engine stopped short of.
+        let schema = Arc::new(Schema::new(vec![Field::new("n", DataType::Utf8, false)]));
+        let col = Arc::new(StringArray::from(vec!["x"; super::MAX_CARD_ROWS + 1])) as ArrayRef;
+        let batch = RecordBatch::try_new(schema.clone(), vec![col]).unwrap();
+        let mem = MemTable::try_new(schema, vec![vec![batch]]).unwrap();
+        let ctx = SessionContext::new();
+        ctx.register_table("big", Arc::new(mem)).unwrap();
+
+        let (card, _) = table_card(&ctx, "big").await.expect("card");
+        assert!(
+            card.starts_with("table big — 1,000,000+ rows"),
+            "a capped count must read as a floor: {card}"
+        );
+    }
+
+    #[tokio::test]
+    async fn table_cards_give_up_when_a_view_blows_the_budget() {
+        // red-team "tablecard-cost": a saved view can be arbitrarily expensive
+        // — a CROSS JOIN passes guard_sql — and its card is rebuilt on EVERY
+        // ask. Over budget the card must be SKIPPED (every caller degrades on
+        // None), never walked to the end.
+        let schema = Arc::new(Schema::new(vec![Field::new("n", DataType::Utf8, false)]));
+        let col = Arc::new(StringArray::from(vec!["x"; 8])) as ArrayRef;
+        let batch = RecordBatch::try_new(schema.clone(), vec![col]).unwrap();
+        // >>128 batches: the leaf yields at least once, so a spent budget is
+        // OBSERVED rather than starved out by a non-yielding operator loop.
+        let batches: Vec<RecordBatch> = (0..2_000).map(|_| batch.clone()).collect();
+        let mem = MemTable::try_new(schema, vec![batches]).unwrap();
+        let ctx = SessionContext::new();
+        ctx.register_table("t", Arc::new(mem)).unwrap();
+        // A blocking aggregate: the card's `LIMIT 3` cannot short-circuit it,
+        // so the sample must consume every batch — and cross the yield point.
+        let df = ctx
+            .sql("SELECT n, COUNT(*) AS c FROM t GROUP BY n")
+            .await
+            .expect("plan");
+        ctx.register_table("wild", df.into_view()).expect("register");
+
+        // `Duration::ZERO` makes the deadline already past, so the first
+        // `Pending` converts deterministically to Elapsed — no wall-clock
+        // race. The outer guard turns a regression into a clean failure, not
+        // a hang.
+        let card = tokio::time::timeout(
+            Duration::from_secs(5),
+            table_card_within(&ctx, "wild", Duration::ZERO),
+        )
+        .await
+        .expect("table_card_within must give up on its budget");
+        assert!(
+            card.is_none(),
+            "an over-budget card must be skipped, not built"
+        );
     }
 
     #[test]
