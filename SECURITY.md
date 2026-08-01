@@ -92,7 +92,11 @@ These are invariants, enforced in both engines and covered by tests:
 - **Opt-in telemetry and chat history**, both default off; lock-not-wipe when an
   org policy disables them.
 - **Tamper-evident audit log** (opt-in or policy-forced): one HMAC-chained local
-  record per answered question; editing or deleting a record breaks verification
+  record per answered question, with the chain's length and head anchored
+  outside the log (`audit/head.json`), so editing a record — or truncating or
+  deleting the active month's log — breaks verification. Detective, not
+  tamper-PROOF: deleting the anchor as well, or controlling the clock, reopens
+  truncation, and months older than the active one are unanchored
   (`openspec/changes/add-audit-log/design.md`).
 - **Atomic 0600 state writes** for secrets, settings, and the audit log.
 - **Verified updates.** Update manifests are checked against a pinned minisign

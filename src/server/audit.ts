@@ -5,8 +5,9 @@
  * read, which provider answered, and which hosts the answer dialed.
  *
  * PARITY, with one deliberate divergence: the Rust engine chains an HMAC-SHA256
- * across records so tampering is detectable; the TS twin OMITS the chain (it is
- * the web-dev twin, not a security surface — see docs/ts-twin.md / design D6).
+ * across records — and anchors the chain's length + head in `audit/head.json`
+ * so truncation and deletion are caught too — while the TS twin OMITS both (it
+ * is the web-dev twin, not a security surface — see docs/ts-twin.md / design D6).
  * The record shape, gating, egress-delta approach, and CSV export stay
  * byte-compatible so the same UI renders either engine's log.
  */
@@ -139,8 +140,9 @@ export function recentAudit(limit: number): {
   return { enabled: auditEnabled(), intact: true, records };
 }
 
-/** Explicit verification. The twin keeps no chain, so it always reports intact
- *  (PARITY — only the Rust engine detects tampering). */
+/** Explicit verification. The twin keeps no chain and no head anchor, so it
+ *  always reports intact (PARITY — only the Rust engine detects tampering,
+ *  including truncation and deletion). */
 export function verifyActiveAudit(): { intact: boolean; breakAt: number; count: number } {
   return { intact: true, breakAt: -1, count: readRecords().length };
 }

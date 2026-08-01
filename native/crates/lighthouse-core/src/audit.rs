@@ -5,9 +5,20 @@
 //! `audit_enabled` setting or the managed policy key `auditLog: "on"`.
 //!
 //! Each record chains an HMAC-SHA256 to the previous record (key derived from
-//! the install secrets store), so deleting or editing any record breaks
-//! verification from that point on. Detective control, not anti-root DRM
-//! (the doc states the threat model).
+//! the install secrets store), so editing any record breaks verification from
+//! that point on. A link binds a record only to its PREDECESSOR, though, so any
+//! PREFIX of a valid chain is itself a valid chain — dropping the newest N
+//! records, or the whole file, would recompute perfectly (red-team:
+//! audit-anchor). `audit/head.json` narrows that: the chain's LENGTH and head
+//! hmac are anchored OUTSIDE the log, keyed the same way, so truncating or
+//! deleting the log fails verification and keeps failing across later appends.
+//! Detective control, not anti-root DRM (the doc states the threat model) —
+//! and honestly bounded: deleting or corrupting head.json ALONE re-opens
+//! truncation permanently (an absent anchor fails open so pre-anchor logs stay
+//! honest, and the next append then re-anchors the shortened log), only the
+//! ACTIVE month is anchored, and an attacker who controls the clock can retire
+//! the anchor to a future month. It raises the cost of casual tampering; it
+//! does not stop a determined local attacker.
 //!
 //! KEEP IN SYNC with src/server/audit.ts (same record shape at the same
 //! choke point; the TS twin omits the HMAC chain — PARITY, it is not a
@@ -20,12 +31,15 @@ use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
-use crate::config::{app_state_dir, now_ms};
+use crate::config::{app_state_dir, now_ms, write_json};
 use crate::contracts::{ChunkMeta, CostMeta};
 
 type HmacSha256 = Hmac<Sha256>;
 
 const HMAC_LABEL: &str = "lighthouse-audit-hmac-v1";
+/// Key label for the out-of-log anchor — separate from the record label so an
+/// anchor hmac can never be replayed as a record hmac, or the reverse.
+const HEAD_LABEL: &str = "lighthouse-audit-head-v1";
 /// The first record chains to this fixed genesis instead of a prior hmac.
 const GENESIS: &str = "genesis";
 
@@ -125,6 +139,10 @@ fn hmac_key() -> [u8; 32] {
     crate::secrets::derived_key(HMAC_LABEL)
 }
 
+fn head_key() -> [u8; 32] {
+    crate::secrets::derived_key(HEAD_LABEL)
+}
+
 /// HMAC-SHA256 over the record's canonical bytes (everything but `hmac`) plus
 /// the previous hmac — the chain link.
 fn compute_hmac(rec: &AuditRecord) -> String {
@@ -143,16 +161,97 @@ fn compute_hmac(rec: &AuditRecord) -> String {
     hex::encode(mac.finalize().into_bytes())
 }
 
-fn last_hmac() -> String {
+/// The chain's head, anchored OUTSIDE the log (red-team: audit-anchor). A link
+/// binds a record only to its predecessor, so a truncated log re-chains
+/// perfectly; pinning the LENGTH and the head hmac in a separate file is what
+/// makes dropping records — or the whole file — visible. `hmac` covers the
+/// other three fields, so editing the anchor to match a shortened log costs the
+/// install key, exactly like forging a record.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AuditHead {
+    month: String,
+    count: usize,
+    last_hmac: String,
+    hmac: String,
+}
+
+/// One anchor per install, beside the month files, describing the ACTIVE month.
+/// Anchored to `audit_path()`'s directory, not `audit_dir()`, so the test
+/// override keeps the anchor next to the log it describes (identical in
+/// production, where `audit_path().parent() == audit_dir()`).
+fn head_path() -> PathBuf {
+    audit_path()
+        .parent()
+        .map(|d| d.join("head.json"))
+        .unwrap_or_else(|| audit_dir().join("head.json"))
+}
+
+/// HMAC-SHA256 over the anchor's canonical bytes (everything but `hmac`).
+fn compute_head_hmac(head: &AuditHead) -> String {
+    let mut mac = HmacSha256::new_from_slice(&head_key()).expect("hmac key");
+    let canonical = serde_json::json!({
+        "month": head.month,
+        "count": head.count,
+        "lastHmac": head.last_hmac,
+    });
+    mac.update(canonical.to_string().as_bytes());
+    hex::encode(mac.finalize().into_bytes())
+}
+
+/// The anchor as stored — `None` when absent or unreadable. Callers decide what
+/// a stale or unauthenticated one means.
+fn read_head() -> Option<AuditHead> {
+    let text = std::fs::read_to_string(head_path()).ok()?;
+    serde_json::from_str::<AuditHead>(&text).ok()
+}
+
+/// Anchor the new length + head after a record lands. Atomic and 0600 via the
+/// same helper settings and secrets use; best-effort, like the append itself.
+fn write_head(count: usize, last_hmac: &str) {
+    let mut head = AuditHead {
+        month: month_stamp(),
+        count,
+        last_hmac: last_hmac.to_string(),
+        hmac: String::new(),
+    };
+    head.hmac = compute_head_hmac(&head);
+    let path = head_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    write_json(&path, &head);
+}
+
+/// The count to anchor after appending onto a file that held `file_count`
+/// records: one more than the file, but never fewer than one more than the
+/// anchor already claims. Monotone on purpose — after a truncation the anchor
+/// keeps counting, so the next legitimate append RECORDS the gap instead of
+/// re-blessing the shortened log.
+fn next_count(file_count: usize) -> usize {
+    let anchored = read_head()
+        .filter(|h| h.month == month_stamp() && h.hmac == compute_head_hmac(h))
+        .map(|h| h.count)
+        .unwrap_or(0);
+    file_count.max(anchored) + 1
+}
+
+/// The active file's tail: the hmac the next record chains to (GENESIS when the
+/// file is absent or holds no record), and how many records it holds.
+fn tail() -> (String, usize) {
     let path = audit_path();
     let Ok(text) = std::fs::read_to_string(&path) else {
-        return GENESIS.to_string();
+        return (GENESIS.to_string(), 0);
     };
-    text.lines()
-        .rev()
-        .find_map(|l| serde_json::from_str::<AuditRecord>(l).ok())
-        .map(|r| r.hmac)
-        .unwrap_or_else(|| GENESIS.to_string())
+    let mut last = GENESIS.to_string();
+    let mut count = 0usize;
+    for line in text.lines() {
+        if let Ok(rec) = serde_json::from_str::<AuditRecord>(line) {
+            last = rec.hmac;
+            count += 1;
+        }
+    }
+    (last, count)
 }
 
 /// Append one record for an answered question. Best-effort and gated: does
@@ -166,6 +265,7 @@ pub fn append(input: AuditInput) {
         use sha2::Digest;
         hex::encode(Sha256::digest(input.question.as_bytes()))
     };
+    let (prev, file_count) = tail();
     let mut rec = AuditRecord {
         ts: now_ms(),
         question_sha256,
@@ -179,7 +279,7 @@ pub fn append(input: AuditInput) {
         },
         artifacts: input.artifacts,
         cost: input.cost,
-        prev_hmac: last_hmac(),
+        prev_hmac: prev,
         hmac: String::new(),
     };
     rec.hmac = compute_hmac(&rec);
@@ -204,7 +304,15 @@ pub fn append(input: AuditInput) {
         opts.open(&path)
     };
     if let Ok(mut f) = opened {
-        let _ = writeln!(f, "{line}");
+        // Anchor the new length + head OUTSIDE the log (red-team: audit-anchor),
+        // and only once the record is really on disk — an anchor running ahead
+        // of the log would read as a truncation, so the record is fsynced first
+        // (`write_json` below fsyncs the anchor and this directory in turn). A
+        // failed sync just skips the anchor: it lags, and `next_count`'s max()
+        // heals that on the next append.
+        if writeln!(f, "{line}").is_ok() && f.sync_all().is_ok() {
+            write_head(next_count(file_count), &rec.hmac);
+        }
     }
 }
 
@@ -257,12 +365,15 @@ impl AnswerAudit {
     }
 }
 
-/// Verify the chain in a file. `Ok(n)` = n records, all intact. `Err(i)` =
-/// the chain first breaks at record index `i` (0-based).
+/// Verify the chain in a file, and — for the ACTIVE month — against the
+/// out-of-log anchor. `Ok(n)` = n records, all intact. `Err(i)` = the chain
+/// first breaks at record index `i` (0-based); for a truncation or a deletion
+/// that is the first record the anchor accounts for that the file no longer has.
 pub fn verify(path: &std::path::Path) -> Result<usize, usize> {
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return Ok(0);
-    };
+    // A missing file is NOT an intact empty chain (red-team: audit-anchor —
+    // this used to `return Ok(0)`, so deleting the month certified as intact).
+    // Walk it as zero records and let the anchor below return the verdict.
+    let text = std::fs::read_to_string(path).unwrap_or_default();
     let mut prev = GENESIS.to_string();
     let mut count = 0usize;
     for (i, line) in text.lines().enumerate() {
@@ -278,7 +389,47 @@ pub fn verify(path: &std::path::Path) -> Result<usize, usize> {
         prev = rec.hmac.clone();
         count += 1;
     }
+    check_anchor(path, count, &prev)?;
     Ok(count)
+}
+
+/// Compare a verified chain against the out-of-log anchor: `Err(i)` when the
+/// anchor says this file should be LONGER, or should END differently, than it
+/// does — i.e. records were truncated away or the file was deleted (red-team:
+/// audit-anchor; SECURITY.md's "deleting a record breaks verification"). Only
+/// the active month's file is anchored; anything else verifies by chain alone.
+fn check_anchor(path: &std::path::Path, count: usize, last: &str) -> Result<(), usize> {
+    if path != audit_path() {
+        return Ok(());
+    }
+    // No usable anchor: a log written before anchoring shipped, or an install
+    // that has logged nothing yet. Verify by chain alone rather than flag every
+    // pre-upgrade log as tampered — the next append anchors it.
+    let Some(head) = read_head() else {
+        return Ok(());
+    };
+    // A well-formed anchor that does not authenticate was hand-edited; nothing
+    // in the file can be trusted, so the break is reported at the very start.
+    if head.hmac != compute_head_hmac(&head) {
+        return Err(0);
+    }
+    // A stale anchor from an earlier month describes a DIFFERENT file: this
+    // month's bucket is new, not shortened.
+    if head.month != month_stamp() {
+        return Ok(());
+    }
+    if count < head.count {
+        // The first record the anchor accounts for that the file no longer has.
+        return Err(count);
+    }
+    // LONGER than anchored is a lagging anchor, not tampering: `append` is
+    // best-effort, so a crash between the line and the anchor write leaves it
+    // behind (the next append heals it). That direction only ever ADDS records,
+    // and forging one still needs the chain key.
+    if count == head.count && last != head.last_hmac {
+        return Err(count.saturating_sub(1));
+    }
+    Ok(())
 }
 
 /// The running cost total across EVERY logged ask (openspec: add-beam-loop
@@ -432,6 +583,7 @@ mod tests {
         let c = setup(false);
         append(input("q", "local", vec![]));
         assert!(!c.file.exists(), "no file when disabled");
+        assert!(!head_path().exists(), "no anchor while the log is off");
     }
 
     #[test]
@@ -463,6 +615,95 @@ mod tests {
         );
         std::fs::write(&c.file, tampered).unwrap();
         assert_eq!(verify(&c.file), Err(1), "edit of record 1 is caught at index 1");
+    }
+
+    /// Red-team (audit-anchor): each link binds a record only to its
+    /// PREDECESSOR, so any PREFIX of a valid chain verifies on its own —
+    /// dropping the newest records used to certify as INTACT, leaving the viewer
+    /// showing "Chain verified" over a log missing the cloud ask. The out-of-log
+    /// anchor pins the LENGTH and the head hmac, so the drop is caught.
+    #[test]
+    fn truncating_the_tail_is_caught() {
+        let c = setup(true);
+        append(input("cloud question", "openai", vec!["api.openai.com".into()]));
+        append(input("local question", "local", vec![]));
+        append(input("third", "local", vec![]));
+        assert_eq!(verify(&c.file), Ok(3), "three appends verify");
+        assert!(
+            head_path().exists(),
+            "every append anchors the chain outside the log"
+        );
+
+        // Drop the newest TWO records; the surviving prefix re-chains perfectly.
+        let text = std::fs::read_to_string(&c.file).unwrap();
+        let kept = text.lines().next().unwrap().to_string();
+        std::fs::write(&c.file, format!("{kept}\n")).unwrap();
+
+        assert_eq!(verify(&c.file), Err(1), "the anchor names the first missing record");
+        let v = verify_active();
+        assert_eq!(v["intact"], false, "the badge flips to tampering detected");
+        assert_eq!(v["breakAt"], 1);
+        assert_eq!(recent(10)["intact"], false, "the log viewer agrees");
+    }
+
+    /// Red-team (audit-anchor): deleting the month file used to certify as an
+    /// intact EMPTY chain (`verify` returned Ok(0) on a read error), and
+    /// re-creating it empty looked identical. SECURITY.md says deleting a record
+    /// breaks verification — the anchor is what makes that true.
+    #[test]
+    fn deleting_the_log_is_caught_and_recreating_it_empty_stays_caught() {
+        let c = setup(true);
+        append(input("cloud question", "openai", vec!["api.openai.com".into()]));
+        append(input("second", "local", vec![]));
+        assert_eq!(verify(&c.file), Ok(2), "two appends verify");
+
+        std::fs::remove_file(&c.file).unwrap();
+        assert_eq!(verify(&c.file), Err(0), "a missing log is not an intact empty chain");
+        assert_eq!(verify_active()["intact"], false);
+
+        std::fs::write(&c.file, "").unwrap();
+        assert_eq!(verify(&c.file), Err(0), "re-creating it empty restores nothing");
+        assert_eq!(recent(10)["intact"], false);
+    }
+
+    /// The anchor's count only goes UP, so asking one more question after a
+    /// truncation records the gap instead of erasing it.
+    #[test]
+    fn a_later_append_cannot_re_bless_a_truncated_log() {
+        let c = setup(true);
+        for q in ["one", "two", "three"] {
+            append(input(q, "local", vec![]));
+        }
+        let text = std::fs::read_to_string(&c.file).unwrap();
+        let kept = text.lines().next().unwrap().to_string();
+        std::fs::write(&c.file, format!("{kept}\n")).unwrap();
+
+        append(input("four", "local", vec![]));
+        // Two well-chained records on disk, but the anchor has counted four.
+        assert_eq!(verify(&c.file), Err(2), "the dropped records stay missing");
+    }
+
+    /// The anchor is keyed like the records, so rewriting it by hand to match a
+    /// shortened log does not restore the verdict.
+    #[test]
+    fn a_hand_edited_anchor_does_not_bless_a_truncated_log() {
+        let c = setup(true);
+        append(input("one", "local", vec![]));
+        append(input("two", "local", vec![]));
+
+        let text = std::fs::read_to_string(&c.file).unwrap();
+        let kept = text.lines().next().unwrap().to_string();
+        let first: AuditRecord = serde_json::from_str(&kept).unwrap();
+        std::fs::write(&c.file, format!("{kept}\n")).unwrap();
+
+        // Point the anchor at the surviving prefix — without the key its hmac
+        // cannot be recomputed, so the edit shows.
+        let mut head = read_head().expect("the appends anchored the chain");
+        head.count = 1;
+        head.last_hmac = first.hmac.clone();
+        write_json(&head_path(), &head);
+
+        assert_eq!(verify(&c.file), Err(0), "an edited anchor is caught");
     }
 
     #[test]
