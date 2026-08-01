@@ -9302,3 +9302,40 @@ Environment. Items 1-3 are container-testable (pure TS + node runner).
 Item 4's end-to-end needs a built shell — desktop-release and ios-build
 are the gates. One commit per numbered item.
 ```
+
+### §57 addendum — why CI didn't catch it (corrected 2026-07-30)
+
+A first pass blamed the `release-smoke.yml` PR path filter (it covered
+`src/shell/**` but not `src/contracts/**`). **That was wrong and is
+recorded here so nobody re-derives it.** `c6fcb9d` also carried the
+0.14.18 version stamps, so it matched `native/**`; the smoke ran on it
+and PASSED, while the shipped app could not load its vault at all.
+
+The real gap is in the smoke's own design. `SMOKE_DRIVER_JS`
+(`lighthouse-desktop/src/lib.rs:147`) is injected JavaScript that calls
+`fetch('/api/rag')` **directly**. A bare `fetch` resolves
+`globalThis.fetch` at call time, so the driver always picks up the
+patched interceptor and always works — regardless of whether the
+application can. It never touches `ragService → ragTransport →
+useRagStore → the rendered tree`. Its own comment claims it takes "the
+exact path a user's ask takes in IPC mode"; it does not — a user's ask
+goes through the app's data layer, the driver hand-rolls the call.
+
+So the boot smoke proves *the IPC bridge and the engine work*. It does
+not prove *the shipped application can use them*. Every bug in the app's
+own data layer is invisible to it — which is exactly the shape of §57.
+
+The filter widening (0.14.20) is still correct on its own merits — a PR
+touching only `src/contracts/**` with no stamp bump gets no boot smoke —
+but it is NOT the fix for this class, and must not be mistaken for one.
+
+**The fix worth making (next):** have the boot smoke assert the
+APPLICATION's state, not a hand-rolled request. Cheapest honest form: on
+a successful load, `useVaultTree` signals readiness (an event or a
+data-attribute carrying the node count); the driver polls for that
+signal before its ask, and fails if the app never reports a loaded tree.
+That closes the class: any future break between module evaluation, the
+interceptor, the transport, the store, and the render fails CI. Keep the
+existing hand-rolled request as the bridge-level check — the point is to
+add the application-level one beside it, not to swap one blind spot for
+another.
