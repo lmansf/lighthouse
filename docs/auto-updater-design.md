@@ -7,11 +7,29 @@
 > transition still govern. Current implementation lives in the Tauri shell:
 > `native/crates/lighthouse-desktop/src/supervise.rs` polls the GitHub
 > releases API (notify), and **Phase B is implemented** as download +
-> minisign-verify + install-on-consent, active only in builds that bake the
-> updater public key (`LIGHTHOUSE_UPDATER_PUBKEY`) against releases carrying
-> `.sig` artifacts; otherwise strictly notify-only (the unverified-download
+> **authorize** + minisign-verify + install-on-consent, active only in builds
+> that bake the updater public key (`LIGHTHOUSE_UPDATER_PUBKEY`) against
+> releases carrying `.sig` artifacts **and a signed `latest.json` +
+> `latest.json.sig`**; otherwise strictly notify-only (the unverified-download
 > path was removed). Verification: `lighthouse-core::updates`. CI/secrets:
 > `desktop-release.yml` + `docs/signing.md`.
+
+> **Gap closed (2026-08 red-team, "forced downgrade").** A signature binds
+> **bytes to the key**, never bytes to a **version** — so the adversary §2
+> already names (release-channel write, *no key compromise*) could re-publish an
+> older, still validly-signed installer under a newer tag and it installed
+> cleanly. Every "download → verify → …" row below is now **download →
+> authorize → verify → …**: the install is authorized against the release's
+> *signed* manifest (`lighthouse-core::updates::authorize_update`), which names
+> the version, this asset's filename, and the signature for those exact bytes;
+> the "strictly newer than the running build" comparison is re-asserted at
+> install time, and a monotonic floor (`<app-data>/updates/install-floor.json`)
+> stops a superseded release being re-offered. §2's "signature > manifest hash"
+> still holds and is sharpened: the manifest **is** used — but it is signed with
+> the same pinned key and commits to per-asset *signatures*, not hashes, so it
+> is an authenticity binding rather than the integrity-only `latest.yml` §2
+> rejects. A release without `latest.json.sig` is notify-only. Details:
+> `docs/signing.md`, "Release manifest — the identity binding".
 
 > **Gaps closed (v0.14.19).** Phase B now installs *in place* and feels
 > automatic: macOS swaps the running `.app` from the verified `.app.tar.gz`
@@ -31,10 +49,10 @@ and the differences are intentional — the asset choice is the pure
 
 | Platform | Update asset | How it installs | What the user sees |
 |---|---|---|---|
-| **Windows** | NSIS `-setup.exe` (+ `.sig`) | download → minisign-verify → launch the installer, app exits so it can replace files | **the NSIS installer UI runs** — an update is a visible, consented install, **not** a silent `/S` swap. The children are halted first so no loaded DLL blocks the overwrite (0.6.x field fix). |
-| **macOS** (signed release) | `.app.tar.gz` (+ `.sig`) | download → verify → unpack + swap the running `.app` bundle **in place** → relaunch | the app closes and reopens on the new version — no Finder drag. Fail-closed: an unwritable location or a bad archive restores the old bundle and falls back to the releases page. |
-| **macOS** (no signed archive) | `.dmg` | download → verify → open the dmg | the user drags the app to Applications, as before (the manual fallback). |
-| **Linux** | `.AppImage` (+ `.sig`) | download → verify → `chmod +x` → open | the freshly-downloaded AppImage launches; the user keeps/runs the new file. |
+| **Windows** | NSIS `-setup.exe` (+ `.sig`) | download → authorize → minisign-verify → launch the installer, app exits so it can replace files | **the NSIS installer UI runs** — an update is a visible, consented install, **not** a silent `/S` swap. The children are halted first so no loaded DLL blocks the overwrite (0.6.x field fix). |
+| **macOS** (signed release) | `.app.tar.gz` (+ `.sig`) | download → authorize → verify → unpack + swap the running `.app` bundle **in place** → relaunch | the app closes and reopens on the new version — no Finder drag. Fail-closed: an unwritable location or a bad archive restores the old bundle and falls back to the releases page. |
+| **macOS** (no signed archive) | `.dmg` | download → authorize → verify → open the dmg | the user drags the app to Applications, as before (the manual fallback). |
+| **Linux** | `.AppImage` (+ `.sig`) | download → authorize → verify → `chmod +x` → open | the freshly-downloaded AppImage launches; the user keeps/runs the new file. |
 | **Linux** (`.deb`-only release) | — | **notify-only**: opens the releases page | a `.deb` is **never** auto-installed — it needs `dpkg`/root and integrates with the system package DB, so in-app apply would be dishonest about what it touched. Pinned by `deb_only_linux_is_notify_only_and_deb_is_never_picked`. |
 
 Two honesty invariants hold across the table: (1) **unsigned builds are strictly

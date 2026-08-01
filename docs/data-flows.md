@@ -106,13 +106,17 @@ background.
 
 **3a. App update download — GitHub (signature-verified).** Only on your
 click, and only in builds carrying the updater public key against a release
-carrying a minisign `.sig`. The installer and its signature download from
+carrying a minisign `.sig` **and a signed manifest**. The installer, its
+signature, and the release's signed manifest (`latest.json` +
+`latest.json.sig`) download from
 `github.com/lmansf/lighthouse/releases/download/…` (302 →
 `*.githubusercontent.com`), and the artifact is **verified against the
-signature before anything executes** (`lighthouse-core::updates`, driven
-from `supervise.rs`). Payload: none (GETs). An unsigned build or release: the
-button opens the releases page in your browser instead — **the app never
-installs what it cannot verify.**
+signature before anything executes** — against the signature the *signed
+manifest* names, so the bytes are bound to a version and a genuinely-signed
+OLDER build cannot be re-published under a newer tag
+(`lighthouse-core::updates`, driven from `supervise.rs`). Payload: none
+(GETs). An unsigned build or release: the button opens the releases page in
+your browser instead — **the app never installs what it cannot verify.**
 
 **3b. Private-model weights — Hugging Face (opt-in, one-time).** Clicking
 **＋** on "Local model (private)" downloads Mistral-7B-Instruct-v0.3 Q4_K_M

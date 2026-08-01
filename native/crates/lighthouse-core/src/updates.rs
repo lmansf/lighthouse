@@ -8,12 +8,20 @@
 //! ⇒ the shell never downloads at all (notify-only). This module is the pure,
 //! engine-side half so it stays unit-testable without a webview.
 //!
+//! A signature binds BYTES to the key — never bytes to a VERSION. The release's
+//! SIGNED manifest (`latest.json` + `latest.json.sig`) is what binds the two,
+//! and `authorize_update` is the gate the install path must pass before an
+//! artifact can run (docs/signing.md, "Release manifest — the identity
+//! binding").
+//!
 //! Format notes (Tauri v2 conventions):
 //! - the `.sig` release asset contains BASE64 of a full minisign signature
 //!   file (untrusted comment / sig / trusted comment / global sig);
 //! - the public key is BASE64 of a full minisign public-key file.
 //! Raw (un-base64'd) minisign content is accepted too, so hand-generated
 //! keys/signatures verify the same way.
+
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 use base64::Engine as _;
@@ -52,6 +60,139 @@ pub fn verify_update_signature(data: &[u8], sig: &str, pubkey: &str) -> Result<(
         Signature::decode(sig_text.trim()).map_err(|e| anyhow!("bad signature format: {e}"))?;
     pk.verify(data, &signature, false)
         .context("update artifact failed signature verification")
+}
+
+/// Parse `x.y.z` into a comparable triple, tolerating a leading `v` and a
+/// trailing pre-release tag (`0.15.0-rc1` → `(0,15,0)`). `None` for anything
+/// unparseable, so a junk version can never read as newer. Lives here (not in
+/// the shell, where it was check-time-only) because the comparison that
+/// AUTHORIZES an install must be tauri-free and unit-tested.
+pub fn version_tuple(v: &str) -> Option<(u64, u64, u64)> {
+    let v = v.trim().trim_start_matches('v');
+    let mut it = v.split('.').map(|p| {
+        p.chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect::<String>()
+            .parse::<u64>()
+            .ok()
+    });
+    Some((it.next()??, it.next()??, it.next().flatten().unwrap_or(0)))
+}
+
+/// What a verified release manifest authorizes: the version it attests, and
+/// the signature it names for the asset about to be installed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AuthorizedUpdate {
+    pub version: String,
+    pub signature: String,
+}
+
+/// Authorize installing `asset_name` from a release, given that release's
+/// SIGNED manifest (`latest.json` + `latest.json.sig`, signed with the same key
+/// as the artifacts) — the gate `update_now` must pass before anything runs.
+///
+/// WHY (red-team 2026-08, "forced downgrade"): a minisign signature binds BYTES
+/// to the key — never bytes to a VERSION. Whoever can write the release channel
+/// (CI token, a maintainer PAT, compromised CI — the adversary
+/// docs/auto-updater-design.md §2 already names) could re-publish an OLDER,
+/// still validly-signed installer under a newer tag: the artifact verified
+/// because it was genuine, so the app installed a superseded build and re-armed
+/// every fix since while the banner read the higher version. The manifest is
+/// the identity binding — it is signed, and it carries the version, this
+/// platform's asset FILENAME (in its url) and the signature CI made for those
+/// exact bytes.
+///
+/// Fails CLOSED on anything it cannot read. Refuses unless: the manifest
+/// verifies against the pinned key; its version parses and is strictly greater
+/// than `current` — the RUNNING build, re-asserted HERE and not merely at check
+/// time, where the only version in hand was the attacker-chosen tag; the
+/// version is not below the monotonic `floor` this install already reached; and
+/// the manifest actually names `asset_name`. An unreadable `floor` is ignored
+/// (the `> current` gate still stands), so a corrupt floor file cannot brick
+/// updating.
+pub fn authorize_update(
+    manifest: &[u8],
+    manifest_sig: &str,
+    pubkey: &str,
+    current: &str,
+    floor: Option<&str>,
+    asset_name: &str,
+) -> Result<AuthorizedUpdate> {
+    verify_update_signature(manifest, manifest_sig, pubkey)
+        .context("update manifest failed signature verification")?;
+    let doc: serde_json::Value =
+        serde_json::from_slice(manifest).context("update manifest is not JSON")?;
+    let version = doc["version"]
+        .as_str()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let (Some(new), Some(running)) = (version_tuple(&version), version_tuple(current)) else {
+        return Err(anyhow!(
+            "unreadable update version (manifest {version:?}, running {current:?})"
+        ));
+    };
+    if new <= running {
+        return Err(anyhow!(
+            "refusing update {version}: not newer than the running build {current}"
+        ));
+    }
+    if let Some(floor) = floor {
+        if version_tuple(floor).is_some_and(|f| new < f) {
+            return Err(anyhow!(
+                "refusing update {version}: superseded — this install already authorized {floor}"
+            ));
+        }
+    }
+    // Bind the FILENAME too: the manifest must name the very asset we are about
+    // to install, and the signature handed back is the one IT attests — not the
+    // loose `<asset>.sig`, which a release publisher can swap for another
+    // genuine one.
+    let want = asset_name.trim().to_ascii_lowercase();
+    let signature = doc["platforms"]
+        .as_object()
+        .and_then(|entries| {
+            entries.values().find_map(|e| {
+                let file = e["url"].as_str()?.rsplit('/').next()?.to_ascii_lowercase();
+                (file == want)
+                    .then(|| e["signature"].as_str().map(str::to_string))
+                    .flatten()
+            })
+        })
+        .ok_or_else(|| anyhow!("update manifest {version} does not attest asset {asset_name}"))?;
+    Ok(AuthorizedUpdate { version, signature })
+}
+
+/// The monotonic downgrade floor, kept beside the staged download in the
+/// app-data updates dir (`supervise.rs::update_now`'s `dir`).
+fn floor_file(dir: &Path) -> PathBuf {
+    dir.join("install-floor.json")
+}
+
+/// The highest version this install has ever authorized, if one was recorded.
+pub fn read_update_floor(dir: &Path) -> Option<String> {
+    let recorded: String = crate::config::read_json(&floor_file(dir), String::new());
+    let recorded = recorded.trim().to_string();
+    (!recorded.is_empty()).then_some(recorded)
+}
+
+/// Raise the floor to `version` — MONOTONIC: an older or unparseable version
+/// never lowers it, so a build that was downgraded (or a bundle rolled back by
+/// hand) cannot rewind the guard and let a superseded release be re-offered.
+/// Best-effort and atomic (`config::write_json`); a failed write leaves the
+/// previous floor in place and `authorize_update`'s `> current` gate still
+/// stands on its own.
+pub fn record_update_floor(dir: &Path, version: &str) {
+    let Some(new) = version_tuple(version) else {
+        return;
+    };
+    if read_update_floor(dir)
+        .and_then(|v| version_tuple(&v))
+        .is_some_and(|cur| new <= cur)
+    {
+        return;
+    }
+    crate::config::write_json(&floor_file(dir), &version.trim().to_string());
 }
 
 /// The platform an update is being picked for — passed in (not read from
@@ -129,6 +270,42 @@ pub fn pick_update_asset(platform: UpdatePlatform, asset_names: &[String]) -> Op
             kind: InstallKind::LinuxAppImage,
         }),
     }
+}
+
+/// Where a picked asset is allowed to land while it stages for verification.
+/// The asset NAME comes off the release manifest — remote, unauthenticated, and
+/// written to disk strictly BEFORE the minisign gate can run — so it never gets
+/// to choose a path: `pick_update_asset` above constrains only the SUFFIX,
+/// which leaves `/etc/cron.d/x.exe` and `../../../x.AppImage` perfectly valid
+/// "assets". Joined naively those are an arbitrary-file create+truncate (and,
+/// on the failure arms, delete) outside anything the pinned key protects — a
+/// signature-gate bypass that needs no signing key (§56 #2).
+///
+/// Accepted only when `asset_name` is exactly ONE plain filename: no separator
+/// of either flavour (a Windows `..\x.exe` parses as a single innocent-looking
+/// component on Unix, so both are refused as STRINGS first), no NUL, and then
+/// exactly one `Component::Normal` and nothing more — which rules out
+/// `RootDir`/`Prefix` (absolute, `C:\`, UNC), `ParentDir` and `CurDir`.
+/// Anything else is `None` and the caller stays notify-only. Note the component
+/// check is the real gate, not the `starts_with` re-check below it: path
+/// comparison is LEXICAL, so `<dir>/../x` does "start with" `<dir>`. The
+/// re-check is still a genuine second net on Windows, where a drive-relative
+/// `C:foo.exe` is the one shape whose push discards the base.
+pub fn staging_path(dir: &Path, asset_name: &str) -> Option<PathBuf> {
+    if asset_name.is_empty()
+        || asset_name.contains('/')
+        || asset_name.contains('\\')
+        || asset_name.contains('\0')
+    {
+        return None;
+    }
+    let mut comps = Path::new(asset_name).components();
+    let file = match (comps.next(), comps.next()) {
+        (Some(Component::Normal(n)), None) => n,
+        _ => return None,
+    };
+    let dest = dir.join(file);
+    dest.starts_with(dir).then_some(dest)
 }
 
 #[cfg(test)]

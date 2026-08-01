@@ -16,6 +16,7 @@ use std::sync::Mutex;
 
 use lighthouse_core::config::resources_dir;
 use lighthouse_core::local_model::{find_installed_model, model_gguf_files, uninstall_marker_path};
+use lighthouse_core::updates::version_tuple;
 use tauri::{AppHandle, Emitter, Manager};
 
 pub const RELEASE_PAGE_URL: &str = "https://github.com/lmansf/lighthouse/releases/latest";
@@ -654,6 +655,15 @@ pub struct UpdateInfo {
     /// fallback / Linux AppImage. `None` when the release carries no installable
     /// asset for this platform (a `.deb`-only Linux release stays notify-only).
     pub kind: Option<lighthouse_core::updates::InstallKind>,
+    /// The release's SIGNED manifest — `latest.json` and its `latest.json.sig`,
+    /// both from the same release. The artifact `.sig` proves only that the
+    /// BYTES are ours, so an OLDER, still validly-signed installer re-published
+    /// under a newer tag used to install cleanly (red-team 2026-08 "forced
+    /// downgrade"). The manifest is signed with the same key and names the
+    /// version AND this platform's asset, so `update_now` authorizes against
+    /// IT. Absent ⇒ notify-only (fail closed).
+    pub manifest_url: Option<String>,
+    pub manifest_sig_url: Option<String>,
 }
 
 pub struct UpdateState(pub Mutex<Option<UpdateInfo>>);
@@ -716,16 +726,17 @@ fn platform_asset(
     Some((picked.name, url, picked.kind))
 }
 
-fn version_tuple(v: &str) -> Option<(u64, u64, u64)> {
-    let v = v.trim().trim_start_matches('v');
-    let mut it = v.split('.').map(|p| {
-        p.chars()
-            .take_while(|c| c.is_ascii_digit())
-            .collect::<String>()
-            .parse::<u64>()
-            .ok()
-    });
-    Some((it.next()??, it.next()??, it.next().flatten().unwrap_or(0)))
+/// The `browser_download_url` of the release asset named `name` (case-
+/// insensitive) — the detached `.sig`, and the signed-manifest pair that binds
+/// an asset to a version. (`version_tuple` now comes from the engine: the
+/// comparison that AUTHORIZES an install has to be tauri-free and unit-tested.)
+fn release_asset_url(assets: &serde_json::Value, name: &str) -> Option<String> {
+    let want = name.trim().to_ascii_lowercase();
+    assets.as_array()?.iter().find_map(|a| {
+        (a["name"].as_str()?.to_ascii_lowercase() == want)
+            .then(|| a["browser_download_url"].as_str().map(String::from))
+            .flatten()
+    })
 }
 
 /// On-focus update nudge: run a check only if at least `min` has elapsed since
@@ -785,18 +796,23 @@ pub async fn check_for_updates(app: AppHandle) {
         let asset = platform_asset(&body["assets"]);
         // The detached signature for this platform's asset, uploaded by CI
         // beside it when release signing is configured.
-        let sig_url = asset.as_ref().and_then(|(name, _, _)| {
-            let want = format!("{}.sig", name.to_ascii_lowercase());
-            body["assets"].as_array()?.iter().find_map(|a| {
-                let n = a["name"].as_str()?;
-                (n.to_ascii_lowercase() == want)
-                    .then(|| a["browser_download_url"].as_str().map(String::from))
-                    .flatten()
-            })
-        });
-        // In-app install requires an asset AND a verifiable signature AND a
-        // baked-in key to verify against — anything less is notify-only.
-        let can_install = asset.is_some() && sig_url.is_some() && updater_pubkey().is_some();
+        let sig_url = asset
+            .as_ref()
+            .and_then(|(name, _, _)| release_asset_url(&body["assets"], &format!("{name}.sig")));
+        // The release's SIGNED manifest, written by the updater-manifest CI
+        // job: it carries the version and, per platform, the asset URL + the
+        // signature CI made for those exact bytes. Without it an install cannot
+        // bind bytes to a VERSION, so it stays notify-only (red-team 2026-08).
+        let manifest_url = release_asset_url(&body["assets"], "latest.json");
+        let manifest_sig_url = release_asset_url(&body["assets"], "latest.json.sig");
+        // In-app install requires an asset AND a verifiable signature AND the
+        // signed manifest AND a baked-in key to verify against — anything less
+        // is notify-only.
+        let can_install = asset.is_some()
+            && sig_url.is_some()
+            && manifest_url.is_some()
+            && manifest_sig_url.is_some()
+            && updater_pubkey().is_some();
         if let Some(state) = app.try_state::<UpdateState>() {
             *state.0.lock().unwrap_or_else(|p| p.into_inner()) = Some(UpdateInfo {
                 version: latest.trim_start_matches('v').to_string(),
@@ -804,6 +820,8 @@ pub async fn check_for_updates(app: AppHandle) {
                 asset_name: asset.as_ref().map(|(n, _, _)| n.clone()),
                 sig_url,
                 kind: asset.as_ref().map(|(_, _, k)| *k),
+                manifest_url,
+                manifest_sig_url,
             });
         }
         let _ = app.emit(
@@ -821,9 +839,13 @@ pub async fn check_for_updates(app: AppHandle) {
     }
 }
 
-/// Click-to-update — updater Phase B (download + VERIFY + install-on-consent).
-/// Requires a baked-in updater public key and a `.sig` beside the release
-/// asset: the installer is downloaded, minisign-verified, and only then run
+/// Click-to-update — updater Phase B (download + AUTHORIZE + VERIFY +
+/// install-on-consent). Requires a baked-in updater public key, a `.sig` beside
+/// the release asset, AND the release's SIGNED manifest (`latest.json` +
+/// `latest.json.sig`) — the manifest is what binds bytes to a VERSION, so a
+/// genuinely-signed OLDER build re-published under a newer tag is refused
+/// (red-team 2026-08 "forced downgrade"). The installer is downloaded,
+/// authorized against the manifest, minisign-verified, and only then run
 /// (Windows: launch NSIS + exit so it can replace files; macOS: unpack the
 /// verified `.app.tar.gz` and swap the running bundle IN PLACE, then relaunch —
 /// the `.dmg` is the manual-drag fallback only when a release carries no signed
@@ -838,14 +860,25 @@ pub async fn update_now(app: AppHandle) -> serde_json::Value {
     let Some(info) = info else {
         return serde_json::json!({ "ok": false, "reason": "no update known" });
     };
-    let (Some(pubkey), Some(url), Some(name), Some(sig_url)) = (
+    let (
+        Some(pubkey),
+        Some(url),
+        Some(name),
+        Some(sig_url),
+        Some(manifest_url),
+        Some(manifest_sig_url),
+    ) = (
         updater_pubkey(),
         info.asset_url.clone(),
         info.asset_name.clone(),
         info.sig_url.clone(),
+        info.manifest_url.clone(),
+        info.manifest_sig_url.clone(),
     ) else {
-        // Notify-only: no key baked into this build, or the release carries
-        // no verifiable signature for this platform's asset.
+        // Notify-only: no key baked into this build, or the release carries no
+        // verifiable signature for this platform's asset, or no SIGNED manifest
+        // to bind that asset to a version — fail closed, the user clicks
+        // through to the releases page.
         crate::open_with_os(std::path::Path::new(RELEASE_PAGE_URL));
         return serde_json::json!({ "ok": true, "action": "page" });
     };
@@ -856,7 +889,18 @@ pub async fn update_now(app: AppHandle) -> serde_json::Value {
         .unwrap_or_else(std::env::temp_dir)
         .join("updates");
     let _ = fs::create_dir_all(&dir);
-    let dest = dir.join(&name);
+    // §56 #2: the asset name is a REMOTE string off the release manifest and it
+    // reaches the filesystem BEFORE the signature gate below can run, so it
+    // never picks the path — an absolute name or a `..` component would be an
+    // arbitrary-file create+truncate (and delete, on the failure arms) outside
+    // anything the pinned key protects. Refusal degrades to notify-only, like
+    // every other failure arm here. (Derivation + tests live in the tauri-free
+    // engine: lighthouse_core::updates::staging_path.)
+    let Some(dest) = lighthouse_core::updates::staging_path(&dir, &name) else {
+        eprintln!("update REJECTED — unsafe asset name in the release manifest: {name}");
+        crate::open_with_os(std::path::Path::new(RELEASE_PAGE_URL));
+        return serde_json::json!({ "ok": false, "reason": "unsafe asset name", "action": "page" });
+    };
 
     let download = async {
         use std::io::Write as _;
@@ -881,10 +925,34 @@ pub async fn update_now(app: AppHandle) -> serde_json::Value {
             .error_for_status()?
             .text()
             .await?;
-        Ok::<_, anyhow::Error>(sig)
+        // The release's SIGNED manifest + its signature — what binds these
+        // bytes to a VERSION (see the authorization below).
+        lighthouse_core::egress::record(
+            &manifest_url,
+            lighthouse_core::egress::PURPOSE_UPDATE_DOWNLOAD,
+        );
+        let manifest = client
+            .get(&manifest_url)
+            .send()
+            .await?
+            .error_for_status()?
+            .bytes()
+            .await?;
+        lighthouse_core::egress::record(
+            &manifest_sig_url,
+            lighthouse_core::egress::PURPOSE_UPDATE_DOWNLOAD,
+        );
+        let manifest_sig = client
+            .get(&manifest_sig_url)
+            .send()
+            .await?
+            .error_for_status()?
+            .text()
+            .await?;
+        Ok::<_, anyhow::Error>((sig, manifest, manifest_sig))
     };
-    let sig = match download.await {
-        Ok(sig) => sig,
+    let (sig, manifest, manifest_sig) = match download.await {
+        Ok(parts) => parts,
         Err(e) => {
             eprintln!("update download failed: {e}");
             let _ = fs::remove_file(&dest);
@@ -893,11 +961,40 @@ pub async fn update_now(app: AppHandle) -> serde_json::Value {
         }
     };
 
+    // WHY (red-team 2026-08 "forced downgrade"): a signature binds BYTES to the
+    // key, not bytes to a VERSION — so an OLDER, still validly-signed installer
+    // re-published under a newer tag installed cleanly here, re-arming every fix
+    // since while the banner read the higher version. The check-time comparison
+    // ran against the attacker-chosen TAG and is not an authorization.
+    // Authorize against the release's SIGNED manifest, which names the version
+    // AND this asset, and re-assert "strictly newer than the build that is
+    // running" HERE, at install.
+    let floor = lighthouse_core::updates::read_update_floor(&dir);
+    let authorized = match lighthouse_core::updates::authorize_update(
+        &manifest,
+        &manifest_sig,
+        pubkey,
+        env!("CARGO_PKG_VERSION"),
+        floor.as_deref(),
+        &name,
+    ) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("update REJECTED — {e}");
+            let _ = fs::remove_file(&dest);
+            crate::open_with_os(std::path::Path::new(RELEASE_PAGE_URL));
+            return serde_json::json!({ "ok": false, "reason": "update not authorized", "action": "page" });
+        }
+    };
+
     // Verify BEFORE anything can execute the artifact. Failure deletes the
     // download and falls back to the releases page — never a silent retry.
     let verify = || -> anyhow::Result<()> {
         let data = fs::read(&dest)?;
-        lighthouse_core::updates::verify_update_signature(&data, &sig, pubkey)
+        lighthouse_core::updates::verify_update_signature(&data, &sig, pubkey)?;
+        // …and against the signature the MANIFEST attests for this asset: the
+        // leg that binds these exact bytes to `authorized.version`.
+        lighthouse_core::updates::verify_update_signature(&data, &authorized.signature, pubkey)
     };
     if let Err(e) = verify() {
         eprintln!("update REJECTED — signature verification failed: {e}");
@@ -905,7 +1002,16 @@ pub async fn update_now(app: AppHandle) -> serde_json::Value {
         crate::open_with_os(std::path::Path::new(RELEASE_PAGE_URL));
         return serde_json::json!({ "ok": false, "reason": "signature verification failed", "action": "page" });
     }
-    eprintln!("update artifact signature verified ({name})");
+    eprintln!(
+        "update artifact signature verified ({name}, {} → {})",
+        env!("CARGO_PKG_VERSION"),
+        authorized.version
+    );
+    // Raise the monotonic floor before the hand-off (this process may not come
+    // back): from here on this install refuses anything OLDER than what it just
+    // authorized, so a superseded release cannot be re-offered under a new tag.
+    // Retrying the same version is still allowed (the floor is a `>=` gate).
+    lighthouse_core::updates::record_update_floor(&dir, &authorized.version);
 
     #[cfg(all(unix, not(target_os = "macos")))]
     {

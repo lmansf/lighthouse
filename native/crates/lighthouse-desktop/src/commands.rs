@@ -708,11 +708,15 @@ pub fn update_state(app: AppHandle) -> Value {
                 "phase": "available",
                 "version": info.version,
                 "url": crate::supervise::RELEASE_PAGE_URL,
-                // In-app install = asset + detached signature + a baked-in key to
-                // verify with (updater Phase B); otherwise the button says
-                // "Get it" and opens the releases page.
+                // In-app install = asset + detached signature + the release's
+                // SIGNED manifest (what binds those bytes to this version —
+                // red-team 2026-08) + a baked-in key to verify with (updater
+                // Phase B); otherwise the button says "Get it" and opens the
+                // releases page.
                 "canInstall": info.asset_url.is_some()
                     && info.sig_url.is_some()
+                    && info.manifest_url.is_some()
+                    && info.manifest_sig_url.is_some()
                     && crate::supervise::updater_pubkey().is_some(),
             }),
             None => json!({ "phase": "none" }),

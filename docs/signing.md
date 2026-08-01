@@ -14,9 +14,63 @@ configuration fails the build loudly.*
 | macOS Developer-ID signing + notarization + stapling | Tauri v2 native (`APPLE_*` env) + `bundle.macOS.entitlements` (`entitlements.plist` — JIT + unsigned-dylib loading for llama) | `APPLE_CERTIFICATE` secret non-empty |
 | Windows Authenticode | `.pfx` imported to the runner store, thumbprint passed via `--config bundle.windows.certificateThumbprint`; sha256 digest + DigiCert timestamp preconfigured in `tauri.conf.json` | `WINDOWS_CERTIFICATE` secret non-empty |
 | Update-artifact signing | `createUpdaterArtifacts` → minisign `.sig` beside each installer, uploaded to the release; fan-in job aggregates `latest.json` (tauri-updater manifest) | `TAURI_SIGNING_PRIVATE_KEY` secret non-empty (+ `LIGHTHOUSE_UPDATER_PUBKEY` variable, else the build fails on purpose) |
-| Updater Phase B (download + verify + install-on-consent) | Shell picks the platform's update asset (`lighthouse-core::updates::pick_update_asset` — the pure per-platform table), downloads installer + `.sig`, verifies with the compile-time-baked pubkey (`lighthouse-core::updates::verify_update_signature`), only then installs. macOS unpacks the verified `.app.tar.gz` and swaps the running bundle **in place** (fail-closed: an unwritable location or a bad archive restores the old bundle and falls back to the `.dmg`); Windows/Linux hand the verified installer to NSIS / the AppImage | pubkey baked at build (`LIGHTHOUSE_UPDATER_PUBKEY`) AND the release carries a `.sig` |
+| Updater Phase B (download + authorize + verify + install-on-consent) | Shell picks the platform's update asset (`lighthouse-core::updates::pick_update_asset` — the pure per-platform table), downloads installer + `.sig` + the release's SIGNED manifest (`latest.json` + `latest.json.sig`), **authorizes** against the manifest (`lighthouse-core::updates::authorize_update`: manifest verifies under the pinned key → its version is strictly newer than the RUNNING build and not below the persisted floor → it names this exact asset), verifies the bytes with the compile-time-baked pubkey against the signature the manifest attests (`lighthouse-core::updates::verify_update_signature`), only then installs. macOS unpacks the verified `.app.tar.gz` and swaps the running bundle **in place** (fail-closed: an unwritable location or a bad archive restores the old bundle and falls back to the `.dmg`); Windows/Linux hand the verified installer to NSIS / the AppImage | pubkey baked at build (`LIGHTHOUSE_UPDATER_PUBKEY`) AND the release carries a `.sig` AND a signed `latest.json` + `latest.json.sig` |
 | CI co-presence gate | `desktop-release.yml` asserts, per signed platform, that every uploaded installer carries its `.sig` and no `.sig` orphans its installer — a missing signature would otherwise drop that platform from `latest.json` silently | `TAURI_SIGNING_PRIVATE_KEY` secret non-empty (inert on unsigned builds) |
 | Notify-only fallback | Without a baked key or a `.sig`, the Update button reads "Get it" and opens the releases page. On Linux a `.deb`-only release is likewise notify-only (no in-place path). **The old behavior of executing an unverified download was removed** (auto-updater-design §2: unverified auto-apply is an RCE hand-off) | automatic |
+
+## Release manifest — the identity binding
+
+*Added by the 2026-08 red-team sweep ("forced downgrade", High).*
+
+A minisign signature binds **bytes to the key**. It says nothing about which
+VERSION those bytes are. So anyone who can write the release channel — the CI
+`GITHUB_TOKEN`, a maintainer PAT, compromised CI: the adversary
+`docs/auto-updater-design.md` §2 already names, **no key compromise required** —
+could re-upload an old release's installer together with its own still-valid
+`.sig` under a new tag. The check compared against the (unsigned, attacker-
+chosen) tag, the asset picker matched by filename suffix, the signature verified
+because it was genuine, and the app installed a superseded build — re-arming
+every fix since — while the banner read the higher version.
+
+**The fix, and the choice made.** Two designs were on the table: put the version
+in the minisign *trusted comment* (which is authenticated), or sign a manifest.
+We sign the manifest. Tauri's bundler generates the trusted comment itself
+(`timestamp:…\tfile:…`) with no way to set it, so the first option would mean
+re-signing every artifact with a raw `minisign` binary on all three runners —
+and the macOS updater archive (`Lighthouse.app.tar.gz`) carries no version in
+its filename at all, so macOS would fail closed forever.
+
+- `latest.json` already carries the release `version` and, per platform, the
+  asset `url` plus the **minisign signature of that asset's bytes**. The
+  `updater-manifest` job now signs the manifest with the same updater key and
+  uploads `latest.json.sig` beside it (§54: the signed-release format changed,
+  and the CI job moved with it).
+- The shell authorizes every install against that pair
+  (`lighthouse-core::updates::authorize_update`): the manifest must verify under
+  the pinned key; its version must be **strictly newer than the running build**,
+  re-asserted at install time (`env!("CARGO_PKG_VERSION")`), not only at check
+  time; the manifest must **name the asset filename** being installed; and the
+  artifact's bytes are then verified against the signature that manifest
+  attests. Bytes ⇄ key ⇄ manifest ⇄ version are one chain. (The per-asset
+  signature is the byte commitment here — strictly stronger than a sha256, and
+  it costs the fan-in job no downloads.)
+- A **monotonic floor** (`<app-data>/updates/install-floor.json`) records the
+  highest version this install ever authorized; anything below it is refused, so
+  a superseded release cannot be re-offered even after a manual rollback. The
+  same version can still be retried after a failed install.
+- **Fails closed:** a release without `latest.json.sig` is notify-only ("Get
+  it"). Releases published before this landed are therefore notify-only — the
+  same one-time transition as the first keyed build below, and inert today
+  because no key is provisioned yet.
+- Guarded by `native/crates/lighthouse-core/tests/updater_downgrade_test.rs`
+  (the gate) and `test/updaterAuthorizesVersion.test.mjs` (the shell wiring —
+  the desktop crate has no container-checkable build).
+- **Residual, accepted:** this is a monotonic-version scheme with no manifest
+  freshness/expiry, so an adversary with release-channel write can still
+  **freeze** a client at a genuine intermediate release (replay v0.12.0's real
+  triple while withholding v0.15.0). It is only marginally stronger than
+  withholding updates outright, which no client-side check can prevent. The
+  banner also still shows the attacker-chosen tag until the refusal fires.
 
 ## Maintainer checklist — what to provision
 
@@ -70,12 +124,14 @@ npx --yes @tauri-apps/cli@^2 signer generate -w updater.key
    ("processing complete"), `.sig` uploads, `updater-manifest` job green.
 2. Artifacts: `signtool verify /pa Lighthouse-Setup.exe` on Windows;
    `spctl -a -t open --context context:primary-signature Lighthouse_*.dmg`
-   and `xcrun stapler validate` on macOS; release carries `latest.json`,
-   `*.sig` for exe / AppImage / `.app.tar.gz`.
+   and `xcrun stapler validate` on macOS; release carries `latest.json` **and
+   `latest.json.sig`**, plus `*.sig` for exe / AppImage / `.app.tar.gz`.
 3. In-app: install the previous release built WITH the pubkey, publish the
    new one, and confirm the sidebar banner's button reads **Update** (not
    "Get it") and completes install after the verification log line
-   `update artifact signature verified`.
+   `update artifact signature verified`. A release missing `latest.json.sig`
+   must correctly read "Get it" instead — that is the downgrade gate failing
+   closed, not a bug.
 
 ### First-signed-release transition (one-time)
 

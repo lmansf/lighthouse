@@ -418,15 +418,20 @@ jobs:
             }
 
   # Fan-in: aggregate the per-platform update artifacts + signatures into the
-  # tauri-plugin-updater manifest (latest.json). Only runs when update-artifact
-  # signing is configured — an unsigned release carries no manifest, and
-  # clients stay notify-only.
+  # update manifest (latest.json), then SIGN the manifest itself. The manifest
+  # is what binds a VERSION to the bytes a client installs (red-team 2026-08
+  # "forced downgrade": an artifact `.sig` proves only that the bytes are ours,
+  # so an older signed installer re-published under a newer tag installed
+  # cleanly) — the shell refuses any install it cannot authorize against
+  # `latest.json` + `latest.json.sig`. Only runs when update-artifact signing is
+  # configured — an unsigned release carries no manifest, and clients stay
+  # notify-only.
   updater-manifest:
     needs: [resolve, bundle]
     if: needs.resolve.outputs.sign_updater == 'true'
     runs-on: ubuntu-latest
     steps:
-      - name: Build and upload latest.json
+      - name: Build latest.json
         uses: actions/github-script@v7
         env:
           RELEASE_TAG: ${{ needs.resolve.outputs.release_tag }}
@@ -476,15 +481,54 @@ jobs:
               platforms,
             };
             const body = JSON.stringify(manifest, null, 2);
-            const existing = assets.find(a => a.name === 'latest.json');
-            if (existing) {
-              await github.rest.repos.deleteReleaseAsset(
-                { owner: context.repo.owner, repo: context.repo.repo, asset_id: existing.id });
+            // Written out for the signing step below, not uploaded here: the
+            // manifest only becomes an authorization once it is signed.
+            require('fs').writeFileSync('latest.json', body);
+            core.info(`built latest.json:\n${body}`);
+      - name: Sign latest.json with the updater key
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          # Same minisign key that signs the installers (the CLI reads both env
+          # vars). An unsigned manifest silently returns every client to
+          # notify-only, so fail the release here instead of shipping one.
+          # `< /dev/null`: if the CLI ever decides to PROMPT (empty/mismatched
+          # password, a flag rename between minors) it must fail immediately
+          # rather than hang the job to the runner timeout.
+          npx --yes @tauri-apps/cli@^2 signer sign latest.json < /dev/null
+          test -s latest.json.sig
+      - name: Upload latest.json + its signature
+        uses: actions/github-script@v7
+        env:
+          RELEASE_TAG: ${{ needs.resolve.outputs.release_tag }}
+        with:
+          script: |
+            const fs = require('fs');
+            const tag = process.env.RELEASE_TAG;
+            const releases = await github.paginate(github.rest.repos.listReleases,
+              { owner: context.repo.owner, repo: context.repo.repo, per_page: 100 });
+            const rel = releases.find(r => r.tag_name === tag);
+            if (!rel) return core.setFailed(`no release with tag ${tag}`);
+            const assets = await github.paginate(github.rest.repos.listReleaseAssets,
+              { owner: context.repo.owner, repo: context.repo.repo, release_id: rel.id, per_page: 100 });
+            // Both move together — a manifest without its signature would put
+            // every client back on notify-only, silently.
+            for (const [name, type] of [['latest.json', 'application/json'],
+                                        ['latest.json.sig', 'text/plain']]) {
+              const existing = assets.find(a => a.name === name);
+              if (existing) {
+                await github.rest.repos.deleteReleaseAsset(
+                  { owner: context.repo.owner, repo: context.repo.repo, asset_id: existing.id });
+              }
+              const data = fs.readFileSync(name);
+              await github.rest.repos.uploadReleaseAsset({
+                owner: context.repo.owner, repo: context.repo.repo,
+                release_id: rel.id, name,
+                data,
+                headers: { 'content-type': type, 'content-length': data.length },
+              });
+              core.info(`uploaded ${name}`);
             }
-            await github.rest.repos.uploadReleaseAsset({
-              owner: context.repo.owner, repo: context.repo.repo,
-              release_id: rel.id, name: 'latest.json',
-              data: body,
-              headers: { 'content-type': 'application/json', 'content-length': body.length },
-            });
-            core.info(`uploaded latest.json:\n${body}`);
