@@ -321,13 +321,60 @@ fn migrate(
     Ok(format!("state-home: {marker_line}"))
 }
 
-/// §41 §1 (deferred clause): mark the extraction cache under the new home as
-/// excluded from device backups — it is regenerable by CACHE_VERSION design;
-/// state.json and the index stay backed up. iOS-only, via the same
-/// ObjC-runtime idiom as the FM bridge (class metadata cannot be
-/// dead-stripped; a missing class/selector is a silent no-op, never a crash).
+/// §41 §1 (deferred clause), widened by the 0.14.20 backup finding: the paths
+/// under the app container that must never ride into an iCloud/Finder device
+/// backup. Pure and platform-neutral — the house verdict-fn shape — so WHICH
+/// paths are excluded is a unit test on every platform; the marking itself is
+/// the thin iOS arm below.
+///
+/// §41 marked only the regenerable extraction cache, which left `secret.key`
+/// in the backup NEXT TO the `secrets.json` it decrypts: every provider API
+/// key and stored OAuth token recoverable in cleartext from a backup, with no
+/// device access and no malware — squarely inside the threat model secrets.rs
+/// documents. add-mobile-apps/design.md ("Data safety on a pocket device")
+/// specified the app-state dir, the `.rag-vault` state and "above all
+/// `secret.key`"; this is that list.
+///
+/// The CONTAINER itself is a target, not just the two files, because a
+/// file-level mark alone cannot hold: the attribute applies only to a path
+/// that already exists, and `secret.key` is created LATER, on first use
+/// (`secrets.rs::machine_secret`); and it is an extended attribute on the
+/// inode, so the engine's atomic temp+rename writer (`config::write_atomic`)
+/// drops it every time `secrets.json` is rewritten. iOS excludes an excluded
+/// directory's contents, including files created after the mark, so the
+/// container entry is the one that holds; the file entries are defense in
+/// depth, re-applied at every boot (bootstrap_env runs this on each launch),
+/// which self-heals a rewrite. Engine state under the container is excluded
+/// with it — superseding §41's narrower "state.json and the index stay backed
+/// up"; the vault's documents live in Documents/ and are untouched.
+pub fn no_backup_targets(new_home: &Path, app_state: &Path) -> Vec<PathBuf> {
+    vec![
+        app_state.to_path_buf(),
+        app_state.join("secret.key"),
+        app_state.join("secrets.json"),
+        new_home.join("cache"),
+    ]
+}
+
+/// Apply `NSURLIsExcludedFromBackupKey` to every target that EXISTS. A target
+/// that does not exist yet is skipped and never created — `setResourceValue:`
+/// would fail on it anyway, and an empty `secret.key` (or a directory of that
+/// name) would break sealing outright. Boot-repeated, so a target that appears
+/// later is marked on the next launch.
 #[cfg(target_os = "ios")]
-pub fn mark_cache_no_backup(new_home: &Path) {
+pub fn mark_no_backup(paths: &[PathBuf]) {
+    for p in paths {
+        if p.exists() {
+            mark_one_no_backup(p);
+        }
+    }
+}
+
+/// One path, one `setResourceValue:forKey:error:` — the §41 ObjC-runtime idiom
+/// unchanged (class metadata cannot be dead-stripped; a missing class/selector
+/// is a silent no-op, never a crash).
+#[cfg(target_os = "ios")]
+fn mark_one_no_backup(path: &Path) {
     use libc::{c_char, c_void};
     extern "C" {
         fn objc_getClass(name: *const c_char) -> *mut c_void;
@@ -339,9 +386,7 @@ pub fn mark_cache_no_backup(new_home: &Path) {
         // made dlsym unreliable for the FM bridge).
         static NSURLIsExcludedFromBackupKey: *mut c_void;
     }
-    let cache = new_home.join("cache");
-    let _ = fs::create_dir_all(&cache);
-    let Ok(cpath) = std::ffi::CString::new(cache.to_string_lossy().into_owned()) else {
+    let Ok(cpath) = std::ffi::CString::new(path.to_string_lossy().into_owned()) else {
         return;
     };
     unsafe {
@@ -396,7 +441,7 @@ pub fn mark_cache_no_backup(new_home: &Path) {
 }
 
 #[cfg(not(target_os = "ios"))]
-pub fn mark_cache_no_backup(_new_home: &Path) {}
+pub fn mark_no_backup(_paths: &[PathBuf]) {}
 
 /// The legacy state home for a given vault directory — named here so the
 /// wrapper's call site and the tests agree on the shape.

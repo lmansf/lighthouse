@@ -355,16 +355,36 @@ fn bootstrap_env(app: &AppHandle) {
         // any engine call opens state. The migration is lossless and
         // idempotent; on ANY failure it flips LIGHTHOUSE_STATE_HOME_LEGACY=1
         // so this launch runs from the legacy dir (never a refuse-to-boot).
-        // The one-line outcome goes to shell.log for field diagnosability,
-        // and the regenerable extraction cache under the new home is marked
-        // do-not-back-up (state.json and the index stay backed up).
+        // The one-line outcome goes to shell.log for field diagnosability.
+        // Then the backup exclusion: this container holds `secret.key` and the
+        // `secrets.json` it seals, so the whole container is marked
+        // do-not-back-up — §41 marked only the regenerable extraction cache,
+        // which left an iCloud/Finder backup carrying provider keys and stored
+        // OAuth tokens in recoverable form (design.md, "Data safety on a
+        // pocket device"). Marking here, before any engine call, is what keeps
+        // a freshly generated `secret.key` out of even its first backup.
+        // Engine state under the container is excluded with it; the vault's
+        // documents live in Documents/ and are untouched. The count goes to
+        // shell.log because the ObjC glue is silent-no-op by design: this line
+        // proves the call was REACHED (not that the attribute landed — only a
+        // device can show that), which is otherwise indistinguishable from
+        // success in the field.
         #[cfg(all(not(desktop), target_os = "ios"))]
         {
             let legacy = lighthouse_shell::state_home::legacy_state_dir(&vault_dir_setting(app));
             let new_home = data.join(".rag-vault");
             let outcome = lighthouse_shell::state_home::ensure_state_home(&legacy, &new_home);
             shell_log(app, &outcome);
-            lighthouse_shell::state_home::mark_cache_no_backup(&new_home);
+            let targets = lighthouse_shell::state_home::no_backup_targets(&new_home, &data);
+            lighthouse_shell::state_home::mark_no_backup(&targets);
+            shell_log(
+                app,
+                &format!(
+                    "state-home: backup exclusion attempted on {} of {} target(s)",
+                    targets.iter().filter(|p| p.exists()).count(),
+                    targets.len()
+                ),
+            );
         }
     }
     // Bundled offline assets (llama-server, embed + OCR models). Packaged
