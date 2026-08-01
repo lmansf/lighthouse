@@ -9099,3 +9099,206 @@ structurally and be honest about the residual. Item 4's end-to-end needs
 a signed release; unit-test the version gate in-container and record the
 rest as verified-at-release. One commit per numbered item.
 ```
+
+## 57. HOTFIX: the vault tree never loads in the shell — a frozen `fetch` (2026-07-30)
+
+Field report: "adding folders doesn't work on desktop now, it goes
+through 'uploading n files' but then just resets." The folder symptom is
+the visible tip. The actual fault is that **every `/api/rag` call fails
+in the Tauri shell**, on desktop AND iOS, and it is live in the shipped
+0.14.19. This jumps the queue ahead of §55 and §56.
+
+Root cause — `c6fcb9d` ("fix(contracts): isolate RAG transport", #227,
+0.14.18) hoisted the fetch reference into a constructor default:
+
+```ts
+// src/contracts/real/ragTransport.ts:40
+constructor(request: RagFetch = fetch) { this.request = request; }
+// :82
+export const ragTransport = new RagTransport();
+```
+
+A default parameter is evaluated when the constructor RUNS — here, at
+module evaluation. The Tauri IPC interceptor that patches `window.fetch`
+is installed later, during React's first render
+(`app/providers.tsx:25-28`, `useState(() => installTauriTransport())`).
+The import graph is static and eager — `app/page.tsx` → `AppShell` →
+`useVaultTree` → `useRagStore` → `@/contracts` → `rag.real` →
+`ragTransport` — so the module evaluates strictly before `Providers`
+renders. `this.request` is therefore permanently the UNPATCHED native
+fetch, and `/api/rag` resolves against the Tauri asset origin
+(`tauri://localhost`), where no such asset exists → non-2xx → throw.
+Before that commit the call site was a bare `fetch("/api/rag", …)`,
+which looks `globalThis.fetch` up at CALL time and so picked up the
+interceptor. Hoisting it froze it. (The comment above the install —
+"Installed before any feature component mounts so no call can slip
+through" — is now false for a reference captured at import time.)
+
+A second defect rides along in the same line: `this.request(...)` invokes
+native `fetch` with `this` bound to the RagTransport instance, which
+browsers reject with `TypeError: Illegal invocation`. It is masked inside
+Tauri (the patched `window.fetch` is an arrow function) and in Node
+(undici tolerates it) — **which is exactly why the suite is green**.
+
+Consequences, in order of how they present:
+- `load()` never succeeds, so the explorer shows the first-run empty
+  state permanently. That is the "resets".
+- Uploads actually SUCCEED — `/api/upload` uses a bare `fetch`
+  (`useRagStore.ts:508`) resolved at call time, so bytes reach
+  `upload_file` → `vault::add_file` and land on disk. **No data loss.**
+  But `upload()`'s trailing `await get().load()` sits OUTSIDE its
+  try/finally (`useRagStore.ts:521-530`), so the `finally` nulls
+  `processing` (the overlay vanishes), then the promise rejects. The
+  caller (`FileExplorer.tsx:1750`) is `void upload(files).then(...)` with
+  no `.catch`, so neither the success flash nor the error banner ever
+  runs. Silent nothing.
+- `desktop` never leaves its initial `false`, so `desktopOS` is false and
+  the two link-in-place menu rows — including "Folder… (linked in
+  place)" — are not rendered at all. That is why FOLDERS read as the
+  broken thing: the surviving row is the copy-in `webkitdirectory` input,
+  gated on `platformKind()`, which defaults to `"desktop"`.
+- Single-file add is broken identically, just too fast to notice.
+- iOS/Android are affected the same way (`installTauriTransport` guards
+  on `__TAURI_INTERNALS__`, true on the mobile shells).
+
+Everything below `/api/rag` is healthy and must not be touched:
+`webkitRelativePath` is sent (`useRagStore.ts:503`) and consumed
+(`tauriTransport.ts:97`); batch caps cannot silently drop files (store 25
+files/64MB per batch across multiple requests; transport 50/200MB per
+request; Rust 25MB per file — over-cap produces a surfaced `skipped`);
+and `vault::add_file` accepts nested paths (`vault.rs:1376-1395`,
+`safe_abs` is a component-wise containment check, not a separator ban).
+
+### Prompt
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first, local-first analytics AI harness: Rust engine
+(native/crates/lighthouse-core) in a Tauri 2 shell (the SAME crate is
+the iOS app), byte-compatible TS twin (src/server/), React UI (src/).
+Read CLAUDE.md, docs/CONVENTIONS.md, and roadmap §57 before writing
+code. This is a HOTFIX for a shipped, user-visible break in 0.14.19 —
+smallest correct change, then ship. It takes priority over §55 and §56.
+
+FIRST, reproduce the reasoning against the current code (2 minutes, do
+not skip): src/contracts/real/ragTransport.ts:40 is
+`constructor(request: RagFetch = fetch)` and :82 is
+`export const ragTransport = new RagTransport()`, so the default is
+evaluated at MODULE EVALUATION. app/providers.tsx:25-28 installs the
+Tauri fetch interceptor during render, which is strictly later. Confirm
+the static import chain (app/page.tsx → AppShell → useVaultTree →
+useRagStore → @/contracts → rag.real → ragTransport) so you can see the
+ordering is eager, not lazy. Then confirm with
+`git show c6fcb9d -- src/contracts/real/rag.real.ts` that the pre-commit
+call site was a bare `fetch("/api/rag", …)` — resolved at call time,
+which is why it worked.
+
+1. Fix the frozen reference (the one-line fix). Make RagTransport resolve
+   the global at CALL time, which also fixes the unbound-`this` defect in
+   the same stroke:
+     constructor(request: RagFetch = (input, init) => fetch(input, init))
+   Do NOT "fix" it by importing the interceptor into the transport, by
+   moving installTauriTransport earlier, or by making the singleton lazy
+   — those all leave the same trap armed for the next call site. The
+   invariant is: a module-scope value must never capture `fetch`.
+   Keep dependency injection working (the explicit-argument path is the
+   reason the class exists) — only the DEFAULT changes.
+
+2. Stop the silent swallow (two small hardenings; these are why a total
+   backend failure presented as "nothing happened"):
+   - src/stores/useRagStore.ts:521-530 — `await get().load()` currently
+     sits OUTSIDE the try/finally, so a refresh failure rejects AFTER
+     `processing` was nulled. Guard it so a refresh failure can never
+     masquerade as a failed upload: the bytes are already committed at
+     that point. Preserve the return contract ({ addedIds, skipped }).
+   - src/features/explorer/FileExplorer.tsx:1750 —
+     `void upload(files).then(...)` has no `.catch`. Add one that
+     surfaces the existing notice (setAddNotice), so a rejection shows an
+     error instead of vanishing. Do the same for the compact caller in
+     FileTileGrid.tsx if it shares the shape.
+   - src/shell/useVaultTree.ts:21-28 logs tree-refresh failures to a
+     console nobody opens. Leave the poll loop resilient, but surface a
+     persistent, non-modal "can't reach the vault" state after N
+     consecutive failures — a total backend outage must be VISIBLE.
+     Keep it quiet for a single transient miss.
+
+3. The pin that would have caught this (do not skip — the suite was
+   GREEN through this entire outage). Add test/ragTransport.fetch.test.mjs:
+   - CALL-TIME RESOLUTION: construct the transport (or import the
+     singleton), THEN replace globalThis.fetch with a spy, then call
+     getTree() and assert the SPY was used. This fails on the old code
+     and passes on the new — it is the regression pin.
+   - NO MODULE-SCOPE CAPTURE (structural, directory-wide): scan
+     src/contracts/**/*.ts and fail if any constructor default,
+     module-scope const, or class field captures a bare `fetch`
+     identifier. RagTransport is the only current instance — verified —
+     so this pins the class of bug, not the one line.
+   - UNBOUND THIS: assert the default path does not invoke fetch with a
+     non-global receiver (a spy that throws when `this` is not
+     globalThis/undefined reproduces the browser's Illegal invocation;
+     Node/undici tolerates it, which is why nothing caught it).
+   Note in the test header WHY node tests missed this: the suite never
+   exercises the Tauri module-eval-before-interceptor ordering, and
+   undici accepts an unbound receiver.
+
+4. Verify the whole seam actually works, not just the unit. Build the
+   desktop app and confirm on a real run: the vault tree LOADS at boot;
+   "Copy folder in…" adds a nested folder and the tree shows it; the
+   "Adding N of M" overlay is followed by the success flash (not a
+   vanish); the two link-in-place rows ("Files… / Folder… (linked in
+   place)") are RENDERED again, which proves `desktop`/`desktopOS`
+   recovered; a single-file add works. Then confirm the same on iOS.
+   Because desktop cannot compile in the dev container, this is the
+   desktop-release / ios-build gate — say plainly in the PR which of
+   these you observed and which CI covered.
+
+5. Re-test the queued mobile report after this lands. §55 diagnosed the
+   compact add-files control as a broken programmatic .click() (real, and
+   independent of this bug) — but THIS bug would also make a mobile add
+   appear to do nothing. Re-observe the §55 symptom on a fixed build
+   before implementing §55, and note in that PR what was actually left.
+
+6. Stamp + ship, expedited. Bump main's current version to the next patch
+   (0.14.19 → 0.14.20 unless something else landed first — read
+   package.json, do not hardcode) across ALL SEVEN stamp files per
+   CLAUDE.md's release-mechanics section, bumping the Cargo.lock
+   lighthouse-* crates BY PATTERN. Full node + cargo suites,
+   release-smoke, ios-build green. Open ONE PR titled "Hotfix: the vault
+   tree never loads in the shell (frozen fetch)"; stop at the PR.
+   After merge (owner): dispatch desktop-release.yml with an EMPTY
+   release_tag, verify the draft's assets, dispatch publish-release.yml
+   with release_tag=v<version> and a body that says plainly that 0.14.18
+   and 0.14.19 could not load the vault in the desktop or iOS app, that
+   no data was lost (uploads committed; only the refresh failed), and
+   that updating restores it. Then dispatch mobile-bootstrap.yml
+   task: ios-beta.
+
+Constraints. No analytics/telemetry/accounts. SharePoint plumbing
+untouched. Do NOT refactor the contracts layer, do NOT revert c6fcb9d
+wholesale (its isolation is fine — only the captured default is wrong),
+and do NOT touch the ingestion chain below /api/rag: useRagStore.upload's
+batching and its bare fetch at :508, handleUpload in tauriTransport.ts
+(including webkitRelativePath → x-dest-dir), upload_file in
+lighthouse-desktop/src/commands.rs, and vault::add_file are all healthy
+and were verified. Scope = the frozen fetch, the three swallow points,
+the pins, and the stamp.
+
+Acceptance:
+1. A test that FAILS on current main and passes after: patching
+   globalThis.fetch after construction is honored by RagTransport.
+2. A directory-wide pin fails if anything under src/contracts/ captures
+   `fetch` at module scope again.
+3. In the built desktop app: the vault tree loads at boot; adding a
+   folder shows "Adding N of M" and then the success flash; the tree
+   contains the nested files; the link-in-place rows are present again.
+   Same verified on iOS.
+4. An upload whose refresh fails shows an error, never a silent reset;
+   a sustained backend outage is visible in the UI.
+5. All seven stamps read the new version; node + cargo + release-smoke +
+   ios-build green; the published notes state the impact and the
+   no-data-loss fact honestly.
+
+Environment. Items 1-3 are container-testable (pure TS + node runner).
+Item 4's end-to-end needs a built shell — desktop-release and ios-build
+are the gates. One commit per numbered item.
+```
