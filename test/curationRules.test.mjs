@@ -4,8 +4,10 @@
  * contract (explicit own flag + ancestor exclusion beat rules; deepest scope
  * then last-defined; `clear` masks and yields the default), the predicates
  * (kind / ext / glob — with the twin's honest kind degradation), add-time
- * validation, non-surprising removal, the byte-pinned cross-engine parity
- * fixture (the SAME tree + rules as the Rust twin resolving the SAME effective
+ * validation, non-surprising removal, the reference-identity property (an
+ * unlinked extN id is recycled by the next link, so its rules leave with it),
+ * the byte-pinned cross-engine parity fixture (the SAME tree + rules as the
+ * Rust twin resolving the SAME effective
  * sets), and the end-to-end future arrival: a rule exists, a NEW matching file
  * lands, and it resolves with the rule's flags — with NO per-node write in
  * state.json — while the inspector names the rule.
@@ -406,4 +408,62 @@ test("rulesListing marks orphaned scopes and labels the vault root", () => {
   assert.equal(listing[1].orphaned, true, "missing folder IS orphaned (kept for cleanup)");
   assert.equal(listing[2].orphaned, false, "the vault root always exists");
   assert.equal(listing[2].scopeLabel, "Vault");
+});
+
+// --- Reference identity (extN ids are recycled, so their rules leave with them) ---------
+
+test("unlinking a reference drops its rules — a recycled extN id includes nothing", () => {
+  freshVault();
+  const { addReference, removeReference, addRule, listRules, activeIncludedFileIds, shareableFileIds } =
+    vaultMod;
+  const mine = mkdtempSync(path.join(tmpdir(), "lh-mine-"));
+  const stranger = mkdtempSync(path.join(tmpdir(), "lh-stranger-"));
+  writeFileSync(path.join(mine, "budget.csv"), "a,b\n1,2\n");
+  writeFileSync(path.join(stranger, "salaries.csv"), "name,pay\nx,1\n");
+
+  const link = addReference(mine);
+  assert.equal(link.id, "ext0");
+  addRule({ scope: link.id, glob: "**", action: "include" });
+  assert.deepEqual(activeIncludedFileIds(), ["ext0/budget.csv"], "my rule includes my file");
+
+  // Unlink, then link a DIFFERENT folder: extN slots are minted
+  // lowest-free-first, so the stranger's folder inherits "ext0".
+  removeReference(link.id);
+  assert.equal(addReference(stranger).id, "ext0", "the freed id is recycled");
+  assert.deepEqual(listRules(), [], "the rule left with the link");
+  assert.deepEqual(activeIncludedFileIds(), [], "a recycled id includes nothing");
+  assert.deepEqual(shareableFileIds(true), [], "and nothing reaches the cloud gate");
+});
+
+test("removing a link takes its rules; undo re-binds them to the new id", () => {
+  freshVault();
+  const { addReference, addRule, listRules, removeFromVault, restoreFromVault, activeIncludedFileIds } =
+    vaultMod;
+  const mine = mkdtempSync(path.join(tmpdir(), "lh-mine-"));
+  const stranger = mkdtempSync(path.join(tmpdir(), "lh-stranger-"));
+  writeFileSync(path.join(mine, "budget.csv"), "a,b\n1,2\n");
+  writeFileSync(path.join(stranger, "salaries.csv"), "name,pay\nx,1\n");
+
+  const link = addReference(mine);
+  const rule = addRule({ scope: link.id, glob: "**", action: "include" });
+  const token = removeFromVault(link.id);
+  assert.deepEqual(listRules(), [], "the rule came out with the link");
+  assert.equal(token.rules.length, 1, "carried in the undo token");
+
+  // Something else claims ext0 before the undo, so the re-link gets a new id.
+  assert.equal(addReference(stranger).id, "ext0", "the freed id is recycled");
+  assert.deepEqual(activeIncludedFileIds(), [], "a recycled id includes nothing");
+
+  const restored = restoreFromVault(token);
+  assert.notEqual(restored.id, "ext0", "the undo re-links on a fresh id");
+  assert.deepEqual(
+    listRules().map((r) => [r.id, r.scope]),
+    [[rule.id, restored.id]],
+    "the rule came back, re-bound to the NEW id",
+  );
+  assert.deepEqual(
+    activeIncludedFileIds(),
+    [`${restored.id}/budget.csv`],
+    "and it decides only my files",
+  );
 });

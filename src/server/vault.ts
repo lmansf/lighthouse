@@ -1348,7 +1348,7 @@ export function addReference(inputPath: string): { id: string; kind: "file" | "f
  *  the inclusion and local-only flags round-trip. `localOnly` is optional so an
  *  older token (from before this change) still restores its inclusion. */
 export type RestoreDescriptor =
-  | { kind: "unlink"; root: string; path: string; included: Record<string, boolean>; localOnly?: Record<string, boolean> }
+  | { kind: "unlink"; root: string; path: string; included: Record<string, boolean>; localOnly?: Record<string, boolean>; rules?: CurationRule[] }
   | { kind: "flags"; included: Record<string, boolean>; localOnly?: Record<string, boolean> }
   | { kind: "trash"; id: string; trashPath: string; included: Record<string, boolean>; localOnly?: Record<string, boolean> };
 
@@ -1369,6 +1369,26 @@ function takeFlagSubtree(
   return taken;
 }
 
+/** Collect + drop every curation rule anchored at a node or beneath it,
+ *  returning the removed rules so a restore can put them back. The mirror of
+ *  remapRuleScopes: a rule FOLLOWS its folder on a move, but a removed
+ *  reference id is NOT reusable identity — extN slots are minted
+ *  lowest-free-first, so the next, DIFFERENT folder inherits the id and a
+ *  surviving rule would implicitly include a stranger's files (nothing renders
+ *  as orphaned, and the rule layer writes no per-node flag to un-tick).
+ *  KEEP IN SYNC with vault.rs::take_rule_scopes. */
+function takeRuleScopes(state: VaultState, nodeId: string): CurationRule[] {
+  const taken: CurationRule[] = [];
+  state.rules = state.rules.filter((r) => {
+    if (r.scope === nodeId || r.scope.startsWith(`${nodeId}/`)) {
+      taken.push(r);
+      return false;
+    }
+    return true;
+  });
+  return taken;
+}
+
 export function removeFromVault(nodeId: string): RestoreDescriptor {
   const state = loadState();
   const refId = refIdOf(nodeId, state.references);
@@ -1378,9 +1398,13 @@ export function removeFromVault(nodeId: string): RestoreDescriptor {
     const realPath = state.references[nodeId]?.path ?? "";
     const included = takeFlagSubtree(state.included, nodeId);
     const localOnly = takeFlagSubtree(state.localOnly, nodeId);
+    // Rules scoped at/under the link come out with it — the freed extN id goes
+    // to the NEXT, different folder (see takeRuleScopes). They ride in the
+    // descriptor so the undo can re-bind them to the id it gets.
+    const rules = takeRuleScopes(state, nodeId);
     delete state.references[nodeId];
     saveState(state);
-    return { kind: "unlink", root: nodeId, path: realPath, included, localOnly };
+    return { kind: "unlink", root: nodeId, path: realPath, included, localOnly, rules };
   }
   // A node *inside* a linked folder: unlinking the whole reference here would
   // drop every sibling too, and we must never touch the user's real external
@@ -1432,6 +1456,20 @@ export function restoreFromVault(desc: RestoreDescriptor): { id?: string; ok?: b
           : k;
     for (const [k, v] of Object.entries(desc.included)) state.included[remap(k)] = v;
     for (const [k, v] of Object.entries(desc.localOnly ?? {})) state.localOnly[remap(k)] = v;
+    // The rules taken at unlink come back the way the flags do — onto the id
+    // this re-link actually got, never the recycled one. An id already present
+    // means a replayed token: skip rather than duplicate. Older descriptors
+    // carry no `rules` key ⇒ nothing. The token is caller-supplied, so a
+    // non-array or a malformed entry is SKIPPED rather than trusted — matching
+    // the Rust twin, where `as_array` + `from_value::<CurationRule>` already
+    // fail closed instead of aborting a restore that has re-linked already.
+    const restoredRules = Array.isArray(desc.rules) ? desc.rules : [];
+    for (const r of restoredRules) {
+      if (!r || typeof r.id !== "string" || typeof r.scope !== "string") continue;
+      if (!state.rules.some((x) => x.id === r.id)) {
+        state.rules.push({ ...r, scope: remap(r.scope) });
+      }
+    }
     saveState(state);
     return { id: newRoot };
   }
@@ -1465,6 +1503,9 @@ export function removeReference(refId: string): void {
   for (const k of Object.keys(state.localOnly)) {
     if (k === refId || k.startsWith(`${refId}/`)) delete state.localOnly[k];
   }
+  // Curation rules scoped at/under the link go with it — this door has no undo
+  // token, so they are simply dropped (see takeRuleScopes).
+  takeRuleScopes(state, refId);
   saveState(state);
 }
 

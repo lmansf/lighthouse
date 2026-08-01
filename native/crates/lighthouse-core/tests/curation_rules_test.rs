@@ -2,8 +2,10 @@
 //! contract (explicit own flag and ancestor exclusion beat rules; deepest
 //! scope then last-defined among rules; `clear` masks and yields the default),
 //! the three predicates (kind / ext / glob), add-time validation, the
-//! non-surprising removal property, the cross-engine parity fixture (the node
-//! twin is test/curationRules.test.mjs over the SAME tree + rules), and the
+//! non-surprising removal property, the reference-identity property (an
+//! unlinked `extN` id is recycled by the next link, so its rules leave with
+//! it), the cross-engine parity fixture (the node twin is
+//! test/curationRules.test.mjs over the SAME tree + rules), and the
 //! end-to-end spec scenario: create a rule, drop a NEW matching file into the
 //! vault, and watch it arrive with the rule's flags — with NO per-node write
 //! in state.json — while the inspector names the rule.
@@ -453,4 +455,85 @@ fn listing_marks_orphaned_scopes_and_labels() {
     assert!(listing[1].orphaned, "missing folder IS orphaned (kept for cleanup)");
     assert!(!listing[2].orphaned, "the vault root always exists");
     assert_eq!(listing[2].scope_label, "Vault");
+}
+
+// --- Reference identity (extN ids are recycled, so their rules leave with them) -----
+
+#[test]
+fn unlinking_drops_scoped_rules_so_a_recycled_ext_id_includes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let mine = tempfile::tempdir().unwrap();
+    let stranger = tempfile::tempdir().unwrap();
+    let _guard = common::lock_env(dir.path());
+
+    // A folder of mine, linked, with a rule that includes everything under it.
+    write(&mine.path().join("budget.csv"), "a,b\n1,2\n");
+    let (mine_id, _) = vault::add_reference(mine.path().to_str().unwrap()).unwrap();
+    assert_eq!(mine_id, "ext0");
+    vault::add_rule(&mine_id, None, None, Some("**"), "include").unwrap();
+    assert_eq!(
+        vault::active_included_file_ids(),
+        vec!["ext0/budget.csv".to_string()],
+        "my rule includes my file"
+    );
+
+    // Unlink it, then link a DIFFERENT folder: extN slots are minted
+    // lowest-free-first, so the stranger's folder inherits "ext0".
+    vault::remove_reference(&mine_id);
+    write(&stranger.path().join("salaries.csv"), "name,pay\nx,1\n");
+    let (their_id, _) = vault::add_reference(stranger.path().to_str().unwrap()).unwrap();
+    assert_eq!(their_id, "ext0", "the freed id is recycled");
+
+    // Nothing of theirs may be implicitly included — not locally, and not in
+    // the cloud-shareable set (there is no per-node flag to un-tick, and the
+    // rule would not render as orphaned, so this is the only defence).
+    assert!(vault::list_rules().is_empty(), "the rule left with the link");
+    assert!(
+        vault::active_included_file_ids().is_empty(),
+        "a recycled id includes nothing"
+    );
+    assert!(
+        vault::shareable_file_ids(true).is_empty(),
+        "and nothing reaches the cloud gate"
+    );
+}
+
+#[test]
+fn removing_a_link_takes_its_rules_and_undo_re_binds_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let mine = tempfile::tempdir().unwrap();
+    let stranger = tempfile::tempdir().unwrap();
+    let _guard = common::lock_env(dir.path());
+
+    write(&mine.path().join("budget.csv"), "a,b\n1,2\n");
+    write(&stranger.path().join("salaries.csv"), "name,pay\nx,1\n");
+    let (mine_id, _) = vault::add_reference(mine.path().to_str().unwrap()).unwrap();
+    let rule = vault::add_rule(&mine_id, None, None, Some("**"), "include").unwrap();
+
+    // The explorer's Remove on a linked root: the rule comes out WITH the link,
+    // carried in the undo token.
+    let token = vault::remove_from_vault(&mine_id).unwrap();
+    assert!(vault::list_rules().is_empty(), "the rule came out with the link");
+    assert_eq!(token["rules"].as_array().map(|a| a.len()), Some(1));
+
+    // Something else claims ext0 before the undo, so the re-link gets a new id.
+    let (their_id, _) = vault::add_reference(stranger.path().to_str().unwrap()).unwrap();
+    assert_eq!(their_id, "ext0", "the freed id is recycled");
+    assert!(
+        vault::active_included_file_ids().is_empty(),
+        "a recycled id includes nothing"
+    );
+
+    let out = vault::restore_from_vault(&token).unwrap();
+    let new_id = out["id"].as_str().unwrap().to_string();
+    assert_ne!(new_id, their_id, "the undo re-links on a fresh id");
+    let rules = vault::list_rules();
+    assert_eq!(rules.len(), 1, "the rule came back");
+    assert_eq!(rules[0].id, rule.id);
+    assert_eq!(rules[0].scope, new_id, "re-bound to the NEW id, not the recycled one");
+    assert_eq!(
+        vault::active_included_file_ids(),
+        vec![format!("{new_id}/budget.csv")],
+        "and it decides only my files"
+    );
 }

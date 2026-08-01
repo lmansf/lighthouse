@@ -1699,6 +1699,28 @@ fn restore_flags(map: &mut HashMap<String, bool>, flags: &serde_json::Map<String
     }
 }
 
+/// Collect + drop every curation rule anchored at a node or beneath it,
+/// returning the removed rules so a restore can put them back. The mirror of
+/// `remap_rule_scopes`: a rule FOLLOWS its folder on a move, but a removed
+/// reference id is NOT reusable identity — `extN` slots are minted
+/// lowest-free-first, so the next, DIFFERENT folder inherits the id and a
+/// surviving rule would implicitly include a stranger's files (nothing renders
+/// as orphaned, and the rule layer writes no per-node flag to un-tick).
+/// KEEP IN SYNC with vault.ts::takeRuleScopes.
+fn take_rule_scopes(rules: &mut Vec<CurationRule>, node_id: &str) -> Vec<CurationRule> {
+    let prefix = format!("{node_id}/");
+    let mut taken: Vec<CurationRule> = Vec::new();
+    rules.retain(|r| {
+        if r.scope == node_id || r.scope.starts_with(prefix.as_str()) {
+            taken.push(r.clone());
+            false
+        } else {
+            true
+        }
+    });
+    taken
+}
+
 /// Remove a node from the vault — non-destructively. A linked item unlinks; a
 /// vault-resident file/folder MOVES to a recoverable trash
 /// (`.rag-vault/trash/<date>/…`) and its inclusion flags are dropped. Returns a
@@ -1716,10 +1738,14 @@ pub fn remove_from_vault(node_id: &str) -> anyhow::Result<serde_json::Value> {
             .unwrap_or_default();
         let included = take_flag_subtree(&mut state.included, node_id);
         let local_only = take_flag_subtree(&mut state.local_only, node_id);
+        // Rules scoped at/under the link come out with it — the freed extN id
+        // goes to the NEXT, different folder (see take_rule_scopes). They ride
+        // in the descriptor so the undo can re-bind them to the id it gets.
+        let rules = take_rule_scopes(&mut state.rules, node_id);
         state.references.remove(node_id);
         save_state(&state);
         return Ok(
-            serde_json::json!({ "kind": "unlink", "root": node_id, "path": path, "included": included, "localOnly": local_only }),
+            serde_json::json!({ "kind": "unlink", "root": node_id, "path": path, "included": included, "localOnly": local_only, "rules": rules }),
         );
     }
     // A node *inside* a linked folder: scope the removal to just this node's
@@ -1814,6 +1840,23 @@ pub fn restore_from_vault(desc: &serde_json::Value) -> anyhow::Result<serde_json
                     state.local_only.insert(remap(k), b);
                 }
             }
+            // The rules taken at unlink come back the way the flags do — onto
+            // the id this re-link actually got, never the recycled one. An id
+            // already present means a replayed token: skip rather than
+            // duplicate. Older descriptors carry no `rules` key ⇒ nothing.
+            for r in desc
+                .get("rules")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default()
+            {
+                if let Ok(mut rule) = serde_json::from_value::<CurationRule>(r) {
+                    rule.scope = remap(rule.scope.as_str());
+                    if !state.rules.iter().any(|x| x.id == rule.id) {
+                        state.rules.push(rule);
+                    }
+                }
+            }
             save_state(&state);
             Ok(serde_json::json!({ "id": new_root }))
         }
@@ -1864,6 +1907,9 @@ pub fn remove_reference(ref_id: &str) {
     state
         .local_only
         .retain(|k, _| k != ref_id && !k.starts_with(&prefix));
+    // Curation rules scoped at/under the link go with it — this door has no
+    // undo token, so they are simply dropped (see take_rule_scopes).
+    take_rule_scopes(&mut state.rules, ref_id);
     save_state(&state);
 }
 
