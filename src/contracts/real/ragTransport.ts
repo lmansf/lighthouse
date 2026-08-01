@@ -37,7 +37,17 @@ function asRecord(value: unknown): Record<string, unknown> {
 export class RagTransport {
   private readonly request: RagFetch;
 
-  constructor(request: RagFetch = fetch) {
+  // The default MUST resolve `fetch` at CALL time rather than capture it here.
+  // This module is evaluated — and the `ragTransport` singleton below
+  // constructed — during import, which is strictly before Providers installs
+  // the Tauri IPC interceptor that patches window.fetch. A captured reference
+  // stays the unpatched native fetch forever, so /api/rag goes to the asset
+  // origin and 404s: the whole vault tree fails to load in the shell (the
+  // 0.14.18 regression, roadmap §57). Calling through this wrapper also keeps
+  // the receiver global — an unbound native fetch throws "Illegal invocation"
+  // in a browser, though Node's undici tolerates it, which is why the suite
+  // never caught it. Pinned by test/ragTransport.fetch.test.mjs.
+  constructor(request: RagFetch = (input, init) => fetch(input, init)) {
     this.request = request;
   }
 

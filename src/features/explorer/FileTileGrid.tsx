@@ -388,7 +388,10 @@ export function FileTileGrid() {
           hidden
           onChange={(e) => {
             const files = Array.from(e.target.files ?? []);
-            if (files.length) void upload(files);
+            // §57: never let a rejection vanish. Compact has no add-failure
+            // surface yet — §55 adds one when it replaces this control.
+            if (files.length)
+              void upload(files).catch((err) => console.error("Add failed", err));
             e.target.value = "";
           }}
         />

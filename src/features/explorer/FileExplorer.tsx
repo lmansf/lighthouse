@@ -1052,6 +1052,7 @@ export function FileExplorer() {
   const styles = useStyles();
   const sources = useRagStore((s) => s.sources);
   const nodes = useRagStore((s) => s.nodes);
+  const treeUnreachable = useRagStore((s) => s.treeUnreachable);
   const selectionMode = useRagStore((s) => s.selectionMode);
   const setSelectionMode = useRagStore((s) => s.setSelectionMode);
   const selectedIds = useRagStore((s) => s.selectedIds);
@@ -1743,14 +1744,18 @@ export function FileExplorer() {
           }
           celebrate(addedIds);
           reportSkipped(problems);
-        })();
+        })().catch(() => setAddNotice("Couldn't add those files. Please try again."));
         return;
       }
     }
-    void upload(files).then(({ addedIds, skipped }) => {
-      celebrate(addedIds);
-      reportSkipped(skipped);
-    });
+    void upload(files)
+      .then(({ addedIds, skipped }) => {
+        celebrate(addedIds);
+        reportSkipped(skipped);
+      })
+      // §57: without this, a rejection cleared the overlay and showed nothing
+      // at all — neither the added flash nor an error. Never silent again.
+      .catch(() => setAddNotice("Couldn't add those files. Please try again."));
   };
 
   /**
@@ -2108,6 +2113,14 @@ export function FileExplorer() {
           <Text size={300} weight="semibold">
             {interestNote}
           </Text>
+        </div>
+      )}
+
+      {/* §57: a sustained tree-load failure is persistent and NOT dismissible —
+          an unreachable vault used to render as a normal empty vault. */}
+      {treeUnreachable && (
+        <div className={styles.addNotice} role="status">
+          <Text size={200}>Can&apos;t reach your vault right now. Retrying…</Text>
         </div>
       )}
 
