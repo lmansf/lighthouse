@@ -80,6 +80,13 @@ interface RagStore {
    * frozen app.
    */
   processing: { done: number; total: number; label: string } | null;
+  /**
+   * True once the vault tree has failed to load repeatedly (§57). A total
+   * backend/IPC outage used to be console-only, so the app just looked empty;
+   * the explorer renders this as a persistent banner so it is never silent.
+   */
+  treeUnreachable: boolean;
+  setTreeUnreachable: (v: boolean) => void;
 
   load: () => Promise<void>;
   setSelectionMode: (on: boolean) => void;
@@ -266,6 +273,11 @@ export const useRagStore = create<RagStore>((set, get) => ({
   selectionMode: false,
   selectedIds: [],
   processing: null,
+  treeUnreachable: false,
+  // Idempotent: the poll calls this on every tick, so only write on a change.
+  setTreeUnreachable: (v) => {
+    if (get().treeUnreachable !== v) set({ treeUnreachable: v });
+  },
 
   clearLastError: () => set({ lastError: null }),
 
@@ -525,7 +537,16 @@ export const useRagStore = create<RagStore>((set, get) => ({
     } finally {
       set({ processing: null });
     }
-    await get().load();
+    // The bytes are already committed here. A failing refresh must NOT reject
+    // the add: it used to, and because `finally` had already cleared the
+    // overlay and the caller had no .catch, a total backend outage read as
+    // "nothing happened" (roadmap §57). Report what was added; let the poll in
+    // useVaultTree recover the tree and surface a sustained outage.
+    try {
+      await get().load();
+    } catch {
+      // deliberately swallowed — see above; useVaultTree owns the outage state
+    }
     return { addedIds, skipped };
   },
 

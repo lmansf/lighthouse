@@ -16,14 +16,27 @@ import { isDesktopShell } from "./desktopBridge";
  */
 export function useVaultTree(): void {
   const load = useRagStore((s) => s.load);
+  const setTreeUnreachable = useRagStore((s) => s.setTreeUnreachable);
 
   useEffect(() => {
     // A transient backend/IPC failure must not crash the poll loop or surface
-    // an unhandled rejection; log and let the next tick recover.
+    // an unhandled rejection; log and let the next tick recover. But a
+    // SUSTAINED failure must become visible (§57): console-only meant a total
+    // outage just rendered as an empty vault, which is what shipped in
+    // 0.14.18/0.14.19. One miss stays quiet; three in a row raise the banner.
+    const FAILURES_BEFORE_VISIBLE = 3;
+    let consecutiveFailures = 0;
     const refresh = () => {
-      void load().catch((err) => {
-        console.error("Failed to refresh the vault tree", err);
-      });
+      void load()
+        .then(() => {
+          consecutiveFailures = 0;
+          setTreeUnreachable(false);
+        })
+        .catch((err) => {
+          consecutiveFailures += 1;
+          console.error("Failed to refresh the vault tree", err);
+          if (consecutiveFailures >= FAILURES_BEFORE_VISIBLE) setTreeUnreachable(true);
+        });
     };
     refresh();
     // Keep the tree live. Inside the desktop shell the engine PUSHES changes
@@ -46,5 +59,5 @@ export function useVaultTree(): void {
       document.removeEventListener("visibilitychange", tick);
       window.removeEventListener("lighthouse:vault-changed", refresh);
     };
-  }, [load]);
+  }, [load, setTreeUnreachable]);
 }
