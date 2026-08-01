@@ -270,7 +270,7 @@ export function BugReport() {
                 appearance="secondary"
                 icon={<IconOpen />}
                 disabled={!canSend}
-                onClick={() => openExternal(buildFeedbackIssueUrl(report))}
+                onClick={() => openExternal(buildFeedbackIssueUrl(report), "app")}
               >
                 Open a GitHub issue
               </Button>
@@ -278,7 +278,7 @@ export function BugReport() {
                 appearance="primary"
                 icon={<IconMail />}
                 disabled={!canSend}
-                onClick={() => openExternal(buildFeedbackMailto(report))}
+                onClick={() => openExternal(buildFeedbackMailto(report), "app")}
               >
                 Email us
               </Button>

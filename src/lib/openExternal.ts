@@ -14,10 +14,69 @@
  * the settings surfaces, answer links — pinned by test/openExternal.test.mjs
  * (no bare window.open outside this file and reportExport's blank print
  * shell, which opens a document the app composes, not an external URL).
+ *
+ * Being the one seam, it is also the one place that can REFUSE. Both rules are
+ * decided BEFORE a transport is chosen, so neither the plugin route nor the
+ * window.open fallback can carry a destination the other would have refused:
+ *
+ * 1. Scheme allowlist — `https:` and `mailto:`, nothing else. `javascript:`,
+ *    `data:`, `file:`, `blob:`, a scheme-relative `//host`, an unparseable
+ *    string: refused.
+ * 2. Provenance, passed as an ARGUMENT by the call site — never sniffed off
+ *    the URL, which is the attacker-shaped half. `"app"` means the app itself
+ *    composed the destination (the feedback handoffs, the repo link).
+ *    Everything else is UNTRUSTED — an href out of answer HTML, a URI out of a
+ *    remote sign-in response — and that is also what a call site that says
+ *    nothing gets: `https:` only, and the user must first agree to a prompt
+ *    NAMING THE HOST.
+ *
+ * Why (red-team High, "answer links reach the OS browser with no allowlist"):
+ * ANSWER_HTML_SCHEMA drops the remote-LOADING tags, so an answer cannot fetch
+ * on its own — but `a[href]` stays navigable and ChatPanel forwards every
+ * non-citation href here, so prompt-injected document content could render an
+ * ordinary-looking link whose query string carries figures out of OTHER files
+ * in the same context. One click, no cloud provider needed, and local-only
+ * marks do not cover it. The offline export path (evidencePack.ts) emits no
+ * href at all; the live path must not be laxer than the export path.
  */
 import { isDesktopShell } from "@/shell/desktopBridge";
 
-export function openExternal(url: string): void {
+/** Who chose this destination — see rule 2 above. Default: untrusted. */
+export type LinkOrigin = "app" | "untrusted";
+
+/** The only schemes this seam serves (`mailto:` for app-composed mail only). */
+const ALLOWED_PROTOCOLS = new Set(["https:", "mailto:"]);
+
+export function openExternal(url: string, origin: LinkOrigin = "untrusted"): void {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return; // not a URL at all (or scheme-relative) — refuse
+  }
+  if (!ALLOWED_PROTOCOLS.has(parsed.protocol)) return;
+  // Hand the transports the string the seam VALIDATED, not the raw one: the
+  // OS-side openers split the authority per RFC 3986 (backslash is not a
+  // delimiter there), so `https://github.com\@evil.example/` parses as host
+  // github.com here and as host evil.example there — the prompt would name
+  // one host and the browser would open another.
+  url = parsed.href;
+  if (origin !== "app") {
+    // Untrusted: `https:` only (a mailto carries no host to name), and the
+    // user sees that host and agrees before anything leaves. `confirm` is the
+    // one synchronous consent primitive at this seam; where the webview does
+    // not implement it (the WKWebView checklist in docs/CONVENTIONS.md — some
+    // web APIs there silently do nothing) the answer is NO.
+    if (parsed.protocol !== "https:") return;
+    if (typeof window.confirm !== "function") return;
+    const agreed = window.confirm(
+      `Open ${parsed.hostname}?\n\n` +
+        "This link came from content Lighthouse didn't write — an answer, a " +
+        "document, or a sign-in reply. The address itself can carry text from " +
+        "your files to that site.",
+    );
+    if (!agreed) return;
+  }
   if (isDesktopShell()) {
     // Lazy import (the tauriTransport idiom): plain-web bundles never pull the
     // Tauri API in through this seam.

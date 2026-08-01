@@ -675,6 +675,11 @@ export function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: 
                             {signinFlow.userCode}
                           </Text>
                           <div className={styles.signinRow}>
+                            {/* NOT app-authored: verificationUri arrives in the
+                                provider's device-auth RESPONSE, so a hostile or
+                                MITM reply would otherwise pick the scheme handed
+                                to the OS. Unmarked = untrusted at the seam:
+                                https only, host shown, user agrees. */}
                             <Button
                               appearance="primary"
                               onClick={() => openExternal(signinFlow.verificationUri)}
@@ -1957,7 +1962,7 @@ export function SettingsMenu() {
             </MenuItem>
             <MenuItem
               icon={<IconOpen />}
-              onClick={() => openExternal(LH_REPO)}
+              onClick={() => openExternal(LH_REPO, "app")}
             >
               Lighthouse on GitHub
             </MenuItem>

@@ -231,7 +231,7 @@ export function SettingsPage() {
         <Row
           icon={<IconOpen />}
           label="Lighthouse on GitHub"
-          onClick={() => openExternal(LH_REPO)}
+          onClick={() => openExternal(LH_REPO, "app")}
         />
         <Row icon={<IconInfo />} label="About Lighthouse" onClick={() => setAboutDlg(true)} />
       </div>
