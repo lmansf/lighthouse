@@ -11,6 +11,12 @@ This schedule markets what is on `main` at **0.12.2** — nothing speculative.
 Fifteen posts: 2/week, ramping to 4 in week 5 (ecosystem week) and 3 in
 week 6. Each post builds on features established by earlier posts.
 
+**Ready-to-paste captions for every post** (plus media, first comment, and
+engagement notes per slot) live in the companion kit:
+`linkedin-data-analysts-posts.md`. All 15 slots are also on the owner's
+calendar (Tue/Thu + week-5 Wed/Fri + week-6 Wed, 08:30–09:00) with the
+same content embedded, so posting is copy-paste from either place.
+
 **Audience:** data analysts (LinkedIn) — beachhead audience. The harness
 story generalizes to financial/ops/research analysts; see Backlog.
 
