@@ -824,3 +824,31 @@ test("inspectView keeps every distinct source file, reads order", () => {
     ["x.csv", "y.csv"],
   );
 });
+
+test("a lone '-' is arithmetic and '--' comments are line-bounded", () => {
+  // Mid-line minus must NOT open a comment — the guard still sees the tail.
+  assert.equal(views.guardViewSql("SELECT a - b FROM t"), null);
+  // A '--' comment blanks to the END OF ITS LINE only; the next line survives,
+  // so a keyword there is still caught…
+  assert.equal(
+    views.guardViewSql("SELECT a FROM t -- note\nWHERE x = 1"),
+    null,
+  );
+  assert.match(String(views.guardViewSql("SELECT a -- note\n; DELETE FROM t")), /read-only|statement/);
+  // …and a ';' hidden INSIDE the comment is scrubbed — still one statement.
+  assert.equal(views.guardViewSql("SELECT a FROM t -- ; delete from t"), null);
+});
+
+test("delete with exactly ONE dependent refuses naming just it, then cascades one hop", () => {
+  const { dir } = freshVault();
+  seedSales(dir);
+  const base = views.createView("solo_base", "SELECT * FROM sales", summary("q"), ["sales.csv"]);
+  const top = views.createView("solo_top", "SELECT * FROM solo_base", summary("q"), []);
+  assert.throws(
+    () => views.deleteView(base.id, false),
+    new Error('"solo_base" can\'t be deleted while other views read it: solo_top'),
+  );
+  assert.equal(views.listViews().length, 2, "refusal deleted nothing");
+  assert.deepEqual(views.deleteView(base.id, true), [base.id, top.id]);
+  assert.deepEqual(views.listViews(), []);
+});

@@ -619,3 +619,28 @@ test("formatGrouped zero boundary; granularity singletons; month-tick index boun
   assert.equal(formatXTick("2024-13", "month"), "2024-13");
   assert.equal(formatXTick("2024-00", "month"), "2024-00");
 });
+
+test("parse accepts exactly MAX_SERIES (3) series and rejects a fourth", () => {
+  const mk = (n) =>
+    JSON.stringify({
+      kind: "line",
+      x: ["a", "b"],
+      series: Array.from({ length: n }, (_, i) => ({ name: `s${i}`, values: [i, i + 1] })),
+    });
+  assert.ok(parseChartSpec(mk(3)));
+  assert.equal(parseChartSpec(mk(4)), null);
+});
+
+test("scaleLinear from a non-zero domain start", () => {
+  // The `- d0` term only matters off the origin — the documented gap.
+  const s = scaleLinear(10, 20, 0, 100);
+  assert.equal(s(10), 0);
+  assert.equal(s(15), 50);
+  assert.equal(s(20), 100);
+  const offset = scaleLinear(10, 20, 30, 40);
+  assert.equal(offset(12), 32);
+});
+
+test("niceTicks with the default count pins the 0–12 grid to a 5-step", () => {
+  assert.deepEqual(niceTicks(0, 12), [0, 5, 10, 15]);
+});

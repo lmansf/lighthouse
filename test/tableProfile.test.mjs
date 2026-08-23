@@ -370,3 +370,24 @@ test("bestAggregate tie-break: equal widths keep the FIRST aggregate (rollup bea
   assert.deepEqual(spec.x, ["2016", "2017"]);
   assert.deepEqual(spec.series[0].values, [150, 200]);
 });
+
+test("group-by rollups switch ON at exactly two categories and sort keys the data never sorted", () => {
+  // Two distinct regions, fed zeta-FIRST: the alphabetical output order can
+  // only come from the comparator, and the rollup itself sits exactly at the
+  // `distinct.size < 2` boundary.
+  const two = "Region,Sales\nzeta,3\nalpha,1\nzeta,2\nalpha,4";
+  const p = tableProfile("t.csv", two);
+  assert.ok(p.includes("sum of Sales by Region: alpha: 5 · zeta: 5"), p);
+  // The chartable aggregate mirrors the same comparator (profileAggregates).
+  const spec = JSON.parse(profileChart("t.csv", two));
+  assert.deepEqual(spec.x, ["alpha", "zeta"]);
+  assert.deepEqual(spec.series[0].values, [5, 5]);
+});
+
+test("group-by rollups cap at MAX_GROUP_KEYS: present at 8 categories, absent at 9", () => {
+  const mk = (n) =>
+    "Region,Sales\n" +
+    Array.from({ length: n }, (_, i) => `r${String(i).padStart(2, "0")},1`).join("\n");
+  assert.ok(tableProfile("t.csv", mk(8)).includes("sum of Sales by Region:"));
+  assert.ok(!tableProfile("t.csv", mk(9)).includes("sum of Sales by Region:"));
+});
