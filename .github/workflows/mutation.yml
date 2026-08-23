@@ -1,0 +1,76 @@
+# PR-scoped mutation testing (quality-audit §07 rec 8): every PR that touches
+# engine code gets its CHANGED code mutation-tested — small enough to run per
+# PR because the scope is the diff, not the crate.
+#
+# Rust: cargo-mutants --in-diff mutates only lines the PR changed in
+# lighthouse-core and fails on any MISSED mutant — new code ships with tests
+# that can tell it from a plausible wrong version of itself. (The fixtures the
+# llm/extract suites read are vendored at native/test-fixtures/, so the
+# workspace-only tree cargo-mutants copies is self-contained.)
+#
+# JS: the audit's TS-AST harness re-scores every changed src/server|src/lib
+# module against its paired test file and fails under an 80% kill floor
+# (the audit's "strong suite" band; override with MUTATION_MIN if a module's
+# equivalent-mutant profile genuinely warrants it).
+name: mutation
+
+on:
+  pull_request:
+    paths:
+      - "native/crates/**"
+      - "src/server/**"
+      - "src/lib/**"
+      - ".github/workflows/mutation.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  rust-mutants:
+    name: cargo-mutants over the PR diff
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: native
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants
+      - name: Diff lighthouse-core against the PR base
+        id: diff
+        run: |
+          git diff --relative "origin/${{ github.base_ref }}...HEAD" \
+            -- crates/lighthouse-core/src > pr.diff
+          echo "lines=$(wc -l < pr.diff)" >> "$GITHUB_OUTPUT"
+      - name: Mutate the changed lines
+        if: steps.diff.outputs.lines != '0'
+        run: |
+          cargo mutants -p lighthouse-core --in-diff pr.diff -j 2 -C --locked
+      - name: Nothing to mutate
+        if: steps.diff.outputs.lines == '0'
+        run: echo "no lighthouse-core source changes in this PR"
+
+  js-mutants:
+    name: TS harness over changed modules
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Mutate changed engine/lib modules
+        run: node scripts/mutation/pr-run.mjs --base "origin/${{ github.base_ref }}"

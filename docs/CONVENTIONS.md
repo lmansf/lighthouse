@@ -181,6 +181,15 @@ OCR models boarded the .app payload" (§25/fp3 §1) and "Assert the
 private-model bridge boarded the app binary" (0.13.9). A new staged asset
 ships with its own end-of-chain assert, not just a staging-step check.
 
+## Vendored twins are pinned, never trusted
+
+When a file must exist in two places (a workspace-only tool can't reach the
+repo root), the second copy is vendored AND a test pins the copies
+byte-identical in both directions — never "remember to sync". Canonical:
+native/test-fixtures/ (the Rust suites' copy of test/fixtures/, so the
+workspace-only tree cargo-mutants copies is self-contained) pinned by
+test/fixturesParity.test.mjs.
+
 ## Cross-feature structural floors
 
 When feature A references feature B's DOM/structure (anchors, ids, class
