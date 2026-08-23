@@ -608,40 +608,18 @@ export async function* answerPipeline(
   }
 }
 
-/** The live ask path (pre-cache behavior, byte-identical): single-shot RAG or
- *  multi-document synthesis, streamed as ChatChunks. */
-async function* answerPipelineLive(
+type InitialRetrieval = Awaited<ReturnType<typeof registryRetrieve>>;
+
+/** The deterministic opening emissions, in order: the instant sources
+ *  acknowledgment, the named-but-excluded honesty note, and the cloud
+ *  local-only-drop honesty note. Extracted verbatim from answerPipelineLive —
+ *  every string is engine text pinned against synth.rs. */
+function* openingNotes(
   question: string,
-  includedFileIds: string[],
   attachmentFileIds: string[],
-  history: ChatTurn[],
-  cfg: ModelCfg,
-  preferredConversationIds: string[] = [],
-): AsyncGenerator<ChatChunk> {
-  // Provenance origin for this answer's stamp — resolved once from the active
-  // provider (agrees with the audit record's `provider`). Every branch's final
-  // chunk carries it; it is never derived from model text.
-  const origin = originOf(cfg);
-  // Local-only enforcement is armed only for a CLOUD provider. On the device
-  // path this is false everywhere below, so the shareable gate is a no-op and
-  // on-device answers are byte-identical to today.
-  const isCloud = isCloudProvider(cfg);
-
-  // A bare follow-up retrieves poorly on its own: blend in the previous user
-  // turn to anchor retrieval to the topic (moved here from the callers so all
-  // three surfaces stay identical).
-  const lastUserTurn = [...history].reverse().find((t) => t.role === "user");
-  const retrievalQuery = lastUserTurn ? `${lastUserTurn.content}\n${question}` : question;
-
-  const initial = await registryRetrieve(
-    retrievalQuery,
-    includedFileIds,
-    attachmentFileIds,
-    5,
-    isCloud,
-    preferredConversationIds,
-  );
-
+  isCloud: boolean,
+  initial: InitialRetrieval,
+): Generator<ChatChunk> {
   // Instant acknowledgment: local models take seconds to a first token, but
   // retrieval lands in milliseconds — naming the sources NOW makes the answer
   // visibly start immediately (0.6.x field feedback: "slow to write… provide
@@ -686,12 +664,21 @@ async function* answerPipelineLive(
       yield { delta: localOnlySkipNote(dropped), done: false };
     }
   }
+}
 
-  // --- Vault meta-answers (openspec: add-vault-meta-answers): anchored
-  //     questions ABOUT the vault (recency, inventory) answer instantly from
-  //     walk metadata — no model call, real references. A null render (incl.
-  //     the PARITY findColumn case — the catalog is desktop-only) falls
-  //     through with NOTHING emitted. KEEP IN SYNC with synth.rs.
+/** Vault meta-answers (openspec: add-vault-meta-answers): anchored questions
+ *  ABOUT the vault (recency, inventory) answer instantly from walk metadata —
+ *  no model call, real references. A null render (incl. the PARITY findColumn
+ *  case — the catalog is desktop-only) falls through with NOTHING emitted.
+ *  Returns true when a meta answer was emitted (caller returns). KEEP IN SYNC
+ *  with synth.rs. */
+function* tryMetaAnswer(
+  question: string,
+  includedFileIds: string[],
+  attachmentFileIds: string[],
+  isCloud: boolean,
+  origin: string,
+): Generator<ChatChunk, boolean> {
   if (attachmentFileIds.length === 0) {
     const intent = metaIntent(question);
     if (intent) {
@@ -704,20 +691,25 @@ async function* answerPipelineLive(
         // Model-free deterministic answer: zero excerpts handed to a model,
         // files behind it are the cited references.
         yield finalChunk(ans.references, 0, origin, [], metaChart ?? undefined);
-        return;
+        return true;
       }
     }
   }
+  return false;
+}
 
-  // --- Answer-level draft-then-verify (G2): on the PRIVATE path, stream an
-  //     instant extractive draft from the retrieval snippets already in hand,
-  //     replaced IN PLACE by the local model's grounded answer below. Gated to
-  //     the LOCAL provider + the draftAnswers preference (default on) + non-empty
-  //     contexts. Meta answered/returned above, so this only ever precedes a real
-  //     local-model grounded answer. The draft is a separate chunk that never
-  //     enters any prompt — zero tokens against the local window. KEEP IN SYNC
-  //     with synth.rs (whose position differs only by the Rust-only analytics
-  //     branch, which has no TS twin).
+/** Answer-level draft-then-verify (G2): on the PRIVATE path, stream an instant
+ *  extractive draft from the retrieval snippets already in hand, replaced IN
+ *  PLACE by the local model's grounded answer that follows. Gated to the LOCAL
+ *  provider + the draftAnswers preference (default on) + non-empty contexts.
+ *  The draft is a separate chunk that never enters any prompt — zero tokens
+ *  against the local window. KEEP IN SYNC with synth.rs (whose position
+ *  differs only by the Rust-only analytics branch, which has no TS twin). */
+function* maybeExtractiveDraft(
+  question: string,
+  cfg: ModelCfg,
+  initial: InitialRetrieval,
+): Generator<ChatChunk> {
   if (
     cfg.providerId === "local" &&
     readDesktopSettings().draftAnswers !== false &&
@@ -733,41 +725,22 @@ async function* answerPipelineLive(
       yield { delta: text, draft: true, done: false };
     }
   }
+}
 
-  // PARITY (openspec: add-recipes §1): synth.rs's Rust-only analytics branch
-  //     appends an engine-derived assumption ledger (`ledger::assumption_ledger`)
-  //     to every analytics answer, beside the Query-used/Computed-from footers.
-  //     The twin has no analytics branch (analytics is desktop/Rust-only), so it
-  //     emits no ledger — the same reason it emits none of the analytics
-  //     provenance footers.
-  // PARITY (openspec: add-semantic-layer §3/§4): the analytics branch ALSO emits
-  //     an engine `*Certified:*` footer (`analytics::certified_metrics`, AST-
-  //     equality) and a trust verdict (`analytics::reconcile_metric`, a guarded
-  //     re-run) on `AnalyticsMeta.certified`/`.trust`. Certification and
-  //     reconciliation are Rust-only (DataFusion), so the twin certifies and
-  //     reconciles nothing and emits no `*Certified:*` line — it only mirrors the
-  //     `certified`/`TrustVerdict` WIRE shape (contracts/types.ts), never
-  //     populated here.
-  // PARITY (openspec: add-recipes §2): synth.rs ALSO has a recipe branch BEFORE
-  //     its model gate — a `run-recipe:{id} on {table}` cue runs a deterministic
-  //     bundle of guarded SELECTs (recipes.rs). Recipes are analytics, so they
-  //     are Rust-engine-only: the twin has no recipe branch (a recipe-cued ask
-  //     degrades like any analytics ask, never a fabricated number), surfaces
-  //     recipe VISIBILITY as `applicableRecipes` → [], and answers
-  //     `{available:false}` on op:"recipes".
-
-  // --- §22.4 queue-not-fail (model warm start): every deterministic emission
-  //     is behind us (meta answers returned; the G2 extractive draft already
-  //     streamed), so nothing instant ever waited. From here every branch talks
-  //     to the model — if the PRIVATE model's server is still starting or
-  //     loading (fresh install, cold launch), hold here with "warming up"
-  //     progress chunks rather than racing streamAnswer into the
-  //     "Local model unavailable → passages" fallback. Bounded: a server that
-  //     never comes up proceeds into today's fallback path. KEEP IN SYNC with
-  //     synth.rs (local_warm_wait). ---
-  yield* localWarmWait(cfg);
-
-  // --- Decide: synthesis or single-shot ---
+/** Candidate selection for multi-document synthesis: explicit multi-attach IS
+ *  the cross-document gesture (filtered through the shareable choke point);
+ *  otherwise a cross-doc cue triggers a wide retrieval pass ranked into doc
+ *  seats, topping up small included sets so every file gets a seat. Returns []
+ *  when synthesis shouldn't run. Extracted verbatim from answerPipelineLive. */
+async function selectSynthesisDocs(
+  question: string,
+  retrievalQuery: string,
+  includedFileIds: string[],
+  attachmentFileIds: string[],
+  cfg: ModelCfg,
+  isCloud: boolean,
+  preferredConversationIds: string[],
+): Promise<DocCandidate[]> {
   let docs: DocCandidate[] = [];
   if (hasRealModel(cfg)) {
     if (attachmentFileIds.length >= MIN_MAP_DOCS) {
@@ -803,259 +776,297 @@ async function* answerPipelineLive(
       }
     }
   }
+  return docs;
+}
 
-  if (docs.length >= MIN_MAP_DOCS) {
-    const total = docs.length + 1;
-    const extracts: { ref: RagReference; text: string }[] = [];
+/** The multi-document map-reduce: per-doc scoped retrieval + extract (with
+ *  table profiles riding along for exact numbers), then one reduce over the
+ *  extracts. Returns true when a synthesized answer was emitted; false falls
+ *  through to the single-shot path. Extracted verbatim from
+ *  answerPipelineLive. */
+async function* multiDocSynthesis(
+  question: string,
+  retrievalQuery: string,
+  docs: DocCandidate[],
+  cfg: ModelCfg,
+  history: ChatTurn[],
+  origin: string,
+  isCloud: boolean,
+): AsyncGenerator<ChatChunk, boolean> {
+  const total = docs.length + 1;
+  const extracts: { ref: RagReference; text: string }[] = [];
 
-    for (let i = 0; i < docs.length; i += 1) {
-      const doc = docs[i];
-      // Resolve the display name early so progress labels are meaningful even
-      // for attachment-picked docs (their candidate name starts empty).
-      const preview = await docText(doc.id, PREVIEW_CHARS);
-      const name = doc.name || preview?.name || doc.id;
-      yield progress(`Reading ${name} (${i + 1}/${docs.length})…`, i + 1, total);
-      if (!preview) continue; // unreadable/deleted file — skip its seat
+  for (let i = 0; i < docs.length; i += 1) {
+    const doc = docs[i];
+    // Resolve the display name early so progress labels are meaningful even
+    // for attachment-picked docs (their candidate name starts empty).
+    const preview = await docText(doc.id, PREVIEW_CHARS);
+    const name = doc.name || preview?.name || doc.id;
+    yield progress(`Reading ${name} (${i + 1}/${docs.length})…`, i + 1, total);
+    if (!preview) continue; // unreadable/deleted file — skip its seat
 
-      // This document's best chunks, via the attachment-scoping retrieval path
-      // (one file id = retrieval constrained to exactly this file). doc.id is
-      // already shareable (filtered above), so isCloud only re-affirms it. No
-      // recall preference: scoped to ONE document, there is no cross-candidate
-      // order to prefer.
-      const perDoc = await vaultRetrieve(retrievalQuery, [], PER_DOC_CHUNKS, [], [doc.id], isCloud);
-      const ctxs: Ctx[] =
-        perDoc.contexts.length > 0
-          ? perDoc.contexts.map((c) => ({ name: ctxLabel(c), text: c.text, score: c.score }))
-          : [{ name, text: preview.text, score: 1 }];
+    // This document's best chunks, via the attachment-scoping retrieval path
+    // (one file id = retrieval constrained to exactly this file). doc.id is
+    // already shareable (filtered above), so isCloud only re-affirms it. No
+    // recall preference: scoped to ONE document, there is no cross-candidate
+    // order to prefer.
+    const perDoc = await vaultRetrieve(retrievalQuery, [], PER_DOC_CHUNKS, [], [doc.id], isCloud);
+    const ctxs: Ctx[] =
+      perDoc.contexts.length > 0
+        ? perDoc.contexts.map((c) => ({ name: ctxLabel(c), text: c.text, score: c.score }))
+        : [{ name, text: preview.text, score: 1 }];
 
-      // Exact numbers for tables: profile the full file, not the preview slice.
-      let profile: string | null = null;
-      if (isProfileable(name)) {
-        const full = await docText(doc.id);
-        profile = full ? tableProfile(name, full.text) : null;
-        if (profile) ctxs.push({ name: `${name} — table profile`, text: profile, score: 0 });
-      }
-
-      let extract = "";
-      try {
-        extract = await collect(streamAnswer(mapQuestion(question), ctxs, cfg, []));
-      } catch {
-        continue; // one bad map call must not sink the whole answer
-      }
-      extract = stripMarkers(extract).trim().slice(0, MAP_EXTRACT_CHARS);
-      if (!extract || extract.startsWith("NO_RELEVANT_CONTENT")) continue;
-      // A model failure mid-map is YIELDED as a "_(… model unavailable — …)_"
-      // note (streamAnswer turns provider errors into a note, not a throw), so
-      // the try/catch above never fires. Skip both the local- and live-model
-      // forms — else a failure note becomes a bogus extract with a fabricated
-      // citation in the reduce. KEEP IN SYNC with synth.rs.
-      if (extract.includes("model unavailable —")) continue;
-
-      const snippet = (perDoc.contexts[0]?.text ?? preview.text).slice(0, SNIPPET_CHARS);
-      // Exact stats ride along into the reduce so the final answer can quote them.
-      const block = profile ? `${extract}\n\n${profile}` : extract;
-      extracts.push({
-        ref: { fileId: doc.id, name, snippet, score: doc.score, kind: sourceKindOf(doc.id) },
-        text: block,
-      });
+    // Exact numbers for tables: profile the full file, not the preview slice.
+    let profile: string | null = null;
+    if (isProfileable(name)) {
+      const full = await docText(doc.id);
+      profile = full ? tableProfile(name, full.text) : null;
+      if (profile) ctxs.push({ name: `${name} — table profile`, text: profile, score: 0 });
     }
 
-    if (extracts.length >= MIN_MAP_DOCS) {
-      yield progress(
-        `Synthesizing across ${extracts.length} documents…`,
-        total,
-        total,
-      );
-      const reduceCtxs: Ctx[] = extracts.map((e) => ({
-        name: e.ref.name,
-        text: e.text,
-        score: e.ref.score,
-      }));
-      // Manifest (§5): one retrieved-chunk per synthesized document, attributed
-      // to its source file via the flowing reference — metadata only.
-      const manifest: ManifestEntry[] = extracts.map((e) => ({
-        name: e.ref.name,
-        kind: "retrieved-chunk",
-        chars: e.text.length,
-        fileId: e.ref.fileId,
-        score: e.ref.score,
-      }));
-      for await (const delta of streamAnswer(question, reduceCtxs, cfg, history)) {
-        yield { delta, done: false };
-      }
-      yield finalChunk(extracts.map((e) => e.ref), reduceCtxs.length, origin, manifest);
-      return;
+    let extract = "";
+    try {
+      extract = await collect(streamAnswer(mapQuestion(question), ctxs, cfg, []));
+    } catch {
+      continue; // one bad map call must not sink the whole answer
     }
-    // Fewer than two documents had anything to say — fall through to the
-    // ordinary single-shot answer over the initial retrieval.
+    extract = stripMarkers(extract).trim().slice(0, MAP_EXTRACT_CHARS);
+    if (!extract || extract.startsWith("NO_RELEVANT_CONTENT")) continue;
+    // A model failure mid-map is YIELDED as a "_(… model unavailable — …)_"
+    // note (streamAnswer turns provider errors into a note, not a throw), so
+    // the try/catch above never fires. Skip both the local- and live-model
+    // forms — else a failure note becomes a bogus extract with a fabricated
+    // citation in the reduce. KEEP IN SYNC with synth.rs.
+    if (extract.includes("model unavailable —")) continue;
+
+    const snippet = (perDoc.contexts[0]?.text ?? preview.text).slice(0, SNIPPET_CHARS);
+    // Exact stats ride along into the reduce so the final answer can quote them.
+    const block = profile ? `${extract}\n\n${profile}` : extract;
+    extracts.push({
+      ref: { fileId: doc.id, name, snippet, score: doc.score, kind: sourceKindOf(doc.id) },
+      text: block,
+    });
   }
 
-  // --- Single-document focus (0.11, field report "partial answers"): a
-  //     question that clearly targets ONE document — a single attachment, a
-  //     named file, or one file dominating the initial hits — is answered
-  //     from ALL of it, not a top-k sample. Full inclusion when the doc fits
-  //     the provider budget; otherwise a map sweep over every chunk (the
-  //     multi-doc machinery, applied per segment). Multi-doc asks never reach
-  //     here (returned above or guarded by the cue); tabular files stay on
-  //     the table-profile path (analytics is desktop-only). KEEP IN SYNC with
-  //     synth.rs. ---
-  // §3 cross-file span: when a SECOND file is comparably relevant, skip the
-  // whole-file focus read (which would single-source the dominant file) and fall
-  // through to single-shot — that one model call already sees BOTH files' top
-  // chunks, so the answer integrates them (no extra calls). Mirrors synth.rs.
-  if (
-    hasRealModel(cfg) &&
-    attachmentFileIds.length <= 1 &&
-    !crossDocCue(question) &&
-    !multiFileSpan(initial.references)
-  ) {
-    // Doc-focus reads the WHOLE target file into the prompt, so both of its
-    // bypasser entrypoints are filtered here at their own choke point: a lone
-    // local-only attachment is dropped, and named-file lookup runs over the
-    // shareable set only. dominantDoc is safe already — initial.references are
-    // shareable.
-    const target: [string, string] | null =
-      attachmentFileIds.length === 1
-        ? (shareableSubset(attachmentFileIds, isCloud)[0] !== undefined
-            ? [attachmentFileIds[0], ""]
-            : null)
-        : namedFileTarget(question, shareableSubset(includedFileIds, isCloud)) ??
-          dominantDoc(initial.contexts.map((c) => c.name), initial.references);
-    const doc = target ? await docChunks(target[0]) : null;
-    // §44 §1b: reverse the single-doc exclusion. A profileable target
-    // (.csv/.tsv) is answered from its EXACT profile — a first-class verified
-    // answer with a shown computation (§3) — instead of being dropped to the
-    // single-shot path where its numbers rode only as advisory context a weak
-    // model could paraphrase into fiction. Mirrors synth.rs. (Analytics is
-    // Rust-only, so this doc-focus reversal is the twin's whole §1b surface.)
-    if (target && doc && isProfileable(doc[0]) && doc[1].length > 0) {
-      const [pname] = doc;
-      const full = await docText(target[0]);
-      const ans = full ? profileAnswer(pname, full.text) : null;
-      if (ans) {
-        yield progress(`Reading all of ${pname}…`, 1, 1);
-        yield { delta: ans, done: false };
-        const reference: RagReference = {
-          fileId: target[0],
-          name: pname,
-          snippet: "",
-          score: 1,
-          kind: sourceKindOf(target[0]),
-        };
-        yield finalChunk([reference], 1, origin, []);
-        return;
-      }
-      // A profileable file that didn't yield a profile (too few rows, not
-      // really tabular) falls through to the single-shot path, where any
-      // numeric narration is still protected by the §2 guard.
+  if (extracts.length >= MIN_MAP_DOCS) {
+    yield progress(
+      `Synthesizing across ${extracts.length} documents…`,
+      total,
+      total,
+    );
+    const reduceCtxs: Ctx[] = extracts.map((e) => ({
+      name: e.ref.name,
+      text: e.text,
+      score: e.ref.score,
+    }));
+    // Manifest (§5): one retrieved-chunk per synthesized document, attributed
+    // to its source file via the flowing reference — metadata only.
+    const manifest: ManifestEntry[] = extracts.map((e) => ({
+      name: e.ref.name,
+      kind: "retrieved-chunk",
+      chars: e.text.length,
+      fileId: e.ref.fileId,
+      score: e.ref.score,
+    }));
+    for await (const delta of streamAnswer(question, reduceCtxs, cfg, history)) {
+      yield { delta, done: false };
     }
-    if (target && doc && !isProfileable(doc[0]) && doc[1].length > 0) {
-      const [name, chunks] = doc;
+    yield finalChunk(extracts.map((e) => e.ref), reduceCtxs.length, origin, manifest);
+    return true;
+  }
+  // Fewer than two documents had anything to say — fall through to the
+  // ordinary single-shot answer over the initial retrieval.
+  return false;
+}
+
+/** The too-big-for-one-prompt half of doc focus: sweep EVERY chunk in ordered
+ *  segments, extract per segment, then synthesize. Returns true when a
+ *  synthesized answer was emitted; false when every segment came back
+ *  empty/failed (caller falls through to single-shot). Extracted verbatim from
+ *  answerPipelineLive. */
+async function* segmentSweep(
+  question: string,
+  name: string,
+  chunks: string[],
+  reference: RagReference,
+  cfg: ModelCfg,
+  history: ChatTurn[],
+  origin: string,
+): AsyncGenerator<ChatChunk, boolean> {
+  const parts = partitionSegments(chunks, docSegmentCharBudget(cfg));
+  const [segs, totalSegs] = sampleSegments(parts, maxDocSegments(cfg));
+  const read = segs.length;
+  if (read < totalSegs) {
+    yield {
+      delta: `_(Long document: read ${read} of ${totalSegs} sections of “${name}”, evenly spread.)_\n\n`,
+      done: false,
+    };
+  }
+  const steps = read + 1;
+  const extracts: [number, string][] = [];
+  for (let i = 0; i < segs.length; i += 1) {
+    yield progress(`Reading ${name} (part ${i + 1}/${read})…`, i + 1, steps);
+    const ctxs: Ctx[] = [{ name: `${name} — part ${i + 1}/${read}`, text: segs[i], score: 1 }];
+    let extract = "";
+    try {
+      extract = await collect(streamAnswer(mapQuestion(question), ctxs, cfg, []));
+    } catch {
+      continue; // one bad map call must not sink the whole answer
+    }
+    extract = stripMarkers(extract).trim().slice(0, MAP_EXTRACT_CHARS);
+    // Same failure-note filter as the multi-doc map step above.
+    if (
+      !extract ||
+      extract.startsWith("NO_RELEVANT_CONTENT") ||
+      extract.includes("model unavailable —")
+    ) {
+      continue;
+    }
+    extracts.push([i + 1, extract]);
+  }
+  if (extracts.length > 0) {
+    yield progress(`Synthesizing ${name}…`, steps, steps);
+    const reduceCtxs: Ctx[] = extracts.map(([i, t]) => ({
+      name: `${name} — part ${i}/${read}`,
+      text: t,
+      score: 1,
+    }));
+    // Manifest (§5): each synthesized segment is a retrieved chunk attributed
+    // to this one file — metadata only.
+    const manifest: ManifestEntry[] = reduceCtxs.map((c) => ({
+      name: c.name,
+      kind: "retrieved-chunk",
+      chars: c.text.length,
+      fileId: reference.fileId,
+      score: c.score,
+    }));
+    for await (const delta of streamAnswer(reduceQuestion(question), reduceCtxs, cfg, history)) {
+      yield { delta, done: false };
+    }
+    yield finalChunk([reference], reduceCtxs.length, origin, manifest);
+    return true;
+  }
+  // Every segment came back empty/failed — fall through to the ordinary
+  // single-shot path below.
+  return false;
+}
+
+/** Single-document focus (0.11, field report "partial answers"): a question
+ *  that clearly targets ONE document — a single attachment, a named file, or
+ *  one file dominating the initial hits — is answered from ALL of it, not a
+ *  top-k sample. Full inclusion when the doc fits the provider budget;
+ *  otherwise a map sweep over every chunk (the multi-doc machinery, applied
+ *  per segment). Returns true when an answer was emitted; false falls through
+ *  to the single-shot path. Extracted verbatim from answerPipelineLive. KEEP
+ *  IN SYNC with synth.rs. */
+async function* singleDocFocus(
+  question: string,
+  includedFileIds: string[],
+  attachmentFileIds: string[],
+  initial: InitialRetrieval,
+  cfg: ModelCfg,
+  history: ChatTurn[],
+  origin: string,
+  isCloud: boolean,
+): AsyncGenerator<ChatChunk, boolean> {
+  // Doc-focus reads the WHOLE target file into the prompt, so both of its
+  // bypasser entrypoints are filtered here at their own choke point: a lone
+  // local-only attachment is dropped, and named-file lookup runs over the
+  // shareable set only. dominantDoc is safe already — initial.references are
+  // shareable.
+  const target: [string, string] | null =
+    attachmentFileIds.length === 1
+      ? (shareableSubset(attachmentFileIds, isCloud)[0] !== undefined
+          ? [attachmentFileIds[0], ""]
+          : null)
+      : namedFileTarget(question, shareableSubset(includedFileIds, isCloud)) ??
+        dominantDoc(initial.contexts.map((c) => c.name), initial.references);
+  const doc = target ? await docChunks(target[0]) : null;
+  // §44 §1b: reverse the single-doc exclusion. A profileable target
+  // (.csv/.tsv) is answered from its EXACT profile — a first-class verified
+  // answer with a shown computation (§3) — instead of being dropped to the
+  // single-shot path where its numbers rode only as advisory context a weak
+  // model could paraphrase into fiction. Mirrors synth.rs. (Analytics is
+  // Rust-only, so this doc-focus reversal is the twin's whole §1b surface.)
+  if (target && doc && isProfileable(doc[0]) && doc[1].length > 0) {
+    const [pname] = doc;
+    const full = await docText(target[0]);
+    const ans = full ? profileAnswer(pname, full.text) : null;
+    if (ans) {
+      yield progress(`Reading all of ${pname}…`, 1, 1);
+      yield { delta: ans, done: false };
       const reference: RagReference = {
         fileId: target[0],
-        name,
-        snippet: chunks[0].slice(0, SNIPPET_CHARS),
+        name: pname,
+        snippet: "",
         score: 1,
         kind: sourceKindOf(target[0]),
       };
-      const totalChars =
-        chunks.reduce((sum, c) => sum + c.length, 0) + 2 * Math.max(0, chunks.length - 1);
-      if (totalChars <= fullDocCharBudget(cfg)) {
-        // The whole document rides in one prompt.
-        yield progress(`Reading all of ${name}…`, 1, 2);
-        const n = chunks.length;
-        const ctxs: Ctx[] = chunks.map((t, i) => ({
-          name: n === 1 ? name : `${name} — part ${i + 1}/${n}`,
-          text: t,
-          // Descending scores make the Rust local clamp's lowest-score-first
-          // drop a deterministic tail truncation (never mid-document holes);
-          // the TS local path never clamps, so they only carry the order.
-          score: 1 - i * 1e-4,
-        }));
-        // Manifest (§5): each whole-document part is a retrieved chunk attributed
-        // to this one file — metadata only.
-        const manifest: ManifestEntry[] = ctxs.map((c) => ({
-          name: c.name,
-          kind: "retrieved-chunk",
-          chars: c.text.length,
-          fileId: reference.fileId,
-          score: c.score,
-        }));
-        for await (const delta of streamAnswer(question, ctxs, cfg, history)) {
-          yield { delta, done: false };
-        }
-        yield finalChunk([reference], ctxs.length, origin, manifest);
-        return;
-      }
-      // Too big for one prompt: sweep EVERY chunk in ordered segments,
-      // extract per segment, then synthesize.
-      const parts = partitionSegments(chunks, docSegmentCharBudget(cfg));
-      const [segs, totalSegs] = sampleSegments(parts, maxDocSegments(cfg));
-      const read = segs.length;
-      if (read < totalSegs) {
-        yield {
-          delta: `_(Long document: read ${read} of ${totalSegs} sections of “${name}”, evenly spread.)_\n\n`,
-          done: false,
-        };
-      }
-      const steps = read + 1;
-      const extracts: [number, string][] = [];
-      for (let i = 0; i < segs.length; i += 1) {
-        yield progress(`Reading ${name} (part ${i + 1}/${read})…`, i + 1, steps);
-        const ctxs: Ctx[] = [{ name: `${name} — part ${i + 1}/${read}`, text: segs[i], score: 1 }];
-        let extract = "";
-        try {
-          extract = await collect(streamAnswer(mapQuestion(question), ctxs, cfg, []));
-        } catch {
-          continue; // one bad map call must not sink the whole answer
-        }
-        extract = stripMarkers(extract).trim().slice(0, MAP_EXTRACT_CHARS);
-        // Same failure-note filter as the multi-doc map step above.
-        if (
-          !extract ||
-          extract.startsWith("NO_RELEVANT_CONTENT") ||
-          extract.includes("model unavailable —")
-        ) {
-          continue;
-        }
-        extracts.push([i + 1, extract]);
-      }
-      if (extracts.length > 0) {
-        yield progress(`Synthesizing ${name}…`, steps, steps);
-        const reduceCtxs: Ctx[] = extracts.map(([i, t]) => ({
-          name: `${name} — part ${i}/${read}`,
-          text: t,
-          score: 1,
-        }));
-        // Manifest (§5): each synthesized segment is a retrieved chunk attributed
-        // to this one file — metadata only.
-        const manifest: ManifestEntry[] = reduceCtxs.map((c) => ({
-          name: c.name,
-          kind: "retrieved-chunk",
-          chars: c.text.length,
-          fileId: reference.fileId,
-          score: c.score,
-        }));
-        for await (const delta of streamAnswer(reduceQuestion(question), reduceCtxs, cfg, history)) {
-          yield { delta, done: false };
-        }
-        yield finalChunk([reference], reduceCtxs.length, origin, manifest);
-        return;
-      }
-      // Every segment came back empty/failed — fall through to the ordinary
-      // single-shot path below.
+      yield finalChunk([reference], 1, origin, []);
+      return true;
     }
+    // A profileable file that didn't yield a profile (too few rows, not
+    // really tabular) falls through to the single-shot path, where any
+    // numeric narration is still protected by the §2 guard.
   }
+  if (target && doc && !isProfileable(doc[0]) && doc[1].length > 0) {
+    const [name, chunks] = doc;
+    const reference: RagReference = {
+      fileId: target[0],
+      name,
+      snippet: chunks[0].slice(0, SNIPPET_CHARS),
+      score: 1,
+      kind: sourceKindOf(target[0]),
+    };
+    const totalChars =
+      chunks.reduce((sum, c) => sum + c.length, 0) + 2 * Math.max(0, chunks.length - 1);
+    if (totalChars <= fullDocCharBudget(cfg)) {
+      // The whole document rides in one prompt.
+      yield progress(`Reading all of ${name}…`, 1, 2);
+      const n = chunks.length;
+      const ctxs: Ctx[] = chunks.map((t, i) => ({
+        name: n === 1 ? name : `${name} — part ${i + 1}/${n}`,
+        text: t,
+        // Descending scores make the Rust local clamp's lowest-score-first
+        // drop a deterministic tail truncation (never mid-document holes);
+        // the TS local path never clamps, so they only carry the order.
+        score: 1 - i * 1e-4,
+      }));
+      // Manifest (§5): each whole-document part is a retrieved chunk attributed
+      // to this one file — metadata only.
+      const manifest: ManifestEntry[] = ctxs.map((c) => ({
+        name: c.name,
+        kind: "retrieved-chunk",
+        chars: c.text.length,
+        fileId: reference.fileId,
+        score: c.score,
+      }));
+      for await (const delta of streamAnswer(question, ctxs, cfg, history)) {
+        yield { delta, done: false };
+      }
+      yield finalChunk([reference], ctxs.length, origin, manifest);
+      return true;
+    }
+    // Too big for one prompt: sweep EVERY chunk in ordered segments,
+    // extract per segment, then synthesize.
+    return yield* segmentSweep(question, name, chunks, reference, cfg, history, origin);
+  }
+  return false;
+}
 
-  // --- Single-shot path (today's behavior) + exact table stats for CSV hits ---
-  // PARITY (§44 §2): the numeric trust guard's ENFORCEMENT is Rust-only, like
-  // the whole analytics branch it protects — synth.rs arms it only when an
-  // `analytics_cue` ask over registered tabular data produced no verified
-  // answer, a seam the twin (no analytics branch) never reaches. The shared
-  // digit-gate lives in numguard.ts (byte-identical to numguard.rs, pinned by
-  // test/numguard.test.mjs); wiring a broader arm here would DIVERGE from
-  // synth.rs, which does not gate a non-analytics RAG answer. The twin's whole
-  // §44 surface is the profileAnswer promotion above.
+/** The single-shot tail (today's behavior): initial retrieval as contexts
+ *  (apple-fm tiers digest them to quotes), table profiles + the visual-first
+ *  profile chart for CSV hits, reliability handholding, one streamed model
+ *  call, and the final provenance chunk. Extracted verbatim from
+ *  answerPipelineLive. */
+async function* singleShotAnswer(
+  question: string,
+  includedFileIds: string[],
+  initial: InitialRetrieval,
+  cfg: ModelCfg,
+  history: ChatTurn[],
+  origin: string,
+): AsyncGenerator<ChatChunk> {
   let contexts: Ctx[] = initial.contexts.map((c) => ({
     name: ctxLabel(c),
     text: c.text,
@@ -1109,4 +1120,154 @@ async function* answerPipelineLive(
   // chunk's meta, never the streamed text a model could mangle. KEEP IN SYNC
   // with synth.rs.
   yield finalChunk(initial.references, contexts.length, origin, manifest, profileChartSpec ?? undefined);
+}
+
+/** The live ask path (pre-cache behavior, byte-identical): single-shot RAG or
+ *  multi-document synthesis, streamed as ChatChunks. */
+async function* answerPipelineLive(
+  question: string,
+  includedFileIds: string[],
+  attachmentFileIds: string[],
+  history: ChatTurn[],
+  cfg: ModelCfg,
+  preferredConversationIds: string[] = [],
+): AsyncGenerator<ChatChunk> {
+  // Provenance origin for this answer's stamp — resolved once from the active
+  // provider (agrees with the audit record's `provider`). Every branch's final
+  // chunk carries it; it is never derived from model text.
+  const origin = originOf(cfg);
+  // Local-only enforcement is armed only for a CLOUD provider. On the device
+  // path this is false everywhere below, so the shareable gate is a no-op and
+  // on-device answers are byte-identical to today.
+  const isCloud = isCloudProvider(cfg);
+
+  // A bare follow-up retrieves poorly on its own: blend in the previous user
+  // turn to anchor retrieval to the topic (moved here from the callers so all
+  // three surfaces stay identical).
+  const lastUserTurn = [...history].reverse().find((t) => t.role === "user");
+  const retrievalQuery = lastUserTurn ? `${lastUserTurn.content}\n${question}` : question;
+
+  const initial = await registryRetrieve(
+    retrievalQuery,
+    includedFileIds,
+    attachmentFileIds,
+    5,
+    isCloud,
+    preferredConversationIds,
+  );
+
+  // The deterministic opening emissions (sources ack + the two honesty
+  // notes) — see openingNotes. KEEP IN SYNC with synth.rs.
+  yield* openingNotes(question, attachmentFileIds, isCloud, initial);
+
+  // Vault meta-answers (openspec: add-vault-meta-answers) — see tryMetaAnswer.
+  // KEEP IN SYNC with synth.rs.
+  if (yield* tryMetaAnswer(question, includedFileIds, attachmentFileIds, isCloud, origin)) {
+    return;
+  }
+
+  // Answer-level draft-then-verify (G2) — see maybeExtractiveDraft. Meta
+  // answered/returned above, so this only ever precedes a real local-model
+  // grounded answer. KEEP IN SYNC with synth.rs.
+  yield* maybeExtractiveDraft(question, cfg, initial);
+
+  // PARITY (openspec: add-recipes §1): synth.rs's Rust-only analytics branch
+  //     appends an engine-derived assumption ledger (`ledger::assumption_ledger`)
+  //     to every analytics answer, beside the Query-used/Computed-from footers.
+  //     The twin has no analytics branch (analytics is desktop/Rust-only), so it
+  //     emits no ledger — the same reason it emits none of the analytics
+  //     provenance footers.
+  // PARITY (openspec: add-semantic-layer §3/§4): the analytics branch ALSO emits
+  //     an engine `*Certified:*` footer (`analytics::certified_metrics`, AST-
+  //     equality) and a trust verdict (`analytics::reconcile_metric`, a guarded
+  //     re-run) on `AnalyticsMeta.certified`/`.trust`. Certification and
+  //     reconciliation are Rust-only (DataFusion), so the twin certifies and
+  //     reconciles nothing and emits no `*Certified:*` line — it only mirrors the
+  //     `certified`/`TrustVerdict` WIRE shape (contracts/types.ts), never
+  //     populated here.
+  // PARITY (openspec: add-recipes §2): synth.rs ALSO has a recipe branch BEFORE
+  //     its model gate — a `run-recipe:{id} on {table}` cue runs a deterministic
+  //     bundle of guarded SELECTs (recipes.rs). Recipes are analytics, so they
+  //     are Rust-engine-only: the twin has no recipe branch (a recipe-cued ask
+  //     degrades like any analytics ask, never a fabricated number), surfaces
+  //     recipe VISIBILITY as `applicableRecipes` → [], and answers
+  //     `{available:false}` on op:"recipes".
+
+  // --- §22.4 queue-not-fail (model warm start): every deterministic emission
+  //     is behind us (meta answers returned; the G2 extractive draft already
+  //     streamed), so nothing instant ever waited. From here every branch talks
+  //     to the model — if the PRIVATE model's server is still starting or
+  //     loading (fresh install, cold launch), hold here with "warming up"
+  //     progress chunks rather than racing streamAnswer into the
+  //     "Local model unavailable → passages" fallback. Bounded: a server that
+  //     never comes up proceeds into today's fallback path. KEEP IN SYNC with
+  //     synth.rs (local_warm_wait). ---
+  yield* localWarmWait(cfg);
+
+  // --- Decide: synthesis or single-shot --- (see selectSynthesisDocs)
+  const docs = await selectSynthesisDocs(
+    question,
+    retrievalQuery,
+    includedFileIds,
+    attachmentFileIds,
+    cfg,
+    isCloud,
+    preferredConversationIds,
+  );
+
+  if (docs.length >= MIN_MAP_DOCS) {
+    if (yield* multiDocSynthesis(question, retrievalQuery, docs, cfg, history, origin, isCloud)) {
+      return;
+    }
+    // Fewer than two documents had anything to say — fall through to the
+    // ordinary single-shot answer over the initial retrieval.
+  }
+
+  // --- Single-document focus (0.11, field report "partial answers"): a
+  //     question that clearly targets ONE document — a single attachment, a
+  //     named file, or one file dominating the initial hits — is answered
+  //     from ALL of it, not a top-k sample. Full inclusion when the doc fits
+  //     the provider budget; otherwise a map sweep over every chunk (the
+  //     multi-doc machinery, applied per segment). Multi-doc asks never reach
+  //     here (returned above or guarded by the cue); tabular files stay on
+  //     the table-profile path (analytics is desktop-only). KEEP IN SYNC with
+  //     synth.rs. ---
+  // §3 cross-file span: when a SECOND file is comparably relevant, skip the
+  // whole-file focus read (which would single-source the dominant file) and fall
+  // through to single-shot — that one model call already sees BOTH files' top
+  // chunks, so the answer integrates them (no extra calls). Mirrors synth.rs.
+  if (
+    hasRealModel(cfg) &&
+    attachmentFileIds.length <= 1 &&
+    !crossDocCue(question) &&
+    !multiFileSpan(initial.references)
+  ) {
+    if (
+      yield* singleDocFocus(
+        question,
+        includedFileIds,
+        attachmentFileIds,
+        initial,
+        cfg,
+        history,
+        origin,
+        isCloud,
+      )
+    ) {
+      return;
+    }
+    // Every segment came back empty/failed (or no target) — fall through to
+    // the ordinary single-shot path below.
+  }
+
+  // --- Single-shot path (today's behavior) + exact table stats for CSV hits ---
+  // PARITY (§44 §2): the numeric trust guard's ENFORCEMENT is Rust-only, like
+  // the whole analytics branch it protects — synth.rs arms it only when an
+  // `analytics_cue` ask over registered tabular data produced no verified
+  // answer, a seam the twin (no analytics branch) never reaches. The shared
+  // digit-gate lives in numguard.ts (byte-identical to numguard.rs, pinned by
+  // test/numguard.test.mjs); wiring a broader arm here would DIVERGE from
+  // synth.rs, which does not gate a non-analytics RAG answer. The twin's whole
+  // §44 surface is the profileAnswer promotion above.
+  yield* singleShotAnswer(question, includedFileIds, initial, cfg, history, origin);
 }
