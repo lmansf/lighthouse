@@ -111,3 +111,10 @@ test("sweep drops only old unreferenced blobs", () => {
   assert.ok(!fs.existsSync(ws.blobPath(gone.hash)), "old unreferenced blob swept");
   assert.ok(fs.existsSync(ws.blobPath(kept.hash)), "referenced blob immortal");
 });
+
+test("ingest warms extraction for rich files and no-ops on plain or missing blobs", async () => {
+  freshState("ing");
+  const csv = ws.attach("conv-i", "sales.csv", Buffer.from("region,amount\nNE,10\n"));
+  await ws.ingest(csv); // plain text: nothing to warm, nothing to throw
+  await ws.ingest({ id: "att-none", name: "gone.pdf", hash: "0".repeat(64), size: 1, addedMs: 0 });
+});

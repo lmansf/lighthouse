@@ -14,6 +14,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { appStateDir, readJson, writeJson } from "./config";
+import { extractRichText, isRichFile } from "./extract";
 
 /**
  * The corpus cap — the product IS "a small group of files, done
@@ -156,6 +157,26 @@ export function resolve(conversationId: string, id: string): { name: string; pat
   const p = blobPath(f.hash);
   if (!fs.existsSync(p)) return null;
   return { name: f.name, path: p };
+}
+
+/**
+ * Eager ingestion (openspec: refocus-chat-attachments, "attach is the moment
+ * of work"): warm the extraction cache for rich formats so the first ask
+ * never pays it. PARITY: the Rust twin also warms its retrieval index and
+ * column catalog — both Rust-only subsystems (the analytics precedent); this
+ * twin's retrieval reads text live at ask time.
+ */
+export async function ingest(att: Attachment): Promise<void> {
+  const abs = blobPath(att.hash);
+  if (!fs.existsSync(abs)) return;
+  if (isRichFile(att.name)) {
+    const ext = path.extname(att.name).slice(1).toLowerCase();
+    try {
+      await extractRichText(abs, ext);
+    } catch {
+      /* best-effort: the ask degrades honestly over unreadable files */
+    }
+  }
 }
 
 /**

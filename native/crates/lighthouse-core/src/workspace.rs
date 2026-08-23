@@ -184,6 +184,47 @@ pub fn resolve(conversation_id: &str, id: &str) -> Option<(String, PathBuf)> {
     Some((f.name.clone(), path))
 }
 
+/// Eager ingestion (openspec: refocus-chat-attachments, "attach is the
+/// moment of work"): warm every cache an ask could need for this
+/// attachment — the retrieval index entry, the column catalog for tabular
+/// files, and rich-format extraction. Everything downstream keys on the
+/// write-once blob path, so this work happens once per unique content and
+/// re-attaching known bytes finds every cache warm. Best-effort by design:
+/// a failed piece leaves the attachment name-findable and the ask degrades
+/// honestly (the existing rule, surfaced at attach time instead of ask
+/// time).
+pub fn ingest(att: &Attachment) {
+    let abs = blob_path(&att.hash);
+    if !abs.exists() {
+        return;
+    }
+    let _ = crate::index::entries_for(&[crate::index::IndexItem {
+        id: att.id.clone(),
+        name: att.name.clone(),
+        path_for: att.name.clone(),
+        abs: Some(abs.clone()),
+    }]);
+    // columns_for self-filters: unreadable or non-tabular files are omitted.
+    let _ = crate::catalog::columns_for(&[(att.id.clone(), att.name.clone(), abs.clone())]);
+    let ext = std::path::Path::new(&att.name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if crate::extract::is_rich_file(&att.name) {
+        let _ = crate::extract::extract_rich_text(&abs, &ext);
+    }
+}
+
+/// [`ingest`] on a background thread — the transports' shape: attach
+/// returns after the manifest write, ingestion warms behind it, and an ask
+/// arriving mid-ingest just recomputes whatever isn't warm yet (the
+/// on-demand paths never depend on readiness for correctness).
+pub fn ingest_detached(att: &Attachment) {
+    let att = att.clone();
+    std::thread::spawn(move || ingest(&att));
+}
+
 /// Drop blobs no manifest references any more, once they are older than the
 /// grace window. Mark-and-sweep over the workspace dir; errors are ignored —
 /// a failed sweep just retries next startup.
@@ -322,6 +363,34 @@ mod tests {
             attach("etc/passwd", "b.txt", b"xyz").unwrap();
             assert_eq!(list("../../etc/passwd").len(), 1);
             assert_eq!(list("etc/passwd").len(), 1);
+        });
+    }
+
+    #[test]
+    fn ingest_warms_the_index_and_catalog_for_the_blob() {
+        with_temp_state(|| {
+            // Until the state_dir re-root (task 1.3) the index/catalog caches
+            // live under VAULT_DIR — point it at the same temp root.
+            let state = std::env::var("LIGHTHOUSE_APP_STATE_DIR").unwrap();
+            std::env::set_var("VAULT_DIR", &state);
+            let att = attach("conv-i", "sales.csv", b"region,amount\nNE,10\nNW,20\n").unwrap();
+            ingest(&att);
+            let peek = crate::index::peek_entry(&att.id, Some(&blob_path(&att.hash)));
+            assert!(peek.is_some(), "index entry warmed at attach time");
+            let cols =
+                crate::catalog::columns_for(&[(att.id.clone(), att.name.clone(), blob_path(&att.hash))]);
+            assert_eq!(cols.len(), 1, "catalog knows the attachment");
+            assert!(cols[0].columns.iter().any(|c| c.name == "region"));
+            // A vanished blob makes ingest a no-op, never a panic.
+            let ghost = Attachment {
+                id: "att-none".into(),
+                name: "gone.csv".into(),
+                hash: "0".repeat(64),
+                size: 1,
+                added_ms: 0,
+            };
+            ingest(&ghost);
+            std::env::remove_var("VAULT_DIR");
         });
     }
 

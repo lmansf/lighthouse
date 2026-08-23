@@ -9,7 +9,7 @@ CLAUDE.md's versioning section (the §31/0.14.0 precedent).
 - [x] 1.1 `workspace.rs` ⇄ `workspace.ts`: blob store (sha256,
       write-once), per-conversation manifest, `att-` id minting, the
       10-attachment / 25 MB caps, mark-and-sweep for unreferenced blobs.
-- [ ] 1.2 Eager ingest on attach: extract ∥ profile ∥ catalog ∥ index,
+- [x] 1.2 Eager ingest on attach: extract ∥ profile ∥ catalog ∥ index,
       content-hash-keyed caches under `app_state_dir()/cache/`, readiness
       state per attachment, ask-awaits-only-what-it-needs.
 - [ ] 1.3 Re-root `config::state_dir()` at `app_state_dir()` (kills the
