@@ -653,7 +653,7 @@ export function AppShell({ sidebar, main }: AppShellProps) {
 
   // Global keyboard shortcuts (documented in the Quick start guide):
   // Ctrl/Cmd+N — new chat · Ctrl/Cmd+B — toggle the file sidebar ·
-  // Ctrl/Cmd+P — quick-open a file · Ctrl/Cmd+, — open Preferences. Features
+  // Ctrl/Cmd+, — open Preferences. Features
   // receive them as CustomEvents so the shell stays decoupled from feature
   // internals. AppShell mounts only in the MAIN window, so none of these fire
   // in the widget or standalone-explorer windows.
@@ -670,10 +670,6 @@ export function AppShell({ sidebar, main }: AppShellProps) {
         // §5/fp4 §3: in the compact arrangement B toggles the Files tab/page.
         if (compactRef.current) setCompactTab((t) => (t === "files" ? "chat" : "files"));
         else setCollapsed((c) => !c);
-      } else if (e.key === "p" || e.key === "P") {
-        // preventDefault deliberately shadows the browser's Print in the web
-        // twin — inside the app, Ctrl/Cmd+P is the file finder.
-        fire("lighthouse:quick-open");
       } else if (e.key === ",") fire("lighthouse:open-preferences");
     };
     window.addEventListener("keydown", onKey);

@@ -106,6 +106,10 @@ test("§3/§49 §4: no footer under the Files tab; desktop footer is Reports + S
   assert.match(sidebar, /\{collapsed \? <UpdateNotice collapsed \/> : <UpdateNotice \/>\}/);
 });
 
-test("the quick-open launcher gate survived the prop rename (fp3 §5 behavior intact)", () => {
-  assert.match(sidebar, /\{!compactPage && \(\s*\n\s*<Tooltip content="Quick open a file"/, "compact page keeps the tile grid's pull-down as its one finder");
+test("no quick-open launcher survives (0.15.0 removed the vault finder)", () => {
+  // Quick-open fuzzy-found a file in the vault TREE; with attachments there is
+  // no tree to find in, so the palette, its Ctrl/Cmd+P shortcut and this
+  // touch launcher all went. The tile grid's pull-down search remains the one
+  // finder on the compact page.
+  assert.doesNotMatch(sidebar, /Quick open a file|lighthouse:quick-open/, "no launcher button");
 });

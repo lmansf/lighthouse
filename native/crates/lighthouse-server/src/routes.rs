@@ -674,10 +674,6 @@ pub async fn chat_post(headers: HeaderMap, body: Option<Json<Value>>) -> Respons
         })
         .unwrap_or_default();
 
-    // Investigation scope + provider policy resolve HERE — the same
-    // chokepoint where the profile's model config is consulted (and beneath
-    // which the managed policy's llm-time belt sits), so a local-only
-    // investigation swaps cfg before any transport exists and scope arrives
     // Investigations retired with the 0.15.0 refocus: an ask's files are its
     // attachments, with no scope, provider policy or recall preference to
     // resolve.

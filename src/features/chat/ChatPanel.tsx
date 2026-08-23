@@ -79,9 +79,6 @@ import { citationQuery, requestFileInspect } from "@/lib/citePreview";
 import { composeEvidencePack, provenanceStampText } from "@/lib/evidencePack";
 import { recallRelated, type RecallHit } from "@/lib/recall";
 import { askSuggestions, ghostCompletion, lastAsk, type AskHistoryItem } from "@/lib/askTypeahead";
-import { quickOpenMatches } from "@/lib/quickOpen";
-import { activeMention, replaceMention, type MentionSpan } from "@/lib/mentionQuery";
-import { emphasize } from "@/features/quickopen/QuickOpen";
 import { AnalyticsChart, standaloneChartSvg } from "@/features/chat/AnalyticsChart";
 import { StatTile } from "@/features/chat/StatTile";
 import { SqlBlock } from "@/features/chat/SqlBlock";
@@ -1143,17 +1140,6 @@ const useStyles = makeStyles({
     whiteSpace: "nowrap",
     flexGrow: 1,
     minWidth: 0,
-  },
-  // @-mention picker (openspec §2) — reuses the askSuggest popover layout; these
-  // add the quick-open-style hit emphasis and the dimmed relative path.
-  mentionHit: { color: tokens.colorBrandForeground1, fontWeight: tokens.fontWeightSemibold },
-  mentionDir: {
-    color: tokens.colorNeutralForeground3,
-    flexShrink: 0,
-    maxWidth: "45%",
-    overflow: "hidden",
-    textOverflow: "ellipsis",
-    whiteSpace: "nowrap",
   },
 });
 
@@ -2609,12 +2595,6 @@ export function ChatPanel() {
   // -1 = none — so a plain Enter still sends (see handleComposerKeyDown).
   const [suggestOpen, setSuggestOpen] = useState(false);
   const [suggestIndex, setSuggestIndex] = useState(-1);
-  // @-mention file picker (openspec §2): the active `@…` span under the caret
-  // (null = none), the highlighted row, and a dismiss key (the span the user
-  // pressed Esc on, so it stays closed until the token changes).
-  const [mention, setMention] = useState<MentionSpan | null>(null);
-  const [mentionSel, setMentionSel] = useState(0);
-  const [mentionDismissed, setMentionDismissed] = useState<string | null>(null);
   // Per-answer 👍/👎, remembered for the session so the choice reads as "set".
   const [ratings, setRatings] = useState<Record<string, "up" | "down">>({});
   // --- Edit SQL dialog (analytics refinement): the answer meta being edited
@@ -3848,26 +3828,7 @@ export function ChatPanel() {
     () => askSuggestions(question, { history: askHistoryItems, pins: [] }),
     [question, askHistoryItems],
   );
-  // @-mention matches (openspec §2): rank the vault with the SAME matcher
-  // quick-open uses, then keep only attachable FILES not already attached. Path
-  // ranking needs the whole tree, so match over all nodes and filter the results
-  // (never the input). Linked/external files match too — the kind==="file" rule,
-  // not the `external` flag.
-  const attachedIds = useMemo(() => new Set(attachments.map((a) => a.id)), [attachments]);
-  const mentionMatches = useMemo(() => {
-    if (!mention) return [];
-    return quickOpenMatches(mention.query, nodes, { limit: 24 })
-      .filter((c) => c.kind === "file" && !attachedIds.has(c.id))
-      .slice(0, 8);
-  }, [mention, nodes, attachedIds]);
-  const mentionKey = mention ? `${mention.start}\x00${mention.query}` : null;
-  const mentionShown =
-    mention !== null && mentionMatches.length > 0 && mentionKey !== mentionDismissed;
-  const mentionSelClamped =
-    mentionMatches.length > 0 ? Math.min(Math.max(mentionSel, 0), mentionMatches.length - 1) : 0;
-  // The mention picker owns the popover slot while it's up — suppress the ask
-  // type-ahead so only one listbox ever shows.
-  const suggestsShown = suggestOpen && askSuggests.length > 0 && !mentionShown;
+  const suggestsShown = suggestOpen && askSuggests.length > 0;
   // Clamp the highlight when the list shrinks under it (a turn settling can
   // re-rank mid-hover): out of range reads as "nothing highlighted".
   const suggestSel = suggestIndex < askSuggests.length ? suggestIndex : -1;
@@ -3923,13 +3884,12 @@ export function ChatPanel() {
       }),
     [ghostDraft, askHistoryItems, ghostExtras],
   );
-  // Visible only when nothing else owns the slot: the @-mention picker and the
-  // type-ahead popover win (their key claims would fight the arrow), IME
-  // composition hides it, and the ranker itself gates GHOST_MIN_CHARS.
+  // Visible only when nothing else owns the slot: the type-ahead popover wins
+  // (its key claims would fight the arrow), IME composition hides it, and the
+  // ranker itself gates GHOST_MIN_CHARS.
   const ghostText =
     ghostSuggested !== null &&
     ghostDraft === question &&
-    !mentionShown &&
     !suggestsShown &&
     !composing &&
     ghostDismissed !== question
@@ -3937,34 +3897,6 @@ export function ChatPanel() {
       : null;
 
   function handleComposerKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
-    // @-mention picker owns the keys while it's up — a mention resolves to an
-    // attachment before the ask type-ahead or send ever see the key. Enter/Tab
-    // accept the highlighted file; Esc dismisses (the draft `@…` is untouched).
-    if (mentionShown) {
-      if (e.key === "ArrowDown") {
-        e.preventDefault();
-        setMentionSel((mentionSelClamped + 1) % mentionMatches.length);
-        return;
-      }
-      if (e.key === "ArrowUp") {
-        e.preventDefault();
-        setMentionSel(mentionSelClamped <= 0 ? mentionMatches.length - 1 : mentionSelClamped - 1);
-        return;
-      }
-      if (e.key === "Escape") {
-        e.preventDefault();
-        setMentionDismissed(mentionKey); // stays closed until the token changes
-        return;
-      }
-      if (
-        (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) ||
-        (e.key === "Tab" && !e.shiftKey)
-      ) {
-        e.preventDefault();
-        acceptMention(mentionMatches[mentionSelClamped]);
-        return;
-      }
-    }
     // Type-ahead first: while the popover is open it owns Down/Up/Esc — and
     // Enter/Tab only when a row is highlighted (suggestSel >= 0), so a plain
     // Enter still sends and Shift+Enter still makes a newline.
@@ -4000,7 +3932,7 @@ export function ChatPanel() {
     // a collapsed caret at the very END of the draft, so → anywhere else keeps
     // moving the caret and a text selection collapses normally. The pickers
     // above keep their precedence for free: while either is open there IS no
-    // ghost (ghostText gates on mentionShown/suggestsShown), and Tab is left
+    // ghost (ghostText gates on suggestsShown), and Tab is left
     // entirely to the type-ahead above.
     if (e.key === "ArrowRight" && ghostText !== null) {
       const el = e.currentTarget;
@@ -4039,34 +3971,6 @@ export function ChatPanel() {
     applySuggestion(text);
     setSuggestOpen(false);
     setSuggestIndex(-1);
-  }
-
-  /** Recompute the active @-mention span from the LIVE textarea (value + caret),
-   *  not React state — so it's correct mid-keystroke. */
-  function refreshMention() {
-    const el = composerRef.current;
-    setMention(el ? activeMention(el.value, el.selectionStart ?? el.value.length) : null);
-  }
-
-  /** Accept a mention row: attach the file and strip its `@fragment` from the
-   *  draft, leaving the caret where the token was (openspec §2). */
-  function acceptMention(candidate: { id: string; name: string }) {
-    addAttachments([{ id: candidate.id, name: candidate.name }]);
-    const el = composerRef.current;
-    const text = el ? el.value : question;
-    if (mention) {
-      const { text: next, caret } = replaceMention(text, mention);
-      setQuestion(next);
-      requestAnimationFrame(() => {
-        const e2 = composerRef.current;
-        if (!e2) return;
-        e2.focus();
-        e2.setSelectionRange(caret, caret);
-      });
-    }
-    setMention(null);
-    setMentionSel(0);
-    setMentionDismissed(null);
   }
 
   /** Fill the composer with a suggested prompt (never auto-send), focus it,
@@ -4388,38 +4292,6 @@ export function ChatPanel() {
       )}
       {attachmentBar}
       <div className={styles.composerWrap}>
-        {mentionShown && (
-          <div
-            role="listbox"
-            id="mention-listbox"
-            aria-label="Attach a file"
-            className={styles.askSuggestPop}
-          >
-            {mentionMatches.map((m, i) => (
-              <div
-                key={m.id}
-                id={`mention-opt-${i}`}
-                role="option"
-                aria-selected={i === mentionSelClamped}
-                title={m.dir ? `${m.name} — ${m.dir}` : m.name}
-                className={mergeClasses(
-                  styles.askSuggestItem,
-                  i === mentionSelClamped && styles.askSuggestItemActive,
-                )}
-                // Keep the caret in the composer through the click (mirrors the
-                // ask type-ahead) so accepting doesn't blur-close the picker.
-                onMouseDown={(e) => e.preventDefault()}
-                onClick={() => acceptMention(m)}
-              >
-                <IconDoc fontSize={14} className={styles.askSuggestIcon} />
-                <span className={styles.askSuggestText}>
-                  {emphasize(m.name, m.nameHits, styles.mentionHit)}
-                </span>
-                {m.dir && <span className={styles.mentionDir}>{m.dir}</span>}
-              </div>
-            ))}
-          </div>
-        )}
         {suggestsShown && (
           <div
             role="listbox"
@@ -4474,11 +4346,7 @@ export function ChatPanel() {
               value={question}
               placeholder={attachments.length > 0 ? "Ask about the attached files…" : placeholder}
               aria-activedescendant={
-                mentionShown
-                  ? `mention-opt-${mentionSelClamped}`
-                  : suggestsShown && suggestSel >= 0
-                    ? `ask-suggest-${suggestSel}`
-                    : undefined
+                suggestsShown && suggestSel >= 0 ? `ask-suggest-${suggestSel}` : undefined
               }
               onChange={(_, d) => {
                 setQuestion(d.value);
@@ -4486,21 +4354,11 @@ export function ChatPanel() {
                 // Enter keeps sending until the user arrows into the list.
                 setSuggestIndex(-1);
                 setSuggestOpen(d.value.trim().length > 0);
-                // Re-detect the @-mention token once the value settles; typing
-                // resets its highlight to the top row (so Enter picks it).
-                setMentionSel(0);
-                requestAnimationFrame(refreshMention);
               }}
-              onSelect={refreshMention}
               // §22.1: no ghost while an IME composition is in flight.
               onCompositionStart={() => setComposing(true)}
               onCompositionEnd={() => setComposing(false)}
-              onBlur={() => {
-                setSuggestOpen(false);
-                // Close the picker after a row click can land — rows keep focus via
-                // onMouseDown preventDefault, so a real blur means "left the field".
-                requestAnimationFrame(() => setMention(null));
-              }}
+              onBlur={() => setSuggestOpen(false)}
               onKeyDown={handleComposerKeyDown}
             />
           </div>

@@ -78,7 +78,11 @@ test("LhSelect: chevron-up-down affordance, checkmarks, sheet on compact", () =>
 test("the sweep left no Fluent DialogSurface in features — every dialog rides the shared surface", () => {
   assert.deepEqual(grepFiles("<DialogSurface"), [], "no raw DialogSurface JSX remains under src/features/");
   const users = grepFiles("<LhDialogSurface");
-  assert.ok(users.length >= 15, `the shared surface is the norm (${users.length} files)`);
+  // A floor, not a census: it only has to prove the shared surface is the
+  // norm rather than a one-off. (It read >= 15 until the 0.15.0 deletions took
+  // feature dirs out; the invariant above — zero raw DialogSurface — is the
+  // one that actually enforces the sweep.)
+  assert.ok(users.length >= 10, `the shared surface is the norm (${users.length} files)`);
 });
 
 test("known judgment calls hold: tooltip-ref switch stays Fluent; independent filters aren't segments", () => {

@@ -190,21 +190,6 @@ export function Sidebar({
                   tile grid's pull-down search instead — one finder per surface.
                   The launcher stays for iPad-regular / desktop-touch, where the
                   tree has no pull-down field. */}
-              {!compactPage && (
-                <Tooltip content="Quick open a file" relationship="label">
-                  <Button
-                    appearance="subtle"
-                    className={styles.quickOpenBtn}
-                    icon={<IconSearch />}
-                    aria-label="Quick open a file"
-                    // Reuses the exact event the Ctrl/Cmd+P shortcut dispatches,
-                    // so the fuzzy finder is reachable without a keyboard.
-                    onClick={() =>
-                      window.dispatchEvent(new CustomEvent("lighthouse:quick-open"))
-                    }
-                  />
-                </Tooltip>
-              )}
               {/* §34: a tab root gets NO trailing control — the tab bar is
                   the navigation; desktop keeps its collapse chevron. */}
               {!compactPage && (

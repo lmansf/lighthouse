@@ -53,7 +53,8 @@ pub async fn chat_ask(
     included_file_ids: Vec<String>,
     history: Vec<Value>,
     attachment_file_ids: Vec<String>,
-    // The investigation this ask runs inside (openspec: add-investigations).
+    // Retired with the 0.15.0 refocus; the parameter stays so an older
+    // client's invoke still deserializes (it is simply ignored).
     // `Option` so an older caller that omits it still invokes cleanly; absent
     // = the global context. Resolved below, beside model_config().
     investigation_id: Option<String>,
@@ -101,20 +102,12 @@ pub async fn chat_ask(
         let skip = turns.len().saturating_sub(8);
         turns.into_iter().skip(skip).collect()
     };
-    // Investigation scope + provider policy resolve HERE — the same
-    // chokepoint where the profile's model config is consulted (and beneath
-    // which the managed policy's llm-time belt sits), so a local-only
-    // investigation swaps cfg before any transport exists and scope arrives
-    // as ordinary attachments (openspec: add-investigations). The third
-    // element is the investigation's conversationRefs — retrieval's recall
-    // preference (§3); empty when no investigation rides the ask. PARITY:
-    // routes.rs chat_post.
-    let (attachment_file_ids, cfg, preferred_conversation_ids) =
-        lighthouse_core::investigations::resolve_ask_context(
-            investigation_id.as_deref(),
-            attachment_file_ids,
-            profile::model_config(),
-        );
+    // Investigations retired with the 0.15.0 refocus: an ask's files are its
+    // attachments, with no scope, provider policy or recall preference to
+    // resolve. PARITY: routes.rs chat_post.
+    let _ = &investigation_id;
+    let cfg = profile::model_config();
+    let preferred_conversation_ids: Vec<String> = Vec::new();
     // Mark a chat in flight so background-conserve suspension (hide-to-tray /
     // idle) can't kill the local chat server out from under this stream — the
     // teardown waits until the guard drops at the end of the ask. Desktop-only:

@@ -20,7 +20,6 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 /** Desktop-only fixed surfaces that never meet the compact tab bar. */
 const ALLOWLIST = new Map([
-  ["src/features/quickopen/QuickOpen.tsx", "centered command palette overlay (desktop-first; no bottom anchor to the shell)"],
   ["src/features/widget/SummonHint.tsx", "widget-mode desktop surface; no compact tab bar exists in widget mode"],
   ["src/shell/VersionBadge.tsx", "desktop corner stamp; not mounted on compact"],
 ]);

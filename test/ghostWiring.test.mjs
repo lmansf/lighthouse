@@ -45,19 +45,19 @@ test("Right Arrow accepts ONLY from a collapsed caret at the very end of the dra
     /applySuggestion\(question \+ ghostText\)/,
     "accepting splices the suffix through the standard fill path (never auto-send)",
   );
-  // The ghost branch sits AFTER the mention/type-ahead blocks — their
-  // precedence ladder stays intact above it.
-  const mentionAt = chat.indexOf('if (mentionShown) {');
+  // The ghost branch sits AFTER the type-ahead block — the precedence ladder
+  // stays intact above it. (The @-mention picker was the third rung until
+  // 0.15.0 removed it with the vault tree it searched.)
   const suggestAt = chat.indexOf("if (suggestsShown) {");
   const ghostAt = chat.indexOf('if (e.key === "ArrowRight" && ghostText !== null) {');
-  assert.ok(mentionAt >= 0 && suggestAt > mentionAt && ghostAt > suggestAt, "picker guards come first");
+  assert.ok(suggestAt >= 0 && ghostAt > suggestAt, "the type-ahead guard comes first");
 });
 
-test("the ghost hides while either picker is open, and during IME composition", () => {
+test("the ghost hides while the type-ahead is open, and during IME composition", () => {
   assert.match(
     chat,
-    /ghostDraft === question &&\s*!mentionShown &&\s*!suggestsShown &&\s*!composing &&\s*ghostDismissed !== question/,
-    "the visibility gate covers pickers, composition, and the Esc park",
+    /ghostDraft === question &&\s*!suggestsShown &&\s*!composing &&\s*ghostDismissed !== question/,
+    "the visibility gate covers the picker, composition, and the Esc park",
   );
   assert.match(chat, /onCompositionStart=\{\(\) => setComposing\(true\)\}/);
   assert.match(chat, /onCompositionEnd=\{\(\) => setComposing\(false\)\}/);
@@ -74,14 +74,14 @@ test("the ghost derives from a ~120ms debounced draft (no per-keystroke flicker)
   assert.match(chat, /ghostDraft === question/);
 });
 
-test("Esc parks the ghost for the CURRENT draft; Tab stays with the pickers", () => {
+test("Esc parks the ghost for the CURRENT draft; Tab stays with the type-ahead", () => {
   assert.match(chat, /if \(e\.key === "Escape" && ghostText !== null\) \{/);
   assert.match(chat, /setGhostDismissed\(question\)/, "dismissal is keyed to this exact draft");
-  // Tab is claimed in exactly two places — the @-mention accept and the
-  // type-ahead accept — the ghost never touches it.
+  // Tab is claimed in exactly ONE place — the type-ahead accept — and the ghost
+  // never touches it. (It was two until 0.15.0 removed the @-mention accept.)
   assert.equal(
     (chat.match(/e\.key === "Tab"/g) ?? []).length,
-    2,
+    1,
     "no new Tab handling anywhere in the composer",
   );
 });
