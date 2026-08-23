@@ -103,13 +103,13 @@ test("sweep drops only old unreferenced blobs", () => {
   const gone = ws.attach("conv-s", "gone.txt", Buffer.from("drop me"));
   ws.detach("conv-s", gone.id);
   ws.sweep();
-  assert.ok(fs.existsSync(ws.blobPath(gone.hash)), "young blob survives the sweep");
+  assert.ok(fs.existsSync(ws.blobPath(gone.hash, gone.name)), "young blob survives the sweep");
   const old = new Date(1_000_000_000);
-  fs.utimesSync(ws.blobPath(gone.hash), old, old);
-  fs.utimesSync(ws.blobPath(kept.hash), old, old);
+  fs.utimesSync(ws.blobPath(gone.hash, gone.name), old, old);
+  fs.utimesSync(ws.blobPath(kept.hash, kept.name), old, old);
   ws.sweep();
-  assert.ok(!fs.existsSync(ws.blobPath(gone.hash)), "old unreferenced blob swept");
-  assert.ok(fs.existsSync(ws.blobPath(kept.hash)), "referenced blob immortal");
+  assert.ok(!fs.existsSync(ws.blobPath(gone.hash, gone.name)), "old unreferenced blob swept");
+  assert.ok(fs.existsSync(ws.blobPath(kept.hash, kept.name)), "referenced blob immortal");
 });
 
 test("ingest warms extraction for rich files and no-ops on plain or missing blobs", async () => {
@@ -117,4 +117,18 @@ test("ingest warms extraction for rich files and no-ops on plain or missing blob
   const csv = ws.attach("conv-i", "sales.csv", Buffer.from("region,amount\nNE,10\n"));
   await ws.ingest(csv); // plain text: nothing to warm, nothing to throw
   await ws.ingest({ id: "att-none", name: "gone.pdf", hash: "0".repeat(64), size: 1, addedMs: 0 });
+});
+
+test("blobs keep the extension the format layer sniffs", () => {
+  freshState("ext");
+  const a = ws.attach("conv-x", "sales.CSV", Buffer.from("region,amount\nNE,1\n"));
+  assert.equal(path.extname(ws.resolve("conv-x", a.id).path), ".csv", "lowercased extension rides the blob");
+  // Same bytes under a different extension is a different blob AND attachment.
+  const b = ws.attach("conv-x", "sales.txt", Buffer.from("region,amount\nNE,1\n"));
+  assert.notEqual(b.id, a.id);
+  assert.equal(b.hash, a.hash, "one hash, two blobs");
+  assert.notEqual(ws.resolve("conv-x", b.id).path, ws.resolve("conv-x", a.id).path);
+  // An extension-less name still resolves (bare hash).
+  const c = ws.attach("conv-x", "README", Buffer.from("hello"));
+  assert.ok(ws.resolve("conv-x", c.id));
 });

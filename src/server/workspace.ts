@@ -51,12 +51,26 @@ function workspaceDir(): string {
 }
 
 /**
- * Blob path for a content hash. Blobs are written once under their own hash
- * and never renamed, so `(path, mtime, size)`-keyed caches downstream are
- * content-hash-keyed by construction.
+ * Blob filename for a content hash + the name it was attached under:
+ * `<hash>.<ext>`, or the bare hash when the name has no extension. The
+ * extension rides along because the entire format layer — extraction, table
+ * profiling, workbook parsing — sniffs by file extension, and a bare content
+ * hash would make every attachment look like an unreadable blob. Same bytes
+ * under the same extension still share one blob.
+ * KEEP IN SYNC with workspace.rs::blob_name.
  */
-export function blobPath(hash: string): string {
-  return path.join(workspaceDir(), "blobs", hash);
+function blobName(hash: string, name: string): string {
+  const ext = path.extname(name).slice(1).toLowerCase();
+  return ext ? `${hash}.${ext}` : hash;
+}
+
+/**
+ * Blob path for an attachment. Blobs are written once and never renamed, so
+ * `(path, mtime, size)`-keyed caches downstream are content-keyed by
+ * construction.
+ */
+export function blobPath(hash: string, name: string): string {
+  return path.join(workspaceDir(), "blobs", blobName(hash, name));
 }
 
 /**
@@ -118,7 +132,7 @@ export function attach(conversationId: string, name: string, bytes: Buffer): Att
   if (m.files.length >= MAX_ATTACHMENTS) {
     throw new Error(`a conversation holds at most ${MAX_ATTACHMENTS} files — remove one first`);
   }
-  const blob = blobPath(hash);
+  const blob = blobPath(hash, name);
   if (!fs.existsSync(blob)) {
     // Write-once via a temp neighbor + rename so a crashed write can never
     // leave a half blob under a valid hash name.
@@ -154,7 +168,7 @@ export function list(conversationId: string): Attachment[] {
 export function resolve(conversationId: string, id: string): { name: string; path: string } | null {
   const f = load(conversationId).files.find((x) => x.id === id);
   if (!f) return null;
-  const p = blobPath(f.hash);
+  const p = blobPath(f.hash, f.name);
   if (!fs.existsSync(p)) return null;
   return { name: f.name, path: p };
 }
@@ -167,7 +181,7 @@ export function resolve(conversationId: string, id: string): { name: string; pat
  * twin's retrieval reads text live at ask time.
  */
 export async function ingest(att: Attachment): Promise<void> {
-  const abs = blobPath(att.hash);
+  const abs = blobPath(att.hash, att.name);
   if (!fs.existsSync(abs)) return;
   if (isRichFile(att.name)) {
     const ext = path.extname(att.name).slice(1).toLowerCase();
@@ -189,7 +203,8 @@ export function sweep(): void {
   for (const e of fs.readdirSync(dir)) {
     if (!e.endsWith(".json")) continue;
     const m = readJson<Manifest>(path.join(dir, e), { v: MANIFEST_V, files: [] });
-    if (m && Array.isArray(m.files)) for (const f of m.files) referenced.add(f.hash);
+    if (m && Array.isArray(m.files))
+      for (const f of m.files) referenced.add(blobName(f.hash, f.name));
   }
   const cutoff = Date.now() - SWEEP_AGE_MS;
   const blobs = path.join(dir, "blobs");

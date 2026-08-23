@@ -59,11 +59,24 @@ fn workspace_dir() -> PathBuf {
     dir
 }
 
-/// Blob path for a content hash. Blobs are written once under their own
-/// hash and never renamed, so `(path, mtime, size)`-keyed caches downstream
-/// (extract, catalog, index) are content-hash-keyed by construction.
-pub fn blob_path(hash: &str) -> PathBuf {
-    workspace_dir().join("blobs").join(hash)
+/// Blob filename for a content hash + the name it was attached under:
+/// `<hash>.<ext>`, or the bare hash when the name has no extension. The
+/// extension rides along because the entire format layer — extraction, table
+/// profiling, workbook parsing — sniffs by file extension, and a bare
+/// content hash would make every attachment look like an unreadable blob.
+/// Same bytes under the same extension still share one blob.
+fn blob_name(hash: &str, name: &str) -> String {
+    match std::path::Path::new(name).extension().and_then(|e| e.to_str()) {
+        Some(ext) if !ext.is_empty() => format!("{hash}.{}", ext.to_ascii_lowercase()),
+        _ => hash.to_string(),
+    }
+}
+
+/// Blob path for an attachment. Blobs are written once and never renamed, so
+/// `(path, mtime, size)`-keyed caches downstream (extract, catalog, index)
+/// are content-keyed by construction.
+pub fn blob_path(hash: &str, name: &str) -> PathBuf {
+    workspace_dir().join("blobs").join(blob_name(hash, name))
 }
 
 /// Manifest filename for a conversation id. Ids come from the client, so the
@@ -134,11 +147,15 @@ pub fn attach(conversation_id: &str, name: &str, bytes: &[u8]) -> Result<Attachm
             "a conversation holds at most {MAX_ATTACHMENTS} files — remove one first"
         ));
     }
-    let blob = blob_path(&hash);
+    let blob = blob_path(&hash, name);
     if !blob.exists() {
         // Write-once via a temp neighbor + rename so a crashed write can
-        // never leave a half blob under a valid hash name.
-        let tmp = blob.with_extension("part");
+        // never leave a half blob under a valid hash name. The suffix is
+        // APPENDED, not substituted: `<hash>.csv` and `<hash>.txt` are
+        // different blobs and must not share one temp path.
+        let mut tmp = blob.clone().into_os_string();
+        tmp.push(".part");
+        let tmp = PathBuf::from(tmp);
         std::fs::write(&tmp, bytes)?;
         std::fs::rename(&tmp, &blob)?;
     }
@@ -177,11 +194,65 @@ pub fn list(conversation_id: &str) -> Vec<Attachment> {
 pub fn resolve(conversation_id: &str, id: &str) -> Option<(String, PathBuf)> {
     let m = load(conversation_id);
     let f = m.files.iter().find(|f| f.id == id)?;
-    let path = blob_path(&f.hash);
+    let path = blob_path(&f.hash, &f.name);
     if !path.exists() {
         return None;
     }
     Some((f.name.clone(), path))
+}
+
+/// Retrieval over a conversation's attachments — the workspace's answer to
+/// `vault::retrieve`. Candidates come from the manifest (no walk, no include
+/// flags, no local-only marks: attaching IS the consent, and the cloud gate
+/// is the per-ask provider choice), and the scoring is the engine's one
+/// implementation, shared with the vault path via `vault::retrieve_items`.
+/// `attachment_ids` narrows to a subset when the ask names one; empty means
+/// the whole conversation.
+pub fn retrieve(
+    conversation_id: &str,
+    query: &str,
+    attachment_ids: &[String],
+    k: usize,
+    preferred_conversation_ids: &[String],
+) -> crate::vault::Retrieved {
+    let files = list(conversation_id);
+    let items: Vec<crate::index::IndexItem> = files
+        .iter()
+        .filter(|f| attachment_ids.is_empty() || attachment_ids.iter().any(|id| id == &f.id))
+        .map(|f| crate::index::IndexItem {
+            id: f.id.clone(),
+            name: f.name.clone(),
+            path_for: f.name.clone(),
+            abs: Some(blob_path(&f.hash, &f.name)),
+        })
+        .collect();
+    if items.is_empty() {
+        return crate::vault::Retrieved { references: vec![], contexts: vec![] };
+    }
+    crate::vault::retrieve_items(query, &items, k, preferred_conversation_ids)
+}
+
+/// An attachment's display name + extracted text, for the synthesis pipeline
+/// (whole-file answers, table profiles). `preview_chars` bounds the map-step
+/// fallback. The workspace twin of `vault::doc_text`.
+pub fn doc_text(
+    conversation_id: &str,
+    id: &str,
+    preview_chars: Option<usize>,
+) -> Option<(String, String)> {
+    const DOC_TEXT_CAP: u64 = 4 * 1024 * 1024;
+    let (name, abs) = resolve(conversation_id, id)?;
+    let text = crate::vault::read_text_abs_capped(&abs, DOC_TEXT_CAP);
+    if text.trim().is_empty() {
+        return None;
+    }
+    Some((
+        name,
+        match preview_chars {
+            Some(n) => text.chars().take(n).collect(),
+            None => text,
+        },
+    ))
 }
 
 /// Eager ingestion (openspec: refocus-chat-attachments, "attach is the
@@ -194,7 +265,7 @@ pub fn resolve(conversation_id: &str, id: &str) -> Option<(String, PathBuf)> {
 /// honestly (the existing rule, surfaced at attach time instead of ask
 /// time).
 pub fn ingest(att: &Attachment) {
-    let abs = blob_path(&att.hash);
+    let abs = blob_path(&att.hash, &att.name);
     if !abs.exists() {
         return;
     }
@@ -237,7 +308,7 @@ pub fn sweep() {
             if p.extension().and_then(|x| x.to_str()) == Some("json") {
                 let m: Manifest = read_json(&p, Manifest::default());
                 for f in m.files {
-                    referenced.insert(f.hash);
+                    referenced.insert(blob_name(&f.hash, &f.name));
                 }
             }
         }
@@ -297,6 +368,29 @@ mod tests {
             // Same bytes in another conversation share the blob and the id.
             let b = attach("conv-2", "a.csv", b"x,y\n1,2\n").unwrap();
             assert_eq!(b.id, a.id);
+        });
+    }
+
+    #[test]
+    fn blobs_keep_the_extension_the_format_layer_sniffs() {
+        with_temp_state(|| {
+            let a = attach("conv-x", "sales.CSV", b"region,amount\nNE,1\n").unwrap();
+            let (_, p) = resolve("conv-x", &a.id).unwrap();
+            assert_eq!(
+                p.extension().and_then(|e| e.to_str()),
+                Some("csv"),
+                "lowercased extension rides the blob: {p:?}"
+            );
+            // Same bytes under a different extension is a different blob AND a
+            // different attachment (the id folds the name).
+            let b = attach("conv-x", "sales.txt", b"region,amount\nNE,1\n").unwrap();
+            assert_ne!(b.id, a.id);
+            assert_eq!(b.hash, a.hash, "one hash, two blobs");
+            let (_, pb) = resolve("conv-x", &b.id).unwrap();
+            assert_ne!(p, pb);
+            // An extension-less name still resolves (bare hash).
+            let c = attach("conv-x", "README", b"hello").unwrap();
+            assert!(resolve("conv-x", &c.id).is_some());
         });
     }
 
@@ -375,10 +469,10 @@ mod tests {
             std::env::set_var("VAULT_DIR", &state);
             let att = attach("conv-i", "sales.csv", b"region,amount\nNE,10\nNW,20\n").unwrap();
             ingest(&att);
-            let peek = crate::index::peek_entry(&att.id, Some(&blob_path(&att.hash)));
+            let peek = crate::index::peek_entry(&att.id, Some(&blob_path(&att.hash, &att.name)));
             assert!(peek.is_some(), "index entry warmed at attach time");
             let cols =
-                crate::catalog::columns_for(&[(att.id.clone(), att.name.clone(), blob_path(&att.hash))]);
+                crate::catalog::columns_for(&[(att.id.clone(), att.name.clone(), blob_path(&att.hash, &att.name))]);
             assert_eq!(cols.len(), 1, "catalog knows the attachment");
             assert!(cols[0].columns.iter().any(|c| c.name == "region"));
             // A vanished blob makes ingest a no-op, never a panic.
@@ -395,6 +489,45 @@ mod tests {
     }
 
     #[test]
+    fn retrieval_answers_from_the_manifest_alone() {
+        with_temp_state(|| {
+            let state = std::env::var("LIGHTHOUSE_APP_STATE_DIR").unwrap();
+            std::env::set_var("VAULT_DIR", &state);
+            let a = attach(
+                "conv-r",
+                "quarterly.md",
+                b"# Q3 revenue\nNortheast revenue rose sharply this quarter.\n",
+            )
+            .unwrap();
+            attach("conv-r", "unrelated.md", b"# Recipes\nBoil the pasta.\n").unwrap();
+            ingest(&a);
+
+            let got = retrieve("conv-r", "Q3 revenue northeast", &[], 5, &[]);
+            assert!(!got.contexts.is_empty(), "the attachment is retrievable");
+            assert!(
+                got.references.iter().any(|r| r.name == "quarterly.md"),
+                "the matching attachment is cited: {:?}",
+                got.references.iter().map(|r| &r.name).collect::<Vec<_>>()
+            );
+            // Narrowing to one attachment excludes the other entirely.
+            let narrowed = retrieve("conv-r", "recipes pasta", &[a.id.clone()], 5, &[]);
+            assert!(
+                narrowed.references.iter().all(|r| r.name == "quarterly.md"),
+                "an explicit subset is the whole candidate set"
+            );
+            // Another conversation shares nothing.
+            assert!(retrieve("conv-empty", "Q3 revenue", &[], 5, &[]).contexts.is_empty());
+
+            // doc_text reads the blob through its extension-carrying name.
+            let (name, text) = doc_text("conv-r", &a.id, None).unwrap();
+            assert_eq!(name, "quarterly.md");
+            assert!(text.contains("Northeast revenue"));
+            assert_eq!(doc_text("conv-r", "att-nope", None), None);
+            std::env::remove_var("VAULT_DIR");
+        });
+    }
+
+    #[test]
     fn sweep_drops_only_old_unreferenced_blobs() {
         with_temp_state(|| {
             let kept = attach("conv-s", "kept.txt", b"keep me").unwrap();
@@ -402,14 +535,14 @@ mod tests {
             detach("conv-s", &gone.id);
             // Fresh unreferenced blob survives (inside the grace window).
             sweep();
-            assert!(blob_path(&gone.hash).exists(), "young blob survives the sweep");
+            assert!(blob_path(&gone.hash, &gone.name).exists(), "young blob survives the sweep");
             // Age it past the window and it goes; the referenced one stays.
             let old = filetime::FileTime::from_unix_time(1_000_000, 0);
-            filetime::set_file_mtime(blob_path(&gone.hash), old).unwrap();
-            filetime::set_file_mtime(blob_path(&kept.hash), old).unwrap();
+            filetime::set_file_mtime(blob_path(&gone.hash, &gone.name), old).unwrap();
+            filetime::set_file_mtime(blob_path(&kept.hash, &kept.name), old).unwrap();
             sweep();
-            assert!(!blob_path(&gone.hash).exists(), "old unreferenced blob swept");
-            assert!(blob_path(&kept.hash).exists(), "referenced blob immortal");
+            assert!(!blob_path(&gone.hash, &gone.name).exists(), "old unreferenced blob swept");
+            assert!(blob_path(&kept.hash, &kept.name).exists(), "referenced blob immortal");
         });
     }
 }

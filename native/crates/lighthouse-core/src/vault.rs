@@ -2772,6 +2772,31 @@ pub fn retrieve(
             abs: Some(e.abs.clone()),
         }))
         .collect();
+    retrieve_items(query, &items, k, preferred_conversation_ids)
+}
+
+/// Score `items` for `query` and build the answer's references + contexts.
+/// Extracted from [`retrieve`] so the corpus that supplies the items is a
+/// caller's choice: the session workspace resolves them from a conversation
+/// manifest (workspace::retrieve), and nothing here walks a directory or
+/// reads vault state.
+pub(crate) fn retrieve_items(
+    query: &str,
+    items: &[crate::index::IndexItem],
+    k: usize,
+    preferred_conversation_ids: &[String],
+) -> Retrieved {
+    let qtokens = tokenize(query);
+    if qtokens.is_empty() {
+        return Retrieved {
+            references: vec![],
+            contexts: vec![],
+        };
+    }
+
+    // Unified retrieval items served by the persistent index (Phase 5): vault
+    // files by node id, mirrored cloud files by absolute mirror path. Stale or
+    // missing entries are rebuilt in parallel inside `entries_for`.
     let entries = crate::index::entries_for(&items);
 
     // Chunks scored this query. The legacy 4,000-chunk cap protected the
@@ -2784,7 +2809,7 @@ pub fn retrieve(
         &'a crate::index::IndexedChunk,
     );
     let mut chunk_refs: Vec<ChunkRef> = Vec::new();
-    'items: for item in &items {
+    'items: for item in items {
         let Some(entry) = entries.get(&item.id) else {
             continue;
         };
@@ -2909,7 +2934,7 @@ pub fn retrieve(
         })
         .collect();
     let present: HashSet<String> = cands.iter().map(|c| c.file_id.clone()).collect();
-    for item in &items {
+    for item in items {
         if present.contains(&item.id) {
             continue;
         }
@@ -3038,6 +3063,7 @@ pub fn retrieve(
         contexts,
     }
 }
+
 
 /// A file's display name + extracted text, for the synthesis pipeline
 /// (crate::synth): table profiles need the full content; `preview_chars`
