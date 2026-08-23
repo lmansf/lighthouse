@@ -248,7 +248,7 @@ export function investigationNotesSubdir(investigationId: string): string {
  * hex chars of sha1(name + createdMs). Deterministic for a given
  * (name, creation instant) and independent of later renames.
  */
-function investigationId(name: string, createdMs: number): string {
+export function investigationId(name: string, createdMs: number): string {
   return `inv-${crypto.createHash("sha1").update(`${name}${createdMs}`).digest("hex").slice(0, 12)}`;
 }
 

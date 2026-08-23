@@ -676,6 +676,10 @@ test("normalizeViewName keeps the z and 9 boundary characters", () => {
   // are kept verbatim, never collapsed to a separator.
   assert.equal(views.normalizeViewName("z9"), "z9");
   assert.equal(views.normalizeViewName("az09"), "az09");
+  // One char past each range end separates instead ('{' = 'z'+1, ':' = '9'+1).
+  // PARITY: views.rs asserts the same four literals.
+  assert.equal(views.normalizeViewName("a{b"), "a_b");
+  assert.equal(views.normalizeViewName("a:0"), "a_0");
 });
 
 test("the scrub steps through quote escapes and closes one char at a time", () => {

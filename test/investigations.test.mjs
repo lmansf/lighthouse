@@ -773,3 +773,10 @@ test("investigation ids are the pins-style sha derivation (inv- + 12 hex)", asyn
   const fork = inv.forkInvestigation(created.id, "Ledger sweep fork");
   assert.match(fork.id, /^inv-[0-9a-f]{12}$/, "fork ids share the shape");
 });
+
+test("investigation ids are pinned across engines (inv- + sha1(name+createdMs)[..12])", () => {
+  // PARITY: lighthouse-core/src/investigations.rs asserts the SAME literals —
+  // the id format is what keeps notes folders and pin membership stable.
+  assert.equal(inv.investigationId("Q3 revenue", 1712345678901), "inv-05f1af184fa7");
+  assert.equal(inv.investigationId("Ops review", 1701000000000), "inv-2a4b112c6cfa");
+});

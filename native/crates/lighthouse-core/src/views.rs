@@ -1172,6 +1172,17 @@ mod tests {
         assert_eq!(normalize_view_name(&capped), "a".repeat(63));
     }
 
+    // PARITY: test/views.test.mjs ("z and 9 boundary") asserts the same four
+    // literals — the [a-z]/[0-9] ranges are inclusive at the top, and the
+    // char one past each range end separates instead.
+    #[test]
+    fn normalize_keeps_the_z_and_9_boundary_characters() {
+        assert_eq!(normalize_view_name("z9"), "z9");
+        assert_eq!(normalize_view_name("az09"), "az09");
+        assert_eq!(normalize_view_name("a{b"), "a_b");
+        assert_eq!(normalize_view_name("a:0"), "a_0");
+    }
+
     #[test]
     fn table_names_collect_from_factors_excluding_ctes() {
         let names = |sql: &str| collect_table_names(sql).expect(sql);

@@ -644,6 +644,15 @@ mod tests {
         assert_eq!(sanitize_folder_name(""), "Investigation");
     }
 
+    // PARITY: test/investigations.test.mjs asserts the SAME two literals —
+    // the id format (inv- + first 12 hex of sha1(name + createdMs)) is what
+    // keeps notes folders and pin membership stable across engines.
+    #[test]
+    fn investigation_ids_are_pinned_across_engines() {
+        assert_eq!(investigation_id("Q3 revenue", 1712345678901), "inv-05f1af184fa7");
+        assert_eq!(investigation_id("Ops review", 1701000000000), "inv-2a4b112c6cfa");
+    }
+
     // PARITY: test/investigations.test.mjs mirrors this validate-at-use table.
     #[test]
     fn notes_folder_segments_are_revalidated_at_use() {
