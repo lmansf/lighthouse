@@ -1955,16 +1955,6 @@ fn analytics_branch(
                     // definitions block. Additive and NOT part of the §3 ablation
                     // (it is the auto-derive deliverable, not a component on
                     // trial); it draws only on engine-known facts, never model
-                    // prose. Empty facts ⇒ None ⇒ nothing pushed. PARITY: Rust-only
-                    // injection (the TS twin has no analytics branch);
-                    // vaultBrief.ts::renderBrief mirrors the renderer.
-                    // §4: the vault brief is orientation prose, not SQL signal —
-                    // the shared-window tiers spend those chars on schemas.
-                    if !plan_tier.is_apple_fm() {
-                        if let Some(brief) = crate::vault_brief::draft_brief(&regs) {
-                            sql_ctxs.push(brief);
-                        }
-                    }
                     // Auto-derived join hints (columns shared across registered
                     // tables). The declared/curated join hints that used to win
                     // over these for a pair were removed in field-patch-0.12.5 §3
