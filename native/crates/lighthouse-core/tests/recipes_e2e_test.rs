@@ -67,6 +67,7 @@ async fn variance_recipe_local_path_tables_ledger_no_narration() {
         BYPASS,
         Default::default(),
         vec![],
+        lighthouse_core::synth::Corpus::default(),
     ))
     .await;
 
@@ -130,6 +131,7 @@ async fn recipe_result_rechecks_through_the_pin_board_path() {
         BYPASS,
         Default::default(),
         vec![],
+        lighthouse_core::synth::Corpus::default(),
     ))
     .await;
     let sql = chunks
@@ -180,6 +182,7 @@ async fn recipe_cloud_posture_stamps_the_source_accurately() {
         BYPASS,
         Default::default(),
         vec![],
+        lighthouse_core::synth::Corpus::default(),
     ))
     .await;
 

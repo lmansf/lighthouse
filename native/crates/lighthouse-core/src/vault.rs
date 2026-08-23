@@ -3096,22 +3096,35 @@ pub fn named_file_target(
     question: &str,
     included_file_ids: &[String],
 ) -> Option<(String, String)> {
+    let included: HashSet<&String> = included_file_ids.iter().collect();
+    let files: Vec<(String, String)> = walk(&vault_dir())
+        .iter()
+        .filter(|n| n.kind == NodeKind::File && included.contains(&n.id))
+        .map(|n| (n.id.clone(), n.name.clone()))
+        .collect();
+    named_file_target_over(question, &files)
+}
+
+/// The same conservative matcher over an explicit `(id, name)` candidate set,
+/// so a corpus that doesn't walk a directory (the session workspace) shares
+/// one implementation with the vault. Ambiguity ⇒ None, as always.
+pub fn named_file_target_over(
+    question: &str,
+    files: &[(String, String)],
+) -> Option<(String, String)> {
     let qtokens = tokenize(question);
     if qtokens.is_empty() {
         return None;
     }
-    let included: HashSet<&String> = included_file_ids.iter().collect();
-    let nodes = walk(&vault_dir());
-    let files: Vec<(String, String, Vec<String>)> = nodes
+    let tokened: Vec<(String, String, Vec<String>)> = files
         .iter()
-        .filter(|n| n.kind == NodeKind::File && included.contains(&n.id))
-        .map(|n| (n.id.clone(), n.name.clone(), name_tokens_of(&n.id, &n.name)))
+        .map(|(id, name)| (id.clone(), name.clone(), name_tokens_of(id, name)))
         .collect();
     let id = pinned_named_file(
         &qtokens,
-        files.iter().map(|(id, _, t)| (id.as_str(), t.as_slice())),
+        tokened.iter().map(|(id, _, t)| (id.as_str(), t.as_slice())),
     )?;
-    files
+    tokened
         .iter()
         .find(|(fid, _, _)| fid == id)
         .map(|(fid, name, _)| (fid.clone(), name.clone()))

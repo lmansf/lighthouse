@@ -1186,6 +1186,10 @@ pub fn answer_pipeline(
     cache: crate::answer_cache::CacheCtl,
     plan: crate::beam::PlanCtl,
     preferred_conversation_ids: Vec<String>,
+    // The ask's corpus (openspec: refocus-chat-attachments). A conversation
+    // id selects that conversation's attachments; `Corpus::default()` is the
+    // legacy vault, until the vault goes.
+    corpus: Corpus,
 ) -> Pin<Box<dyn Stream<Item = ChatChunk> + Send>> {
     Box::pin(async_stream::stream! {
         let is_cloud = is_cloud_provider(&cfg);
@@ -1202,6 +1206,7 @@ pub fn answer_pipeline(
                 cfg,
                 plan,
                 preferred_conversation_ids,
+                corpus,
             );
             while let Some(c) = inner.next().await {
                 yield c;
@@ -1216,15 +1221,25 @@ pub fn answer_pipeline(
             let model = cfg.model_id.clone();
             let atts = attachment_file_ids.clone();
             let prefs = preferred_conversation_ids.clone();
-            tokio::task::spawn_blocking(move || {
-                crate::answer_cache::cache_key(
+            let cid = corpus.conversation_id.clone();
+            tokio::task::spawn_blocking(move || match cid {
+                // Attachment bytes are immutable, so the workspace key is an
+                // exact content claim (and portable across conversations).
+                Some(cid) => crate::answer_cache::workspace_cache_key(
+                    &cid,
+                    &q,
+                    provider.as_deref(),
+                    model.as_deref(),
+                    &atts,
+                ),
+                None => crate::answer_cache::cache_key(
                     &q,
                     provider.as_deref(),
                     model.as_deref(),
                     &atts,
                     &prefs,
                     is_cloud,
-                )
+                ),
             })
             .await
             .ok()
@@ -1268,6 +1283,7 @@ pub fn answer_pipeline(
             cfg,
             plan,
             preferred_conversation_ids,
+            corpus,
         );
         let mut text = String::new();
         let mut draft_active = false;
@@ -1340,6 +1356,7 @@ fn recipe_branch(
     origin: String,
     sink: llm::UsageSink,
     is_cloud: bool,
+    corpus: Corpus,
 ) -> Pin<Box<dyn Stream<Item = ChatChunk> + Send>> {
     Box::pin(async_stream::stream! {
         // --- Recipe branch (openspec: add-recipes §2.2): an EXPLICIT, chip/
@@ -1356,30 +1373,16 @@ fn recipe_branch(
                 .expect("parse_recipe_cue only matches a known built-in");
             yield progress("Reading table schemas…".to_string(), 1, 4);
 
-            // Candidate gather — the SAME shareable-subset rule the analytics
-            // branch uses, so a private table's bytes never reach a cloud model.
-            let candidate_ids: Vec<String> = if !attachment_file_ids.is_empty() {
-                vault::shareable_subset(&attachment_file_ids, is_cloud)
+            // Candidate gather — the corpus applies whatever gate it has (the
+            // vault's shareable subset; a conversation's attachments need
+            // none), so a private table's bytes never reach a cloud model.
+            let scope = if attachment_file_ids.is_empty() {
+                included_file_ids.clone()
             } else {
-                let active: std::collections::HashSet<String> =
-                    vault::shareable_file_ids(is_cloud).into_iter().collect();
-                included_file_ids
-                    .iter()
-                    .filter(|id| active.contains(*id))
-                    .cloned()
-                    .collect()
+                attachment_file_ids.clone()
             };
-            let mut files: Vec<(String, String, std::path::PathBuf)> = Vec::new();
-            for id in candidate_ids {
-                if files.len() >= crate::analytics::CANDIDATE_SCAN {
-                    break;
-                }
-                if let Some((name, abs)) = vault::doc_path(&id) {
-                    if crate::analytics::is_tabular(&name) || crate::analytics::is_pdf(&name) {
-                        files.push((id, name, abs));
-                    }
-                }
-            }
+            let files =
+                corpus.analytic_files(&scope, is_cloud, crate::analytics::CANDIDATE_SCAN);
             // Resolve the target table's TYPED columns the same way
             // `applicable_recipes` OFFERS it — catalog kinds for a file (a CSV
             // date reads as Date), the resolved Arrow schema for a view — so
@@ -1815,6 +1818,7 @@ fn analytics_branch(
     is_cloud: bool,
     plan: crate::beam::PlanCtl,
     guard: GuardCtl,
+    corpus: Corpus,
 ) -> Pin<Box<dyn Stream<Item = ChatChunk> + Send>> {
     Box::pin(async_stream::stream! {
         // --- Analytics branch (docs/analytics-beam.md): aggregate ask over
@@ -1838,33 +1842,18 @@ fn analytics_branch(
             // Shareable candidate gather: on the cloud path both branches drop
             // effectively-local-only ids, so a private table's schema card
             // (column names + sample rows) is never built for a vendor prompt.
-            let candidate_ids: Vec<String> = if !attachment_file_ids.is_empty() {
-                vault::shareable_subset(&attachment_file_ids, is_cloud)
+            // Scan wide so whole file families are visible to union grouping;
+            // registration slots stay bounded downstream. PDFs with a
+            // confident text-layer grid register as bonus tables (G3); they
+            // stay OUT of is_tabular so prose chunking and spreadsheet meta
+            // answers are unaffected.
+            let scope = if attachment_file_ids.is_empty() {
+                included_file_ids.clone()
             } else {
-                let active: std::collections::HashSet<String> =
-                    vault::shareable_file_ids(is_cloud).into_iter().collect();
-                included_file_ids
-                    .iter()
-                    .filter(|id| active.contains(*id))
-                    .cloned()
-                    .collect()
+                attachment_file_ids.clone()
             };
-            let mut files: Vec<(String, String, std::path::PathBuf)> = Vec::new();
-            for id in candidate_ids {
-                // Scan wide so whole file families are visible to union
-                // grouping; registration slots stay bounded downstream.
-                if files.len() >= crate::analytics::CANDIDATE_SCAN {
-                    break;
-                }
-                if let Some((name, abs)) = vault::doc_path(&id) {
-                    // PDFs with a confident text-layer grid register as bonus
-                    // tables (G3); they stay OUT of is_tabular so prose chunking
-                    // and spreadsheet meta answers are unaffected.
-                    if crate::analytics::is_tabular(&name) || crate::analytics::is_pdf(&name) {
-                        files.push((id, name, abs));
-                    }
-                }
-            }
+            let files =
+                corpus.analytic_files(&scope, is_cloud, crate::analytics::CANDIDATE_SCAN);
             if !files.is_empty() {
                 yield progress("Reading table schemas…".to_string(), 1, 4);
                 let ctx = datafusion::prelude::SessionContext::new();
@@ -2736,7 +2725,7 @@ fn analytics_branch(
                     if let Some((pf_id, pf_name, _)) =
                         files.iter().find(|(_, n, _)| is_profileable(n)).cloned()
                     {
-                        if let Some((_, pf_full)) = vault::doc_text(&pf_id, None) {
+                        if let Some((_, pf_full)) = corpus.doc_text(&pf_id, None) {
                             if let Some(pf_ans) =
                                 crate::table_profile::profile_answer(&pf_name, &pf_full)
                             {
@@ -2832,6 +2821,7 @@ async fn select_synthesis_docs(
     cfg: ModelCfg,
     is_cloud: bool,
     preferred_conversation_ids: Vec<String>,
+    corpus: Corpus,
 ) -> Vec<DocCandidate> {
         let mut docs: Vec<DocCandidate> = Vec::new();
         if has_real_model(&cfg) {
@@ -2839,28 +2829,45 @@ async fn select_synthesis_docs(
                 // Multi-attach IS the cross-document gesture — but a marked
                 // attachment can't ride to a cloud model. Filter this bypasser
                 // at its own choke point before any doc_text read below.
-                docs = vault::shareable_subset(&attachment_file_ids, is_cloud)
-                    .iter()
+                docs = corpus
+                    .candidates(&attachment_file_ids, is_cloud)
+                    .into_iter()
                     .take(MAX_MAP_DOCS)
-                    .map(|id| DocCandidate { id: id.clone(), name: String::new(), score: ASSUMED_DOC_SCORE })
+                    .map(|(id, name)| DocCandidate { id, name, score: ASSUMED_DOC_SCORE })
                     .collect();
             } else if attachment_file_ids.is_empty() && cross_doc_cue(&question) {
-                let wide = sources::retrieve(
-                    &retrieval_query,
-                    &included_file_ids,
-                    &[],
-                    WIDE_K,
-                    is_cloud,
-                    &preferred_conversation_ids,
-                )
-                .await;
+                let wide = match &corpus.conversation_id {
+                    Some(_) => corpus.retrieve(
+                        &retrieval_query,
+                        &included_file_ids,
+                        &[],
+                        WIDE_K,
+                        is_cloud,
+                        &preferred_conversation_ids,
+                    ),
+                    None => {
+                        sources::retrieve(
+                            &retrieval_query,
+                            &included_file_ids,
+                            &[],
+                            WIDE_K,
+                            is_cloud,
+                            &preferred_conversation_ids,
+                        )
+                        .await
+                    }
+                };
                 docs = rank_docs_from_hits(&wide.references, MAX_MAP_DOCS);
-                let active: std::collections::HashSet<String> =
-                    vault::shareable_file_ids(is_cloud).into_iter().collect();
-                let in_scope: Vec<&String> =
-                    included_file_ids.iter().filter(|id| active.contains(*id)).collect();
+                // Small corpora answer better whole: when the in-scope set is
+                // no bigger than the map budget, every candidate joins even if
+                // retrieval missed it.
+                let in_scope: Vec<String> = corpus
+                    .candidates(&included_file_ids, is_cloud)
+                    .into_iter()
+                    .map(|(id, _)| id)
+                    .collect();
                 if in_scope.len() <= MAX_MAP_DOCS {
-                    for id in in_scope {
+                    for id in &in_scope {
                         if docs.len() >= MAX_MAP_DOCS {
                             break;
                         }
@@ -2890,6 +2897,7 @@ fn multi_doc_synthesis(
     sink: llm::UsageSink,
     is_cloud: bool,
     guard: GuardCtl,
+    corpus: Corpus,
 ) -> Pin<Box<dyn Stream<Item = ChatChunk> + Send>> {
     Box::pin(async_stream::stream! {
         if docs.len() >= MIN_MAP_DOCS {
@@ -2897,7 +2905,7 @@ fn multi_doc_synthesis(
             let mut extracts: Vec<(RagReference, String)> = Vec::new();
 
             for (i, doc) in docs.iter().enumerate() {
-                let preview = vault::doc_text(&doc.id, Some(PREVIEW_CHARS));
+                let preview = corpus.doc_text(&doc.id, Some(PREVIEW_CHARS));
                 let name = if !doc.name.is_empty() {
                     doc.name.clone()
                 } else {
@@ -2914,12 +2922,11 @@ fn multi_doc_synthesis(
                 // doc.id is already shareable (filtered above), so is_cloud here
                 // only re-affirms the guarantee. No recall preference: scoped to
                 // ONE document, there is no cross-candidate order to prefer.
-                let per_doc = vault::retrieve(
+                let per_doc = corpus.retrieve(
                     &retrieval_query,
                     &[],
-                    PER_DOC_CHUNKS,
-                    &[],
                     std::slice::from_ref(&doc.id),
+                    PER_DOC_CHUNKS,
                     is_cloud,
                     &[],
                 );
@@ -2936,7 +2943,7 @@ fn multi_doc_synthesis(
                 // Exact numbers for tables: profile the full file, not the preview.
                 let mut profile: Option<String> = None;
                 if is_profileable(&name) {
-                    profile = vault::doc_text(&doc.id, None)
+                    profile = corpus.doc_text(&doc.id, None)
                         .and_then(|(_, full)| table_profile(&name, &full));
                     if let Some(p) = &profile {
                         ctxs.push(Ctx {
@@ -3070,6 +3077,7 @@ fn single_doc_focus(
     sink: llm::UsageSink,
     is_cloud: bool,
     guard: GuardCtl,
+    corpus: Corpus,
 ) -> Pin<Box<dyn Stream<Item = ChatChunk> + Send>> {
     Box::pin(async_stream::stream! {
         // --- Single-document focus (0.11, field report "partial answers"):
@@ -3097,15 +3105,17 @@ fn single_doc_focus(
             // "named" into a cloud prompt). dominant_doc is safe already —
             // initial.references are shareable.
             let target: Option<(String, String)> = if attachment_file_ids.len() == 1 {
-                vault::shareable_subset(&attachment_file_ids, is_cloud)
+                corpus
+                    .candidates(&attachment_file_ids, is_cloud)
                     .into_iter()
                     .next()
-                    .map(|id| (id, String::new()))
+                    .map(|(id, name)| (id, name))
             } else {
                 let named = tokio::task::spawn_blocking({
                     let q = question.clone();
-                    let ids = vault::shareable_subset(&included_file_ids, is_cloud);
-                    move || vault::named_file_target(&q, &ids)
+                    let ids = included_file_ids.clone();
+                    let corpus = corpus.clone();
+                    move || corpus.named_file_target(&q, &ids, is_cloud)
                 })
                 .await
                 .unwrap_or_default();
@@ -3118,7 +3128,8 @@ fn single_doc_focus(
             let doc: Option<(String, String, Vec<String>)> = match target {
                 Some((doc_id, _)) => {
                     let id = doc_id.clone();
-                    tokio::task::spawn_blocking(move || vault::doc_chunks(&id))
+                    let corpus = corpus.clone();
+                    tokio::task::spawn_blocking(move || corpus.doc_chunks(&id))
                         .await
                         .unwrap_or_default()
                         .map(|(name, chunks)| (doc_id, name, chunks))
@@ -3136,7 +3147,7 @@ fn single_doc_focus(
             if let Some((doc_id, name, _)) =
                 doc.clone().filter(|(_, n, c)| is_profileable(n) && !c.is_empty())
             {
-                if let Some((_, full)) = vault::doc_text(&doc_id, None) {
+                if let Some((_, full)) = corpus.doc_text(&doc_id, None) {
                     if let Some(ans) = crate::table_profile::profile_answer(&name, &full) {
                         // §47 §1: narrate over the verified profile, then disclose
                         // the exact figures (the §2 ladder keeps the prose's
@@ -3420,6 +3431,7 @@ fn single_shot_answer(
     origin: String,
     sink: llm::UsageSink,
     guard: GuardCtl,
+    corpus: Corpus,
 ) -> Pin<Box<dyn Stream<Item = ChatChunk> + Send>> {
     Box::pin(async_stream::stream! {
         // --- Single-shot path + exact table stats for CSV hits ---
@@ -3465,7 +3477,7 @@ fn single_shot_answer(
                 continue;
             }
             seen.insert(r.file_id.clone());
-            let Some((_, full)) = vault::doc_text(&r.file_id, None) else {
+            let Some((_, full)) = corpus.doc_text(&r.file_id, None) else {
                 continue;
             };
             if let Some(p) = table_profile(&r.name, &full) {
@@ -3540,6 +3552,151 @@ fn single_shot_answer(
     })
 }
 
+/// Where an ask's candidates come from.
+///
+/// Since the 0.15.0 refocus (openspec: refocus-chat-attachments) an ask
+/// carries its conversation, and the candidates ARE that conversation's
+/// attachments — resolved from the workspace manifest, never walked. `None`
+/// selects the legacy vault corpus, which stays alive only until the vault
+/// is deleted (task 1.6); once it is, this type collapses to the
+/// conversation id itself.
+///
+/// The three operations below are every way the pipeline reaches file
+/// content, so switching corpora is switching this one value.
+#[derive(Clone, Debug, Default)]
+pub struct Corpus {
+    pub conversation_id: Option<String>,
+}
+
+impl Corpus {
+    /// The conversation's attachments (workspace) or the vault's shareable,
+    /// included set — as `(id, name)` pairs in candidate order.
+    pub fn candidates(&self, ids: &[String], is_cloud: bool) -> Vec<(String, String)> {
+        match &self.conversation_id {
+            Some(cid) => crate::workspace::list(cid)
+                .into_iter()
+                .filter(|f| ids.is_empty() || ids.iter().any(|id| id == &f.id))
+                .map(|f| (f.id, f.name))
+                .collect(),
+            None => {
+                let scoped: Vec<String> = if ids.is_empty() {
+                    vault::shareable_file_ids(is_cloud)
+                } else {
+                    vault::shareable_subset(ids, is_cloud)
+                };
+                scoped
+                    .into_iter()
+                    .filter_map(|id| vault::doc_path(&id).map(|(name, _)| (id, name)))
+                    .collect()
+            }
+        }
+    }
+
+    /// Retrieval over this corpus. Attachments need no include/local-only
+    /// filtering — attaching IS the consent, and the cloud gate is the ask's
+    /// own provider choice.
+    pub fn retrieve(
+        &self,
+        query: &str,
+        included_file_ids: &[String],
+        attachment_ids: &[String],
+        k: usize,
+        is_cloud: bool,
+        preferred_conversation_ids: &[String],
+    ) -> vault::Retrieved {
+        match &self.conversation_id {
+            Some(cid) => crate::workspace::retrieve(
+                cid,
+                query,
+                attachment_ids,
+                k,
+                preferred_conversation_ids,
+            ),
+            None => vault::retrieve(
+                query,
+                included_file_ids,
+                k,
+                &[],
+                attachment_ids,
+                is_cloud,
+                preferred_conversation_ids,
+            ),
+        }
+    }
+
+    /// Candidate files for the analytics-style branches: `(id, name, path)`
+    /// triples for the tabular and PDF candidates, in candidate order, capped
+    /// at `cap`. This is the one place the include/local-only gate used to be
+    /// spelled out per branch; a workspace corpus needs no gate at all.
+    pub fn analytic_files(
+        &self,
+        ids: &[String],
+        is_cloud: bool,
+        cap: usize,
+    ) -> Vec<(String, String, std::path::PathBuf)> {
+        let mut out = Vec::new();
+        for (id, name) in self.candidates(ids, is_cloud) {
+            if out.len() >= cap {
+                break;
+            }
+            if !crate::analytics::is_tabular(&name) && !crate::analytics::is_pdf(&name) {
+                continue;
+            }
+            if let Some((_, abs)) = self.doc_path(&id) {
+                out.push((id, name, abs));
+            }
+        }
+        out
+    }
+
+    /// A candidate's display name + extracted text.
+    pub fn doc_text(&self, id: &str, preview_chars: Option<usize>) -> Option<(String, String)> {
+        match &self.conversation_id {
+            Some(cid) => crate::workspace::doc_text(cid, id, preview_chars),
+            None => vault::doc_text(id, preview_chars),
+        }
+    }
+
+    /// The single candidate the question NAMES, if any — the doc-focus
+    /// detector. One matcher, whichever corpus supplies the names.
+    pub fn named_file_target(
+        &self,
+        question: &str,
+        ids: &[String],
+        is_cloud: bool,
+    ) -> Option<(String, String)> {
+        match &self.conversation_id {
+            Some(_) => vault::named_file_target_over(question, &self.candidates(ids, is_cloud)),
+            None => vault::named_file_target(question, &vault::shareable_subset(ids, is_cloud)),
+        }
+    }
+
+    /// A candidate's display name + ORDERED chunk texts (whole-document
+    /// coverage), from the same byte-identical chunker the index uses.
+    pub fn doc_chunks(&self, id: &str) -> Option<(String, Vec<String>)> {
+        match &self.conversation_id {
+            Some(_) => {
+                let (name, text) = self.doc_text(id, None)?;
+                let chunks = vault::chunk_texts_named(&name, &text);
+                if chunks.is_empty() {
+                    return None;
+                }
+                Some((name, chunks))
+            }
+            None => vault::doc_chunks(id),
+        }
+    }
+
+    /// A candidate's display name + the path its bytes live at (analytics
+    /// registers files by path).
+    pub fn doc_path(&self, id: &str) -> Option<(String, std::path::PathBuf)> {
+        match &self.conversation_id {
+            Some(cid) => crate::workspace::resolve(cid, id),
+            None => vault::doc_path(id),
+        }
+    }
+}
+
 fn live_pipeline(
     question: String,
     included_file_ids: Vec<String>,
@@ -3552,6 +3709,7 @@ fn live_pipeline(
     // everywhere else they are inert (an ordinary ask).
     plan: crate::beam::PlanCtl,
     preferred_conversation_ids: Vec<String>,
+    corpus: Corpus,
 ) -> Pin<Box<dyn Stream<Item = ChatChunk> + Send>> {
     Box::pin(async_stream::stream! {
         // Provenance origin for this answer's stamp — resolved once from the
@@ -3570,7 +3728,7 @@ fn live_pipeline(
         let is_cloud = is_cloud_provider(&cfg);
 
         {
-            let mut sub = recipe_branch(question.clone(), included_file_ids.clone(), attachment_file_ids.clone(), history.clone(), cfg.clone(), origin.clone(), sink.clone(), is_cloud);
+            let mut sub = recipe_branch(question.clone(), included_file_ids.clone(), attachment_file_ids.clone(), history.clone(), cfg.clone(), origin.clone(), sink.clone(), is_cloud, corpus.clone());
             let mut answered = false;
             while let Some(c) = sub.next().await { if c.done { answered = true; } yield c; }
             if answered { return; }
@@ -3584,15 +3742,31 @@ fn live_pipeline(
             None => question.clone(),
         };
 
-        let initial = sources::retrieve(
-            &retrieval_query,
-            &included_file_ids,
-            &attachment_file_ids,
-            5,
-            is_cloud,
-            &preferred_conversation_ids,
-        )
-        .await;
+        // The corpus decides where candidates come from: a conversation's
+        // attachments (manifest lookup) or the legacy vault + connectors
+        // aggregate. Only the vault path can reach a network-mirrored source,
+        // so only it needs the async aggregator.
+        let initial = match &corpus.conversation_id {
+            Some(_) => corpus.retrieve(
+                &retrieval_query,
+                &included_file_ids,
+                &attachment_file_ids,
+                5,
+                is_cloud,
+                &preferred_conversation_ids,
+            ),
+            None => {
+                sources::retrieve(
+                    &retrieval_query,
+                    &included_file_ids,
+                    &attachment_file_ids,
+                    5,
+                    is_cloud,
+                    &preferred_conversation_ids,
+                )
+                .await
+            }
+        };
 
         {
             let mut sub = opening_notes(question.clone(), attachment_file_ids.clone(), is_cloud, initial.clone());
@@ -3616,7 +3790,7 @@ fn live_pipeline(
         let guard: GuardCtl = GuardCtl::default();
 
         {
-            let mut sub = analytics_branch(question.clone(), included_file_ids.clone(), attachment_file_ids.clone(), history.clone(), cfg.clone(), origin.clone(), sink.clone(), is_cloud, plan.clone(), guard.clone());
+            let mut sub = analytics_branch(question.clone(), included_file_ids.clone(), attachment_file_ids.clone(), history.clone(), cfg.clone(), origin.clone(), sink.clone(), is_cloud, plan.clone(), guard.clone(), corpus.clone());
             let mut answered = false;
             while let Some(c) = sub.next().await { if c.done { answered = true; } yield c; }
             if answered { return; }
@@ -3677,25 +3851,26 @@ fn live_pipeline(
             cfg.clone(),
             is_cloud,
             preferred_conversation_ids.clone(),
+            corpus.clone(),
         )
         .await;
 
         {
-            let mut sub = multi_doc_synthesis(question.clone(), retrieval_query.clone(), docs.clone(), cfg.clone(), history.clone(), origin.clone(), sink.clone(), is_cloud, guard.clone());
+            let mut sub = multi_doc_synthesis(question.clone(), retrieval_query.clone(), docs.clone(), cfg.clone(), history.clone(), origin.clone(), sink.clone(), is_cloud, guard.clone(), corpus.clone());
             let mut answered = false;
             while let Some(c) = sub.next().await { if c.done { answered = true; } yield c; }
             if answered { return; }
         }
 
         {
-            let mut sub = single_doc_focus(question.clone(), included_file_ids.clone(), attachment_file_ids.clone(), initial.clone(), cfg.clone(), history.clone(), origin.clone(), sink.clone(), is_cloud, guard.clone());
+            let mut sub = single_doc_focus(question.clone(), included_file_ids.clone(), attachment_file_ids.clone(), initial.clone(), cfg.clone(), history.clone(), origin.clone(), sink.clone(), is_cloud, guard.clone(), corpus.clone());
             let mut answered = false;
             while let Some(c) = sub.next().await { if c.done { answered = true; } yield c; }
             if answered { return; }
         }
 
         {
-            let mut sub = single_shot_answer(question.clone(), included_file_ids.clone(), initial.clone(), cfg.clone(), history.clone(), origin.clone(), sink.clone(), guard.clone());
+            let mut sub = single_shot_answer(question.clone(), included_file_ids.clone(), initial.clone(), cfg.clone(), history.clone(), origin.clone(), sink.clone(), guard.clone(), corpus.clone());
             while let Some(c) = sub.next().await { yield c; }
         }
     })

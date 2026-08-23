@@ -694,6 +694,12 @@ export interface AskOptions {
    * Absent = the global context.
    */
   investigationId?: string;
+  /**
+   * The conversation this ask belongs to (openspec:
+   * refocus-chat-attachments): its attachments ARE the corpus the engine
+   * answers from. Absent = the legacy vault corpus, until the vault goes.
+   */
+  conversationId?: string;
 }
 
 /** Streams an assistant answer plus its references for a user question. */

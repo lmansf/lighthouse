@@ -1233,6 +1233,16 @@ pub async fn chat_post(headers: HeaderMap, body: Option<Json<Value>>) -> Respons
     let included_file_ids = string_array(&body["includedFileIds"]);
     // Files the user explicitly attached to this question.
     let attachment_ids = string_array(&body["attachmentFileIds"]);
+    // The conversation this ask belongs to (openspec:
+    // refocus-chat-attachments): its attachments ARE the corpus. Absent = the
+    // legacy vault corpus, until the vault goes (task 1.6).
+    let corpus = lighthouse_core::synth::Corpus {
+        conversation_id: body["conversationId"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from),
+    };
     // The investigation this ask runs inside (openspec: add-investigations);
     // absent = the global context. Resolved below, beside model_config().
     let investigation_id = body["investigationId"].as_str().map(String::from);
@@ -1318,6 +1328,7 @@ pub async fn chat_post(headers: HeaderMap, body: Option<Json<Value>>) -> Respons
             cache,
             plan,
             preferred_conversation_ids,
+            corpus,
         );
         let mut final_files: Vec<String> = Vec::new();
         let mut artifacts: Vec<String> = Vec::new();

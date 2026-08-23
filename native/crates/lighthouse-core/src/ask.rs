@@ -165,6 +165,11 @@ pub fn run_headless_ask(
             crate::answer_cache::CacheCtl::default(),
             crate::beam::PlanCtl::default(),
             preferred_conversation_ids,
+            // A headless ask names files on the command line, so it reads the
+            // vault corpus. `lighthouse ask <files…>` (openspec:
+            // refocus-chat-attachments task 3.1) will attach them to a
+            // throwaway conversation and pass that corpus instead.
+            crate::synth::Corpus::default(),
         );
         let mut final_files: Vec<String> = Vec::new();
         let mut artifacts: Vec<String> = Vec::new();

@@ -187,6 +187,7 @@ async fn collect_pipeline(question: &str, ids: Vec<String>, cfg: ModelCfg) -> (S
         Default::default(),
         Default::default(),
         vec![],
+        lighthouse_core::synth::Corpus::default(),
     );
     let mut text = String::new();
     let mut final_files: Vec<String> = Vec::new();

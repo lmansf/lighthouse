@@ -418,7 +418,8 @@ async fn unchanged_question_replays_verbatim_and_a_touched_file_runs_live() {
             Default::default(),
             Default::default(),
             vec![],
-        )
+                lighthouse_core::synth::Corpus::default(),
+    )
     };
 
     // 1st ask: live over the deterministic meta path — no replay stamp.
@@ -493,7 +494,8 @@ async fn bypass_runs_live_and_refreshes_the_entry() {
             cache,
             Default::default(),
             vec![],
-        )
+                lighthouse_core::synth::Corpus::default(),
+    )
     };
 
     let (_t1, _c1) = drive(ask(CacheCtl::default())).await; // live, inserted
@@ -546,7 +548,8 @@ async fn plan_only_neither_reads_nor_writes_the_answer_cache() {
             CacheCtl::default(),
             plan,
             vec![],
-        )
+                lighthouse_core::synth::Corpus::default(),
+    )
     };
     let plan_only = || PlanCtl { plan_only: true, approved_plan: None };
     let cached_at = |chunks: &[ChatChunk]| -> Option<i64> {

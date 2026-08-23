@@ -3516,7 +3516,12 @@ export function ChatPanel() {
         history,
         attachmentIds,
         controller.signal,
-        { bypassCache: opts?.bypassCache === true, persistAllowed, investigationId },
+        {
+          bypassCache: opts?.bypassCache === true,
+          persistAllowed,
+          investigationId,
+          conversationId: conversationIdAtAsk,
+        },
       )) {
         // Stop pressed: some transports (the Tauri fetch interceptor) don't
         // honor AbortSignal, so also bail out of the loop explicitly and keep

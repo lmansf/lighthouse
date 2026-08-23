@@ -29,11 +29,12 @@ test("the ask carries the investigation: id in the wire opts, ref write on settl
     /const investigationId = useChatStore\.getState\(\)\.currentInvestigationId \?\? undefined;/,
     "the ask captures the current investigation at send time",
   );
-  // …rides the wire beside the cache controls…
+  // …rides the wire beside the cache controls and the ask's conversation
+  // (openspec: refocus-chat-attachments — the conversation names the corpus)…
   assert.match(
     chat,
-    /\{ bypassCache: opts\?\.bypassCache === true, persistAllowed, investigationId \}/,
-    "chatService.ask opts carry investigationId",
+    /bypassCache: opts\?\.bypassCache === true,\s*\n\s*persistAllowed,\s*\n\s*investigationId,\s*\n\s*conversationId: conversationIdAtAsk,/,
+    "chatService.ask opts carry investigationId and the ask's conversation",
   );
   // …and a SUCCESSFUL settle records the conversation ref — same id, same
   // conversation, same persistAllowed — never on Stop (the abort branch owns

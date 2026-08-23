@@ -70,6 +70,11 @@ pub async fn chat_ask(
     // runs). Absent = an ordinary ask, so an older caller invokes unchanged.
     plan_only: Option<bool>,
     approved_plan: Option<String>,
+    // The conversation this ask belongs to (openspec:
+    // refocus-chat-attachments): its attachments ARE the corpus. `Option` so an
+    // older caller still invokes cleanly; absent = the legacy vault corpus,
+    // until the vault goes (task 1.6).
+    conversation_id: Option<String>,
     on_chunk: Channel<ChatChunk>,
 ) -> Result<(), String> {
     // 0.14.1 field report: iOS tears the private-model loopback listener down
@@ -143,6 +148,11 @@ pub async fn chat_ask(
             approved_plan,
         },
         preferred_conversation_ids,
+        lighthouse_core::synth::Corpus {
+            conversation_id: conversation_id
+                .map(|c| c.trim().to_string())
+                .filter(|c| !c.is_empty()),
+        },
     );
     let mut final_files: Vec<String> = Vec::new();
     let mut artifacts: Vec<String> = Vec::new();

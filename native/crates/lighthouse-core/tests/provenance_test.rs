@@ -40,6 +40,7 @@ async fn final_chunk_for(cfg: ModelCfg) -> ChatChunk {
         Default::default(),
         Default::default(),
         vec![],
+        lighthouse_core::synth::Corpus::default(),
     );
     let mut last_done: Option<ChatChunk> = None;
     while let Some(c) = stream.next().await {

@@ -31,6 +31,10 @@ class RealChatService implements ChatService {
         // add-investigations). Optional: JSON.stringify drops the key when
         // absent, so a global-context ask stays byte-identical to today's.
         investigationId: opts?.investigationId,
+        // The conversation this ask belongs to (openspec:
+        // refocus-chat-attachments) — its attachments are the corpus. Optional
+        // for the same reason: absent keeps the key out of the wire.
+        conversationId: opts?.conversationId,
       }),
       signal,
     });
