@@ -4,7 +4,7 @@
  * The surfaces are JSX modules the node runner cannot import — so, like
  * chatScroll.test.mjs / firstRunTour.test.mjs, the guarantees are asserted
  * structurally against the source: WHERE the investigation id rides (ask
- * opts, pin, export, the settle-time conversation-ref write) and WHAT the
+ * opts, export, the settle-time conversation-ref write) and WHAT the
  * nav does (mounts above the explorer, archives — never deletes, keeps the
  * calm neutral selection). Live behavior is the E2E pass (tasks.md §6.1).
  *
@@ -46,12 +46,7 @@ test("the ask carries the investigation: id in the wire opts, ref write on settl
   );
 });
 
-test("belonging rides the actions: pin and note export both carry the current investigation", () => {
-  assert.match(
-    chat,
-    /ragService\.pinAsk\(\s*question,\s*meta\.sql,\s*meta\.fileIds,\s*useChatStore\.getState\(\)\.currentInvestigationId \?\? undefined,\s*\)/,
-    "pinAsk adopts the current investigation",
-  );
+test("belonging rides the actions: note export carries the current investigation", () => {
   assert.match(
     chat,
     /ragService\.exportChat\(\s*title,\s*transcriptMarkdown\(msgs, title\),\s*investigationId \? \{ investigationId \} : undefined,\s*\)/,

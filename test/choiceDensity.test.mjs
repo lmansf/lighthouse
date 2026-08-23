@@ -21,9 +21,9 @@ const settings = read("src/features/settings/SettingsMenu.tsx");
 const explorer = read("src/features/explorer/FileExplorer.tsx");
 const investigations = read("src/features/investigations/InvestigationsNav.tsx");
 
-test("§51 §1: the five 'do with it' actions live under ONE Save & share… menu, handlers intact", () => {
+test("§51 §1: the 'do with it' actions live under ONE Save & share… menu, handlers intact", () => {
   // The five save/promote actions are built into one menu item list…
-  for (const key of ['key: "csv"', 'key: "evidence"', 'key: "pin"', 'key: "view"', 'key: "metric"']) {
+  for (const key of ['key: "csv"', 'key: "evidence"', 'key: "view"', 'key: "metric"']) {
     assert.match(chat, new RegExp(key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), `${key} in the Save & share menu`);
   }
   assert.match(chat, /Save &amp; share…/, "the pinned menu label");
@@ -33,10 +33,9 @@ test("§51 §1: the five 'do with it' actions live under ONE Save & share… men
   // stays sqlHasAggregate-gated.
   assert.match(chat, /if \(onSave\)\s*\n?\s*shareItems\.push/, "Save-as-CSV still onSave-gated");
   assert.match(chat, /if \(onEvidencePack\)/, "Evidence pack still onEvidencePack-gated");
-  assert.match(chat, /if \(onPin\)/, "Pin still onPin-gated");
   assert.match(chat, /if \(onDefineMetric && sqlHasAggregate\(meta\.sql\)\)/, "Define-metric still aggregate-gated");
   // The RefineChips call site still wires every handler — nothing was dropped.
-  for (const prop of ["onSave={", "onEvidencePack={", "onPin={", "onSaveView={", "onDefineMetric={"]) {
+  for (const prop of ["onSave={", "onEvidencePack={", "onSaveView={", "onDefineMetric={"]) {
     assert.ok(chat.includes(prop), `RefineChips still receives ${prop}`);
   }
 });

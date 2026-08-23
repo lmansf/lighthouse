@@ -50,11 +50,11 @@ import {
   shorthands,
   tokens,
 } from "@fluentui/react-components";
-import { IconAdd, IconArrowDown, IconAttach, IconChat, IconCheck, IconChevronDown, IconClose, IconCode, IconCopy, IconDoc, IconDocAdd, IconEdit, IconError, IconFilter, IconHistory, IconLock, IconMore, IconOpen, IconPin, IconPlay, IconRefresh, IconSave, IconSend, IconSettings, IconShield, IconSparkle, IconStop, IconTable, IconTag, IconThumbDown, IconThumbUp, IconTrash, IconUndo, IconWarning } from "@/shell/icons";
+import { IconAdd, IconArrowDown, IconAttach, IconChat, IconCheck, IconChevronDown, IconClose, IconCode, IconCopy, IconDoc, IconDocAdd, IconEdit, IconError, IconFilter, IconHistory, IconLock, IconMore, IconOpen, IconPlay, IconRefresh, IconSave, IconSend, IconSettings, IconShield, IconSparkle, IconStop, IconTable, IconTag, IconThumbDown, IconThumbUp, IconTrash, IconUndo, IconWarning } from "@/shell/icons";
 import dynamic from "next/dynamic";
 import { type Components } from "react-markdown";
 import type { DragEvent, ReactNode } from "react";
-import type { AnalyticsMeta, ChangedPin, ChatTurn, Pin, RagReference } from "@/contracts";
+import type { AnalyticsMeta, ChatTurn, RagReference } from "@/contracts";
 import { chatService, MODEL_PROVIDERS, ragService } from "@/contracts";
 import { useRagStore } from "@/stores/useRagStore";
 import { useAuthStore } from "@/stores/useAuthStore";
@@ -87,7 +87,6 @@ import { StatTile } from "@/features/chat/StatTile";
 import { SqlBlock } from "@/features/chat/SqlBlock";
 import { formatSql } from "@/lib/sqlFormat";
 import { safeMarkdownPrefix, splitMarkdownBlocks } from "@/lib/streamingMarkdown";
-import { PinMiniChart } from "@/features/chat/PinMiniChart";
 import { SaveViewDialog } from "@/features/views/SaveViewDialog";
 import { DefineMetricDialog } from "@/features/semantic/DefineMetricDialog";
 import { EgressShield } from "@/features/egress/EgressShield";
@@ -742,137 +741,6 @@ const useStyles = makeStyles({
     fontStyle: "normal",
   },
   skipNoteIcon: { flexShrink: 0, marginTop: "3px", color: tokens.colorNeutralForeground3 },
-  // --- Pinned questions: the changed-pins alert banner and the dialog. ---
-  pinBanner: {
-    display: "flex",
-    alignItems: "center",
-    flexWrap: "wrap",
-    gap: tokens.spacingHorizontalS,
-    padding: `${tokens.spacingVerticalS} ${tokens.spacingHorizontalM}`,
-    marginBottom: tokens.spacingVerticalS,
-    borderRadius: tokens.borderRadiusMedium,
-    backgroundColor: tokens.colorBrandBackground2,
-    color: tokens.colorNeutralForeground1,
-  },
-  // One changed pin: its re-ask button with the before→after mini-chart tucked
-  // beneath, so the numbers and the drill-down stay visually paired.
-  pinAlertItem: {
-    display: "inline-flex",
-    flexDirection: "column",
-    alignItems: "flex-start",
-    gap: tokens.spacingVerticalXXS,
-  },
-  pinDialogSurface: { maxWidth: "640px", width: "92vw" },
-  pinList: {
-    display: "flex",
-    flexDirection: "column",
-    gap: tokens.spacingVerticalS,
-    maxHeight: "48vh",
-    overflowY: "auto",
-  },
-  pinRow: {
-    display: "flex",
-    alignItems: "flex-start",
-    gap: tokens.spacingHorizontalS,
-    padding: `${tokens.spacingVerticalS} ${tokens.spacingHorizontalM}`,
-    borderRadius: tokens.borderRadiusMedium,
-    backgroundColor: tokens.colorNeutralBackground3,
-  },
-  pinRowMain: { display: "flex", flexDirection: "column", gap: "2px", flexGrow: 1, minWidth: 0 },
-  pinStale: { color: tokens.colorPaletteRedForeground1 },
-  pinMeta: { color: tokens.colorNeutralForeground3 },
-  // Inline failure banner for a turn that couldn't get an answer — mirrors the
-  // addNotice pattern, in danger colors, with Retry + settings escape hatches.
-  errorNotice: {
-    display: "flex",
-    alignItems: "center",
-    flexWrap: "wrap",
-    gap: tokens.spacingHorizontalS,
-    padding: `${tokens.spacingVerticalS} ${tokens.spacingHorizontalM}`,
-    borderRadius: tokens.borderRadiusMedium,
-    backgroundColor: tokens.colorStatusDangerBackground1,
-    color: tokens.colorStatusDangerForeground1,
-  },
-  // Quiet one-liners: the "(stopped)" note and the zero-references honesty note.
-  quietNote: { color: tokens.colorNeutralForeground3 },
-  // Engine-emitted provenance stamp under an answer ("Answered on this device /
-  // via <vendor>") — a small hairline badge whose dot carries the origin:
-  // amber = on-device (the AA-gated mark amber), neutral = a named vendor.
-  // The stamp text itself is engine-emitted and byte-unchanged.
-  provenanceStamp: {
-    display: "inline-flex",
-    alignItems: "center",
-    alignSelf: "flex-start",
-    gap: tokens.spacingHorizontalXS,
-    marginTop: tokens.spacingVerticalXS,
-    ...shorthands.padding("2px", tokens.spacingHorizontalS),
-    ...shorthands.border("1px", "solid", tokens.colorNeutralStroke2),
-    borderRadius: tokens.borderRadiusCircular,
-    color: tokens.colorNeutralForeground3,
-    fontVariantNumeric: "tabular-nums",
-  },
-  provenanceDot: {
-    width: "6px",
-    height: "6px",
-    borderRadius: "50%",
-    flexShrink: 0,
-  },
-  provenanceDotDevice: { backgroundColor: tokens.colorBrandForeground1 },
-  provenanceDotVendor: { backgroundColor: tokens.colorNeutralForeground3 },
-  // Answer-cache line under a replayed answer ("From cache · same data as
-  // HH:MM · Re-run") — same quiet register as the provenance stamp; rendered
-  // only from the final chunk's engine-emitted `meta.cachedAt`.
-  cacheLine: {
-    display: "block",
-    marginTop: tokens.spacingVerticalXXS,
-    color: tokens.colorNeutralForeground3,
-    fontVariantNumeric: "tabular-nums",
-  },
-  // G4: the truncation disclosure bound to a sortable result table's <caption>,
-  // so it stays with the table through sorting.
-  tableCaption: {
-    captionSide: "bottom",
-    textAlign: "left",
-    color: tokens.colorNeutralForeground3,
-    fontSize: tokens.fontSizeBase200,
-    fontStyle: "italic",
-    paddingTop: tokens.spacingVerticalXXS,
-    fontVariantNumeric: "tabular-nums",
-  },
-  // G2 draft-then-verify: the muted "verifying…" badge shown under the
-  // provisional extractive draft while the private model composes the answer.
-  draftBadge: {
-    color: tokens.colorNeutralForeground3,
-    fontStyle: "italic",
-    display: "block",
-    marginTop: tokens.spacingVerticalXS,
-  },
-  refCard: {
-    display: "flex",
-    alignItems: "center",
-    gap: tokens.spacingHorizontalM,
-    ...shorthands.padding(tokens.spacingVerticalS, tokens.spacingHorizontalM),
-  },
-  refCardInteractive: {
-    cursor: "pointer",
-    ":hover": { backgroundColor: tokens.colorNeutralBackground2Hover },
-    ":hover .open-affordance": { opacity: 1 },
-    // Keyboard path: reveal the secondary open-in-app button on focus too.
-    ":focus-within .open-affordance": { opacity: 1 },
-  },
-  // Brief highlight when a citation chip jumps to this card (class is toggled
-  // for ~1.2s): a brand-tinted background that fades back out.
-  refCardFlash: {
-    animationName: {
-      from: { backgroundColor: tokens.colorBrandBackground2 },
-      to: { backgroundColor: "transparent" },
-    },
-    animationDuration: "1.2s",
-    animationTimingFunction: "ease-out",
-    "@media (prefers-reduced-motion: reduce)": { animationName: "none" },
-  },
-  openIcon: { opacity: 0.55, transition: "opacity 120ms ease", color: tokens.colorNeutralForeground3, "@media (hover: none)": { opacity: 1 } },
-  refMeta: { display: "flex", flexDirection: "column", flex: 1, minWidth: 0 },
   // §3: related files as compact GitHub-tag-style chips on a wrapping row.
   // fp3 §2: the row WRAPS (never shrinks its chips) so touch targets stay full
   // size when they overflow; a coarse pointer gets a roomier gap.
@@ -1908,8 +1776,6 @@ function RefineChips({
   savePending,
   onEvidencePack,
   packPending,
-  onPin,
-  pinPending,
   onSaveView,
   onDefineMetric,
 }: {
@@ -1936,9 +1802,6 @@ function RefineChips({
    *  narrative, table, chart, SQL, provenance) — desktop-gated like onSave. */
   onEvidencePack?: (meta: AnalyticsMeta) => void;
   packPending?: boolean;
-  /** Pin this answer so vault changes recheck it (desktop rechecks live). */
-  onPin?: (meta: AnalyticsMeta) => void;
-  pinPending?: boolean;
   /** Save this answer's SQL as a named view (openspec: add-shaped-views) —
    *  same visibility as Edit SQL: any answer whose meta carries the SQL. */
   onSaveView?: (meta: AnalyticsMeta) => void;
@@ -1990,14 +1853,6 @@ function RefineChips({
       icon: <IconDoc />,
       disabled: disabled || packPending,
       onClick: () => onEvidencePack(meta),
-    });
-  if (onPin)
-    shareItems.push({
-      key: "pin",
-      label: pinPending ? "Pinning…" : "Pin",
-      icon: <IconPin />,
-      disabled: disabled || pinPending,
-      onClick: () => onPin(meta),
     });
   if (onSaveView)
     shareItems.push({
@@ -2874,18 +2729,6 @@ export function ChatPanel() {
   }, []);
   // In-flight guard: a double-click must not write "Chat.md" AND "Chat (1).md".
   const [exportBusy, setExportBusy] = useState(false);
-  // --- Pinned questions: per-turn pin outcome, the changed-pins alerts (from
-  //     the shell's watcher-driven recheck pass), and the pins dialog. ---
-  const [pinNotes, setPinNotes] = useState<
-    Record<
-      string,
-      { pending?: boolean; ok?: boolean; error?: string; pinId?: string }
-    >
-  >({});
-  const [pinAlerts, setPinAlerts] = useState<ChangedPin[]>([]);
-  const [pinsOpen, setPinsOpen] = useState(false);
-  const [pinList, setPinList] = useState<Pin[]>([]);
-  const [pinsBusy, setPinsBusy] = useState(false);
   // --- Save as view (openspec: add-shaped-views §3.1): the dialog's target
   //     (the answer's meta + the question that produced it) and the per-turn
   //     saved confirmation — the savedNotes idiom. ---
@@ -2913,7 +2756,6 @@ export function ChatPanel() {
   useEffect(() => {
     setSavedNotes({});
     setPackNotes({});
-    setPinNotes({});
     setRatings({});
     setInlineCharts({});
     // Save-as-view state is per-conversation too (like the "Chart it" inline
@@ -3869,62 +3711,9 @@ export function ChatPanel() {
     setDefineMetric({ msgId: asstId, meta, question });
   }
 
-  /**
-   * Pin an analytics answer: the engine watches its files and flags this
-   * question when the computed result changes. Question = the user turn that
-   * produced the answer.
-   */
-  async function pinAnswer(asstId: string, meta: AnalyticsMeta) {
-    const msgs = useChatStore.getState().messages;
-    const idx = msgs.findIndex((x) => x.id === asstId);
-    const prev = idx > 0 ? msgs[idx - 1] : undefined;
-    const question =
-      (prev?.role === "user" ? prev.content : "").trim().replace(/\s+/g, " ").slice(0, 200) ||
-      "Pinned question";
-    // Same per-conversation guard as saveResultCsv: ids restart per chat, so
-    // don't paint a "Pinned" note onto a same-id answer in a chat the user
-    // switched to mid-request.
-    const convo = useChatStore.getState().currentId;
-    const stillHere = () => useChatStore.getState().currentId === convo;
-    setPinNotes((s) => ({ ...s, [asstId]: { pending: true } }));
-    try {
-      // The pin adopts the current investigation (openspec: add-investigations
-      // §3) — its membership; the global context leaves it uncategorized.
-      const res = await ragService.pinAsk(
-        question,
-        meta.sql,
-        meta.fileIds,
-        useChatStore.getState().currentInvestigationId ?? undefined,
-      );
-      if (!stillHere()) return;
-      if (res.error || !res.pin) {
-        setPinNotes((s) => ({ ...s, [asstId]: { error: res.error ?? "could not pin" } }));
-      } else {
-        setPinNotes((s) => ({ ...s, [asstId]: { ok: true, pinId: res.pin?.id } }));
-      }
-    } catch (err) {
-      if (!stillHere()) return;
-      setPinNotes((s) => ({
-        ...s,
-        [asstId]: { error: err instanceof Error ? err.message : "could not pin" },
-      }));
-    }
-  }
 
   // Changed-pin alerts pushed by the desktop shell after its watcher-driven
   // recheck pass (openspec: add-pinned-questions). Newest wins per pin id.
-  useEffect(() => {
-    const onPinsChanged = (e: Event) => {
-      const changed = (e as CustomEvent<{ changed?: ChangedPin[] }>).detail?.changed;
-      if (!Array.isArray(changed) || changed.length === 0) return;
-      setPinAlerts((prev) => {
-        const ids = new Set(changed.map((c) => c.id));
-        return [...changed, ...prev.filter((p) => !ids.has(p.id))].slice(0, 5);
-      });
-    };
-    window.addEventListener("lighthouse:pins-changed", onPinsChanged);
-    return () => window.removeEventListener("lighthouse:pins-changed", onPinsChanged);
-  }, []);
 
   // The pins dialog opens from the settings gear (or anywhere) via this event.
   useEffect(() => {
@@ -3934,21 +3723,6 @@ export function ChatPanel() {
   }, []);
 
   // Load the pin list whenever the dialog opens.
-  useEffect(() => {
-    if (!pinsOpen) return;
-    let cancelled = false;
-    ragService
-      .listPins()
-      .then((pins) => {
-        if (!cancelled) setPinList(pins);
-      })
-      .catch(() => {
-        if (!cancelled) setPinList([]);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [pinsOpen]);
 
   // …and once at mount, so pinned questions feed the ask type-ahead before the
   // dialog is ever opened. Same local engine list the dialog reads — on
@@ -3968,37 +3742,8 @@ export function ChatPanel() {
     };
   }, []);
 
-  /** Manual re-check from the dialog; changed pins also feed the banner. */
-  async function recheckPinsNow() {
-    if (pinsBusy) return;
-    setPinsBusy(true);
-    try {
-      const { changed, pins } = await ragService.recheckPins();
-      setPinList(pins);
-      if (changed.length > 0) {
-        setPinAlerts((prev) => {
-          const ids = new Set(changed.map((c) => c.id));
-          return [...changed, ...prev.filter((p) => !ids.has(p.id))].slice(0, 5);
-        });
-      }
-    } catch {
-      /* the list simply stays as-is */
-    } finally {
-      setPinsBusy(false);
-    }
-  }
 
 
-  /** Remove a pin from the dialog. */
-  async function removePin(id: string) {
-    try {
-      await ragService.unpinAsk(id);
-    } catch {
-      /* idempotent — refresh below tells the truth */
-    }
-    setPinList((pins) => pins.filter((p) => p.id !== id));
-    setPinAlerts((alerts) => alerts.filter((a) => a.id !== id));
-  }
 
 
 
@@ -4287,10 +4032,9 @@ export function ChatPanel() {
     }
     return items;
   }, [conversations, currentId, messages]);
-  const pinQuestions = useMemo(() => pinList.map((p) => p.question), [pinList]);
   const askSuggests = useMemo(
-    () => askSuggestions(question, { history: askHistoryItems, pins: pinQuestions }),
-    [question, askHistoryItems, pinQuestions],
+    () => askSuggestions(question, { history: askHistoryItems, pins: [] }),
+    [question, askHistoryItems],
   );
   // @-mention matches (openspec §2): rank the vault with the SAME matcher
   // quick-open uses, then keep only attachable FILES not already attached. Path
@@ -4362,10 +4106,10 @@ export function ChatPanel() {
     () =>
       ghostCompletion(ghostDraft, {
         history: askHistoryItems,
-        pins: pinQuestions,
+        pins: [],
         extras: ghostExtras,
       }),
-    [ghostDraft, askHistoryItems, pinQuestions, ghostExtras],
+    [ghostDraft, askHistoryItems, ghostExtras],
   );
   // Visible only when nothing else owns the slot: the @-mention picker and the
   // type-ahead popover win (their key claims would fight the arrow), IME
@@ -4912,11 +4656,7 @@ export function ChatPanel() {
                 onMouseDown={(e) => e.preventDefault()}
                 onClick={() => acceptSuggestion(s.text)}
               >
-                {s.source === "pin" ? (
-                  <IconPin fontSize={14} className={styles.askSuggestIcon} />
-                ) : (
-                  <IconHistory fontSize={14} className={styles.askSuggestIcon} />
-                )}
+                <IconHistory fontSize={14} className={styles.askSuggestIcon} />
                 <span className={styles.askSuggestText}>{s.text}</span>
               </div>
             ))}
@@ -5033,132 +4773,6 @@ export function ChatPanel() {
   // Changed-pins alert: one dismissible banner; each entry re-asks on click
   // (the fresh narrated answer IS the drill-down). Rendered in both the hero
   // and the conversation views — alerts land whenever the vault changes.
-  const pinAlertBanner =
-    pinAlerts.length > 0 ? (
-      <div className={styles.pinBanner} role="status">
-        <IconPin fontSize={16} />
-        <Text size={200} weight="semibold">
-          {pinAlerts.length === 1 ? "A pinned answer changed:" : "Pinned answers changed:"}
-        </Text>
-        {pinAlerts.map((a) => {
-          // When the engine's before/after summaries are cleanly numeric, embed
-          // a tiny before→after chart from those verified numbers; otherwise the
-          // tooltip carries the change as text (pinChartData fails closed).
-          const mini = pinChartData(a.before, a.after);
-          return (
-            <div key={a.id} className={styles.pinAlertItem}>
-              <Tooltip
-                content={a.before ? `was: ${a.before} → now: ${a.after}` : `now: ${a.after}`}
-                relationship="description"
-              >
-                <Button
-                  size="small"
-                  appearance="secondary"
-                  shape="circular"
-                  disabled={streaming}
-                  onClick={() => askPinned(a.question, a.id)}
-                >
-                  {a.question.length > 48 ? `${a.question.slice(0, 47)}…` : a.question}
-                </Button>
-              </Tooltip>
-              {mini && <PinMiniChart data={mini} />}
-            </div>
-          );
-        })}
-        <span style={{ flex: 1 }} />
-        <Button
-          size="small"
-          appearance="subtle"
-          icon={<IconClose />}
-          aria-label="Dismiss pin alerts"
-          onClick={() => setPinAlerts([])}
-        />
-      </div>
-    ) : null;
-
-  // Pins dialog (opened from the settings gear or a pin confirmation): list,
-  // manual re-check, remove; stale pins show the engine's reason.
-  const pinsDialog = (
-    <Dialog
-      open={pinsOpen}
-      onOpenChange={(_, data) => {
-        if (!data.open) setPinsOpen(false);
-      }}
-    >
-      <LhDialogSurface className={styles.pinDialogSurface}>
-        <DialogBody>
-          <DialogTitle>Pinned questions</DialogTitle>
-          <DialogContent className={styles.sqlDialogContent}>
-            <Text size={200} className={styles.quietNote}>
-              Lighthouse re-runs each pin&apos;s saved query when the files it reads change —
-              no AI involved — and flags the ones whose numbers moved.
-            </Text>
-            {pinList.length === 0 ? (
-              <Text size={300}>
-                No pins yet. Ask a data question, then choose <b>Pin</b> under the answer.
-              </Text>
-            ) : (
-              <div className={styles.pinList}>
-                {pinList.map((p) => (
-                  <div key={p.id} className={styles.pinRow}>
-                    <IconPin fontSize={16} />
-                    <div className={styles.pinRowMain}>
-                      <Text size={300} weight="semibold">
-                        {p.question}
-                      </Text>
-                      {p.staleReason ? (
-                        <Text size={200} className={styles.pinStale}>
-                          stale: {p.staleReason}
-                        </Text>
-                      ) : (
-                        <Text size={200} className={styles.pinMeta}>
-                          {p.lastSummary ?? "not checked yet"}
-                        </Text>
-                      )}
-                      <Text size={200} className={styles.pinMeta}>
-                        {p.fileIds.length} file{p.fileIds.length === 1 ? "" : "s"} watched
-                        {p.lastRunMs
-                          ? ` · checked ${formatRelativeTime(p.lastRunMs)}`
-                          : ""}
-                      </Text>
-                    </div>
-                    <Button
-                      size="small"
-                      appearance="secondary"
-                      disabled={streaming}
-                      onClick={() => askPinned(p.question)}
-                    >
-                      Ask again
-                    </Button>
-                    <Button
-                      size="small"
-                      appearance="subtle"
-                      icon={<IconTrash />}
-                      aria-label={`Remove pin: ${p.question}`}
-                      disabled={pinsBusy}
-                      onClick={() => void removePin(p.id)}
-                    />
-                  </div>
-                ))}
-              </div>
-            )}
-          </DialogContent>
-          <DialogActions>
-            <Button appearance="secondary" onClick={() => setPinsOpen(false)}>
-              Close
-            </Button>
-            <Button
-              appearance="primary"
-              disabled={pinsBusy || pinList.length === 0}
-              onClick={() => void recheckPinsNow()}
-            >
-              {pinsBusy ? "Checking…" : "Re-check now"}
-            </Button>
-          </DialogActions>
-        </DialogBody>
-      </LhDialogSurface>
-    </Dialog>
-  );
 
   // Before the first question, center the prompt in the rail (Google-style).
   if (messages.length === 0 && !streaming) {
@@ -5168,8 +4782,6 @@ export function ChatPanel() {
         className={mergeClasses(styles.panel, dropping ? styles.panelDropping : undefined)}
         {...dropHandlers}
       >
-        {pinsDialog}
-        {pinAlertBanner}
         <div className={styles.hero}>
           <span className={styles.beacon} />
           <Title3>
@@ -5273,11 +4885,9 @@ export function ChatPanel() {
       className={mergeClasses(styles.panel, dropping ? styles.panelDropping : undefined)}
       {...dropHandlers}
     >
-      {pinsDialog}
       {historySheet}
       {investigationsSheet}
       <div className={styles.conversation}>
-        {pinAlertBanner}
         <div className={styles.header}>
           {/* Compact context header (openspec: add-investigations §4.2): inside
               an investigation the Title3 is its name with the scope size as a
@@ -5645,33 +5255,9 @@ export function ChatPanel() {
                               desktop ? (meta) => void saveEvidencePack(m.id, meta) : undefined
                             }
                             packPending={packNotes[m.id]?.pending}
-                            onPin={(meta) => void pinAnswer(m.id, meta)}
-                            pinPending={pinNotes[m.id]?.pending}
                             onSaveView={(meta) => openSaveView(m.id, meta)}
                             onDefineMetric={(meta) => openDefineMetric(m.id, meta)}
                           />
-                          {pinNotes[m.id]?.ok && (
-                            <div className={styles.savedNote}>
-                              <IconPin fontSize={14} />
-                              <Text size={200}>
-                                Pinned — Lighthouse will flag this question when the underlying
-                                files change.
-                              </Text>
-                              <Button
-                                size="small"
-                                appearance="subtle"
-                                onClick={() => setPinsOpen(true)}
-                              >
-                                View pins
-                              </Button>
-                            </div>
-                          )}
-                          {pinNotes[m.id]?.error && (
-                            <div className={styles.savedNote}>
-                              <IconError fontSize={14} />
-                              <Text size={200}>Couldn&apos;t pin — {pinNotes[m.id].error}</Text>
-                            </div>
-                          )}
                           {savedNotes[m.id]?.name && (
                             <div className={styles.savedNote}>
                               <IconCheck fontSize={14} />

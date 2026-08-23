@@ -18,7 +18,7 @@ const read = (p) => readFileSync(path.join(ROOT, p), "utf8");
 
 const chat = read("src/features/chat/ChatPanel.tsx");
 
-test("the ghost consumes the tested ranker with history + pins + engine extras", () => {
+test("the ghost consumes the tested ranker with history + engine extras", () => {
   assert.match(
     chat,
     /import \{ askSuggestions, ghostCompletion, lastAsk, type AskHistoryItem \} from "@\/lib\/askTypeahead";/,
@@ -26,7 +26,7 @@ test("the ghost consumes the tested ranker with history + pins + engine extras",
   );
   assert.match(
     chat,
-    /ghostCompletion\(ghostDraft, \{\s*history: askHistoryItems,\s*pins: pinQuestions,\s*extras: ghostExtras,\s*\}\)/,
+    /ghostCompletion\(ghostDraft, \{\s*history: askHistoryItems,\s*pins: \[\],\s*extras: ghostExtras,\s*\}\)/,
     "sources = past asks + pinned questions + extras",
   );
   // Extras are the §22.3 validated engine asks — ALL of them, ghost-only.

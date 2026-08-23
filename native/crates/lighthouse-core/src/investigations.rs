@@ -160,11 +160,9 @@ pub fn list() -> Vec<Investigation> {
 /// (tampered store) derives NO notes rather than scanning a wrong prefix.
 /// PARITY: investigations.ts::investigationView.
 pub fn view(record: Investigation) -> InvestigationView {
-    let pin_refs = crate::pins::list()
-        .into_iter()
-        .filter(|p| p.investigation_id.as_deref() == Some(record.id.as_str()))
-        .map(|p| p.id)
-        .collect();
+    // Pins retired with the 0.15.0 refocus, so nothing can belong by pin any
+    // more; the field stays on the view until investigations follow.
+    let pin_refs = Vec::new();
     let note_refs = match notes_folder_segment(&record) {
         Some(folder) => {
             let prefix = format!("Lighthouse Notes/{folder}/");

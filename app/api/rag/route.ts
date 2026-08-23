@@ -31,7 +31,6 @@ import {
   writeConversationNote,
   purgeConversationNotes,
 } from "@/server/vault";
-import { addPin, listPins, removePin } from "@/server/pins";
 import {
   addInvestigationConversationRef,
   createInvestigation,
@@ -43,7 +42,6 @@ import {
   renameInvestigation,
   setInvestigationArchived,
 } from "@/server/investigations";
-import {
 import {
   createView,
   deleteView,
@@ -724,50 +722,6 @@ export async function POST(req: Request) {
         reason:
           "defining a metric from an answer runs in the Rust engine — this dev server can't parse SQL",
       });
-
-    // --- Pinned questions (openspec: add-pinned-questions). PARITY: rechecks
-    //     re-run SQL through DataFusion (Rust engine only) — this dev
-    //     server does CRUD and reports "no changes" on recheck, so pinned
-    //     summaries simply stay as of pin time.
-    case "pinAsk": {
-      const question = typeof body.question === "string" ? body.question : "";
-      const sql = typeof body.sql === "string" ? body.sql : "";
-      const fileIds = Array.isArray(body.fileIds)
-        ? body.fileIds.filter((x: unknown): x is string => typeof x === "string")
-        : [];
-      // The current investigation, when one is (openspec:
-      // add-investigations) — the pin carries it as its membership.
-      const investigationId =
-        typeof body.investigationId === "string" ? body.investigationId : undefined;
-      try {
-        return NextResponse.json({ pin: addPin(question, sql, fileIds, investigationId) });
-      } catch (err) {
-        return NextResponse.json({
-          error: err instanceof Error ? err.message : "could not pin",
-        });
-      }
-    }
-
-    case "unpinAsk":
-      if (typeof body.id !== "string" || !body.id) {
-        return NextResponse.json({ error: "id required" }, { status: 400 });
-      }
-      removePin(body.id);
-      return NextResponse.json({ ok: true });
-
-    case "listPins":
-      // Optional investigation filter (openspec: add-investigations); absent
-      // (or blank) keeps the original "all pins" behavior.
-      return NextResponse.json({
-        pins: listPins(
-          typeof body.investigationId === "string" && body.investigationId
-            ? body.investigationId
-            : undefined,
-        ),
-      });
-
-    case "recheckPins":
-      return NextResponse.json({ changed: [], pins: listPins() });
 
     case "exportChat": {
       // Write a client-composed artifact into the vault (openspec:

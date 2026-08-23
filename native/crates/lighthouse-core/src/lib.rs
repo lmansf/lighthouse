@@ -29,7 +29,6 @@ pub mod meta;
 pub mod numguard;
 pub mod ocr;
 pub mod pdf_tables;
-pub mod pins;
 pub mod profile;
 pub mod provider_auth;
 pub mod quotes;

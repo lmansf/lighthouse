@@ -24,7 +24,6 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { stateDir, writeJson } from "./config";
-import { listPins } from "./pins";
 import { historyAllowed } from "./policy";
 import { localModelConfig } from "./profile";
 import { listNodes } from "./vault";
@@ -143,9 +142,8 @@ export function listInvestigations(): Investigation[] {
  * investigations.rs::view.
  */
 export function investigationView(record: Investigation): InvestigationView {
-  const pinRefs = listPins()
-    .filter((p) => p.investigationId === record.id)
-    .map((p) => p.id);
+  // Pins retired with the 0.15.0 refocus; nothing belongs by pin any more.
+  const pinRefs: string[] = [];
   const folder = notesFolderSegment(record);
   let noteRefs: string[] = [];
   if (folder) {

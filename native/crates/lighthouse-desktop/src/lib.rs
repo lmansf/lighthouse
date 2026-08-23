@@ -2,7 +2,7 @@
 //! restructured for add-mobile-apps §2.
 //!
 //! This file is the PORTABLE spine: the engine bootstrap (`bootstrap_env`),
-//! the settings file, the IPC command registration, the pins
+//! the settings file, the IPC command registration
 //! scheduler, the watcher + index warm-up, the smoke/diag drivers, and the
 //! UI transport (bundled-asset IPC or the embedded loopback server). The
 //! desktop bin (`main.rs`) and the mobile targets (`#[tauri::mobile_entry_point]`)
@@ -497,72 +497,6 @@ pub fn run() {
                 shell_log(app.handle(), &format!("private-model probe: {verdict}"));
                 // §35 §1: Dynamic Type changes re-resolve without an app kill.
                 commands::start_content_size_observer();
-            }
-
-            // --- Pinned-question rechecks (openspec: add-pinned-questions):
-            // sample the watcher generation every 30 s; when it advanced,
-            // wait for a full 60 s window with no further changes (bulk file
-            // operations collapse into one pass), then re-run every pin's
-            // stored SQL — deterministic, guarded, no model — and emit ONE
-            // `pins-changed` event with the changed set. Emission failures
-            // go to shell.log and the next generation change retries.
-            {
-                let handle = handle.clone();
-                tauri::async_runtime::spawn(async move {
-                    let mut last_seen = lighthouse_core::watch::generation();
-                    // Alerts that couldn't be delivered yet (emit failure) —
-                    // carried into the next pass so they're never lost: the
-                    // digests persist BEFORE the emit, so without this buffer
-                    // a failed emit would silently swallow the change.
-                    let mut pending: Vec<lighthouse_core::pins::ChangedPin> = Vec::new();
-                    loop {
-                        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-                        let g = lighthouse_core::watch::generation();
-                        if g == last_seen {
-                            continue;
-                        }
-                        // Quiet debounce: keep waiting while changes keep landing.
-                        let mut quiet = g;
-                        loop {
-                            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-                            let now = lighthouse_core::watch::generation();
-                            if now == quiet {
-                                break;
-                            }
-                            quiet = now;
-                        }
-                        last_seen = quiet;
-                        if pending.is_empty() && lighthouse_core::pins::list().is_empty() {
-                            continue;
-                        }
-                        let changed = lighthouse_core::pins::recheck_all().await;
-                        // Newest state wins per pin id; undelivered older
-                        // alerts for other pins ride along.
-                        let fresh: std::collections::HashSet<String> =
-                            changed.iter().map(|c| c.id.clone()).collect();
-                        pending.retain(|p| !fresh.contains(&p.id));
-                        pending.extend(changed);
-                        // Fire the change toast when there's something fresh — but
-                        // do NOT early-continue on an empty `pending`, or a note
-                        // that has come due this pass (from changes accumulated on
-                        // an EARLIER pass) would be skipped whenever the current
-                        // pass produced no fresh pin change — e.g. the watcher
-                        // generation bumped on an unrelated vault edit.
-                        if !pending.is_empty() {
-                            match handle
-                                .emit("pins-changed", serde_json::json!({ "changed": pending }))
-                            {
-                                Ok(()) => pending.clear(),
-                                Err(e) => {
-                                    shell_log(
-                                        &handle,
-                                        &format!("pins: emit failed (will retry next pass): {e}"),
-                                    );
-                                }
-                            }
-                        }
-                    }
-                });
             }
 
             // Phase 5 watcher: event-driven tree/index freshness + a pushed

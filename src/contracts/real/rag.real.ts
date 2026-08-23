@@ -5,7 +5,6 @@ import { ragTransport } from "./ragTransport";
 // contracts barrel is imported by engine-level suites without webpack aliases.
 import { rememberPlatform } from "../../shell/desktopBridge";
 import type {
-  ChangedPin,
   CurationRule,
   CurationRuleInput,
   DataSource,
@@ -15,7 +14,6 @@ import type {
   InsightsScan,
   Investigation,
   InvestigationCreateInput,
-  Pin,
   PolicySnapshot,
   EgressSnapshot,
   AuditSnapshot,
@@ -212,45 +210,9 @@ class RealRagService implements RagService {
     };
   }
 
-  async pinAsk(
-    question: string,
-    sql: string,
-    fileIds: string[],
-    investigationId?: string,
-  ): Promise<{ pin?: Pin; error?: string }> {
-    // Absent investigationId keeps the original wire shape byte-for-byte —
-    // a global-context pin stays uncategorized (openspec: add-investigations).
-    return (await post({
-      op: "pinAsk",
-      question,
-      sql,
-      fileIds,
-      ...(investigationId ? { investigationId } : {}),
-    })) as {
-      pin?: Pin;
-      error?: string;
-    };
-  }
 
-  async unpinAsk(id: string): Promise<void> {
-    await post({ op: "unpinAsk", id });
-  }
 
-  async listPins(investigationId?: string): Promise<Pin[]> {
-    const res = await post({
-      op: "listPins",
-      ...(investigationId ? { investigationId } : {}),
-    });
-    return Array.isArray(res.pins) ? (res.pins as Pin[]) : [];
-  }
 
-  async recheckPins(): Promise<{ changed: ChangedPin[]; pins: Pin[] }> {
-    const res = await post({ op: "recheckPins" });
-    return {
-      changed: Array.isArray(res.changed) ? (res.changed as ChangedPin[]) : [],
-      pins: Array.isArray(res.pins) ? (res.pins as Pin[]) : [],
-    };
-  }
 
 
 

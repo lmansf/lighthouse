@@ -89,7 +89,6 @@ fn round_trips_byte_stable() {
     // The wire view enriches with DERIVED memberships — empty until §3/§4.
     let views = investigations::listing();
     assert_eq!(views.len(), 1);
-    assert!(views[0].pin_refs.is_empty() && views[0].note_refs.is_empty());
 }
 
 #[test]
@@ -374,75 +373,6 @@ fn parity_scoped_ask_retrieval_candidate_ids() {
 
 // --- §3 belonging: pins, notes, recall ----------------------------------------
 
-/// Pins belong via `Pin.investigationId` — the single source of truth the
-/// view derives `pinRefs` from. Old pins (written before the field existed)
-/// load unchanged, stay uncategorized, and keep round-tripping WITHOUT the
-/// field; the list op's filter narrows to one investigation without touching
-/// the "all" behavior. Mirrored by test/investigations.test.mjs (PARITY).
-#[test]
-fn pins_belong_and_the_view_derives_pin_refs() {
-    let vault_dir = tempfile::tempdir().unwrap();
-    let _guard = common::lock_env(vault_dir.path());
-    let state = vault_dir.path().join(".rag-vault");
-    std::fs::create_dir_all(&state).unwrap();
-
-    // A store written BEFORE the field existed (no investigationId anywhere).
-    std::fs::write(
-        state.join("pins.json"),
-        r#"{"pins":[{"id":"pin-legacy000001","question":"legacy pin","sql":"SELECT 1","fileIds":["a.csv"],"createdMs":7}]}"#,
-    )
-    .unwrap();
-    let legacy = lighthouse_core::pins::list();
-    assert_eq!(legacy.len(), 1, "old stores still load");
-    assert_eq!(legacy[0].investigation_id, None, "…and stay uncategorized");
-
-    let inv = investigations::create("Q3 audit", &[], ProviderPolicy::Default).unwrap();
-
-    // One pin inside the investigation, one global (explicit None), plus a
-    // blank id that must normalize to uncategorized.
-    let member =
-        lighthouse_core::pins::add("member?", "SELECT 2", &ids(&["a.csv"]), Some(&inv.id))
-            .expect("adds");
-    assert_eq!(member.investigation_id.as_deref(), Some(inv.id.as_str()));
-    let global = lighthouse_core::pins::add("global?", "SELECT 3", &[], None).expect("adds");
-    assert_eq!(global.investigation_id, None);
-    let blank = lighthouse_core::pins::add("blank?", "SELECT 4", &[], Some("  ")).expect("adds");
-    assert_eq!(blank.investigation_id, None, "blank id = uncategorized");
-
-    // Round trip: re-read from disk, fields intact; the raw store carries
-    // investigationId ONLY on the member pin (absent = omitted, so legacy
-    // pins keep round-tripping byte-compatibly).
-    let listed = lighthouse_core::pins::list();
-    assert_eq!(listed.len(), 4);
-    assert_eq!(
-        listed.iter().find(|p| p.id == member.id).unwrap().investigation_id.as_deref(),
-        Some(inv.id.as_str())
-    );
-    assert_eq!(listed.iter().find(|p| p.id == "pin-legacy000001").unwrap().investigation_id, None);
-    let raw = std::fs::read_to_string(state.join("pins.json")).unwrap();
-    assert_eq!(raw.matches("\"investigationId\"").count(), 1, "{raw}");
-
-    // The list filter narrows to the investigation; None keeps "all".
-    assert_eq!(lighthouse_core::pins::list_for(None).len(), 4);
-    let filtered = lighthouse_core::pins::list_for(Some(&inv.id));
-    assert_eq!(filtered.len(), 1);
-    assert_eq!(filtered[0].id, member.id);
-    assert!(lighthouse_core::pins::list_for(Some("inv-nope")).is_empty());
-
-    // The view derives pinRefs from the store — the member only.
-    let views = investigations::listing();
-    assert_eq!(views.len(), 1);
-    assert_eq!(views[0].pin_refs, vec![member.id.clone()]);
-
-    // Re-pinning the same SQL from the GLOBAL context replaces the pin and
-    // drops its membership (replace semantics, like every other field).
-    let repinned = lighthouse_core::pins::add("member?", "SELECT 2", &ids(&["a.csv"]), None)
-        .expect("re-pin");
-    assert_eq!(repinned.id, member.id, "same SQL ⇒ same pin id");
-    assert_eq!(repinned.investigation_id, None);
-    assert!(investigations::listing()[0].pin_refs.is_empty(), "membership followed the re-pin");
-}
-
 /// Notes belong by location: `notes_subdir` resolves `Lighthouse
 /// Notes/<stored folderName>` for a KNOWN investigation only (unknown id and
 /// tampered stores reject — the traversal attempt never becomes a write
@@ -570,9 +500,6 @@ fn fork_copies_structure_only_without_touching_the_parents_members() {
         investigations::add_conversation_ref(&parent.id, "conv-1", true).unwrap();
         investigations::add_conversation_ref(&parent.id, "conv-2", true).unwrap();
     });
-    let parent_pin =
-        lighthouse_core::pins::add("q?", "SELECT 1", &ids(&["cases/a.md"]), Some(&parent.id))
-            .unwrap();
     let parent_subdir = investigations::notes_subdir(&parent.id).unwrap();
     let (parent_note_id, _) =
         vault::write_artifact(&parent_subdir, "Parent note", "md", b"# parent body").unwrap();
@@ -595,18 +522,9 @@ fn fork_copies_structure_only_without_touching_the_parents_members() {
     // empty folder, no pins), while the parent keeps its pin and note.
     let views = investigations::listing();
     let fork_view = views.iter().find(|v| v.record.id == fork.id).unwrap();
-    assert!(fork_view.pin_refs.is_empty(), "fork has no pins: {:?}", fork_view.pin_refs);
     assert!(fork_view.note_refs.is_empty(), "fork has its own empty notes folder");
     let parent_view = views.iter().find(|v| v.record.id == parent.id).unwrap();
-    assert_eq!(parent_view.pin_refs, vec![parent_pin.id.clone()], "parent keeps its pin");
     assert_eq!(parent_view.note_refs, vec![parent_note_id], "parent keeps its note");
-
-    // The pin still belongs to the PARENT — never re-pointed at the fork.
-    let pin = lighthouse_core::pins::list()
-        .into_iter()
-        .find(|p| p.id == parent_pin.id)
-        .unwrap();
-    assert_eq!(pin.investigation_id.as_deref(), Some(parent.id.as_str()));
 
     // Both lines coexist (a branch adds a line; it moves nothing).
     assert_eq!(investigations::list().len(), 2);
@@ -659,13 +577,6 @@ fn export_writes_under_the_notes_folder_and_lists_membership_without_transcripts
     with_policy(None, || {
         investigations::add_conversation_ref(&inv.id, "conv-9", true).unwrap();
     });
-    let pin = lighthouse_core::pins::add(
-        "rows?",
-        "SELECT count(*)",
-        &ids(&["cases/x.md"]),
-        Some(&inv.id),
-    )
-    .unwrap();
     // A prior note in the folder — its BODY must never leak into the export.
     let subdir = investigations::notes_subdir(&inv.id).unwrap();
     let (prior_note_id, _) =
@@ -679,7 +590,6 @@ fn export_writes_under_the_notes_folder_and_lists_membership_without_transcripts
     assert!(md.contains("- Provider policy: default\n"));
     assert!(md.contains("\n## Scope\n\n- cases/x.md\n"), "{md}");
     assert!(md.contains("\n## Conversations\n\n- conv-9\n"), "{md}");
-    assert!(md.contains(&format!("\n## Pins\n\n- {}\n", pin.id)), "{md}");
     assert!(md.contains(&format!("- {prior_note_id}\n")), "note listed by id: {md}");
     assert!(!md.contains("SECRET TRANSCRIPT BODY"), "never embeds transcripts: {md}");
 

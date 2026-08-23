@@ -640,40 +640,7 @@ async fn investigation_belonging_over_the_wire() {
     .unwrap();
     assert_eq!(res["savedId"], "Lighthouse Results/pack.html");
 
-    // --- pinAsk + investigationId: the pin carries its membership; the
-    //     filtered list narrows to it while the plain list stays "all". -----
-    let res: Value = post(json!({
-        "op": "pinAsk", "question": "how many?", "sql": "SELECT 1", "fileIds": ["a.csv"],
-        "investigationId": inv_id,
-    }))
-    .await
-    .unwrap()
-    .json()
-    .await
-    .unwrap();
-    let pin_id = res["pin"]["id"].as_str().unwrap().to_string();
-    assert_eq!(res["pin"]["investigationId"], inv_id.as_str());
-    let _: Value = post(json!({
-        "op": "pinAsk", "question": "global?", "sql": "SELECT 2", "fileIds": [],
-    }))
-    .await
-    .unwrap()
-    .json()
-    .await
-    .unwrap();
-    let all: Value = post(json!({ "op": "listPins" })).await.unwrap().json().await.unwrap();
-    assert_eq!(all["pins"].as_array().unwrap().len(), 2, "no filter = all pins");
-    let filtered: Value = post(json!({ "op": "listPins", "investigationId": inv_id }))
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    let filtered = filtered["pins"].as_array().unwrap();
-    assert_eq!(filtered.len(), 1);
-    assert_eq!(filtered[0]["id"], pin_id.as_str());
-
-    // --- The listing derives both memberships (§3): pins from pins.json,
+    // --- The listing derives note membership (§3):
     //     notes from the investigation's folder. ----------------------------
     let listed: Value = post(json!({ "op": "investigations", "action": "list" }))
         .await
@@ -682,7 +649,6 @@ async fn investigation_belonging_over_the_wire() {
         .await
         .unwrap();
     let view = &listed["investigations"][0];
-    assert_eq!(view["pinRefs"], json!([pin_id]));
     assert_eq!(
         view["noteRefs"],
         json!(["Lighthouse Notes/Harbor case/Team sync.md"])

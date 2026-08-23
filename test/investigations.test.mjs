@@ -14,7 +14,6 @@ import { register } from "node:module";
 register("./_ts-extensionless-hook.mjs", import.meta.url);
 
 const inv = await import("../src/server/investigations.ts");
-const pinsMod = await import("../src/server/pins.ts");
 const policy = await import("../src/server/policy.ts");
 const vaultMod = await import("../src/server/vault.ts");
 
@@ -370,64 +369,8 @@ test("parity: scoped ask resolves identical retrieval candidate ids", async () =
   );
 });
 
-// --- §3 belonging: pins, notes, recall ----------------------------------------
+// --- §3 belonging: notes, recall -----------------------------------------------
 
-test("pins belong via investigationId and the view derives pinRefs", () => {
-  // Mirrors investigations_test.rs::pins_belong_and_the_view_derives_pin_refs
-  // (PARITY): old stores load uncategorized, membership rides addPin, the
-  // filter narrows, the view derives, and a re-pin moves the membership.
-  const stateDir = freshVault();
-  fs.mkdirSync(stateDir, { recursive: true });
-
-  // A store written BEFORE the field existed (no investigationId anywhere).
-  fs.writeFileSync(
-    path.join(stateDir, "pins.json"),
-    '{"pins":[{"id":"pin-legacy000001","question":"legacy pin","sql":"SELECT 1","fileIds":["a.csv"],"createdMs":7}]}',
-  );
-  const legacy = pinsMod.listPins();
-  assert.equal(legacy.length, 1, "old stores still load");
-  assert.equal(legacy[0].investigationId, undefined, "…and stay uncategorized");
-
-  const created = inv.createInvestigation("Q3 audit", [], "default");
-
-  // One pin inside the investigation, one global, plus a blank id that must
-  // normalize to uncategorized.
-  const member = pinsMod.addPin("member?", "SELECT 2", ["a.csv"], created.id);
-  assert.equal(member.investigationId, created.id);
-  const global = pinsMod.addPin("global?", "SELECT 3", []);
-  assert.equal(global.investigationId, undefined);
-  const blank = pinsMod.addPin("blank?", "SELECT 4", [], "  ");
-  assert.equal(blank.investigationId, undefined, "blank id = uncategorized");
-
-  // Round trip: re-read from disk, fields intact; the raw store carries
-  // investigationId ONLY on the member pin (absent = omitted, so legacy
-  // pins keep round-tripping byte-compatibly).
-  const listed = pinsMod.listPins();
-  assert.equal(listed.length, 4);
-  assert.equal(listed.find((p) => p.id === member.id).investigationId, created.id);
-  assert.equal(listed.find((p) => p.id === "pin-legacy000001").investigationId, undefined);
-  const raw = fs.readFileSync(path.join(stateDir, "pins.json"), "utf8");
-  assert.equal(raw.match(/"investigationId"/g).length, 1, raw);
-
-  // The list filter narrows to the investigation; absent keeps "all".
-  assert.equal(pinsMod.listPins().length, 4);
-  const filtered = pinsMod.listPins(created.id);
-  assert.equal(filtered.length, 1);
-  assert.equal(filtered[0].id, member.id);
-  assert.deepEqual(pinsMod.listPins("inv-nope"), []);
-
-  // The view derives pinRefs from the store — the member only.
-  const views = inv.investigationsListing();
-  assert.equal(views.length, 1);
-  assert.deepEqual(views[0].pinRefs, [member.id]);
-
-  // Re-pinning the same SQL from the GLOBAL context replaces the pin and
-  // drops its membership (replace semantics, like every other field).
-  const repinned = pinsMod.addPin("member?", "SELECT 2", ["a.csv"]);
-  assert.equal(repinned.id, member.id, "same SQL ⇒ same pin id");
-  assert.equal(repinned.investigationId, undefined);
-  assert.deepEqual(inv.investigationsListing()[0].pinRefs, [], "membership followed the re-pin");
-});
 
 test("notes land under the investigation folder and the view derives noteRefs", () => {
   // Mirrors investigations_test.rs::
@@ -534,7 +477,6 @@ test("fork copies structure only without touching the parent's members", () => {
     inv.addInvestigationConversationRef(parent.id, "conv-1", true);
     inv.addInvestigationConversationRef(parent.id, "conv-2", true);
   });
-  const parentPin = pinsMod.addPin("q?", "SELECT 1", ["cases/a.md"], parent.id);
   const parentSubdir = inv.investigationNotesSubdir(parent.id);
   const parentNote = vaultMod.writeArtifact(
     parentSubdir,
@@ -556,18 +498,13 @@ test("fork copies structure only without touching the parent's members", () => {
   assert.notEqual(fork.folderName, parent.folderName, "not the parent's folder");
 
   // Derived membership is NOT duplicated: the fork's view is empty, while the
-  // parent keeps its pin and note.
+  // parent keeps its note.
   const views = inv.investigationsListing();
   const forkView = views.find((v) => v.id === fork.id);
-  assert.deepEqual(forkView.pinRefs, [], "fork has no pins");
   assert.deepEqual(forkView.noteRefs, [], "fork has its own empty notes folder");
   const parentView = views.find((v) => v.id === parent.id);
-  assert.deepEqual(parentView.pinRefs, [parentPin.id], "parent keeps its pin");
   assert.deepEqual(parentView.noteRefs, [parentNote.id], "parent keeps its note");
 
-  // The pin still belongs to the PARENT — never re-pointed at the fork.
-  const pin = pinsMod.listPins().find((p) => p.id === parentPin.id);
-  assert.equal(pin.investigationId, parent.id);
 
   // Both lines coexist (a branch adds a line; it moves nothing).
   assert.equal(inv.listInvestigations().length, 2);
@@ -597,7 +534,6 @@ test("export writes under the notes folder and lists membership without transcri
   withPolicy(null, () => {
     inv.addInvestigationConversationRef(created.id, "conv-9", true);
   });
-  const pin = pinsMod.addPin("rows?", "SELECT count(*)", ["cases/x.md"], created.id);
   // A prior note in the folder — its BODY must never leak into the export.
   const subdir = inv.investigationNotesSubdir(created.id);
   const priorNote = vaultMod.writeArtifact(
@@ -614,7 +550,6 @@ test("export writes under the notes folder and lists membership without transcri
   assert.ok(md.includes("- Provider policy: default\n"));
   assert.ok(md.includes("\n## Scope\n\n- cases/x.md\n"), md);
   assert.ok(md.includes("\n## Conversations\n\n- conv-9\n"), md);
-  assert.ok(md.includes(`\n## Pins\n\n- ${pin.id}\n`), md);
   assert.ok(md.includes(`- ${priorNote.id}\n`), `note listed by id: ${md}`);
   assert.ok(!md.includes("SECRET TRANSCRIPT BODY"), "never embeds transcripts");
 

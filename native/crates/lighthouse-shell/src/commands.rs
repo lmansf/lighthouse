@@ -633,56 +633,6 @@ pub async fn rag_op(
                 Err(e) => json!({ "error": e }),
             })
         }
-        // --- Briefing note refresh (G5): recheck each pin for a REAL before→
-        //     after, compose the deterministic note, and overwrite Lighthouse
-        //     Notes/Lighthouse Briefing.md in place. No OS notification here —
-        //     the user is in the dialog; the result is confirmed inline. ---
-        // --- Pinned questions (openspec: add-pinned-questions): persist an
-        //     analytics answer's question + SQL + files; rechecks are guarded
-        //     and model-free. The background scheduler lives in main.rs. ---
-        Some("pinAsk") => {
-            let question = body["question"].as_str().unwrap_or("").to_string();
-            let sql = body["sql"].as_str().unwrap_or("").to_string();
-            let file_ids: Vec<String> = body["fileIds"]
-                .as_array()
-                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-                .unwrap_or_default();
-            // The current investigation, when one is (openspec:
-            // add-investigations) — the pin carries it as its membership.
-            let investigation_id = body["investigationId"].as_str();
-            Ok(match lighthouse_core::pins::add(&question, &sql, &file_ids, investigation_id) {
-                Ok(pin) => {
-                    // Prime the fresh pin's digest + summary so the dialog has
-                    // something to show (and the first real change alerts).
-                    let _ = lighthouse_core::pins::recheck_one(&pin.id).await;
-                    let pins = lighthouse_core::pins::list();
-                    let primed =
-                        pins.iter().find(|p| p.id == pin.id).cloned().unwrap_or(pin);
-                    json!({ "pin": primed })
-                }
-                Err(e) => json!({ "error": e }),
-            })
-        }
-        Some("unpinAsk") => {
-            let Some(id) = body["id"].as_str().filter(|s| !s.is_empty()) else {
-                return Err("id required".into());
-            };
-            lighthouse_core::pins::remove(id);
-            Ok(json!({ "ok": true }))
-        }
-        Some("listPins") => {
-            // Optional investigation filter (openspec: add-investigations);
-            // absent (or blank) keeps the original "all pins" behavior.
-            let investigation_id = body["investigationId"].as_str().filter(|s| !s.is_empty());
-            Ok(json!({ "pins": lighthouse_core::pins::list_for(investigation_id) }))
-        }
-        Some("recheckPins") => {
-            let changed = lighthouse_core::pins::recheck_all().await;
-            Ok(json!({
-                "changed": changed,
-                "pins": lighthouse_core::pins::list(),
-            }))
-        }
         // Catalog-derived example questions for the chat empty state — every
         // one names real columns of a real included file, so the analytics
         // path can answer it. Empty when nothing tabular is included.

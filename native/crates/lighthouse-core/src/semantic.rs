@@ -1004,9 +1004,6 @@ pub fn propose_metrics() -> Vec<MetricProposal> {
     for v in crate::views::list() {
         usage.push((v.sql, false));
     }
-    for p in crate::pins::list() {
-        usage.push((p.sql, false));
-    }
     usage.extend(crate::answer_cache::mined_analytics_sqls());
     propose_metrics_from_usage(&usage, &list().metrics)
 }
