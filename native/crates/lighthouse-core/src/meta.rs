@@ -24,7 +24,7 @@ use datafusion::prelude::SessionContext;
 use serde::Serialize;
 
 use crate::analytics::{
-    is_pdf, is_tabular, register_tables, register_views, sanitize_table_name, saved_age_label,
+    is_pdf, is_tabular, register_tables, sanitize_table_name, saved_age_label,
 };
 use crate::catalog::{self, ColumnKind};
 use crate::contracts::RagReference;
@@ -667,7 +667,7 @@ pub fn suggested_asks(included: &[String], is_cloud: bool) -> Vec<SuggestedAsk> 
 pub async fn suggested_asks_resolved(included: Vec<String>, is_cloud: bool) -> Vec<SuggestedAsk> {
     // File chips first — the unchanged blocking path.
     let file_included = included.clone();
-    let mut asks = tokio::task::spawn_blocking(move || suggested_asks(&file_included, is_cloud))
+    let asks = tokio::task::spawn_blocking(move || suggested_asks(&file_included, is_cloud))
         .await
         .unwrap_or_default();
     if asks.len() >= SUGGEST_MAX {
@@ -675,73 +675,7 @@ pub async fn suggested_asks_resolved(included: Vec<String>, is_cloud: bool) -> V
     }
     // Resolve the eligible views' in-scope source files (blocking: store read +
     // per-file vault-state checks). An empty result means the whole view branch
-    // is skipped — the zero-view path never builds a context.
-    let files = tokio::task::spawn_blocking(move || {
-        let eligible = crate::views::eligible_for_posture(is_cloud);
-        if eligible.is_empty() {
-            return Vec::new();
-        }
-        view_source_files(&eligible, &included, is_cloud)
-    })
-    .await
-    .unwrap_or_default();
-    if files.is_empty() {
-        return asks;
-    }
-    // One fresh context: register the sources, then the views virtually (the
-    // ask-time primitive). register_views re-applies the posture, so a
-    // local-only view never resolves on a cloud ask.
-    let ctx = SessionContext::new();
-    let regs = register_tables(&ctx, &files, is_cloud).await;
-    if regs.is_empty() {
-        return asks;
-    }
-    let view_regs = register_views(&ctx, &regs, is_cloud).await;
-    // Dedup view chips against the file chips (and each other) by label.
-    let mut seen: HashSet<String> = asks.iter().map(|a| a.label.clone()).collect();
-    for vr in &view_regs {
-        if asks.len() >= SUGGEST_MAX {
-            break;
-        }
-        let cols = view_typed_columns(&ctx, &vr.name).await;
-        push_view_suggestions(&mut asks, &mut seen, &vr.name, &cols);
-    }
     asks
-}
-
-/// The in-scope, tabular/PDF source files the eligible views read, as
-/// `(file_id, name, abs)` triples for `register_tables`. "In scope" is the
-/// SHAREABLE set for the posture (active-included minus effectively-local-only
-/// on cloud) intersected with the caller's `included` set — the same scope the
-/// file chips honor, so a view chip never rests on a file the chat isn't
-/// showing as included. Deduped by file id; a view over another view still
-/// contributes its transitive sources because that parent view is eligible too
-/// (so its `reads.files` are in this union).
-fn view_source_files(
-    eligible: &[crate::views::View],
-    included: &[String],
-    is_cloud: bool,
-) -> Vec<(String, String, PathBuf)> {
-    let active: HashSet<String> = vault::shareable_file_ids(is_cloud).into_iter().collect();
-    let included: HashSet<&str> = included.iter().map(String::as_str).collect();
-    let mut out: Vec<(String, String, PathBuf)> = Vec::new();
-    let mut seen: HashSet<String> = HashSet::new();
-    for v in eligible {
-        for f in &v.reads.files {
-            if !active.contains(&f.file_id) || !included.contains(f.file_id.as_str()) {
-                continue;
-            }
-            if !seen.insert(f.file_id.clone()) {
-                continue;
-            }
-            if let Some((name, abs)) = vault::doc_path(&f.file_id) {
-                if is_tabular(&name) || is_pdf(&name) {
-                    out.push((f.file_id.clone(), name, abs));
-                }
-            }
-        }
-    }
-    out
 }
 
 /// A registered view's result columns as `(lowercased name, kind)`, kinds read
@@ -779,39 +713,6 @@ fn arrow_kind(dt: &DataType) -> ColumnKind {
     }
 }
 
-/// Append the view-scoped chips for one resolved view's columns — the same
-/// idioms as the file chips ("Total {num} by {text}", "Monthly trend of
-/// {num}") with the view name in both label and question. Pure and
-/// budget-aware, so it is unit-testable without a SessionContext.
-fn push_view_suggestions(
-    asks: &mut Vec<SuggestedAsk>,
-    seen: &mut HashSet<String>,
-    view_name: &str,
-    cols: &[(String, ColumnKind)],
-) {
-    let numeric = cols.iter().find(|(_, k)| *k == ColumnKind::Numeric);
-    let text = cols.iter().find(|(_, k)| *k == ColumnKind::Text);
-    let date = cols.iter().find(|(_, k)| *k == ColumnKind::Date);
-    if let (Some((n, _)), Some((c, _))) = (numeric, text) {
-        let q = format!("Total {n} by {c} in {view_name}");
-        if asks.len() < SUGGEST_MAX && seen.insert(q.clone()) {
-            asks.push(SuggestedAsk {
-                label: q.clone(),
-                question: q,
-            });
-        }
-    }
-    if let (Some(_), Some((n, _))) = (date, numeric) {
-        let q = format!("Monthly trend of {n} in {view_name}");
-        if asks.len() < SUGGEST_MAX && seen.insert(q.clone()) {
-            asks.push(SuggestedAsk {
-                label: q.clone(),
-                question: q,
-            });
-        }
-    }
-}
-
 // --- Applicable recipes (openspec: add-recipes §2.3) ------------------------------
 
 /// One applicable recipe, resolved for the Library gallery / empty-state chips:
@@ -842,7 +743,7 @@ const RECIPE_CARDS_MAX: usize = 24;
 pub async fn applicable_recipes(included: Vec<String>, is_cloud: bool) -> Vec<RecipeCard> {
     // File cards first — the unchanged, cheap path (no DataFusion).
     let file_included = included.clone();
-    let mut cards = tokio::task::spawn_blocking(move || file_recipe_cards(&file_included, is_cloud))
+    let cards = tokio::task::spawn_blocking(move || file_recipe_cards(&file_included, is_cloud))
         .await
         .unwrap_or_default();
     let mut seen: HashSet<(String, String)> =
@@ -852,32 +753,6 @@ pub async fn applicable_recipes(included: Vec<String>, is_cloud: bool) -> Vec<Re
     }
     // Resolve the eligible views' in-scope source files (blocking store reads).
     // An empty result skips the whole view branch — the zero-view path never
-    // builds a context, exactly like `suggested_asks_resolved`.
-    let files = tokio::task::spawn_blocking(move || {
-        let eligible = crate::views::eligible_for_posture(is_cloud);
-        if eligible.is_empty() {
-            return Vec::new();
-        }
-        view_source_files(&eligible, &included, is_cloud)
-    })
-    .await
-    .unwrap_or_default();
-    if files.is_empty() {
-        return cards;
-    }
-    let ctx = SessionContext::new();
-    let regs = register_tables(&ctx, &files, is_cloud).await;
-    if regs.is_empty() {
-        return cards;
-    }
-    let view_regs = register_views(&ctx, &regs, is_cloud).await;
-    for vr in &view_regs {
-        if cards.len() >= RECIPE_CARDS_MAX {
-            break;
-        }
-        let cols = view_typed_columns(&ctx, &vr.name).await;
-        push_recipe_cards(&mut cards, &mut seen, &vr.name, &cols);
-    }
     cards
 }
 
@@ -980,143 +855,9 @@ pub struct SuggestedMetric {
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SemanticCards {
-    pub metrics: Vec<MetricCard>,
     pub synonyms: Vec<SynonymCard>,
     pub suggested_synonyms: Vec<SynonymCard>,
     pub suggested_metrics: Vec<SuggestedMetric>,
-}
-
-/// The posture-eligible metrics/synonyms whose tables are in the included set —
-/// the `applicable_recipes` shape for the semantic nav (openspec §6.1). Metrics
-/// gate on their `reads` intersecting `included` (a metric over a file the chat
-/// isn't showing never surfaces, exactly as a recipe/view does); posture gating
-/// comes free from `semantic::eligible_for_posture` (a local-only metric is
-/// absent on a cloud ask). Model-free AND DataFusion-free — a metric carries its
-/// `reads`, so no table registration is needed (unlike `applicable_recipes`, so
-/// this stays a cheap synchronous store read like `op:"views"` list). Synonyms
-/// surface when their canonical names a surfaced metric, or names no metric at
-/// all (a column synonym — kept, it can't be ruled out). PARITY: mirrored in
-/// semantic.ts::applicableSemantics (the twin computes the identical subset — no
-/// analytics needed).
-pub fn applicable_semantics(included_vec: Vec<String>, is_cloud: bool) -> SemanticCards {
-    let set = crate::semantic::eligible_for_posture(is_cloud);
-    let included: HashSet<&str> = included_vec.iter().map(String::as_str).collect();
-    let view_records = crate::views::list();
-    let metrics: Vec<MetricCard> = set
-        .metrics
-        .iter()
-        .filter(|m| metric_reads_included(m, &included, &view_records))
-        .map(|m| MetricCard {
-            id: m.id.clone(),
-            name: m.name.clone(),
-            expression: m.expression.clone(),
-            description: m.description.clone(),
-            entity: m.entity.clone(),
-            local_only: crate::semantic::metric_effectively_local_only(&m.reads),
-        })
-        .collect();
-    // A synonym rides when its canonical names a surfaced metric, OR names no
-    // metric at all (⇒ a column synonym, which we can't table-scope, so keep it);
-    // a synonym for a metric filtered OUT of scope is dropped with its metric.
-    let surfaced: HashSet<String> = metrics.iter().map(|m| m.name.to_lowercase()).collect();
-    let all_metrics: HashSet<String> = set.metrics.iter().map(|m| m.name.to_lowercase()).collect();
-    let synonyms: Vec<SynonymCard> = set
-        .synonyms
-        .iter()
-        .filter(|s| {
-            let canon = s.canonical.to_lowercase();
-            surfaced.contains(&canon) || !all_metrics.contains(&canon)
-        })
-        .map(|s| SynonymCard {
-            term: s.term.clone(),
-            canonical: s.canonical.clone(),
-        })
-        .collect();
-
-    // Auto-derived PROPOSALS (openspec: field-patch-0.12.5 §3.4) — the nav's
-    // Suggested affordance. Never stored: the user accepts each through the same
-    // guarded create path. Synonyms come from the included tabular columns'
-    // known abbreviations (deduped against ALL existing synonyms, not just the
-    // posture-eligible ones); metrics come from recurring usage. Column reads are
-    // the cheap cache-first `columns_for` the recipe/capability surfaces already
-    // run on the included set.
-    let tabular: Vec<(String, String, PathBuf)> =
-        included_files_with_mtime(&included_vec, is_cloud)
-            .into_iter()
-            .filter(|(_, name, _, _)| is_tabular(name))
-            .map(|(id, name, abs, _)| (id, name, abs))
-            .collect();
-    let columns: Vec<String> = catalog::columns_for(&tabular)
-        .into_iter()
-        .flat_map(|fc| fc.columns.into_iter().map(|c| c.name))
-        .collect();
-    let all_synonyms = crate::semantic::list().synonyms;
-    let suggested_synonyms: Vec<SynonymCard> =
-        crate::semantic::propose_synonyms(&columns, &all_synonyms)
-            .into_iter()
-            .map(|s| SynonymCard {
-                term: s.term,
-                canonical: s.canonical,
-            })
-            .collect();
-    let suggested_metrics: Vec<SuggestedMetric> = crate::semantic::propose_metrics()
-        .into_iter()
-        .map(|p| SuggestedMetric {
-            expression: p.expression,
-            entity: p.entity,
-            occurrences: p.occurrences,
-            certified: p.certified,
-        })
-        .collect();
-
-    SemanticCards {
-        metrics,
-        synonyms,
-        suggested_synonyms,
-        suggested_metrics,
-    }
-}
-
-/// Whether a metric's transitive source files intersect the included set: its
-/// own `reads.files`, or any read view whose transitive sources do (the
-/// `register_views`/inspect accumulation, one store lookup per view).
-fn metric_reads_included(
-    m: &crate::semantic::Metric,
-    included: &HashSet<&str>,
-    view_records: &[crate::views::View],
-) -> bool {
-    if m.reads.files.iter().any(|f| included.contains(f.file_id.as_str())) {
-        return true;
-    }
-    let mut seen: Vec<String> = Vec::new();
-    m.reads
-        .views
-        .iter()
-        .any(|vid| view_files_included(vid, view_records, included, &mut seen))
-}
-
-/// Whether a view's transitive source files intersect `included` — the upstream
-/// walk (own `reads.files`, then each parent view), cycle-tolerant via `seen`.
-fn view_files_included(
-    view_id: &str,
-    records: &[crate::views::View],
-    included: &HashSet<&str>,
-    seen: &mut Vec<String>,
-) -> bool {
-    if seen.iter().any(|s| s == view_id) {
-        return false;
-    }
-    seen.push(view_id.to_string());
-    let Some(v) = records.iter().find(|r| r.id == view_id) else {
-        return false;
-    };
-    if v.reads.files.iter().any(|f| included.contains(f.file_id.as_str())) {
-        return true;
-    }
-    v.reads
-        .views
-        .iter()
-        .any(|pid| view_files_included(pid, records, included, seen))
 }
 
 // --- Capability map (openspec: add-deep-analysis §3) ------------------------------
@@ -1152,15 +893,14 @@ pub struct SuggestedInvestigation {
 pub struct CapabilityMap {
     pub tables: Vec<CapabilityTable>,
     pub recipes: Vec<RecipeCard>,
-    pub metrics: Vec<MetricCard>,
     pub suggested_asks: Vec<SuggestedAsk>,
     pub suggested_investigations: Vec<SuggestedInvestigation>,
 }
 
 /// Aggregate the analyzable surfaces for the included set into one map (openspec:
-/// add-deep-analysis §3). It introduces NO new analysis: the recipes, metrics, and
-/// asks are the existing `applicable_recipes` / `applicable_semantics` /
-/// `suggested_asks_resolved` outputs VERBATIM, so their cloud-posture gating
+/// add-deep-analysis §3). It introduces NO new analysis: the recipes and
+/// asks are the existing `applicable_recipes` / `suggested_asks_resolved`
+/// outputs VERBATIM, so their cloud-posture gating
 /// carries through unchanged (a local-only recipe/metric never appears on a cloud
 /// map). The tables + `suggested_investigations` come from the SAME recent
 /// tabular-file window (`SUGGEST_FILES`) those nav helpers use, so the map is
@@ -1204,10 +944,9 @@ pub async fn capability_map(included: Vec<String>, is_cloud: bool) -> Capability
 
     // The existing posture-gated surfaces, reused verbatim (no re-gating).
     let recipes = applicable_recipes(included.clone(), is_cloud).await;
-    let metrics = applicable_semantics(included.clone(), is_cloud).metrics;
     let suggested_asks = suggested_asks_resolved(included, is_cloud).await;
 
-    CapabilityMap { tables, recipes, metrics, suggested_asks, suggested_investigations }
+    CapabilityMap { tables, recipes, suggested_asks, suggested_investigations }
 }
 
 // --- Tests -----------------------------------------------------------------------
@@ -1216,65 +955,6 @@ pub async fn capability_map(included: Vec<String>, is_cloud: bool) -> Capability
 mod tests {
     use super::*;
 
-    #[test]
-    fn metric_applicability_gates_on_included_sources() {
-        // Pure over synthetic records (the `push_recipe_cards` test posture) — no
-        // VAULT_DIR: `applicable_semantics` itself reads the store, so its
-        // applicability gate is what we unit-test here.
-        use crate::semantic::Metric;
-        use crate::views::{FileRead, Reads, SummarySource, View, ViewSummary};
-        let metric = |files: Vec<&str>, views: Vec<&str>| Metric {
-            id: "metric-x".into(),
-            name: "revenue".into(),
-            expression: "SUM(amount)".into(),
-            description: String::new(),
-            entity: "sales".into(),
-            reads: Reads {
-                files: files
-                    .into_iter()
-                    .map(|f| FileRead {
-                        file_id: f.into(),
-                        table_name: "sales".into(),
-                    })
-                    .collect(),
-                views: views.into_iter().map(String::from).collect(),
-            },
-            summary: ViewSummary {
-                text: String::new(),
-                source: SummarySource::Question,
-            },
-            created_ms: 0,
-        };
-        let included: HashSet<&str> = ["sales-csv"].into_iter().collect();
-        let no_views: Vec<View> = Vec::new();
-        // A direct file dependency in the included set surfaces the metric; one
-        // outside it does not (the recipe/view applicability rule).
-        assert!(metric_reads_included(&metric(vec!["sales-csv"], vec![]), &included, &no_views));
-        assert!(!metric_reads_included(&metric(vec!["other-csv"], vec![]), &included, &no_views));
-        // A metric over a VIEW surfaces when that view's transitive source is in.
-        let view = View {
-            id: "view-1".into(),
-            name: "clean_sales".into(),
-            sql: "SELECT * FROM sales".into(),
-            reads: Reads {
-                files: vec![FileRead {
-                    file_id: "sales-csv".into(),
-                    table_name: "sales".into(),
-                }],
-                views: vec![],
-            },
-            summary: ViewSummary {
-                text: String::new(),
-                source: SummarySource::Question,
-            },
-            created_ms: 0,
-        };
-        assert!(metric_reads_included(
-            &metric(vec![], vec!["view-1"]),
-            &included,
-            std::slice::from_ref(&view)
-        ));
-    }
 
     #[test]
     fn applicable_recipes_gate_on_column_kinds() {

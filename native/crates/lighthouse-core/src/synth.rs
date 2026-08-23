@@ -1396,7 +1396,6 @@ fn recipe_branch(
             .unwrap_or_default();
             let ctx = datafusion::prelude::SessionContext::new();
             let regs = crate::analytics::register_tables(&ctx, &files, is_cloud).await;
-            let view_regs = crate::analytics::register_views(&ctx, &regs, is_cloud).await;
 
             // Map the cue's table (a file display name or a view name) to the
             // registered SQL table name + its typed columns.
@@ -1419,17 +1418,6 @@ fn recipe_branch(
                         fc.columns.iter().map(|c| (c.name.clone(), c.kind)).collect();
                     target_columns = cols.iter().map(|(n, _)| n.clone()).collect();
                     resolved = recipe.resolve(&sql_table, &cols);
-                }
-            }
-            if resolved.is_none() {
-                if let Some(name) = view_regs
-                    .iter()
-                    .find(|vr| vr.name == cue.table)
-                    .map(|vr| vr.name.clone())
-                {
-                    let cols = crate::meta::view_typed_columns(&ctx, &name).await;
-                    target_columns = cols.iter().map(|(n, _)| n.clone()).collect();
-                    resolved = recipe.resolve(&name, &cols);
                 }
             }
 
@@ -1618,7 +1606,7 @@ fn recipe_branch(
                 .join("\n");
             if let Some(fresh) = crate::analytics::freshness_line(
                 &regs,
-                &crate::analytics::expand_views_for_freshness(&all_sql, &view_regs),
+                &all_sql,
                 crate::config::now_ms(),
             ) {
                 yield delta(fresh);
@@ -1633,18 +1621,6 @@ fn recipe_branch(
                     yield delta(format!("\n{ledger}\n"));
                 }
             }
-            // Certified answers (openspec: add-semantic-layer §3): the metrics
-            // the representative query (the one AnalyticsMeta carries) verifiably
-            // computed — engine-emitted after the Assumptions footer, never model
-            // text; empty ⇒ no line (byte-identical to a metric-free vault).
-            let semantic_eligible = crate::semantic::eligible_for_posture(is_cloud);
-            let certified = crate::analytics::certified_metrics(
-                &representative_sql,
-                &semantic_eligible.metrics,
-            );
-            if !certified.is_empty() {
-                yield delta(format!("\n*Certified:* {}\n", certified.join(", ")));
-            }
             if let Some(cap) = crate::analytics::row_cap_footer(&regs) {
                 yield delta(cap);
             }
@@ -1652,23 +1628,11 @@ fn recipe_branch(
             let (refs, meta_ids) = analytics_refs(&regs);
             let mut done =
                 final_chunk(refs, steps.len(), &origin, cost_meta(&cfg, sink.total()), manifest);
-            // Trust check (openspec: add-semantic-layer §4): reconcile the
-            // representative query's certified metric through the SAME guard
-            // (model-free, honest degradation) when a metric certified and its
-            // result is in hand.
-            let metric_rec = certified.first().and_then(|name| {
-                semantic_eligible.metrics.iter().find(|m| &m.name == name)
-            });
-            let trust = match (metric_rec, &representative_result) {
-                (Some(m), Some(res)) => {
-                    Some(crate::analytics::reconcile_metric(&ctx, &representative_sql, res, m).await)
-                }
-                _ => None,
-            };
+            let trust = None;
             done.analytics = Some(AnalyticsMeta {
                 sql: representative_sql,
                 file_ids: meta_ids,
-                certified: (!certified.is_empty()).then(|| certified.clone()),
+                certified: None,
                 trust,
             });
             if let Some(m) = done.meta.as_mut() {
@@ -1872,13 +1836,6 @@ fn analytics_branch(
                         g.file = regs.first().map(|r| r.file_name.clone()).unwrap_or_default();
                         g.columns = regs.first().map(|r| r.columns.clone()).unwrap_or_default();
                     }
-                    // Saved views resolve as virtual tables AFTER the files
-                    // (openspec: add-shaped-views §2): each eligible view
-                    // registers under the shared table caps and contributes a
-                    // view-marked card. Zero saved views ⇒ empty, and every
-                    // prompt string below is byte-identical to today.
-                    let view_regs =
-                        crate::analytics::register_views(&ctx, &regs, is_cloud).await;
                     // §32 §4 / §44 §1a: the planning tier decides the schema
                     // diet. On the shared-window on-device tiers (apple-fm AND
                     // the §42 mobile llama) the question ranks the tables (top 3
@@ -1889,11 +1846,7 @@ fn analytics_branch(
                     // 6144 window, so it needs the same diet). Cloud and desktop
                     // llama-6144 keep every full card byte-for-byte.
                     let plan_tier = llm::narration_tier(&cfg);
-                    let plan_synonyms: Vec<(String, String)> = if plan_tier.wants_pruned_plan() {
-                        crate::semantic::planning_synonyms(is_cloud)
-                    } else {
-                        Vec::new()
-                    };
+                    let plan_synonyms: Vec<(String, String)> = Vec::new();
                     let mut sql_ctxs: Vec<Ctx> = if plan_tier.wants_pruned_plan() {
                         crate::analytics::rank_tables(&regs, &question, &plan_synonyms)
                             .into_iter()
@@ -1916,34 +1869,8 @@ fn analytics_branch(
                             })
                             .collect()
                     };
-                    // Deterministic prompt order: file cards, view cards, the
-                    // semantic business-definitions block, the vault brief, then
-                    // join hints.
-                    sql_ctxs.extend(view_regs.iter().map(|v| Ctx {
-                        name: v.name.clone(),
-                        text: v.card.clone(),
-                        score: 1.0,
-                    }));
-                    // The semantic layer's business-definitions block (openspec:
-                    // add-semantic-layer §2.2): posture-eligible metrics,
-                    // synonyms, and metric-expansion examples, rendered
-                    // deterministically and count-capped. Pushed here so BOTH the
-                    // single-query and
-                    // multi-step paths (each consumes `sql_ctxs`) see it. Zero
-                    // eligible definitions ⇒ None ⇒ NOT pushed ⇒ every prompt
-                    // string below is byte-identical to the pre-semantic-layer
-                    // prompt (pinned by a test). PARITY: this analytics-branch
-                    // injection is Rust-only (the TS twin has no analytics
-                    // branch); semantic.ts::renderBlock mirrors the labels.
-                    // §4: apple tiers carry only the QUESTION-MATCHED semantic
-                    // entries (applicable definitions, not the whole store).
-                    let semantic_block = if plan_tier.is_apple_fm() {
-                        crate::semantic::prompt_block_matched(is_cloud, &question)
-                    } else {
-                        crate::semantic::prompt_block(is_cloud)
-                    };
-                    let has_semantic = if let Some(block) = semantic_block {
-                        sql_ctxs.push(block);
+                    // Deterministic prompt order: file cards, then join hints.
+                    let has_semantic = if false {
                         true
                     } else {
                         false
@@ -2040,13 +1967,12 @@ fn analytics_branch(
                         // written from — schema/view cards + join hints — metadata
                         // only, already the gated shareable set.
                         let manifest =
-                            planning_manifest(&sql_ctxs, &regs, view_regs.len(), has_semantic);
+                            planning_manifest(&sql_ctxs, &regs, 0, has_semantic);
                         match proposed {
                             Some(sql) => {
                                 let tables: Vec<String> = regs
                                     .iter()
                                     .map(|r| r.file_name.clone())
-                                    .chain(view_regs.iter().map(|v| v.name.clone()))
                                     .collect();
                                 yield plan_chunk(
                                     PlanPreview { sql, tables },
@@ -2320,9 +2246,7 @@ fn analytics_branch(
                             // never rendered).
                             if let Some(fresh) = crate::analytics::freshness_line(
                                 &regs,
-                                &crate::analytics::expand_views_for_freshness(
-                                    &all_sql, &view_regs,
-                                ),
+                                &all_sql,
                                 crate::config::now_ms(),
                             ) {
                                 yield delta(fresh);
@@ -2338,19 +2262,6 @@ fn analytics_branch(
                                 ) {
                                     yield delta(format!("\n{ledger}\n"));
                                 }
-                            }
-                            // Certified answers (openspec: add-semantic-layer §3):
-                            // the metrics the LAST executed step's SQL (the query
-                            // AnalyticsMeta carries) verifiably computed — emitted
-                            // after the Assumptions footer, never model text.
-                            let semantic_eligible =
-                                crate::semantic::eligible_for_posture(is_cloud);
-                            let certified = crate::analytics::certified_metrics(
-                                steps.last().map(|s| s.sql.as_str()).unwrap_or(""),
-                                &semantic_eligible.metrics,
-                            );
-                            if !certified.is_empty() {
-                                yield delta(format!("\n*Certified:* {}\n", certified.join(", ")));
                             }
                             // Same row-cap honesty as the single-query path:
                             // the steps read the same registrations, so a
@@ -2383,16 +2294,7 @@ fn analytics_branch(
                             // result is in hand.
                             let last_sql =
                                 steps.last().map(|s| s.sql.clone()).unwrap_or_default();
-                            let metric_rec = certified.first().and_then(|name| {
-                                semantic_eligible.metrics.iter().find(|m| &m.name == name)
-                            });
-                            let trust = match (metric_rec, &last_result) {
-                                (Some(m), Some(res)) => Some(
-                                    crate::analytics::reconcile_metric(&ctx, &last_sql, res, m)
-                                        .await,
-                                ),
-                                _ => None,
-                            };
+                            let trust = None;
                             if let Some(m) = done.meta.as_mut() {
                                 m.chart = last_chart.clone();
                                 // §32 §3c: the last step's verified rows — the
@@ -2404,7 +2306,7 @@ fn analytics_branch(
                             done.analytics = Some(AnalyticsMeta {
                                 sql: last_sql,
                                 file_ids: meta_ids,
-                                certified: (!certified.is_empty()).then(|| certified.clone()),
+                                certified: None,
                                 trust,
                             });
                             yield done;
@@ -2582,7 +2484,7 @@ fn analytics_branch(
                         // footer on real files.
                         if let Some(fresh) = crate::analytics::freshness_line(
                             &regs,
-                            &crate::analytics::expand_views_for_freshness(&sql, &view_regs),
+                            &sql,
                             crate::config::now_ms(),
                         ) {
                             yield delta(fresh);
@@ -2598,22 +2500,6 @@ fn analytics_branch(
                             crate::ledger::assumption_ledger(&sql, &regs, &res)
                         {
                             yield delta(format!("\n{ledger}\n"));
-                        }
-                        // Certified answers (openspec: add-semantic-layer §3):
-                        // the metric names this answer's SQL VERIFIABLY computed
-                        // (AST-equality vs the posture-eligible blessed
-                        // definitions) — engine-emitted AFTER the Query-used /
-                        // Computed-from / Assumptions footers, deterministic,
-                        // never model text. Empty ⇒ no line, so a vault with no
-                        // metrics stays byte-identical.
-                        let semantic_eligible =
-                            crate::semantic::eligible_for_posture(is_cloud);
-                        let certified = crate::analytics::certified_metrics(
-                            &sql,
-                            &semantic_eligible.metrics,
-                        );
-                        if !certified.is_empty() {
-                            yield delta(format!("\n*Certified:* {}\n", certified.join(", ")));
                         }
                         // Truncation honesty: a capped result states its true
                         // total deterministically (matches the model-free
@@ -2680,18 +2566,11 @@ fn analytics_branch(
                         // honest degradation, never breaks the answer. Only a
                         // certified metric is reconciled; a non-metric answer
                         // carries no verdict (no badge).
-                        let trust = match certified.first().and_then(|name| {
-                            semantic_eligible.metrics.iter().find(|m| &m.name == name)
-                        }) {
-                            Some(m) => {
-                                Some(crate::analytics::reconcile_metric(&ctx, &sql, &res, m).await)
-                            }
-                            None => None,
-                        };
+                        let trust = None;
                         done.analytics = Some(AnalyticsMeta {
                             sql,
                             file_ids: meta_ids,
-                            certified: (!certified.is_empty()).then(|| certified.clone()),
+                            certified: None,
                             trust,
                         });
                         if let Some(m) = done.meta.as_mut() {

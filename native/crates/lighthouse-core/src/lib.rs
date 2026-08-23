@@ -34,7 +34,6 @@ pub mod recipes;
 pub mod reports;
 pub mod policy;
 pub mod secrets;
-pub mod semantic;
 pub mod updates;
 pub mod settings;
 pub mod sources;
@@ -42,7 +41,6 @@ pub mod sqlfmt;
 pub mod synth;
 pub mod table_profile;
 pub mod vault;
-pub mod views;
 pub mod watch;
 pub mod workspace;
 

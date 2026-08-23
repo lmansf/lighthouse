@@ -260,38 +260,6 @@ pub fn cache_key(
     is_cloud: bool,
 ) -> String {
     let digest = candidate_digest(&crate::vault::shareable_freshness_keys(is_cloud));
-    // The view REGISTRY as it could apply to this ask (openspec:
-    // add-shaped-views, design.md "Answer cache"): every view eligible under
-    // the ask's posture — cloud asks exclude effectively-local-only views —
-    // sorted by name. The DEFINITIONS are the material (source-data freshness
-    // already rides the candidate digest), so creating, renaming, or deleting
-    // a view invalidates honestly, and zero views leaves every key untouched.
-    let mut views: Vec<(String, String)> = crate::views::eligible_for_posture(is_cloud)
-        .into_iter()
-        .map(|v| (v.name, v.sql))
-        .collect();
-    views.sort();
-    // The semantic REGISTRY as it could apply to this ask (openspec:
-    // add-semantic-layer §5.2): every posture-eligible definition of the two
-    // kinds — a cloud ask excludes the effectively-local-only metrics and any
-    // synonym that references them (`eligible_for_posture`) — rendered as
-    // (kind-prefixed name, value) pairs so the kinds can never collide, sorted.
-    // The DEFINITIONS are the material, so editing any posture-eligible
-    // definition invalidates dependent entries, a cloud ask never keys on a
-    // local-only definition, and zero definitions leaves every key untouched.
-    let semantics = crate::semantic::eligible_for_posture(is_cloud);
-    let mut semantic_registry: Vec<(String, String)> = semantics
-        .metrics
-        .into_iter()
-        .map(|m| (format!("m:{}", m.name), m.expression))
-        .chain(
-            semantics
-                .synonyms
-                .into_iter()
-                .map(|s| (format!("s:{}", s.term), s.canonical)),
-        )
-        .collect();
-    semantic_registry.sort();
     key_from_parts(
         question,
         provider_id,
@@ -299,8 +267,8 @@ pub fn cache_key(
         attachment_ids,
         preferred_conversation_ids,
         &digest,
-        &views,
-        &semantic_registry,
+        &[],
+        &[],
     )
 }
 
