@@ -13,6 +13,10 @@ Do not bump minor for ordinary feature releases.
 (Owner designation, 2026-07-22: the §31 Apple-feel pass — token layer,
 glass chrome, control swaps, icon registry — was designated the 0.14.0
 overhaul.)
+(Owner designation, 2026-08-23: the chat-attachments refocus — persistent
+vault dropped for the session workspace, openspec
+`refocus-chat-attachments`, sign-off recorded in its proposal — is the
+0.15.0 overhaul.)
 
 ## Release mechanics (post-0.11.0 — Electron retired; iOS added in 0.13.x)
 
