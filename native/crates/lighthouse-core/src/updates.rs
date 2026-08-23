@@ -265,4 +265,23 @@ mod tests {
             "Lighthouse.AppImage"
         );
     }
+
+    /// Pins parse_pubkey's ROUTING, not just its end-to-end happy path
+    /// (mutation testing: `||` -> `&&` on the multiline/comment check survived
+    /// the other tests). A full .pub whose comment line does NOT carry the
+    /// standard "untrusted comment:" prefix must still take the decode path —
+    /// minisign skips the first line whatever it says — and verify. The
+    /// mutated `&&` routes it to from_base64 (which chokes on the newline)
+    /// and rejects a perfectly good key.
+    #[test]
+    fn pubkey_with_nonstandard_comment_line_still_verifies() {
+        let data = b"lighthouse update bytes";
+        let (_pk_b64, sig_b64, pk_raw) = tauri_style_fixture(data);
+        let key_line = pk_raw.lines().nth(1).expect("key line").to_string();
+        let odd_comment = format!("minisign key for lighthouse\n{key_line}");
+        verify_update_signature(data, &sig_b64, &odd_comment)
+            .expect("nonstandard comment line must still route to decode and verify");
+        // And a comment-only input (no key line at all) stays an error.
+        assert!(verify_update_signature(data, &sig_b64, "untrusted comment: nothing else").is_err());
+    }
 }

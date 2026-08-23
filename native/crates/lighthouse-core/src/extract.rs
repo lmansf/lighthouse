@@ -1033,35 +1033,20 @@ fn extract_odf(buf: &[u8]) -> anyhow::Result<String> {
 /// the index instead ("don\u{92}t" would never match a search for "don't").
 /// 0xA0–0xFF is identical to Latin-1; the five undefined bytes pass through.
 fn cp1252_char(b: u8) -> char {
-    match b {
-        0x80 => '€',
-        0x82 => '‚',
-        0x83 => 'ƒ',
-        0x84 => '„',
-        0x85 => '…',
-        0x86 => '†',
-        0x87 => '‡',
-        0x88 => 'ˆ',
-        0x89 => '‰',
-        0x8A => 'Š',
-        0x8B => '‹',
-        0x8C => 'Œ',
-        0x8E => 'Ž',
-        0x91 => '\u{2018}',
-        0x92 => '\u{2019}',
-        0x93 => '\u{201C}',
-        0x94 => '\u{201D}',
-        0x95 => '•',
-        0x96 => '–',
-        0x97 => '—',
-        0x98 => '˜',
-        0x99 => '™',
-        0x9A => 'š',
-        0x9B => '›',
-        0x9C => 'œ',
-        0x9E => 'ž',
-        0x9F => 'Ÿ',
-        other => other as char,
+    // The 0x80–0x9F block as a straight lookup table (indexed by b - 0x80).
+    // The five undefined bytes (0x81, 0x8D, 0x8F, 0x90, 0x9D) keep the old
+    // pass-through behavior — their raw C1 code points — so the table is
+    // byte-for-byte the previous match.
+    const CP1252_80_9F: [char; 32] = [
+        '€', '\u{81}', '‚', 'ƒ', '„', '…', '†', '‡',
+        'ˆ', '‰', 'Š', '‹', 'Œ', '\u{8D}', 'Ž', '\u{8F}',
+        '\u{90}', '\u{2018}', '\u{2019}', '\u{201C}', '\u{201D}', '•', '–', '—',
+        '˜', '™', 'š', '›', 'œ', '\u{9D}', 'ž', 'Ÿ',
+    ];
+    if (0x80..=0x9F).contains(&b) {
+        CP1252_80_9F[(b - 0x80) as usize]
+    } else {
+        b as char
     }
 }
 
