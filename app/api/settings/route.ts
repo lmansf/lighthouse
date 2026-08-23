@@ -32,8 +32,6 @@ export async function GET() {
     whisperMode: s.whisperMode === true, // opt-in, default off
     summonShortcut: s.summonShortcut ?? "ctrl+super+shift+space",
     semanticSearch: s.semanticSearch !== false, // default on
-    briefingNotify: s.briefingNotify !== false, // default on (G5)
-    briefingNoteHour: s.briefingNoteHour ?? 9, // default 9am (G5)
     tourShown: s.tourShown === true, // first-run tour, once per install
     explorerWidth: { window: explorerWidth(s, "window"), widget: explorerWidth(s, "widget") },
     // Sectioned-sidebar flyout (openspec: field-patch-0.12.5 §1): per-mode width
@@ -59,8 +57,6 @@ export async function POST(req: Request) {
     whisperMode?: boolean;
     summonShortcut?: string;
     semanticSearch?: boolean;
-    briefingNotify?: boolean;
-    briefingNoteHour?: number;
     tourShown?: boolean;
   } = {};
   if (typeof body.runOnStartup === "boolean") patch.runOnStartup = body.runOnStartup;
@@ -69,9 +65,6 @@ export async function POST(req: Request) {
   if (typeof body.whisperMode === "boolean") patch.whisperMode = body.whisperMode;
   if (typeof body.summonShortcut === "string") patch.summonShortcut = body.summonShortcut;
   if (typeof body.semanticSearch === "boolean") patch.semanticSearch = body.semanticSearch;
-  if (typeof body.briefingNotify === "boolean") patch.briefingNotify = body.briefingNotify;
-  if (typeof body.briefingNoteHour === "number" && body.briefingNoteHour >= 0 && body.briefingNoteHour <= 23)
-    patch.briefingNoteHour = body.briefingNoteHour;
   if (typeof body.tourShown === "boolean") patch.tourShown = body.tourShown;
   // Resizable explorer width (openspec: add-usability-field-patch §1) — a per-
   // window-mode value that MERGES, so it rides its own read-modify-write setter
@@ -108,8 +101,6 @@ export async function POST(req: Request) {
     whisperMode: s.whisperMode === true,
     summonShortcut: s.summonShortcut ?? "ctrl+super+shift+space",
     semanticSearch: s.semanticSearch !== false,
-    briefingNotify: s.briefingNotify !== false,
-    briefingNoteHour: s.briefingNoteHour ?? 9,
     tourShown: s.tourShown === true,
     explorerWidth: { window: explorerWidth(s, "window"), widget: explorerWidth(s, "widget") },
     flyoutWidth: { window: flyoutWidth(s, "window"), widget: flyoutWidth(s, "widget") },

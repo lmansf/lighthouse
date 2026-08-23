@@ -42,9 +42,6 @@ import type {
   Board,
   BoardCardRef,
   BoardCardRefresh,
-  Briefing,
-  BriefingReport,
-  Cadence,
   ChangedPin,
   ChatChunk,
   ChatTurn,
@@ -242,27 +239,7 @@ export interface RagService {
    * execute SQL, so it reports no changes and returns the list unchanged.
    */
   recheckPins(): Promise<{ changed: ChangedPin[]; pins: Pin[] }>;
-  /** All briefings, oldest first (add-briefings). */
-  listBriefings(): Promise<Briefing[]>;
-  /**
-   * Create or replace a briefing: a titled, ordered set of pins run together
-   * into one report. Re-saving the same title replaces it; past the cap the
-   * error explains the limit.
-   */
-  saveBriefing(
-    title: string,
-    pinIds: string[],
-    cadence: Cadence,
-  ): Promise<{ briefing?: Briefing; error?: string }>;
-  /** Remove a briefing (idempotent). */
-  removeBriefing(id: string): Promise<void>;
-  /**
-   * Run a briefing now: re-execute each pin's SQL and compose the report.
-   * PARITY: the web dev twin can't execute SQL, so it composes from each pin's
-   * last known summary. `undefined` when the id is unknown.
-   */
-  runBriefing(id: string): Promise<BriefingReport | undefined>;
-  /**
+          /**
    * Engine-derived example questions for the chat empty state: each names real
    * columns of a real included tabular file, so the analytics path can answer
    * it ("Total amount by region in sales.csv"). `label` is the chip text,
@@ -355,14 +332,7 @@ export interface RagService {
    */
   auditExport(): Promise<{ savedId?: string; savedName?: string; error?: string }>;
 
-  /**
-   * G5: refresh the "Lighthouse Briefing" note (Lighthouse Notes/) from the pins
-   * that changed, on demand. Returns the written file's id and name, or an
-   * `error`. Desktop rechecks each pin's SQL for a real before→after; the web
-   * dev twin composes from each pin's last known summary (no before).
-   */
-  refreshBriefingNote(): Promise<{ savedId?: string; savedName?: string; error?: string }>;
-  /**
+    /**
    * Investigations (openspec: add-investigations): named, durable containers
    * for analysis. Every record in creation order — the caller filters
    * archived ones (archive hides, never deletes). `pinRefs`/`noteRefs` come

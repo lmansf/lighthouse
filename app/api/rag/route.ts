@@ -53,12 +53,6 @@ import {
   setBoardCards,
 } from "@/server/boards";
 import {
-  addBriefing,
-  listBriefings,
-  removeBriefing,
-  runBriefing,
-  composeBriefingNote,
-} from "@/server/briefings";
 import {
   createView,
   deleteView,
@@ -871,38 +865,6 @@ export async function POST(req: Request) {
     case "recheckPins":
       return NextResponse.json({ changed: [], pins: listPins() });
 
-    case "listBriefings":
-      return NextResponse.json({ briefings: listBriefings() });
-
-    case "saveBriefing": {
-      const title = typeof body.title === "string" ? body.title : "";
-      const pinIds = Array.isArray(body.pinIds)
-        ? body.pinIds.filter((x: unknown): x is string => typeof x === "string")
-        : [];
-      const cadence: Cadence =
-        body.cadence === "daily" || body.cadence === "weekly" ? body.cadence : "manual";
-      try {
-        return NextResponse.json({ briefing: addBriefing(title, pinIds, cadence) });
-      } catch (err) {
-        return NextResponse.json({
-          error: err instanceof Error ? err.message : "could not save briefing",
-        });
-      }
-    }
-
-    case "removeBriefing":
-      if (typeof body.id !== "string" || !body.id) {
-        return NextResponse.json({ error: "id required" }, { status: 400 });
-      }
-      removeBriefing(body.id);
-      return NextResponse.json({ ok: true });
-
-    case "runBriefing":
-      if (typeof body.id !== "string" || !body.id) {
-        return NextResponse.json({ error: "id required" }, { status: 400 });
-      }
-      return NextResponse.json({ report: runBriefing(body.id) ?? undefined });
-
     case "exportChat": {
       // Write a client-composed artifact into the vault (openspec:
       // add-answer-artifacts). Default: the chat transcript as a markdown
@@ -998,30 +960,6 @@ export async function POST(req: Request) {
           error: err instanceof Error ? err.message : "could not purge conversation notes",
         });
       }
-
-    // G5: refresh the briefing note on demand. PARITY: the desktop engine
-    // rechecks each pin's SQL for a real before→after; the web dev twin can't
-    // run DataFusion, so it composes from each pin's last known summary (no
-    // `before`). The composer + refreshArtifact writer are byte-identical.
-    case "refreshBriefingNote": {
-      try {
-        const changed = listPins()
-          .filter((p) => p.lastSummary)
-          .map((p) => ({ question: p.question, after: p.lastSummary as string }));
-        const md = composeBriefingNote(changed, Date.now());
-        const { id, name } = refreshArtifact(
-          "Lighthouse Notes",
-          "Lighthouse Briefing",
-          "md",
-          Buffer.from(md, "utf8"),
-        );
-        return NextResponse.json({ savedId: id, savedName: name });
-      } catch (err) {
-        return NextResponse.json({
-          error: err instanceof Error ? err.message : "could not write the briefing note",
-        });
-      }
-    }
 
     // Provider sign-in (0.12.1 §3). PARITY: the RFC 8628 device flow lives in
     // the desktop engine only (native provider_auth.rs — itself inert until a

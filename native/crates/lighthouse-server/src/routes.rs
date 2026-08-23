@@ -27,16 +27,6 @@ fn bad_request(msg: &str) -> Response {
     (StatusCode::BAD_REQUEST, Json(json!({ "error": msg }))).into_response()
 }
 
-/// Wire cadence string → engine enum (unknown/absent = manual).
-fn parse_cadence(s: Option<&str>) -> lighthouse_core::briefings::Cadence {
-    use lighthouse_core::briefings::Cadence;
-    match s {
-        Some("daily") => Cadence::Daily,
-        Some("weekly") => Cadence::Weekly,
-        _ => Cadence::Manual,
-    }
-}
-
 fn err_message(err: &anyhow::Error, fallback: &str) -> String {
     let m = err.to_string();
     if m.is_empty() {
@@ -781,69 +771,6 @@ pub async fn rag_post(headers: HeaderMap, body: Option<Json<Value>>) -> Response
         // the note just because nothing changed. No OS notification and NO daily-
         // gate stamp on this explicit, in-dialog path. (PARITY: the desktop shell's
         // scheduled daily-delta write lives in main.rs.)
-        Some("refreshBriefingNote") => {
-            let _ = lighthouse_core::pins::recheck_all().await;
-            let now = lighthouse_core::config::now_ms();
-            let entries: Vec<lighthouse_core::pins::ChangedPin> = lighthouse_core::pins::list()
-                .into_iter()
-                .filter_map(|p| {
-                    p.last_summary.clone().map(|s| lighthouse_core::pins::ChangedPin {
-                        id: p.id.clone(),
-                        question: p.question.clone(),
-                        before: None,
-                        after: s,
-                    })
-                })
-                .collect();
-            let md = lighthouse_core::briefings::compose_briefing_note(&entries, now);
-            let written = tokio::task::spawn_blocking(move || {
-                lighthouse_core::vault::refresh_artifact(
-                    "Lighthouse Notes",
-                    "Lighthouse Briefing",
-                    "md",
-                    md.as_bytes(),
-                )
-            })
-            .await
-            .map_err(|e| e.to_string())
-            .and_then(|r| r.map_err(|e| e.to_string()));
-            return match written {
-                Ok((id, name)) => {
-                    Json(json!({ "savedId": id, "savedName": name })).into_response()
-                }
-                Err(e) => Json(json!({ "error": e })).into_response(),
-            };
-        }
-        Some("listBriefings") => {
-            return Json(json!({ "briefings": lighthouse_core::briefings::list() }))
-                .into_response();
-        }
-        Some("saveBriefing") => {
-            let title = body["title"].as_str().unwrap_or("").to_string();
-            let pin_ids: Vec<String> = body["pinIds"]
-                .as_array()
-                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-                .unwrap_or_default();
-            let cadence = parse_cadence(body["cadence"].as_str());
-            return match lighthouse_core::briefings::add(&title, &pin_ids, cadence) {
-                Ok(briefing) => Json(json!({ "briefing": briefing })).into_response(),
-                Err(e) => Json(json!({ "error": e })).into_response(),
-            };
-        }
-        Some("removeBriefing") => {
-            let Some(id) = body["id"].as_str().filter(|s| !s.is_empty()) else {
-                return bad_request("id required");
-            };
-            lighthouse_core::briefings::remove(id);
-            return Json(json!({ "ok": true })).into_response();
-        }
-        Some("runBriefing") => {
-            let Some(id) = body["id"].as_str().filter(|s| !s.is_empty()) else {
-                return bad_request("id required");
-            };
-            let report = lighthouse_core::briefings::run(id).await;
-            return Json(json!({ "report": report })).into_response();
-        }
         // Catalog-derived example questions for the chat empty state — every
         // one names real columns of a real included file, so the analytics
         // path can answer it. Empty when nothing tabular is included.
@@ -1702,8 +1629,6 @@ pub async fn settings_get() -> Response {
         "ocrEnabled": s.ocr_enabled != Some(false), // default on
         "auditEnabled": s.audit_enabled == Some(true), // opt-in, default off
         "draftAnswers": s.draft_answers != Some(false), // default on
-        "briefingNotify": s.briefing_notify != Some(false), // default on (G5)
-        "briefingNoteHour": s.briefing_note_hour.unwrap_or(9), // default 9am (G5)
         "tourShown": s.tour_shown == Some(true), // first-run tour, once per install
         // Resizable explorer width per window mode (openspec §1), clamped at
         // read; null when unset. Mirrors app/api/settings/route.ts GET.
@@ -1740,8 +1665,6 @@ pub async fn settings_post(headers: HeaderMap, body: Option<Json<Value>>) -> Res
         body["ocrEnabled"].as_bool(),
         body["auditEnabled"].as_bool(),
         body["draftAnswers"].as_bool(),
-        body["briefingNotify"].as_bool(),
-        body["briefingNoteHour"].as_i64(),
         body["tourShown"].as_bool(),
         body["beamMaxSteps"].as_i64(),
     );
@@ -1774,8 +1697,6 @@ pub async fn settings_post(headers: HeaderMap, body: Option<Json<Value>>) -> Res
         "backgroundConserve": s.background_conserve != Some(false),
         "ocrEnabled": s.ocr_enabled != Some(false),
         "draftAnswers": s.draft_answers != Some(false),
-        "briefingNotify": s.briefing_notify != Some(false),
-        "briefingNoteHour": s.briefing_note_hour.unwrap_or(9),
         "tourShown": s.tour_shown == Some(true),
         "explorerWidth": {
             "window": widths.explorer_width("window"),

@@ -3,9 +3,6 @@ import type {
   Board,
   BoardCardRef,
   BoardCardRefresh,
-  Briefing,
-  BriefingReport,
-  Cadence,
   ChangedPin,
   CurationRule,
   CurationRuleInput,
@@ -336,50 +333,10 @@ class MockRagService implements RagService {
     return { changed: [], pins: this.pins.map((p) => ({ ...p })) };
   }
 
-  // In-memory briefings so the briefings dialog is exercisable offline.
-  private briefings: Briefing[] = [];
 
-  async listBriefings(): Promise<Briefing[]> {
-    return this.briefings.map((b) => ({ ...b }));
-  }
 
-  async saveBriefing(
-    title: string,
-    pinIds: string[],
-    cadence: Cadence,
-  ): Promise<{ briefing?: Briefing; error?: string }> {
-    if (!title.trim()) return { error: "a briefing needs a title" };
-    if (pinIds.length === 0) return { error: "a briefing needs at least one pinned question" };
-    const id = `brief-${title.trim().toLowerCase().replace(/\W/g, "").slice(0, 12)}`;
-    const existing = this.briefings.find((b) => b.id === id);
-    this.briefings = this.briefings.filter((b) => b.id !== id);
-    if (this.briefings.length >= 20) return { error: "briefing limit reached (20) — remove one first" };
-    const briefing: Briefing = {
-      id,
-      title: title.trim(),
-      pinIds,
-      cadence,
-      createdMs: existing?.createdMs ?? Date.now(),
-    };
-    this.briefings.push(briefing);
-    return { briefing: { ...briefing } };
-  }
 
-  async removeBriefing(id: string): Promise<void> {
-    this.briefings = this.briefings.filter((b) => b.id !== id);
-  }
 
-  async runBriefing(id: string): Promise<BriefingReport | undefined> {
-    const briefing = this.briefings.find((b) => b.id === id);
-    if (!briefing) return undefined;
-    const sections = briefing.pinIds.map((pid) => {
-      const pin = this.pins.find((p) => p.id === pid);
-      return pin
-        ? { question: pin.question, markdown: pin.lastSummary ?? "" }
-        : { question: `(removed pin ${pid})`, markdown: "", error: "this pinned question was removed" };
-    });
-    return { id: briefing.id, title: briefing.title, generatedMs: Date.now(), sections };
-  }
 
   async suggestedAsks(includedFileIds: string[]): Promise<{ label: string; question: string }[]> {
     // The mock has no column catalog; surface canned asks for the first
@@ -725,12 +682,6 @@ class MockRagService implements RagService {
     return { error: "audit log is disabled" };
   }
 
-  async refreshBriefingNote(): Promise<{ savedId?: string; savedName?: string; error?: string }> {
-    return {
-      savedId: "Lighthouse Notes/Lighthouse Briefing.md",
-      savedName: "Lighthouse Briefing.md",
-    };
-  }
 
   // In-memory investigations (openspec: add-investigations) so the nav is
   // exercisable offline. Mirrors the engines' validation (non-empty name,

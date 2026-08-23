@@ -97,15 +97,6 @@ pub struct DesktopSettings {
     /// draft and the answer streams as before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub draft_answers: Option<bool>,
-    /// G5 briefing note: fire an OS notification when the scheduled note is
-    /// refreshed. Default ON (None = on); the note is always written silently
-    /// regardless. Suppressed while the app is hidden/conserving.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub briefing_notify: Option<bool>,
-    /// G5 briefing note: the local hour (0–23) at or after which the scheduled
-    /// note may refresh, at most once per day. None = the default (9am).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub briefing_note_hour: Option<i64>,
     /// Whether the once-per-install first-run orientation tour has been shown.
     /// Written true the moment the tour first appears (so completing AND
     /// skipping both mark it done); only a wiped app-state dir re-shows it.
@@ -244,8 +235,6 @@ pub fn write_desktop_settings(
     ocr_enabled: Option<bool>,
     audit_enabled: Option<bool>,
     draft_answers: Option<bool>,
-    briefing_notify: Option<bool>,
-    briefing_note_hour: Option<i64>,
     tour_shown: Option<bool>,
     beam_max_steps: Option<i64>,
 ) -> DesktopSettings {
@@ -285,15 +274,6 @@ pub fn write_desktop_settings(
     }
     if draft_answers.is_some() {
         next.draft_answers = draft_answers;
-    }
-    if briefing_notify.is_some() {
-        next.briefing_notify = briefing_notify;
-    }
-    // Store only a valid hour; a nonsense value falls back to the default at read.
-    if let Some(h) = briefing_note_hour {
-        if (0..=23).contains(&h) {
-            next.briefing_note_hour = Some(h);
-        }
     }
     if tour_shown.is_some() {
         next.tour_shown = tour_shown;

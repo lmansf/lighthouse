@@ -8,9 +8,6 @@ import type {
   Board,
   BoardCardRef,
   BoardCardRefresh,
-  Briefing,
-  BriefingReport,
-  Cadence,
   ChangedPin,
   CurationRule,
   CurationRuleInput,
@@ -258,30 +255,9 @@ class RealRagService implements RagService {
     };
   }
 
-  async listBriefings(): Promise<Briefing[]> {
-    const res = await post({ op: "listBriefings" });
-    return Array.isArray(res.briefings) ? (res.briefings as Briefing[]) : [];
-  }
 
-  async saveBriefing(
-    title: string,
-    pinIds: string[],
-    cadence: Cadence,
-  ): Promise<{ briefing?: Briefing; error?: string }> {
-    return (await post({ op: "saveBriefing", title, pinIds, cadence })) as {
-      briefing?: Briefing;
-      error?: string;
-    };
-  }
 
-  async removeBriefing(id: string): Promise<void> {
-    await post({ op: "removeBriefing", id });
-  }
 
-  async runBriefing(id: string): Promise<BriefingReport | undefined> {
-    const res = await post({ op: "runBriefing", id });
-    return (res.report as BriefingReport | undefined) ?? undefined;
-  }
 
   async suggestedAsks(includedFileIds: string[]): Promise<{ label: string; question: string }[]> {
     const res = await post({ op: "suggestedAsks", includedFileIds });
@@ -409,13 +385,6 @@ class RealRagService implements RagService {
     };
   }
 
-  async refreshBriefingNote(): Promise<{ savedId?: string; savedName?: string; error?: string }> {
-    return (await post({ op: "refreshBriefingNote" })) as unknown as {
-      savedId?: string;
-      savedName?: string;
-      error?: string;
-    };
-  }
 
   /**
    * Mutating investigations sub-ops return validation failures as 400 +

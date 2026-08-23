@@ -73,7 +73,7 @@ test("no model-call site exists OUTSIDE the manifest's files", () => {
   // manifest — a brand-new caller file is the loudest kind of new site.
   const rustCallers = ["synth.rs", "views.rs", "reports.rs"];
   const rustDir = "native/crates/lighthouse-core/src";
-  for (const f of ["analytics.rs", "briefings.rs", "insights.rs", "recipes.rs", "llm.rs"]) {
+  for (const f of ["analytics.rs", "insights.rs", "recipes.rs", "llm.rs"]) {
     const text = stripComments(read(path.join(rustDir, f)));
     const calls = (text.match(/llm::stream_answer\(/g) ?? []).length;
     assert.equal(
@@ -101,7 +101,7 @@ test("stream_local is reached only through stream_answer (no direct outside call
   // The budget seam sits in stream_answer; a direct stream_local caller
   // would bypass it. llm.rs owns the only call.
   const rustDir = "native/crates/lighthouse-core/src";
-  for (const f of ["synth.rs", "views.rs", "reports.rs", "analytics.rs", "briefings.rs"]) {
+  for (const f of ["synth.rs", "views.rs", "reports.rs", "analytics.rs"]) {
     const text = stripComments(read(path.join(rustDir, f)));
     assert.ok(
       !/stream_local\(/.test(text),

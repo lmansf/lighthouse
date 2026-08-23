@@ -88,7 +88,6 @@ import { StatTile } from "@/features/chat/StatTile";
 import { SqlBlock } from "@/features/chat/SqlBlock";
 import { formatSql } from "@/lib/sqlFormat";
 import { safeMarkdownPrefix, splitMarkdownBlocks } from "@/lib/streamingMarkdown";
-import { BriefingsPanel } from "@/features/chat/BriefingsPanel";
 import { PinMiniChart } from "@/features/chat/PinMiniChart";
 import { SaveViewDialog } from "@/features/views/SaveViewDialog";
 import { DefineMetricDialog } from "@/features/semantic/DefineMetricDialog";
@@ -2908,7 +2907,6 @@ export function ChatPanel() {
     question: string;
   } | null>(null);
   // G5: transient "Saved to Lighthouse Notes" note after a manual refresh.
-  const [briefingSaved, setBriefingSaved] = useState<string | null>(null);
   // Outcome of a pins-dialog row's "Add to board" (openspec: add-boards).
   const [pinBoardNote, setPinBoardNote] = useState<string | null>(null);
   // "Chart it" (charts by default, 0.12.1): per-turn inline table-chart
@@ -3997,20 +3995,6 @@ export function ChatPanel() {
     }
   }
 
-  /** G5: refresh the "Lighthouse Briefing" note on demand and confirm inline. */
-  async function refreshBriefingNoteNow() {
-    if (pinsBusy) return;
-    setPinsBusy(true);
-    setBriefingSaved(null);
-    try {
-      const res = await ragService.refreshBriefingNote();
-      setBriefingSaved(res.error ? `Couldn't save: ${res.error}` : "Saved to Lighthouse Notes");
-    } catch {
-      setBriefingSaved("Couldn't save the briefing note");
-    } finally {
-      setPinsBusy(false);
-    }
-  }
 
   /** Remove a pin from the dialog. */
   async function removePin(id: string) {
@@ -5204,9 +5188,6 @@ export function ChatPanel() {
                 ))}
               </div>
             )}
-            <Divider />
-            <Text weight="semibold">Briefings</Text>
-            <BriefingsPanel pins={pinList} />
           </DialogContent>
           <DialogActions>
             {pinBoardNote && (
@@ -5214,20 +5195,8 @@ export function ChatPanel() {
                 {pinBoardNote}
               </Text>
             )}
-            {briefingSaved && (
-              <Text size={200} className={styles.quietNote}>
-                {briefingSaved}
-              </Text>
-            )}
             <Button appearance="secondary" onClick={() => setPinsOpen(false)}>
               Close
-            </Button>
-            <Button
-              appearance="secondary"
-              disabled={pinsBusy || pinList.length === 0}
-              onClick={() => void refreshBriefingNoteNow()}
-            >
-              Refresh briefing note
             </Button>
             <Button
               appearance="primary"

@@ -386,8 +386,6 @@ pub fn settings_get(app: AppHandle) -> Value {
         "ocrEnabled": s.ocr_enabled != Some(false), // default on (add-ocr-perception)
         "auditEnabled": s.audit_enabled == Some(true), // opt-in, default off (add-audit-log)
         "draftAnswers": s.draft_answers != Some(false), // default on (G2)
-        "briefingNotify": s.briefing_notify != Some(false), // default on (G5)
-        "briefingNoteHour": s.briefing_note_hour.unwrap_or(9), // default 9am (G5)
         "tourShown": s.tour_shown == Some(true), // first-run tour, once per install
         // Resizable explorer width per window mode (openspec §1), clamped at
         // read; null when unset. Mirrors app/api/settings/route.ts GET.
@@ -414,8 +412,6 @@ pub fn settings_set(
     ocr_enabled: Option<bool>,
     audit_enabled: Option<bool>,
     draft_answers: Option<bool>,
-    briefing_notify: Option<bool>,
-    briefing_note_hour: Option<i64>,
     tour_shown: Option<bool>,
     beam_max_steps: Option<i64>,
     // Resizable explorer width (openspec §1): {mode,width} for one window mode.
@@ -469,8 +465,6 @@ pub fn settings_set(
         ocr_enabled,
         audit_enabled,
         draft_answers,
-        briefing_notify,
-        briefing_note_hour,
         tour_shown,
         beam_max_steps,
     );
@@ -608,8 +602,6 @@ pub fn settings_set(
         "semanticSearch": s.semantic_search != Some(false),
         "backgroundConserve": s.background_conserve != Some(false),
         "draftAnswers": s.draft_answers != Some(false),
-        "briefingNotify": s.briefing_notify != Some(false),
-        "briefingNoteHour": s.briefing_note_hour.unwrap_or(9),
         "explorerWidth": {
             "window": widths.explorer_width("window"),
             "widget": widths.explorer_width("widget"),

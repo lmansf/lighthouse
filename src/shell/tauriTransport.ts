@@ -246,8 +246,6 @@ async function route(
             ocrEnabled: typeof body.ocrEnabled === "boolean" ? body.ocrEnabled : null,
             auditEnabled: typeof body.auditEnabled === "boolean" ? body.auditEnabled : null,
             draftAnswers: typeof body.draftAnswers === "boolean" ? body.draftAnswers : null,
-            briefingNotify: typeof body.briefingNotify === "boolean" ? body.briefingNotify : null,
-            briefingNoteHour: typeof body.briefingNoteHour === "number" ? body.briefingNoteHour : null,
             tourShown: typeof body.tourShown === "boolean" ? body.tourShown : null,
             // Resizable explorer width (openspec §1): a per-mode {mode,width}
             // routed to the engine's narrow merge-setter (set_explorer_width),

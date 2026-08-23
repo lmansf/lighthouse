@@ -597,38 +597,6 @@ export interface ChangedPin {
   after: string;
 }
 
-/** How often a briefing wants to regenerate. `manual` never comes due on its own. */
-export type Cadence = "manual" | "daily" | "weekly";
-
-/**
- * A briefing: a titled, ordered selection of pinned questions (add-briefings).
- * Running it re-executes each pin's SQL and composes the results into one
- * report. Persisted engine-side (cap 20); `cadence` drives the shell's timer.
- */
-export interface Briefing {
-  id: string;
-  title: string;
-  pinIds: string[];
-  cadence: Cadence;
-  lastRunMs?: number;
-  createdMs: number;
-}
-
-/** One question's slot in a composed report. `error` set = pin gone / query failed. */
-export interface BriefingSection {
-  question: string;
-  markdown: string;
-  error?: string;
-}
-
-/** A freshly composed briefing report. */
-export interface BriefingReport {
-  id: string;
-  title: string;
-  generatedMs: number;
-  sections: BriefingSection[];
-}
-
 /**
  * Provider posture of an investigation (openspec: add-investigations):
  * "local-only" forces the private path for every ask inside it at the same

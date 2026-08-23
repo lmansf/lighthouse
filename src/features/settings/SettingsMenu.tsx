@@ -94,7 +94,7 @@ const useStyles = makeStyles({
   // reveals everything past the two essentials (collapsed by default).
   advancedToggle: { alignSelf: "flex-start", color: tokens.colorNeutralForeground2 },
   prefHint: { color: tokens.colorNeutralForeground3, fontSize: tokens.fontSizeBase200 },
-  // G5: the briefing-note hour picker row (label + dropdown, inline).
+  // Inline label + control rows in Preferences.
   prefRow: { display: "flex", alignItems: "center", gap: tokens.spacingHorizontalS },
   // Hydration placeholder / load-failure row for the desktop-only settings, so
   // "still loading" and "load failed" don't both look like "unsupported".
@@ -1075,10 +1075,6 @@ export function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (
   // G2 draft-then-verify: show an instant extractive draft while the private
   // model composes the verified answer, replaced in place. Default on.
   const [draftAnswers, setDraftAnswers] = useState(true);
-  // G5 briefing note: notify when the scheduled note refreshes (default on),
-  // and the local hour it may refresh at (default 9am).
-  const [briefingNotify, setBriefingNotify] = useState(true);
-  const [briefingNoteHour, setBriefingNoteHour] = useState(9);
   // Local audit log (openspec: add-audit-log): record what was read / which
   // provider answered / what left the machine, per question. Default OFF.
   const [auditEnabled, setAuditEnabled] = useState(false);
@@ -1150,8 +1146,6 @@ export function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (
         setBackgroundConserve(d.backgroundConserve !== false);
         setOcrEnabled(d.ocrEnabled !== false);
         setDraftAnswers(d.draftAnswers !== false);
-        setBriefingNotify(d.briefingNotify !== false);
-        setBriefingNoteHour(typeof d.briefingNoteHour === "number" ? d.briefingNoteHour : 9);
         setAuditEnabled(d.auditEnabled === true);
         setUiMode(d.uiMode === "widget" ? "widget" : "window");
         setWhisperMode(d.whisperMode === true);
@@ -1233,17 +1227,7 @@ export function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (
     void postSetting({ draftAnswers: next }, () => setDraftAnswers(prev));
   }
 
-  function updateBriefingNotify(next: boolean) {
-    const prev = briefingNotify;
-    setBriefingNotify(next);
-    void postSetting({ briefingNotify: next }, () => setBriefingNotify(prev));
-  }
 
-  function updateBriefingHour(next: number) {
-    const prev = briefingNoteHour;
-    setBriefingNoteHour(next);
-    void postSetting({ briefingNoteHour: next }, () => setBriefingNoteHour(prev));
-  }
 
   function updateAudit(next: boolean) {
     const prev = auditEnabled;
@@ -1581,32 +1565,6 @@ export function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (
               )}
 
               {desktop && (
-                <LhSwitch
-                  checked={briefingNotify}
-                  onChange={(_, d) => updateBriefingNotify(Boolean(d.checked))}
-                  label="Notify me when the daily briefing note updates — a Lighthouse Notes file that refreshes when a pinned question's answer changes (the note is always written; this only controls the notification)"
-                />
-              )}
-
-              {desktop && briefingNotify && (
-                <div className={styles.prefRow}>
-                  <Text className={styles.prefHint}>Refresh the briefing note after</Text>
-                  <Dropdown
-                    size="small"
-                    selectedOptions={[String(briefingNoteHour)]}
-                    value={`${briefingNoteHour % 12 === 0 ? 12 : briefingNoteHour % 12} ${briefingNoteHour < 12 ? "AM" : "PM"}`}
-                    onOptionSelect={(_, d) => updateBriefingHour(Number(d.optionValue))}
-                  >
-                    {Array.from({ length: 24 }, (_, h) => (
-                      <Option key={h} value={String(h)}>
-                        {`${h % 12 === 0 ? 12 : h % 12}:00 ${h < 12 ? "AM" : "PM"}`}
-                      </Option>
-                    ))}
-                  </Dropdown>
-                </div>
-              )}
-
-              {desktop && (
                 <>
                   <LhSwitch
                     checked={locks?.ocrOff ? false : ocrEnabled}
@@ -1628,7 +1586,7 @@ export function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (
                   shell too, so it wrongly surfaced the floating-bar/tray options
                   there; these all drive the desktop floating bar + tray + global
                   key listeners, inert on iOS. (The feature toggles above —
-                  semantic search, OCR, draft, briefings — stay `desktop`-gated;
+                  semantic search, OCR, draft — stay `desktop`-gated;
                   they are not shell chrome.) */}
               {platformKind() === "desktop" && (
                 <>

@@ -36,8 +36,6 @@ fn every_settings_field_round_trips() {
         ocr_enabled: Some(false),
         audit_enabled: Some(true),
         draft_answers: Some(false),
-        briefing_notify: Some(false),
-        briefing_note_hour: Some(7),
         tour_shown: Some(true),
         openai_auth_method: Some("signin".into()),
         beam_max_steps: Some(6),
@@ -60,8 +58,6 @@ fn every_settings_field_round_trips() {
         ocr_enabled,
         audit_enabled,
         draft_answers,
-        briefing_notify,
-        briefing_note_hour,
         tour_shown,
         openai_auth_method,
         beam_max_steps,
@@ -79,8 +75,6 @@ fn every_settings_field_round_trips() {
     assert_eq!(ocr_enabled, Some(false));
     assert_eq!(audit_enabled, Some(true));
     assert_eq!(draft_answers, Some(false));
-    assert_eq!(briefing_notify, Some(false));
-    assert_eq!(briefing_note_hour, Some(7));
     assert_eq!(tour_shown, Some(true));
     assert_eq!(openai_auth_method.as_deref(), Some("signin"));
     assert_eq!(beam_max_steps, Some(6));
@@ -100,8 +94,6 @@ fn every_settings_field_round_trips() {
         "ocrEnabled",
         "auditEnabled",
         "draftAnswers",
-        "briefingNotify",
-        "briefingNoteHour",
         "tourShown",
         "openaiAuthMethod",
         "beamMaxSteps",
@@ -141,8 +133,6 @@ fn writer_persists_every_toggle_and_preserves_shell_keys() {
         Some(false),                    // ocr_enabled
         Some(true),                     // audit_enabled
         Some(false),                    // draft_answers
-        Some(false),                    // briefing_notify
-        Some(7),                        // briefing_note_hour
         Some(true),                     // tour_shown
         Some(8),                        // beam_max_steps
     );
@@ -159,8 +149,6 @@ fn writer_persists_every_toggle_and_preserves_shell_keys() {
     assert_eq!(s.ocr_enabled, Some(false));
     assert_eq!(s.audit_enabled, Some(true));
     assert_eq!(s.draft_answers, Some(false));
-    assert_eq!(s.briefing_notify, Some(false));
-    assert_eq!(s.briefing_note_hour, Some(7));
     assert_eq!(s.tour_shown, Some(true));
     assert_eq!(s.beam_max_steps, Some(8));
     assert_eq!(

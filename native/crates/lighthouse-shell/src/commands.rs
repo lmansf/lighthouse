@@ -692,47 +692,6 @@ pub async fn rag_op(
         //     after, compose the deterministic note, and overwrite Lighthouse
         //     Notes/Lighthouse Briefing.md in place. No OS notification here —
         //     the user is in the dialog; the result is confirmed inline. ---
-        Some("refreshBriefingNote") => {
-            // Recheck to freshen each pin's summary, then compose from a SNAPSHOT
-            // of every pin that has a summary (matching the web twin) — NOT just
-            // what changed on this recheck. A manual refresh regenerates the whole
-            // briefing, so it never clobbers a meaningful note with the empty-set
-            // message just because nothing changed since the last check. No OS
-            // notification (the user is in the dialog) and NO daily-gate stamp: the
-            // on-demand snapshot and the scheduled daily delta are independent.
-            let _ = lighthouse_core::pins::recheck_all().await;
-            let now = lighthouse_core::config::now_ms();
-            let entries: Vec<lighthouse_core::pins::ChangedPin> = lighthouse_core::pins::list()
-                .into_iter()
-                .filter_map(|p| {
-                    p.last_summary.clone().map(|s| lighthouse_core::pins::ChangedPin {
-                        id: p.id.clone(),
-                        question: p.question.clone(),
-                        before: None,
-                        after: s,
-                    })
-                })
-                .collect();
-            let md = lighthouse_core::briefings::compose_briefing_note(&entries, now);
-            let written = tokio::task::spawn_blocking(move || {
-                lighthouse_core::vault::refresh_artifact(
-                    "Lighthouse Notes",
-                    "Lighthouse Briefing",
-                    "md",
-                    md.as_bytes(),
-                )
-            })
-            .await
-            .map_err(|e| e.to_string())
-            .and_then(|r| r.map_err(|e| e.to_string()));
-            Ok(match written {
-                Ok((id, name)) => {
-                    vault_changed();
-                    json!({ "savedId": id, "savedName": name })
-                }
-                Err(e) => json!({ "error": e }),
-            })
-        }
         // --- Pinned questions (openspec: add-pinned-questions): persist an
         //     analytics answer's question + SQL + files; rechecks are guarded
         //     and model-free. The background scheduler lives in main.rs. ---
@@ -778,36 +737,6 @@ pub async fn rag_op(
                 "changed": changed,
                 "pins": lighthouse_core::pins::list(),
             }))
-        }
-        Some("listBriefings") => Ok(json!({ "briefings": lighthouse_core::briefings::list() })),
-        Some("saveBriefing") => {
-            let title = body["title"].as_str().unwrap_or("").to_string();
-            let pin_ids: Vec<String> = body["pinIds"]
-                .as_array()
-                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-                .unwrap_or_default();
-            let cadence = match body["cadence"].as_str() {
-                Some("daily") => lighthouse_core::briefings::Cadence::Daily,
-                Some("weekly") => lighthouse_core::briefings::Cadence::Weekly,
-                _ => lighthouse_core::briefings::Cadence::Manual,
-            };
-            Ok(match lighthouse_core::briefings::add(&title, &pin_ids, cadence) {
-                Ok(briefing) => json!({ "briefing": briefing }),
-                Err(e) => json!({ "error": e }),
-            })
-        }
-        Some("removeBriefing") => {
-            let Some(id) = body["id"].as_str().filter(|s| !s.is_empty()) else {
-                return Err("id required".into());
-            };
-            lighthouse_core::briefings::remove(id);
-            Ok(json!({ "ok": true }))
-        }
-        Some("runBriefing") => {
-            let Some(id) = body["id"].as_str().filter(|s| !s.is_empty()) else {
-                return Err("id required".into());
-            };
-            Ok(json!({ "report": lighthouse_core::briefings::run(id).await }))
         }
         // Catalog-derived example questions for the chat empty state — every
         // one names real columns of a real included file, so the analytics
