@@ -6837,4 +6837,408 @@ mod row_cap_disclosure {
         };
         assert!(row_cap_footer(&[grouped]).is_none());
     }
+
+}
+
+// Survivor pins from the 2026-08 mutation audit: the tabular-ingestion layer's
+// missed mutants, each pinned at its exact boundary. The xlsx builder writes a
+// minimal real OOXML workbook (inline strings) so calamine parses exactly the
+// rows each test states — no external fixtures.
+#[cfg(test)]
+mod ingestion_mutation_pins {
+    use super::*;
+    use datafusion::datasource::TableProvider as _;
+
+    fn write_min_xlsx(path: &std::path::Path, sheets: &[(&str, &[&[&str]])]) {
+        use std::io::Write as _;
+        let file = std::fs::File::create(path).expect("create xlsx");
+        let mut zip = zip::ZipWriter::new(file);
+        let opts = zip::write::SimpleFileOptions::default();
+        let mut put = |name: &str, body: String| {
+            zip.start_file(name, opts).expect("zip entry");
+            zip.write_all(body.as_bytes()).expect("zip write");
+        };
+        let mut overrides = String::new();
+        let mut sheet_refs = String::new();
+        let mut rels = String::new();
+        for (i, (name, _)) in sheets.iter().enumerate() {
+            let n = i + 1;
+            overrides.push_str(&format!(
+                "<Override PartName=\"/xl/worksheets/sheet{n}.xml\" \
+                 ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/>"
+            ));
+            sheet_refs.push_str(&format!(
+                "<sheet name=\"{name}\" sheetId=\"{n}\" r:id=\"rId{n}\"/>"
+            ));
+            rels.push_str(&format!(
+                "<Relationship Id=\"rId{n}\" \
+                 Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" \
+                 Target=\"worksheets/sheet{n}.xml\"/>"
+            ));
+        }
+        put(
+            "[Content_Types].xml",
+            format!(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
+                 <Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">\
+                 <Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>\
+                 <Default Extension=\"xml\" ContentType=\"application/xml\"/>\
+                 <Override PartName=\"/xl/workbook.xml\" \
+                 ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml\"/>\
+                 {overrides}</Types>"
+            ),
+        );
+        put(
+            "_rels/.rels",
+            "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
+             <Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\
+             <Relationship Id=\"rId1\" \
+             Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" \
+             Target=\"xl/workbook.xml\"/></Relationships>"
+                .to_string(),
+        );
+        put(
+            "xl/workbook.xml",
+            format!(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
+                 <workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" \
+                 xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">\
+                 <sheets>{sheet_refs}</sheets></workbook>"
+            ),
+        );
+        put(
+            "xl/_rels/workbook.xml.rels",
+            format!(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
+                 <Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\
+                 {rels}</Relationships>"
+            ),
+        );
+        for (i, (_, rows)) in sheets.iter().enumerate() {
+            let n = i + 1;
+            let mut body = String::new();
+            for (r, row) in rows.iter().enumerate() {
+                body.push_str(&format!("<row r=\"{}\">", r + 1));
+                for (c, cell) in row.iter().enumerate() {
+                    if cell.is_empty() {
+                        continue;
+                    }
+                    let col = (b'A' + c as u8) as char;
+                    // Numbers as native numeric cells, everything else inline str.
+                    if cell.parse::<f64>().is_ok() {
+                        body.push_str(&format!("<c r=\"{col}{}\"><v>{cell}</v></c>", r + 1));
+                    } else {
+                        body.push_str(&format!(
+                            "<c r=\"{col}{}\" t=\"inlineStr\"><is><t>{cell}</t></is></c>",
+                            r + 1
+                        ));
+                    }
+                }
+                body.push_str("</row>");
+            }
+            put(
+                &format!("xl/worksheets/sheet{n}.xml"),
+                format!(
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
+                     <worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">\
+                     <sheetData>{body}</sheetData></worksheet>"
+                ),
+            );
+        }
+        zip.finish().expect("zip finish");
+    }
+
+    fn field_names(wbk: &CachedWorkbook) -> Vec<Vec<String>> {
+        wbk.sheets
+            .iter()
+            .map(|s| s.mem.schema().fields().iter().map(|f| f.name().clone()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn xlsx_builder_round_trips_through_calamine() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("t.xlsx");
+        write_min_xlsx(&p, &[("Sheet1", &[&["name", "amount"], &["a", "1"], &["b", "2"]])]);
+        let wbk = parse_workbook(&p);
+        assert!(!wbk.multi);
+        assert_eq!(field_names(&wbk), vec![vec!["name".to_string(), "amount".to_string()]]);
+    }
+
+    #[test]
+    fn parse_workbook_multi_flag_and_sheet_typing_boundaries() {
+        let dir = tempfile::tempdir().unwrap();
+        // Two sheets -> multi (kills `>` -> `<` on names.len() > 1). The 1-column
+        // sheet is skipped (headers.len() < 2), the 2-column/2-data-row sheet is
+        // KEPT (kills `<` -> `<=`/`==` on data.len() < 2 and headers.len() < 2).
+        let p = dir.path().join("two.xlsx");
+        write_min_xlsx(
+            &p,
+            &[
+                ("Only", &[&["single"], &["1"], &["2"], &["3"]]),
+                ("Kept", &[&["name", "amount"], &["a", "1"], &["b", "2"]]),
+            ],
+        );
+        let wbk = parse_workbook(&p);
+        assert!(wbk.multi, "two sheet names => multi naming");
+        assert_eq!(wbk.sheets.len(), 1, "1-column sheet is skipped, 2-column kept");
+        assert_eq!(wbk.sheets[0].sheet, "kept");
+        assert_eq!(wbk.sheets[0].capped_rows, None, "2 data rows is not a cap");
+
+        // Single sheet -> multi = false even when the book has empty extras.
+        let q = dir.path().join("one.xlsx");
+        write_min_xlsx(&q, &[("S", &[&["name", "amount"], &["a", "1"], &["b", "2"]])]);
+        assert!(!parse_workbook(&q).multi);
+    }
+
+    #[test]
+    fn parse_workbook_title_row_moves_data_start_and_headers_fall_back_to_col_n() {
+        let dir = tempfile::tempdir().unwrap();
+        // Row 0 is a 1-cell title (never a header), row 1 is the detected header
+        // with an empty cell and a "table" cell: both fall back to col_N (kills
+        // the `||` -> `&&` and `==` -> `!=` on the fallback condition). Data must
+        // start AT row h+1 (kills `+` -> `*` in all[h + 1..]): the header row
+        // itself must not reappear as a data row.
+        let p = dir.path().join("titled.xlsx");
+        write_min_xlsx(
+            &p,
+            &[(
+                "S",
+                &[
+                    &["Quarterly report", "", ""],
+                    &["", "table", "amount"],
+                    &["a", "b", "1"],
+                    &["c", "d", "2"],
+                ],
+            )],
+        );
+        let wbk = parse_workbook(&p);
+        assert_eq!(wbk.sheets.len(), 1);
+        assert_eq!(
+            field_names(&wbk)[0],
+            vec!["col_1".to_string(), "col_2".to_string(), "amount".to_string()]
+        );
+        // 2 data rows past the title+header; None = no cap and no header leak.
+        assert_eq!(wbk.sheets[0].capped_rows, None);
+        let batch_rows = wbk.sheets[0].mem.schema().fields().len();
+        assert_eq!(batch_rows, 3, "three typed columns");
+    }
+
+    #[test]
+    fn workbook_cache_key_is_path_mtime_size_and_none_for_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("k.xlsx");
+        std::fs::write(&p, b"0123456789").unwrap();
+        let key = workbook_cache_key(&p).expect("stattable file has a key");
+        assert_eq!(key.0, p.to_string_lossy().to_string(), "component 1 is the real path");
+        assert!(key.1 > 1_000_000_000_000, "component 2 is a real epoch-ms mtime");
+        assert_eq!(key.2, 10, "component 3 is the byte size");
+        assert_eq!(workbook_cache_key(&dir.path().join("absent.xlsx")), None);
+    }
+
+    #[test]
+    fn register_workbook_clears_the_cache_only_at_the_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("c.xlsx");
+        write_min_xlsx(&p, &[("S", &[&["name", "amount"], &["a", "1"], &["b", "2"]])]);
+        let parsed = std::sync::Arc::new(parse_workbook(&p));
+        {
+            let mut c = workbook_cache().lock().unwrap();
+            c.clear();
+            // One BELOW the cap: a miss must insert without clearing.
+            for i in 0..(WORKBOOK_CACHE_CAP - 1) {
+                c.insert((format!("synthetic-{i}"), 1, 1), parsed.clone());
+            }
+        }
+        let ctx = SessionContext::new();
+        let regs = register_workbook(&ctx, "c", &p);
+        assert_eq!(regs.len(), 1);
+        assert_eq!(
+            workbook_cache().lock().unwrap().len(),
+            WORKBOOK_CACHE_CAP,
+            "below the cap nothing is evicted (127 synthetic + this insert)"
+        );
+        // AT the cap: the next miss clears the whole map first (kills `>=` -> `<`).
+        let q = dir.path().join("d.xlsx");
+        write_min_xlsx(&q, &[("S", &[&["name", "amount"], &["a", "1"], &["b", "2"]])]);
+        let ctx2 = SessionContext::new();
+        let _ = register_workbook(&ctx2, "d", &q);
+        assert_eq!(
+            workbook_cache().lock().unwrap().len(),
+            1,
+            "at the cap the map is dropped and refilled with just the new entry"
+        );
+        workbook_cache().lock().unwrap().clear();
+    }
+
+    #[test]
+    fn union_matrix_accepts_exactly_two_by_two_and_rejects_one_member() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("jan.xlsx");
+        let b = dir.path().join("feb.xlsx");
+        // Exactly 2 headers, 1 data row per member (2 total), 2 members: every
+        // `<` in `headers < 2 || data < 2 || included < 2` sits AT its boundary,
+        // so the `<=`/`==` mutants all reject what must be accepted.
+        write_min_xlsx(&a, &[("S", &[&["name", "amount"], &["a", "1"]])]);
+        write_min_xlsx(&b, &[("S", &[&["name", "amount"], &["b", "2"]])]);
+        let members = vec![
+            ("id-a".to_string(), "jan.xlsx".to_string(), a.clone()),
+            ("id-b".to_string(), "feb.xlsx".to_string(), b.clone()),
+        ];
+        let (_, batch, included) =
+            workbook_union_matrix(&members).expect("2 cols x 2 rows x 2 members unions");
+        assert_eq!(included, 2);
+        assert_eq!(batch.num_rows(), 2);
+
+        // Wider/taller union still unions (kills the `<` -> `>` flips).
+        let c = dir.path().join("mar.xlsx");
+        let d = dir.path().join("apr.xlsx");
+        write_min_xlsx(
+            &c,
+            &[("S", &[&["name", "region", "amount"], &["a", "n", "1"], &["b", "s", "2"]])],
+        );
+        write_min_xlsx(
+            &d,
+            &[("S", &[&["name", "region", "amount"], &["c", "e", "3"], &["d", "w", "4"]])],
+        );
+        let members = vec![
+            ("id-c".to_string(), "mar.xlsx".to_string(), c),
+            ("id-d".to_string(), "apr.xlsx".to_string(), d),
+        ];
+        let (_, batch, included) = workbook_union_matrix(&members).expect("3x4x2 unions");
+        assert_eq!((included, batch.num_rows()), (2, 4));
+
+        // A single member can never claim to be a union.
+        let members = vec![("id-a".to_string(), "jan.xlsx".to_string(), a)];
+        assert!(workbook_union_matrix(&members).is_none());
+    }
+
+    #[test]
+    fn detect_header_row_mostly_numeric_gate_sits_at_half() {
+        // r0 qualifies ONLY under the strict `textual * 2 < len` reading:
+        // 2 textual of 4 => 4 < 4 is false => qualifies; the `<=`/`==` mutants
+        // skip it and fall back to row 0 anyway — so pair it with a junk row 0
+        // and assert the header moved.
+        let rows = vec![
+            vec!["only-title".to_string(), String::new(), String::new(), String::new()],
+            vec!["name".to_string(), "1".to_string(), "region".to_string(), "2".to_string()],
+        ];
+        assert_eq!(detect_header_row(&rows), 1);
+        // A 1-of-3-textual row is data under `*2` but a header under `+2`
+        // (kills `*` -> `+`): the real code must keep looking and pick row 2.
+        let rows = vec![
+            vec!["t".to_string(), String::new(), String::new()],
+            vec!["2".to_string(), "3".to_string(), "x".to_string()],
+            vec!["name".to_string(), "region".to_string(), "amount".to_string()],
+        ];
+        assert_eq!(detect_header_row(&rows), 2);
+    }
+
+    #[test]
+    fn serial_dates_need_whole_numbers_inside_the_window() {
+        let v = |s: &str| s.to_string();
+        let vals = [v("45000"), v("45001")];
+        assert!(looks_like_serial_dates(&vals.iter().collect::<Vec<_>>()));
+        // All-empty is NOT serial dates (kills fn -> true).
+        let vals = [v(""), v("  ")];
+        assert!(!looks_like_serial_dates(&vals.iter().collect::<Vec<_>>()));
+        // A whole number OUTSIDE the window fails (kills `&&` -> `||` and the
+        // guard -> true: 100 has fract 0 but is no Excel date).
+        let vals = [v("100")];
+        assert!(!looks_like_serial_dates(&vals.iter().collect::<Vec<_>>()));
+        // A fractional number inside the window fails too.
+        let vals = [v("45000.5")];
+        assert!(!looks_like_serial_dates(&vals.iter().collect::<Vec<_>>()));
+    }
+
+    #[test]
+    fn table_from_matrix_types_at_the_eighty_percent_boundary() {
+        let headers = vec!["name".to_string(), "amount".to_string(), "empty".to_string()];
+        // amount: exactly 4 numeric of 5 non-empty = 80% => Float64.
+        let data: Vec<Vec<String>> = vec![
+            vec!["a".into(), "1".into(), "".into()],
+            vec!["b".into(), "2".into(), "".into()],
+            vec!["c".into(), "3".into(), "".into()],
+            vec!["d".into(), "4".into(), "".into()],
+            vec!["e".into(), "x".into(), "".into()],
+        ];
+        let (schema, _) = table_from_matrix(&headers, &data).expect("types");
+        assert_eq!(schema.field(1).data_type(), &DataType::Float64, "80% exactly is numeric");
+        // An all-empty column must stay Utf8 (kills `&&` -> `||` and `>` -> `>=`
+        // on `non_empty > 0`: zero values is never a numeric column).
+        assert_eq!(schema.field(2).data_type(), &DataType::Utf8, "all-empty stays text");
+        // 3 of 5 numeric (60%) stays text.
+        let data2: Vec<Vec<String>> = vec![
+            vec!["a".into(), "1".into(), "".into()],
+            vec!["b".into(), "2".into(), "".into()],
+            vec!["c".into(), "3".into(), "".into()],
+            vec!["d".into(), "x".into(), "".into()],
+            vec!["e".into(), "y".into(), "".into()],
+        ];
+        let (schema2, _) = table_from_matrix(&headers, &data2).expect("types");
+        assert_eq!(schema2.field(1).data_type(), &DataType::Utf8);
+    }
+
+    #[test]
+    fn register_grid_boundaries_and_col_n_fallback() {
+        let ctx = SessionContext::new();
+        let grid = crate::pdf_tables::Table {
+            header_like: true,
+            rows: vec![
+                // "table" and empty headers fall back to col_N (kills `||` -> `&&`).
+                vec!["table".to_string(), "".to_string(), "amount".to_string()],
+                vec!["a".to_string(), "b".to_string(), "1".to_string()],
+                vec!["c".to_string(), "d".to_string(), "2".to_string()],
+            ],
+        };
+        let name = register_grid(&ctx, "pdf_t", &grid).expect("2 data rows registers");
+        assert_eq!(name, "pdf_t");
+        // The registered schema uses the fallback names.
+        let ctx2 = SessionContext::new();
+        let g2 = crate::pdf_tables::Table {
+            header_like: true,
+            rows: vec![
+                vec!["name".to_string(), "amount".to_string()],
+                vec!["a".to_string(), "1".to_string()],
+            ],
+        };
+        // Exactly ONE data row is too thin (kills `<` -> `<=` on data.len()).
+        assert!(register_grid(&ctx2, "thin", &g2).is_none());
+        let g1 = crate::pdf_tables::Table {
+            header_like: true,
+            rows: vec![vec!["single".to_string()], vec!["1".to_string()], vec!["2".to_string()]],
+        };
+        // One column is too narrow (kills `<` -> `<=` on headers.len()).
+        assert!(register_grid(&ctx2, "narrow", &g1).is_none());
+    }
+
+    #[tokio::test]
+    async fn register_pdf_registers_nothing_for_junk_bytes() {
+        // A small non-PDF file passes the size guard, parses to zero grids, and
+        // must register NOTHING — killing the fn-replacement mutants that
+        // fabricate table names (vec!["xyzzy"] / vec![""]). The positive-grid
+        // cases live behind a real positioned-glyph PDF and are deferred.
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("junk.pdf");
+        std::fs::write(&p, b"%PDF-1.4 not really a table").unwrap();
+        let ctx = SessionContext::new();
+        assert!(register_pdf(&ctx, "junk", &p).await.is_empty());
+    }
+
+    #[test]
+    fn generic_join_cols_include_bare_and_numbered_col_prefixes() {
+        assert!(is_generic_join_col("col_3"));
+        // "col_" with an EMPTY suffix is not the auto-name pattern (kills
+        // `&&` -> `||`, which would call any col_* generic).
+        assert!(!is_generic_join_col("col_"));
+        assert!(!is_generic_join_col("col_x"));
+        assert!(!is_generic_join_col("customer_id"));
+    }
+
+    #[test]
+    fn saved_age_label_switches_off_just_now_at_exactly_one_minute() {
+        assert_eq!(saved_age_label(0, 59_999), "just now");
+        // Exactly 60s is a minute, not "just now" (kills `<` -> `<=`).
+        assert_ne!(saved_age_label(0, 60_000), "just now");
+    }
 }

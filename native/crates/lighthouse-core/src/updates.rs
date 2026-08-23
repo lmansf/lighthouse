@@ -134,7 +134,6 @@ pub fn pick_update_asset(platform: UpdatePlatform, asset_names: &[String]) -> Op
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::Engine as _;
 
     /// Generate a keypair + signature the way `tauri signer sign` lays them
     /// out: base64 of the full minisign key/signature files.
