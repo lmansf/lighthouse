@@ -15,6 +15,13 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { appStateDir, readJson, writeJson } from "./config";
 import { extractRichText, isRichFile } from "./extract";
+import {
+  chunkTextsNamed,
+  readTextAbs,
+  retrieveItems,
+  type RetrievalItem,
+  type Retrieved,
+} from "./vault";
 
 /**
  * The corpus cap — the product IS "a small group of files, done
@@ -171,6 +178,73 @@ export function resolve(conversationId: string, id: string): { name: string; pat
   const p = blobPath(f.hash, f.name);
   if (!fs.existsSync(p)) return null;
   return { name: f.name, path: p };
+}
+
+/**
+ * Retrieval over ONE conversation's attachments. The vault's gating layer has
+ * no counterpart here — attaching IS the consent, and the cloud posture is the
+ * ask's own provider choice — so this resolves the manifest to retrieval items
+ * and hands them straight to the shared ranker. `attachmentIds` narrows to a
+ * per-question subset; empty means the whole conversation.
+ *
+ * KEEP IN SYNC with workspace.rs::retrieve.
+ */
+export async function retrieve(
+  conversationId: string,
+  query: string,
+  attachmentIds: string[],
+  k = 5,
+  preferredConversationIds: string[] = [],
+): Promise<Retrieved> {
+  const items: RetrievalItem[] = list(conversationId)
+    .filter((f) => attachmentIds.length === 0 || attachmentIds.includes(f.id))
+    .map((f) => ({
+      id: f.id,
+      name: f.name,
+      // An attachment id is opaque (a content hash), so name-token matching
+      // runs on the display name alone — the same choice the vault makes for
+      // an opaque cloud id.
+      pathFor: "",
+      read: () => readTextAbs(blobPath(f.hash, f.name)),
+    }));
+  if (items.length === 0) return { references: [], contexts: [] };
+  return retrieveItems(query, items, k, preferredConversationIds);
+}
+
+/**
+ * An attachment's display name + extracted text, for the synthesis pipeline
+ * (whole-file answers, table profiles). `previewChars` bounds the map-step
+ * fallback. The workspace twin of `vault.docText`.
+ *
+ * KEEP IN SYNC with workspace.rs::doc_text.
+ */
+export async function docText(
+  conversationId: string,
+  id: string,
+  previewChars?: number,
+): Promise<{ name: string; text: string } | null> {
+  const hit = resolve(conversationId, id);
+  if (!hit) return null;
+  const text = await readTextAbs(hit.path);
+  if (!text.trim()) return null;
+  return { name: hit.name, text: previewChars ? text.slice(0, previewChars) : text };
+}
+
+/**
+ * An attachment's display name + ORDERED chunk texts — the same byte-identical
+ * chunker the vault path uses — for whole-document coverage (doc-focus).
+ *
+ * KEEP IN SYNC with the `doc_chunks` arm of synth.rs::Corpus.
+ */
+export async function docChunks(
+  conversationId: string,
+  id: string,
+): Promise<[string, string[]] | null> {
+  const doc = await docText(conversationId, id);
+  if (!doc) return null;
+  const chunks = chunkTextsNamed(doc.name, doc.text);
+  if (chunks.length === 0) return null;
+  return [doc.name, chunks];
 }
 
 /**

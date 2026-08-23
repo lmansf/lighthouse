@@ -1,6 +1,13 @@
-/** Upload endpoint: stream multipart files into the vault (excluded by default). */
+/**
+ * Upload endpoint: stream multipart files into the CONVERSATION WORKSPACE when
+ * the request names one (openspec: refocus-chat-attachments §2.1), or into the
+ * vault when it doesn't — the legacy path, until the vault goes.
+ *
+ * PARITY: upload_post in routes.rs.
+ */
 import { NextResponse } from "next/server";
 import { addFile } from "@/server/vault";
+import * as workspace from "@/server/workspace";
 import { isSameOrigin } from "@/server/http";
 
 export const runtime = "nodejs";
@@ -20,6 +27,12 @@ export async function POST(req: Request) {
   }
   const destRaw = form.get("dir");
   const dest = typeof destRaw === "string" && destRaw ? destRaw : null;
+  // The conversation these files are being attached to. Present ⇒ they join
+  // that conversation's workspace (where the engine enforces the 10-file cap);
+  // absent ⇒ the legacy vault write.
+  const convRaw = form.get("conversationId");
+  const conversationId =
+    typeof convRaw === "string" && convRaw.trim() !== "" ? convRaw.trim() : null;
 
   // For folder uploads the client sends a `paths` entry per file (the file's
   // path relative to the dropped folder, e.g. "notes/2024/q1.md") so the folder
@@ -60,7 +73,15 @@ export async function POST(req: Request) {
     const target = subDir || dest;
     try {
       const bytes = Buffer.from(await file.arrayBuffer());
-      added.push(addFile(file.name, bytes, target));
+      if (conversationId) {
+        // Attaching to a conversation puts the bytes in its workspace, and
+        // ingestion starts at once so the first ask finds the cache warm.
+        const att = workspace.attach(conversationId, file.name, bytes);
+        void workspace.ingest(att);
+        added.push({ newId: att.id });
+      } else {
+        added.push(addFile(file.name, bytes, target));
+      }
       accepted++;
       totalBytes += file.size;
     } catch (err) {

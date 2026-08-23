@@ -2000,17 +2000,47 @@ export async function retrieve(
     if (listing) return buildListing(nodes, listing);
   }
 
-  const qtokens = tokenize(query);
-  if (qtokens.length === 0) return { references: [], contexts: [] };
-
   const state = loadState();
   // Unified retrieval items: vault files (read by node id) and mirrored cloud
   // files (read by absolute mirror path). `pathFor` seeds name-token matching —
   // vault ids are real paths; cloud ids are opaque, so match on the name only.
-  const items: { id: string; name: string; pathFor: string; read: () => Promise<string> }[] = [
+  const items: RetrievalItem[] = [
     ...nodes.map((n) => ({ id: n.id, name: n.name, pathFor: n.id, read: () => readText(n.id, state) })),
     ...external.map((e) => ({ id: e.id, name: e.name, pathFor: "", read: () => readTextAbs(e.abs) })),
   ];
+  return retrieveItems(query, items, k, preferredConversationIds);
+}
+
+/**
+ * One candidate for `retrieveItems`: an id, its display name, the path string
+ * that seeds name-token matching (`pathFor` — a vault id is a real path; an
+ * attachment or cloud id is opaque, so those match on the name alone), and a
+ * reader for its text.
+ */
+export interface RetrievalItem {
+  id: string;
+  name: string;
+  pathFor: string;
+  read: () => Promise<string>;
+}
+
+/**
+ * Rank `items` against `query` and build the references + contexts — the
+ * SOURCE-AGNOSTIC scoring tail of `retrieve`, split out so a workspace corpus
+ * (conversation attachments) runs the identical ranking without any vault
+ * gating in front of it (openspec: refocus-chat-attachments §1.4). The gate is
+ * the caller's business; this is the ranker. KEEP IN SYNC with
+ * vault.rs::retrieve_items.
+ */
+export async function retrieveItems(
+  query: string,
+  items: RetrievalItem[],
+  k = 5,
+  preferredConversationIds: string[] = [],
+): Promise<Retrieved> {
+  const qtokens = tokenize(query);
+  if (qtokens.length === 0) return { references: [], contexts: [] };
+  if (items.length === 0) return { references: [], contexts: [] };
   const nameToks = new Map<string, string[]>();
   for (const it of items) nameToks.set(it.id, nameTokensOf(it.pathFor, it.name));
   const preview = new Map<string, string>(); // first content slice, for name-only hits
@@ -2180,6 +2210,39 @@ export function namedFileTarget(
   const id = pinnedNamedFile(qtokens, files);
   const hit = files.find((f) => f.id === id);
   return hit ? [hit.id, hit.name] : null;
+}
+
+/**
+ * The single file the question NAMES out of an EXPLICIT candidate list, if any
+ * — the same conservative matcher as `namedFileTarget` (ambiguity ⇒ null) over
+ * `(id, name)` pairs a caller already resolved. This is the corpus-agnostic
+ * form: the vault path passes its shareable subset, the workspace passes a
+ * conversation's attachments. KEEP IN SYNC with vault.rs::named_file_target_over.
+ */
+export function namedFileTargetOver(
+  question: string,
+  files: [string, string][],
+): [string, string] | null {
+  const qtokens = tokenize(question);
+  if (qtokens.length === 0) return null;
+  const tokened = files.map(([id, name]) => ({ id, name, toks: nameTokensOf(id, name) }));
+  const id = pinnedNamedFile(qtokens, tokened);
+  const hit = tokened.find((f) => f.id === id);
+  return hit ? [hit.id, hit.name] : null;
+}
+
+/**
+ * A vault file's display name + the absolute path its bytes live at — what the
+ * analytics branches register tables from. KEEP IN SYNC with vault.rs::doc_path.
+ */
+export function docPath(fileId: string): { name: string; path: string } | null {
+  const node = walk(vaultDir()).find((n) => n.kind === "file" && n.id === fileId);
+  if (!node) return null;
+  try {
+    return { name: node.name, path: resolveAbs(fileId, loadState()) };
+  } catch {
+    return null;
+  }
 }
 
 /**

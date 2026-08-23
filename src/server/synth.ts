@@ -9,19 +9,22 @@
  * helpers in lighthouse-core) must keep prompts and formats byte-identical.
  */
 import type { ChatChunk, ChatTurn, RagReference } from "@/contracts";
-import { retrieve as registryRetrieve } from "./sources/registry";
 import {
   retrieve as vaultRetrieve,
-  docText,
-  docChunks,
+  docText as vaultDocText,
+  docChunks as vaultDocChunks,
+  docPath as vaultDocPath,
   activeIncludedFileIds,
   shareableFileIds,
   shareableSubset,
   localOnlySubset,
   namedButExcluded,
   namedFileTarget,
+  namedFileTargetOver,
   sourceKindOf,
+  type Retrieved,
 } from "./vault";
+import * as workspace from "./workspace";
 import {
   remoteProvider,
   streamAnswer,
@@ -45,6 +48,7 @@ import { metaIntent, renderMeta } from "./meta";
 import { isProfileable, profileAnswer, profileChart, tableProfile } from "./tableProfile";
 import {
   cacheKey,
+  workspaceCacheKey,
   insert as cacheInsert,
   lookup as cacheLookup,
   type CacheCtl,
@@ -511,6 +515,92 @@ function retrievalManifest(
  * retrieval's recall preference; empty when no investigation rides the ask.
  * KEEP IN SYNC with lighthouse-core/src/synth.rs::answer_pipeline.
  */
+/**
+ * WHICH corpus an ask reads (openspec: refocus-chat-attachments §1.4). A
+ * conversation id selects that conversation's ATTACHMENTS; `null` selects the
+ * legacy vault. Every branch of the pipeline resolves its candidates, whole-file
+ * text, chunks, named-file target and analytics paths through this one object,
+ * so the two corpora differ in exactly one place instead of at fourteen call
+ * sites.
+ *
+ * The vault arm carries the include/local-only gate; the workspace arm needs
+ * none — attaching IS the consent, and the cloud posture is the ask's own
+ * provider choice.
+ *
+ * KEEP IN SYNC with synth.rs::Corpus.
+ */
+export class Corpus {
+  // A plain field, not a `readonly` constructor parameter property: Node's
+  // type-stripping loader (which runs this twin in the test suite) rejects
+  // parameter properties as they need real emit, not erasure.
+  readonly conversationId: string | null;
+
+  constructor(conversationId: string | null = null) {
+    this.conversationId = conversationId;
+  }
+
+  /** The conversation's attachments, or the vault's shareable included set, as
+   *  `(id, name)` pairs in candidate order. */
+  candidates(ids: string[], isCloud: boolean): [string, string][] {
+    if (this.conversationId !== null) {
+      return workspace
+        .list(this.conversationId)
+        .filter((f) => ids.length === 0 || ids.includes(f.id))
+        .map((f) => [f.id, f.name] as [string, string]);
+    }
+    const scoped = ids.length === 0 ? shareableFileIds(isCloud) : shareableSubset(ids, isCloud);
+    const out: [string, string][] = [];
+    for (const id of scoped) {
+      const hit = vaultDocPath(id);
+      if (hit) out.push([id, hit.name]);
+    }
+    return out;
+  }
+
+  /** Retrieval over this corpus. */
+  retrieve(
+    query: string,
+    includedFileIds: string[],
+    attachmentIds: string[],
+    k: number,
+    isCloud: boolean,
+    preferredConversationIds: string[],
+  ): Promise<Retrieved> {
+    return this.conversationId !== null
+      ? workspace.retrieve(this.conversationId, query, attachmentIds, k, preferredConversationIds)
+      : vaultRetrieve(query, includedFileIds, k, [], attachmentIds, isCloud, preferredConversationIds);
+  }
+
+  /** A candidate's display name + extracted text. */
+  docText(id: string, previewChars?: number): Promise<{ name: string; text: string } | null> {
+    return this.conversationId !== null
+      ? workspace.docText(this.conversationId, id, previewChars)
+      : vaultDocText(id, previewChars);
+  }
+
+  /** A candidate's display name + ORDERED chunk texts (whole-document coverage). */
+  docChunks(id: string): Promise<[string, string[]] | null> {
+    return this.conversationId !== null
+      ? workspace.docChunks(this.conversationId, id)
+      : vaultDocChunks(id);
+  }
+
+  /** A candidate's display name + the path its bytes live at. */
+  docPath(id: string): { name: string; path: string } | null {
+    return this.conversationId !== null
+      ? workspace.resolve(this.conversationId, id)
+      : vaultDocPath(id);
+  }
+
+  /** The single candidate the question NAMES, if any — one matcher, whichever
+   *  corpus supplies the names. */
+  namedFileTarget(question: string, ids: string[], isCloud: boolean): [string, string] | null {
+    return this.conversationId !== null
+      ? namedFileTargetOver(question, this.candidates(ids, isCloud))
+      : namedFileTarget(question, shareableSubset(ids, isCloud));
+  }
+}
+
 export async function* answerPipeline(
   question: string,
   includedFileIds: string[],
@@ -519,6 +609,7 @@ export async function* answerPipeline(
   cfg: ModelCfg,
   cache: CacheCtl = {},
   preferredConversationIds: string[] = [],
+  corpus: Corpus = new Corpus(),
 ): AsyncGenerator<ChatChunk> {
   // PARITY (openspec: add-beam-loop §4.4): two-phase plan approval is Rust-only.
   // Plan generation lives in the analytics branch, which the Rust engine ships
@@ -531,7 +622,27 @@ export async function* answerPipeline(
   // Key at ask entry. A failing cache degrades to "no cache this ask".
   let key: string | null = null;
   try {
-    key = cacheKey(question, cfg.providerId, cfg.modelId, attachmentFileIds, preferredConversationIds, isCloudProvider(cfg));
+    // A workspace ask keys over its OWN attachments' content hashes; a vault
+    // ask keys over the vault's freshness digest. Keying an attachment ask with
+    // the vault key would let two conversations replay each other's answers.
+    // KEEP IN SYNC with synth.rs::answer_pipeline.
+    key =
+      corpus.conversationId !== null
+        ? workspaceCacheKey(
+            corpus.conversationId,
+            question,
+            cfg.providerId,
+            cfg.modelId,
+            attachmentFileIds,
+          )
+        : cacheKey(
+            question,
+            cfg.providerId,
+            cfg.modelId,
+            attachmentFileIds,
+            preferredConversationIds,
+            isCloudProvider(cfg),
+          );
     // Lookup also enforces the persistence posture (a disallowed ask deletes
     // any disk mirror even when it misses or bypasses).
     const hit = cacheLookup(key, cache);
@@ -565,6 +676,7 @@ export async function* answerPipeline(
     history,
     cfg,
     preferredConversationIds,
+    corpus,
   )) {
     if (chunk.delta) {
       if (chunk.draft) {
@@ -608,7 +720,7 @@ export async function* answerPipeline(
   }
 }
 
-type InitialRetrieval = Awaited<ReturnType<typeof registryRetrieve>>;
+type InitialRetrieval = Retrieved;
 
 /** The deterministic opening emissions, in order: the instant sources
  *  acknowledgment, the named-but-excluded honesty note, and the cloud
@@ -740,6 +852,7 @@ async function selectSynthesisDocs(
   cfg: ModelCfg,
   isCloud: boolean,
   preferredConversationIds: string[],
+  corpus: Corpus,
 ): Promise<DocCandidate[]> {
   let docs: DocCandidate[] = [];
   if (hasRealModel(cfg)) {
@@ -747,7 +860,10 @@ async function selectSynthesisDocs(
       // Explicit multi-attach IS the cross-document gesture — but a marked
       // attachment can't ride to a cloud model. Filter this bypasser at its own
       // choke point before any docText read below.
-      docs = shareableSubset(attachmentFileIds, isCloud).slice(0, MAX_MAP_DOCS).map((id) => ({
+      docs = corpus
+        .candidates(attachmentFileIds, isCloud)
+        .slice(0, MAX_MAP_DOCS)
+        .map(([id]) => ({
         id,
         name: "",
         score: ASSUMED_DOC_SCORE,
@@ -755,7 +871,7 @@ async function selectSynthesisDocs(
     } else if (attachmentFileIds.length === 0 && crossDocCue(question)) {
       // Rank documents by a wide retrieval pass; when few files are included,
       // make sure each of them gets a seat even if the query's tokens miss it.
-      const wide = await registryRetrieve(
+      const wide = await corpus.retrieve(
         retrievalQuery,
         includedFileIds,
         [],
@@ -764,8 +880,7 @@ async function selectSynthesisDocs(
         preferredConversationIds,
       );
       docs = rankDocsFromHits(wide.references, MAX_MAP_DOCS);
-      const active = new Set(shareableFileIds(isCloud));
-      const inScope = includedFileIds.filter((id) => active.has(id));
+      const inScope = corpus.candidates(includedFileIds, isCloud).map(([id]) => id);
       if (inScope.length <= MAX_MAP_DOCS) {
         const seen = new Set(docs.map((d) => d.id));
         for (const id of inScope) {
@@ -792,6 +907,7 @@ async function* multiDocSynthesis(
   history: ChatTurn[],
   origin: string,
   isCloud: boolean,
+  corpus: Corpus,
 ): AsyncGenerator<ChatChunk, boolean> {
   const total = docs.length + 1;
   const extracts: { ref: RagReference; text: string }[] = [];
@@ -800,7 +916,7 @@ async function* multiDocSynthesis(
     const doc = docs[i];
     // Resolve the display name early so progress labels are meaningful even
     // for attachment-picked docs (their candidate name starts empty).
-    const preview = await docText(doc.id, PREVIEW_CHARS);
+    const preview = await corpus.docText(doc.id, PREVIEW_CHARS);
     const name = doc.name || preview?.name || doc.id;
     yield progress(`Reading ${name} (${i + 1}/${docs.length})…`, i + 1, total);
     if (!preview) continue; // unreadable/deleted file — skip its seat
@@ -810,7 +926,7 @@ async function* multiDocSynthesis(
     // already shareable (filtered above), so isCloud only re-affirms it. No
     // recall preference: scoped to ONE document, there is no cross-candidate
     // order to prefer.
-    const perDoc = await vaultRetrieve(retrievalQuery, [], PER_DOC_CHUNKS, [], [doc.id], isCloud);
+    const perDoc = await corpus.retrieve(retrievalQuery, [], [doc.id], PER_DOC_CHUNKS, isCloud, []);
     const ctxs: Ctx[] =
       perDoc.contexts.length > 0
         ? perDoc.contexts.map((c) => ({ name: ctxLabel(c), text: c.text, score: c.score }))
@@ -819,7 +935,7 @@ async function* multiDocSynthesis(
     // Exact numbers for tables: profile the full file, not the preview slice.
     let profile: string | null = null;
     if (isProfileable(name)) {
-      const full = await docText(doc.id);
+      const full = await corpus.docText(doc.id);
       profile = full ? tableProfile(name, full.text) : null;
       if (profile) ctxs.push({ name: `${name} — table profile`, text: profile, score: 0 });
     }
@@ -968,6 +1084,7 @@ async function* singleDocFocus(
   history: ChatTurn[],
   origin: string,
   isCloud: boolean,
+  corpus: Corpus,
 ): AsyncGenerator<ChatChunk, boolean> {
   // Doc-focus reads the WHOLE target file into the prompt, so both of its
   // bypasser entrypoints are filtered here at their own choke point: a lone
@@ -976,12 +1093,12 @@ async function* singleDocFocus(
   // shareable.
   const target: [string, string] | null =
     attachmentFileIds.length === 1
-      ? (shareableSubset(attachmentFileIds, isCloud)[0] !== undefined
+      ? (corpus.candidates(attachmentFileIds, isCloud)[0] !== undefined
           ? [attachmentFileIds[0], ""]
           : null)
-      : namedFileTarget(question, shareableSubset(includedFileIds, isCloud)) ??
+      : corpus.namedFileTarget(question, includedFileIds, isCloud) ??
         dominantDoc(initial.contexts.map((c) => c.name), initial.references);
-  const doc = target ? await docChunks(target[0]) : null;
+  const doc = target ? await corpus.docChunks(target[0]) : null;
   // §44 §1b: reverse the single-doc exclusion. A profileable target
   // (.csv/.tsv) is answered from its EXACT profile — a first-class verified
   // answer with a shown computation (§3) — instead of being dropped to the
@@ -990,7 +1107,7 @@ async function* singleDocFocus(
   // Rust-only, so this doc-focus reversal is the twin's whole §1b surface.)
   if (target && doc && isProfileable(doc[0]) && doc[1].length > 0) {
     const [pname] = doc;
-    const full = await docText(target[0]);
+    const full = await corpus.docText(target[0]);
     const ans = full ? profileAnswer(pname, full.text) : null;
     if (ans) {
       yield progress(`Reading all of ${pname}…`, 1, 1);
@@ -1066,6 +1183,7 @@ async function* singleShotAnswer(
   cfg: ModelCfg,
   history: ChatTurn[],
   origin: string,
+  corpus: Corpus,
 ): AsyncGenerator<ChatChunk> {
   let contexts: Ctx[] = initial.contexts.map((c) => ({
     name: ctxLabel(c),
@@ -1098,7 +1216,7 @@ async function* singleShotAnswer(
     if (profiled >= 2) break;
     if (seen.has(r.fileId) || !isProfileable(r.name)) continue;
     seen.add(r.fileId);
-    const full = await docText(r.fileId);
+    const full = await corpus.docText(r.fileId);
     const profile = full ? tableProfile(r.name, full.text) : null;
     if (profile) {
       const pname = `${r.name} — table profile`;
@@ -1131,6 +1249,7 @@ async function* answerPipelineLive(
   history: ChatTurn[],
   cfg: ModelCfg,
   preferredConversationIds: string[] = [],
+  corpus: Corpus = new Corpus(),
 ): AsyncGenerator<ChatChunk> {
   // Provenance origin for this answer's stamp — resolved once from the active
   // provider (agrees with the audit record's `provider`). Every branch's final
@@ -1147,7 +1266,7 @@ async function* answerPipelineLive(
   const lastUserTurn = [...history].reverse().find((t) => t.role === "user");
   const retrievalQuery = lastUserTurn ? `${lastUserTurn.content}\n${question}` : question;
 
-  const initial = await registryRetrieve(
+  const initial = await corpus.retrieve(
     retrievalQuery,
     includedFileIds,
     attachmentFileIds,
@@ -1213,10 +1332,13 @@ async function* answerPipelineLive(
     cfg,
     isCloud,
     preferredConversationIds,
+    corpus,
   );
 
   if (docs.length >= MIN_MAP_DOCS) {
-    if (yield* multiDocSynthesis(question, retrievalQuery, docs, cfg, history, origin, isCloud)) {
+    if (
+      yield* multiDocSynthesis(question, retrievalQuery, docs, cfg, history, origin, isCloud, corpus)
+    ) {
       return;
     }
     // Fewer than two documents had anything to say — fall through to the
@@ -1252,6 +1374,7 @@ async function* answerPipelineLive(
         history,
         origin,
         isCloud,
+        corpus,
       )
     ) {
       return;
@@ -1269,5 +1392,5 @@ async function* answerPipelineLive(
   // test/numguard.test.mjs); wiring a broader arm here would DIVERGE from
   // synth.rs, which does not gate a non-analytics RAG answer. The twin's whole
   // §44 surface is the profileAnswer promotion above.
-  yield* singleShotAnswer(question, includedFileIds, initial, cfg, history, origin);
+  yield* singleShotAnswer(question, includedFileIds, initial, cfg, history, origin, corpus);
 }
