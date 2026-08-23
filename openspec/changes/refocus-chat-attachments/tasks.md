@@ -22,17 +22,22 @@ CLAUDE.md's versioning section (the §31/0.14.0 precedent).
       swap (§1.8) and the freshness stamps' wording (§4.2) — the cache key
       already switched to content hashes in 1.5.
 - [x] 1.5 Answer cache re-key to sorted (attachment id, hash) pairs.
-- [ ] 1.6 Deletions: walker/state/include/local-only/curation in
+- [~] 1.6 Deletions (briefings, boards, pins done both engines; investigations
+      done in Rust — its TS twin + the UI's investigation surface follow in
+      §1.8, which is where the chat store's conversation grouping unwinds): walker/state/include/local-only/curation in
       `vault.rs`/`vault.ts`, `watch.rs`, `meta.rs`, `insights.rs`,
       `vault_brief.rs`, `sources/*`, views, semantic, pins, boards,
       briefings, investigations — with their tests.
 - [ ] 1.7 Reports re-home to `app_state_dir()/reports/`; export via save
       dialog.
 
-- [ ] 1.8 TS twin corpus swap: mirror `Corpus` in synth.ts over the 11
-      retrieval/doc sites, and take `conversationId` through
-      `app/api/chat` + `app/api/upload`. (The twin is a dev engine — the
-      shipping Rust path is complete — so this follows the deletions.)
+- [ ] 1.8 TS twin: mirror `Corpus` in synth.ts over the 11 retrieval/doc
+      sites, take `conversationId` through `app/api/chat` + `app/api/upload`,
+      and delete the twin's investigations module with the UI surface it
+      feeds. That surface is larger than the earlier features: the chat
+      store GROUPS conversations by investigationId (36 call sites across
+      the stores and UI), and investigationId also rides exportChat, the
+      report door and the ask wire. Worth its own pass.
 
 ## 2. Transports + shell
 - [~] 2.1 Upload surfaces target the workspace when the request names a

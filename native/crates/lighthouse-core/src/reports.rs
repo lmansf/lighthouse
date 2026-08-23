@@ -1077,14 +1077,8 @@ fn file_mtime_ms(abs: &std::path::Path) -> u64 {
 /// the saved artifact's `(id, name)` so the app can open it. The write NEVER
 /// egresses and NEVER writes outside the vault (the `vault::write_artifact` funnel
 /// enforces the allowlist).
-pub fn write_report(
-    report: &Report,
-    investigation_id: Option<&str>,
-) -> Result<(String, String), String> {
-    let subdir = match investigation_id {
-        Some(id) if !id.trim().is_empty() => crate::investigations::notes_subdir(id)?,
-        _ => REPORTS_SUBDIR.to_string(),
-    };
+pub fn write_report(report: &Report) -> Result<(String, String), String> {
+    let subdir = REPORTS_SUBDIR.to_string();
     let markdown = render_markdown(report);
     crate::vault::write_artifact(&subdir, &report.title, "md", markdown.as_bytes())
         .map_err(|e| e.to_string())

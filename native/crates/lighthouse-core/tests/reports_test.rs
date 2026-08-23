@@ -165,7 +165,7 @@ async fn investigate_writes_the_report_under_the_reports_allowlist() {
     let files = vec![write_csv(dir.path(), "sales.csv", SPIKE_CSV)];
 
     let report = investigate("sales.csv", &files, false).await;
-    let (id, name) = write_report(&report, None).expect("the report writes into the vault");
+    let (id, name) = write_report(&report).expect("the report writes into the vault");
 
     // It lands under the reports allowlist as a markdown note, and returns its id.
     assert!(id.starts_with("Lighthouse Reports/"), "under the reports allowlist: {id}");

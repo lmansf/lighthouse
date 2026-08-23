@@ -5,7 +5,6 @@
 //! |-----------------------|---------------------------|-----------------------------------------------|
 //! | `ask_vault`           | `ask::run_headless_ask`   | audited + egress-attributed (the chokepoint)  |
 //! | `list_files`          | `vault::list_nodes`       | on-device read                                |
-//! | `list_investigations` | `investigations::listing` | on-device read (derived membership)           |
 //! | `run_analytics_sql`   | `analytics::run_direct`   | guarded read-only SELECT (`guard_sql`)        |
 //!
 //! §3.4 — the two posture-bearing invariants live in the ENGINE, not here:
@@ -33,7 +32,7 @@ use lighthouse_core::contracts::{ChatChunk, ChunkMeta};
 pub(crate) fn is_known(name: &str) -> bool {
     matches!(
         name,
-        "ask_vault" | "list_files" | "list_investigations" | "run_analytics_sql"
+        "ask_vault" | "list_files" | "run_analytics_sql"
     )
 }
 
@@ -42,13 +41,12 @@ pub(crate) fn schemas() -> Vec<Value> {
     vec![
         json!({
             "name": "ask_vault",
-            "description": "Answer a question over the vault through the shared, audited ask chokepoint (run_headless_ask). Returns the answer text, its engine-stamped provenance (origin, tokens, cost estimate), the cited references, and analytics provenance when the answer is analytical. Egresses exactly as an app ask would and is recorded in the audit + egress ledger; local:true (or a local-only investigation) forces the on-device, zero-network model.",
+            "description": "Answer a question over the vault through the shared, audited ask chokepoint (run_headless_ask). Returns the answer text, its engine-stamped provenance (origin, tokens, cost estimate), the cited references, and analytics provenance when the answer is analytical. Egresses exactly as an app ask would and is recorded in the audit + egress ledger; local:true forces the on-device, zero-network model.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "question": { "type": "string", "description": "The question to answer over the vault." },
-                    "local": { "type": "boolean", "description": "Force the on-device (key-less, zero-network) model. Most-restrictive wins: this OR a local-only investigation forces device." },
-                    "investigation": { "type": "string", "description": "Run the ask inside this investigation id (its scope and provider policy apply)." },
+                    "local": { "type": "boolean", "description": "Force the on-device (key-less, zero-network) model. Forces the device path." },
                     "included_file_ids": { "type": "array", "items": { "type": "string" }, "description": "The RAG-included vault file ids to answer over (the transports' includedFileIds set)." }
                 },
                 "required": ["question"],
@@ -58,11 +56,6 @@ pub(crate) fn schemas() -> Vec<Value> {
         json!({
             "name": "list_files",
             "description": "List the vault's file/folder nodes (on-device read, no egress). Each node carries id, name, kind, ragIncluded, and effective local-only state.",
-            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
-        }),
-        json!({
-            "name": "list_investigations",
-            "description": "List the investigations with their derived membership (pinRefs + noteRefs). On-device read, no egress.",
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
         }),
         json!({
@@ -89,7 +82,6 @@ pub(crate) async fn call(name: &str, args: &Value) -> Result<Value, String> {
     match name {
         "ask_vault" => ask_vault(args).await,
         "list_files" => list_files(),
-        "list_investigations" => list_investigations(),
         "run_analytics_sql" => run_analytics_sql(args).await,
         // The caller gates unknown names via `is_known`; kept total for safety.
         other => Err(format!("unknown tool: {other}")),
@@ -116,7 +108,6 @@ async fn ask_vault(args: &Value) -> Result<Value, String> {
     let opts = AskOpts {
         local: args["local"].as_bool().unwrap_or(false),
         vault: None,
-        investigation_id: args["investigation"].as_str().map(String::from),
         attachment_ids: Vec::new(),
     };
 
@@ -192,10 +183,6 @@ fn list_files() -> Result<Value, String> {
     Ok(json!({ "files": lighthouse_core::vault::list_nodes() }))
 }
 
-fn list_investigations() -> Result<Value, String> {
-    Ok(json!({ "investigations": lighthouse_core::investigations::listing() }))
-}
-
 // --- run_analytics_sql (guarded) ---------------------------------------------------
 
 async fn run_analytics_sql(args: &Value) -> Result<Value, String> {
@@ -233,6 +220,9 @@ mod tests {
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         std::env::set_var("VAULT_DIR", vault);
+        // Since the 0.15.0 re-root, engine state follows LIGHTHOUSE_APP_STATE_DIR
+        // alone — keep it inside this test's own temp vault.
+        std::env::set_var("LIGHTHOUSE_APP_STATE_DIR", vault.join(".rag-vault"));
         std::env::remove_var("LIGHTHOUSE_API_TOKEN");
         std::env::remove_var("LIGHTHOUSE_DESKTOP");
         lighthouse_core::vault::invalidate_walk_cache();
@@ -281,7 +271,6 @@ mod tests {
     async fn ask_vault_returns_grounded_device_answer_with_provenance() {
         let dir = tempfile::tempdir().unwrap();
         let _guard = lock_env(dir.path());
-        std::env::remove_var("LIGHTHOUSE_APP_STATE_DIR");
         std::env::remove_var("LIGHTHOUSE_PROFILE_FILE");
         lighthouse_core::answer_cache::reset_store();
         seed_meta_vault(dir.path());
@@ -329,38 +318,6 @@ mod tests {
         assert!(
             node.get("id").is_some() && node.get("kind").is_some() && node.get("ragIncluded").is_some(),
             "each node carries the FileNode shape: {node}"
-        );
-    }
-
-    /// §3.6 — `list_investigations` returns the enriched views (record +
-    /// DERIVED pinRefs/noteRefs).
-    #[tokio::test]
-    async fn list_investigations_returns_views_with_derived_membership() {
-        let dir = tempfile::tempdir().unwrap();
-        let _guard = lock_env(dir.path());
-        lighthouse_core::vault::invalidate_walk_cache();
-        lighthouse_core::investigations::create(
-            "Q3 revenue",
-            &[],
-            lighthouse_core::investigations::ProviderPolicy::Default,
-        )
-        .expect("create an investigation");
-
-        let resp = crate::protocol::handle(tool_call("list_investigations", json!({}))).await;
-        assert_eq!(resp["result"]["isError"], json!(false), "{resp}");
-        let p = payload(&resp);
-        let invs = p["investigations"].as_array().expect("an investigations array");
-        let inv = invs
-            .iter()
-            .find(|i| i["name"] == "Q3 revenue")
-            .unwrap_or_else(|| panic!("the created investigation is listed: {p}"));
-        assert!(
-            inv["pinRefs"].is_array() && inv["noteRefs"].is_array(),
-            "the view carries derived pinRefs + noteRefs: {inv}"
-        );
-        assert!(
-            inv.get("id").is_some() && inv.get("scopeFileIds").is_some(),
-            "the flattened record fields are present: {inv}"
         );
     }
 

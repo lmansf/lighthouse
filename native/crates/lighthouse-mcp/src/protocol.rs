@@ -136,15 +136,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tools_list_returns_the_four_tools_with_schemas() {
+    async fn tools_list_returns_the_three_tools_with_schemas() {
         let resp = handle(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" })).await;
         let tools = resp["result"]["tools"].as_array().expect("a tools array");
-        assert_eq!(tools.len(), 4, "exactly the v1 tool set");
+        assert_eq!(tools.len(), 3, "exactly the v1 tool set");
         let names: std::collections::BTreeSet<&str> =
             tools.iter().filter_map(|t| t["name"].as_str()).collect();
         assert_eq!(
             names,
-            ["ask_vault", "list_files", "list_investigations", "run_analytics_sql"]
+            ["ask_vault", "list_files", "run_analytics_sql"]
                 .into_iter()
                 .collect()
         );

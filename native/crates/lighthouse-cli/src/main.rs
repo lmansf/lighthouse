@@ -32,22 +32,18 @@ use serde::Serialize;
 
 use lighthouse_core::ask::{run_headless_ask, AskOpts};
 use lighthouse_core::contracts::{AnalyticsMeta, ChatChunk, ChunkMeta, CostMeta, NodeKind, RagReference};
-use lighthouse_core::{investigations, vault};
+use lighthouse_core::vault;
 
 const USAGE: &str = "\
 lighthouse — headless vault CLI (openspec: add-automation)
 
 USAGE:
     lighthouse ask \"<question>\" [--local] [--vault <path>] [--json]
-                               [--investigation <id>] [--include <file-id>]...
-    lighthouse fork <investigation-id> --name \"<new name>\" [--vault <path>] [--json]
-    lighthouse export <investigation-id> [--vault <path>] [--json]
 
 FLAGS:
     --local               Force the on-device model — zero network egress.
     --vault <path>        Point the engine at this vault directory before its first read.
     --json                Emit one JSON object instead of human-readable output.
-    --investigation <id>  Run the ask inside this investigation (its scope + policy apply).
     --include <file-id>   Attach a file to the ask (repeatable).
 
 Every `ask` is answered through the shared audited chokepoint, so it is recorded
@@ -62,17 +58,6 @@ investigation, no flag needed) forces the device path and egresses nothing.";
 #[derive(Debug, PartialEq)]
 enum Command {
     Ask(AskArgs),
-    Fork {
-        id: String,
-        name: String,
-        vault: Option<PathBuf>,
-        json: bool,
-    },
-    Export {
-        id: String,
-        vault: Option<PathBuf>,
-        json: bool,
-    },
     Help,
 }
 
@@ -85,7 +70,6 @@ struct AskArgs {
     json: bool,
     local: bool,
     vault: Option<PathBuf>,
-    investigation: Option<String>,
     includes: Vec<String>,
 }
 
@@ -94,8 +78,6 @@ fn parse_args(args: Vec<String>) -> Result<Command, String> {
     match it.next().as_deref() {
         None | Some("-h") | Some("--help") | Some("help") => Ok(Command::Help),
         Some("ask") => parse_ask(it.collect()),
-        Some("fork") => parse_fork(it.collect()),
-        Some("export") => parse_export(it.collect()),
         Some(other) => Err(format!("unknown subcommand: {other}")),
     }
 }
@@ -112,7 +94,6 @@ fn parse_ask(args: Vec<String>) -> Result<Command, String> {
     let mut json = false;
     let mut local = false;
     let mut vault: Option<PathBuf> = None;
-    let mut investigation: Option<String> = None;
     let mut includes: Vec<String> = Vec::new();
 
     let mut it = args.into_iter();
@@ -121,7 +102,6 @@ fn parse_ask(args: Vec<String>) -> Result<Command, String> {
             "--local" => local = true,
             "--json" => json = true,
             "--vault" => vault = Some(PathBuf::from(take_value(&mut it, "--vault")?)),
-            "--investigation" => investigation = Some(take_value(&mut it, "--investigation")?),
             "--include" => includes.push(take_value(&mut it, "--include")?),
             "-h" | "--help" => return Ok(Command::Help),
             other if other.starts_with("--") => {
@@ -143,71 +123,8 @@ fn parse_ask(args: Vec<String>) -> Result<Command, String> {
         json,
         local,
         vault,
-        investigation,
         includes,
     }))
-}
-
-fn parse_fork(args: Vec<String>) -> Result<Command, String> {
-    let mut id: Option<String> = None;
-    let mut name: Option<String> = None;
-    let mut vault: Option<PathBuf> = None;
-    let mut json = false;
-
-    let mut it = args.into_iter();
-    while let Some(arg) = it.next() {
-        match arg.as_str() {
-            "--name" => name = Some(take_value(&mut it, "--name")?),
-            "--vault" => vault = Some(PathBuf::from(take_value(&mut it, "--vault")?)),
-            "--json" => json = true,
-            "-h" | "--help" => return Ok(Command::Help),
-            other if other.starts_with("--") => {
-                return Err(format!("unknown flag for fork: {other}"))
-            }
-            other => {
-                if id.is_some() {
-                    return Err("fork takes a single investigation id".to_string());
-                }
-                id = Some(other.to_string());
-            }
-        }
-    }
-
-    let id = id.ok_or_else(|| "fork requires an investigation id".to_string())?;
-    let name = name.ok_or_else(|| "fork requires --name \"<new name>\"".to_string())?;
-    Ok(Command::Fork {
-        id,
-        name,
-        vault,
-        json,
-    })
-}
-
-fn parse_export(args: Vec<String>) -> Result<Command, String> {
-    let mut id: Option<String> = None;
-    let mut vault: Option<PathBuf> = None;
-    let mut json = false;
-
-    let mut it = args.into_iter();
-    while let Some(arg) = it.next() {
-        match arg.as_str() {
-            "--vault" => vault = Some(PathBuf::from(take_value(&mut it, "--vault")?)),
-            "--json" => json = true,
-            "-h" | "--help" => return Ok(Command::Help),
-            other if other.starts_with("--") => {
-                return Err(format!("unknown flag for export: {other}"))
-            }
-            other => {
-                if id.is_some() {
-                    return Err("export takes a single investigation id".to_string());
-                }
-                id = Some(other.to_string());
-            }
-        }
-    }
-
-    let id = id.ok_or_else(|| "export requires an investigation id".to_string())?;
-    Ok(Command::Export { id, vault, json })
 }
 
 // --- Vault override ----------------------------------------------------------
@@ -434,11 +351,10 @@ async fn run_ask(a: AskArgs) -> ExitCode {
     let opts = AskOpts {
         local: a.local,
         vault: a.vault,
-        investigation_id: a.investigation,
         attachment_ids: a.includes,
     };
     // Every ask goes through the shared chokepoint — audited + egress-attributed,
-    // never `answer_pipeline` directly. A local-only scope/investigation forces
+    // never `answer_pipeline` directly. The `--local` flag forces
     // device inside the helper with no flag (the engine decides; we pass through).
     let stream = run_headless_ask(a.question, included, Vec::new(), opts);
 
@@ -477,69 +393,6 @@ async fn run_ask(a: AskArgs) -> ExitCode {
     }
 }
 
-fn run_fork(id: String, name: String, vault: Option<PathBuf>, json: bool) -> ExitCode {
-    apply_vault_override(vault.as_deref());
-    match investigations::fork(&id, &name) {
-        Ok(inv) => {
-            if json {
-                println!(
-                    "{}",
-                    serde_json::json!({ "savedId": inv.id, "savedName": inv.name })
-                );
-            } else {
-                println!("forked investigation: {} ({})", inv.name, inv.id);
-            }
-            ExitCode::SUCCESS
-        }
-        Err(e) => {
-            eprintln!("lighthouse: fork failed: {e}");
-            ExitCode::FAILURE
-        }
-    }
-}
-
-fn run_export(id: String, vault: Option<PathBuf>, json: bool) -> ExitCode {
-    apply_vault_override(vault.as_deref());
-    // Mirror the `routes.rs` `action:"export"` arm IN-PROCESS: render the
-    // investigation (references, never transcripts), resolve its OWN notes folder
-    // (the write-artifact allowlist, re-validated at use), then write the markdown
-    // as a sanitized, non-egress in-vault note. A validation failure (unknown id,
-    // unusable folder) is a human-readable error and writes nothing.
-    let markdown = match investigations::export_markdown(&id, None) {
-        Ok(md) => md,
-        Err(e) => {
-            eprintln!("lighthouse: export failed: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-    let subdir = match investigations::notes_subdir(&id) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("lighthouse: export failed: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-    // Title matches the op's default ("Investigation"); write_artifact sanitizes
-    // it and appends a collision suffix, returning (savedId, savedName).
-    match vault::write_artifact(&subdir, "Investigation", "md", markdown.as_bytes()) {
-        Ok((saved_id, saved_name)) => {
-            if json {
-                println!(
-                    "{}",
-                    serde_json::json!({ "savedId": saved_id, "savedName": saved_name })
-                );
-            } else {
-                println!("exported investigation to: {saved_id}");
-            }
-            ExitCode::SUCCESS
-        }
-        Err(e) => {
-            eprintln!("lighthouse: export failed: {e}");
-            ExitCode::FAILURE
-        }
-    }
-}
-
 async fn run(cmd: Command) -> ExitCode {
     match cmd {
         Command::Help => {
@@ -547,13 +400,6 @@ async fn run(cmd: Command) -> ExitCode {
             ExitCode::SUCCESS
         }
         Command::Ask(a) => run_ask(a).await,
-        Command::Fork {
-            id,
-            name,
-            vault,
-            json,
-        } => run_fork(id, name, vault, json),
-        Command::Export { id, vault, json } => run_export(id, vault, json),
     }
 }
 
@@ -590,9 +436,12 @@ mod tests {
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         std::env::set_var("VAULT_DIR", vault_dir);
+        // Since the 0.15.0 re-root, engine state follows LIGHTHOUSE_APP_STATE_DIR
+        // alone — point it inside this test's own temp vault (clearing it would
+        // read and write the developer's real data home).
+        std::env::set_var("LIGHTHOUSE_APP_STATE_DIR", vault_dir.join(".rag-vault"));
         std::env::remove_var("LIGHTHOUSE_API_TOKEN");
         std::env::remove_var("LIGHTHOUSE_DESKTOP");
-        std::env::remove_var("LIGHTHOUSE_APP_STATE_DIR");
         std::env::remove_var("LIGHTHOUSE_PROFILE_FILE");
         vault::invalidate_walk_cache();
         guard
@@ -662,8 +511,6 @@ mod tests {
             "--json",
             "--vault",
             "/v",
-            "--investigation",
-            "inv-1",
             "--include",
             "a.csv",
             "--include",
@@ -677,7 +524,6 @@ mod tests {
                 json: true,
                 local: true,
                 vault: Some(PathBuf::from("/v")),
-                investigation: Some("inv-1".to_string()),
                 includes: vec!["a.csv".to_string(), "b.md".to_string()],
             })
         );
@@ -688,7 +534,7 @@ mod tests {
         match parse_args(args(&["ask", "q"])).unwrap() {
             Command::Ask(a) => {
                 assert!(!a.local && !a.json);
-                assert!(a.vault.is_none() && a.investigation.is_none());
+                assert!(a.vault.is_none());
                 assert!(a.includes.is_empty());
                 assert_eq!(a.question, "q");
             }
@@ -701,34 +547,6 @@ mod tests {
         assert!(parse_args(args(&["ask", "--local"])).is_err());
         assert!(parse_args(args(&["ask", "one", "two"])).is_err(), "one question only");
         assert!(parse_args(args(&["ask", "q", "--nope"])).is_err(), "unknown flag");
-    }
-
-    #[test]
-    fn parse_fork_needs_id_and_name() {
-        assert_eq!(
-            parse_args(args(&["fork", "inv-1", "--name", "Q3 deep dive"])).unwrap(),
-            Command::Fork {
-                id: "inv-1".to_string(),
-                name: "Q3 deep dive".to_string(),
-                vault: None,
-                json: false,
-            }
-        );
-        assert!(parse_args(args(&["fork", "inv-1"])).is_err(), "fork needs --name");
-        assert!(parse_args(args(&["fork", "--name", "x"])).is_err(), "fork needs an id");
-    }
-
-    #[test]
-    fn parse_export_takes_id_and_json() {
-        assert_eq!(
-            parse_args(args(&["export", "inv-1", "--json"])).unwrap(),
-            Command::Export {
-                id: "inv-1".to_string(),
-                vault: None,
-                json: true,
-            }
-        );
-        assert!(parse_args(args(&["export"])).is_err(), "export needs an id");
     }
 
     #[test]

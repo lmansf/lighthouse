@@ -57,12 +57,7 @@ pub struct AskOpts {
     /// first read. `None` uses the ambient configuration. See
     /// `run_headless_ask` for the vault-dir ⇒ state-root mapping.
     pub vault: Option<PathBuf>,
-    /// Run the ask inside this investigation — its scope arrives as attachments
-    /// and its `provider_policy` (e.g. `local-only`) is honored by
-    /// `resolve_ask_context`. `None` = the global context.
-    pub investigation_id: Option<String>,
-    /// Files explicitly attached to this question (the `--include`/attachment
-    /// set the transports resolve through `resolve_ask_context`).
+    /// Files explicitly attached to this question (the `--include` set).
     pub attachment_ids: Vec<String>,
 }
 
@@ -102,7 +97,6 @@ pub fn run_headless_ask(
     let AskOpts {
         local,
         vault,
-        investigation_id,
         attachment_ids,
     } = opts;
 
@@ -132,17 +126,11 @@ pub fn run_headless_ask(
         crate::profile::model_config()
     };
 
-    // (2) Scope + provider policy resolve HERE — the same chokepoint the UI
-    // transports use. A `local-only` investigation swaps `cfg` to local before
-    // any transport exists; scope arrives as ordinary attachments; the third
-    // element is the investigation's conversationRefs (retrieval's recall
-    // preference), empty when no investigation rides the ask.
-    let (attachments, cfg, preferred_conversation_ids) =
-        crate::investigations::resolve_ask_context(
-            investigation_id.as_deref(),
-            attachment_ids,
-            cfg,
-        );
+    // (2) Investigations retired with the 0.15.0 refocus: an ask's files are
+    // its attachments, and there is no scope, provider policy or recall
+    // preference to resolve any more.
+    let attachments = attachment_ids;
+    let preferred_conversation_ids: Vec<String> = Vec::new();
 
     // (3) Audit log: capture the question + egress baseline before the answer;
     // the delta + provider + files + new cost are recorded once the final chunk
@@ -213,14 +201,10 @@ mod tests {
     fn askopts_default_is_inert() {
         // The derived Default is the baseline every departure opts INTO: the
         // profile's provider (not forced local), the ambient vault (no
-        // override), the global context (no investigation), no attachments.
+        // override), no attachments.
         let opts = AskOpts::default();
         assert!(!opts.local, "default does not force the local provider");
         assert!(opts.vault.is_none(), "default leaves the ambient vault in place");
-        assert!(
-            opts.investigation_id.is_none(),
-            "default runs in the global context, not an investigation"
-        );
         assert!(
             opts.attachment_ids.is_empty(),
             "default attaches no explicit files"

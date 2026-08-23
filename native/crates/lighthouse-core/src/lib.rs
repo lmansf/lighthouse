@@ -21,7 +21,6 @@ pub mod extract;
 pub mod index;
 pub mod insights;
 pub mod inspect;
-pub mod investigations;
 pub mod ledger;
 pub mod llm;
 pub mod local_model;
