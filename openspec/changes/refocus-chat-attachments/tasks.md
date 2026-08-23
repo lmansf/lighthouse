@@ -22,12 +22,25 @@ CLAUDE.md's versioning section (the §31/0.14.0 precedent).
       swap (§1.8) and the freshness stamps' wording (§4.2) — the cache key
       already switched to content hashes in 1.5.
 - [x] 1.5 Answer cache re-key to sorted (attachment id, hash) pairs.
-- [~] 1.6 Deletions (briefings, boards, pins done both engines; investigations
-      done in Rust — its TS twin + the UI's investigation surface follow in
-      §1.8, which is where the chat store's conversation grouping unwinds): walker/state/include/local-only/curation in
-      `vault.rs`/`vault.ts`, `watch.rs`, `meta.rs`, `insights.rs`,
-      `vault_brief.rs`, `sources/*`, views, semantic, pins, boards,
-      briefings, investigations — with their tests.
+- [~] 1.6 Deletions. DONE both engines: briefings, boards, pins. DONE in
+      Rust (TS twin + UI follow in §1.8): investigations, vault_brief,
+      insights.
+      NEXT — views + semantic, the entangled pair. Engine coupling is
+      bounded and known: analytics.rs registers posture-eligible views as
+      tables (`analytics.rs:548-583`), collects table names for freshness
+      (`:1672`) and expands certified metrics into SQL (`:1759-1785`);
+      synth.rs threads semantic eligibility and the metric/synonym prompt
+      blocks through the analytics branch (6 sites); answer_cache.rs drops
+      its two registry key components (already byte-identical when both
+      registries are empty, so no key churn for attachment-only asks);
+      inspect.rs and meta.rs read views for the inspector and the
+      capability map. UI is the larger half: ViewsNav, ShapeViewDialog,
+      the semantic nav + dialogs, useViewsStore, and the Save-as-view /
+      Define-metric answer actions.
+      THEN — meta.rs needs SPLITTING, not deleting: its vault meta-answers
+      go, but suggested asks, applicable recipes, the capability map and
+      semantic applicability still make sense over attachments.
+      THEN — sources/* (connectors), then the vault core + watch.rs.
 - [ ] 1.7 Reports re-home to `app_state_dir()/reports/`; export via save
       dialog.
 
