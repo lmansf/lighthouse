@@ -481,7 +481,7 @@ class RealRagService implements RagService {
 
   /**
    * Views sub-ops (openspec: add-shaped-views) return refusals as 400 +
-   * {error}; unlike boards, the service surface THROWS the engine's reason
+   * {error}; the service surface THROWS the engine's reason
    * (the dialogs catch and show it verbatim — the engine owns the rules).
    */
   private async viewsOp(body: Record<string, unknown>): Promise<Record<string, unknown>> {

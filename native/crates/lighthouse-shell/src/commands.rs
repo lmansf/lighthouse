@@ -249,22 +249,13 @@ pub async fn rag_op(
                     .into(),
             ),
         },
-        // Boards (openspec: add-boards) — mirrors the routes.rs op exactly:
-        // store CRUD (engine-minted ids, per-scope name validation, lazy
-        // virtual defaults) plus refreshCards, the model-free per-pin
-        // re-execution through the SAME run_direct guard as pin rechecks (a
-        // manual board refresh IS a recheck). Boards never touch vault files
-        // or the tree, so there is NO vault-changed broadcast (like
-        // investigations); refresh freshness reaches the UI in the response
-        // itself, and watcher-driven changes keep riding the existing
-        // pins-changed relay — no new event channel.
         // Shaped views (openspec: add-shaped-views §3) — mirrors the routes.rs
         // op exactly: store CRUD (engine-minted ids, save-time guard +
         // reads/DAG validation, dependent-aware lifecycle) plus `dependents`,
         // the name lists the rename/delete dialogs show. The wire carries the
         // summary FLATTENED (summaryText + summarySource); the ViewSummary is
         // built here. Views never touch vault files or the tree, so there is
-        // NO vault-changed broadcast (like boards/investigations).
+        // NO vault-changed broadcast (like investigations).
         Some("views") => match body["action"].as_str() {
             Some("list") => Ok(json!({ "views": lighthouse_core::views::list() })),
             Some("create") => {

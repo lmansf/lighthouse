@@ -7,7 +7,7 @@
  * contracts.rs ChunkMeta::table). Cloud/desktop answers and legacy saved
  * chats keep their markdown tables. `answerTable()` hides that split: prefer
  * the structured field, fall back to parsing the FIRST GFM table out of the
- * answer text — so RefineChips, Chart-it, boards, and the evidence pack all
+ * answer text — so RefineChips, Chart-it, and the evidence pack all
  * keep working across eras from ONE seam.
  *
  * The markdown parser lives here (moved from boardModel, which re-exports it)

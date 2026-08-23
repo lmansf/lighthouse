@@ -141,7 +141,7 @@ function broadcastViewsChanged(): void {
   }
 }
 
-/** Ask about a view through the existing ask seam (boards/widget hand-off). */
+/** Ask about a view through the existing ask seam (widget hand-off). */
 function askAbout(v: View): void {
   if (typeof window === "undefined") return;
   window.dispatchEvent(

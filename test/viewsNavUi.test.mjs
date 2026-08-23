@@ -114,7 +114,7 @@ test("the row menu carries Inspect / Rename / Ask about this view / Delete", () 
   }
   // Clicking a row (and Inspect) opens the inspector through the dispatched seam.
   assert.match(nav, /requestViewInspect\(v\.id\)/, "the row opens the inspector by view id");
-  // "Ask about this view" reuses the existing ask seam (boards/widget hand-off).
+  // "Ask about this view" reuses the existing ask seam (widget hand-off).
   assert.match(
     nav,
     /new CustomEvent\("lighthouse:ask-question", \{ detail: \{ question: `Show me the \$\{v\.name\} view\.` \} \}\)/,

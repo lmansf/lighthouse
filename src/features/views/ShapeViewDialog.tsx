@@ -16,7 +16,7 @@
  * entry point and feeds `sources`/`fileIds` from the catalog.
  *
  * Beam treatment: Fluent tokens only, so both themes come for free; the
- * surface sizing mirrors BoardPanel's dialog.
+ * surface sizing mirrors the pins dialog.
  */
 
 import { useEffect, useState } from "react";

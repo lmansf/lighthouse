@@ -218,9 +218,9 @@ fn summarize(markdown: &str) -> String {
 /// Re-run one pin in place. The alert (`Some` = the result digest CHANGED
 /// since the last run; a first run only primes the digest — nothing to
 /// compare yet, no alert) rides alongside the full deterministic result:
-/// boards' refresh (openspec: add-boards) renders the rows/chart/footer
+/// A pin recheck renders the rows/chart/footer
 /// that rechecks deliberately never persist, and returning them from the
-/// ONE execution keeps a board refresh from running every query twice.
+/// ONE execution keeps a recheck from running every query twice.
 /// Errors mark the pin stale (reason kept) and never alert.
 async fn recheck_pin(
     pin: &mut Pin,
@@ -349,7 +349,7 @@ pub async fn recheck_one(id: &str) -> Option<ChangedPin> {
 }
 
 /// One pin's guarded re-execution WITH its full deterministic result — the
-/// boards refresh path (openspec: add-boards). A manual board refresh IS a
+/// pin recheck path. A manual recheck IS a
 /// recheck: the same `run_direct` guard, the same `summarize`, the same
 /// digest/summary/lastRun/staleReason write-back (merged under the
 /// `recheck_all` guard) — plus the rows/chart/footer the recheck loop

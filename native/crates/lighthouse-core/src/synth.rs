@@ -1450,7 +1450,7 @@ fn recipe_branch(
 
             let plan = (recipe.plan)(&params);
             // The representative query — plan[0], the recipe's primary result —
-            // rides AnalyticsMeta so pin/board/save/Edit-SQL keep working: the
+            // rides AnalyticsMeta so pin/save/Edit-SQL keep working: the
             // same single-SQL limitation multi-step has (RISK-2); a structured-
             // plan pin field is a deferred follow-on.
             let representative_sql =
@@ -1648,7 +1648,7 @@ fn recipe_branch(
             if let Some(cap) = crate::analytics::row_cap_footer(&regs) {
                 yield delta(cap);
             }
-            // Pin/board/save act on the representative query.
+            // Pin/save act on the representative query.
             let (refs, meta_ids) = analytics_refs(&regs);
             let mut done =
                 final_chunk(refs, steps.len(), &origin, cost_meta(&cfg, sink.total()), manifest);

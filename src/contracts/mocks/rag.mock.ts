@@ -330,11 +330,6 @@ class MockRagService implements RagService {
     return { changed: [], pins: this.pins.map((p) => ({ ...p })) };
   }
 
-
-
-
-
-
   async suggestedAsks(includedFileIds: string[]): Promise<{ label: string; question: string }[]> {
     // The mock has no column catalog; surface canned asks for the first
     // included tabular file so the empty-state chips are exercisable offline.
@@ -679,7 +674,6 @@ class MockRagService implements RagService {
     return { error: "audit log is disabled" };
   }
 
-
   // In-memory investigations (openspec: add-investigations) so the nav is
   // exercisable offline. Mirrors the engines' validation (non-empty name,
   // case-insensitive uniqueness across archived records, traversal-safe
@@ -833,49 +827,6 @@ class MockRagService implements RagService {
     this.noteIdsByInvestigation.set(id, notes);
     return { savedId, savedName };
   }
-
-  // In-memory boards (openspec: add-boards) so the board panel is
-  // exercisable offline. Mirrors the engines' validation and lazy defaults:
-  // per-scope case-insensitive name uniqueness, S|M|L size whitelist,
-  // tombstone-tolerant pin refs, and virtual defaults under deterministic
-  // ids ("default-global" / "default-<invId>") that materialize on first
-  // mutation. refreshCards answers from the mock's stored pins (live:
-  // false), so cards render like the twin's last-known snapshots.
-
-
-  private boardNameTaken(name: string, scope: string | undefined, excludingId?: string): boolean {
-    const wanted = name.toLowerCase();
-    return this.boards.some(
-      (b) =>
-        b.id !== excludingId && b.investigationId === scope && b.name.toLowerCase() === wanted,
-    );
-  }
-
-  /** The scope + default name a never-persisted default id names, or null. */
-  private virtualBoardScope(id: string): { scope?: string; name: string } | null {
-    if (id === "default-global") return { name: "My board" };
-    if (!id.startsWith("default-")) return null;
-    const inv = this.investigations.find((i) => i.id === id.slice("default-".length));
-    return inv ? { scope: inv.id, name: inv.name } : null;
-  }
-
-
-  /** Mirrors the engines' card validation, byte-identical reasons. */
-  private validateBoardCards(cards: BoardCardRef[]): string | null {
-    for (const c of cards) {
-      if (!c.pinId.trim()) return "every card needs a pinId";
-      if (c.size !== "S" && c.size !== "M" && c.size !== "L") {
-        return 'card size must be "S", "M", or "L"';
-      }
-    }
-    return null;
-  }
-
-
-
-
-
-
 
   // In-memory shaped views (openspec: add-shaped-views) so the Save-as-view
   // and shaping dialogs are exercisable offline. Mirrors the service surface:

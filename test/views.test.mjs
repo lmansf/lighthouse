@@ -642,7 +642,7 @@ test("route.ts views arms round-trip through src/server/views.ts", () => {
   // Dependents answers the NAME lists the rename/delete dialogs show.
   assert.match(routeSrc, /dependents: dependentsOf\(body\.id\)\.map\(\(v\) => v\.name\)/);
   assert.match(routeSrc, /transitive: transitiveDependents\(body\.id\)\.map\(\(v\) => v\.name\)/);
-  // Refusals surface as 400 + the engine's reason (the boards idiom).
+  // Refusals surface as 400 + the engine's reason.
   assert.match(
     routeSrc,
     /views action must be list, create, rename, delete, dependents, or inspect/,

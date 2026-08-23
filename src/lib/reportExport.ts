@@ -1,6 +1,6 @@
 /**
  * Report export actions (openspec: add-usability-field-patch §4). One place any
- * report-shaped surface (deep-analysis reports, briefings, evidence packs, board
+ * report-shaped surface (deep-analysis reports, evidence packs, answer
  * exports, Notes/transcripts) reaches for to save itself three ways:
  *
  *  - (a) self-contained HTML — composeReportHtml (inline CSS + charts baked to

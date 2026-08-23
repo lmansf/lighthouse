@@ -265,22 +265,12 @@ pub async fn rag_post(headers: HeaderMap, body: Option<Json<Value>>) -> Response
                 "investigations action must be list, create, rename, setArchived, addConversationRef, fork, or export",
             ),
         },
-        // Boards (openspec: add-boards): pin-backed local dashboards. CRUD on
-        // the vault-scoped boards store — engine-minted ids, per-scope name
-        // validation, lazy virtual defaults that materialize on first
-        // mutation — plus refreshCards, the model-free per-pin re-execution
-        // through the SAME run_direct guard as pin rechecks (a manual board
-        // refresh IS a recheck: the pin's stored digest/summary advance
-        // identically). Validation failures → 400 with the engine's reason,
-        // like investigations. PARITY: commands.rs mirrors this op exactly;
-        // the TS twin answers refreshCards from stored pin state
-        // (live: false — analytics is Rust-engine-only).
         // Shaped views (openspec: add-shaped-views §3): CRUD on the views
         // store — engine-minted ids, save-time guard + reads/DAG validation,
         // dependent-aware lifecycle — plus `dependents`, the name lists the
         // rename/delete dialogs show. The wire carries the summary FLATTENED
         // (summaryText + summarySource); the ViewSummary is built here.
-        // Validation failures → 400 with the engine's reason, like boards.
+        // Validation failures → 400 with the engine's reason.
         // PARITY: commands.rs mirrors this op exactly; the TS twin's CRUD
         // runs for real against src/server/views.ts.
         Some("views") => match body["action"].as_str() {

@@ -5,7 +5,7 @@
 //! must survive that). Covers: the LOCAL/extractive path (result tables +
 //! provenance footer + the §1 assumption ledger, NO narration), the cloud
 //! posture's freshness stamp, and that a recipe result's representative query
-//! rechecks through the pin/board re-execution path (`run_direct`).
+//! rechecks through the pin re-execution path (`run_direct`).
 
 mod common;
 
@@ -96,7 +96,7 @@ async fn variance_recipe_local_path_tables_ledger_no_narration() {
     );
 
     // The terminating chunk carries the recipe's representative query so
-    // pin/board/Edit-SQL keep working (the multi-step single-SQL contract).
+    // pin/Edit-SQL keep working (the multi-step single-SQL contract).
     let done = chunks.iter().find(|c| c.done).expect("terminating chunk");
     let meta = done
         .analytics
@@ -111,7 +111,7 @@ async fn variance_recipe_local_path_tables_ledger_no_narration() {
 
 #[tokio::test]
 async fn recipe_result_rechecks_through_the_pin_board_path() {
-    // "Pin the result to a board" exercises the pin/board/Edit-SQL re-execution
+    // Pinning the result exercises the pin/Edit-SQL re-execution
     // seam, which re-runs the pinned answer's representative query through
     // `run_direct` (the guarded model-free path behind pin rechecks). A recipe
     // result must recheck to the SAME engine numbers as any answer.
@@ -141,7 +141,7 @@ async fn recipe_result_rechecks_through_the_pin_board_path() {
         .map(|m| m.sql.clone())
         .expect("recipe answer carries a representative query");
 
-    // Re-execute it exactly as a pin recheck / board card would.
+    // Re-execute it exactly as a pin recheck would.
     let recheck = run_direct(&sql, &["sales.csv".to_string()])
         .await
         .expect("the representative query rechecks");

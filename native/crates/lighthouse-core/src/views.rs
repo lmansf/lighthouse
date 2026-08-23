@@ -22,7 +22,7 @@
 //!
 //! Versioning posture (user data, not a cache): the store is a versioned
 //! envelope `{v: 1, views: [...]}` in `state_dir()/views.json` — the
-//! investigations/boards idiom verbatim. `v == 1` loads; an unknown or
+//! investigations idiom verbatim. `v == 1` loads; an unknown or
 //! missing version — or unparseable JSON — loads EMPTY for the session, and
 //! the first subsequent write renames the unreadable file to
 //! `views.json.bak-<epochms>` before writing a fresh v1 envelope. Nothing is
@@ -60,7 +60,7 @@ pub(crate) const RESERVED_NAMES: [&str; 15] = [
     "limit", "table", "values",
 ];
 
-/// Serializes load-modify-save on the store (mirrors boards'/investigations').
+/// Serializes load-modify-save on the store (mirrors investigations').
 fn store_lock() -> MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
@@ -202,7 +202,7 @@ fn save(records: &[View]) {
 }
 
 /// Stable engine-minted id: `view-` + first 12 hex chars of
-/// sha1(name \n sql \n createdMs) — the boards `board_id` idiom. The sql
+/// sha1(name \n sql \n createdMs) — the engine-minted-id idiom. The sql
 /// rides in the hash so same-named creations in the same millisecond (a
 /// deleted name reused by tests) can't collide. KEEP IN SYNC with
 /// views.ts::viewId.
@@ -1071,7 +1071,7 @@ pub async fn shape_view(
 mod tests {
     use super::*;
 
-    // Pure-function tests only, like boards.rs — the store scenarios (round
+    // Pure-function tests only, like pins.rs — the store scenarios (round
     // trip, bak-on-write, lifecycle, sources-untouched) live in
     // tests/views_test.rs where VAULT_DIR mutation is serialized by the
     // shared env lock.
@@ -1134,7 +1134,7 @@ mod tests {
         assert!(parse_store("{ not json").is_none());
         assert!(parse_store("null").is_none());
         // A record with an out-of-whitelist summary source is malformed, not
-        // coerced (the boards CardSize posture).
+        // coerced (the strict-enum posture).
         assert!(parse_store(
             r#"{"v":1,"views":[{"id":"a","name":"n","sql":"SELECT 1","reads":{"files":[],"views":[]},"summary":{"text":"t","source":"guess"},"createdMs":1}]}"#
         )

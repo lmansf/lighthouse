@@ -3,7 +3,7 @@
  * GFM table already rendered in an answer — for answers the ENGINE didn't
  * chart (prose-model tables, twin answers, truncated results). Zero model
  * calls, zero network: everything here reads the table's own cells, exactly
- * as displayed, through the same forgiving number reader the boards/pins
+ * as displayed, through the same forgiving number reader the pins
  * features already trust (parsePinNumber).
  *
  * The rules deliberately mirror the engine heuristic
@@ -33,7 +33,7 @@ import {
 } from "./chartSpec";
 
 /** The shape boardModel.parseMarkdownTable returns (structural, so this lib
- *  module doesn't reach into the boards feature). */
+ *  module stays feature-agnostic). */
 export interface TableLike {
   header: string[];
   rows: string[][];

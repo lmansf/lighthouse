@@ -115,10 +115,6 @@ export default function Home() {
               file, then reveal it in the explorer or attach it to the chat.
               Main window only — AppShell owns the shortcut. */}
           <QuickOpen />
-          {/* The pin board (openspec: add-boards): opened from the settings
-              gear via lighthouse:open-board; mounted here (not lazily on
-              open) so its pins-changed listener retains change badges while
-              the board is closed. */}
           {/* §49 §2: the in-app report reader — opened by lighthouse:open-report
               {id} from every report door (generate, per-answer, Reports home).
               Mounted here (not lazily on open) so its listener persists while
