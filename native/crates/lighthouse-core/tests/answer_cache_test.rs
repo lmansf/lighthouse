@@ -61,7 +61,6 @@ const DISALLOWED: CacheCtl = CacheCtl { bypass_cache: false, persist_allowed: fa
 fn every_key_component_is_load_bearing_and_normalization_folds_noise_only() {
     let dir = tempfile::tempdir().unwrap();
     let _guard = common::lock_env(dir.path());
-    std::env::remove_var("LIGHTHOUSE_APP_STATE_DIR");
     answer_cache::reset_store();
     write(&dir.path().join("report.md"), "quarterly revenue summary");
     write(&dir.path().join("private.csv"), "region,revenue\nNE,100\n");
@@ -117,7 +116,6 @@ fn every_key_component_is_load_bearing_and_normalization_folds_noise_only() {
 fn history_off_serves_memory_only_and_deletes_the_disk_mirror() {
     let dir = tempfile::tempdir().unwrap();
     let _guard = common::lock_env(dir.path());
-    std::env::remove_var("LIGHTHOUSE_APP_STATE_DIR");
     answer_cache::reset_store();
 
     // An allowed insert writes through.
@@ -148,7 +146,6 @@ fn history_off_serves_memory_only_and_deletes_the_disk_mirror() {
 fn lru_is_bounded_at_64_touch_refreshes_and_the_store_round_trips_disk() {
     let dir = tempfile::tempdir().unwrap();
     let _guard = common::lock_env(dir.path());
-    std::env::remove_var("LIGHTHOUSE_APP_STATE_DIR");
     answer_cache::reset_store();
 
     for i in 0..70 {
@@ -179,7 +176,6 @@ fn lru_is_bounded_at_64_touch_refreshes_and_the_store_round_trips_disk() {
 fn corrupt_or_version_mismatched_store_is_a_miss_and_self_heals() {
     let dir = tempfile::tempdir().unwrap();
     let _guard = common::lock_env(dir.path());
-    std::env::remove_var("LIGHTHOUSE_APP_STATE_DIR");
     answer_cache::reset_store();
 
     // Corrupt file: reads as empty (miss ⇒ live), never an error.
@@ -215,7 +211,6 @@ fn a_cache_replay_reports_zero_new_cost_but_carries_the_original_as_history() {
     // never double-counts a replay.
     let dir = tempfile::tempdir().unwrap();
     let _guard = common::lock_env(dir.path());
-    std::env::remove_var("LIGHTHOUSE_APP_STATE_DIR");
     answer_cache::reset_store();
 
     // A billable cloud answer's stored meter: 100/50 provider-reported tokens
@@ -258,7 +253,6 @@ fn a_cache_replay_shows_the_original_manifest_not_a_blank() {
     // the persisted entries carry names/kinds/counts/file ids, never context text.
     let dir = tempfile::tempdir().unwrap();
     let _guard = common::lock_env(dir.path());
-    std::env::remove_var("LIGHTHOUSE_APP_STATE_DIR");
     answer_cache::reset_store();
 
     let mut e = entry("verified answer over private files");
@@ -305,7 +299,6 @@ fn the_structured_table_rides_the_replay_like_the_chart_does() {
     // deserializes to None instead of failing.
     let dir = tempfile::tempdir().unwrap();
     let _guard = common::lock_env(dir.path());
-    std::env::remove_var("LIGHTHOUSE_APP_STATE_DIR");
     answer_cache::reset_store();
 
     let mut e = entry("prose answer over a fact sheet");
@@ -340,7 +333,6 @@ fn a_certified_answer_replays_certified_from_the_stored_analytics_meta() {
     // store byte-for-byte through disk.
     let dir = tempfile::tempdir().unwrap();
     let _guard = common::lock_env(dir.path());
-    std::env::remove_var("LIGHTHOUSE_APP_STATE_DIR");
     answer_cache::reset_store();
 
     let mut e = entry("Revenue by region.\n\n*Certified:* revenue");
@@ -404,7 +396,6 @@ async fn drive(
 async fn unchanged_question_replays_verbatim_and_a_touched_file_runs_live() {
     let dir = tempfile::tempdir().unwrap();
     let _guard = common::lock_env(dir.path());
-    std::env::remove_var("LIGHTHOUSE_APP_STATE_DIR");
     answer_cache::reset_store();
     write(
         &dir.path().join("sales.csv"),
@@ -485,7 +476,6 @@ async fn unchanged_question_replays_verbatim_and_a_touched_file_runs_live() {
 async fn bypass_runs_live_and_refreshes_the_entry() {
     let dir = tempfile::tempdir().unwrap();
     let _guard = common::lock_env(dir.path());
-    std::env::remove_var("LIGHTHOUSE_APP_STATE_DIR");
     answer_cache::reset_store();
     write(&dir.path().join("notes.md"), "# planning\nsome prose\n");
     vault::invalidate_walk_cache();
@@ -534,7 +524,6 @@ async fn bypass_runs_live_and_refreshes_the_entry() {
 async fn plan_only_neither_reads_nor_writes_the_answer_cache() {
     let dir = tempfile::tempdir().unwrap();
     let _guard = common::lock_env(dir.path());
-    std::env::remove_var("LIGHTHOUSE_APP_STATE_DIR");
     answer_cache::reset_store();
     write(
         &dir.path().join("sales.csv"),

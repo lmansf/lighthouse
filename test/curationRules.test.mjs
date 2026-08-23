@@ -27,7 +27,7 @@ function freshVault() {
   const vault = path.join(home, "vault");
   mkdirSync(path.join(vault, ".rag-vault"), { recursive: true });
   process.env.VAULT_DIR = vault;
-  delete process.env.LIGHTHOUSE_APP_STATE_DIR;
+  process.env.LIGHTHOUSE_APP_STATE_DIR = path.join(vault, ".rag-vault");
   return vault;
 }
 

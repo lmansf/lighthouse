@@ -13,6 +13,11 @@ pub fn lock_env(vault: &Path) -> MutexGuard<'static, ()> {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     std::env::set_var("VAULT_DIR", vault);
+    // Since the 0.15.0 re-root, engine state comes from LIGHTHOUSE_APP_STATE_DIR
+    // alone. Point it inside the test's own temp vault so each case still gets
+    // an isolated store (and the historical `.rag-vault` layout assertions
+    // keep meaning what they say).
+    std::env::set_var("LIGHTHOUSE_APP_STATE_DIR", vault.join(".rag-vault"));
     std::env::remove_var("LIGHTHOUSE_API_TOKEN");
     std::env::remove_var("LIGHTHOUSE_DESKTOP");
     // With experiments removed, default inclusion is a fixed privacy-preserving

@@ -24,6 +24,7 @@ function freshVault() {
   const vault = path.join(home, "vault");
   mkdirSync(path.join(vault, ".rag-vault"), { recursive: true });
   process.env.VAULT_DIR = vault;
+  process.env.LIGHTHOUSE_APP_STATE_DIR = path.join(vault, ".rag-vault");
   // With no explicit default-inclusion choice on the profile, files start
   // EXCLUDED (the app's conservative default) — deterministic inclusion, the
   // exact state of the field report.

@@ -23,7 +23,7 @@ register("./_ts-extensionless-hook.mjs", import.meta.url);
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lh-secrets-"));
 process.env.VAULT_DIR = dir; // appStateDir falls back to <vault>/.rag-vault
-delete process.env.LIGHTHOUSE_APP_STATE_DIR;
+process.env.LIGHTHOUSE_APP_STATE_DIR = path.join(dir, ".rag-vault");
 delete process.env.OPENAI_API_KEY;
 delete process.env.ANTHROPIC_API_KEY;
 

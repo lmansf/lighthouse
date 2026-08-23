@@ -22,6 +22,7 @@ const pinsMod = await import("../src/server/pins.ts");
 function freshVault() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lh-boards-"));
   process.env.VAULT_DIR = dir;
+  process.env.LIGHTHOUSE_APP_STATE_DIR = path.join(dir, ".rag-vault");
   return path.join(dir, ".rag-vault");
 }
 

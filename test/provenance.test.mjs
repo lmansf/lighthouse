@@ -44,6 +44,7 @@ test("stamp origin and source count agree with the audit record", async () => {
   const vault = path.join(home, "vault");
   mkdirSync(vault, { recursive: true });
   process.env.VAULT_DIR = vault;
+  process.env.LIGHTHOUSE_APP_STATE_DIR = path.join(vault, ".rag-vault");
   writeFileSync(
     path.join(vault, "sales.csv"),
     "date,region,amount\n2026-01-05,NE,100\n2026-01-06,NW,50\n",

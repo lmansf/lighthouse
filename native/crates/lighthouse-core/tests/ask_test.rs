@@ -113,7 +113,6 @@ async fn headless_ask_is_recorded_like_an_app_ask() {
     let dir = tempfile::tempdir().unwrap();
     let aux = tempfile::tempdir().unwrap();
     let _guard = common::lock_env(dir.path());
-    std::env::remove_var("LIGHTHOUSE_APP_STATE_DIR");
     // A keyless CLOUD provider via the profile — the meta path is model-free, so
     // this answers on-device with zero network, yet the audit still records the
     // configured provider (read from cfg exactly as the transports derive it).
@@ -161,7 +160,6 @@ async fn local_forces_device_and_records_no_egress() {
     let dir = tempfile::tempdir().unwrap();
     let aux = tempfile::tempdir().unwrap();
     let _guard = common::lock_env(dir.path());
-    std::env::remove_var("LIGHTHOUSE_APP_STATE_DIR");
     std::env::remove_var("LIGHTHOUSE_PROFILE_FILE");
     let audit_file = aux.path().join("audit.jsonl");
     std::env::set_var("LIGHTHOUSE_AUDIT_FILE", &audit_file);
@@ -194,7 +192,6 @@ async fn cache_replay_records_zero_new_cost() {
     let dir = tempfile::tempdir().unwrap();
     let aux = tempfile::tempdir().unwrap();
     let _guard = common::lock_env(dir.path());
-    std::env::remove_var("LIGHTHOUSE_APP_STATE_DIR");
     std::env::remove_var("LIGHTHOUSE_PROFILE_FILE");
     let audit_file = aux.path().join("audit.jsonl");
     std::env::set_var("LIGHTHOUSE_AUDIT_FILE", &audit_file);
@@ -244,7 +241,6 @@ async fn headless_local_ask_is_grounded_deterministic_and_stamp_agreeing() {
     let dir = tempfile::tempdir().unwrap();
     let aux = tempfile::tempdir().unwrap();
     let _guard = common::lock_env(dir.path());
-    std::env::remove_var("LIGHTHOUSE_APP_STATE_DIR");
     std::env::remove_var("LIGHTHOUSE_PROFILE_FILE");
     std::env::remove_var("LIGHTHOUSE_AUDIT_FILE");
     enable_audit(&aux.path().join("settings.json"));
@@ -309,6 +305,11 @@ async fn opts_vault_redirects_vault_reads_and_audit_state_root() {
     let elsewhere = tempfile::tempdir().unwrap(); // a decoy "desktop install" state dir
     let aux = tempfile::tempdir().unwrap();
     let _guard = common::lock_env(vault.path());
+    // Seed X's vault (and its include flags, which since the 0.15.0 re-root
+    // live in X's OWN state root, not beside the documents) BEFORE the decoy
+    // install becomes ambient.
+    let ids = seed_meta_vault(vault.path());
+
     // Simulate a desktop install whose state dir is NOT the vault's: audit/cache
     // would land HERE if `opts.vault` failed to override it.
     std::env::set_var("LIGHTHOUSE_APP_STATE_DIR", elsewhere.path());
@@ -318,8 +319,6 @@ async fn opts_vault_redirects_vault_reads_and_audit_state_root() {
     std::env::remove_var("LIGHTHOUSE_PROFILE_FILE");
     enable_audit(&aux.path().join("settings.json"));
     answer_cache::reset_store();
-
-    let ids = seed_meta_vault(vault.path());
     // `opts.vault = X` — the helper sets VAULT_DIR = X and pins
     // LIGHTHOUSE_APP_STATE_DIR = X/.rag-vault before the first read.
     let chunks = drive(run_headless_ask(

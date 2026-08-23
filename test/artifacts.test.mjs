@@ -19,6 +19,7 @@ const home = mkdtempSync(path.join(tmpdir(), "lh-artifact-"));
 const vault = path.join(home, "vault");
 mkdirSync(vault, { recursive: true });
 process.env.VAULT_DIR = vault;
+process.env.LIGHTHOUSE_APP_STATE_DIR = path.join(vault, ".rag-vault");
 
 const { writeArtifact } = await import("../src/server/vault.ts");
 

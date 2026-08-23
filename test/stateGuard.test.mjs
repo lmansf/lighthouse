@@ -19,6 +19,7 @@ register("./_ts-extensionless-hook.mjs", import.meta.url);
 
 const vault = mkdtempSync(path.join(tmpdir(), "lh-state-guard-"));
 process.env.VAULT_DIR = vault;
+process.env.LIGHTHOUSE_APP_STATE_DIR = path.join(vault, ".rag-vault");
 
 const { setIncluded, stateWrittenByNewer } = await import("../src/server/vault.ts");
 const { appVersion, statePath } = await import("../src/server/config.ts");
@@ -58,8 +59,9 @@ test("an older build reading newer state goes read-only; unknown fields survive"
 });
 
 test("the normal path stamps the writer and round-trips byte-identically", () => {
-  // Fresh vault directory (the guard verdict is re-read per statePath()).
-  process.env.VAULT_DIR = mkdtempSync(path.join(tmpdir(), "lh-state-guard2-"));
+  // Fresh state root (the guard verdict is re-read per statePath(), and since
+  // the 0.15.0 re-root the state file follows LIGHTHOUSE_APP_STATE_DIR).
+  process.env.LIGHTHOUSE_APP_STATE_DIR = mkdtempSync(path.join(tmpdir(), "lh-state-guard2-"));
   setIncluded("notes.md", true);
   const file = statePath();
   const first = readFileSync(file, "utf8");

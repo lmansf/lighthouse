@@ -12,6 +12,7 @@ register("./_ts-extensionless-hook.mjs", import.meta.url);
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lh-brief-"));
 process.env.VAULT_DIR = dir;
+process.env.LIGHTHOUSE_APP_STATE_DIR = path.join(dir, ".rag-vault");
 
 const {
   listBriefings,

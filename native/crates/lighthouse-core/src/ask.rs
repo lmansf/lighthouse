@@ -109,30 +109,20 @@ pub fn run_headless_ask(
     // §1.4 — point the engine at `opts.vault` BEFORE the first read (the
     // `VAULT_DIR`-style override the test harness uses, and the
     // `LIGHTHOUSE_SMOKE_STATE` precedent of setting a root before the engine
-    // reads state). The mapping is the load-bearing detail:
+    // reads state).
     //
-    //   - `config::vault_dir()`   reads `VAULT_DIR` — the documents.
-    //   - `config::state_dir()`   = `vault_dir()/.rag-vault` — DERIVED, so it
-    //                               moves with `VAULT_DIR` alone. Investigations
-    //                               (`investigations.json`) live here.
-    //   - `config::app_state_dir()` prefers `LIGHTHOUSE_APP_STATE_DIR` and only
-    //                               FALLS BACK to `state_dir()`. The audit log
-    //                               (`app_state_dir()/audit`) and the answer
-    //                               cache (`app_state_dir()/answer-cache.json`)
-    //                               live here.
-    //
-    // So `VAULT_DIR` alone redirects the vault + investigations, but the audit
-    // and cache follow `LIGHTHOUSE_APP_STATE_DIR` whenever it is set (a desktop
-    // install sets it to its private data dir). To make a one-shot `--vault X`
-    // read X's vault AND write its audit to X's OWN state root, we set BOTH:
-    // `VAULT_DIR = X` and `LIGHTHOUSE_APP_STATE_DIR = state_dir()` (= `X/.rag-
-    // vault`, exactly the in-vault fallback), pinning audit/cache under X even
-    // if an ambient `LIGHTHOUSE_APP_STATE_DIR` would otherwise win. Both roots
-    // then resolve under X's single `.rag-vault`, matching where the vault's
-    // own investigations already land.
+    // Since the 0.15.0 re-root there is ONE state root — `app_state_dir()`,
+    // read from `LIGHTHOUSE_APP_STATE_DIR` — and it no longer derives from
+    // the documents folder. A one-shot `--vault X` therefore has to name X's
+    // state root itself; deriving it (the old `state_dir()` call here) would
+    // now resolve to the ambient install's dir and silently write a desktop
+    // install's audit for a one-shot ask. The literal `X/.rag-vault` keeps
+    // the flag's documented contract — read X, write X's own audit and cache
+    // — until `--vault` retires with the vault itself (openspec:
+    // refocus-chat-attachments task 3.1).
     if let Some(vault) = vault.as_deref() {
         std::env::set_var("VAULT_DIR", vault);
-        std::env::set_var("LIGHTHOUSE_APP_STATE_DIR", crate::config::state_dir());
+        std::env::set_var("LIGHTHOUSE_APP_STATE_DIR", vault.join(".rag-vault"));
     }
 
     // (1) Base config — local (device) when forced, else the profile's.

@@ -1,8 +1,9 @@
 //! Server-side configuration (port of `src/server/config.ts`).
 //!
-//! Everything is stored on the local filesystem; the vault is a plain directory
-//! of the user's files and derived state lives in a hidden `.rag-vault/`
-//! subfolder beside the documents.
+//! Everything is stored on the local filesystem, under one root: the app's
+//! own state directory ([`app_state_dir`]). Since the 0.15.0 refocus the
+//! engine keeps no user-folder-derived state — the user's files reach it as
+//! chat attachments, and their bytes live in the workspace blob store.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -49,37 +50,14 @@ pub fn vault_dir() -> PathBuf {
     dir
 }
 
-/// Hidden state directory for inclusion flags, profile, and indexes.
-///
-/// §41: platform-aware. Desktop (and the web/dev twin) keeps the historical
-/// in-vault `.rag-vault` — byte-identical behavior. iOS moves engine state
-/// OUT of the user-visible Documents vault into the app's Application
-/// Support container: the shell's `bootstrap_env` points
-/// `LIGHTHOUSE_APP_STATE_DIR` there before any engine call, so the Files-app
-/// door ("On My iPhone → Lighthouse") shows only the user's documents. The
-/// env var is read directly — NOT via [`app_state_dir`], whose fallback is
-/// this very function (a cycle). Unset env on iOS (bare engine under a test
-/// harness) falls back to the historical in-vault location so the engine
-/// still boots; the shell always sets it in the app. The one-shot CLI
-/// `--vault` flow (ask.rs) re-points LIGHTHOUSE_APP_STATE_DIR in-vault —
-/// desktop-only (no CLI ships on iOS), so the iOS arm never sees it.
-/// `LIGHTHOUSE_STATE_HOME_LEGACY=1` is the migration's fail-open switch
-/// (lighthouse-shell::state_home): a failed Documents→App Support migration
-/// keeps this launch running from the legacy dir — never a refuse-to-boot.
+/// Engine state directory. Since the 0.15.0 refocus this is simply
+/// [`app_state_dir`]: engine state no longer derives from — or lives beside —
+/// a user folder, because there is no persistent vault to hang it on. The
+/// alias stays so the many existing call sites keep reading naturally; the
+/// §41 iOS state-home seam (Documents `.rag-vault` → Application Support)
+/// retires with it, since state is never in Documents any more.
 pub fn state_dir() -> PathBuf {
-    let dir = if cfg!(target_os = "ios") {
-        let legacy = std::env::var("LIGHTHOUSE_STATE_HOME_LEGACY")
-            .map(|v| v == "1")
-            .unwrap_or(false);
-        match env_trimmed("LIGHTHOUSE_APP_STATE_DIR") {
-            Some(p) if !legacy => PathBuf::from(p).join(".rag-vault"),
-            _ => vault_dir().join(".rag-vault"),
-        }
-    } else {
-        vault_dir().join(".rag-vault")
-    };
-    let _ = fs::create_dir_all(&dir);
-    dir
+    app_state_dir()
 }
 
 pub fn state_path() -> PathBuf {
@@ -101,21 +79,45 @@ pub fn profile_path() -> PathBuf {
     state_dir().join("profile.json")
 }
 
-/// Install-global state (signed-in profile, sealed secrets, settings) that
-/// must persist across vault switches. This state belongs to the user's
-/// install, not to whichever folder happens to be the vault — storing it
-/// in-vault meant "Choose vault folder…" re-pointed the engine at a folder
-/// with none of it and silently signed the user out. Same rule the profile
-/// and connector credentials already follow (see profile_path/connectors_dir):
-/// the desktop shell sets LIGHTHOUSE_APP_STATE_DIR to its private data dir;
-/// web/dev falls back to the in-vault state dir for parity.
+/// The single root for everything the engine stores: the workspace (blobs +
+/// per-conversation manifests), caches, settings, secrets, audit, reports.
+/// The desktop and iOS shells point `LIGHTHOUSE_APP_STATE_DIR` at their
+/// private data container before any engine call; a bare engine (CLI, tests,
+/// web/dev) falls back to the platform data home. It never derives from a
+/// user folder — that derivation was what made "Choose vault folder…" strand
+/// a user's profile, and after the 0.15.0 refocus there is no vault to
+/// derive from at all.
+/// PARITY: config.ts::appStateDir.
 pub fn app_state_dir() -> PathBuf {
-    if let Some(p) = env_trimmed("LIGHTHOUSE_APP_STATE_DIR") {
-        let dir = PathBuf::from(p);
-        let _ = fs::create_dir_all(&dir);
-        return dir;
+    let dir = match env_trimmed("LIGHTHOUSE_APP_STATE_DIR") {
+        Some(p) => PathBuf::from(p),
+        None => default_app_state_dir(),
+    };
+    let _ = fs::create_dir_all(&dir);
+    dir
+}
+
+/// Platform data home, resolved from the environment alone (no directories
+/// crate): `~/Library/Application Support/Lighthouse` on macOS, `%APPDATA%\
+/// Lighthouse` on Windows, `$XDG_DATA_HOME`/`~/.local/share/lighthouse`
+/// elsewhere. A home-less environment falls back to `./.lighthouse` so the
+/// engine still boots (a bare CI container, say) rather than refusing.
+fn default_app_state_dir() -> PathBuf {
+    #[cfg(target_os = "macos")]
+    if let Some(home) = env_trimmed("HOME") {
+        return PathBuf::from(home).join("Library/Application Support/Lighthouse");
     }
-    state_dir()
+    #[cfg(target_os = "windows")]
+    if let Some(appdata) = env_trimmed("APPDATA") {
+        return PathBuf::from(appdata).join("Lighthouse");
+    }
+    if let Some(xdg) = env_trimmed("XDG_DATA_HOME") {
+        return PathBuf::from(xdg).join("lighthouse");
+    }
+    if let Some(home) = env_trimmed("HOME") {
+        return PathBuf::from(home).join(".local/share/lighthouse");
+    }
+    std::env::current_dir().unwrap_or_default().join(".lighthouse")
 }
 
 /// Public Entra client id for the SharePoint connector (public PKCE-class
@@ -306,30 +308,37 @@ mod tests {
     /// pins the RELOCATED home instead: `LIGHTHOUSE_APP_STATE_DIR/.rag-vault`,
     /// with the legacy switch restoring the in-vault dir.
     #[test]
-    fn state_dir_platform_seam() {
+    fn state_root_is_app_state_never_the_user_folder() {
         let _env = crate::test_env_lock();
         // Process-global env: mutate under distinctive values and restore, so
-        // parallel tests that also read VAULT_DIR see it back untouched.
+        // parallel tests that also read these see them back untouched.
         let prev_vault = std::env::var("VAULT_DIR").ok();
         let prev_app = std::env::var("LIGHTHOUSE_APP_STATE_DIR").ok();
-        let prev_legacy = std::env::var("LIGHTHOUSE_STATE_HOME_LEGACY").ok();
-        let vault = std::env::temp_dir().join("lh-s41-vault");
-        let appstate = std::env::temp_dir().join("lh-s41-appstate");
+        let prev_home = std::env::var("HOME").ok();
+        let prev_xdg = std::env::var("XDG_DATA_HOME").ok();
+        let vault = std::env::temp_dir().join("lh-root-vault");
+        let appstate = std::env::temp_dir().join("lh-root-appstate");
         std::env::set_var("VAULT_DIR", &vault);
         std::env::set_var("LIGHTHOUSE_APP_STATE_DIR", &appstate);
-        std::env::remove_var("LIGHTHOUSE_STATE_HOME_LEGACY");
 
-        let resolved = state_dir();
-        if cfg!(target_os = "ios") {
-            assert_eq!(resolved, appstate.join(".rag-vault"));
-            std::env::set_var("LIGHTHOUSE_STATE_HOME_LEGACY", "1");
-            assert_eq!(state_dir(), vault.join(".rag-vault"));
-        } else {
-            // Desktop/web byte-identical: in-vault, env vars irrelevant here.
-            assert_eq!(resolved, vault.join(".rag-vault"));
-            std::env::set_var("LIGHTHOUSE_STATE_HOME_LEGACY", "1");
-            assert_eq!(state_dir(), vault.join(".rag-vault"));
-        }
+        // The 0.15.0 contract on every platform: state IS the app-state dir,
+        // and the user folder can never move it.
+        assert_eq!(state_dir(), appstate);
+        assert_eq!(app_state_dir(), appstate);
+        assert_eq!(state_path(), appstate.join("state.json"));
+
+        // With no override, the platform data home answers — still never the
+        // vault. (macOS resolves under HOME; elsewhere XDG_DATA_HOME wins.)
+        std::env::remove_var("LIGHTHOUSE_APP_STATE_DIR");
+        let home = std::env::temp_dir().join("lh-root-home");
+        std::env::set_var("HOME", &home);
+        std::env::set_var("XDG_DATA_HOME", home.join("share"));
+        let fallback = app_state_dir();
+        assert!(
+            fallback.starts_with(&home),
+            "fallback resolves under the platform data home: {fallback:?}"
+        );
+        assert!(!fallback.starts_with(&vault), "never derived from the vault");
 
         match prev_vault {
             Some(v) => std::env::set_var("VAULT_DIR", v),
@@ -339,9 +348,13 @@ mod tests {
             Some(v) => std::env::set_var("LIGHTHOUSE_APP_STATE_DIR", v),
             None => std::env::remove_var("LIGHTHOUSE_APP_STATE_DIR"),
         }
-        match prev_legacy {
-            Some(v) => std::env::set_var("LIGHTHOUSE_STATE_HOME_LEGACY", v),
-            None => std::env::remove_var("LIGHTHOUSE_STATE_HOME_LEGACY"),
+        match prev_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        match prev_xdg {
+            Some(v) => std::env::set_var("XDG_DATA_HOME", v),
+            None => std::env::remove_var("XDG_DATA_HOME"),
         }
     }
 }

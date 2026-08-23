@@ -12,7 +12,7 @@ CLAUDE.md's versioning section (the §31/0.14.0 precedent).
 - [x] 1.2 Eager ingest on attach: extract ∥ profile ∥ catalog ∥ index,
       content-hash-keyed caches under `app_state_dir()/cache/`, readiness
       state per attachment, ask-awaits-only-what-it-needs.
-- [ ] 1.3 Re-root `config::state_dir()` at `app_state_dir()` (kills the
+- [x] 1.3 Re-root `config::state_dir()` at `app_state_dir()` (kills the
       vault_dir derivation — the audit's structural trap #1).
 - [ ] 1.4 `workspace::retrieve` + `doc_text`/`doc_path` via manifest;
       collapse `included_file_ids`/`attachment_file_ids` across the synth

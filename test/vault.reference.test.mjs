@@ -43,6 +43,7 @@ test("link-first adds: covered chat-drop resolves to its node, overlaps rejected
   const vault = path.join(home, "vault");
   mkdirSync(vault, { recursive: true });
   process.env.VAULT_DIR = vault;
+  process.env.LIGHTHOUSE_APP_STATE_DIR = path.join(vault, ".rag-vault");
 
   // A real external tree the user will link in place (NOT copied into the vault).
   const extFolder = path.join(home, "Desktop", "project");

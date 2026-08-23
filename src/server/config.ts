@@ -21,20 +21,14 @@ export function vaultDir(): string {
 }
 
 /**
- * Hidden state directory for inclusion flags, profile, and indexes.
- *
- * §41: the Rust engine is platform-aware here — on iOS the state home moves
- * out of the Documents vault into the app's Application Support container
- * (LIGHTHOUSE_APP_STATE_DIR, with LIGHTHOUSE_STATE_HOME_LEGACY=1 as the
- * migration's fail-open switch). The TS twin never runs on iOS, so this
- * mirrors the seam's SHAPE only: web/dev behavior is unchanged (the
- * in-vault `.rag-vault`, exactly as before). PARITY: config.rs::state_dir —
- * wire-compatible, deliberately not byte-twinned (platform arms differ).
+ * Engine state directory. Since the 0.15.0 refocus this is simply
+ * appStateDir(): engine state no longer derives from — or lives beside — a
+ * user folder, because there is no persistent vault to hang it on. The alias
+ * stays so existing call sites keep reading naturally.
+ * PARITY: config.rs::state_dir.
  */
 export function stateDir(): string {
-  const dir = path.join(vaultDir(), ".rag-vault");
-  fs.mkdirSync(dir, { recursive: true });
-  return dir;
+  return appStateDir();
 }
 
 /**
@@ -73,16 +67,36 @@ export function profilePath(): string {
  * in-vault meant "Choose vault folder…" re-pointed the engine at a folder with
  * no license and silently signed the user out. Same rule the profile and
  * connector credentials already follow (see connectorsDir). The desktop shell
- * sets LIGHTHOUSE_APP_STATE_DIR to its private data dir; plain web/dev falls
- * back to the in-vault state dir for parity.
+ * sets LIGHTHOUSE_APP_STATE_DIR to its private data dir; a bare engine
+ * (tests, web/dev) falls back to the platform data home — never a user
+ * folder.
  */
 export function appStateDir(): string {
   const override = process.env.LIGHTHOUSE_APP_STATE_DIR?.trim();
-  if (override) {
-    fs.mkdirSync(override, { recursive: true });
-    return override;
+  const dir = override || defaultAppStateDir();
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+/**
+ * Platform data home, resolved from the environment alone: Application
+ * Support on macOS, %APPDATA% on Windows, $XDG_DATA_HOME / ~/.local/share
+ * elsewhere. A home-less environment falls back to ./.lighthouse so the
+ * engine still boots. PARITY: config.rs::default_app_state_dir.
+ */
+function defaultAppStateDir(): string {
+  const home = process.env.HOME?.trim() || process.env.USERPROFILE?.trim();
+  if (process.platform === "darwin" && home) {
+    return path.join(home, "Library/Application Support/Lighthouse");
   }
-  return stateDir();
+  if (process.platform === "win32") {
+    const appdata = process.env.APPDATA?.trim();
+    if (appdata) return path.join(appdata, "Lighthouse");
+  }
+  const xdg = process.env.XDG_DATA_HOME?.trim();
+  if (xdg) return path.join(xdg, "lighthouse");
+  if (home) return path.join(home, ".local/share/lighthouse");
+  return path.join(process.cwd(), ".lighthouse");
 }
 
 /** The single logical source id for the local vault folder. */

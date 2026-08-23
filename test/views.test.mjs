@@ -23,6 +23,7 @@ const vault = await import("../src/server/vault.ts");
 function freshVault() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lh-views-"));
   process.env.VAULT_DIR = dir;
+  process.env.LIGHTHOUSE_APP_STATE_DIR = path.join(dir, ".rag-vault");
   return { dir, stateDir: path.join(dir, ".rag-vault") };
 }
 

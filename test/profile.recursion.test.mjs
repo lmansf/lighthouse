@@ -31,6 +31,7 @@ register("./_ts-extensionless-hook.mjs", pathToFileURL(import.meta.filename));
 function freshVault() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "profile-recursion-"));
   process.env.VAULT_DIR = dir;
+  process.env.LIGHTHOUSE_APP_STATE_DIR = path.join(dir, ".rag-vault");
   return dir;
 }
 

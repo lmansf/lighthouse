@@ -371,10 +371,12 @@ mod tests {
         let _guard = test_lock();
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("VAULT_DIR", dir.path());
+        std::env::set_var("LIGHTHOUSE_APP_STATE_DIR", dir.path().join(".rag-vault"));
         // Start from an empty store every time.
         let _ = std::fs::remove_file(briefings_path());
         f();
         std::env::remove_var("VAULT_DIR");
+        std::env::remove_var("LIGHTHOUSE_APP_STATE_DIR");
     }
 
     #[test]
@@ -439,6 +441,7 @@ mod tests {
         let _guard = test_lock();
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("VAULT_DIR", dir.path());
+        std::env::set_var("LIGHTHOUSE_APP_STATE_DIR", dir.path().join(".rag-vault"));
         let _ = std::fs::remove_file(briefings_path());
 
         add("Q3", &["pin-missing".into()], Cadence::Manual).unwrap();
@@ -450,6 +453,7 @@ mod tests {
         // A run stamps last_run_ms so the schedule advances.
         assert!(list()[0].last_run_ms.is_some());
         std::env::remove_var("VAULT_DIR");
+        std::env::remove_var("LIGHTHOUSE_APP_STATE_DIR");
     }
 
     #[test]
