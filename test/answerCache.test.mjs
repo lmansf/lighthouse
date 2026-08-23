@@ -460,3 +460,140 @@ test("cacheKey folds the view registry by posture (local-only views re-key local
   assert.notEqual(localKey(), local1);
   assert.notEqual(cloudKey(), cloud1, "an eligible view re-keys the cloud ask");
 });
+
+// --- The persistence gate, pinned mutant-by-mutant ----------------------------------
+// These pin the exact envelope version, the once-per-process disk-load latch,
+// the posture INSERT applies (not just lookup), and the all-or-nothing entry
+// validation — the guards a mutation run showed the round-trip tests above
+// exercise only from one side.
+
+const { readFileSync } = await import("node:fs");
+const { spawnSync } = await import("node:child_process");
+
+test("a handcrafted v:1 envelope is accepted, and inserts stamp v:1 back", () => {
+  const vault = freshVault();
+  cache.resetStore();
+
+  // The on-disk contract is EXACTLY v:1 — a file another process (or an
+  // earlier run) wrote with v:1 must hit, not just a self-round-trip.
+  writeFileSync(
+    cacheFile(vault),
+    JSON.stringify({ v: 1, entries: [{ ...entryOf("from disk"), key: "restart-k" }] }),
+  );
+  assert.equal(
+    cache.lookup("restart-k", ALLOWED)?.text,
+    "from disk",
+    "v:1 is THE live envelope version — it must be accepted",
+  );
+
+  // And the write side stamps the same literal version.
+  cache.insert("w1", entryOf("w"), ALLOWED);
+  assert.equal(JSON.parse(readFileSync(cacheFile(vault), "utf8")).v, 1, "writes stamp v:1");
+});
+
+test("the disk merge latches ONCE per process — later allowed asks never re-read disk", () => {
+  const vault = freshVault();
+  cache.resetStore();
+
+  writeFileSync(
+    cacheFile(vault),
+    JSON.stringify({ v: 1, entries: [{ ...entryOf("early"), key: "early-k" }] }),
+  );
+  assert.equal(cache.lookup("early-k", ALLOWED)?.text, "early", "the first allowed ask merges disk");
+
+  // Disk content that appears AFTER the latch is invisible to this process:
+  // only a restart re-reads the mirror.
+  writeFileSync(
+    cacheFile(vault),
+    JSON.stringify({ v: 1, entries: [{ ...entryOf("late"), key: "late-k" }] }),
+  );
+  assert.equal(cache.lookup("late-k", ALLOWED), null, "post-latch disk edits never merge");
+});
+
+test("the disk mirror replays across a REAL process restart (the latch starts unlatched)", () => {
+  const vault = freshVault();
+  cache.resetStore();
+  writeFileSync(
+    cacheFile(vault),
+    JSON.stringify({ v: 1, entries: [{ ...entryOf("survived restart"), key: "rk" }] }),
+  );
+
+  // A brand-new process — module state at its initial values, no resetStore —
+  // must lazily merge the mirror on its FIRST allowed ask. This is the
+  // cross-restart half of the replay guarantee the in-process tests can't see.
+  const hookUrl = new URL("./_ts-extensionless-hook.mjs", import.meta.url).href;
+  const modUrl = new URL("../src/server/answerCache.ts", import.meta.url).href;
+  const script = [
+    'import { register } from "node:module";',
+    `register(${JSON.stringify(hookUrl)}, ${JSON.stringify(import.meta.url)});`,
+    `const cache = await import(${JSON.stringify(modUrl)});`,
+    'const hit = cache.lookup("rk", { persistAllowed: true });',
+    'process.stdout.write(hit ? hit.text : "MISS");',
+  ].join("\n");
+  const r = spawnSync(process.execPath, ["--input-type=module", "-e", script], {
+    env: { ...process.env, VAULT_DIR: vault },
+    encoding: "utf8",
+  });
+  assert.equal(r.status, 0, `restarted process failed: ${r.stderr}`);
+  assert.equal(r.stdout, "survived restart", "a fresh process merges the mirror on first allowed ask");
+});
+
+test("INSERT applies the posture too: allowed merges the prior store, disallowed deletes it", () => {
+  const vault = freshVault();
+  cache.resetStore();
+
+  // An allowed insert into a fresh process first MERGES the prior process's
+  // disk entries — the write-through must carry them, never clobber them.
+  writeFileSync(
+    cacheFile(vault),
+    JSON.stringify({ v: 1, entries: [{ ...entryOf("kept"), key: "prior-k" }] }),
+  );
+  cache.insert("new-k", entryOf("new"), ALLOWED);
+  assert.equal(
+    cache.lookup("prior-k", ALLOWED)?.text,
+    "kept",
+    "an allowed insert merges the prior store into memory",
+  );
+  const onDisk = JSON.parse(readFileSync(cacheFile(vault), "utf8"));
+  assert.ok(
+    onDisk.entries.some((e) => e.key === "prior-k"),
+    "the write-through preserves the merged prior entry",
+  );
+
+  // A DISALLOWED insert deletes the mirror even though it never writes —
+  // history-off clears stored chat content on every request, inserts included.
+  cache.insert("k-priv", entryOf("private"), DISALLOWED);
+  assert.ok(!existsSync(cacheFile(vault)), "a disallowed insert deletes the persisted cache");
+});
+
+test("a null entry voids the envelope as a plain miss — never a crash", () => {
+  const vault = freshVault();
+  cache.resetStore();
+  writeFileSync(
+    cacheFile(vault),
+    JSON.stringify({ v: 1, entries: [null, { ...entryOf("x"), key: "kn" }] }),
+  );
+  // The null must short-circuit BEFORE any property access: the whole file
+  // voids (all-or-nothing) and the healthy sibling entry never loads either.
+  assert.equal(cache.lookup("kn", ALLOWED), null, "a null entry voids the file, no throw");
+});
+
+test("entry validation is a strict conjunction — ONE wrong field type voids the file", () => {
+  const vault = freshVault();
+  const probes = [
+    ["text", { text: 42 }],
+    ["references", { references: "nope" }],
+    ["createdMs", { createdMs: "old" }],
+    ["meta.origin", { meta: { origin: 7, excerptCount: 0, sourceFileCount: 0 } }],
+  ];
+  for (const [field, patch] of probes) {
+    cache.resetStore();
+    writeFileSync(
+      cacheFile(vault),
+      JSON.stringify({ v: 1, entries: [{ ...entryOf("ok"), key: "km", ...patch }] }),
+    );
+    // Every OTHER field is valid: only a strict AND across all checks voids
+    // the entry — any single check weakening to OR would let it load.
+    assert.equal(cache.lookup("km", ALLOWED), null, `a malformed ${field} voids the file`);
+  }
+});

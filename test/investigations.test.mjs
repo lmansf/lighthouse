@@ -687,3 +687,89 @@ test("export render is byte-stable (matches the Rust literal)", () => {
   const titled = inv.exportMarkdown("inv-branch", { "conv-1": "Kickoff", "conv-2": "" });
   assert.ok(titled.includes("\n## Conversations\n\n- Kickoff (conv-1)\n- conv-2\n"), titled);
 });
+
+// --- mutation-hardening pins --------------------------------------------------
+// Each test below pins a boundary the mutation run showed was unobserved:
+// the sanitizer's dots-only fallback, the at-use folder-segment rejections
+// (backslash + dots-only), and the exact pins-style id derivation.
+
+test("folder sanitizer: dots-only and separator-only names fall back to Investigation", () => {
+  // sanitizeFolderName: `!collapsed || /^\.+$/.test(collapsed)` — EITHER arm
+  // alone must trigger the fallback (a "&&" there would fire on neither,
+  // since an empty string can never also be dots-only).
+  freshVault();
+
+  // Dots-only survives create's non-empty name check but the FOLDER falls
+  // back — "..." must never become a directory segment.
+  const dots = inv.createInvestigation("...", [], "default");
+  assert.equal(dots.name, "...", "display name keeps the dots");
+  assert.equal(dots.folderName, "Investigation", "dots-only folder falls back");
+
+  // Separators-only collapses to EMPTY after stripping — the other arm.
+  const seps = inv.createInvestigation("//\\", [], "default");
+  assert.equal(seps.folderName, "Investigation", "separator-only folder falls back");
+
+  // Both resolve to the shared fallback subfolder, never a raw segment.
+  assert.equal(inv.investigationNotesSubdir(dots.id), "Lighthouse Notes/Investigation");
+});
+
+test("notes folder segment rejects backslash and dots-only names at use", () => {
+  // notesFolderSegment's rejection chain is FIVE independent `||` arms; the
+  // existing tests exercise `/`-traversal and "Chats" but neither the `\\`
+  // arm nor the at-use dots-only arm — hand-tamper the store to drive each
+  // alone, exactly like the "../evil" fixture above.
+  const stateDir = freshVault();
+  fs.mkdirSync(stateDir, { recursive: true });
+  const rec = (id, folderName) => ({
+    id,
+    name: id,
+    createdMs: 1,
+    archived: false,
+    scopeFileIds: [],
+    providerPolicy: "default",
+    conversationRefs: [],
+    folderName,
+  });
+  fs.writeFileSync(
+    path.join(stateDir, "investigations.json"),
+    JSON.stringify({
+      v: 1,
+      investigations: [rec("inv-bslash", "..\\evil"), rec("inv-dots", "..")],
+    }),
+  );
+
+  assert.throws(
+    () => inv.investigationNotesSubdir("inv-bslash"),
+    /investigation folder name is not usable/,
+    "backslash separators rejected at use",
+  );
+  assert.throws(
+    () => inv.investigationNotesSubdir("inv-dots"),
+    /investigation folder name is not usable/,
+    "dots-only rejected at use (parent traversal)",
+  );
+  for (const view of inv.investigationsListing()) {
+    assert.deepEqual(view.noteRefs, [], "unusable folders derive nothing");
+  }
+});
+
+test("investigation ids are the pins-style sha derivation (inv- + 12 hex)", async () => {
+  // The id is minted as `inv-` + the FIRST TWELVE hex chars of
+  // sha1(`${name}${createdMs}`) — deterministic for a (name, instant) pair,
+  // so recompute it from the returned record and demand byte equality
+  // (which also pins the slice window: offset 0, length 12).
+  const crypto = (await import("node:crypto")).default;
+  freshVault();
+  const created = inv.createInvestigation("Ledger sweep", [], "default");
+  const expected = `inv-${crypto
+    .createHash("sha1")
+    .update(`${created.name}${created.createdMs}`)
+    .digest("hex")
+    .slice(0, 12)}`;
+  assert.equal(created.id, expected, "exact pins-style derivation");
+  assert.match(created.id, /^inv-[0-9a-f]{12}$/, "inv- + exactly 12 hex chars");
+
+  // Fork mints through the same derivation for ITS name + instant.
+  const fork = inv.forkInvestigation(created.id, "Ledger sweep fork");
+  assert.match(fork.id, /^inv-[0-9a-f]{12}$/, "fork ids share the shape");
+});

@@ -484,3 +484,138 @@ test("stripChartRequestFences removes directive fences from displayed prose", ()
   // No fence, no change.
   assert.equal(stripChartRequestFences("plain prose"), "plain prose");
 });
+
+// --- Mutation-hardening: pin guard order, boundaries, and axis math ------------
+// Each test below kills a cluster of mutants a prior mutation run showed the
+// suite missed. Every assertion pins CURRENT behavior of the unmutated module.
+
+test("parseChartSpec rejects hollow specs by returning null, never throwing", () => {
+  // JSON "null" parses to null — the object guard must short-circuit before
+  // any property read (|| → && here would throw on o.kind).
+  assert.equal(parseChartSpec("null"), null);
+  // Missing x entirely: the Array.isArray leg must run before .length.
+  assert.equal(
+    parseChartSpec(JSON.stringify({ kind: "bar", series: [{ name: "v", values: [1, 2] }] })),
+    null,
+  );
+  // Missing series entirely.
+  assert.equal(parseChartSpec(JSON.stringify({ kind: "bar", x: ["a", "b"] })), null);
+  // Empty series array: length < 1 rejects on its own.
+  assert.equal(parseChartSpec(JSON.stringify({ kind: "bar", x: ["a", "b"], series: [] })), null);
+  // A null series entry: the object guard must catch typeof null === "object".
+  assert.equal(parseChartSpec(JSON.stringify({ kind: "bar", x: ["a", "b"], series: [null] })), null);
+  // A series with no values array at all.
+  assert.equal(
+    parseChartSpec(JSON.stringify({ kind: "bar", x: ["a", "b"], series: [{ name: "v" }] })),
+    null,
+  );
+});
+
+test("parseChartSpec rejects non-finite numbers (JSON 1e999 parses to Infinity)", () => {
+  // The finiteness leg of `typeof v === "number" && Number.isFinite(v)` is only
+  // reachable through an overflowing JSON literal — pin it everywhere it guards.
+  // Series values:
+  assert.equal(
+    parseChartSpec('{"kind":"bar","x":["a","b"],"series":[{"name":"v","values":[1,1e999]}]}'),
+    null,
+  );
+  // Band bounds (parseBound):
+  assert.equal(
+    parseChartSpec(
+      '{"kind":"band","x":["a","b"],"series":[{"name":"v","values":[1,2],"lower":[1e999,0],"upper":[2,3]}]}',
+    ),
+    null,
+  );
+  // Scatter xValues (with two good pairs so the paired-count guard passes):
+  assert.equal(
+    parseChartSpec(
+      '{"kind":"scatter","x":["1","2","3"],"xValues":[1,2,1e999],"series":[{"name":"y","values":[1,2,3]}]}',
+    ),
+    null,
+  );
+});
+
+test("parseChartSpec accepts a scatter with exactly two paired points (the floor)", () => {
+  // paired < 2 rejects; AT two pairs the scatter is valid.
+  const spec = parseChartSpec(
+    JSON.stringify({ kind: "scatter", x: ["1", "2"], xValues: [1, 2], series: [{ name: "y", values: [3, 4] }] }),
+  );
+  assert.ok(spec);
+  assert.deepEqual(spec.xValues, [1, 2]);
+});
+
+test("parseChartDirective: null body rejects cleanly; body may hug the fence header", () => {
+  // JSON "null" body: the object guard must short-circuit (no o.kind read on null).
+  assert.equal(parseChartDirective('```lighthouse-chart-request\nnull\n```'), null);
+  // The body starts at the very first char after the header — no newline required.
+  const hugged = parseChartDirective('```lighthouse-chart-request{"kind":"none"}\n```');
+  assert.ok(hugged);
+  assert.equal(hugged.kind, "none");
+});
+
+test("validateDirective accepts exactly MAX_SERIES (3) series columns", () => {
+  // The > MAX_SERIES rejection is exclusive: AT the cap is valid.
+  assert.equal(
+    validateDirective(
+      { kind: "bar", labelColumn: "region", seriesColumns: ["total", "pct", "total"] },
+      parityColumns,
+    ),
+    null,
+  );
+});
+
+test("niceTicks pins exact tick arrays (nice-number spans, steps, and padding)", () => {
+  // Non-finite domains collapse to the [0, 1] fallback axis.
+  assert.deepEqual(niceTicks(NaN, 100), [0, 1]);
+  assert.deepEqual(niceTicks(0, Infinity), [0, 1]);
+  // Default count (4) and the round/floor niceNum branches, pinned exactly.
+  assert.deepEqual(niceTicks(0, 300), [0, 100, 200, 300]);
+  assert.deepEqual(niceTicks(40, 60), [40, 45, 50, 55, 60]); // nonzero min: lo/hi flooring
+  assert.deepEqual(niceTicks(2, 8), [2, 4, 6, 8]); // range 6: floor-branch frac > 5 → span 10
+  assert.deepEqual(niceTicks(0, 10), [0, 2, 4, 6, 8, 10]); // frac == 1 is inclusive
+  assert.deepEqual(niceTicks(0, 50), [0, 10, 20, 30, 40, 50]); // frac == 5 is inclusive
+  assert.deepEqual(niceTicks(0, 21), [0, 10, 20, 30]); // frac 2.1 → floor-branch 5 → span 50
+  // Degenerate domains pad by |min| (or 1 at zero) and recurse.
+  assert.deepEqual(niceTicks(5, 5), [2, 3, 4, 5, 6, 7, 8]);
+  assert.deepEqual(niceTicks(0, 0), [-0.6, -0.4, -0.2, 0, 0.2, 0.4, 0.6]);
+  // Custom counts exercise the round-branch thresholds of niceNum.
+  assert.deepEqual(niceTicks(0, 10, 0), [0, 10]); // count clamps to ≥ 1
+  assert.deepEqual(niceTicks(0, 2, 1), [0, 2]); // step frac 2 → 2 (not 1)
+  assert.deepEqual(niceTicks(0, 5, 1), [0, 5]); // step frac 5 → 5 (not 6/10)
+  assert.deepEqual(niceTicks(0, 10, 3), [0, 5, 10]); // step frac 3.33 → 5 (not 2)
+  assert.deepEqual(niceTicks(0, 50, 7), [0, 10, 20, 30, 40, 50]); // step frac 7.14 → 10
+  assert.deepEqual(niceTicks(0, 6, 7), [0, 1, 2, 3, 4, 5, 6]); // step frac 1.43 → 1
+});
+
+test("scaleLinear maps with nonzero domain AND range offsets", () => {
+  // d0 and r0 offsets both matter: (v - d0) and (r1 - r0) are not symmetric.
+  const s = scaleLinear(10, 20, 100, 300);
+  assert.equal(s(10), 100);
+  assert.equal(s(15), 200);
+  assert.equal(s(20), 300);
+});
+
+test("formatTick thresholds are inclusive and trimNum tiers by magnitude", () => {
+  // AT each threshold the compact suffix applies (>=, not >).
+  assert.equal(formatTick(1_000_000_000), "1B");
+  assert.equal(formatTick(1_000_000), "1M");
+  assert.equal(formatTick(1_000), "1k");
+  // trimNum precision tiers: <10 → 2 decimals, <100 → 1, else 0.
+  assert.equal(formatTick(0.125), "0.13");
+  assert.equal(formatTick(10.25), "10.3");
+  assert.equal(formatTick(100.5), "101");
+});
+
+test("formatGrouped zero boundary; granularity singletons; month-tick index bounds", () => {
+  // v < 0 is strict: zero and small positives never grow a minus sign.
+  assert.equal(formatGrouped(0), "0");
+  assert.equal(formatGrouped(0.5), "0.5");
+  // Empty label list is category; a SINGLE well-formed label still classifies.
+  assert.equal(detectGranularity([]), "category");
+  assert.equal(detectGranularity(["2024"]), "year");
+  // Month index guard: 01 and 12 map, out-of-range passes through untouched.
+  assert.equal(formatXTick("2024-01", "month"), "Jan");
+  assert.equal(formatXTick("2024-12", "month"), "Dec");
+  assert.equal(formatXTick("2024-13", "month"), "2024-13");
+  assert.equal(formatXTick("2024-00", "month"), "2024-00");
+});
