@@ -18,12 +18,12 @@
 //   2. All USER DATA resolves through the install-independent app_data_base
 //      (or the user's Documents for the vault) — never relative to the running
 //      executable. So replacing the bundle cannot move settings, models,
-//      connectors, or the vault out from under an install.
+//      or the vault out from under an install.
 //
 // The preserved set (asserted below, so this test doubles as its
 // documentation): lighthouse-settings.json (which holds the vaultDir pointer),
-// the models dir, the connectors dir, the LIGHTHOUSE_APP_STATE_DIR (secrets /
-// sealed keys / signed-in profile), and the vault folder itself.
+// the models dir, the LIGHTHOUSE_APP_STATE_DIR (secrets / sealed keys /
+// signed-in profile), and the vault folder itself.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -80,12 +80,11 @@ test("all user data resolves install-independently (app_data_base / Documents), 
   assert.ok(settings.length > 0, "settings_file must exist");
   assert.match(settings, /app_data_base\(app\)/, "settings_file must resolve through app_data_base");
 
-  // Models + connectors (and the whole app-state dir) are set from app_data_base
-  // in bootstrap_env, so a bundle swap leaves the downloaded model in place.
+  // Models (and the whole app-state dir) are set from app_data_base in
+  // bootstrap_env, so a bundle swap leaves the downloaded model in place.
   const boot = lib.slice(lib.indexOf("fn bootstrap_env("));
   assert.match(boot, /app_data_base\(app\)/, "bootstrap_env must root app-data at app_data_base");
   assert.match(boot, /LIGHTHOUSE_MODELS_DIR/, "bootstrap_env must set the models dir under app-data");
-  assert.match(boot, /LIGHTHOUSE_CONNECTORS_DIR/, "bootstrap_env must set the connectors dir under app-data");
 
   // The strongest pin: NO user-data path in lib.rs is derived from the running
   // executable's location. If someone rooted data at current_exe() (i.e. inside

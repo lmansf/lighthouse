@@ -2,7 +2,7 @@
  * Source registry — the seam that lets the explorer and API stay source-agnostic.
  *
  * The local vault is always present and is the fallback owner for bare node ids.
- * Cloud connectors (SharePoint first) register here later, owning ids prefixed
+ * Cloud connectors would register here, owning ids prefixed
  * `${sourceId}::`, and the registry routes each curation op to the owning source
  * and aggregates listings across all of them.
  */
@@ -21,12 +21,11 @@ import {
 } from "../vault";
 import { inspect as vaultInspect } from "../inspect";
 import { localVault } from "./local";
-import { sharepoint } from "./sharepoint";
 import type { SourceConnector } from "./types";
 
 // Local vault is kept LAST so it acts as the fallback owner (cloud connectors,
 // which match by id prefix, are consulted first).
-const connectors: SourceConnector[] = [sharepoint, localVault];
+const connectors: SourceConnector[] = [localVault];
 
 /** The connector that owns a node id — a cloud connector by id prefix, else local. */
 function connectorFor(id: string): SourceConnector {

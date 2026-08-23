@@ -1979,27 +1979,6 @@ export function FileExplorer() {
                     {desktopOS ? "Copy folder in…" : "Folder…"}
                   </MenuItem>
                 )}
-                {/* fp3 §4: the SharePoint "coming soon" teaser is hidden (not
-                    removed — the plumbing stays) on the compact files page, where
-                    the Browse menu is trimmed to what actually works on device. */}
-                {!compact && (
-                  <>
-                    <MenuDivider />
-                    <MenuItem
-                      icon={<IconCloudUp />}
-                      onClick={() =>
-                        registerInterest("SharePoint isn't ready yet — it's on the way.")
-                      }
-                    >
-                      <span className={styles.comingSoonItem}>
-                        SharePoint
-                        <Badge appearance="tint" color="brand" size="small">
-                          Coming soon
-                        </Badge>
-                      </span>
-                    </MenuItem>
-                  </>
-                )}
               </MenuList>
             </LhMenuPopover>
           </Menu>

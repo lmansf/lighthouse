@@ -39,7 +39,6 @@ fn watch_roots() -> Vec<PathBuf> {
     for r in crate::vault::reference_roots() {
         roots.push(r);
     }
-    roots.push(crate::sources::microsoft::mirror_dir());
     roots
 }
 
@@ -142,21 +141,17 @@ fn run() {
                     let refs: Vec<(String, PathBuf)> = crate::vault::reference_roots_with_ids();
                     let mut ids: HashSet<String> = HashSet::new();
                     let mut relevant = false;
-                    let mut mirror_churn = false;
                     for event in &events {
                         for path in &event.paths {
                             let mapped = ids_for_path(path, &vault, &refs);
                             if !mapped.is_empty() {
                                 relevant = true;
-                            } else if path.starts_with(crate::sources::microsoft::mirror_dir()) {
-                                relevant = true;
-                                mirror_churn = true; // ids unmappable — full drop
                             }
                             ids.extend(mapped);
                         }
                     }
                     if relevant {
-                        if mirror_churn || ids.is_empty() {
+                        if ids.is_empty() {
                             crate::index::invalidate_all();
                         } else {
                             let ids: Vec<String> = ids.into_iter().collect();

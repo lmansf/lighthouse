@@ -37,9 +37,6 @@ function errorResponse(path: string, message: string): Response {
   if ((path === "/api/open" || path === "/api/reveal") && message === "file no longer exists") {
     return json({ error: message }, 404);
   }
-  if (path === "/api/connect") {
-    return json({ error: message }, message === "not connected" ? 400 : 500);
-  }
   return json({ error: message }, 400);
 }
 
@@ -217,8 +214,6 @@ async function route(
       return method === "GET" ? call("profile_get") : call("profile_op", { body });
     case "/api/diagnostics":
       return call("diagnostics");
-    case "/api/connect":
-      return call("connect_op", { body });
     case "/api/model":
       return method === "GET"
         ? call("model_status")

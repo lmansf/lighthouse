@@ -227,11 +227,6 @@ pub async fn diagnostics(app: AppHandle) -> Result<Value, String> {
     }))
 }
 
-#[tauri::command]
-pub async fn connect_op(body: Value) -> Result<Value, String> {
-    lighthouse_shell::commands::connect_op(body).await
-}
-
 // The model commands are async so they run on the Tauri async runtime, NOT the
 // main thread. That (a) gives `start_download()` an ambient Tokio runtime to
 // spawn onto, and (b) contains any future panic in this path to the task —

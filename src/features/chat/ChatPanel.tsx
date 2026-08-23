@@ -3712,40 +3712,6 @@ export function ChatPanel() {
   }
 
 
-  // Changed-pin alerts pushed by the desktop shell after its watcher-driven
-  // recheck pass (openspec: add-pinned-questions). Newest wins per pin id.
-
-  // The pins dialog opens from the settings gear (or anywhere) via this event.
-  useEffect(() => {
-    const onOpen = () => setPinsOpen(true);
-    window.addEventListener("lighthouse:open-pins", onOpen);
-    return () => window.removeEventListener("lighthouse:open-pins", onOpen);
-  }, []);
-
-  // Load the pin list whenever the dialog opens.
-
-  // …and once at mount, so pinned questions feed the ask type-ahead before the
-  // dialog is ever opened. Same local engine list the dialog reads — on
-  // failure the type-ahead simply has no pins.
-  useEffect(() => {
-    let cancelled = false;
-    ragService
-      .listPins()
-      .then((pins) => {
-        if (!cancelled && pins.length > 0) setPinList(pins);
-      })
-      .catch(() => {
-        /* history-only suggestions */
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-
-
-
-
 
   /** §3 Synthesize: re-ask the SAME question scoped to an answer's own source
    *  files, so the response INTEGRATES all of them (>= 2 attachments routes
@@ -3765,14 +3731,6 @@ export function ChatPanel() {
     }
     if (!question) return;
     void sendQuestion(question, { attachmentsOverride: fileRefs.map((r) => ({ id: r.fileId })) });
-  }
-
-  /** Ask a pinned/changed question again — the fresh answer is the drill-down. */
-  function askPinned(question: string, pinId?: string) {
-    if (streaming) return;
-    setPinsOpen(false);
-    if (pinId) setPinAlerts((alerts) => alerts.filter((a) => a.id !== pinId));
-    void sendQuestion(question);
   }
 
   function ask() {

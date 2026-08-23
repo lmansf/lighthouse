@@ -411,7 +411,6 @@ pub async fn rag_post(headers: HeaderMap, body: Option<Json<Value>>) -> Response
                 return bad_request("investigate needs a table");
             };
             let table = table.to_string();
-            let investigation_id = body["investigationId"].as_str().map(String::from);
             // Optional structured shape (openspec: add-report-templates). Absent or
             // unknown ⇒ Standard, whose path is byte-identical to before. A template
             // narrates its framing with the configured model over the verified
@@ -637,9 +636,6 @@ pub async fn chat_post(headers: HeaderMap, body: Option<Json<Value>>) -> Respons
             .filter(|s| !s.is_empty())
             .map(String::from),
     };
-    // The investigation this ask runs inside (openspec: add-investigations);
-    // absent = the global context. Resolved below, beside model_config().
-    let investigation_id = body["investigationId"].as_str().map(String::from);
     // Answer cache controls (openspec: add-answer-cache): Re-run's lookup
     // bypass, and the client's per-request persistence verdict. Both default
     // false — an absent field fails toward privacy (memory-only cache).
@@ -818,72 +814,6 @@ pub async fn diagnostics_get() -> Response {
         "log": "",
     }))
     .into_response()
-}
-
-// --- /api/connect -------------------------------------------------------------
-
-fn connect_status_payload() -> Value {
-    let s = sources::microsoft::load_state();
-    json!({
-        "connected": sources::microsoft::is_connected(),
-        "account": s.account,
-        "available": s.available.unwrap_or(true),
-        "nodeCount": s.nodes.map(|n| n.len()).unwrap_or(0),
-        "pending": s.pending.is_some(),
-    })
-}
-
-pub async fn connect_post(headers: HeaderMap, body: Option<Json<Value>>) -> Response {
-    if !is_same_origin(&headers) {
-        return forbidden();
-    }
-    let body = body.map(|Json(v)| v).unwrap_or_else(|| json!({}));
-    let result: anyhow::Result<Response> = async {
-        match body["op"].as_str() {
-            Some("status") => Ok(Json(connect_status_payload()).into_response()),
-            Some("start") => {
-                let flow = sources::microsoft::start_device_code().await?;
-                Ok(Json(serde_json::to_value(flow)?).into_response())
-            }
-            Some("poll") => {
-                let result = sources::microsoft::poll_device_code().await?;
-                // On first success, populate the placeholder tree so files appear.
-                if result.status == "connected" {
-                    let _ = sources::sharepoint::refresh_listing().await;
-                }
-                let mut payload = serde_json::to_value(&result)?;
-                if let (Some(obj), Some(status)) = (
-                    payload.as_object_mut(),
-                    connect_status_payload().as_object(),
-                ) {
-                    for (k, v) in status {
-                        obj.insert(k.clone(), v.clone());
-                    }
-                }
-                Ok(Json(payload).into_response())
-            }
-            Some("refresh") => {
-                if !sources::microsoft::is_connected() {
-                    return Ok(bad_request("not connected"));
-                }
-                let node_count = sources::sharepoint::refresh_listing().await?;
-                Ok(Json(json!({ "ok": true, "nodeCount": node_count })).into_response())
-            }
-            Some("disconnect") => {
-                sources::sharepoint::disconnect();
-                Ok(Json(json!({ "ok": true })).into_response())
-            }
-            _ => Ok(bad_request("unknown op")),
-        }
-    }
-    .await;
-    result.unwrap_or_else(|err| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": err_message(&err, "connection error") })),
-        )
-            .into_response()
-    })
 }
 
 // --- /api/model ---------------------------------------------------------------

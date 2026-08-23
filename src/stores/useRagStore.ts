@@ -11,18 +11,6 @@ import type {
 import { setManagedLocks } from "./managedLocks";
 import { ragService } from "@/contracts";
 
-/** SharePoint device-code sign-in: dialog visibility + flow phase. */
-export interface SharePointConnect {
-  open: boolean;
-  phase: "idle" | "starting" | "waiting" | "connected" | "expired" | "error";
-  /** Short code the user types at the verification URL. */
-  userCode?: string;
-  verificationUri?: string;
-  /** Microsoft's human-readable instruction string. */
-  message?: string;
-  error?: string;
-}
-
 /**
  * Shared RAG selection state. The explorer writes to it (toggling inclusion);
  * chat reads `includedFileIds` to scope retrieval. This store is the live wire
@@ -165,15 +153,6 @@ interface RagStore {
   addRule: (rule: CurationRuleInput) => Promise<{ error?: string }>;
   /** Remove a rule; the files it was deciding revert to the next layer down. */
   removeRule: (id: string) => Promise<void>;
-
-  /** SharePoint connection flow state (device-code dialog + polling). */
-  sharepoint: SharePointConnect;
-  /** Begin the SharePoint device-code sign-in; opens the dialog and polls. */
-  connectSharePoint: () => Promise<void>;
-  /** Dismiss the connect dialog and stop polling. */
-  closeSharePointDialog: () => void;
-  /** Sign out of SharePoint, dropping tokens and mirrored content. */
-  disconnectSharePoint: () => Promise<void>;
 
   /** Ids of every included file (leaf) node - what chat retrieves against. */
   includedFileIds: () => string[];
@@ -646,76 +625,6 @@ export const useRagStore = create<RagStore>((set, get) => ({
         /* skip un-restorable token */
       }
     }
-    await get().load();
-  },
-
-  sharepoint: { open: false, phase: "idle" },
-
-  connectSharePoint: async () => {
-    set({ sharepoint: { open: true, phase: "starting" } });
-    const post = (op: string) =>
-      fetch("/api/connect", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ op }),
-      });
-    try {
-      const res = await post("start");
-      const data: { userCode?: string; verificationUri?: string; message?: string; interval?: number; error?: string } =
-        await res.json();
-      if (!res.ok) throw new Error(data.error || "could not start sign-in");
-      set({
-        sharepoint: {
-          open: true,
-          phase: "waiting",
-          userCode: data.userCode,
-          verificationUri: data.verificationUri,
-          message: data.message,
-        },
-      });
-      const interval = Math.max(2, Number(data.interval) || 5);
-      const poll = async () => {
-        const cur = get().sharepoint;
-        if (!cur.open || cur.phase !== "waiting") return; // dialog closed / done
-        let pres: { status?: string } = { status: "pending" };
-        try {
-          pres = await (await post("poll")).json();
-        } catch {
-          pres = { status: "pending" };
-        }
-        const now = get().sharepoint;
-        if (!now.open || now.phase !== "waiting") return;
-        if (pres.status === "connected") {
-          set((s) => ({ sharepoint: { ...s.sharepoint, phase: "connected" } }));
-          await get().load();
-          return;
-        }
-        if (pres.status === "expired") {
-          set((s) => ({ sharepoint: { ...s.sharepoint, phase: "expired" } }));
-          return;
-        }
-        setTimeout(() => void poll(), interval * 1000);
-      };
-      setTimeout(() => void poll(), interval * 1000);
-    } catch (err) {
-      set({
-        sharepoint: {
-          open: true,
-          phase: "error",
-          error: err instanceof Error ? err.message : "connection error",
-        },
-      });
-    }
-  },
-
-  closeSharePointDialog: () => set({ sharepoint: { open: false, phase: "idle" } }),
-
-  disconnectSharePoint: async () => {
-    await fetch("/api/connect", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ op: "disconnect" }),
-    }).catch(() => {});
     await get().load();
   },
 

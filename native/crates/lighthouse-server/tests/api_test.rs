@@ -294,19 +294,6 @@ async fn wire_protocol_end_to_end() {
         "the default keyed summon chord when none is set"
     );
 
-    // --- /api/connect status (not connected) ----------------------------------------
-    let c: Value = client
-        .post(format!("{base}/api/connect"))
-        .json(&json!({ "op": "status" }))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(c["connected"], false);
-    assert_eq!(c["pending"], false);
-
     // --- remove to trash over the wire ------------------------------------------------
     let r = client
         .post(format!("{base}/api/rag"))

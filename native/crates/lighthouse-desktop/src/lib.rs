@@ -279,16 +279,13 @@ fn bootstrap_env(app: &AppHandle) {
     std::env::set_var("LIGHTHOUSE_DESKTOP", "1");
     std::env::set_var("VAULT_DIR", vault_dir_setting(app));
     std::env::set_var("LIGHTHOUSE_SETTINGS_FILE", settings_file(app));
-    // Pinned base (see `app_data_base`): models, connectors, profile, and the
+    // Pinned base (see `app_data_base`): models, profile, and the
     // whole LIGHTHOUSE_APP_STATE_DIR (secrets, sealed keys) stay at the historical
     // path across the 0.12.8 identifier rename. Smoke isolation still wins.
     if let Some(data) = smoke_state_dir().or_else(|| app_data_base(app)) {
         let models = data.join("models");
-        let connectors = data.join("connectors");
         let _ = fs::create_dir_all(&models);
-        let _ = fs::create_dir_all(&connectors);
         std::env::set_var("LIGHTHOUSE_MODELS_DIR", &models);
-        std::env::set_var("LIGHTHOUSE_CONNECTORS_DIR", &connectors);
 
         // The signed-in profile lives in this private data dir so it survives
         // vault moves / re-points (which otherwise stranded it and forced a
@@ -431,7 +428,6 @@ pub fn run() {
             commands::chat_ask,
             commands::profile_get,
             commands::profile_op,
-            commands::connect_op,
             commands::model_status,
             commands::model_download,
             commands::model_uninstall,

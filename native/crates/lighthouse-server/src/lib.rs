@@ -16,7 +16,6 @@ pub fn app() -> Router {
             "/api/profile",
             get(routes::profile_get).post(routes::profile_post),
         )
-        .route("/api/connect", post(routes::connect_post))
         .route(
             "/api/model",
             get(routes::model_get)

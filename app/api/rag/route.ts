@@ -61,7 +61,6 @@ import {
 } from "@/server/semantic";
 import { modelConfig } from "@/server/profile";
 import { isCloudProvider } from "@/server/synth";
-import type { Cadence } from "@/contracts";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";

@@ -66,7 +66,7 @@ export function profilePath(): string {
  * user's install, not to whichever folder happens to be the vault — storing it
  * in-vault meant "Choose vault folder…" re-pointed the engine at a folder with
  * no license and silently signed the user out. Same rule the profile and
- * connector credentials already follow (see connectorsDir). The desktop shell
+ * connector credentials already followed. The desktop shell
  * sets LIGHTHOUSE_APP_STATE_DIR to its private data dir; a bare engine
  * (tests, web/dev) falls back to the platform data home — never a user
  * folder.
@@ -101,53 +101,6 @@ function defaultAppStateDir(): string {
 
 /** The single logical source id for the local vault folder. */
 export const VAULT_SOURCE_ID = "vault";
-
-/** The logical source id for the Microsoft SharePoint / OneDrive connector. */
-export const SHAREPOINT_SOURCE_ID = "sharepoint";
-
-/**
- * Public Microsoft Entra (Azure AD) application client id for the SharePoint
- * connector. This is a *public* PKCE/device-code client — it carries no secret,
- * so shipping it in the app is expected and safe. Overridable via env for
- * self-hosters who register their own app.
- */
-export const SHAREPOINT_CLIENT_ID =
-  process.env.SHAREPOINT_CLIENT_ID?.trim() || "d25817ff-a0ed-4458-9282-41a18ce6d48a";
-
-/**
- * Entra authority. The base (`/common`) lets any work/school or personal
- * account sign in; the device-code flow appends `/oauth2/v2.0/devicecode` and
- * `/token` to it (see sources/microsoft/auth.ts). Overridable for self-hosters
- * who pin a single tenant.
- */
-export const SHAREPOINT_AUTHORITY =
-  process.env.SHAREPOINT_AUTHORITY?.trim() || "https://login.microsoftonline.com/common";
-
-/**
- * Native-client redirect URI registered on the Entra app. The device-code flow
- * this connector uses does NOT need a redirect (the user approves in a browser
- * and the app polls for the token), so this is recorded only to mirror the
- * Azure app registration — and for a future interactive (auth-code + PKCE)
- * flow. MSAL's convention for a public desktop client is `msal<clientId>://auth`.
- */
-export const SHAREPOINT_REDIRECT_URI =
-  process.env.SHAREPOINT_REDIRECT_URI?.trim() || `msal${SHAREPOINT_CLIENT_ID}://auth`;
-
-/**
- * Per-connector state directory (OAuth tokens, mirrored content, inclusion).
- * Lives beside the vault state, never inside the repo or the app bundle.
- */
-export function connectorsDir(): string {
-  // OAuth refresh/access tokens live here. Prefer a location OUTSIDE the vault:
-  // the vault defaults to the user's Documents folder, which is routinely synced
-  // to OneDrive/iCloud and swept into backups — a long-lived credential should
-  // not ride along. The desktop shell sets LIGHTHOUSE_CONNECTORS_DIR to its
-  // private userData dir; plain web/dev falls back to the in-vault path.
-  const override = process.env.LIGHTHOUSE_CONNECTORS_DIR?.trim();
-  const dir = override || path.join(stateDir(), "connectors");
-  fs.mkdirSync(dir, { recursive: true });
-  return dir;
-}
 
 /**
  * True only when running inside the packaged desktop app (the shell sets this).

@@ -2005,10 +2005,6 @@ fn analytics_branch(
                         // here (cheap) rather than reparse a row count out of
                         // the markdown (unreliable). None if no step succeeds.
                         let mut last_rows: Option<crate::ledger::RowFacts> = None;
-                        // The last executed step's full result, retained for the
-                        // §4 trust re-run (the query AnalyticsMeta carries); the
-                        // StepRecord keeps only markdown, so hold the batches here.
-                        let mut last_result: Option<crate::analytics::QueryResult> = None;
                         // Per-ask token accounting (openspec: add-beam-loop §1):
                         // the ask-level `sink` (opened at the top of the pipeline)
                         // is shared across this ask's plan calls, corrective
@@ -2100,7 +2096,6 @@ fn analytics_branch(
                                             sql: attempt.clone(),
                                             result_markdown: res.markdown.clone(),
                                         });
-                                        last_result = Some(res);
                                         continue 'steps;
                                     }
                                     Err(err) if round == 0 => {

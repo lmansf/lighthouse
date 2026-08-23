@@ -434,7 +434,6 @@ pub async fn rag_op(
                 return Err("investigate needs a table".into());
             };
             let table = table.to_string();
-            let investigation_id = body["investigationId"].as_str().map(String::from);
             // Optional structured shape (openspec: add-report-templates). Absent or
             // unknown ⇒ Standard, whose path is byte-identical to before. A template
             // narrates its framing with the configured model over the verified
@@ -670,56 +669,6 @@ pub async fn profile_op(body: Value) -> Result<Value, String> {
     Ok(serde_json::to_value(profile::get_state()).unwrap_or_else(|_| json!({})))
 }
 
-pub async fn connect_op(body: Value) -> Result<Value, String> {
-    let status_payload = || {
-        let s = sources::microsoft::load_state();
-        json!({
-            "connected": sources::microsoft::is_connected(),
-            "account": s.account,
-            "available": s.available.unwrap_or(true),
-            "nodeCount": s.nodes.map(|n| n.len()).unwrap_or(0),
-            "pending": s.pending.is_some(),
-        })
-    };
-    match body["op"].as_str() {
-        Some("status") => Ok(status_payload()),
-        Some("start") => sources::microsoft::start_device_code()
-            .await
-            .and_then(|f| Ok(serde_json::to_value(f)?))
-            .map_err(|e| err_string(e, "connection error")),
-        Some("poll") => {
-            let result = sources::microsoft::poll_device_code()
-                .await
-                .map_err(|e| e.to_string())?;
-            if result.status == "connected" {
-                let _ = sources::sharepoint::refresh_listing().await;
-            }
-            let mut payload = serde_json::to_value(&result).map_err(|e| e.to_string())?;
-            if let (Some(obj), Some(status)) =
-                (payload.as_object_mut(), status_payload().as_object())
-            {
-                for (k, v) in status {
-                    obj.insert(k.clone(), v.clone());
-                }
-            }
-            Ok(payload)
-        }
-        Some("refresh") => {
-            if !sources::microsoft::is_connected() {
-                return Err("not connected".into());
-            }
-            let node_count = sources::sharepoint::refresh_listing()
-                .await
-                .map_err(|e| e.to_string())?;
-            Ok(json!({ "ok": true, "nodeCount": node_count }))
-        }
-        Some("disconnect") => {
-            sources::sharepoint::disconnect();
-            Ok(json!({ "ok": true }))
-        }
-        _ => Err("unknown op".into()),
-    }
-}
 
 // The model commands are async so they run on the Tauri async runtime, NOT the
 // main thread. That (a) gives `start_download()` an ambient Tokio runtime to

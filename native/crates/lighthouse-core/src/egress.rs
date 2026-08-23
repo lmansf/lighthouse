@@ -25,7 +25,6 @@ pub const PURPOSE_AI_PROVIDER: &str = "AI provider";
 pub const PURPOSE_UPDATE_CHECK: &str = "Update check";
 pub const PURPOSE_UPDATE_DOWNLOAD: &str = "Update download";
 pub const PURPOSE_MODEL_DOWNLOAD: &str = "Model download";
-pub const PURPOSE_SHAREPOINT: &str = "SharePoint / OneDrive";
 
 #[derive(Clone)]
 struct Entry {

@@ -20,12 +20,9 @@ use std::sync::Arc;
 use datafusion::arrow::array::{ArrayRef, Float64Array, StringArray};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::prelude::SessionContext;
 use serde::Serialize;
 
-use crate::analytics::{
-    is_pdf, is_tabular, register_tables, sanitize_table_name, saved_age_label,
-};
+use crate::analytics::{is_tabular, sanitize_table_name, saved_age_label};
 use crate::catalog::{self, ColumnKind};
 use crate::contracts::RagReference;
 use crate::vault;
@@ -640,77 +637,13 @@ pub fn suggested_asks(included: &[String], is_cloud: bool) -> Vec<SuggestedAsk> 
     asks
 }
 
-/// Suggested asks INCLUDING saved views (openspec: add-shaped-views §4). The
-/// file-derived chips are the existing `suggested_asks` (unchanged, cheap: a
-/// cache-first header read, no DataFusion); when the ask still has room under
-/// `SUGGEST_MAX` AND any saved view is eligible under the posture, the eligible
-/// views are resolved ONCE — their transitive source files registered and
-/// `register_views` run — and view-derived chips are appended from each
-/// resolved result's columns, in the same idioms as the file chips but scoped
-/// to the view (the view name rides in both the label and the question, so a
-/// view chip is distinct from any same-column file chip and names the table the
-/// ask targets).
-///
-/// Gated so the common zero-view path is byte-identical to `suggested_asks` and
-/// pays NO DataFusion cost: an empty store, no eligible views, or no in-scope
-/// source files all short-circuit before any context is built. A view over a
-/// local-only source is excluded on cloud asks — `eligible_for_posture` /
-/// `register_views` honor the posture exactly as the ask pipeline does.
-///
-/// Column KINDS come from the resolved result's Arrow schema (a `ViewReg`
-/// carries column NAMES only): `is_numeric()` is authoritative for the
-/// "Total {num} by {text}" idiom; the engine registers CSV dates as ISO text,
-/// so the date-driven "Monthly trend" idiom fires only for genuinely
-/// date-typed results (e.g. a parquet-backed view) — honest under-suggestion,
-/// never a fabricated kind. This is the cheapest correct path to real view
-/// columns: no value sampling, and no cost at all until a view exists.
+/// Suggested asks, off the async transport boundary. The scan itself is
+/// blocking (a cache-first header read per file, no DataFusion), so it runs on
+/// a blocking thread; the chips are `suggested_asks`' exactly.
 pub async fn suggested_asks_resolved(included: Vec<String>, is_cloud: bool) -> Vec<SuggestedAsk> {
-    // File chips first — the unchanged blocking path.
-    let file_included = included.clone();
-    let asks = tokio::task::spawn_blocking(move || suggested_asks(&file_included, is_cloud))
+    tokio::task::spawn_blocking(move || suggested_asks(&included, is_cloud))
         .await
-        .unwrap_or_default();
-    if asks.len() >= SUGGEST_MAX {
-        return asks;
-    }
-    // Resolve the eligible views' in-scope source files (blocking: store read +
-    // per-file vault-state checks). An empty result means the whole view branch
-    asks
-}
-
-/// A registered view's result columns as `(lowercased name, kind)`, kinds read
-/// from the Arrow schema (no rows collected). Empty when the view isn't
-/// registered. `pub(crate)` so the recipe executor (synth.rs) resolves a view
-/// target's typed columns the SAME way `applicable_recipes` offers it.
-pub(crate) async fn view_typed_columns(ctx: &SessionContext, name: &str) -> Vec<(String, ColumnKind)> {
-    let Ok(df) = ctx.table(name).await else {
-        return Vec::new();
-    };
-    df.schema()
-        .fields()
-        .iter()
-        .map(|f| (f.name().to_lowercase(), arrow_kind(f.data_type())))
-        .collect()
-}
-
-/// Arrow type → the catalog's coarse column kind. `is_numeric()` is
-/// authoritative; only genuinely temporal types read as Date (CSV dates arrive
-/// as ISO text and read as Text — see `suggested_asks_resolved`).
-fn arrow_kind(dt: &DataType) -> ColumnKind {
-    if dt.is_numeric() {
-        ColumnKind::Numeric
-    } else if matches!(
-        dt,
-        DataType::Date32
-            | DataType::Date64
-            | DataType::Timestamp(_, _)
-            | DataType::Time32(_)
-            | DataType::Time64(_)
-    ) {
-        ColumnKind::Date
-    } else {
-        ColumnKind::Text
-    }
+        .unwrap_or_default()
 }
 
 // --- Applicable recipes (openspec: add-recipes §2.3) ------------------------------
@@ -733,27 +666,13 @@ const RECIPE_CARDS_MAX: usize = 24;
 
 /// Recipes applicable to the included set, resolved the SAME way
 /// `suggested_asks_resolved` resolves chips (openspec: add-recipes §2.3): the
-/// cheap, blocking, cache-first FILE path (each recipe's `needs` evaluated
-/// against `columns_for`'s typed columns — a CSV date reads as Date-kind), then
-/// — gated so the zero-view path pays no DataFusion cost — the eligible VIEWS,
-/// typed from their resolved Arrow schema. Posture gating comes free from
-/// reusing the shareable set + `eligible_for_posture`/`register_views`, so a
-/// view that is effectively local-only never surfaces a recipe on a cloud ask.
+/// cheap, blocking, cache-first FILE path — each recipe's `needs` evaluated
+/// against `columns_for`'s typed columns (a CSV date reads as Date-kind).
 /// The data-quality audit needs nothing, so it surfaces on every table.
 pub async fn applicable_recipes(included: Vec<String>, is_cloud: bool) -> Vec<RecipeCard> {
-    // File cards first — the unchanged, cheap path (no DataFusion).
-    let file_included = included.clone();
-    let cards = tokio::task::spawn_blocking(move || file_recipe_cards(&file_included, is_cloud))
+    tokio::task::spawn_blocking(move || file_recipe_cards(&included, is_cloud))
         .await
-        .unwrap_or_default();
-    let mut seen: HashSet<(String, String)> =
-        cards.iter().map(|c| (c.id.clone(), c.table.clone())).collect();
-    if cards.len() >= RECIPE_CARDS_MAX {
-        return cards;
-    }
-    // Resolve the eligible views' in-scope source files (blocking store reads).
-    // An empty result skips the whole view branch — the zero-view path never
-    cards
+        .unwrap_or_default()
 }
 
 /// File-derived recipe cards: the most recently modified included tabular files,

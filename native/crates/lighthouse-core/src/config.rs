@@ -14,8 +14,6 @@ use serde::Serialize;
 
 /// The single logical source id for the local vault folder.
 pub const VAULT_SOURCE_ID: &str = "vault";
-/// The logical source id for the Microsoft SharePoint / OneDrive connector.
-pub const SHAREPOINT_SOURCE_ID: &str = "sharepoint";
 
 fn env_trimmed(name: &str) -> Option<String> {
     std::env::var(name)
@@ -69,10 +67,9 @@ pub fn profile_path() -> PathBuf {
     // INDEPENDENT of the vault folder — a vault can be moved, re-pointed, or
     // cloud-synced, and `current_dir()`-relative resolution can differ between
     // launches, any of which would strand the profile and force a fresh
-    // sign-in. This is the same rule connector credentials already follow
-    // (see connectors_dir). The desktop shell sets LIGHTHOUSE_PROFILE_FILE to
-    // its private data dir; the web/dev build (no shell) falls back to the
-    // vault's .rag-vault for parity.
+    // sign-in. The desktop shell sets LIGHTHOUSE_PROFILE_FILE to its private
+    // data dir; the web/dev build (no shell) falls back to the vault's
+    // .rag-vault for parity.
     if let Some(p) = env_trimmed("LIGHTHOUSE_PROFILE_FILE") {
         return PathBuf::from(p);
     }
@@ -118,30 +115,6 @@ fn default_app_state_dir() -> PathBuf {
         return PathBuf::from(home).join(".local/share/lighthouse");
     }
     std::env::current_dir().unwrap_or_default().join(".lighthouse")
-}
-
-/// Public Entra client id for the SharePoint connector (public PKCE-class
-/// client — carries no secret; overridable for self-hosters).
-pub fn sharepoint_client_id() -> String {
-    env_trimmed("SHAREPOINT_CLIENT_ID")
-        .unwrap_or_else(|| "d25817ff-a0ed-4458-9282-41a18ce6d48a".to_string())
-}
-
-pub fn sharepoint_authority() -> String {
-    env_trimmed("SHAREPOINT_AUTHORITY")
-        .unwrap_or_else(|| "https://login.microsoftonline.com/common".to_string())
-}
-
-/// Per-connector state directory (OAuth tokens, mirrored content, inclusion).
-/// Prefers LIGHTHOUSE_CONNECTORS_DIR (the desktop shell's private userData dir)
-/// so long-lived credentials never ride along in a cloud-synced vault.
-pub fn connectors_dir() -> PathBuf {
-    let dir = match env_trimmed("LIGHTHOUSE_CONNECTORS_DIR") {
-        Some(v) => PathBuf::from(v),
-        None => state_dir().join("connectors"),
-    };
-    let _ = fs::create_dir_all(&dir);
-    dir
 }
 
 /// True only when running inside the packaged desktop app.

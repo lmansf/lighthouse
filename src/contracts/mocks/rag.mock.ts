@@ -644,7 +644,7 @@ class MockRagService implements RagService {
   private investigationViewOf(rec: Investigation): Investigation {
     return {
       ...rec,
-      pinRefs: this.pins.filter((p) => p.investigationId === rec.id).map((p) => p.id),
+      pinRefs: [],
       noteRefs: [...(this.noteIdsByInvestigation.get(rec.id) ?? [])],
     };
   }

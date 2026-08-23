@@ -1958,7 +1958,7 @@ pub fn local_only_subset(ids: &[String], is_cloud: bool) -> Vec<String> {
 }
 
 /// Single-id `is_effectively_local_only` that loads state itself — for callers
-/// outside vault.rs that don't hold a `VaultState` (the sharepoint connector's
+/// outside vault.rs that don't hold a `VaultState` (callers that only hold a
 /// node list, the analytics belt-and-suspenders). Local-only marks live in the
 /// vault state keyed by node id regardless of the owning source. Callers pass
 /// FILE ids (retrieval candidates), so the rule layer applies.
