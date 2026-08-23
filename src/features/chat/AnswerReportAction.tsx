@@ -108,11 +108,8 @@ export function AnswerReportAction({ fileIds }: { fileIds: string[] }) {
       setPicked(null);
       setSaved({ id: savedId, name: savedName });
       // §49 §3: open, don't just save silently — the reader opens on the fresh
-      // report, and the tree still highlights the saved node.
+      // report.
       openSavedReport(savedId);
-      if (typeof window !== "undefined") {
-        window.dispatchEvent(new CustomEvent("lighthouse:reveal-node", { detail: { id: savedId } }));
-      }
     } catch {
       // Rust-only: the web twin throws — an honest note, never a fake save.
       setError("Deep analysis runs in the desktop engine.");

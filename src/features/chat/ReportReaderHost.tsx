@@ -7,7 +7,8 @@
  * chart from its ```lighthouse-chart fence (the same parseChartSpec →
  * AnalyticsChart path the chat answer uses). Desktop centered card / compact
  * swipe sheet via LhDialogSurface. Header: the report title, its generation
- * stamp, and Export (HTML / Markdown / Print) + Reveal-in-Files + Close.
+ * stamp, and Export (HTML / Markdown / Print) + Close. Export goes through
+ * the OS save dialog, so the reader no longer reveals an in-app copy.
  *
  * Reading NEVER egresses — it is a local vault read (ragService.readNote);
  * report GENERATION is untouched. Mounted once, beside FileInspectorHost, so its
@@ -236,21 +237,6 @@ export function ReportReaderHost() {
                     ]}
                     aria-label="Export report"
                   />
-                )}
-                {id && (
-                  <Button
-                    appearance="subtle"
-                    size="small"
-                    onClick={() => {
-                      if (typeof window !== "undefined") {
-                        window.dispatchEvent(
-                          new CustomEvent("lighthouse:reveal-node", { detail: { id } }),
-                        );
-                      }
-                    }}
-                  >
-                    Reveal in Files
-                  </Button>
                 )}
                 <Button appearance="subtle" size="small" onClick={close} aria-label="Close report">
                   Close

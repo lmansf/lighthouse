@@ -958,130 +958,160 @@ async fn narrate(
     Some(text)
 }
 
-/// The default vault subfolder for a standalone report (no named investigation) —
-/// a write-artifact allowlist entry, alongside `Lighthouse Results`/`Lighthouse
-/// Notes`.
-pub const REPORTS_SUBDIR: &str = "Lighthouse Reports";
-
-/// §49: a generous cap for reading a saved report note back for the in-app
-/// reader. Reports are text (a few KB to tens of KB); 8 MiB is far above any
-/// real report yet bounds a pathological file.
-const NOTE_READ_CAP: u64 = 8 * 1024 * 1024;
-
-/// §49: read a saved report note's FULL markdown by its vault node id — the
-/// backing for the in-app report reader (§2). Returns `(name, markdown)` with
-/// the raw bytes intact (the ```lighthouse-chart fence survives, so the reader
-/// draws the key chart). `None` for an unknown/removed id. PURE READ — never
-/// mutates the vault, so it is safe on any tier and egresses nothing.
-pub fn read_note(file_id: &str) -> Option<(String, String)> {
-    let node = crate::vault::list_nodes()
-        .into_iter()
-        .find(|n| n.kind == crate::contracts::NodeKind::File && n.id == file_id)?;
-    let abs = crate::vault::resolve_node_path(file_id).ok()?;
-    let markdown = crate::vault::read_text_abs_capped(&abs, NOTE_READ_CAP);
-    Some((node.name, markdown))
+/// The reports directory: `app_state_dir()/reports/` (openspec:
+/// refocus-chat-attachments §1.7). Reports used to be vault notes — written
+/// through `vault::write_artifact` into a `Lighthouse Reports/` folder and
+/// listed by walking the vault tree. With the
+/// vault gone, a report is the app's OWN artifact and lives in the app's own
+/// state dir. Created on demand; a report id is the bare filename inside it.
+pub fn reports_dir() -> std::path::PathBuf {
+    let dir = crate::config::app_state_dir().join("reports");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
 }
 
-/// §49: a saved report's listing row for the Reports home — the note's vault
-/// node id, its display name, the containing folder segment (the investigation
-/// name, or `Lighthouse Reports` for a standalone report, for the home's
-/// subtitle), and the file's mtime in epoch ms. `FileNode` carries NO timestamp,
-/// so an honest newest-first can only come from the filesystem — here, where
-/// `read_note` already reads. Rust-engine-only, like `write_report`/`read_note`.
+/// §49: a generous cap for reading a saved report back for the in-app reader.
+/// Reports are text (a few KB to tens of KB); 8 MiB is far above any real
+/// report yet bounds a pathological file.
+const NOTE_READ_CAP: u64 = 8 * 1024 * 1024;
+
+/// Sanitize a report title into a filename stem — the `vault::write_artifact`
+/// rules, kept byte-for-byte so a title that produced `Q3 revenue.md` in the
+/// vault era produces `Q3 revenue.md` here. Separators and control characters
+/// become `-`, the stem is capped at 80 chars, and leading dots are stripped so
+/// a title can never mint a dotfile. U+FEFF is trimmed alongside whitespace
+/// (Rust's `is_whitespace()` does not treat a BOM as space; JS `trim()` does).
+fn report_stem(title: &str) -> String {
+    let mut clean: String = title
+        .chars()
+        .map(|c| if c == '/' || c == '\\' || c.is_control() { '-' } else { c })
+        .take(80)
+        .collect();
+    let is_trim = |c: char| c.is_whitespace() || c == '\u{FEFF}';
+    clean = clean.trim_matches(is_trim).trim_start_matches('.').trim_matches(is_trim).to_string();
+    if clean.is_empty() {
+        clean = "report".to_string();
+    }
+    clean
+}
+
+/// A report id is a BARE FILENAME in `reports_dir()`. Anything carrying a path
+/// separator, a parent segment, or a leading dot is refused rather than
+/// resolved — the reader takes its id straight off the wire, so this is the
+/// traversal gate for `read_note` (the vault's `safe_abs` funnel used to be).
+fn safe_report_name(id: &str) -> Option<String> {
+    if id.is_empty()
+        || id.len() > 255
+        || id.contains('/')
+        || id.contains('\\')
+        || id.starts_with('.')
+        || id.contains('\0')
+        || !id.ends_with(".md")
+    {
+        return None;
+    }
+    Some(id.to_string())
+}
+
+/// §49: read a saved report's FULL markdown by id — the backing for the in-app
+/// reader (§2). Returns `(name, markdown)` with the raw bytes intact (the
+/// ```lighthouse-chart fence survives, so the reader draws the key chart).
+/// `None` for an unknown id or one that isn't a bare filename. PURE READ — it
+/// never writes and egresses nothing.
+pub fn read_note(file_id: &str) -> Option<(String, String)> {
+    let name = safe_report_name(file_id)?;
+    let abs = reports_dir().join(&name);
+    if !abs.is_file() {
+        return None;
+    }
+    Some((name, read_capped(&abs, NOTE_READ_CAP)))
+}
+
+/// Read at most `cap` bytes of a file as lossy UTF-8 (the vault's
+/// `read_text_abs_capped`, inlined now that reports don't go through the vault).
+fn read_capped(abs: &std::path::Path, cap: u64) -> String {
+    use std::io::Read;
+    let Ok(file) = std::fs::File::open(abs) else {
+        return String::new();
+    };
+    let mut buf = Vec::new();
+    if file.take(cap).read_to_end(&mut buf).is_err() {
+        return String::new();
+    }
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
+/// §49: a saved report's listing row for the Reports home — its id (the bare
+/// filename, which `read_note` takes), its display name, and the file's mtime
+/// in epoch ms. The vault-era `folder` field is gone with investigations: every
+/// report is standalone now, so the subtitle it fed was always the same string.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReportEntry {
     pub id: String,
     pub name: String,
-    pub folder: String,
     pub generated_ms: u64,
 }
 
-/// The report-note signature: every rendered report's preamble (`report_header`,
-/// shared by every template) carries this phrase, so a candidate `.md` under a
-/// report folder that contains it IS a report — and a conversation note or
-/// briefing that happens to sit in the same `Lighthouse Notes/` tree is not.
-const REPORT_SIGNATURE: &str = "every figure computed by Lighthouse";
-
-/// §49: the head-read cap for the signature peek — the preamble is in the first
-/// few hundred bytes; 4 KiB is ample and bounds the scan of each candidate.
-const NOTE_SIGNATURE_PEEK: u64 = 4 * 1024;
-
-/// §49: list the saved reports for the Reports home, NEWEST-FIRST. A report is a
-/// `.md` note under `Lighthouse Reports/` (a standalone report) or an
-/// investigation's `Lighthouse Notes/<folder>/` subdir — EXCLUDING
-/// `Lighthouse Notes/Chats/` (auto-exported conversation notes) — whose head
-/// carries the report signature. Ordered by file mtime descending (the honest
-/// "saved at"; ties broken by name so the order is deterministic). PURE READ —
-/// never mutates the vault and egresses nothing, so it is safe on any tier. The
-/// TS twin has no report engine, so its `listReports` returns `[]`.
+/// §49: list the saved reports for the Reports home, NEWEST-FIRST. Every `.md`
+/// in `reports_dir()` is a report — the directory is the app's own and nothing
+/// else writes there, so the vault-era signature peek (which existed only to
+/// tell a report from a chat note sharing the Notes tree) is gone. Ordered by
+/// mtime descending, ties broken by name so the order is deterministic. PURE
+/// READ — safe on any tier, egresses nothing.
 pub fn list_reports() -> Vec<ReportEntry> {
-    let mut out: Vec<ReportEntry> = crate::vault::list_nodes()
-        .into_iter()
-        .filter(|n| n.kind == crate::contracts::NodeKind::File && is_report_path(&n.id))
-        .filter_map(|n| {
-            let abs = crate::vault::resolve_node_path(&n.id).ok()?;
-            // Confirm the report signature (excludes chat notes / briefings that
-            // share the Notes tree) by peeking the file head only.
-            let head = crate::vault::read_text_abs_capped(&abs, NOTE_SIGNATURE_PEEK);
-            if !head.contains(REPORT_SIGNATURE) {
+    let Ok(entries) = std::fs::read_dir(reports_dir()) else {
+        return Vec::new();
+    };
+    let mut out: Vec<ReportEntry> = entries
+        .filter_map(|e| {
+            let entry = e.ok()?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let name = safe_report_name(&name)?;
+            let meta = entry.metadata().ok()?;
+            if !meta.is_file() {
                 return None;
             }
-            let generated_ms = file_mtime_ms(&abs);
-            let folder = parent_segment(&n.id);
-            Some(ReportEntry { id: n.id, name: n.name, folder, generated_ms })
+            let generated_ms = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            Some(ReportEntry { id: name.clone(), name, generated_ms })
         })
         .collect();
     out.sort_by(|a, b| b.generated_ms.cmp(&a.generated_ms).then_with(|| a.name.cmp(&b.name)));
     out
 }
 
-/// A vault id under a report folder: `Lighthouse Reports/…` (standalone) or an
-/// investigation notes subdir `Lighthouse Notes/…` that is NOT the `Chats/`
-/// conversation directory.
-fn is_report_path(id: &str) -> bool {
-    if !id.ends_with(".md") {
-        return false;
-    }
-    if id.starts_with("Lighthouse Reports/") {
-        return true;
-    }
-    id.starts_with("Lighthouse Notes/") && !id.starts_with("Lighthouse Notes/Chats/")
-}
-
-/// The parent folder segment of a vault id (the investigation folder, or
-/// `Lighthouse Reports`) for the home's subtitle. `""` when the id has no parent
-/// segment.
-fn parent_segment(id: &str) -> String {
-    let mut parts: Vec<&str> = id.split('/').collect();
-    parts.pop(); // drop the filename
-    parts.pop().map(str::to_string).unwrap_or_default()
-}
-
-/// File mtime in epoch ms (0 when unavailable) — the honest "saved at" for the
-/// newest-first ordering.
-fn file_mtime_ms(abs: &std::path::Path) -> u64 {
-    std::fs::metadata(abs)
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
-
-/// Render `report` to markdown and write it into the vault as a NON-EGRESS note
-/// (openspec add-deep-analysis §2.4) — the `exportChat`/briefing precedent. When
-/// `investigation_id` names a known investigation, the note lands in that
-/// investigation's `Lighthouse Notes/<folder>` subdir; otherwise under
-/// `Lighthouse Reports`. Both are write-artifact allowlist entries, so the write
-/// is sanitized, traversal-safe, and never overwrites an existing note. Returns
-/// the saved artifact's `(id, name)` so the app can open it. The write NEVER
-/// egresses and NEVER writes outside the vault (the `vault::write_artifact` funnel
-/// enforces the allowlist).
+/// Render `report` to markdown and save it under `reports_dir()`. NEVER
+/// overwrites: a title colliding with an existing report takes a ` (1)`, ` (2)`
+/// … suffix, the same collision discipline `vault::add_file` applied in the
+/// vault era. Returns the saved report's `(id, name)` — identical strings now
+/// that an id is a bare filename — so the app can open it. The write never
+/// egresses and, by `report_stem` + the join, never lands outside the reports
+/// directory.
 pub fn write_report(report: &Report) -> Result<(String, String), String> {
-    let subdir = REPORTS_SUBDIR.to_string();
+    let dir = reports_dir();
+    let stem = report_stem(&report.title);
     let markdown = render_markdown(report);
-    crate::vault::write_artifact(&subdir, &report.title, "md", markdown.as_bytes())
-        .map_err(|e| e.to_string())
+    // Bounded probe: a user with 500 same-titled reports gets an error rather
+    // than an unbounded scan.
+    for n in 0..500 {
+        let name =
+            if n == 0 { format!("{stem}.md") } else { format!("{stem} ({n}).md") };
+        let abs = dir.join(&name);
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&abs) {
+            Ok(mut f) => {
+                use std::io::Write;
+                f.write_all(markdown.as_bytes()).map_err(|e| e.to_string())?;
+                return Ok((name.clone(), name));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    Err("too many reports share this title — rename one".to_string())
 }
 
 /// Whether a typed column set can carry the temporal recipe battery — at least

@@ -24,17 +24,15 @@ export type ReportTemplate = "imrad" | "bluf";
 
 /**
  * §49 §4: one saved report's listing row for the Reports home library. `id` is
- * the note's vault node id (feed it to `readNote` / the reader open event),
- * `name` the display filename, `folder` the containing folder segment (the
- * investigation name, or `"Lighthouse Reports"` for a standalone report — the
- * home's subtitle), and `generatedAtMs` the file's save time (epoch ms) that
- * orders the list newest-first. Rust-engine-only, like the whole report engine;
- * the web dev twin has no reports, so `listReports` returns `[]`.
+ * the report's filename in the engine's reports directory (feed it to
+ * `readNote` / the reader open event), `name` the display filename, and
+ * `generatedAtMs` the file's save time (epoch ms) that orders the list
+ * newest-first. Rust-engine-only, like the whole report engine; the web dev
+ * twin has no reports, so `listReports` returns `[]`.
  */
 export interface ReportSummary {
   id: string;
   name: string;
-  folder: string;
   generatedAtMs: number;
 }
 
@@ -133,10 +131,9 @@ export interface RagService {
   readNote(id: string): Promise<{ markdown: string; name: string }>;
   /**
    * §49 §4: list every saved report for the Reports home library, NEWEST-FIRST
-   * (by save time). A report is a note under `Lighthouse Reports/` (standalone)
-   * or an investigation's `Lighthouse Notes/<folder>/` subdir carrying the
-   * report signature — conversation notes and briefings are excluded. PURE READ.
-   * Desktop engine only; the web dev twin has no report engine and returns `[]`.
+   * (by save time). A report is a `.md` in the engine's reports directory —
+   * the app's own store, so every file there is one. PURE READ. Desktop engine
+   * only; the web dev twin has no report engine and returns `[]`.
    */
   listReports(): Promise<ReportSummary[]>;
   /**
@@ -485,11 +482,10 @@ export interface RagService {
   insights(): Promise<InsightsScan>;
   /**
    * Deep analysis (openspec: add-deep-analysis §2): run the applicable recipe
-   * battery over `table`, assemble the verified results into a report, and WRITE
-   * it into the vault as a markdown note — returns the saved node id + name so the
-   * caller can reveal it. Rust-only (DataFusion + recipes); the web dev twin
-   * throws (unavailable). `investigationId` optionally files the note under that
-   * investigation's notes folder instead of `Lighthouse Reports`.
+   * battery over `table`, assemble the verified results into a report, and save
+   * it as markdown in the engine's reports directory — returns its id + name so
+   * the caller can open the reader on it. Rust-only (DataFusion + recipes); the
+   * web dev twin throws (unavailable).
    *
    * `template` (openspec: add-report-templates) optionally prescribes a
    * structured shape — `"imrad"` (Scientific method: Introduction/Methods/

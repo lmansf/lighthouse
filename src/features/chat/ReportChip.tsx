@@ -26,18 +26,15 @@ export function ReportChip({ table }: { table: string }) {
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string | null>(null);
 
-  // Run the recipe battery + write the report, then reveal the saved note in
-  // the tree (the chat-citation reveal seam). No hypothesis on the hero door —
-  // the per-answer Report action (§3b) owns the hypothesis-framed variant.
+  // Run the recipe battery, save the report, and open the reader on it. No
+  // hypothesis on the hero door — the per-answer Report action (§3b) owns the
+  // hypothesis-framed variant.
   async function investigate(template?: ReportTemplate) {
     setBusy(true);
     setNote(null);
     try {
       const { savedId, savedName } = await ragService.investigate(table, undefined, template);
       setNote(`Saved ${savedName}`);
-      if (typeof window !== "undefined" && savedId) {
-        window.dispatchEvent(new CustomEvent("lighthouse:reveal-node", { detail: { id: savedId } }));
-      }
       // §49 §3: open the reader on the fresh report — never a silent save.
       openSavedReport(savedId);
     } catch {

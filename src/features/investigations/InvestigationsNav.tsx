@@ -415,9 +415,6 @@ export function InvestigationsNav() {
       );
       setHypoTemplate(null);
       setNavNote(`Saved ${savedName}`);
-      if (typeof window !== "undefined" && savedId) {
-        window.dispatchEvent(new CustomEvent("lighthouse:reveal-node", { detail: { id: savedId } }));
-      }
       // §49 §3: open the reader on the fresh report — never a silent save.
       openSavedReport(savedId);
     } catch {

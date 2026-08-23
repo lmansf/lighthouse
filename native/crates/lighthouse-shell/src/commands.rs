@@ -174,7 +174,6 @@ pub async fn rag_op(
                     json!({
                         "id": r.id,
                         "name": r.name,
-                        "folder": r.folder,
                         "generatedAtMs": r.generated_ms,
                     })
                 })

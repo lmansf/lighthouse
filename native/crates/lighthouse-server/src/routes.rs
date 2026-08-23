@@ -156,7 +156,6 @@ pub async fn rag_post(headers: HeaderMap, body: Option<Json<Value>>) -> Response
                     json!({
                         "id": r.id,
                         "name": r.name,
-                        "folder": r.folder,
                         "generatedAtMs": r.generated_ms,
                     })
                 })

@@ -82,8 +82,10 @@ test("§49 §3: every report door OPENS the reader (openSavedReport), never a si
     const src = read(p);
     assert.match(src, /import \{ openSavedReport \} from "@\/lib\/openReport";/, `${why} imports the reader-open helper`);
     assert.match(src, /openSavedReport\(savedId\);/, `${why} opens the reader on the fresh report`);
-    // The tree reveal survives alongside it (open AND highlight, not either/or).
-    assert.match(src, /"lighthouse:reveal-node"/, `${why} still reveals the saved node`);
+    // Opening the reader is now the WHOLE reveal: since 0.15.0 a report is not
+    // a vault node, so there is no tree row left to highlight alongside it
+    // (openspec: refocus-chat-attachments §1.7).
+    assert.equal(/"lighthouse:reveal-node"/.test(src), false, `${why} no longer reveals a vault node`);
   }
   // The per-answer "Open" affordance opens the reader on the saved report too.
   assert.match(
@@ -96,14 +98,16 @@ test("§49 §3: every report door OPENS the reader (openSavedReport), never a si
 test("§49 §2: the reader host reads the note, DRAWS its key chart, and exports", () => {
   const host = read("src/features/chat/ReportReaderHost.tsx");
   assert.match(host, /window\.addEventListener\(OPEN_REPORT_EVENT, onOpen\)/, "opens on the event");
-  assert.match(host, /ragService\s*\n?\s*\.readNote\(id\)/, "reads the saved note (local vault read)");
+  assert.match(host, /ragService\s*\n?\s*\.readNote\(id\)/, "reads the saved report (a local read)");
   assert.match(host, /const CHART_LANG = "language-lighthouse-chart"/, "recognizes the persisted chart fence");
   assert.match(host, /<AnalyticsChart spec=\{spec\} \/>/, "draws the key chart (the chat answer's chart path)");
-  // Export (Markdown / HTML / Print) + Reveal + Close — the reader's actions.
+  // Export (Markdown / HTML / Print) + Close — the reader's actions. Since
+  // 0.15.0 export goes through the OS save dialog, so there is no in-app copy
+  // left to "Reveal in Files" (openspec: refocus-chat-attachments §1.7).
   assert.match(host, /label: "Markdown \(\.md\)"/, "Export → Markdown");
   assert.match(host, /label: "Web page \(\.html\)"/, "Export → HTML");
   assert.match(host, /label: "Print \/ Save as PDF"/, "Export → Print");
-  assert.match(host, /Reveal in Files/, "Reveal-in-Files");
+  assert.equal(/Reveal in Files/.test(host), false, "no reveal — the user picked the location");
   assert.match(host, /aria-label="Close report"/, "Close");
 });
 
@@ -140,11 +144,15 @@ test("§49 §4: Reports is a first-class destination — mobile tab, desktop ent
 test("§49 §4: listReports is wired Rust-only across the engine layers", () => {
   const core = read("native/crates/lighthouse-core/src/reports.rs");
   assert.match(core, /pub fn list_reports\(\) -> Vec<ReportEntry>/, "the engine op");
-  // Precise report identification: the report-header signature, EXCLUDING the
-  // conversation-notes folder that shares the Notes tree.
-  assert.match(core, /const REPORT_SIGNATURE: &str = "every figure computed by Lighthouse";/, "the report signature");
-  assert.match(core, /"Lighthouse Notes\/Chats\/"/, "excludes conversation notes");
-  // mtime descending — the honest newest-first (FileNode carries no timestamp).
+  // Reports live in the app's own directory since 0.15.0, so every .md in it
+  // IS a report — the vault-era signature peek (which existed only to tell a
+  // report from a chat note sharing the Notes tree) is gone with the vault.
+  assert.match(core, /pub fn reports_dir\(\) -> std::path::PathBuf/, "its own directory");
+  assert.match(core, /app_state_dir\(\)\.join\("reports"\)/, "under the app state dir");
+  assert.equal(/REPORT_SIGNATURE/.test(core), false, "no signature peek needed");
+  // A wire id is a bare filename — the traversal gate for the reader.
+  assert.match(core, /fn safe_report_name\(id: &str\) -> Option<String>/, "the id gate");
+  // mtime descending — the honest newest-first.
   assert.match(core, /b\.generated_ms\.cmp\(&a\.generated_ms\)/, "newest-first by file mtime");
   // The op is reachable on both wire surfaces (desktop command + server route).
   assert.match(read("native/crates/lighthouse-shell/src/commands.rs"), /Some\("listReports"\)/, "shell command arm");

@@ -384,11 +384,11 @@ class MockRagService implements RagService {
     template?: ReportTemplate,
     _hypothesis?: string,
   ): Promise<{ savedId: string; savedName: string }> {
-    // A fake saved note so the gallery's Investigate affordance is exercisable
-    // offline. PARITY: the real web dev twin throws (deep analysis is Rust-only);
-    // the desktop engine writes the real report under Lighthouse Reports/. The
-    // saved name mirrors the Rust `ReportTemplate::title_suffix` so a templated
-    // mock reveal shows the same titled note the desktop engine would write.
+    // A fake saved report so the gallery's Investigate affordance is
+    // exercisable offline. PARITY: the real web dev twin throws (deep analysis
+    // is Rust-only); the desktop engine saves the real report in its reports
+    // directory. The name mirrors the Rust `ReportTemplate::title_suffix` so a
+    // templated mock shows the same title the desktop engine would write.
     const suffix =
       template === "imrad"
         ? " — Scientific method"
@@ -396,17 +396,17 @@ class MockRagService implements RagService {
           ? " — Business report"
           : "";
     const name = `Investigate ${table}${suffix}.md`;
-    return { savedId: `Lighthouse Reports/${name}`, savedName: name };
+    // An id IS the bare filename since 0.15.0 (refocus-chat-attachments §1.7).
+    return { savedId: name, savedName: name };
   }
 
   async readNote(id: string): Promise<{ markdown: string; name: string }> {
     // §49: a believable saved-report markdown so the in-app report reader
     // renders end to end offline — a heading, a summary, a ```lighthouse-chart
     // fence (so the key chart draws), a section table, and caveats. PARITY: the
-    // desktop engine returns the ACTUAL saved note via vault read; this mock is
-    // what the offline/test flow drives against. The name derives from the id
-    // the mock investigate() saved under (`Lighthouse Reports/<name>`).
-    const name = id.split("/").pop() ?? "Report.md";
+    // desktop engine returns the ACTUAL saved report; this mock is what the
+    // offline/test flow drives against. The id IS the filename.
+    const name = id || "Report.md";
     const title = name.replace(/\.md$/, "");
     const markdown = [
       `# ${title}`,
@@ -448,15 +448,13 @@ class MockRagService implements RagService {
     // path works end to end. Fixed timestamps keep the order deterministic.
     return [
       {
-        id: "Lighthouse Reports/Investigate Sales.md",
+        id: "Investigate Sales.md",
         name: "Investigate Sales.md",
-        folder: "Lighthouse Reports",
         generatedAtMs: 1_720_000_200_000,
       },
       {
-        id: "Lighthouse Notes/Q3 churn/Investigate Signups — Scientific method.md",
+        id: "Investigate Signups — Scientific method.md",
         name: "Investigate Signups — Scientific method.md",
-        folder: "Q3 churn",
         generatedAtMs: 1_720_000_100_000,
       },
     ];

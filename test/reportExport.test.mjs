@@ -59,18 +59,36 @@ test("the title is HTML-escaped (no markup injection through it)", () => {
   assert.ok(html.includes("&lt;script&gt;"));
 });
 
-// --- The three export actions (structural — they wrap the vault-write path) --
+// --- The three export actions (structural — they wrap the save dialog) ------
 
-test("reportExport wires HTML / Markdown / print to the allowlist write", () => {
+test("reportExport wires HTML / Markdown / print to the OS save dialog", () => {
   const src = read("src/lib/reportExport.ts");
-  // (a) HTML → self-contained doc, written to the Results folder.
+  // (a) HTML → self-contained doc, (c) Markdown → raw. Both go through the
+  // save dialog since 0.15.0 — the vault allowlist folders they used to write
+  // into are gone (openspec: refocus-chat-attachments §1.7).
   assert.match(src, /composeReportHtml\(input\)/);
-  assert.match(src, /subdir:\s*"Lighthouse Results",\s*\n?\s*ext:\s*"html"/);
-  // (c) Markdown → a .md note.
-  assert.match(src, /subdir:\s*"Lighthouse Notes",\s*\n?\s*ext:\s*"md"/);
+  assert.match(src, /saveWhereverTheUserPicks\(input\.title, "html", composeReportHtml\(input\)\)/);
+  assert.match(src, /saveWhereverTheUserPicks\(title, "md", markdown\)/);
+  // Desktop: the native dialog through the shell bridge. Browser dev twin: the
+  // anchor download, which is that platform's save dialog.
+  assert.match(src, /bridge\.saveFile\(hint, ext, content\)/, "the native save dialog");
+  assert.match(src, /a\.download = name/, "the browser fallback");
+  // A dismissed dialog is a cancel, never reported as a failure.
+  assert.match(src, /cancelled: true/, "cancel is not an error");
   // (b) PDF → the system print / Save-as-PDF flow.
   assert.match(src, /export function printReport/);
   assert.match(src, /\.print\(\)/);
-  // Nothing egresses — it only reaches the vault write + the OS print dialog.
+  // Nothing egresses — local disk and OS dialogs only.
   assert.equal(/fetch\(|https?:\/\//.test(src), false);
+});
+
+test("the save door only ever writes the app's own two formats", () => {
+  // The extension is the app's, never the client's: the desktop command
+  // allowlists md/html and refuses anything else, so no wire value can name an
+  // executable extension for the file the user is about to be handed.
+  const cmd = read("native/crates/lighthouse-desktop/src/commands.rs");
+  const save = cmd.slice(cmd.indexOf("pub async fn save_file("));
+  assert.match(save, /"md" => "md"/);
+  assert.match(save, /"html" => "html"/);
+  assert.match(save, /other => return Err\(format!\("unsupported export type: \{other\}"\)\)/);
 });

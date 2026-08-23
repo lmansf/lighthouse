@@ -653,6 +653,54 @@ pub async fn pick_link_paths(app: AppHandle, directory: bool) -> Vec<String> {
     rx.await.unwrap_or_default()
 }
 
+/// Save client-composed content wherever the USER picks (openspec:
+/// refocus-chat-attachments §1.7). Exports used to write into vault allowlist
+/// folders because no OS save dialog existed here; with the vault gone an
+/// export belongs to the user's filesystem, not the app's. The dialog is the
+/// permission — the app writes exactly one file, exactly where the user said,
+/// and nothing egresses. Returns the saved file's display name, or `None` when
+/// the user cancels (a cancel is not an error).
+#[tauri::command]
+pub async fn save_file(
+    app: AppHandle,
+    name_hint: String,
+    ext: String,
+    content: String,
+) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    // The extension is the app's, never the client's: an export is markdown or
+    // self-contained HTML, and nothing else may be written through this door.
+    let ext = match ext.as_str() {
+        "md" => "md",
+        "html" => "html",
+        other => return Err(format!("unsupported export type: {other}")),
+    };
+    let stem: String = name_hint
+        .chars()
+        .map(|c| if c == '/' || c == '\\' || c.is_control() { '-' } else { c })
+        .take(80)
+        .collect();
+    let stem = stem.trim().trim_start_matches('.').trim().to_string();
+    let stem = if stem.is_empty() { "Report".to_string() } else { stem };
+
+    let (tx, rx) = tokio::sync::oneshot::channel::<Option<std::path::PathBuf>>();
+    app.dialog()
+        .file()
+        .set_title("Save report")
+        .set_file_name(format!("{stem}.{ext}"))
+        .add_filter(if ext == "md" { "Markdown" } else { "HTML" }, &[ext])
+        .save_file(move |p| {
+            let _ = tx.send(p.and_then(|f| f.into_path().ok()));
+        });
+    let Some(path) = rx.await.map_err(|_| "save dialog closed unexpectedly".to_string())? else {
+        return Ok(None); // user cancelled
+    };
+    std::fs::write(&path, content.as_bytes()).map_err(|e| e.to_string())?;
+    Ok(Some(
+        path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or(stem),
+    ))
+}
+
 /// One uploaded file as a raw-bytes IPC request (filename/dir in headers) —
 /// replaces the HTTP multipart route with the same caps and semantics.
 #[tauri::command]

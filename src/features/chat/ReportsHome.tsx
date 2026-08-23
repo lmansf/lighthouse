@@ -3,8 +3,7 @@
 /**
  * §49 §4: the Reports HOME — a first-class library of every saved report. Lists
  * the reports the engine knows about (`ragService.listReports`, newest-first: a
- * `.md` under `Lighthouse Reports/` or an investigation's `Lighthouse Notes/`
- * subdir carrying the report signature), each row opening the §2 in-app reader
+ * `.md` in the engine's own reports directory), each row opening the §2 reader
  * via `openSavedReport(id)`. A "New report" composer runs the SAME templated
  * deep analysis the chat doors do — capability-gated on an investigable table
  * (`ragService.capabilityMap` over the included files); the engine's numbers are
@@ -38,11 +37,6 @@ import { LhDialogSurface, LhSegmented, LhSelect } from "@/shell/controls";
 import { openSavedReport, OPEN_REPORT_EVENT } from "@/lib/openReport";
 import { isSheetName, resolveSheetTable } from "@/lib/reportTargets";
 import { useRagStore } from "@/stores/useRagStore";
-
-/** The standalone-report vault folder (mirrors Rust `reports::REPORTS_SUBDIR`).
- *  A row whose folder IS this is a standalone report — its title already says
- *  so, so no "from <folder>" subtitle; any OTHER folder is an investigation. */
-const REPORTS_SUBDIR = "Lighthouse Reports";
 
 /** The UI offers three; the wire template is only "imrad" | "bluf" — "standard"
  *  maps to NO template (the deterministic report), like every other door. */
@@ -242,12 +236,9 @@ export function ReportsHome({ onOpened }: { onOpened?: () => void }) {
       if (!tableName) return; // resolveTable set an honest error (stay in composer)
       const { savedId } = await ragService.investigate(tableName, undefined, wire, hypoText.trim() || undefined);
       setComposing(false);
-      // Open the reader on the fresh report and highlight the saved node — the
-      // §3 "don't just save silently" behavior, shared with the chat doors.
+      // Open the reader on the fresh report — the §3 "don't just save silently"
+      // behavior, shared with the chat doors.
       openSavedReport(savedId);
-      if (typeof window !== "undefined" && savedId) {
-        window.dispatchEvent(new CustomEvent("lighthouse:reveal-node", { detail: { id: savedId } }));
-      }
       reload();
       onOpened?.();
     } catch {
@@ -376,10 +367,7 @@ export function ReportsHome({ onOpened }: { onOpened?: () => void }) {
           {reports.map((r) => {
             const title = r.name.replace(/\.md$/, "");
             const when = savedAgo(r.generatedAtMs);
-            // The folder subtitle names the investigation; a standalone report's
-            // folder IS "Lighthouse Reports", which the title already implies.
-            const from = r.folder && r.folder !== REPORTS_SUBDIR ? r.folder : "";
-            const meta = [from, when].filter(Boolean).join(" · ");
+            const meta = when;
             return (
               <button
                 key={r.id}

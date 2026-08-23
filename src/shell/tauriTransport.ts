@@ -393,6 +393,11 @@ function installDesktopBridge(
     linkDialog(directory: boolean): Promise<string[]> {
       return core.invoke<string[]>("pick_link_paths", { directory });
     },
+    /** Native save dialog (openspec: refocus-chat-attachments §1.7). Resolves
+     *  to the saved file's name, or null when the user cancels. */
+    saveFile(nameHint: string, ext: "md" | "html", content: string): Promise<string | null> {
+      return core.invoke<string | null>("save_file", { nameHint, ext, content });
+    },
   };
   (window as unknown as { lighthouseDesktop?: typeof bridge }).lighthouseDesktop = bridge;
 }
