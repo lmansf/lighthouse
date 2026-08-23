@@ -22,6 +22,10 @@ fn lock_env() -> MutexGuard<'static, ()> {
 async fn spawn_server() -> (String, tempfile::TempDir) {
     let vault_dir = tempfile::tempdir().unwrap();
     std::env::set_var("VAULT_DIR", vault_dir.path());
+    // Since the 0.15.0 re-root, engine state (and the workspace) follow
+    // LIGHTHOUSE_APP_STATE_DIR alone — keep each server's state inside its own
+    // temp vault so tests stay isolated from the developer's real data home.
+    std::env::set_var("LIGHTHOUSE_APP_STATE_DIR", vault_dir.path().join(".rag-vault"));
     std::env::remove_var("LIGHTHOUSE_API_TOKEN");
     std::env::remove_var("LIGHTHOUSE_DESKTOP");
     std::env::remove_var("ANTHROPIC_API_KEY");
@@ -1035,3 +1039,89 @@ async fn boards_over_the_wire() {
         assert_eq!(err["error"], want, "{body}");
     }
 }
+
+/// The 0.15.0 flow over the wire (openspec: refocus-chat-attachments): an
+/// upload that names a conversation lands in that conversation's WORKSPACE,
+/// not the vault folder, and the ask that follows answers from it — with the
+/// 10-file cap refusing the eleventh.
+#[tokio::test]
+async fn uploading_to_a_conversation_attaches_and_answers() {
+    let _guard = lock_env();
+    let (base, vault_dir) = spawn_server().await;
+    let client = reqwest::Client::new();
+
+    let upload = |name: &'static str, body: &'static str, conv: Option<&'static str>| {
+        let client = client.clone();
+        let base = base.clone();
+        async move {
+            let mut form = reqwest::multipart::Form::new().part(
+                "files",
+                reqwest::multipart::Part::bytes(body.as_bytes().to_vec()).file_name(name),
+            );
+            if let Some(c) = conv {
+                form = form.text("conversationId", c);
+            }
+            client
+                .post(format!("{base}/api/upload"))
+                .multipart(form)
+                .send()
+                .await
+                .unwrap()
+                .json::<Value>()
+                .await
+                .unwrap()
+        }
+    };
+
+    let up = upload(
+        "quarterly.md",
+        "# Q3 revenue\nNortheast revenue rose sharply this quarter.\n",
+        Some("conv-1"),
+    )
+    .await;
+    let new_id = up["added"][0]["newId"].as_str().unwrap().to_string();
+    assert!(new_id.starts_with("att-"), "an attachment id, not a vault path: {new_id}");
+    assert!(
+        !vault_dir.path().join("quarterly.md").exists(),
+        "the user's folder is untouched — bytes live in the workspace"
+    );
+
+    // The ask names the conversation, and answers from its attachment.
+    let chat: String = client
+        .post(format!("{base}/api/chat"))
+        .json(&json!({
+            "question": "What happened to Northeast revenue?",
+            "conversationId": "conv-1",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        chat.contains("quarterly.md"),
+        "the answer cites the conversation's attachment: {chat}"
+    );
+
+    // The engine's cap holds over the wire: the eleventh file is refused with
+    // a reason, and the first ten stay attached.
+    for i in 1..MAX_ATTACHMENTS_OVER_WIRE {
+        let body: &'static str = Box::leak(format!("filler {i}\n").into_boxed_str());
+        let name: &'static str = Box::leak(format!("f{i}.md").into_boxed_str());
+        let r = upload(name, body, Some("conv-1")).await;
+        assert!(r["skipped"].as_array().unwrap().is_empty(), "file {i} attached");
+    }
+    let over = upload("one-more.md", "too many\n", Some("conv-1")).await;
+    assert!(over["added"].as_array().unwrap().is_empty(), "the eleventh is refused");
+    assert!(
+        over["skipped"][0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("at most 10 files"),
+        "the refusal says why: {over}"
+    );
+}
+
+/// The engine's cap, restated where the wire test can read it.
+const MAX_ATTACHMENTS_OVER_WIRE: usize = lighthouse_core::workspace::MAX_ATTACHMENTS;

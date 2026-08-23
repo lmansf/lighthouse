@@ -70,6 +70,10 @@ async function handleUpload(core: TauriCore, init: RequestInit | undefined): Pro
   }
   const dirRaw = form.get("dir");
   const dest = typeof dirRaw === "string" && dirRaw ? dirRaw : null;
+  // The conversation these files attach to (openspec:
+  // refocus-chat-attachments); absent ⇒ the legacy vault write.
+  const convRaw = form.get("conversationId");
+  const conversationId = typeof convRaw === "string" && convRaw ? convRaw : null;
   const rawPaths = form.getAll("paths");
   const items = form
     .getAll("files")
@@ -102,6 +106,7 @@ async function handleUpload(core: TauriCore, init: RequestInit | undefined): Pro
         headers: {
           "x-file-name": encodeURIComponent(file.name),
           ...(target ? { "x-dest-dir": encodeURIComponent(target) } : {}),
+          ...(conversationId ? { "x-conversation-id": encodeURIComponent(conversationId) } : {}),
         },
       });
       added.push(result);

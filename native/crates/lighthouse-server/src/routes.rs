@@ -1593,6 +1593,7 @@ pub async fn upload_post(
     let mut files: Vec<(String, bytes::Bytes)> = Vec::new();
     let mut paths: Vec<String> = Vec::new();
     let mut dir: Option<String> = None;
+    let mut conversation: Option<String> = None;
     loop {
         match form.next_field().await {
             Ok(Some(field)) => match field.name() {
@@ -1608,6 +1609,15 @@ pub async fn upload_post(
                     let v = field.text().await.unwrap_or_default();
                     if !v.is_empty() {
                         dir = Some(v);
+                    }
+                }
+                // The conversation these files are being attached to
+                // (openspec: refocus-chat-attachments). Present ⇒ they join
+                // that conversation's workspace; absent ⇒ the legacy vault.
+                Some("conversationId") => {
+                    let v = field.text().await.unwrap_or_default();
+                    if !v.trim().is_empty() {
+                        conversation = Some(v.trim().to_string());
                     }
                 }
                 _ => {}
@@ -1643,10 +1653,23 @@ pub async fn upload_post(
             }));
             continue;
         }
-        // Derive a sub-directory from the relative path; fall back to `dir`.
-        let sub_dir = rel.rfind('/').map(|i| rel[..i].to_string());
-        let target = sub_dir.or_else(|| dir.clone());
-        match vault::add_file(name, bytes, target.as_deref()) {
+        // Attaching to a conversation puts the bytes in its workspace — the
+        // engine enforces the 10-file cap there, and ingestion starts at once
+        // so the first ask finds every cache warm. Uploading without a
+        // conversation is the legacy vault write, until the vault goes.
+        let result = match &conversation {
+            Some(cid) => lighthouse_core::workspace::attach(cid, name, bytes).map(|att| {
+                lighthouse_core::workspace::ingest_detached(&att);
+                att.id
+            }),
+            None => {
+                // Derive a sub-directory from the relative path; fall back to `dir`.
+                let sub_dir = rel.rfind('/').map(|i| rel[..i].to_string());
+                let target = sub_dir.or_else(|| dir.clone());
+                vault::add_file(name, bytes, target.as_deref())
+            }
+        };
+        match result {
             Ok(new_id) => {
                 added.push(json!({ "newId": new_id }));
                 accepted += 1;

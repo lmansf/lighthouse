@@ -44,6 +44,9 @@ async fn managed_policy_is_enforced_at_the_engine() {
     .unwrap();
 
     std::env::set_var("VAULT_DIR", vault.path());
+    // Since the 0.15.0 re-root, engine state follows LIGHTHOUSE_APP_STATE_DIR
+    // alone — keep it inside this test's own temp vault.
+    std::env::set_var("LIGHTHOUSE_APP_STATE_DIR", vault.path().join(".rag-vault"));
     std::env::remove_var("LIGHTHOUSE_API_TOKEN");
     std::env::remove_var("LIGHTHOUSE_DESKTOP");
     std::env::remove_var("ANTHROPIC_API_KEY");

@@ -692,9 +692,21 @@ pub fn upload_file(request: tauri::ipc::Request<'_>) -> Result<Value, String> {
     };
     let name = header("x-file-name").ok_or("x-file-name header required")?;
     let dir = header("x-dest-dir");
-    vault::add_file(&name, bytes, dir.as_deref())
-        .map(|new_id| json!({ "newId": new_id }))
-        .map_err(|e| err_string(e, "upload failed"))
+    // Attaching to a conversation puts the bytes in its workspace — the engine
+    // enforces the 10-file cap there, and ingestion starts at once so the first
+    // ask finds every cache warm. No conversation ⇒ the legacy vault write,
+    // until the vault goes (openspec: refocus-chat-attachments task 1.6).
+    match header("x-conversation-id") {
+        Some(cid) => lighthouse_core::workspace::attach(&cid, &name, bytes)
+            .map(|att| {
+                lighthouse_core::workspace::ingest_detached(&att);
+                json!({ "newId": att.id })
+            })
+            .map_err(|e| err_string(e, "upload failed")),
+        None => vault::add_file(&name, bytes, dir.as_deref())
+            .map(|new_id| json!({ "newId": new_id }))
+            .map_err(|e| err_string(e, "upload failed")),
+    }
 }
 
 /// Current update-notification state (splash/tray parity with the Electron

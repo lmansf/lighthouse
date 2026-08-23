@@ -29,9 +29,11 @@ CLAUDE.md's versioning section (the §31/0.14.0 precedent).
       dialog.
 
 ## 2. Transports + shell
-- [ ] 2.1 Upload surfaces (`routes.rs`, `commands.rs`, `app/api/upload`,
-      `tauriTransport.ts`) target the workspace, enforce the caps, return
-      readiness.
+- [~] 2.1 Upload surfaces target the workspace when the request names a
+      conversation (`routes.rs` multipart `conversationId`, `commands.rs`
+      `x-conversation-id`, `tauriTransport.ts`), enforcing the engine's caps
+      and starting ingestion at once. REMAINING: the Next.js
+      `app/api/upload` twin, and surfacing per-file readiness to the client.
 - [ ] 2.2 Ask surfaces drop include/scope resolution; vault-generation
       SSE/Tauri push retires with the watcher.
 - [ ] 2.3 iOS: retire the `Documents/Lighthouse Vault` bootstrap + §41
