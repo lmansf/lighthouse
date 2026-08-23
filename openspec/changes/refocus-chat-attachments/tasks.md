@@ -6,7 +6,7 @@ First act of implementation: record the 0.15.0 owner designation in
 CLAUDE.md's versioning section (the §31/0.14.0 precedent).
 
 ## 1. Engine core (both engines, PARITY)
-- [ ] 1.1 `workspace.rs` ⇄ `workspace.ts`: blob store (sha256,
+- [x] 1.1 `workspace.rs` ⇄ `workspace.ts`: blob store (sha256,
       write-once), per-conversation manifest, `att-` id minting, the
       10-attachment / 25 MB caps, mark-and-sweep for unreferenced blobs.
 - [ ] 1.2 Eager ingest on attach: extract ∥ profile ∥ catalog ∥ index,

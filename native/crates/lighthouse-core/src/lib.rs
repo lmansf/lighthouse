@@ -50,6 +50,7 @@ pub mod vault;
 pub mod vault_brief;
 pub mod views;
 pub mod watch;
+pub mod workspace;
 
 /// One process-wide lock for lib tests that mutate process environment
 /// (VAULT_DIR and friends). A module-local lock only serializes its own
