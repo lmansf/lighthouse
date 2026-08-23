@@ -90,15 +90,3 @@ test("the chat renderer draws meta.table at the answer's table position (wiring 
   const tableProps = chat.match(/metaTable=\{m\.meta\?\.table\}/g) ?? [];
   assert.equal(tableProps.length, 3, "AnswerMarkdown + RefineChips + ChartItRow all threaded");
 });
-
-test("boards read tables through the accessor too (parse-fallback arm)", () => {
-  const model = read("src/features/boards/boardModel.ts");
-  const card = read("src/features/boards/BoardCard.tsx");
-  assert.match(model, /const table = answerTable\(\{ content: markdown \}\);/, "detectStat");
-  assert.match(card, /const table = answerTable\(\{ content: markdown \}\);/, "LiveBody");
-  assert.match(
-    model,
-    /export \{ answerTable, parseMarkdownTable, type ParsedTable \} from "\.\.\/\.\.\/lib\/answerTable";/,
-    "boardModel re-exports the moved parser so existing importers keep working",
-  );
-});

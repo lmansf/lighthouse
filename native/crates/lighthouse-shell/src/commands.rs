@@ -258,52 +258,6 @@ pub async fn rag_op(
         // investigations); refresh freshness reaches the UI in the response
         // itself, and watcher-driven changes keep riding the existing
         // pins-changed relay — no new event channel.
-        Some("boards") => match body["action"].as_str() {
-            Some("list") => {
-                // Optional investigation filter — absent (or blank) is "all",
-                // the listPins convention exactly.
-                let investigation_id = body["investigationId"].as_str().filter(|s| !s.is_empty());
-                Ok(json!({ "boards": lighthouse_core::boards::list_for(investigation_id) }))
-            }
-            Some("create") => {
-                let board = lighthouse_core::boards::create(
-                    body["name"].as_str().unwrap_or(""),
-                    body["investigationId"].as_str(),
-                )?;
-                Ok(json!({ "board": board }))
-            }
-            Some("rename") => {
-                let Some(id) = body["id"].as_str().filter(|s| !s.is_empty()) else {
-                    return Err("id required".into());
-                };
-                let board =
-                    lighthouse_core::boards::rename(id, body["name"].as_str().unwrap_or(""))?;
-                Ok(json!({ "board": board }))
-            }
-            Some("delete") => {
-                let Some(id) = body["id"].as_str().filter(|s| !s.is_empty()) else {
-                    return Err("id required".into());
-                };
-                lighthouse_core::boards::delete(id)?;
-                Ok(json!({ "ok": true }))
-            }
-            Some("setCards") => {
-                let Some(id) = body["id"].as_str().filter(|s| !s.is_empty()) else {
-                    return Err("id required".into());
-                };
-                let cards = lighthouse_core::boards::parse_cards(&body["cards"])?;
-                let board = lighthouse_core::boards::set_cards(id, cards)?;
-                Ok(json!({ "board": board }))
-            }
-            Some("refreshCards") => {
-                let pin_ids = string_array(&body["pinIds"]);
-                Ok(json!({ "cards": lighthouse_core::boards::refresh_cards(&pin_ids).await }))
-            }
-            _ => Err(
-                "boards action must be list, create, rename, delete, setCards, or refreshCards"
-                    .into(),
-            ),
-        },
         // Shaped views (openspec: add-shaped-views §3) — mirrors the routes.rs
         // op exactly: store CRUD (engine-minted ids, save-time guard +
         // reads/DAG validation, dependent-aware lifecycle) plus `dependents`,

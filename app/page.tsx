@@ -42,10 +42,6 @@ const QuickOpen = dynamic(
   () => import("@/features/quickopen/QuickOpen").then((m) => m.QuickOpen),
   { ssr: false },
 );
-const BoardHost = dynamic(
-  () => import("@/features/boards/BoardPanel").then((m) => m.BoardHost),
-  { ssr: false },
-);
 const ReportReaderHost = dynamic(
   () => import("@/features/chat/ReportReaderHost").then((m) => m.ReportReaderHost),
   { ssr: false },
@@ -123,7 +119,6 @@ export default function Home() {
               gear via lighthouse:open-board; mounted here (not lazily on
               open) so its pins-changed listener retains change badges while
               the board is closed. */}
-          <BoardHost />
           {/* §49 §2: the in-app report reader — opened by lighthouse:open-report
               {id} from every report door (generate, per-answer, Reports home).
               Mounted here (not lazily on open) so its listener persists while

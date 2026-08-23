@@ -50,7 +50,7 @@ import {
   shorthands,
   tokens,
 } from "@fluentui/react-components";
-import { IconAdd, IconArrowDown, IconAttach, IconBoard, IconChat, IconCheck, IconChevronDown, IconClose, IconCode, IconCopy, IconDoc, IconDocAdd, IconEdit, IconError, IconFilter, IconHistory, IconLock, IconMore, IconOpen, IconPin, IconPlay, IconRefresh, IconSave, IconSend, IconSettings, IconShield, IconSparkle, IconStop, IconTable, IconTag, IconThumbDown, IconThumbUp, IconTrash, IconUndo, IconWarning } from "@/shell/icons";
+import { IconAdd, IconArrowDown, IconAttach, IconChat, IconCheck, IconChevronDown, IconClose, IconCode, IconCopy, IconDoc, IconDocAdd, IconEdit, IconError, IconFilter, IconHistory, IconLock, IconMore, IconOpen, IconPin, IconPlay, IconRefresh, IconSave, IconSend, IconSettings, IconShield, IconSparkle, IconStop, IconTable, IconTag, IconThumbDown, IconThumbUp, IconTrash, IconUndo, IconWarning } from "@/shell/icons";
 import dynamic from "next/dynamic";
 import { type Components } from "react-markdown";
 import type { DragEvent, ReactNode } from "react";
@@ -75,7 +75,6 @@ import {
   type SortDir,
 } from "@/lib/sortTable";
 import { pinChartData } from "@/lib/pinChart";
-import { addPinToCurrentBoard } from "@/features/boards/boardScope";
 import { citationQuery, requestFileInspect } from "@/lib/citePreview";
 import { composeEvidencePack, provenanceStampText } from "@/lib/evidencePack";
 import { recallRelated, type RecallHit } from "@/lib/recall";
@@ -2880,10 +2879,7 @@ export function ChatPanel() {
   const [pinNotes, setPinNotes] = useState<
     Record<
       string,
-      // `pinId` (set on success) feeds the "Add to board" affordance beside
-      // the confirmation; `boardNote` is that affordance's outcome line
-      // (openspec: add-boards §4.1).
-      { pending?: boolean; ok?: boolean; error?: string; pinId?: string; boardNote?: string }
+      { pending?: boolean; ok?: boolean; error?: string; pinId?: string }
     >
   >({});
   const [pinAlerts, setPinAlerts] = useState<ChangedPin[]>([]);
@@ -2907,8 +2903,6 @@ export function ChatPanel() {
     question: string;
   } | null>(null);
   // G5: transient "Saved to Lighthouse Notes" note after a manual refresh.
-  // Outcome of a pins-dialog row's "Add to board" (openspec: add-boards).
-  const [pinBoardNote, setPinBoardNote] = useState<string | null>(null);
   // "Chart it" (charts by default, 0.12.1): per-turn inline table-chart
   // visibility — savedNotes-style UI state, never persisted; the spec itself
   // recomputes from the answer markdown, zero model/network calls.
@@ -3942,7 +3936,6 @@ export function ChatPanel() {
   // Load the pin list whenever the dialog opens.
   useEffect(() => {
     if (!pinsOpen) return;
-    setPinBoardNote(null); // last session's "Added to …" note is stale
     let cancelled = false;
     ragService
       .listPins()
@@ -4007,35 +4000,7 @@ export function ChatPanel() {
     setPinAlerts((alerts) => alerts.filter((a) => a.id !== id));
   }
 
-  /**
-   * "Add to board" beside a pin confirmation (openspec: add-boards §4.1):
-   * append a size-M card for the just-created pin to the current scope's
-   * board; the outcome replaces the button inline.
-   */
-  async function addPinNoteToBoard(asstId: string) {
-    const note = pinNotes[asstId];
-    if (!note?.pinId || note.boardNote) return; // in flight or already added
-    // The interim note replaces the button at once, so a double-click can't
-    // race two appends past the board's duplicate check.
-    setPinNotes((s) => ({ ...s, [asstId]: { ...s[asstId], boardNote: "Adding…" } }));
-    const res = await addPinToCurrentBoard(note.pinId);
-    setPinNotes((s) => ({
-      ...s,
-      [asstId]: { ...s[asstId], boardNote: res.note ?? `Couldn't add — ${res.error}` },
-    }));
-  }
 
-  /** "Add to board" on a pins-dialog row; the outcome shows in the actions row. */
-  async function addPinRowToBoard(pinId: string) {
-    if (pinsBusy) return;
-    setPinsBusy(true); // one add at a time — the row buttons disable meanwhile
-    try {
-      const res = await addPinToCurrentBoard(pinId);
-      setPinBoardNote(res.note ?? `Couldn't add — ${res.error}`);
-    } finally {
-      setPinsBusy(false);
-    }
-  }
 
   /** §3 Synthesize: re-ask the SAME question scoped to an answer's own source
    *  files, so the response INTEGRATES all of them (>= 2 attachments routes
@@ -5165,17 +5130,6 @@ export function ChatPanel() {
                     >
                       Ask again
                     </Button>
-                    {/* Every listed pin can become a board card (add-boards). */}
-                    <Tooltip content="Add to board" relationship="label">
-                      <Button
-                        size="small"
-                        appearance="subtle"
-                        icon={<IconBoard />}
-                        aria-label={`Add to board: ${p.question}`}
-                        disabled={pinsBusy}
-                        onClick={() => void addPinRowToBoard(p.id)}
-                      />
-                    </Tooltip>
                     <Button
                       size="small"
                       appearance="subtle"
@@ -5190,11 +5144,6 @@ export function ChatPanel() {
             )}
           </DialogContent>
           <DialogActions>
-            {pinBoardNote && (
-              <Text size={200} className={styles.quietNote} role="status">
-                {pinBoardNote}
-              </Text>
-            )}
             <Button appearance="secondary" onClick={() => setPinsOpen(false)}>
               Close
             </Button>
@@ -5715,20 +5664,6 @@ export function ChatPanel() {
                               >
                                 View pins
                               </Button>
-                              {/* The pin-success moment doubles as the board's
-                                  add affordance (openspec: add-boards §4.1). */}
-                              {pinNotes[m.id]?.boardNote ? (
-                                <Text size={200}>{pinNotes[m.id].boardNote}</Text>
-                              ) : (
-                                <Button
-                                  size="small"
-                                  appearance="subtle"
-                                  icon={<IconBoard />}
-                                  onClick={() => void addPinNoteToBoard(m.id)}
-                                >
-                                  Add to board
-                                </Button>
-                              )}
                             </div>
                           )}
                           {pinNotes[m.id]?.error && (

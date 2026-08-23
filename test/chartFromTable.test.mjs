@@ -14,7 +14,7 @@ register("./_ts-extensionless-hook.mjs", import.meta.url);
 const { chartSpecFromTable, hasEngineChartFence, looksTemporal } = await import(
   "../src/lib/chartFromTable.ts"
 );
-const { parseMarkdownTable } = await import("../src/features/boards/boardModel.ts");
+const { parseMarkdownTable } = await import("../src/lib/answerTable.ts");
 const { parseChartSpec } = await import("../src/lib/chartSpec.ts");
 
 const table = (header, rows) => ({ header, rows });

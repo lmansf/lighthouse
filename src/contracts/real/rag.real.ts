@@ -5,9 +5,6 @@ import { ragTransport } from "./ragTransport";
 // contracts barrel is imported by engine-level suites without webpack aliases.
 import { rememberPlatform } from "../../shell/desktopBridge";
 import type {
-  Board,
-  BoardCardRef,
-  BoardCardRefresh,
   ChangedPin,
   CurationRule,
   CurationRuleInput,
@@ -475,63 +472,12 @@ class RealRagService implements RagService {
     return data;
   }
 
-  /**
-   * Mutating boards sub-ops (openspec: add-boards) return validation
-   * failures as 400 + {error} (like investigations); read the body instead
-   * of throwing so the UI can surface the engine's reason inline.
-   */
-  private async boardsOp(
-    body: Record<string, unknown>,
-  ): Promise<{ board?: Board; ok?: boolean; error?: string }> {
-    const result = await ragTransport.postResult<{
-      board?: Board;
-      ok?: boolean;
-      error?: string;
-    }>({ op: "boards", ...body });
-    const data = result.body;
-    if (!result.ok) return { error: data.error ?? `POST /api/rag ${result.status}` };
-    return data;
-  }
 
-  async listBoards(investigationId?: string): Promise<Board[]> {
-    const res = await post({
-      op: "boards",
-      action: "list",
-      ...(investigationId ? { investigationId } : {}),
-    });
-    return Array.isArray(res.boards) ? (res.boards as Board[]) : [];
-  }
 
-  async createBoard(
-    name: string,
-    investigationId?: string,
-  ): Promise<{ board?: Board; error?: string }> {
-    return this.boardsOp({
-      action: "create",
-      name,
-      ...(investigationId ? { investigationId } : {}),
-    });
-  }
 
-  async renameBoard(id: string, name: string): Promise<{ board?: Board; error?: string }> {
-    return this.boardsOp({ action: "rename", id, name });
-  }
 
-  async deleteBoard(id: string): Promise<{ ok?: boolean; error?: string }> {
-    return this.boardsOp({ action: "delete", id });
-  }
 
-  async setBoardCards(
-    id: string,
-    cards: BoardCardRef[],
-  ): Promise<{ board?: Board; error?: string }> {
-    return this.boardsOp({ action: "setCards", id, cards });
-  }
 
-  async refreshBoardCards(pinIds: string[]): Promise<BoardCardRefresh[]> {
-    const res = await post({ op: "boards", action: "refreshCards", pinIds });
-    return Array.isArray(res.cards) ? (res.cards as BoardCardRefresh[]) : [];
-  }
 
   /**
    * Views sub-ops (openspec: add-shaped-views) return refusals as 400 +

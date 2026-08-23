@@ -28,7 +28,7 @@ import {
   shorthands,
   tokens,
 } from "@fluentui/react-components";
-import { IconAI, IconBoard, IconBook, IconChevronDown, IconChevronRight, IconHelp, IconHistory, IconInfo, IconInsight, IconLibrary, IconOpen, IconOptions, IconPin, IconSettings, IconShieldTask, IconTrash, IconWarning } from "@/shell/icons";
+import { IconAI, IconBook, IconChevronDown, IconChevronRight, IconHelp, IconHistory, IconInfo, IconInsight, IconLibrary, IconOpen, IconOptions, IconPin, IconSettings, IconShieldTask, IconTrash, IconWarning } from "@/shell/icons";
 import { LhDialogSurface, LhMenuPopover, LhSegmented, LhSelect, LhSwitch } from "@/shell/controls";
 import {
   MODEL_PROVIDERS,
@@ -1880,16 +1880,6 @@ export function SettingsMenu() {
               }
             >
               Pinned questions
-            </MenuItem>
-            <MenuItem
-              icon={<IconBoard />}
-              onClick={() =>
-                // The board host (app/page.tsx) owns the panel; same seam
-                // as open-pins (openspec: add-boards §2.2).
-                window.dispatchEvent(new CustomEvent("lighthouse:open-board"))
-              }
-            >
-              Board
             </MenuItem>
             {/* 0.13.10 §3: the relocated management surfaces. */}
             <MenuItem icon={<IconBook />} onClick={() => setSemanticDlg(true)}>

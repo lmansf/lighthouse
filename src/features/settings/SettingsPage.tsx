@@ -18,7 +18,6 @@ import { useState } from "react";
 import { Text, makeStyles, mergeClasses, shorthands, tokens } from "@fluentui/react-components";
 import {
   IconAI,
-  IconBoard,
   IconChevronRight,
   IconHelp,
   IconHistory,
@@ -174,11 +173,6 @@ export function SettingsPage() {
           icon={<IconPin />}
           label="Pinned questions"
           onClick={() => window.dispatchEvent(new CustomEvent("lighthouse:open-pins"))}
-        />
-        <Row
-          icon={<IconBoard />}
-          label="Board"
-          onClick={() => window.dispatchEvent(new CustomEvent("lighthouse:open-board"))}
         />
         <Row icon={<IconHistory />} label="Audit log" onClick={() => setAuditDlg(true)} />
       </div>
