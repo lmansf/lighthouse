@@ -376,14 +376,11 @@ fn csv_field(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
 
-    /// The audit path + settings + policy env are process-global — serialize.
+    /// The audit path + settings + policy env are process-global — serialize
+    /// on the crate-wide env lock.
     fn test_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
+        crate::test_env_lock()
     }
 
     struct Ctx {

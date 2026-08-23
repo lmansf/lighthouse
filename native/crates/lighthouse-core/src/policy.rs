@@ -312,14 +312,11 @@ pub fn snapshot() -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex as TestMutex, OnceLock as TestOnce};
 
-    /// Env + the process-global policy cache are shared — serialize tests.
+    /// Env + the process-global policy cache are shared — serialize on the
+    /// crate-wide env lock.
     fn test_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: TestOnce<TestMutex<()>> = TestOnce::new();
-        LOCK.get_or_init(|| TestMutex::new(()))
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
+        crate::test_env_lock()
     }
 
     fn with_policy_file(content: Option<&str>, f: impl FnOnce()) {

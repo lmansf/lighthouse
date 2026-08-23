@@ -307,6 +307,7 @@ mod tests {
     /// with the legacy switch restoring the in-vault dir.
     #[test]
     fn state_dir_platform_seam() {
+        let _env = crate::test_env_lock();
         // Process-global env: mutate under distinctive values and restore, so
         // parallel tests that also read VAULT_DIR see it back untouched.
         let prev_vault = std::env::var("VAULT_DIR").ok();

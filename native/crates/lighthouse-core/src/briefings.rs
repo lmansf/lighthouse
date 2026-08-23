@@ -359,14 +359,12 @@ pub fn mark_note_run(now_ms: i64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
 
-    /// VAULT_DIR is process-global — serialize the store-touching tests.
+    /// VAULT_DIR is process-global — serialize on the crate-wide env lock
+    /// (a module-local lock left cross-module races under the parallel
+    /// runner; the audit found them as intermittent failures).
     fn test_lock() -> MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
+        crate::test_env_lock()
     }
 
     fn with_temp_vault(f: impl FnOnce()) {

@@ -50,3 +50,16 @@ pub mod vault;
 pub mod vault_brief;
 pub mod views;
 pub mod watch;
+
+/// One process-wide lock for lib tests that mutate process environment
+/// (VAULT_DIR and friends). A module-local lock only serializes its own
+/// module — the parallel runner interleaves modules, and env vars are
+/// process state, so every env-touching lib test shares this one.
+/// Non-reentrant: take it once at the top of the test, never nested.
+#[cfg(test)]
+pub(crate) fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+}
