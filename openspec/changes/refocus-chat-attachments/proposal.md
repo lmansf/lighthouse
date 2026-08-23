@@ -65,9 +65,10 @@ versioning section when implementation starts).
   (`meta.rs` — "what's new in my vault" has no referent), `insights.rs` and
   `vault_brief.rs` (vault-wide scans), connectors/cloud sources (SharePoint
   mirror + OAuth registry), briefings, and the vault onboarding step.
-- **Removed pending the sign-off forks below**: views, semantic layer,
-  pins, boards, investigations (all premised on a durable corpus — see
-  Open decisions).
+- **Also removed** (owner sign-off, 2026-08-23): views, semantic layer,
+  pins, boards, investigations — all premised on a durable corpus.
+  Per-conversation "define a metric for THESE files" may return later,
+  scoped to attachments, if missed.
 - **Version**: seven-stamp bump to **0.15.0**; release notes state plainly
   that the app stops reading the vault folder and user files stay where they
   always were (the vault was the user's own folder; nothing is deleted or
@@ -87,25 +88,21 @@ versioning section when implementation starts).
 - Not a UI redesign: ChatPanel keeps its layout; surfaces that lose their
   subject are removed, not reimagined.
 
-## Open decisions (owner sign-off before implementation)
+## Decisions (owner sign-off, 2026-08-23)
 
-1. **Views + semantic layer**: drop in 0.15.0 (recommended — both store
-   durable vault-file ids; per-conversation "define a metric for THESE
-   files" can return later scoped to attachments), or port to
-   workspace-scoped definitions now (adds a rewrite inside the rewrite).
-2. **Pins / boards / briefings / investigations**: drop in 0.15.0
-   (recommended — every one is a promise that file ids outlive the
-   conversation), or keep investigations as a thin conversation-organizer
-   without recall/scopes.
-3. **Reports**: keep re-homed in app state (recommended) or reduce to
-   export-only.
-4. **iOS**: stays in scope (recommended — attachments-only makes iOS
-   simpler: the Files-app picker IS the attach flow; the §41 state-home
-   migration and `Documents/Lighthouse Vault` bootstrap retire), or pause
-   the target for one release.
-5. **TS twin**: keep byte-parity for the surviving engine modules
-   (recommended — the dev-container and web transport still depend on it;
-   the cut shrinks the parity surface substantially), or freeze the twin.
+All five forks resolved on the recommended option:
+
+1. **Views + semantic layer**: DROPPED — both store durable vault-file
+   ids; attachment-scoped definitions can return later if missed.
+2. **Pins / boards / briefings / investigations**: DROPPED — every one is
+   a promise that file ids outlive the conversation.
+3. **Reports**: KEPT, re-homed to `app_state_dir()/reports/`; export via
+   the save dialog.
+4. **iOS**: STAYS in scope — the Files-app picker becomes the attach
+   flow; the §41 state-home migration and `Documents/Lighthouse Vault`
+   bootstrap retire.
+5. **TS twin**: KEEPS byte-parity for the surviving engine modules; the
+   cut shrinks the parity surface substantially.
 
 ## Capabilities
 
@@ -117,8 +114,7 @@ versioning section when implementation starts).
 ### Removed Capabilities
 - `vault` (walk/include/local-only/curation/watch), `explorer`,
   `meta-answers`, `insights`, `vault-brief`, `connectors`, `briefings`,
-  and — per the open decisions — `shaped-views`, `semantic-layer`, `pins`,
-  `boards`, `investigations`.
+  `shaped-views`, `semantic-layer`, `pins`, `boards`, `investigations`.
 
 ## Impact
 

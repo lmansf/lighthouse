@@ -59,8 +59,8 @@ first token of the first ask gated only by the model call.
   `mtimeMs:size` to the content hash — attachment bytes are immutable, so
   "same data" claims become exact instead of heuristic.
 - Answer cache key: normalized question + provider/model + sorted
-  `(attachment id, hash)` pairs. The view/semantic registry components stay
-  only if fork 1 keeps those features.
+  `(attachment id, hash)` pairs. The view/semantic registry components
+  retire with those features (sign-off fork 1).
 
 ## Parity
 

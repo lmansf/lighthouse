@@ -1,6 +1,7 @@
 # Tasks — refocus: chat attachments only (0.15.0)
 
-Gate: owner sign-off on proposal.md's five open decisions BEFORE task 1.
+Gate: CLEARED — owner sign-off received 2026-08-23, all five decisions
+on the recommended option (see proposal.md "Decisions").
 First act of implementation: record the 0.15.0 owner designation in
 CLAUDE.md's versioning section (the §31/0.14.0 precedent).
 
@@ -19,8 +20,8 @@ CLAUDE.md's versioning section (the §31/0.14.0 precedent).
 - [ ] 1.5 Answer cache re-key to sorted (attachment id, hash) pairs.
 - [ ] 1.6 Deletions: walker/state/include/local-only/curation in
       `vault.rs`/`vault.ts`, `watch.rs`, `meta.rs`, `insights.rs`,
-      `vault_brief.rs`, `sources/*` (+ per fork 1–2: views, semantic,
-      pins, boards, briefings, investigations) — with their tests.
+      `vault_brief.rs`, `sources/*`, views, semantic, pins, boards,
+      briefings, investigations — with their tests.
 - [ ] 1.7 Reports re-home to `app_state_dir()/reports/`; export via save
       dialog.
 
@@ -40,8 +41,8 @@ CLAUDE.md's versioning section (the §31/0.14.0 precedent).
       retire.
 
 ## 4. UI
-- [ ] 4.1 Remove explorer, quick-open, widget, vault onboarding, briefings
-      surfaces (+ per forks: views/semantic/boards/investigations nav).
+- [ ] 4.1 Remove explorer, quick-open, widget, vault onboarding, and the
+      briefings/views/semantic/boards/investigations surfaces.
 - [ ] 4.2 ChatPanel attach flow: cap refusal message, per-file readiness
       ticks, ingest-error rows; empty-conversation nudge.
 - [ ] 4.3 Reports home re-pointed at the new store.
