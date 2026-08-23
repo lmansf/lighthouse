@@ -14,10 +14,14 @@ CLAUDE.md's versioning section (the §31/0.14.0 precedent).
       state per attachment, ask-awaits-only-what-it-needs.
 - [x] 1.3 Re-root `config::state_dir()` at `app_state_dir()` (kills the
       vault_dir derivation — the audit's structural trap #1).
-- [ ] 1.4 `workspace::retrieve` + `doc_text`/`doc_path` via manifest;
-      collapse `included_file_ids`/`attachment_file_ids` across the synth
-      branch helpers; freshness stamps switch to content hashes.
-- [ ] 1.5 Answer cache re-key to sorted (attachment id, hash) pairs.
+- [~] 1.4 `workspace::retrieve` + `doc_text` via manifest — DONE (the
+      scoring tail of `vault::retrieve` is now the shared
+      `retrieve_items`, and blobs carry their extension so the format
+      layer still sniffs). REMAINING: collapse
+      `included_file_ids`/`attachment_file_ids` across the synth branch
+      helpers and switch the freshness stamps to content hashes — that
+      is where the pipeline starts calling the workspace.
+- [x] 1.5 Answer cache re-key to sorted (attachment id, hash) pairs.
 - [ ] 1.6 Deletions: walker/state/include/local-only/curation in
       `vault.rs`/`vault.ts`, `watch.rs`, `meta.rs`, `insights.rs`,
       `vault_brief.rs`, `sources/*`, views, semantic, pins, boards,
