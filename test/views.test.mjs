@@ -659,3 +659,168 @@ test("route.ts shapeView arm is the PARITY stub: available:false, nothing persis
   );
   assert.doesNotMatch(body, /createView|writeJson|save\(/, "the stub persists nothing");
 });
+
+// --- mutation-hardening pins (boundary/guard behavior the earlier suite left loose) --
+
+test("view ids are view- plus exactly the first 12 hex chars", () => {
+  const { dir } = freshVault();
+  seedSales(dir);
+  const created = views.createView("idcheck", "SELECT * FROM sales", summary("q"), ["sales.csv"]);
+  // KEEP IN SYNC with views.rs::view_id: `view-` + sha1 prefix, 12 chars, no
+  // more, no less, lowercase hex only.
+  assert.match(created.id, /^view-[0-9a-f]{12}$/);
+});
+
+test("normalizeViewName keeps the z and 9 boundary characters", () => {
+  // The [a-z] / [0-9] range checks are INCLUSIVE at the top end: 'z' and '9'
+  // are kept verbatim, never collapsed to a separator.
+  assert.equal(views.normalizeViewName("z9"), "z9");
+  assert.equal(views.normalizeViewName("az09"), "az09");
+});
+
+test("the scrub steps through quote escapes and closes one char at a time", () => {
+  // A '' pair is consumed as a unit ONLY when both chars are quotes; a closing
+  // quote followed by anything else ends the literal exactly there, so the
+  // `update` outside the literals stays visible to the forbidden-word scan.
+  assert.equal(views.guardViewSql("SELECT '' update ''"), "only read-only SELECT queries are allowed");
+  // A pair skip advances exactly 2: 'ab''' is a whole literal and the bare
+  // `update` after it still trips the guard.
+  assert.equal(views.guardViewSql("SELECT 'ab''' update"), "only read-only SELECT queries are allowed");
+  // A double-quoted identifier consumes its closing quote and no more — what
+  // follows is back outside and scanned.
+  assert.equal(views.guardViewSql('SELECT "x" update FROM t'), "only read-only SELECT queries are allowed");
+});
+
+test("the scrub starts a line comment only at a real -- pair", () => {
+  // A single dash is ordinary text: nothing after `5-3` is comment-scrubbed,
+  // so the forbidden word still refuses.
+  assert.equal(views.guardViewSql("SELECT 5-3, update FROM t"), "only read-only SELECT queries are allowed");
+  // The comment starts AT the first dash (both dashes scrubbed): a statement
+  // whose first line is a comment still trims to a leading SELECT.
+  assert.equal(views.guardViewSql("--x\nSELECT 1"), null);
+});
+
+test("the scrub opens, spans, and closes block comments exactly", () => {
+  // Open consumes exactly `/*`: an empty comment ends at its own `*/` and the
+  // `update` after it stays visible.
+  assert.equal(views.guardViewSql("SELECT 1/**/update FROM t"), "only read-only SELECT queries are allowed");
+  // The interior scan runs to the real `*/` close — inner content (including
+  // forbidden words, stray `/`, stray `*`) is fully blanked.
+  assert.equal(views.guardViewSql("SELECT 1 /* x update */ FROM t"), null);
+  assert.equal(views.guardViewSql("SELECT 1 /* a/ update */ FROM t"), null);
+  assert.equal(views.guardViewSql("SELECT 1 /* a*b update */ FROM t"), null);
+  // Close consumes exactly `*/`: a leading comment leaves a statement that
+  // trims to SELECT, with or without a space after the close.
+  assert.equal(views.guardViewSql("/* hi */ SELECT 1"), null);
+  assert.equal(views.guardViewSql("/* hi */SELECT 1"), null);
+});
+
+test("unknown deps are acyclic and a cyclic graph prices past the cap exactly", () => {
+  // A dependency id that resolves to no record contributes nothing — NOT a
+  // cycle (KEEP IN SYNC with views.rs::would_cycle's unknown-id arm).
+  assert.ok(!views.wouldCycle([], "view-new", ["view-ghost"]));
+  // A revisit on the current path answers exactly MAX_VIEW_DEPTH + 1, so a
+  // synthetic 2-cycle walked from outside prices at MAX + 4 (1 for the new
+  // view + a, b, and the revisit's cap answer).
+  const mk = (id, readViews) => ({
+    id,
+    name: id,
+    sql: "SELECT 1",
+    reads: { files: [], views: readViews },
+    summary: summary(""),
+    createdMs: 1,
+  });
+  assert.equal(
+    views.viewDepth([mk("a", ["b"]), mk("b", ["a"])], ["a"]),
+    views.MAX_VIEW_DEPTH + 4,
+  );
+});
+
+test("transitiveDependents closes over a store where a dependent precedes its parent", () => {
+  // Creation order always lists a parent before its readers, so a single
+  // sweep would LOOK sufficient — a crafted store with the chain reversed
+  // proves the fixpoint loop really iterates until nothing grows.
+  const { stateDir } = freshVault();
+  fs.mkdirSync(stateDir, { recursive: true });
+  const crafted = JSON.stringify(
+    {
+      v: 1,
+      views: [
+        {
+          id: "view-ttt", name: "top_c", sql: "SELECT * FROM mid_c",
+          reads: { files: [], views: ["view-mmm"] },
+          summary: { text: "q", source: "question" }, createdMs: 3,
+        },
+        {
+          id: "view-mmm", name: "mid_c", sql: "SELECT * FROM base_c",
+          reads: { files: [], views: ["view-bbb"] },
+          summary: { text: "q", source: "question" }, createdMs: 2,
+        },
+        {
+          id: "view-bbb", name: "base_c", sql: "SELECT 1",
+          reads: { files: [], views: [] },
+          summary: { text: "q", source: "question" }, createdMs: 1,
+        },
+      ],
+    },
+    null,
+    2,
+  );
+  fs.writeFileSync(path.join(stateDir, "views.json"), crafted);
+  assert.deepEqual(
+    views.transitiveDependents("view-bbb").map((d) => d.name),
+    ["top_c", "mid_c"],
+    "the second sweep picks up the dependent listed before its parent",
+  );
+});
+
+test("non-tabular files neither resolve as tables nor shadow view names", () => {
+  const { dir } = freshVault();
+  fs.writeFileSync(path.join(dir, "notes.txt"), "hello world\n");
+  vault.setIncluded("notes.txt", true);
+
+  // resolveFiles drops the .txt (the tabular/PDF registration gate), so the
+  // definition's reference is refused as unknown — never bound to a table.
+  assert.throws(
+    () => views.createView("textview", "SELECT * FROM notes", summary("q"), ["notes.txt"]),
+    new Error("unknown table in definition: notes"),
+  );
+  // …and the catalog's taken names skip it too: a view may claim "notes".
+  const v = views.createView("notes", "SELECT 1", summary("q"), []);
+  assert.equal(v.name, "notes");
+});
+
+test("delete refuses with exactly one dependent", () => {
+  const { dir } = freshVault();
+  seedSales(dir);
+  const base = views.createView("base", "SELECT * FROM sales", summary("q"), ["sales.csv"]);
+  views.createView("mid", "SELECT * FROM base", summary("q"), []);
+  // The refusal threshold is ANY dependent (> 0), not two.
+  assert.throws(
+    () => views.deleteView(base.id, false),
+    new Error('"base" can\'t be deleted while other views read it: mid'),
+  );
+  assert.equal(views.listViews().length, 2, "refusal deleted nothing");
+});
+
+test("inspectView keeps every distinct source file, reads order", () => {
+  const { dir } = freshVault();
+  fs.writeFileSync(path.join(dir, "x.csv"), "a\n1\n");
+  fs.writeFileSync(path.join(dir, "y.csv"), "a\n2\n");
+  vault.setIncluded("x.csv", true);
+  vault.setIncluded("y.csv", true);
+  const two = views.createView("pair", "SELECT * FROM x JOIN y ON true", summary("q"), [
+    "x.csv",
+    "y.csv",
+  ]);
+  assert.deepEqual(two.reads.files, [
+    { fileId: "x.csv", tableName: "x" },
+    { fileId: "y.csv", tableName: "y" },
+  ]);
+  // The dedupe keeps DISTINCT files — the second file is not swallowed and
+  // nothing is listed twice.
+  assert.deepEqual(
+    views.inspectView(two.id).sources.map((s) => s.fileId),
+    ["x.csv", "y.csv"],
+  );
+});
