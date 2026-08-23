@@ -34,7 +34,6 @@ const MANIFEST = [
   // narration (narrate_over_facts) and the RAG-fallback ladder (narrate_gated),
   // each buffering an attempt + a tightened retry — four more Narration sites.
   { file: "native/crates/lighthouse-core/src/synth.rs", pattern: /llm::stream_answer\(/g, count: 18, callType: "Narration" },
-  { file: "native/crates/lighthouse-core/src/views.rs", pattern: /llm::stream_answer\(/g, count: 1, callType: "Narration" },
   // The two report-framing calls (§38) ride the ReportFraming reserve.
   { file: "native/crates/lighthouse-core/src/reports.rs", pattern: /llm::stream_answer\(/g, count: 1, callType: "ReportFraming" },
   // The TS twin's ask path (reports are Rust-only; NL→SQL rides its own
@@ -71,9 +70,9 @@ test("every model-call site maps to a registered budget call type (exact invento
 test("no model-call site exists OUTSIDE the manifest's files", () => {
   // Any engine file calling stream_answer/streamAnswer must be in the
   // manifest — a brand-new caller file is the loudest kind of new site.
-  const rustCallers = ["synth.rs", "views.rs", "reports.rs"];
+  const rustCallers = ["synth.rs", "reports.rs"];
   const rustDir = "native/crates/lighthouse-core/src";
-  for (const f of ["analytics.rs", "insights.rs", "recipes.rs", "llm.rs"]) {
+  for (const f of ["analytics.rs", "recipes.rs", "llm.rs"]) {
     const text = stripComments(read(path.join(rustDir, f)));
     const calls = (text.match(/llm::stream_answer\(/g) ?? []).length;
     assert.equal(
@@ -101,7 +100,7 @@ test("stream_local is reached only through stream_answer (no direct outside call
   // The budget seam sits in stream_answer; a direct stream_local caller
   // would bypass it. llm.rs owns the only call.
   const rustDir = "native/crates/lighthouse-core/src";
-  for (const f of ["synth.rs", "views.rs", "reports.rs", "analytics.rs"]) {
+  for (const f of ["synth.rs", "reports.rs", "analytics.rs"]) {
     const text = stripComments(read(path.join(rustDir, f)));
     assert.ok(
       !/stream_local\(/.test(text),
